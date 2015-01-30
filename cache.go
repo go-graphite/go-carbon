@@ -36,7 +36,7 @@ func NewCache() *Cache {
 		size:       0,
 		inputChan:  make(chan *Message, 1024),
 		outputChan: make(chan *CacheValues, 1024),
-		exitChan:   make(chan bool, 0),
+		exitChan:   make(chan bool),
 	}
 	return cache
 }
