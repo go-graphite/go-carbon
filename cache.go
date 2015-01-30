@@ -42,6 +42,9 @@ func NewCache() *Cache {
 
 // Get any key/values pair from Cache
 func (c Cache) Get() (string, *CacheValues) {
+	for key, values := range c.data {
+		return key, values
+	}
 	return "", nil
 }
 
@@ -63,6 +66,11 @@ func (c *Cache) Add(key string, value float64, timestamp int64) {
 		c.data[key] = values
 	}
 	c.size++
+}
+
+// Size returns size
+func (c *Cache) Size() int {
+	return c.size
 }
 
 func (c *Cache) worker() {
