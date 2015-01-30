@@ -81,9 +81,9 @@ func (c *Cache) worker() {
 	for {
 		if values == nil {
 			key, values = c.Get()
-			c.Remove(key)
 
 			if values != nil {
+				c.Remove(key)
 				sendTo = c.outputChan
 			} else {
 				sendTo = nil
