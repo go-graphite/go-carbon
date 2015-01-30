@@ -4,14 +4,13 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Message with metric value from carbon clients
 type Message struct {
-	Name  string
-	Value float64
-	Time  time.Time
+	Name      string
+	Value     float64
+	Timestamp int64
 }
 
 // NewMessage creates new instance of Message
@@ -50,7 +49,7 @@ func ParseTextMessage(line string) (*Message, error) {
 
 	msg.Name = row[0]
 	msg.Value = value
-	msg.Time = time.Unix(int64(tsf), 0)
+	msg.Timestamp = int64(tsf)
 
 	return msg, nil
 }

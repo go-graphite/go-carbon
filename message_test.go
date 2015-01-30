@@ -1,9 +1,6 @@
 package carbon
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestParseTextMessage(t *testing.T) {
 
@@ -27,7 +24,7 @@ func TestParseTextMessage(t *testing.T) {
 			return
 		}
 
-		if msg.Name != message.Name || msg.Time != message.Time || msg.Value != message.Value {
+		if msg.Name != message.Name || msg.Timestamp != message.Timestamp || msg.Value != message.Value {
 			t.Fatalf("%#v != %#v", msg, message)
 			return
 		}
@@ -45,20 +42,20 @@ func TestParseTextMessage(t *testing.T) {
 	assertError("metric.name 42 10\n")
 
 	assertOk("metric.name 42 1422642189", &Message{
-		Name:  "metric.name",
-		Value: 42,
-		Time:  time.Unix(1422642189, 0),
+		Name:      "metric.name",
+		Value:     42,
+		Timestamp: 1422642189,
 	})
 	assertOk("metric.name 42 1422642189\n", &Message{
-		Name:  "metric.name",
-		Value: 42,
-		Time:  time.Unix(1422642189, 0),
+		Name:      "metric.name",
+		Value:     42,
+		Timestamp: 1422642189,
 	})
 
 	assertOk("metric.name 42.15 1422642189\n", &Message{
-		Name:  "metric.name",
-		Value: 42.15,
-		Time:  time.Unix(1422642189, 0),
+		Name:      "metric.name",
+		Value:     42.15,
+		Timestamp: 1422642189,
 	})
 
 }
