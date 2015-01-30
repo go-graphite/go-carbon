@@ -2,6 +2,7 @@ package carbon
 
 // CacheValues one metric data
 type CacheValues struct {
+	Key  string
 	Data []struct {
 		Value     float64
 		Timestamp int64
@@ -84,6 +85,7 @@ func (c *Cache) worker() {
 
 			if values != nil {
 				c.Remove(key)
+				values.Key = key
 				sendTo = c.outputChan
 			} else {
 				sendTo = nil
@@ -100,6 +102,16 @@ func (c *Cache) worker() {
 		}
 	}
 
+}
+
+// In returns input channel
+func (c *Cache) In() chan *Message {
+	return c.inputChan
+}
+
+// Out returns output channel
+func (c *Cache) Out() chan *CacheValues {
+	return c.outputChan
 }
 
 // Run worker
