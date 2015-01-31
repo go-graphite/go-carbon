@@ -24,11 +24,17 @@ type udpConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type tcpConfig struct {
+	Listen  string `toml:"listen"`
+	Enabled bool   `toml:"enabled"`
+}
+
 // Config ...
 type Config struct {
 	Logfile string               `toml:"logfile"`
 	Whisper whisperConfig        `toml:"whisper"`
 	Udp     map[string]udpConfig `toml:"udp"`
+	Tcp     map[string]tcpConfig `toml:"tcp"`
 }
 
 func newConfig() *Config {
@@ -41,6 +47,12 @@ func newConfig() *Config {
 		},
 		Udp: map[string]udpConfig{
 			"default": udpConfig{
+				Listen:  ":2003",
+				Enabled: true,
+			},
+		},
+		Tcp: map[string]tcpConfig{
+			"default": tcpConfig{
 				Listen:  ":2003",
 				Enabled: true,
 			},
@@ -117,7 +129,7 @@ func main() {
 				log.Fatal(err)
 			}
 
-			udpListener := carbon.NewUdpReceiver(cache.In())
+			udpListener := carbon.NewUDPReceiver(cache.In())
 			defer udpListener.Stop()
 			if err = udpListener.Listen(udpAddr); err != nil {
 				log.Fatal(err)
@@ -125,6 +137,23 @@ func main() {
 		}
 	}
 	/* UDP end */
+
+	/* TCP start */
+	for _, tcpCfg := range cfg.Tcp {
+		if tcpCfg.Enabled {
+			tcpAddr, err := net.ResolveTCPAddr("tcp", tcpCfg.Listen)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			tcpListener := carbon.NewTCPReceiver(cache.In())
+			defer tcpListener.Stop()
+			if err = tcpListener.Listen(tcpAddr); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+	/* TCP end */
 
 	/* WHISPER start */
 	if cfg.Whisper.Enabled {

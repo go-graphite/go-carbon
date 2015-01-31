@@ -10,21 +10,21 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
-// TcpReceiver receive metrics from TCP and UDP sockets
-type TcpReceiver struct {
+// TCPReceiver receive metrics from TCP and UDP sockets
+type TCPReceiver struct {
 	out  chan *Message
 	exit chan bool
 }
 
-// NewTcpReceiver create new instance of TcpReceiver
-func NewTcpReceiver(out chan *Message) *TcpReceiver {
-	return &TcpReceiver{
+// NewTCPReceiver create new instance of TCPReceiver
+func NewTCPReceiver(out chan *Message) *TCPReceiver {
+	return &TCPReceiver{
 		out:  out,
 		exit: make(chan bool),
 	}
 }
 
-func (rcv *TcpReceiver) handleConnection(conn net.Conn) {
+func (rcv *TCPReceiver) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(time.Minute))
 	reader := bufio.NewReader(conn)
@@ -53,7 +53,7 @@ func (rcv *TcpReceiver) handleConnection(conn net.Conn) {
 }
 
 // Listen bind port. Receive messages and send to out channel
-func (rcv *TcpReceiver) Listen(addr *net.TCPAddr) error {
+func (rcv *TCPReceiver) Listen(addr *net.TCPAddr) error {
 	sock, err := net.ListenTCP("tcp", addr)
 	if err != nil {
 		return err
@@ -89,6 +89,6 @@ func (rcv *TcpReceiver) Listen(addr *net.TCPAddr) error {
 }
 
 // Stop all listeners
-func (rcv *TcpReceiver) Stop() {
+func (rcv *TCPReceiver) Stop() {
 	close(rcv.exit)
 }

@@ -9,22 +9,22 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
-// UdpReceiver receive metrics from TCP and UDP sockets
-type UdpReceiver struct {
+// UDPReceiver receive metrics from TCP and UDP sockets
+type UDPReceiver struct {
 	out  chan *Message
 	exit chan bool
 }
 
-// NewUdpReceiver create new instance of UdpReceiver
-func NewUdpReceiver(out chan *Message) *UdpReceiver {
-	return &UdpReceiver{
+// NewUDPReceiver create new instance of UDPReceiver
+func NewUDPReceiver(out chan *Message) *UDPReceiver {
+	return &UDPReceiver{
 		out:  out,
 		exit: make(chan bool),
 	}
 }
 
 // Listen bind port. Receive messages and send to out channel
-func (rcv *UdpReceiver) Listen(addr *net.UDPAddr) error {
+func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 	sock, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return err
@@ -84,6 +84,6 @@ func (rcv *UdpReceiver) Listen(addr *net.UDPAddr) error {
 }
 
 // Stop all listeners
-func (rcv *UdpReceiver) Stop() {
+func (rcv *UDPReceiver) Stop() {
 	close(rcv.exit)
 }

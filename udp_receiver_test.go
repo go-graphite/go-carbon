@@ -8,12 +8,12 @@ import (
 
 type udpTestCase struct {
 	*testing.T
-	receiver *UdpReceiver
+	receiver *UDPReceiver
 	conn     net.Conn
 	rcvChan  chan *Message
 }
 
-func newUdpTestCase(t *testing.T) *udpTestCase {
+func newUDPTestCase(t *testing.T) *udpTestCase {
 	test := &udpTestCase{
 		T: t,
 	}
@@ -24,7 +24,7 @@ func newUdpTestCase(t *testing.T) *udpTestCase {
 	}
 
 	test.rcvChan = make(chan *Message, 128)
-	test.receiver = NewUdpReceiver(test.rcvChan)
+	test.receiver = NewUDPReceiver(test.rcvChan)
 	// defer receiver.Stop()
 
 	if err = test.receiver.Listen(addr); err != nil {
@@ -62,8 +62,8 @@ func (test *udpTestCase) Eq(a *Message, b *Message) {
 	}
 }
 
-func TestUdpReceiver1(t *testing.T) {
-	test := newUdpTestCase(t)
+func TestUDPReceiver1(t *testing.T) {
+	test := newUDPTestCase(t)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\n")
@@ -82,8 +82,8 @@ func TestUdpReceiver1(t *testing.T) {
 	}
 }
 
-func TestUdpReceiver2(t *testing.T) {
-	test := newUdpTestCase(t)
+func TestUDPReceiver2(t *testing.T) {
+	test := newUDPTestCase(t)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")

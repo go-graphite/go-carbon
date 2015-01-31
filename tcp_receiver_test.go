@@ -8,12 +8,12 @@ import (
 
 type tcpTestCase struct {
 	*testing.T
-	receiver *TcpReceiver
+	receiver *TCPReceiver
 	conn     net.Conn
 	rcvChan  chan *Message
 }
 
-func newTcpTestCase(t *testing.T) *tcpTestCase {
+func newTCPTestCase(t *testing.T) *tcpTestCase {
 	test := &tcpTestCase{
 		T: t,
 	}
@@ -24,7 +24,7 @@ func newTcpTestCase(t *testing.T) *tcpTestCase {
 	}
 
 	test.rcvChan = make(chan *Message, 128)
-	test.receiver = NewTcpReceiver(test.rcvChan)
+	test.receiver = NewTCPReceiver(test.rcvChan)
 	// defer receiver.Stop()
 
 	if err = test.receiver.Listen(addr); err != nil {
@@ -62,8 +62,8 @@ func (test *tcpTestCase) Eq(a *Message, b *Message) {
 	}
 }
 
-func TestTcpReceiver1(t *testing.T) {
-	test := newTcpTestCase(t)
+func TestTCPReceiver1(t *testing.T) {
+	test := newTCPTestCase(t)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\n")
@@ -82,8 +82,8 @@ func TestTcpReceiver1(t *testing.T) {
 	}
 }
 
-func TestTcpReceiver2(t *testing.T) {
-	test := newTcpTestCase(t)
+func TestTCPReceiver2(t *testing.T) {
+	test := newTCPTestCase(t)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
