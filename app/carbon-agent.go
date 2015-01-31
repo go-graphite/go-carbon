@@ -14,8 +14,11 @@ func main() {
 	}
 
 	cache := carbon.NewCache()
+	cache.Run()
+	defer cache.Stop()
 
 	udpListener := carbon.NewUdpReceiver(cache.In())
+	defer udpListener.Stop()
 	if err = udpListener.Listen(udpAddr); err != nil {
 		log.Fatal(err)
 	}
