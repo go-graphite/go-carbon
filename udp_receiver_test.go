@@ -34,7 +34,7 @@ func TestUdpReceiver(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
 
 	for i := 0; i < 1; i++ {
 		select {

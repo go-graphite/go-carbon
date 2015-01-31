@@ -1,9 +1,10 @@
 package carbon
 
 import (
+	"bytes"
+	"io"
+	"log"
 	"net"
-
-	"github.com/k0kubun/pp"
 )
 
 // UdpReceiver receive metrics from TCP and UDP sockets
@@ -38,11 +39,31 @@ func (rcv *UdpReceiver) Listen(addr *net.UDPAddr) error {
 		var buf [2048]byte
 
 		for {
-			rlen, remote, err := sock.ReadFromUDP(buf[:])
+			// @TODO: store incomplete lines
+			rlen, _, err := sock.ReadFromUDP(buf[:])
 			if err != nil {
 				break
 			}
-			pp.Println(rlen, remote, err)
+
+			data := bytes.NewBuffer(buf[:rlen])
+
+			for {
+				line, err := data.ReadBytes('\n')
+
+				if err != nil {
+					if err == io.EOF && len(line) > 0 {
+						// @TODO: handle unfinished line
+					}
+					break
+				}
+				if len(line) > 0 { // skip empty lines
+					if msg, err := ParseTextMessage(string(line)); err != nil {
+						log.Print(err)
+					} else {
+						rcv.out <- msg
+					}
+				}
+			}
 		}
 
 	}()

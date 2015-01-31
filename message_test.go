@@ -41,11 +41,8 @@ func TestParseTextMessage(t *testing.T) {
 	assertError("metric..name 42a 1422642189\n")
 	assertError("metric.name 42 10\n")
 
-	assertOk("metric.name 42 1422642189", &Message{
-		Name:      "metric.name",
-		Value:     42,
-		Timestamp: 1422642189,
-	})
+	assertError("metric.name 42 1422642189")
+
 	assertOk("metric.name 42 1422642189\n", &Message{
 		Name:      "metric.name",
 		Value:     42,
