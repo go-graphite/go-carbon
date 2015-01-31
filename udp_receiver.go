@@ -3,8 +3,10 @@ package carbon
 import (
 	"bytes"
 	"io"
-	"log"
 	"net"
+	"strings"
+
+	"github.com/Sirupsen/logrus"
 )
 
 // UdpReceiver receive metrics from TCP and UDP sockets
@@ -36,13 +38,19 @@ func (rcv *UdpReceiver) Listen(addr *net.UDPAddr) error {
 	}()
 
 	go func() {
+		defer sock.Close()
+
 		var buf [2048]byte
 
 		for {
 			// @TODO: store incomplete lines
 			rlen, _, err := sock.ReadFromUDP(buf[:])
 			if err != nil {
-				break
+				if strings.Contains(err.Error(), "use of closed network connection") {
+					break
+				}
+				logrus.Error(err)
+				continue
 			}
 
 			data := bytes.NewBuffer(buf[:rlen])
@@ -51,14 +59,18 @@ func (rcv *UdpReceiver) Listen(addr *net.UDPAddr) error {
 				line, err := data.ReadBytes('\n')
 
 				if err != nil {
-					if err == io.EOF && len(line) > 0 {
-						// @TODO: handle unfinished line
+					if err == io.EOF {
+						if len(line) > 0 {
+							// @TODO: handle unfinished line
+						}
+					} else {
+						logrus.Error(err)
 					}
 					break
 				}
 				if len(line) > 0 { // skip empty lines
 					if msg, err := ParseTextMessage(string(line)); err != nil {
-						log.Print(err)
+						logrus.Info(err)
 					} else {
 						rcv.out <- msg
 					}
