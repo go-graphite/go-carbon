@@ -18,11 +18,12 @@ type WhisperPersister struct {
 }
 
 // NewWhisperPersister create instance of WhisperPersister
-func NewWhisperPersister(schemas *WhisperSchemas, in chan *CacheValues) *WhisperPersister {
+func NewWhisperPersister(rootPath string, schemas *WhisperSchemas, in chan *CacheValues) *WhisperPersister {
 	return &WhisperPersister{
-		in:      in,
-		exit:    make(chan bool),
-		schemas: schemas,
+		in:       in,
+		exit:     make(chan bool),
+		schemas:  schemas,
+		rootPath: rootPath,
 	}
 }
 
