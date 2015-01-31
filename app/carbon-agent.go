@@ -88,9 +88,7 @@ func ParseConfig(filename string, cfg interface{}) error {
 }
 
 func main() {
-
-	// Config
-
+	/* CONFIG start */
 	configFile := flag.String("config", "", "Filename of config")
 	printDefaultConfig := flag.Bool("config-print-default", false, "Print default config")
 
@@ -110,7 +108,7 @@ func main() {
 	}
 
 	// pp.Println(cfg)
-	// end of config
+	/* CONFIG end */
 
 	cache := carbon.NewCache()
 	cache.Start()
