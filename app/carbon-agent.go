@@ -112,11 +112,6 @@ func main() {
 	// pp.Println(cfg)
 	// end of config
 
-	whisperSchemas, err := carbon.ReadWhisperSchemas("schemas")
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	cache := carbon.NewCache()
 	cache.Start()
 	defer cache.Stop()
@@ -157,6 +152,11 @@ func main() {
 
 	/* WHISPER start */
 	if cfg.Whisper.Enabled {
+		whisperSchemas, err := carbon.ReadWhisperSchemas(cfg.Whisper.Schemas)
+		if err != nil {
+			log.Fatal(err)
+		}
+
 		whisperPersister := carbon.NewWhisperPersister(cfg.Whisper.DataDir, whisperSchemas, cache.Out())
 
 		whisperPersister.Start()
