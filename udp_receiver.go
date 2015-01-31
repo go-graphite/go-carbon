@@ -1,6 +1,10 @@
 package carbon
 
-import "net"
+import (
+	"net"
+
+	"github.com/k0kubun/pp"
+)
 
 // UdpReceiver receive metrics from TCP and UDP sockets
 type UdpReceiver struct {
@@ -18,10 +22,31 @@ func NewUdpReceiver(out chan *Message) *UdpReceiver {
 
 // Listen bind port. Receive messages and send to out channel
 func (rcv *UdpReceiver) Listen(addr *net.UDPAddr) error {
-	_, err := net.ListenUDP("udp", addr)
+	sock, err := net.ListenUDP("udp", addr)
 	if err != nil {
 		return err
 	}
+
+	go func() {
+		select {
+		case <-rcv.exit:
+			sock.Close()
+		}
+	}()
+
+	go func() {
+		var buf [2048]byte
+
+		for {
+			rlen, remote, err := sock.ReadFromUDP(buf[:])
+			if err != nil {
+				break
+			}
+			pp.Println(rlen, remote, err)
+		}
+
+	}()
+
 	return nil
 }
 

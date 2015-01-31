@@ -8,7 +8,7 @@ import (
 )
 
 func main() {
-	udpAddr, err := net.ResolveUDPAddr("udp", ":12004")
+	udpAddr, err := net.ResolveUDPAddr("udp", ":2003")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -19,4 +19,6 @@ func main() {
 	if err = udpListener.Listen(udpAddr); err != nil {
 		log.Fatal(err)
 	}
+
+	select {}
 }
