@@ -2,8 +2,8 @@ package carbon
 
 // CacheValues one metric data
 type CacheValues struct {
-	Key  string
-	Data []struct {
+	Metric string
+	Data   []struct {
 		Value     float64
 		Timestamp int64
 	}
@@ -14,10 +14,7 @@ func (values *CacheValues) Append(value float64, timestamp int64) {
 	values.Data = append(values.Data, struct {
 		Value     float64
 		Timestamp int64
-	}{
-		Value:     value,
-		Timestamp: timestamp,
-	})
+	}{value, timestamp})
 }
 
 // Cache stores and aggregate metrics in memory
@@ -85,7 +82,7 @@ func (c *Cache) worker() {
 
 			if values != nil {
 				c.Remove(key)
-				values.Key = key
+				values.Metric = key
 				sendTo = c.outputChan
 			} else {
 				sendTo = nil
@@ -114,8 +111,8 @@ func (c *Cache) Out() chan *CacheValues {
 	return c.outputChan
 }
 
-// Run worker
-func (c *Cache) Run() {
+// Start worker
+func (c *Cache) Start() {
 	go c.worker()
 }
 
