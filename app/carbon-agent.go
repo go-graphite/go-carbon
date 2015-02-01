@@ -39,9 +39,14 @@ func (d *Duration) Value() time.Duration {
 	return d.Duration
 }
 
+type carbonConfig struct {
+	Logfile     string `toml:"logfile"`
+	GraphPrefix string `toml:"graph-prefix"`
+}
+
 type whisperConfig struct {
 	DataDir string `toml:"data-dir"`
-	Schemas string `toml:"data-file"`
+	Schemas string `toml:"schemas-file"`
 	Enabled bool   `toml:"enabled"`
 }
 
@@ -63,7 +68,7 @@ type carbonlinkConfig struct {
 
 // Config ...
 type Config struct {
-	Logfile    string           `toml:"logfile"`
+	Carbon     carbonConfig     `toml:"carbon"`
 	Whisper    whisperConfig    `toml:"whisper"`
 	Udp        udpConfig        `toml:"udp"`
 	Tcp        tcpConfig        `toml:"tcp"`
@@ -72,7 +77,10 @@ type Config struct {
 
 func newConfig() *Config {
 	cfg := &Config{
-		Logfile: "",
+		Carbon: carbonConfig{
+			Logfile:     "",
+			GraphPrefix: "carbon.agents.{host}.",
+		},
 		Whisper: whisperConfig{
 			DataDir: "/data/graphite/whisper/",
 			Schemas: "/data/graphite/schemas",

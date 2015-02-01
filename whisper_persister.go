@@ -61,12 +61,12 @@ func (persister *WhisperPersister) store(values *CacheValues) {
 	//persister.schemas.Match(values.Metric)
 }
 
-func (persister *WhisperPersister) worker() {
+func (persister *WhisperPersister) worker(in chan *CacheValues) {
 	for {
 		select {
 		case <-persister.exit:
 			break
-		case values := <-persister.in:
+		case values := <-in:
 			persister.store(values)
 		}
 	}
@@ -74,7 +74,7 @@ func (persister *WhisperPersister) worker() {
 
 // Start worker
 func (persister *WhisperPersister) Start() {
-	go persister.worker()
+	go persister.worker(persister.in)
 }
 
 // Stop worker
