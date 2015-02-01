@@ -66,6 +66,8 @@ func TestUDPReceiver1(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
+	time.Sleep(10 * time.Millisecond)
+
 	test.Send("hello.world 42.15 1422698155\n")
 
 	time.Sleep(10 * time.Millisecond)
@@ -85,6 +87,8 @@ func TestUDPReceiver1(t *testing.T) {
 func TestUDPReceiver2(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
+
+	time.Sleep(10 * time.Millisecond)
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
 

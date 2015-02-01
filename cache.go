@@ -1,5 +1,32 @@
 package carbon
 
+// CacheQuery request from carbonlink
+type CacheQuery struct {
+	Metric    string
+	ReplyChan chan *CacheReply
+}
+
+// NewCacheQuery create CacheQuery instance
+func NewCacheQuery(metric string) *CacheQuery {
+	return &CacheQuery{
+		Metric:    metric,
+		ReplyChan: make(chan *CacheReply, 1),
+	}
+}
+
+// CacheReply response to carbonlink
+type CacheReply struct {
+	Data []struct {
+		Value     float64
+		Timestamp int64
+	}
+}
+
+// NewCacheReply create CacheReply instance
+func NewCacheReply() *CacheReply {
+	return &CacheReply{}
+}
+
 // CacheValues one metric data
 type CacheValues struct {
 	Metric string
@@ -23,17 +50,18 @@ type Cache struct {
 	size       int
 	inputChan  chan *Message     // from receivers
 	outputChan chan *CacheValues // to persisters
+	queryChan  chan *CacheQuery  // from carbonlink
 	exitChan   chan bool         // close for stop worker
 }
 
 // NewCache create Cache instance and run in/out goroutine
 func NewCache() *Cache {
 	cache := &Cache{
-		data:       make(map[string]*CacheValues, 0),
-		size:       0,
-		inputChan:  make(chan *Message, 1024),
-		outputChan: make(chan *CacheValues, 1024),
-		exitChan:   make(chan bool),
+		data:      make(map[string]*CacheValues, 0),
+		size:      0,
+		inputChan: make(chan *Message, 1024),
+		exitChan:  make(chan bool),
+		queryChan: make(chan *CacheQuery, 16),
 	}
 	return cache
 }
@@ -90,6 +118,16 @@ func (c *Cache) worker() {
 		}
 
 		select {
+		case query := <-c.queryChan:
+			reply := NewCacheReply()
+
+			if values != nil && values.Metric == query.Metric {
+				reply.Data = values.Data
+			} else if v, ok := c.data[query.Metric]; ok {
+				reply.Data = v.Data
+			}
+
+			query.ReplyChan <- reply
 		case sendTo <- values:
 			values = nil
 		case msg := <-c.inputChan:
@@ -111,8 +149,21 @@ func (c *Cache) Out() chan *CacheValues {
 	return c.outputChan
 }
 
+// Query returns carbonlink query channel
+func (c *Cache) Query() chan *CacheQuery {
+	return c.queryChan
+}
+
+// SetOutputChanSize ...
+func (c *Cache) SetOutputChanSize(size int) {
+	c.outputChan = make(chan *CacheValues, size)
+}
+
 // Start worker
 func (c *Cache) Start() {
+	if c.outputChan == nil {
+		c.outputChan = make(chan *CacheValues, 1024)
+	}
 	go c.worker()
 }
 

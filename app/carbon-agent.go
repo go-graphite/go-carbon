@@ -7,11 +7,37 @@ import (
 	"log"
 	"net"
 	"os"
+	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/Sirupsen/logrus"
 
 	"devroom.ru/lomik/carbon"
 )
+
+// Duration wrapper time.Duration for TOML
+type Duration struct {
+	time.Duration
+}
+
+var _ toml.TextMarshaler = &Duration{}
+
+// UnmarshalText from TOML
+func (d *Duration) UnmarshalText(text []byte) error {
+	var err error
+	d.Duration, err = time.ParseDuration(string(text))
+	return err
+}
+
+// MarshalText encode text with TOML format
+func (d *Duration) MarshalText() ([]byte, error) {
+	return []byte(d.Duration.String()), nil
+}
+
+// Value return time.Duration value
+func (d *Duration) Value() time.Duration {
+	return d.Duration
+}
 
 type whisperConfig struct {
 	DataDir string `toml:"data-dir"`
@@ -29,12 +55,19 @@ type tcpConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type carbonlinkConfig struct {
+	Listen      string    `toml:"listen"`
+	Enabled     bool      `toml:"enabled"`
+	ReadTimeout *Duration `toml:"read-timeout"`
+}
+
 // Config ...
 type Config struct {
-	Logfile string               `toml:"logfile"`
-	Whisper whisperConfig        `toml:"whisper"`
-	Udp     map[string]udpConfig `toml:"udp"`
-	Tcp     map[string]tcpConfig `toml:"tcp"`
+	Logfile    string                      `toml:"logfile"`
+	Whisper    whisperConfig               `toml:"whisper"`
+	Udp        map[string]udpConfig        `toml:"udp"`
+	Tcp        map[string]tcpConfig        `toml:"tcp"`
+	Carbonlink map[string]carbonlinkConfig `toml:"carbonlink"`
 }
 
 func newConfig() *Config {
@@ -55,6 +88,15 @@ func newConfig() *Config {
 			"default": tcpConfig{
 				Listen:  ":2003",
 				Enabled: true,
+			},
+		},
+		Carbonlink: map[string]carbonlinkConfig{
+			"default": carbonlinkConfig{
+				Listen:  ":2004", //??
+				Enabled: true,
+				ReadTimeout: &Duration{
+					Duration: 30 * time.Second,
+				},
 			},
 		},
 	}
@@ -162,5 +204,6 @@ func main() {
 	}
 	/* WHISPER end */
 
+	logrus.Info("started")
 	select {}
 }
