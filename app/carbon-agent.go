@@ -63,11 +63,11 @@ type carbonlinkConfig struct {
 
 // Config ...
 type Config struct {
-	Logfile    string                      `toml:"logfile"`
-	Whisper    whisperConfig               `toml:"whisper"`
-	Udp        map[string]udpConfig        `toml:"udp"`
-	Tcp        map[string]tcpConfig        `toml:"tcp"`
-	Carbonlink map[string]carbonlinkConfig `toml:"carbonlink"`
+	Logfile    string           `toml:"logfile"`
+	Whisper    whisperConfig    `toml:"whisper"`
+	Udp        udpConfig        `toml:"udp"`
+	Tcp        tcpConfig        `toml:"tcp"`
+	Carbonlink carbonlinkConfig `toml:"carbonlink"`
 }
 
 func newConfig() *Config {
@@ -78,25 +78,19 @@ func newConfig() *Config {
 			Schemas: "/data/graphite/schemas",
 			Enabled: true,
 		},
-		Udp: map[string]udpConfig{
-			"default": udpConfig{
-				Listen:  ":2003",
-				Enabled: true,
-			},
+		Udp: udpConfig{
+			Listen:  ":2003",
+			Enabled: true,
 		},
-		Tcp: map[string]tcpConfig{
-			"default": tcpConfig{
-				Listen:  ":2003",
-				Enabled: true,
-			},
+		Tcp: tcpConfig{
+			Listen:  ":2003",
+			Enabled: true,
 		},
-		Carbonlink: map[string]carbonlinkConfig{
-			"default": carbonlinkConfig{
-				Listen:  ":2004", //??
-				Enabled: true,
-				ReadTimeout: &Duration{
-					Duration: 30 * time.Second,
-				},
+		Carbonlink: carbonlinkConfig{
+			Listen:  ":2004", //??
+			Enabled: true,
+			ReadTimeout: &Duration{
+				Duration: 30 * time.Second,
 			},
 		},
 	}
@@ -157,35 +151,34 @@ func main() {
 	defer cache.Stop()
 
 	/* UDP start */
-	for _, udpCfg := range cfg.Udp {
-		if udpCfg.Enabled {
-			udpAddr, err := net.ResolveUDPAddr("udp", udpCfg.Listen)
-			if err != nil {
-				log.Fatal(err)
-			}
+	udpCfg := cfg.Udp
+	if udpCfg.Enabled {
+		udpAddr, err := net.ResolveUDPAddr("udp", udpCfg.Listen)
+		if err != nil {
+			log.Fatal(err)
+		}
 
-			udpListener := carbon.NewUDPReceiver(cache.In())
-			defer udpListener.Stop()
-			if err = udpListener.Listen(udpAddr); err != nil {
-				log.Fatal(err)
-			}
+		udpListener := carbon.NewUDPReceiver(cache.In())
+		defer udpListener.Stop()
+		if err = udpListener.Listen(udpAddr); err != nil {
+			log.Fatal(err)
 		}
 	}
 	/* UDP end */
 
 	/* TCP start */
-	for _, tcpCfg := range cfg.Tcp {
-		if tcpCfg.Enabled {
-			tcpAddr, err := net.ResolveTCPAddr("tcp", tcpCfg.Listen)
-			if err != nil {
-				log.Fatal(err)
-			}
+	tcpCfg := cfg.Tcp
 
-			tcpListener := carbon.NewTCPReceiver(cache.In())
-			defer tcpListener.Stop()
-			if err = tcpListener.Listen(tcpAddr); err != nil {
-				log.Fatal(err)
-			}
+	if tcpCfg.Enabled {
+		tcpAddr, err := net.ResolveTCPAddr("tcp", tcpCfg.Listen)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		tcpListener := carbon.NewTCPReceiver(cache.In())
+		defer tcpListener.Stop()
+		if err = tcpListener.Listen(tcpAddr); err != nil {
+			log.Fatal(err)
 		}
 	}
 	/* TCP end */
