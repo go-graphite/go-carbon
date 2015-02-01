@@ -84,17 +84,48 @@ func TestCarbonlink(t *testing.T) {
 	conn.SetDeadline(time.Now().Add(time.Second))
 	defer conn.Close()
 
+	var replyLength int32
+	var data []byte
+
+	/* MESSAGE 1 */
+
 	if _, err := conn.Write([]byte(sampleCacheQuery)); err != nil {
 		t.Fatal(err)
 	}
 
-	data := make([]byte, 43) // 43 = len of message below
+	if err := binary.Read(conn, binary.BigEndian, &replyLength); err != nil {
+		t.Fatal(err)
+	}
+
+	data = make([]byte, replyLength)
 
 	if err := binary.Read(conn, binary.BigEndian, data); err != nil {
 		t.Fatal(err)
 	}
 
-	if string(data) != "\x00\x00\x00'\x80\x02}(X\n\x00\x00\x00datapoints](J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86eu." {
+	// {u'datapoints': [(1422797285, 42.17)]}
+	if string(data) != "\x80\x02}(X\n\x00\x00\x00datapoints](J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86eu." {
+		fmt.Printf("%#v\n", string(data))
+		t.Fatal("wrong reply from carbonlink")
+	}
+
+	/* MESSAGE 2 */
+	if _, err := conn.Write([]byte(sampleCacheQuery2)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := binary.Read(conn, binary.BigEndian, &replyLength); err != nil {
+		t.Fatal(err)
+	}
+
+	data = make([]byte, replyLength)
+
+	if err := binary.Read(conn, binary.BigEndian, data); err != nil {
+		t.Fatal(err)
+	}
+
+	// {u'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
+	if string(data) != "\x80\x02}(X\n\x00\x00\x00datapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86eu." {
 		fmt.Printf("%#v\n", string(data))
 		t.Fatal("wrong reply from carbonlink")
 	}
