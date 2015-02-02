@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -154,7 +155,16 @@ func main() {
 	// pp.Println(cfg)
 	/* CONFIG end */
 
+	// carbon-cache prefix
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.Replace(hostname, ".", "_", -1)
+		cfg.Carbon.GraphPrefix = strings.Replace(cfg.Carbon.GraphPrefix, "{host}", hostname, -1)
+	} else {
+		cfg.Carbon.GraphPrefix = strings.Replace(cfg.Carbon.GraphPrefix, "{host}", "localhost", -1)
+	}
+
 	cache := carbon.NewCache()
+	cache.SetGraphPrefix(cfg.Carbon.GraphPrefix)
 	cache.Start()
 	defer cache.Stop()
 

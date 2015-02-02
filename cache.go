@@ -1,5 +1,7 @@
 package carbon
 
+import "time"
+
 // CacheQuery request from carbonlink
 type CacheQuery struct {
 	Metric    string
@@ -46,22 +48,24 @@ func (values *CacheValues) Append(value float64, timestamp int64) {
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
-	data       map[string]*CacheValues
-	size       int
-	inputChan  chan *Message     // from receivers
-	outputChan chan *CacheValues // to persisters
-	queryChan  chan *CacheQuery  // from carbonlink
-	exitChan   chan bool         // close for stop worker
+	data        map[string]*CacheValues
+	size        int
+	inputChan   chan *Message     // from receivers
+	outputChan  chan *CacheValues // to persisters
+	queryChan   chan *CacheQuery  // from carbonlink
+	exitChan    chan bool         // close for stop worker
+	graphPrefix string
 }
 
 // NewCache create Cache instance and run in/out goroutine
 func NewCache() *Cache {
 	cache := &Cache{
-		data:      make(map[string]*CacheValues, 0),
-		size:      0,
-		inputChan: make(chan *Message, 1024),
-		exitChan:  make(chan bool),
-		queryChan: make(chan *CacheQuery, 16),
+		data:        make(map[string]*CacheValues, 0),
+		size:        0,
+		inputChan:   make(chan *Message, 1024),
+		exitChan:    make(chan bool),
+		queryChan:   make(chan *CacheQuery, 16),
+		graphPrefix: "carbon",
 	}
 	return cache
 }
@@ -94,15 +98,28 @@ func (c *Cache) Add(key string, value float64, timestamp int64) {
 	c.size++
 }
 
+// SetGraphPrefix for internal cache metrics
+func (c *Cache) SetGraphPrefix(prefix string) {
+	c.graphPrefix = prefix
+}
+
 // Size returns size
 func (c *Cache) Size() int {
 	return c.size
+}
+
+// doCheckoint reorder save queue, add carbon metrics to queue
+func (c *Cache) doCheckpoint() {
+
 }
 
 func (c *Cache) worker() {
 	var key string
 	var values *CacheValues
 	var sendTo chan *CacheValues
+
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
 
 	for {
 		if values == nil {
@@ -118,6 +135,8 @@ func (c *Cache) worker() {
 		}
 
 		select {
+		case <-ticker.C:
+			c.doCheckpoint()
 		case query := <-c.queryChan:
 			reply := NewCacheReply()
 
