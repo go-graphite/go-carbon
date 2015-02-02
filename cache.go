@@ -1,6 +1,10 @@
 package carbon
 
-import "time"
+import (
+	"time"
+
+	"github.com/Sirupsen/logrus"
+)
 
 // CacheQuery request from carbonlink
 type CacheQuery struct {
@@ -55,6 +59,7 @@ type Cache struct {
 	queryChan   chan *CacheQuery  // from carbonlink
 	exitChan    chan bool         // close for stop worker
 	graphPrefix string
+	queryCnt    int
 }
 
 // NewCache create Cache instance and run in/out goroutine
@@ -66,6 +71,7 @@ func NewCache() *Cache {
 		exitChan:    make(chan bool),
 		queryChan:   make(chan *CacheQuery, 16),
 		graphPrefix: "carbon",
+		queryCnt:    0,
 	}
 	return cache
 }
@@ -110,7 +116,16 @@ func (c *Cache) Size() int {
 
 // doCheckoint reorder save queue, add carbon metrics to queue
 func (c *Cache) doCheckpoint() {
+	start := time.Now()
 
+	worktime := time.Now().Sub(start)
+	logrus.WithFields(logrus.Fields{
+		"time":    worktime.String(),
+		"size":    c.size,
+		"metrics": len(c.data),
+		"queries": c.queryCnt,
+	}).Info("doCheckpoint()")
+	c.queryCnt = 0
 }
 
 func (c *Cache) worker() {
@@ -138,6 +153,7 @@ func (c *Cache) worker() {
 		case <-ticker.C:
 			c.doCheckpoint()
 		case query := <-c.queryChan:
+			c.queryCnt++
 			reply := NewCacheReply()
 
 			if values != nil && values.Metric == query.Metric {
