@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -115,9 +116,28 @@ func (c *Cache) Size() int {
 	return c.size
 }
 
+type cacheQueueItem struct {
+	metric string
+	count  int
+}
+
+type cacheQueue []*cacheQueueItem
+
+func (v cacheQueue) Len() int           { return len(v) }
+func (v cacheQueue) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
+func (v cacheQueue) Less(i, j int) bool { return v[i].count < v[j].count }
+
 // doCheckoint reorder save queue, add carbon metrics to queue
 func (c *Cache) doCheckpoint() {
 	start := time.Now()
+
+	newQueue := make(cacheQueue, 0)
+
+	for key, values := range c.data {
+		newQueue = append(newQueue, &cacheQueueItem{key, len(values.Data)})
+	}
+
+	sort.Sort(newQueue)
 
 	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.size"), float64(c.size), start.Unix())
 	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.metrics"), float64(len(c.data)), start.Unix())
