@@ -68,7 +68,7 @@ type Cache struct {
 	exitChan    chan bool         // close for stop worker
 	graphPrefix string
 	queryCnt    int
-	queue       *cacheQueue
+	queue       cacheQueue
 }
 
 // NewCache create Cache instance and run in/out goroutine
@@ -81,12 +81,25 @@ func NewCache() *Cache {
 		queryChan:   make(chan *CacheQuery, 16),
 		graphPrefix: "carbon",
 		queryCnt:    0,
+		queue:       make(cacheQueue, 0),
 	}
 	return cache
 }
 
 // Get any key/values pair from Cache
 func (c Cache) Get() (string, *CacheValues) {
+	for {
+		size := len(c.queue)
+		if size == 0 {
+			break
+		}
+		cacheRecord := c.queue[size-1]
+		c.queue = c.queue[:size-1]
+
+		if values, ok := c.data[cacheRecord.metric]; ok {
+			return cacheRecord.metric, values
+		}
+	}
 	for key, values := range c.data {
 		return key, values
 	}
@@ -140,17 +153,22 @@ func (c *Cache) doCheckpoint() {
 
 	sort.Sort(newQueue)
 
+	c.queue = newQueue
+
+	worktime := time.Now().Sub(start)
+
 	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.size"), float64(c.size), start.Unix())
 	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.metrics"), float64(len(c.data)), start.Unix())
 	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.queries"), float64(c.queryCnt), start.Unix())
+	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.checkpoint_time"), worktime.Seconds(), start.Unix())
 
-	worktime := time.Now().Sub(start)
 	logrus.WithFields(logrus.Fields{
 		"time":    worktime.String(),
 		"size":    c.size,
 		"metrics": len(c.data),
 		"queries": c.queryCnt,
 	}).Info("doCheckpoint()")
+
 	c.queryCnt = 0
 }
 
