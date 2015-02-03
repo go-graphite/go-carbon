@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -117,6 +118,10 @@ func (c *Cache) Size() int {
 // doCheckoint reorder save queue, add carbon metrics to queue
 func (c *Cache) doCheckpoint() {
 	start := time.Now()
+
+	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.size"), float64(c.size), start.Unix())
+	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.metrics"), float64(len(c.data)), start.Unix())
+	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.queries"), float64(c.queryCnt), start.Unix())
 
 	worktime := time.Now().Sub(start)
 	logrus.WithFields(logrus.Fields{
