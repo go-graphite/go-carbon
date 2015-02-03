@@ -52,6 +52,12 @@ func (values *CacheValues) Append(value float64, timestamp int64) {
 	}{value, timestamp})
 }
 
+type cacheQueue []*cacheQueueItem
+
+func (v cacheQueue) Len() int           { return len(v) }
+func (v cacheQueue) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
+func (v cacheQueue) Less(i, j int) bool { return v[i].count < v[j].count }
+
 // Cache stores and aggregate metrics in memory
 type Cache struct {
 	data        map[string]*CacheValues
@@ -62,6 +68,7 @@ type Cache struct {
 	exitChan    chan bool         // close for stop worker
 	graphPrefix string
 	queryCnt    int
+	queue       *cacheQueue
 }
 
 // NewCache create Cache instance and run in/out goroutine
@@ -120,12 +127,6 @@ type cacheQueueItem struct {
 	metric string
 	count  int
 }
-
-type cacheQueue []*cacheQueueItem
-
-func (v cacheQueue) Len() int           { return len(v) }
-func (v cacheQueue) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v cacheQueue) Less(i, j int) bool { return v[i].count < v[j].count }
 
 // doCheckoint reorder save queue, add carbon metrics to queue
 func (c *Cache) doCheckpoint() {
