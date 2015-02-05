@@ -79,7 +79,7 @@ func NewCache() *Cache {
 		inputChan:   make(chan *Message, 1024),
 		exitChan:    make(chan bool),
 		queryChan:   make(chan *CacheQuery, 16),
-		graphPrefix: "carbon",
+		graphPrefix: "carbon.",
 		queryCnt:    0,
 		queue:       make(cacheQueue, 0),
 	}
@@ -141,7 +141,7 @@ type cacheQueueItem struct {
 	count  int
 }
 
-// doCheckoint reorder save queue, add carbon metrics to queue
+// doCheckpoint reorder save queue, add carbon metrics to queue
 func (c *Cache) doCheckpoint() {
 	start := time.Now()
 
@@ -157,10 +157,23 @@ func (c *Cache) doCheckpoint() {
 
 	worktime := time.Now().Sub(start)
 
-	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.size"), float64(c.size), start.Unix())
-	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.metrics"), float64(len(c.data)), start.Unix())
-	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.queries"), float64(c.queryCnt), start.Unix())
-	c.Add(fmt.Sprintf("%s%s", c.graphPrefix, "cache.checkpoint_time"), worktime.Seconds(), start.Unix())
+	var key string
+
+	key = fmt.Sprintf("%s%s", c.graphPrefix, "cache.size")
+	c.Add(key, float64(c.size), start.Unix())
+	c.queue = append(c.queue, &cacheQueueItem{key, 1})
+
+	key = fmt.Sprintf("%s%s", c.graphPrefix, "cache.metrics")
+	c.Add(key, float64(len(c.data)), start.Unix())
+	c.queue = append(c.queue, &cacheQueueItem{key, 1})
+
+	key = fmt.Sprintf("%s%s", c.graphPrefix, "cache.queries")
+	c.Add(key, float64(c.queryCnt), start.Unix())
+	c.queue = append(c.queue, &cacheQueueItem{key, 1})
+
+	key = fmt.Sprintf("%s%s", c.graphPrefix, "cache.checkpoint_time")
+	c.Add(key, worktime.Seconds(), start.Unix())
+	c.queue = append(c.queue, &cacheQueueItem{key, 1})
 
 	logrus.WithFields(logrus.Fields{
 		"time":    worktime.String(),

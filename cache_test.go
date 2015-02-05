@@ -73,6 +73,20 @@ func TestCacheCheckpoint(t *testing.T) {
 		t.Fatal("wrong metric received")
 	}
 
+	systemMetrics := []string{
+		"carbon.cache.checkpoint_time",
+		"carbon.cache.queries",
+		"carbon.cache.metrics",
+		"carbon.cache.size",
+	}
+
+	for _, metricName := range systemMetrics {
+		d = <-cache.Out()
+		if d.Metric != metricName {
+			t.Fatalf("%#v != %#v", d.Metric, metricName)
+		}
+	}
+
 	result := sizes[1:]
 	sort.Sort(sort.Reverse(sort.IntSlice(result)))
 
