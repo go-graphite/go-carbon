@@ -51,6 +51,10 @@ type whisperConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type cacheConfig struct {
+	MaxSize int `toml:"max-size"`
+}
+
 type udpConfig struct {
 	Listen  string `toml:"listen"`
 	Enabled bool   `toml:"enabled"`
@@ -71,6 +75,7 @@ type carbonlinkConfig struct {
 type Config struct {
 	Carbon     carbonConfig     `toml:"carbon"`
 	Whisper    whisperConfig    `toml:"whisper"`
+	Cache      cacheConfig      `toml:"cache"`
 	Udp        udpConfig        `toml:"udp"`
 	Tcp        tcpConfig        `toml:"tcp"`
 	Carbonlink carbonlinkConfig `toml:"carbonlink"`
@@ -86,6 +91,9 @@ func newConfig() *Config {
 			DataDir: "/data/graphite/whisper/",
 			Schemas: "/data/graphite/schemas",
 			Enabled: true,
+		},
+		Cache: cacheConfig{
+			MaxSize: 1000000,
 		},
 		Udp: udpConfig{
 			Listen:  ":2003",
@@ -165,6 +173,7 @@ func main() {
 
 	cache := carbon.NewCache()
 	cache.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+	cache.SetMaxSize(cfg.Cache.MaxSize)
 	cache.Start()
 	defer cache.Stop()
 

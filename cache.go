@@ -62,12 +62,14 @@ func (v cacheQueue) Less(i, j int) bool { return v[i].count < v[j].count }
 type Cache struct {
 	data        map[string]*CacheValues
 	size        int
+	maxSize     int
 	inputChan   chan *Message     // from receivers
 	outputChan  chan *CacheValues // to persisters
 	queryChan   chan *CacheQuery  // from carbonlink
 	exitChan    chan bool         // close for stop worker
 	graphPrefix string
 	queryCnt    int
+	oversizeCnt int // drop packages if cache full
 	queue       cacheQueue
 }
 
@@ -76,6 +78,7 @@ func NewCache() *Cache {
 	cache := &Cache{
 		data:        make(map[string]*CacheValues, 0),
 		size:        0,
+		maxSize:     1000000,
 		inputChan:   make(chan *Message, 1024),
 		exitChan:    make(chan bool),
 		queryChan:   make(chan *CacheQuery, 16),
@@ -131,6 +134,11 @@ func (c *Cache) SetGraphPrefix(prefix string) {
 	c.graphPrefix = prefix
 }
 
+// SetMaxSize of cache
+func (c *Cache) SetMaxSize(maxSize int) {
+	c.maxSize = maxSize
+}
+
 // Size returns size
 func (c *Cache) Size() int {
 	return c.size
@@ -171,18 +179,24 @@ func (c *Cache) doCheckpoint() {
 	c.Add(key, float64(c.queryCnt), start.Unix())
 	c.queue = append(c.queue, &cacheQueueItem{key, 1})
 
+	key = fmt.Sprintf("%s%s", c.graphPrefix, "cache.oversize")
+	c.Add(key, float64(c.oversizeCnt), start.Unix())
+	c.queue = append(c.queue, &cacheQueueItem{key, 1})
+
 	key = fmt.Sprintf("%s%s", c.graphPrefix, "cache.checkpoint_time")
 	c.Add(key, worktime.Seconds(), start.Unix())
 	c.queue = append(c.queue, &cacheQueueItem{key, 1})
 
 	logrus.WithFields(logrus.Fields{
-		"time":    worktime.String(),
-		"size":    c.size,
-		"metrics": len(c.data),
-		"queries": c.queryCnt,
+		"time":     worktime.String(),
+		"size":     c.size,
+		"metrics":  len(c.data),
+		"queries":  c.queryCnt,
+		"oversize": c.oversizeCnt,
 	}).Info("doCheckpoint()")
 
 	c.queryCnt = 0
+	c.oversizeCnt = 0
 }
 
 func (c *Cache) worker() {
@@ -223,7 +237,11 @@ func (c *Cache) worker() {
 		case sendTo <- values:
 			values = nil
 		case msg := <-c.inputChan:
-			c.Add(msg.Name, msg.Value, msg.Timestamp)
+			if c.maxSize == 0 || c.size < c.maxSize {
+				c.Add(msg.Name, msg.Value, msg.Timestamp)
+			} else {
+				c.oversizeCnt++
+			}
 		case <-c.exitChan:
 			break
 		}
