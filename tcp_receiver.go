@@ -18,6 +18,7 @@ type TCPReceiver struct {
 	exit            chan bool
 	graphPrefix     string
 	metricsReceived uint32
+	active          int32 // counter
 }
 
 // NewTCPReceiver create new instance of TCPReceiver
@@ -45,6 +46,9 @@ func (rcv *TCPReceiver) Stat(metric string, value float64) {
 }
 
 func (rcv *TCPReceiver) handleConnection(conn net.Conn) {
+	atomic.AddInt32(&rcv.active, 1)
+	defer atomic.AddInt32(&rcv.active, -1)
+
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(time.Minute))
 	reader := bufio.NewReader(conn)
@@ -90,6 +94,10 @@ func (rcv *TCPReceiver) Listen(addr *net.TCPAddr) error {
 				cnt := atomic.LoadUint32(&rcv.metricsReceived)
 				atomic.AddUint32(&rcv.metricsReceived, -cnt)
 				rcv.Stat("tcpMetricsReceived", float64(cnt))
+
+				active := atomic.LoadInt32(&rcv.active)
+				atomic.AddInt32(&rcv.active, -active)
+				rcv.Stat("tcpActive", float64(active))
 			case <-rcv.exit:
 				sock.Close()
 				return
