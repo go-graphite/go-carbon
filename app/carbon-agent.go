@@ -186,6 +186,8 @@ func main() {
 		}
 
 		udpListener := carbon.NewUDPReceiver(cache.In())
+		udpListener.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+
 		defer udpListener.Stop()
 		if err = udpListener.Listen(udpAddr); err != nil {
 			log.Fatal(err)
@@ -203,6 +205,8 @@ func main() {
 		}
 
 		tcpListener := carbon.NewTCPReceiver(cache.In())
+		tcpListener.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+
 		defer tcpListener.Stop()
 		if err = tcpListener.Listen(tcpAddr); err != nil {
 			log.Fatal(err)

@@ -2,9 +2,11 @@ package carbon
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -12,8 +14,10 @@ import (
 
 // TCPReceiver receive metrics from TCP and UDP sockets
 type TCPReceiver struct {
-	out  chan *Message
-	exit chan bool
+	out             chan *Message
+	exit            chan bool
+	graphPrefix     string
+	metricsReceived uint32
 }
 
 // NewTCPReceiver create new instance of TCPReceiver
@@ -22,6 +26,22 @@ func NewTCPReceiver(out chan *Message) *TCPReceiver {
 		out:  out,
 		exit: make(chan bool),
 	}
+}
+
+// SetGraphPrefix for internal cache metrics
+func (rcv *TCPReceiver) SetGraphPrefix(prefix string) {
+	rcv.graphPrefix = prefix
+}
+
+// Stat sends internal statistics to cache
+func (rcv *TCPReceiver) Stat(metric string, value float64) {
+	msg := NewMessage()
+
+	msg.Name = fmt.Sprintf("%s%s", rcv.graphPrefix, metric)
+	msg.Value = value
+	msg.Timestamp = time.Now().Unix()
+
+	rcv.out <- msg
 }
 
 func (rcv *TCPReceiver) handleConnection(conn net.Conn) {
@@ -46,6 +66,7 @@ func (rcv *TCPReceiver) handleConnection(conn net.Conn) {
 			if msg, err := ParseTextMessage(string(line)); err != nil {
 				logrus.Info(err)
 			} else {
+				atomic.AddUint32(&rcv.metricsReceived, 1)
 				rcv.out <- msg
 			}
 		}
@@ -60,9 +81,19 @@ func (rcv *TCPReceiver) Listen(addr *net.TCPAddr) error {
 	}
 
 	go func() {
-		select {
-		case <-rcv.exit:
-			sock.Close()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				cnt := atomic.LoadUint32(&rcv.metricsReceived)
+				atomic.AddUint32(&rcv.metricsReceived, -cnt)
+				rcv.Stat("tcpMetricsReceived", float64(cnt))
+			case <-rcv.exit:
+				sock.Close()
+				return
+			}
 		}
 	}()
 

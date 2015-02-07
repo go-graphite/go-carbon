@@ -2,17 +2,22 @@ package carbon
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 )
 
 // UDPReceiver receive metrics from TCP and UDP sockets
 type UDPReceiver struct {
-	out  chan *Message
-	exit chan bool
+	out             chan *Message
+	exit            chan bool
+	graphPrefix     string
+	metricsReceived uint32
 }
 
 // NewUDPReceiver create new instance of UDPReceiver
@@ -23,6 +28,22 @@ func NewUDPReceiver(out chan *Message) *UDPReceiver {
 	}
 }
 
+// SetGraphPrefix for internal cache metrics
+func (rcv *UDPReceiver) SetGraphPrefix(prefix string) {
+	rcv.graphPrefix = prefix
+}
+
+// Stat sends internal statistics to cache
+func (rcv *UDPReceiver) Stat(metric string, value float64) {
+	msg := NewMessage()
+
+	msg.Name = fmt.Sprintf("%s%s", rcv.graphPrefix, metric)
+	msg.Value = value
+	msg.Timestamp = time.Now().Unix()
+
+	rcv.out <- msg
+}
+
 // Listen bind port. Receive messages and send to out channel
 func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 	sock, err := net.ListenUDP("udp", addr)
@@ -31,9 +52,19 @@ func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 	}
 
 	go func() {
-		select {
-		case <-rcv.exit:
-			sock.Close()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ticker.C:
+				cnt := atomic.LoadUint32(&rcv.metricsReceived)
+				atomic.AddUint32(&rcv.metricsReceived, -cnt)
+				rcv.Stat("udpMetricsReceived", float64(cnt))
+			case <-rcv.exit:
+				sock.Close()
+				return
+			}
 		}
 	}()
 
@@ -72,6 +103,7 @@ func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 					if msg, err := ParseTextMessage(string(line)); err != nil {
 						logrus.Info(err)
 					} else {
+						atomic.AddUint32(&rcv.metricsReceived, 1)
 						rcv.out <- msg
 					}
 				}
