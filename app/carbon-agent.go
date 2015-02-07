@@ -222,6 +222,7 @@ func main() {
 		}
 
 		whisperPersister := carbon.NewWhisperPersister(cfg.Whisper.DataDir, whisperSchemas, cache.Out())
+		whisperPersister.SetGraphPrefix(cfg.Carbon.GraphPrefix)
 
 		whisperPersister.Start()
 		defer whisperPersister.Stop()

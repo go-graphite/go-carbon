@@ -1,9 +1,12 @@
 package carbon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/grobian/go-whisper"
@@ -11,10 +14,13 @@ import (
 
 // WhisperPersister receive metrics from TCP and UDP sockets
 type WhisperPersister struct {
-	in       chan *CacheValues
-	exit     chan bool
-	schemas  *WhisperSchemas
-	rootPath string
+	in          chan *CacheValues
+	exit        chan bool
+	schemas     *WhisperSchemas
+	rootPath    string
+	graphPrefix string
+	commited    uint64 // (updateOperations << 32) + commitedPoints
+	created     uint32 // counter
 }
 
 // NewWhisperPersister create instance of WhisperPersister
@@ -27,8 +33,22 @@ func NewWhisperPersister(rootPath string, schemas *WhisperSchemas, in chan *Cach
 	}
 }
 
+// SetGraphPrefix for internal cache metrics
+func (persister *WhisperPersister) SetGraphPrefix(prefix string) {
+	persister.graphPrefix = prefix
+}
+
+// Stat sends internal statistics to cache
+func (persister *WhisperPersister) Stat(metric string, value float64) {
+	values := &CacheValues{}
+	values.Append(value, time.Now().Unix())
+	values.Metric = fmt.Sprintf("%s%s", persister.graphPrefix, metric)
+
+	persister.in <- values
+}
+
 func (persister *WhisperPersister) store(values *CacheValues) {
-	// @TODO: lock, no thread safe
+	// @TODO: lock or shard by hash(metricName), no thread safe
 	path := filepath.Join(persister.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := whisper.Open(path)
@@ -52,13 +72,17 @@ func (persister *WhisperPersister) store(values *CacheValues) {
 			logrus.Warningf("Failed to create new whisper file %s: %s", path, err.Error())
 			return
 		}
+
+		atomic.AddUint32(&persister.created, 1)
 	}
 
 	for _, r := range values.Data {
 		w.Update(r.Value, int(r.Timestamp))
 	}
+
+	atomic.AddUint64(&persister.commited, (uint64(1)<<32)+uint64(len(values.Data)))
+
 	w.Close()
-	//persister.schemas.Match(values.Metric)
 }
 
 func (persister *WhisperPersister) worker(in chan *CacheValues) {
@@ -72,8 +96,37 @@ func (persister *WhisperPersister) worker(in chan *CacheValues) {
 	}
 }
 
+func (persister *WhisperPersister) statWorker() {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-persister.exit:
+			break
+		case <-ticker.C:
+			// @send stat
+			cnt := atomic.LoadUint64(&persister.commited)
+			atomic.AddUint64(&persister.commited, -cnt)
+			persister.Stat("updateOperations", float64(cnt>>32))
+			persister.Stat("commitedPoints", float64(cnt%(1<<32)))
+			if float64(cnt>>32) > 0 {
+				persister.Stat("pointsPerUpdate", float64(cnt%(1<<32))/float64(cnt>>32))
+			} else {
+				persister.Stat("pointsPerUpdate", 0.0)
+			}
+
+			created := atomic.LoadUint32(&persister.created)
+			atomic.AddUint32(&persister.created, -created)
+
+			persister.Stat("created", float64(created))
+		}
+	}
+}
+
 // Start worker
 func (persister *WhisperPersister) Start() {
+	go persister.statWorker()
 	go persister.worker(persister.in)
 }
 
