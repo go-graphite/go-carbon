@@ -50,10 +50,11 @@ func (rcv *TCPReceiver) handleConnection(conn net.Conn) {
 	defer atomic.AddInt32(&rcv.active, -1)
 
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(time.Minute))
 	reader := bufio.NewReader(conn)
 
 	for {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+
 		line, err := reader.ReadBytes('\n')
 
 		if err != nil {
