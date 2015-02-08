@@ -76,9 +76,12 @@ func (persister *WhisperPersister) store(values *CacheValues) {
 		atomic.AddUint32(&persister.created, 1)
 	}
 
-	for _, r := range values.Data {
-		w.Update(r.Value, int(r.Timestamp))
+	points := make([]*whisper.TimeSeriesPoint, len(values.Data))
+	for i, r := range values.Data {
+		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
 	}
+
+	w.UpdateMany(points)
 
 	atomic.AddUint64(&persister.commited, (uint64(1)<<32)+uint64(len(values.Data)))
 
