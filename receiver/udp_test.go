@@ -1,16 +1,18 @@
-package carbon
+package receiver
 
 import (
 	"net"
 	"testing"
 	"time"
+
+	"devroom.ru/lomik/carbon/points"
 )
 
 type udpTestCase struct {
 	*testing.T
-	receiver *UDPReceiver
+	receiver *UDP
 	conn     net.Conn
-	rcvChan  chan *Message
+	rcvChan  chan *points.Points
 }
 
 func newUDPTestCase(t *testing.T) *udpTestCase {
@@ -18,20 +20,20 @@ func newUDPTestCase(t *testing.T) *udpTestCase {
 		T: t,
 	}
 
-	addr, err := net.ResolveUDPAddr("udp", "localhost:1818")
+	addr, err := net.ResolveUDPAddr("udp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	test.rcvChan = make(chan *Message, 128)
-	test.receiver = NewUDPReceiver(test.rcvChan)
+	test.rcvChan = make(chan *points.Points, 128)
+	test.receiver = NewUDP(test.rcvChan)
 	// defer receiver.Stop()
 
 	if err = test.receiver.Listen(addr); err != nil {
 		t.Fatal(err)
 	}
 
-	test.conn, err = net.Dial("udp", addr.String())
+	test.conn, err = net.Dial("udp", test.receiver.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +58,15 @@ func (test *udpTestCase) Send(text string) {
 	}
 }
 
-func (test *udpTestCase) Eq(a *Message, b *Message) {
-	if a.Name != b.Name || a.Value != b.Value || a.Timestamp != b.Timestamp {
+func (test *udpTestCase) Eq(a *points.Points, b *points.Points) {
+	if a.Metric != b.Metric ||
+		a.Data[0].Value != b.Data[0].Value ||
+		a.Data[0].Timestamp != b.Data[0].Timestamp {
 		test.Fatalf("%#v != %#v", a, b)
 	}
 }
 
-func TestUDPReceiver1(t *testing.T) {
+func TestUDP1(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
@@ -74,17 +78,13 @@ func TestUDPReceiver1(t *testing.T) {
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, &Message{
-			Name:      "hello.world",
-			Value:     42.15,
-			Timestamp: 1422698155,
-		})
+		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
 	default:
 		t.Fatalf("Message #0 not received")
 	}
 }
 
-func TestUDPReceiver2(t *testing.T) {
+func TestUDP2(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
@@ -96,22 +96,14 @@ func TestUDPReceiver2(t *testing.T) {
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, &Message{
-			Name:      "hello.world",
-			Value:     42.15,
-			Timestamp: 1422698155,
-		})
+		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
 	default:
 		t.Fatalf("Message #0 not received")
 	}
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, &Message{
-			Name:      "metric.name",
-			Value:     -72.11,
-			Timestamp: 1422698155,
-		})
+		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
 	default:
 		t.Fatalf("Message #1 not received")
 	}

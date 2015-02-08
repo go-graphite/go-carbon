@@ -1,4 +1,4 @@
-package carbon
+package receiver
 
 import (
 	"bytes"
@@ -9,44 +9,54 @@ import (
 	"sync/atomic"
 	"time"
 
+	"devroom.ru/lomik/carbon/points"
+
 	"github.com/Sirupsen/logrus"
 )
 
-// UDPReceiver receive metrics from TCP and UDP sockets
-type UDPReceiver struct {
-	out             chan *Message
+// UDP receive metrics from UDP socket
+type UDP struct {
+	out             chan *points.Points
 	exit            chan bool
 	graphPrefix     string
 	metricsReceived uint32
+	conn            *net.UDPConn
 }
 
-// NewUDPReceiver create new instance of UDPReceiver
-func NewUDPReceiver(out chan *Message) *UDPReceiver {
-	return &UDPReceiver{
+// NewUDP create new instance of UDP
+func NewUDP(out chan *points.Points) *UDP {
+	return &UDP{
 		out:  out,
 		exit: make(chan bool),
 	}
 }
 
+// Addr returns binded socket address. For bind port 0 in tests
+func (rcv *UDP) Addr() net.Addr {
+	if rcv.conn == nil {
+		return nil
+	}
+	return rcv.conn.LocalAddr()
+}
+
 // SetGraphPrefix for internal cache metrics
-func (rcv *UDPReceiver) SetGraphPrefix(prefix string) {
+func (rcv *UDP) SetGraphPrefix(prefix string) {
 	rcv.graphPrefix = prefix
 }
 
 // Stat sends internal statistics to cache
-func (rcv *UDPReceiver) Stat(metric string, value float64) {
-	msg := NewMessage()
-
-	msg.Name = fmt.Sprintf("%s%s", rcv.graphPrefix, metric)
-	msg.Value = value
-	msg.Timestamp = time.Now().Unix()
-
-	rcv.out <- msg
+func (rcv *UDP) Stat(metric string, value float64) {
+	rcv.out <- points.OnePoint(
+		fmt.Sprintf("%s%s", rcv.graphPrefix, metric),
+		value,
+		time.Now().Unix(),
+	)
 }
 
 // Listen bind port. Receive messages and send to out channel
-func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
-	sock, err := net.ListenUDP("udp", addr)
+func (rcv *UDP) Listen(addr *net.UDPAddr) error {
+	var err error
+	rcv.conn, err = net.ListenUDP("udp", addr)
 	if err != nil {
 		return err
 	}
@@ -60,22 +70,22 @@ func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 			case <-ticker.C:
 				cnt := atomic.LoadUint32(&rcv.metricsReceived)
 				atomic.AddUint32(&rcv.metricsReceived, -cnt)
-				rcv.Stat("udpMetricsReceived", float64(cnt))
+				rcv.Stat("udp.metricsReceived", float64(cnt))
 			case <-rcv.exit:
-				sock.Close()
+				rcv.conn.Close()
 				return
 			}
 		}
 	}()
 
 	go func() {
-		defer sock.Close()
+		defer rcv.conn.Close()
 
 		var buf [2048]byte
 
 		for {
 			// @TODO: store incomplete lines
-			rlen, _, err := sock.ReadFromUDP(buf[:])
+			rlen, _, err := rcv.conn.ReadFromUDP(buf[:])
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					break
@@ -100,7 +110,7 @@ func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 					break
 				}
 				if len(line) > 0 { // skip empty lines
-					if msg, err := ParseTextMessage(string(line)); err != nil {
+					if msg, err := points.ParseText(string(line)); err != nil {
 						logrus.Info(err)
 					} else {
 						atomic.AddUint32(&rcv.metricsReceived, 1)
@@ -116,6 +126,6 @@ func (rcv *UDPReceiver) Listen(addr *net.UDPAddr) error {
 }
 
 // Stop all listeners
-func (rcv *UDPReceiver) Stop() {
+func (rcv *UDP) Stop() {
 	close(rcv.exit)
 }

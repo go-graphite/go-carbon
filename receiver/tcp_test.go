@@ -1,16 +1,18 @@
-package carbon
+package receiver
 
 import (
 	"net"
 	"testing"
 	"time"
+
+	"devroom.ru/lomik/carbon/points"
 )
 
 type tcpTestCase struct {
 	*testing.T
-	receiver *TCPReceiver
+	receiver *TCP
 	conn     net.Conn
-	rcvChan  chan *Message
+	rcvChan  chan *points.Points
 }
 
 func newTCPTestCase(t *testing.T) *tcpTestCase {
@@ -18,20 +20,20 @@ func newTCPTestCase(t *testing.T) *tcpTestCase {
 		T: t,
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", "localhost:1818")
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	test.rcvChan = make(chan *Message, 128)
-	test.receiver = NewTCPReceiver(test.rcvChan)
+	test.rcvChan = make(chan *points.Points, 128)
+	test.receiver = NewTCP(test.rcvChan)
 	// defer receiver.Stop()
 
 	if err = test.receiver.Listen(addr); err != nil {
 		t.Fatal(err)
 	}
 
-	test.conn, err = net.Dial("tcp", addr.String())
+	test.conn, err = net.Dial("tcp", test.receiver.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,13 +58,15 @@ func (test *tcpTestCase) Send(text string) {
 	}
 }
 
-func (test *tcpTestCase) Eq(a *Message, b *Message) {
-	if a.Name != b.Name || a.Value != b.Value || a.Timestamp != b.Timestamp {
+func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
+	if a.Metric != b.Metric ||
+		a.Data[0].Value != b.Data[0].Value ||
+		a.Data[0].Timestamp != b.Data[0].Timestamp {
 		test.Fatalf("%#v != %#v", a, b)
 	}
 }
 
-func TestTCPReceiver1(t *testing.T) {
+func TestTCP1(t *testing.T) {
 	test := newTCPTestCase(t)
 	defer test.Finish()
 
@@ -72,17 +76,13 @@ func TestTCPReceiver1(t *testing.T) {
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, &Message{
-			Name:      "hello.world",
-			Value:     42.15,
-			Timestamp: 1422698155,
-		})
+		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
 	default:
 		t.Fatalf("Message #0 not received")
 	}
 }
 
-func TestTCPReceiver2(t *testing.T) {
+func TestTCP2(t *testing.T) {
 	test := newTCPTestCase(t)
 	defer test.Finish()
 
@@ -92,22 +92,14 @@ func TestTCPReceiver2(t *testing.T) {
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, &Message{
-			Name:      "hello.world",
-			Value:     42.15,
-			Timestamp: 1422698155,
-		})
+		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
 	default:
 		t.Fatalf("Message #0 not received")
 	}
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, &Message{
-			Name:      "metric.name",
-			Value:     -72.11,
-			Timestamp: 1422698155,
-		})
+		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
 	default:
 		t.Fatalf("Message #1 not received")
 	}
