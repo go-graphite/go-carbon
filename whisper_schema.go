@@ -21,7 +21,7 @@ type whisperSchemaItem struct {
 	pattern      *regexp.Regexp
 	retentionStr string
 	retentions   whisper.Retentions
-	priority     int
+	priority     int64
 }
 
 type whisperSchemaItemByPriority []*whisperSchemaItem
@@ -83,7 +83,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 
 	result := NewWhisperSchemas()
 
-	for _, s := range sections {
+	for index, s := range sections {
 		item := &whisperSchemaItem{}
 		// this is mildly stupid, but I don't feel like forking
 		// configparser just for this
@@ -105,7 +105,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		if err != nil {
 			return nil, err
 		}
-		item.priority = int(p)
+		item.priority = int64(p)<<32 - int64(index) // for sort records with same priority
 		// item.priority = (s.ValueOf("priority"))
 		logrus.Debugf("adding schema [%s] pattern = %s retentions = %s",
 			item.name, s.ValueOf("pattern"), item.retentionStr)
