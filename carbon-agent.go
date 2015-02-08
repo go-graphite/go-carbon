@@ -10,10 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"devroom.ru/lomik/carbon/cache"
+	"devroom.ru/lomik/carbon/persister"
+	"devroom.ru/lomik/carbon/receiver"
+
 	"github.com/BurntSushi/toml"
 	"github.com/Sirupsen/logrus"
-
-	"devroom.ru/lomik/carbon"
 )
 
 // Duration wrapper time.Duration for TOML
@@ -171,7 +173,7 @@ func main() {
 		cfg.Carbon.GraphPrefix = strings.Replace(cfg.Carbon.GraphPrefix, "{host}", "localhost", -1)
 	}
 
-	cache := carbon.NewCache()
+	cache := cache.New()
 	cache.SetGraphPrefix(cfg.Carbon.GraphPrefix)
 	cache.SetMaxSize(cfg.Cache.MaxSize)
 	cache.Start()
@@ -185,7 +187,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		udpListener := carbon.NewUDPReceiver(cache.In())
+		udpListener := receiver.NewUDP(cache.In())
 		udpListener.SetGraphPrefix(cfg.Carbon.GraphPrefix)
 
 		defer udpListener.Stop()
@@ -204,7 +206,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		tcpListener := carbon.NewTCPReceiver(cache.In())
+		tcpListener := receiver.NewTCP(cache.In())
 		tcpListener.SetGraphPrefix(cfg.Carbon.GraphPrefix)
 
 		defer tcpListener.Stop()
@@ -216,12 +218,12 @@ func main() {
 
 	/* WHISPER start */
 	if cfg.Whisper.Enabled {
-		whisperSchemas, err := carbon.ReadWhisperSchemas(cfg.Whisper.Schemas)
+		whisperSchemas, err := persister.ReadWhisperSchemas(cfg.Whisper.Schemas)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		whisperPersister := carbon.NewWhisperPersister(cfg.Whisper.DataDir, whisperSchemas, cache.Out())
+		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, cache.Out())
 		whisperPersister.SetGraphPrefix(cfg.Carbon.GraphPrefix)
 
 		whisperPersister.Start()

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"devroom.ru/lomik/carbon"
+	"devroom.ru/lomik/carbon/points"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/grobian/go-whisper"
@@ -16,7 +16,7 @@ import (
 
 // Whisper write data to *.wsp files
 type Whisper struct {
-	in          chan *CacheValues
+	in          chan *points.Points
 	exit        chan bool
 	schemas     *WhisperSchemas
 	rootPath    string
@@ -26,7 +26,7 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas *WhisperSchemas, in chan *carbon.CacheValues) *Whisper {
+func NewWhisper(rootPath string, schemas *WhisperSchemas, in chan *points.Points) *Whisper {
 	return &Whisper{
 		in:       in,
 		exit:     make(chan bool),
@@ -42,14 +42,14 @@ func (p *Whisper) SetGraphPrefix(prefix string) {
 
 // Stat sends internal statistics to cache
 func (p *Whisper) Stat(metric string, value float64) {
-	values := &CacheValues{}
-	values.Append(value, time.Now().Unix())
-	values.Metric = fmt.Sprintf("%s%s", p.graphPrefix, metric)
-
-	p.in <- values
+	p.in <- points.OnePoint(
+		fmt.Sprintf("%s%s", p.graphPrefix, metric),
+		value,
+		time.Now().Unix(),
+	)
 }
 
-func (p *Whisper) store(values *CacheValues) {
+func (p *Whisper) store(values *points.Points) {
 	// @TODO: lock or shard by hash(metricName), no thread safe
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
@@ -90,7 +90,7 @@ func (p *Whisper) store(values *CacheValues) {
 	w.Close()
 }
 
-func (p *Whisper) worker(in chan *CacheValues) {
+func (p *Whisper) worker(in chan *points.Points) {
 	for {
 		select {
 		case <-p.exit:
