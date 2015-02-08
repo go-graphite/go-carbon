@@ -1,4 +1,4 @@
-package carbon
+package cache
 
 import (
 	"bufio"
@@ -58,14 +58,14 @@ func ReadCarbonlinkRequest(reader io.Reader) (*CarbonlinkRequest, error) {
 
 // CarbonlinkListener receive cache Carbonlinkrequests from graphite-web
 type CarbonlinkListener struct {
-	queryChan    chan *CacheQuery
+	queryChan    chan *Query
 	exit         chan bool
 	readTimeout  time.Duration
 	queryTimeout time.Duration
 }
 
 // NewCarbonlinkListener create new instance of CarbonlinkListener
-func NewCarbonlinkListener(queryChan chan *CacheQuery) *CarbonlinkListener {
+func NewCarbonlinkListener(queryChan chan *Query) *CarbonlinkListener {
 	return &CarbonlinkListener{
 		exit:         make(chan bool),
 		queryChan:    queryChan,
@@ -74,12 +74,12 @@ func NewCarbonlinkListener(queryChan chan *CacheQuery) *CarbonlinkListener {
 	}
 }
 
-func (listener *CarbonlinkListener) packReply(reply *CacheReply) []byte {
+func (listener *CarbonlinkListener) packReply(reply *Reply) []byte {
 	buf := new(bytes.Buffer)
 
 	var datapoints []interface{}
 
-	for _, item := range reply.Data {
+	for _, item := range reply.Points.Data {
 		datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
 	}
 
@@ -121,16 +121,16 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 			}
 
 			if req.Type == "cache-query" {
-				cacheReq := NewCacheQuery(req.Metric)
+				cacheReq := NewQuery(req.Metric)
 				listener.queryChan <- cacheReq
 
-				var reply *CacheReply
+				var reply *Reply
 
 				select {
 				case reply = <-cacheReq.ReplyChan:
 				case <-time.After(listener.queryTimeout):
 					logrus.Infof("[carbonlink] Cache no reply (%s timeout)", listener.queryTimeout)
-					reply = NewCacheReply()
+					reply = NewReply()
 				}
 				packed := listener.packReply(reply)
 				if packed == nil {

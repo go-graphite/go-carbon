@@ -1,4 +1,4 @@
-package carbon
+package persister
 
 import (
 	"fmt"
@@ -8,12 +8,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"devroom.ru/lomik/carbon"
+
 	"github.com/Sirupsen/logrus"
 	"github.com/grobian/go-whisper"
 )
 
-// WhisperPersister receive metrics from TCP and UDP sockets
-type WhisperPersister struct {
+// Whisper write data to *.wsp files
+type Whisper struct {
 	in          chan *CacheValues
 	exit        chan bool
 	schemas     *WhisperSchemas
@@ -23,9 +25,9 @@ type WhisperPersister struct {
 	created     uint32 // counter
 }
 
-// NewWhisperPersister create instance of WhisperPersister
-func NewWhisperPersister(rootPath string, schemas *WhisperSchemas, in chan *CacheValues) *WhisperPersister {
-	return &WhisperPersister{
+// NewWhisper create instance of Whisper
+func NewWhisper(rootPath string, schemas *WhisperSchemas, in chan *carbon.CacheValues) *Whisper {
+	return &Whisper{
 		in:       in,
 		exit:     make(chan bool),
 		schemas:  schemas,
@@ -34,26 +36,26 @@ func NewWhisperPersister(rootPath string, schemas *WhisperSchemas, in chan *Cach
 }
 
 // SetGraphPrefix for internal cache metrics
-func (persister *WhisperPersister) SetGraphPrefix(prefix string) {
-	persister.graphPrefix = prefix
+func (p *Whisper) SetGraphPrefix(prefix string) {
+	p.graphPrefix = prefix
 }
 
 // Stat sends internal statistics to cache
-func (persister *WhisperPersister) Stat(metric string, value float64) {
+func (p *Whisper) Stat(metric string, value float64) {
 	values := &CacheValues{}
 	values.Append(value, time.Now().Unix())
-	values.Metric = fmt.Sprintf("%s%s", persister.graphPrefix, metric)
+	values.Metric = fmt.Sprintf("%s%s", p.graphPrefix, metric)
 
-	persister.in <- values
+	p.in <- values
 }
 
-func (persister *WhisperPersister) store(values *CacheValues) {
+func (p *Whisper) store(values *CacheValues) {
 	// @TODO: lock or shard by hash(metricName), no thread safe
-	path := filepath.Join(persister.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
+	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := whisper.Open(path)
 	if err != nil {
-		schema := persister.schemas.match(values.Metric)
+		schema := p.schemas.match(values.Metric)
 		if schema == nil {
 			logrus.Errorf("No storage schema defined for %s", values.Metric)
 			return
@@ -73,7 +75,7 @@ func (persister *WhisperPersister) store(values *CacheValues) {
 			return
 		}
 
-		atomic.AddUint32(&persister.created, 1)
+		atomic.AddUint32(&p.created, 1)
 	}
 
 	points := make([]*whisper.TimeSeriesPoint, len(values.Data))
@@ -83,57 +85,57 @@ func (persister *WhisperPersister) store(values *CacheValues) {
 
 	w.UpdateMany(points)
 
-	atomic.AddUint64(&persister.commited, (uint64(1)<<32)+uint64(len(values.Data)))
+	atomic.AddUint64(&p.commited, (uint64(1)<<32)+uint64(len(values.Data)))
 
 	w.Close()
 }
 
-func (persister *WhisperPersister) worker(in chan *CacheValues) {
+func (p *Whisper) worker(in chan *CacheValues) {
 	for {
 		select {
-		case <-persister.exit:
+		case <-p.exit:
 			break
 		case values := <-in:
-			persister.store(values)
+			p.store(values)
 		}
 	}
 }
 
-func (persister *WhisperPersister) statWorker() {
+func (p *Whisper) statWorker() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-persister.exit:
+		case <-p.exit:
 			break
 		case <-ticker.C:
 			// @send stat
-			cnt := atomic.LoadUint64(&persister.commited)
-			atomic.AddUint64(&persister.commited, -cnt)
-			persister.Stat("updateOperations", float64(cnt>>32))
-			persister.Stat("commitedPoints", float64(cnt%(1<<32)))
+			cnt := atomic.LoadUint64(&p.commited)
+			atomic.AddUint64(&p.commited, -cnt)
+			p.Stat("updateOperations", float64(cnt>>32))
+			p.Stat("commitedPoints", float64(cnt%(1<<32)))
 			if float64(cnt>>32) > 0 {
-				persister.Stat("pointsPerUpdate", float64(cnt%(1<<32))/float64(cnt>>32))
+				p.Stat("pointsPerUpdate", float64(cnt%(1<<32))/float64(cnt>>32))
 			} else {
-				persister.Stat("pointsPerUpdate", 0.0)
+				p.Stat("pointsPerUpdate", 0.0)
 			}
 
-			created := atomic.LoadUint32(&persister.created)
-			atomic.AddUint32(&persister.created, -created)
+			created := atomic.LoadUint32(&p.created)
+			atomic.AddUint32(&p.created, -created)
 
-			persister.Stat("created", float64(created))
+			p.Stat("created", float64(created))
 		}
 	}
 }
 
 // Start worker
-func (persister *WhisperPersister) Start() {
-	go persister.statWorker()
-	go persister.worker(persister.in)
+func (p *Whisper) Start() {
+	go p.statWorker()
+	go p.worker(p.in)
 }
 
 // Stop worker
-func (persister *WhisperPersister) Stop() {
-	close(persister.exit)
+func (p *Whisper) Stop() {
+	close(p.exit)
 }

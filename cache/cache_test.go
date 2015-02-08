@@ -1,31 +1,33 @@
-package carbon
+package cache
 
 import (
 	"fmt"
 	"sort"
 	"testing"
 	"time"
+
+	"devroom.ru/lomik/carbon/points"
 )
 
 func TestCache(t *testing.T) {
 
-	c := NewCache()
+	c := New()
 
-	c.Add("hello.world", 42, 10)
+	c.Add(points.OnePoint("hello.world", 42, 10))
 
 	if c.Size() != 1 {
 		t.FailNow()
 	}
 
-	c.Add("hello.world", 15, 12)
+	c.Add(points.OnePoint("hello.world", 15, 12))
 
 	if c.Size() != 2 {
 		t.FailNow()
 	}
 
-	key, values := c.Get()
+	values := c.Pop()
 
-	if key != "hello.world" {
+	if values.Metric != "hello.world" {
 		t.FailNow()
 	}
 
@@ -33,15 +35,13 @@ func TestCache(t *testing.T) {
 		t.FailNow()
 	}
 
-	c.Remove(key)
-
 	if c.Size() != 0 {
 		t.FailNow()
 	}
 }
 
 func TestCacheCheckpoint(t *testing.T) {
-	cache := NewCache()
+	cache := New()
 	cache.Start()
 	cache.SetOutputChanSize(0)
 
@@ -55,12 +55,7 @@ func TestCacheCheckpoint(t *testing.T) {
 		metricName := fmt.Sprintf("metric%d", index)
 
 		for i := value; i > 0; i-- {
-
-			cache.In() <- &Message{
-				Name:      metricName,
-				Value:     float64(i),
-				Timestamp: startTime + int64(i),
-			}
+			cache.In() <- points.OnePoint(metricName, float64(i), startTime+int64(i))
 		}
 
 	}

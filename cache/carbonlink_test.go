@@ -1,4 +1,4 @@
-package carbon
+package cache
 
 import (
 	"bytes"
@@ -7,6 +7,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"devroom.ru/lomik/carbon/points"
 )
 
 const sampleCacheQuery = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.cache.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
@@ -37,27 +39,27 @@ func TestCarbonlinkRead(t *testing.T) {
 }
 
 func TestCarbonlink(t *testing.T) {
-	cache := NewCache()
+	cache := New()
 	cache.Start()
 	cache.SetOutputChanSize(0)
 
-	msg1 := &Message{
-		Name:      "carbon.agents.carbon_agent_server.cache.size",
-		Value:     42.17,
-		Timestamp: 1422797285,
-	}
+	msg1 := points.OnePoint(
+		"carbon.agents.carbon_agent_server.cache.size",
+		42.17,
+		1422797285,
+	)
 
-	msg2 := &Message{
-		Name:      "carbon.agents.carbon_agent_server.param.size",
-		Value:     -42.14,
-		Timestamp: 1422797267,
-	}
+	msg2 := points.OnePoint(
+		"carbon.agents.carbon_agent_server.param.size",
+		-42.14,
+		1422797267,
+	)
 
-	msg3 := &Message{
-		Name:      "carbon.agents.carbon_agent_server.param.size",
-		Value:     15,
-		Timestamp: 1422795966,
-	}
+	msg3 := points.OnePoint(
+		"carbon.agents.carbon_agent_server.param.size",
+		15,
+		1422795966,
+	)
 
 	cache.In() <- msg1
 	cache.In() <- msg2
