@@ -113,6 +113,10 @@ func (p *Whisper) statWorker() {
 			// @send stat
 			cnt := atomic.LoadUint64(&p.commited)
 			atomic.AddUint64(&p.commited, -cnt)
+
+			created := atomic.LoadUint32(&p.created)
+			atomic.AddUint32(&p.created, -created)
+
 			p.Stat("updateOperations", float64(cnt>>32))
 			p.Stat("commitedPoints", float64(cnt%(1<<32)))
 			if float64(cnt>>32) > 0 {
@@ -120,9 +124,6 @@ func (p *Whisper) statWorker() {
 			} else {
 				p.Stat("pointsPerUpdate", 0.0)
 			}
-
-			created := atomic.LoadUint32(&p.created)
-			atomic.AddUint32(&p.created, -created)
 
 			p.Stat("created", float64(created))
 		}
