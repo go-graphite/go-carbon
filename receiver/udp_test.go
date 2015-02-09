@@ -108,3 +108,29 @@ func TestUDP2(t *testing.T) {
 		t.Fatalf("Message #1 not received")
 	}
 }
+
+func TestUDP3(t *testing.T) {
+	test := newUDPTestCase(t)
+	defer test.Finish()
+
+	time.Sleep(10 * time.Millisecond)
+
+	test.Send("hello.world 42.15 1422698155\nmetri")
+	test.Send("c.name -72.11 1422698155\n")
+
+	time.Sleep(10 * time.Millisecond)
+
+	select {
+	case msg := <-test.rcvChan:
+		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
+	default:
+		t.Fatalf("Message #0 not received")
+	}
+
+	select {
+	case msg := <-test.rcvChan:
+		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
+	default:
+		t.Fatalf("Message #1 not received")
+	}
+}
