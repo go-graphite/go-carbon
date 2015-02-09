@@ -109,7 +109,7 @@ func TestUDP2(t *testing.T) {
 	}
 }
 
-func TestUDP3(t *testing.T) {
+func TestChunkedUDP(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
