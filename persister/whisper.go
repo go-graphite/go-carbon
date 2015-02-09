@@ -43,7 +43,7 @@ func (p *Whisper) SetGraphPrefix(prefix string) {
 // Stat sends internal statistics to cache
 func (p *Whisper) Stat(metric string, value float64) {
 	p.in <- points.OnePoint(
-		fmt.Sprintf("%s%s", p.graphPrefix, metric),
+		fmt.Sprintf("%spersister.%s", p.graphPrefix, metric),
 		value,
 		time.Now().Unix(),
 	)
