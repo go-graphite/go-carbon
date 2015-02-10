@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"devroom.ru/lomik/carbon/cache"
+	"devroom.ru/lomik/carbon/logging"
 	"devroom.ru/lomik/carbon/persister"
 	"devroom.ru/lomik/carbon/receiver"
 
@@ -161,6 +162,8 @@ func main() {
 	if err := ParseConfig(*configFile, cfg); err != nil {
 		log.Fatal(err)
 	}
+
+	logging.SetFile(cfg.Carbon.Logfile)
 
 	// pp.Println(cfg)
 	/* CONFIG end */
