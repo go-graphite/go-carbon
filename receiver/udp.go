@@ -21,6 +21,7 @@ type UDP struct {
 	graphPrefix        string
 	metricsReceived    uint32
 	incompleteReceived uint32
+	errors             uint32
 	conn               *net.UDPConn
 }
 
@@ -130,6 +131,10 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 				cnt = atomic.LoadUint32(&rcv.incompleteReceived)
 				atomic.AddUint32(&rcv.incompleteReceived, -cnt)
 				rcv.Stat("udp.incompleteReceived", float64(cnt))
+
+				cnt = atomic.LoadUint32(&rcv.errors)
+				atomic.AddUint32(&rcv.errors, -cnt)
+				rcv.Stat("udp.errors", float64(cnt))
 			case <-rcv.exit:
 				rcv.conn.Close()
 				return
@@ -152,6 +157,7 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					break
 				}
+				atomic.AddUint32(&rcv.errors, 1)
 				logrus.Error(err)
 				continue
 			}
@@ -175,12 +181,14 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 							atomic.AddUint32(&rcv.incompleteReceived, 1)
 						}
 					} else {
+						atomic.AddUint32(&rcv.errors, 1)
 						logrus.Error(err)
 					}
 					break
 				}
 				if len(line) > 0 { // skip empty lines
 					if msg, err := points.ParseText(string(line)); err != nil {
+						atomic.AddUint32(&rcv.errors, 1)
 						logrus.Info(err)
 					} else {
 						atomic.AddUint32(&rcv.metricsReceived, 1)

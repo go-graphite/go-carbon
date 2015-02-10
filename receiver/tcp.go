@@ -20,6 +20,7 @@ type TCP struct {
 	exit            chan bool
 	graphPrefix     string
 	metricsReceived uint32
+	errors          uint32
 	active          int32 // counter
 	listener        *net.TCPListener
 }
@@ -72,12 +73,14 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 					logrus.Warningf("Unfinished line: %#v", line)
 				}
 			} else {
+				atomic.AddUint32(&rcv.errors, 1)
 				logrus.Error(err)
 			}
 			break
 		}
 		if len(line) > 0 { // skip empty lines
 			if msg, err := points.ParseText(string(line)); err != nil {
+				atomic.AddUint32(&rcv.errors, 1)
 				logrus.Info(err)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
@@ -109,6 +112,10 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				active := atomic.LoadInt32(&rcv.active)
 				atomic.AddInt32(&rcv.active, -active)
 				rcv.Stat("tcp.active", float64(active))
+
+				errors := atomic.LoadUint32(&rcv.errors)
+				atomic.AddUint32(&rcv.errors, -errors)
+				rcv.Stat("tcp.errors", float64(errors))
 			case <-rcv.exit:
 				rcv.listener.Close()
 				return
