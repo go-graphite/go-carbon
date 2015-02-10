@@ -140,8 +140,8 @@ func (c *Cache) doCheckpoint() {
 	c.stat("size", float64(c.size))
 	c.stat("metrics", float64(len(c.data)))
 	c.stat("queries", float64(c.queryCnt))
-	c.stat("oversize", float64(c.oversizeCnt))
-	c.stat("checkpoint_time", worktime.Seconds())
+	c.stat("oversizeDrops", float64(c.oversizeCnt))
+	c.stat("checkpointTime", worktime.Seconds())
 
 	logrus.WithFields(logrus.Fields{
 		"time":     worktime.String(),
