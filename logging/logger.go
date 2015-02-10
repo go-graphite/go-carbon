@@ -20,9 +20,9 @@ func init() {
 		for signal := range signalChan {
 			if signal == syscall.SIGHUP {
 				err := std.Reopen()
-				std.logger.Info("HUP received, reopen log %#v", std.Filename())
+				logrus.Infof("HUP received, reopen log %#v", std.Filename())
 				if err != nil {
-					std.logger.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
 				}
 			}
 		}
@@ -36,7 +36,6 @@ type FileLogger struct {
 	sync.RWMutex
 	filename string
 	fd       *os.File
-	logger   *logrus.Logger
 }
 
 // NewFileLogger create instance FileLogger
@@ -44,7 +43,6 @@ func NewFileLogger() *FileLogger {
 	return &FileLogger{
 		filename: "",
 		fd:       nil,
-		logger:   nil,
 	}
 }
 
@@ -85,11 +83,7 @@ func (l *FileLogger) Reopen() error {
 	} else {
 		loggerOut = os.Stderr
 	}
-	if l.logger != nil {
-		l.logger.Out = loggerOut
-	} else {
-		logrus.SetOutput(loggerOut)
-	}
+	logrus.SetOutput(loggerOut)
 
 	if oldFd != nil {
 		oldFd.Close()
