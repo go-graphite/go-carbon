@@ -13,7 +13,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/alyu/configparser"
-	"github.com/grobian/go-whisper"
+	"github.com/lomik/go-whisper"
 )
 
 type whisperSchemaItem struct {

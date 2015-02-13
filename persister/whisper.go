@@ -11,7 +11,7 @@ import (
 	"devroom.ru/lomik/carbon/points"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/grobian/go-whisper"
+	"github.com/lomik/go-whisper"
 )
 
 // Whisper write data to *.wsp files
@@ -69,7 +69,7 @@ func (p *Whisper) store(values *points.Points) {
 			return
 		}
 
-		w, err = whisper.Create(path, schema.retentions, whisper.Last, 0.5)
+		w, err = whisper.Create(path, schema.retentions, whisper.Average, 0.5)
 		if err != nil {
 			logrus.Warningf("Failed to create new whisper file %s: %s", path, err.Error())
 			return
@@ -83,11 +83,15 @@ func (p *Whisper) store(values *points.Points) {
 		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
 	}
 
-	w.UpdateMany(points)
-
 	atomic.AddUint64(&p.commited, (uint64(1)<<32)+uint64(len(values.Data)))
+	defer w.Close()
 
-	w.Close()
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.Warningf("UpdateMany %s recovered: %s", path, r)
+		}
+	}()
+	w.UpdateMany(points)
 }
 
 func (p *Whisper) worker(in chan *points.Points) {
