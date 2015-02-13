@@ -84,6 +84,7 @@ func (p *Whisper) store(values *points.Points) {
 	}
 
 	atomic.AddUint64(&p.commited, (uint64(1)<<32)+uint64(len(values.Data)))
+
 	defer w.Close()
 
 	defer func() {
