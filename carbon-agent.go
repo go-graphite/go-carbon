@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/Sirupsen/logrus"
 )
+
+import _ "net/http/pprof"
 
 // Duration wrapper time.Duration for TOML
 type Duration struct {
@@ -74,6 +77,11 @@ type carbonlinkConfig struct {
 	ReadTimeout *Duration `toml:"read-timeout"`
 }
 
+type pprofConfig struct {
+	Listen  string `toml:"listen"`
+	Enabled bool   `toml:"enabled"`
+}
+
 // Config ...
 type Config struct {
 	Carbon     carbonConfig     `toml:"carbon"`
@@ -82,6 +90,7 @@ type Config struct {
 	Udp        udpConfig        `toml:"udp"`
 	Tcp        tcpConfig        `toml:"tcp"`
 	Carbonlink carbonlinkConfig `toml:"carbonlink"`
+	Pprof      pprofConfig      `toml:"pprof"`
 }
 
 func newConfig() *Config {
@@ -112,6 +121,10 @@ func newConfig() *Config {
 			ReadTimeout: &Duration{
 				Duration: 30 * time.Second,
 			},
+		},
+		Pprof: pprofConfig{
+			Listen:  "localhost:7007",
+			Enabled: false,
 		},
 	}
 
@@ -144,6 +157,7 @@ func ParseConfig(filename string, cfg interface{}) error {
 }
 
 func main() {
+
 	/* CONFIG start */
 	configFile := flag.String("config", "", "Filename of config")
 	printDefaultConfig := flag.Bool("config-print-default", false, "Print default config")
@@ -167,6 +181,13 @@ func main() {
 
 	// pp.Println(cfg)
 	/* CONFIG end */
+
+	// pprof
+	if cfg.Pprof.Enabled {
+		go func() {
+			logrus.Fatal(http.ListenAndServe(cfg.Pprof.Listen, nil))
+		}()
+	}
 
 	// carbon-cache prefix
 	if hostname, err := os.Hostname(); err == nil {
