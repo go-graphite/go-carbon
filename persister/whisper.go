@@ -2,6 +2,7 @@ package persister
 
 import (
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,28 +17,35 @@ import (
 
 // Whisper write data to *.wsp files
 type Whisper struct {
-	in          chan *points.Points
-	exit        chan bool
-	schemas     *WhisperSchemas
-	rootPath    string
-	graphPrefix string
-	commited    uint64 // (updateOperations << 32) + commitedPoints
-	created     uint32 // counter
+	in           chan *points.Points
+	exit         chan bool
+	schemas      *WhisperSchemas
+	workersCount int
+	rootPath     string
+	graphPrefix  string
+	commited     uint64 // (updateOperations << 32) + commitedPoints
+	created      uint32 // counter
 }
 
 // NewWhisper create instance of Whisper
 func NewWhisper(rootPath string, schemas *WhisperSchemas, in chan *points.Points) *Whisper {
 	return &Whisper{
-		in:       in,
-		exit:     make(chan bool),
-		schemas:  schemas,
-		rootPath: rootPath,
+		in:           in,
+		exit:         make(chan bool),
+		schemas:      schemas,
+		rootPath:     rootPath,
+		workersCount: 1,
 	}
 }
 
 // SetGraphPrefix for internal cache metrics
 func (p *Whisper) SetGraphPrefix(prefix string) {
 	p.graphPrefix = prefix
+}
+
+// SetWorkers count
+func (p *Whisper) SetWorkers(count int) {
+	p.workersCount = count
 }
 
 // Stat sends internal statistics to cache
@@ -106,6 +114,19 @@ func (p *Whisper) worker(in chan *points.Points) {
 	}
 }
 
+func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) {
+	workers := len(out)
+	for {
+		select {
+		case <-p.exit:
+			break
+		case values := <-in:
+			index := int(crc32.ChecksumIEEE([]byte(values.Metric))) % workers
+			out[index] <- values
+		}
+	}
+}
+
 func (p *Whisper) statWorker() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -138,7 +159,17 @@ func (p *Whisper) statWorker() {
 // Start worker
 func (p *Whisper) Start() {
 	go p.statWorker()
-	go p.worker(p.in)
+	if p.workersCount <= 1 { // solo worker
+		go p.worker(p.in)
+	} else {
+		channels := make([](chan *points.Points), 0)
+		for i := 0; i < p.workersCount; i++ {
+			ch := make(chan *points.Points, 32)
+			channels = append(channels, ch)
+			go p.worker(ch)
+		}
+		go p.shuffler(p.in, channels)
+	}
 }
 
 // Stop worker

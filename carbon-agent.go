@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -46,14 +47,16 @@ func (d *Duration) Value() time.Duration {
 	return d.Duration
 }
 
-type carbonConfig struct {
+type commonConfig struct {
 	Logfile     string `toml:"logfile"`
 	GraphPrefix string `toml:"graph-prefix"`
+	MaxCPU      int    `toml:"max-cpu"`
 }
 
 type whisperConfig struct {
 	DataDir string `toml:"data-dir"`
 	Schemas string `toml:"schemas-file"`
+	Workers int    `toml:"workers"`
 	Enabled bool   `toml:"enabled"`
 }
 
@@ -84,7 +87,7 @@ type pprofConfig struct {
 
 // Config ...
 type Config struct {
-	Carbon     carbonConfig     `toml:"carbon"`
+	Common     commonConfig     `toml:"common"`
 	Whisper    whisperConfig    `toml:"whisper"`
 	Cache      cacheConfig      `toml:"cache"`
 	Udp        udpConfig        `toml:"udp"`
@@ -95,14 +98,16 @@ type Config struct {
 
 func newConfig() *Config {
 	cfg := &Config{
-		Carbon: carbonConfig{
+		Common: commonConfig{
 			Logfile:     "",
 			GraphPrefix: "carbon.agents.{host}.",
+			MaxCPU:      1,
 		},
 		Whisper: whisperConfig{
 			DataDir: "/data/graphite/whisper/",
 			Schemas: "/data/graphite/schemas",
 			Enabled: true,
+			Workers: 1,
 		},
 		Cache: cacheConfig{
 			MaxSize: 1000000,
@@ -177,7 +182,10 @@ func main() {
 		log.Fatal(err)
 	}
 
-	logging.SetFile(cfg.Carbon.Logfile)
+	logging.SetFile(cfg.Common.Logfile)
+	logrus.SetLevel(logrus.DebugLevel)
+
+	runtime.GOMAXPROCS(cfg.Common.MaxCPU)
 
 	// pp.Println(cfg)
 	/* CONFIG end */
@@ -192,13 +200,13 @@ func main() {
 	// carbon-cache prefix
 	if hostname, err := os.Hostname(); err == nil {
 		hostname = strings.Replace(hostname, ".", "_", -1)
-		cfg.Carbon.GraphPrefix = strings.Replace(cfg.Carbon.GraphPrefix, "{host}", hostname, -1)
+		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", hostname, -1)
 	} else {
-		cfg.Carbon.GraphPrefix = strings.Replace(cfg.Carbon.GraphPrefix, "{host}", "localhost", -1)
+		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", "localhost", -1)
 	}
 
 	cache := cache.New()
-	cache.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+	cache.SetGraphPrefix(cfg.Common.GraphPrefix)
 	cache.SetMaxSize(cfg.Cache.MaxSize)
 	cache.Start()
 	defer cache.Stop()
@@ -212,7 +220,7 @@ func main() {
 		}
 
 		udpListener := receiver.NewUDP(cache.In())
-		udpListener.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+		udpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
 
 		defer udpListener.Stop()
 		if err = udpListener.Listen(udpAddr); err != nil {
@@ -231,7 +239,7 @@ func main() {
 		}
 
 		tcpListener := receiver.NewTCP(cache.In())
-		tcpListener.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+		tcpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
 
 		defer tcpListener.Stop()
 		if err = tcpListener.Listen(tcpAddr); err != nil {
@@ -248,7 +256,8 @@ func main() {
 		}
 
 		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, cache.Out())
-		whisperPersister.SetGraphPrefix(cfg.Carbon.GraphPrefix)
+		whisperPersister.SetGraphPrefix(cfg.Common.GraphPrefix)
+		whisperPersister.SetWorkers(cfg.Whisper.Workers)
 
 		whisperPersister.Start()
 		defer whisperPersister.Stop()
