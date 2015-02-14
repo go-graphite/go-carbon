@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -162,4 +163,14 @@ func TestCarbonlink(t *testing.T) {
 	}
 
 	// conn.Read(b)
+
+	/* WRONG MESSAGE TEST */
+	if _, err := conn.Write([]byte("\x00\x00\x00\x05aaaaa")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := binary.Read(conn, binary.BigEndian, &replyLength); err == nil || err != io.EOF {
+		t.Fatal("Connection not closed on wrong request")
+	}
+
 }

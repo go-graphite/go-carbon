@@ -124,6 +124,7 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 		req, err := ReadCarbonlinkRequest(reader)
 
 		if err != nil {
+			logrus.Warningf("[carbonlink] wrong carbonlink request from: %s", conn.RemoteAddr().String())
 			break
 		}
 		if req != nil {
