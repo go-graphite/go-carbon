@@ -149,7 +149,7 @@ func (c *Cache) doCheckpoint() {
 		"metrics":  len(c.data),
 		"queries":  c.queryCnt,
 		"overflow": c.overflowCnt,
-	}).Info("doCheckpoint()")
+	}).Info("[cache] doCheckpoint()")
 
 	c.queryCnt = 0
 	c.overflowCnt = 0

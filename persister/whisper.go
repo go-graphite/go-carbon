@@ -65,12 +65,12 @@ func (p *Whisper) store(values *points.Points) {
 	if err != nil {
 		schema := p.schemas.match(values.Metric)
 		if schema == nil {
-			logrus.Errorf("No storage schema defined for %s", values.Metric)
+			logrus.Errorf("[persister] No storage schema defined for %s", values.Metric)
 			return
 		}
 
-		logrus.Infof("Creating %s: %s, retention %#v (section %#v)",
-			values.Metric, path, schema.retentionStr, schema.name)
+		logrus.Infof("[persister] Creating %s: retention %#v (section %#v)",
+			path, schema.retentionStr, schema.name)
 
 		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
 			logrus.Error(err)
@@ -79,7 +79,7 @@ func (p *Whisper) store(values *points.Points) {
 
 		w, err = whisper.Create(path, schema.retentions, whisper.Average, 0.5)
 		if err != nil {
-			logrus.Warningf("Failed to create new whisper file %s: %s", path, err.Error())
+			logrus.Warningf("[persister] Failed to create new whisper file %s: %s", path, err.Error())
 			return
 		}
 
@@ -97,7 +97,7 @@ func (p *Whisper) store(values *points.Points) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			logrus.Warningf("UpdateMany %s recovered: %s", path, r)
+			logrus.Warningf("[persister] UpdateMany %s recovered: %s", path, r)
 		}
 	}()
 	w.UpdateMany(points)
@@ -128,7 +128,7 @@ func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) 
 }
 
 // save stat
-func (p *Whisper) statJob() {
+func (p *Whisper) doCheckpoint() {
 	cnt := atomic.LoadUint64(&p.commited)
 	atomic.AddUint64(&p.commited, -cnt)
 
@@ -136,9 +136,10 @@ func (p *Whisper) statJob() {
 	atomic.AddUint32(&p.created, -created)
 
 	logrus.WithFields(logrus.Fields{
-		"cnt":     cnt,
-		"created": created,
-	}).Info("persister checkpoint")
+		"updateOperations": float64(cnt >> 32),
+		"commitedPoints":   float64(cnt % (1 << 32)),
+		"created":          created,
+	}).Info("[persister] doCheckpoint()")
 
 	p.Stat("updateOperations", float64(cnt>>32))
 	p.Stat("commitedPoints", float64(cnt%(1<<32)))
@@ -162,7 +163,7 @@ func (p *Whisper) statWorker() {
 		case <-p.exit:
 			break
 		case <-ticker.C:
-			go p.statJob()
+			go p.doCheckpoint()
 		}
 	}
 }
