@@ -127,6 +127,26 @@ func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) 
 	}
 }
 
+// save stat
+func (p *Whisper) statJob() {
+	cnt := atomic.LoadUint64(&p.commited)
+	atomic.AddUint64(&p.commited, -cnt)
+
+	created := atomic.LoadUint32(&p.created)
+	atomic.AddUint32(&p.created, -created)
+
+	p.Stat("updateOperations", float64(cnt>>32))
+	p.Stat("commitedPoints", float64(cnt%(1<<32)))
+	if float64(cnt>>32) > 0 {
+		p.Stat("pointsPerUpdate", float64(cnt%(1<<32))/float64(cnt>>32))
+	} else {
+		p.Stat("pointsPerUpdate", 0.0)
+	}
+
+	p.Stat("created", float64(created))
+}
+
+// stat timer
 func (p *Whisper) statWorker() {
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -136,22 +156,7 @@ func (p *Whisper) statWorker() {
 		case <-p.exit:
 			break
 		case <-ticker.C:
-			// @send stat
-			cnt := atomic.LoadUint64(&p.commited)
-			atomic.AddUint64(&p.commited, -cnt)
-
-			created := atomic.LoadUint32(&p.created)
-			atomic.AddUint32(&p.created, -created)
-
-			p.Stat("updateOperations", float64(cnt>>32))
-			p.Stat("commitedPoints", float64(cnt%(1<<32)))
-			if float64(cnt>>32) > 0 {
-				p.Stat("pointsPerUpdate", float64(cnt%(1<<32))/float64(cnt>>32))
-			} else {
-				p.Stat("pointsPerUpdate", 0.0)
-			}
-
-			p.Stat("created", float64(created))
+			go p.statJob()
 		}
 	}
 }
