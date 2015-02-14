@@ -74,6 +74,16 @@ func NewCarbonlinkListener(queryChan chan *Query) *CarbonlinkListener {
 	}
 }
 
+// SetReadTimeout for read request from client
+func (listener *CarbonlinkListener) SetReadTimeout(timeout time.Duration) {
+	listener.readTimeout = timeout
+}
+
+// SetQueryTimeout for queries to cache
+func (listener *CarbonlinkListener) SetQueryTimeout(timeout time.Duration) {
+	listener.queryTimeout = timeout
+}
+
 func (listener *CarbonlinkListener) packReply(reply *Reply) []byte {
 	buf := new(bytes.Buffer)
 

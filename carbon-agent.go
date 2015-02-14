@@ -75,9 +75,10 @@ type tcpConfig struct {
 }
 
 type carbonlinkConfig struct {
-	Listen      string    `toml:"listen"`
-	Enabled     bool      `toml:"enabled"`
-	ReadTimeout *Duration `toml:"read-timeout"`
+	Listen       string    `toml:"listen"`
+	Enabled      bool      `toml:"enabled"`
+	ReadTimeout  *Duration `toml:"read-timeout"`
+	QueryTimeout *Duration `toml:"query-timeout"`
 }
 
 type pprofConfig struct {
@@ -125,6 +126,9 @@ func newConfig() *Config {
 			Enabled: true,
 			ReadTimeout: &Duration{
 				Duration: 30 * time.Second,
+			},
+			QueryTimeout: &Duration{
+				Duration: 100 * time.Millisecond,
 			},
 		},
 		Pprof: pprofConfig{
@@ -205,11 +209,11 @@ func main() {
 		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", "localhost", -1)
 	}
 
-	cache := cache.New()
-	cache.SetGraphPrefix(cfg.Common.GraphPrefix)
-	cache.SetMaxSize(cfg.Cache.MaxSize)
-	cache.Start()
-	defer cache.Stop()
+	core := cache.New()
+	core.SetGraphPrefix(cfg.Common.GraphPrefix)
+	core.SetMaxSize(cfg.Cache.MaxSize)
+	core.Start()
+	defer core.Stop()
 
 	/* UDP start */
 	udpCfg := cfg.Udp
@@ -219,7 +223,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		udpListener := receiver.NewUDP(cache.In())
+		udpListener := receiver.NewUDP(core.In())
 		udpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
 
 		defer udpListener.Stop()
@@ -238,7 +242,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		tcpListener := receiver.NewTCP(cache.In())
+		tcpListener := receiver.NewTCP(core.In())
 		tcpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
 
 		defer tcpListener.Stop()
@@ -255,7 +259,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, cache.Out())
+		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, core.Out())
 		whisperPersister.SetGraphPrefix(cfg.Common.GraphPrefix)
 		whisperPersister.SetWorkers(cfg.Whisper.Workers)
 
@@ -263,6 +267,25 @@ func main() {
 		defer whisperPersister.Stop()
 	}
 	/* WHISPER end */
+
+	/* CARBONLINK start */
+	if cfg.Carbonlink.Enabled {
+		linkAddr, err := net.ResolveTCPAddr("tcp", cfg.Carbonlink.Listen)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		carbonlink := cache.NewCarbonlinkListener(core.Query())
+		carbonlink.SetReadTimeout(cfg.Carbonlink.ReadTimeout.Value())
+		carbonlink.SetQueryTimeout(cfg.Carbonlink.QueryTimeout.Value())
+
+		defer carbonlink.Stop()
+		if err = carbonlink.Listen(linkAddr); err != nil {
+			log.Fatal(err)
+		}
+
+	}
+	/* CARBONLINK end */
 
 	logrus.Info("started")
 	select {}

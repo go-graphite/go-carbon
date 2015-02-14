@@ -94,7 +94,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		}
 		item.pattern, err = regexp.Compile(s.ValueOf("pattern"))
 		if err != nil {
-			logrus.Errorf("failed to parse pattern '%s'for [%s]: %s",
+			logrus.Errorf("[persister] Failed to parse pattern '%s'for [%s]: %s",
 				s.ValueOf("pattern"), item.name, err.Error())
 			return nil, err
 		}
@@ -107,7 +107,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		}
 		item.priority = int64(p)<<32 - int64(index) // for sort records with same priority
 		// item.priority = (s.ValueOf("priority"))
-		logrus.Debugf("adding schema [%s] pattern = %s retentions = %s",
+		logrus.Debugf("[persister] Adding schema [%s] pattern = %s retentions = %s",
 			item.name, s.ValueOf("pattern"), item.retentionStr)
 
 		result.Data = append(result.Data, item)
