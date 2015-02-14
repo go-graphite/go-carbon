@@ -59,9 +59,7 @@ func (test *udpTestCase) Send(text string) {
 }
 
 func (test *udpTestCase) Eq(a *points.Points, b *points.Points) {
-	if a.Metric != b.Metric ||
-		a.Data[0].Value != b.Data[0].Value ||
-		a.Data[0].Timestamp != b.Data[0].Timestamp {
+	if !a.Eq(b) {
 		test.Fatalf("%#v != %#v", a, b)
 	}
 }

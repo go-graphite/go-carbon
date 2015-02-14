@@ -23,13 +23,24 @@ type TCP struct {
 	errors          uint32
 	active          int32 // counter
 	listener        *net.TCPListener
+	isPickle        bool
 }
 
 // NewTCP create new instance of TCP
 func NewTCP(out chan *points.Points) *TCP {
 	return &TCP{
-		out:  out,
-		exit: make(chan bool),
+		out:      out,
+		exit:     make(chan bool),
+		isPickle: false,
+	}
+}
+
+// NewPickle create new instance of TCP with pickle listener enabled
+func NewPickle(out chan *points.Points) *TCP {
+	return &TCP{
+		out:      out,
+		exit:     make(chan bool),
+		isPickle: true,
 	}
 }
 
@@ -40,8 +51,16 @@ func (rcv *TCP) SetGraphPrefix(prefix string) {
 
 // Stat sends internal statistics to cache
 func (rcv *TCP) Stat(metric string, value float64) {
+	var protocolPrefix string
+
+	if rcv.isPickle {
+		protocolPrefix = "pickle"
+	} else {
+		protocolPrefix = "tcp"
+	}
+
 	rcv.out <- points.OnePoint(
-		fmt.Sprintf("%s%s", rcv.graphPrefix, metric),
+		fmt.Sprintf("%s%s.%s", rcv.graphPrefix, protocolPrefix, metric),
 		value,
 		time.Now().Unix(),
 	)
@@ -90,6 +109,41 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 	}
 }
 
+func (rcv *TCP) handlePickle(conn net.Conn) {
+	atomic.AddInt32(&rcv.active, 1)
+	defer atomic.AddInt32(&rcv.active, -1)
+
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+
+	for {
+		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+
+		line, err := reader.ReadBytes('\n')
+
+		if err != nil {
+			if err == io.EOF {
+				if len(line) > 0 {
+					logrus.Warningf("AAAA Unfinished line: %#v", line)
+				}
+			} else {
+				atomic.AddUint32(&rcv.errors, 1)
+				logrus.Error(err)
+			}
+			break
+		}
+		if len(line) > 0 { // skip empty lines
+			if msg, err := points.ParseText(string(line)); err != nil {
+				atomic.AddUint32(&rcv.errors, 1)
+				logrus.Info(err)
+			} else {
+				atomic.AddUint32(&rcv.metricsReceived, 1)
+				rcv.out <- msg
+			}
+		}
+	}
+}
+
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 	var err error
@@ -107,21 +161,26 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 			case <-ticker.C:
 				cnt := atomic.LoadUint32(&rcv.metricsReceived)
 				atomic.AddUint32(&rcv.metricsReceived, -cnt)
-				rcv.Stat("tcp.metricsReceived", float64(cnt))
+				rcv.Stat("metricsReceived", float64(cnt))
 
 				active := atomic.LoadInt32(&rcv.active)
 				atomic.AddInt32(&rcv.active, -active)
-				rcv.Stat("tcp.active", float64(active))
+				rcv.Stat("active", float64(active))
 
 				errors := atomic.LoadUint32(&rcv.errors)
 				atomic.AddUint32(&rcv.errors, -errors)
-				rcv.Stat("tcp.errors", float64(errors))
+				rcv.Stat("errors", float64(errors))
 			case <-rcv.exit:
 				rcv.listener.Close()
 				return
 			}
 		}
 	}()
+
+	handler := rcv.handleConnection
+	if rcv.isPickle {
+		handler = rcv.handlePickle
+	}
 
 	go func() {
 		defer rcv.listener.Close()
@@ -137,7 +196,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				continue
 			}
 
-			go rcv.handleConnection(conn)
+			go handler(conn)
 		}
 
 	}()

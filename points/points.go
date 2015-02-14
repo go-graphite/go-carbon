@@ -75,6 +75,44 @@ func ParseText(line string) (*Points, error) {
 }
 
 // Append point
-func (points *Points) Append(p *Point) {
-	points.Data = append(points.Data, p)
+func (p *Points) Append(onePoint *Point) *Points {
+	p.Data = append(p.Data, onePoint)
+	return p
+}
+
+// Add
+func (p *Points) Add(value float64, timestamp int64) *Points {
+	p.Data = append(p.Data, &Point{
+		Value:     value,
+		Timestamp: timestamp,
+	})
+	return p
+}
+
+// Eq points check
+func (p *Points) Eq(other *Points) bool {
+	if other == nil {
+		return false
+	}
+	if p.Metric != other.Metric {
+		return false
+	}
+	if p.Data == nil && other.Data == nil {
+		return true
+	}
+	if (p.Data == nil || other.Data == nil) && (p.Data != nil || other.Data != nil) {
+		return false
+	}
+	if len(p.Data) != len(other.Data) {
+		return false
+	}
+	for i := 0; i < len(p.Data); i++ {
+		if p.Data[i].Value != other.Data[i].Value {
+			return false
+		}
+		if p.Data[i].Timestamp != other.Data[i].Timestamp {
+			return false
+		}
+	}
+	return true
 }

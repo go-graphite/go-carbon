@@ -8,15 +8,15 @@ import (
 	"devroom.ru/lomik/carbon/points"
 )
 
-type tcpTestCase struct {
+type pickleTestCase struct {
 	*testing.T
 	receiver *TCP
 	conn     net.Conn
 	rcvChan  chan *points.Points
 }
 
-func newTCPTestCase(t *testing.T) *tcpTestCase {
-	test := &tcpTestCase{
+func newPickleTestCase(t *testing.T) *pickleTestCase {
+	test := &pickleTestCase{
 		T: t,
 	}
 
@@ -26,7 +26,7 @@ func newTCPTestCase(t *testing.T) *tcpTestCase {
 	}
 
 	test.rcvChan = make(chan *points.Points, 128)
-	test.receiver = NewTCP(test.rcvChan)
+	test.receiver = NewPickle(test.rcvChan)
 	// defer receiver.Stop()
 
 	if err = test.receiver.Listen(addr); err != nil {
@@ -41,7 +41,7 @@ func newTCPTestCase(t *testing.T) *tcpTestCase {
 	return test
 }
 
-func (test *tcpTestCase) Finish() {
+func (test *pickleTestCase) Finish() {
 	if test.conn != nil {
 		test.conn.Close()
 		test.conn = nil
@@ -52,52 +52,37 @@ func (test *tcpTestCase) Finish() {
 	}
 }
 
-func (test *tcpTestCase) Send(text string) {
+func (test *pickleTestCase) Send(text string) {
 	if _, err := test.conn.Write([]byte(text)); err != nil {
 		test.Fatal(err)
 	}
 }
 
-func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
+func (test *pickleTestCase) Eq(a *points.Points, b *points.Points) {
 	if !a.Eq(b) {
 		test.Fatalf("%#v != %#v", a, b)
 	}
 }
 
-func TestTCP1(t *testing.T) {
-	test := newTCPTestCase(t)
+func TestPickle(t *testing.T) {
+	test := newPickleTestCase(t)
 	defer test.Finish()
 
-	test.Send("hello.world 42.15 1422698155\n")
+	// [("param1", (1423931224, 60.2), (1423931284, 42)), ("param2", (1423931224, -15))]
+	test.Send("\x00\x00\x00m(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\n(I1423931284\nI42\ntp3\ntp4\na(S'param2'\np5\n(I1423931224\nI15\ntp6\ntp7\na.")
 
 	time.Sleep(10 * time.Millisecond)
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-}
-
-func TestTCP2(t *testing.T) {
-	test := newTCPTestCase(t)
-	defer test.Finish()
-
-	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
-
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
+		test.Eq(msg, points.OnePoint("param1", 60.2, 1423931224).Add(42, 1423931284))
 	default:
 		t.Fatalf("Message #0 not received")
 	}
 
 	select {
 	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
+		test.Eq(msg, points.OnePoint("param2", -15, 1423931224))
 	default:
 		t.Fatalf("Message #1 not received")
 	}

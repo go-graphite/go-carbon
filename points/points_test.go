@@ -24,9 +24,7 @@ func TestParseText(t *testing.T) {
 			return
 		}
 
-		if p.Metric != points.Metric ||
-			p.Data[0].Timestamp != points.Data[0].Timestamp ||
-			p.Data[0].Value != points.Data[0].Value {
+		if !points.Eq(p) {
 			t.Fatalf("%#v != %#v", p, points)
 			return
 		}
