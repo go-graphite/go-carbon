@@ -61,7 +61,8 @@ type whisperConfig struct {
 }
 
 type cacheConfig struct {
-	MaxSize int `toml:"max-size"`
+	MaxSize     int `toml:"max-size"`
+	InputBuffer int `toml:"input-buffer"`
 }
 
 type udpConfig struct {
@@ -111,7 +112,8 @@ func newConfig() *Config {
 			Workers: 1,
 		},
 		Cache: cacheConfig{
-			MaxSize: 1000000,
+			MaxSize:     1000000,
+			InputBuffer: 51200,
 		},
 		Udp: udpConfig{
 			Listen:  ":2003",
@@ -212,6 +214,7 @@ func main() {
 	core := cache.New()
 	core.SetGraphPrefix(cfg.Common.GraphPrefix)
 	core.SetMaxSize(cfg.Cache.MaxSize)
+	core.SetInputCapacity(cfg.Cache.InputBuffer)
 	core.Start()
 	defer core.Stop()
 

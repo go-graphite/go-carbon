@@ -18,33 +18,40 @@ func (v queue) Less(i, j int) bool { return v[i].count < v[j].count }
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
-	data        map[string]*points.Points
-	size        int
-	maxSize     int
-	inputChan   chan *points.Points // from receivers
-	outputChan  chan *points.Points // to persisters
-	queryChan   chan *Query         // from carbonlink
-	exitChan    chan bool           // close for stop worker
-	graphPrefix string
-	queryCnt    int
-	overflowCnt int // drop packages if cache full
-	queue       queue
+	data          map[string]*points.Points
+	size          int
+	maxSize       int
+	inputChan     chan *points.Points // from receivers
+	inputCapacity int                 // buffer size of inputChan
+	outputChan    chan *points.Points // to persisters
+	queryChan     chan *Query         // from carbonlink
+	exitChan      chan bool           // close for stop worker
+	graphPrefix   string
+	queryCnt      int
+	overflowCnt   int // drop packages if cache full
+	queue         queue
 }
 
 // New create Cache instance and run in/out goroutine
 func New() *Cache {
 	cache := &Cache{
-		data:        make(map[string]*points.Points, 0),
-		size:        0,
-		maxSize:     1000000,
-		inputChan:   make(chan *points.Points, 51200),
-		exitChan:    make(chan bool),
-		queryChan:   make(chan *Query, 16),
-		graphPrefix: "carbon.",
-		queryCnt:    0,
-		queue:       make(queue, 0),
+		data:          make(map[string]*points.Points, 0),
+		size:          0,
+		maxSize:       1000000,
+		exitChan:      make(chan bool),
+		queryChan:     make(chan *Query, 16),
+		graphPrefix:   "carbon.",
+		queryCnt:      0,
+		queue:         make(queue, 0),
+		inputCapacity: 51200,
+		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
+}
+
+// SetInputCapacity set buffer size of input channel. Call before In() getter
+func (c *Cache) SetInputCapacity(size int) {
+	c.inputCapacity = size
 }
 
 // Get any key/values pair from Cache
@@ -213,6 +220,9 @@ func (c *Cache) worker() {
 
 // In returns input channel
 func (c *Cache) In() chan *points.Points {
+	if c.inputChan == nil {
+		c.inputChan = make(chan *points.Points, c.inputCapacity)
+	}
 	return c.inputChan
 }
 
