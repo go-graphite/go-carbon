@@ -27,7 +27,7 @@ type Cache struct {
 	exitChan    chan bool           // close for stop worker
 	graphPrefix string
 	queryCnt    int
-	oversizeCnt int // drop packages if cache full
+	overflowCnt int // drop packages if cache full
 	queue       queue
 }
 
@@ -140,7 +140,7 @@ func (c *Cache) doCheckpoint() {
 	c.stat("size", float64(c.size))
 	c.stat("metrics", float64(len(c.data)))
 	c.stat("queries", float64(c.queryCnt))
-	c.stat("oversizeDrops", float64(c.oversizeCnt))
+	c.stat("overflow", float64(c.overflowCnt))
 	c.stat("checkpointTime", worktime.Seconds())
 
 	logrus.WithFields(logrus.Fields{
@@ -148,11 +148,11 @@ func (c *Cache) doCheckpoint() {
 		"size":     c.size,
 		"metrics":  len(c.data),
 		"queries":  c.queryCnt,
-		"oversize": c.oversizeCnt,
+		"overflow": c.overflowCnt,
 	}).Info("doCheckpoint()")
 
 	c.queryCnt = 0
-	c.oversizeCnt = 0
+	c.overflowCnt = 0
 }
 
 func (c *Cache) worker() {
@@ -193,7 +193,7 @@ func (c *Cache) worker() {
 			if c.maxSize == 0 || c.size < c.maxSize {
 				c.Add(msg)
 			} else {
-				c.oversizeCnt++
+				c.overflowCnt++
 			}
 		case <-c.exitChan: // exit
 			break
