@@ -69,7 +69,7 @@ func TestPickle(t *testing.T) {
 	defer test.Finish()
 
 	// [("param1", (1423931224, 60.2), (1423931284, 42)), ("param2", (1423931224, -15))]
-	test.Send("\x00\x00\x00m(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\n(I1423931284\nI42\ntp3\ntp4\na(S'param2'\np5\n(I1423931224\nI15\ntp6\ntp7\na.")
+	test.Send("\x00\x00\x00n(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\n(I1423931284\nI42\ntp3\ntp4\na(S'param2'\np5\n(I1423931224\nI-15\ntp6\ntp7\na.")
 
 	time.Sleep(10 * time.Millisecond)
 

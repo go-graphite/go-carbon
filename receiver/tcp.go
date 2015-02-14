@@ -2,6 +2,8 @@ package receiver
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -12,6 +14,7 @@ import (
 	"devroom.ru/lomik/carbon/points"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/hydrogen18/stalecucumber"
 )
 
 // TCP receive metrics from TCP connections
@@ -89,7 +92,7 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 		if err != nil {
 			if err == io.EOF {
 				if len(line) > 0 {
-					logrus.Warningf("Unfinished line: %#v", line)
+					logrus.Warningf("[tcp] Unfinished line: %#v", line)
 				}
 			} else {
 				atomic.AddUint32(&rcv.errors, 1)
@@ -116,30 +119,104 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
+	var msgLen uint32
+	var err error
+
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 
-		line, err := reader.ReadBytes('\n')
-
+		err = binary.Read(reader, binary.BigEndian, &msgLen)
 		if err != nil {
 			if err == io.EOF {
-				if len(line) > 0 {
-					logrus.Warningf("AAAA Unfinished line: %#v", line)
-				}
-			} else {
-				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Error(err)
+				return
 			}
-			break
+
+			atomic.AddUint32(&rcv.errors, 1)
+			logrus.Warningf("[pickle] Can't read message length: %s", err.Error())
+			return
 		}
-		if len(line) > 0 { // skip empty lines
-			if msg, err := points.ParseText(string(line)); err != nil {
+
+		data := make([]byte, msgLen)
+
+		if err = binary.Read(reader, binary.BigEndian, data); err != nil {
+			atomic.AddUint32(&rcv.errors, 1)
+			logrus.Warningf("[pickle] Can't read message body: %s", err.Error())
+			return
+		}
+
+		result, err := stalecucumber.Unpickle(bytes.NewReader(data))
+		if err != nil {
+			atomic.AddUint32(&rcv.errors, 1)
+			logrus.Warningf("[pickle] Can't unpickle message: %s", err.Error())
+			return
+		}
+
+		list, err := stalecucumber.ListOrTuple(result, err)
+		if err != nil {
+			atomic.AddUint32(&rcv.errors, 1)
+			logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+			return
+		}
+
+		for i := 0; i < len(list); i++ {
+			metric, err := stalecucumber.ListOrTuple(list[i], nil)
+			if err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Info(err)
-			} else {
-				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out <- msg
+				logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+				return
 			}
+
+			if len(metric) < 2 {
+				atomic.AddUint32(&rcv.errors, 1)
+				logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+				return
+			}
+
+			name, err := stalecucumber.String(metric[0], nil)
+			if err != nil {
+				atomic.AddUint32(&rcv.errors, 1)
+				logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+				return
+			}
+
+			msg := points.New()
+			msg.Metric = name
+
+			for j := 1; j < len(metric); j++ {
+				v, err := stalecucumber.ListOrTuple(metric[j], nil)
+				if err != nil {
+					atomic.AddUint32(&rcv.errors, 1)
+					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+					return
+				}
+				if len(v) != 2 {
+					atomic.AddUint32(&rcv.errors, 1)
+					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+					return
+				}
+				timestamp, err := stalecucumber.Int(v[0], nil)
+				if err != nil {
+					atomic.AddUint32(&rcv.errors, 1)
+					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+					return
+				}
+
+				value, err := stalecucumber.Float(v[1], nil)
+				if err != nil {
+					valueInt, err := stalecucumber.Int(v[1], nil)
+					if err != nil {
+						atomic.AddUint32(&rcv.errors, 1)
+						logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
+						return
+					}
+					value = float64(valueInt)
+				}
+
+				msg.Add(value, timestamp)
+			}
+
+			atomic.AddUint32(&rcv.metricsReceived, 1)
+			rcv.out <- msg
 		}
 	}
 }
@@ -192,7 +269,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					break
 				}
-				logrus.Warningf("Failed to accept connection: %s", err)
+				logrus.Warningf("[tcp] Failed to accept connection: %s", err)
 				continue
 			}
 
