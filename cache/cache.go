@@ -37,7 +37,7 @@ func New() *Cache {
 		data:        make(map[string]*points.Points, 0),
 		size:        0,
 		maxSize:     1000000,
-		inputChan:   make(chan *points.Points, 1024),
+		inputChan:   make(chan *points.Points, 51200),
 		exitChan:    make(chan bool),
 		queryChan:   make(chan *Query, 16),
 		graphPrefix: "carbon.",
@@ -125,6 +125,8 @@ func (c *Cache) stat(metric string, value float64) {
 func (c *Cache) doCheckpoint() {
 	start := time.Now()
 
+	inputLenBeforeCheckpoint := len(c.inputChan)
+
 	newQueue := make(queue, 0)
 
 	for key, values := range c.data {
@@ -135,6 +137,8 @@ func (c *Cache) doCheckpoint() {
 
 	c.queue = newQueue
 
+	inputLenAfterCheckpoint := len(c.inputChan)
+
 	worktime := time.Now().Sub(start)
 
 	c.stat("size", float64(c.size))
@@ -142,13 +146,18 @@ func (c *Cache) doCheckpoint() {
 	c.stat("queries", float64(c.queryCnt))
 	c.stat("overflow", float64(c.overflowCnt))
 	c.stat("checkpointTime", worktime.Seconds())
+	c.stat("inputLenBeforeCheckpoint", float64(inputLenBeforeCheckpoint))
+	c.stat("inputLenAfterCheckpoint", float64(inputLenAfterCheckpoint))
 
 	logrus.WithFields(logrus.Fields{
-		"time":     worktime.String(),
-		"size":     c.size,
-		"metrics":  len(c.data),
-		"queries":  c.queryCnt,
-		"overflow": c.overflowCnt,
+		"time":                     worktime.String(),
+		"size":                     c.size,
+		"metrics":                  len(c.data),
+		"queries":                  c.queryCnt,
+		"overflow":                 c.overflowCnt,
+		"inputLenBeforeCheckpoint": inputLenBeforeCheckpoint,
+		"inputLenAfterCheckpoint":  inputLenAfterCheckpoint,
+		"inputCapacity":            cap(c.inputChan),
 	}).Info("[cache] doCheckpoint()")
 
 	c.queryCnt = 0

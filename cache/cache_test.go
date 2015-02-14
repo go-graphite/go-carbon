@@ -69,6 +69,8 @@ func TestCacheCheckpoint(t *testing.T) {
 	}
 
 	systemMetrics := []string{
+		"carbon.cache.inputLenAfterCheckpoint",
+		"carbon.cache.inputLenBeforeCheckpoint",
 		"carbon.cache.checkpointTime",
 		"carbon.cache.overflow",
 		"carbon.cache.queries",
