@@ -94,6 +94,7 @@ type Config struct {
 	Cache      cacheConfig      `toml:"cache"`
 	Udp        udpConfig        `toml:"udp"`
 	Tcp        tcpConfig        `toml:"tcp"`
+	Pickle     tcpConfig        `toml:"pickle"`
 	Carbonlink carbonlinkConfig `toml:"carbonlink"`
 	Pprof      pprofConfig      `toml:"pprof"`
 }
@@ -121,6 +122,10 @@ func newConfig() *Config {
 		},
 		Tcp: tcpConfig{
 			Listen:  ":2003",
+			Enabled: true,
+		},
+		Pickle: tcpConfig{
+			Listen:  ":2004",
 			Enabled: true,
 		},
 		Carbonlink: carbonlinkConfig{
@@ -254,6 +259,25 @@ func main() {
 		}
 	}
 	/* TCP end */
+
+	/* PICKLE start */
+	pickleCfg := cfg.Pickle
+
+	if pickleCfg.Enabled {
+		pickleAddr, err := net.ResolveTCPAddr("tcp", pickleCfg.Listen)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		pickleListener := receiver.NewPickle(core.In())
+		pickleListener.SetGraphPrefix(cfg.Common.GraphPrefix)
+
+		defer pickleListener.Stop()
+		if err = pickleListener.Listen(pickleAddr); err != nil {
+			log.Fatal(err)
+		}
+	}
+	/* PICKLE end */
 
 	/* WHISPER start */
 	if cfg.Whisper.Enabled {
