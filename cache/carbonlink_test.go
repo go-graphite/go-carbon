@@ -132,5 +132,34 @@ func TestCarbonlink(t *testing.T) {
 		t.Fatal("wrong reply from carbonlink")
 	}
 
+	/* MESSAGE 3 */
+	/* Remove carbon.agents.carbon_agent_server.param.size from cache and request again */
+
+	for {
+		c := <-cache.Out()
+		if c.Metric == "carbon.agents.carbon_agent_server.param.size" {
+			break
+		}
+	}
+
+	if _, err := conn.Write([]byte(sampleCacheQuery2)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := binary.Read(conn, binary.BigEndian, &replyLength); err != nil {
+		t.Fatal(err)
+	}
+
+	data = make([]byte, replyLength)
+
+	if err := binary.Read(conn, binary.BigEndian, data); err != nil {
+		t.Fatal(err)
+	}
+
+	if string(data) != "\x80\x02}(X\n\x00\x00\x00datapoints](eu." {
+		fmt.Printf("%#v\n", string(data))
+		t.Fatal("wrong reply from carbonlink")
+	}
+
 	// conn.Read(b)
 }

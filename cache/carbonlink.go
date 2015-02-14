@@ -89,8 +89,10 @@ func (listener *CarbonlinkListener) packReply(reply *Reply) []byte {
 
 	var datapoints []interface{}
 
-	for _, item := range reply.Points.Data {
-		datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+	if reply.Points != nil {
+		for _, item := range reply.Points.Data {
+			datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+		}
 	}
 
 	r := make(map[string][]interface{})
