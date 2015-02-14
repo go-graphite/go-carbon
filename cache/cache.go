@@ -27,7 +27,7 @@ type Cache struct {
 	exitChan    chan bool           // close for stop worker
 	graphPrefix string
 	queryCnt    int
-	overflowCnt int // drop packages if cache full
+	oversizeCnt int // drop packages if cache full
 	queue       queue
 }
 
@@ -140,7 +140,7 @@ func (c *Cache) doCheckpoint() {
 	c.stat("size", float64(c.size))
 	c.stat("metrics", float64(len(c.data)))
 	c.stat("queries", float64(c.queryCnt))
-	c.stat("overflow", float64(c.overflowCnt))
+	c.stat("oversizeDrops", float64(c.oversizeCnt))
 	c.stat("checkpointTime", worktime.Seconds())
 
 	logrus.WithFields(logrus.Fields{
@@ -148,16 +148,16 @@ func (c *Cache) doCheckpoint() {
 		"size":     c.size,
 		"metrics":  len(c.data),
 		"queries":  c.queryCnt,
-		"overflow": c.overflowCnt,
+		"oversize": c.oversizeCnt,
 	}).Info("doCheckpoint()")
 
 	c.queryCnt = 0
-	c.overflowCnt = 0
+	c.oversizeCnt = 0
 }
 
 func (c *Cache) worker() {
 	var values *points.Points
-	// var sendTo chan *points.Points
+	var sendTo chan *points.Points
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -166,24 +166,16 @@ func (c *Cache) worker() {
 		if values == nil {
 			values = c.Pop()
 
-			// if values != nil {
-			// 	sendTo = c.outputChan
-			// } else {
-			// 	sendTo = nil
-			// }
+			if values != nil {
+				sendTo = c.outputChan
+			} else {
+				sendTo = nil
+			}
 		}
 
-		// hand made same priority
 		select {
 		case <-ticker.C: // checkpoint
 			c.doCheckpoint()
-		case <-c.exitChan: // exit
-			break
-		default:
-		}
-
-		// query from carbonlink
-		select {
 		case query := <-c.queryChan: // carbonlink
 			c.queryCnt++
 			reply := NewReply()
@@ -195,27 +187,16 @@ func (c *Cache) worker() {
 			}
 
 			query.ReplyChan <- reply
-		default:
-		}
-
-		// metric from receivers
-		select {
+		case sendTo <- values: // to persister
+			values = nil
 		case msg := <-c.inputChan: // from receiver
 			if c.maxSize == 0 || c.size < c.maxSize {
 				c.Add(msg)
 			} else {
-				c.overflowCnt++
+				c.oversizeCnt++
 			}
-		default:
-		}
-
-		// send values to persister
-		if values != nil {
-			select {
-			case c.outputChan <- values: // to persister
-				values = nil
-			default:
-			}
+		case <-c.exitChan: // exit
+			break
 		}
 	}
 
