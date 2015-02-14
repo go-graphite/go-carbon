@@ -121,7 +121,7 @@ func newConfig() *Config {
 			Enabled: true,
 		},
 		Carbonlink: carbonlinkConfig{
-			Listen:  ":2004", //??
+			Listen:  "127.0.0.1:7002",
 			Enabled: true,
 			ReadTimeout: &Duration{
 				Duration: 30 * time.Second,
