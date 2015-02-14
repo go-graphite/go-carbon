@@ -135,6 +135,11 @@ func (p *Whisper) statJob() {
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
+	logrus.WithFields(logrus.Fields{
+		"cnt":     cnt,
+		"created": created,
+	}).Info("persister checkpoint")
+
 	p.Stat("updateOperations", float64(cnt>>32))
 	p.Stat("commitedPoints", float64(cnt%(1<<32)))
 	if float64(cnt>>32) > 0 {
@@ -144,6 +149,7 @@ func (p *Whisper) statJob() {
 	}
 
 	p.Stat("created", float64(created))
+
 }
 
 // stat timer
@@ -167,12 +173,14 @@ func (p *Whisper) Start() {
 	if p.workersCount <= 1 { // solo worker
 		go p.worker(p.in)
 	} else {
-		channels := make([](chan *points.Points), 0)
+		var channels [](chan *points.Points)
+
 		for i := 0; i < p.workersCount; i++ {
 			ch := make(chan *points.Points, 32)
 			channels = append(channels, ch)
 			go p.worker(ch)
 		}
+
 		go p.shuffler(p.in, channels)
 	}
 }
