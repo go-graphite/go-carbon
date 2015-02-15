@@ -15,7 +15,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Many persister workers (with use many cpu cores)
 
 
-## TODO
+### TODO
 * [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf) support
 
 
