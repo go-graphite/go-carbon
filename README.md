@@ -4,7 +4,7 @@ go-carbon
 Golang implementation of Graphite/Carbon server with classic architecture: Agent -> Cache -> Persister
 
 
-![Architecture](carbon.png)
+![Architecture](carbon2.png)
 
 ### Supported features
 * Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
