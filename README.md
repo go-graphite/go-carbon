@@ -1,4 +1,4 @@
-carbon-agent
+go-carbon
 ============
 
 Golang implementation of Graphite/Carbon server with classic architecture: Agent -> Cache -> Persister
