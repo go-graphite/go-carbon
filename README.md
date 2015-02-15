@@ -20,6 +20,13 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 
 
 ## Installation
+```
+go get github.com/lomik/go-carbon
+cd $GOPATH/bin/
+./go-carbon -config-print-default > /usr/local/etc/carbon.conf
+vim /usr/local/etc/carbon.conf
+./go-carbon -config=/usr/local/etc/carbon.conf
+```
 
 ## Configuration
 ```
