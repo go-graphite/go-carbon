@@ -12,10 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"devroom.ru/lomik/carbon/cache"
-	"devroom.ru/lomik/carbon/logging"
-	"devroom.ru/lomik/carbon/persister"
-	"devroom.ru/lomik/carbon/receiver"
+	"github.com/lomik/go-carbon/cache"
+	"github.com/lomik/go-carbon/logging"
+	"github.com/lomik/go-carbon/persister"
+	"github.com/lomik/go-carbon/receiver"
 
 	"github.com/BurntSushi/toml"
 	"github.com/Sirupsen/logrus"

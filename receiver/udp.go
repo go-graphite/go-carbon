@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"devroom.ru/lomik/carbon/points"
+	"github.com/lomik/go-carbon/points"
 
 	"github.com/Sirupsen/logrus"
 )

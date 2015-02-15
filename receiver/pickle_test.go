@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"devroom.ru/lomik/carbon/points"
+	"github.com/lomik/go-carbon/points"
 )
 
 type pickleTestCase struct {
