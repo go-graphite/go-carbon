@@ -79,7 +79,7 @@ func (p *Whisper) store(values *points.Points) {
 
 		w, err = whisper.Create(path, schema.retentions, whisper.Average, 0.5)
 		if err != nil {
-			logrus.Warningf("[persister] Failed to create new whisper file %s: %s", path, err.Error())
+			logrus.Errorf("[persister] Failed to create new whisper file %s: %s", path, err.Error())
 			return
 		}
 
@@ -97,7 +97,7 @@ func (p *Whisper) store(values *points.Points) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			logrus.Warningf("[persister] UpdateMany %s recovered: %s", path, r)
+			logrus.Errorf("[persister] UpdateMany %s recovered: %s", path, r)
 		}
 	}()
 	w.UpdateMany(points)
