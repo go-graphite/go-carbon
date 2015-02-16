@@ -107,7 +107,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		if priorityStr == "" {
 			p = 0
 		} else {
-			p, err = strconv.ParseInt(s.ValueOf("priority"), 10, 0)
+			p, err = strconv.ParseInt(priorityStr, 10, 0)
 			if err != nil {
 				logrus.Errorf("[persister] wrong priority in schema: %s", err)
 				return nil, err
