@@ -8,17 +8,20 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/user"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/BurntSushi/toml"
+	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/logging"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
-
-	"github.com/BurntSushi/toml"
-	"github.com/Sirupsen/logrus"
+	"github.com/sevlyar/go-daemon"
 )
 
 import _ "net/http/pprof"
@@ -48,6 +51,7 @@ func (d *Duration) Value() time.Duration {
 }
 
 type commonConfig struct {
+	User        string `toml:"user"`
 	Logfile     string `toml:"logfile"`
 	GraphPrefix string `toml:"graph-prefix"`
 	MaxCPU      int    `toml:"max-cpu"`
@@ -105,6 +109,7 @@ func newConfig() *Config {
 			Logfile:     "",
 			GraphPrefix: "carbon.agents.{host}.",
 			MaxCPU:      1,
+			User:        "",
 		},
 		Whisper: whisperConfig{
 			DataDir: "/data/graphite/whisper/",
@@ -173,24 +178,71 @@ func ParseConfig(filename string, cfg interface{}) error {
 }
 
 func main() {
+	var err error
 
 	/* CONFIG start */
+
 	configFile := flag.String("config", "", "Filename of config")
 	printDefaultConfig := flag.Bool("config-print-default", false, "Print default config")
+	checkConfig := flag.Bool("check-config", false, "Check config and exit")
+	isDaemon := flag.Bool("daemon", false, "Run in background")
+	pidfile := flag.String("pidfile", "", "Pidfile path (only for daemon)")
 
 	flag.Parse()
 
 	cfg := newConfig()
 
 	if *printDefaultConfig {
-		if err := PrintConfig(cfg); err != nil {
+		if err = PrintConfig(cfg); err != nil {
 			log.Fatal(err)
 		}
-		os.Exit(0)
+		return
 	}
 
-	if err := ParseConfig(*configFile, cfg); err != nil {
+	if err = ParseConfig(*configFile, cfg); err != nil {
 		log.Fatal(err)
+	}
+
+	var runAsUser *user.User
+	if cfg.Common.User != "" {
+		runAsUser, err = user.Lookup(cfg.Common.User)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if *checkConfig {
+		return
+	}
+
+	if *isDaemon {
+
+		context := new(daemon.Context)
+		if *pidfile != "" {
+			context.PidFileName = *pidfile
+			context.PidFilePerm = 0644
+		}
+
+		runtime.LockOSThread()
+
+		if runAsUser != nil {
+			uid, err := strconv.ParseInt(runAsUser.Uid, 10, 0)
+			if err != nil {
+				log.Fatal(err)
+			}
+			if err = syscall.Setuid(int(uid)); err != nil {
+				log.Fatal(err)
+			}
+		}
+
+		child, _ := context.Reborn()
+
+		if child != nil {
+			return
+		}
+		defer context.Release()
+
+		runtime.UnlockOSThread()
 	}
 
 	logging.SetFile(cfg.Common.Logfile)
@@ -198,7 +250,6 @@ func main() {
 
 	runtime.GOMAXPROCS(cfg.Common.MaxCPU)
 
-	// pp.Println(cfg)
 	/* CONFIG end */
 
 	// pprof
