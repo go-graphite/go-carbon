@@ -101,9 +101,17 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		item.retentionStr = s.ValueOf("retentions")
 		item.retentions, err = ParseRetentionDefs(item.retentionStr)
 
-		p, err := strconv.ParseInt(s.ValueOf("priority"), 10, 0)
-		if err != nil {
-			return nil, err
+		priorityStr := s.ValueOf("priority")
+
+		var p int64
+		if priorityStr == "" {
+			p = 0
+		} else {
+			p, err = strconv.ParseInt(s.ValueOf("priority"), 10, 0)
+			if err != nil {
+				logrus.Errorf("[persister] wrong priority in schema: %s", err)
+				return nil, err
+			}
 		}
 		item.priority = int64(p)<<32 - int64(index) // for sort records with same priority
 		// item.priority = (s.ValueOf("priority"))
