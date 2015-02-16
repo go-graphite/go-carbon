@@ -216,6 +216,7 @@ func main() {
 	}
 
 	if *isDaemon {
+		runtime.LockOSThread()
 
 		context := new(daemon.Context)
 		if *pidfile != "" {
@@ -223,15 +224,20 @@ func main() {
 			context.PidFilePerm = 0644
 		}
 
-		runtime.LockOSThread()
-
 		if runAsUser != nil {
 			uid, err := strconv.ParseInt(runAsUser.Uid, 10, 0)
 			if err != nil {
 				log.Fatal(err)
 			}
-			if err = syscall.Setuid(int(uid)); err != nil {
+
+			gid, err := strconv.ParseInt(runAsUser.Gid, 10, 0)
+			if err != nil {
 				log.Fatal(err)
+			}
+
+			context.Credential = &syscall.Credential{
+				Uid: uint32(uid),
+				Gid: uint32(gid),
 			}
 		}
 
