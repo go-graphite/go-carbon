@@ -24,8 +24,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 ```
 git clone https://github.com/lomik/go-carbon.git
 cd go-carbon
-git submodule init
-git submodule update
+git submodule update --init
 make
 
 sudo install -m 0755 go-carbon /usr/local/bin/go-carbon
