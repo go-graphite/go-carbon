@@ -13,6 +13,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Carbonlink (requests to cache from graphite-web)
 * Logging with rotation (reopen logfile on HUP)
 * Many persister workers (with use many cpu cores)
+* Run as daemon
 
 
 ### TODO
@@ -35,7 +36,19 @@ sudo go-carbon --config /usr/local/etc/carbon.conf --daemon
 
 ## Configuration
 ```
+$ go-carbon --help
+Usage of go-carbon:
+  -check-config=false: Check config and exit
+  -config="": Filename of config
+  -config-print-default=false: Print default config
+  -daemon=false: Run in background
+  -pidfile="": Pidfile path (only for daemon)
+```
+
+```
 [common]
+# Run as user. Works only in daemon mode
+user = ""
 # If logfile is empty use stderr
 logfile = ""
 # Prefix for store all carbon graphs. Supported macroses: {host}
