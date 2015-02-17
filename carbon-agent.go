@@ -26,6 +26,9 @@ import (
 
 import _ "net/http/pprof"
 
+// Version of go-carbon
+const Version = "0.2"
+
 // Duration wrapper time.Duration for TOML
 type Duration struct {
 	time.Duration
@@ -185,10 +188,18 @@ func main() {
 	configFile := flag.String("config", "", "Filename of config")
 	printDefaultConfig := flag.Bool("config-print-default", false, "Print default config")
 	checkConfig := flag.Bool("check-config", false, "Check config and exit")
+
+	printVersion := flag.Bool("version", false, "Print version")
+
 	isDaemon := flag.Bool("daemon", false, "Run in background")
 	pidfile := flag.String("pidfile", "", "Pidfile path (only for daemon)")
 
 	flag.Parse()
+
+	if *printVersion {
+		fmt.Print(Version)
+		return
+	}
 
 	cfg := newConfig()
 

@@ -27,10 +27,14 @@ cd go-carbon
 git submodule update --init
 make
 
+# hand-made install
 sudo install -m 0755 go-carbon /usr/local/bin/go-carbon
 sudo go-carbon --config-print-default > /usr/local/etc/carbon.conf
 sudo vim /usr/local/etc/carbon.conf
 sudo go-carbon --config /usr/local/etc/carbon.conf --daemon
+
+# build rpm (centos 6)
+make rpm
 ```
 
 ## Configuration
@@ -42,6 +46,7 @@ Usage of go-carbon:
   -config-print-default=false: Print default config
   -daemon=false: Run in background
   -pidfile="": Pidfile path (only for daemon)
+  -version=false: Print version
 ```
 
 ```
