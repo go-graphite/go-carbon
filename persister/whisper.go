@@ -69,7 +69,7 @@ func (p *Whisper) store(values *points.Points) {
 			return
 		}
 
-		logrus.Infof("[persister] Creating %s: retention %#v (section %#v)",
+		logrus.Debugf("[persister] Creating %s: retention %#v (section %#v)",
 			path, schema.retentionStr, schema.name)
 
 		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
