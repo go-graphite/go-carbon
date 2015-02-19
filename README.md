@@ -98,3 +98,27 @@ listen = "localhost:7007"
 enabled = false
 ```
 
+## Changelog
+##### master (next version)
+* Log "create wsp" as debug
+* Log UDP checkpoint (calculate stats every minute)
+
+##### version 0.2
+* Git submodule dependencies
+* Init script for CentOS 6
+* Makefile
+* "make rpm" script
+* Daemonize and run-as-user support
+* "--check-config" option
+* "--pidfile" option
+
+##### version 0.1
++ First full-functional public version
++ Logging with HUP rotation support
++ UDP receiver
++ Tcp receiver
++ Pickle receiver
++ TOML-configs
++ Carbonlink
++ Multi-persister support
++ storage-schemas.conf support
