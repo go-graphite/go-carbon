@@ -124,17 +124,24 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 		for {
 			select {
 			case <-ticker.C:
-				cnt := atomic.LoadUint32(&rcv.metricsReceived)
-				atomic.AddUint32(&rcv.metricsReceived, -cnt)
-				rcv.Stat("udp.metricsReceived", float64(cnt))
+				metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+				atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+				rcv.Stat("udp.metricsReceived", float64(metricsReceived))
 
-				cnt = atomic.LoadUint32(&rcv.incompleteReceived)
-				atomic.AddUint32(&rcv.incompleteReceived, -cnt)
-				rcv.Stat("udp.incompleteReceived", float64(cnt))
+				incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
+				atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
+				rcv.Stat("udp.incompleteReceived", float64(incompleteReceived))
 
-				cnt = atomic.LoadUint32(&rcv.errors)
-				atomic.AddUint32(&rcv.errors, -cnt)
-				rcv.Stat("udp.errors", float64(cnt))
+				errors := atomic.LoadUint32(&rcv.errors)
+				atomic.AddUint32(&rcv.errors, -errors)
+				rcv.Stat("udp.errors", float64(errors))
+
+				logrus.WithFields(logrus.Fields{
+					"metricsReceived":    metricsReceived,
+					"incompleteReceived": incompleteReceived,
+					"errors":             errors,
+				}).Info("[udp] doCheckpoint()")
+
 			case <-rcv.exit:
 				rcv.conn.Close()
 				return
