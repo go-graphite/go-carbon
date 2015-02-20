@@ -12,7 +12,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
 * Carbonlink (requests to cache from graphite-web)
 * Logging with rotation (reopen logfile on HUP)
-* Many persister workers (with use many cpu cores)
+* Many persister workers (using many cpu cores)
 * Run as daemon
 
 
