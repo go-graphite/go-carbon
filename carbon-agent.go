@@ -226,6 +226,10 @@ func main() {
 		return
 	}
 
+	if err := logging.SetFile(cfg.Common.Logfile); err != nil {
+		logrus.Fatal(err)
+	}
+
 	if *isDaemon {
 		runtime.LockOSThread()
 
@@ -262,7 +266,6 @@ func main() {
 		runtime.UnlockOSThread()
 	}
 
-	logging.SetFile(cfg.Common.Logfile)
 	logrus.SetLevel(logrus.DebugLevel)
 
 	runtime.GOMAXPROCS(cfg.Common.MaxCPU)

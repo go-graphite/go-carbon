@@ -8,7 +8,10 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/howeyc/fsnotify"
 )
+
+var std = NewFileLogger()
 
 func init() {
 	logrus.SetFormatter(&TextFormatter{})
@@ -17,10 +20,20 @@ func init() {
 	signal.Notify(signalChan, syscall.SIGHUP)
 
 	go func() {
-		for signal := range signalChan {
-			if signal == syscall.SIGHUP {
+		for {
+			select {
+			case signal := <-signalChan:
+				if signal == syscall.SIGHUP {
+					err := std.Reopen()
+					logrus.Infof("HUP received, reopen log %#v", std.Filename())
+					if err != nil {
+						logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+					}
+				}
+
+			case <-std.Watcher.Event:
 				err := std.Reopen()
-				logrus.Infof("HUP received, reopen log %#v", std.Filename())
+				logrus.Infof("Reopen log %#v by fsnotify event", std.Filename())
 				if err != nil {
 					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
 				}
@@ -29,20 +42,25 @@ func init() {
 	}()
 }
 
-var std = NewFileLogger()
-
 // FileLogger wrapper
 type FileLogger struct {
 	sync.RWMutex
 	filename string
 	fd       *os.File
+	Watcher  *fsnotify.Watcher
 }
 
 // NewFileLogger create instance FileLogger
 func NewFileLogger() *FileLogger {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logrus.Warningf("fsnotify.NewWatcher(): %s", err)
+		watcher = nil
+	}
 	return &FileLogger{
 		filename: "",
 		fd:       nil,
+		Watcher:  watcher,
 	}
 }
 
@@ -52,7 +70,15 @@ func (l *FileLogger) Open(filename string) error {
 	l.filename = filename
 	l.Unlock()
 
-	return l.Reopen()
+	reopenErr := l.Reopen()
+
+	if l.Watcher != nil {
+		if err := l.Watcher.WatchFlags(filename, fsnotify.FSN_DELETE|fsnotify.FSN_RENAME|fsnotify.FSN_CREATE); err != nil {
+			logrus.Warningf("fsnotify.Watcher.Watch(%s): %s", filename, err)
+		}
+	}
+
+	return reopenErr
 }
 
 // Reopen file
