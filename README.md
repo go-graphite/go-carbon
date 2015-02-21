@@ -11,7 +11,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
 * [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
 * Carbonlink (requests to cache from graphite-web)
-* Logging with rotation (reopen logfile on HUP)
+* Logging with rotation (reopen log by HUP signal or inotify event)
 * Many persister workers (using many cpu cores)
 * Run as daemon
 
@@ -102,6 +102,8 @@ enabled = false
 ##### master (next version)
 * Log "create wsp" as debug
 * Log UDP checkpoint (calculate stats every minute)
+* Rotate logfile by inotify event (without HUP)
+* Check logfile opened
 
 ##### version 0.2
 * Git submodule dependencies
