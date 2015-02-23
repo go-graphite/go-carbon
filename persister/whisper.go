@@ -20,6 +20,7 @@ type Whisper struct {
 	in           chan *points.Points
 	exit         chan bool
 	schemas      *WhisperSchemas
+	aggregation  *WhisperAggregation
 	workersCount int
 	rootPath     string
 	graphPrefix  string
@@ -28,11 +29,12 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas *WhisperSchemas, in chan *points.Points) *Whisper {
+func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points) *Whisper {
 	return &Whisper{
 		in:           in,
 		exit:         make(chan bool),
 		schemas:      schemas,
+		aggregation:  aggregation,
 		rootPath:     rootPath,
 		workersCount: 1,
 	}
@@ -69,15 +71,26 @@ func (p *Whisper) store(values *points.Points) {
 			return
 		}
 
-		logrus.Debugf("[persister] Creating %s: retention %#v (section %#v)",
-			path, schema.retentionStr, schema.name)
+		aggr := p.aggregation.match(values.Metric)
+		if aggr == nil {
+			logrus.Errorf("[persister] No storage aggregation defined for %s", values.Metric)
+			return
+		}
+
+		logrus.WithFields(logrus.Fields{
+			"retention":    schema.retentionStr,
+			"schema":       schema.name,
+			"aggregation":  aggr.name,
+			"xFilesFactor": aggr.xFilesFactor,
+			"method":       aggr.aggregationMethodStr,
+		}).Debugf("[persister] Creating %s", path)
 
 		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
 			logrus.Error(err)
 			return
 		}
 
-		w, err = whisper.Create(path, schema.retentions, whisper.Average, 0.5)
+		w, err = whisper.Create(path, schema.retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor))
 		if err != nil {
 			logrus.Errorf("[persister] Failed to create new whisper file %s: %s", path, err.Error())
 			return

@@ -10,15 +10,11 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
 * Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
 * [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
+* [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf)
 * Carbonlink (requests to cache from graphite-web)
 * Logging with rotation (reopen log by HUP signal or inotify event)
 * Many persister workers (using many cpu cores)
 * Run as daemon
-
-
-### TODO
-* [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf) support
-
 
 ## Installation
 ```
@@ -55,14 +51,17 @@ Usage of go-carbon:
 user = ""
 # If logfile is empty use stderr
 logfile = ""
-# Prefix for store all carbon graphs. Supported macroses: {host}
+# Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}."
 # Increase for configuration with multi persisters
 max-cpu = 1
 
 [whisper]
 data-dir = "/data/graphite/whisper/"
+# http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf. Required
 schemas-file = "/data/graphite/schemas"
+# http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional
+aggregation-file = ""
 # Workers count. Metrics sharded by "crc32(metricName) % workers"
 workers = 1
 enabled = true
@@ -104,6 +103,7 @@ enabled = false
 * Log UDP checkpoint (calculate stats every minute)
 * Rotate logfile by inotify event (without HUP)
 * Check logfile opened
+* [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf) support
 
 ##### version 0.2
 * Git submodule dependencies
