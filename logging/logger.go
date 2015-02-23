@@ -72,7 +72,7 @@ func (l *FileLogger) Open(filename string) error {
 
 	reopenErr := l.Reopen()
 
-	if l.Watcher != nil {
+	if l.Watcher != nil && filename != "" {
 		if err := l.Watcher.WatchFlags(filename, fsnotify.FSN_DELETE|fsnotify.FSN_RENAME|fsnotify.FSN_CREATE); err != nil {
 			logrus.Warningf("fsnotify.Watcher.Watch(%s): %s", filename, err)
 		}
