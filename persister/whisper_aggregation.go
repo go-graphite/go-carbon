@@ -97,7 +97,7 @@ func ReadWhisperAggregation(file string) (*WhisperAggregation, error) {
 			continue
 		}
 
-		logrus.Debugf("[persister] adding aggregation [%s] pattern = %s aggregationMethod = %s xFilesFactor = %f",
+		logrus.Debugf("[persister] Adding aggregation [%s] pattern = %s aggregationMethod = %s xFilesFactor = %f",
 			item.name, s.ValueOf("pattern"),
 			item.aggregationMethodStr, item.xFilesFactor)
 
