@@ -41,7 +41,7 @@ func TestParseText(t *testing.T) {
 	assertError("metric.name 42a 1422642189\n")
 	assertError("metric.name 42 10\n")
 
-	assertError("metric.name 42 2524708500\n")
+	assertError("metric.name 42 4102545300\n")
 
 	assertOk("metric.name -42.76 1422642189\n",
 		OnePoint("metric.name", -42.76, 1422642189))
