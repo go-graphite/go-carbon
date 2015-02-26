@@ -22,7 +22,6 @@ rpm: tmp/go-carbon.tar.gz
 submodules:
 	git submodule init
 	git submodule update --recursive
-	touch .submodules
 
 test:
 	$(GO) test ./...
