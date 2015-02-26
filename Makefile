@@ -1,5 +1,5 @@
 GO ?= go
-GOPATH := $(CURDIR)/_vendor
+export GOPATH := $(CURDIR)/_vendor
 
 all: go-carbon
 
