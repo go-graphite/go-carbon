@@ -58,9 +58,9 @@ func ParseText(line string) (*Points, error) {
 	}
 
 	// 0x2e == ".". Or use split? @TODO: benchmark
-	if strings.Contains(row[0], "..") || row[0][0] == 0x2e || row[0][len(row)-1] == 0x2e {
-		return nil, fmt.Errorf("bad message: %#v", line)
-	}
+	// if strings.Contains(row[0], "..") || row[0][0] == 0x2e || row[0][len(row)-1] == 0x2e {
+	// 	return nil, fmt.Errorf("bad message: %#v", line)
+	// }
 
 	value, err := strconv.ParseFloat(row[1], 64)
 
@@ -75,15 +75,15 @@ func ParseText(line string) (*Points, error) {
 	}
 
 	// 315522000 == "1980-01-01 00:00:00"
-	if tsf < 315532800 {
-		return nil, fmt.Errorf("bad message: %#v", line)
-	}
+	// if tsf < 315532800 {
+	// 	return nil, fmt.Errorf("bad message: %#v", line)
+	// }
 
 	// 4102444800 = "2100-01-01 00:00:00"
 	// Hello people from the future
-	if tsf > 4102444800 {
-		return nil, fmt.Errorf("bad message: %#v", line)
-	}
+	// if tsf > 4102444800 {
+	// 	return nil, fmt.Errorf("bad message: %#v", line)
+	// }
 
 	return OnePoint(row[0], value, int64(tsf)), nil
 }
