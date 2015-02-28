@@ -110,7 +110,7 @@ type Config struct {
 func newConfig() *Config {
 	cfg := &Config{
 		Common: commonConfig{
-			Logfile:     "",
+			Logfile:     "/var/log/go-carbon/go-carbon.log",
 			GraphPrefix: "carbon.agents.{host}.",
 			MaxCPU:      1,
 			User:        "",
@@ -226,6 +226,10 @@ func main() {
 
 	if *checkConfig {
 		return
+	}
+
+	if err := logging.PrepareFile(cfg.Common.Logfile, runAsUser); err != nil {
+		logrus.Fatal(err)
 	}
 
 	if err := logging.SetFile(cfg.Common.Logfile); err != nil {

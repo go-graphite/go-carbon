@@ -50,7 +50,7 @@ Usage of go-carbon:
 # Run as user. Works only in daemon mode
 user = ""
 # If logfile is empty use stderr
-logfile = ""
+logfile = "/var/log/go-carbon/go-carbon.log"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}."
 # Increase for configuration with multi persisters
@@ -104,6 +104,7 @@ enabled = false
 * Rotate logfile by inotify event (without HUP)
 * Check logfile opened
 * [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf) support
+* Create and chown logfile before daemonize and change user
 
 ##### version 0.2
 * Git submodule dependencies

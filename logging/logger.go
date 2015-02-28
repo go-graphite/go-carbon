@@ -4,6 +4,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 
@@ -90,7 +93,7 @@ func (l *FileLogger) Reopen() error {
 	var err error
 
 	if l.filename != "" {
-		newFd, err = os.OpenFile(l.filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+		newFd, err = os.OpenFile(l.filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
 
 		if err != nil {
 			return err
@@ -128,4 +131,43 @@ func (l *FileLogger) Filename() string {
 // SetFile for default logger
 func SetFile(filename string) error {
 	return std.Open(filename)
+}
+
+// PrepareFile creates logfile and set it writable for user
+func PrepareFile(filename string, owner *user.User) error {
+	if filename == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(filename), 0755); err != nil {
+		return err
+	}
+
+	fd, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	if fd != nil {
+		fd.Close()
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.Chmod(filename, 0644); err != nil {
+		return err
+	}
+	if owner != nil {
+
+		uid, err := strconv.ParseInt(owner.Uid, 10, 0)
+		if err != nil {
+			return err
+		}
+
+		gid, err := strconv.ParseInt(owner.Gid, 10, 0)
+		if err != nil {
+			return err
+		}
+
+		if err := os.Chown(filename, int(uid), int(gid)); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
