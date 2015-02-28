@@ -1,0 +1,5 @@
+go-carbon (0.2) unstable; urgency=low
+
+  * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
+
+ -- Dave Rawks <dave@pandora.com>  Thu, 26 Feb 2015 11:00:28 -0800
