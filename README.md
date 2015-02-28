@@ -18,19 +18,23 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 
 ## Installation
 ```
+# build binary
 git clone https://github.com/lomik/go-carbon.git
 cd go-carbon
-git submodule update --init
+make submodules
 make
+
+# build rpm (centos 6)
+make rpm
+
+# build debian/ubuntu package
+make deb
 
 # hand-made install
 sudo install -m 0755 go-carbon /usr/local/bin/go-carbon
 sudo go-carbon --config-print-default > /usr/local/etc/carbon.conf
 sudo vim /usr/local/etc/carbon.conf
 sudo go-carbon --config /usr/local/etc/carbon.conf --daemon
-
-# build rpm (centos 6)
-make rpm
 ```
 
 ## Configuration
@@ -105,6 +109,7 @@ enabled = false
 * Check logfile opened
 * [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf) support
 * Create and chown logfile before daemonize and change user
+* Debian package (thanks [Dave Rawks](https://github.com/drawks))
 
 ##### version 0.2
 * Git submodule dependencies
