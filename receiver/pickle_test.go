@@ -87,3 +87,20 @@ func TestPickle(t *testing.T) {
 		t.Fatalf("Message #1 not received")
 	}
 }
+
+func TestPickleFloatTimestamp(t *testing.T) {
+	test := newPickleTestCase(t)
+	defer test.Finish()
+
+	// [("param1", (1425734474.15, 42.2))]
+	test.Send("\x00\x00\x00)\x80\x02]q\x00U\x06param1q\x01GA\xd5>\xbe\xd2\x89\x99\x9aG@E\x19\x99\x99\x99\x99\x9a\x86q\x02\x86q\x03a.")
+
+	time.Sleep(10 * time.Millisecond)
+
+	select {
+	case msg := <-test.rcvChan:
+		test.Eq(msg, points.OnePoint("param1", 42.2, 1425734474))
+	default:
+		t.Fatalf("Message #0 not received")
+	}
+}

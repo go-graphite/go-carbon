@@ -184,25 +184,36 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 			for j := 1; j < len(metric); j++ {
 				v, err := stalecucumber.ListOrTuple(metric[j], nil)
+
 				if err != nil {
 					atomic.AddUint32(&rcv.errors, 1)
 					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
 					return
 				}
+
 				if len(v) != 2 {
 					atomic.AddUint32(&rcv.errors, 1)
 					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
 					return
 				}
-				timestamp, err := stalecucumber.Float(v[0], nil)
+
+				timestamp, err := stalecucumber.Int(v[0], nil)
 				if err != nil {
-					timestampInt, err := stalecucumber.Int(v[0], nil)
+
+					timestampFloat, err := stalecucumber.Float(v[0], nil)
 					if err != nil {
 						atomic.AddUint32(&rcv.errors, 1)
 						logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
 						return
 					}
-					timestamp = float64(timestampInt)
+
+					timestamp = int64(timestampFloat)
+				}
+
+				if timestamp < 0 || timestamp > 4294967295 {
+					atomic.AddUint32(&rcv.errors, 1)
+					logrus.Warningf("[pickle] Wrong unpickled message: wrong timestamp %d", timestamp)
+					return
 				}
 
 				value, err := stalecucumber.Float(v[1], nil)
@@ -216,7 +227,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 					value = float64(valueInt)
 				}
 
-				msg.Add(value, int64(timestamp))
+				msg.Add(value, timestamp)
 			}
 
 			atomic.AddUint32(&rcv.metricsReceived, 1)
