@@ -2,7 +2,6 @@ package receiver
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -14,7 +13,6 @@ import (
 	"github.com/lomik/go-carbon/points"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/hydrogen18/stalecucumber"
 )
 
 // TCP receive metrics from TCP connections
@@ -125,6 +123,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 
+		// Read prepended length
 		err = binary.Read(reader, binary.BigEndian, &msgLen)
 		if err != nil {
 			if err == io.EOF {
@@ -136,90 +135,26 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 			return
 		}
 
+		// Allocate a byte array of the expected length
 		data := make([]byte, msgLen)
 
+		// Read remainder of pickle packet into byte array
 		if err = binary.Read(reader, binary.BigEndian, data); err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
 			logrus.Warningf("[pickle] Can't read message body: %s", err.Error())
 			return
 		}
 
-		result, err := stalecucumber.Unpickle(bytes.NewReader(data))
+		msgs, err := points.ParsePickle(data)
+
 		if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
 			logrus.Warningf("[pickle] Can't unpickle message: %s", err.Error())
 			return
 		}
 
-		list, err := stalecucumber.ListOrTuple(result, err)
-		if err != nil {
-			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-			return
-		}
-
-		for i := 0; i < len(list); i++ {
-			metric, err := stalecucumber.ListOrTuple(list[i], nil)
-			if err != nil {
-				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-				return
-			}
-
-			if len(metric) < 2 {
-				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-				return
-			}
-
-			name, err := stalecucumber.String(metric[0], nil)
-			if err != nil {
-				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-				return
-			}
-
-			msg := points.New()
-			msg.Metric = name
-
-			for j := 1; j < len(metric); j++ {
-				v, err := stalecucumber.ListOrTuple(metric[j], nil)
-				if err != nil {
-					atomic.AddUint32(&rcv.errors, 1)
-					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-					return
-				}
-				if len(v) != 2 {
-					atomic.AddUint32(&rcv.errors, 1)
-					logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-					return
-				}
-				timestamp, err := stalecucumber.Float(v[0], nil)
-				if err != nil {
-					timestampInt, err := stalecucumber.Int(v[0], nil)
-					if err != nil {
-						atomic.AddUint32(&rcv.errors, 1)
-						logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-						return
-					}
-					timestamp = float64(timestampInt)
-				}
-
-				value, err := stalecucumber.Float(v[1], nil)
-				if err != nil {
-					valueInt, err := stalecucumber.Int(v[1], nil)
-					if err != nil {
-						atomic.AddUint32(&rcv.errors, 1)
-						logrus.Warningf("[pickle] Wrong unpickled message: %s", err.Error())
-						return
-					}
-					value = float64(valueInt)
-				}
-
-				msg.Add(value, int64(timestamp))
-			}
-
-			atomic.AddUint32(&rcv.metricsReceived, 1)
+		for _, msg := range msgs {
+			atomic.AddUint32(&rcv.metricsReceived, uint32(len(msg.Data)))
 			rcv.out <- msg
 		}
 	}
