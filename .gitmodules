@@ -19,3 +19,6 @@
 [submodule "_vendor/src/github.com/howeyc/fsnotify"]
 	path = _vendor/src/github.com/howeyc/fsnotify
 	url = https://github.com/howeyc/fsnotify.git
+[submodule "_vendor/src/github.com/stretchr/testify"]
+	path = _vendor/src/github.com/stretchr/testify
+	url = git@github.com:stretchr/testify.git
