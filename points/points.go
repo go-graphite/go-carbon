@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"github.com/hydrogen18/stalecucumber"
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/hydrogen18/stalecucumber"
 )
 
 // Point value/time pair
@@ -127,17 +128,17 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 			if len(v) != 2 {
 				return nil, errors.New("Unexpected array length while unpickling data point")
 			}
-			timestamp, err := stalecucumber.Float(v[0], nil)
+			timestamp, err := stalecucumber.Int(v[0], nil)
 			if err != nil {
-				timestampInt, err := stalecucumber.Int(v[0], nil)
+				timestampFloat, err := stalecucumber.Float(v[0], nil)
 				if err != nil {
 					return nil, err
 				}
-				if timestampInt > math.MaxUint32 || timestampInt < 0 {
-					err = errors.New("Unexpected value for timestamp, cannot be cast to uint32")
-					return nil, err
-				}
-				timestamp = float64(timestampInt)
+				timestamp = int64(timestampFloat)
+			}
+			if timestamp > math.MaxUint32 || timestamp < 0 {
+				err = errors.New("Unexpected value for timestamp, cannot be cast to uint32")
+				return nil, err
 			}
 
 			value, err := stalecucumber.Float(v[1], nil)
@@ -149,7 +150,7 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 				value = float64(valueInt)
 			}
 
-			msg.Add(value, int64(timestamp))
+			msg.Add(value, timestamp)
 		}
 		msgs = append(msgs, msg)
 	}
