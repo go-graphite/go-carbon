@@ -21,7 +21,7 @@ import (
 	"github.com/lomik/go-carbon/logging"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
-	"github.com/sevlyar/go-daemon"
+	"github.com/lomik/go-daemon"
 )
 
 import _ "net/http/pprof"
