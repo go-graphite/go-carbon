@@ -18,9 +18,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 
 ## Performance
 
-Faster than default carbon. In all conditions :)
-
-How much faster depends on server hardware, storage-schemas, etc.
+Faster than default carbon. In all conditions :) How much faster depends on server hardware, storage-schemas, etc.
 
 The result of replacing "carbon" to "go-carbon" on a server with a load up to 900 thousand metric per minute:
 
