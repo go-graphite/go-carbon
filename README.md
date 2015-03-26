@@ -4,7 +4,7 @@ go-carbon
 Golang implementation of Graphite/Carbon server with classic architecture: Agent -> Cache -> Persister
 
 
-![Architecture](carbon2.png)
+![Architecture](doc/design.png)
 
 ### Supported features
 * Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
@@ -15,6 +15,16 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Logging with rotation (reopen log by HUP signal or inotify event)
 * Many persister workers (using many cpu cores)
 * Run as daemon
+
+## Performance
+
+Faster than default carbon. In all conditions :)
+
+How much faster depends on server hardware, storage-schemas, etc.
+
+The result of replacing "carbon" to "go-carbon" on a server with a load up to 900 thousand metric per minute:
+
+![Success story](doc/success1.png)
 
 ## Installation
 ```
