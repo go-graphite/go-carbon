@@ -18,10 +18,10 @@
 	url = https://github.com/howeyc/fsnotify.git
 [submodule "_vendor/src/github.com/stretchr/testify"]
 	path = _vendor/src/github.com/stretchr/testify
-	url = git@github.com:stretchr/testify.git
+	url = https://github.com/stretchr/testify.git
 [submodule "_vendor/src/github.com/benbjohnson/clock"]
 	path = _vendor/src/github.com/benbjohnson/clock
-	url = git@github.com:benbjohnson/clock.git
+	url = https://github.com/benbjohnson/clock.git
 [submodule "_vendor/src/github.com/lomik/go-daemon"]
 	path = _vendor/src/github.com/lomik/go-daemon
 	url = https://github.com/lomik/go-daemon.git
