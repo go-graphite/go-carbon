@@ -13,7 +13,7 @@ go-carbon (0.3) unstable; urgency=low
   * Create and chown logfile before daemonize and change user
   * Debian package (thanks Dave Rawks)
 
- -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, Mar 4 16:31:15 2015 +0300
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 4 Mar 2015 16:31:15 +0300
 
 go-carbon (0.2) unstable; urgency=low
 
