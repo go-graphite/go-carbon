@@ -110,7 +110,11 @@ enabled = false
 ```
 
 ## Changelog
-##### master (next version)
+##### version 0.4
+* Code refactoring and improved test coverage (thanks [Dave Rawks](https://github.com/drawks))
+* Bug fixes
+
+##### version 0.3
 * Log "create wsp" as debug
 * Log UDP checkpoint (calculate stats every minute)
 * Rotate logfile by inotify event (without HUP)

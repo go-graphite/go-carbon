@@ -1,3 +1,20 @@
+go-carbon (0.4) unstable; urgency=low
+  * Code refactoring and improved test coverage
+  * Bug fixes
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 1 Apr 2015 10:00:28 +0300
+
+go-carbon (0.3) unstable; urgency=low
+  * Log "create wsp" as debug
+  * Log UDP checkpoint (calculate stats every minute)
+  * Rotate logfile by inotify event (without HUP)
+  * Check logfile opened
+  * storage-aggregation.conf support
+  * Create and chown logfile before daemonize and change user
+  * Debian package (thanks Dave Rawks)
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, Mar 4 16:31:15 2015 +0300
+
 go-carbon (0.2) unstable; urgency=low
 
   * Initial release (Closes: #nnnn)  <nnnn is the bug number of your ITP>
