@@ -110,6 +110,9 @@ enabled = false
 ```
 
 ## Changelog
+##### version 0.4.1
+* Bug fix schemas parser
+
 ##### version 0.4
 * Code refactoring and improved test coverage (thanks [Dave Rawks](https://github.com/drawks))
 * Bug fixes

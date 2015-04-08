@@ -27,7 +27,7 @@ import (
 import _ "net/http/pprof"
 
 // Version of go-carbon
-const Version = "0.4"
+const Version = "0.4.1"
 
 // Duration wrapper time.Duration for TOML
 type Duration struct {

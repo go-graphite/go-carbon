@@ -1,3 +1,8 @@
+go-carbon (0.4.1) unstable; urgency=low
+  * Bug fix schemas parser
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 8 Apr 2015 18:32:28 +0300
+
 go-carbon (0.4) unstable; urgency=low
   * Code refactoring and improved test coverage
   * Bug fixes
