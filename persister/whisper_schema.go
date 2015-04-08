@@ -41,6 +41,7 @@ type WhisperSchemas struct {
 func ParseRetentionDefs(retentionDefs string) (whisper.Retentions, error) {
 	retentions := make(whisper.Retentions, 0)
 	for _, retentionDef := range strings.Split(retentionDefs, ",") {
+		retentionDef = strings.TrimSpace(retentionDef)
 		// check if old format
 		row := strings.Split(retentionDef, ":")
 		if len(row) == 2 {
@@ -100,6 +101,12 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		}
 		item.retentionStr = s.ValueOf("retentions")
 		item.retentions, err = ParseRetentionDefs(item.retentionStr)
+
+		if err != nil {
+			logrus.Errorf("[persister] Failed to parse retentions '%s'for [%s]: %s",
+				s.ValueOf("retentions"), item.name, err.Error())
+			return nil, err
+		}
 
 		priorityStr := s.ValueOf("priority")
 
