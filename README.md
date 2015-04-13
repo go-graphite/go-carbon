@@ -110,6 +110,9 @@ enabled = false
 ```
 
 ## Changelog
+##### version 0.4.2
+* Fix bug in go-whisper: points in long archives missed if metrics retention count >=3
+
 ##### version 0.4.1
 * Bug fix schemas parser
 

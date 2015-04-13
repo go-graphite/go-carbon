@@ -1,3 +1,8 @@
+go-carbon (0.4.2) unstable; urgency=low
+  * Fix bug in go-whisper: points in long archives missed if metrics retention count >=3
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Thu, 14 Apr 2015 01:25:00 +0300
+
 go-carbon (0.4.1) unstable; urgency=low
   * Bug fix schemas parser
 
