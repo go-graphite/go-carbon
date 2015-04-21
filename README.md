@@ -1,8 +1,7 @@
-go-carbon
+go-carbon [![Build Status](https://travis-ci.org/lomik/go-carbon.svg?branch=master)](https://travis-ci.org/lomik/go-carbon)
 ============
 
 Golang implementation of Graphite/Carbon server with classic architecture: Agent -> Cache -> Persister
-
 
 ![Architecture](doc/design.png)
 
