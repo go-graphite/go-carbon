@@ -16,6 +16,7 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
+// CreateOpener whisper opener interface for mock in tests
 type CreateOpener interface {
 	Create(string, whisper.Retentions, whisper.AggregationMethod, float32) (*whisper.Whisper, error)
 	Open(string) (*whisper.Whisper, error)
@@ -57,7 +58,7 @@ func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAg
 	}
 }
 
-// Holder for factory functions
+// WhisperFactory - holder for factory functions
 type WhisperFactory struct{}
 
 // Create creates a new underlying whisperdb file
