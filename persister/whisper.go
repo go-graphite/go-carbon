@@ -35,26 +35,28 @@ var app = Persister{
 
 // Whisper write data to *.wsp files
 type Whisper struct {
-	in           chan *points.Points
-	exit         chan bool
-	schemas      *WhisperSchemas
-	aggregation  *WhisperAggregation
-	workersCount int
-	rootPath     string
-	graphPrefix  string
-	commited     uint64 // (updateOperations << 32) + commitedPoints
-	created      uint32 // counter
+	in                  chan *points.Points
+	exit                chan bool
+	schemas             *WhisperSchemas
+	aggregation         *WhisperAggregation
+	workersCount        int
+	rootPath            string
+	graphPrefix         string
+	commited            uint64 // (updateOperations << 32) + commitedPoints
+	created             uint32 // counter
+	maxUpdatesPerSecond int
 }
 
 // NewWhisper create instance of Whisper
 func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points) *Whisper {
 	return &Whisper{
-		in:           in,
-		exit:         make(chan bool),
-		schemas:      schemas,
-		aggregation:  aggregation,
-		workersCount: 1,
-		rootPath:     rootPath,
+		in:                  in,
+		exit:                make(chan bool),
+		schemas:             schemas,
+		aggregation:         aggregation,
+		workersCount:        1,
+		rootPath:            rootPath,
+		maxUpdatesPerSecond: 0,
 	}
 }
 
@@ -74,6 +76,11 @@ func (WhisperFactory) Open(path string) (*whisper.Whisper, error) {
 // SetGraphPrefix for internal cache metrics
 func (p *Whisper) SetGraphPrefix(prefix string) {
 	p.graphPrefix = prefix
+}
+
+// SetMaxUpdatesPerSecond enable throttling
+func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
+	p.maxUpdatesPerSecond = maxUpdatesPerSecond
 }
 
 // SetWorkers count
@@ -215,8 +222,14 @@ func (p *Whisper) statWorker() {
 // Start worker
 func (p *Whisper) Start() {
 	go p.statWorker()
+
+	inChan := p.in
+	if p.maxUpdatesPerSecond > 0 {
+		inChan = points.ThrottleChan(inChan, p.maxUpdatesPerSecond)
+	}
+
 	if p.workersCount <= 1 { // solo worker
-		go p.worker(p.in)
+		go p.worker(inChan)
 	} else {
 		var channels [](chan *points.Points)
 
@@ -226,7 +239,7 @@ func (p *Whisper) Start() {
 			go p.worker(ch)
 		}
 
-		go p.shuffler(p.in, channels)
+		go p.shuffler(inChan, channels)
 	}
 }
 

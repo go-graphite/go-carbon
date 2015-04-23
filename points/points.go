@@ -93,6 +93,7 @@ func ParseText(line string) (*Points, error) {
 	return OnePoint(row[0], value, int64(tsf)), nil
 }
 
+// ParsePickle ...
 func ParsePickle(pkt []byte) ([]*Points, error) {
 	result, err := stalecucumber.Unpickle(bytes.NewReader(pkt))
 
