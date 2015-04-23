@@ -61,11 +61,12 @@ type commonConfig struct {
 }
 
 type whisperConfig struct {
-	DataDir     string `toml:"data-dir"`
-	Schemas     string `toml:"schemas-file"`
-	Aggregation string `toml:"aggregation-file"`
-	Workers     int    `toml:"workers"`
-	Enabled     bool   `toml:"enabled"`
+	DataDir             string `toml:"data-dir"`
+	Schemas             string `toml:"schemas-file"`
+	Aggregation         string `toml:"aggregation-file"`
+	Workers             int    `toml:"workers"`
+	MaxUpdatesPerSecond int    `toml:"max-updates-per-second"`
+	Enabled             bool   `toml:"enabled"`
 }
 
 type cacheConfig struct {
@@ -116,11 +117,12 @@ func newConfig() *Config {
 			User:        "",
 		},
 		Whisper: whisperConfig{
-			DataDir:     "/data/graphite/whisper/",
-			Schemas:     "/data/graphite/schemas",
-			Aggregation: "",
-			Enabled:     true,
-			Workers:     1,
+			DataDir:             "/data/graphite/whisper/",
+			Schemas:             "/data/graphite/schemas",
+			Aggregation:         "",
+			MaxUpdatesPerSecond: 0,
+			Enabled:             true,
+			Workers:             1,
 		},
 		Cache: cacheConfig{
 			MaxSize:     1000000,
@@ -376,6 +378,7 @@ func main() {
 
 		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, whisperAggregation, core.Out())
 		whisperPersister.SetGraphPrefix(cfg.Common.GraphPrefix)
+		whisperPersister.SetMaxUpdatesPerSecond(cfg.Whisper.MaxUpdatesPerSecond)
 		whisperPersister.SetWorkers(cfg.Whisper.Workers)
 
 		whisperPersister.Start()
