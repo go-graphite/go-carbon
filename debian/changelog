@@ -1,3 +1,8 @@
+go-carbon (0.4.3) unstable; urgency=low
+  * Optional whisper throttle setting
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 24 Apr 2015 01:24:00 +0300
+
 go-carbon (0.4.2) unstable; urgency=low
   * Fix bug in go-whisper: points in long archives missed if metrics retention count >=3
 

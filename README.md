@@ -75,6 +75,8 @@ schemas-file = "/data/graphite/schemas"
 aggregation-file = ""
 # Workers count. Metrics sharded by "crc32(metricName) % workers"
 workers = 1
+# Limits the number of whisper update_many() calls per second. 0 - no limit
+max-updates-per-second = 0
 enabled = true
 
 [cache]
@@ -109,6 +111,9 @@ enabled = false
 ```
 
 ## Changelog
+##### version 0.4.3
+* Optional whisper throttle setting #8
+
 ##### version 0.4.2
 * Fix bug in go-whisper: points in long archives missed if metrics retention count >=3
 
