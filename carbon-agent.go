@@ -226,6 +226,25 @@ func main() {
 		}
 	}
 
+	var whisperSchemas *persister.WhisperSchemas
+	var whisperAggregation *persister.WhisperAggregation
+
+	if cfg.Whisper.Enabled {
+		whisperSchemas, err = persister.ReadWhisperSchemas(cfg.Whisper.Schemas)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if cfg.Whisper.Aggregation != "" {
+			whisperAggregation, err = persister.ReadWhisperAggregation(cfg.Whisper.Aggregation)
+			if err != nil {
+				log.Fatal(err)
+			}
+		} else {
+			whisperAggregation = persister.NewWhisperAggregation()
+		}
+	}
+
 	if *checkConfig {
 		return
 	}
@@ -360,22 +379,6 @@ func main() {
 
 	/* WHISPER start */
 	if cfg.Whisper.Enabled {
-		whisperSchemas, err := persister.ReadWhisperSchemas(cfg.Whisper.Schemas)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		var whisperAggregation *persister.WhisperAggregation
-
-		if cfg.Whisper.Aggregation != "" {
-			whisperAggregation, err = persister.ReadWhisperAggregation(cfg.Whisper.Aggregation)
-			if err != nil {
-				log.Fatal(err)
-			}
-		} else {
-			whisperAggregation = persister.NewWhisperAggregation()
-		}
-
 		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, whisperAggregation, core.Out())
 		whisperPersister.SetGraphPrefix(cfg.Common.GraphPrefix)
 		whisperPersister.SetMaxUpdatesPerSecond(cfg.Whisper.MaxUpdatesPerSecond)

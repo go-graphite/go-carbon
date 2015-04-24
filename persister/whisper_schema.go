@@ -95,7 +95,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		}
 		item.pattern, err = regexp.Compile(s.ValueOf("pattern"))
 		if err != nil {
-			logrus.Errorf("[persister] Failed to parse pattern '%s'for [%s]: %s",
+			logrus.Errorf("[persister] Failed to parse pattern '%s' for [%s]: %s",
 				s.ValueOf("pattern"), item.name, err.Error())
 			return nil, err
 		}
@@ -103,7 +103,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		item.retentions, err = ParseRetentionDefs(item.retentionStr)
 
 		if err != nil {
-			logrus.Errorf("[persister] Failed to parse retentions '%s'for [%s]: %s",
+			logrus.Errorf("[persister] Failed to parse retentions '%s' for [%s]: %s",
 				s.ValueOf("retentions"), item.name, err.Error())
 			return nil, err
 		}

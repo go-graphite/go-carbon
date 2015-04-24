@@ -111,8 +111,11 @@ enabled = false
 ```
 
 ## Changelog
+##### master
+* `-check-config` validates schemas and aggregation configs
+
 ##### version 0.4.3
-* Optional whisper throttle setting #8
+* Optional whisper throttle setting #8: `max-updates-per-second`
 
 ##### version 0.4.2
 * Fix bug in go-whisper: points in long archives missed if metrics retention count >=3
@@ -139,8 +142,8 @@ enabled = false
 * Makefile
 * "make rpm" script
 * Daemonize and run-as-user support
-* "--check-config" option
-* "--pidfile" option
+* `-check-config` option
+* `-pidfile` option
 
 ##### version 0.1
 + First full-functional public version
