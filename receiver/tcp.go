@@ -179,9 +179,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				atomic.AddUint32(&rcv.metricsReceived, -cnt)
 				rcv.Stat("metricsReceived", float64(cnt))
 
-				active := atomic.LoadInt32(&rcv.active)
-				atomic.AddInt32(&rcv.active, -active)
-				rcv.Stat("active", float64(active))
+				rcv.Stat("active", float64(atomic.LoadInt32(&rcv.active)))
 
 				errors := atomic.LoadUint32(&rcv.errors)
 				atomic.AddUint32(&rcv.errors, -errors)

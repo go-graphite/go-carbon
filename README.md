@@ -113,6 +113,7 @@ enabled = false
 ## Changelog
 ##### master
 * `-check-config` validates schemas and aggregation configs
+* Fix broken internal metrics `tcp.active` and `pickle.active`
 
 ##### version 0.4.3
 * Optional whisper throttle setting #8: `max-updates-per-second`
