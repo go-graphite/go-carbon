@@ -81,11 +81,11 @@ type testcase struct {
 	retentions string
 }
 
-func assertSchemas(t *testing.T, content string, expected []testcase) {
+func assertSchemas(t *testing.T, content string, expected []testcase) *WhisperSchemas {
 	schemas, err := parseSchemas(t, content)
 	if expected == nil {
 		assert.Error(t, err)
-		return
+		return nil
 	}
 	assert.Equal(t, len(expected), len(schemas.Data))
 	for i := 0; i < len(expected); i++ {
@@ -93,10 +93,11 @@ func assertSchemas(t *testing.T, content string, expected []testcase) {
 		assert.Equal(t, expected[i].pattern, schemas.Data[i].pattern.String())
 		assertRetentionsEq(t, schemas.Data[i].retentions, expected[i].retentions)
 	}
+
+	return schemas
 }
 
-func TestParseSchemas1(t *testing.T) {
-	// Simple parse
+func TestParseSchemasSimple(t *testing.T) {
 	assertSchemas(t, `
 [carbon]
 pattern = ^carbon\.
@@ -111,4 +112,55 @@ retentions = 1m:30d,1h:5y
 			testcase{"default", ".*", "1m:30d,1h:5y"},
 		},
 	)
+}
+
+func TestParseSchemasSortingAndMatch(t *testing.T) {
+	// mixed record with and without priority. match metrics
+	assert := assert.New(t)
+
+	schemas := assertSchemas(t, `
+[carbon]
+pattern = ^carbon\.
+retentions = 60s:90d
+
+[db]
+pattern = ^db\.
+retentions = 1m:30d,1h:5y
+
+[collector]
+pattern = ^.*\.collector\.
+retentions = 5s:300s,300s:30d
+priority = 10
+
+[gitlab]
+pattern = ^gitlab\.
+retentions = 1s:7d
+priority = 100
+
+[jira]
+pattern = ^server\.
+retentions = 1s:7d
+priority = 10
+	`,
+		[]testcase{
+			testcase{"gitlab", "^gitlab\\.", "1s:7d"},
+			testcase{"collector", "^.*\\.collector\\.", "5s:5m,5m:30d"},
+			testcase{"jira", "^server\\.", "1s:7d"},
+			testcase{"carbon", "^carbon\\.", "1m:90d"},
+			testcase{"db", "^db\\.", "1m:30d,1h:5y"},
+		},
+	)
+
+	matched := schemas.match("db.collector.cpu")
+	if assert.NotNil(matched) {
+		assert.Equal("collector", matched.name)
+	}
+
+	matched = schemas.match("db.mysql.rps")
+	if assert.NotNil(matched) {
+		assert.Equal("db", matched.name)
+	}
+
+	matched = schemas.match("unknown")
+	assert.Nil(matched)
 }
