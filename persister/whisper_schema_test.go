@@ -81,10 +81,10 @@ type testcase struct {
 	retentions string
 }
 
-func assertSchemas(t *testing.T, content string, expected []testcase) *WhisperSchemas {
+func assertSchemas(t *testing.T, content string, expected []testcase, msg ...interface{}) *WhisperSchemas {
 	schemas, err := parseSchemas(t, content)
 	if expected == nil {
-		assert.Error(t, err)
+		assert.Error(t, err, msg...)
 		return nil
 	}
 	assert.Equal(t, len(expected), len(schemas.Data))
@@ -163,4 +163,80 @@ priority = 10
 
 	matched = schemas.match("unknown")
 	assert.Nil(matched)
+}
+
+func TestParseWrongSchemas(t *testing.T) {
+	/*
+		Cases:
+			1. no pattern
+			2. no retentions
+			3. wrong pattern
+			4. wrong retentions
+			5. wrong priority
+			6. empty pattern
+			7. empty retentions
+			8. empty priority
+	*/
+
+	// has no pattern
+	assertSchemas(t, `
+[carbon]
+parrent = ^carbon\.
+retentions = 60s:90d
+
+[db]
+pattern = ^db\.
+retentions = 1m:30d,1h:5y
+`, nil, "No pattern")
+
+	// no retentions
+	assertSchemas(t, `
+[carbon]
+pattern = ^carbon\.
+ret = 60s:90d
+`, nil, "No retentions")
+
+	// wrong pattern
+	assertSchemas(t, `
+[carbon]
+pattern = ^carb(on\.
+retentions = 60s:90d
+`, nil, "Wrong pattern")
+
+	// wrong retentions
+	assertSchemas(t, `
+[carbon]
+pattern = ^carbon\.
+retentions = 60v:90d
+`, nil, "Wrong retentions")
+
+	// wrong priority
+	assertSchemas(t, `
+[carbon]
+pattern = ^carbon\.
+retentions = 60s:90d
+priority = ab
+`, nil, "Wrong priority")
+
+	// empty pattern
+	assertSchemas(t, `
+[carbon]
+pattern =
+retentions = 60s:90d
+`, nil, "Empty pattern")
+
+	// empty retentions
+	assertSchemas(t, `
+[carbon]
+pattern = ^carbon\.
+retentions =
+`, nil, "Empty retentions")
+
+	// empty priority
+	assertSchemas(t, `
+[carbon]
+pattern = ^carb(on\.
+retentions = 60s:90d
+priority =
+`, nil, "Empty priority")
 }
