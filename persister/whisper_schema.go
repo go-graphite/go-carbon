@@ -76,7 +76,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 	if err != nil {
 		return nil, err
 	}
-	// pp.Println(config)
+
 	sections, err := config.AllSections()
 	if err != nil {
 		return nil, err
@@ -93,19 +93,21 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		if item.name == "" {
 			continue
 		}
-		item.pattern, err = regexp.Compile(s.ValueOf("pattern"))
+		patternStr := s.ValueOf("pattern")
+		if patternStr == "" {
+			return nil, fmt.Errorf("[persister] Empty pattern '%s' for [%s]", item.name)
+		}
+		item.pattern, err = regexp.Compile(patternStr)
 		if err != nil {
-			logrus.Errorf("[persister] Failed to parse pattern '%s' for [%s]: %s",
+			return nil, fmt.Errorf("[persister] Failed to parse pattern '%s' for [%s]: %s",
 				s.ValueOf("pattern"), item.name, err.Error())
-			return nil, err
 		}
 		item.retentionStr = s.ValueOf("retentions")
 		item.retentions, err = ParseRetentionDefs(item.retentionStr)
 
 		if err != nil {
-			logrus.Errorf("[persister] Failed to parse retentions '%s' for [%s]: %s",
+			return nil, fmt.Errorf("[persister] Failed to parse retentions '%s' for [%s]: %s",
 				s.ValueOf("retentions"), item.name, err.Error())
-			return nil, err
 		}
 
 		priorityStr := s.ValueOf("priority")
@@ -116,8 +118,7 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		} else {
 			p, err = strconv.ParseInt(priorityStr, 10, 0)
 			if err != nil {
-				logrus.Errorf("[persister] wrong priority in schema: %s", err)
-				return nil, err
+				return nil, fmt.Errorf("[persister] wrong priority in schema: %s", err)
 			}
 		}
 		item.priority = int64(p)<<32 - int64(index) // for sort records with same priority

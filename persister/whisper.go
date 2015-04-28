@@ -98,7 +98,6 @@ func (p *Whisper) Stat(metric string, value float64) {
 }
 
 func (p *Whisper) store(values *points.Points) {
-	// @TODO: lock or shard by hash(metricName), no thread safe
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := app.Whisper.Open(path)
