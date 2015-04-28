@@ -165,6 +165,26 @@ priority = 10
 	assert.Nil(matched)
 }
 
+func TestSchemasNotFound(t *testing.T) {
+	// create and remove file
+	assert := assert.New(t)
+
+	tmpFile, err := ioutil.TempFile("", "schemas-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+
+	if err := os.Remove(tmpFile.Name()); err != nil {
+		t.Fatal(err)
+	}
+
+	schemas, err := ReadWhisperSchemas(tmpFile.Name())
+
+	assert.Nil(schemas)
+	assert.Error(err)
+}
+
 func TestParseWrongSchemas(t *testing.T) {
 	/*
 		Cases:
