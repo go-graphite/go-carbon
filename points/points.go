@@ -58,10 +58,6 @@ func ParseText(line string) (*Points, error) {
 		return nil, fmt.Errorf("bad message: %#v", line)
 	}
 
-	if row[0] == "" {
-		return nil, fmt.Errorf("bad message: %#v", line)
-	}
-
 	// 0x2e == ".". Or use split? @TODO: benchmark
 	// if strings.Contains(row[0], "..") || row[0][0] == 0x2e || row[0][len(row)-1] == 0x2e {
 	// 	return nil, fmt.Errorf("bad message: %#v", line)
