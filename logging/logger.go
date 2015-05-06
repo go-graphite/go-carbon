@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"os/signal"
@@ -170,4 +171,21 @@ func PrepareFile(filename string, owner *user.User) error {
 	}
 
 	return nil
+}
+
+// Test run callable with changed logging output
+func Test(callable func(*bytes.Buffer)) {
+	buf := &bytes.Buffer{}
+	logrus.SetOutput(buf)
+
+	callable(buf)
+
+	var loggerOut io.Writer
+	if std.fd != nil {
+		loggerOut = std.fd
+	} else {
+		loggerOut = os.Stderr
+	}
+
+	logrus.SetOutput(loggerOut)
 }

@@ -22,6 +22,7 @@ type UDP struct {
 	metricsReceived    uint32
 	incompleteReceived uint32
 	errors             uint32
+	logIncomplete      bool
 	conn               *net.UDPConn
 }
 
@@ -94,6 +95,11 @@ func (storage *incompleteStorage) checkAndClear() {
 	storage.purge()
 }
 
+// ToggleLogIncomplete enable or disable incomplete messages logging
+func (rcv *UDP) ToggleLogIncomplete(value bool) {
+	rcv.logIncomplete = value
+}
+
 // Addr returns binded socket address. For bind port 0 in tests
 func (rcv *UDP) Addr() net.Addr {
 	if rcv.conn == nil {
@@ -114,6 +120,26 @@ func (rcv *UDP) Stat(metric string, value float64) {
 		value,
 		time.Now().Unix(),
 	)
+}
+
+func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
+	p1 := bytes.IndexByte(message, 0xa) // find first "\n"
+
+	if p1 != -1 && p1+len(lastLine) < len(message)-10 { // print short version
+		logrus.Warningf(
+			"[udp] incomplete message from %s: \"%s\\n...(%d bytes)...\\n%s\"",
+			peer.String(),
+			string(message[:p1]),
+			len(message)-p1-len(lastLine)-2,
+			string(lastLine),
+		)
+	} else { // print full
+		logrus.Warningf(
+			"[udp] incomplete message from %s: %#v",
+			peer.String(),
+			string(message),
+		)
+	}
 }
 
 // Listen bind port. Receive messages and send to out channel
@@ -190,7 +216,12 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 
 				if err != nil {
 					if err == io.EOF {
-						if len(line) > 0 {
+						if len(line) > 0 { // incomplete line received
+
+							if rcv.logIncomplete {
+								logIncomplete(peer, buf[:rlen], line)
+							}
+
 							lines.store(peer.String(), line)
 							atomic.AddUint32(&rcv.incompleteReceived, 1)
 						}

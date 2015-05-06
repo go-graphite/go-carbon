@@ -1,11 +1,14 @@
 package receiver
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/lomik/go-carbon/logging"
 	"github.com/lomik/go-carbon/points"
+	"github.com/stretchr/testify/assert"
 )
 
 type udpTestCase struct {
@@ -38,6 +41,13 @@ func newUDPTestCase(t *testing.T) *udpTestCase {
 		t.Fatal(err)
 	}
 	// defer conn.Close()
+	time.Sleep(5 * time.Millisecond)
+
+	return test
+}
+
+func (test *udpTestCase) EnableIncompleteLogging() *udpTestCase {
+	test.receiver.ToggleLogIncomplete(true)
 	return test
 }
 
@@ -56,6 +66,7 @@ func (test *udpTestCase) Send(text string) {
 	if _, err := test.conn.Write([]byte(text)); err != nil {
 		test.Fatal(err)
 	}
+	time.Sleep(5 * time.Millisecond)
 }
 
 func (test *udpTestCase) Eq(a *points.Points, b *points.Points) {
@@ -68,11 +79,7 @@ func TestUDP1(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
-	time.Sleep(10 * time.Millisecond)
-
 	test.Send("hello.world 42.15 1422698155\n")
-
-	time.Sleep(10 * time.Millisecond)
 
 	select {
 	case msg := <-test.rcvChan:
@@ -86,11 +93,7 @@ func TestUDP2(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
-	time.Sleep(10 * time.Millisecond)
-
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
-
-	time.Sleep(10 * time.Millisecond)
 
 	select {
 	case msg := <-test.rcvChan:
@@ -111,12 +114,8 @@ func TestChunkedUDP(t *testing.T) {
 	test := newUDPTestCase(t)
 	defer test.Finish()
 
-	time.Sleep(10 * time.Millisecond)
-
 	test.Send("hello.world 42.15 1422698155\nmetri")
 	test.Send("c.name -72.11 1422698155\n")
-
-	time.Sleep(10 * time.Millisecond)
 
 	select {
 	case msg := <-test.rcvChan:
@@ -131,4 +130,44 @@ func TestChunkedUDP(t *testing.T) {
 	default:
 		t.Fatalf("Message #1 not received")
 	}
+}
+
+func TestLogIncompleteMessage(t *testing.T) {
+	assert := assert.New(t)
+
+	// 3 lines
+	logging.Test(func(log *bytes.Buffer) {
+		test := newUDPTestCase(t).EnableIncompleteLogging()
+		defer test.Finish()
+
+		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 4")
+		assert.Contains(log.String(), "metric1 42 1422698155\\n...(21 bytes)...\\nmetric3 4")
+	})
+
+	// > 3 lines
+	logging.Test(func(log *bytes.Buffer) {
+		test := newUDPTestCase(t).EnableIncompleteLogging()
+		defer test.Finish()
+
+		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 44 1422698155\nmetric4 45 ")
+		assert.Contains(log.String(), "metric1 42 1422698155\\n...(43 bytes)...\\nmetric4 45 ")
+	})
+
+	// 2 lines
+	logging.Test(func(log *bytes.Buffer) {
+		test := newUDPTestCase(t).EnableIncompleteLogging()
+		defer test.Finish()
+
+		test.Send("metric1 42 1422698155\nmetric2 43 14226981")
+		assert.Contains(log.String(), "metric1 42 1422698155\\nmetric2 43 14226981")
+	})
+
+	// single line
+	logging.Test(func(log *bytes.Buffer) {
+		test := newUDPTestCase(t).EnableIncompleteLogging()
+		defer test.Finish()
+
+		test.Send("metric1 42 1422698155")
+		assert.Contains(log.String(), "metric1 42 1422698155")
+	})
 }

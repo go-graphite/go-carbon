@@ -75,8 +75,9 @@ type cacheConfig struct {
 }
 
 type udpConfig struct {
-	Listen  string `toml:"listen"`
-	Enabled bool   `toml:"enabled"`
+	Listen        string `toml:"listen"`
+	Enabled       bool   `toml:"enabled"`
+	LogIncomplete bool   `toml:"log-incomplete"`
 }
 
 type tcpConfig struct {
@@ -129,8 +130,9 @@ func newConfig() *Config {
 			InputBuffer: 51200,
 		},
 		Udp: udpConfig{
-			Listen:  ":2003",
-			Enabled: true,
+			Listen:        ":2003",
+			Enabled:       true,
+			LogIncomplete: false,
 		},
 		Tcp: tcpConfig{
 			Listen:  ":2003",
@@ -331,6 +333,10 @@ func main() {
 
 		udpListener := receiver.NewUDP(core.In())
 		udpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
+
+		if udpCfg.LogIncomplete {
+			udpListener.ToggleLogIncomplete(true)
+		}
 
 		defer udpListener.Stop()
 		if err = udpListener.Listen(udpAddr); err != nil {
