@@ -88,6 +88,8 @@ input-buffer = 51200
 [udp]
 listen = ":2003"
 enabled = true
+# Enable optional logging of incomplete messages (chunked by MTU)
+log-incomplete = false
 
 [tcp]
 listen = ":2003"
@@ -114,6 +116,7 @@ enabled = false
 ##### master
 * `-check-config` validates schemas and aggregation configs
 * Fix broken internal metrics `tcp.active` and `pickle.active`
+* Optional udp incomplete messages logging: `log-incomplete` setting
 
 ##### version 0.4.3
 * Optional whisper throttle setting #8: `max-updates-per-second`
