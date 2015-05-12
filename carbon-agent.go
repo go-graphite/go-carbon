@@ -335,7 +335,7 @@ func main() {
 		udpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
 
 		if udpCfg.LogIncomplete {
-			udpListener.ToggleLogIncomplete(true)
+			udpListener.SetLogIncomplete(true)
 		}
 
 		defer udpListener.Stop()

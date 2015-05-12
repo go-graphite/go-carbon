@@ -95,8 +95,8 @@ func (storage *incompleteStorage) checkAndClear() {
 	storage.purge()
 }
 
-// ToggleLogIncomplete enable or disable incomplete messages logging
-func (rcv *UDP) ToggleLogIncomplete(value bool) {
+// SetLogIncomplete enable or disable incomplete messages logging
+func (rcv *UDP) SetLogIncomplete(value bool) {
 	rcv.logIncomplete = value
 }
 
