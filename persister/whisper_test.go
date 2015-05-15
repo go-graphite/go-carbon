@@ -10,6 +10,7 @@ import (
 
 	"fmt"
 	"math/rand"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,6 +38,20 @@ func TestSetGraphPrefix(t *testing.T) {
 	fixture.SetGraphPrefix("foo.bar")
 	expected := "foo.bar"
 	assert.Equal(t, fixture.graphPrefix, expected)
+}
+
+func TestLoadCommited(t *testing.T) {
+	/*
+	   https://golang.org/pkg/sync/atomic/#pkg-note-BUG
+	   On both ARM and x86-32, it is the caller's responsibility to arrange for 64-bit alignment of 64-bit words accessed atomically. The first word in a global variable or in an allocated struct or slice can be relied upon to be 64-bit aligned.
+
+	   Bug in go-carbon <= 0.4.3
+	*/
+	inchan := make(chan *points.Points)
+	schemas := WhisperSchemas{}
+	aggrs := WhisperAggregation{}
+	p := NewWhisper("foo", &schemas, &aggrs, inchan)
+	atomic.LoadUint64(&p.commited)
 }
 
 func TestSetWorkers(t *testing.T) {

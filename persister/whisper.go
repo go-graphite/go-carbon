@@ -35,6 +35,7 @@ var app = Persister{
 
 // Whisper write data to *.wsp files
 type Whisper struct {
+	commited            uint64 // (updateOperations << 32) + commitedPoints. First for alignment https://golang.org/pkg/sync/atomic/#pkg-note-BUG
 	in                  chan *points.Points
 	exit                chan bool
 	schemas             *WhisperSchemas
@@ -42,7 +43,6 @@ type Whisper struct {
 	workersCount        int
 	rootPath            string
 	graphPrefix         string
-	commited            uint64 // (updateOperations << 32) + commitedPoints
 	created             uint32 // counter
 	maxUpdatesPerSecond int
 }
@@ -165,13 +165,13 @@ func (p *Whisper) worker(in chan *points.Points) {
 }
 
 func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) {
-	workers := len(out)
+	workers := uint32(len(out))
 	for {
 		select {
 		case <-p.exit:
 			break
 		case values := <-in:
-			index := int(crc32.ChecksumIEEE([]byte(values.Metric))) % workers
+			index := crc32.ChecksumIEEE([]byte(values.Metric)) % workers
 			out[index] <- values
 		}
 	}
