@@ -37,6 +37,7 @@ func TestFsnotifyRotate(t *testing.T) {
 	if err := SetFile(filename); err != nil {
 		t.Fatal(err)
 	}
+	defer SetFile("")
 
 	checkExists := func(text string) {
 		fd, err := os.Open(filename)
