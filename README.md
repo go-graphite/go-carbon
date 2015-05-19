@@ -118,6 +118,7 @@ enabled = false
 * Fix broken internal metrics `tcp.active` and `pickle.active`
 * Optional udp incomplete messages logging: `log-incomplete` setting
 * Fixes for working on x86-32
+* logging fsnotify: fix ONCE rotation bug
 
 ##### version 0.4.3
 * Optional whisper throttle setting #8: `max-updates-per-second`
