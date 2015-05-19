@@ -65,10 +65,11 @@ func TestFsnotifyRotate(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		move(i)
 		time.Sleep(10 * time.Millisecond)
-		msg := fmt.Sprintf("Message #%d.", i)
+		move(i)
+		time.Sleep(30 * time.Millisecond)
 
+		msg := fmt.Sprintf("Message #%d.", i)
 		logrus.Info(msg)
 		checkExists(msg)
 	}
