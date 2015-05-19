@@ -8,7 +8,7 @@ import (
 )
 
 func TestThrottleChan(t *testing.T) {
-	perSecond := 1000
+	perSecond := 100
 	timestamp := time.Now().Unix()
 
 	chIn := make(chan *Points)

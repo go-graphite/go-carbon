@@ -20,24 +20,16 @@ var std = NewFileLogger()
 func init() {
 	logrus.SetFormatter(&TextFormatter{})
 
-	signalChan := make(chan os.Signal, 1)
+	// signal watcher
+	signalChan := make(chan os.Signal, 16)
 	signal.Notify(signalChan, syscall.SIGHUP)
 
 	go func() {
 		for {
 			select {
-			case signal := <-signalChan:
-				if signal == syscall.SIGHUP {
-					err := std.Reopen()
-					logrus.Infof("HUP received, reopen log %#v", std.Filename())
-					if err != nil {
-						logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
-					}
-				}
-
-			case <-std.Watcher.Event:
+			case <-signalChan:
 				err := std.Reopen()
-				logrus.Infof("Reopen log %#v by fsnotify event", std.Filename())
+				logrus.Infof("HUP received, reopen log %#v", std.Filename())
 				if err != nil {
 					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
 				}
@@ -49,22 +41,17 @@ func init() {
 // FileLogger wrapper
 type FileLogger struct {
 	sync.RWMutex
-	filename string
-	fd       *os.File
-	Watcher  *fsnotify.Watcher
+	filename    string
+	fd          *os.File
+	watcherDone chan bool
 }
 
 // NewFileLogger create instance FileLogger
 func NewFileLogger() *FileLogger {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		logrus.Warningf("fsnotify.NewWatcher(): %s", err)
-		watcher = nil
-	}
 	return &FileLogger{
-		filename: "",
-		fd:       nil,
-		Watcher:  watcher,
+		filename:    "",
+		fd:          nil,
+		watcherDone: nil,
 	}
 }
 
@@ -75,14 +62,54 @@ func (l *FileLogger) Open(filename string) error {
 	l.Unlock()
 
 	reopenErr := l.Reopen()
+	if l.watcherDone != nil {
+		close(l.watcherDone)
+	}
+	l.watcherDone = make(chan bool)
+	l.fsWatch(l.filename, l.watcherDone)
 
-	if l.Watcher != nil && filename != "" {
-		if err := l.Watcher.WatchFlags(filename, fsnotify.FSN_DELETE|fsnotify.FSN_RENAME|fsnotify.FSN_CREATE); err != nil {
+	return reopenErr
+}
+
+//
+func (l *FileLogger) fsWatch(filename string, quit chan bool) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logrus.Warningf("fsnotify.NewWatcher(): %s", err)
+		return
+	}
+
+	if filename == "" {
+		return
+	}
+
+	subscribe := func() {
+		if err := watcher.WatchFlags(filename, fsnotify.FSN_CREATE|fsnotify.FSN_DELETE|fsnotify.FSN_RENAME); err != nil {
 			logrus.Warningf("fsnotify.Watcher.Watch(%s): %s", filename, err)
 		}
 	}
 
-	return reopenErr
+	subscribe()
+
+	go func() {
+		defer watcher.Close()
+
+		for {
+			select {
+			case <-watcher.Event:
+				l.Reopen()
+				subscribe()
+
+				logrus.Infof("Reopen log %#v by fsnotify event", std.Filename())
+				if err != nil {
+					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+				}
+
+			case <-quit:
+				return
+			}
+		}
+	}()
 }
 
 // Reopen file
