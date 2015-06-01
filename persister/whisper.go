@@ -35,7 +35,8 @@ var app = Persister{
 
 // Whisper write data to *.wsp files
 type Whisper struct {
-	commited            uint64 // (updateOperations << 32) + commitedPoints. First for alignment https://golang.org/pkg/sync/atomic/#pkg-note-BUG
+	updateOperations    uint32
+	commitedPoints      uint32
 	in                  chan *points.Points
 	exit                chan bool
 	schemas             *WhisperSchemas
@@ -141,7 +142,8 @@ func (p *Whisper) store(values *points.Points) {
 		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
 	}
 
-	atomic.AddUint64(&p.commited, (uint64(1)<<32)+uint64(len(values.Data)))
+	atomic.AddUint32(&p.commitedPoints, uint32(len(values.Data)))
+	atomic.AddUint32(&p.updateOperations, 1)
 
 	defer w.Close()
 
@@ -179,22 +181,24 @@ func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) 
 
 // save stat
 func (p *Whisper) doCheckpoint() {
-	cnt := atomic.LoadUint64(&p.commited)
-	atomic.AddUint64(&p.commited, -cnt)
+	updateOperations := atomic.LoadUint32(&p.updateOperations)
+	commitedPoints := atomic.LoadUint32(&p.commitedPoints)
+	atomic.AddUint32(&p.updateOperations, -updateOperations)
+	atomic.AddUint32(&p.commitedPoints, -commitedPoints)
 
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
 	logrus.WithFields(logrus.Fields{
-		"updateOperations": float64(cnt >> 32),
-		"commitedPoints":   float64(cnt % (1 << 32)),
+		"updateOperations": float64(updateOperations),
+		"commitedPoints":   float64(commitedPoints),
 		"created":          created,
 	}).Info("[persister] doCheckpoint()")
 
-	p.Stat("updateOperations", float64(cnt>>32))
-	p.Stat("commitedPoints", float64(cnt%(1<<32)))
-	if float64(cnt>>32) > 0 {
-		p.Stat("pointsPerUpdate", float64(cnt%(1<<32))/float64(cnt>>32))
+	p.Stat("updateOperations", float64(updateOperations))
+	p.Stat("commitedPoints", float64(commitedPoints))
+	if updateOperations > 0 {
+		p.Stat("pointsPerUpdate", float64(commitedPoints)/float64(updateOperations))
 	} else {
 		p.Stat("pointsPerUpdate", 0.0)
 	}
