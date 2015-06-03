@@ -114,6 +114,8 @@ enabled = false
 
 ## Changelog
 ##### master
+
+##### version 0.5.0
 * `-check-config` validates schemas and aggregation configs
 * Fix broken internal metrics `tcp.active` and `pickle.active`
 * Optional udp incomplete messages logging: `log-incomplete` setting
