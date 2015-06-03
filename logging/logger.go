@@ -152,7 +152,7 @@ func (l *FileLogger) Reopen() error {
 // Filename returns current filename
 func (l *FileLogger) Filename() string {
 	l.RLock()
-	l.RUnlock()
+	defer l.RUnlock()
 	return l.filename
 }
 
