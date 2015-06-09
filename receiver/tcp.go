@@ -101,7 +101,7 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 		if len(line) > 0 { // skip empty lines
 			if msg, err := points.ParseText(string(line)); err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Warning(err)
+				logrus.Info(err)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
 				rcv.out <- msg
@@ -149,7 +149,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 		if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Warningf("[pickle] Can't unpickle message: %s", err.Error())
+			logrus.Infof("[pickle] Can't unpickle message: %s", err.Error())
 			return
 		}
 

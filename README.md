@@ -114,6 +114,7 @@ enabled = false
 
 ## Changelog
 ##### master
+* Reduced error level of "bad messages" in tcp and pickle receivers. Now `info`
 
 ##### version 0.5.0
 * `-check-config` validates schemas and aggregation configs
