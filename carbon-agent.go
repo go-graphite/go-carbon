@@ -56,6 +56,7 @@ func (d *Duration) Value() time.Duration {
 type commonConfig struct {
 	User        string `toml:"user"`
 	Logfile     string `toml:"logfile"`
+	LogLevel    string `toml:"log-level"`
 	GraphPrefix string `toml:"graph-prefix"`
 	MaxCPU      int    `toml:"max-cpu"`
 }
@@ -113,6 +114,7 @@ func newConfig() *Config {
 	cfg := &Config{
 		Common: commonConfig{
 			Logfile:     "/var/log/go-carbon/go-carbon.log",
+			LogLevel:    "info",
 			GraphPrefix: "carbon.agents.{host}.",
 			MaxCPU:      1,
 			User:        "",
@@ -245,6 +247,10 @@ func main() {
 		} else {
 			whisperAggregation = persister.NewWhisperAggregation()
 		}
+	}
+
+	if err := logging.SetLevel(cfg.Common.LogLevel); err != nil {
+		log.Fatal(err)
 	}
 
 	if *checkConfig {

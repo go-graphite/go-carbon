@@ -161,6 +161,16 @@ func SetFile(filename string) error {
 	return std.Open(filename)
 }
 
+// SetLevel for default logger
+func SetLevel(lvl string) error {
+	level, err := logrus.ParseLevel(lvl)
+	if err != nil {
+		return err
+	}
+	logrus.SetLevel(level)
+	return nil
+}
+
 // PrepareFile creates logfile and set it writable for user
 func PrepareFile(filename string, owner *user.User) error {
 	if filename == "" {

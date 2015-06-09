@@ -62,6 +62,8 @@ Usage of go-carbon:
 user = ""
 # If logfile is empty use stderr
 logfile = "/var/log/go-carbon/go-carbon.log"
+# Logging error level. Valid values: "debug", "info", "warn", "warning", "error"
+log-level = "info"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}."
 # Increase for configuration with multi persisters
