@@ -62,6 +62,7 @@ type CarbonlinkListener struct {
 	exit         chan bool
 	readTimeout  time.Duration
 	queryTimeout time.Duration
+	tcpListener  *net.TCPListener
 }
 
 // NewCarbonlinkListener create new instance of CarbonlinkListener
@@ -159,9 +160,18 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 	}
 }
 
+// Addr returns binded socket address. For bind port 0 in tests
+func (listener *CarbonlinkListener) Addr() net.Addr {
+	if listener.tcpListener == nil {
+		return nil
+	}
+	return listener.tcpListener.Addr()
+}
+
 // Listen bind port. Receive messages and send to out channel
 func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
-	sock, err := net.ListenTCP("tcp", addr)
+	var err error
+	listener.tcpListener, err = net.ListenTCP("tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -169,16 +179,16 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 	go func() {
 		select {
 		case <-listener.exit:
-			sock.Close()
+			listener.tcpListener.Close()
 		}
 	}()
 
 	go func() {
-		defer sock.Close()
+		defer listener.tcpListener.Close()
 
 		for {
 
-			conn, err := sock.Accept()
+			conn, err := listener.tcpListener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					break
