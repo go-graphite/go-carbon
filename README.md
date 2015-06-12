@@ -118,6 +118,7 @@ enabled = false
 ##### master
 * Reduced error level of "bad messages" in tcp and pickle receivers. Now `info`
 * Configurable logging level. `log-level` option
+* Fix `wrong carbonlink request` error in log
 
 ##### version 0.5.0
 * `-check-config` validates schemas and aggregation configs
