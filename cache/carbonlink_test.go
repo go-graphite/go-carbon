@@ -174,7 +174,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 			[]string{
 				"] D [carbonlink] read carbonlink request from",
 				"Can't read message length",
-				"EOF",
+				// "EOF",
 			},
 		},
 		{ // connect, send msg length and disconnect
@@ -183,7 +183,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 			[]string{
 				"] D [carbonlink] read carbonlink request from",
 				"Can't read message body",
-				"EOF",
+				// "EOF",
 			},
 		},
 		{ // connect and wait timeout
@@ -192,7 +192,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 			[]string{
 				"] D [carbonlink] read carbonlink request from",
 				"Can't read message length",
-				"i/o timeout",
+				// "i/o timeout",
 			},
 		},
 		{ // connect, send msg length and wait timeout
@@ -201,7 +201,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 			[]string{
 				"] D [carbonlink] read carbonlink request from",
 				"Can't read message body",
-				"i/o timeout",
+				// "i/o timeout",
 			},
 		},
 		{ // send broken pickle
