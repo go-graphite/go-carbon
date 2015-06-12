@@ -21,7 +21,10 @@ func TestCarbonlinkRead(t *testing.T) {
 
 	reader := bytes.NewReader([]byte(sampleCacheQuery))
 
-	req, err := ReadCarbonlinkRequest(reader)
+	reqData, err := ReadCarbonlinkRequest(reader)
+	assert.NoError(err)
+
+	req, err := ParseCarbonlinkRequest(reqData)
 
 	assert.NoError(err)
 	assert.NotNil(req)
@@ -142,4 +145,96 @@ func TestCarbonlink(t *testing.T) {
 		assert.Error(err)
 		assert.Equal(io.EOF, err)
 	})
+}
+
+func TestCarbonlinkErrors(t *testing.T) {
+	assert := assert.New(t)
+
+	cache := New()
+	cache.Start()
+	cache.SetOutputChanSize(0)
+
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	assert.NoError(err)
+
+	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink.SetReadTimeout(10 * time.Millisecond)
+	defer carbonlink.Stop()
+
+	assert.NoError(carbonlink.Listen(addr))
+
+	table := []*struct {
+		closeAfterWrite bool
+		msg             []byte
+		logContains     []string
+	}{
+		{ // connect and disconnect
+			true,
+			[]byte{},
+			[]string{
+				"] D [carbonlink] read carbonlink request from",
+				"Can't read message length",
+				"EOF",
+			},
+		},
+		{ // connect, send msg length and disconnect
+			true,
+			[]byte(sampleCacheQuery2[:4]),
+			[]string{
+				"] D [carbonlink] read carbonlink request from",
+				"Can't read message body",
+				"EOF",
+			},
+		},
+		{ // connect and wait timeout
+			false,
+			[]byte{},
+			[]string{
+				"] D [carbonlink] read carbonlink request from",
+				"Can't read message length",
+				"i/o timeout",
+			},
+		},
+		{ // connect, send msg length and wait timeout
+			false,
+			[]byte(sampleCacheQuery2[:4]),
+			[]string{
+				"] D [carbonlink] read carbonlink request from",
+				"Can't read message body",
+				"i/o timeout",
+			},
+		},
+		{ // send broken pickle
+			false,
+			[]byte(sampleCacheQuery2[:len(sampleCacheQuery2)-1] + "a"),
+			[]string{
+				"] W [carbonlink] parse carbonlink request from",
+				"Pickle Machine failed",
+			},
+		},
+	}
+
+	for _, test := range table {
+		logging.TestWithLevel("debug", func(log *bytes.Buffer) {
+			conn, err := net.Dial("tcp", carbonlink.Addr().String())
+			assert.NoError(err)
+
+			if len(test.msg) > 0 {
+				_, err = conn.Write(test.msg)
+				assert.NoError(err)
+			}
+
+			if test.closeAfterWrite {
+				conn.Close()
+			} else {
+				defer conn.Close()
+			}
+
+			time.Sleep(100 * time.Millisecond)
+
+			for _, logMsg := range test.logContains {
+				assert.Contains(log.String(), logMsg)
+			}
+		})
+	}
 }

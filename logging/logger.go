@@ -226,3 +226,12 @@ func Test(callable func(*bytes.Buffer)) {
 
 	logrus.SetOutput(loggerOut)
 }
+
+// TestWithLevel run callable with changed logging output and log level
+func TestWithLevel(level string, callable func(*bytes.Buffer)) {
+	originalLevel := logrus.GetLevel()
+	defer logrus.SetLevel(originalLevel)
+	SetLevel(level)
+
+	Test(callable)
+}

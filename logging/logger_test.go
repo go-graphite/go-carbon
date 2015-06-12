@@ -34,12 +34,9 @@ func TestSetLevel(t *testing.T) {
 	defer logrus.SetLevel(originalLevel)
 
 	for testIndex := 0; testIndex < len(table); testIndex++ {
-		err := SetLevel(table[testIndex].levelString)
-		assert.NoError(err)
-
 		checkLevel := table[testIndex].level
 
-		Test(func(log *bytes.Buffer) {
+		TestWithLevel(table[testIndex].levelString, func(log *bytes.Buffer) {
 			callLoggers()
 
 			for i := 0; i < len(table); i++ {

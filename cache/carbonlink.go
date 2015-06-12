@@ -39,21 +39,21 @@ func ParseCarbonlinkRequest(data []byte) (*CarbonlinkRequest, error) {
 	return req, nil
 }
 
-// ReadCarbonlinkRequest from socket/buffer and unpack
-func ReadCarbonlinkRequest(reader io.Reader) (*CarbonlinkRequest, error) {
+// ReadCarbonlinkRequest from socket/buffer
+func ReadCarbonlinkRequest(reader io.Reader) ([]byte, error) {
 	var msgLen uint32
 
 	if err := binary.Read(reader, binary.BigEndian, &msgLen); err != nil {
-		return nil, fmt.Errorf("[carbonlink] Can't read message length: %s", err.Error())
+		return nil, fmt.Errorf("Can't read message length: %s", err.Error())
 	}
 
 	data := make([]byte, msgLen)
 
 	if err := binary.Read(reader, binary.BigEndian, data); err != nil {
-		return nil, fmt.Errorf("[carbonlink] Can't read message body: %s", err.Error())
+		return nil, fmt.Errorf("Can't read message body: %s", err.Error())
 	}
 
-	return ParseCarbonlinkRequest(data)
+	return data, nil
 }
 
 // CarbonlinkListener receive cache Carbonlinkrequests from graphite-web
@@ -122,10 +122,16 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(listener.readTimeout))
 
-		req, err := ReadCarbonlinkRequest(reader)
+		reqData, err := ReadCarbonlinkRequest(reader)
+		if err != nil {
+			logrus.Debugf("[carbonlink] read carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
+			break
+		}
+
+		req, err := ParseCarbonlinkRequest(reqData)
 
 		if err != nil {
-			logrus.Warningf("[carbonlink] wrong carbonlink request from: %s", conn.RemoteAddr().String())
+			logrus.Warningf("[carbonlink] parse carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
 		if req != nil {
