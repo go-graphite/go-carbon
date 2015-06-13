@@ -24,6 +24,7 @@ The result of replacing "carbon" to "go-carbon" on a server with a load up to 90
 ![Success story](doc/success1.png)
 
 ## Installation
+Use binary packages from [releases page](https://github.com/lomik/go-carbon/releases) or build manually:
 ```
 # build binary
 git clone https://github.com/lomik/go-carbon.git
