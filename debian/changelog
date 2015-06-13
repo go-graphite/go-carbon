@@ -1,3 +1,10 @@
+go-carbon (0.5.1) stable; urgency=low
+  * Reduced error level of "bad messages" in tcp and pickle receivers. Now `info`
+  * Configurable logging level. `log-level` option
+  * Fix `wrong carbonlink request` error in log
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Sat, 13 Jun 2015 12:15:00 +0300
+
 go-carbon (0.5.0) stable; urgency=low
   * `-check-config` validates schemas and aggregation configs
   * Fix broken internal metrics `tcp.active` and `pickle.active`

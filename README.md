@@ -117,6 +117,8 @@ enabled = false
 
 ## Changelog
 ##### master
+
+##### version 0.5.1
 * Reduced error level of "bad messages" in tcp and pickle receivers. Now `info`
 * Configurable logging level. `log-level` option
 * Fix `wrong carbonlink request` error in log
