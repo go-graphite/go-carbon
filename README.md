@@ -117,6 +117,8 @@ enabled = false
 
 ## Changelog
 ##### master
+##### version 0.5.2
+* Fix bug in go-whisper library: UpdateMany saves first point if many points has identical timestamp
 
 ##### version 0.5.1
 * Reduced error level of "bad messages" in tcp and pickle receivers. Now `info`
