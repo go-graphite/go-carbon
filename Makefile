@@ -20,7 +20,7 @@ rpm: tmp/go-carbon.tar.gz
 	cd tmp && ./buildrpm.sh ../deploy/go-carbon.spec.centos `../go-carbon --version`
 
 deb: 
-	dpkg-buildpackage -B
+	dpkg-buildpackage -B -us -uc
 
 submodules:
 	git submodule init
