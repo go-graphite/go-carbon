@@ -38,6 +38,9 @@ make rpm
 # build debian/ubuntu package
 make deb
 
+Install debian dependencies: 
+apt-get install golang 
+
 # hand-made install
 sudo install -m 0755 go-carbon /usr/local/bin/go-carbon
 sudo go-carbon --config-print-default > /usr/local/etc/carbon.conf
