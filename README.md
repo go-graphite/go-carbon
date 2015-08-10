@@ -120,6 +120,11 @@ enabled = false
 
 ## Changelog
 ##### master
+##### version 0.5.3
+* Improved validation of bad wsp files
+* RPM init script checks config before restart
+* Debug logging of bad pickle messages
+
 ##### version 0.5.2
 * Fix bug in go-whisper library: UpdateMany saves first point if many points has identical timestamp
 
