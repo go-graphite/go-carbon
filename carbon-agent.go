@@ -301,8 +301,6 @@ func main() {
 		runtime.UnlockOSThread()
 	}
 
-	logrus.SetLevel(logrus.DebugLevel)
-
 	runtime.GOMAXPROCS(cfg.Common.MaxCPU)
 
 	/* CONFIG end */

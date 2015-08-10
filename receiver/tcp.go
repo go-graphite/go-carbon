@@ -150,6 +150,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 		if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
 			logrus.Infof("[pickle] Can't unpickle message: %s", err.Error())
+			logrus.Debugf("[pickle] Bad message: %#v", string(data))
 			return
 		}
 
