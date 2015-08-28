@@ -120,6 +120,9 @@ enabled = false
 
 ## Changelog
 ##### master
+##### version 0.5.4
+* Fix RPM init script
+
 ##### version 0.5.3
 * Improved validation of bad wsp files
 * RPM init script checks config before restart
