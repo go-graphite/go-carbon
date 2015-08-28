@@ -34,7 +34,7 @@ RETVAL=0
 
 start() {
     echo -n $"Starting $prog services: "
-    daemon -pidfile $pidfile $carbon -config $config -pidfile $pidfile -daemon
+    daemon --pidfile $pidfile $carbon -config $config -pidfile $pidfile -daemon
     RETVAL=$?
     echo
     [ $RETVAL -eq 0 ] && touch /var/lock/subsys/$prog || \
