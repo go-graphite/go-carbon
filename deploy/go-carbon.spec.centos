@@ -1,3 +1,5 @@
+%define debug_package %{nil}
+
 Name:	    go-carbon
 Version:	%{version}
 Release:	1%{?dist}
