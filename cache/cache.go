@@ -54,8 +54,7 @@ func (c *Cache) SetInputCapacity(size int) {
 	c.inputCapacity = size
 }
 
-// Get any key/values pair from Cache
-func (c *Cache) Get() *points.Points {
+func (c *Cache) getNext() *points.Points {
 	for {
 		size := len(c.queue)
 		if size == 0 {
@@ -68,10 +67,29 @@ func (c *Cache) Get() *points.Points {
 			return values
 		}
 	}
+	return nil
+}
+
+func (c *Cache) getAny() *points.Points {
 	for _, values := range c.data {
 		return values
 	}
 	return nil
+}
+
+// Get any key/values pair from Cache
+func (c *Cache) Get() *points.Points {
+	if values := c.getNext(); values != nil {
+		return values
+	}
+
+	c.updateQueue()
+
+	if values := c.getNext(); values != nil {
+		return values
+	}
+
+	return c.getAny()
 }
 
 // Remove key from cache
@@ -84,6 +102,9 @@ func (c *Cache) Remove(key string) {
 
 // Pop return and remove next for save point from cache
 func (c *Cache) Pop() *points.Points {
+	if c.size == 0 {
+		return nil
+	}
 	v := c.Get()
 	if v != nil {
 		c.Remove(v.Metric)
@@ -128,12 +149,7 @@ func (c *Cache) stat(metric string, value float64) {
 	c.queue = append(c.queue, &queueItem{key, 1})
 }
 
-// doCheckpoint reorder save queue, add carbon metrics to queue
-func (c *Cache) doCheckpoint() {
-	start := time.Now()
-
-	inputLenBeforeCheckpoint := len(c.inputChan)
-
+func (c *Cache) updateQueue() {
 	newQueue := make(queue, 0)
 
 	for key, values := range c.data {
@@ -143,6 +159,15 @@ func (c *Cache) doCheckpoint() {
 	sort.Sort(newQueue)
 
 	c.queue = newQueue
+}
+
+// doCheckpoint reorder save queue, add carbon metrics to queue
+func (c *Cache) doCheckpoint() {
+	start := time.Now()
+
+	inputLenBeforeCheckpoint := len(c.inputChan)
+
+	c.updateQueue()
 
 	inputLenAfterCheckpoint := len(c.inputChan)
 
@@ -174,19 +199,30 @@ func (c *Cache) doCheckpoint() {
 func (c *Cache) worker() {
 	var values *points.Points
 	var sendTo chan *points.Points
+	var forceReceive bool
+
+	forceReceiveThreshold := cap(c.inputChan) / 10
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
+MAIN_LOOP:
 	for {
-		if values == nil {
-			values = c.Pop()
 
-			if values != nil {
-				sendTo = c.outputChan
-			} else {
-				sendTo = nil
-			}
+		if len(c.inputChan) > forceReceiveThreshold {
+			forceReceive = true
+		} else {
+			forceReceive = false
+		}
+
+		if values == nil && !forceReceive {
+			values = c.Pop()
+		}
+
+		if values != nil {
+			sendTo = c.outputChan
+		} else {
+			sendTo = nil
 		}
 
 		select {
@@ -212,7 +248,7 @@ func (c *Cache) worker() {
 				c.overflowCnt++
 			}
 		case <-c.exitChan: // exit
-			break
+			break MAIN_LOOP
 		}
 	}
 
