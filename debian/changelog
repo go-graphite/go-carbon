@@ -1,3 +1,8 @@
+go-carbon (0.5.5) stable; urgency=low
+  * Cache module optimization
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 28 Oct 2015 15:00:00 +0300
+
 go-carbon (0.5.4) stable; urgency=low
   * Fix RPM init script
 

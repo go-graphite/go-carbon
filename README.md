@@ -120,6 +120,9 @@ enabled = false
 
 ## Changelog
 ##### master
+##### version 0.5.5
+* Cache module optimization
+
 ##### version 0.5.4
 * Fix RPM init script
 
