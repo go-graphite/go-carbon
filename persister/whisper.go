@@ -41,6 +41,7 @@ type Whisper struct {
 	exit                chan bool
 	schemas             *WhisperSchemas
 	aggregation         *WhisperAggregation
+	metricInterval      time.Duration // checkpoint interval
 	workersCount        int
 	rootPath            string
 	graphPrefix         string
@@ -55,6 +56,7 @@ func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAg
 		exit:                make(chan bool),
 		schemas:             schemas,
 		aggregation:         aggregation,
+		metricInterval:      time.Minute,
 		workersCount:        1,
 		rootPath:            rootPath,
 		maxUpdatesPerSecond: 0,
@@ -87,6 +89,11 @@ func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
 // SetWorkers count
 func (p *Whisper) SetWorkers(count int) {
 	p.workersCount = count
+}
+
+// SetMetricInterval sets doChekpoint interval
+func (p *Whisper) SetMetricInterval(interval time.Duration) {
+	p.metricInterval = interval
 }
 
 // Stat sends internal statistics to cache
@@ -209,7 +216,7 @@ func (p *Whisper) doCheckpoint() {
 
 // stat timer
 func (p *Whisper) statWorker() {
-	ticker := app.Clock.Ticker(time.Minute)
+	ticker := app.Clock.Ticker(p.metricInterval)
 	defer ticker.Stop()
 
 	for {

@@ -24,13 +24,15 @@ type UDP struct {
 	errors             uint32
 	logIncomplete      bool
 	conn               *net.UDPConn
+	metricInterval     time.Duration
 }
 
 // NewUDP create new instance of UDP
 func NewUDP(out chan *points.Points) *UDP {
 	return &UDP{
-		out:  out,
-		exit: make(chan bool),
+		out:            out,
+		exit:           make(chan bool),
+		metricInterval: time.Minute,
 	}
 }
 
@@ -100,6 +102,11 @@ func (rcv *UDP) SetLogIncomplete(value bool) {
 	rcv.logIncomplete = value
 }
 
+// SetMetricInterval sets doChekpoint interval
+func (rcv *UDP) SetMetricInterval(interval time.Duration) {
+	rcv.metricInterval = interval
+}
+
 // Addr returns binded socket address. For bind port 0 in tests
 func (rcv *UDP) Addr() net.Addr {
 	if rcv.conn == nil {
@@ -151,7 +158,7 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		ticker := time.NewTicker(rcv.metricInterval)
 		defer ticker.Stop()
 
 		for {

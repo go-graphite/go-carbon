@@ -54,11 +54,12 @@ func (d *Duration) Value() time.Duration {
 }
 
 type commonConfig struct {
-	User        string `toml:"user"`
-	Logfile     string `toml:"logfile"`
-	LogLevel    string `toml:"log-level"`
-	GraphPrefix string `toml:"graph-prefix"`
-	MaxCPU      int    `toml:"max-cpu"`
+	User           string    `toml:"user"`
+	Logfile        string    `toml:"logfile"`
+	LogLevel       string    `toml:"log-level"`
+	GraphPrefix    string    `toml:"graph-prefix"`
+	MetricInterval *Duration `toml:"metric-interval"`
+	MaxCPU         int       `toml:"max-cpu"`
 }
 
 type whisperConfig struct {
@@ -116,8 +117,11 @@ func newConfig() *Config {
 			Logfile:     "/var/log/go-carbon/go-carbon.log",
 			LogLevel:    "info",
 			GraphPrefix: "carbon.agents.{host}.",
-			MaxCPU:      1,
-			User:        "",
+			MetricInterval: &Duration{
+				Duration: time.Minute,
+			},
+			MaxCPU: 1,
+			User:   "",
 		},
 		Whisper: whisperConfig{
 			DataDir:             "/data/graphite/whisper/",
@@ -322,6 +326,7 @@ func main() {
 
 	core := cache.New()
 	core.SetGraphPrefix(cfg.Common.GraphPrefix)
+	core.SetMetricInterval(cfg.Common.MetricInterval.Value())
 	core.SetMaxSize(cfg.Cache.MaxSize)
 	core.SetInputCapacity(cfg.Cache.InputBuffer)
 	core.Start()
@@ -337,6 +342,7 @@ func main() {
 
 		udpListener := receiver.NewUDP(core.In())
 		udpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
+		udpListener.SetMetricInterval(cfg.Common.MetricInterval.Value())
 
 		if udpCfg.LogIncomplete {
 			udpListener.SetLogIncomplete(true)
@@ -360,6 +366,7 @@ func main() {
 
 		tcpListener := receiver.NewTCP(core.In())
 		tcpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
+		tcpListener.SetMetricInterval(cfg.Common.MetricInterval.Value())
 
 		defer tcpListener.Stop()
 		if err = tcpListener.Listen(tcpAddr); err != nil {
@@ -379,6 +386,7 @@ func main() {
 
 		pickleListener := receiver.NewPickle(core.In())
 		pickleListener.SetGraphPrefix(cfg.Common.GraphPrefix)
+		pickleListener.SetMetricInterval(cfg.Common.MetricInterval.Value())
 
 		defer pickleListener.Stop()
 		if err = pickleListener.Listen(pickleAddr); err != nil {
@@ -391,6 +399,7 @@ func main() {
 	if cfg.Whisper.Enabled {
 		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, whisperSchemas, whisperAggregation, core.Out())
 		whisperPersister.SetGraphPrefix(cfg.Common.GraphPrefix)
+		whisperPersister.SetMetricInterval(cfg.Common.MetricInterval.Value())
 		whisperPersister.SetMaxUpdatesPerSecond(cfg.Whisper.MaxUpdatesPerSecond)
 		whisperPersister.SetWorkers(cfg.Whisper.Workers)
 

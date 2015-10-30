@@ -25,29 +25,37 @@ type TCP struct {
 	active          int32 // counter
 	listener        *net.TCPListener
 	isPickle        bool
+	metricInterval  time.Duration
 }
 
 // NewTCP create new instance of TCP
 func NewTCP(out chan *points.Points) *TCP {
 	return &TCP{
-		out:      out,
-		exit:     make(chan bool),
-		isPickle: false,
+		out:            out,
+		exit:           make(chan bool),
+		isPickle:       false,
+		metricInterval: time.Minute,
 	}
 }
 
 // NewPickle create new instance of TCP with pickle listener enabled
 func NewPickle(out chan *points.Points) *TCP {
 	return &TCP{
-		out:      out,
-		exit:     make(chan bool),
-		isPickle: true,
+		out:            out,
+		exit:           make(chan bool),
+		isPickle:       true,
+		metricInterval: time.Minute,
 	}
 }
 
 // SetGraphPrefix for internal cache metrics
 func (rcv *TCP) SetGraphPrefix(prefix string) {
 	rcv.graphPrefix = prefix
+}
+
+// SetMetricInterval sets doChekpoint interval
+func (rcv *TCP) SetMetricInterval(interval time.Duration) {
+	rcv.metricInterval = interval
 }
 
 // Stat sends internal statistics to cache
@@ -170,21 +178,33 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 	}
 
 	go func() {
-		ticker := time.NewTicker(time.Minute)
+		rcvName := "tcp"
+		if rcv.isPickle {
+			rcvName = "pickle"
+		}
+
+		ticker := time.NewTicker(rcv.metricInterval)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				cnt := atomic.LoadUint32(&rcv.metricsReceived)
-				atomic.AddUint32(&rcv.metricsReceived, -cnt)
-				rcv.Stat("metricsReceived", float64(cnt))
+				metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+				atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+				rcv.Stat("metricsReceived", float64(metricsReceived))
 
-				rcv.Stat("active", float64(atomic.LoadInt32(&rcv.active)))
+				active := float64(atomic.LoadInt32(&rcv.active))
+				rcv.Stat("active", active)
 
 				errors := atomic.LoadUint32(&rcv.errors)
 				atomic.AddUint32(&rcv.errors, -errors)
 				rcv.Stat("errors", float64(errors))
+
+				logrus.WithFields(logrus.Fields{
+					"metricsReceived": metricsReceived,
+					"active":          active,
+					"errors":          errors,
+				}).Infof("[%s] doCheckpoint()", rcvName)
 			case <-rcv.exit:
 				rcv.listener.Close()
 				return

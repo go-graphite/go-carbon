@@ -18,32 +18,34 @@ func (v queue) Less(i, j int) bool { return v[i].count < v[j].count }
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
-	data          map[string]*points.Points
-	size          int
-	maxSize       int
-	inputChan     chan *points.Points // from receivers
-	inputCapacity int                 // buffer size of inputChan
-	outputChan    chan *points.Points // to persisters
-	queryChan     chan *Query         // from carbonlink
-	exitChan      chan bool           // close for stop worker
-	graphPrefix   string
-	queryCnt      int
-	overflowCnt   int // drop packages if cache full
-	queue         queue
+	data           map[string]*points.Points
+	size           int
+	maxSize        int
+	inputChan      chan *points.Points // from receivers
+	inputCapacity  int                 // buffer size of inputChan
+	outputChan     chan *points.Points // to persisters
+	queryChan      chan *Query         // from carbonlink
+	exitChan       chan bool           // close for stop worker
+	metricInterval time.Duration       // checkpoint interval
+	graphPrefix    string
+	queryCnt       int
+	overflowCnt    int // drop packages if cache full
+	queue          queue
 }
 
 // New create Cache instance and run in/out goroutine
 func New() *Cache {
 	cache := &Cache{
-		data:          make(map[string]*points.Points, 0),
-		size:          0,
-		maxSize:       1000000,
-		exitChan:      make(chan bool),
-		queryChan:     make(chan *Query, 16),
-		graphPrefix:   "carbon.",
-		queryCnt:      0,
-		queue:         make(queue, 0),
-		inputCapacity: 51200,
+		data:           make(map[string]*points.Points, 0),
+		size:           0,
+		maxSize:        1000000,
+		exitChan:       make(chan bool),
+		metricInterval: time.Minute,
+		queryChan:      make(chan *Query, 16),
+		graphPrefix:    "carbon.",
+		queryCnt:       0,
+		queue:          make(queue, 0),
+		inputCapacity:  51200,
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
@@ -52,6 +54,11 @@ func New() *Cache {
 // SetInputCapacity set buffer size of input channel. Call before In() getter
 func (c *Cache) SetInputCapacity(size int) {
 	c.inputCapacity = size
+}
+
+// SetMetricInterval sets doChekpoint interval
+func (c *Cache) SetMetricInterval(interval time.Duration) {
+	c.metricInterval = interval
 }
 
 func (c *Cache) getNext() *points.Points {
@@ -203,7 +210,7 @@ func (c *Cache) worker() {
 
 	forceReceiveThreshold := cap(c.inputChan) / 10
 
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(c.metricInterval)
 	defer ticker.Stop()
 
 MAIN_LOOP:

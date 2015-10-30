@@ -20,11 +20,12 @@ func TestNewWhisper(t *testing.T) {
 	aggrs := WhisperAggregation{}
 	output := NewWhisper("foo", &schemas, &aggrs, inchan)
 	expected := Whisper{
-		in:           inchan,
-		schemas:      &schemas,
-		aggregation:  &aggrs,
-		workersCount: 1,
-		rootPath:     "foo",
+		in:             inchan,
+		schemas:        &schemas,
+		aggregation:    &aggrs,
+		workersCount:   1,
+		rootPath:       "foo",
+		metricInterval: time.Minute,
 	}
 	assert.NotNil(t, output.exit, "Failed to init exit channel")
 	// copy exit channel into out expected struct

@@ -70,6 +70,8 @@ logfile = "/var/log/go-carbon/go-carbon.log"
 log-level = "info"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}."
+# Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
+metric-interval = "1m0s"
 # Increase for configuration with multi persisters
 max-cpu = 1
 
@@ -120,6 +122,8 @@ enabled = false
 
 ## Changelog
 ##### master
+* `metric-interval` option. 
+
 ##### version 0.5.5
 * Cache module optimization
 
