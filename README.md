@@ -124,7 +124,7 @@ enabled = false
 ##### master
 
 ##### version 0.6
-* `metric-interval` option. 
+* `metric-interval` option 
 
 ##### version 0.5.5
 * Cache module optimization
