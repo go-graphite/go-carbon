@@ -122,6 +122,8 @@ enabled = false
 
 ## Changelog
 ##### master
+
+##### version 0.6
 * `metric-interval` option. 
 
 ##### version 0.5.5

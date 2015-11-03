@@ -1,3 +1,8 @@
+go-carbon (0.6) stable; urgency=low
+  * `metric-interval` option
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 3 Nov 2015 23:00:00 +0300
+
 go-carbon (0.5.5) stable; urgency=low
   * Cache module optimization
 
