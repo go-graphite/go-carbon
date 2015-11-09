@@ -90,6 +90,19 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
+	finished := make(chan bool)
+	defer close(finished)
+
+	go func() {
+		select {
+		case <-finished:
+			return
+		case <-rcv.exit:
+			conn.Close()
+			return
+		}
+	}()
+
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 
@@ -127,6 +140,19 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 	var msgLen uint32
 	var err error
+
+	finished := make(chan bool)
+	defer close(finished)
+
+	go func() {
+		select {
+		case <-finished:
+			return
+		case <-rcv.exit:
+			conn.Close()
+			return
+		}
+	}()
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
