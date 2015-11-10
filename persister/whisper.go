@@ -29,6 +29,7 @@ type Whisper struct {
 	graphPrefix         string
 	created             uint32 // counter
 	maxUpdatesPerSecond int
+	mockStore           func(p *Whisper, values *points.Points)
 }
 
 // NewWhisper create instance of Whisper
@@ -74,7 +75,7 @@ func (p *Whisper) Stat(metric string, value float64) {
 	)
 }
 
-func (p *Whisper) store(values *points.Points) {
+func store(p *Whisper, values *points.Points) {
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := whisper.Open(path)
@@ -132,13 +133,18 @@ func (p *Whisper) store(values *points.Points) {
 }
 
 func (p *Whisper) worker(in chan *points.Points) {
+	storeFunc := store
+	if p.mockStore != nil {
+		storeFunc = p.mockStore
+	}
+
 LOOP:
 	for {
 		select {
 		case <-p.exit:
 			break LOOP
 		case values := <-in:
-			p.store(values)
+			storeFunc(p, values)
 		}
 	}
 }
