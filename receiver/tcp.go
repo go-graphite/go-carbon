@@ -19,6 +19,7 @@ import (
 type TCP struct {
 	out             chan *points.Points
 	exit            chan bool
+	finished        chan bool
 	graphPrefix     string
 	metricsReceived uint32
 	errors          uint32
@@ -33,6 +34,7 @@ func NewTCP(out chan *points.Points) *TCP {
 	return &TCP{
 		out:            out,
 		exit:           make(chan bool),
+		finished:       make(chan bool),
 		isPickle:       false,
 		metricInterval: time.Minute,
 	}
@@ -43,6 +45,7 @@ func NewPickle(out chan *points.Points) *TCP {
 	return &TCP{
 		out:            out,
 		exit:           make(chan bool),
+		finished:       make(chan bool),
 		isPickle:       true,
 		metricInterval: time.Minute,
 	}
@@ -260,6 +263,8 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 			go handler(conn)
 		}
 
+		close(rcv.finished)
+
 	}()
 
 	return nil
@@ -268,4 +273,5 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 // Stop all listeners
 func (rcv *TCP) Stop() {
 	close(rcv.exit)
+	<-rcv.finished
 }

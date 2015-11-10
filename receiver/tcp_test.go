@@ -102,32 +102,3 @@ func TestTCP2(t *testing.T) {
 		t.Fatalf("Message #1 not received")
 	}
 }
-
-func TestStopTCP(t *testing.T) {
-	test := newTCPTestCase(t)
-	defer test.Finish()
-
-	ch := test.rcvChan
-	test.Send("hello.world 42.15 1422698155\n")
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-ch:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-
-	test.receiver.Stop()
-	test.receiver = nil
-	time.Sleep(10 * time.Millisecond)
-
-	test.Send("metric.name -72.11 1422698155\n")
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case <-ch:
-		t.Fatalf("Message #0 received")
-	default:
-	}
-}
