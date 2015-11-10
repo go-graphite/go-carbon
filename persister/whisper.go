@@ -145,10 +145,11 @@ func (p *Whisper) store(values *points.Points) {
 }
 
 func (p *Whisper) worker(in chan *points.Points) {
+LOOP:
 	for {
 		select {
 		case <-p.exit:
-			break
+			break LOOP
 		case values := <-in:
 			p.store(values)
 		}
@@ -201,10 +202,11 @@ func (p *Whisper) statWorker() {
 	ticker := time.NewTicker(p.metricInterval)
 	defer ticker.Stop()
 
+LOOP:
 	for {
 		select {
 		case <-p.exit:
-			break
+			break LOOP
 		case <-ticker.C:
 			go p.doCheckpoint()
 		}

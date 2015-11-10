@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/lomik/go-carbon/carbon"
@@ -10,6 +11,8 @@ import (
 
 func TestStartStop(t *testing.T) {
 	assert := assert.New(t)
+
+	startGoroutineNum := runtime.NumGoroutine()
 
 	for i := 0; i < 10; i++ {
 		qa.Root(t, func(root string) {
@@ -25,4 +28,13 @@ func TestStartStop(t *testing.T) {
 			app.Stop()
 		})
 	}
+
+	// p := pprof.Lookup("goroutine")
+	// p.WriteTo(os.Stdout, 1)
+
+	endGoroutineNum := runtime.NumGoroutine()
+
+	// GC worker etc
+	assert.InDelta(startGoroutineNum, endGoroutineNum, 2)
+
 }
