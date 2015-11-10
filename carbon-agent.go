@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os/user"
 	"runtime"
@@ -12,11 +11,8 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/carbon"
 	"github.com/lomik/go-carbon/logging"
-	"github.com/lomik/go-carbon/persister"
-	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/go-daemon"
 )
 
@@ -67,11 +63,6 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-	}
-
-	// check schemas.conf and aggregation.conf
-	if err = app.ParseWhisperConf(); err != nil {
-		log.Fatal(err)
 	}
 
 	if err := logging.SetLevel(cfg.Common.LogLevel); err != nil {
@@ -138,109 +129,11 @@ func main() {
 		}()
 	}
 
-	core := cache.New()
-	core.SetGraphPrefix(cfg.Common.GraphPrefix)
-	core.SetMetricInterval(cfg.Common.MetricInterval.Value())
-	core.SetMaxSize(cfg.Cache.MaxSize)
-	core.SetInputCapacity(cfg.Cache.InputBuffer)
-	core.Start()
-	defer core.Stop()
-
-	/* UDP start */
-	udpCfg := cfg.Udp
-	if udpCfg.Enabled {
-		udpAddr, err := net.ResolveUDPAddr("udp", udpCfg.Listen)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		udpListener := receiver.NewUDP(core.In())
-		udpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
-		udpListener.SetMetricInterval(cfg.Common.MetricInterval.Value())
-
-		if udpCfg.LogIncomplete {
-			udpListener.SetLogIncomplete(true)
-		}
-
-		defer udpListener.Stop()
-		if err = udpListener.Listen(udpAddr); err != nil {
-			log.Fatal(err)
-		}
+	if err = app.Start(); err != nil {
+		logrus.Fatal(err)
+	} else {
+		logrus.Info("started")
 	}
-	/* UDP end */
 
-	/* TCP start */
-	tcpCfg := cfg.Tcp
-
-	if tcpCfg.Enabled {
-		tcpAddr, err := net.ResolveTCPAddr("tcp", tcpCfg.Listen)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		tcpListener := receiver.NewTCP(core.In())
-		tcpListener.SetGraphPrefix(cfg.Common.GraphPrefix)
-		tcpListener.SetMetricInterval(cfg.Common.MetricInterval.Value())
-
-		defer tcpListener.Stop()
-		if err = tcpListener.Listen(tcpAddr); err != nil {
-			log.Fatal(err)
-		}
-	}
-	/* TCP end */
-
-	/* PICKLE start */
-	pickleCfg := cfg.Pickle
-
-	if pickleCfg.Enabled {
-		pickleAddr, err := net.ResolveTCPAddr("tcp", pickleCfg.Listen)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		pickleListener := receiver.NewPickle(core.In())
-		pickleListener.SetGraphPrefix(cfg.Common.GraphPrefix)
-		pickleListener.SetMetricInterval(cfg.Common.MetricInterval.Value())
-
-		defer pickleListener.Stop()
-		if err = pickleListener.Listen(pickleAddr); err != nil {
-			log.Fatal(err)
-		}
-	}
-	/* PICKLE end */
-
-	/* WHISPER start */
-	if cfg.Whisper.Enabled {
-		whisperPersister := persister.NewWhisper(cfg.Whisper.DataDir, app.Schemas, app.Aggregation, core.Out())
-		whisperPersister.SetGraphPrefix(cfg.Common.GraphPrefix)
-		whisperPersister.SetMetricInterval(cfg.Common.MetricInterval.Value())
-		whisperPersister.SetMaxUpdatesPerSecond(cfg.Whisper.MaxUpdatesPerSecond)
-		whisperPersister.SetWorkers(cfg.Whisper.Workers)
-
-		whisperPersister.Start()
-		defer whisperPersister.Stop()
-	}
-	/* WHISPER end */
-
-	/* CARBONLINK start */
-	if cfg.Carbonlink.Enabled {
-		linkAddr, err := net.ResolveTCPAddr("tcp", cfg.Carbonlink.Listen)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		carbonlink := cache.NewCarbonlinkListener(core.Query())
-		carbonlink.SetReadTimeout(cfg.Carbonlink.ReadTimeout.Value())
-		carbonlink.SetQueryTimeout(cfg.Carbonlink.QueryTimeout.Value())
-
-		defer carbonlink.Stop()
-		if err = carbonlink.Listen(linkAddr); err != nil {
-			log.Fatal(err)
-		}
-
-	}
-	/* CARBONLINK end */
-
-	logrus.Info("started")
-	select {}
+	app.Loop()
 }

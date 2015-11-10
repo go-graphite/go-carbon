@@ -3,6 +3,8 @@ package carbon
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
+	"path/filepath"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -170,4 +172,30 @@ func ParseConfig(filename string, cfg interface{}) error {
 		}
 	}
 	return nil
+}
+
+// TestConfig creates config with all files in root directory
+func TestConfig(rootDir string) string {
+	cfg := NewConfig()
+
+	cfg.Common.Logfile = filepath.Join(rootDir, "go-carbon.log")
+
+	cfg.Whisper.DataDir = rootDir
+	cfg.Whisper.Schemas = filepath.Join(rootDir, "schemas.conf")
+	// cfg.Whisper.Aggregation = filepath.Join(rootDir, "aggregation.conf")
+
+	configFile := filepath.Join(rootDir, "go-carbon.conf")
+
+	buf := new(bytes.Buffer)
+
+	encoder := toml.NewEncoder(buf)
+	encoder.Indent = ""
+
+	if err := encoder.Encode(cfg); err != nil {
+		return configFile
+	}
+
+	ioutil.WriteFile(configFile, buf.Bytes(), 0644)
+
+	return configFile
 }
