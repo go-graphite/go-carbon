@@ -48,18 +48,20 @@ func main() {
 		return
 	}
 
-	cfg := carbon.NewConfig()
-
 	if *printDefaultConfig {
-		if err = carbon.PrintConfig(cfg); err != nil {
+		if err = carbon.PrintConfig(carbon.NewConfig()); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
 
-	if err = carbon.ParseConfig(*configFile, cfg); err != nil {
+	app := carbon.New(*configFile)
+
+	if err = app.ParseConfig(); err != nil {
 		log.Fatal(err)
 	}
+
+	cfg := app.Config
 
 	var runAsUser *user.User
 	if cfg.Common.User != "" {
@@ -68,8 +70,6 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-
-	app := carbon.New(cfg)
 
 	// check schemas.conf and aggregation.conf
 	if err = app.ParseWhisperConf(); err != nil {
@@ -80,6 +80,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// config parsed successfully. Exit in check-only mode
 	if *checkConfig {
 		return
 	}

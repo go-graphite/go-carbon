@@ -3,36 +3,55 @@ package carbon
 import "github.com/lomik/go-carbon/persister"
 
 type App struct {
-	Config      *Config
-	Schemas     *persister.WhisperSchemas
-	Aggregation *persister.WhisperAggregation
+	ConfigFilename string
+	Config         *Config
+	Schemas        *persister.WhisperSchemas
+	Aggregation    *persister.WhisperAggregation
 }
 
 // New App instance
-func New(config *Config) *App {
+func New(configFilename string) *App {
 	app := &App{
-		Config: config,
+		ConfigFilename: configFilename,
+		Config:         NewConfig(),
 	}
 	return app
+}
+
+// ParseConfig loads config from app.ConfigFilename
+func (app *App) ParseConfig() error {
+	cfg := NewConfig()
+	if err := ParseConfig(app.ConfigFilename, cfg); err != nil {
+		return err
+	}
+	app.Config = cfg
+	return nil
 }
 
 // ParseWhisperConf parse schemas.conf and aggregation.conf
 func (app *App) ParseWhisperConf() error {
 	var err error
+	var newSchemas *persister.WhisperSchemas
+	var newAggregation *persister.WhisperAggregation
+
 	if app.Config.Whisper.Enabled {
-		app.Schemas, err = persister.ReadWhisperSchemas(app.Config.Whisper.Schemas)
+		newSchemas, err = persister.ReadWhisperSchemas(app.Config.Whisper.Schemas)
 		if err != nil {
 			return err
 		}
 
 		if app.Config.Whisper.Aggregation != "" {
-			app.Aggregation, err = persister.ReadWhisperAggregation(app.Config.Whisper.Aggregation)
+			newAggregation, err = persister.ReadWhisperAggregation(app.Config.Whisper.Aggregation)
 			if err != nil {
 				return err
 			}
 		} else {
-			app.Aggregation = persister.NewWhisperAggregation()
+			newAggregation = persister.NewWhisperAggregation()
 		}
 	}
-	return err
+
+	app.Schemas = newSchemas
+	app.Aggregation = newAggregation
+
+	return nil
 }
