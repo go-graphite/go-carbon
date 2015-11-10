@@ -53,14 +53,14 @@ func (app *App) ParseConfig() error {
 		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", "localhost", -1)
 	}
 
-	if app.Config.Whisper.Enabled {
-		newSchemas, err = persister.ReadWhisperSchemas(app.Config.Whisper.Schemas)
+	if cfg.Whisper.Enabled {
+		newSchemas, err = persister.ReadWhisperSchemas(cfg.Whisper.Schemas)
 		if err != nil {
 			return err
 		}
 
-		if app.Config.Whisper.Aggregation != "" {
-			newAggregation, err = persister.ReadWhisperAggregation(app.Config.Whisper.Aggregation)
+		if cfg.Whisper.Aggregation != "" {
+			newAggregation, err = persister.ReadWhisperAggregation(cfg.Whisper.Aggregation)
 			if err != nil {
 				return err
 			}
