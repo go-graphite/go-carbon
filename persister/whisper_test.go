@@ -1,6 +1,8 @@
 package persister
 
 import (
+	"sync"
+
 	"github.com/lomik/go-carbon/points"
 	//"github.com/lomik/go-whisper"
 
@@ -80,43 +82,46 @@ func randomPoints(num int, out chan *points.Points) {
 
 func TestShuffler(t *testing.T) {
 	rand.Seed(time.Now().Unix())
-	fixture := Whisper{exit: make(chan bool)}
+	fixture := Whisper{}
 	in := make(chan *points.Points)
 	out1 := make(chan *points.Points)
 	out2 := make(chan *points.Points)
 	out3 := make(chan *points.Points)
 	out4 := make(chan *points.Points)
 	out := [](chan *points.Points){out1, out2, out3, out4}
-	go fixture.shuffler(in, out)
+	go fixture.shuffler(in, out, nil)
 	buckets := [4]int{0, 0, 0, 0}
-	dotest := make(chan bool)
 	runlength := 10000
-	go func() {
-		for {
-			select {
-			case <-out1:
-				buckets[0]++
-			case <-out2:
-				buckets[1]++
-			case <-out3:
-				buckets[2]++
-			case <-out4:
-				buckets[3]++
-			case <-dotest:
-				total := 0
-				for b := range buckets {
-					assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5% across 4 buckets after %d inputs", runlength))
-					total += buckets[b]
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	for index, _ := range out {
+		outChan := out[index]
+		i := index
+		go func() {
+			for {
+				_, ok := <-outChan
+				if !ok {
+					break
 				}
-				assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")
-
+				buckets[i]++
 			}
+			wg.Done()
+		}()
+	}
 
-		}
-	}()
 	randomPoints(runlength, in)
-	fixture.exit <- true
-	dotest <- true
+
+	close(in)
+	wg.Wait()
+
+	total := 0
+	for b := range buckets {
+		assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5% across 4 buckets after %d inputs", runlength))
+		total += buckets[b]
+	}
+	assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")
 
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +31,7 @@ type Whisper struct {
 	created             uint32 // counter
 	maxUpdatesPerSecond int
 	mockStore           func(p *Whisper, values *points.Points)
+	wg                  sync.WaitGroup
 }
 
 // NewWhisper create instance of Whisper
@@ -73,6 +75,14 @@ func (p *Whisper) Stat(metric string, value float64) {
 		value,
 		time.Now().Unix(),
 	)
+}
+
+func (p *Whisper) spawn(f func()) {
+	p.wg.Add(1)
+	go func() {
+		f()
+		p.wg.Done()
+	}()
 }
 
 func store(p *Whisper, values *points.Points) {
@@ -132,7 +142,7 @@ func store(p *Whisper, values *points.Points) {
 	w.UpdateMany(points)
 }
 
-func (p *Whisper) worker(in chan *points.Points) {
+func (p *Whisper) worker(in chan *points.Points, exit chan bool) {
 	storeFunc := store
 	if p.mockStore != nil {
 		storeFunc = p.mockStore
@@ -141,26 +151,36 @@ func (p *Whisper) worker(in chan *points.Points) {
 LOOP:
 	for {
 		select {
-		case <-p.exit:
+		case <-exit:
 			break LOOP
-		case values := <-in:
+		case values, ok := <-in:
+			if !ok {
+				break LOOP
+			}
 			storeFunc(p, values)
 		}
 	}
 }
 
-func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) {
+func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points), exit chan bool) {
 	workers := uint32(len(out))
 
 LOOP:
 	for {
 		select {
-		case <-p.exit:
+		case <-exit:
 			break LOOP
-		case values := <-in:
+		case values, ok := <-in:
+			if !ok {
+				break LOOP
+			}
 			index := crc32.ChecksumIEEE([]byte(values.Metric)) % workers
 			out[index] <- values
 		}
+	}
+
+	for _, ch := range out {
+		close(ch)
 	}
 }
 
@@ -208,31 +228,76 @@ LOOP:
 	}
 }
 
+func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
+	out := make(chan *points.Points, cap(in))
+
+	step := time.Duration(1e9/ratePerSec) * time.Nanosecond
+
+	go func() {
+		var p *points.Points
+		var opened bool
+
+		defer close(out)
+
+		// start flight
+		throttleTicker := time.NewTicker(step)
+		defer throttleTicker.Stop()
+
+	LOOP:
+		for {
+			select {
+			case <-throttleTicker.C:
+				if p, opened = <-in; !opened {
+					return
+				}
+				out <- p
+			case <-exit:
+				break LOOP
+			}
+		}
+	}()
+
+	return out
+}
+
 // Start worker
 func (p *Whisper) Start() {
-	go p.statWorker()
+	p.spawn(func() {
+		p.statWorker()
+	})
 
 	inChan := p.in
+
+	readerExit := p.exit
+
 	if p.maxUpdatesPerSecond > 0 {
-		inChan = points.ThrottleChan(inChan, p.maxUpdatesPerSecond)
+		inChan = throttleChan(inChan, p.maxUpdatesPerSecond, p.exit)
+		readerExit = nil // read all before channel is closed
 	}
 
 	if p.workersCount <= 1 { // solo worker
-		go p.worker(inChan)
+		p.spawn(func() {
+			p.worker(inChan, readerExit)
+		})
 	} else {
 		var channels [](chan *points.Points)
 
 		for i := 0; i < p.workersCount; i++ {
 			ch := make(chan *points.Points, 32)
 			channels = append(channels, ch)
-			go p.worker(ch)
+			p.spawn(func() {
+				p.worker(ch, nil)
+			})
 		}
 
-		go p.shuffler(inChan, channels)
+		p.spawn(func() {
+			p.shuffler(inChan, channels, readerExit)
+		})
 	}
 }
 
 // Stop worker
 func (p *Whisper) Stop() {
 	close(p.exit)
+	p.wg.Wait()
 }
