@@ -1,6 +1,11 @@
 package carbon
 
-import "github.com/lomik/go-carbon/persister"
+import (
+	"os"
+	"strings"
+
+	"github.com/lomik/go-carbon/persister"
+)
 
 type App struct {
 	ConfigFilename string
@@ -24,6 +29,15 @@ func (app *App) ParseConfig() error {
 	if err := ParseConfig(app.ConfigFilename, cfg); err != nil {
 		return err
 	}
+
+	// carbon-cache prefix
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.Replace(hostname, ".", "_", -1)
+		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", hostname, -1)
+	} else {
+		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", "localhost", -1)
+	}
+
 	app.Config = cfg
 	return nil
 }
@@ -53,5 +67,10 @@ func (app *App) ParseWhisperConf() error {
 	app.Schemas = newSchemas
 	app.Aggregation = newAggregation
 
+	return nil
+}
+
+// ReloadConfig reloads some settings from config
+func (app *App) ReloadConfig() error {
 	return nil
 }

@@ -6,11 +6,9 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"os/user"
 	"runtime"
 	"strconv"
-	"strings"
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
@@ -138,14 +136,6 @@ func main() {
 		go func() {
 			logrus.Fatal(http.ListenAndServe(cfg.Pprof.Listen, nil))
 		}()
-	}
-
-	// carbon-cache prefix
-	if hostname, err := os.Hostname(); err == nil {
-		hostname = strings.Replace(hostname, ".", "_", -1)
-		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", hostname, -1)
-	} else {
-		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", "localhost", -1)
 	}
 
 	core := cache.New()
