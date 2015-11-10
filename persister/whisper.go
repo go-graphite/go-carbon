@@ -158,10 +158,12 @@ LOOP:
 
 func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points)) {
 	workers := uint32(len(out))
+
+LOOP:
 	for {
 		select {
 		case <-p.exit:
-			break
+			break LOOP
 		case values := <-in:
 			index := crc32.ChecksumIEEE([]byte(values.Metric)) % workers
 			out[index] <- values
