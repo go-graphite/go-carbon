@@ -18,7 +18,7 @@ import (
 type UDP struct {
 	out                chan *points.Points
 	exit               chan bool
-	exitConfirmed      chan bool
+	finished           chan bool
 	graphPrefix        string
 	metricsReceived    uint32
 	incompleteReceived uint32
@@ -33,7 +33,7 @@ func NewUDP(out chan *points.Points) *UDP {
 	return &UDP{
 		out:            out,
 		exit:           make(chan bool),
-		exitConfirmed:  make(chan bool),
+		finished:       make(chan bool),
 		metricInterval: time.Minute,
 	}
 }
@@ -252,7 +252,7 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 			}
 		}
 
-		close(rcv.exitConfirmed)
+		close(rcv.finished)
 
 	}()
 
@@ -262,5 +262,5 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 // Stop all listeners
 func (rcv *UDP) Stop() {
 	close(rcv.exit)
-	<-rcv.exitConfirmed
+	<-rcv.finished
 }
