@@ -45,19 +45,6 @@ func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAg
 	}
 }
 
-// WhisperFactory - holder for factory functions
-type WhisperFactory struct{}
-
-// Create creates a new underlying whisperdb file
-func (WhisperFactory) Create(path string, retentions whisper.Retentions, aggregationMethod whisper.AggregationMethod, xFilesFactor float32) (*whisper.Whisper, error) {
-	return whisper.Create(path, retentions, aggregationMethod, xFilesFactor)
-}
-
-// Open opens an existing underlying whisperdb file
-func (WhisperFactory) Open(path string) (*whisper.Whisper, error) {
-	return whisper.Open(path)
-}
-
 // SetGraphPrefix for internal cache metrics
 func (p *Whisper) SetGraphPrefix(prefix string) {
 	p.graphPrefix = prefix
