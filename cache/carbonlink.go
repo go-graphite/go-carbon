@@ -60,6 +60,7 @@ func ReadCarbonlinkRequest(reader io.Reader) ([]byte, error) {
 type CarbonlinkListener struct {
 	queryChan    chan *Query
 	exit         chan bool
+	finished     chan bool
 	readTimeout  time.Duration
 	queryTimeout time.Duration
 	tcpListener  *net.TCPListener
@@ -69,6 +70,7 @@ type CarbonlinkListener struct {
 func NewCarbonlinkListener(queryChan chan *Query) *CarbonlinkListener {
 	return &CarbonlinkListener{
 		exit:         make(chan bool),
+		finished:     make(chan bool),
 		queryChan:    queryChan,
 		readTimeout:  30 * time.Second,
 		queryTimeout: 100 * time.Millisecond,
@@ -206,6 +208,8 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 			go listener.handleConnection(conn)
 		}
 
+		close(listener.finished)
+
 	}()
 
 	return nil
@@ -214,4 +218,5 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 // Stop all listeners
 func (listener *CarbonlinkListener) Stop() {
 	close(listener.exit)
+	<-listener.finished
 }

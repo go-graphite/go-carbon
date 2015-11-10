@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/lomik/go-carbon/points"
-	"github.com/lomik/go-carbon/receiver"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,7 +18,7 @@ func TestStopUDP(t *testing.T) {
 	ch := make(chan *points.Points, 128)
 
 	for i := 0; i < 10; i++ {
-		listener := receiver.NewUDP(ch)
+		listener := NewUDP(ch)
 		assert.NoError(listener.Listen(addr))
 		addr = listener.Addr().(*net.UDPAddr) // listen same port in next iteration
 		listener.Stop()
@@ -35,7 +34,7 @@ func TestStopTCP(t *testing.T) {
 	ch := make(chan *points.Points, 128)
 
 	for i := 0; i < 10; i++ {
-		listener := receiver.NewTCP(ch)
+		listener := NewTCP(ch)
 		assert.NoError(listener.Listen(addr))
 		addr = listener.Addr().(*net.TCPAddr) // listen same port in next iteration
 		listener.Stop()
@@ -51,7 +50,7 @@ func TestStopPickle(t *testing.T) {
 	ch := make(chan *points.Points, 128)
 
 	for i := 0; i < 10; i++ {
-		listener := receiver.NewPickle(ch)
+		listener := NewPickle(ch)
 		assert.NoError(listener.Listen(addr))
 		addr = listener.Addr().(*net.TCPAddr) // listen same port in next iteration
 		listener.Stop()
