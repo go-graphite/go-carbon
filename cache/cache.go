@@ -3,6 +3,7 @@ package cache
 import (
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/lomik/go-carbon/points"
@@ -31,6 +32,7 @@ type Cache struct {
 	queryCnt       int
 	overflowCnt    int // drop packages if cache full
 	queue          queue
+	wg             sync.WaitGroup
 }
 
 // New create Cache instance and run in/out goroutine
@@ -59,6 +61,14 @@ func (c *Cache) SetInputCapacity(size int) {
 // SetMetricInterval sets doChekpoint interval
 func (c *Cache) SetMetricInterval(interval time.Duration) {
 	c.metricInterval = interval
+}
+
+func (c *Cache) spawn(f func()) {
+	c.wg.Add(1)
+	go func() {
+		f()
+		c.wg.Done()
+	}()
 }
 
 func (c *Cache) getNext() *points.Points {
@@ -289,10 +299,13 @@ func (c *Cache) Start() {
 	if c.outputChan == nil {
 		c.outputChan = make(chan *points.Points, 1024)
 	}
-	go c.worker()
+	c.spawn(func() {
+		c.worker()
+	})
 }
 
 // Stop worker
 func (c *Cache) Stop() {
 	close(c.exitChan)
+	c.wg.Wait()
 }
