@@ -58,13 +58,41 @@ func TestGracefullyStop(t *testing.T) {
 
 	startGoroutineNum := runtime.NumGoroutine()
 	for i := 0; i < 5; i++ {
-		do(0, 1)
-		do(0, 4)
-		do(4000, 1)
-		do(4000, 4)
+		for _, maxUpdatesPerSecond := range []int{0, 4000} {
+			for _, workers := range []int{1, 4} {
+				do(maxUpdatesPerSecond, workers)
+			}
+		}
 	}
 	endGoroutineNum := runtime.NumGoroutine()
-
 	// GC worker etc
 	assert.InDelta(startGoroutineNum, endGoroutineNum, 2)
+}
+
+func TestStopEmptyThrottledPersister(t *testing.T) {
+	// Test bug: not stopped without traffic
+
+	assert := assert.New(t)
+	for _, maxUpdatesPerSecond := range []int{0, 4000} {
+		for _, workers := range []int{1, 4} {
+			qa.Root(t, func(root string) {
+
+				ch := make(chan *points.Points, 10)
+				p := NewWhisper(root, nil, nil, ch)
+				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
+				p.SetWorkers(workers)
+
+				p.mockStore = func(p *Whisper, values *points.Points) {}
+
+				p.Start()
+				time.Sleep(10 * time.Millisecond)
+
+				start := time.Now()
+				p.Stop()
+				worktime := time.Now().Sub(start)
+
+				assert.True(worktime.Seconds() < 1, "maxUpdatesPerSecond: %d, workers: %d", maxUpdatesPerSecond, workers)
+			})
+		}
+	}
 }

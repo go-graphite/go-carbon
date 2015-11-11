@@ -3,6 +3,7 @@ package persister
 import (
 	"fmt"
 	"hash/crc32"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,7 +39,7 @@ type Whisper struct {
 func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points) *Whisper {
 	return &Whisper{
 		in:                  in,
-		exit:                make(chan bool),
+		exit:                nil,
 		schemas:             schemas,
 		aggregation:         aggregation,
 		metricInterval:      time.Minute,
@@ -56,6 +57,11 @@ func (p *Whisper) SetGraphPrefix(prefix string) {
 // SetMaxUpdatesPerSecond enable throttling
 func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
 	p.maxUpdatesPerSecond = maxUpdatesPerSecond
+}
+
+// GetMaxUpdatesPerSecond returns current throttling speed
+func (p *Whisper) GetMaxUpdatesPerSecond() int {
+	return p.maxUpdatesPerSecond
 }
 
 // SetWorkers count
@@ -235,7 +241,7 @@ func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *
 
 	go func() {
 		var p *points.Points
-		var opened bool
+		var ok bool
 
 		defer close(out)
 
@@ -247,8 +253,13 @@ func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *
 		for {
 			select {
 			case <-throttleTicker.C:
-				if p, opened = <-in; !opened {
-					return
+				select {
+				case p, ok = <-in:
+					if !ok {
+						break LOOP
+					}
+				case <-exit:
+					break LOOP
 				}
 				out <- p
 			case <-exit:
@@ -262,6 +273,13 @@ func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *
 
 // Start worker
 func (p *Whisper) Start() {
+
+	if p.exit != nil { // already started
+		log.Fatal("Persister already started")
+		return
+	}
+	p.exit = make(chan bool)
+
 	p.spawn(func() {
 		p.statWorker()
 	})
@@ -298,6 +316,9 @@ func (p *Whisper) Start() {
 
 // Stop worker
 func (p *Whisper) Stop() {
-	close(p.exit)
-	p.wg.Wait()
+	if p.exit != nil {
+		close(p.exit)
+		p.wg.Wait()
+		p.exit = nil
+	}
 }

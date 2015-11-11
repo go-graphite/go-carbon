@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"os/user"
 	"runtime"
 	"strconv"
@@ -125,6 +127,11 @@ func main() {
 	// pprof
 	if cfg.Pprof.Enabled {
 		go func() {
+
+			// c := make(chan os.Signal, 1)
+			// signal.Notify(c, syscall.SIGSTOP)
+			// @todo: stop
+
 			logrus.Fatal(http.ListenAndServe(cfg.Pprof.Listen, nil))
 		}()
 	}
@@ -135,5 +142,14 @@ func main() {
 		logrus.Info("started")
 	}
 
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGUSR2)
+		<-c
+		app.GraceStop()
+	}()
+
 	app.Loop()
+
+	logrus.Info("stopped")
 }

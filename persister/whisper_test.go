@@ -4,10 +4,8 @@ import (
 	"sync"
 
 	"github.com/lomik/go-carbon/points"
-	//"github.com/lomik/go-whisper"
 
 	"github.com/stretchr/testify/assert"
-	//"github.com/stretchr/testify/mock"
 
 	"fmt"
 	"math/rand"
@@ -28,7 +26,7 @@ func TestNewWhisper(t *testing.T) {
 		rootPath:       "foo",
 		metricInterval: time.Minute,
 	}
-	assert.NotNil(t, output.exit, "Failed to init exit channel")
+	assert.Nil(t, output.exit)
 	// copy exit channel into out expected struct
 	expected.exit = output.exit
 	assert.Equal(t, *output, expected)
@@ -123,31 +121,4 @@ func TestShuffler(t *testing.T) {
 	}
 	assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")
 
-}
-
-func TestDoCheckpoint(t *testing.T) {
-}
-
-func TestStatWorker(t *testing.T) {
-}
-
-func TestStart(t *testing.T) {
-}
-
-func TestStop(t *testing.T) {
-	fixture := Whisper{exit: make(chan bool)}
-	timeout := make(chan bool, 1)
-	go func() {
-		time.Sleep(1 * time.Second)
-		timeout <- true
-	}()
-	fixture.Stop()
-	select {
-	case _, ok := <-fixture.exit:
-		assert.False(t, ok, "close caused a write to the exit channel")
-		// a read from ch has occurred
-	case _, ok := <-timeout:
-		assert.False(t, ok, "close failed to close the exit channel in a reasonable time")
-		// the read from ch has timed out
-	}
 }
