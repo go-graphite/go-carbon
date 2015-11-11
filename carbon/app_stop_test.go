@@ -25,8 +25,6 @@ func TestStartStop(t *testing.T) {
 			assert.NoError(app.ParseConfig())
 			assert.NoError(app.Start())
 
-			// time.Sleep(time.Minute)
-
 			app.Stop()
 		})
 	}
@@ -34,7 +32,7 @@ func TestStartStop(t *testing.T) {
 	endGoroutineNum := runtime.NumGoroutine()
 
 	// GC worker etc
-	if !assert.InDelta(startGoroutineNum, endGoroutineNum, 2) {
+	if !assert.InDelta(startGoroutineNum, endGoroutineNum, 3) {
 		p := pprof.Lookup("goroutine")
 		p.WriteTo(os.Stdout, 1)
 	}
