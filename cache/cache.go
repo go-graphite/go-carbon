@@ -281,6 +281,9 @@ func (c *Cache) In() chan *points.Points {
 
 // Out returns output channel
 func (c *Cache) Out() chan *points.Points {
+	if c.outputChan == nil {
+		c.outputChan = make(chan *points.Points, 1024)
+	}
 	return c.outputChan
 }
 
@@ -296,6 +299,9 @@ func (c *Cache) SetOutputChanSize(size int) {
 
 // Start worker
 func (c *Cache) Start() {
+	if c.inputChan == nil {
+		c.inputChan = make(chan *points.Points, c.inputCapacity)
+	}
 	if c.outputChan == nil {
 		c.outputChan = make(chan *points.Points, 1024)
 	}
