@@ -1,7 +1,9 @@
 package carbon
 
 import (
+	"os"
 	"runtime"
+	"runtime/pprof"
 	"testing"
 
 	"github.com/lomik/go-carbon/carbon"
@@ -29,12 +31,12 @@ func TestStartStop(t *testing.T) {
 		})
 	}
 
-	// p := pprof.Lookup("goroutine")
-	// p.WriteTo(os.Stdout, 1)
-
 	endGoroutineNum := runtime.NumGoroutine()
 
 	// GC worker etc
-	assert.InDelta(startGoroutineNum, endGoroutineNum, 2)
+	if !assert.InDelta(startGoroutineNum, endGoroutineNum, 2) {
+		p := pprof.Lookup("goroutine")
+		p.WriteTo(os.Stdout, 1)
+	}
 
 }
