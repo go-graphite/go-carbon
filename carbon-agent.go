@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,21 @@ import _ "net/http/pprof"
 
 // Version of go-carbon
 const Version = "0.6"
+
+func httpServe(addr string) (func(), error) {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+
+	listener, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	go http.Serve(listener, nil)
+	return func() { listener.Close() }, nil
+}
 
 func main() {
 	var err error
@@ -125,15 +141,12 @@ func main() {
 	/* CONFIG end */
 
 	// pprof
+	httpStop := func() {}
 	if cfg.Pprof.Enabled {
-		go func() {
-
-			// c := make(chan os.Signal, 1)
-			// signal.Notify(c, syscall.SIGSTOP)
-			// @todo: stop
-
-			logrus.Fatal(http.ListenAndServe(cfg.Pprof.Listen, nil))
-		}()
+		httpStop, err = httpServe(cfg.Pprof.Listen)
+		if err != nil {
+			logrus.Fatal(err)
+		}
 	}
 
 	if err = app.Start(); err != nil {
@@ -146,6 +159,7 @@ func main() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGUSR2)
 		<-c
+		httpStop()
 		app.GraceStop()
 	}()
 
