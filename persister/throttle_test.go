@@ -1,9 +1,10 @@
-package points
+package persister
 
 import (
 	"testing"
 	"time"
 
+	"github.com/lomik/go-carbon/points"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -11,20 +12,20 @@ func TestThrottleChan(t *testing.T) {
 	perSecond := 100
 	timestamp := time.Now().Unix()
 
-	chIn := make(chan *Points)
-	chOut := ThrottleChan(chIn, perSecond)
+	chIn := make(chan *points.Points)
+	chOut := throttleChan(chIn, perSecond, nil)
 	wait := time.After(time.Second)
 
 	bw := 0
 
-loop:
+LOOP:
 	for {
 		select {
 		case <-wait:
-			break loop
+			break LOOP
 		default:
 		}
-		chIn <- OnePoint("metric", 1, timestamp)
+		chIn <- points.OnePoint("metric", 1, timestamp)
 		<-chOut
 		bw++
 	}

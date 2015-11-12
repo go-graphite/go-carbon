@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/hydrogen18/stalecucumber"
 )
@@ -39,6 +40,11 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 			},
 		},
 	}
+}
+
+// NowPoint create OnePoint with now timestamp
+func NowPoint(metric string, value float64) *Points {
+	return OnePoint(metric, value, time.Now().Unix())
 }
 
 // Copy returns copy of object

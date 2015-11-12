@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -26,6 +27,7 @@ type TCP struct {
 	listener        *net.TCPListener
 	isPickle        bool
 	metricInterval  time.Duration
+	wg              sync.WaitGroup
 }
 
 // NewTCP create new instance of TCP
@@ -83,12 +85,33 @@ func (rcv *TCP) Addr() net.Addr {
 	return rcv.listener.Addr()
 }
 
+func (rcv *TCP) spawn(f func()) {
+	rcv.wg.Add(1)
+	go func() {
+		f()
+		rcv.wg.Done()
+	}()
+}
+
 func (rcv *TCP) handleConnection(conn net.Conn) {
 	atomic.AddInt32(&rcv.active, 1)
 	defer atomic.AddInt32(&rcv.active, -1)
 
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
+
+	finished := make(chan bool)
+	defer close(finished)
+
+	rcv.spawn(func() {
+		select {
+		case <-finished:
+			return
+		case <-rcv.exit:
+			conn.Close()
+			return
+		}
+	})
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
@@ -127,6 +150,19 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 	var msgLen uint32
 	var err error
+
+	finished := make(chan bool)
+	defer close(finished)
+
+	rcv.spawn(func() {
+		select {
+		case <-finished:
+			return
+		case <-rcv.exit:
+			conn.Close()
+			return
+		}
+	})
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
@@ -177,7 +213,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 		return err
 	}
 
-	go func() {
+	rcv.spawn(func() {
 		rcvName := "tcp"
 		if rcv.isPickle {
 			rcvName = "pickle"
@@ -210,14 +246,14 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				return
 			}
 		}
-	}()
+	})
 
 	handler := rcv.handleConnection
 	if rcv.isPickle {
 		handler = rcv.handlePickle
 	}
 
-	go func() {
+	rcv.spawn(func() {
 		defer rcv.listener.Close()
 
 		for {
@@ -231,10 +267,12 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				continue
 			}
 
-			go handler(conn)
+			rcv.spawn(func() {
+				handler(conn)
+			})
 		}
 
-	}()
+	})
 
 	return nil
 }
@@ -242,4 +280,5 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 // Stop all listeners
 func (rcv *TCP) Stop() {
 	close(rcv.exit)
+	rcv.wg.Wait()
 }

@@ -1,12 +1,11 @@
 package persister
 
 import (
-	"github.com/lomik/go-carbon/points"
-	//"github.com/lomik/go-whisper"
+	"sync"
 
-	"github.com/benbjohnson/clock"
+	"github.com/lomik/go-carbon/points"
+
 	"github.com/stretchr/testify/assert"
-	//"github.com/stretchr/testify/mock"
 
 	"fmt"
 	"math/rand"
@@ -27,7 +26,7 @@ func TestNewWhisper(t *testing.T) {
 		rootPath:       "foo",
 		metricInterval: time.Minute,
 	}
-	assert.NotNil(t, output.exit, "Failed to init exit channel")
+	assert.Nil(t, output.exit)
 	// copy exit channel into out expected struct
 	expected.exit = output.exit
 	assert.Equal(t, *output, expected)
@@ -48,8 +47,6 @@ func TestSetWorkers(t *testing.T) {
 }
 
 func TestStat(t *testing.T) {
-	mock := clock.NewMock()
-	app.Clock = mock
 	fixture := Whisper{
 		graphPrefix: "bing.bang.",
 	}
@@ -59,47 +56,12 @@ func TestStat(t *testing.T) {
 		expected := points.OnePoint(
 			"bing.bang.persister.foo.bar",
 			1.5,
-			0,
+			time.Now().Unix(),
 		)
 		assert.Equal(t, output, expected)
 	}()
 	fixture.Stat("foo.bar", 1.5)
 
-}
-
-/* This mock and associated test doesn't work quite right... I'm not sure why.
-
-type TestWhisperFactory struct {
-	mock.Mock
-}
-
-func (o TestWhisperFactory) Open(path string) (w *whisper.Whisper, err error) {
-	args := o.Called(path)
-	return args.Get(0).(*whisper.Whisper), args.Error(1)
-}
-
-func (o TestWhisperFactory) Create(path string, retentions whisper.Retentions, aggregationMethod whisper.AggregationMethod, xFilesFactor float32) (w *whisper.Whisper, err error) {
-	args := o.Called(path, retentions, aggregationMethod, xFilesFactor)
-	return args.Get(0).(*whisper.Whisper), args.Error(1)
-}
-
-func TestStore(t *testing.T) {
-	factory := TestWhisperFactory{}
-	app.Whisper = &factory
-	inchan := make(chan *points.Points)
-	schemas := WhisperSchemas{}
-	aggrs := WhisperAggregation{}
-	fixture := NewWhisper("foo", &schemas, &aggrs, inchan)
-	p := points.OnePoint("foo.bar", 1.5, 0)
-	factory.On("Open", "foo/foo/bar.wsp").Return(&whisper.Whisper{}, nil)
-	fixture.store(p)
-	// This fails, for unknown reasons
-	//factory.AssertExpectations(t)
-}
-*/
-
-// I don't see a good way to isolate this unit from store
-func TestWorker(t *testing.T) {
 }
 
 func randomPoints(num int, out chan *points.Points) {
@@ -118,69 +80,45 @@ func randomPoints(num int, out chan *points.Points) {
 
 func TestShuffler(t *testing.T) {
 	rand.Seed(time.Now().Unix())
-	fixture := Whisper{exit: make(chan bool)}
+	fixture := Whisper{}
 	in := make(chan *points.Points)
 	out1 := make(chan *points.Points)
 	out2 := make(chan *points.Points)
 	out3 := make(chan *points.Points)
 	out4 := make(chan *points.Points)
 	out := [](chan *points.Points){out1, out2, out3, out4}
-	go fixture.shuffler(in, out)
+	go fixture.shuffler(in, out, nil)
 	buckets := [4]int{0, 0, 0, 0}
-	dotest := make(chan bool)
 	runlength := 10000
-	go func() {
-		for {
-			select {
-			case <-out1:
-				buckets[0]++
-			case <-out2:
-				buckets[1]++
-			case <-out3:
-				buckets[2]++
-			case <-out4:
-				buckets[3]++
-			case <-dotest:
-				total := 0
-				for b := range buckets {
-					assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5% across 4 buckets after %d inputs", runlength))
-					total += buckets[b]
+
+	var wg sync.WaitGroup
+	wg.Add(4)
+
+	for index, _ := range out {
+		outChan := out[index]
+		i := index
+		go func() {
+			for {
+				_, ok := <-outChan
+				if !ok {
+					break
 				}
-				assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")
-
+				buckets[i]++
 			}
-
-		}
-	}()
-	randomPoints(runlength, in)
-	fixture.exit <- true
-	dotest <- true
-
-}
-
-func TestDoCheckpoint(t *testing.T) {
-}
-
-func TestStatWorker(t *testing.T) {
-}
-
-func TestStart(t *testing.T) {
-}
-
-func TestStop(t *testing.T) {
-	fixture := Whisper{exit: make(chan bool)}
-	timeout := make(chan bool, 1)
-	go func() {
-		time.Sleep(1 * time.Second)
-		timeout <- true
-	}()
-	fixture.Stop()
-	select {
-	case _, ok := <-fixture.exit:
-		assert.False(t, ok, "close caused a write to the exit channel")
-		// a read from ch has occurred
-	case _, ok := <-timeout:
-		assert.False(t, ok, "close failed to close the exit channel in a reasonable time")
-		// the read from ch has timed out
+			wg.Done()
+		}()
 	}
+
+	randomPoints(runlength, in)
+
+	close(in)
+	wg.Wait()
+
+	total := 0
+	for b := range buckets {
+		assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5% across 4 buckets after %d inputs", runlength))
+		total += buckets[b]
+	}
+	assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")
+
 }
