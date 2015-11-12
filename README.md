@@ -122,6 +122,8 @@ enabled = false
 
 ## Changelog
 ##### master
+* Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
+* Fix bug: Cache may start save points only after first checkpoint
 
 ##### version 0.6
 * `metric-interval` option 
