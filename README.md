@@ -124,6 +124,7 @@ enabled = false
 ##### master
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
 * Fix bug: Cache may start save points only after first checkpoint
+* Decimal numbers in log files instead of hexademical #22
 
 ##### version 0.6
 * `metric-interval` option 
