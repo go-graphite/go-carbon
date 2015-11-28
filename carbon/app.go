@@ -17,8 +17,6 @@ type App struct {
 	sync.RWMutex
 	ConfigFilename string
 	Config         *Config
-	Schemas        *persister.WhisperSchemas
-	Aggregation    *persister.WhisperAggregation
 	Cache          *cache.Cache
 	UDP            *receiver.UDP
 	TCP            *receiver.TCP
@@ -41,8 +39,6 @@ func New(configFilename string) *App {
 // ParseConfig loads config from config file, schemas.conf, aggregation.conf
 func (app *App) ParseConfig() error {
 	var err error
-	var newSchemas *persister.WhisperSchemas
-	var newAggregation *persister.WhisperAggregation
 
 	cfg := NewConfig()
 	if err := ParseConfig(app.ConfigFilename, cfg); err != nil {
@@ -58,24 +54,22 @@ func (app *App) ParseConfig() error {
 	}
 
 	if cfg.Whisper.Enabled {
-		newSchemas, err = persister.ReadWhisperSchemas(cfg.Whisper.Schemas)
+		cfg.Whisper.Schemas, err = persister.ReadWhisperSchemas(cfg.Whisper.SchemasFilename)
 		if err != nil {
 			return err
 		}
 
-		if cfg.Whisper.Aggregation != "" {
-			newAggregation, err = persister.ReadWhisperAggregation(cfg.Whisper.Aggregation)
+		if cfg.Whisper.AggregationFilename != "" {
+			cfg.Whisper.Aggregation, err = persister.ReadWhisperAggregation(cfg.Whisper.AggregationFilename)
 			if err != nil {
 				return err
 			}
 		} else {
-			newAggregation = persister.NewWhisperAggregation()
+			cfg.Whisper.Aggregation = persister.NewWhisperAggregation()
 		}
 	}
 
 	app.Config = cfg
-	app.Schemas = newSchemas
-	app.Aggregation = newAggregation
 
 	return nil
 }
@@ -291,7 +285,12 @@ func (app *App) Start() (err error) {
 
 	/* WHISPER start */
 	if conf.Whisper.Enabled {
-		whisperPersister := persister.NewWhisper(conf.Whisper.DataDir, app.Schemas, app.Aggregation, core.Out())
+		whisperPersister := persister.NewWhisper(
+			conf.Whisper.DataDir,
+			conf.Whisper.Schemas,
+			conf.Whisper.Aggregation,
+			core.Out(),
+		)
 		whisperPersister.SetGraphPrefix(conf.Common.GraphPrefix)
 		whisperPersister.SetMetricInterval(conf.Common.MetricInterval.Value())
 		whisperPersister.SetMaxUpdatesPerSecond(conf.Whisper.MaxUpdatesPerSecond)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/lomik/go-carbon/persister"
 )
 
 // Duration wrapper time.Duration for TOML
@@ -45,11 +46,13 @@ type commonConfig struct {
 
 type whisperConfig struct {
 	DataDir             string `toml:"data-dir"`
-	Schemas             string `toml:"schemas-file"`
-	Aggregation         string `toml:"aggregation-file"`
+	SchemasFilename     string `toml:"schemas-file"`
+	AggregationFilename string `toml:"aggregation-file"`
 	Workers             int    `toml:"workers"`
 	MaxUpdatesPerSecond int    `toml:"max-updates-per-second"`
 	Enabled             bool   `toml:"enabled"`
+	Schemas             *persister.WhisperSchemas
+	Aggregation         *persister.WhisperAggregation
 }
 
 type cacheConfig struct {
@@ -107,8 +110,8 @@ func NewConfig() *Config {
 		},
 		Whisper: whisperConfig{
 			DataDir:             "/data/graphite/whisper/",
-			Schemas:             "/data/graphite/schemas",
-			Aggregation:         "",
+			SchemasFilename:     "/data/graphite/schemas",
+			AggregationFilename: "",
 			MaxUpdatesPerSecond: 0,
 			Enabled:             true,
 			Workers:             1,
@@ -181,7 +184,7 @@ func TestConfig(rootDir string) string {
 	cfg.Common.Logfile = filepath.Join(rootDir, "go-carbon.log")
 
 	cfg.Whisper.DataDir = rootDir
-	cfg.Whisper.Schemas = filepath.Join(rootDir, "schemas.conf")
+	cfg.Whisper.SchemasFilename = filepath.Join(rootDir, "schemas.conf")
 	// cfg.Whisper.Aggregation = filepath.Join(rootDir, "aggregation.conf")
 
 	configFile := filepath.Join(rootDir, "go-carbon.conf")
@@ -195,7 +198,7 @@ func TestConfig(rootDir string) string {
 		return configFile
 	}
 
-	ioutil.WriteFile(cfg.Whisper.Schemas, []byte(`
+	ioutil.WriteFile(cfg.Whisper.SchemasFilename, []byte(`
 [default]
 priority = 1
 pattern = .*
