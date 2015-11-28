@@ -114,6 +114,19 @@ retentions = 1m:30d,1h:5y
 	)
 }
 
+func TestParseSchemasComment(t *testing.T) {
+	assertSchemas(t, `
+# This is a wild comment
+[carbon]
+pattern = ^carbon\.
+retentions = 60s:90d
+	`,
+		[]testcase{
+			testcase{"carbon", "^carbon\\.", "60s:90d"},
+		},
+	)
+}
+
 func TestParseSchemasSortingAndMatch(t *testing.T) {
 	// mixed record with and without priority. match metrics
 	assert := assert.New(t)

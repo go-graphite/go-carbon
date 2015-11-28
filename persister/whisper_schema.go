@@ -93,6 +93,9 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		if item.name == "" {
 			continue
 		}
+		if strings.HasPrefix(item.name, "#") {
+			continue
+		}
 		patternStr := s.ValueOf("pattern")
 		if patternStr == "" {
 			return nil, fmt.Errorf("[persister] Empty pattern '%s' for [%s]", item.name)
