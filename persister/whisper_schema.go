@@ -90,12 +90,10 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		// configparser just for this
 		item.name =
 			strings.Trim(strings.SplitN(s.String(), "\n", 2)[0], " []")
-		if item.name == "" {
+		if item.name == "" || strings.HasPrefix(item.name, "#") {
 			continue
 		}
-		if strings.HasPrefix(item.name, "#") {
-			continue
-		}
+
 		patternStr := s.ValueOf("pattern")
 		if patternStr == "" {
 			return nil, fmt.Errorf("[persister] Empty pattern '%s' for [%s]", item.name)

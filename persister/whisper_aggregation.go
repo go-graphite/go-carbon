@@ -62,9 +62,10 @@ func ReadWhisperAggregation(file string) (*WhisperAggregation, error) {
 		// configparser just for this
 		item.name =
 			strings.Trim(strings.SplitN(s.String(), "\n", 2)[0], " []")
-		if item.name == "" {
+		if item.name == "" || strings.HasPrefix(item.name, "#") {
 			continue
 		}
+
 		item.pattern, err = regexp.Compile(s.ValueOf("pattern"))
 		if err != nil {
 			logrus.Errorf("[persister] Failed to parse pattern '%s'for [%s]: %s",
