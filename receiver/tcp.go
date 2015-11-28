@@ -237,9 +237,9 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 				rcv.Stat("errors", float64(errors))
 
 				logrus.WithFields(logrus.Fields{
-					"metricsReceived": metricsReceived,
-					"active":          active,
-					"errors":          errors,
+					"metricsReceived": int(metricsReceived),
+					"active":          int(active),
+					"errors":          int(errors),
 				}).Infof("[%s] doCheckpoint()", rcvName)
 			case <-rcv.exit:
 				rcv.listener.Close()

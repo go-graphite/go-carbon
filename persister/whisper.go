@@ -201,9 +201,9 @@ func (p *Whisper) doCheckpoint() {
 	atomic.AddUint32(&p.created, -created)
 
 	logrus.WithFields(logrus.Fields{
-		"updateOperations": float64(updateOperations),
-		"commitedPoints":   float64(commitedPoints),
-		"created":          created,
+		"updateOperations": int(updateOperations),
+		"commitedPoints":   int(commitedPoints),
+		"created":          int(created),
 	}).Info("[persister] doCheckpoint()")
 
 	p.Stat("updateOperations", float64(updateOperations))

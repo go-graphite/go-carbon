@@ -179,9 +179,9 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 				rcv.Stat("udp.errors", float64(errors))
 
 				logrus.WithFields(logrus.Fields{
-					"metricsReceived":    metricsReceived,
-					"incompleteReceived": incompleteReceived,
-					"errors":             errors,
+					"metricsReceived":    int(metricsReceived),
+					"incompleteReceived": int(incompleteReceived),
+					"errors":             int(errors),
 				}).Info("[udp] doCheckpoint()")
 
 			case <-rcv.exit:
