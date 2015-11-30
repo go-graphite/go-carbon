@@ -36,8 +36,8 @@ func New(configFilename string) *App {
 	return app
 }
 
-// ParseConfig loads config from config file, schemas.conf, aggregation.conf
-func (app *App) ParseConfig() error {
+// configure loads config from config file, schemas.conf, aggregation.conf
+func (app *App) configure() error {
 	var err error
 
 	cfg := NewConfig()
@@ -74,8 +74,30 @@ func (app *App) ParseConfig() error {
 	return nil
 }
 
+// ParseConfig loads config from config file, schemas.conf, aggregation.conf
+func (app *App) ParseConfig() error {
+	app.Lock()
+	defer app.Unlock()
+
+	return app.configure()
+}
+
 // ReloadConfig reloads some settings from config
 func (app *App) ReloadConfig() error {
+	app.Lock()
+	defer app.Unlock()
+
+	var err error
+	if err = app.configure(); err != nil {
+		return err
+	}
+
+	if app.Persister != nil {
+		app.Persister.Stop()
+		app.Persister = nil
+	}
+	app.startPersister()
+
 	return nil
 }
 
@@ -194,6 +216,25 @@ func (app *App) GraceStop() {
 	app.stopAll()
 }
 
+func (app *App) startPersister() {
+	if app.Config.Whisper.Enabled {
+		p := persister.NewWhisper(
+			app.Config.Whisper.DataDir,
+			app.Config.Whisper.Schemas,
+			app.Config.Whisper.Aggregation,
+			app.Cache.Out(),
+		)
+		p.SetGraphPrefix(app.Config.Common.GraphPrefix)
+		p.SetMetricInterval(app.Config.Common.MetricInterval.Value())
+		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
+		p.SetWorkers(app.Config.Whisper.Workers)
+
+		p.Start()
+
+		app.Persister = p
+	}
+}
+
 // Start starts
 func (app *App) Start() (err error) {
 	app.Lock()
@@ -215,6 +256,10 @@ func (app *App) Start() (err error) {
 	core.Start()
 
 	app.Cache = core
+
+	/* WHISPER start */
+	app.startPersister()
+	/* WHISPER end */
 
 	/* UDP start */
 	if conf.Udp.Enabled {
@@ -282,25 +327,6 @@ func (app *App) Start() (err error) {
 		app.Pickle = pickleListener
 	}
 	/* PICKLE end */
-
-	/* WHISPER start */
-	if conf.Whisper.Enabled {
-		whisperPersister := persister.NewWhisper(
-			conf.Whisper.DataDir,
-			conf.Whisper.Schemas,
-			conf.Whisper.Aggregation,
-			core.Out(),
-		)
-		whisperPersister.SetGraphPrefix(conf.Common.GraphPrefix)
-		whisperPersister.SetMetricInterval(conf.Common.MetricInterval.Value())
-		whisperPersister.SetMaxUpdatesPerSecond(conf.Whisper.MaxUpdatesPerSecond)
-		whisperPersister.SetWorkers(conf.Whisper.Workers)
-
-		whisperPersister.Start()
-
-		app.Persister = whisperPersister
-	}
-	/* WHISPER end */
 
 	/* CARBONLINK start */
 	if conf.Carbonlink.Enabled {
