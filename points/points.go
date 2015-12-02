@@ -71,13 +71,13 @@ func ParseText(line string) (*Points, error) {
 
 	value, err := strconv.ParseFloat(row[1], 64)
 
-	if err != nil {
+	if err != nil || math.IsNaN(value) {
 		return nil, fmt.Errorf("bad message: %#v", line)
 	}
 
 	tsf, err := strconv.ParseFloat(row[2], 64)
 
-	if err != nil {
+	if err != nil || math.IsNaN(tsf) {
 		return nil, fmt.Errorf("bad message: %#v", line)
 	}
 
