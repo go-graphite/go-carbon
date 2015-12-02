@@ -2,7 +2,7 @@
 
 Name:	    go-carbon
 Version:	%{version}
-Release:	1%{?dist}
+Release:	%{release}%{?dist}
 Summary:	Carbon server for graphite
 
 Group:		Development/Tools

@@ -15,8 +15,15 @@ RPM_TOPDIR="$ROOT/rpm"
 mkdir -p ${RPM_TOPDIR}/{BUILD,RPMS,SOURCES,SRPMS,SPECS,BUILDROOT}
 mkdir -p ${RPM_TOPDIR}/RPMS/{i386,i586,i686,noarch}
 
+VERSION="$(echo $2|awk -F "-" '{print $1}')"
+RELEASE="$(echo $2|awk -F "-" '{print $2}')"
+if [ "$RELEASE" = "" ]; then
+    RELEASE="1"
+fi
+
 rpmbuild -ba --clean $1 \
-    --define "version $2" \
+    --define "version $VERSION" \
+    --define "release $RELEASE" \
     --define "packager ${PACKAGER}" \
     --define "_topdir $RPM_TOPDIR" \
     --define "_tmppath $RPM_TOPDIR/tmp" \
