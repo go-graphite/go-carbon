@@ -63,6 +63,8 @@ func TestCarbonlink(t *testing.T) {
 
 	defer cache.Stop()
 
+	time.Sleep(50 * time.Millisecond)
+
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
