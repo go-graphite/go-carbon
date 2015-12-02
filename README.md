@@ -122,6 +122,8 @@ enabled = false
 
 ## Changelog
 ##### master
+
+##### 0.7-beta1
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
 * Reload persister config (`whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`) on `HUP` signal 
 * Fix bug: Cache may start save points only after first checkpoint

@@ -1,3 +1,15 @@
+go-carbon (0.7-beta1) unstable; urgency=low
+  * Grace stop on USR2 signal: close all socket listeners, flush cache to disk
+    and stop carbon
+  * Reload persister config (whisper section of main config,
+    storage-schemas.conf and storage-aggregation.conf) on HUP signal
+  * Fix bug: Cache may start save points only after first checkpoint
+  * Decimal numbers in log files instead of hexademical #22
+  * Fix bug: NaN values being saved in Whisper datafiles #17 (thanks Andrew
+    Hayworth)
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 3 Dec 2015 01:10:00 +0300
+
 go-carbon (0.6) stable; urgency=low
   * `metric-interval` option
 
