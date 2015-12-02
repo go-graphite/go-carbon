@@ -123,6 +123,7 @@ enabled = false
 ## Changelog
 ##### master
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
+* Reload persister config (`whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`) on `HUP` signal 
 * Fix bug: Cache may start save points only after first checkpoint
 * Decimal numbers in log files instead of hexademical #22
 * Fix bug: NaN values being saved in Whisper datafiles #17 (thanks [Andrew Hayworth](https://github.com/ahayworth))
