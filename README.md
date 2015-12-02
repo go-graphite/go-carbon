@@ -5,7 +5,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 
 ![Architecture](doc/design.png)
 
-### Supported features
+### Features
 * Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
 * Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
 * [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
