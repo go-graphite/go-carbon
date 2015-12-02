@@ -125,6 +125,7 @@ enabled = false
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
 * Fix bug: Cache may start save points only after first checkpoint
 * Decimal numbers in log files instead of hexademical #22
+* Fix bug: NaN values being saved in Whisper datafiles #17 (thanks [Andrew Hayworth](https://github.com/ahayworth))
 
 ##### version 0.6
 * `metric-interval` option 
