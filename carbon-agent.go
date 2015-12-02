@@ -163,6 +163,20 @@ func main() {
 		app.GraceStop()
 	}()
 
+	go func() {
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, syscall.SIGHUP)
+		for {
+			<-c
+			logrus.Info("HUP received. Reload config")
+			if err := app.ReloadConfig(); err != nil {
+				logrus.Errorf("Config reload failed: %s", err.Error())
+			} else {
+				logrus.Info("Config successfully reloaded")
+			}
+		}
+	}()
+
 	app.Loop()
 
 	logrus.Info("stopped")
