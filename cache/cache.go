@@ -3,9 +3,9 @@ package cache
 import (
 	"fmt"
 	"sort"
-	"sync"
 	"time"
 
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 
 	"github.com/Sirupsen/logrus"
@@ -19,6 +19,7 @@ func (v queue) Less(i, j int) bool { return v[i].count < v[j].count }
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
+	helper.Stoppable
 	data           map[string]*points.Points
 	size           int
 	maxSize        int
@@ -26,13 +27,11 @@ type Cache struct {
 	inputCapacity  int                 // buffer size of inputChan
 	outputChan     chan *points.Points // to persisters
 	queryChan      chan *Query         // from carbonlink
-	exitChan       chan bool           // close for stop worker
 	metricInterval time.Duration       // checkpoint interval
 	graphPrefix    string
 	queryCnt       int
 	overflowCnt    int // drop packages if cache full
 	queue          queue
-	wg             sync.WaitGroup
 }
 
 // New create Cache instance and run in/out goroutine
@@ -41,7 +40,6 @@ func New() *Cache {
 		data:           make(map[string]*points.Points, 0),
 		size:           0,
 		maxSize:        1000000,
-		exitChan:       make(chan bool),
 		metricInterval: time.Minute,
 		queryChan:      make(chan *Query, 16),
 		graphPrefix:    "carbon.",
@@ -61,14 +59,6 @@ func (c *Cache) SetInputCapacity(size int) {
 // SetMetricInterval sets doChekpoint interval
 func (c *Cache) SetMetricInterval(interval time.Duration) {
 	c.metricInterval = interval
-}
-
-func (c *Cache) spawn(f func()) {
-	c.wg.Add(1)
-	go func() {
-		f()
-		c.wg.Done()
-	}()
 }
 
 func (c *Cache) getNext() *points.Points {
@@ -213,7 +203,7 @@ func (c *Cache) doCheckpoint() {
 	c.overflowCnt = 0
 }
 
-func (c *Cache) worker() {
+func (c *Cache) worker(exitChan chan bool) {
 	var values *points.Points
 	var sendTo chan *points.Points
 	var forceReceive bool
@@ -264,7 +254,7 @@ MAIN_LOOP:
 			} else {
 				c.overflowCnt++
 			}
-		case <-c.exitChan: // exit
+		case <-exitChan: // exit
 			break MAIN_LOOP
 		}
 	}
@@ -299,19 +289,16 @@ func (c *Cache) SetOutputChanSize(size int) {
 
 // Start worker
 func (c *Cache) Start() {
-	if c.inputChan == nil {
-		c.inputChan = make(chan *points.Points, c.inputCapacity)
-	}
-	if c.outputChan == nil {
-		c.outputChan = make(chan *points.Points, 1024)
-	}
-	c.spawn(func() {
-		c.worker()
-	})
-}
+	c.StartFunc(func() {
+		if c.inputChan == nil {
+			c.inputChan = make(chan *points.Points, c.inputCapacity)
+		}
+		if c.outputChan == nil {
+			c.outputChan = make(chan *points.Points, 1024)
+		}
 
-// Stop worker
-func (c *Cache) Stop() {
-	close(c.exitChan)
-	c.wg.Wait()
+		c.Go(func(exit chan bool) {
+			c.worker(exit)
+		})
+	})
 }
