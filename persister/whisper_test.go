@@ -26,9 +26,6 @@ func TestNewWhisper(t *testing.T) {
 		rootPath:       "foo",
 		metricInterval: time.Minute,
 	}
-	assert.Nil(t, output.exit)
-	// copy exit channel into out expected struct
-	expected.exit = output.exit
 	assert.Equal(t, *output, expected)
 }
 

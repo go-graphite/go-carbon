@@ -5,9 +5,10 @@ import "sync"
 // Stoppable is abstract class with Start/Stop methods
 type Stoppable struct {
 	sync.RWMutex
-	exit chan bool
-	wg   sync.WaitGroup
-	Go   func(callable func(exit chan bool))
+	exit     chan bool
+	wg       sync.WaitGroup
+	Go       func(callable func(exit chan bool))
+	WithExit func(callable func(exit chan bool))
 }
 
 // Start ...
@@ -19,13 +20,6 @@ func (s *Stoppable) Start() {
 func (s *Stoppable) Stop() {
 	s.StopFunc(func() {})
 }
-
-// // Exit returns exit channel
-// func (s *Stoppable) Exit() chan bool {
-// 	s.RLock()
-// 	defer s.RUnlock()
-// 	return s.exit
-// }
 
 // StartFunc ...
 func (s *Stoppable) StartFunc(callable func()) {
@@ -45,6 +39,9 @@ func (s *Stoppable) StartFunc(callable func()) {
 			callable(exit)
 			s.wg.Done()
 		}()
+	}
+	s.WithExit = func(callable func(exit chan bool)) {
+		callable(exit)
 	}
 	callable()
 }

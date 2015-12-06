@@ -3,26 +3,25 @@ package persister
 import (
 	"fmt"
 	"hash/crc32"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-whisper"
 
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
 
 // Whisper write data to *.wsp files
 type Whisper struct {
+	helper.Stoppable
 	updateOperations    uint32
 	commitedPoints      uint32
 	in                  chan *points.Points
-	exit                chan bool
 	schemas             *WhisperSchemas
 	aggregation         *WhisperAggregation
 	metricInterval      time.Duration // checkpoint interval
@@ -32,14 +31,12 @@ type Whisper struct {
 	created             uint32 // counter
 	maxUpdatesPerSecond int
 	mockStore           func(p *Whisper, values *points.Points)
-	wg                  sync.WaitGroup
 }
 
 // NewWhisper create instance of Whisper
 func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points) *Whisper {
 	return &Whisper{
 		in:                  in,
-		exit:                nil,
 		schemas:             schemas,
 		aggregation:         aggregation,
 		metricInterval:      time.Minute,
@@ -81,14 +78,6 @@ func (p *Whisper) Stat(metric string, value float64) {
 		value,
 		time.Now().Unix(),
 	)
-}
-
-func (p *Whisper) spawn(f func()) {
-	p.wg.Add(1)
-	go func() {
-		f()
-		p.wg.Done()
-	}()
 }
 
 func store(p *Whisper, values *points.Points) {
@@ -219,14 +208,14 @@ func (p *Whisper) doCheckpoint() {
 }
 
 // stat timer
-func (p *Whisper) statWorker() {
+func (p *Whisper) statWorker(exit chan bool) {
 	ticker := time.NewTicker(p.metricInterval)
 	defer ticker.Stop()
 
 LOOP:
 	for {
 		select {
-		case <-p.exit:
+		case <-exit:
 			break LOOP
 		case <-ticker.C:
 			go p.doCheckpoint()
@@ -274,51 +263,43 @@ func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *
 // Start worker
 func (p *Whisper) Start() {
 
-	if p.exit != nil { // already started
-		log.Fatal("Persister already started")
-		return
-	}
-	p.exit = make(chan bool)
+	p.StartFunc(func() {
 
-	p.spawn(func() {
-		p.statWorker()
+		p.Go(func(exitChan chan bool) {
+			p.statWorker(exitChan)
+		})
+
+		p.WithExit(func(exitChan chan bool) {
+
+			inChan := p.in
+
+			readerExit := exitChan
+
+			if p.maxUpdatesPerSecond > 0 {
+				inChan = throttleChan(inChan, p.maxUpdatesPerSecond, exitChan)
+				readerExit = nil // read all before channel is closed
+			}
+
+			if p.workersCount <= 1 { // solo worker
+				p.Go(func(e chan bool) {
+					p.worker(inChan, readerExit)
+				})
+			} else {
+				var channels [](chan *points.Points)
+
+				for i := 0; i < p.workersCount; i++ {
+					ch := make(chan *points.Points, 32)
+					channels = append(channels, ch)
+					p.Go(func(e chan bool) {
+						p.worker(ch, nil)
+					})
+				}
+
+				p.Go(func(e chan bool) {
+					p.shuffler(inChan, channels, readerExit)
+				})
+			}
+
+		})
 	})
-
-	inChan := p.in
-
-	readerExit := p.exit
-
-	if p.maxUpdatesPerSecond > 0 {
-		inChan = throttleChan(inChan, p.maxUpdatesPerSecond, p.exit)
-		readerExit = nil // read all before channel is closed
-	}
-
-	if p.workersCount <= 1 { // solo worker
-		p.spawn(func() {
-			p.worker(inChan, readerExit)
-		})
-	} else {
-		var channels [](chan *points.Points)
-
-		for i := 0; i < p.workersCount; i++ {
-			ch := make(chan *points.Points, 32)
-			channels = append(channels, ch)
-			p.spawn(func() {
-				p.worker(ch, nil)
-			})
-		}
-
-		p.spawn(func() {
-			p.shuffler(inChan, channels, readerExit)
-		})
-	}
-}
-
-// Stop worker
-func (p *Whisper) Stop() {
-	if p.exit != nil {
-		close(p.exit)
-		p.wg.Wait()
-		p.exit = nil
-	}
 }
