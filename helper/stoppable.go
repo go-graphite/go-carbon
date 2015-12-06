@@ -61,4 +61,7 @@ func (s *Stoppable) StopFunc(callable func()) {
 	s.wg.Wait()
 	s.exit = nil
 	s.Go = func(callable func(exit chan bool)) {}
+	s.WithExit = func(callable func(exit chan bool)) {
+		callable(nil)
+	}
 }
