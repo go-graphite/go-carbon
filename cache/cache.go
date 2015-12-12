@@ -289,7 +289,7 @@ func (c *Cache) SetOutputChanSize(size int) {
 
 // Start worker
 func (c *Cache) Start() {
-	c.StartFunc(func() {
+	c.StartFunc(func() error {
 		if c.inputChan == nil {
 			c.inputChan = make(chan *points.Points, c.inputCapacity)
 		}
@@ -300,5 +300,7 @@ func (c *Cache) Start() {
 		c.Go(func(exit chan bool) {
 			c.worker(exit)
 		})
+
+		return nil
 	})
 }

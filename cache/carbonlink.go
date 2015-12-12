@@ -177,26 +177,27 @@ func (listener *CarbonlinkListener) Addr() net.Addr {
 
 // Listen bind port. Receive messages and send to out channel
 func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
-	var err error
-	listener.tcpListener, err = net.ListenTCP("tcp", addr)
-	if err != nil {
-		return err
-	}
+	listener.StartFunc(func() error {
+		tcpListener, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			return err
+		}
 
-	listener.StartFunc(func() {
+		listener.tcpListener = tcpListener
+
 		listener.Go(func(exit chan bool) {
 			select {
 			case <-exit:
-				listener.tcpListener.Close()
+				tcpListener.Close()
 			}
 		})
 
 		listener.Go(func(exit chan bool) {
-			defer listener.tcpListener.Close()
+			defer tcpListener.Close()
 
 			for {
 
-				conn, err := listener.tcpListener.Accept()
+				conn, err := tcpListener.Accept()
 				if err != nil {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						break
@@ -208,6 +209,8 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 				go listener.handleConnection(conn)
 			}
 		})
+
+		return nil
 	})
 
 	return nil

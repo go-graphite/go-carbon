@@ -149,109 +149,114 @@ func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
 	}
 }
 
-// Listen bind port. Receive messages and send to out channel
-func (rcv *UDP) Listen(addr *net.UDPAddr) error {
-	var err error
-	rcv.conn, err = net.ListenUDP("udp", addr)
-	if err != nil {
-		return err
+func (rcv *UDP) statWorker(exit chan bool) {
+	ticker := time.NewTicker(rcv.metricInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+			atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+			rcv.Stat("udp.metricsReceived", float64(metricsReceived))
+
+			incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
+			atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
+			rcv.Stat("udp.incompleteReceived", float64(incompleteReceived))
+
+			errors := atomic.LoadUint32(&rcv.errors)
+			atomic.AddUint32(&rcv.errors, -errors)
+			rcv.Stat("udp.errors", float64(errors))
+
+			logrus.WithFields(logrus.Fields{
+				"metricsReceived":    int(metricsReceived),
+				"incompleteReceived": int(incompleteReceived),
+				"errors":             int(errors),
+			}).Info("[udp] doCheckpoint()")
+
+		case <-exit:
+			rcv.conn.Close()
+			return
+		}
 	}
+}
 
-	rcv.StartFunc(func() {
+func (rcv *UDP) receiveWorker(exit chan bool) {
+	defer rcv.conn.Close()
 
-		rcv.Go(func(exit chan bool) {
-			ticker := time.NewTicker(rcv.metricInterval)
-			defer ticker.Stop()
+	var buf [65535]byte
 
-			for {
-				select {
-				case <-ticker.C:
-					metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
-					atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-					rcv.Stat("udp.metricsReceived", float64(metricsReceived))
+	var data *bytes.Buffer
 
-					incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
-					atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
-					rcv.Stat("udp.incompleteReceived", float64(incompleteReceived))
+	lines := newIncompleteStorage()
 
-					errors := atomic.LoadUint32(&rcv.errors)
-					atomic.AddUint32(&rcv.errors, -errors)
-					rcv.Stat("udp.errors", float64(errors))
-
-					logrus.WithFields(logrus.Fields{
-						"metricsReceived":    int(metricsReceived),
-						"incompleteReceived": int(incompleteReceived),
-						"errors":             int(errors),
-					}).Info("[udp] doCheckpoint()")
-
-				case <-exit:
-					rcv.conn.Close()
-					return
-				}
+	for {
+		rlen, peer, err := rcv.conn.ReadFromUDP(buf[:])
+		if err != nil {
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				break
 			}
-		})
+			atomic.AddUint32(&rcv.errors, 1)
+			logrus.Error(err)
+			continue
+		}
 
-		rcv.Go(func(exit chan bool) {
-			defer rcv.conn.Close()
+		prev := lines.pop(peer.String())
 
-			var buf [2048]byte
+		if prev != nil {
+			data = bytes.NewBuffer(prev)
+			data.Write(buf[:rlen])
+		} else {
+			data = bytes.NewBuffer(buf[:rlen])
+		}
 
-			var data *bytes.Buffer
+		for {
+			line, err := data.ReadBytes('\n')
 
-			lines := newIncompleteStorage()
+			if err != nil {
+				if err == io.EOF {
+					if len(line) > 0 { // incomplete line received
 
-			for {
-				rlen, peer, err := rcv.conn.ReadFromUDP(buf[:])
-				if err != nil {
-					if strings.Contains(err.Error(), "use of closed network connection") {
-						break
+						if rcv.logIncomplete {
+							logIncomplete(peer, buf[:rlen], line)
+						}
+
+						lines.store(peer.String(), line)
+						atomic.AddUint32(&rcv.incompleteReceived, 1)
 					}
+				} else {
 					atomic.AddUint32(&rcv.errors, 1)
 					logrus.Error(err)
-					continue
 				}
-
-				prev := lines.pop(peer.String())
-
-				if prev != nil {
-					data = bytes.NewBuffer(prev)
-					data.Write(buf[:rlen])
+				break
+			}
+			if len(line) > 0 { // skip empty lines
+				if msg, err := points.ParseText(string(line)); err != nil {
+					atomic.AddUint32(&rcv.errors, 1)
+					logrus.Info(err)
 				} else {
-					data = bytes.NewBuffer(buf[:rlen])
-				}
-
-				for {
-					line, err := data.ReadBytes('\n')
-
-					if err != nil {
-						if err == io.EOF {
-							if len(line) > 0 { // incomplete line received
-
-								if rcv.logIncomplete {
-									logIncomplete(peer, buf[:rlen], line)
-								}
-
-								lines.store(peer.String(), line)
-								atomic.AddUint32(&rcv.incompleteReceived, 1)
-							}
-						} else {
-							atomic.AddUint32(&rcv.errors, 1)
-							logrus.Error(err)
-						}
-						break
-					}
-					if len(line) > 0 { // skip empty lines
-						if msg, err := points.ParseText(string(line)); err != nil {
-							atomic.AddUint32(&rcv.errors, 1)
-							logrus.Info(err)
-						} else {
-							atomic.AddUint32(&rcv.metricsReceived, 1)
-							rcv.out <- msg
-						}
-					}
+					atomic.AddUint32(&rcv.metricsReceived, 1)
+					rcv.out <- msg
 				}
 			}
-		})
+		}
+	}
+}
+
+// Listen bind port. Receive messages and send to out channel
+func (rcv *UDP) Listen(addr *net.UDPAddr) error {
+	return rcv.StartFunc(func() error {
+		var err error
+		rcv.conn, err = net.ListenUDP("udp", addr)
+		if err != nil {
+			return err
+		}
+
+		rcv.Go(rcv.statWorker)
+
+		rcv.Go(rcv.receiveWorker)
+
+		return nil
 	})
 
 	return nil

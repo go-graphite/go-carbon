@@ -2,6 +2,9 @@ package helper
 
 import "sync"
 
+type StoppableInterface interface {
+}
+
 // Stoppable is abstract class with Start/Stop methods
 type Stoppable struct {
 	sync.RWMutex
@@ -13,7 +16,7 @@ type Stoppable struct {
 
 // Start ...
 func (s *Stoppable) Start() {
-	s.StartFunc(func() {})
+	s.StartFunc(func() error { return nil })
 }
 
 // Stop ...
@@ -22,13 +25,13 @@ func (s *Stoppable) Stop() {
 }
 
 // StartFunc ...
-func (s *Stoppable) StartFunc(callable func()) {
+func (s *Stoppable) StartFunc(startProcedure func() error) error {
 	s.Lock()
 	defer s.Unlock()
 
 	// already started
 	if s.exit != nil {
-		return
+		return nil
 	}
 
 	exit := make(chan bool)
@@ -43,14 +46,18 @@ func (s *Stoppable) StartFunc(callable func()) {
 	s.WithExit = func(callable func(exit chan bool)) {
 		callable(exit)
 	}
-	callable()
+
+	err := startProcedure()
+
+	// stop all if start failed
+	if err != nil {
+		s.doStop(func() {})
+	}
+
+	return err
 }
 
-// StopFunc ...
-func (s *Stoppable) StopFunc(callable func()) {
-	s.Lock()
-	defer s.Unlock()
-
+func (s *Stoppable) doStop(callable func()) {
 	// already stopped
 	if s.exit == nil {
 		return
@@ -64,4 +71,17 @@ func (s *Stoppable) StopFunc(callable func()) {
 	s.WithExit = func(callable func(exit chan bool)) {
 		callable(nil)
 	}
+}
+
+// StopFunc ...
+func (s *Stoppable) StopFunc(callable func()) {
+	s.Lock()
+	defer s.Unlock()
+
+	// already stopped
+	if s.exit == nil {
+		return
+	}
+
+	s.doStop(callable)
 }

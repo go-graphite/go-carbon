@@ -196,13 +196,12 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
-	var err error
-	rcv.listener, err = net.ListenTCP("tcp", addr)
-	if err != nil {
-		return err
-	}
+	rcv.StartFunc(func() error {
 
-	rcv.StartFunc(func() {
+		tcpListener, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			return err
+		}
 
 		rcv.Go(func(exit chan bool) {
 			rcvName := "tcp"
@@ -233,7 +232,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 						"errors":          int(errors),
 					}).Infof("[%s] doCheckpoint()", rcvName)
 				case <-exit:
-					rcv.listener.Close()
+					tcpListener.Close()
 					return
 				}
 			}
@@ -245,11 +244,11 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 		}
 
 		rcv.Go(func(exit chan bool) {
-			defer rcv.listener.Close()
+			defer tcpListener.Close()
 
 			for {
 
-				conn, err := rcv.listener.Accept()
+				conn, err := tcpListener.Accept()
 				if err != nil {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						break
@@ -265,6 +264,9 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 
 		})
 
+		rcv.listener = tcpListener
+
+		return nil
 	})
 
 	return nil

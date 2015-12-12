@@ -263,7 +263,7 @@ func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *
 // Start worker
 func (p *Whisper) Start() {
 
-	p.StartFunc(func() {
+	p.StartFunc(func() error {
 
 		p.Go(func(exitChan chan bool) {
 			p.statWorker(exitChan)
@@ -301,5 +301,7 @@ func (p *Whisper) Start() {
 			}
 
 		})
+
+		return nil
 	})
 }
