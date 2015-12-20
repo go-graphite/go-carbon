@@ -12,6 +12,8 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/hydrogen18/stalecucumber"
+
+	"github.com/lomik/go-carbon/helper"
 )
 
 // CarbonlinkRequest ...
@@ -58,9 +60,8 @@ func ReadCarbonlinkRequest(reader io.Reader) ([]byte, error) {
 
 // CarbonlinkListener receive cache Carbonlinkrequests from graphite-web
 type CarbonlinkListener struct {
+	helper.Stoppable
 	queryChan    chan *Query
-	exit         chan bool
-	finished     chan bool
 	readTimeout  time.Duration
 	queryTimeout time.Duration
 	tcpListener  *net.TCPListener
@@ -69,8 +70,6 @@ type CarbonlinkListener struct {
 // NewCarbonlinkListener create new instance of CarbonlinkListener
 func NewCarbonlinkListener(queryChan chan *Query) *CarbonlinkListener {
 	return &CarbonlinkListener{
-		exit:         make(chan bool),
-		finished:     make(chan bool),
 		queryChan:    queryChan,
 		readTimeout:  30 * time.Second,
 		queryTimeout: 100 * time.Millisecond,
@@ -178,45 +177,41 @@ func (listener *CarbonlinkListener) Addr() net.Addr {
 
 // Listen bind port. Receive messages and send to out channel
 func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
-	var err error
-	listener.tcpListener, err = net.ListenTCP("tcp", addr)
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		select {
-		case <-listener.exit:
-			listener.tcpListener.Close()
+	listener.StartFunc(func() error {
+		tcpListener, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			return err
 		}
-	}()
 
-	go func() {
-		defer listener.tcpListener.Close()
+		listener.tcpListener = tcpListener
 
-		for {
-
-			conn, err := listener.tcpListener.Accept()
-			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
-					break
-				}
-				logrus.Warningf("[carbonlink] Failed to accept connection: %s", err)
-				continue
+		listener.Go(func(exit chan bool) {
+			select {
+			case <-exit:
+				tcpListener.Close()
 			}
+		})
 
-			go listener.handleConnection(conn)
-		}
+		listener.Go(func(exit chan bool) {
+			defer tcpListener.Close()
 
-		close(listener.finished)
+			for {
 
-	}()
+				conn, err := tcpListener.Accept()
+				if err != nil {
+					if strings.Contains(err.Error(), "use of closed network connection") {
+						break
+					}
+					logrus.Warningf("[carbonlink] Failed to accept connection: %s", err)
+					continue
+				}
+
+				go listener.handleConnection(conn)
+			}
+		})
+
+		return nil
+	})
 
 	return nil
-}
-
-// Stop all listeners
-func (listener *CarbonlinkListener) Stop() {
-	close(listener.exit)
-	<-listener.finished
 }

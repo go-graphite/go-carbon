@@ -7,10 +7,10 @@ import (
 	"io"
 	"net"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 
 	"github.com/Sirupsen/logrus"
@@ -18,8 +18,8 @@ import (
 
 // TCP receive metrics from TCP connections
 type TCP struct {
+	helper.Stoppable
 	out             chan *points.Points
-	exit            chan bool
 	graphPrefix     string
 	metricsReceived uint32
 	errors          uint32
@@ -27,14 +27,12 @@ type TCP struct {
 	listener        *net.TCPListener
 	isPickle        bool
 	metricInterval  time.Duration
-	wg              sync.WaitGroup
 }
 
 // NewTCP create new instance of TCP
 func NewTCP(out chan *points.Points) *TCP {
 	return &TCP{
 		out:            out,
-		exit:           make(chan bool),
 		isPickle:       false,
 		metricInterval: time.Minute,
 	}
@@ -44,7 +42,6 @@ func NewTCP(out chan *points.Points) *TCP {
 func NewPickle(out chan *points.Points) *TCP {
 	return &TCP{
 		out:            out,
-		exit:           make(chan bool),
 		isPickle:       true,
 		metricInterval: time.Minute,
 	}
@@ -85,14 +82,6 @@ func (rcv *TCP) Addr() net.Addr {
 	return rcv.listener.Addr()
 }
 
-func (rcv *TCP) spawn(f func()) {
-	rcv.wg.Add(1)
-	go func() {
-		f()
-		rcv.wg.Done()
-	}()
-}
-
 func (rcv *TCP) handleConnection(conn net.Conn) {
 	atomic.AddInt32(&rcv.active, 1)
 	defer atomic.AddInt32(&rcv.active, -1)
@@ -103,11 +92,11 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 	finished := make(chan bool)
 	defer close(finished)
 
-	rcv.spawn(func() {
+	rcv.Go(func(exit chan bool) {
 		select {
 		case <-finished:
 			return
-		case <-rcv.exit:
+		case <-exit:
 			conn.Close()
 			return
 		}
@@ -154,11 +143,11 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	finished := make(chan bool)
 	defer close(finished)
 
-	rcv.spawn(func() {
+	rcv.Go(func(exit chan bool) {
 		select {
 		case <-finished:
 			return
-		case <-rcv.exit:
+		case <-exit:
 			conn.Close()
 			return
 		}
@@ -207,78 +196,78 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
-	var err error
-	rcv.listener, err = net.ListenTCP("tcp", addr)
-	if err != nil {
-		return err
-	}
+	rcv.StartFunc(func() error {
 
-	rcv.spawn(func() {
-		rcvName := "tcp"
-		if rcv.isPickle {
-			rcvName = "pickle"
+		tcpListener, err := net.ListenTCP("tcp", addr)
+		if err != nil {
+			return err
 		}
 
-		ticker := time.NewTicker(rcv.metricInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
-				atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-				rcv.Stat("metricsReceived", float64(metricsReceived))
-
-				active := float64(atomic.LoadInt32(&rcv.active))
-				rcv.Stat("active", active)
-
-				errors := atomic.LoadUint32(&rcv.errors)
-				atomic.AddUint32(&rcv.errors, -errors)
-				rcv.Stat("errors", float64(errors))
-
-				logrus.WithFields(logrus.Fields{
-					"metricsReceived": int(metricsReceived),
-					"active":          int(active),
-					"errors":          int(errors),
-				}).Infof("[%s] doCheckpoint()", rcvName)
-			case <-rcv.exit:
-				rcv.listener.Close()
-				return
+		rcv.Go(func(exit chan bool) {
+			rcvName := "tcp"
+			if rcv.isPickle {
+				rcvName = "pickle"
 			}
-		}
-	})
 
-	handler := rcv.handleConnection
-	if rcv.isPickle {
-		handler = rcv.handlePickle
-	}
+			ticker := time.NewTicker(rcv.metricInterval)
+			defer ticker.Stop()
 
-	rcv.spawn(func() {
-		defer rcv.listener.Close()
+			for {
+				select {
+				case <-ticker.C:
+					metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+					atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+					rcv.Stat("metricsReceived", float64(metricsReceived))
 
-		for {
+					active := float64(atomic.LoadInt32(&rcv.active))
+					rcv.Stat("active", active)
 
-			conn, err := rcv.listener.Accept()
-			if err != nil {
-				if strings.Contains(err.Error(), "use of closed network connection") {
-					break
+					errors := atomic.LoadUint32(&rcv.errors)
+					atomic.AddUint32(&rcv.errors, -errors)
+					rcv.Stat("errors", float64(errors))
+
+					logrus.WithFields(logrus.Fields{
+						"metricsReceived": int(metricsReceived),
+						"active":          int(active),
+						"errors":          int(errors),
+					}).Infof("[%s] doCheckpoint()", rcvName)
+				case <-exit:
+					tcpListener.Close()
+					return
 				}
-				logrus.Warningf("[tcp] Failed to accept connection: %s", err)
-				continue
 			}
+		})
 
-			rcv.spawn(func() {
-				handler(conn)
-			})
+		handler := rcv.handleConnection
+		if rcv.isPickle {
+			handler = rcv.handlePickle
 		}
 
+		rcv.Go(func(exit chan bool) {
+			defer tcpListener.Close()
+
+			for {
+
+				conn, err := tcpListener.Accept()
+				if err != nil {
+					if strings.Contains(err.Error(), "use of closed network connection") {
+						break
+					}
+					logrus.Warningf("[tcp] Failed to accept connection: %s", err)
+					continue
+				}
+
+				rcv.Go(func(exit chan bool) {
+					handler(conn)
+				})
+			}
+
+		})
+
+		rcv.listener = tcpListener
+
+		return nil
 	})
 
 	return nil
-}
-
-// Stop all listeners
-func (rcv *TCP) Stop() {
-	close(rcv.exit)
-	rcv.wg.Wait()
 }
