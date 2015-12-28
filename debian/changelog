@@ -1,3 +1,8 @@
+go-carbon (0.7-beta2) unstable; urgency=low
+  * Code refactoring
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Mon, 28 Dec 2015 21:30:00 +0300
+
 go-carbon (0.7-beta1) unstable; urgency=low
   * Grace stop on USR2 signal: close all socket listeners, flush cache to disk
     and stop carbon
