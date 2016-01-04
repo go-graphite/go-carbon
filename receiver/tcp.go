@@ -196,7 +196,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
-	rcv.StartFunc(func() error {
+	return rcv.StartFunc(func() error {
 
 		tcpListener, err := net.ListenTCP("tcp", addr)
 		if err != nil {
@@ -268,6 +268,4 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 
 		return nil
 	})
-
-	return nil
 }
