@@ -1,3 +1,8 @@
+go-carbon (0.7-beta3) unstable; urgency=low
+  * Missing error handling
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 5 Jan 2016 19:00:00 +0300
+
 go-carbon (0.7-beta2) unstable; urgency=low
   * Code refactoring
 
