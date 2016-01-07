@@ -19,14 +19,15 @@ import (
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
-	out             chan *points.Points
-	graphPrefix     string
-	metricsReceived uint32
-	errors          uint32
-	active          int32 // counter
-	listener        *net.TCPListener
-	isPickle        bool
-	metricInterval  time.Duration
+	out                  chan *points.Points
+	graphPrefix          string
+	maxPickleMessageSize uint32
+	metricsReceived      uint32
+	errors               uint32
+	active               int32 // counter
+	listener             *net.TCPListener
+	isPickle             bool
+	metricInterval       time.Duration
 }
 
 // NewTCP create new instance of TCP
@@ -41,9 +42,10 @@ func NewTCP(out chan *points.Points) *TCP {
 // NewPickle create new instance of TCP with pickle listener enabled
 func NewPickle(out chan *points.Points) *TCP {
 	return &TCP{
-		out:            out,
-		isPickle:       true,
-		metricInterval: time.Minute,
+		out:                  out,
+		isPickle:             true,
+		metricInterval:       time.Minute,
+		maxPickleMessageSize: 67108864, // 64 Mb
 	}
 }
 
@@ -55,6 +57,11 @@ func (rcv *TCP) SetGraphPrefix(prefix string) {
 // SetMetricInterval sets doChekpoint interval
 func (rcv *TCP) SetMetricInterval(interval time.Duration) {
 	rcv.metricInterval = interval
+}
+
+// SetMaxPickleMessageSize sets maxPickleMessageSize (in bytes)
+func (rcv *TCP) SetMaxPickleMessageSize(newSize uint32) {
+	rcv.maxPickleMessageSize = newSize
 }
 
 // Stat sends internal statistics to cache
@@ -131,6 +138,12 @@ func (rcv *TCP) handleConnection(conn net.Conn) {
 }
 
 func (rcv *TCP) handlePickle(conn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.Errorf("[pickle] Unknown error recovered: %s", r)
+		}
+	}()
+
 	atomic.AddInt32(&rcv.active, 1)
 	defer atomic.AddInt32(&rcv.active, -1)
 
@@ -153,6 +166,8 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 		}
 	})
 
+	maxMessageSize := rcv.maxPickleMessageSize
+
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 
@@ -165,6 +180,12 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 			atomic.AddUint32(&rcv.errors, 1)
 			logrus.Warningf("[pickle] Can't read message length: %s", err.Error())
+			return
+		}
+
+		if msgLen > maxMessageSize {
+			atomic.AddUint32(&rcv.errors, 1)
+			logrus.Warningf("[pickle] Bad message size: %d", msgLen)
 			return
 		}
 

@@ -71,6 +71,12 @@ type tcpConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type pickleConfig struct {
+	Listen         string `toml:"listen"`
+	MaxMessageSize int    `toml:"max-message-size"`
+	Enabled        bool   `toml:"enabled"`
+}
+
 type carbonlinkConfig struct {
 	Listen       string    `toml:"listen"`
 	Enabled      bool      `toml:"enabled"`
@@ -90,7 +96,7 @@ type Config struct {
 	Cache      cacheConfig      `toml:"cache"`
 	Udp        udpConfig        `toml:"udp"`
 	Tcp        tcpConfig        `toml:"tcp"`
-	Pickle     tcpConfig        `toml:"pickle"`
+	Pickle     pickleConfig     `toml:"pickle"`
 	Carbonlink carbonlinkConfig `toml:"carbonlink"`
 	Pprof      pprofConfig      `toml:"pprof"`
 }
@@ -129,9 +135,10 @@ func NewConfig() *Config {
 			Listen:  ":2003",
 			Enabled: true,
 		},
-		Pickle: tcpConfig{
-			Listen:  ":2004",
-			Enabled: true,
+		Pickle: pickleConfig{
+			Listen:         ":2004",
+			Enabled:        true,
+			MaxMessageSize: 67108864, // 64 Mb
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

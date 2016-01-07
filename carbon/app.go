@@ -319,6 +319,7 @@ func (app *App) Start() (err error) {
 		pickleListener := receiver.NewPickle(core.In())
 		pickleListener.SetGraphPrefix(conf.Common.GraphPrefix)
 		pickleListener.SetMetricInterval(conf.Common.MetricInterval.Value())
+		pickleListener.SetMaxPickleMessageSize(uint32(conf.Pickle.MaxMessageSize))
 
 		if err = pickleListener.Listen(pickleAddr); err != nil {
 			return
