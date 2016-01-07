@@ -106,6 +106,8 @@ enabled = true
 [pickle]
 listen = ":2004"
 enabled = true
+# Limit message size for prevent memory overflow
+max-message-size = 67108864
 
 [carbonlink]
 listen = "127.0.0.1:7002"
@@ -123,12 +125,13 @@ enabled = false
 ## Changelog
 ##### master
 
-##### 0.7-beta1
+##### 0.7-beta4
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
 * Reload persister config (`whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`) on `HUP` signal 
 * Fix bug: Cache may start save points only after first checkpoint
 * Decimal numbers in log files instead of hexademical #22
 * Fix bug: NaN values being saved in Whisper datafiles #17 (thanks [Andrew Hayworth](https://github.com/ahayworth))
+* Fix bug: may crash on bad pickle message with big message size in header #30. Added option `pickle.max-message-size` with 64 MB default value
 
 ##### version 0.6
 * `metric-interval` option 

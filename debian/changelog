@@ -1,3 +1,9 @@
+go-carbon (0.7-beta4) unstable; urgency=low
+  * Fix bug: may crash on bad pickle message with big message size in header
+    #30. Added option `pickle.max-message-size` with 64 MB default value
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 8 Jan 2016 00:50:00 +0300
+
 go-carbon (0.7-beta3) unstable; urgency=low
   * Missing error handling
 
