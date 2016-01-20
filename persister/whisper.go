@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -226,13 +227,31 @@ LOOP:
 func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
 	out := make(chan *points.Points, cap(in))
 
-	step := time.Duration(1e9/ratePerSec) * time.Nanosecond
+	delimeter := ratePerSec
+	chunk := 1
 
-	go func() {
+	if ratePerSec > 1000 {
+		minRemainder := ratePerSec
+
+		for i := 100; i < 1000; i++ {
+			if ratePerSec%i < minRemainder {
+				delimeter = i
+				minRemainder = ratePerSec % delimeter
+			}
+		}
+
+		chunk = ratePerSec / delimeter
+	}
+
+	step := time.Duration(1e9/delimeter) * time.Nanosecond
+
+	var onceClose sync.Once
+
+	throttleWorker := func() {
 		var p *points.Points
 		var ok bool
 
-		defer close(out)
+		defer onceClose.Do(func() { close(out) })
 
 		// start flight
 		throttleTicker := time.NewTicker(step)
@@ -242,20 +261,24 @@ func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *
 		for {
 			select {
 			case <-throttleTicker.C:
-				select {
-				case p, ok = <-in:
-					if !ok {
+				for i := 0; i < chunk; i++ {
+					select {
+					case p, ok = <-in:
+						if !ok {
+							break LOOP
+						}
+					case <-exit:
 						break LOOP
 					}
-				case <-exit:
-					break LOOP
+					out <- p
 				}
-				out <- p
 			case <-exit:
 				break LOOP
 			}
 		}
-	}()
+	}
+
+	go throttleWorker()
 
 	return out
 }

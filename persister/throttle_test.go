@@ -1,6 +1,7 @@
 package persister
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -8,8 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestThrottleChan(t *testing.T) {
-	perSecond := 100
+func doTestThrottleChan(t *testing.T, perSecond int) {
 	timestamp := time.Now().Unix()
 
 	chIn := make(chan *points.Points)
@@ -34,6 +34,14 @@ LOOP:
 	max := float64(perSecond) * 1.05
 	min := float64(perSecond) * 0.95
 
-	assert.True(t, float64(bw) >= min)
-	assert.True(t, float64(bw) <= max)
+	assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+	assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+}
+
+func TestThrottleChan(t *testing.T) {
+	perSecondTable := []int{1, 10, 100, 1000, 10000, 100000, 200000, 531234}
+
+	for _, perSecond := range perSecondTable {
+		doTestThrottleChan(t, perSecond)
+	}
 }
