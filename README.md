@@ -124,6 +124,7 @@ enabled = false
 
 ## Changelog
 ##### master
+* Improved throttling (max-updates-per-second) performance #32
 
 ##### 0.7-beta4
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
