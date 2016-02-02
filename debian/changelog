@@ -1,3 +1,8 @@
+go-carbon (0.7) stable; urgency=low
+  * Improved throttling (max-updates-per-second) performance #32
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 3 Feb 2016 00:50:00 +0300
+
 go-carbon (0.7-beta4) unstable; urgency=low
   * Fix bug: may crash on bad pickle message with big message size in header
     #30. Added option `pickle.max-message-size` with 64 MB default value

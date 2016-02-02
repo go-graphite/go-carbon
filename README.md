@@ -14,6 +14,8 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Logging with rotation (reopen log by HUP signal or inotify event)
 * Many persister workers (using many cpu cores)
 * Run as daemon
+* Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
+* Reload persister config (whisper section of main config, storage-schemas.conf and storage-aggregation.conf) on HUP signal
 
 ## Performance
 
@@ -124,15 +126,15 @@ enabled = false
 
 ## Changelog
 ##### master
-* Improved throttling (max-updates-per-second) performance #32
 
-##### 0.7-beta4
+##### version 0.7
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
 * Reload persister config (`whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`) on `HUP` signal 
 * Fix bug: Cache may start save points only after first checkpoint
 * Decimal numbers in log files instead of hexademical #22
 * Fix bug: NaN values being saved in Whisper datafiles #17 (thanks [Andrew Hayworth](https://github.com/ahayworth))
 * Fix bug: may crash on bad pickle message with big message size in header #30. Added option `pickle.max-message-size` with 64 MB default value
+* Improved throttling (max-updates-per-second) performance #32
 
 ##### version 0.6
 * `metric-interval` option 
