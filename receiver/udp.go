@@ -158,15 +158,15 @@ func (rcv *UDP) statWorker(exit chan bool) {
 		case <-ticker.C:
 			metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 			atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-			rcv.Stat("udp.metricsReceived", float64(metricsReceived))
+			rcv.Stat("metricsReceived", float64(metricsReceived))
 
 			incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
 			atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
-			rcv.Stat("udp.incompleteReceived", float64(incompleteReceived))
+			rcv.Stat("incompleteReceived", float64(incompleteReceived))
 
 			errors := atomic.LoadUint32(&rcv.errors)
 			atomic.AddUint32(&rcv.errors, -errors)
-			rcv.Stat("udp.errors", float64(errors))
+			rcv.Stat("errors", float64(errors))
 
 			logrus.WithFields(logrus.Fields{
 				"metricsReceived":    int(metricsReceived),

@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -271,7 +272,7 @@ func (app *App) Start() (err error) {
 		}
 
 		udpListener := receiver.NewUDP(core.In())
-		udpListener.SetGraphPrefix(conf.Common.GraphPrefix)
+		udpListener.SetGraphPrefix(fmt.Sprintf("%s.udp", conf.Common.GraphPrefix))
 		udpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 
 		if conf.Udp.LogIncomplete {
@@ -296,7 +297,7 @@ func (app *App) Start() (err error) {
 		}
 
 		tcpListener := receiver.NewTCP(core.In())
-		tcpListener.SetGraphPrefix(conf.Common.GraphPrefix)
+		tcpListener.SetGraphPrefix(fmt.Sprintf("%s.tcp", conf.Common.GraphPrefix))
 		tcpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 
 		if err = tcpListener.Listen(tcpAddr); err != nil {
@@ -317,7 +318,7 @@ func (app *App) Start() (err error) {
 		}
 
 		pickleListener := receiver.NewPickle(core.In())
-		pickleListener.SetGraphPrefix(conf.Common.GraphPrefix)
+		pickleListener.SetGraphPrefix(fmt.Sprintf("%s.pickle", conf.Common.GraphPrefix))
 		pickleListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 		pickleListener.SetMaxPickleMessageSize(uint32(conf.Pickle.MaxMessageSize))
 
