@@ -67,7 +67,7 @@ func (rcv *TCP) SetMaxPickleMessageSize(newSize uint32) {
 // Stat sends internal statistics to cache
 func (rcv *TCP) Stat(metric string, value float64) {
 	rcv.out <- points.OnePoint(
-		fmt.Sprintf("%s.%s", rcv.graphPrefix, metric),
+		fmt.Sprintf("%s%s", rcv.graphPrefix, metric),
 		value,
 		time.Now().Unix(),
 	)
