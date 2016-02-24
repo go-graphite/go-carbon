@@ -2,6 +2,7 @@ package persister
 
 import (
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -39,7 +40,11 @@ LOOP:
 }
 
 func TestThrottleChan(t *testing.T) {
-	perSecondTable := []int{1, 10, 100, 1000, 10000, 100000, 200000, 531234}
+	perSecondTable := []int{1, 10, 100, 1000, 10000, 100000, 213000}
+
+	if os.Getenv("TRAVIS") != "true" {
+		perSecondTable = append(perSecondTable, 531234)
+	}
 
 	for _, perSecond := range perSecondTable {
 		doTestThrottleChan(t, perSecond)

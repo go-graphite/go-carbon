@@ -32,7 +32,7 @@ func TestStartStop(t *testing.T) {
 	endGoroutineNum := runtime.NumGoroutine()
 
 	// GC worker etc
-	if !assert.InDelta(startGoroutineNum, endGoroutineNum, 3) {
+	if !assert.InDelta(startGoroutineNum, endGoroutineNum, 4) {
 		p := pprof.Lookup("goroutine")
 		p.WriteTo(os.Stdout, 1)
 	}
