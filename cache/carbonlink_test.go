@@ -119,6 +119,7 @@ func TestCarbonlink(t *testing.T) {
 
 	for {
 		c := <-cache.Out()
+		cache.Confirm() <- c
 		if c.Metric == "carbon.agents.carbon_agent_server.param.size" {
 			break
 		}

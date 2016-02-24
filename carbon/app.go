@@ -224,6 +224,7 @@ func (app *App) startPersister() {
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
 			app.Cache.Out(),
+			app.Cache.Confirm(),
 		)
 		p.SetGraphPrefix(app.Config.Common.GraphPrefix)
 		p.SetMetricInterval(app.Config.Common.MetricInterval.Value())

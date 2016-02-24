@@ -86,13 +86,21 @@ func (listener *CarbonlinkListener) SetQueryTimeout(timeout time.Duration) {
 	listener.queryTimeout = timeout
 }
 
-func (listener *CarbonlinkListener) packReply(reply *Reply) []byte {
+func (listener *CarbonlinkListener) packReply(query *Query) []byte {
 	buf := new(bytes.Buffer)
 
 	var datapoints []interface{}
 
-	if reply.Points != nil {
-		for _, item := range reply.Points.Data {
+	if query.InFlightData != nil {
+		for _, points := range query.InFlightData {
+			for _, item := range points.Data {
+				datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+			}
+		}
+	}
+
+	if query.CacheData != nil {
+		for _, item := range query.CacheData.Data {
 			datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
 		}
 	}
@@ -142,18 +150,17 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 			}
 
 			if req.Type == "cache-query" {
-				cacheReq := NewQuery(req.Metric)
-				listener.queryChan <- cacheReq
-
-				var reply *Reply
+				query := NewQuery(req.Metric)
+				listener.queryChan <- query
 
 				select {
-				case reply = <-cacheReq.ReplyChan:
+				case <-query.Wait:
+					// pass
 				case <-time.After(listener.queryTimeout):
 					logrus.Infof("[carbonlink] Cache no reply (%s timeout)", listener.queryTimeout)
-					reply = NewReply()
 				}
-				packed := listener.packReply(reply)
+
+				packed := listener.packReply(query)
 				if packed == nil {
 					break
 				}
