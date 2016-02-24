@@ -212,9 +212,19 @@ func (c *Cache) worker(exitChan chan bool) {
 
 	toConfirmTracker := make(chan *points.Points)
 
-	confirmTracker := newNotConfirmed()
+	confirmTracker := &notConfirmed{
+		data:           make(map[string][]*points.Points),
+		queryChan:      make(chan *Query, 16),
+		metricInterval: c.metricInterval,
+		graphPrefix:    c.graphPrefix,
+		in:             toConfirmTracker,
+		out:            c.outputChan,
+		confirmed:      c.confirmChan,
+		cacheIn:        c.inputChan,
+	}
+
 	c.Go(func(exit chan bool) {
-		confirmTracker.worker(toConfirmTracker, c.outputChan, c.confirmChan, exit)
+		confirmTracker.worker(exit)
 	})
 
 	forceReceiveThreshold := cap(c.inputChan) / 10
