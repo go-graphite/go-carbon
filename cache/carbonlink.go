@@ -91,7 +91,7 @@ func (listener *CarbonlinkListener) packReply(query *Query) []byte {
 
 	var datapoints []interface{}
 
-	if query.InFlightData != nil {
+	if query != nil && query.InFlightData != nil {
 		for _, points := range query.InFlightData {
 			for _, item := range points.Data {
 				datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
@@ -99,7 +99,7 @@ func (listener *CarbonlinkListener) packReply(query *Query) []byte {
 		}
 	}
 
-	if query.CacheData != nil {
+	if query != nil && query.CacheData != nil {
 		for _, item := range query.CacheData.Data {
 			datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
 		}
@@ -158,6 +158,7 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 					// pass
 				case <-time.After(listener.queryTimeout):
 					logrus.Infof("[carbonlink] Cache no reply (%s timeout)", listener.queryTimeout)
+					query = nil // empty reply
 				}
 
 				packed := listener.packReply(query)
