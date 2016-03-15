@@ -126,6 +126,7 @@ enabled = false
 
 ## Changelog
 ##### master
+* Fixed problem: Points in queue (channel) between cache and persister subsystems was invisible for carbonlink
 
 ##### version 0.7
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
