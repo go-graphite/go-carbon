@@ -23,6 +23,7 @@ type Whisper struct {
 	updateOperations    uint32
 	commitedPoints      uint32
 	in                  chan *points.Points
+	confirm             chan *points.Points
 	schemas             *WhisperSchemas
 	aggregation         *WhisperAggregation
 	metricInterval      time.Duration // checkpoint interval
@@ -35,9 +36,10 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points) *Whisper {
+func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points, confirm chan *points.Points) *Whisper {
 	return &Whisper{
 		in:                  in,
+		confirm:             confirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
 		metricInterval:      time.Minute,
@@ -83,6 +85,10 @@ func (p *Whisper) Stat(metric string, value float64) {
 
 func store(p *Whisper, values *points.Points) {
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
+
+	if p.confirm != nil {
+		defer func() { p.confirm <- values }()
+	}
 
 	w, err := whisper.Open(path)
 	if err != nil {

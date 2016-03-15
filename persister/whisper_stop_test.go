@@ -19,7 +19,7 @@ func TestGracefullyStop(t *testing.T) {
 		ch := make(chan *points.Points, 1000)
 
 		qa.Root(t, func(root string) {
-			p := NewWhisper(root, nil, nil, ch)
+			p := NewWhisper(root, nil, nil, ch, nil)
 			p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 			p.SetWorkers(workers)
 
@@ -78,7 +78,7 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 			qa.Root(t, func(root string) {
 
 				ch := make(chan *points.Points, 10)
-				p := NewWhisper(root, nil, nil, ch)
+				p := NewWhisper(root, nil, nil, ch, nil)
 				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 				p.SetWorkers(workers)
 

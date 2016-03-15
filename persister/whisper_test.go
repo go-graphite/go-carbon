@@ -17,7 +17,7 @@ func TestNewWhisper(t *testing.T) {
 	inchan := make(chan *points.Points)
 	schemas := WhisperSchemas{}
 	aggrs := WhisperAggregation{}
-	output := NewWhisper("foo", &schemas, &aggrs, inchan)
+	output := NewWhisper("foo", &schemas, &aggrs, inchan, nil)
 	expected := Whisper{
 		in:             inchan,
 		schemas:        &schemas,

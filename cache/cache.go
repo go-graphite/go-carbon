@@ -27,6 +27,7 @@ type Cache struct {
 	inputCapacity  int                 // buffer size of inputChan
 	outputChan     chan *points.Points // to persisters
 	queryChan      chan *Query         // from carbonlink
+	confirmChan    chan *points.Points // for persisted confirmation
 	metricInterval time.Duration       // checkpoint interval
 	graphPrefix    string
 	queryCnt       int
@@ -45,6 +46,7 @@ func New() *Cache {
 		graphPrefix:    "carbon.",
 		queryCnt:       0,
 		queue:          make(queue, 0),
+		confirmChan:    make(chan *points.Points, 2048),
 		inputCapacity:  51200,
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
@@ -208,6 +210,23 @@ func (c *Cache) worker(exitChan chan bool) {
 	var sendTo chan *points.Points
 	var forceReceive bool
 
+	toConfirmTracker := make(chan *points.Points)
+
+	confirmTracker := &notConfirmed{
+		data:           make(map[string][]*points.Points),
+		queryChan:      make(chan *Query, 16),
+		metricInterval: c.metricInterval,
+		graphPrefix:    c.graphPrefix,
+		in:             toConfirmTracker,
+		out:            c.outputChan,
+		confirmed:      c.confirmChan,
+		cacheIn:        c.inputChan,
+	}
+
+	c.Go(func(exit chan bool) {
+		confirmTracker.worker(exit)
+	})
+
 	forceReceiveThreshold := cap(c.inputChan) / 10
 
 	ticker := time.NewTicker(c.metricInterval)
@@ -227,7 +246,7 @@ MAIN_LOOP:
 		}
 
 		if values != nil {
-			sendTo = c.outputChan
+			sendTo = toConfirmTracker
 		} else {
 			sendTo = nil
 		}
@@ -237,15 +256,14 @@ MAIN_LOOP:
 			c.doCheckpoint()
 		case query := <-c.queryChan: // carbonlink
 			c.queryCnt++
-			reply := NewReply()
 
 			if values != nil && values.Metric == query.Metric {
-				reply.Points = values.Copy()
+				query.CacheData = values
 			} else if v, ok := c.data[query.Metric]; ok {
-				reply.Points = v.Copy()
+				query.CacheData = v.Copy()
 			}
 
-			query.ReplyChan <- reply
+			confirmTracker.queryChan <- query
 		case sendTo <- values: // to persister
 			values = nil
 		case msg := <-c.inputChan: // from receiver
@@ -280,6 +298,11 @@ func (c *Cache) Out() chan *points.Points {
 // Query returns carbonlink query channel
 func (c *Cache) Query() chan *Query {
 	return c.queryChan
+}
+
+// Confirm returns confirmation channel for persister
+func (c *Cache) Confirm() chan *points.Points {
+	return c.confirmChan
 }
 
 // SetOutputChanSize ...
