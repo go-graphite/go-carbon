@@ -1,7 +1,7 @@
+all: go-carbon
+
 GO ?= go
 export GOPATH := $(CURDIR)/_vendor
-
-all: go-carbon
 
 go-carbon:
 	$(GO) build
