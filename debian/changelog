@@ -2,7 +2,7 @@ go-carbon (0.7.1) stable; urgency=low
   * Fixed problem: Points in queue (channel) between cache and persister
     subsystems was invisible for carbonlink
 
-   -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 5 Apr 2016 22:00:00 +0300
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 5 Apr 2016 22:00:00 +0300
 
 go-carbon (0.7) stable; urgency=low
   * Improved throttling (max-updates-per-second) performance #32
