@@ -126,6 +126,8 @@ enabled = false
 
 ## Changelog
 ##### master
+* Added sparse file creation (`whisper.sparse-create` config option)
+
 ##### version 0.7.1
 * Fixed problem: Points in queue (channel) between cache and persister subsystems was invisible for carbonlink
 

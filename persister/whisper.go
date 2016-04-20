@@ -31,6 +31,7 @@ type Whisper struct {
 	rootPath            string
 	graphPrefix         string
 	created             uint32 // counter
+	sparse              bool
 	maxUpdatesPerSecond int
 	mockStore           func(p *Whisper, values *points.Points)
 }
@@ -67,6 +68,11 @@ func (p *Whisper) GetMaxUpdatesPerSecond() int {
 // SetWorkers count
 func (p *Whisper) SetWorkers(count int) {
 	p.workersCount = count
+}
+
+// SetSparse creation
+func (p *Whisper) SetSparse(sparse bool) {
+	p.sparse = sparse
 }
 
 // SetMetricInterval sets doChekpoint interval
@@ -117,7 +123,9 @@ func store(p *Whisper, values *points.Points) {
 			return
 		}
 
-		w, err = whisper.Create(path, schema.retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor))
+		w, err = whisper.CreateWithOptions(path, schema.retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
+			Sparse: p.sparse,
+		})
 		if err != nil {
 			logrus.Errorf("[persister] Failed to create new whisper file %s: %s", path, err.Error())
 			return
