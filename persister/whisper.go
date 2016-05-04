@@ -24,7 +24,7 @@ type Whisper struct {
 	commitedPoints      uint32
 	in                  chan *points.Points
 	confirm             chan *points.Points
-	schemas             *WhisperSchemas
+	schemas             WhisperSchemas
 	aggregation         *WhisperAggregation
 	metricInterval      time.Duration // checkpoint interval
 	workersCount        int
@@ -37,7 +37,7 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points, confirm chan *points.Points) *Whisper {
+func NewWhisper(rootPath string, schemas WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points, confirm chan *points.Points) *Whisper {
 	return &Whisper{
 		in:                  in,
 		confirm:             confirm,
@@ -98,8 +98,8 @@ func store(p *Whisper, values *points.Points) {
 
 	w, err := whisper.Open(path)
 	if err != nil {
-		schema := p.schemas.match(values.Metric)
-		if schema == nil {
+		schema, ok := p.schemas.Match(values.Metric)
+		if !ok {
 			logrus.Errorf("[persister] No storage schema defined for %s", values.Metric)
 			return
 		}
@@ -111,8 +111,8 @@ func store(p *Whisper, values *points.Points) {
 		}
 
 		logrus.WithFields(logrus.Fields{
-			"retention":    schema.retentionStr,
-			"schema":       schema.name,
+			"retention":    schema.RetentionStr,
+			"schema":       schema.Name,
 			"aggregation":  aggr.name,
 			"xFilesFactor": aggr.xFilesFactor,
 			"method":       aggr.aggregationMethodStr,
@@ -123,7 +123,7 @@ func store(p *Whisper, values *points.Points) {
 			return
 		}
 
-		w, err = whisper.CreateWithOptions(path, schema.retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
+		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
 			Sparse: p.sparse,
 		})
 		if err != nil {

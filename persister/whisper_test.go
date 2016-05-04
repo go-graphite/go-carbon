@@ -17,10 +17,10 @@ func TestNewWhisper(t *testing.T) {
 	inchan := make(chan *points.Points)
 	schemas := WhisperSchemas{}
 	aggrs := WhisperAggregation{}
-	output := NewWhisper("foo", &schemas, &aggrs, inchan, nil)
+	output := NewWhisper("foo", schemas, &aggrs, inchan, nil)
 	expected := Whisper{
 		in:             inchan,
-		schemas:        &schemas,
+		schemas:        schemas,
 		aggregation:    &aggrs,
 		workersCount:   1,
 		rootPath:       "foo",
