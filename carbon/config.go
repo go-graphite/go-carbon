@@ -52,7 +52,7 @@ type whisperConfig struct {
 	MaxUpdatesPerSecond int    `toml:"max-updates-per-second"`
 	Sparse              bool   `toml:"sparse-create"`
 	Enabled             bool   `toml:"enabled"`
-	Schemas             *persister.WhisperSchemas
+	Schemas             persister.WhisperSchemas
 	Aggregation         *persister.WhisperAggregation
 }
 
