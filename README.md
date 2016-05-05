@@ -127,6 +127,9 @@ enabled = false
 ## Changelog
 ##### master
 * Added sparse file creation (`whisper.sparse-create` config option)
+* Enable reload in init script (thanks [Jose Riguera](https://github.com/jriguera))
+* Clean up schemas parser code (thanks [Dieter Plaetinck](https://github.com/Dieterbe))
+* Better go-whisper error handling (thanks [Hiroaki Nakamura](https://github.com/hnakamur))
 
 ##### version 0.7.1
 * Fixed problem: Points in queue (channel) between cache and persister subsystems was invisible for carbonlink
