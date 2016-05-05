@@ -98,6 +98,12 @@ func store(p *Whisper, values *points.Points) {
 
 	w, err := whisper.Open(path)
 	if err != nil {
+		// create new whisper if file not exists
+		if !os.IsNotExist(err) {
+			logrus.Errorf("[persister] Failed to open whisper file %s: %s", path, err.Error())
+			return
+		}
+
 		schema, ok := p.schemas.Match(values.Metric)
 		if !ok {
 			logrus.Errorf("[persister] No storage schema defined for %s", values.Metric)
