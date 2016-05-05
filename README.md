@@ -130,6 +130,7 @@ enabled = false
 * Enable reload in init script (thanks [Jose Riguera](https://github.com/jriguera))
 * Clean up schemas parser code (thanks [Dieter Plaetinck](https://github.com/Dieterbe))
 * Better go-whisper error handling (thanks [Hiroaki Nakamura](https://github.com/hnakamur))
+* Don't try to create whisper file if exists with bad permissions
 
 ##### version 0.7.1
 * Fixed problem: Points in queue (channel) between cache and persister subsystems was invisible for carbonlink
