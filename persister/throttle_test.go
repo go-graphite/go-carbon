@@ -33,7 +33,7 @@ LOOP:
 	close(chIn)
 
 	max := float64(perSecond) * 1.05
-	min := float64(perSecond) * 0.95
+	min := float64(perSecond) * 0.80
 
 	assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
 	assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
