@@ -19,7 +19,7 @@ rpm: tmp/go-carbon.tar.gz
 	cp deploy/buildrpm.sh tmp/buildrpm.sh
 	cd tmp && ./buildrpm.sh ../deploy/go-carbon.spec.centos `../go-carbon --version`
 
-deb: 
+deb:
 	DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -B -us -uc
 
 submodules:
@@ -31,3 +31,7 @@ test:
 
 clean:
 	rm -f go-carbon
+
+image:
+	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
+	docker build -t go-carbon .
