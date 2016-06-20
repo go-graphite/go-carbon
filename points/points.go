@@ -20,8 +20,9 @@ type Point struct {
 
 // Points from carbon clients
 type Points struct {
-	Metric string
-	Data   []*Point
+	Metric      string
+	Data        []*Point
+	LastWriteTS int64
 }
 
 // New creates new instance of Points
@@ -39,6 +40,7 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 				Timestamp: timestamp,
 			},
 		},
+		LastWriteTS: time.Now().UnixNano(),
 	}
 }
 
