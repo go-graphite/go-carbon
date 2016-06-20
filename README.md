@@ -87,6 +87,8 @@ aggregation-file = ""
 workers = 1
 # Limits the number of whisper update_many() calls per second. 0 - no limit
 max-updates-per-second = 0
+# Sparse file creation
+sparse-create = false
 enabled = true
 
 [cache]
@@ -126,6 +128,8 @@ enabled = false
 
 ## Changelog
 ##### master
+
+##### version 0.7.2
 * Added sparse file creation (`whisper.sparse-create` config option)
 * Enable reload in init script (thanks [Jose Riguera](https://github.com/jriguera))
 * Clean up schemas parser code (thanks [Dieter Plaetinck](https://github.com/Dieterbe))

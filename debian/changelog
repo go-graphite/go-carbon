@@ -1,3 +1,12 @@
+go-carbon (0.7.2) stable; urgency=low
+  * Added sparse file creation (whisper.sparse-create config option)
+  * Enable reload in init script (thanks Jose Riguera)
+  * Clean up schemas parser code (thanks Dieter Plaetinck)
+  * Better go-whisper error handling (thanks Hiroaki Nakamura)
+  * Don't try to create whisper file if exists with bad permissions #21
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 17 Jun 2016 22:45:00 +0300
+
 go-carbon (0.7.1) stable; urgency=low
   * Fixed problem: Points in queue (channel) between cache and persister
     subsystems was invisible for carbonlink
