@@ -11,16 +11,34 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
+type queueItem struct {
+	metric string
+	count  int
+	ts     int64
+}
+
 type queue []*queueItem
 
-func (v queue) Len() int           { return len(v) }
-func (v queue) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v queue) Less(i, j int) bool { return v[i].count < v[j].count }
+type byLength []*queueItem
+type byTimestamp []*queueItem
+
+func (v byLength) Len() int           { return len(v) }
+func (v byLength) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
+func (v byLength) Less(i, j int) bool { return v[i].count < v[j].count }
+
+func (v byTimestamp) Len() int           { return len(v) }
+func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
+func (v byTimestamp) Less(i, j int) bool { return v[i].ts > v[j].ts }
+
+type cachePoints struct {
+	Points *points.Points
+	LastWriteTS int64
+}
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
 	helper.Stoppable
-	data           map[string]*points.Points
+	data           map[string]*cachePoints
 	size           int
 	maxSize        int
 	inputChan      chan *points.Points // from receivers
@@ -31,14 +49,15 @@ type Cache struct {
 	metricInterval time.Duration       // checkpoint interval
 	graphPrefix    string
 	queryCnt       int
-	overflowCnt    int // drop packages if cache full
+	overflowCnt    int    // drop packages if cache full
+	writeStrategy  string // max or sorted
 	queue          queue
 }
 
 // New create Cache instance and run in/out goroutine
 func New() *Cache {
 	cache := &Cache{
-		data:           make(map[string]*points.Points, 0),
+		data:           make(map[string]*cachePoints, 0),
 		size:           0,
 		maxSize:        1000000,
 		metricInterval: time.Minute,
@@ -48,9 +67,15 @@ func New() *Cache {
 		queue:          make(queue, 0),
 		confirmChan:    make(chan *points.Points, 2048),
 		inputCapacity:  51200,
+		writeStrategy:  "max",
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
+}
+
+// SetWriteStrategy ...
+func (c *Cache) SetWriteStrategy(s string) {
+	c.writeStrategy = s
 }
 
 // SetInputCapacity set buffer size of input channel. Call before In() getter
@@ -73,7 +98,8 @@ func (c *Cache) getNext() *points.Points {
 		c.queue = c.queue[:size-1]
 
 		if values, ok := c.data[cacheRecord.metric]; ok {
-			return values
+			c.data[cacheRecord.metric].LastWriteTS = time.Now().Unix()
+			return values.Points
 		}
 	}
 	return nil
@@ -81,7 +107,7 @@ func (c *Cache) getNext() *points.Points {
 
 func (c *Cache) getAny() *points.Points {
 	for _, values := range c.data {
-		return values
+		return values.Points
 	}
 	return nil
 }
@@ -104,7 +130,7 @@ func (c *Cache) Get() *points.Points {
 // Remove key from cache
 func (c *Cache) Remove(key string) {
 	if value, exists := c.data[key]; exists {
-		c.size -= len(value.Data)
+		c.size -= len(value.Points.Data)
 		delete(c.data, key)
 	}
 }
@@ -124,9 +150,12 @@ func (c *Cache) Pop() *points.Points {
 // Add points to cache
 func (c *Cache) Add(p *points.Points) {
 	if values, exists := c.data[p.Metric]; exists {
-		values.Data = append(values.Data, p.Data...)
+		values.Points.Data = append(values.Points.Data, p.Data...)
 	} else {
-		c.data[p.Metric] = p
+		c.data[p.Metric] = &cachePoints{
+			Points:      p,
+			LastWriteTS: time.Now().Unix(),
+		}
 	}
 	c.size += len(p.Data)
 }
@@ -146,27 +175,26 @@ func (c *Cache) Size() int {
 	return c.size
 }
 
-type queueItem struct {
-	metric string
-	count  int
-}
-
+ 
 // stat send internal statistics of cache
 func (c *Cache) stat(metric string, value float64) {
 	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
 	c.Add(points.OnePoint(key, value, time.Now().Unix()))
-	c.queue = append(c.queue, &queueItem{key, 1})
+	c.queue = append(c.queue, &queueItem{key, 1, 0})
 }
 
 func (c *Cache) updateQueue() {
 	newQueue := make(queue, 0)
 
 	for key, values := range c.data {
-		newQueue = append(newQueue, &queueItem{key, len(values.Data)})
+		newQueue = append(newQueue, &queueItem{key, len(values.Points.Data), values.LastWriteTS})
 	}
 
-	sort.Sort(newQueue)
-
+	if c.writeStrategy == "max" {
+		sort.Sort(byLength(newQueue))
+	} else {
+		sort.Sort(byTimestamp(newQueue))
+	}
 	c.queue = newQueue
 }
 
@@ -260,7 +288,7 @@ MAIN_LOOP:
 			if values != nil && values.Metric == query.Metric {
 				query.CacheData = values
 			} else if v, ok := c.data[query.Metric]; ok {
-				query.CacheData = v.Copy()
+				query.CacheData = v.Points.Copy()
 			}
 
 			confirmTracker.queryChan <- query
