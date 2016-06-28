@@ -69,6 +69,10 @@ func (app *App) configure() error {
 			cfg.Whisper.Aggregation = persister.NewWhisperAggregation()
 		}
 	}
+	if !(cfg.Cache.WriteStrategy == "max" ||
+		cfg.Cache.WriteStrategy == "sorted") {
+		return fmt.Errorf("go-carbon support only \"max\" or \"sorted\" write-strategy")
+	}
 
 	app.Config = cfg
 
@@ -256,6 +260,7 @@ func (app *App) Start() (err error) {
 	core.SetMetricInterval(conf.Common.MetricInterval.Value())
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetInputCapacity(conf.Cache.InputBuffer)
+	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.Start()
 
 	app.Cache = core

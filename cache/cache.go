@@ -11,11 +11,24 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
+type queueItem struct {
+	metric string
+	count  int
+	ts     int64
+}
+
 type queue []*queueItem
 
-func (v queue) Len() int           { return len(v) }
-func (v queue) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v queue) Less(i, j int) bool { return v[i].count < v[j].count }
+type byLength []*queueItem
+type byTimestamp []*queueItem
+
+func (v byLength) Len() int           { return len(v) }
+func (v byLength) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
+func (v byLength) Less(i, j int) bool { return v[i].count < v[j].count }
+
+func (v byTimestamp) Len() int           { return len(v) }
+func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
+func (v byTimestamp) Less(i, j int) bool { return v[i].ts > v[j].ts }
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
@@ -31,7 +44,8 @@ type Cache struct {
 	metricInterval time.Duration       // checkpoint interval
 	graphPrefix    string
 	queryCnt       int
-	overflowCnt    int // drop packages if cache full
+	overflowCnt    int    // drop packages if cache full
+	writeStrategy  string // max or sorted
 	queue          queue
 }
 
@@ -48,9 +62,15 @@ func New() *Cache {
 		queue:          make(queue, 0),
 		confirmChan:    make(chan *points.Points, 2048),
 		inputCapacity:  51200,
+		writeStrategy:  "max",
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
+}
+
+// SetWriteStrategy ...
+func (c *Cache) SetWriteStrategy(s string) {
+	c.writeStrategy = s
 }
 
 // SetInputCapacity set buffer size of input channel. Call before In() getter
@@ -146,27 +166,26 @@ func (c *Cache) Size() int {
 	return c.size
 }
 
-type queueItem struct {
-	metric string
-	count  int
-}
-
+ 
 // stat send internal statistics of cache
 func (c *Cache) stat(metric string, value float64) {
 	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
 	c.Add(points.OnePoint(key, value, time.Now().Unix()))
-	c.queue = append(c.queue, &queueItem{key, 1})
+	c.queue = append(c.queue, &queueItem{key, 1, 0})
 }
 
 func (c *Cache) updateQueue() {
 	newQueue := make(queue, 0)
 
 	for key, values := range c.data {
-		newQueue = append(newQueue, &queueItem{key, len(values.Data)})
+		newQueue = append(newQueue,	&queueItem{key, len(values.Data), values.Data[0].Timestamp})
 	}
 
-	sort.Sort(newQueue)
-
+	if c.writeStrategy == "max" {
+		sort.Sort(byLength(newQueue))
+	} else {
+		sort.Sort(byTimestamp(newQueue))
+	}
 	c.queue = newQueue
 }
 
