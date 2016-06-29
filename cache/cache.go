@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"encoding/gob"
 	"fmt"
+	"os"
 	"sort"
 	"time"
 
@@ -46,6 +48,7 @@ type Cache struct {
 	queryCnt       int
 	overflowCnt    int    // drop packages if cache full
 	writeStrategy  string // max or sorted
+	stateFile      string
 	queue          queue
 }
 
@@ -66,6 +69,68 @@ func New() *Cache {
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
+}
+
+// SetStateFile ...
+func (c *Cache) SetStateFile(s string) {
+	c.stateFile = s
+}
+
+// SaveState ...
+func (c *Cache) SaveState() {
+	flushStart := time.Now()
+	logrus.WithFields(logrus.Fields{
+		"size":     c.Size(),
+		"inputLen": len(c.In()),
+	}).Info("[cache] start flush")
+	if err := c.saveStateToFile(); err != nil {
+		logrus.Errorf("[cache] Can't flush cache [%s]", err.Error())
+		return
+	}
+	flushWorktime := time.Now().Sub(flushStart)
+	logrus.WithFields(logrus.Fields{
+		"time": flushWorktime.String(),
+	}).Info("[cache] finish flush")
+}
+
+func (c *Cache) saveStateToFile() error {
+	f, err := os.Create(c.stateFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	encoder := gob.NewEncoder(f)
+	encoder.Encode(c.data)
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LoadState ...
+func (c *Cache) LoadState() {
+	if err := c.loadStateFromFile(); err != nil {
+		logrus.Warnf("[cache] Can't load old state [%s]", err.Error())
+	}
+	os.Remove(c.stateFile)
+	logrus.Infof("[cache] Loaded %d metrics and %d points from file", len(c.data), c.Size())
+}
+
+func (c *Cache) loadStateFromFile() error {
+	f, err := os.Open(c.stateFile)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	decoder := gob.NewDecoder(f)
+	err = decoder.Decode(&c.data)
+	if err != nil {
+		return err
+	}
+	for _, p := range c.data {
+		c.size += len(p.Data)
+	}
+	return nil
 }
 
 // SetWriteStrategy ...
@@ -166,7 +231,6 @@ func (c *Cache) Size() int {
 	return c.size
 }
 
- 
 // stat send internal statistics of cache
 func (c *Cache) stat(metric string, value float64) {
 	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
@@ -178,7 +242,7 @@ func (c *Cache) updateQueue() {
 	newQueue := make(queue, 0)
 
 	for key, values := range c.data {
-		newQueue = append(newQueue,	&queueItem{key, len(values.Data), values.Data[0].Timestamp})
+		newQueue = append(newQueue, &queueItem{key, len(values.Data), values.Data[0].Timestamp})
 	}
 
 	if c.writeStrategy == "max" {

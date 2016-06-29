@@ -160,7 +160,7 @@ func main() {
 		signal.Notify(c, syscall.SIGUSR2)
 		<-c
 		httpStop()
-		app.GraceStop()
+		app.Stop()
 	}()
 
 	go func() {

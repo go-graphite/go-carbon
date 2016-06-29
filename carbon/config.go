@@ -60,6 +60,7 @@ type cacheConfig struct {
 	MaxSize       int    `toml:"max-size"`
 	InputBuffer   int    `toml:"input-buffer"`
 	WriteStrategy string `toml:"write-strategy"`
+	StateFile     string `toml:"state-file"`
 }
 
 type udpConfig struct {
@@ -129,6 +130,7 @@ func NewConfig() *Config {
 			MaxSize:       1000000,
 			InputBuffer:   51200,
 			WriteStrategy: "max",
+			StateFile:     "/tmp/go-carbon.dat",
 		},
 		Udp: udpConfig{
 			Listen:        ":2003",

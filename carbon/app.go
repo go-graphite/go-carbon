@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
@@ -144,6 +143,7 @@ func (app *App) stopAll() {
 
 	if app.Cache != nil {
 		app.Cache.Stop()
+		app.Cache.SaveState()
 		app.Cache = nil
 		logrus.Debug("[cache] finished")
 	}
@@ -155,69 +155,10 @@ func (app *App) stopAll() {
 	}
 }
 
-// Stop force stop all components
+// Stop - close all listening sockets, flush cache, stop application
 func (app *App) Stop() {
 	app.Lock()
 	defer app.Unlock()
-	app.stopAll()
-}
-
-// GraceStop implements gracefully stop. Close all listening sockets, flush cache, stop application
-func (app *App) GraceStop() {
-	app.Lock()
-	defer app.Unlock()
-
-	logrus.Info("grace stop inited")
-
-	app.stopListeners()
-
-	// Flush cache
-	if app.Cache != nil && app.Persister != nil {
-
-		if app.Persister.GetMaxUpdatesPerSecond() > 0 {
-			logrus.Debug("[persister] stop old throttled persister, start new unlimited")
-			app.Persister.Stop()
-			logrus.Debug("[persister] old persister finished")
-			app.Persister.SetMaxUpdatesPerSecond(0)
-			app.Persister.Start()
-			logrus.Debug("[persister] new persister started")
-		}
-		// @TODO: disable throttling in persister
-
-		flushStart := time.Now()
-
-		logrus.WithFields(logrus.Fields{
-			"size":     app.Cache.Size(),
-			"inputLen": len(app.Cache.In()),
-		}).Info("[cache] start flush")
-
-		checkTicker := time.NewTicker(10 * time.Millisecond)
-		defer checkTicker.Stop()
-
-		statTicker := time.NewTicker(time.Second)
-		defer statTicker.Stop()
-
-	FLUSH_LOOP:
-		for {
-			select {
-			case <-checkTicker.C:
-				if app.Cache.Size()+len(app.Cache.In()) == 0 {
-					break FLUSH_LOOP
-				}
-			case <-statTicker.C:
-				logrus.WithFields(logrus.Fields{
-					"size":     app.Cache.Size(),
-					"inputLen": len(app.Cache.In()),
-				}).Info("[cache] flush checkpoint")
-			}
-		}
-
-		flushWorktime := time.Now().Sub(flushStart)
-		logrus.WithFields(logrus.Fields{
-			"time": flushWorktime.String(),
-		}).Info("[cache] finish flush")
-	}
-
 	app.stopAll()
 }
 
@@ -261,6 +202,8 @@ func (app *App) Start() (err error) {
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
+	core.SetStateFile(conf.Cache.StateFile)
+	core.LoadState()
 	core.Start()
 
 	app.Cache = core
