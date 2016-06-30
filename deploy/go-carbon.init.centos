@@ -61,6 +61,14 @@ restart() {
     start
 }
 
+reload() {
+    echo -n $"Reloading $prog: "
+    killproc -p $pidfile $prog -HUP
+    RETVAL=$?
+    echo
+    return $RETVAL
+}
+
 rhstatus() {
     status -p $pidfile
     return $?
@@ -87,6 +95,9 @@ case "$1" in
     restart)
         restart
         ;;
+    reload)
+        reload
+        ;;
     status)
         rhstatus
         ;;
@@ -97,7 +108,7 @@ case "$1" in
         configtest
         ;;
     *)
-    echo $"Usage: $0 {start|stop|restart|status|condrestart|configtest}"
+    echo $"Usage: $0 {start|stop|restart|reload|status|condrestart|configtest}"
     exit 2
 esac
 
