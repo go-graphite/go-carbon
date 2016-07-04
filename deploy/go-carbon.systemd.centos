@@ -8,8 +8,8 @@ After=network-online.target
 ExecReload=/bin/kill -HUP $MAINPID
 KillMode=process
 Restart=on-failure
-User=carbon
-Group=carbon
+User=go-carbon
+Group=go-carbon
 EnvironmentFile=/etc/sysconfig/go-carbon
 Type=simple
 ExecStart=/usr/local/bin/go-carbon --config=${CONF_FILE} 
