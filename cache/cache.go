@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"time"
 
@@ -374,4 +375,9 @@ func (c *Cache) Start() error {
 
 		return nil
 	})
+}
+
+// Dump all cache to writer
+func (c *Cache) Dump(w io.Writer) error {
+	return nil
 }
