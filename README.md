@@ -130,7 +130,7 @@ enabled = false
 
 ## Changelog
 ##### master
-* Added `cache.write-strategy` option (values "max" or "sorted"). (thanks [Alexander Akulov](https://github.com/AlexAkulov))
+* Added `cache.write-strategy` option (values "max" or "sorted") (thanks [Alexander Akulov](https://github.com/AlexAkulov))
 * `commitedPoints` metric renamed to `committedPoints`
 
 ##### version 0.7.2
