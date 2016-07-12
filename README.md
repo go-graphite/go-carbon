@@ -96,6 +96,8 @@ enabled = true
 max-size = 1000000
 # Capacity of queue between receivers and cache
 input-buffer = 51200
+# Same as CACHE_WRITE_STRATEGY in original carbon. Values: "max" or "sorted"
+write-strategy = "max"
 
 [udp]
 listen = ":2003"
@@ -128,6 +130,8 @@ enabled = false
 
 ## Changelog
 ##### master
+* Added `cache.write-strategy` option (values "max" or "sorted"). (thanks [Alexander Akulov](https://github.com/AlexAkulov))
+* `commitedPoints` metric renamed to `committedPoints`
 
 ##### version 0.7.2
 * Added sparse file creation (`whisper.sparse-create` config option)
