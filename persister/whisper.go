@@ -21,7 +21,7 @@ import (
 type Whisper struct {
 	helper.Stoppable
 	updateOperations    uint32
-	commitedPoints      uint32
+	committedPoints     uint32
 	in                  chan *points.Points
 	confirm             chan *points.Points
 	schemas             WhisperSchemas
@@ -145,7 +145,7 @@ func store(p *Whisper, values *points.Points) {
 		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
 	}
 
-	atomic.AddUint32(&p.commitedPoints, uint32(len(values.Data)))
+	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
 	atomic.AddUint32(&p.updateOperations, 1)
 
 	defer w.Close()
@@ -203,23 +203,23 @@ LOOP:
 // save stat
 func (p *Whisper) doCheckpoint() {
 	updateOperations := atomic.LoadUint32(&p.updateOperations)
-	commitedPoints := atomic.LoadUint32(&p.commitedPoints)
+	committedPoints := atomic.LoadUint32(&p.committedPoints)
 	atomic.AddUint32(&p.updateOperations, -updateOperations)
-	atomic.AddUint32(&p.commitedPoints, -commitedPoints)
+	atomic.AddUint32(&p.committedPoints, -committedPoints)
 
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
 	logrus.WithFields(logrus.Fields{
 		"updateOperations": int(updateOperations),
-		"commitedPoints":   int(commitedPoints),
+		"committedPoints":  int(committedPoints),
 		"created":          int(created),
 	}).Info("[persister] doCheckpoint()")
 
 	p.Stat("updateOperations", float64(updateOperations))
-	p.Stat("commitedPoints", float64(commitedPoints))
+	p.Stat("committedPoints", float64(committedPoints))
 	if updateOperations > 0 {
-		p.Stat("pointsPerUpdate", float64(commitedPoints)/float64(updateOperations))
+		p.Stat("pointsPerUpdate", float64(committedPoints)/float64(updateOperations))
 	} else {
 		p.Stat("pointsPerUpdate", 0.0)
 	}
