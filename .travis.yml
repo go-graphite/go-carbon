@@ -6,7 +6,10 @@ go:
  - release
  - tip
 
-install: make submodules
+env:
+ - GOPATH=$GOPATH:vendor
+ - GOPATH=$GOPATH:vendor
+ - GO15VENDOREXPERIMENT=1
 
 script:
  - make test
