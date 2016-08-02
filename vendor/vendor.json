@@ -1,0 +1,61 @@
+{
+	"comment": "",
+	"ignore": "test",
+	"package": [
+		{
+			"checksumSHA1": "hqDDDpue/5363luidNMBS8z8eJU=",
+			"path": "github.com/BurntSushi/toml",
+			"revision": "99064174e013895bbd9b025c31100bd1d9b590ca",
+			"revisionTime": "2016-07-17T15:07:09Z"
+		},
+		{
+			"checksumSHA1": "yXrS4e4yxaRBu/MX+39X3cS4kbg=",
+			"path": "github.com/Sirupsen/logrus",
+			"revision": "a283a10442df8dc09befd873fab202bf8a253d6a",
+			"revisionTime": "2016-07-16T02:56:31Z"
+		},
+		{
+			"checksumSHA1": "acGG5NV9NBtjspVlWZ86Zzg8pW8=",
+			"path": "github.com/alyu/configparser",
+			"revision": "26b2fe18bee125de2a3090d6fadb7e280e63eba6",
+			"revisionTime": "2015-11-25T02:12:32Z"
+		},
+		{
+			"checksumSHA1": "ZxzYc1JwJ3U6kZbw/KGuPko5lSY=",
+			"path": "github.com/howeyc/fsnotify",
+			"revision": "f0c08ee9c60704c1879025f2ae0ff3e000082c13",
+			"revisionTime": "2015-10-03T19:46:02Z"
+		},
+		{
+			"checksumSHA1": "VQBPFqwnkrwgnUyn5NnlxLSkSbI=",
+			"path": "github.com/hydrogen18/stalecucumber",
+			"revision": "4b15de9f2c33bb173793ca94dd3181c06edd1dee",
+			"revisionTime": "2015-08-19T22:11:39Z"
+		},
+		{
+			"checksumSHA1": "t6t/j9zdghR0myTtQPozN68BStI=",
+			"path": "github.com/lomik/go-daemon",
+			"revision": "205ceae1aeac90abdbcae9fca16ba44b407c598d",
+			"revisionTime": "2015-03-13T19:36:13Z"
+		},
+		{
+			"checksumSHA1": "FWzBDjjSx/OaoGNNK/MTamWEr8M=",
+			"path": "github.com/lomik/go-whisper",
+			"revision": "537ebed0a597c2262dfe1b2eaa1ac68efd5804fb",
+			"revisionTime": "2016-05-05T07:06:08Z"
+		},
+		{
+			"checksumSHA1": "iydUphwYqZRq3WhstEdGsbvBAKs=",
+			"path": "github.com/stretchr/testify/assert",
+			"revision": "d77da356e56a7428ad25149ca77381849a6a5232",
+			"revisionTime": "2016-06-15T09:26:46Z"
+		},
+		{
+			"checksumSHA1": "8fD/im5Kwvy3JgmxulDTambmE8w=",
+			"path": "golang.org/x/sys/unix",
+			"revision": "a646d33e2ee3172a661fc09bca23bb4889a41bc8",
+			"revisionTime": "2016-07-15T05:43:45Z"
+		}
+	],
+	"rootPath": "github.com/lomik/go-carbon"
+}
