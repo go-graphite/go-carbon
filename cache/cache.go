@@ -379,5 +379,15 @@ func (c *Cache) Start() error {
 
 // Dump all cache to writer
 func (c *Cache) Dump(w io.Writer) error {
+
+	for _, p := range c.data { // every metric
+		for _, d := range p.Data { // every metric point
+			_, err := w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+			if err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }

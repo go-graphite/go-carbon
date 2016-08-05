@@ -1,12 +1,16 @@
 package carbon
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lomik/go-carbon/points"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
@@ -165,6 +169,19 @@ func (app *App) Stop() {
 
 // GraceStop implements gracefully stop. Close all listening sockets, flush cache, stop application
 func (app *App) GraceStop() {
+
+	// grace stop with dump cache and input
+	if app.Config.Dump.Enabled {
+		err := app.GraceStopDump()
+		if err != nil {
+			logrus.Fatal(err)
+		}
+
+		app.stopAll()
+
+		return
+	}
+
 	app.Lock()
 	defer app.Unlock()
 
@@ -198,12 +215,12 @@ func (app *App) GraceStop() {
 		statTicker := time.NewTicker(time.Second)
 		defer statTicker.Stop()
 
-	FLUSH_LOOP:
+	FlushLoop:
 		for {
 			select {
 			case <-checkTicker.C:
 				if app.Cache.Size()+len(app.Cache.In()) == 0 {
-					break FLUSH_LOOP
+					break FlushLoop
 				}
 			case <-statTicker.C:
 				logrus.WithFields(logrus.Fields{
@@ -220,6 +237,132 @@ func (app *App) GraceStop() {
 	}
 
 	app.stopAll()
+}
+
+// GraceStopDump implements gracefully stop:
+// * Start writing all new data to xlogs
+// * Stop cache worker
+// * Dump all cache to file
+// * Stop listeners
+// * Close xlogs
+// * Exit application
+func (app *App) GraceStopDump() error {
+	app.Lock()
+	defer app.Unlock()
+
+	logrus.Info("grace stop with dump inited")
+
+	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().Unix())
+	snapFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s", filenamePostfix))
+	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s", filenamePostfix))
+
+	// start dumpers
+	logrus.Infof("start cache dump to %s", snapFilename)
+	logrus.Infof("start input dump to %s", xlogFilename)
+
+	// open snap file
+	snap, err := os.Create(snapFilename)
+	if err != nil {
+		return err
+	}
+	snapWriter := bufio.NewWriterSize(snap, 1048576) // 1Mb
+
+	// start input dumper
+	xlog, err := os.Create(xlogFilename)
+	if err != nil {
+		return err
+	}
+	xlogWriter := bufio.NewWriterSize(xlog, 1048576) // 1Mb
+
+	xlogExit := make(chan bool)
+
+	var xlogWg sync.WaitGroup
+	xlogWg.Add(1)
+
+	go func() {
+		points.Glue(xlogExit, app.Cache.In(), 65536, time.Second, func(b []byte) {
+			xlogWriter.Write(b)
+		})
+		xlogWg.Done()
+	}()
+
+	// stop cache
+	logrus.Info("[cache] stop worker")
+	dumpStart := time.Now()
+
+	app.Cache.Stop()
+	cacheOut := app.Cache.Out()
+	close(cacheOut)
+
+	logrus.WithFields(logrus.Fields{
+		"size":    app.Cache.Size(),
+		"outSize": len(cacheOut),
+	}).Info("[cache] start dump")
+
+	// dump points from cache.out channel
+	points.Glue(nil, cacheOut, 65536, time.Second, func(b []byte) {
+		snapWriter.Write(b)
+	})
+
+	// dump cache
+	err = app.Cache.Dump(snapWriter)
+	if err != nil {
+		return err
+	}
+
+	dumpWorktime := time.Now().Sub(dumpStart)
+	logrus.WithFields(logrus.Fields{
+		"time": dumpWorktime.String(),
+	}).Info("[cache] finish dump")
+
+	if err = snapWriter.Flush(); err != nil {
+		return err
+	}
+
+	if err = snap.Close(); err != nil {
+		return err
+	}
+
+	// cache dump finished
+	logrus.Info("stop listeners")
+	app.stopListeners()
+
+	// wait for all data from input channel written
+	checkTicker := time.NewTicker(10 * time.Millisecond)
+	defer checkTicker.Stop()
+
+	statTicker := time.NewTicker(time.Second)
+	defer statTicker.Stop()
+
+FlushLoop:
+	for {
+		select {
+		case <-checkTicker.C:
+			if len(app.Cache.In()) == 0 {
+				break FlushLoop
+			}
+		case <-statTicker.C:
+			logrus.WithFields(logrus.Fields{
+				"inputLen": len(app.Cache.In()),
+			}).Info("[cache] wait input")
+		}
+	}
+
+	// stop xlog writer
+	close(xlogExit)
+	xlogWg.Wait()
+
+	if err = xlogWriter.Flush(); err != nil {
+		return err
+	}
+
+	if err = xlog.Close(); err != nil {
+		return err
+	}
+
+	logrus.Info("dump finished")
+
+	return nil
 }
 
 func (app *App) startPersister() {
