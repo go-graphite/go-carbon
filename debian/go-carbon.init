@@ -22,7 +22,7 @@ NAME=go-carbon
 DAEMON=/usr/sbin/go-carbon
 PIDFILE=/var/run/$NAME.pid
 CONFIGFILE="/etc/$NAME/go-carbon.conf"
-DAEMON_ARGS="--config $CONFIGFILE --pidfile $PIDFILE --daemon"
+DAEMON_ARGS="-config $CONFIGFILE -pidfile $PIDFILE -daemon"
 SCRIPTNAME=/etc/init.d/$NAME
 
 # Exit if the package is not installed
