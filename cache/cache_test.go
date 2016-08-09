@@ -42,7 +42,6 @@ func TestCache(t *testing.T) {
 
 func TestCacheCheckpoint(t *testing.T) {
 	t.SkipNow() // @TODO
-	return
 	cache := New()
 	cache.Start()
 	cache.SetOutputChanSize(0)

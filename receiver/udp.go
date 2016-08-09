@@ -258,6 +258,4 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 
 		return nil
 	})
-
-	return nil
 }

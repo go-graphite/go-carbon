@@ -31,7 +31,7 @@ func init() {
 				err := std.Reopen()
 				logrus.Infof("HUP received, reopen log %#v", std.Filename())
 				if err != nil {
-					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+					logrus.Errorf("Reopen log %#v failed: %s", std.Filename(), err.Error())
 				}
 			}
 		}
@@ -102,7 +102,7 @@ func (l *FileLogger) fsWatch(filename string, quit chan bool) {
 
 				logrus.Infof("Reopen log %#v by fsnotify event", std.Filename())
 				if err != nil {
-					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+					logrus.Errorf("Reopen log %#v failed: %s", std.Filename(), err.Error())
 				}
 
 			case <-quit:
