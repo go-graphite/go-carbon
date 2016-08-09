@@ -244,7 +244,7 @@ LOOP:
 	}
 }
 
-func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
+func ThrottleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
 	out := make(chan *points.Points, cap(in))
 
 	delimeter := ratePerSec
@@ -319,7 +319,7 @@ func (p *Whisper) Start() error {
 			readerExit := exitChan
 
 			if p.maxUpdatesPerSecond > 0 {
-				inChan = throttleChan(inChan, p.maxUpdatesPerSecond, exitChan)
+				inChan = ThrottleChan(inChan, p.maxUpdatesPerSecond, exitChan)
 				readerExit = nil // read all before channel is closed
 			}
 
