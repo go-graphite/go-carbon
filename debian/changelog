@@ -1,3 +1,10 @@
+go-carbon (0.7.3) stable; urgency=low
+  * Added cache.write-strategy option (values "max" or "sorted") (thanks
+    Alexander Akulov)
+  * commitedPoints metric renamed to committedPoints
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Thu, 9 Aug 2016 23:45:00 +0300
+
 go-carbon (0.7.2) stable; urgency=low
   * Added sparse file creation (whisper.sparse-create config option)
   * Enable reload in init script (thanks Jose Riguera)
