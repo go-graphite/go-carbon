@@ -3,6 +3,7 @@ package carbon
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -213,17 +214,67 @@ FlushLoop:
 	return nil
 }
 
-// recover cache and input dumps from disk to memory
-func Recover(path string, out chan *points.Points) {
-	files, err := ioutil.ReadDir(path)
+// RecoverFromFile read and parse data from single file
+func RecoverFromFile(filename string, out chan *points.Points) error {
+	var pointsCount int
+	startTime := time.Now()
+
+	logrus.Infof("[recover] start %s", filename)
+
+	defer func() {
+		finishTime := time.Now()
+
+		logrus.
+			WithField("points", pointsCount).
+			WithField("time", finishTime.Sub(startTime)).
+			Infof("[recover] finish %s", filename)
+	}()
+
+	file, err := os.Open(filename)
 	if err != nil {
-		logrus.Errorf("readdir %s failed: %s", path, err.Error())
+		return err
+	}
+	defer file.Close()
+
+	reader := bufio.NewReaderSize(file, 1024*1024)
+
+	for {
+		line, _, err := reader.ReadLine()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return err
+		}
+
+		if len(line) > 0 {
+			p, err := points.ParseText(string(line))
+
+			if err != nil {
+				logrus.Warnf("[recover] wrong message %#v", string(line))
+			} else {
+				pointsCount++
+				out <- p
+			}
+		}
+	}
+
+	return nil
+}
+
+// Recover cache and input dumps from disk to memory
+func Recover(dumpDir string, out chan *points.Points) {
+	files, err := ioutil.ReadDir(dumpDir)
+	if err != nil {
+		logrus.Errorf("readdir %s failed: %s", dumpDir, err.Error())
 		return
 	}
 
 	// read files and lazy sorting
 	list := make([]string, 0)
 
+FilesLoop:
 	for _, file := range files {
 		if file.IsDir() {
 			continue
@@ -241,13 +292,15 @@ func Recover(path string, out chan *points.Points) {
 			fileWithSortPrefix = fmt.Sprintf("%s_%s:%s", r[2], "1", file.Name())
 		case "input":
 			fileWithSortPrefix = fmt.Sprintf("%s_%s:%s", r[2], "2", file.Name())
+		default:
+			continue FilesLoop
 		}
 
 		list = append(list, fileWithSortPrefix)
 	}
 
 	if len(list) == 0 {
-		logrus.Infof("nothing to recover from %s", path)
+		logrus.Infof("nothing to recover from %s", dumpDir)
 		return
 	}
 
@@ -257,5 +310,12 @@ func Recover(path string, out chan *points.Points) {
 		list[index] = strings.SplitN(fileWithSortPrefix, ":", 2)[1]
 	}
 
-	logrus.WithField("files", list).Infof("start recover from %s", path)
+	logrus.WithField("files", list).Infof("start recover from %s", dumpDir)
+
+	for _, fn := range list {
+		err := RecoverFromFile(path.Join(dumpDir, fn), out)
+		if err != nil {
+			logrus.Errorf("Recover from %s failed: %s", path.Join(dumpDir, fn), err.Error())
+		}
+	}
 }
