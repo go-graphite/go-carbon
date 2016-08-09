@@ -13,7 +13,6 @@ import (
 
 func TestFsnotifyRotate(t *testing.T) {
 	t.SkipNow()
-	return
 
 	assert := assert.New(t)
 

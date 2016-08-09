@@ -113,7 +113,7 @@ func TestShuffler(t *testing.T) {
 
 	total := 0
 	for b := range buckets {
-		assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5% across 4 buckets after %d inputs", runlength))
+		assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5%% across 4 buckets after %d inputs", runlength))
 		total += buckets[b]
 	}
 	assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")

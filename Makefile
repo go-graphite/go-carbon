@@ -28,6 +28,7 @@ submodules:
 
 test:
 	$(GO) test ./...
+	$(GO) vet ./...
 
 clean:
 	rm -f go-carbon
