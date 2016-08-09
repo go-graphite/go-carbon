@@ -198,7 +198,7 @@ func (c *Cache) stat(metric string, value float64) {
 
 func (c *Cache) updateQueue() {
 	start := time.Now()
-	newQueue := make(queue, 0)
+	newQueue := c.queue[:0]
 
 	for key, values := range c.data {
 		newQueue = append(newQueue,	&queueItem{key, len(values.Data), values.Data[0].Timestamp})
