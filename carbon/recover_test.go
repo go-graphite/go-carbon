@@ -77,7 +77,7 @@ func TestRecover(t *testing.T) {
 
 		ch := make(chan *points.Points, 1024)
 
-		Recover(root, ch)
+		RecoverFromDir(root, ch)
 
 		close(ch)
 

@@ -298,6 +298,12 @@ func (app *App) Start() (err error) {
 	}
 	/* CARBONLINK end */
 
+	/* RECOVER start */
+	if conf.Dump.Enabled {
+		go app.Recover(core.In(), conf.Dump.Path, conf.Dump.RecoverPerSecond)
+	}
+	/* RECOVER end */
+
 	return
 }
 

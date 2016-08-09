@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -263,8 +264,14 @@ func RecoverFromFile(filename string, out chan *points.Points) error {
 	return nil
 }
 
-// Recover cache and input dumps from disk to memory
-func Recover(dumpDir string, out chan *points.Points) {
+// RecoverFromDir cache and input dumps from disk to memory
+func RecoverFromDir(dumpDir string, out chan *points.Points) {
+	startTime := time.Now()
+	defer func() {
+		finishTime := time.Now()
+		logrus.WithField("time", finishTime.Sub(startTime)).Info("[recover] finished")
+	}()
+
 	files, err := ioutil.ReadDir(dumpDir)
 	if err != nil {
 		logrus.Errorf("readdir %s failed: %s", dumpDir, err.Error())
@@ -300,7 +307,7 @@ FilesLoop:
 	}
 
 	if len(list) == 0 {
-		logrus.Infof("nothing to recover from %s", dumpDir)
+		logrus.Infof("[recover] nothing to recover from %s", dumpDir)
 		return
 	}
 
@@ -310,12 +317,45 @@ FilesLoop:
 		list[index] = strings.SplitN(fileWithSortPrefix, ":", 2)[1]
 	}
 
-	logrus.WithField("files", list).Infof("start recover from %s", dumpDir)
+	logrus.WithField("files", list).Infof("[recover] start recover from %s", dumpDir)
 
 	for _, fn := range list {
-		err := RecoverFromFile(path.Join(dumpDir, fn), out)
+		filename := path.Join(dumpDir, fn)
+		err := RecoverFromFile(filename, out)
 		if err != nil {
-			logrus.Errorf("Recover from %s failed: %s", path.Join(dumpDir, fn), err.Error())
+			logrus.Errorf("[recover] read %s failed: %s", filename, err.Error())
 		}
+
+		err = os.Remove(filename)
+		if err != nil {
+			logrus.Errorf("[recover] remove %s failed: %s", filename, err.Error())
+		}
+	}
+}
+
+// Recover from dump.path
+func (app *App) Recover(inputChan chan *points.Points, path string, rps int) {
+	if rps > 0 {
+		// recover throttled
+		readChan := make(chan *points.Points)
+		exitChan := make(chan bool)
+
+		ch := persister.ThrottleChan(readChan, rps, exitChan)
+
+		go func() {
+			// from throttled out to input
+			for {
+				p, ok := <-ch
+				if !ok {
+					return
+				}
+				inputChan <- p
+			}
+		}()
+
+		RecoverFromDir(path, readChan)
+		close(readChan) //  required for finish throttling worker
+	} else {
+		RecoverFromDir(path, inputChan)
 	}
 }
