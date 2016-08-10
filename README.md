@@ -132,6 +132,35 @@ listen = "localhost:7007"
 enabled = false
 ```
 
+### OS tuning
+It is crucial for performance to ensure that your OS tuned so that go-carbon
+is never blocked on writes, usually that involves adjusting following sysctl
+params on Linux systems:
+
+```bash
+# percentage of your RAM which can be left unwritten to disk. MUST be much more than
+# your write rate, which is usually one FS block size (4KB) per metric.
+sysctl -w vm.dirty_ratio = 80
+
+# percentage of yout RAM when background writer have to kick in and
+# start writes to disk. Make it way above the value you see in `/proc/meminfo|grep Dirty`
+# so that it doesn't interefere with dirty_expire_centisecs explained below
+sysctl -w vm.dirty_background_ratio = 50
+
+# allow page to be left dirty no longer than 10 mins
+# if unwritten page stays longer than time set here,
+# kernel starts writing it out
+sysctl -w vm.dirty_expire_centisecs = $(( 10*60*100 ))
+```
+
+Net effect of these 3 params is that with `dirty_*_ratio` params set high
+enough multiple updates to a metric don't trigger disk activity. Multiple datapoint
+writes are coalesced into single disk write which kernel then writes to disk
+in a background.
+
+With settings above applied, best write-strategy to use is "noop"
+
+
 ## Changelog
 ##### master
 
