@@ -26,9 +26,9 @@ func (app *App) CollectStat() {
 	// if app.Cache != nil {
 	// 	app.Cache.Stat(statModule("cache"))
 	// }
-	// if app.UDP != nil {
-	// 	app.UDP.Stat(statModule("udp"))
-	// }
+	if app.UDP != nil {
+		app.UDP.Stat(statModule("udp"))
+	}
 	// if app.TCP != nil {
 	// 	app.TCP.Stat(statModule("tcp"))
 	// }

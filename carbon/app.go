@@ -218,8 +218,6 @@ func (app *App) Start() (err error) {
 		}
 
 		udpListener := receiver.NewUDP(core.In())
-		udpListener.SetGraphPrefix(fmt.Sprintf("%sudp.", conf.Common.GraphPrefix))
-		udpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 
 		if conf.Udp.LogIncomplete {
 			udpListener.SetLogIncomplete(true)
