@@ -171,8 +171,6 @@ func (app *App) startPersister() {
 			app.Cache.Out(),
 			app.Cache.Confirm(),
 		)
-		p.SetGraphPrefix(app.Config.Common.GraphPrefix)
-		p.SetMetricInterval(app.Config.Common.MetricInterval.Value())
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetWorkers(app.Config.Whisper.Workers)
