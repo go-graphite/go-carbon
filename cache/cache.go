@@ -30,6 +30,14 @@ func (v byTimestamp) Len() int           { return len(v) }
 func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byTimestamp) Less(i, j int) bool { return v[i].ts > v[j].ts }
 
+type WriteStrategy int
+
+const (
+	MaximumLength WriteStrategy = iota
+	TimestampOrder
+	Noop
+)
+
 // Cache stores and aggregate metrics in memory
 type Cache struct {
 	helper.Stoppable
@@ -44,8 +52,8 @@ type Cache struct {
 	metricInterval time.Duration       // checkpoint interval
 	graphPrefix    string
 	queryCnt       int
-	overflowCnt    int    // drop packages if cache full
-	writeStrategy  string // max or sorted
+	overflowCnt    int // drop packages if cache full
+	writeStrategy  WriteStrategy
 	queue          queue
 	queueBuildCnt  int           // number of times writeout queue was built
 	queueBuildTime time.Duration // time spent building writeout queue
@@ -66,15 +74,25 @@ func New() *Cache {
 		queue:          make(queue, 0),
 		confirmChan:    make(chan *points.Points, 2048),
 		inputCapacity:  51200,
-		writeStrategy:  "max",
+		writeStrategy:  MaximumLength,
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
 }
 
 // SetWriteStrategy ...
-func (c *Cache) SetWriteStrategy(s string) {
-	c.writeStrategy = s
+func (c *Cache) SetWriteStrategy(s string) (err error) {
+	switch s {
+	case "max":
+		c.writeStrategy = MaximumLength
+	case "sort":
+		c.writeStrategy = TimestampOrder
+	case "noop":
+		c.writeStrategy = Noop
+	default:
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
+	}
+	return nil
 }
 
 // SetInputCapacity set buffer size of input channel. Call before In() getter
@@ -186,10 +204,12 @@ func (c *Cache) updateQueue() {
 		newQueue = append(newQueue,	&queueItem{key, len(values.Data), values.Data[0].Timestamp})
 	}
 
-	if c.writeStrategy == "max" {
+	switch c.writeStrategy {
+	case MaximumLength:
 		sort.Sort(byLength(newQueue))
-	} else {
+	case TimestampOrder:
 		sort.Sort(byTimestamp(newQueue))
+	case Noop:
 	}
 	c.queue = newQueue
 

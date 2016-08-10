@@ -96,7 +96,11 @@ enabled = true
 max-size = 1000000
 # Capacity of queue between receivers and cache
 input-buffer = 51200
-# Same as CACHE_WRITE_STRATEGY in original carbon. Values: "max" or "sorted"
+# Strategy to persist metrics. Values: "max","sorted","noop"
+#   "max" - write metrics with most unwritten datapoints first
+#   "sorted" - sort by timestamp of first unwritten datapoint.
+#   "noop" - pick metrics to write in unspecified order,
+#            requires least CPU and improves cache responsiveness
 write-strategy = "max"
 
 [udp]
