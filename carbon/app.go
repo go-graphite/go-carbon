@@ -195,8 +195,6 @@ func (app *App) Start() (err error) {
 	conf := app.Config
 
 	core := cache.New()
-	core.SetGraphPrefix(conf.Common.GraphPrefix)
-	core.SetMetricInterval(conf.Common.MetricInterval.Value())
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)

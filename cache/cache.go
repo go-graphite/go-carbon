@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
-
-	"github.com/Sirupsen/logrus"
 )
 
 type queue []*points.Points
@@ -37,21 +36,21 @@ const (
 type Cache struct {
 	helper.Stoppable
 	data                          map[string]*points.Points
-	size                          int
-	maxSize                       int
+	size                          uint32 // local read-only copy of sizeShared for worker goroutine
+	sizeShared                    uint32 // changing via atomic
+	metricCount                   uint32 // metrics count, changing via atomic
+	maxSize                       uint32
 	inputChan                     chan *points.Points // from receivers
 	inputCapacity                 int                 // buffer size of inputChan
 	outputChan                    chan *points.Points // to persisters
 	queryChan                     chan *Query         // from carbonlink
 	confirmChan                   chan *points.Points // for persisted confirmation
-	metricInterval                time.Duration       // checkpoint interval
-	graphPrefix                   string
-	queryCnt                      int
-	overflowCnt                   int // drop packages if cache full
+	queryCnt                      uint32
+	overflowCnt                   uint32 // drop packages if cache full
 	writeStrategy                 WriteStrategy
 	queue                         queue
-	queueBuildCnt                 int           // number of times writeout queue was built
-	queueBuildTime                time.Duration // time spent building writeout queue
+	queueBuildCnt                 uint32 // number of times writeout queue was built
+	queueBuildTime                uint32 // time spent building writeout queue in milliseconds
 	maxInputLenBeforeQueueRebuild int
 	maxInputLenAfterQueueRebuild  int
 	queueWriteoutStart            time.Time
@@ -64,17 +63,11 @@ func New() *Cache {
 		data:               make(map[string]*points.Points, 0),
 		size:               0,
 		maxSize:            1000000,
-		metricInterval:     time.Minute,
 		queryChan:          make(chan *Query, 16),
-		graphPrefix:        "carbon.",
-		queueBuildCnt:      0,
-		queueBuildTime:     0,
-		queryCnt:           0,
 		queue:              make(queue, 0),
 		confirmChan:        make(chan *points.Points, 2048),
 		inputCapacity:      51200,
 		writeStrategy:      MaximumLength,
-		queueWriteoutTime:  0,
 		queueWriteoutStart: time.Time{},
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
@@ -99,11 +92,6 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 // SetInputCapacity set buffer size of input channel. Call before In() getter
 func (c *Cache) SetInputCapacity(size int) {
 	c.inputCapacity = size
-}
-
-// SetMetricInterval sets doChekpoint interval
-func (c *Cache) SetMetricInterval(interval time.Duration) {
-	c.metricInterval = interval
 }
 
 func (c *Cache) getNext() *points.Points {
@@ -142,7 +130,8 @@ func (c *Cache) Get() *points.Points {
 // Remove key from cache
 func (c *Cache) Remove(key string, size int) {
 	delete(c.data, key)
-	c.size -= size
+	c.size = atomic.AddUint32(&c.sizeShared, -uint32(size))
+	atomic.AddUint32(&c.metricCount, ^uint32(0))
 }
 
 // Pop return and remove next for save point from cache
@@ -162,33 +151,20 @@ func (c *Cache) Add(p *points.Points) {
 	if values, exists := c.data[p.Metric]; exists {
 		values.Data = append(values.Data, p.Data...)
 	} else {
+		atomic.AddUint32(&c.metricCount, 1)
 		c.data[p.Metric] = p
 	}
-	c.size += len(p.Data)
-}
-
-// SetGraphPrefix for internal cache metrics
-func (c *Cache) SetGraphPrefix(prefix string) {
-	c.graphPrefix = prefix
+	c.size = atomic.AddUint32(&c.sizeShared, uint32(len(p.Data)))
 }
 
 // SetMaxSize of cache
-func (c *Cache) SetMaxSize(maxSize int) {
+func (c *Cache) SetMaxSize(maxSize uint32) {
 	c.maxSize = maxSize
 }
 
 // Size returns size
-func (c *Cache) Size() int {
-	return c.size
-}
-
-// stat send internal statistics of cache
-func (c *Cache) stat(metric string, value float64) {
-	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
-
-	p := points.OnePoint(key, value, time.Now().Unix())
-	c.Add(p)
-	c.queue = append(c.queue, p)
+func (c *Cache) Size() uint32 {
+	return atomic.LoadUint32(&c.sizeShared)
 }
 
 func (c *Cache) updateQueue() {
@@ -210,8 +186,9 @@ func (c *Cache) updateQueue() {
 	}
 	c.queue = newQueue
 
-	c.queueBuildTime += time.Now().Sub(start)
-	c.queueBuildCnt++
+	atomic.AddUint32(&c.queueBuildTime, uint32(time.Now().Sub(start).Nanoseconds()/10000000))
+	atomic.AddUint32(&c.queueBuildCnt, 1)
+
 	inputLenAfterQueueRebuild := len(c.inputChan)
 
 	if inputLenAfterQueueRebuild > c.maxInputLenAfterQueueRebuild {
@@ -220,38 +197,30 @@ func (c *Cache) updateQueue() {
 	}
 }
 
-// add carbon metrics to queue
-func (c *Cache) doCheckpoint() {
-	c.stat("size", float64(c.size))
-	c.stat("metrics", float64(len(c.data)))
-	c.stat("queries", float64(c.queryCnt))
-	c.stat("overflow", float64(c.overflowCnt))
-	c.stat("queueBuildCount", float64(c.queueBuildCnt))
-	c.stat("queueBuildTime", c.queueBuildTime.Seconds())
-	c.stat("maxInputLenBeforeQueueRebuild", float64(c.maxInputLenBeforeQueueRebuild))
-	c.stat("maxInputLenAfterQueueRebuild", float64(c.maxInputLenAfterQueueRebuild))
-	c.stat("queueWriteoutTime", float64(c.queueWriteoutTime.Seconds()))
+// Collect cache metrics
+func (c *Cache) Stat(send func(metric string, value float64)) {
+	send("size", float64(c.Size()))
+	send("metrics", float64(atomic.LoadUint32(&c.metricCount)))
 
-	logrus.WithFields(logrus.Fields{
-		"size":                          c.size,
-		"metrics":                       len(c.data),
-		"queries":                       c.queryCnt,
-		"overflow":                      c.overflowCnt,
-		"maxInputLenBeforeQueueRebuild": c.maxInputLenBeforeQueueRebuild,
-		"maxInputLenAfterQueueRebuild":  c.maxInputLenAfterQueueRebuild,
-		"inputCapacity":                 cap(c.inputChan),
-		"queueBuildCount":               c.queueBuildCnt,
-		"queueBuildTime":                c.queueBuildTime.String(),
-		"queueWriteoutTime":             c.queueWriteoutTime.String(),
-	}).Info("[cache] doCheckpoint()")
+	queryCnt := atomic.LoadUint32(&c.queryCnt)
+	atomic.AddUint32(&c.queryCnt, -queryCnt)
+	send("queries", float64(queryCnt))
 
-	c.queryCnt = 0
-	c.overflowCnt = 0
-	c.queueBuildCnt = 0
-	c.queueBuildTime = 0
-	c.queueWriteoutTime = 0
-	c.maxInputLenBeforeQueueRebuild = 0
-	c.maxInputLenAfterQueueRebuild = 0
+	overflowCnt := atomic.LoadUint32(&c.overflowCnt)
+	atomic.AddUint32(&c.overflowCnt, -overflowCnt)
+	send("overflow", float64(overflowCnt))
+
+	queueBuildCnt := atomic.LoadUint32(&c.queueBuildCnt)
+	atomic.AddUint32(&c.queueBuildCnt, -queueBuildCnt)
+	send("queueBuildCount", float64(queueBuildCnt))
+
+	queueBuildTime := atomic.LoadUint32(&c.queueBuildTime)
+	atomic.AddUint32(&c.queueBuildTime, -queueBuildTime)
+	send("queueBuildTime", float64(queueBuildTime/1000))
+
+	// c.stat("maxInputLenBeforeQueueRebuild", float64(c.maxInputLenBeforeQueueRebuild))
+	// c.stat("maxInputLenAfterQueueRebuild", float64(c.maxInputLenAfterQueueRebuild))
+	// c.stat("queueWriteoutTime", float64(c.queueWriteoutTime.Seconds()))
 }
 
 func (c *Cache) worker(exitChan chan bool) {
@@ -262,14 +231,12 @@ func (c *Cache) worker(exitChan chan bool) {
 	toConfirmTracker := make(chan *points.Points)
 
 	confirmTracker := &notConfirmed{
-		data:           make(map[string][]*points.Points),
-		queryChan:      make(chan *Query, 16),
-		metricInterval: c.metricInterval,
-		graphPrefix:    c.graphPrefix,
-		in:             toConfirmTracker,
-		out:            c.outputChan,
-		confirmed:      c.confirmChan,
-		cacheIn:        c.inputChan,
+		data:      make(map[string][]*points.Points),
+		queryChan: make(chan *Query, 16),
+		in:        toConfirmTracker,
+		out:       c.outputChan,
+		confirmed: c.confirmChan,
+		cacheIn:   c.inputChan,
 	}
 
 	c.Go(func(exit chan bool) {
@@ -278,7 +245,7 @@ func (c *Cache) worker(exitChan chan bool) {
 
 	forceReceiveThreshold := cap(c.inputChan) / 10
 
-	ticker := time.NewTicker(c.metricInterval)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
 
 MAIN_LOOP:
@@ -302,9 +269,9 @@ MAIN_LOOP:
 
 		select {
 		case <-ticker.C: // checkpoint
-			c.doCheckpoint()
+			c.updateQueue()
 		case query := <-c.queryChan: // carbonlink
-			c.queryCnt++
+			atomic.AddUint32(&c.queryCnt, 1)
 
 			if values != nil && values.Metric == query.Metric {
 				query.CacheData = values
@@ -319,7 +286,7 @@ MAIN_LOOP:
 			if c.maxSize == 0 || c.size < c.maxSize {
 				c.Add(msg)
 			} else {
-				c.overflowCnt++
+				atomic.AddUint32(&c.overflowCnt, 1)
 			}
 		case <-exitChan: // exit
 			break MAIN_LOOP

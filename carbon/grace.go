@@ -69,7 +69,7 @@ func (app *App) GraceStop() {
 		for {
 			select {
 			case <-checkTicker.C:
-				if app.Cache.Size()+len(app.Cache.In()) == 0 {
+				if int(app.Cache.Size())+len(app.Cache.In()) == 0 {
 					break FlushLoop
 				}
 			case <-statTicker.C:

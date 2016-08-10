@@ -3,9 +3,7 @@ package cache
 import (
 	"fmt"
 	"math/rand"
-	"sort"
 	"testing"
-	"time"
 
 	"github.com/lomik/go-carbon/points"
 )
@@ -38,63 +36,6 @@ func TestCache(t *testing.T) {
 
 	if c.Size() != 0 {
 		t.FailNow()
-	}
-}
-
-func TestCacheCheckpoint(t *testing.T) {
-	t.SkipNow() // @TODO
-	cache := New()
-	cache.Start()
-	cache.SetOutputChanSize(0)
-
-	defer cache.Stop()
-
-	startTime := time.Now().Unix() - 60*60
-
-	sizes := []int{1, 15, 42, 56, 22, 90, 1}
-
-	for index, value := range sizes {
-		metricName := fmt.Sprintf("metric%d", index)
-
-		for i := value; i > 0; i-- {
-			cache.In() <- points.OnePoint(metricName, float64(i), startTime+int64(i))
-		}
-
-	}
-
-	time.Sleep(100 * time.Millisecond)
-	cache.doCheckpoint()
-
-	d := <-cache.Out()
-	if d.Metric != "metric0" {
-		t.Fatal("wrong metric received")
-	}
-
-	systemMetrics := []string{
-		"carbon.cache.inputLenAfterCheckpoint",
-		"carbon.cache.inputLenBeforeCheckpoint",
-		"carbon.cache.checkpointTime",
-		"carbon.cache.overflow",
-		"carbon.cache.queries",
-		"carbon.cache.metrics",
-		"carbon.cache.size",
-	}
-
-	for _, metricName := range systemMetrics {
-		d = <-cache.Out()
-		if d.Metric != metricName {
-			t.Fatalf("%#v != %#v", d.Metric, metricName)
-		}
-	}
-
-	result := sizes[1:]
-	sort.Sort(sort.Reverse(sort.IntSlice(result)))
-
-	for _, size := range result {
-		d = <-cache.Out()
-		if len(d.Data) != size {
-			t.Fatalf("wrong metric received. Waiting metric with %d points, received with %d", size, len(d.Data))
-		}
 	}
 }
 
@@ -131,11 +72,13 @@ func benchmarkStrategy(b *testing.B, strategy string) {
 
 	for i := 0; i < b.N; i++ {
 		cache.updateQueue()
-                for {
-                    p := cache.getNext()
-                    gp = p  // assign to package level var to avoid compiler optimizing us out
-                    if p == nil { break }
-                }
+		for {
+			p := cache.getNext()
+			gp = p // assign to package level var to avoid compiler optimizing us out
+			if p == nil {
+				break
+			}
+		}
 	}
 }
 
