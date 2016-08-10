@@ -11,24 +11,18 @@ import (
 	"github.com/Sirupsen/logrus"
 )
 
-type queueItem struct {
-	metric string
-	count  int
-	ts     int64
-}
+type queue []*points.Points
 
-type queue []*queueItem
-
-type byLength []*queueItem
-type byTimestamp []*queueItem
+type byLength queue
+type byTimestamp queue
 
 func (v byLength) Len() int           { return len(v) }
 func (v byLength) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byLength) Less(i, j int) bool { return v[i].count < v[j].count }
+func (v byLength) Less(i, j int) bool { return len(v[i].Data) < len(v[j].Data) }
 
 func (v byTimestamp) Len() int           { return len(v) }
 func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byTimestamp) Less(i, j int) bool { return v[i].ts > v[j].ts }
+func (v byTimestamp) Less(i, j int) bool { return v[i].Data[0].Timestamp > v[j].Data[0].Timestamp }
 
 type WriteStrategy int
 
@@ -106,19 +100,13 @@ func (c *Cache) SetMetricInterval(interval time.Duration) {
 }
 
 func (c *Cache) getNext() *points.Points {
-	for {
-		size := len(c.queue)
-		if size == 0 {
-			break
-		}
-		cacheRecord := c.queue[size-1]
-		c.queue = c.queue[:size-1]
-
-		if values, ok := c.data[cacheRecord.metric]; ok {
-			return values
-		}
+	size := len(c.queue)
+	if size == 0 {
+		return nil
 	}
-	return nil
+	values := c.queue[size-1]
+	c.queue = c.queue[:size-1]
+	return values
 }
 
 func (c *Cache) getAny() *points.Points {
@@ -188,20 +176,21 @@ func (c *Cache) Size() int {
 	return c.size
 }
 
- 
 // stat send internal statistics of cache
 func (c *Cache) stat(metric string, value float64) {
 	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
-	c.Add(points.OnePoint(key, value, time.Now().Unix()))
-	c.queue = append(c.queue, &queueItem{key, 1, 0})
+
+	p := points.OnePoint(key, value, time.Now().Unix())
+	c.Add(p)
+	c.queue = append(c.queue, p)
 }
 
 func (c *Cache) updateQueue() {
 	start := time.Now()
-	newQueue := make(queue, 0)
+	newQueue := c.queue[:0]
 
-	for key, values := range c.data {
-		newQueue = append(newQueue,	&queueItem{key, len(values.Data), values.Data[0].Timestamp})
+	for _, values := range c.data {
+		newQueue = append(newQueue, values)
 	}
 
 	switch c.writeStrategy {

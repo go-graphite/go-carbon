@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"math/rand"
 	"sort"
 	"testing"
 	"time"
@@ -96,3 +97,48 @@ func TestCacheCheckpoint(t *testing.T) {
 		}
 	}
 }
+
+var cache *Cache
+
+func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
+	if cache != nil {
+		return cache
+	}
+	cache = New()
+	cache.SetOutputChanSize(0)
+
+	for i := 0; i < metricsCount; i++ {
+		m := fmt.Sprintf("%d.metric.name.for.bench.test.%d", rand.Intn(metricsCount), i)
+
+		p := points.OnePoint(m, 0, int64(i))
+		for j := 0; j < rand.Intn(maxPointsPerMetric)+1; j++ {
+			p.Add(0, int64(i+j))
+		}
+		cache.Add(p)
+	}
+	cache.updateQueue() // warmup
+	return cache
+}
+
+var gp *points.Points
+
+func benchmarkStrategy(b *testing.B, strategy string) {
+	cache := createCacheAndPopulate(1000*1000, 100)
+	if err := cache.SetWriteStrategy(strategy); err != nil {
+		b.Errorf("Can't set strategy %s", strategy)
+	}
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		cache.updateQueue()
+                for {
+                    p := cache.getNext()
+                    gp = p  // assign to package level var to avoid compiler optimizing us out
+                    if p == nil { break }
+                }
+	}
+}
+
+func BenchmarkUpdateQueueMax(b *testing.B)  { benchmarkStrategy(b, "max") }
+func BenchmarkUpdateQueueSort(b *testing.B) { benchmarkStrategy(b, "sort") }
+func BenchmarkUpdateQueueNoop(b *testing.B) { benchmarkStrategy(b, "noop") }
