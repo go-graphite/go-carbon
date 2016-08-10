@@ -29,12 +29,12 @@ func (app *App) CollectStat() {
 	if app.UDP != nil {
 		app.UDP.Stat(statModule("udp"))
 	}
-	// if app.TCP != nil {
-	// 	app.TCP.Stat(statModule("tcp"))
-	// }
-	// if app.Pickle != nil {
-	// 	app.Pickle.Stat(statModule("pickle"))
-	// }
+	if app.TCP != nil {
+		app.TCP.Stat(statModule("tcp"))
+	}
+	if app.Pickle != nil {
+		app.Pickle.Stat(statModule("pickle"))
+	}
 	if app.Persister != nil {
 		app.Persister.Stat(statModule("persister"))
 	}

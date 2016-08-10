@@ -241,9 +241,6 @@ func (app *App) Start() (err error) {
 		}
 
 		tcpListener := receiver.NewTCP(core.In())
-		tcpListener.SetGraphPrefix(fmt.Sprintf("%stcp.", conf.Common.GraphPrefix))
-		tcpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
-
 		if err = tcpListener.Listen(tcpAddr); err != nil {
 			return
 		}
@@ -262,8 +259,6 @@ func (app *App) Start() (err error) {
 		}
 
 		pickleListener := receiver.NewPickle(core.In())
-		pickleListener.SetGraphPrefix(fmt.Sprintf("%spickle.", conf.Common.GraphPrefix))
-		pickleListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 		pickleListener.SetMaxPickleMessageSize(uint32(conf.Pickle.MaxMessageSize))
 
 		if err = pickleListener.Listen(pickleAddr); err != nil {

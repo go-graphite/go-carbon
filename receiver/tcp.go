@@ -3,7 +3,6 @@ package receiver
 import (
 	"bufio"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -20,22 +19,19 @@ import (
 type TCP struct {
 	helper.Stoppable
 	out                  chan *points.Points
-	graphPrefix          string
 	maxPickleMessageSize uint32
 	metricsReceived      uint32
 	errors               uint32
 	active               int32 // counter
 	listener             *net.TCPListener
 	isPickle             bool
-	metricInterval       time.Duration
 }
 
 // NewTCP create new instance of TCP
 func NewTCP(out chan *points.Points) *TCP {
 	return &TCP{
-		out:            out,
-		isPickle:       false,
-		metricInterval: time.Minute,
+		out:      out,
+		isPickle: false,
 	}
 }
 
@@ -44,33 +40,13 @@ func NewPickle(out chan *points.Points) *TCP {
 	return &TCP{
 		out:                  out,
 		isPickle:             true,
-		metricInterval:       time.Minute,
 		maxPickleMessageSize: 67108864, // 64 Mb
 	}
-}
-
-// SetGraphPrefix for internal cache metrics
-func (rcv *TCP) SetGraphPrefix(prefix string) {
-	rcv.graphPrefix = prefix
-}
-
-// SetMetricInterval sets doChekpoint interval
-func (rcv *TCP) SetMetricInterval(interval time.Duration) {
-	rcv.metricInterval = interval
 }
 
 // SetMaxPickleMessageSize sets maxPickleMessageSize (in bytes)
 func (rcv *TCP) SetMaxPickleMessageSize(newSize uint32) {
 	rcv.maxPickleMessageSize = newSize
-}
-
-// Stat sends internal statistics to cache
-func (rcv *TCP) Stat(metric string, value float64) {
-	rcv.out <- points.OnePoint(
-		fmt.Sprintf("%s%s", rcv.graphPrefix, metric),
-		value,
-		time.Now().Unix(),
-	)
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -207,6 +183,19 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	}
 }
 
+func (rcv *TCP) Stat(send func(metric string, value float64)) {
+	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+	send("metricsReceived", float64(metricsReceived))
+
+	active := float64(atomic.LoadInt32(&rcv.active))
+	send("active", active)
+
+	errors := atomic.LoadUint32(&rcv.errors)
+	atomic.AddUint32(&rcv.errors, -errors)
+	send("errors", float64(errors))
+}
+
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 	return rcv.StartFunc(func() error {
@@ -217,38 +206,8 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 		}
 
 		rcv.Go(func(exit chan bool) {
-			rcvName := "tcp"
-			if rcv.isPickle {
-				rcvName = "pickle"
-			}
-
-			ticker := time.NewTicker(rcv.metricInterval)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ticker.C:
-					metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
-					atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-					rcv.Stat("metricsReceived", float64(metricsReceived))
-
-					active := float64(atomic.LoadInt32(&rcv.active))
-					rcv.Stat("active", active)
-
-					errors := atomic.LoadUint32(&rcv.errors)
-					atomic.AddUint32(&rcv.errors, -errors)
-					rcv.Stat("errors", float64(errors))
-
-					logrus.WithFields(logrus.Fields{
-						"metricsReceived": int(metricsReceived),
-						"active":          int(active),
-						"errors":          int(errors),
-					}).Infof("[%s] doCheckpoint()", rcvName)
-				case <-exit:
-					tcpListener.Close()
-					return
-				}
-			}
+			<-exit
+			tcpListener.Close()
 		})
 
 		handler := rcv.handleConnection
