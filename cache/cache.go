@@ -47,6 +47,8 @@ type Cache struct {
 	overflowCnt    int    // drop packages if cache full
 	writeStrategy  string // max or sorted
 	queue          queue
+	queueBuildCnt  int           // number of times writeout queue was built
+	queueBuildTime time.Duration // time spent building writeout queue
 }
 
 // New create Cache instance and run in/out goroutine
@@ -58,6 +60,8 @@ func New() *Cache {
 		metricInterval: time.Minute,
 		queryChan:      make(chan *Query, 16),
 		graphPrefix:    "carbon.",
+		queueBuildCnt:  0,
+		queueBuildTime: 0,
 		queryCnt:       0,
 		queue:          make(queue, 0),
 		confirmChan:    make(chan *points.Points, 2048),
@@ -175,6 +179,7 @@ func (c *Cache) stat(metric string, value float64) {
 }
 
 func (c *Cache) updateQueue() {
+	start := time.Now()
 	newQueue := make(queue, 0)
 
 	for key, values := range c.data {
@@ -187,6 +192,9 @@ func (c *Cache) updateQueue() {
 		sort.Sort(byTimestamp(newQueue))
 	}
 	c.queue = newQueue
+
+	c.queueBuildTime += time.Now().Sub(start)
+	c.queueBuildCnt += 1
 }
 
 // doCheckpoint reorder save queue, add carbon metrics to queue
@@ -205,6 +213,8 @@ func (c *Cache) doCheckpoint() {
 	c.stat("metrics", float64(len(c.data)))
 	c.stat("queries", float64(c.queryCnt))
 	c.stat("overflow", float64(c.overflowCnt))
+	c.stat("queueBuildCount", float64(c.queueBuildCnt))
+	c.stat("queueBuildTime", c.queueBuildTime.Seconds())
 	c.stat("checkpointTime", worktime.Seconds())
 	c.stat("inputLenBeforeCheckpoint", float64(inputLenBeforeCheckpoint))
 	c.stat("inputLenAfterCheckpoint", float64(inputLenAfterCheckpoint))
@@ -218,10 +228,13 @@ func (c *Cache) doCheckpoint() {
 		"inputLenBeforeCheckpoint": inputLenBeforeCheckpoint,
 		"inputLenAfterCheckpoint":  inputLenAfterCheckpoint,
 		"inputCapacity":            cap(c.inputChan),
+		"queueBuildCount":          c.queueBuildCnt,
 	}).Info("[cache] doCheckpoint()")
 
 	c.queryCnt = 0
 	c.overflowCnt = 0
+	c.queueBuildCnt = 0
+	c.queueBuildTime = 0
 }
 
 func (c *Cache) worker(exitChan chan bool) {
