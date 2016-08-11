@@ -190,7 +190,7 @@ func (c *Cache) updateQueue() {
 	c.queue = newQueue
 
 	c.queueBuildTime += time.Now().Sub(start)
-	c.queueBuildCnt += 1
+	c.queueBuildCnt++
 }
 
 // doCheckpoint reorder save queue, add carbon metrics to queue
