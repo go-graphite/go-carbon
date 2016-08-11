@@ -23,6 +23,7 @@ type App struct {
 	Pickle         *receiver.TCP
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
+	Collector      *Collector
 	exit           chan bool
 }
 
@@ -103,6 +104,13 @@ func (app *App) ReloadConfig() error {
 	}
 	app.startPersister()
 
+	if app.Collector != nil {
+		app.Collector.Stop()
+		app.Collector = nil
+	}
+
+	app.Collector = NewCollector(app)
+
 	return nil
 }
 
@@ -146,6 +154,12 @@ func (app *App) stopAll() {
 		app.Cache.Stop()
 		app.Cache = nil
 		logrus.Debug("[cache] finished")
+	}
+
+	if app.Collector != nil {
+		app.Collector.Stop()
+		app.Collector = nil
+		logrus.Debug("[stat] finished")
 	}
 
 	if app.exit != nil {
@@ -292,6 +306,10 @@ func (app *App) Start() (err error) {
 		go app.Recover(core.In(), conf.Dump.Path, conf.Dump.RecoverPerSecond)
 	}
 	/* RECOVER end */
+
+	/* COLLECTOR start */
+	app.Collector = NewCollector(app)
+	/* COLLECTOR end */
 
 	return
 }
