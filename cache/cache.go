@@ -109,13 +109,6 @@ func (c *Cache) getNext() *points.Points {
 	return values
 }
 
-func (c *Cache) getAny() *points.Points {
-	for _, values := range c.data {
-		return values
-	}
-	return nil
-}
-
 // Get any key/values pair from Cache
 func (c *Cache) Get() *points.Points {
 	if values := c.getNext(); values != nil {
@@ -124,19 +117,13 @@ func (c *Cache) Get() *points.Points {
 
 	c.updateQueue()
 
-	if values := c.getNext(); values != nil {
-		return values
-	}
-
-	return c.getAny()
+	return c.getNext()
 }
 
 // Remove key from cache
-func (c *Cache) Remove(key string) {
-	if value, exists := c.data[key]; exists {
-		c.size -= len(value.Data)
-		delete(c.data, key)
-	}
+func (c *Cache) Remove(key string, size int) {
+	delete(c.data, key)
+	c.size -= size
 }
 
 // Pop return and remove next for save point from cache
@@ -146,7 +133,7 @@ func (c *Cache) Pop() *points.Points {
 	}
 	v := c.Get()
 	if v != nil {
-		c.Remove(v.Metric)
+		c.Remove(v.Metric, len(v.Data))
 	}
 	return v
 }
