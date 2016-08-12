@@ -51,6 +51,8 @@ type Cache struct {
 	queue          queue
 	queueBuildCnt  int           // number of times writeout queue was built
 	queueBuildTime time.Duration // time spent building writeout queue
+	maxInputLenBeforeQueueRebuild int
+	maxInputLenAfterQueueRebuild  int
 }
 
 // New create Cache instance and run in/out goroutine
@@ -174,6 +176,8 @@ func (c *Cache) stat(metric string, value float64) {
 
 func (c *Cache) updateQueue() {
 	start := time.Now()
+	inputLenBeforeQueueRebuild := len(c.inputChan)
+
 	newQueue := c.queue[:0]
 
 	for _, values := range c.data {
@@ -191,46 +195,43 @@ func (c *Cache) updateQueue() {
 
 	c.queueBuildTime += time.Now().Sub(start)
 	c.queueBuildCnt++
+	inputLenAfterQueueRebuild := len(c.inputChan)
+
+	if inputLenAfterQueueRebuild > c.maxInputLenAfterQueueRebuild {
+		c.maxInputLenAfterQueueRebuild = inputLenAfterQueueRebuild
+		c.maxInputLenBeforeQueueRebuild = inputLenBeforeQueueRebuild
+	}
 }
 
-// doCheckpoint reorder save queue, add carbon metrics to queue
+// add carbon metrics to queue
 func (c *Cache) doCheckpoint() {
-	start := time.Now()
-
-	inputLenBeforeCheckpoint := len(c.inputChan)
-
-	c.updateQueue()
-
-	inputLenAfterCheckpoint := len(c.inputChan)
-
-	worktime := time.Now().Sub(start)
-
 	c.stat("size", float64(c.size))
 	c.stat("metrics", float64(len(c.data)))
 	c.stat("queries", float64(c.queryCnt))
 	c.stat("overflow", float64(c.overflowCnt))
 	c.stat("queueBuildCount", float64(c.queueBuildCnt))
 	c.stat("queueBuildTime", c.queueBuildTime.Seconds())
-	c.stat("checkpointTime", worktime.Seconds())
-	c.stat("inputLenBeforeCheckpoint", float64(inputLenBeforeCheckpoint))
-	c.stat("inputLenAfterCheckpoint", float64(inputLenAfterCheckpoint))
+	c.stat("maxInputLenBeforeQueueRebuild", float64(c.maxInputLenBeforeQueueRebuild))
+	c.stat("maxInputLenAfterQueueRebuild", float64(c.maxInputLenAfterQueueRebuild))
 
 	logrus.WithFields(logrus.Fields{
-		"time":                     worktime.String(),
-		"size":                     c.size,
-		"metrics":                  len(c.data),
-		"queries":                  c.queryCnt,
-		"overflow":                 c.overflowCnt,
-		"inputLenBeforeCheckpoint": inputLenBeforeCheckpoint,
-		"inputLenAfterCheckpoint":  inputLenAfterCheckpoint,
-		"inputCapacity":            cap(c.inputChan),
-		"queueBuildCount":          c.queueBuildCnt,
+		"size":                          c.size,
+		"metrics":                       len(c.data),
+		"queries":                       c.queryCnt,
+		"overflow":                      c.overflowCnt,
+		"maxInputLenBeforeQueueRebuild": c.maxInputLenBeforeQueueRebuild,
+		"maxInputLenAfterQueueRebuild":  c.maxInputLenAfterQueueRebuild,
+		"inputCapacity":                 cap(c.inputChan),
+		"queueBuildCount":               c.queueBuildCnt,
+		"queueBuildTime":                c.queueBuildTime.String(),
 	}).Info("[cache] doCheckpoint()")
 
 	c.queryCnt = 0
 	c.overflowCnt = 0
 	c.queueBuildCnt = 0
 	c.queueBuildTime = 0
+	c.maxInputLenBeforeQueueRebuild = 0
+	c.maxInputLenAfterQueueRebuild = 0
 }
 
 func (c *Cache) worker(exitChan chan bool) {
