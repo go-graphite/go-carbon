@@ -51,10 +51,10 @@ type Cache struct {
 	queue                         queue
 	queueBuildCnt                 uint32 // number of times writeout queue was built
 	queueBuildTime                uint32 // time spent building writeout queue in milliseconds
-	maxInputLenBeforeQueueRebuild int
-	maxInputLenAfterQueueRebuild  int
+	maxInputLenBeforeQueueRebuild uint32
+	maxInputLenAfterQueueRebuild  uint32
 	queueWriteoutStart            time.Time
-	queueWriteoutTime             time.Duration
+	queueWriteoutTime             uint32 // in milliseconds
 }
 
 // New create Cache instance and run in/out goroutine
@@ -111,7 +111,7 @@ func (c *Cache) Get() *points.Points {
 	}
 
 	if (c.queueWriteoutStart != time.Time{}) {
-		c.queueWriteoutTime += time.Now().Sub(c.queueWriteoutStart)
+		atomic.AddUint32(&c.queueWriteoutTime, uint32(time.Now().Sub(c.queueWriteoutStart).Nanoseconds()/1000000))
 	}
 
 	c.updateQueue()
@@ -191,9 +191,9 @@ func (c *Cache) updateQueue() {
 
 	inputLenAfterQueueRebuild := len(c.inputChan)
 
-	if inputLenAfterQueueRebuild > c.maxInputLenAfterQueueRebuild {
-		c.maxInputLenAfterQueueRebuild = inputLenAfterQueueRebuild
-		c.maxInputLenBeforeQueueRebuild = inputLenBeforeQueueRebuild
+	if uint32(inputLenAfterQueueRebuild) > atomic.LoadUint32(&c.maxInputLenAfterQueueRebuild) {
+		atomic.StoreUint32(&c.maxInputLenAfterQueueRebuild, uint32(inputLenAfterQueueRebuild))
+		atomic.StoreUint32(&c.maxInputLenBeforeQueueRebuild, uint32(inputLenBeforeQueueRebuild))
 	}
 }
 
@@ -216,11 +216,19 @@ func (c *Cache) Stat(send func(metric string, value float64)) {
 
 	queueBuildTime := atomic.LoadUint32(&c.queueBuildTime)
 	atomic.AddUint32(&c.queueBuildTime, -queueBuildTime)
-	send("queueBuildTime", float64(queueBuildTime/1000))
+	send("queueBuildTime", float64(queueBuildTime)/1000.0)
 
-	// c.stat("maxInputLenBeforeQueueRebuild", float64(c.maxInputLenBeforeQueueRebuild))
-	// c.stat("maxInputLenAfterQueueRebuild", float64(c.maxInputLenAfterQueueRebuild))
-	// c.stat("queueWriteoutTime", float64(c.queueWriteoutTime.Seconds()))
+	queueWriteoutTime := atomic.LoadUint32(&c.queueWriteoutTime)
+	atomic.AddUint32(&c.queueWriteoutTime, -queueWriteoutTime)
+	send("queueWriteoutTime", float64(queueWriteoutTime)/1000.0)
+
+	maxInputLenBeforeQueueRebuild := atomic.LoadUint32(&c.maxInputLenBeforeQueueRebuild)
+	atomic.CompareAndSwapUint32(&c.maxInputLenAfterQueueRebuild, maxInputLenBeforeQueueRebuild, 0)
+	send("maxInputLenBeforeQueueRebuild", float64(maxInputLenBeforeQueueRebuild))
+
+	maxInputLenAfterQueueRebuild := atomic.LoadUint32(&c.maxInputLenAfterQueueRebuild)
+	atomic.CompareAndSwapUint32(&c.maxInputLenAfterQueueRebuild, maxInputLenAfterQueueRebuild, 0)
+	send("maxInputLenAfterQueueRebuild", float64(maxInputLenAfterQueueRebuild))
 }
 
 func (c *Cache) worker(exitChan chan bool) {
