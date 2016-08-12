@@ -21,7 +21,7 @@ type Point struct {
 // Points from carbon clients
 type Points struct {
 	Metric string
-	Data   []*Point
+	Data   []Point
 }
 
 // New creates new instance of Points
@@ -33,8 +33,8 @@ func New() *Points {
 func OnePoint(metric string, value float64, timestamp int64) *Points {
 	return &Points{
 		Metric: metric,
-		Data: []*Point{
-			&Point{
+		Data: []Point{
+			Point{
 				Value:     value,
 				Timestamp: timestamp,
 			},
@@ -161,14 +161,14 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 }
 
 // Append point
-func (p *Points) Append(onePoint *Point) *Points {
+func (p *Points) Append(onePoint Point) *Points {
 	p.Data = append(p.Data, onePoint)
 	return p
 }
 
 // Add value/timestamp pair to points
 func (p *Points) Add(value float64, timestamp int64) *Points {
-	p.Data = append(p.Data, &Point{
+	p.Data = append(p.Data, Point{
 		Value:     value,
 		Timestamp: timestamp,
 	})
