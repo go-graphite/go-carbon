@@ -35,24 +35,26 @@ const (
 // Cache stores and aggregate metrics in memory
 type Cache struct {
 	helper.Stoppable
-	data           map[string]*points.Points
-	size           int
-	maxSize        int
-	inputChan      chan *points.Points // from receivers
-	inputCapacity  int                 // buffer size of inputChan
-	outputChan     chan *points.Points // to persisters
-	queryChan      chan *Query         // from carbonlink
-	confirmChan    chan *points.Points // for persisted confirmation
-	metricInterval time.Duration       // checkpoint interval
-	graphPrefix    string
-	queryCnt       int
-	overflowCnt    int // drop packages if cache full
-	writeStrategy  WriteStrategy
-	queue          queue
-	queueBuildCnt  int           // number of times writeout queue was built
-	queueBuildTime time.Duration // time spent building writeout queue
+	data                          map[string]*points.Points
+	size                          int
+	maxSize                       int
+	inputChan                     chan *points.Points // from receivers
+	inputCapacity                 int                 // buffer size of inputChan
+	outputChan                    chan *points.Points // to persisters
+	queryChan                     chan *Query         // from carbonlink
+	confirmChan                   chan *points.Points // for persisted confirmation
+	metricInterval                time.Duration       // checkpoint interval
+	graphPrefix                   string
+	queryCnt                      int
+	overflowCnt                   int // drop packages if cache full
+	writeStrategy                 WriteStrategy
+	queue                         queue
+	queueBuildCnt                 int           // number of times writeout queue was built
+	queueBuildTime                time.Duration // time spent building writeout queue
 	maxInputLenBeforeQueueRebuild int
 	maxInputLenAfterQueueRebuild  int
+	queueWriteoutStart            time.Time
+	queueWriteoutTime             time.Duration
 }
 
 // New create Cache instance and run in/out goroutine
@@ -117,9 +119,17 @@ func (c *Cache) Get() *points.Points {
 		return values
 	}
 
+	c.queueWriteoutTime += time.Now().Sub(c.queueWriteoutStart)
+
 	c.updateQueue()
 
-	return c.getNext()
+	value := c.getNext()
+
+	if value != nil {
+		c.queueWriteoutStart = time.Now()
+	}
+
+	return value
 }
 
 // Remove key from cache
@@ -213,6 +223,7 @@ func (c *Cache) doCheckpoint() {
 	c.stat("queueBuildTime", c.queueBuildTime.Seconds())
 	c.stat("maxInputLenBeforeQueueRebuild", float64(c.maxInputLenBeforeQueueRebuild))
 	c.stat("maxInputLenAfterQueueRebuild", float64(c.maxInputLenAfterQueueRebuild))
+	c.stat("queueWriteoutTime", float64(c.queueWriteoutTime.Seconds()))
 
 	logrus.WithFields(logrus.Fields{
 		"size":                          c.size,
@@ -224,6 +235,7 @@ func (c *Cache) doCheckpoint() {
 		"inputCapacity":                 cap(c.inputChan),
 		"queueBuildCount":               c.queueBuildCnt,
 		"queueBuildTime":                c.queueBuildTime.String(),
+		"queueWriteoutTime":             c.queueWriteoutTime.String(),
 	}).Info("[cache] doCheckpoint()")
 
 	c.queryCnt = 0
