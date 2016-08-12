@@ -160,12 +160,11 @@ in a background.
 
 With settings above applied, best write-strategy to use is "noop"
 
-# Reported stats
-## Cache
+## Reported stats
 
 | metric | description |
 | --- | --- |
-| queueWriteoutTime | Time in seconds to make a full cycle writing all metrics |
+| cache.queueWriteoutTime | Time in seconds to make a full cycle writing all metrics |
 
 
 ## Changelog
