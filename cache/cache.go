@@ -223,7 +223,7 @@ func (c *Cache) Stat(send func(metric string, value float64)) {
 	send("queueWriteoutTime", float64(queueWriteoutTime)/1000.0)
 
 	maxInputLenBeforeQueueRebuild := atomic.LoadUint32(&c.maxInputLenBeforeQueueRebuild)
-	atomic.CompareAndSwapUint32(&c.maxInputLenAfterQueueRebuild, maxInputLenBeforeQueueRebuild, 0)
+	atomic.CompareAndSwapUint32(&c.maxInputLenBeforeQueueRebuild, maxInputLenBeforeQueueRebuild, 0)
 	send("maxInputLenBeforeQueueRebuild", float64(maxInputLenBeforeQueueRebuild))
 
 	maxInputLenAfterQueueRebuild := atomic.LoadUint32(&c.maxInputLenAfterQueueRebuild)
