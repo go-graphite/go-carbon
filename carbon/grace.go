@@ -227,7 +227,7 @@ func RecoverFromFile(filename string, out chan *points.Points) error {
 
 		logrus.
 			WithField("points", pointsCount).
-			WithField("time", finishTime.Sub(startTime)).
+			WithField("time", finishTime.Sub(startTime).String()).
 			Infof("[recover] finish %s", filename)
 	}()
 
@@ -269,7 +269,7 @@ func RecoverFromDir(dumpDir string, out chan *points.Points) {
 	startTime := time.Now()
 	defer func() {
 		finishTime := time.Now()
-		logrus.WithField("time", finishTime.Sub(startTime)).Info("[recover] finished")
+		logrus.WithField("time", finishTime.Sub(startTime).String()).Info("[recover] finished")
 	}()
 
 	files, err := ioutil.ReadDir(dumpDir)
