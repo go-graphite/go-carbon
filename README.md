@@ -169,7 +169,9 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
-##### master
+##### master (unstable, untested)
+* Fully refactored and optimizer cache module (core of go-carbon) (thanks [Maxim Ivanov](https://github.com/redbaron))
+* Added `noop` cache.write-strategy (thanks [Maxim Ivanov](https://github.com/redbaron))
 
 ##### version 0.7.3
 * Added `cache.write-strategy` option (values "max" or "sorted") (thanks [Alexander Akulov](https://github.com/AlexAkulov))
