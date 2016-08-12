@@ -60,19 +60,21 @@ type Cache struct {
 // New create Cache instance and run in/out goroutine
 func New() *Cache {
 	cache := &Cache{
-		data:           make(map[string]*points.Points, 0),
-		size:           0,
-		maxSize:        1000000,
-		metricInterval: time.Minute,
-		queryChan:      make(chan *Query, 16),
-		graphPrefix:    "carbon.",
-		queueBuildCnt:  0,
-		queueBuildTime: 0,
-		queryCnt:       0,
-		queue:          make(queue, 0),
-		confirmChan:    make(chan *points.Points, 2048),
-		inputCapacity:  51200,
-		writeStrategy:  MaximumLength,
+		data:               make(map[string]*points.Points, 0),
+		size:               0,
+		maxSize:            1000000,
+		metricInterval:     time.Minute,
+		queryChan:          make(chan *Query, 16),
+		graphPrefix:        "carbon.",
+		queueBuildCnt:      0,
+		queueBuildTime:     0,
+		queryCnt:           0,
+		queue:              make(queue, 0),
+		confirmChan:        make(chan *points.Points, 2048),
+		inputCapacity:      51200,
+		writeStrategy:      MaximumLength,
+		queueWriteoutTime:  0,
+		queueWriteoutStart: time.Time{},
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
@@ -119,7 +121,9 @@ func (c *Cache) Get() *points.Points {
 		return values
 	}
 
-	c.queueWriteoutTime += time.Now().Sub(c.queueWriteoutStart)
+	if (c.queueWriteoutStart != time.Time{}) {
+		c.queueWriteoutTime += time.Now().Sub(c.queueWriteoutStart)
+	}
 
 	c.updateQueue()
 
@@ -127,6 +131,8 @@ func (c *Cache) Get() *points.Points {
 
 	if value != nil {
 		c.queueWriteoutStart = time.Now()
+	} else {
+		c.queueWriteoutStart = time.Time{}
 	}
 
 	return value
@@ -242,6 +248,7 @@ func (c *Cache) doCheckpoint() {
 	c.overflowCnt = 0
 	c.queueBuildCnt = 0
 	c.queueBuildTime = 0
+	c.queueWriteoutTime = 0
 	c.maxInputLenBeforeQueueRebuild = 0
 	c.maxInputLenAfterQueueRebuild = 0
 }
