@@ -245,9 +245,6 @@ func (c *Cache) worker(exitChan chan bool) {
 
 	forceReceiveThreshold := cap(c.inputChan) / 10
 
-	ticker := time.NewTicker(time.Minute)
-	defer ticker.Stop()
-
 MAIN_LOOP:
 	for {
 
@@ -268,8 +265,6 @@ MAIN_LOOP:
 		}
 
 		select {
-		case <-ticker.C: // checkpoint
-			c.updateQueue()
 		case query := <-c.queryChan: // carbonlink
 			atomic.AddUint32(&c.queryCnt, 1)
 
