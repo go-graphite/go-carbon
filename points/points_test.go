@@ -90,7 +90,7 @@ func TestCopyAndEq(t *testing.T) {
 		&Points{
 			Metric: "metric.name",
 		},
-		points.Copy().Append(&Point{
+		points.Copy().Append(Point{
 			Value:     42.15,
 			Timestamp: timestamp,
 		}),
