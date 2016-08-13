@@ -57,7 +57,7 @@ type whisperConfig struct {
 }
 
 type cacheConfig struct {
-	MaxSize       int    `toml:"max-size"`
+	MaxSize       uint32 `toml:"max-size"`
 	InputBuffer   int    `toml:"input-buffer"`
 	WriteStrategy string `toml:"write-strategy"`
 }
@@ -91,6 +91,12 @@ type pprofConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type dumpConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	Path             string `toml:"path"`
+	RecoverPerSecond int    `toml:"recover-per-second"`
+}
+
 // Config ...
 type Config struct {
 	Common     commonConfig     `toml:"common"`
@@ -100,6 +106,7 @@ type Config struct {
 	Tcp        tcpConfig        `toml:"tcp"`
 	Pickle     pickleConfig     `toml:"pickle"`
 	Carbonlink carbonlinkConfig `toml:"carbonlink"`
+	Dump       dumpConfig       `toml:"dump"`
 	Pprof      pprofConfig      `toml:"pprof"`
 }
 
@@ -158,6 +165,7 @@ func NewConfig() *Config {
 			Listen:  "localhost:7007",
 			Enabled: false,
 		},
+		Dump: dumpConfig{},
 	}
 
 	return cfg

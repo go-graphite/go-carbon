@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
@@ -24,6 +23,7 @@ type App struct {
 	Pickle         *receiver.TCP
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
+	Collector      *Collector
 	exit           chan bool
 }
 
@@ -104,6 +104,13 @@ func (app *App) ReloadConfig() error {
 	}
 	app.startPersister()
 
+	if app.Collector != nil {
+		app.Collector.Stop()
+		app.Collector = nil
+	}
+
+	app.Collector = NewCollector(app)
+
 	return nil
 }
 
@@ -149,6 +156,12 @@ func (app *App) stopAll() {
 		logrus.Debug("[cache] finished")
 	}
 
+	if app.Collector != nil {
+		app.Collector.Stop()
+		app.Collector = nil
+		logrus.Debug("[stat] finished")
+	}
+
 	if app.exit != nil {
 		close(app.exit)
 		app.exit = nil
@@ -163,65 +176,6 @@ func (app *App) Stop() {
 	app.stopAll()
 }
 
-// GraceStop implements gracefully stop. Close all listening sockets, flush cache, stop application
-func (app *App) GraceStop() {
-	app.Lock()
-	defer app.Unlock()
-
-	logrus.Info("grace stop inited")
-
-	app.stopListeners()
-
-	// Flush cache
-	if app.Cache != nil && app.Persister != nil {
-
-		if app.Persister.GetMaxUpdatesPerSecond() > 0 {
-			logrus.Debug("[persister] stop old throttled persister, start new unlimited")
-			app.Persister.Stop()
-			logrus.Debug("[persister] old persister finished")
-			app.Persister.SetMaxUpdatesPerSecond(0)
-			app.Persister.Start()
-			logrus.Debug("[persister] new persister started")
-		}
-		// @TODO: disable throttling in persister
-
-		flushStart := time.Now()
-
-		logrus.WithFields(logrus.Fields{
-			"size":     app.Cache.Size(),
-			"inputLen": len(app.Cache.In()),
-		}).Info("[cache] start flush")
-
-		checkTicker := time.NewTicker(10 * time.Millisecond)
-		defer checkTicker.Stop()
-
-		statTicker := time.NewTicker(time.Second)
-		defer statTicker.Stop()
-
-	FLUSH_LOOP:
-		for {
-			select {
-			case <-checkTicker.C:
-				if app.Cache.Size()+len(app.Cache.In()) == 0 {
-					break FLUSH_LOOP
-				}
-			case <-statTicker.C:
-				logrus.WithFields(logrus.Fields{
-					"size":     app.Cache.Size(),
-					"inputLen": len(app.Cache.In()),
-				}).Info("[cache] flush checkpoint")
-			}
-		}
-
-		flushWorktime := time.Now().Sub(flushStart)
-		logrus.WithFields(logrus.Fields{
-			"time": flushWorktime.String(),
-		}).Info("[cache] finish flush")
-	}
-
-	app.stopAll()
-}
-
 func (app *App) startPersister() {
 	if app.Config.Whisper.Enabled {
 		p := persister.NewWhisper(
@@ -231,8 +185,6 @@ func (app *App) startPersister() {
 			app.Cache.Out(),
 			app.Cache.Confirm(),
 		)
-		p.SetGraphPrefix(app.Config.Common.GraphPrefix)
-		p.SetMetricInterval(app.Config.Common.MetricInterval.Value())
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetWorkers(app.Config.Whisper.Workers)
@@ -257,8 +209,6 @@ func (app *App) Start() (err error) {
 	conf := app.Config
 
 	core := cache.New()
-	core.SetGraphPrefix(conf.Common.GraphPrefix)
-	core.SetMetricInterval(conf.Common.MetricInterval.Value())
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
@@ -280,8 +230,6 @@ func (app *App) Start() (err error) {
 		}
 
 		udpListener := receiver.NewUDP(core.In())
-		udpListener.SetGraphPrefix(fmt.Sprintf("%sudp.", conf.Common.GraphPrefix))
-		udpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 
 		if conf.Udp.LogIncomplete {
 			udpListener.SetLogIncomplete(true)
@@ -305,9 +253,6 @@ func (app *App) Start() (err error) {
 		}
 
 		tcpListener := receiver.NewTCP(core.In())
-		tcpListener.SetGraphPrefix(fmt.Sprintf("%stcp.", conf.Common.GraphPrefix))
-		tcpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
-
 		if err = tcpListener.Listen(tcpAddr); err != nil {
 			return
 		}
@@ -326,8 +271,6 @@ func (app *App) Start() (err error) {
 		}
 
 		pickleListener := receiver.NewPickle(core.In())
-		pickleListener.SetGraphPrefix(fmt.Sprintf("%spickle.", conf.Common.GraphPrefix))
-		pickleListener.SetMetricInterval(conf.Common.MetricInterval.Value())
 		pickleListener.SetMaxPickleMessageSize(uint32(conf.Pickle.MaxMessageSize))
 
 		if err = pickleListener.Listen(pickleAddr); err != nil {
@@ -357,6 +300,16 @@ func (app *App) Start() (err error) {
 		app.CarbonLink = carbonlink
 	}
 	/* CARBONLINK end */
+
+	/* RECOVER start */
+	if conf.Dump.Enabled {
+		go app.Recover(core.In(), conf.Dump.Path, conf.Dump.RecoverPerSecond)
+	}
+	/* RECOVER end */
+
+	/* COLLECTOR start */
+	app.Collector = NewCollector(app)
+	/* COLLECTOR end */
 
 	return
 }

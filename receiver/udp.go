@@ -2,7 +2,6 @@ package receiver
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -19,21 +18,16 @@ import (
 type UDP struct {
 	helper.Stoppable
 	out                chan *points.Points
-	graphPrefix        string
 	metricsReceived    uint32
 	incompleteReceived uint32
 	errors             uint32
 	logIncomplete      bool
 	conn               *net.UDPConn
-	metricInterval     time.Duration
 }
 
 // NewUDP create new instance of UDP
 func NewUDP(out chan *points.Points) *UDP {
-	return &UDP{
-		out:            out,
-		metricInterval: time.Minute,
-	}
+	return &UDP{out: out}
 }
 
 type incompleteRecord struct {
@@ -102,31 +96,12 @@ func (rcv *UDP) SetLogIncomplete(value bool) {
 	rcv.logIncomplete = value
 }
 
-// SetMetricInterval sets doChekpoint interval
-func (rcv *UDP) SetMetricInterval(interval time.Duration) {
-	rcv.metricInterval = interval
-}
-
 // Addr returns binded socket address. For bind port 0 in tests
 func (rcv *UDP) Addr() net.Addr {
 	if rcv.conn == nil {
 		return nil
 	}
 	return rcv.conn.LocalAddr()
-}
-
-// SetGraphPrefix for internal cache metrics
-func (rcv *UDP) SetGraphPrefix(prefix string) {
-	rcv.graphPrefix = prefix
-}
-
-// Stat sends internal statistics to cache
-func (rcv *UDP) Stat(metric string, value float64) {
-	rcv.out <- points.OnePoint(
-		fmt.Sprintf("%s%s", rcv.graphPrefix, metric),
-		value,
-		time.Now().Unix(),
-	)
 }
 
 func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
@@ -149,36 +124,18 @@ func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
 	}
 }
 
-func (rcv *UDP) statWorker(exit chan bool) {
-	ticker := time.NewTicker(rcv.metricInterval)
-	defer ticker.Stop()
+func (rcv *UDP) Stat(send func(metric string, value float64)) {
+	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+	send("metricsReceived", float64(metricsReceived))
 
-	for {
-		select {
-		case <-ticker.C:
-			metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
-			atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-			rcv.Stat("metricsReceived", float64(metricsReceived))
+	incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
+	atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
+	send("incompleteReceived", float64(incompleteReceived))
 
-			incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
-			atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
-			rcv.Stat("incompleteReceived", float64(incompleteReceived))
-
-			errors := atomic.LoadUint32(&rcv.errors)
-			atomic.AddUint32(&rcv.errors, -errors)
-			rcv.Stat("errors", float64(errors))
-
-			logrus.WithFields(logrus.Fields{
-				"metricsReceived":    int(metricsReceived),
-				"incompleteReceived": int(incompleteReceived),
-				"errors":             int(errors),
-			}).Info("[udp] doCheckpoint()")
-
-		case <-exit:
-			rcv.conn.Close()
-			return
-		}
-	}
+	errors := atomic.LoadUint32(&rcv.errors)
+	atomic.AddUint32(&rcv.errors, -errors)
+	send("errors", float64(errors))
 }
 
 func (rcv *UDP) receiveWorker(exit chan bool) {
@@ -252,7 +209,10 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 			return err
 		}
 
-		rcv.Go(rcv.statWorker)
+		rcv.Go(func(exit chan bool) {
+			<-exit
+			rcv.conn.Close()
+		})
 
 		rcv.Go(rcv.receiveWorker)
 
