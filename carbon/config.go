@@ -94,7 +94,7 @@ type pprofConfig struct {
 type dumpConfig struct {
 	Enabled          bool   `toml:"enabled"`
 	Path             string `toml:"path"`
-	RecoverPerSecond int    `toml:"recover-per-second"`
+	RestorePerSecond int    `toml:"restore-per-second"`
 }
 
 // Config ...

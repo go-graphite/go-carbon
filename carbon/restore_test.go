@@ -9,7 +9,7 @@ import (
 	"github.com/lomik/go-carbon/qa"
 )
 
-func TestRecover(t *testing.T) {
+func TestRestore(t *testing.T) {
 	qa.Root(t, func(root string) {
 		w := func(fn, body string) {
 			err := ioutil.WriteFile(path.Join(root, fn), []byte(body), 0644)
@@ -77,7 +77,7 @@ func TestRecover(t *testing.T) {
 
 		ch := make(chan *points.Points, 1024)
 
-		RecoverFromDir(root, ch)
+		RestoreFromDir(root, ch)
 
 		close(ch)
 

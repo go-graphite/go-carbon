@@ -301,11 +301,11 @@ func (app *App) Start() (err error) {
 	}
 	/* CARBONLINK end */
 
-	/* RECOVER start */
+	/* RESTORE start */
 	if conf.Dump.Enabled {
-		go app.Recover(core.In(), conf.Dump.Path, conf.Dump.RecoverPerSecond)
+		go app.Restore(core.In(), conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
-	/* RECOVER end */
+	/* RESTORE end */
 
 	/* COLLECTOR start */
 	app.Collector = NewCollector(app)

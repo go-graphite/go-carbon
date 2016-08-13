@@ -215,12 +215,12 @@ FlushLoop:
 	return nil
 }
 
-// RecoverFromFile read and parse data from single file
-func RecoverFromFile(filename string, out chan *points.Points) error {
+// RestoreFromFile read and parse data from single file
+func RestoreFromFile(filename string, out chan *points.Points) error {
 	var pointsCount int
 	startTime := time.Now()
 
-	logrus.Infof("[recover] start %s", filename)
+	logrus.Infof("[restore] start %s", filename)
 
 	defer func() {
 		finishTime := time.Now()
@@ -228,7 +228,7 @@ func RecoverFromFile(filename string, out chan *points.Points) error {
 		logrus.
 			WithField("points", pointsCount).
 			WithField("time", finishTime.Sub(startTime).String()).
-			Infof("[recover] finish %s", filename)
+			Infof("[restore] finish %s", filename)
 	}()
 
 	file, err := os.Open(filename)
@@ -253,7 +253,7 @@ func RecoverFromFile(filename string, out chan *points.Points) error {
 			p, err := points.ParseText(string(line))
 
 			if err != nil {
-				logrus.Warnf("[recover] wrong message %#v", string(line))
+				logrus.Warnf("[restore] wrong message %#v", string(line))
 			} else {
 				pointsCount++
 				out <- p
@@ -264,12 +264,12 @@ func RecoverFromFile(filename string, out chan *points.Points) error {
 	return nil
 }
 
-// RecoverFromDir cache and input dumps from disk to memory
-func RecoverFromDir(dumpDir string, out chan *points.Points) {
+// RestoreFromDir cache and input dumps from disk to memory
+func RestoreFromDir(dumpDir string, out chan *points.Points) {
 	startTime := time.Now()
 	defer func() {
 		finishTime := time.Now()
-		logrus.WithField("time", finishTime.Sub(startTime).String()).Info("[recover] finished")
+		logrus.WithField("time", finishTime.Sub(startTime).String()).Info("[restore] finished")
 	}()
 
 	files, err := ioutil.ReadDir(dumpDir)
@@ -307,7 +307,7 @@ FilesLoop:
 	}
 
 	if len(list) == 0 {
-		logrus.Infof("[recover] nothing to recover from %s", dumpDir)
+		logrus.Infof("[restore] nothing to do from %s", dumpDir)
 		return
 	}
 
@@ -317,26 +317,26 @@ FilesLoop:
 		list[index] = strings.SplitN(fileWithSortPrefix, ":", 2)[1]
 	}
 
-	logrus.WithField("files", list).Infof("[recover] start recover from %s", dumpDir)
+	logrus.WithField("files", list).Infof("[restore] start from %s", dumpDir)
 
 	for _, fn := range list {
 		filename := path.Join(dumpDir, fn)
-		err := RecoverFromFile(filename, out)
+		err := RestoreFromFile(filename, out)
 		if err != nil {
-			logrus.Errorf("[recover] read %s failed: %s", filename, err.Error())
+			logrus.Errorf("[restore] read %s failed: %s", filename, err.Error())
 		}
 
 		err = os.Remove(filename)
 		if err != nil {
-			logrus.Errorf("[recover] remove %s failed: %s", filename, err.Error())
+			logrus.Errorf("[restore] remove %s failed: %s", filename, err.Error())
 		}
 	}
 }
 
-// Recover from dump.path
-func (app *App) Recover(inputChan chan *points.Points, path string, rps int) {
+// Restore from dump.path
+func (app *App) Restore(inputChan chan *points.Points, path string, rps int) {
 	if rps > 0 {
-		// recover throttled
+		// throttled
 		readChan := make(chan *points.Points)
 		exitChan := make(chan bool)
 
@@ -353,9 +353,9 @@ func (app *App) Recover(inputChan chan *points.Points, path string, rps int) {
 			}
 		}()
 
-		RecoverFromDir(path, readChan)
+		RestoreFromDir(path, readChan)
 		close(readChan) //  required for finish throttling worker
 	} else {
-		RecoverFromDir(path, inputChan)
+		RestoreFromDir(path, inputChan)
 	}
 }
