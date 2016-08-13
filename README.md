@@ -171,6 +171,8 @@ With settings above applied, best write-strategy to use is "noop"
 ##### master (unstable, untested)
 * Fully refactored and optimizer cache module (core of go-carbon) (thanks [Maxim Ivanov](https://github.com/redbaron))
 * Added `noop` cache.write-strategy (thanks [Maxim Ivanov](https://github.com/redbaron))
+* New optional dump/restore functional for minimize data loss on restart
+* Refactored internal stat mechanics. `common.graph-prefix` and `common.metric-interval` now can be changed without restart (on HUP signal)
 
 ##### version 0.7.3
 * Added `cache.write-strategy` option (values "max" or "sorted") (thanks [Alexander Akulov](https://github.com/AlexAkulov))
