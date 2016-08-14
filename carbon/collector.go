@@ -2,6 +2,8 @@ package carbon
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -15,6 +17,7 @@ type Collector struct {
 	app            *App
 	graphPrefix    string
 	metricInterval time.Duration
+	endpoint       string
 	data           chan *points.Points
 }
 
@@ -24,6 +27,7 @@ func NewCollector(app *App) *Collector {
 		graphPrefix:    app.Config.Common.GraphPrefix,
 		metricInterval: app.Config.Common.MetricInterval.Value(),
 		data:           make(chan *points.Points, 4096),
+		endpoint:       app.Config.Common.MetricEndpoint,
 	}
 
 	c.Start()
@@ -43,24 +47,62 @@ func NewCollector(app *App) *Collector {
 		}
 	})
 
-	// sender worker
-	out := app.Cache.In()
+	if c.endpoint == MetricEndpointLocal {
+		// sender worker
+		out := app.Cache.In()
 
-	c.Go(func(exit chan bool) {
-		for {
-			select {
-			case <-exit:
-				return
-			case p := <-c.data:
+		c.Go(func(exit chan bool) {
+			for {
 				select {
-				case out <- p:
-				// pass
 				case <-exit:
 					return
+				case p := <-c.data:
+					select {
+					case out <- p:
+					// pass
+					case <-exit:
+						return
+					}
 				}
 			}
+		})
+	} else {
+		endpoint, err := url.Parse(c.endpoint)
+		if err != nil {
+			logrus.Errorf("[stat] metric-endpoint parse error: %s", err.Error())
 		}
-	})
+
+		c.Go(func(exit chan bool) {
+			points.Glue(exit, c.data, 1200, time.Second, func(chunk []byte) {
+				// send data to endpoint
+				for {
+					conn, err := net.DialTimeout(endpoint.Scheme, endpoint.Host, 5*time.Second)
+					if err != nil {
+						logrus.Errorf("[stat] dial %s failed: %s", c.endpoint, err.Error())
+						time.Sleep(time.Second)
+						continue
+					}
+
+					err = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					if err != nil {
+						logrus.Errorf("[stat] conn.SetDeadline failed: %s", err.Error())
+						time.Sleep(time.Second)
+						continue
+					}
+
+					_, err = conn.Write(chunk)
+					if err != nil {
+						logrus.Errorf("[stat] conn.Write failed: %s", err.Error())
+						time.Sleep(time.Second)
+						continue
+					}
+
+					return
+				}
+			})
+		})
+
+	}
 
 	return c
 }

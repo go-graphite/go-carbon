@@ -3,6 +3,7 @@ package carbon
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -73,6 +74,18 @@ func (app *App) configure() error {
 		cfg.Cache.WriteStrategy == "sorted" ||
 		cfg.Cache.WriteStrategy == "noop") {
 		return fmt.Errorf("go-carbon support only \"max\", \"sorted\"  or \"noop\" write-strategy")
+	}
+
+	if cfg.Common.MetricEndpoint != MetricEndpointLocal {
+		u, err := url.Parse(cfg.Common.MetricEndpoint)
+
+		if err != nil {
+			return fmt.Errorf("common.metric-endpoint parse error: %s", err.Error())
+		}
+
+		if u.Scheme != "tcp" && u.Scheme != "udp" {
+			return fmt.Errorf("common.metric-endpoint supports only tcp and udp protocols. %#v is unsupported", u.Scheme)
+		}
 	}
 
 	app.Config = cfg
