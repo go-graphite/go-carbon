@@ -198,21 +198,14 @@ func (c *Cache) updateQueue() {
 }
 
 // Collect cache metrics
-func (c *Cache) Stat(send func(metric string, value float64)) {
+func (c *Cache) Stat(send helper.StatCb) {
 	send("size", float64(c.Size()))
 	send("metrics", float64(atomic.LoadUint32(&c.metricCount)))
 
-	queryCnt := atomic.LoadUint32(&c.queryCnt)
-	atomic.AddUint32(&c.queryCnt, -queryCnt)
-	send("queries", float64(queryCnt))
-
-	overflowCnt := atomic.LoadUint32(&c.overflowCnt)
-	atomic.AddUint32(&c.overflowCnt, -overflowCnt)
-	send("overflow", float64(overflowCnt))
-
-	queueBuildCnt := atomic.LoadUint32(&c.queueBuildCnt)
-	atomic.AddUint32(&c.queueBuildCnt, -queueBuildCnt)
-	send("queueBuildCount", float64(queueBuildCnt))
+	helper.SendAndSubstractUint32("queries", &c.queryCnt, send)
+	helper.SendAndSubstractUint32("overflow", &c.overflowCnt, send)
+	helper.SendAndSubstractUint32("queueBuildCount", &c.queueBuildCnt, send)
+	helper.SendAndSubstractUint32("queueBuildTime", &c.queueBuildTime, send)
 
 	queueBuildTime := atomic.LoadUint32(&c.queueBuildTime)
 	atomic.AddUint32(&c.queueBuildTime, -queueBuildTime)
@@ -222,13 +215,8 @@ func (c *Cache) Stat(send func(metric string, value float64)) {
 	atomic.AddUint32(&c.queueWriteoutTime, -queueWriteoutTime)
 	send("queueWriteoutTime", float64(queueWriteoutTime)/1000.0)
 
-	maxInputLenBeforeQueueRebuild := atomic.LoadUint32(&c.maxInputLenBeforeQueueRebuild)
-	atomic.CompareAndSwapUint32(&c.maxInputLenBeforeQueueRebuild, maxInputLenBeforeQueueRebuild, 0)
-	send("maxInputLenBeforeQueueRebuild", float64(maxInputLenBeforeQueueRebuild))
-
-	maxInputLenAfterQueueRebuild := atomic.LoadUint32(&c.maxInputLenAfterQueueRebuild)
-	atomic.CompareAndSwapUint32(&c.maxInputLenAfterQueueRebuild, maxInputLenAfterQueueRebuild, 0)
-	send("maxInputLenAfterQueueRebuild", float64(maxInputLenAfterQueueRebuild))
+	helper.SendAndZeroIfNotUpdatedUint32("maxInputLenBeforeQueueRebuild", &c.maxInputLenBeforeQueueRebuild, send)
+	helper.SendAndZeroIfNotUpdatedUint32("maxInputLenAfterQueueRebuild", &c.maxInputLenAfterQueueRebuild, send)
 }
 
 func (c *Cache) worker(exitChan chan bool) {
