@@ -6,37 +6,23 @@ import (
 	"testing"
 
 	"github.com/lomik/go-carbon/points"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestCache(t *testing.T) {
-
 	c := New()
+	assert := assert.New(t)
 
 	c.Add(points.OnePoint("hello.world", 42, 10))
-
-	if c.Size() != 1 {
-		t.FailNow()
-	}
+	assert.Equal(1, int(c.Size()), "Size of cache didn't go up when point was added")
 
 	c.Add(points.OnePoint("hello.world", 15, 12))
-
-	if c.Size() != 2 {
-		t.FailNow()
-	}
+	assert.Equal(2, int(c.Size()), "Size of cache didn't go up to 2 when point was added")
 
 	values := c.Pop()
-
-	if values.Metric != "hello.world" {
-		t.FailNow()
-	}
-
-	if len(values.Data) != 2 {
-		t.FailNow()
-	}
-
-	if c.Size() != 0 {
-		t.FailNow()
-	}
+	assert.Equal("hello.world", values.Metric, "Popped metric name is not one we added")
+	assert.Equal(2, len(values.Data), "Popped metric doesn't have expected number of datapoints")
+	assert.Equal(0, int(c.Size()), "Cache size didn't go to zero when only metric was popped")
 }
 
 var cache *Cache
@@ -61,7 +47,7 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 	return cache
 }
 
-var gp *points.Points
+var gp points.Points
 
 func benchmarkStrategy(b *testing.B, strategy string) {
 	cache := createCacheAndPopulate(1000*1000, 100)
@@ -73,9 +59,9 @@ func benchmarkStrategy(b *testing.B, strategy string) {
 	for i := 0; i < b.N; i++ {
 		cache.updateQueue()
 		for {
-			p := cache.getNext()
+			p, exists := cache.getNext()
 			gp = p // assign to package level var to avoid compiler optimizing us out
-			if p == nil {
+			if !exists {
 				break
 			}
 		}

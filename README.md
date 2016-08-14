@@ -97,8 +97,6 @@ enabled = true
 [cache]
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000
-# Capacity of queue between receivers and cache
-input-buffer = 51200
 # Strategy to persist metrics. Values: "max","sorted","noop"
 #   "max" - write metrics with most unwritten datapoints first
 #   "sorted" - sort by timestamp of first unwritten datapoint.
@@ -175,7 +173,9 @@ With settings above applied, best write-strategy to use is "noop"
 
 | metric | description |
 | --- | --- |
-| cache.queueWriteoutTime | Time in seconds to make a full cycle writing all metrics |
+| cache.queueBuildCount | Number of times writeout queue was rebuilt (higher is better) |
+| cache.queueBuildTimeMs | Total time spent rebuilding writeout queue. Divide by queueBuildCount to get average rebuild time (lower is better) |
+| cache.queueWriteoutTimeMs | Time in milliseconds to make a full cycle writing all metrics. Divide by queueBuildCount to get average writeout time (lower is better) |
 
 
 ## Changelog

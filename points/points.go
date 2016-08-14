@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -51,7 +52,7 @@ func NowPoint(metric string, value float64) *Points {
 func (p *Points) Copy() *Points {
 	return &Points{
 		Metric: p.Metric,
-		Data:   p.Data,
+		Data:   append(make([]Point, 0, len(p.Data)), p.Data...),
 	}
 }
 
@@ -164,6 +165,16 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 func (p *Points) Append(onePoint Point) *Points {
 	p.Data = append(p.Data, onePoint)
 	return p
+}
+
+func (p *Points) WriteTo(w io.Writer) (err error) {
+	for _, d := range p.Data { // every metric point
+		_, err = w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Add value/timestamp pair to points

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 
+	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -36,26 +37,6 @@ func UDPLogIncomplete(enable bool) Option {
 	}
 }
 
-// OutChan creates option for New contructor
-func OutChan(ch chan *points.Points) Option {
-	return OutFunc(func(p *points.Points) {
-		ch <- p
-	})
-}
-
-// OutFunc creates option for New contructor
-func OutFunc(out func(*points.Points)) Option {
-	return func(r Receiver) error {
-		if t, ok := r.(*TCP); ok {
-			t.out = out
-		}
-		if t, ok := r.(*UDP); ok {
-			t.out = out
-		}
-		return nil
-	}
-}
-
 // Name creates option for New contructor
 func Name(name string) Option {
 	return func(r Receiver) error {
@@ -72,7 +53,7 @@ func Name(name string) Option {
 func blackhole(p *points.Points) {}
 
 // New creates udp, tcp, pickle receiver
-func New(dsn string, opts ...Option) (Receiver, error) {
+func New(dsn string, c *cache.Cache, opts ...Option) (Receiver, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return nil, err
@@ -85,8 +66,8 @@ func New(dsn string, opts ...Option) (Receiver, error) {
 		}
 
 		r := &TCP{
-			out:  blackhole,
-			name: u.Scheme,
+			cache: c,
+			name:  u.Scheme,
 		}
 
 		if u.Scheme == "pickle" {
@@ -112,8 +93,8 @@ func New(dsn string, opts ...Option) (Receiver, error) {
 		}
 
 		r := &UDP{
-			out:  blackhole,
-			name: u.Scheme,
+			cache: c,
+			name:  u.Scheme,
 		}
 
 		for _, optApply := range opts {

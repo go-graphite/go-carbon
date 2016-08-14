@@ -9,11 +9,11 @@ import (
 	"path"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/lomik/go-carbon/persister"
+	"github.com/lomik/go-carbon/cache"
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -55,8 +55,7 @@ func (app *App) GraceStop() {
 		flushStart := time.Now()
 
 		logrus.WithFields(logrus.Fields{
-			"size":     app.Cache.Size(),
-			"inputLen": len(app.Cache.In()),
+			"size": app.Cache.Size(),
 		}).Info("[cache] start flush")
 
 		checkTicker := time.NewTicker(10 * time.Millisecond)
@@ -69,13 +68,12 @@ func (app *App) GraceStop() {
 		for {
 			select {
 			case <-checkTicker.C:
-				if int(app.Cache.Size())+len(app.Cache.In()) == 0 {
+				if int(app.Cache.Size()) == 0 {
 					break FlushLoop
 				}
 			case <-statTicker.C:
 				logrus.WithFields(logrus.Fields{
-					"size":     app.Cache.Size(),
-					"inputLen": len(app.Cache.In()),
+					"size": app.Cache.Size(),
 				}).Info("[cache] flush checkpoint")
 			}
 		}
@@ -123,22 +121,14 @@ func (app *App) GraceStopDump() error {
 		return err
 	}
 	xlogWriter := bufio.NewWriterSize(xlog, 1048576) // 1Mb
-
-	xlogExit := make(chan bool)
-
-	var xlogWg sync.WaitGroup
-	xlogWg.Add(1)
-
-	go func() {
-		points.Glue(xlogExit, app.Cache.In(), 65536, time.Second, func(b []byte) {
-			xlogWriter.Write(b)
-		})
-		xlogWg.Done()
-	}()
+	app.Cache.DivertToXlog(xlogWriter)
 
 	// stop cache
 	logrus.Info("[cache] stop worker")
 	dumpStart := time.Now()
+
+	logrus.Info("stop listeners")
+	app.stopListeners()
 
 	app.Cache.Stop()
 	cacheOut := app.Cache.Out()
@@ -160,6 +150,10 @@ func (app *App) GraceStopDump() error {
 		return err
 	}
 
+	// cache dump finished
+	logrus.Info("stop listeners")
+	app.stopListeners()
+
 	dumpWorktime := time.Now().Sub(dumpStart)
 	logrus.WithFields(logrus.Fields{
 		"time": dumpWorktime.String(),
@@ -172,35 +166,6 @@ func (app *App) GraceStopDump() error {
 	if err = snap.Close(); err != nil {
 		return err
 	}
-
-	// cache dump finished
-	logrus.Info("stop listeners")
-	app.stopListeners()
-
-	// wait for all data from input channel written
-	checkTicker := time.NewTicker(10 * time.Millisecond)
-	defer checkTicker.Stop()
-
-	statTicker := time.NewTicker(time.Second)
-	defer statTicker.Stop()
-
-FlushLoop:
-	for {
-		select {
-		case <-checkTicker.C:
-			if len(app.Cache.In()) == 0 {
-				break FlushLoop
-			}
-		case <-statTicker.C:
-			logrus.WithFields(logrus.Fields{
-				"inputLen": len(app.Cache.In()),
-			}).Info("[cache] wait input")
-		}
-	}
-
-	// stop xlog writer
-	close(xlogExit)
-	xlogWg.Wait()
 
 	if err = xlogWriter.Flush(); err != nil {
 		return err
@@ -216,7 +181,7 @@ FlushLoop:
 }
 
 // RestoreFromFile read and parse data from single file
-func RestoreFromFile(filename string, out chan *points.Points) error {
+func RestoreFromFile(filename string, cache *cache.Cache, lim *helper.Ratelimiter, rps int) error {
 	var pointsCount int
 	startTime := time.Now()
 
@@ -256,7 +221,8 @@ func RestoreFromFile(filename string, out chan *points.Points) error {
 				logrus.Warnf("[restore] wrong message %#v", string(line))
 			} else {
 				pointsCount++
-				out <- p
+				lim.TickSleep(rps)
+				cache.Add(p)
 			}
 		}
 	}
@@ -265,7 +231,7 @@ func RestoreFromFile(filename string, out chan *points.Points) error {
 }
 
 // RestoreFromDir cache and input dumps from disk to memory
-func RestoreFromDir(dumpDir string, out chan *points.Points) {
+func RestoreFromDir(dumpDir string, cache *cache.Cache, rps int) {
 	startTime := time.Now()
 	defer func() {
 		finishTime := time.Now()
@@ -319,9 +285,11 @@ FilesLoop:
 
 	logrus.WithField("files", list).Infof("[restore] start from %s", dumpDir)
 
+	limiter := helper.NewRatelimiter()
+
 	for _, fn := range list {
 		filename := path.Join(dumpDir, fn)
-		err := RestoreFromFile(filename, out)
+		err := RestoreFromFile(filename, cache, &limiter, rps)
 		if err != nil {
 			logrus.Errorf("[restore] read %s failed: %s", filename, err.Error())
 		}
@@ -334,28 +302,6 @@ FilesLoop:
 }
 
 // Restore from dump.path
-func (app *App) Restore(inputChan chan *points.Points, path string, rps int) {
-	if rps > 0 {
-		// throttled
-		readChan := make(chan *points.Points)
-		exitChan := make(chan bool)
-
-		ch := persister.ThrottleChan(readChan, rps, exitChan)
-
-		go func() {
-			// from throttled out to input
-			for {
-				p, ok := <-ch
-				if !ok {
-					return
-				}
-				inputChan <- p
-			}
-		}()
-
-		RestoreFromDir(path, readChan)
-		close(readChan) //  required for finish throttling worker
-	} else {
-		RestoreFromDir(path, inputChan)
-	}
+func (app *App) Restore(cache *cache.Cache, path string, rps int) {
+	RestoreFromDir(path, cache, rps)
 }

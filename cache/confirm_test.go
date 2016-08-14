@@ -22,7 +22,7 @@ func TestCarbonlinkNotConfirmed(t *testing.T) {
 		1422797285,
 	)
 
-	cache.In() <- msg1
+	cache.Add(msg1)
 
 	inFlightMessage := <-outChan
 	assert.True(inFlightMessage.Eq(msg1))

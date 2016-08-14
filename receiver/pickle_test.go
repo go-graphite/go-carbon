@@ -23,15 +23,7 @@ func TestPickle(t *testing.T) {
 	defer test.Finish()
 
 	test.Send("\x00\x00\x00#\x80\x02]q\x00U\x0bhello.worldq\x01J\xf8\xd3\x8eVK*\x86q\x02\x86q\x03a.")
-
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42, 1452200952))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.GetEq("hello.world", points.OnePoint("hello.world", 42, 1452200952))
 }
 
 func TestBadPickle(t *testing.T) {

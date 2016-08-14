@@ -54,8 +54,7 @@ func NewCollector(app *App) *Collector {
 	}
 
 	if c.endpoint == MetricEndpointLocal {
-		// sender worker
-		out := app.Cache.In()
+		cache := app.Cache
 
 		c.Go(func(exit chan bool) {
 			for {
@@ -63,12 +62,7 @@ func NewCollector(app *App) *Collector {
 				case <-exit:
 					return
 				case p := <-c.data:
-					select {
-					case out <- p:
-					// pass
-					case <-exit:
-						return
-					}
+					cache.Add(p)
 				}
 			}
 		})

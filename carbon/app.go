@@ -227,7 +227,6 @@ func (app *App) Start() (err error) {
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
-	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.Start()
 
@@ -241,7 +240,7 @@ func (app *App) Start() (err error) {
 	if conf.Udp.Enabled {
 		app.UDP, err = receiver.New(
 			"udp://"+conf.Udp.Listen,
-			receiver.OutChan(core.In()),
+			app.Cache,
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
 		)
 
@@ -255,9 +254,8 @@ func (app *App) Start() (err error) {
 	if conf.Tcp.Enabled {
 		app.TCP, err = receiver.New(
 			"tcp://"+conf.Tcp.Listen,
-			receiver.OutChan(core.In()),
+			app.Cache,
 		)
-
 		if err != nil {
 			return
 		}
@@ -268,7 +266,7 @@ func (app *App) Start() (err error) {
 	if conf.Pickle.Enabled {
 		app.Pickle, err = receiver.New(
 			"pickle://"+conf.Pickle.Listen,
-			receiver.OutChan(core.In()),
+			app.Cache,
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
 		)
 
@@ -300,7 +298,7 @@ func (app *App) Start() (err error) {
 
 	/* RESTORE start */
 	if conf.Dump.Enabled {
-		go app.Restore(core.In(), conf.Dump.Path, conf.Dump.RestorePerSecond)
+		go app.Restore(app.Cache, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
 	/* RESTORE end */
 

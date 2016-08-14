@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
@@ -19,7 +20,7 @@ import (
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
-	out                  func(*points.Points)
+	cache                *cache.Cache
 	name                 string // name for store metrics
 	maxPickleMessageSize uint32
 	metricsReceived      uint32
@@ -84,7 +85,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 				logrus.Info(err)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out(msg)
+				rcv.cache.Add(msg)
 			}
 		}
 	}
@@ -142,7 +143,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 		for _, msg := range msgs {
 			atomic.AddUint32(&rcv.metricsReceived, uint32(len(msg.Data)))
-			rcv.out(msg)
+			rcv.cache.Add(msg)
 		}
 	}
 }

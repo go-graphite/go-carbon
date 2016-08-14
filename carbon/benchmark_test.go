@@ -19,6 +19,7 @@ import (
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/stretchr/testify/assert"
 )
 
 import (
@@ -113,6 +114,7 @@ func startReceivers(b *testing.B, r *receiver.TCP, metrics []string, numConnecti
 
 func startPersisters(t *testing.B, cache *cache.Cache, numPersisters int, exitChan chan struct{}) (p *persister.Whisper, countReport chan int) {
 	p = persister.NewWhisper("", nil, nil, cache.Out(), cache.Confirm())
+
 	p.SetWorkers(numPersisters)
 
 	countReport = make(chan int)
@@ -163,7 +165,7 @@ func genMetrics(spec metricSpec) []string {
 		return gMetrics
 	}
 
-	gMetrics = make([]string, spec.Count())
+	gMetrics = make([]string, 0, spec.Count())
 	now := time.Now().Second()
 
 	id := 0
@@ -255,7 +257,7 @@ func startCarbonLink(b *testing.B, c *cache.Cache, metrics []string, numCLClient
 	return carbonlink
 }
 
-func startAll(b *testing.B, numPersisters, numReceivers, numCLClients int, spec metricSpec) BenchApp {
+func startAll(b *testing.B, qStrategy string, numPersisters, numReceivers, numCLClients int, spec metricSpec) BenchApp {
 	exitChan := make(chan struct{})
 
 	var wgBenchStart, wgInitDone sync.WaitGroup
@@ -263,13 +265,15 @@ func startAll(b *testing.B, numPersisters, numReceivers, numCLClients int, spec 
 
 	c := cache.New()
 	c.SetMaxSize(0)
+	assert.NoError(b, c.SetWriteStrategy(qStrategy))
 
 	metrics := genMetrics(spec)
+	assert.Equal(b, spec.Count(), len(metrics))
 
-	rcv, _ := receiver.New("tcp://:0", receiver.OutChan(c.In()))
+	rcv, _ := receiver.New("tcp://:0", c)
 	r := rcv.(*receiver.TCP)
+	r.Start() // populates r.Go callback, doesn't do much beyond that
 
-	// r.Start() // populates r.Go callback, doesn't do much beyond that
 	startReceivers(b, r, metrics, numReceivers, &wgInitDone, &wgBenchStart)
 
 	p, countsChan := startPersisters(b, c, numPersisters, exitChan)
@@ -288,9 +292,9 @@ func startAll(b *testing.B, numPersisters, numReceivers, numCLClients int, spec 
 	}
 }
 
-func bench(b *testing.B, numPersisters, numReceivers, numCLClients int, metricSpec metricSpec) {
+func bench(b *testing.B, qStrategy string, numPersisters, numReceivers, numCLClients int, metricSpec metricSpec) {
 
-	app := startAll(b, numPersisters, numReceivers, numCLClients, metricSpec)
+	app := startAll(b, qStrategy, numPersisters, numReceivers, numCLClients, metricSpec)
 	defer app.cache.Stop()
 	defer app.receiver.Stop()
 
@@ -299,7 +303,7 @@ func bench(b *testing.B, numPersisters, numReceivers, numCLClients int, metricSp
 	defer close(app.exitChan)
 
 	expectedCount := (metricSpec.Count() / numReceivers) * b.N * numReceivers // due to integer division order is important
-	b.Logf("%d(N=%d) datapoints, numPersisters=%d, numClients=%d, numCarbonClients=%d", expectedCount, b.N, numPersisters, numReceivers, numCLClients)
+	b.Logf("%d(N=%d) datapoints, qStrategy=%s numPersisters=%d, numClients=%d, numCarbonClients=%d", expectedCount, b.N, qStrategy, numPersisters, numReceivers, numCLClients)
 
 	app.wgInitDone.Wait() // wait for all workers to complete init
 	b.ResetTimer()
@@ -308,7 +312,7 @@ func bench(b *testing.B, numPersisters, numReceivers, numCLClients int, metricSp
 	// start cache after we unleashed senders so that writeout queue has something to work with
 	app.cache.Start()
 
-	ticker := time.NewTicker(time.Duration(120*b.N) * time.Second)
+	ticker := time.NewTicker(time.Duration(60*b.N) * time.Second)
 
 	defer ticker.Stop()
 	b.Logf("Receiving confirmations from persisters")
@@ -357,6 +361,7 @@ func BenchmarkApp(b *testing.B) {
 	NUM_PERSISTERS := 4
 	NUM_CLIENTS := 4
 	NUM_CARBONLINK_CLIENTS := 2
+	QUEUE_WRITE_STRATEGY := "noop"
 
 	if i, err := strconv.Atoi(os.Getenv("NUM_PERSISTERS")); err == nil && i >= 0 {
 		NUM_PERSISTERS = i
@@ -368,5 +373,9 @@ func BenchmarkApp(b *testing.B) {
 		NUM_CARBONLINK_CLIENTS = i
 	}
 
-	bench(b, NUM_PERSISTERS, NUM_CLIENTS, NUM_CARBONLINK_CLIENTS, spec)
+	if s := os.Getenv("QUEUE_WRITE_STRATEGY"); s != "" {
+		QUEUE_WRITE_STRATEGY = s
+	}
+
+	bench(b, QUEUE_WRITE_STRATEGY, NUM_PERSISTERS, NUM_CLIENTS, NUM_CARBONLINK_CLIENTS, spec)
 }

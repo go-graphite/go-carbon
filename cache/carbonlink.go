@@ -199,7 +199,12 @@ func packReply(query *Query) []byte {
 	numPoints := 0
 
 	if query != nil {
-		numPoints += len(query.InFlightData)
+		if query.InFlightData != nil {
+			for _, points := range query.InFlightData {
+				numPoints += len(points.Data)
+			}
+		}
+
 		if query.CacheData != nil {
 			numPoints += len(query.CacheData.Data)
 		}
