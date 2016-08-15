@@ -136,9 +136,6 @@ func (c *Cache) Remove(key string, size int) {
 
 // Pop return and remove next for save point from cache
 func (c *Cache) Pop() *points.Points {
-	if c.size == 0 {
-		return nil
-	}
 	v := c.Get()
 	if v != nil {
 		c.Remove(v.Metric, len(v.Data))
@@ -168,6 +165,10 @@ func (c *Cache) Size() uint32 {
 }
 
 func (c *Cache) updateQueue() {
+	if c.size == 0 {
+		return
+	}
+
 	start := time.Now()
 	inputLenBeforeQueueRebuild := len(c.inputChan)
 
@@ -205,7 +206,6 @@ func (c *Cache) Stat(send helper.StatCb) {
 	helper.SendAndSubstractUint32("queries", &c.queryCnt, send)
 	helper.SendAndSubstractUint32("overflow", &c.overflowCnt, send)
 	helper.SendAndSubstractUint32("queueBuildCount", &c.queueBuildCnt, send)
-	helper.SendAndSubstractUint32("queueBuildTime", &c.queueBuildTime, send)
 
 	queueBuildTime := atomic.LoadUint32(&c.queueBuildTime)
 	atomic.AddUint32(&c.queueBuildTime, -queueBuildTime)
