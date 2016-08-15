@@ -94,14 +94,14 @@ func (listener *CarbonlinkListener) packReply(query *Query) []byte {
 	if query != nil && query.InFlightData != nil {
 		for _, points := range query.InFlightData {
 			for _, item := range points.Data {
-				datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+				datapoints = append(datapoints, stalecucumber.NewTuple(item.Time, item.Value))
 			}
 		}
 	}
 
 	if query != nil && query.CacheData != nil {
 		for _, item := range query.CacheData.Data {
-			datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+			datapoints = append(datapoints, stalecucumber.NewTuple(item.Time, item.Value))
 		}
 	}
 

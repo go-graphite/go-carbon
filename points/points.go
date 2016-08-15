@@ -10,13 +10,10 @@ import (
 	"time"
 
 	"github.com/hydrogen18/stalecucumber"
+	"github.com/lomik/go-whisper"
 )
 
-// Point value/time pair
-type Point struct {
-	Value     float64
-	Timestamp int64
-}
+type Point whisper.TimeSeriesPoint
 
 // Points from carbon clients
 type Points struct {
@@ -34,9 +31,9 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 	return &Points{
 		Metric: metric,
 		Data: []Point{
-			Point{
-				Value:     value,
-				Timestamp: timestamp,
+			{
+				Value: value,
+				Time:  int(timestamp),
 			},
 		},
 	}
@@ -169,8 +166,8 @@ func (p *Points) Append(onePoint Point) *Points {
 // Add value/timestamp pair to points
 func (p *Points) Add(value float64, timestamp int64) *Points {
 	p.Data = append(p.Data, Point{
-		Value:     value,
-		Timestamp: timestamp,
+		Value: value,
+		Time:  int(timestamp),
 	})
 	return p
 }
@@ -196,7 +193,7 @@ func (p *Points) Eq(other *Points) bool {
 		if p.Data[i].Value != other.Data[i].Value {
 			return false
 		}
-		if p.Data[i].Timestamp != other.Data[i].Timestamp {
+		if p.Data[i].Time != other.Data[i].Time {
 			return false
 		}
 	}

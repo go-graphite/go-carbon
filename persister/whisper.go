@@ -117,9 +117,10 @@ func store(p *Whisper, values *points.Points) {
 		atomic.AddUint32(&p.created, 1)
 	}
 
+	// go-whisper API requires slice of pointers,not values for some reason
 	points := make([]*whisper.TimeSeriesPoint, len(values.Data))
-	for i, r := range values.Data {
-		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
+	for i := range values.Data {
+		points[i] = (*whisper.TimeSeriesPoint)(&values.Data[i])
 	}
 
 	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))

@@ -22,7 +22,7 @@ func (v byLength) Less(i, j int) bool { return len(v[i].Data) < len(v[j].Data) }
 
 func (v byTimestamp) Len() int           { return len(v) }
 func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byTimestamp) Less(i, j int) bool { return v[i].Data[0].Timestamp > v[j].Data[0].Timestamp }
+func (v byTimestamp) Less(i, j int) bool { return v[i].Data[0].Time > v[j].Data[0].Time }
 
 type WriteStrategy int
 
@@ -340,7 +340,7 @@ func (c *Cache) Dump(w io.Writer) error {
 
 	for _, p := range c.data { // every metric
 		for _, d := range p.Data { // every metric point
-			_, err := w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+			_, err := w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Time)))
 			if err != nil {
 				return err
 			}
