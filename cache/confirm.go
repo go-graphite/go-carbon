@@ -8,7 +8,6 @@ type notConfirmed struct {
 	in        chan *points.Points
 	out       chan *points.Points
 	confirmed chan *points.Points
-	cacheIn   chan *points.Points
 	size      int
 }
 
