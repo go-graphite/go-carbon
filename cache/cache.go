@@ -232,7 +232,6 @@ func (c *Cache) worker(exitChan chan bool) {
 		in:        toConfirmTracker,
 		out:       c.outputChan,
 		confirmed: c.confirmChan,
-		cacheIn:   c.inputChan,
 	}
 
 	c.Go(func(exit chan bool) {
