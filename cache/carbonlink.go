@@ -198,16 +198,9 @@ func packReply(query *Query) []byte {
 
 	numPoints := 0
 
-	if query != nil {
-		if query.InFlightData != nil {
-			for _, points := range query.InFlightData {
-				numPoints += len(points.Data)
-			}
-		}
-
-		if query.CacheData != nil {
-			numPoints += len(query.CacheData.Data)
-		}
+	if query != nil && query.CacheData != nil {
+		query.CacheData.Lock()
+		numPoints = len(query.CacheData.Data)
 	}
 
 	buf := bytes.NewBuffer([]byte("\x80\x02}U\ndatapoints]"))
@@ -216,18 +209,11 @@ func packReply(query *Query) []byte {
 		buf.WriteByte('(')
 	}
 
-	if query != nil && query.InFlightData != nil {
-		for _, points := range query.InFlightData {
-			for _, item := range points.Data {
-				picklePoint(buf, item)
-			}
-		}
-	}
-
 	if query != nil && query.CacheData != nil {
 		for _, item := range query.CacheData.Data {
 			picklePoint(buf, item)
 		}
+		query.CacheData.Unlock()
 	}
 
 	if numPoints == 0 {

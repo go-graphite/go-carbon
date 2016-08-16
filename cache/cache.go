@@ -1,9 +1,9 @@
 package cache
 
 import (
+	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"sync/atomic"
 	"time"
 
@@ -12,127 +12,50 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
-type queue []points.Points
-
-type byLength queue
-type byTimestamp queue
-
-func (v byLength) Len() int           { return len(v) }
-func (v byLength) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byLength) Less(i, j int) bool { return len(v[i].Data) < len(v[j].Data) }
-
-func (v byTimestamp) Len() int           { return len(v) }
-func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byTimestamp) Less(i, j int) bool { return v[i].Data[0].Timestamp > v[j].Data[0].Timestamp }
-
-type WriteStrategy int
-
-const (
-	MaximumLength WriteStrategy = iota
-	TimestampOrder
-	Noop
-)
+type cacheStats struct {
+	sizeShared          int32  // changing via atomic
+	queueBuildCnt       uint32 // number of times writeout queue was built
+	queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
+	queueWriteoutTimeMs uint32 // in milliseconds
+	overflowCnt         uint32 // drop packages if cache full
+	queryCnt            uint32 // number of queries
+}
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
 	helper.Stoppable
-	data               cmap.ConcurrentMap
-	sizeShared         int32  // changing via atomic
-	metricCount        uint32 // metrics count, changing via atomic
-	maxSize            int32
-	outputChan         chan *points.Points // to persisters
-	queryChan          chan *Query         // from carbonlink
-	confirmChan        chan *points.Points // for persisted confirmation
-	queryCnt           uint32
-	overflowCnt        uint32 // drop packages if cache full
-	writeStrategy      WriteStrategy
-	queue              queue
-	queueBuildCnt      uint32 // number of times writeout queue was built
-	queueBuildTime     uint32 // time spent building writeout queue in milliseconds
-	queueWriteoutStart time.Time
-	queueWriteoutTime  uint32 // in milliseconds
-	xlog               io.Writer
+	data          cmap.ConcurrentMap
+	queue         WriteoutQueue
+	cacheStats    cacheStats
+	maxSize       int32
+	numPersisters int
+	queryChan     chan *Query // from carbonlink
+	dispatchChan  chan []*points.Points
+	xlog          io.Writer
 }
 
 // New create Cache instance and run in/out goroutine
 func New() *Cache {
 	cache := &Cache{
-		data:               cmap.New(),
-		maxSize:            1000000,
-		queryChan:          make(chan *Query, 16),
-		queue:              make(queue, 0),
-		confirmChan:        make(chan *points.Points, 2048),
-		writeStrategy:      MaximumLength,
-		queueWriteoutStart: time.Time{},
+		data:      cmap.New(),
+		maxSize:   1000000,
+		queryChan: make(chan *Query, 16),
 	}
+
+	cache.queue = NewQueue(&cache.data, &cache.cacheStats)
 	return cache
 }
 
-// SetWriteStrategy ...
-func (c *Cache) SetWriteStrategy(s string) (err error) {
-	switch s {
-	case "max":
-		c.writeStrategy = MaximumLength
-	case "sort":
-		c.writeStrategy = TimestampOrder
-	case "noop":
-		c.writeStrategy = Noop
-	default:
-		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
-	}
-	return nil
-}
-
-func (c *Cache) getNext() (values points.Points, exists bool) {
-	size := len(c.queue)
-	if size == 0 {
-		return points.Points{}, false
-	}
-	values = c.queue[size-1]
-	c.queue = c.queue[:size-1]
-	return values, true
-}
-
-// Get any key/values pair from Cache
-func (c *Cache) Get() (values points.Points, exists bool) {
-	if values, exists = c.getNext(); exists {
-		return values, exists
-	}
-
-	if (c.queueWriteoutStart != time.Time{}) {
-		atomic.AddUint32(&c.queueWriteoutTime, uint32(time.Now().Sub(c.queueWriteoutStart)/time.Millisecond))
-	}
-
-	c.updateQueue()
-
-	values, exists = c.getNext()
-
-	if exists {
-		c.queueWriteoutStart = time.Now()
-	} else {
-		c.queueWriteoutStart = time.Time{}
-	}
-
-	return values, exists
-}
-
-// Pop return and remove next for save point from cache
-func (c *Cache) Pop() (v *points.Points) {
-	valInQueue, exists := c.Get()
-	if exists {
-		v, _ = c.data.Pop(valInQueue.Metric)
-		atomic.AddInt32(&c.sizeShared, -int32(len(v.Data)))
-	}
-
-	return v
-}
-
-func upsertCb(exists bool, valueInMap *points.Points, p *points.Points) *points.Points {
+func upsertCb(exists bool, valueInMap *points.Points, p *points.Points) (*points.Points, bool) {
 	if !exists {
-		return p
+		return p, false
 	}
-	valueInMap.Data = append(valueInMap.Data, p.Data...)
-	return valueInMap
+	valueInMap.AppendPoints(p.Data)
+	return valueInMap, false
+}
+
+func (c *Cache) Stats() *cacheStats {
+	return &c.cacheStats
 }
 
 // Add points to cache
@@ -141,20 +64,22 @@ func (c *Cache) Add(p *points.Points) {
 		p.WriteTo(c.xlog)
 	}
 	if c.maxSize > 0 && c.Size() > c.maxSize {
-		c.overflowCnt++
-		atomic.AddUint32(&c.overflowCnt, 1)
+		atomic.AddUint32(&c.cacheStats.overflowCnt, 1)
 		return
 	}
 
+	count := len(p.Data) // save count before adding to map, otherwise
+	// we'd need a lock to read len
+
 	c.data.Upsert(p.Metric, p, upsertCb)
-	atomic.AddInt32(&c.sizeShared, int32(len(p.Data)))
+	atomic.AddInt32(&c.cacheStats.sizeShared, int32(count))
 }
 
 func upsertSingleCb(exists bool, valueInMap *points.Points, p points.SinglePoint) *points.Points {
 	if !exists {
-		return points.OnePoint(p.Metric, p.Point.Value, p.Point.Timestamp)
+		return points.OnePoint(p.Metric, p.Point.Value, int64(p.Point.Timestamp))
 	}
-	valueInMap.Data = append(valueInMap.Data, p.Point)
+	valueInMap.AppendSinglePoint(&p)
 	return valueInMap
 }
 
@@ -164,13 +89,26 @@ func (c *Cache) AddSinglePoint(p points.SinglePoint) {
 		p.WriteTo(c.xlog)
 	}
 	if c.maxSize > 0 && c.Size() > c.maxSize {
-		c.overflowCnt++
-		atomic.AddUint32(&c.overflowCnt, 1)
+		atomic.AddUint32(&c.cacheStats.overflowCnt, 1)
 		return
 	}
 
 	c.data.UpsertSingle(p.Metric, p, upsertSingleCb)
-	atomic.AddInt32(&c.sizeShared, 1)
+	atomic.AddInt32(&c.cacheStats.sizeShared, 1)
+}
+
+func (c *Cache) SetWriteStrategy(s string) (err error) {
+	switch s {
+	case "max":
+		c.queue.writeStrategy = MaximumLength
+	case "sort":
+		c.queue.writeStrategy = TimestampOrder
+	case "noop":
+		c.queue.writeStrategy = Noop
+	default:
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
+	}
+	return nil
 }
 
 func (c *Cache) GetMetric(key string) (*points.Points, bool) {
@@ -182,9 +120,26 @@ func (c *Cache) SetMaxSize(maxSize int32) {
 	c.maxSize = maxSize
 }
 
+// Sets number of persisters cache should distribute write jobs to
+func (c *Cache) SetNumPersisters(numPersisters int) (err error) {
+	if c.dispatchChan != nil {
+		// TODO: need to check all invariants and allow clean resize, or dont bother
+		//       and just go with stupidly high number like 256
+		return errors.New("Dynamic change of number of persisters is not supported yet (can cause batches to be lost)")
+	}
+	c.dispatchChan = make(chan []*points.Points, numPersisters)
+	c.numPersisters = numPersisters
+	return nil
+}
+
 // Size returns size
 func (c *Cache) Size() int32 {
-	return atomic.LoadInt32(&c.sizeShared)
+	return atomic.LoadInt32(&c.cacheStats.sizeShared)
+}
+
+// Get reference to writeout queue
+func (c *Cache) WriteoutQueue() *WriteoutQueue {
+	return &c.queue
 }
 
 func (c *Cache) updateQueue() {
@@ -192,24 +147,16 @@ func (c *Cache) updateQueue() {
 		return
 	}
 
-	start := time.Now()
-
-	newQueue := c.queue[:0]
-
-	c.data.IterCb(func(_ string, v *points.Points) { newQueue = append(newQueue, *v) })
-
-	switch c.writeStrategy {
-	case MaximumLength:
-		sort.Sort(byLength(newQueue))
-	case TimestampOrder:
-		sort.Sort(byTimestamp(newQueue))
-	case Noop:
+	if !c.queue.Update() {
+		return
 	}
 
-	c.queue = newQueue
+	batches := c.queue.Chop(c.numPersisters)
+	c.queue.activeWorkers = int32(len(batches))
 
-	atomic.AddUint32(&c.queueBuildTime, uint32(time.Now().Sub(start)/time.Millisecond))
-	atomic.AddUint32(&c.queueBuildCnt, 1)
+	for i := range batches {
+		c.dispatchChan <- batches[i]
+	}
 }
 
 // Collect cache metrics
@@ -217,74 +164,40 @@ func (c *Cache) Stat(send helper.StatCb) {
 	send("size", float64(c.Size()))
 	send("metrics", float64(c.data.Count()))
 
-	helper.SendAndSubstractUint32("queries", &c.queryCnt, send)
-	helper.SendAndSubstractUint32("overflow", &c.overflowCnt, send)
-	helper.SendAndSubstractUint32("queueBuildCount", &c.queueBuildCnt, send)
-	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.queueBuildTime, send)
-	helper.SendAndSubstractUint32("queueWriteoutTimeMs", &c.queueWriteoutTime, send)
+	helper.SendAndSubstractUint32("queries", &c.cacheStats.queryCnt, send)
+	helper.SendAndSubstractUint32("overflow", &c.cacheStats.overflowCnt, send)
+	helper.SendAndSubstractUint32("queueBuildCount", &c.cacheStats.queueBuildCnt, send)
+	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.cacheStats.queueBuildTimeMs, send)
+	helper.SendAndSubstractUint32("queueWriteoutTimeMs", &c.cacheStats.queueWriteoutTimeMs, send)
 }
 
 func (c *Cache) worker(exitChan chan bool) {
-	var values *points.Points
-	var sendTo chan *points.Points
-
-	toConfirmTracker := make(chan *points.Points)
-
-	confirmTracker := &notConfirmed{
-		data:      make(map[string][]*points.Points),
-		queryChan: make(chan *Query, 16),
-		in:        toConfirmTracker,
-		out:       c.outputChan,
-		confirmed: c.confirmChan,
-	}
-
-	c.Go(func(exit chan bool) {
-		confirmTracker.worker(exit)
-	})
-
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 MAIN_LOOP:
 	for {
-
-		if values == nil {
-			values = c.Pop()
-		}
-
-		if values != nil {
-			sendTo = toConfirmTracker
-		} else {
-			sendTo = nil
-		}
+		c.updateQueue()
 
 		select {
-		case <-ticker.C:
+		case <-c.queue.writeoutCompleteChan:
+		case <-ticker.C: // ticker is here to kick off queue update and writeout
+
 		case query := <-c.queryChan: // carbonlink
-			atomic.AddUint32(&c.queryCnt, 1)
-
-			if values != nil && values.Metric == query.Metric {
-				query.CacheData = values.Copy()
-			} else if v, ok := c.GetMetric(query.Metric); ok {
-				query.CacheData = v.Copy()
+			atomic.AddUint32(&c.cacheStats.queryCnt, 1)
+			if v, ok := c.GetMetric(query.Metric); ok {
+				query.CacheData = v
 			}
+			close(query.Wait)
 
-			confirmTracker.queryChan <- query
-		case sendTo <- values: // to persister
-			values = nil
 		case <-exitChan: // exit
 			break MAIN_LOOP
 		}
 	}
-
 }
 
-// Out returns output channel
-func (c *Cache) Out() chan *points.Points {
-	if c.outputChan == nil {
-		c.outputChan = make(chan *points.Points, 1024)
-	}
-	return c.outputChan
+func (c *Cache) Out() <-chan []*points.Points {
+	return c.dispatchChan
 }
 
 // Query returns carbonlink query channel
@@ -292,23 +205,16 @@ func (c *Cache) Query() chan *Query {
 	return c.queryChan
 }
 
-// Confirm returns confirmation channel for persister
-func (c *Cache) Confirm() chan *points.Points {
-	return c.confirmChan
-}
-
-// SetOutputChanSize ...
-func (c *Cache) SetOutputChanSize(size int) {
-	c.outputChan = make(chan *points.Points, size)
-}
-
 // Start worker
 func (c *Cache) Start() error {
-	return c.StartFunc(func() error {
-		if c.outputChan == nil {
-			c.outputChan = make(chan *points.Points, 1024)
-		}
+	if c.numPersisters <= 0 {
+		return errors.New("numPersisters should be >0 when starting a cache")
+	}
+	if c.dispatchChan == nil {
+		return errors.New("BUG: dispatch chan was left unconfigured")
+	}
 
+	return c.StartFunc(func() error {
 		c.Go(func(exit chan bool) {
 			c.worker(exit)
 		})
@@ -320,6 +226,22 @@ func (c *Cache) Start() error {
 // when xlog is !nil, calls to Add/AddSingle make an entry in a xlog
 func (c *Cache) DivertToXlog(w io.Writer) {
 	c.xlog = w
+}
+
+func (c *Cache) Stop() {
+	c.StopFunc(func() {
+		// cache might be sending batches and with stopped
+		// persisters it wont recieve our exit channel message
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-c.dispatchChan:
+			case <-ticker.C:
+				return
+			}
+		}
+	})
 }
 
 // Dump all cache to writer

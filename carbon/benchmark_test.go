@@ -17,8 +17,8 @@ import (
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/persister"
-	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/lomik/go-whisper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -113,8 +113,7 @@ func startReceivers(b *testing.B, r *receiver.TCP, metrics []string, numConnecti
 }
 
 func startPersisters(t *testing.B, cache *cache.Cache, numPersisters int, exitChan chan struct{}) (p *persister.Whisper, countReport chan int) {
-	p = persister.NewWhisper("", nil, nil, cache.Out(), cache.Confirm())
-
+	p = persister.NewWhisper("", nil, nil, cache.Out(), cache.WriteoutQueue().Process)
 	p.SetWorkers(numPersisters)
 
 	countReport = make(chan int)
@@ -122,8 +121,9 @@ func startPersisters(t *testing.B, cache *cache.Cache, numPersisters int, exitCh
 	p.SetMockStore(func() (persister.StoreFunc, func()) {
 		receivedCount := 0
 
-		store := func(_ *persister.Whisper, v *points.Points) {
-			receivedCount += len(v.Data)
+		store := func(_ *persister.Whisper, _ string, v []*whisper.TimeSeriesPoint) error {
+			receivedCount += len(v)
+			return nil
 		}
 
 		batchDone := func() {
@@ -264,7 +264,7 @@ func startAll(b *testing.B, qStrategy string, numPersisters, numReceivers, numCL
 	wgBenchStart.Add(1)
 
 	c := cache.New()
-	c.SetMaxSize(0)
+	c.SetNumPersisters(numPersisters)
 	assert.NoError(b, c.SetWriteStrategy(qStrategy))
 
 	metrics := genMetrics(spec)
@@ -329,9 +329,7 @@ LOOP:
 	}
 
 	b.StopTimer()
-	cacheStats := make(map[string]float64, 16)
-	app.cache.Stat(func(m string, v float64) { cacheStats[m] = v })
-	b.Logf("Cache stats %v", cacheStats)
+	b.Logf("Cache : %v", app.cache.Stats())
 
 	ticker = time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

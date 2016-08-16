@@ -131,18 +131,10 @@ func (app *App) GraceStopDump() error {
 	app.stopListeners()
 
 	app.Cache.Stop()
-	cacheOut := app.Cache.Out()
-	close(cacheOut)
 
 	logrus.WithFields(logrus.Fields{
-		"size":    app.Cache.Size(),
-		"outSize": len(cacheOut),
+		"size": app.Cache.Size(),
 	}).Info("[cache] start dump")
-
-	// dump points from cache.out channel
-	points.Glue(nil, cacheOut, 65536, time.Second, func(b []byte) {
-		snapWriter.Write(b)
-	})
 
 	// dump cache
 	err = app.Cache.Dump(snapWriter)

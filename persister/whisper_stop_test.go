@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/qa"
+	"github.com/lomik/go-whisper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,45 +18,36 @@ func TestGracefullyStop(t *testing.T) {
 	assert := assert.New(t)
 
 	do := func(maxUpdatesPerSecond int, workers int) {
-		ch := make(chan *points.Points, 1000)
-
 		qa.Root(t, func(root string) {
-			p := NewWhisper(root, nil, nil, ch, nil)
+			cache := cache.New()
+			cache.SetNumPersisters(workers)
+			assert.NoError(cache.Start()) // to read from cache.queue.writeoutComplete
+			p := NewWhisper(root, nil, nil, cache.Out(), cache.WriteoutQueue().Process)
 			p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 			p.SetWorkers(workers)
 
 			storeWait := make(chan bool)
-			var storeCount uint32
+			var storeCount, sentCount uint32
 
 			p.mockStore = func() (StoreFunc, func()) {
-				return func(p *Whisper, values *points.Points) {
+				return func(p *Whisper, metric string, values []*whisper.TimeSeriesPoint) error {
 					<-storeWait
 					atomic.AddUint32(&storeCount, 1)
+					return nil
 				}, nil
 			}
-
-			var sentCount int
-
 			p.Start()
-
-		SEND_LOOP:
-			for {
-				select {
-				case ch <- points.NowPoint(fmt.Sprintf("%d", sentCount), float64(sentCount)):
-					sentCount++
-				default:
-					break SEND_LOOP
-				}
+			for sentCount = 0; sentCount < 1000; sentCount++ {
+				cache.Add(points.NowPoint(fmt.Sprintf("%d", sentCount), float64(sentCount)))
 			}
-
-			time.Sleep(10 * time.Millisecond)
 			close(storeWait)
-
 			p.Stop()
+			cache.Stop()
 
-			storeCount += uint32(len(ch))
-			assert.Equal(sentCount, int(storeCount), "maxUpdatesPerSecond: %d, workers: %d", maxUpdatesPerSecond, workers)
-
+			// number of processed metrics + number unprocessed ones (== cache size, because we had 1 point per metric)
+			// should be equal to number of metrics sent
+			atomic.AddUint32(&storeCount, uint32(cache.Size()))
+			assert.Equal(int(sentCount), int(storeCount), "maxUpdatesPerSecond: %d, workers: %d", maxUpdatesPerSecond, workers)
 		})
 	}
 
@@ -79,23 +72,24 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 		for _, workers := range []int{1, 4} {
 			qa.Root(t, func(root string) {
 
-				ch := make(chan *points.Points, 10)
-				p := NewWhisper(root, nil, nil, ch, nil)
+				cache := cache.New()
+				cache.SetNumPersisters(workers)
+				assert.NoError(cache.Start()) // to read from writeout complete channel
+				p := NewWhisper(root, nil, nil, cache.Out(), cache.WriteoutQueue().Process)
 				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 				p.SetWorkers(workers)
 
 				p.mockStore = func() (StoreFunc, func()) {
-					return func(p *Whisper, values *points.Points) {}, nil
+					return func(p *Whisper, metric string, values []*whisper.TimeSeriesPoint) error { return nil }, nil
 				}
 
 				p.Start()
-				time.Sleep(10 * time.Millisecond)
-
 				start := time.Now()
 				p.Stop()
+				cache.Stop()
 				worktime := time.Now().Sub(start)
 
-				assert.True(worktime.Seconds() < 1, "maxUpdatesPerSecond: %d, workers: %d", maxUpdatesPerSecond, workers)
+				assert.True(worktime.Seconds() < 2, "maxUpdatesPerSecond: %d, workers: %d", maxUpdatesPerSecond, workers)
 			})
 		}
 	}

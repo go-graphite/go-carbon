@@ -19,8 +19,8 @@ func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.SetOutputChanSize(0)
-	cache.Start()
+	cache.SetNumPersisters(1)
+	assert.NoError(cache.Start())
 
 	msg1 := points.OnePoint(
 		"carbon.agents.carbon_agent_server.cache.size",
@@ -98,7 +98,6 @@ func TestCarbonlink(t *testing.T) {
 	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
 	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
 		string(data))
-	cleanup()
 
 	/* MESSAGE 2.5 - unicode */
 	conn, cleanup = NewClient()
@@ -116,18 +115,10 @@ func TestCarbonlink(t *testing.T) {
 	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
 	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
 		string(data))
-	cleanup()
 
 	/* MESSAGE 3 */
 	/* Remove carbon.agents.carbon_agent_server.param.size from cache and request again */
-	conn, cleanup = NewClient()
-	for {
-		c := <-cache.Out()
-		cache.Confirm() <- c
-		if c.Metric == "carbon.agents.carbon_agent_server.param.size" {
-			break
-		}
-	}
+	cache.data.Remove("carbon.agents.carbon_agent_server.param.size")
 
 	_, err = conn.Write([]byte(sampleCacheQuery2))
 	assert.NoError(err)
@@ -174,7 +165,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.SetOutputChanSize(0)
+	cache.SetNumPersisters(1)
 	cache.Start()
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -216,7 +207,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 		},
 	}
 
-	for _, test := range table {
+	for i, test := range table {
 		remoteaddr, _ := net.ResolveTCPAddr("tcp", carbonlink.Addr().String())
 		conn, err := net.DialTCP("tcp", addr, remoteaddr)
 		assert.NoError(err)
@@ -232,7 +223,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 			conn.SetWriteBuffer(0)
 			n, err := conn.Write([]byte("x"))
 			if err == nil || n > 0 {
-				t.Errorf("CarbonlinkListener did not close connection as expected")
+				t.Errorf("CarbonlinkListener(%d) did not close connection as expected", i)
 			}
 		}
 		conn.Close()

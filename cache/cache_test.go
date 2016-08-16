@@ -19,10 +19,10 @@ func TestCache(t *testing.T) {
 	c.Add(points.OnePoint("hello.world", 15, 12))
 	assert.Equal(2, int(c.Size()), "Size of cache didn't go up to 2 when point was added")
 
-	values := c.Pop()
-	assert.Equal("hello.world", values.Metric, "Popped metric name is not one we added")
-	assert.Equal(2, len(values.Data), "Popped metric doesn't have expected number of datapoints")
-	assert.Equal(0, int(c.Size()), "Cache size didn't go to zero when only metric was popped")
+	values, ok := c.GetMetric("hello.world")
+	assert.True(ok, "Can't get metric which we just added to cache")
+	assert.Equal("hello.world", values.Metric, "Retrieved metric name is not one we added")
+	assert.Equal(2, len(values.Data), "Retrieved metric doesn't have expected number of datapoints")
 }
 
 var cache *Cache
@@ -32,8 +32,6 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 		return cache
 	}
 	cache = New()
-	cache.SetOutputChanSize(0)
-
 	for i := 0; i < metricsCount; i++ {
 		m := fmt.Sprintf("%d.metric.name.for.bench.test.%d", rand.Intn(metricsCount), i)
 
@@ -58,13 +56,6 @@ func benchmarkStrategy(b *testing.B, strategy string) {
 
 	for i := 0; i < b.N; i++ {
 		cache.updateQueue()
-		for {
-			p, exists := cache.getNext()
-			gp = p // assign to package level var to avoid compiler optimizing us out
-			if !exists {
-				break
-			}
-		}
 	}
 }
 

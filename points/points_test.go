@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"unsafe"
 
+	"github.com/lomik/go-whisper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -55,10 +57,10 @@ func TestParseText(t *testing.T) {
 	assertError("metric.name 42 NaN\n")
 
 	assertOk("metric.name -42.76 1422642189\n",
-		SinglePoint{"metric.name", Point{-42.76, 1422642189}})
+		SinglePoint{"metric.name", Point{Value: -42.76, Timestamp: 1422642189}})
 
 	assertOk("metric.name 42.15 1422642189\n",
-		SinglePoint{"metric.name", Point{42.15, 1422642189}})
+		SinglePoint{"metric.name", Point{Value: 42.15, Timestamp: 1422642189}})
 
 }
 
@@ -75,12 +77,6 @@ func TestCopyAndEq(t *testing.T) {
 		),
 	)
 
-	assert.True(
-		points.Eq(
-			points.Copy(),
-		),
-	)
-
 	other := []*Points{
 		nil,
 		OnePoint("other.metric", 42.15, timestamp),
@@ -90,9 +86,9 @@ func TestCopyAndEq(t *testing.T) {
 		&Points{
 			Metric: "metric.name",
 		},
-		points.Copy().Append(Point{
+		points.copy().Append(Point{
 			Value:     42.15,
-			Timestamp: timestamp,
+			Timestamp: int(timestamp),
 		}),
 	}
 
@@ -100,7 +96,9 @@ func TestCopyAndEq(t *testing.T) {
 		assert.False(
 			points.Eq(
 				other[i],
-			),
+			), "%v.Eq(%v) == True, but should be false",
+			points,
+			other[i],
 		)
 	}
 
@@ -191,6 +189,24 @@ func TestParsePickle(t *testing.T) {
 		assert.Error(t, err, fmt.Sprintf("bad pickle #%d failed to raise and error", casenum))
 	}
 
+}
+
+func TestPointCompatWithWhisperTimeseriesPoint(t *testing.T) {
+	var w whisper.TimeSeriesPoint
+	var p Point
+	assert.Equal(t, unsafe.Offsetof(w.Time), unsafe.Offsetof(p.Timestamp))
+	assert.Equal(t, unsafe.Sizeof(w.Time), unsafe.Sizeof(p.Timestamp))
+	assert.Equal(t, unsafe.Offsetof(w.Value), unsafe.Offsetof(p.Value))
+	assert.Equal(t, unsafe.Sizeof(w.Value), unsafe.Sizeof(p.Value))
+}
+
+func TestPointShift(t *testing.T) {
+	ref := OnePoint("p", 10, 9000)
+	assert.Equal(t, ref, OnePoint("p", 10, 9000).Shift(0), "Failed shifting 0 points")
+	assert.Equal(t, ref, OnePoint("p", 10, 9000).Shift(-1), "Failed shifting -1 points")
+	assert.Equal(t, ref, OnePoint("p", 5, 5000).Add(10, 9000).Shift(1), "Failed shifting 1 points")
+	assert.Equal(t, &Points{Metric: "p", Data: make([]Point, 0)}, OnePoint("p", 10, 9000).Shift(1), "Failed shifting all points")
+	assert.Equal(t, &Points{Metric: "p", Data: make([]Point, 0)}, OnePoint("p", 10, 9000).Add(20, 9020).Shift(999), "Failed shifting more than all  points")
 }
 
 func BenchmarkParsePickle(b *testing.B) {

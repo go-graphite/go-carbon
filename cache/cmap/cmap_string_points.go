@@ -44,22 +44,33 @@ func (m *ConcurrentMap) Set(key string, value *points.Points) {
 }
 
 // Callback to return new element to be inserted into the map
+// also reterns 'delete' flag which if set, element will be deleted from map
+//
 // It is called while lock is held, therefore it MUST NOT
 // try to access other keys in same map, as it can lead to deadlock since
 // Go sync.RWLock is not reentrant
-type UpsertCb func(exist bool, valueInMap *points.Points, newValue *points.Points) *points.Points
+//
+
+type UpsertCb func(exist bool, valueInMap *points.Points, newValue *points.Points) (*points.Points, bool)
 
 // Insert or Update - updates existing element or inserts a new one using UpsertCb
-func (m *ConcurrentMap) Upsert(key string, value *points.Points, cb UpsertCb) (res *points.Points) {
+// returns element left in a map and 'del' flag value (if true, element was deleted from the map)
+func (m *ConcurrentMap) Upsert(key string, value *points.Points, cb UpsertCb) (res *points.Points, del bool) {
 	shard := m.GetShard(key)
 	shard.Lock()
-	v, ok := shard.items[key]
-	res = cb(ok, v, value)
-	if res != v { // micro optimisation: don't re-insert if returned obj is same pointer as one already in map
-		shard.items[key] = res
+	v, exists := shard.items[key]
+	res, del = cb(exists, v, value)
+	if del {
+		if exists { // micro optimisation: try to delete only if it was there
+			delete(shard.items, key)
+		}
+	} else {
+		if res != v { // micro optimisation: don't re-insert if same pointer
+			shard.items[key] = res
+		}
 	}
 	shard.Unlock()
-	return res
+	return res, del
 }
 
 type UpsertSingleCb func(exist bool, valueInMap *points.Points, newValue points.SinglePoint) *points.Points
@@ -69,7 +80,9 @@ func (m *ConcurrentMap) UpsertSingle(key string, value points.SinglePoint, cb Up
 	shard.Lock()
 	v, ok := shard.items[key]
 	res = cb(ok, v, value)
-	shard.items[key] = res
+	if res != v {  // micro optimisation: don't re-insert if returned obj is same pointer as one already in map
+		shard.items[key] = res
+	}
 	shard.Unlock()
 	return res
 }
@@ -95,6 +108,15 @@ func (m *ConcurrentMap) Count() int {
 		shard.RUnlock()
 	}
 	return count
+}
+
+// Removes an element from the map.
+func (m *ConcurrentMap) Remove(key string) {
+	// Try to get shard.
+	shard := m.GetShard(key)
+	shard.Lock()
+	delete(shard.items, key)
+	shard.Unlock()
 }
 
 // Removes an element from the map.

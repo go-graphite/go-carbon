@@ -4,10 +4,9 @@ import "github.com/lomik/go-carbon/points"
 
 // Query request from carbonlink
 type Query struct {
-	Metric       string
-	Wait         chan bool        // close after finish collect reply
-	CacheData    *points.Points   // from cache
-	InFlightData []*points.Points // from confirm tracker
+	Metric    string
+	Wait      chan bool      // close after finish collect reply
+	CacheData *points.Points // from cache
 }
 
 // NewQuery create Query instance

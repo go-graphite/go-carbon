@@ -8,19 +8,29 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hydrogen18/stalecucumber"
 )
 
+// persisters register this callback to do point processing
+// point is passed in locked state, callback MUST unlock it upon return even if error is returned,
+// but preferrably it should unlock it ASAP, before entering potentially lengthy IO
+type PersistPointFunc func(*Points) error
+
+// Type of callback which all persisters must call to process received batch of points
+type BatchProcessFunc func([]*Points, PersistPointFunc) (metricCount int)
+
 // Point value/time pair
 type Point struct {
+	Timestamp int
 	Value     float64
-	Timestamp int64
 }
 
 // Points from carbon clients
 type Points struct {
+	sync.Mutex
 	Metric string
 	Data   []Point
 }
@@ -47,7 +57,7 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 		Data: []Point{
 			Point{
 				Value:     value,
-				Timestamp: timestamp,
+				Timestamp: int(timestamp),
 			},
 		},
 	}
@@ -59,10 +69,13 @@ func NowPoint(metric string, value float64) *Points {
 }
 
 // Copy returns copy of object
-func (p *Points) Copy() *Points {
+func (p *Points) copy() *Points {
+	data := make([]Point, len(p.Data))
+	copy(data, p.Data)
+
 	return &Points{
 		Metric: p.Metric,
-		Data:   append(make([]Point, 0, len(p.Data)), p.Data...),
+		Data:   data,
 	}
 }
 
@@ -103,7 +116,7 @@ func ParseText(line string) (SinglePoint, error) {
 	// 	return nil, fmt.Errorf("bad message: %#v", line)
 	// }
 
-	return SinglePoint{row[0], Point{value, int64(tsf)}}, nil
+	return SinglePoint{row[0], Point{int(tsf), value}}, nil
 }
 
 // ParsePickle ...
@@ -173,6 +186,8 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 
 // Append point
 func (p *Points) Append(onePoint Point) *Points {
+	p.Lock()
+	defer p.Unlock()
 	p.Data = append(p.Data, onePoint)
 	return p
 }
@@ -189,11 +204,45 @@ func (p *Points) WriteTo(w io.Writer) (n int64, err error) {
 	return n, err
 }
 
+// Append *Points (concatination)
+func (p *Points) AppendPoints(v []Point) *Points {
+	p.Lock()
+	defer p.Unlock()
+	p.Data = append(p.Data, v...)
+	return p
+}
+
+// Append SinglePoint
+func (p *Points) AppendSinglePoint(v *SinglePoint) *Points {
+	p.Lock()
+	defer p.Unlock()
+	p.Data = append(p.Data, v.Point)
+	return p
+}
+
+func (p *Points) Shift(count int) *Points {
+	if count < 1 {
+		return p
+	}
+
+	p.Lock()
+	defer p.Unlock()
+
+	if count >= len(p.Data) {
+		p.Data = p.Data[:0]
+	} else {
+		p.Data = append(p.Data[:0], p.Data[count:]...)
+	}
+	return p
+}
+
 // Add value/timestamp pair to points
 func (p *Points) Add(value float64, timestamp int64) *Points {
+	p.Lock()
+	defer p.Unlock()
 	p.Data = append(p.Data, Point{
 		Value:     value,
-		Timestamp: timestamp,
+		Timestamp: int(timestamp),
 	})
 	return p
 }

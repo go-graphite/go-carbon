@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/url"
@@ -12,22 +13,40 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
+type statCb func(module string) func(metric string, value float64)
+
 type Collector struct {
 	helper.Stoppable
-	app            *App
-	graphPrefix    string
-	metricInterval time.Duration
-	endpoint       string
-	data           chan *points.Points
+	app             *App
+	metricInterval  time.Duration
+	statModule      statCb
+	statModuleFlush func()
 }
 
 func NewCollector(app *App) *Collector {
+	var statModule statCb
+	var statModuleFlush func()
+
+	if u, err := url.Parse(app.Config.Common.MetricEndpoint); app.Config.Common.MetricEndpoint == MetricEndpointLocal || err != nil {
+		if err != nil {
+			logrus.Errorf("[stat] metric-endpoint parse error: %s", err.Error())
+		}
+		statModule, statModuleFlush = func(module string) func(metric string, value float64) {
+			return func(metric string, value float64) {
+				key := fmt.Sprintf("%s.%s.%s", app.Config.Common.GraphPrefix, module, metric)
+				logrus.Infof("[stat] %s=%#v", key, value)
+				app.Cache.Add(points.NowPoint(key, value))
+			}
+		}, nil
+	} else {
+		statModule, statModuleFlush = sendMetricFactory(u)
+	}
+
 	c := &Collector{
-		app:            app,
-		graphPrefix:    app.Config.Common.GraphPrefix,
-		metricInterval: app.Config.Common.MetricInterval.Value(),
-		data:           make(chan *points.Points, 4096),
-		endpoint:       app.Config.Common.MetricEndpoint,
+		app:             app,
+		metricInterval:  app.Config.Common.MetricInterval.Value(),
+		statModule:      statModule,
+		statModuleFlush: statModuleFlush,
 	}
 
 	c.Start()
@@ -47,90 +66,65 @@ func NewCollector(app *App) *Collector {
 		}
 	})
 
-	endpoint, err := url.Parse(c.endpoint)
-	if err != nil {
-		logrus.Errorf("[stat] metric-endpoint parse error: %s", err.Error())
-		c.endpoint = MetricEndpointLocal
-	}
+	return c
+}
 
-	if c.endpoint == MetricEndpointLocal {
-		cache := app.Cache
+func sendMetricFactory(endpoint *url.URL) (statCb, func()) {
+	var conn net.Conn
 
-		c.Go(func(exit chan bool) {
-			for {
-				select {
-				case <-exit:
-					return
-				case p := <-c.data:
-					cache.Add(p)
-				}
-			}
-		})
-	} else {
-		chunkSize := 32768
-		if endpoint.Scheme == "udp" {
-			chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
+	getConnection := func() bool {
+		var err error
+		defaultTimeout := 5 * time.Second
+
+		conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
+		if err != nil {
+			logrus.Errorf("[stat] dial %s failed: %s", endpoint.String(), err.Error())
+			conn.Close()
+			conn = nil
+			return false
 		}
 
-		c.Go(func(exit chan bool) {
-			points.Glue(exit, c.data, chunkSize, time.Second, func(chunk []byte) {
+		err = conn.SetDeadline(time.Now().Add(defaultTimeout))
+		if err != nil {
+			conn.Close()
+			conn = nil
+			logrus.Errorf("[stat] conn.SetDeadline failed: %s", err.Error())
+			return false
+		}
 
-				var conn net.Conn
-				var err error
-				defaultTimeout := 5 * time.Second
-
-				// send data to endpoint
-			SendLoop:
-				for {
-
-					// check exit
-					select {
-					case <-exit:
-						break SendLoop
-					default:
-						// pass
-					}
-
-					// close old broken connection
-					if conn != nil {
-						conn.Close()
-						conn = nil
-					}
-
-					conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
-					if err != nil {
-						logrus.Errorf("[stat] dial %s failed: %s", c.endpoint, err.Error())
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					err = conn.SetDeadline(time.Now().Add(defaultTimeout))
-					if err != nil {
-						logrus.Errorf("[stat] conn.SetDeadline failed: %s", err.Error())
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					_, err := conn.Write(chunk)
-					if err != nil {
-						logrus.Errorf("[stat] conn.Write failed: %s", err.Error())
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					break SendLoop
-				}
-
-				if conn != nil {
-					conn.Close()
-					conn = nil
-				}
-			})
-		})
-
+		return true
 	}
 
-	return c
+	chunkSize := 32768
+	if endpoint.Scheme == "udp" {
+		chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
+	}
+
+	chunkBuf := bytes.NewBuffer(make([]byte, chunkSize))
+
+	flush := func() {
+		if !getConnection() {
+			return
+		}
+		_, err := conn.Write(chunkBuf.Bytes())
+		chunkBuf.Reset()
+		if err != nil {
+			logrus.Errorf("[stat] conn.Write failed: %s", err.Error())
+			conn.Close()
+			conn = nil
+		}
+	}
+
+	return func(module string) func(metric string, value float64) {
+		return func(metric string, value float64) {
+			s := fmt.Sprintf("%s %v %v\n", metric, value, time.Now().UTC().Second())
+
+			if chunkBuf.Len()+len(s) > chunkSize {
+				flush()
+			}
+			chunkBuf.WriteString(s)
+		}
+	}, flush
 }
 
 func (c *Collector) collect() {
@@ -139,19 +133,7 @@ func (c *Collector) collect() {
 	app.Lock()
 	defer app.Unlock()
 
-	statModule := func(module string) func(metric string, value float64) {
-		return func(metric string, value float64) {
-			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, module, metric)
-			logrus.Infof("[stat] %s=%#v", key, value)
-			select {
-			case c.data <- points.NowPoint(key, value):
-				// pass
-			default:
-				logrus.WithField("key", key).WithField("value", value).
-					Warn("[stat] send queue is full. Metric dropped")
-			}
-		}
-	}
+	statModule, flush := c.statModule, c.statModuleFlush
 
 	if app.Cache != nil {
 		app.Cache.Stat(statModule("cache"))
@@ -167,5 +149,9 @@ func (c *Collector) collect() {
 	}
 	if app.Persister != nil {
 		app.Persister.Stat(statModule("persister"))
+	}
+
+	if flush != nil {
+		flush()
 	}
 }
