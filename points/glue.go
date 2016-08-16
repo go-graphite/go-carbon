@@ -43,7 +43,7 @@ func Glue(exit chan bool, in chan *Points, chunkSize int, chunkTimeout time.Dura
 		}
 
 		for _, d := range p.Data {
-			s := fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)
+			s := fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Time)
 
 			if buf.Len()+len(s) > chunkSize {
 				flush()

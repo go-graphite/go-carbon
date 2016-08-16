@@ -31,45 +31,45 @@ func TestRestore(t *testing.T) {
 			&points.Points{
 				Metric: "m2",
 				Data: []points.Point{
-					points.Point{
-						Value:     2.000000,
-						Timestamp: 1470687039,
+					{
+						Value: 2.000000,
+						Time:  1470687039,
 					},
 				},
 			},
 			&points.Points{
 				Metric: "m1",
 				Data: []points.Point{
-					points.Point{
-						Value:     1.000000,
-						Timestamp: 1470687039,
+					{
+						Value: 1.000000,
+						Time:  1470687039,
 					},
 				},
 			},
 			&points.Points{
 				Metric: "m5",
 				Data: []points.Point{
-					points.Point{
-						Value:     5.000000,
-						Timestamp: 1470687217,
+					{
+						Value: 5.000000,
+						Time:  1470687217,
 					},
 				},
 			},
 			&points.Points{
 				Metric: "m4",
 				Data: []points.Point{
-					points.Point{
-						Value:     4.000000,
-						Timestamp: 1470687217,
+					{
+						Value: 4.000000,
+						Time:  1470687217,
 					},
 				},
 			},
 			&points.Points{
 				Metric: "m3",
 				Data: []points.Point{
-					points.Point{
-						Value:     3.000000,
-						Timestamp: 1470687217,
+					{
+						Value: 3.000000,
+						Time:  1470687217,
 					},
 				},
 			},
