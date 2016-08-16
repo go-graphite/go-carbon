@@ -116,7 +116,7 @@ func NewConfig() *Config {
 		Common: commonConfig{
 			Logfile:     "/var/log/go-carbon/go-carbon.log",
 			LogLevel:    "info",
-			GraphPrefix: "carbon.agents.{host}.",
+			GraphPrefix: "carbon.agents.{host}",
 			MetricInterval: &Duration{
 				Duration: time.Minute,
 			},
