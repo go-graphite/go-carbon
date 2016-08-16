@@ -72,7 +72,7 @@ func (c *Collector) collect() {
 
 	statModule := func(module string) func(metric string, value float64) {
 		return func(metric string, value float64) {
-			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, module, metric)
+			key := fmt.Sprintf("%s%s.%s", c.graphPrefix, module, metric)
 			logrus.Infof("[stat] %s=%#v", key, value)
 			select {
 			case c.data <- points.NowPoint(key, value):
