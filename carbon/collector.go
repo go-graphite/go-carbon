@@ -31,6 +31,7 @@ func NewCollector(app *App) *Collector {
 	// collector worker
 	c.Go(func(exit chan bool) {
 		ticker := time.NewTicker(c.metricInterval)
+		defer ticker.Stop()
 
 		for {
 			select {
