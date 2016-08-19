@@ -36,8 +36,8 @@ func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.Start()
 	cache.SetOutputChanSize(0)
+	cache.Start()
 
 	msg1 := points.OnePoint(
 		"carbon.agents.carbon_agent_server.cache.size",
@@ -139,7 +139,7 @@ func TestCarbonlink(t *testing.T) {
 	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](eu.", string(data))
 
 	/* WRONG MESSAGE TEST */
-	logging.Test(func(log *bytes.Buffer) { // silent logs
+	logging.Test(func(log logging.TestOut) { // silent logs
 		_, err = conn.Write([]byte("\x00\x00\x00\x05aaaaa"))
 		assert.NoError(err)
 
@@ -154,8 +154,8 @@ func TestCarbonlinkErrors(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.Start()
 	cache.SetOutputChanSize(0)
+	cache.Start()
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
@@ -218,7 +218,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 	}
 
 	for _, test := range table {
-		logging.TestWithLevel("debug", func(log *bytes.Buffer) {
+		logging.TestWithLevel("debug", func(log logging.TestOut) {
 			conn, err := net.Dial("tcp", carbonlink.Addr().String())
 			assert.NoError(err)
 

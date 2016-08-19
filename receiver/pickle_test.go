@@ -1,7 +1,6 @@
 package receiver
 
 import (
-	"bytes"
 	"testing"
 	"time"
 
@@ -41,7 +40,7 @@ func TestPickleMemoryError(t *testing.T) {
 	test := newTCPTestCase(t, true)
 	defer test.Finish()
 
-	logging.Test(func(log *bytes.Buffer) {
+	logging.Test(func(log logging.TestOut) {
 		test.Send("\x80\x00\x00\x00") // 2Gb message length
 		time.Sleep(10 * time.Millisecond)
 
