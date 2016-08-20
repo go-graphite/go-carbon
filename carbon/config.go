@@ -11,6 +11,8 @@ import (
 	"github.com/lomik/go-carbon/persister"
 )
 
+const MetricEndpointLocal = "local"
+
 // Duration wrapper time.Duration for TOML
 type Duration struct {
 	time.Duration
@@ -41,6 +43,7 @@ type commonConfig struct {
 	LogLevel       string    `toml:"log-level"`
 	GraphPrefix    string    `toml:"graph-prefix"`
 	MetricInterval *Duration `toml:"metric-interval"`
+	MetricEndpoint string    `toml:"metric-endpoint"`
 	MaxCPU         int       `toml:"max-cpu"`
 }
 
@@ -120,8 +123,9 @@ func NewConfig() *Config {
 			MetricInterval: &Duration{
 				Duration: time.Minute,
 			},
-			MaxCPU: 1,
-			User:   "",
+			MetricEndpoint: MetricEndpointLocal,
+			MaxCPU:         1,
+			User:           "",
 		},
 		Whisper: whisperConfig{
 			DataDir:             "/data/graphite/whisper/",
