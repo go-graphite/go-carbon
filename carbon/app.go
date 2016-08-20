@@ -76,6 +76,10 @@ func (app *App) configure() error {
 		return fmt.Errorf("go-carbon support only \"max\", \"sorted\"  or \"noop\" write-strategy")
 	}
 
+	if cfg.Common.MetricEndpoint == "" {
+		cfg.Common.MetricEndpoint = MetricEndpointLocal
+	}
+
 	if cfg.Common.MetricEndpoint != MetricEndpointLocal {
 		u, err := url.Parse(cfg.Common.MetricEndpoint)
 

@@ -47,6 +47,12 @@ func NewCollector(app *App) *Collector {
 		}
 	})
 
+	endpoint, err := url.Parse(c.endpoint)
+	if err != nil {
+		logrus.Errorf("[stat] metric-endpoint parse error: %s", err.Error())
+		c.endpoint = MetricEndpointLocal
+	}
+
 	if c.endpoint == MetricEndpointLocal {
 		// sender worker
 		out := app.Cache.In()
@@ -67,37 +73,63 @@ func NewCollector(app *App) *Collector {
 			}
 		})
 	} else {
-		endpoint, err := url.Parse(c.endpoint)
-		if err != nil {
-			logrus.Errorf("[stat] metric-endpoint parse error: %s", err.Error())
+		chunkSize := 32768
+		if endpoint.Scheme == "udp" {
+			chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
 		}
 
 		c.Go(func(exit chan bool) {
-			points.Glue(exit, c.data, 1200, time.Second, func(chunk []byte) {
+			points.Glue(exit, c.data, chunkSize, time.Second, func(chunk []byte) {
+
+				var conn net.Conn
+				var err error
+				defaultTimeout := 5 * time.Second
+
 				// send data to endpoint
+			SendLoop:
 				for {
-					conn, err := net.DialTimeout(endpoint.Scheme, endpoint.Host, 5*time.Second)
+
+					// check exit
+					select {
+					case <-exit:
+						break SendLoop
+					default:
+						// pass
+					}
+
+					// close old broken connection
+					if conn != nil {
+						conn.Close()
+						conn = nil
+					}
+
+					conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
 					if err != nil {
 						logrus.Errorf("[stat] dial %s failed: %s", c.endpoint, err.Error())
 						time.Sleep(time.Second)
-						continue
+						continue SendLoop
 					}
 
-					err = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					err = conn.SetDeadline(time.Now().Add(defaultTimeout))
 					if err != nil {
 						logrus.Errorf("[stat] conn.SetDeadline failed: %s", err.Error())
 						time.Sleep(time.Second)
-						continue
+						continue SendLoop
 					}
 
-					_, err = conn.Write(chunk)
+					_, err := conn.Write(chunk)
 					if err != nil {
 						logrus.Errorf("[stat] conn.Write failed: %s", err.Error())
 						time.Sleep(time.Second)
-						continue
+						continue SendLoop
 					}
 
-					return
+					break SendLoop
+				}
+
+				if conn != nil {
+					conn.Close()
+					conn = nil
 				}
 			})
 		})
