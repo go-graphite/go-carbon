@@ -124,7 +124,7 @@ func (listener *CarbonlinkListener) packReply(query *Query) []byte {
 	return resultBuf.Bytes()
 }
 
-func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
+func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
@@ -214,7 +214,7 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 					continue
 				}
 
-				go listener.handleConnection(conn)
+				go listener.HandleConnection(conn)
 			}
 		})
 

@@ -57,7 +57,7 @@ func (rcv *TCP) Addr() net.Addr {
 	return rcv.listener.Addr()
 }
 
-func (rcv *TCP) handleConnection(conn net.Conn) {
+func (rcv *TCP) HandleConnection(conn net.Conn) {
 	atomic.AddInt32(&rcv.active, 1)
 	defer atomic.AddInt32(&rcv.active, -1)
 
@@ -210,7 +210,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 			tcpListener.Close()
 		})
 
-		handler := rcv.handleConnection
+		handler := rcv.HandleConnection
 		if rcv.isPickle {
 			handler = rcv.handlePickle
 		}

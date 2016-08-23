@@ -16,6 +16,8 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
+type StoreFunc func(p *Whisper, values *points.Points)
+
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
@@ -30,7 +32,7 @@ type Whisper struct {
 	created             uint32 // counter
 	sparse              bool
 	maxUpdatesPerSecond int
-	mockStore           func(p *Whisper, values *points.Points)
+	mockStore           func() (StoreFunc, func())
 }
 
 // NewWhisper create instance of Whisper
@@ -64,6 +66,10 @@ func (p *Whisper) SetWorkers(count int) {
 // SetSparse creation
 func (p *Whisper) SetSparse(sparse bool) {
 	p.sparse = sparse
+}
+
+func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
+	p.mockStore = fn
 }
 
 func store(p *Whisper, values *points.Points) {
@@ -137,8 +143,9 @@ func store(p *Whisper, values *points.Points) {
 
 func (p *Whisper) worker(in chan *points.Points, exit chan bool) {
 	storeFunc := store
+	var doneCb func()
 	if p.mockStore != nil {
-		storeFunc = p.mockStore
+		storeFunc, doneCb = p.mockStore()
 	}
 
 LOOP:
@@ -151,6 +158,9 @@ LOOP:
 				break LOOP
 			}
 			storeFunc(p, values)
+			if doneCb != nil {
+				doneCb()
+			}
 		}
 	}
 }
