@@ -125,8 +125,6 @@ listen = "127.0.0.1:7002"
 enabled = true
 # Close inactive connections after "read-timeout"
 read-timeout = "30s"
-# Return empty result if cache not reply
-query-timeout = "100ms"
 
 [dump]
 # Enable dump/restore function on USR2 signal

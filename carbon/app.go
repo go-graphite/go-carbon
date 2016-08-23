@@ -285,9 +285,8 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonlink := cache.NewCarbonlinkListener(core.Query())
+		carbonlink := cache.NewCarbonlinkListener(app.Cache)
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
-		carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 
 		if err = carbonlink.Listen(linkAddr); err != nil {
 			return

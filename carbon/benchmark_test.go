@@ -248,7 +248,7 @@ func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numC
 }
 
 func startCarbonLink(b *testing.B, c *cache.Cache, metrics []string, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) *cache.CarbonlinkListener {
-	carbonlink := cache.NewCarbonlinkListener(c.Query())
+	carbonlink := cache.NewCarbonlinkListener(c)
 
 	wgInitDone.Add(numCLClients)
 	for i := 0; i < numCLClients; i++ {

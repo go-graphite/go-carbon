@@ -49,7 +49,7 @@ func TestCarbonlink(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink := NewCarbonlinkListener(cache)
 	defer carbonlink.Stop()
 
 	assert.NoError(carbonlink.Listen(addr))
@@ -98,6 +98,7 @@ func TestCarbonlink(t *testing.T) {
 	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
 	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
 		string(data))
+	cleanup()
 
 	/* MESSAGE 2.5 - unicode */
 	conn, cleanup = NewClient()
@@ -171,7 +172,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink := NewCarbonlinkListener(cache)
 	listenerTimeout := 10 * time.Millisecond
 	carbonlink.SetReadTimeout(listenerTimeout)
 	defer carbonlink.Stop()
@@ -293,11 +294,9 @@ func BenchmarkCarbonLinkPickleParse(b *testing.B) {
 func BenchmarkCarbonLinkPackReply(b *testing.B) {
 	p := points.OnePoint("carbon.agents.carbon_agent_server.param.size", 15, 1422795966).Add(15, 9000000).Add(16, 9000000)
 
-	q := Query{CacheData: p}
-
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			packReply(&q)
+			packReply(p)
 		}
 	})
 }
