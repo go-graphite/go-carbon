@@ -133,6 +133,7 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 
 		reqData, err := ReadCarbonlinkRequest(reader)
 		if err != nil {
+			conn.(*net.TCPConn).SetLinger(0)
 			logrus.Debugf("[carbonlink] read carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
@@ -140,6 +141,7 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 		req, err := ParseCarbonlinkRequest(reqData)
 
 		if err != nil {
+			conn.(*net.TCPConn).SetLinger(0)
 			logrus.Warningf("[carbonlink] parse carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
