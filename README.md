@@ -15,6 +15,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Many persister workers (using many cpu cores)
 * Run as daemon
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
+* Alternative grace stop on `USR2` signal (config `dump` section): start write new data to file, stop persister, dump cache to file, stop all (and restore from files after next start)
 * Reload persister config (whisper section of main config, storage-schemas.conf and storage-aggregation.conf) on HUP signal
 
 ## Performance
@@ -71,9 +72,11 @@ logfile = "/var/log/go-carbon/go-carbon.log"
 # Logging error level. Valid values: "debug", "info", "warn", "warning", "error"
 log-level = "info"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
-graph-prefix = "carbon.agents.{host}."
+graph-prefix = "carbon.agents.{host}"
 # Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
 metric-interval = "1m0s"
+# Endpoint for store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
+metric-endpoint = ""
 # Increase for configuration with multi persisters
 max-cpu = 1
 
@@ -126,6 +129,14 @@ enabled = true
 read-timeout = "30s"
 # Return empty result if cache not reply
 query-timeout = "100ms"
+
+[dump]
+# Enable dump/restore function on USR2 signal
+enabled = false
+# Directory for store dump data. Should be writeable for carbon
+path = ""
+# Restore speed. 0 - unlimited
+restore-per-second = 0
 
 [pprof]
 listen = "localhost:7007"
