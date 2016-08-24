@@ -49,6 +49,10 @@ func ReadCarbonlinkRequest(reader io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("Can't read message length: %s", err.Error())
 	}
 
+	if msgLen > 1024 {
+		return nil, fmt.Errorf("Too big carbonlink request")
+	}
+
 	data := make([]byte, msgLen)
 
 	if err := binary.Read(reader, binary.BigEndian, data); err != nil {
