@@ -3,34 +3,17 @@ package cache
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
-	"github.com/lomik/go-carbon/logging"
 	"github.com/lomik/go-carbon/points"
 	"github.com/stretchr/testify/assert"
 )
 
 const sampleCacheQuery = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.cache.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
 const sampleCacheQuery2 = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.param.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
-
-func TestCarbonlinkRead(t *testing.T) {
-	assert := assert.New(t)
-
-	reader := bytes.NewReader([]byte(sampleCacheQuery))
-
-	reqData, err := ReadCarbonlinkRequest(reader)
-	assert.NoError(err)
-
-	req, err := ParseCarbonlinkRequest(reqData)
-
-	assert.NoError(err)
-	assert.NotNil(req)
-	assert.Equal("cache-query", req.Type)
-	assert.Equal("carbon.agents.carbon_agent_server.cache.size", req.Metric)
-}
 
 func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
@@ -73,17 +56,19 @@ func TestCarbonlink(t *testing.T) {
 
 	assert.NoError(carbonlink.Listen(addr))
 
-	conn, err := net.Dial("tcp", carbonlink.Addr().String())
-	assert.NoError(err)
+	NewClient := func() (conn net.Conn, cleanup func()) {
+		conn, err := net.Dial("tcp", carbonlink.Addr().String())
+		assert.NoError(err)
 
-	conn.SetDeadline(time.Now().Add(time.Second))
-	defer conn.Close()
+		conn.SetDeadline(time.Now().Add(time.Second))
+		return conn, func() { conn.Close() }
+	}
 
 	var replyLength int32
 	var data []byte
 
 	/* MESSAGE 1 */
-
+	conn, cleanup := NewClient()
 	_, err = conn.Write([]byte(sampleCacheQuery))
 	assert.NoError(err)
 
@@ -97,8 +82,10 @@ func TestCarbonlink(t *testing.T) {
 
 	// {u'datapoints': [(1422797285, 42.17)]}
 	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86eu.", string(data))
+	cleanup()
 
 	/* MESSAGE 2 */
+	conn, cleanup = NewClient()
 	_, err = conn.Write([]byte(sampleCacheQuery2))
 	assert.NoError(err)
 
@@ -113,10 +100,11 @@ func TestCarbonlink(t *testing.T) {
 	// {u'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
 	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86eu.",
 		string(data))
+	cleanup()
 
 	/* MESSAGE 3 */
 	/* Remove carbon.agents.carbon_agent_server.param.size from cache and request again */
-
+	conn, cleanup = NewClient()
 	for {
 		c := <-cache.Out()
 		cache.Confirm() <- c
@@ -137,17 +125,27 @@ func TestCarbonlink(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](eu.", string(data))
+	cleanup()
 
 	/* WRONG MESSAGE TEST */
-	logging.Test(func(log logging.TestOut) { // silent logs
-		_, err = conn.Write([]byte("\x00\x00\x00\x05aaaaa"))
-		assert.NoError(err)
+	conn, cleanup = NewClient()
+	_, err = conn.Write([]byte("\x00\x00\x00\x05aaaaa"))
+	assert.NoError(err)
 
-		err = binary.Read(conn, binary.BigEndian, &replyLength)
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
 
-		assert.Error(err)
-		assert.Equal(io.EOF, err)
-	})
+	assert.Error(err)
+	cleanup()
+
+	/* Invalid querytype */
+	conn, cleanup = NewClient()
+	_, err = conn.Write([]byte("\x00\x00\x00(\x80\x02}q\x00(U\x06metricq\x01U\x03barq\x02U\x04typeq\x03U\x03fooq\x04u."))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+
+	assert.Error(err)
+	cleanup()
 }
 
 func TestCarbonlinkErrors(t *testing.T) {
@@ -161,83 +159,145 @@ func TestCarbonlinkErrors(t *testing.T) {
 	assert.NoError(err)
 
 	carbonlink := NewCarbonlinkListener(cache.Query())
-	carbonlink.SetReadTimeout(10 * time.Millisecond)
+	listenerTimeout := 10 * time.Millisecond
+	carbonlink.SetReadTimeout(listenerTimeout)
 	defer carbonlink.Stop()
 
-	assert.NoError(carbonlink.Listen(addr))
+	err = carbonlink.Listen(addr)
+	if err != nil {
+		t.Errorf("Received %q when attempting to start CarbonlinkListener", err)
+	}
 
 	table := []*struct {
-		closeAfterWrite bool
-		msg             []byte
-		logContains     []string
+		waitAfterWrite time.Duration
+		msg            []byte
 	}{
 		{ // connect and disconnect
-			true,
+			time.Millisecond * 0,
 			[]byte{},
-			[]string{
-				"] D [carbonlink] read carbonlink request from",
-				"Can't read message length",
-				// "EOF",
-			},
 		},
 		{ // connect, send msg length and disconnect
-			true,
+			time.Millisecond * 0,
 			[]byte(sampleCacheQuery2[:4]),
-			[]string{
-				"] D [carbonlink] read carbonlink request from",
-				"Can't read message body",
-				// "EOF",
-			},
 		},
 		{ // connect and wait timeout
-			false,
+			listenerTimeout * 2,
 			[]byte{},
-			[]string{
-				"] D [carbonlink] read carbonlink request from",
-				"Can't read message length",
-				// "i/o timeout",
-			},
 		},
 		{ // connect, send msg length and wait timeout
-			false,
+			listenerTimeout * 2,
 			[]byte(sampleCacheQuery2[:4]),
-			[]string{
-				"] D [carbonlink] read carbonlink request from",
-				"Can't read message body",
-				// "i/o timeout",
-			},
 		},
 		{ // send broken pickle
-			false,
+			listenerTimeout * 2,
 			[]byte(sampleCacheQuery2[:len(sampleCacheQuery2)-1] + "a"),
-			[]string{
-				"] W [carbonlink] parse carbonlink request from",
-				"Pickle Machine failed",
-			},
 		},
 	}
 
 	for _, test := range table {
-		logging.TestWithLevel("debug", func(log logging.TestOut) {
-			conn, err := net.Dial("tcp", carbonlink.Addr().String())
-			assert.NoError(err)
+		remoteaddr, _ := net.ResolveTCPAddr("tcp", carbonlink.Addr().String())
+		conn, err := net.DialTCP("tcp", addr, remoteaddr)
+		assert.NoError(err)
 
-			if len(test.msg) > 0 {
-				_, err = conn.Write(test.msg)
-				assert.NoError(err)
+		if len(test.msg) > 0 {
+			_, err = conn.Write(test.msg)
+			if err != nil {
+				t.Errorf("Received %q when attempting to write to CarbonlinkListener", err)
 			}
-
-			if test.closeAfterWrite {
-				conn.Close()
-			} else {
-				defer conn.Close()
+		}
+		time.Sleep(test.waitAfterWrite)
+		if test.waitAfterWrite > listenerTimeout {
+			conn.SetWriteBuffer(0)
+			n, err := conn.Write([]byte("x"))
+			if err == nil || n > 0 {
+				t.Errorf("CarbonlinkListener did not close connection as expected")
 			}
+		}
+		conn.Close()
 
-			time.Sleep(100 * time.Millisecond)
+	}
+}
 
-			for _, logMsg := range test.logContains {
-				assert.Contains(log.String(), logMsg)
-			}
-		})
+func TestReadCarbonlinkRequest(t *testing.T) {
+
+	tests := []struct {
+		name    string
+		data    []byte
+		want    []byte
+		wantErr bool
+	}{
+		{name: "Empty reader",
+			data:    []byte{},
+			wantErr: true},
+		// Length is expected to be 32 bits
+		{name: "Short Length",
+			data:    []byte("\x00"),
+			wantErr: true},
+		{name: "Length, but no body",
+			data:    []byte("\x00\x00\x00\x01"),
+			wantErr: true},
+		{name: "Valid Length and body",
+			data: []byte("\x00\x00\x00\x01x"),
+			want: []byte("x"),
+		},
+		{name: "Length zero, no body",
+			data: []byte("\x00\x00\x00\x00"),
+			want: []byte(""),
+		},
+	}
+	for _, tt := range tests {
+		got, err := ReadCarbonlinkRequest(bytes.NewReader(tt.data))
+		if (err != nil) != tt.wantErr {
+			t.Errorf("%q. ReadCarbonlinkRequest() error = %v, wantErr %v", tt.name, err, tt.wantErr)
+			continue
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q. ReadCarbonlinkRequest() = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestNewCarbonlinkRequest(t *testing.T) {
+	want := &CarbonlinkRequest{}
+	got := NewCarbonlinkRequest()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("NewCarbonlinkRequest() = %v, want %v", got, want)
+	}
+}
+
+func TestParseCarbonlinkRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		want    *CarbonlinkRequest
+		wantErr bool
+	}{
+		{name: "Good query",
+			data: []byte(sampleCacheQuery)[4:],
+			want: &CarbonlinkRequest{
+				Type:   "cache-query",
+				Metric: "carbon.agents.carbon_agent_server.cache.size"},
+		},
+		{name: "Invalid query type",
+			data: []byte("\x80\x02}q\x00(U\x06Metricq\x01U\x03barq\x02U\x04Typeq\x03U\x03fooq\x04u."),
+			want: &CarbonlinkRequest{
+				Type:   "foo",
+				Metric: "bar",
+			},
+		},
+		{name: "Garbage",
+			data:    []byte("garbage"),
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		got, err := ParseCarbonlinkRequest(tt.data)
+		if (err != nil) != tt.wantErr {
+			t.Errorf("%q. ParseCarbonlinkRequest() error = %v, wantErr %v", tt.name, err, tt.wantErr)
+			continue
+		}
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%q. ParseCarbonlinkRequest() = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
