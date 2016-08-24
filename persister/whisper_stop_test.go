@@ -26,9 +26,11 @@ func TestGracefullyStop(t *testing.T) {
 			storeWait := make(chan bool)
 			var storeCount uint32
 
-			p.mockStore = func(p *Whisper, values *points.Points) {
-				<-storeWait
-				atomic.AddUint32(&storeCount, 1)
+			p.mockStore = func() (StoreFunc, func()) {
+				return func(p *Whisper, values *points.Points) {
+					<-storeWait
+					atomic.AddUint32(&storeCount, 1)
+				}, nil
 			}
 
 			var sentCount int
@@ -82,7 +84,9 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 				p.SetWorkers(workers)
 
-				p.mockStore = func(p *Whisper, values *points.Points) {}
+				p.mockStore = func() (StoreFunc, func()) {
+					return func(p *Whisper, values *points.Points) {}, nil
+				}
 
 				p.Start()
 				time.Sleep(10 * time.Millisecond)
