@@ -301,3 +301,23 @@ func TestParseCarbonlinkRequest(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkCarbonLinkPickleParse(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			ParseCarbonlinkRequest([]byte(sampleCacheQuery))
+		}
+	})
+}
+
+func BenchmarkCarbonLinkPackReply(b *testing.B) {
+	p := points.OnePoint("carbon.agents.carbon_agent_server.param.size", 15, 1422795966).Add(15, 9000000).Add(16, 9000000)
+
+	q := Query{CacheData: p}
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			packReply(&q)
+		}
+	})
+}

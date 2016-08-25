@@ -90,7 +90,7 @@ func (listener *CarbonlinkListener) SetQueryTimeout(timeout time.Duration) {
 	listener.queryTimeout = timeout
 }
 
-func (listener *CarbonlinkListener) packReply(query *Query) []byte {
+func packReply(query *Query) []byte {
 	buf := new(bytes.Buffer)
 
 	var datapoints []interface{}
@@ -167,7 +167,7 @@ func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 					query = nil // empty reply
 				}
 
-				packed := listener.packReply(query)
+				packed := packReply(query)
 				if packed == nil {
 					break
 				}
