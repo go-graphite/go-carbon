@@ -80,8 +80,8 @@ func TestCarbonlink(t *testing.T) {
 	err = binary.Read(conn, binary.BigEndian, data)
 	assert.NoError(err)
 
-	// {u'datapoints': [(1422797285, 42.17)]}
-	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86eu.", string(data))
+	// {'datapoints': [(1422797285, 42.17)]}
+	assert.Equal([]byte("\x80\x02}U\ndatapoints]J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86as."), data)
 	cleanup()
 
 	/* MESSAGE 2 */
@@ -97,8 +97,8 @@ func TestCarbonlink(t *testing.T) {
 	err = binary.Read(conn, binary.BigEndian, data)
 	assert.NoError(err)
 
-	// {u'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
-	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86eu.",
+	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
 		string(data))
 	cleanup()
 
@@ -124,7 +124,7 @@ func TestCarbonlink(t *testing.T) {
 	err = binary.Read(conn, binary.BigEndian, data)
 	assert.NoError(err)
 
-	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](eu.", string(data))
+	assert.Equal("\x80\x02}U\ndatapoints]s.", string(data))
 	cleanup()
 
 	/* WRONG MESSAGE TEST */

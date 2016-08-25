@@ -6,14 +6,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/hydrogen18/stalecucumber"
 
 	"github.com/lomik/go-carbon/helper"
+	"github.com/lomik/go-carbon/points"
 )
 
 // CarbonlinkRequest ...
@@ -186,42 +187,78 @@ func (listener *CarbonlinkListener) SetQueryTimeout(timeout time.Duration) {
 	listener.queryTimeout = timeout
 }
 
-func packReply(query *Query) []byte {
-	buf := new(bytes.Buffer)
+func pickleWriteMemo(b *bytes.Buffer, memo *uint32) {
+	if *memo < 256 {
+		b.WriteByte('q')
+		b.WriteByte(uint8(*memo))
+	} else {
+		b.WriteByte('r')
+		var buf [4]byte
+		s := buf[:]
+		binary.LittleEndian.PutUint32(s, *memo)
+		b.Write(s)
+	}
+	*memo += 1
+}
 
-	var datapoints []interface{}
+func picklePoint(b *bytes.Buffer, p points.Point) {
+	var buf [8]byte
+	s := buf[:]
+
+	b.WriteByte('J')
+	binary.LittleEndian.PutUint32(s, uint32(p.Timestamp))
+	b.Write(s[:4])
+
+	b.WriteByte('G')
+	binary.BigEndian.PutUint64(s, uint64(math.Float64bits(p.Value)))
+	b.Write(s)
+
+	b.WriteByte('\x86') // assemble 2 element tuple
+}
+
+func packReply(query *Query) []byte {
+
+	numPoints := 0
+
+	if query != nil {
+		numPoints += len(query.InFlightData)
+		if query.CacheData != nil {
+			numPoints += len(query.CacheData.Data)
+		}
+	}
+
+	buf := bytes.NewBuffer([]byte("\x00\x00\x00\x00\x80\x02}U\ndatapoints]"))
+
+	if numPoints > 1 {
+		buf.WriteByte('(')
+	}
 
 	if query != nil && query.InFlightData != nil {
 		for _, points := range query.InFlightData {
 			for _, item := range points.Data {
-				datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+				picklePoint(buf, item)
 			}
 		}
 	}
 
 	if query != nil && query.CacheData != nil {
 		for _, item := range query.CacheData.Data {
-			datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+			picklePoint(buf, item)
 		}
 	}
 
-	r := make(map[string][]interface{})
-	r["datapoints"] = datapoints
-
-	_, err := stalecucumber.NewPickler(buf).Pickle(r)
-
-	if err != nil { // unknown wtf error
-		return nil
+	if numPoints == 0 {
+		buf.Write([]byte{'s', '.'})
+	} else if numPoints == 1 {
+		buf.Write([]byte{'a', 's', '.'})
+	} else if numPoints > 1 {
+		buf.Write([]byte{'e', 's', '.'})
 	}
 
-	resultBuf := new(bytes.Buffer)
-	if err := binary.Write(resultBuf, binary.BigEndian, int32(buf.Len())); err != nil {
-		return nil
-	}
+	result := buf.Bytes()
+	binary.BigEndian.PutUint32(result[:4], uint32(buf.Len()-4))
 
-	resultBuf.Write(buf.Bytes())
-
-	return resultBuf.Bytes()
+	return result
 }
 
 func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
