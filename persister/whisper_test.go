@@ -19,21 +19,13 @@ func TestNewWhisper(t *testing.T) {
 	aggrs := WhisperAggregation{}
 	output := NewWhisper("foo", schemas, &aggrs, inchan, nil)
 	expected := Whisper{
-		in:             inchan,
-		schemas:        schemas,
-		aggregation:    &aggrs,
-		workersCount:   1,
-		rootPath:       "foo",
-		metricInterval: time.Minute,
+		in:           inchan,
+		schemas:      schemas,
+		aggregation:  &aggrs,
+		workersCount: 1,
+		rootPath:     "foo",
 	}
 	assert.Equal(t, *output, expected)
-}
-
-func TestSetGraphPrefix(t *testing.T) {
-	fixture := Whisper{}
-	fixture.SetGraphPrefix("foo.bar")
-	expected := "foo.bar"
-	assert.Equal(t, fixture.graphPrefix, expected)
 }
 
 func TestSetWorkers(t *testing.T) {
@@ -41,24 +33,6 @@ func TestSetWorkers(t *testing.T) {
 	fixture.SetWorkers(10)
 	expected := 10
 	assert.Equal(t, fixture.workersCount, expected)
-}
-
-func TestStat(t *testing.T) {
-	fixture := Whisper{
-		graphPrefix: "bing.bang.",
-	}
-	fixture.in = make(chan *points.Points)
-	go func() {
-		output := <-fixture.in
-		expected := points.OnePoint(
-			"bing.bang.persister.foo.bar",
-			1.5,
-			time.Now().Unix(),
-		)
-		assert.Equal(t, output, expected)
-	}()
-	fixture.Stat("foo.bar", 1.5)
-
 }
 
 func randomPoints(num int, out chan *points.Points) {
@@ -113,7 +87,7 @@ func TestShuffler(t *testing.T) {
 
 	total := 0
 	for b := range buckets {
-		assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5% across 4 buckets after %d inputs", runlength))
+		assert.InEpsilon(t, float64(runlength)/4, buckets[b], (float64(runlength)/4)*.005, fmt.Sprintf("shuffle distribution is greater than .5%% across 4 buckets after %d inputs", runlength))
 		total += buckets[b]
 	}
 	assert.Equal(t, runlength, total, "total output of shuffle is not equal to input")

@@ -1,7 +1,6 @@
 package logging
 
 import (
-	"bytes"
 	"testing"
 
 	"github.com/Sirupsen/logrus"
@@ -36,7 +35,7 @@ func TestSetLevel(t *testing.T) {
 	for testIndex := 0; testIndex < len(table); testIndex++ {
 		checkLevel := table[testIndex].level
 
-		TestWithLevel(table[testIndex].levelString, func(log *bytes.Buffer) {
+		TestWithLevel(table[testIndex].levelString, func(log TestOut) {
 			callLoggers()
 
 			for i := 0; i < len(table); i++ {

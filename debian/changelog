@@ -1,3 +1,23 @@
+go-carbon (0.8.0) unstable; urgency=low
+  * Fully refactored and optimizer cache module (core of go-carbon) (thanks
+    Maxim Ivanov)
+  * Added noop cache.write-strategy (thanks Maxim Ivanov)
+  * New optional dump/restore functional for minimize data loss on restart
+  * Refactored internal stat mechanics. common.graph-prefix and
+    common.metric-interval now can be changed without restart (on HUP signal)
+  * Customizable internal metrics endpoint. common.metric-endpoint param.
+    Valid values: "local" and "" (write directly to whisper),
+    "tcp://host:port", "udp://host:port"
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 24 Aug 2016 22:30:00 +0300
+
+go-carbon (0.7.3) stable; urgency=low
+  * Added cache.write-strategy option (values "max" or "sorted") (thanks
+    Alexander Akulov)
+  * commitedPoints metric renamed to committedPoints
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Thu, 9 Aug 2016 23:45:00 +0300
+
 go-carbon (0.7.2) stable; urgency=low
   * Added sparse file creation (whisper.sparse-create config option)
   * Enable reload in init script (thanks Jose Riguera)

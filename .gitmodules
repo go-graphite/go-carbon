@@ -22,6 +22,9 @@
 [submodule "_vendor/src/github.com/benbjohnson/clock"]
 	path = _vendor/src/github.com/benbjohnson/clock
 	url = https://github.com/benbjohnson/clock.git
-[submodule "_vendor/src/github.com/lomik/go-daemon"]
-	path = _vendor/src/github.com/lomik/go-daemon
-	url = https://github.com/lomik/go-daemon.git
+[submodule "_vendor/src/github.com/sevlyar/go-daemon"]
+	path = _vendor/src/github.com/sevlyar/go-daemon
+	url = https://github.com/sevlyar/go-daemon.git
+[submodule "_vendor/src/github.com/kardianos/osext"]
+	path = _vendor/src/github.com/kardianos/osext
+	url = https://github.com/kardianos/osext

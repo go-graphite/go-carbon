@@ -14,7 +14,7 @@ func doTestThrottleChan(t *testing.T, perSecond int) {
 	timestamp := time.Now().Unix()
 
 	chIn := make(chan *points.Points)
-	chOut := throttleChan(chIn, perSecond, nil)
+	chOut := ThrottleChan(chIn, perSecond, nil)
 	wait := time.After(time.Second)
 
 	bw := 0

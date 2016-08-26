@@ -11,6 +11,8 @@ import (
 	"github.com/lomik/go-carbon/persister"
 )
 
+const MetricEndpointLocal = "local"
+
 // Duration wrapper time.Duration for TOML
 type Duration struct {
 	time.Duration
@@ -41,6 +43,7 @@ type commonConfig struct {
 	LogLevel       string    `toml:"log-level"`
 	GraphPrefix    string    `toml:"graph-prefix"`
 	MetricInterval *Duration `toml:"metric-interval"`
+	MetricEndpoint string    `toml:"metric-endpoint"`
 	MaxCPU         int       `toml:"max-cpu"`
 }
 
@@ -57,7 +60,7 @@ type whisperConfig struct {
 }
 
 type cacheConfig struct {
-	MaxSize       int    `toml:"max-size"`
+	MaxSize       uint32 `toml:"max-size"`
 	InputBuffer   int    `toml:"input-buffer"`
 	WriteStrategy string `toml:"write-strategy"`
 }
@@ -91,6 +94,12 @@ type pprofConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type dumpConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	Path             string `toml:"path"`
+	RestorePerSecond int    `toml:"restore-per-second"`
+}
+
 // Config ...
 type Config struct {
 	Common     commonConfig     `toml:"common"`
@@ -100,6 +109,7 @@ type Config struct {
 	Tcp        tcpConfig        `toml:"tcp"`
 	Pickle     pickleConfig     `toml:"pickle"`
 	Carbonlink carbonlinkConfig `toml:"carbonlink"`
+	Dump       dumpConfig       `toml:"dump"`
 	Pprof      pprofConfig      `toml:"pprof"`
 }
 
@@ -109,12 +119,13 @@ func NewConfig() *Config {
 		Common: commonConfig{
 			Logfile:     "/var/log/go-carbon/go-carbon.log",
 			LogLevel:    "info",
-			GraphPrefix: "carbon.agents.{host}.",
+			GraphPrefix: "carbon.agents.{host}",
 			MetricInterval: &Duration{
 				Duration: time.Minute,
 			},
-			MaxCPU: 1,
-			User:   "",
+			MetricEndpoint: MetricEndpointLocal,
+			MaxCPU:         1,
+			User:           "",
 		},
 		Whisper: whisperConfig{
 			DataDir:             "/data/graphite/whisper/",
@@ -158,6 +169,7 @@ func NewConfig() *Config {
 			Listen:  "localhost:7007",
 			Enabled: false,
 		},
+		Dump: dumpConfig{},
 	}
 
 	return cfg

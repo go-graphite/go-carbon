@@ -1,7 +1,6 @@
 package persister
 
 import (
-	"fmt"
 	"hash/crc32"
 	"os"
 	"path/filepath"
@@ -17,23 +16,23 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
+type StoreFunc func(p *Whisper, values *points.Points)
+
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
 	updateOperations    uint32
-	commitedPoints      uint32
+	committedPoints     uint32
 	in                  chan *points.Points
 	confirm             chan *points.Points
 	schemas             WhisperSchemas
 	aggregation         *WhisperAggregation
-	metricInterval      time.Duration // checkpoint interval
 	workersCount        int
 	rootPath            string
-	graphPrefix         string
 	created             uint32 // counter
 	sparse              bool
 	maxUpdatesPerSecond int
-	mockStore           func(p *Whisper, values *points.Points)
+	mockStore           func() (StoreFunc, func())
 }
 
 // NewWhisper create instance of Whisper
@@ -43,16 +42,10 @@ func NewWhisper(rootPath string, schemas WhisperSchemas, aggregation *WhisperAgg
 		confirm:             confirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
-		metricInterval:      time.Minute,
 		workersCount:        1,
 		rootPath:            rootPath,
 		maxUpdatesPerSecond: 0,
 	}
-}
-
-// SetGraphPrefix for internal cache metrics
-func (p *Whisper) SetGraphPrefix(prefix string) {
-	p.graphPrefix = prefix
 }
 
 // SetMaxUpdatesPerSecond enable throttling
@@ -75,18 +68,8 @@ func (p *Whisper) SetSparse(sparse bool) {
 	p.sparse = sparse
 }
 
-// SetMetricInterval sets doChekpoint interval
-func (p *Whisper) SetMetricInterval(interval time.Duration) {
-	p.metricInterval = interval
-}
-
-// Stat sends internal statistics to cache
-func (p *Whisper) Stat(metric string, value float64) {
-	p.in <- points.OnePoint(
-		fmt.Sprintf("%spersister.%s", p.graphPrefix, metric),
-		value,
-		time.Now().Unix(),
-	)
+func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
+	p.mockStore = fn
 }
 
 func store(p *Whisper, values *points.Points) {
@@ -145,7 +128,7 @@ func store(p *Whisper, values *points.Points) {
 		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
 	}
 
-	atomic.AddUint32(&p.commitedPoints, uint32(len(values.Data)))
+	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
 	atomic.AddUint32(&p.updateOperations, 1)
 
 	defer w.Close()
@@ -160,8 +143,9 @@ func store(p *Whisper, values *points.Points) {
 
 func (p *Whisper) worker(in chan *points.Points, exit chan bool) {
 	storeFunc := store
+	var doneCb func()
 	if p.mockStore != nil {
-		storeFunc = p.mockStore
+		storeFunc, doneCb = p.mockStore()
 	}
 
 LOOP:
@@ -174,6 +158,9 @@ LOOP:
 				break LOOP
 			}
 			storeFunc(p, values)
+			if doneCb != nil {
+				doneCb()
+			}
 		}
 	}
 }
@@ -200,51 +187,29 @@ LOOP:
 	}
 }
 
-// save stat
-func (p *Whisper) doCheckpoint() {
+// Stat callback
+func (p *Whisper) Stat(send func(metric string, value float64)) {
 	updateOperations := atomic.LoadUint32(&p.updateOperations)
-	commitedPoints := atomic.LoadUint32(&p.commitedPoints)
+	committedPoints := atomic.LoadUint32(&p.committedPoints)
 	atomic.AddUint32(&p.updateOperations, -updateOperations)
-	atomic.AddUint32(&p.commitedPoints, -commitedPoints)
+	atomic.AddUint32(&p.committedPoints, -committedPoints)
 
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
-	logrus.WithFields(logrus.Fields{
-		"updateOperations": int(updateOperations),
-		"commitedPoints":   int(commitedPoints),
-		"created":          int(created),
-	}).Info("[persister] doCheckpoint()")
-
-	p.Stat("updateOperations", float64(updateOperations))
-	p.Stat("commitedPoints", float64(commitedPoints))
+	send("updateOperations", float64(updateOperations))
+	send("committedPoints", float64(committedPoints))
 	if updateOperations > 0 {
-		p.Stat("pointsPerUpdate", float64(commitedPoints)/float64(updateOperations))
+		send("pointsPerUpdate", float64(committedPoints)/float64(updateOperations))
 	} else {
-		p.Stat("pointsPerUpdate", 0.0)
+		send("pointsPerUpdate", 0.0)
 	}
 
-	p.Stat("created", float64(created))
+	send("created", float64(created))
 
 }
 
-// stat timer
-func (p *Whisper) statWorker(exit chan bool) {
-	ticker := time.NewTicker(p.metricInterval)
-	defer ticker.Stop()
-
-LOOP:
-	for {
-		select {
-		case <-exit:
-			break LOOP
-		case <-ticker.C:
-			go p.doCheckpoint()
-		}
-	}
-}
-
-func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
+func ThrottleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
 	out := make(chan *points.Points, cap(in))
 
 	delimeter := ratePerSec
@@ -308,10 +273,6 @@ func (p *Whisper) Start() error {
 
 	return p.StartFunc(func() error {
 
-		p.Go(func(exitChan chan bool) {
-			p.statWorker(exitChan)
-		})
-
 		p.WithExit(func(exitChan chan bool) {
 
 			inChan := p.in
@@ -319,7 +280,7 @@ func (p *Whisper) Start() error {
 			readerExit := exitChan
 
 			if p.maxUpdatesPerSecond > 0 {
-				inChan = throttleChan(inChan, p.maxUpdatesPerSecond, exitChan)
+				inChan = ThrottleChan(inChan, p.maxUpdatesPerSecond, exitChan)
 				readerExit = nil // read all before channel is closed
 			}
 

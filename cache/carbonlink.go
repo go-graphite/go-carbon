@@ -49,6 +49,10 @@ func ReadCarbonlinkRequest(reader io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("Can't read message length: %s", err.Error())
 	}
 
+	if msgLen > 1024 {
+		return nil, fmt.Errorf("Too big carbonlink request")
+	}
+
 	data := make([]byte, msgLen)
 
 	if err := binary.Read(reader, binary.BigEndian, data); err != nil {
@@ -124,7 +128,7 @@ func (listener *CarbonlinkListener) packReply(query *Query) []byte {
 	return resultBuf.Bytes()
 }
 
-func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
+func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 
@@ -133,6 +137,7 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 
 		reqData, err := ReadCarbonlinkRequest(reader)
 		if err != nil {
+			conn.(*net.TCPConn).SetLinger(0)
 			logrus.Debugf("[carbonlink] read carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
@@ -140,6 +145,7 @@ func (listener *CarbonlinkListener) handleConnection(conn net.Conn) {
 		req, err := ParseCarbonlinkRequest(reqData)
 
 		if err != nil {
+			conn.(*net.TCPConn).SetLinger(0)
 			logrus.Warningf("[carbonlink] parse carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
@@ -214,7 +220,7 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 					continue
 				}
 
-				go listener.handleConnection(conn)
+				go listener.HandleConnection(conn)
 			}
 		})
 

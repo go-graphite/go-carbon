@@ -16,13 +16,13 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/carbon"
 	"github.com/lomik/go-carbon/logging"
-	"github.com/lomik/go-daemon"
+	"github.com/sevlyar/go-daemon"
 )
 
 import _ "net/http/pprof"
 
 // Version of go-carbon
-const Version = "0.7.2"
+const Version = "0.8.0"
 
 func httpServe(addr string) (func(), error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)

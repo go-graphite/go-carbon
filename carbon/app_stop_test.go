@@ -6,7 +6,6 @@ import (
 	"runtime/pprof"
 	"testing"
 
-	"github.com/lomik/go-carbon/carbon"
 	"github.com/lomik/go-carbon/qa"
 	"github.com/stretchr/testify/assert"
 )
@@ -20,7 +19,7 @@ func TestStartStop(t *testing.T) {
 		qa.Root(t, func(root string) {
 			configFile := TestConfig(root)
 
-			app := carbon.New(configFile)
+			app := New(configFile)
 
 			assert.NoError(app.ParseConfig())
 			assert.NoError(app.Start())

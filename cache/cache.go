@@ -2,75 +2,91 @@ package cache
 
 import (
 	"fmt"
+	"io"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
-
-	"github.com/Sirupsen/logrus"
 )
 
-type queueItem struct {
-	metric string
-	count  int
-	ts     int64
-}
+type queue []*points.Points
 
-type queue []*queueItem
-
-type byLength []*queueItem
-type byTimestamp []*queueItem
+type byLength queue
+type byTimestamp queue
 
 func (v byLength) Len() int           { return len(v) }
 func (v byLength) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byLength) Less(i, j int) bool { return v[i].count < v[j].count }
+func (v byLength) Less(i, j int) bool { return len(v[i].Data) < len(v[j].Data) }
 
 func (v byTimestamp) Len() int           { return len(v) }
 func (v byTimestamp) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v byTimestamp) Less(i, j int) bool { return v[i].ts > v[j].ts }
+func (v byTimestamp) Less(i, j int) bool { return v[i].Data[0].Timestamp > v[j].Data[0].Timestamp }
+
+type WriteStrategy int
+
+const (
+	MaximumLength WriteStrategy = iota
+	TimestampOrder
+	Noop
+)
 
 // Cache stores and aggregate metrics in memory
 type Cache struct {
 	helper.Stoppable
-	data           map[string]*points.Points
-	size           int
-	maxSize        int
-	inputChan      chan *points.Points // from receivers
-	inputCapacity  int                 // buffer size of inputChan
-	outputChan     chan *points.Points // to persisters
-	queryChan      chan *Query         // from carbonlink
-	confirmChan    chan *points.Points // for persisted confirmation
-	metricInterval time.Duration       // checkpoint interval
-	graphPrefix    string
-	queryCnt       int
-	overflowCnt    int    // drop packages if cache full
-	writeStrategy  string // max or sorted
-	queue          queue
+	data                          map[string]*points.Points
+	size                          uint32 // local read-only copy of sizeShared for worker goroutine
+	sizeShared                    uint32 // changing via atomic
+	metricCount                   uint32 // metrics count, changing via atomic
+	maxSize                       uint32
+	inputChan                     chan *points.Points // from receivers
+	inputCapacity                 int                 // buffer size of inputChan
+	outputChan                    chan *points.Points // to persisters
+	queryChan                     chan *Query         // from carbonlink
+	confirmChan                   chan *points.Points // for persisted confirmation
+	queryCnt                      uint32
+	overflowCnt                   uint32 // drop packages if cache full
+	writeStrategy                 WriteStrategy
+	queue                         queue
+	queueBuildCnt                 uint32 // number of times writeout queue was built
+	queueBuildTime                uint32 // time spent building writeout queue in milliseconds
+	maxInputLenBeforeQueueRebuild uint32
+	maxInputLenAfterQueueRebuild  uint32
+	queueWriteoutStart            time.Time
+	queueWriteoutTime             uint32 // in milliseconds
 }
 
 // New create Cache instance and run in/out goroutine
 func New() *Cache {
 	cache := &Cache{
-		data:           make(map[string]*points.Points, 0),
-		size:           0,
-		maxSize:        1000000,
-		metricInterval: time.Minute,
-		queryChan:      make(chan *Query, 16),
-		graphPrefix:    "carbon.",
-		queryCnt:       0,
-		queue:          make(queue, 0),
-		confirmChan:    make(chan *points.Points, 2048),
-		inputCapacity:  51200,
-		writeStrategy:  "max",
+		data:               make(map[string]*points.Points, 0),
+		size:               0,
+		maxSize:            1000000,
+		queryChan:          make(chan *Query, 16),
+		queue:              make(queue, 0),
+		confirmChan:        make(chan *points.Points, 2048),
+		inputCapacity:      51200,
+		writeStrategy:      MaximumLength,
+		queueWriteoutStart: time.Time{},
 		// inputChan:   make(chan *points.Points, 51200), create in In() getter
 	}
 	return cache
 }
 
 // SetWriteStrategy ...
-func (c *Cache) SetWriteStrategy(s string) {
-	c.writeStrategy = s
+func (c *Cache) SetWriteStrategy(s string) (err error) {
+	switch s {
+	case "max":
+		c.writeStrategy = MaximumLength
+	case "sort":
+		c.writeStrategy = TimestampOrder
+	case "noop":
+		c.writeStrategy = Noop
+	default:
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
+	}
+	return nil
 }
 
 // SetInputCapacity set buffer size of input channel. Call before In() getter
@@ -78,32 +94,14 @@ func (c *Cache) SetInputCapacity(size int) {
 	c.inputCapacity = size
 }
 
-// SetMetricInterval sets doChekpoint interval
-func (c *Cache) SetMetricInterval(interval time.Duration) {
-	c.metricInterval = interval
-}
-
 func (c *Cache) getNext() *points.Points {
-	for {
-		size := len(c.queue)
-		if size == 0 {
-			break
-		}
-		cacheRecord := c.queue[size-1]
-		c.queue = c.queue[:size-1]
-
-		if values, ok := c.data[cacheRecord.metric]; ok {
-			return values
-		}
+	size := len(c.queue)
+	if size == 0 {
+		return nil
 	}
-	return nil
-}
-
-func (c *Cache) getAny() *points.Points {
-	for _, values := range c.data {
-		return values
-	}
-	return nil
+	values := c.queue[size-1]
+	c.queue = c.queue[:size-1]
+	return values
 }
 
 // Get any key/values pair from Cache
@@ -112,31 +110,35 @@ func (c *Cache) Get() *points.Points {
 		return values
 	}
 
-	c.updateQueue()
-
-	if values := c.getNext(); values != nil {
-		return values
+	if (c.queueWriteoutStart != time.Time{}) {
+		atomic.AddUint32(&c.queueWriteoutTime, uint32(time.Now().Sub(c.queueWriteoutStart).Nanoseconds()/1000000))
 	}
 
-	return c.getAny()
+	c.updateQueue()
+
+	value := c.getNext()
+
+	if value != nil {
+		c.queueWriteoutStart = time.Now()
+	} else {
+		c.queueWriteoutStart = time.Time{}
+	}
+
+	return value
 }
 
 // Remove key from cache
-func (c *Cache) Remove(key string) {
-	if value, exists := c.data[key]; exists {
-		c.size -= len(value.Data)
-		delete(c.data, key)
-	}
+func (c *Cache) Remove(key string, size int) {
+	delete(c.data, key)
+	c.size = atomic.AddUint32(&c.sizeShared, -uint32(size))
+	atomic.AddUint32(&c.metricCount, ^uint32(0))
 }
 
 // Pop return and remove next for save point from cache
 func (c *Cache) Pop() *points.Points {
-	if c.size == 0 {
-		return nil
-	}
 	v := c.Get()
 	if v != nil {
-		c.Remove(v.Metric)
+		c.Remove(v.Metric, len(v.Data))
 	}
 	return v
 }
@@ -146,82 +148,75 @@ func (c *Cache) Add(p *points.Points) {
 	if values, exists := c.data[p.Metric]; exists {
 		values.Data = append(values.Data, p.Data...)
 	} else {
+		atomic.AddUint32(&c.metricCount, 1)
 		c.data[p.Metric] = p
 	}
-	c.size += len(p.Data)
-}
-
-// SetGraphPrefix for internal cache metrics
-func (c *Cache) SetGraphPrefix(prefix string) {
-	c.graphPrefix = prefix
+	c.size = atomic.AddUint32(&c.sizeShared, uint32(len(p.Data)))
 }
 
 // SetMaxSize of cache
-func (c *Cache) SetMaxSize(maxSize int) {
+func (c *Cache) SetMaxSize(maxSize uint32) {
 	c.maxSize = maxSize
 }
 
 // Size returns size
-func (c *Cache) Size() int {
-	return c.size
-}
-
- 
-// stat send internal statistics of cache
-func (c *Cache) stat(metric string, value float64) {
-	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
-	c.Add(points.OnePoint(key, value, time.Now().Unix()))
-	c.queue = append(c.queue, &queueItem{key, 1, 0})
+func (c *Cache) Size() uint32 {
+	return atomic.LoadUint32(&c.sizeShared)
 }
 
 func (c *Cache) updateQueue() {
-	newQueue := make(queue, 0)
-
-	for key, values := range c.data {
-		newQueue = append(newQueue,	&queueItem{key, len(values.Data), values.Data[0].Timestamp})
+	if c.size == 0 {
+		return
 	}
 
-	if c.writeStrategy == "max" {
+	start := time.Now()
+	inputLenBeforeQueueRebuild := len(c.inputChan)
+
+	newQueue := c.queue[:0]
+
+	for _, values := range c.data {
+		newQueue = append(newQueue, values)
+	}
+
+	switch c.writeStrategy {
+	case MaximumLength:
 		sort.Sort(byLength(newQueue))
-	} else {
+	case TimestampOrder:
 		sort.Sort(byTimestamp(newQueue))
+	case Noop:
 	}
 	c.queue = newQueue
+
+	atomic.AddUint32(&c.queueBuildTime, uint32(time.Now().Sub(start).Nanoseconds()/10000000))
+	atomic.AddUint32(&c.queueBuildCnt, 1)
+
+	inputLenAfterQueueRebuild := len(c.inputChan)
+
+	if uint32(inputLenAfterQueueRebuild) > atomic.LoadUint32(&c.maxInputLenAfterQueueRebuild) {
+		atomic.StoreUint32(&c.maxInputLenAfterQueueRebuild, uint32(inputLenAfterQueueRebuild))
+		atomic.StoreUint32(&c.maxInputLenBeforeQueueRebuild, uint32(inputLenBeforeQueueRebuild))
+	}
 }
 
-// doCheckpoint reorder save queue, add carbon metrics to queue
-func (c *Cache) doCheckpoint() {
-	start := time.Now()
+// Collect cache metrics
+func (c *Cache) Stat(send helper.StatCb) {
+	send("size", float64(c.Size()))
+	send("metrics", float64(atomic.LoadUint32(&c.metricCount)))
 
-	inputLenBeforeCheckpoint := len(c.inputChan)
+	helper.SendAndSubstractUint32("queries", &c.queryCnt, send)
+	helper.SendAndSubstractUint32("overflow", &c.overflowCnt, send)
+	helper.SendAndSubstractUint32("queueBuildCount", &c.queueBuildCnt, send)
 
-	c.updateQueue()
+	queueBuildTime := atomic.LoadUint32(&c.queueBuildTime)
+	atomic.AddUint32(&c.queueBuildTime, -queueBuildTime)
+	send("queueBuildTime", float64(queueBuildTime)/1000.0)
 
-	inputLenAfterCheckpoint := len(c.inputChan)
+	queueWriteoutTime := atomic.LoadUint32(&c.queueWriteoutTime)
+	atomic.AddUint32(&c.queueWriteoutTime, -queueWriteoutTime)
+	send("queueWriteoutTime", float64(queueWriteoutTime)/1000.0)
 
-	worktime := time.Now().Sub(start)
-
-	c.stat("size", float64(c.size))
-	c.stat("metrics", float64(len(c.data)))
-	c.stat("queries", float64(c.queryCnt))
-	c.stat("overflow", float64(c.overflowCnt))
-	c.stat("checkpointTime", worktime.Seconds())
-	c.stat("inputLenBeforeCheckpoint", float64(inputLenBeforeCheckpoint))
-	c.stat("inputLenAfterCheckpoint", float64(inputLenAfterCheckpoint))
-
-	logrus.WithFields(logrus.Fields{
-		"time":                     worktime.String(),
-		"size":                     c.size,
-		"metrics":                  len(c.data),
-		"queries":                  c.queryCnt,
-		"overflow":                 c.overflowCnt,
-		"inputLenBeforeCheckpoint": inputLenBeforeCheckpoint,
-		"inputLenAfterCheckpoint":  inputLenAfterCheckpoint,
-		"inputCapacity":            cap(c.inputChan),
-	}).Info("[cache] doCheckpoint()")
-
-	c.queryCnt = 0
-	c.overflowCnt = 0
+	helper.SendAndZeroIfNotUpdatedUint32("maxInputLenBeforeQueueRebuild", &c.maxInputLenBeforeQueueRebuild, send)
+	helper.SendAndZeroIfNotUpdatedUint32("maxInputLenAfterQueueRebuild", &c.maxInputLenAfterQueueRebuild, send)
 }
 
 func (c *Cache) worker(exitChan chan bool) {
@@ -232,14 +227,11 @@ func (c *Cache) worker(exitChan chan bool) {
 	toConfirmTracker := make(chan *points.Points)
 
 	confirmTracker := &notConfirmed{
-		data:           make(map[string][]*points.Points),
-		queryChan:      make(chan *Query, 16),
-		metricInterval: c.metricInterval,
-		graphPrefix:    c.graphPrefix,
-		in:             toConfirmTracker,
-		out:            c.outputChan,
-		confirmed:      c.confirmChan,
-		cacheIn:        c.inputChan,
+		data:      make(map[string][]*points.Points),
+		queryChan: make(chan *Query, 16),
+		in:        toConfirmTracker,
+		out:       c.outputChan,
+		confirmed: c.confirmChan,
 	}
 
 	c.Go(func(exit chan bool) {
@@ -247,9 +239,6 @@ func (c *Cache) worker(exitChan chan bool) {
 	})
 
 	forceReceiveThreshold := cap(c.inputChan) / 10
-
-	ticker := time.NewTicker(c.metricInterval)
-	defer ticker.Stop()
 
 MAIN_LOOP:
 	for {
@@ -271,10 +260,8 @@ MAIN_LOOP:
 		}
 
 		select {
-		case <-ticker.C: // checkpoint
-			c.doCheckpoint()
 		case query := <-c.queryChan: // carbonlink
-			c.queryCnt++
+			atomic.AddUint32(&c.queryCnt, 1)
 
 			if values != nil && values.Metric == query.Metric {
 				query.CacheData = values
@@ -289,7 +276,7 @@ MAIN_LOOP:
 			if c.maxSize == 0 || c.size < c.maxSize {
 				c.Add(msg)
 			} else {
-				c.overflowCnt++
+				atomic.AddUint32(&c.overflowCnt, 1)
 			}
 		case <-exitChan: // exit
 			break MAIN_LOOP
@@ -345,4 +332,19 @@ func (c *Cache) Start() error {
 
 		return nil
 	})
+}
+
+// Dump all cache to writer
+func (c *Cache) Dump(w io.Writer) error {
+
+	for _, p := range c.data { // every metric
+		for _, d := range p.Data { // every metric point
+			_, err := w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

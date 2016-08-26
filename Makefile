@@ -29,7 +29,8 @@ submodules:
 	git submodule update --recursive
 
 test:
-	$(GO) test ./...
+	$(GO) test -race ./...
+	$(GO) vet ./...
 
 clean:
 	rm -f go-carbon
