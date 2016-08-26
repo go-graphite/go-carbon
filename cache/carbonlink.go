@@ -1,11 +1,9 @@
 package cache
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math"
 	"net"
 	"strings"
@@ -14,6 +12,7 @@ import (
 	"github.com/Sirupsen/logrus"
 
 	"github.com/lomik/go-carbon/helper"
+	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -138,27 +137,6 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 	return req, nil
 }
 
-// ReadCarbonlinkRequest from socket/buffer
-func ReadCarbonlinkRequest(reader io.Reader) ([]byte, error) {
-	var msgLen uint32
-
-	if err := binary.Read(reader, binary.BigEndian, &msgLen); err != nil {
-		return nil, fmt.Errorf("Can't read message length: %s", err.Error())
-	}
-
-	if msgLen > 1024 {
-		return nil, fmt.Errorf("Too big carbonlink request")
-	}
-
-	data := make([]byte, msgLen)
-
-	if err := binary.Read(reader, binary.BigEndian, data); err != nil {
-		return nil, fmt.Errorf("Can't read message body: %s", err.Error())
-	}
-
-	return data, nil
-}
-
 // CarbonlinkListener receive cache Carbonlinkrequests from graphite-web
 type CarbonlinkListener struct {
 	helper.Stoppable
@@ -227,7 +205,7 @@ func packReply(query *Query) []byte {
 		}
 	}
 
-	buf := bytes.NewBuffer([]byte("\x00\x00\x00\x00\x80\x02}U\ndatapoints]"))
+	buf := bytes.NewBuffer([]byte("\x80\x02}U\ndatapoints]"))
 
 	if numPoints > 1 {
 		buf.WriteByte('(')
@@ -255,22 +233,18 @@ func packReply(query *Query) []byte {
 		buf.Write([]byte{'e', 's', '.'})
 	}
 
-	result := buf.Bytes()
-	binary.BigEndian.PutUint32(result[:4], uint32(buf.Len()-4))
-
-	return result
+	return buf.Bytes()
 }
 
-func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
+func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 	defer conn.Close()
-	reader := bufio.NewReader(conn)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(listener.readTimeout))
+		reqData, err := conn.ReadFrame()
 
-		reqData, err := ReadCarbonlinkRequest(reader)
 		if err != nil {
-			conn.(*net.TCPConn).SetLinger(0)
+			conn.Conn.(*net.TCPConn).SetLinger(0)
 			logrus.Debugf("[carbonlink] read carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
@@ -278,17 +252,14 @@ func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 		req, err := ParseCarbonlinkRequest(reqData)
 
 		if err != nil {
-			conn.(*net.TCPConn).SetLinger(0)
+			conn.Conn.(*net.TCPConn).SetLinger(0)
 			logrus.Warningf("[carbonlink] parse carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
 			break
 		}
 		if req != nil {
 			if req.Type != "cache-query" {
 				logrus.Warningf("[carbonlink] unknown query type: %#v", req.Type)
-				buf := bytes.NewBuffer([]byte(fmt.Sprintf("\x00\x00\x00\x00\x80\x02}q\x00U\x05errorq\x01U\x1aInvalid request type %qq\x02s.", req.Type)))
-				result := buf.Bytes()
-				binary.BigEndian.PutUint32(result[:4], uint32(buf.Len()-4))
-				conn.Write(result)
+				conn.Write([]byte(fmt.Sprintf("\x80\x02}q\x00U\x05errorq\x01U\x1aInvalid request type %qq\x02s.", req.Type)))
 				break
 			}
 
@@ -312,7 +283,6 @@ func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 					logrus.Infof("[carbonlink] reply error: %s", err)
 					break
 				}
-				// pp.Println(reply)
 			}
 		}
 	}
@@ -347,7 +317,6 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 			defer tcpListener.Close()
 
 			for {
-
 				conn, err := tcpListener.Accept()
 				if err != nil {
 					if strings.Contains(err.Error(), "use of closed network connection") {
@@ -356,8 +325,9 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 					logrus.Warningf("[carbonlink] Failed to accept connection: %s", err)
 					continue
 				}
-
-				go listener.HandleConnection(conn)
+				framed_conn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
+				framed_conn.MaxFrameSize = 1048576 // 1MB max frame size for read and write
+				go listener.HandleConnection(*framed_conn)
 			}
 		})
 
