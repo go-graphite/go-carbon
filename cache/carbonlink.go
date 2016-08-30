@@ -6,14 +6,15 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/hydrogen18/stalecucumber"
 
 	"github.com/lomik/go-carbon/helper"
+	"github.com/lomik/go-carbon/points"
 )
 
 // CarbonlinkRequest ...
@@ -29,13 +30,109 @@ func NewCarbonlinkRequest() *CarbonlinkRequest {
 	return &CarbonlinkRequest{}
 }
 
+func pickleMaybeMemo(b *[]byte) bool { //"consumes" memo tokens
+	if len(*b) > 1 && (*b)[0] == 'q' {
+		*b = (*b)[2:]
+	}
+	return true
+}
+
+func pickleGetStr(buf *[]byte) (string, bool) {
+	if len(*buf) == 0 {
+		return "", false
+	}
+	b := *buf
+
+	if b[0] == 'U' { // short string
+		if len(b) >= 2 {
+			sLen := int(uint8(b[1]))
+			if len(b) >= 2+sLen {
+				*buf = b[2+sLen:]
+				return string(b[2 : 2+sLen]), true
+			}
+		}
+	} else if b[0] == 'T' { //long string
+		if len(b) >= 5 {
+			sLen := int(binary.LittleEndian.Uint32(b[1:]))
+			if len(b) >= 5+sLen {
+				*buf = b[5+sLen:]
+				return string(b[5 : 5+sLen]), true
+			}
+		}
+	}
+	return "", false
+}
+
+func expectBytes(b *[]byte, v []byte) bool {
+	if bytes.Index(*b, v) == 0 {
+		*b = (*b)[len(v):]
+		return true
+	} else {
+		return false
+	}
+}
+
+var badErr error = fmt.Errorf("Bad pickle message")
+
 // ParseCarbonlinkRequest from pickle encoded data
-func ParseCarbonlinkRequest(data []byte) (*CarbonlinkRequest, error) {
-	reader := bytes.NewReader(data)
+func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
+
+	if !(expectBytes(&d, []byte("\x80\x02}")) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("("))) {
+		return nil, badErr
+	}
+
 	req := NewCarbonlinkRequest()
 
-	if err := stalecucumber.UnpackInto(req).From(stalecucumber.Unpickle(reader)); err != nil {
-		return nil, err
+	var Metric, Type string
+	var ok bool
+
+	if expectBytes(&d, []byte("U\x06metric")) {
+		if !pickleMaybeMemo(&d) {
+			return nil, badErr
+		}
+		if Metric, ok = pickleGetStr(&d); !ok {
+			return nil, badErr
+		}
+
+		if !(pickleMaybeMemo(&d) && expectBytes(&d, []byte("U\x04type")) && pickleMaybeMemo(&d)) {
+			return nil, badErr
+		}
+
+		if Type, ok = pickleGetStr(&d); !ok {
+			return nil, badErr
+		}
+
+		if !pickleMaybeMemo(&d) {
+			return nil, badErr
+		}
+
+		req.Metric = Metric
+		req.Type = Type
+	} else if expectBytes(&d, []byte("U\x04type")) {
+		if !pickleMaybeMemo(&d) {
+			return nil, badErr
+		}
+
+		if Type, ok = pickleGetStr(&d); !ok {
+			return nil, badErr
+		}
+
+		if !(pickleMaybeMemo(&d) && expectBytes(&d, []byte("U\x06metric")) && pickleMaybeMemo(&d)) {
+			return nil, badErr
+		}
+
+		if Metric, ok = pickleGetStr(&d); !ok {
+			return nil, badErr
+		}
+
+		if !pickleMaybeMemo(&d) {
+			return nil, badErr
+		}
+
+		req.Metric = Metric
+		req.Type = Type
+	} else {
+		return nil, badErr
 	}
 
 	return req, nil
@@ -90,42 +187,78 @@ func (listener *CarbonlinkListener) SetQueryTimeout(timeout time.Duration) {
 	listener.queryTimeout = timeout
 }
 
-func (listener *CarbonlinkListener) packReply(query *Query) []byte {
-	buf := new(bytes.Buffer)
+func pickleWriteMemo(b *bytes.Buffer, memo *uint32) {
+	if *memo < 256 {
+		b.WriteByte('q')
+		b.WriteByte(uint8(*memo))
+	} else {
+		b.WriteByte('r')
+		var buf [4]byte
+		s := buf[:]
+		binary.LittleEndian.PutUint32(s, *memo)
+		b.Write(s)
+	}
+	*memo += 1
+}
 
-	var datapoints []interface{}
+func picklePoint(b *bytes.Buffer, p points.Point) {
+	var buf [8]byte
+	s := buf[:]
+
+	b.WriteByte('J')
+	binary.LittleEndian.PutUint32(s, uint32(p.Timestamp))
+	b.Write(s[:4])
+
+	b.WriteByte('G')
+	binary.BigEndian.PutUint64(s, uint64(math.Float64bits(p.Value)))
+	b.Write(s)
+
+	b.WriteByte('\x86') // assemble 2 element tuple
+}
+
+func packReply(query *Query) []byte {
+
+	numPoints := 0
+
+	if query != nil {
+		numPoints += len(query.InFlightData)
+		if query.CacheData != nil {
+			numPoints += len(query.CacheData.Data)
+		}
+	}
+
+	buf := bytes.NewBuffer([]byte("\x00\x00\x00\x00\x80\x02}U\ndatapoints]"))
+
+	if numPoints > 1 {
+		buf.WriteByte('(')
+	}
 
 	if query != nil && query.InFlightData != nil {
 		for _, points := range query.InFlightData {
 			for _, item := range points.Data {
-				datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+				picklePoint(buf, item)
 			}
 		}
 	}
 
 	if query != nil && query.CacheData != nil {
 		for _, item := range query.CacheData.Data {
-			datapoints = append(datapoints, stalecucumber.NewTuple(item.Timestamp, item.Value))
+			picklePoint(buf, item)
 		}
 	}
 
-	r := make(map[string][]interface{})
-	r["datapoints"] = datapoints
-
-	_, err := stalecucumber.NewPickler(buf).Pickle(r)
-
-	if err != nil { // unknown wtf error
-		return nil
+	if numPoints == 0 {
+		buf.Write([]byte{'s', '.'})
+	} else if numPoints == 1 {
+		buf.Write([]byte{'a', 's', '.'})
+	} else if numPoints > 1 {
+		buf.Write([]byte{'e', 's', '.'})
 	}
 
-	resultBuf := new(bytes.Buffer)
-	if err := binary.Write(resultBuf, binary.BigEndian, int32(buf.Len())); err != nil {
-		return nil
-	}
+	result := buf.Bytes()
+	binary.BigEndian.PutUint32(result[:4], uint32(buf.Len()-4))
 
-	resultBuf.Write(buf.Bytes())
-
-	return resultBuf.Bytes()
+	return result
 }
 
 func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
@@ -167,7 +300,7 @@ func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 					query = nil // empty reply
 				}
 
-				packed := listener.packReply(query)
+				packed := packReply(query)
 				if packed == nil {
 					break
 				}

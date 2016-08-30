@@ -13,7 +13,7 @@ import (
 )
 
 const sampleCacheQuery = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.cache.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
-const sampleCacheQuery2 = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.param.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
+const sampleCacheQuery2 = "\x00\x00\x00Y\x80\x02}q\x01(U\x04typeq\x04U\x0bcache-queryq\x05U\x06metricq\x02U,carbon.agents.carbon_agent_server.param.sizeq\x03u."
 
 func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
@@ -80,8 +80,8 @@ func TestCarbonlink(t *testing.T) {
 	err = binary.Read(conn, binary.BigEndian, data)
 	assert.NoError(err)
 
-	// {u'datapoints': [(1422797285, 42.17)]}
-	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86eu.", string(data))
+	// {'datapoints': [(1422797285, 42.17)]}
+	assert.Equal([]byte("\x80\x02}U\ndatapoints]J\xe5)\xceTG@E\x15\xc2\x8f\\(\xf6\x86as."), data)
 	cleanup()
 
 	/* MESSAGE 2 */
@@ -97,8 +97,8 @@ func TestCarbonlink(t *testing.T) {
 	err = binary.Read(conn, binary.BigEndian, data)
 	assert.NoError(err)
 
-	// {u'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
-	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86eu.",
+	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
 		string(data))
 	cleanup()
 
@@ -124,7 +124,7 @@ func TestCarbonlink(t *testing.T) {
 	err = binary.Read(conn, binary.BigEndian, data)
 	assert.NoError(err)
 
-	assert.Equal("\x80\x02}(X\n\x00\x00\x00datapoints](eu.", string(data))
+	assert.Equal("\x80\x02}U\ndatapoints]s.", string(data))
 	cleanup()
 
 	/* WRONG MESSAGE TEST */
@@ -278,8 +278,14 @@ func TestParseCarbonlinkRequest(t *testing.T) {
 				Type:   "cache-query",
 				Metric: "carbon.agents.carbon_agent_server.cache.size"},
 		},
+		{name: "Good query2",
+			data: []byte(sampleCacheQuery2)[4:],
+			want: &CarbonlinkRequest{
+				Type:   "cache-query",
+				Metric: "carbon.agents.carbon_agent_server.param.size"},
+		},
 		{name: "Invalid query type",
-			data: []byte("\x80\x02}q\x00(U\x06Metricq\x01U\x03barq\x02U\x04Typeq\x03U\x03fooq\x04u."),
+			data: []byte("\x80\x02}q\x00(U\x06metricq\x01U\x03barq\x02U\x04typeq\x03U\x03fooq\x04u."),
 			want: &CarbonlinkRequest{
 				Type:   "foo",
 				Metric: "bar",
@@ -300,4 +306,24 @@ func TestParseCarbonlinkRequest(t *testing.T) {
 			t.Errorf("%q. ParseCarbonlinkRequest() = %v, want %v", tt.name, got, tt.want)
 		}
 	}
+}
+
+func BenchmarkCarbonLinkPickleParse(b *testing.B) {
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			ParseCarbonlinkRequest([]byte(sampleCacheQuery))
+		}
+	})
+}
+
+func BenchmarkCarbonLinkPackReply(b *testing.B) {
+	p := points.OnePoint("carbon.agents.carbon_agent_server.param.size", 15, 1422795966).Add(15, 9000000).Add(16, 9000000)
+
+	q := Query{CacheData: p}
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			packReply(&q)
+		}
+	})
 }
