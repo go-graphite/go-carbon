@@ -155,8 +155,14 @@ func (m *metricSpec) Len() (c int) {
 	return
 }
 
+var gMetrics []string
+
 func genMetrics(spec metricSpec) []string {
-	metrics := make([]string, 0)
+	if gMetrics != nil {
+		return gMetrics
+	}
+
+	gMetrics = make([]string, spec.Count())
 	now := time.Now().Second()
 
 	id := 0
@@ -164,12 +170,13 @@ func genMetrics(spec metricSpec) []string {
 		for i := 0; i < metricCount; i++ {
 			for j := 0; j < numDataPoints; j++ {
 				m := fmt.Sprintf("this.is.a.test.metric.%d.%d.count %d %d\n", id, i, j, now)
-				metrics = append(metrics, m)
+				gMetrics = append(gMetrics, m)
 			}
 		}
 		id++
 	}
-	return metrics
+
+	return gMetrics
 }
 
 func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) {
