@@ -155,8 +155,14 @@ func (m *metricSpec) Len() (c int) {
 	return
 }
 
+var gMetrics []string
+
 func genMetrics(spec metricSpec) []string {
-	metrics := make([]string, 0)
+	if gMetrics != nil {
+		return gMetrics
+	}
+
+	gMetrics = make([]string, spec.Count())
 	now := time.Now().Second()
 
 	id := 0
@@ -164,20 +170,24 @@ func genMetrics(spec metricSpec) []string {
 		for i := 0; i < metricCount; i++ {
 			for j := 0; j < numDataPoints; j++ {
 				m := fmt.Sprintf("this.is.a.test.metric.%d.%d.count %d %d\n", id, i, j, now)
-				metrics = append(metrics, m)
+				gMetrics = append(gMetrics, m)
 			}
 		}
 		id++
 	}
-	return metrics
+
+	return gMetrics
 }
 
-func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) {
+var clReqs map[int]string
+var clReqsLock sync.Mutex
+
+func genCLReqs(workerId int, metrics []string, numCLClients int) string {
 	priv := make([]string, len(metrics))
 	copy(priv, metrics) // make a private copy
 
 	// shuffle metrics
-	rnd := rand.New(rand.NewSource(int64(i + 69))) //different shuffle from in persisters, but still reproducible
+	rnd := rand.New(rand.NewSource(int64(workerId + 69))) //different shuffle from in persisters, but still reproducible
 	for i := range priv {
 		j := rnd.Intn(i + 1)
 		priv[i], priv[j] = priv[j], priv[i]
@@ -212,12 +222,25 @@ func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numC
 		priv[idx] = strings.Join(msgParts, "")
 	}
 
-	s := strings.Join(priv, "")
-	priv = nil // free memory
+	return strings.Join(priv, "")
+}
+
+func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) {
+	clReqsLock.Lock()
+	if _, ok := clReqs[i]; !ok {
+		clReqsLock.Unlock()
+		s := genCLReqs(i, metrics, numCLClients)
+		clReqsLock.Lock()
+		if clReqs == nil {
+			clReqs = make(map[int]string)
+		}
+		clReqs[i] = s
+	}
+	clReqsLock.Unlock()
 
 	wgInitDone.Done() // notify that we are ready to start loop
 	wgBenchStart.Wait()
-	l.HandleConnection(NewMockStringConn(s, 9999999))
+	l.HandleConnection(NewMockStringConn(clReqs[i], 9999999))
 }
 
 func startCarbonLink(b *testing.B, c *cache.Cache, metrics []string, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) *cache.CarbonlinkListener {
