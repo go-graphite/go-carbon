@@ -190,7 +190,7 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 					logrus.Info(err)
 				} else {
 					atomic.AddUint32(&rcv.metricsReceived, 1)
-					rcv.cache.Add(msg)
+					rcv.cache.AddSinglePoint(msg)
 				}
 			}
 		}

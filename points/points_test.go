@@ -16,13 +16,13 @@ func TestParseText(t *testing.T) {
 			t.Fatalf("Bad message parsed without error: %#v", line)
 			return
 		}
-		if m != nil {
+		if (m != SinglePoint{}) {
 			t.Fatalf("Wrong message %#v != nil", m)
 			return
 		}
 	}
 
-	assertOk := func(line string, points *Points) {
+	assertOk := func(line string, expected SinglePoint) {
 		p, err := ParseText(line)
 
 		if err != nil {
@@ -30,8 +30,8 @@ func TestParseText(t *testing.T) {
 			return
 		}
 
-		if !points.Eq(p) {
-			t.Fatalf("%#v != %#v", p, points)
+		if expected != p {
+			t.Fatalf("%#v != %#v", expected, p)
 			return
 		}
 	}
@@ -55,10 +55,10 @@ func TestParseText(t *testing.T) {
 	assertError("metric.name 42 NaN\n")
 
 	assertOk("metric.name -42.76 1422642189\n",
-		OnePoint("metric.name", -42.76, 1422642189))
+		SinglePoint{"metric.name", Point{-42.76, 1422642189}})
 
 	assertOk("metric.name 42.15 1422642189\n",
-		OnePoint("metric.name", 42.15, 1422642189))
+		SinglePoint{"metric.name", Point{42.15, 1422642189}})
 
 }
 

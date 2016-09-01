@@ -62,6 +62,18 @@ func (m *ConcurrentMap) Upsert(key string, value *points.Points, cb UpsertCb) (r
 	return res
 }
 
+type UpsertSingleCb func(exist bool, valueInMap *points.Points, newValue points.SinglePoint) *points.Points
+
+func (m *ConcurrentMap) UpsertSingle(key string, value points.SinglePoint, cb UpsertSingleCb) (res *points.Points) {
+	shard := m.GetShard(key)
+	shard.Lock()
+	v, ok := shard.items[key]
+	res = cb(ok, v, value)
+	shard.items[key] = res
+	shard.Unlock()
+	return res
+}
+
 // Retrieves an element from map under given key.
 func (m *ConcurrentMap) Get(key string) (*points.Points, bool) {
 	// Get shard

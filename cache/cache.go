@@ -150,6 +150,29 @@ func (c *Cache) Add(p *points.Points) {
 	atomic.AddInt32(&c.sizeShared, int32(len(p.Data)))
 }
 
+func upsertSingleCb(exists bool, valueInMap *points.Points, p points.SinglePoint) *points.Points {
+	if !exists {
+		return points.OnePoint(p.Metric, p.Point.Value, p.Point.Timestamp)
+	}
+	valueInMap.Data = append(valueInMap.Data, p.Point)
+	return valueInMap
+}
+
+// Add single point to cache
+func (c *Cache) AddSinglePoint(p points.SinglePoint) {
+	if c.xlog != nil {
+		p.WriteTo(c.xlog)
+	}
+	if c.maxSize > 0 && c.Size() > c.maxSize {
+		c.overflowCnt++
+		atomic.AddUint32(&c.overflowCnt, 1)
+		return
+	}
+
+	c.data.UpsertSingle(p.Metric, p, upsertSingleCb)
+	atomic.AddInt32(&c.sizeShared, 1)
+}
+
 func (c *Cache) GetMetric(key string) (*points.Points, bool) {
 	return c.data.Get(key)
 }

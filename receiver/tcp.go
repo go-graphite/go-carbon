@@ -85,7 +85,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 				logrus.Info(err)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.cache.Add(msg)
+				rcv.cache.AddSinglePoint(msg)
 			}
 		}
 	}

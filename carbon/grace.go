@@ -222,7 +222,7 @@ func RestoreFromFile(filename string, cache *cache.Cache, lim *helper.Ratelimite
 			} else {
 				pointsCount++
 				lim.TickSleep(rps)
-				cache.Add(p)
+				cache.AddSinglePoint(p)
 			}
 		}
 	}
