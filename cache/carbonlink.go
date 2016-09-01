@@ -51,7 +51,7 @@ func pickleGetStr(buf *[]byte) (string, bool) {
 				return string(b[2 : 2+sLen]), true
 			}
 		}
-	} else if b[0] == 'T' { //long string
+	} else if b[0] == 'T' || b[0] == 'X' { //long string or utf8 string
 		if len(b) >= 5 {
 			sLen := int(binary.LittleEndian.Uint32(b[1:]))
 			if len(b) >= 5+sLen {

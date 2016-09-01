@@ -14,6 +14,7 @@ import (
 
 const sampleCacheQuery = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.cache.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
 const sampleCacheQuery2 = "\x00\x00\x00Y\x80\x02}q\x01(U\x04typeq\x04U\x0bcache-queryq\x05U\x06metricq\x02U,carbon.agents.carbon_agent_server.param.sizeq\x03u."
+const sampleCacheQuery3 = "\x00\x00\x00R\x80\x02}(U\x06metricX,\x00\x00\x00carbon.agents.carbon_agent_server.param.sizeU\x04typeU\x0bcache-queryu." // unicode metric
 
 func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
@@ -87,6 +88,24 @@ func TestCarbonlink(t *testing.T) {
 	/* MESSAGE 2 */
 	conn, cleanup = NewClient()
 	_, err = conn.Write([]byte(sampleCacheQuery2))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
+		string(data))
+	cleanup()
+
+	/* MESSAGE 2.5 - unicode */
+	conn, cleanup = NewClient()
+	_, err = conn.Write([]byte(sampleCacheQuery3))
 	assert.NoError(err)
 
 	err = binary.Read(conn, binary.BigEndian, &replyLength)
