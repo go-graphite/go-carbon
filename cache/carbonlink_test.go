@@ -144,7 +144,13 @@ func TestCarbonlink(t *testing.T) {
 
 	err = binary.Read(conn, binary.BigEndian, &replyLength)
 
-	assert.Error(err)
+	assert.NoError(err)
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	assert.Equal("\x80\x02}q\x00U\x05errorq\x01U\x1aInvalid request type \"foo\"q\x02s.", string(data))
 	cleanup()
 }
 

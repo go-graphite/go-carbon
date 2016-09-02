@@ -285,6 +285,10 @@ func (listener *CarbonlinkListener) HandleConnection(conn net.Conn) {
 		if req != nil {
 			if req.Type != "cache-query" {
 				logrus.Warningf("[carbonlink] unknown query type: %#v", req.Type)
+				buf := bytes.NewBuffer([]byte(fmt.Sprintf("\x00\x00\x00\x00\x80\x02}q\x00U\x05errorq\x01U\x1aInvalid request type %qq\x02s.", req.Type)))
+				result := buf.Bytes()
+				binary.BigEndian.PutUint32(result[:4], uint32(buf.Len()-4))
+				conn.Write(result)
 				break
 			}
 
