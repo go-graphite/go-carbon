@@ -41,8 +41,8 @@ type Conn struct {
 // should be one of 1, 2 or 4. endianess should be one of binary.BigEndian or
 // binary.LittleEndian.
 //
-// The difference to a normal net.Conn is that Read(b []byte) prefixes each
-// packet with a size and Write(b []byte) reads that size and waits for that
+// The difference to a normal net.Conn is that Write(b []byte) prefixes each
+// packet with a size and Read(b []byte) reads that size and waits for that
 // many bytes.
 //
 // A complementary ReadFrame()
@@ -75,26 +75,15 @@ func (f *Conn) Read(b []byte) (n int, err error) {
 	total := 0
 
 	if f.bytesLeft <= 0 {
-		frame_size, err := f.readSize()
+		frameSize, err := f.readSize()
 		if err != nil {
 			return total, err
 		}
-		f.bytesLeft = frame_size
+		f.bytesLeft = frameSize
 	}
-
-	for len(b) > 0 && f.bytesLeft > 0 {
-		size := min(f.bytesLeft, len(b))
-
-		n, err := f.Conn.Read(b[:size])
-		if err != nil {
-			return total, err
-		}
-		total += n
-		b = b[size:]
-		f.bytesLeft -= size
-	}
-
-	return total, nil
+	n, err = io.ReadFull(f.Conn, b[:min(f.bytesLeft, len(b))])
+	f.bytesLeft -= n
+	return
 }
 
 // ReadFrame returns the next full frame in the stream.
@@ -162,7 +151,6 @@ func (f *Conn) Write(b []byte) (n int, err error) {
 func min(a, b int) int {
 	if a < b {
 		return a
-	} else {
-		return b
 	}
+	return b
 }

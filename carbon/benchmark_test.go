@@ -241,8 +241,8 @@ func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numC
 
 	wgInitDone.Done() // notify that we are ready to start loop
 	wgBenchStart.Wait()
-	framed_conn, _ := framing.NewConn(NewMockStringConn(clReqs[i], 9999999).(net.Conn), byte(4), binary.BigEndian)
-	l.HandleConnection(*framed_conn)
+	framedConn, _ := framing.NewConn(NewMockStringConn(clReqs[i], 9999999).(net.Conn), byte(4), binary.BigEndian)
+	l.HandleConnection(*framedConn)
 }
 
 func startCarbonLink(b *testing.B, c *cache.Cache, metrics []string, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) *cache.CarbonlinkListener {

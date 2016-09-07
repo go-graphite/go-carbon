@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"testing"
 	"time"
 
@@ -47,10 +46,8 @@ func run(t *testing.T, size byte, endianess binary.ByteOrder) {
 	}
 	defer l.Close()
 
-	port := l.Addr().(*net.TCPAddr).Port
-
 	go func() {
-		conn, err := net.Dial("tcp", ":"+strconv.Itoa(port))
+		conn, err := net.Dial("tcp", l.Addr().String())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,7 +59,7 @@ func run(t *testing.T, size byte, endianess binary.ByteOrder) {
 		defer framed.Close()
 
 		for i := 1; i <= 2; i++ {
-			if _, err := fmt.Fprintf(framed, message); err != nil {
+			if _, err := fmt.Fprint(framed, message); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -125,13 +122,13 @@ func TestMessageSmallerThanBuffer(t *testing.T) {
 	conn := &fake{ReadWriter: bytes.NewBuffer([]byte{4, 0, 1, 2, 3})}
 	framed, _ := framing.NewConn(&fake{ReadWriter: conn}, 1, nil)
 
-	first_b := make([]byte, 6)
-	first_n, first_err := framed.Read(first_b)
-	if first_n != 4 || first_err != nil {
-		t.Fatalf("first_n = %d, first_err = %#v", first_n, first_err)
+	b1 := make([]byte, 6)
+	n1, err1 := framed.Read(b1)
+	if n1 != 4 || err1 != nil {
+		t.Fatalf("n1 = %d, err1 = %#v", n1, err1)
 	}
-	if !bytes.Equal(first_b, []byte{0, 1, 2, 3, 0, 0}) {
-		t.Fatal(first_b)
+	if !bytes.Equal(b1, []byte{0, 1, 2, 3, 0, 0}) {
+		t.Fatal(b1)
 	}
 }
 
@@ -147,37 +144,37 @@ func TestMessageBiggerThanBuffer(t *testing.T) {
 	})}
 	framed, _ := framing.NewConn(&fake{ReadWriter: conn}, 1, nil)
 
-	first_b := make([]byte, 4)
-	first_n, first_err := framed.Read(first_b)
-	if first_n != 4 || first_err != nil {
-		t.Fatal(first_n, first_err)
+	b1 := make([]byte, 4)
+	n1, err1 := framed.Read(b1)
+	if n1 != 4 || err1 != nil {
+		t.Fatal(n1, err1)
 	}
-	if !bytes.Equal(first_b, []byte{0, 1, 2, 3}) {
-		t.Fatal(first_b)
-	}
-
-	second_b := make([]byte, 3)
-	second_n, second_err := framed.Read(second_b)
-	if second_n != 2 || second_err != nil {
-		t.Fatal(second_n, second_err)
-	}
-	if !bytes.Equal(second_b, []byte{4, 5, 0}) {
-		t.Fatal(second_b)
+	if !bytes.Equal(b1, []byte{0, 1, 2, 3}) {
+		t.Fatal(b1)
 	}
 
-	third_b := make([]byte, 5)
-	third_n, third_err := framed.Read(third_b)
-	if third_n != 4 || third_err != nil {
-		t.Fatal(third_n, third_err)
+	b2 := make([]byte, 3)
+	n2, err2 := framed.Read(b2)
+	if n2 != 2 || err2 != nil {
+		t.Fatal(n2, err2)
 	}
-	if !bytes.Equal(third_b, []byte{7, 8, 9, 10, 0}) {
-		t.Fatal(third_b)
+	if !bytes.Equal(b2, []byte{4, 5, 0}) {
+		t.Fatal(b2)
 	}
 
-	fourth_b := make([]byte, 1)
-	fourth_n, fourth_err := framed.Read(fourth_b)
-	if fourth_n != 0 || fourth_err != io.EOF {
-		t.Fatal(fourth_n, fourth_err)
+	b3 := make([]byte, 5)
+	n3, err3 := framed.Read(b3)
+	if n3 != 4 || err3 != nil {
+		t.Fatal(n3, err3)
+	}
+	if !bytes.Equal(b3, []byte{7, 8, 9, 10, 0}) {
+		t.Fatal(b3)
+	}
+
+	b4 := make([]byte, 1)
+	n4, err4 := framed.Read(b4)
+	if n4 != 0 || err4 != io.EOF {
+		t.Fatal(n4, err4)
 	}
 
 }

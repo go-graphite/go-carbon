@@ -325,9 +325,9 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 					logrus.Warningf("[carbonlink] Failed to accept connection: %s", err)
 					continue
 				}
-				framed_conn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
-				framed_conn.MaxFrameSize = 1048576 // 1MB max frame size for read and write
-				go listener.HandleConnection(*framed_conn)
+				framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
+				framedConn.MaxFrameSize = 1048576 // 1MB max frame size for read and write
+				go listener.HandleConnection(*framedConn)
 			}
 		})
 

@@ -107,7 +107,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 }
 
 func (rcv *TCP) handlePickle(conn net.Conn) {
-	framed_conn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
+	framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
 	defer func() {
 		if r := recover(); r != nil {
 			logrus.Errorf("[pickle] Unknown error recovered: %s", r)
@@ -132,11 +132,11 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 		}
 	})
 
-	framed_conn.MaxFrameSize = uint(rcv.maxPickleMessageSize)
+	framedConn.MaxFrameSize = uint(rcv.maxPickleMessageSize)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
-		data, err := framed_conn.ReadFrame()
+		data, err := framedConn.ReadFrame()
 		if err == framing.ErrPrefixLength {
 			atomic.AddUint32(&rcv.errors, 1)
 			logrus.Warningf("[pickle] Bad message size")
