@@ -2,7 +2,6 @@ package persister
 
 import (
 	"fmt"
-	"os"
 	"testing"
 	"time"
 
@@ -10,14 +9,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func doTestThrottleChan(t *testing.T, perSecond int) {
+func doTestThrottleChan(perSecond int) (bw int) {
 	timestamp := time.Now().Unix()
 
 	chIn := make(chan *points.Points)
 	chOut := ThrottleChan(chIn, perSecond, nil)
 	wait := time.After(time.Second)
-
-	bw := 0
 
 LOOP:
 	for {
@@ -32,21 +29,23 @@ LOOP:
 	}
 	close(chIn)
 
-	max := float64(perSecond) * 1.05
-	min := float64(perSecond) * 0.95
-
-	assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
-	assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+	return bw
 }
 
 func TestThrottleChan(t *testing.T) {
-	perSecondTable := []int{1, 10, 100, 1000, 10000, 100000, 213000}
+	perSecondTable := []int{1, 10, 100, 1000, 10000, 100000, 200000, 400000, 800000, 1600000, 3200000}
 
-	if os.Getenv("TRAVIS") != "true" {
-		perSecondTable = append(perSecondTable, 531234)
-	}
+	bwMax := doTestThrottleChan(100000000000)
 
 	for _, perSecond := range perSecondTable {
-		doTestThrottleChan(t, perSecond)
+		if float64(perSecond) > float64(bwMax)*float64(0.9) {
+			fmt.Printf("Maximum bandwidth is %d. Skipping %d and higher.\n", bwMax, perSecond)
+			break
+		}
+		bw := doTestThrottleChan(perSecond)
+		max := float64(perSecond) * 1.05
+		min := float64(perSecond) * 0.95
+		assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+		assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
 	}
 }
