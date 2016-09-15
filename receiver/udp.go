@@ -17,7 +17,8 @@ import (
 // UDP receive metrics from UDP socket
 type UDP struct {
 	helper.Stoppable
-	out                chan *points.Points
+	out                func(*points.Points)
+	name               string
 	metricsReceived    uint32
 	incompleteReceived uint32
 	errors             uint32
@@ -25,9 +26,9 @@ type UDP struct {
 	conn               *net.UDPConn
 }
 
-// NewUDP create new instance of UDP
-func NewUDP(out chan *points.Points) *UDP {
-	return &UDP{out: out}
+// Name returns receiver name (for store internal metrics)
+func (rcv *UDP) Name() string {
+	return rcv.name
 }
 
 type incompleteRecord struct {
@@ -89,11 +90,6 @@ func (storage *incompleteStorage) checkAndClear() {
 		return
 	}
 	storage.purge()
-}
-
-// SetLogIncomplete enable or disable incomplete messages logging
-func (rcv *UDP) SetLogIncomplete(value bool) {
-	rcv.logIncomplete = value
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -193,7 +189,7 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 					logrus.Info(err)
 				} else {
 					atomic.AddUint32(&rcv.metricsReceived, 1)
-					rcv.out <- msg
+					rcv.out(msg)
 				}
 			}
 		}

@@ -25,17 +25,19 @@ func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 		t.Fatal(err)
 	}
 
-	test.rcvChan = make(chan *points.Points, 128)
+	scheme := "tcp"
 	if isPickle {
-		test.receiver = NewPickle(test.rcvChan)
-	} else {
-		test.receiver = NewTCP(test.rcvChan)
+		scheme = "pickle"
 	}
-	// defer receiver.Stop()
 
-	if err = test.receiver.Listen(addr); err != nil {
+	test.rcvChan = make(chan *points.Points, 128)
+
+	r, err := New(scheme+"://"+addr.String(), OutChan(test.rcvChan))
+	if err != nil {
 		t.Fatal(err)
 	}
+
+	test.receiver = r.(*TCP)
 
 	test.conn, err = net.Dial("tcp", test.receiver.Addr().String())
 	if err != nil {

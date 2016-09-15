@@ -19,9 +19,9 @@ type App struct {
 	ConfigFilename string
 	Config         *Config
 	Cache          *cache.Cache
-	UDP            *receiver.UDP
-	TCP            *receiver.TCP
-	Pickle         *receiver.TCP
+	UDP            receiver.Receiver
+	TCP            receiver.Receiver
+	Pickle         receiver.Receiver
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
 	Collector      *Collector
@@ -239,62 +239,42 @@ func (app *App) Start() (err error) {
 
 	/* UDP start */
 	if conf.Udp.Enabled {
-		var udpAddr *net.UDPAddr
+		app.UDP, err = receiver.New(
+			"udp://"+conf.Udp.Listen,
+			receiver.OutChan(core.In()),
+			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
+		)
 
-		udpAddr, err = net.ResolveUDPAddr("udp", conf.Udp.Listen)
 		if err != nil {
 			return
 		}
-
-		udpListener := receiver.NewUDP(core.In())
-
-		if conf.Udp.LogIncomplete {
-			udpListener.SetLogIncomplete(true)
-		}
-
-		err = udpListener.Listen(udpAddr)
-		if err != nil {
-			return
-		}
-
-		app.UDP = udpListener
 	}
 	/* UDP end */
 
 	/* TCP start */
 	if conf.Tcp.Enabled {
-		var tcpAddr *net.TCPAddr
-		tcpAddr, err = net.ResolveTCPAddr("tcp", conf.Tcp.Listen)
+		app.TCP, err = receiver.New(
+			"tcp://"+conf.Tcp.Listen,
+			receiver.OutChan(core.In()),
+		)
+
 		if err != nil {
 			return
 		}
-
-		tcpListener := receiver.NewTCP(core.In())
-		if err = tcpListener.Listen(tcpAddr); err != nil {
-			return
-		}
-
-		app.TCP = tcpListener
 	}
 	/* TCP end */
 
 	/* PICKLE start */
-
 	if conf.Pickle.Enabled {
-		var pickleAddr *net.TCPAddr
-		pickleAddr, err = net.ResolveTCPAddr("tcp", conf.Pickle.Listen)
+		app.Pickle, err = receiver.New(
+			"pickle://"+conf.Pickle.Listen,
+			receiver.OutChan(core.In()),
+			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
+		)
+
 		if err != nil {
 			return
 		}
-
-		pickleListener := receiver.NewPickle(core.In())
-		pickleListener.SetMaxPickleMessageSize(uint32(conf.Pickle.MaxMessageSize))
-
-		if err = pickleListener.Listen(pickleAddr); err != nil {
-			return
-		}
-
-		app.Pickle = pickleListener
 	}
 	/* PICKLE end */
 

@@ -266,8 +266,10 @@ func startAll(b *testing.B, numPersisters, numReceivers, numCLClients int, spec 
 
 	metrics := genMetrics(spec)
 
-	r := receiver.NewTCP(c.In())
-	r.Start() // populates r.Go callback, doesn't do much beyond that
+	rcv, _ := receiver.New("tcp://:0", receiver.OutChan(c.In()))
+	r := rcv.(*receiver.TCP)
+
+	// r.Start() // populates r.Go callback, doesn't do much beyond that
 	startReceivers(b, r, metrics, numReceivers, &wgInitDone, &wgBenchStart)
 
 	p, countsChan := startPersisters(b, c, numPersisters, exitChan)

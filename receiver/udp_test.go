@@ -28,13 +28,12 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 	}
 
 	test.rcvChan = make(chan *points.Points, 128)
-	test.receiver = NewUDP(test.rcvChan)
-	test.receiver.SetLogIncomplete(logIncomplete)
-	// defer receiver.Stop()
 
-	if err = test.receiver.Listen(addr); err != nil {
+	r, err := New("udp://"+addr.String(), UDPLogIncomplete(logIncomplete), OutChan(test.rcvChan))
+	if err != nil {
 		t.Fatal(err)
 	}
+	test.receiver = r.(*UDP)
 
 	test.conn, err = net.Dial("udp", test.receiver.Addr().String())
 	if err != nil {

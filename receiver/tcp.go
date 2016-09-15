@@ -19,7 +19,8 @@ import (
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
-	out                  chan *points.Points
+	out                  func(*points.Points)
+	name                 string // name for store metrics
 	maxPickleMessageSize uint32
 	metricsReceived      uint32
 	errors               uint32
@@ -28,26 +29,9 @@ type TCP struct {
 	isPickle             bool
 }
 
-// NewTCP create new instance of TCP
-func NewTCP(out chan *points.Points) *TCP {
-	return &TCP{
-		out:      out,
-		isPickle: false,
-	}
-}
-
-// NewPickle create new instance of TCP with pickle listener enabled
-func NewPickle(out chan *points.Points) *TCP {
-	return &TCP{
-		out:                  out,
-		isPickle:             true,
-		maxPickleMessageSize: 67108864, // 64 Mb
-	}
-}
-
-// SetMaxPickleMessageSize sets maxPickleMessageSize (in bytes)
-func (rcv *TCP) SetMaxPickleMessageSize(newSize uint32) {
-	rcv.maxPickleMessageSize = newSize
+// Name returns receiver name (for store internal metrics)
+func (rcv *TCP) Name() string {
+	return rcv.name
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -100,7 +84,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 				logrus.Info(err)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out <- msg
+				rcv.out(msg)
 			}
 		}
 	}
@@ -158,7 +142,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 		for _, msg := range msgs {
 			atomic.AddUint32(&rcv.metricsReceived, uint32(len(msg.Data)))
-			rcv.out <- msg
+			rcv.out(msg)
 		}
 	}
 }

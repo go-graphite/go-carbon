@@ -15,13 +15,11 @@ func TestStopUDP(t *testing.T) {
 	addr, err := net.ResolveUDPAddr("udp", ":0")
 	assert.NoError(err)
 
-	ch := make(chan *points.Points, 128)
-
 	for i := 0; i < 10; i++ {
-		listener := NewUDP(ch)
-		assert.NoError(listener.Listen(addr))
-		addr = listener.Addr().(*net.UDPAddr) // listen same port in next iteration
-		listener.Stop()
+		r, err := New("udp://" + addr.String())
+		assert.NoError(err)
+		addr = r.(*UDP).Addr().(*net.UDPAddr) // listen same port in next iteration
+		r.Stop()
 	}
 }
 
@@ -31,13 +29,11 @@ func TestStopTCP(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", ":0")
 	assert.NoError(err)
 
-	ch := make(chan *points.Points, 128)
-
 	for i := 0; i < 10; i++ {
-		listener := NewTCP(ch)
-		assert.NoError(listener.Listen(addr))
-		addr = listener.Addr().(*net.TCPAddr) // listen same port in next iteration
-		listener.Stop()
+		r, err := New("tcp://" + addr.String())
+		assert.NoError(err)
+		addr = r.(*TCP).Addr().(*net.TCPAddr) // listen same port in next iteration
+		r.Stop()
 	}
 }
 
@@ -47,13 +43,11 @@ func TestStopPickle(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", ":0")
 	assert.NoError(err)
 
-	ch := make(chan *points.Points, 128)
-
 	for i := 0; i < 10; i++ {
-		listener := NewPickle(ch)
-		assert.NoError(listener.Listen(addr))
-		addr = listener.Addr().(*net.TCPAddr) // listen same port in next iteration
-		listener.Stop()
+		r, err := New("pickle://" + addr.String())
+		assert.NoError(err)
+		addr = r.(*TCP).Addr().(*net.TCPAddr) // listen same port in next iteration
+		r.Stop()
 	}
 }
 
