@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/lomik/go-carbon/cache"
+	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
@@ -50,7 +51,7 @@ type MockAddr struct {
 
 func (a *MockAddr) String() string { return "mock" }
 
-func NewMockStringConn(s string, repeats int) net.Conn {
+func NewMockStringConn(s string, repeats int) io.ReadWriteCloser {
 	return &StringConn{
 		r:       strings.NewReader(s),
 		i:       0,
@@ -100,7 +101,7 @@ func receiverWorker(i int, metrics []string, r *receiver.TCP, numConnections int
 
 	wgInitDone.Done() // notify that we are ready to start loop
 	wgBenchStart.Wait()
-	r.HandleConnection(NewMockStringConn(s, iterCount))
+	r.HandleConnection(NewMockStringConn(s, iterCount).(net.Conn))
 }
 
 func startReceivers(b *testing.B, r *receiver.TCP, metrics []string, numConnections int, wgInitDone, wgBenchStart *sync.WaitGroup) {
@@ -240,7 +241,8 @@ func carbonLinkWorker(i int, metrics []string, l *cache.CarbonlinkListener, numC
 
 	wgInitDone.Done() // notify that we are ready to start loop
 	wgBenchStart.Wait()
-	l.HandleConnection(NewMockStringConn(clReqs[i], 9999999))
+	framedConn, _ := framing.NewConn(NewMockStringConn(clReqs[i], 9999999).(net.Conn), byte(4), binary.BigEndian)
+	l.HandleConnection(*framedConn)
 }
 
 func startCarbonLink(b *testing.B, c *cache.Cache, metrics []string, numCLClients int, wgInitDone, wgBenchStart *sync.WaitGroup) *cache.CarbonlinkListener {

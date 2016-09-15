@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lomik/go-carbon/helper"
+	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
 
 	"github.com/Sirupsen/logrus"
@@ -106,6 +107,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 }
 
 func (rcv *TCP) handlePickle(conn net.Conn) {
+	framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
 	defer func() {
 		if r := recover(); r != nil {
 			logrus.Errorf("[pickle] Unknown error recovered: %s", r)
@@ -116,10 +118,6 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	defer atomic.AddInt32(&rcv.active, -1)
 
 	defer conn.Close()
-	reader := bufio.NewReader(conn)
-
-	var msgLen uint32
-	var err error
 
 	finished := make(chan bool)
 	defer close(finished)
@@ -134,34 +132,16 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 		}
 	})
 
-	maxMessageSize := rcv.maxPickleMessageSize
+	framedConn.MaxFrameSize = uint(rcv.maxPickleMessageSize)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
-
-		// Read prepended length
-		err = binary.Read(reader, binary.BigEndian, &msgLen)
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-
+		data, err := framedConn.ReadFrame()
+		if err == framing.ErrPrefixLength {
 			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Warningf("[pickle] Can't read message length: %s", err.Error())
+			logrus.Warningf("[pickle] Bad message size")
 			return
-		}
-
-		if msgLen > maxMessageSize {
-			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Warningf("[pickle] Bad message size: %d", msgLen)
-			return
-		}
-
-		// Allocate a byte array of the expected length
-		data := make([]byte, msgLen)
-
-		// Read remainder of pickle packet into byte array
-		if err = binary.Read(reader, binary.BigEndian, data); err != nil {
+		} else if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
 			logrus.Warningf("[pickle] Can't read message body: %s", err.Error())
 			return

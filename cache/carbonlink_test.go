@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"bytes"
 	"encoding/binary"
 	"net"
 	"reflect"
@@ -68,7 +67,7 @@ func TestCarbonlink(t *testing.T) {
 		return conn, func() { conn.Close() }
 	}
 
-	var replyLength int32
+	var replyLength uint32
 	var data []byte
 
 	/* MESSAGE 1 */
@@ -243,45 +242,6 @@ func TestCarbonlinkErrors(t *testing.T) {
 		}
 		conn.Close()
 
-	}
-}
-
-func TestReadCarbonlinkRequest(t *testing.T) {
-
-	tests := []struct {
-		name    string
-		data    []byte
-		want    []byte
-		wantErr bool
-	}{
-		{name: "Empty reader",
-			data:    []byte{},
-			wantErr: true},
-		// Length is expected to be 32 bits
-		{name: "Short Length",
-			data:    []byte("\x00"),
-			wantErr: true},
-		{name: "Length, but no body",
-			data:    []byte("\x00\x00\x00\x01"),
-			wantErr: true},
-		{name: "Valid Length and body",
-			data: []byte("\x00\x00\x00\x01x"),
-			want: []byte("x"),
-		},
-		{name: "Length zero, no body",
-			data: []byte("\x00\x00\x00\x00"),
-			want: []byte(""),
-		},
-	}
-	for _, tt := range tests {
-		got, err := ReadCarbonlinkRequest(bytes.NewReader(tt.data))
-		if (err != nil) != tt.wantErr {
-			t.Errorf("%q. ReadCarbonlinkRequest() error = %v, wantErr %v", tt.name, err, tt.wantErr)
-			continue
-		}
-		if !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("%q. ReadCarbonlinkRequest() = %v, want %v", tt.name, got, tt.want)
-		}
 	}
 }
 
