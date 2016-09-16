@@ -38,18 +38,9 @@ func UDPLogIncomplete(enable bool) Option {
 
 // OutChan creates option for New contructor
 func OutChan(ch chan *points.Points) Option {
-	out := func(p *points.Points) {
+	return OutFunc(func(p *points.Points) {
 		ch <- p
-	}
-	return func(r Receiver) error {
-		if t, ok := r.(*TCP); ok {
-			t.out = out
-		}
-		if t, ok := r.(*UDP); ok {
-			t.out = out
-		}
-		return nil
-	}
+	})
 }
 
 // OutFunc creates option for New contructor
