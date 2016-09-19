@@ -1,10 +1,12 @@
 package receiver
 
 import (
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -12,12 +14,15 @@ type tcpTestCase struct {
 	*testing.T
 	receiver *TCP
 	conn     net.Conn
-	rcvChan  chan *points.Points
+	cache    *cache.Cache
+	sendTime time.Time
 }
 
 func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 	test := &tcpTestCase{
-		T: t,
+		T:        t,
+		cache:    cache.New(),
+		sendTime: time.Time{},
 	}
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
@@ -30,9 +35,7 @@ func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 		scheme = "pickle"
 	}
 
-	test.rcvChan = make(chan *points.Points, 128)
-
-	r, err := New(scheme+"://"+addr.String(), OutChan(test.rcvChan))
+	r, err := New(scheme+"://"+addr.String(), test.cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,6 +65,7 @@ func (test *tcpTestCase) Send(text string) {
 	if _, err := test.conn.Write([]byte(text)); err != nil {
 		test.Fatal(err)
 	}
+	test.sendTime = time.Now()
 }
 
 func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
@@ -70,41 +74,42 @@ func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
 	}
 }
 
+func (test *tcpTestCase) Get(metric string) (*points.Points, bool) {
+	delta := time.Now().Sub(test.sendTime).Seconds()/1000 - 10
+	if delta < 0 {
+		time.Sleep(time.Duration(-delta) * time.Millisecond)
+	}
+
+	return test.cache.GetMetric(metric)
+}
+
+func (test *tcpTestCase) GetEq(metric string, b *points.Points) {
+	m, ok := test.Get(metric)
+	if ok {
+		test.Eq(m, b)
+	} else {
+		test.Fatalf("Metric %s not found", metric)
+	}
+}
+
 func TestTCP1(t *testing.T) {
 	test := newTCPTestCase(t, false)
 	defer test.Finish()
 
-	test.Send("hello.world 42.15 1422698155\n")
+	metric := "hello.world"
+	test.Send(fmt.Sprintf("%s 42.15 1422698155\n", metric))
 
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.GetEq(metric, points.OnePoint(metric, 42.15, 1422698155))
 }
 
 func TestTCP2(t *testing.T) {
 	test := newTCPTestCase(t, false)
 	defer test.Finish()
 
-	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
+	metric1 := "hello.world"
+	metric2 := "metric.name"
+	test.Send(fmt.Sprintf("%s 42.15 1422698155\n%s -72.11 1422698155\n", metric1, metric2))
 
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.GetEq(metric1, points.OnePoint(metric1, 42.15, 1422698155))
+	test.GetEq(metric2, points.OnePoint(metric2, -72.11, 1422698155))
 }

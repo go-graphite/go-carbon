@@ -13,10 +13,8 @@ func TestStopCarbonLink(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", ":0")
 	assert.NoError(err)
 
-	ch := make(chan *Query, 128)
-
 	for i := 0; i < 10; i++ {
-		listener := NewCarbonlinkListener(ch)
+		listener := NewCarbonlinkListener(New())
 		assert.NoError(listener.Listen(addr))
 		addr = listener.Addr().(*net.TCPAddr) // listen same port in next iteration
 		listener.Stop()

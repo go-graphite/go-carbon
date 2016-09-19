@@ -119,7 +119,7 @@ func (app *App) ReloadConfig() error {
 		app.Persister.Stop()
 		app.Persister = nil
 	}
-	app.startPersister()
+	app.startPersister(app.Cache)
 
 	if app.Collector != nil {
 		app.Collector.Stop()
@@ -193,14 +193,14 @@ func (app *App) Stop() {
 	app.stopAll()
 }
 
-func (app *App) startPersister() {
+func (app *App) startPersister(c *cache.Cache) {
 	if app.Config.Whisper.Enabled {
 		p := persister.NewWhisper(
 			app.Config.Whisper.DataDir,
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
-			app.Cache.Out(),
-			app.Cache.Confirm(),
+			c.Out(),
+			c.WriteoutQueue().Process,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
@@ -227,21 +227,21 @@ func (app *App) Start() (err error) {
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
-	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
+	core.SetNumPersisters(app.Config.Whisper.Workers)
 	core.Start()
 
 	app.Cache = core
 
 	/* WHISPER start */
-	app.startPersister()
+	app.startPersister(app.Cache)
 	/* WHISPER end */
 
 	/* UDP start */
 	if conf.Udp.Enabled {
 		app.UDP, err = receiver.New(
 			"udp://"+conf.Udp.Listen,
-			receiver.OutChan(core.In()),
+			app.Cache,
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
 		)
 
@@ -255,9 +255,8 @@ func (app *App) Start() (err error) {
 	if conf.Tcp.Enabled {
 		app.TCP, err = receiver.New(
 			"tcp://"+conf.Tcp.Listen,
-			receiver.OutChan(core.In()),
+			app.Cache,
 		)
-
 		if err != nil {
 			return
 		}
@@ -268,7 +267,7 @@ func (app *App) Start() (err error) {
 	if conf.Pickle.Enabled {
 		app.Pickle, err = receiver.New(
 			"pickle://"+conf.Pickle.Listen,
-			receiver.OutChan(core.In()),
+			app.Cache,
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
 		)
 
@@ -286,9 +285,8 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonlink := cache.NewCarbonlinkListener(core.Query())
+		carbonlink := cache.NewCarbonlinkListener(app.Cache)
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
-		carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 
 		if err = carbonlink.Listen(linkAddr); err != nil {
 			return
@@ -300,7 +298,7 @@ func (app *App) Start() (err error) {
 
 	/* RESTORE start */
 	if conf.Dump.Enabled {
-		go app.Restore(core.In(), conf.Dump.Path, conf.Dump.RestorePerSecond)
+		go app.Restore(app.Cache, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
 	/* RESTORE end */
 

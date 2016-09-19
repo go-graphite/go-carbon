@@ -5,6 +5,7 @@ import (
 	"path"
 	"testing"
 
+	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/qa"
 )
@@ -75,22 +76,26 @@ func TestRestore(t *testing.T) {
 			},
 		}
 
-		ch := make(chan *points.Points, 1024)
+		cache := cache.New()
+		RestoreFromDir(root, cache, 0)
 
-		RestoreFromDir(root, ch)
-
-		close(ch)
-
-		if len(ch) != len(expected) {
+		if cache.Size() != int32(len(expected)) {
 			t.FailNow()
 		}
 
-		index := 0
-		for p := range ch {
-			if !expected[index].Eq(p) {
-				t.FailNow()
+		for idx, p := range expected {
+			var m *points.Points
+			var ok bool
+			if m, ok = cache.GetMetric(p.Metric); !ok {
+				t.Fatalf("metric %s wasn't found in cache after restore", p.Metric)
 			}
-			index++
+			if m != expected[idx] {
+				t.Logf("Strange, pointers are different. Map: %v, []expected slice: %v", &m, &expected[idx])
+			}
+
+			if !m.Eq(expected[idx]) {
+				t.Fatalf("Found %v, expected %v", m, expected[idx])
+			}
 		}
 	})
 }

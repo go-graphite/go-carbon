@@ -4,24 +4,45 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hydrogen18/stalecucumber"
 )
 
+// persisters register this callback to do point processing
+// point is passed in locked state, callback MUST unlock it upon return even if error is returned,
+// but preferrably it should unlock it ASAP, before entering potentially lengthy IO
+type PersistPointFunc func(*Points) error
+
+// Type of callback which all persisters must call to process received batch of points
+type BatchProcessFunc func([]*Points, PersistPointFunc) (metricCount int)
+
 // Point value/time pair
 type Point struct {
+	Timestamp int
 	Value     float64
-	Timestamp int64
 }
 
 // Points from carbon clients
 type Points struct {
+	sync.Mutex
 	Metric string
 	Data   []Point
+}
+
+type SinglePoint struct {
+	Metric string
+	Point  Point
+}
+
+func (p *SinglePoint) WriteTo(w io.Writer) (n int64, err error) {
+	c, err := w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, p.Point.Value, p.Point.Timestamp)))
+	return int64(c), err
 }
 
 // New creates new instance of Points
@@ -36,7 +57,7 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 		Data: []Point{
 			Point{
 				Value:     value,
-				Timestamp: timestamp,
+				Timestamp: int(timestamp),
 			},
 		},
 	}
@@ -48,20 +69,23 @@ func NowPoint(metric string, value float64) *Points {
 }
 
 // Copy returns copy of object
-func (p *Points) Copy() *Points {
+func (p *Points) copy() *Points {
+	data := make([]Point, len(p.Data))
+	copy(data, p.Data)
+
 	return &Points{
 		Metric: p.Metric,
-		Data:   p.Data,
+		Data:   data,
 	}
 }
 
 // ParseText parse text protocol Point
 //  host.Point.value 42 1422641531\n
-func ParseText(line string) (*Points, error) {
+func ParseText(line string) (SinglePoint, error) {
 
 	row := strings.Split(strings.Trim(line, "\n \t\r"), " ")
 	if len(row) != 3 {
-		return nil, fmt.Errorf("bad message: %#v", line)
+		return SinglePoint{}, fmt.Errorf("bad message: %#v", line)
 	}
 
 	// 0x2e == ".". Or use split? @TODO: benchmark
@@ -72,13 +96,13 @@ func ParseText(line string) (*Points, error) {
 	value, err := strconv.ParseFloat(row[1], 64)
 
 	if err != nil || math.IsNaN(value) {
-		return nil, fmt.Errorf("bad message: %#v", line)
+		return SinglePoint{}, fmt.Errorf("bad message: %#v", line)
 	}
 
 	tsf, err := strconv.ParseFloat(row[2], 64)
 
 	if err != nil || math.IsNaN(tsf) {
-		return nil, fmt.Errorf("bad message: %#v", line)
+		return SinglePoint{}, fmt.Errorf("bad message: %#v", line)
 	}
 
 	// 315522000 == "1980-01-01 00:00:00"
@@ -92,7 +116,7 @@ func ParseText(line string) (*Points, error) {
 	// 	return nil, fmt.Errorf("bad message: %#v", line)
 	// }
 
-	return OnePoint(row[0], value, int64(tsf)), nil
+	return SinglePoint{row[0], Point{int(tsf), value}}, nil
 }
 
 // ParsePickle ...
@@ -162,15 +186,63 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 
 // Append point
 func (p *Points) Append(onePoint Point) *Points {
+	p.Lock()
+	defer p.Unlock()
 	p.Data = append(p.Data, onePoint)
+	return p
+}
+
+func (p *Points) WriteTo(w io.Writer) (n int64, err error) {
+	var c int
+	for _, d := range p.Data { // every metric point
+		c, err = w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+		n += int64(c)
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, err
+}
+
+// Append *Points (concatination)
+func (p *Points) AppendPoints(v []Point) *Points {
+	p.Lock()
+	defer p.Unlock()
+	p.Data = append(p.Data, v...)
+	return p
+}
+
+// Append SinglePoint
+func (p *Points) AppendSinglePoint(v *SinglePoint) *Points {
+	p.Lock()
+	defer p.Unlock()
+	p.Data = append(p.Data, v.Point)
+	return p
+}
+
+func (p *Points) Shift(count int) *Points {
+	if count < 1 {
+		return p
+	}
+
+	p.Lock()
+	defer p.Unlock()
+
+	if count >= len(p.Data) {
+		p.Data = p.Data[:0]
+	} else {
+		p.Data = append(p.Data[:0], p.Data[count:]...)
+	}
 	return p
 }
 
 // Add value/timestamp pair to points
 func (p *Points) Add(value float64, timestamp int64) *Points {
+	p.Lock()
+	defer p.Unlock()
 	p.Data = append(p.Data, Point{
 		Value:     value,
-		Timestamp: timestamp,
+		Timestamp: int(timestamp),
 	})
 	return p
 }

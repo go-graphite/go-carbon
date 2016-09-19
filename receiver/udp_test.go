@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/logging"
 	"github.com/lomik/go-carbon/points"
 	"github.com/stretchr/testify/assert"
@@ -14,12 +15,15 @@ type udpTestCase struct {
 	*testing.T
 	receiver *UDP
 	conn     net.Conn
-	rcvChan  chan *points.Points
+	cache    *cache.Cache
+	sendTime time.Time
 }
 
 func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 	test := &udpTestCase{
-		T: t,
+		T:        t,
+		cache:    cache.New(),
+		sendTime: time.Time{},
 	}
 
 	addr, err := net.ResolveUDPAddr("udp", "localhost:0")
@@ -27,9 +31,7 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 		t.Fatal(err)
 	}
 
-	test.rcvChan = make(chan *points.Points, 128)
-
-	r, err := New("udp://"+addr.String(), UDPLogIncomplete(logIncomplete), OutChan(test.rcvChan))
+	r, err := New("udp://"+addr.String(), test.cache, UDPLogIncomplete(logIncomplete))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +70,26 @@ func (test *udpTestCase) Send(text string) {
 	if _, err := test.conn.Write([]byte(text)); err != nil {
 		test.Fatal(err)
 	}
+	test.sendTime = time.Now()
 	time.Sleep(5 * time.Millisecond)
+}
+
+func (test *udpTestCase) Get(metric string) (*points.Points, bool) {
+	delta := time.Now().Sub(test.sendTime).Seconds()/1000 - 10
+	if delta < 0 {
+		time.Sleep(time.Duration(-delta) * time.Millisecond)
+	}
+
+	return test.cache.GetMetric(metric)
+}
+
+func (test *udpTestCase) GetEq(metric string, b *points.Points) {
+	m, ok := test.Get(metric)
+	if ok {
+		test.Eq(m, b)
+	} else {
+		test.Fatalf("Metric %s not found", metric)
+	}
 }
 
 func (test *udpTestCase) Eq(a *points.Points, b *points.Points) {
@@ -82,13 +103,7 @@ func TestUDP1(t *testing.T) {
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\n")
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.GetEq("hello.world", points.OnePoint("hello.world", 42.15, 1422698155))
 }
 
 func TestUDP2(t *testing.T) {
@@ -96,20 +111,8 @@ func TestUDP2(t *testing.T) {
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.GetEq("hello.world", points.OnePoint("hello.world", 42.15, 1422698155))
+	test.GetEq("metric.name", points.OnePoint("metric.name", -72.11, 1422698155))
 }
 
 func TestChunkedUDP(t *testing.T) {
@@ -119,19 +122,8 @@ func TestChunkedUDP(t *testing.T) {
 	test.Send("hello.world 42.15 1422698155\nmetri")
 	test.Send("c.name -72.11 1422698155\n")
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.GetEq("hello.world", points.OnePoint("hello.world", 42.15, 1422698155))
+	test.GetEq("metric.name", points.OnePoint("metric.name", -72.11, 1422698155))
 }
 
 func TestLogIncompleteMessage(t *testing.T) {

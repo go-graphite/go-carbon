@@ -19,8 +19,8 @@ func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.SetOutputChanSize(0)
-	cache.Start()
+	cache.SetNumPersisters(1)
+	assert.NoError(cache.Start())
 
 	msg1 := points.OnePoint(
 		"carbon.agents.carbon_agent_server.cache.size",
@@ -40,21 +40,16 @@ func TestCarbonlink(t *testing.T) {
 		1422795966,
 	)
 
-	cache.In() <- msg1
-	cache.In() <- msg2
-	cache.In() <- msg3
+	cache.Add(msg1)
+	cache.Add(msg2)
+	cache.Add(msg3)
 
 	defer cache.Stop()
-	for {
-		if len(cache.In()) == 0 {
-			break
-		}
-	}
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink := NewCarbonlinkListener(cache)
 	defer carbonlink.Stop()
 
 	assert.NoError(carbonlink.Listen(addr))
@@ -121,18 +116,10 @@ func TestCarbonlink(t *testing.T) {
 	// {'datapoints': [(1422797267, -42.14), (1422795966, 15.0)]}
 	assert.Equal("\x80\x02}U\ndatapoints](J\xd3)\xceTG\xc0E\x11\xeb\x85\x1e\xb8R\x86J\xbe$\xceTG@.\x00\x00\x00\x00\x00\x00\x86es.",
 		string(data))
-	cleanup()
 
 	/* MESSAGE 3 */
 	/* Remove carbon.agents.carbon_agent_server.param.size from cache and request again */
-	conn, cleanup = NewClient()
-	for {
-		c := <-cache.Out()
-		cache.Confirm() <- c
-		if c.Metric == "carbon.agents.carbon_agent_server.param.size" {
-			break
-		}
-	}
+	cache.data.Remove("carbon.agents.carbon_agent_server.param.size")
 
 	_, err = conn.Write([]byte(sampleCacheQuery2))
 	assert.NoError(err)
@@ -179,13 +166,13 @@ func TestCarbonlinkErrors(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.SetOutputChanSize(0)
+	cache.SetNumPersisters(1)
 	cache.Start()
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink := NewCarbonlinkListener(cache)
 	listenerTimeout := 10 * time.Millisecond
 	carbonlink.SetReadTimeout(listenerTimeout)
 	defer carbonlink.Stop()
@@ -221,7 +208,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 		},
 	}
 
-	for _, test := range table {
+	for i, test := range table {
 		remoteaddr, _ := net.ResolveTCPAddr("tcp", carbonlink.Addr().String())
 		conn, err := net.DialTCP("tcp", addr, remoteaddr)
 		assert.NoError(err)
@@ -237,7 +224,7 @@ func TestCarbonlinkErrors(t *testing.T) {
 			conn.SetWriteBuffer(0)
 			n, err := conn.Write([]byte("x"))
 			if err == nil || n > 0 {
-				t.Errorf("CarbonlinkListener did not close connection as expected")
+				t.Errorf("CarbonlinkListener(%d) did not close connection as expected", i)
 			}
 		}
 		conn.Close()
@@ -307,11 +294,9 @@ func BenchmarkCarbonLinkPickleParse(b *testing.B) {
 func BenchmarkCarbonLinkPackReply(b *testing.B) {
 	p := points.OnePoint("carbon.agents.carbon_agent_server.param.size", 15, 1422795966).Add(15, 9000000).Add(16, 9000000)
 
-	q := Query{CacheData: p}
-
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			packReply(&q)
+			packReply(p)
 		}
 	})
 }
