@@ -90,7 +90,6 @@ func NewCollector(app *App) *Collector {
 			case <-exit:
 				return
 			case <-ticker.C:
-				// collect
 				c.collect()
 			}
 		}
