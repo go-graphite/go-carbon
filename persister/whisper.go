@@ -188,7 +188,7 @@ LOOP:
 }
 
 // Stat callback
-func (p *Whisper) Stat(send func(metric string, value float64)) {
+func (p *Whisper) Stat(send helper.StatCallback) {
 	updateOperations := atomic.LoadUint32(&p.updateOperations)
 	committedPoints := atomic.LoadUint32(&p.committedPoints)
 	atomic.AddUint32(&p.updateOperations, -updateOperations)

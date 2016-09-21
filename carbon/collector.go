@@ -12,25 +12,73 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
+type statFunc func()
+
+type statModule interface {
+	Stat(send helper.StatCallback)
+}
+
 type Collector struct {
 	helper.Stoppable
-	app            *App
 	graphPrefix    string
 	metricInterval time.Duration
 	endpoint       string
 	data           chan *points.Points
+	stats          []statFunc
 }
 
 func NewCollector(app *App) *Collector {
+	// app locked by caller
+
 	c := &Collector{
-		app:            app,
 		graphPrefix:    app.Config.Common.GraphPrefix,
 		metricInterval: app.Config.Common.MetricInterval.Value(),
 		data:           make(chan *points.Points, 4096),
 		endpoint:       app.Config.Common.MetricEndpoint,
+		stats:          make([]statFunc, 0),
 	}
 
 	c.Start()
+
+	sendCallback := func(moduleName string) func(metric string, value float64) {
+		return func(metric string, value float64) {
+			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, moduleName, metric)
+			logrus.Infof("[stat] %s=%#v", key, value)
+			select {
+			case c.data <- points.NowPoint(key, value):
+				// pass
+			default:
+				logrus.WithField("key", key).WithField("value", value).
+					Warn("[stat] send queue is full. Metric dropped")
+			}
+		}
+	}
+
+	moduleCallback := func(moduleName string, moduleObj statModule) statFunc {
+		return func() {
+			moduleObj.Stat(sendCallback(moduleName))
+		}
+	}
+
+	if app.Cache != nil {
+		c.stats = append(c.stats, moduleCallback("cache", app.Cache))
+	}
+
+	if app.UDP != nil {
+		c.stats = append(c.stats, moduleCallback("udp", app.UDP))
+	}
+
+	if app.TCP != nil {
+		c.stats = append(c.stats, moduleCallback("tcp", app.TCP))
+	}
+
+	if app.Pickle != nil {
+		c.stats = append(c.stats, moduleCallback("pickle", app.Pickle))
+	}
+
+	if app.Persister != nil {
+		c.stats = append(c.stats, moduleCallback("persister", app.Persister))
+	}
 
 	// collector worker
 	c.Go(func(exit chan bool) {
@@ -42,6 +90,7 @@ func NewCollector(app *App) *Collector {
 			case <-exit:
 				return
 			case <-ticker.C:
+				// collect
 				c.collect()
 			}
 		}
@@ -140,38 +189,7 @@ func NewCollector(app *App) *Collector {
 }
 
 func (c *Collector) collect() {
-	app := c.app
-
-	app.Lock()
-	defer app.Unlock()
-
-	statModule := func(module string) func(metric string, value float64) {
-		return func(metric string, value float64) {
-			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, module, metric)
-			logrus.Infof("[stat] %s=%#v", key, value)
-			select {
-			case c.data <- points.NowPoint(key, value):
-				// pass
-			default:
-				logrus.WithField("key", key).WithField("value", value).
-					Warn("[stat] send queue is full. Metric dropped")
-			}
-		}
-	}
-
-	if app.Cache != nil {
-		app.Cache.Stat(statModule("cache"))
-	}
-	if app.UDP != nil {
-		app.UDP.Stat(statModule("udp"))
-	}
-	if app.TCP != nil {
-		app.TCP.Stat(statModule("tcp"))
-	}
-	if app.Pickle != nil {
-		app.Pickle.Stat(statModule("pickle"))
-	}
-	if app.Persister != nil {
-		app.Persister.Stat(statModule("persister"))
+	for _, stat := range c.stats {
+		stat()
 	}
 }

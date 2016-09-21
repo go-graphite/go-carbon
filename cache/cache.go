@@ -199,7 +199,7 @@ func (c *Cache) updateQueue() {
 }
 
 // Collect cache metrics
-func (c *Cache) Stat(send helper.StatCb) {
+func (c *Cache) Stat(send helper.StatCallback) {
 	send("size", float64(c.Size()))
 	send("metrics", float64(atomic.LoadUint32(&c.metricCount)))
 
