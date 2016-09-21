@@ -122,8 +122,12 @@ func (app *App) ReloadConfig() error {
 	app.startPersister()
 
 	if app.Collector != nil {
-		app.Collector.Stop()
+		collector := app.Collector
 		app.Collector = nil
+
+		app.Unlock() // unlock app as collector uses this lock too
+		collector.Stop()
+		app.Lock()
 	}
 
 	app.Collector = NewCollector(app)

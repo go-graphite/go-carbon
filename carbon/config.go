@@ -208,6 +208,13 @@ func TestConfig(rootDir string) string {
 
 	cfg.Whisper.DataDir = rootDir
 	cfg.Whisper.SchemasFilename = filepath.Join(rootDir, "schemas.conf")
+	cfg.Whisper.Enabled = true
+
+	cfg.Udp.Listen =  "127.0.0.1:0"
+	cfg.Tcp.Listen =  "127.0.0.1:0"
+	cfg.Pickle.Listen =  "127.0.0.1:0"
+	cfg.Carbonlink.Listen =  "127.0.0.1:0"
+
 	// cfg.Whisper.Aggregation = filepath.Join(rootDir, "aggregation.conf")
 
 	configFile := filepath.Join(rootDir, "go-carbon.conf")
