@@ -24,7 +24,7 @@ type App struct {
 	Pickle         receiver.Receiver
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
-	Collector      *Collector
+	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	exit           chan bool
 }
 

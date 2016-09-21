@@ -5,13 +5,14 @@ import (
 	"net"
 	"net/url"
 
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
 
 type Receiver interface {
 	Stop()
 	Name() string
-	Stat(func(metric string, value float64))
+	Stat(helper.StatCallback)
 }
 
 type Option func(Receiver) error

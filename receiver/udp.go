@@ -120,7 +120,7 @@ func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
 	}
 }
 
-func (rcv *UDP) Stat(send func(metric string, value float64)) {
+func (rcv *UDP) Stat(send helper.StatCallback) {
 	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
 	send("metricsReceived", float64(metricsReceived))

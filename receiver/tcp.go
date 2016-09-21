@@ -147,7 +147,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	}
 }
 
-func (rcv *TCP) Stat(send func(metric string, value float64)) {
+func (rcv *TCP) Stat(send helper.StatCallback) {
 	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
 	send("metricsReceived", float64(metricsReceived))
