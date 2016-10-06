@@ -179,6 +179,9 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
+##### version 0.8.1
+* Bug fix: The synchronous config reload (HUP signal) and launch of the internal collecting statistics procedure (every "metric-interval") could cause deadlock (thanks [Maxim Ivanov](https://github.com/redbaron))
+
 ##### version 0.8.0
 * Fully refactored and optimizer cache module (core of go-carbon) (thanks [Maxim Ivanov](https://github.com/redbaron))
 * Added `noop` cache.write-strategy (thanks [Maxim Ivanov](https://github.com/redbaron))
