@@ -5,4 +5,5 @@
     missingok
     notifempty
     nocreate
+    copytruncate
 }
