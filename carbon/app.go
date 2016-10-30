@@ -10,6 +10,7 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
+	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
 )
@@ -24,6 +25,7 @@ type App struct {
 	Pickle         receiver.Receiver
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
+	Carbonserver   *carbonserver.CarbonserverListener
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	exit           chan bool
 }
@@ -156,6 +158,12 @@ func (app *App) stopListeners() {
 		app.CarbonLink = nil
 		logrus.Debug("[carbonlink] finished")
 	}
+
+	if app.Carbonserver != nil {
+		app.Carbonserver.Stop()
+		app.Carbonserver = nil
+		logrus.Debug("[carbonserver] finished")
+	}
 }
 
 func (app *App) stopAll() {
@@ -277,6 +285,29 @@ func (app *App) Start() (err error) {
 		}
 	}
 	/* PICKLE end */
+
+	/* CARBONLINK start */
+	if conf.Carbonserver.Enabled {
+		if err != nil {
+			return
+		}
+
+		carbonserver := carbonserver.NewCarbonserverListener(core.Query())
+		carbonserver.SetWhisperData(conf.Whisper.DataDir)
+		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
+		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
+		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
+		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
+		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
+		carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+
+		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
+			return
+		}
+
+		app.Carbonserver = carbonserver
+	}
+	/* CARBONLINK end */
 
 	/* CARBONLINK start */
 	if conf.Carbonlink.Enabled {

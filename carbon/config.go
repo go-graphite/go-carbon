@@ -89,6 +89,17 @@ type carbonlinkConfig struct {
 	QueryTimeout *Duration `toml:"query-timeout"`
 }
 
+type carbonserverConfig struct {
+	Listen            string    `toml:"listen"`
+	Enabled           bool      `toml:"enabled"`
+	ReadTimeout       *Duration `toml:"read-timeout"`
+	QueryTimeout      *Duration `toml:"query-timeout"`
+	ScanFrequency     *Duration `toml:"scan-frequency"`
+	Buckets           int       `toml:"buckets"`
+	MaxGlobs          int       `toml:"max-globs"`
+	MetricsAsCounters bool      `toml:"metrics-as-counters"`
+}
+
 type pprofConfig struct {
 	Listen  string `toml:"listen"`
 	Enabled bool   `toml:"enabled"`
@@ -102,15 +113,16 @@ type dumpConfig struct {
 
 // Config ...
 type Config struct {
-	Common     commonConfig     `toml:"common"`
-	Whisper    whisperConfig    `toml:"whisper"`
-	Cache      cacheConfig      `toml:"cache"`
-	Udp        udpConfig        `toml:"udp"`
-	Tcp        tcpConfig        `toml:"tcp"`
-	Pickle     pickleConfig     `toml:"pickle"`
-	Carbonlink carbonlinkConfig `toml:"carbonlink"`
-	Dump       dumpConfig       `toml:"dump"`
-	Pprof      pprofConfig      `toml:"pprof"`
+	Common       commonConfig       `toml:"common"`
+	Whisper      whisperConfig      `toml:"whisper"`
+	Cache        cacheConfig        `toml:"cache"`
+	Udp          udpConfig          `toml:"udp"`
+	Tcp          tcpConfig          `toml:"tcp"`
+	Pickle       pickleConfig       `toml:"pickle"`
+	Carbonlink   carbonlinkConfig   `toml:"carbonlink"`
+	Carbonserver carbonserverConfig `toml:"carbonserver"`
+	Dump         dumpConfig         `toml:"dump"`
+	Pprof        pprofConfig        `toml:"pprof"`
 }
 
 // NewConfig ...
@@ -154,6 +166,22 @@ func NewConfig() *Config {
 			Listen:         ":2004",
 			Enabled:        true,
 			MaxMessageSize: 67108864, // 64 Mb
+		},
+		Carbonserver: carbonserverConfig{
+			Listen:            "127.0.0.1:8080",
+			Enabled:           false,
+			Buckets:           10,
+			MaxGlobs:          100,
+			MetricsAsCounters: false,
+			ScanFrequency: &Duration{
+				Duration: 300 * time.Second,
+			},
+			ReadTimeout: &Duration{
+				Duration: 30 * time.Second,
+			},
+			QueryTimeout: &Duration{
+				Duration: 100 * time.Millisecond,
+			},
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
