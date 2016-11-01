@@ -28,3 +28,21 @@
 [submodule "_vendor/src/github.com/kardianos/osext"]
 	path = _vendor/src/github.com/kardianos/osext
 	url = https://github.com/kardianos/osext
+[submodule "_vendor/src/github.com/NYTimes/gziphandler"]
+	path = _vendor/src/github.com/NYTimes/gziphandler
+	url = https://github.com/NYTimes/gziphandler
+[submodule "_vendor/src/github.com/dgryski/carbonzipper"]
+	path = _vendor/src/github.com/dgryski/carbonzipper
+	url = https://github.com/dgryski/carbonzipper
+[submodule "_vendor/src/github.com/dgryski/go-trigram"]
+	path = _vendor/src/github.com/dgryski/go-trigram
+	url = https://github.com/dgryski/go-trigram
+[submodule "_vendor/src/github.com/dgryski/httputil"]
+	path = _vendor/src/github.com/dgryski/httputil
+	url = https://github.com/dgryski/httputil
+[submodule "_vendor/src/github.com/gogo/protobuf"]
+	path = _vendor/src/github.com/gogo/protobuf
+	url = https://github.com/gogo/protobuf
+[submodule "_vendor/src/github.com/kisielk/og-rek"]
+	path = _vendor/src/github.com/kisielk/og-rek
+	url = https://github.com/kisielk/og-rek
