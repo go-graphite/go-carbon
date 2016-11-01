@@ -27,8 +27,8 @@ submodules:
 	git submodule update --recursive
 
 test:
-	$(GO) test -race ./...
-	$(GO) vet ./...
+	find . -not -path "*vendor*" -name "*.go" | rev | cut -d/ -f2- | rev | cut -d/ -f2- | sort -u | xargs -IMODULE $(GO) test -race github.com/lomik/go-carbon/MODULE
+	find . -not -path "*vendor*" -name "*.go" | rev | cut -d/ -f2- | rev | cut -d/ -f2- | sort -u | xargs -IMODULE $(GO) vet github.com/lomik/go-carbon/MODULE
 
 clean:
 	rm -f go-carbon

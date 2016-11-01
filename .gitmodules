@@ -46,3 +46,48 @@
 [submodule "_vendor/src/github.com/kisielk/og-rek"]
 	path = _vendor/src/github.com/kisielk/og-rek
 	url = https://github.com/kisielk/og-rek
+[submodule "vendor/github.com/Sirupsen/logrus"]
+	path = vendor/github.com/Sirupsen/logrus
+	url = https://github.com/Sirupsen/logrus
+[submodule "vendor/github.com/sevlyar/go-daemon"]
+	path = vendor/github.com/sevlyar/go-daemon
+	url = https://github.com/sevlyar/go-daemon
+[submodule "vendor/github.com/kardianos/osext"]
+	path = vendor/github.com/kardianos/osext
+	url = https://github.com/kardianos/osext
+[submodule "vendor/github.com/stretchr/testify"]
+	path = vendor/github.com/stretchr/testify
+	url = https://github.com/stretchr/testify
+[submodule "vendor/github.com/BurntSushi/toml"]
+	path = vendor/github.com/BurntSushi/toml
+	url = https://github.com/BurntSushi/toml
+[submodule "vendor/github.com/NYTimes/gziphandler"]
+	path = vendor/github.com/NYTimes/gziphandler
+	url = https://github.com/NYTimes/gziphandler
+[submodule "vendor/github.com/dgryski/carbonzipper"]
+	path = vendor/github.com/dgryski/carbonzipper
+	url = https://github.com/dgryski/carbonzipper
+[submodule "vendor/github.com/gogo/protobuf"]
+	path = vendor/github.com/gogo/protobuf
+	url = https://github.com/gogo/protobuf
+[submodule "vendor/github.com/dgryski/go-trigram"]
+	path = vendor/github.com/dgryski/go-trigram
+	url = https://github.com/dgryski/go-trigram
+[submodule "vendor/github.com/dgryski/httputil"]
+	path = vendor/github.com/dgryski/httputil
+	url = https://github.com/dgryski/httputil
+[submodule "vendor/github.com/kisielk/og-rek"]
+	path = vendor/github.com/kisielk/og-rek
+	url = https://github.com/kisielk/og-rek
+[submodule "vendor/github.com/lomik/go-whisper"]
+	path = vendor/github.com/lomik/go-whisper
+	url = https://github.com/lomik/go-whisper
+[submodule "vendor/github.com/howeyc/fsnotify"]
+	path = vendor/github.com/howeyc/fsnotify
+	url = https://github.com/howeyc/fsnotify
+[submodule "vendor/github.com/alyu/configparser"]
+	path = vendor/github.com/alyu/configparser
+	url = https://github.com/alyu/configparser
+[submodule "vendor/github.com/hydrogen18/stalecucumber"]
+	path = vendor/github.com/hydrogen18/stalecucumber
+	url = https://github.com/hydrogen18/stalecucumber
