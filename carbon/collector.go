@@ -64,6 +64,10 @@ func NewCollector(app *App) *Collector {
 		c.stats = append(c.stats, moduleCallback("cache", app.Cache))
 	}
 
+	if app.Carbonserver != nil {
+		c.stats = append(c.stats, moduleCallback("carbonserver", app.Carbonserver))
+	}
+
 	if app.UDP != nil {
 		c.stats = append(c.stats, moduleCallback("udp", app.UDP))
 	}
