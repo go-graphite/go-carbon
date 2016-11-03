@@ -11,7 +11,7 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
-var shardCount = 1024
+const shardCount = 1024
 
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
