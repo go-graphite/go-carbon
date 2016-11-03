@@ -18,12 +18,14 @@ const shardCount = 1024
 type Cache struct {
 	data []*Shard
 
+	maxSize int32
+
 	stat struct {
 		size                int32  // changing via atomic
 		queueBuildCnt       uint32 // number of times writeout queue was built
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTimeMs uint32 // in milliseconds
-		overflowCnt         uint32 // drop packages if cache full
+		overflowCnt         int32  // drop packages if cache full
 		queryCnt            uint32 // number of queries
 	}
 }
@@ -64,11 +66,21 @@ func (c *Cache) GetShard(key string) *Shard {
 	return c.data[uint(fnv32(key))%uint(shardCount)]
 }
 
+func (c *Cache) Size() int32 {
+	return atomic.LoadInt32(&c.stat.size)
+}
+
 // Sets the given value under the specified key.
-func (c *Cache) Upsert(p *points.Points) {
+func (c *Cache) Add(p *points.Points) {
 	// Get map shard.
-	shard := c.GetShard(p.Metric)
 	count := len(p.Data)
+
+	if c.maxSize > 0 && c.Size() > c.maxSize {
+		atomic.AddInt32(&c.stat.overflowCnt, int32(count))
+		return
+	}
+
+	shard := c.GetShard(p.Metric)
 
 	shard.Lock()
 	if values, exists := shard.items[p.Metric]; exists {
