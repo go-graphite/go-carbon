@@ -246,7 +246,7 @@ func (app *App) Start() (err error) {
 	if conf.Udp.Enabled {
 		app.UDP, err = receiver.New(
 			"udp://"+conf.Udp.Listen,
-			receiver.OutChan(core.In()),
+			receiver.OutFunc(core.Add),
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
 		)
 
@@ -260,7 +260,7 @@ func (app *App) Start() (err error) {
 	if conf.Tcp.Enabled {
 		app.TCP, err = receiver.New(
 			"tcp://"+conf.Tcp.Listen,
-			receiver.OutChan(core.In()),
+			receiver.OutFunc(core.Add),
 		)
 
 		if err != nil {
@@ -273,7 +273,7 @@ func (app *App) Start() (err error) {
 	if conf.Pickle.Enabled {
 		app.Pickle, err = receiver.New(
 			"pickle://"+conf.Pickle.Listen,
-			receiver.OutChan(core.In()),
+			receiver.OutFunc(core.Add),
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
 		)
 
@@ -289,14 +289,14 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonserver := carbonserver.NewCarbonserverListener(core.Query())
+		carbonserver := carbonserver.NewCarbonserverListener(core)
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
-		carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
 			return
@@ -314,9 +314,9 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonlink := cache.NewCarbonlinkListener(core.Query())
+		carbonlink := cache.NewCarbonlinkListener(core)
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
-		carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
+		// carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 
 		if err = carbonlink.Listen(linkAddr); err != nil {
 			return
@@ -328,7 +328,7 @@ func (app *App) Start() (err error) {
 
 	/* RESTORE start */
 	if conf.Dump.Enabled {
-		go app.Restore(core.In(), conf.Dump.Path, conf.Dump.RestorePerSecond)
+		go app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
 	/* RESTORE end */
 
