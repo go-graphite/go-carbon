@@ -7,6 +7,7 @@ Based on https://github.com/orcaman/concurrent-map
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lomik/go-carbon/points"
 )
@@ -24,6 +25,10 @@ const shardCount = 1024
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
+	sync.Mutex
+
+	queueLastBuild time.Time
+
 	data []*Shard
 
 	maxSize       int32
@@ -73,6 +78,18 @@ func fnv32(key string) uint32 {
 func (c *Cache) GetShard(key string) *Shard {
 	// @TODO: remove type casts?
 	return c.data[uint(fnv32(key))%uint(shardCount)]
+}
+
+func (c *Cache) Get(key string) []points.Point {
+	shard := c.GetShard(key)
+
+	var data []points.Point
+	shard.Lock()
+	if p, exists := shard.items[key]; exists {
+		data = p.Data
+	}
+	shard.Unlock()
+	return data
 }
 
 func (c *Cache) Len() int32 {

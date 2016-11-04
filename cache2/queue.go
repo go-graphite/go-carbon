@@ -2,6 +2,8 @@ package cache
 
 import (
 	"sort"
+	"sync/atomic"
+	"time"
 
 	"github.com/lomik/go-carbon/points"
 )
@@ -20,6 +22,21 @@ func (v byOrderKey) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 
 func (c *Cache) makeQueue() chan *points.Points {
+	if !c.queueLastBuild.IsZero() {
+		// @TODO: may be max (with atomic cas)
+		atomic.StoreUint32(&c.stat.queueWriteoutTimeMs, uint32(time.Since(c.queueLastBuild)/time.Millisecond))
+	}
+
+	start := time.Now()
+
+	defer func() {
+		atomic.AddUint32(&c.stat.queueBuildTimeMs, uint32(time.Since(start)/time.Millisecond))
+		atomic.AddUint32(&c.stat.queueBuildCnt, 1)
+
+		c.Lock()
+		c.queueLastBuild = time.Now()
+		c.Unlock()
+	}()
 
 	orderKey := func(p *points.Points) int64 {
 		return 0
