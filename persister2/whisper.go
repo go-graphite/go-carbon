@@ -31,6 +31,7 @@ type Whisper struct {
 	created             uint32 // counter
 	sparse              bool
 	maxUpdatesPerSecond int
+	throttleTicker      *ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
 	mockStore           func() (StoreFunc, func())
 }
@@ -161,6 +162,13 @@ func (p *Whisper) worker(recv func(chan bool) *points.Points, exit chan bool) {
 
 LOOP:
 	for {
+		select {
+		case <-p.throttleTicker.C:
+			// pass
+		case <-exit:
+			return
+		}
+
 		points := recv(exit)
 		if points == nil {
 			// exit closed
@@ -197,22 +205,22 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 // Start worker
 func (p *Whisper) Start() error {
-
 	return p.StartFunc(func() error {
-
 		p.WithExit(func(exitChan chan bool) {
+			p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
 			p.Go(func(exit chan bool) {
 				p.worker(p.recv, exit)
 			})
 
-			// if p.maxUpdatesPerSecond > 0 {
-			// 	inChan = ThrottleChan(inChan, p.maxUpdatesPerSecond, exitChan)
-			// 	readerExit = nil // read all before channel is closed
-			// }
-
 		})
 
 		return nil
+	})
+}
+
+func (p *Whisper) Stop() {
+	p.StopFunc(func() {
+		p.throttleTicker.Stop()
 	})
 }

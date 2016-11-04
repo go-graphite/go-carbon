@@ -18,7 +18,14 @@ func NewThrottleTicker(ratePerSec int) *ThrottleTicker {
 
 	t.Start()
 
+	if ratePerSec <= 0 {
+		close(t.C)
+		return t
+	}
+
 	t.Go(func(exit chan bool) {
+		defer close(t.C)
+
 		delimeter := ratePerSec
 		chunk := 1
 
