@@ -62,6 +62,8 @@ func New() *Cache {
 	return c
 }
 
+func (c *Cache) Stop() {}
+
 // hash function
 // @TODO: try crc32 or something else?
 func fnv32(key string) uint32 {
