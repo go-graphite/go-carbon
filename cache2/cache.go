@@ -35,6 +35,8 @@ type Cache struct {
 	maxSize       int32
 	writeStrategy WriteStrategy
 
+	writeoutQueue *WriteoutQueue
+
 	stat struct {
 		size                int32  // changing via atomic
 		queueBuildCnt       uint32 // number of times writeout queue was built
@@ -60,6 +62,8 @@ func New() *Cache {
 	for i := 0; i < shardCount; i++ {
 		c.data[i] = &Shard{items: make(map[string]*points.Points)}
 	}
+
+	c.writeoutQueue = NewWriteoutQueue(c)
 	return c
 }
 
@@ -168,5 +172,5 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 }
 
 func (c *Cache) WriteoutQueue() *WriteoutQueue {
-	return NewWriteoutQueue(c)
+	return c.writeoutQueue
 }

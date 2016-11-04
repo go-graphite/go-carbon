@@ -20,7 +20,6 @@ func makeRecvFromChan(ch chan *points.Points) func(chan bool) *points.Points {
 		case p := <-ch:
 			return p
 		}
-		return nil
 	}
 }
 
