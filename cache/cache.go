@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -42,7 +43,7 @@ type Cache struct {
 		queueBuildCnt       uint32 // number of times writeout queue was built
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTimeMs uint32 // in milliseconds
-		overflowCnt         int32  // drop packages if cache full
+		overflowCnt         uint32 // drop packages if cache full
 		queryCnt            uint32 // number of queries
 	}
 }
@@ -85,7 +86,25 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 	return nil
 }
 
+// SetMaxSize of cache
+func (c *Cache) SetMaxSize(maxSize uint32) {
+	c.maxSize = int32(maxSize)
+}
+
 func (c *Cache) Stop() {}
+
+// Collect cache metrics
+func (c *Cache) Stat(send helper.StatCallback) {
+	send("size", float64(c.Size()))
+	send("metrics", float64(c.Len()))
+
+	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
+	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
+	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
+
+	helper.SendAndSubstractUint32("queueBuildTime", &c.stat.queueBuildTimeMs, send)
+	helper.SendAndSubstractUint32("queueWriteoutTimeMs", &c.stat.queueWriteoutTimeMs, send)
+}
 
 // hash function
 // @TODO: try crc32 or something else?
@@ -106,6 +125,8 @@ func (c *Cache) GetShard(key string) *Shard {
 }
 
 func (c *Cache) Get(key string) []points.Point {
+	atomic.AddUint32(&c.stat.queryCnt, 1)
+
 	shard := c.GetShard(key)
 
 	var data []points.Point
@@ -138,7 +159,7 @@ func (c *Cache) Add(p *points.Points) {
 	count := len(p.Data)
 
 	if c.maxSize > 0 && c.Size() > c.maxSize {
-		atomic.AddInt32(&c.stat.overflowCnt, int32(count))
+		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
 		return
 	}
 

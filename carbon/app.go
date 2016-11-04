@@ -207,8 +207,7 @@ func (app *App) startPersister() {
 			app.Config.Whisper.DataDir,
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
-			app.Cache.Out(),
-			app.Cache.Confirm(),
+			app.Cache.WriteoutQueue().Get,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
@@ -235,9 +234,7 @@ func (app *App) Start() (err error) {
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
-	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
-	core.Start()
 
 	app.Cache = core
 
