@@ -11,6 +11,14 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
+type WriteStrategy int
+
+const (
+	MaximumLength WriteStrategy = iota
+	TimestampOrder
+	Noop
+)
+
 const shardCount = 1024
 
 // A "thread" safe map of type string:Anything.
@@ -18,7 +26,8 @@ const shardCount = 1024
 type Cache struct {
 	data []*Shard
 
-	maxSize int32
+	maxSize       int32
+	writeStrategy WriteStrategy
 
 	stat struct {
 		size                int32  // changing via atomic
@@ -64,6 +73,17 @@ func fnv32(key string) uint32 {
 func (c *Cache) GetShard(key string) *Shard {
 	// @TODO: remove type casts?
 	return c.data[uint(fnv32(key))%uint(shardCount)]
+}
+
+func (c *Cache) Len() int32 {
+	l := 0
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+		l += len(shard.items)
+		shard.Unlock()
+	}
+	return int32(l)
 }
 
 func (c *Cache) Size() int32 {
