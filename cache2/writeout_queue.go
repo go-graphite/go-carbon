@@ -28,7 +28,7 @@ func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 
 func (q *WriteoutQueue) makeRebuildCallback() func() chan bool {
 	var nextRebuildOnce sync.Once
-	var nextRebuildComplete chan bool
+	nextRebuildComplete := make(chan bool)
 
 	nextRebuild := func() chan bool {
 		// next rebuild

@@ -22,6 +22,10 @@ func (v byOrderKey) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 
 func (c *Cache) makeQueue() chan *points.Points {
+	c.Lock()
+	writeStrategy := c.writeStrategy
+	c.Unlock()
+
 	if !c.queueLastBuild.IsZero() {
 		// @TODO: may be max (with atomic cas)
 		atomic.StoreUint32(&c.stat.queueWriteoutTimeMs, uint32(time.Since(c.queueLastBuild)/time.Millisecond))
@@ -42,7 +46,7 @@ func (c *Cache) makeQueue() chan *points.Points {
 		return 0
 	}
 
-	switch c.writeStrategy {
+	switch writeStrategy {
 	case MaximumLength:
 		orderKey = func(p *points.Points) int64 {
 			return int64(len(p.Data))
@@ -76,7 +80,7 @@ func (c *Cache) makeQueue() chan *points.Points {
 
 	q = q[:index]
 
-	switch c.writeStrategy {
+	switch writeStrategy {
 	case MaximumLength:
 		sort.Sort(sort.Reverse(byOrderKey(q)))
 	case TimestampOrder:

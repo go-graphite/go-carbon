@@ -5,6 +5,7 @@ Based on https://github.com/orcaman/concurrent-map
 */
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -60,6 +61,24 @@ func New() *Cache {
 		c.data[i] = &Shard{items: make(map[string]*points.Points)}
 	}
 	return c
+}
+
+// SetWriteStrategy ...
+func (c *Cache) SetWriteStrategy(s string) (err error) {
+	c.Lock()
+	defer c.Unlock()
+
+	switch s {
+	case "max":
+		c.writeStrategy = MaximumLength
+	case "sort":
+		c.writeStrategy = TimestampOrder
+	case "noop":
+		c.writeStrategy = Noop
+	default:
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
+	}
+	return nil
 }
 
 func (c *Cache) Stop() {}
