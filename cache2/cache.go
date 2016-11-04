@@ -128,3 +128,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 
 	return p, exists
 }
+
+func (c *Cache) WriteoutQueue() *WriteoutQueue {
+	return &WriteoutQueue{cache: c}
+}
