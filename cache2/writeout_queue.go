@@ -17,6 +17,15 @@ type WriteoutQueue struct {
 	rebuild func() chan bool // return chan waiting for complete
 }
 
+func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
+	q := &WriteoutQueue{
+		cache: cache,
+		queue: nil,
+	}
+	q.rebuild = q.makeRebuildCallback()
+	return q
+}
+
 func (q *WriteoutQueue) makeRebuildCallback() func() chan bool {
 	var nextRebuildOnce sync.Once
 	var nextRebuildComplete chan bool
