@@ -183,7 +183,7 @@ func (p *Whisper) Start() error {
 		p.WithExit(func(exitChan chan bool) {
 
 			p.Go(func(exit chan bool) {
-				p.worker(p.recv, nil)
+				p.worker(p.recv, exit)
 			})
 
 			// if p.maxUpdatesPerSecond > 0 {
