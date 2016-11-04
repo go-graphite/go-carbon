@@ -7,7 +7,7 @@ import (
 )
 
 type queueItem struct {
-	point    *points.Points
+	points   *points.Points
 	orderKey int64
 }
 
@@ -19,7 +19,7 @@ func (v byOrderKey) Len() int           { return len(v) }
 func (v byOrderKey) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 
-func (c *Cache) makeQueue() queue {
+func (c *Cache) makeQueue() chan *points.Points {
 
 	orderKey := func(p *points.Points) int64 {
 		return 0
@@ -46,7 +46,7 @@ func (c *Cache) makeQueue() queue {
 
 		for _, p := range shard.items {
 			if index < size {
-				q[index].point = p
+				q[index].points = p
 				q[index].orderKey = orderKey(p)
 			} else {
 				q = append(q, queueItem{p, orderKey(p)})
@@ -66,5 +66,15 @@ func (c *Cache) makeQueue() queue {
 		sort.Sort(byOrderKey(q))
 	}
 
-	return q
+	l := len(q)
+	if l == 0 {
+		return nil
+	}
+
+	ch := make(chan *points.Points, l)
+	for _, i := range q {
+		ch <- i.points
+	}
+
+	return ch
 }
