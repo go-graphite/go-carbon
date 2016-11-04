@@ -16,6 +16,8 @@ func NewThrottleTicker(ratePerSec int) *ThrottleTicker {
 		C: make(chan bool, 128),
 	}
 
+	t.Start()
+
 	t.Go(func(exit chan bool) {
 		delimeter := ratePerSec
 		chunk := 1

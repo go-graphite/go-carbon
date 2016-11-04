@@ -12,6 +12,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func makeRecvFromChan(ch chan *points.Points) func(chan bool) *points.Points {
+	return func(abort chan bool) *points.Points {
+		select {
+		case <-abort:
+			return nil
+		case p := <-ch:
+			return p
+		}
+		return nil
+	}
+}
+
 func TestGracefullyStop(t *testing.T) {
 	assert := assert.New(t)
 
@@ -19,7 +31,7 @@ func TestGracefullyStop(t *testing.T) {
 		ch := make(chan *points.Points, 1000)
 
 		qa.Root(t, func(root string) {
-			p := NewWhisper(root, nil, nil, ch, nil)
+			p := NewWhisper(root, nil, nil, makeRecvFromChan(ch))
 			p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 			p.SetWorkers(workers)
 
@@ -80,7 +92,7 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 			qa.Root(t, func(root string) {
 
 				ch := make(chan *points.Points, 10)
-				p := NewWhisper(root, nil, nil, ch, nil)
+				p := NewWhisper(root, nil, nil, makeRecvFromChan(ch))
 				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 				p.SetWorkers(workers)
 

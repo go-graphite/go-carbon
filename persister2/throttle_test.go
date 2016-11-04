@@ -9,8 +9,6 @@ import (
 )
 
 func doTestThrottleTicker(perSecond int) (bw int) {
-	timestamp := time.Now().Unix()
-
 	// start := time.Now()
 	wait := time.After(time.Second)
 
@@ -32,7 +30,7 @@ LOOP:
 }
 
 func TestThrottleChan(t *testing.T) {
-	perSecondTable := []int{1, 10, 100, 1000, 10000, 100000, 200000, 400000}
+	perSecondTable := []int{100, 1000, 10000, 100000, 200000, 400000}
 
 	for _, perSecond := range perSecondTable {
 		bw := doTestThrottleTicker(perSecond)
