@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/Sirupsen/logrus"
@@ -12,6 +13,8 @@ import (
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
+
+const storeMutexCount = 2048
 
 type StoreFunc func(p *Whisper, values *points.Points)
 
@@ -28,6 +31,7 @@ type Whisper struct {
 	created             uint32 // counter
 	sparse              bool
 	maxUpdatesPerSecond int
+	storeMutex          [storeMutexCount]sync.Mutex
 	mockStore           func() (StoreFunc, func())
 }
 
@@ -67,7 +71,23 @@ func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
 	p.mockStore = fn
 }
 
+func fnv32(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime32 = uint32(16777619)
+	for i := 0; i < len(key); i++ {
+		hash *= prime32
+		hash ^= uint32(key[i])
+	}
+	return hash
+}
+
 func store(p *Whisper, values *points.Points) {
+	// avoid concurrent store same metric
+	// @TODO: may be flock?
+	mutexIndex := fnv32(values.Metric) % storeMutexCount
+	p.storeMutex[mutexIndex].Lock()
+	defer p.storeMutex[mutexIndex].Unlock()
+
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := whisper.Open(path)
