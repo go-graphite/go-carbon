@@ -57,6 +57,27 @@ func OutFunc(out func(*points.Points)) Option {
 	}
 }
 
+// BufferSize creates option for New contructor
+func BufferSize(size int) Option {
+	return func(r Receiver) error {
+		if t, ok := r.(*TCP); ok {
+			if size == 0 {
+				t.buffer = nil
+			} else {
+				t.buffer = make(chan *points.Points, size)
+			}
+		}
+		if t, ok := r.(*UDP); ok {
+			if size == 0 {
+				t.buffer = nil
+			} else {
+				t.buffer = make(chan *points.Points, size)
+			}
+		}
+		return nil
+	}
+}
+
 // Name creates option for New contructor
 func Name(name string) Option {
 	return func(r Receiver) error {

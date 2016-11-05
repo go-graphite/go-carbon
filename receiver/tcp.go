@@ -27,6 +27,7 @@ type TCP struct {
 	active               int32 // counter
 	listener             *net.TCPListener
 	isPickle             bool
+	buffer               chan *points.Points
 }
 
 // Name returns receiver name (for store internal metrics)
@@ -177,6 +178,25 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 		handler := rcv.HandleConnection
 		if rcv.isPickle {
 			handler = rcv.handlePickle
+		}
+
+		if rcv.buffer != nil {
+			originalOut := rcv.out
+
+			rcv.Go(func(exit chan bool) {
+				for {
+					select {
+					case <-exit:
+						return
+					case p := <-rcv.buffer:
+						originalOut(p)
+					}
+				}
+			})
+
+			rcv.out = func(p *points.Points) {
+				rcv.buffer <- p
+			}
 		}
 
 		rcv.Go(func(exit chan bool) {
