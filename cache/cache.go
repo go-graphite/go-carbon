@@ -6,6 +6,7 @@ Based on https://github.com/orcaman/concurrent-map
 
 import (
 	"fmt"
+	"io"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,9 @@ type Cache struct {
 	writeStrategy WriteStrategy
 
 	writeoutQueue *WriteoutQueue
+
+	xlog      io.Writer
+	xlogMutex sync.RWMutex
 
 	stat struct {
 		size                int32  // changing via atomic
@@ -153,8 +157,22 @@ func (c *Cache) Size() int32 {
 	return atomic.LoadInt32(&c.stat.size)
 }
 
+func (c *Cache) DivertToXlog(w io.Writer) {
+	c.xlogMutex.Lock()
+	c.xlog = w
+	c.xlogMutex.Unlock()
+}
+
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
+	c.xlogMutex.RLock()
+	xlog := c.xlog
+	c.xlogMutex.RUnlock()
+
+	if xlog != nil {
+		p.WriteTo(xlog)
+	}
+
 	// Get map shard.
 	count := len(p.Data)
 
