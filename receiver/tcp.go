@@ -159,6 +159,10 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	errors := atomic.LoadUint32(&rcv.errors)
 	atomic.AddUint32(&rcv.errors, -errors)
 	send("errors", float64(errors))
+
+	if rcv.buffer != nil {
+		send("bufferLen", float64(len(rcv.buffer)))
+	}
 }
 
 // Listen bind port. Receive messages and send to out channel
