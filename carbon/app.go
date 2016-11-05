@@ -248,6 +248,7 @@ func (app *App) Start() (err error) {
 			"udp://"+conf.Udp.Listen,
 			receiver.OutFunc(core.Add),
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
+			receiver.BufferSize(conf.Udp.BufferSize),
 		)
 
 		if err != nil {
@@ -261,6 +262,7 @@ func (app *App) Start() (err error) {
 		app.TCP, err = receiver.New(
 			"tcp://"+conf.Tcp.Listen,
 			receiver.OutFunc(core.Add),
+			receiver.BufferSize(conf.Tcp.BufferSize),
 		)
 
 		if err != nil {
@@ -275,6 +277,7 @@ func (app *App) Start() (err error) {
 			"pickle://"+conf.Pickle.Listen,
 			receiver.OutFunc(core.Add),
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
+			receiver.BufferSize(conf.Pickle.BufferSize),
 		)
 
 		if err != nil {
