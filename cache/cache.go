@@ -163,6 +163,19 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 	c.xlogMutex.Unlock()
 }
 
+func (c *Cache) Dump(w io.Writer) {
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+
+		for _, p := range shard.items {
+			p.WriteTo(w)
+		}
+
+		shard.Unlock()
+	}
+}
+
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
 	c.xlogMutex.RLock()
