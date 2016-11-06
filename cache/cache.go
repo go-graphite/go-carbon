@@ -163,17 +163,22 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 	c.xlogMutex.Unlock()
 }
 
-func (c *Cache) Dump(w io.Writer) {
+func (c *Cache) Dump(w io.Writer) error {
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
 		shard.Lock()
 
 		for _, p := range shard.items {
-			p.WriteTo(w)
+			if _, err := p.WriteTo(w); err != nil {
+				return err
+			}
+
 		}
 
 		shard.Unlock()
 	}
+
+	return nil
 }
 
 // Sets the given value under the specified key.
