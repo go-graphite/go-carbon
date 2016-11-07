@@ -106,7 +106,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
 
-	helper.SendAndZeroIfNotUpdatedUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
+	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
 
 	queueWriteoutTimeMs := atomic.LoadUint32(&c.stat.queueWriteoutTimeMs)
 	atomic.CompareAndSwapUint32(&c.stat.queueWriteoutTimeMs, queueWriteoutTimeMs, 0)
