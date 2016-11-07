@@ -13,7 +13,7 @@ type ThrottleTicker struct {
 
 func NewThrottleTicker(ratePerSec int) *ThrottleTicker {
 	t := &ThrottleTicker{
-		C: make(chan bool, 128),
+		C: make(chan bool, ratePerSec),
 	}
 
 	t.Start()
