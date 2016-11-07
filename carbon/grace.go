@@ -9,12 +9,29 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/points"
 )
+
+type SyncWriter struct {
+	sync.Mutex
+	w *bufio.Writer
+}
+
+func (s *SyncWriter) Write(p []byte) (n int, err error) {
+	s.Lock()
+	n, err = s.w.Write(p)
+	s.Unlock()
+	return
+}
+
+func (s *SyncWriter) Flush() error {
+	return s.w.Flush()
+}
 
 // DumpStop implements gracefully stop:
 // * Start writing all new data to xlogs
@@ -58,7 +75,7 @@ func (app *App) DumpStop() error {
 	if err != nil {
 		return err
 	}
-	xlogWriter := bufio.NewWriterSize(xlog, 1048576) // 1Mb
+	xlogWriter := &SyncWriter{w: bufio.NewWriterSize(xlog, 1048576)} // 1Mb
 
 	app.Cache.DivertToXlog(xlogWriter)
 
