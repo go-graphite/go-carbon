@@ -2,7 +2,9 @@ package cache
 
 import (
 	"sync"
+	"time"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -22,17 +24,24 @@ func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 		cache: cache,
 		queue: nil,
 	}
-	q.rebuild = q.makeRebuildCallback()
+	q.rebuild = q.makeRebuildCallback(time.Time{})
 	return q
 }
 
-func (q *WriteoutQueue) makeRebuildCallback() func() chan bool {
+func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime time.Time) func() chan bool {
 	var nextRebuildOnce sync.Once
 	nextRebuildComplete := make(chan bool)
 
 	nextRebuild := func() chan bool {
 		// next rebuild
 		nextRebuildOnce.Do(func() {
+			now := time.Now()
+			logrus.Debugf("nextRebuildOnce.Do: %#v %#v", now.String(), nextRebuildTime.String())
+			if now.Before(nextRebuildTime) {
+				sleepTime := nextRebuildTime.Sub(now)
+				logrus.Debugf("sleep %s before rebuild", sleepTime.String())
+				time.Sleep(sleepTime)
+			}
 			q.update()
 			close(nextRebuildComplete)
 		})
@@ -48,7 +57,7 @@ func (q *WriteoutQueue) update() {
 
 	q.Lock()
 	q.queue = queue
-	q.rebuild = q.makeRebuildCallback()
+	q.rebuild = q.makeRebuildCallback(time.Now().Add(100 * time.Millisecond))
 	q.Unlock()
 }
 
