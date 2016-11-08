@@ -28,7 +28,7 @@ func (c *Cache) makeQueue() chan *points.Points {
 
 	if !c.queueLastBuild.IsZero() {
 		// @TODO: may be max (with atomic cas)
-		atomic.StoreUint32(&c.stat.queueWriteoutTimeMs, uint32(time.Since(c.queueLastBuild)/time.Millisecond))
+		atomic.StoreUint32(&c.stat.queueWriteoutTime, uint32(time.Since(c.queueLastBuild)/time.Second))
 	}
 
 	start := time.Now()

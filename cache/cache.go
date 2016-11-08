@@ -43,12 +43,12 @@ type Cache struct {
 	xlogMutex sync.RWMutex
 
 	stat struct {
-		size                int32  // changing via atomic
-		queueBuildCnt       uint32 // number of times writeout queue was built
-		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
-		queueWriteoutTimeMs uint32 // in milliseconds
-		overflowCnt         uint32 // drop packages if cache full
-		queryCnt            uint32 // number of queries
+		size              int32  // changing via atomic
+		queueBuildCnt     uint32 // number of times writeout queue was built
+		queueBuildTimeMs  uint32 // time spent building writeout queue in milliseconds
+		queueWriteoutTime uint32 // in milliseconds
+		overflowCnt       uint32 // drop packages if cache full
+		queryCnt          uint32 // number of queries
 	}
 }
 
@@ -108,9 +108,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 
 	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
 
-	queueWriteoutTimeMs := atomic.LoadUint32(&c.stat.queueWriteoutTimeMs)
-	atomic.CompareAndSwapUint32(&c.stat.queueWriteoutTimeMs, queueWriteoutTimeMs, 0)
-	send("queueWriteoutTime", float64(queueWriteoutTimeMs)/1000.0)
+	helper.SendUint32("queueWriteoutTime", &c.stat.queueWriteoutTime, send)
 }
 
 // hash function

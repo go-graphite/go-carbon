@@ -15,6 +15,11 @@ func SendUint64(metric string, v *uint64, send StatCallback) {
 	send(metric, float64(res))
 }
 
+func SendUint32(metric string, v *uint32, send StatCallback) {
+	res := atomic.LoadUint32(v)
+	send(metric, float64(res))
+}
+
 func SendAndSubstractUint32(metric string, v *uint32, send StatCallback) {
 	res := atomic.LoadUint32(v)
 	atomic.AddUint32(v, ^uint32(res-1))
