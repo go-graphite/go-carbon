@@ -14,7 +14,7 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
-const storeMutexCount = 2048
+const storeMutexCount = 32768
 
 type StoreFunc func(p *Whisper, values *points.Points)
 
