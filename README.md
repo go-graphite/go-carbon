@@ -14,8 +14,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 * Logging with rotation (reopen log by HUP signal or inotify event)
 * Many persister workers (using many cpu cores)
 * Run as daemon
-* Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
-* Alternative grace stop on `USR2` signal (config `dump` section): start write new data to file, stop persister, dump cache to file, stop all (and restore from files after next start)
+* Optional dump/restore restart on `USR2` signal (config `dump` section): stop persister, start write new data to file, dump cache to file, stop all (and restore from files after next start)
 * Reload persister config (whisper section of main config, storage-schemas.conf and storage-aggregation.conf) on HUP signal
 
 ## Performance
@@ -98,7 +97,6 @@ enabled = true
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000
 # Capacity of queue between receivers and cache
-input-buffer = 51200
 # Strategy to persist metrics. Values: "max","sorted","noop"
 #   "max" - write metrics with most unwritten datapoints first
 #   "sorted" - sort by timestamp of first unwritten datapoint.
@@ -111,24 +109,28 @@ listen = ":2003"
 enabled = true
 # Enable optional logging of incomplete messages (chunked by MTU)
 log-incomplete = false
+# Optional internal queue between receiver and cache
+buffer-size = 0
 
 [tcp]
 listen = ":2003"
 enabled = true
+# Optional internal queue between receiver and cache
+buffer-size = 0
 
 [pickle]
 listen = ":2004"
 enabled = true
 # Limit message size for prevent memory overflow
 max-message-size = 67108864
+# Optional internal queue between receiver and cache
+buffer-size = 0
 
 [carbonlink]
 listen = "127.0.0.1:7002"
 enabled = true
 # Close inactive connections after "read-timeout"
 read-timeout = "30s"
-# Return empty result if cache not reply
-query-timeout = "100ms"
 
 [dump]
 # Enable dump/restore function on USR2 signal
@@ -179,6 +181,12 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
+##### master
+* Completely new internal architecture
+* Removed flush to whisper and stop on `USR2` signal. Use dump/restore instead
+* Removed global queue (channel) between receivers and cache, added optional per-receiver queues
+* Built-in [carbonserver](https://github.com/grobian/carbonserver) (thanks [Vladimir Smirnov](https://github.com/Civil))
+
 ##### version 0.8.1
 * Bug fix: The synchronous config reload (HUP signal) and launch of the internal collecting statistics procedure (every "metric-interval") could cause deadlock (thanks [Maxim Ivanov](https://github.com/redbaron))
 
