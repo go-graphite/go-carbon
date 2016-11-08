@@ -207,8 +207,7 @@ func (app *App) startPersister() {
 			app.Config.Whisper.DataDir,
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
-			app.Cache.Out(),
-			app.Cache.Confirm(),
+			app.Cache.WriteoutQueue().Get,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
@@ -235,9 +234,7 @@ func (app *App) Start() (err error) {
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
-	core.SetInputCapacity(conf.Cache.InputBuffer)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
-	core.Start()
 
 	app.Cache = core
 
@@ -249,8 +246,9 @@ func (app *App) Start() (err error) {
 	if conf.Udp.Enabled {
 		app.UDP, err = receiver.New(
 			"udp://"+conf.Udp.Listen,
-			receiver.OutChan(core.In()),
+			receiver.OutFunc(core.Add),
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
+			receiver.BufferSize(conf.Udp.BufferSize),
 		)
 
 		if err != nil {
@@ -263,7 +261,8 @@ func (app *App) Start() (err error) {
 	if conf.Tcp.Enabled {
 		app.TCP, err = receiver.New(
 			"tcp://"+conf.Tcp.Listen,
-			receiver.OutChan(core.In()),
+			receiver.OutFunc(core.Add),
+			receiver.BufferSize(conf.Tcp.BufferSize),
 		)
 
 		if err != nil {
@@ -276,8 +275,9 @@ func (app *App) Start() (err error) {
 	if conf.Pickle.Enabled {
 		app.Pickle, err = receiver.New(
 			"pickle://"+conf.Pickle.Listen,
-			receiver.OutChan(core.In()),
+			receiver.OutFunc(core.Add),
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
+			receiver.BufferSize(conf.Pickle.BufferSize),
 		)
 
 		if err != nil {
@@ -292,14 +292,14 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonserver := carbonserver.NewCarbonserverListener(core.Query())
+		carbonserver := carbonserver.NewCarbonserverListener(core)
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
-		carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
 			return
@@ -317,9 +317,9 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonlink := cache.NewCarbonlinkListener(core.Query())
+		carbonlink := cache.NewCarbonlinkListener(core)
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
-		carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
+		// carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 
 		if err = carbonlink.Listen(linkAddr); err != nil {
 			return
@@ -331,7 +331,7 @@ func (app *App) Start() (err error) {
 
 	/* RESTORE start */
 	if conf.Dump.Enabled {
-		go app.Restore(core.In(), conf.Dump.Path, conf.Dump.RestorePerSecond)
+		go app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
 	/* RESTORE end */
 

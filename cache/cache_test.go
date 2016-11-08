@@ -24,7 +24,8 @@ func TestCache(t *testing.T) {
 		t.FailNow()
 	}
 
-	values := c.Pop()
+	q := c.WriteoutQueue()
+	values := q.Get(nil)
 
 	if values.Metric != "hello.world" {
 		t.FailNow()
@@ -46,7 +47,6 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 		return cache
 	}
 	cache = New()
-	cache.SetOutputChanSize(0)
 
 	for i := 0; i < metricsCount; i++ {
 		m := fmt.Sprintf("%d.metric.name.for.bench.test.%d", rand.Intn(metricsCount), i)
@@ -57,7 +57,7 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 		}
 		cache.Add(p)
 	}
-	cache.updateQueue() // warmup
+	cache.makeQueue() // warmup
 	return cache
 }
 
@@ -71,14 +71,7 @@ func benchmarkStrategy(b *testing.B, strategy string) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		cache.updateQueue()
-		for {
-			p := cache.getNext()
-			gp = p // assign to package level var to avoid compiler optimizing us out
-			if p == nil {
-				break
-			}
-		}
+		cache.makeQueue()
 	}
 }
 

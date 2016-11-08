@@ -19,8 +19,6 @@ func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.SetOutputChanSize(0)
-	cache.Start()
 
 	msg1 := points.OnePoint(
 		"carbon.agents.carbon_agent_server.cache.size",
@@ -40,21 +38,16 @@ func TestCarbonlink(t *testing.T) {
 		1422795966,
 	)
 
-	cache.In() <- msg1
-	cache.In() <- msg2
-	cache.In() <- msg3
+	cache.Add(msg1)
+	cache.Add(msg2)
+	cache.Add(msg3)
 
 	defer cache.Stop()
-	for {
-		if len(cache.In()) == 0 {
-			break
-		}
-	}
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink := NewCarbonlinkListener(cache)
 	defer carbonlink.Stop()
 
 	assert.NoError(carbonlink.Listen(addr))
@@ -126,13 +119,7 @@ func TestCarbonlink(t *testing.T) {
 	/* MESSAGE 3 */
 	/* Remove carbon.agents.carbon_agent_server.param.size from cache and request again */
 	conn, cleanup = NewClient()
-	for {
-		c := <-cache.Out()
-		cache.Confirm() <- c
-		if c.Metric == "carbon.agents.carbon_agent_server.param.size" {
-			break
-		}
-	}
+	cache.Pop("carbon.agents.carbon_agent_server.param.size")
 
 	_, err = conn.Write([]byte(sampleCacheQuery2))
 	assert.NoError(err)
@@ -179,13 +166,11 @@ func TestCarbonlinkErrors(t *testing.T) {
 	assert := assert.New(t)
 
 	cache := New()
-	cache.SetOutputChanSize(0)
-	cache.Start()
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache.Query())
+	carbonlink := NewCarbonlinkListener(cache)
 	listenerTimeout := 10 * time.Millisecond
 	carbonlink.SetReadTimeout(listenerTimeout)
 	defer carbonlink.Stop()
@@ -307,11 +292,9 @@ func BenchmarkCarbonLinkPickleParse(b *testing.B) {
 func BenchmarkCarbonLinkPackReply(b *testing.B) {
 	p := points.OnePoint("carbon.agents.carbon_agent_server.param.size", 15, 1422795966).Add(15, 9000000).Add(16, 9000000)
 
-	q := Query{CacheData: p}
-
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			packReply(&q)
+			packReply(p.Data)
 		}
 	})
 }

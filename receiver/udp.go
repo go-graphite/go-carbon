@@ -24,6 +24,7 @@ type UDP struct {
 	errors             uint32
 	logIncomplete      bool
 	conn               *net.UDPConn
+	buffer             chan *points.Points
 }
 
 // Name returns receiver name (for store internal metrics)
@@ -132,6 +133,10 @@ func (rcv *UDP) Stat(send helper.StatCallback) {
 	errors := atomic.LoadUint32(&rcv.errors)
 	atomic.AddUint32(&rcv.errors, -errors)
 	send("errors", float64(errors))
+
+	if rcv.buffer != nil {
+		send("bufferLen", float64(len(rcv.buffer)))
+	}
 }
 
 func (rcv *UDP) receiveWorker(exit chan bool) {
@@ -209,6 +214,25 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 			<-exit
 			rcv.conn.Close()
 		})
+
+		if rcv.buffer != nil {
+			originalOut := rcv.out
+
+			rcv.Go(func(exit chan bool) {
+				for {
+					select {
+					case <-exit:
+						return
+					case p := <-rcv.buffer:
+						originalOut(p)
+					}
+				}
+			})
+
+			rcv.out = func(p *points.Points) {
+				rcv.buffer <- p
+			}
+		}
 
 		rcv.Go(rcv.receiveWorker)
 

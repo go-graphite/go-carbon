@@ -69,17 +69,20 @@ type udpConfig struct {
 	Listen        string `toml:"listen"`
 	Enabled       bool   `toml:"enabled"`
 	LogIncomplete bool   `toml:"log-incomplete"`
+	BufferSize    int    `toml:"buffer-size"`
 }
 
 type tcpConfig struct {
-	Listen  string `toml:"listen"`
-	Enabled bool   `toml:"enabled"`
+	Listen     string `toml:"listen"`
+	Enabled    bool   `toml:"enabled"`
+	BufferSize int    `toml:"buffer-size"`
 }
 
 type pickleConfig struct {
 	Listen         string `toml:"listen"`
 	MaxMessageSize int    `toml:"max-message-size"`
 	Enabled        bool   `toml:"enabled"`
+	BufferSize     int    `toml:"buffer-size"`
 }
 
 type carbonlinkConfig struct {

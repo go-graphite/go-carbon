@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -53,6 +54,18 @@ func (p *Points) Copy() *Points {
 		Metric: p.Metric,
 		Data:   p.Data,
 	}
+}
+
+func (p *Points) WriteTo(w io.Writer) (n int64, err error) {
+	var c int
+	for _, d := range p.Data { // every metric point
+		c, err = w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+		n += int64(c)
+		if err != nil {
+			return
+		}
+	}
+	return
 }
 
 // ParseText parse text protocol Point

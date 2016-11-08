@@ -1,20 +1,20 @@
 package persister
 
 import (
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/lomik/go-whisper"
+	whisper "github.com/lomik/go-whisper"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
+
+const storeMutexCount = 32768
 
 type StoreFunc func(p *Whisper, values *points.Points)
 
@@ -23,8 +23,7 @@ type Whisper struct {
 	helper.Stoppable
 	updateOperations    uint32
 	committedPoints     uint32
-	in                  chan *points.Points
-	confirm             chan *points.Points
+	recv                func(chan bool) *points.Points
 	schemas             WhisperSchemas
 	aggregation         *WhisperAggregation
 	workersCount        int
@@ -32,14 +31,19 @@ type Whisper struct {
 	created             uint32 // counter
 	sparse              bool
 	maxUpdatesPerSecond int
+	throttleTicker      *ThrottleTicker
+	storeMutex          [storeMutexCount]sync.Mutex
 	mockStore           func() (StoreFunc, func())
+	// blockThrottleNs        uint64 // sum ns counter
+	// blockQueueGetNs        uint64 // sum ns counter
+	// blockAvoidConcurrentNs uint64 // sum ns counter
+	// blockUpdateManyNs      uint64 // sum ns counter
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points, confirm chan *points.Points) *Whisper {
+func NewWhisper(rootPath string, schemas WhisperSchemas, aggregation *WhisperAggregation, recv func(chan bool) *points.Points) *Whisper {
 	return &Whisper{
-		in:                  in,
-		confirm:             confirm,
+		recv:                recv,
 		schemas:             schemas,
 		aggregation:         aggregation,
 		workersCount:        1,
@@ -60,7 +64,11 @@ func (p *Whisper) GetMaxUpdatesPerSecond() int {
 
 // SetWorkers count
 func (p *Whisper) SetWorkers(count int) {
-	p.workersCount = count
+	if count >= 1 {
+		p.workersCount = count
+	} else {
+		p.workersCount = 1
+	}
 }
 
 // SetSparse creation
@@ -72,12 +80,26 @@ func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
 	p.mockStore = fn
 }
 
-func store(p *Whisper, values *points.Points) {
-	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
-
-	if p.confirm != nil {
-		defer func() { p.confirm <- values }()
+func fnv32(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime32 = uint32(16777619)
+	for i := 0; i < len(key); i++ {
+		hash *= prime32
+		hash ^= uint32(key[i])
 	}
+	return hash
+}
+
+func store(p *Whisper, values *points.Points) {
+	// avoid concurrent store same metric
+	// @TODO: may be flock?
+	// start := time.Now()
+	mutexIndex := fnv32(values.Metric) % storeMutexCount
+	p.storeMutex[mutexIndex].Lock()
+	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
+	defer p.storeMutex[mutexIndex].Unlock()
+
+	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := whisper.Open(path)
 	if err != nil {
@@ -138,10 +160,13 @@ func store(p *Whisper, values *points.Points) {
 			logrus.Errorf("[persister] UpdateMany %s recovered: %s", path, r)
 		}
 	}()
+
+	// start = time.Now()
 	w.UpdateMany(points)
+	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 }
 
-func (p *Whisper) worker(in chan *points.Points, exit chan bool) {
+func (p *Whisper) worker(recv func(chan bool) *points.Points, exit chan bool) {
 	storeFunc := store
 	var doneCb func()
 	if p.mockStore != nil {
@@ -150,40 +175,26 @@ func (p *Whisper) worker(in chan *points.Points, exit chan bool) {
 
 LOOP:
 	for {
+		// start := time.Now()
 		select {
+		case <-p.throttleTicker.C:
+			// atomic.AddUint64(&p.blockThrottleNs, uint64(time.Since(start).Nanoseconds()))
+			// pass
 		case <-exit:
-			break LOOP
-		case values, ok := <-in:
-			if !ok {
-				break LOOP
-			}
-			storeFunc(p, values)
-			if doneCb != nil {
-				doneCb()
-			}
+			return
 		}
-	}
-}
 
-func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points), exit chan bool) {
-	workers := uint32(len(out))
-
-LOOP:
-	for {
-		select {
-		case <-exit:
+		// start = time.Now()
+		points := recv(exit)
+		// atomic.AddUint64(&p.blockQueueGetNs, uint64(time.Since(start).Nanoseconds()))
+		if points == nil {
+			// exit closed
 			break LOOP
-		case values, ok := <-in:
-			if !ok {
-				break LOOP
-			}
-			index := crc32.ChecksumIEEE([]byte(values.Metric)) % workers
-			out[index] <- values
 		}
-	}
-
-	for _, ch := range out {
-		close(ch)
+		storeFunc(p, points)
+		if doneCb != nil {
+			doneCb()
+		}
 	}
 }
 
@@ -207,105 +218,33 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 
-}
+	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
+	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
+	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)
+	// helper.SendAndSubstractUint64("blockUpdateManyNs", &p.blockUpdateManyNs, send)
 
-func ThrottleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
-	out := make(chan *points.Points, cap(in))
-
-	delimeter := ratePerSec
-	chunk := 1
-
-	if ratePerSec > 1000 {
-		minRemainder := ratePerSec
-
-		for i := 100; i < 1000; i++ {
-			if ratePerSec%i < minRemainder {
-				delimeter = i
-				minRemainder = ratePerSec % delimeter
-			}
-		}
-
-		chunk = ratePerSec / delimeter
-	}
-
-	step := time.Duration(1e9/delimeter) * time.Nanosecond
-
-	var onceClose sync.Once
-
-	throttleWorker := func() {
-		var p *points.Points
-		var ok bool
-
-		defer onceClose.Do(func() { close(out) })
-
-		// start flight
-		throttleTicker := time.NewTicker(step)
-		defer throttleTicker.Stop()
-
-	LOOP:
-		for {
-			select {
-			case <-throttleTicker.C:
-				for i := 0; i < chunk; i++ {
-					select {
-					case p, ok = <-in:
-						if !ok {
-							break LOOP
-						}
-					case <-exit:
-						break LOOP
-					}
-					out <- p
-				}
-			case <-exit:
-				break LOOP
-			}
-		}
-	}
-
-	go throttleWorker()
-
-	return out
 }
 
 // Start worker
 func (p *Whisper) Start() error {
-
 	return p.StartFunc(func() error {
-
 		p.WithExit(func(exitChan chan bool) {
+			p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
-			inChan := p.in
-
-			readerExit := exitChan
-
-			if p.maxUpdatesPerSecond > 0 {
-				inChan = ThrottleChan(inChan, p.maxUpdatesPerSecond, exitChan)
-				readerExit = nil // read all before channel is closed
-			}
-
-			if p.workersCount <= 1 { // solo worker
-				p.Go(func(e chan bool) {
-					p.worker(inChan, readerExit)
-				})
-			} else {
-				var channels [](chan *points.Points)
-
-				for i := 0; i < p.workersCount; i++ {
-					ch := make(chan *points.Points, 32)
-					channels = append(channels, ch)
-					p.Go(func(e chan bool) {
-						p.worker(ch, nil)
-					})
-				}
-
-				p.Go(func(e chan bool) {
-					p.shuffler(inChan, channels, readerExit)
+			for i := 0; i < p.workersCount; i++ {
+				p.Go(func(exit chan bool) {
+					p.worker(p.recv, exit)
 				})
 			}
 
 		})
 
 		return nil
+	})
+}
+
+func (p *Whisper) Stop() {
+	p.StopFunc(func() {
+		p.throttleTicker.Stop()
 	})
 }

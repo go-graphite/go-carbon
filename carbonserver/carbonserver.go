@@ -36,7 +36,7 @@ import (
 	"github.com/NYTimes/gziphandler"
 	logger "github.com/Sirupsen/logrus"
 	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
-	"github.com/dgryski/go-trigram"
+	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
 	"github.com/gogo/protobuf/proto"
 	pickle "github.com/kisielk/og-rek"
@@ -63,9 +63,8 @@ type metricStruct struct {
 
 type CarbonserverListener struct {
 	helper.Stoppable
-	queryChan         chan *cache.Query
+	cache             *cache.Cache
 	readTimeout       time.Duration
-	queryTimeout      time.Duration
 	whisperData       string
 	buckets           int
 	maxGlobs          int
@@ -75,8 +74,8 @@ type CarbonserverListener struct {
 
 	fileIdx atomic.Value
 
-	metrics metricStruct
-	exitChan          chan struct{}
+	metrics     metricStruct
+	exitChan    chan struct{}
 	timeBuckets []uint64
 }
 
@@ -85,11 +84,11 @@ type fileIndex struct {
 	files []string
 }
 
-func NewCarbonserverListener(queryChan chan *cache.Query) *CarbonserverListener {
+func NewCarbonserverListener(cache *cache.Cache) *CarbonserverListener {
 	return &CarbonserverListener{
 		// Config variables
 		metricsAsCounters: false,
-		queryChan:         queryChan,
+		cache:             cache,
 	}
 }
 
@@ -107,9 +106,6 @@ func (listener *CarbonserverListener) SetScanFrequency(scanFrequency time.Durati
 }
 func (listener *CarbonserverListener) SetReadTimeout(readTimeout time.Duration) {
 	listener.readTimeout = readTimeout
-}
-func (listener *CarbonserverListener) SetQueryTimeout(queryTimeout time.Duration) {
-	listener.queryTimeout = queryTimeout
 }
 func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters bool) {
 	listener.metricsAsCounters = metricsAsCounters
@@ -476,8 +472,6 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		cacheGotEverything := false
 
 		// Query cache
-		query := cache.NewQuery(metric)
-		listener.queryChan <- query
 
 		// We need to obtain the metadata from whisper file anyway.
 		path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
@@ -509,44 +503,27 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 
 		cachedValues := make([]float64, 0, (untilTime-fromTime)/int(step))
 
+		var cacheData []points.Point
+
 		if step != bestStep {
 			logger.Warnln("[carbonserver] Cache won't be used because we are requesting data not from the best archive (not supported yet)")
-			query = nil
 		} else {
-			select {
-			case <-query.Wait:
-				// pass
-			case <-time.After(listener.queryTimeout):
-				logger.Infof("[carbonserver] Cache no reply (%s timeout)", listener.queryTimeout)
-				atomic.AddUint64(&listener.metrics.CacheTimeouts, 1)
-				query = nil
-			}
+			// query cache
+			cacheData = listener.cache.Get(metric)
 		}
 
-		if query != nil {
-			if query.InFlightData != nil {
-				for _, points := range query.InFlightData {
-					tmpValues, cacheFetchedFromTime, cacheFetchedUntilTime := fetchCachedData(points.Data, fetchFromTime, fetchUntilTime, step)
-					if cacheFromTime == 0 || cacheFromTime > cacheFetchedFromTime {
-						cacheFromTime = cacheFetchedFromTime
-					}
-					if cacheUntilTime == 0 || cacheUntilTime < cacheFetchedUntilTime {
-						cacheUntilTime = cacheFetchedFromTime
-					}
-					cachedValues = append(cachedValues, tmpValues...)
-				}
-			}
-			if query.CacheData != nil {
-				tmpValues, cacheFetchedFromTime, cacheFetchedUntilTime := fetchCachedData(query.CacheData.Data, fetchFromTime, fetchUntilTime, step)
-				if cacheFromTime == 0 || cacheFromTime > cacheFetchedFromTime {
-					cacheFromTime = cacheFetchedFromTime
-				}
-				if cacheUntilTime == 0 || cacheUntilTime < cacheFetchedUntilTime {
-					cacheUntilTime = cacheFetchedFromTime
-				}
+		if cacheData != nil {
 
-				cachedValues = append(cachedValues, tmpValues...)
+			tmpValues, cacheFetchedFromTime, cacheFetchedUntilTime := fetchCachedData(cacheData, fetchFromTime, fetchUntilTime, step)
+			if cacheFromTime == 0 || cacheFromTime > cacheFetchedFromTime {
+				cacheFromTime = cacheFetchedFromTime
 			}
+			if cacheUntilTime == 0 || cacheUntilTime < cacheFetchedUntilTime {
+				cacheUntilTime = cacheFetchedFromTime
+			}
+
+			cachedValues = append(cachedValues, tmpValues...)
+
 			if cacheFromTime != 0 {
 				atomic.AddUint64(&listener.metrics.CacheHits, 1)
 
