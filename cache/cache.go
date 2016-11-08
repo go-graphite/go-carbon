@@ -39,8 +39,7 @@ type Cache struct {
 
 	writeoutQueue *WriteoutQueue
 
-	xlog      io.Writer
-	xlogMutex sync.RWMutex
+	xlog atomic.Value // io.Writer
 
 	stat struct {
 		size              int32  // changing via atomic
@@ -159,9 +158,7 @@ func (c *Cache) Size() int32 {
 }
 
 func (c *Cache) DivertToXlog(w io.Writer) {
-	c.xlogMutex.Lock()
-	c.xlog = w
-	c.xlogMutex.Unlock()
+	c.xlog.Store(w)
 }
 
 func (c *Cache) Dump(w io.Writer) error {
@@ -184,12 +181,10 @@ func (c *Cache) Dump(w io.Writer) error {
 
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
-	c.xlogMutex.RLock()
-	xlog := c.xlog
-	c.xlogMutex.RUnlock()
+	xlog := c.xlog.Load()
 
 	if xlog != nil {
-		p.WriteTo(xlog)
+		p.WriteTo(xlog.(io.Writer))
 	}
 
 	// Get map shard.
