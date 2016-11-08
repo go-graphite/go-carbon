@@ -24,11 +24,12 @@ func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 func (c *Cache) makeQueue() chan *points.Points {
 	c.Lock()
 	writeStrategy := c.writeStrategy
+	prevBuild := c.queueLastBuild
 	c.Unlock()
 
-	if !c.queueLastBuild.IsZero() {
+	if !prevBuild.IsZero() {
 		// @TODO: may be max (with atomic cas)
-		atomic.StoreUint32(&c.stat.queueWriteoutTime, uint32(time.Since(c.queueLastBuild)/time.Second))
+		atomic.StoreUint32(&c.stat.queueWriteoutTime, uint32(time.Since(prevBuild)/time.Second))
 	}
 
 	start := time.Now()
