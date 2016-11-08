@@ -34,6 +34,10 @@ type Whisper struct {
 	throttleTicker      *ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
 	mockStore           func() (StoreFunc, func())
+	// blockThrottleNs        uint64 // sum ns counter
+	// blockQueueGetNs        uint64 // sum ns counter
+	// blockAvoidConcurrentNs uint64 // sum ns counter
+	// blockUpdateManyNs      uint64 // sum ns counter
 }
 
 // NewWhisper create instance of Whisper
@@ -60,7 +64,11 @@ func (p *Whisper) GetMaxUpdatesPerSecond() int {
 
 // SetWorkers count
 func (p *Whisper) SetWorkers(count int) {
-	p.workersCount = count
+	if count >= 1 {
+		p.workersCount = count
+	} else {
+		p.workersCount = 1
+	}
 }
 
 // SetSparse creation
@@ -85,8 +93,10 @@ func fnv32(key string) uint32 {
 func store(p *Whisper, values *points.Points) {
 	// avoid concurrent store same metric
 	// @TODO: may be flock?
+	// start := time.Now()
 	mutexIndex := fnv32(values.Metric) % storeMutexCount
 	p.storeMutex[mutexIndex].Lock()
+	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
 	defer p.storeMutex[mutexIndex].Unlock()
 
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
@@ -150,7 +160,10 @@ func store(p *Whisper, values *points.Points) {
 			logrus.Errorf("[persister] UpdateMany %s recovered: %s", path, r)
 		}
 	}()
+
+	// start = time.Now()
 	w.UpdateMany(points)
+	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 }
 
 func (p *Whisper) worker(recv func(chan bool) *points.Points, exit chan bool) {
@@ -162,14 +175,18 @@ func (p *Whisper) worker(recv func(chan bool) *points.Points, exit chan bool) {
 
 LOOP:
 	for {
+		// start := time.Now()
 		select {
 		case <-p.throttleTicker.C:
+			// atomic.AddUint64(&p.blockThrottleNs, uint64(time.Since(start).Nanoseconds()))
 			// pass
 		case <-exit:
 			return
 		}
 
+		// start = time.Now()
 		points := recv(exit)
+		// atomic.AddUint64(&p.blockQueueGetNs, uint64(time.Since(start).Nanoseconds()))
 		if points == nil {
 			// exit closed
 			break LOOP
@@ -201,6 +218,11 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 
+	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
+	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
+	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)
+	// helper.SendAndSubstractUint64("blockUpdateManyNs", &p.blockUpdateManyNs, send)
+
 }
 
 // Start worker
@@ -209,9 +231,11 @@ func (p *Whisper) Start() error {
 		p.WithExit(func(exitChan chan bool) {
 			p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
-			p.Go(func(exit chan bool) {
-				p.worker(p.recv, exit)
-			})
+			for i := 0; i < p.workersCount; i++ {
+				p.Go(func(exit chan bool) {
+					p.worker(p.recv, exit)
+				})
+			}
 
 		})
 
