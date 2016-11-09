@@ -72,6 +72,7 @@ type CarbonserverListener struct {
 	helper.Stoppable
 	cache             *cache.Cache
 	readTimeout       time.Duration
+	writeTimeout      time.Duration
 	whisperData       string
 	buckets           int
 	maxGlobs          int
@@ -113,6 +114,9 @@ func (listener *CarbonserverListener) SetScanFrequency(scanFrequency time.Durati
 }
 func (listener *CarbonserverListener) SetReadTimeout(readTimeout time.Duration) {
 	listener.readTimeout = readTimeout
+}
+func (listener *CarbonserverListener) SetWriteTimeout(writeTimeout time.Duration) {
+	listener.writeTimeout = writeTimeout
 }
 func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters bool) {
 	listener.metricsAsCounters = metricsAsCounters
@@ -831,7 +835,13 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		return err
 	}
 
-	go http.Serve(listener.tcpListener, gziphandler.GzipHandler(carbonserverMux))
+	srv := &http.Server{
+		Handler:      gziphandler.GzipHandler(carbonserverMux),
+		ReadTimeout:  listener.readTimeout,
+		WriteTimeout: listener.writeTimeout,
+	}
+
+	go srv.Serve(listener.tcpListener)
 	return nil
 }
 
