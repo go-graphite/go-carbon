@@ -16,7 +16,7 @@ type WriteoutQueue struct {
 	// q := <- queue
 	// p := cache.Pop(q.Metric)
 	queue   chan *points.Points
-	rebuild func() chan bool // return chan waiting for complete
+	rebuild func(abort chan bool) chan bool // return chan waiting for complete
 }
 
 func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
@@ -28,11 +28,11 @@ func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 	return q
 }
 
-func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime time.Time) func() chan bool {
+func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime time.Time) func(chan bool) chan bool {
 	var nextRebuildOnce sync.Once
 	nextRebuildComplete := make(chan bool)
 
-	nextRebuild := func() chan bool {
+	nextRebuild := func(abort chan bool) chan bool {
 		// next rebuild
 		nextRebuildOnce.Do(func() {
 			now := time.Now()
@@ -40,7 +40,13 @@ func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime time.Time) func() ch
 			if now.Before(nextRebuildTime) {
 				sleepTime := nextRebuildTime.Sub(now)
 				logrus.Debugf("sleep %s before rebuild", sleepTime.String())
-				time.Sleep(sleepTime)
+
+				select {
+				case <-time.After(sleepTime):
+					// pass
+				case <-abort:
+					// pass
+				}
 			}
 			q.update()
 			close(nextRebuildComplete)
@@ -61,7 +67,7 @@ func (q *WriteoutQueue) update() {
 	q.Unlock()
 }
 
-func (q *WriteoutQueue) Get(abort chan bool) *points.Points {
+func (q *WriteoutQueue) get(abort chan bool, pop func(key string) (p *points.Points, exists bool)) *points.Points {
 QueueLoop:
 	for {
 		q.RLock()
@@ -74,7 +80,7 @@ QueueLoop:
 			select {
 			case qp := <-queue:
 				// pop from cache
-				if p, exists := q.cache.Pop(qp.Metric); exists {
+				if p, exists := pop(qp.Metric); exists {
 					return p
 				}
 				continue FetchLoop
@@ -83,7 +89,7 @@ QueueLoop:
 			default:
 				// queue is empty, create new
 				select {
-				case <-rebuild():
+				case <-rebuild(abort):
 					// wait for rebuild
 					continue QueueLoop
 				case <-abort:
@@ -92,4 +98,12 @@ QueueLoop:
 			}
 		}
 	}
+}
+
+func (q *WriteoutQueue) Get(abort chan bool) *points.Points {
+	return q.get(abort, q.cache.Pop)
+}
+
+func (q *WriteoutQueue) GetNotConfirmed(abort chan bool) *points.Points {
+	return q.get(abort, q.cache.PopNotConfirmed)
 }
