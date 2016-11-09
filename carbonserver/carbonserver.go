@@ -58,7 +58,6 @@ type metricStruct struct {
 	CachePartialHit         uint64
 	CacheMiss               uint64
 	CacheOnlyHit            uint64
-	CacheTimeout            uint64
 	CacheRequestsTotal      uint64
 	CacheWaitTimeNS         uint64
 	CacheWaitTimeOverheadNS uint64
@@ -773,7 +772,6 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("cache_partial_hit", &listener.metrics.CachePartialHit, send)
 	sender("cache_miss", &listener.metrics.CacheMiss, send)
 	sender("cache_only_hit", &listener.metrics.CacheOnlyHit, send)
-	sender("cache_timeout", &listener.metrics.CacheTimeout, send)
 	sender("cache_wait_time_ns", &listener.metrics.CacheWaitTimeNS, send)
 	sender("cache_wait_time_overhead_ns", &listener.metrics.CacheWaitTimeOverheadNS, send)
 	sender("cache_requests", &listener.metrics.CacheRequestsTotal, send)
