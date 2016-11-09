@@ -55,16 +55,17 @@ type metricStruct struct {
 	FindZero                uint64
 	InfoRequests            uint64
 	InfoErrors              uint64
-	CacheHits               uint64
+	CachePartialHit         uint64
 	CacheMiss               uint64
-	CacheFullHits           uint64
-	CacheTimeouts           uint64
-	CacheRequests           uint64
+	CacheOnlyHit            uint64
+	CacheTimeout            uint64
+	CacheRequestsTotal      uint64
 	CacheWaitTimeNS         uint64
 	CacheWaitTimeOverheadNS uint64
 	DiskWaitTimeNS          uint64
 	DiskRequests            uint64
-	PointsFetched           uint64
+	PointsReturned          uint64
+	MetricsReturned         uint64
 }
 
 type CarbonserverListener struct {
@@ -506,6 +507,7 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 			logger.Infof("[carbonserver] Can't find proper archive for the request for metric %q", path)
 			continue
 		}
+		atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 
 		cachedValues := make([]float64, 0)
 		var cacheData []points.Point
@@ -521,7 +523,7 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		}
 
 		if cacheData != nil {
-			atomic.AddUint64(&listener.metrics.CacheRequests, 1)
+			atomic.AddUint64(&listener.metrics.CacheRequestsTotal, 1)
 
 			cachedValues, cacheFromTime, cacheUntilTime = fetchCachedData(cacheData, fetchFromTime, fetchUntilTime, step)
 			logger.Debugf("[carbonserver] fetched cached metric=%v from=%v until=%v", metric, cacheFromTime, cacheUntilTime)
@@ -535,9 +537,9 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 					fetchUntilTime = cacheUntilTime
 					fetchFromTime = cacheFromTime
 					cacheGotEverything = true
-					atomic.AddUint64(&listener.metrics.CacheFullHits, 1)
+					atomic.AddUint64(&listener.metrics.CacheOnlyHit, 1)
 				} else {
-					atomic.AddUint64(&listener.metrics.CacheHits, 1)
+					atomic.AddUint64(&listener.metrics.CachePartialHit, 1)
 				}
 			} else {
 				atomic.AddUint64(&listener.metrics.CacheMiss, 1)
@@ -582,7 +584,7 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		startTime := fetchFromTime
 		stopTime := fetchUntilTime
 		points := (stopTime - startTime) / step
-		atomic.AddUint64(&listener.metrics.PointsFetched, uint64(points))
+		atomic.AddUint64(&listener.metrics.PointsReturned, uint64(points))
 		response := pb.FetchResponse{
 			Name:      proto.String(metric),
 			StartTime: &startTime,
@@ -764,16 +766,17 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("find_requests", &listener.metrics.FindRequests, send)
 	sender("find_errors", &listener.metrics.FindErrors, send)
 	sender("find_zero", &listener.metrics.FindZero, send)
-	sender("cache_hits", &listener.metrics.CacheHits, send)
+	sender("cache_partial_hit", &listener.metrics.CachePartialHit, send)
 	sender("cache_miss", &listener.metrics.CacheMiss, send)
-	sender("cache_full_hits", &listener.metrics.CacheFullHits, send)
-	sender("cache_timeouts", &listener.metrics.CacheTimeouts, send)
+	sender("cache_only_hit", &listener.metrics.CacheOnlyHit, send)
+	sender("cache_timeout", &listener.metrics.CacheTimeout, send)
 	sender("cache_wait_time_ns", &listener.metrics.CacheWaitTimeNS, send)
 	sender("cache_wait_time_overhead_ns", &listener.metrics.CacheWaitTimeOverheadNS, send)
-	sender("cache_requests", &listener.metrics.CacheRequests, send)
+	sender("cache_requests", &listener.metrics.CacheRequestsTotal, send)
 	sender("disk_wait_time_ns", &listener.metrics.DiskWaitTimeNS, send)
 	sender("disk_requests", &listener.metrics.DiskRequests, send)
-	sender("points_fetched", &listener.metrics.PointsFetched, send)
+	sender("points_fetched", &listener.metrics.PointsReturned, send)
+	sender("metrics_fetched", &listener.metrics.MetricsReturned, send)
 
 	sender("alloc", &alloc, send)
 	sender("total_alloc", &totalAlloc, send)
