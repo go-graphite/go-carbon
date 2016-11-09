@@ -417,6 +417,7 @@ func fetchCachedData(data []points.Point, fetchFromTime, fetchUntilTime, step in
 
 func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /render/?target=the.metric.name&format=pickle&from=1396008021&until=1396022421
+	t0 := time.Now()
 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 	req.ParseForm()
@@ -424,8 +425,6 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 	format := req.FormValue("format")
 	from := req.FormValue("from")
 	until := req.FormValue("until")
-
-	t0 := time.Now()
 
 	// Make sure we log which metric caused a panic()
 	defer func() {
@@ -445,8 +444,6 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		return
 	}
 
-	files, leafs := listener.expandGlobs(metric)
-
 	var badTime bool
 
 	i, err := strconv.Atoi(from)
@@ -454,13 +451,13 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		logger.Infof("[carbonserver] fromTime (%s) invalid: %s (in %s)", from, err, req.URL.RequestURI())
 		badTime = true
 	}
-	fromTime := int(i)
+	fromTime := int32(i)
 	i, err = strconv.Atoi(until)
 	if err != nil {
 		logger.Infof("[carbonserver] untilTime (%s) invalid: %s (in %s)", from, err, req.URL.RequestURI())
 		badTime = true
 	}
-	untilTime := int(i)
+	untilTime := int32(i)
 
 	if badTime {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
@@ -468,6 +465,74 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		return
 	}
 
+	multi, err := listener.fetchData(metric, fromTime, untilTime)
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		logger.Infof("[carbonserver] %s", err)
+		http.Error(wr, fmt.Sprintf("Bad request (%s)", err),
+			http.StatusBadRequest)
+	}
+
+	var b []byte
+	switch format {
+	case "json":
+		wr.Header().Set("Content-Type", "application/json")
+		b, err = json.Marshal(multi)
+
+	case "protobuf":
+		wr.Header().Set("Content-Type", "application/protobuf")
+		b, err = proto.Marshal(multi)
+
+	case "pickle":
+		// transform protobuf data into what pickle expects
+		//[{'start': 1396271100, 'step': 60, 'name': 'metric',
+		//'values': [9.0, 19.0, None], 'end': 1396273140}
+
+		var response []map[string]interface{}
+
+		for _, metric := range multi.GetMetrics() {
+
+			var m map[string]interface{}
+
+			m = make(map[string]interface{})
+			m["start"] = metric.StartTime
+			m["step"] = metric.StepTime
+			m["end"] = metric.StopTime
+			m["name"] = metric.Name
+
+			mv := make([]interface{}, len(metric.Values))
+			for i, p := range metric.Values {
+				if metric.IsAbsent[i] {
+					mv[i] = nil
+				} else {
+					mv[i] = p
+				}
+			}
+
+			m["values"] = mv
+			response = append(response, m)
+		}
+
+		wr.Header().Set("Content-Type", "application/pickle")
+		var buf bytes.Buffer
+		pEnc := pickle.NewEncoder(&buf)
+		err = pEnc.Encode(response)
+		b = buf.Bytes()
+	}
+
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		logger.Infof("[carbonserver] failed to create %s data for %s: %s", format, "<metric>", err)
+		return
+	}
+	wr.Write(b)
+
+	logger.Debugf("[carbonserver] fetch: served %q from %s to %s in %v", metric, from, until, time.Since(t0))
+
+}
+
+func (listener *CarbonserverListener) fetchData(metric string, fromTime, untilTime int32) (*pb.MultiFetchResponse, error) {
+	files, leafs := listener.expandGlobs(metric)
 	var multi pb.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
@@ -492,18 +557,18 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		}
 
 		retentions := w.Retentions()
-		now := int(time.Now().Unix())
+		now := int32(time.Now().Unix())
 		diff := now - fromTime
 		bestStep := int32(retentions[0].SecondsPerPoint())
 		for _, retention := range retentions {
-			if retention.MaxRetention() >= diff {
+			if int32(retention.MaxRetention()) >= diff {
 				step = int32(retention.SecondsPerPoint())
 				break
 			}
 		}
 
-		fetchUntilTime := int32(untilTime)
-		fetchFromTime := int32(fromTime)
+		fetchUntilTime := untilTime
+		fetchFromTime := fromTime
 
 		if step == 0 {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
@@ -622,62 +687,7 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 
 		multi.Metrics = append(multi.Metrics, &response)
 	}
-
-	var b []byte
-	switch format {
-	case "json":
-		wr.Header().Set("Content-Type", "application/json")
-		b, err = json.Marshal(multi)
-
-	case "protobuf":
-		wr.Header().Set("Content-Type", "application/protobuf")
-		b, err = proto.Marshal(&multi)
-
-	case "pickle":
-		// transform protobuf data into what pickle expects
-		//[{'start': 1396271100, 'step': 60, 'name': 'metric',
-		//'values': [9.0, 19.0, None], 'end': 1396273140}
-
-		var response []map[string]interface{}
-
-		for _, metric := range multi.GetMetrics() {
-
-			var m map[string]interface{}
-
-			m = make(map[string]interface{})
-			m["start"] = metric.StartTime
-			m["step"] = metric.StepTime
-			m["end"] = metric.StopTime
-			m["name"] = metric.Name
-
-			mv := make([]interface{}, len(metric.Values))
-			for i, p := range metric.Values {
-				if metric.IsAbsent[i] {
-					mv[i] = nil
-				} else {
-					mv[i] = p
-				}
-			}
-
-			m["values"] = mv
-			response = append(response, m)
-		}
-
-		wr.Header().Set("Content-Type", "application/pickle")
-		var buf bytes.Buffer
-		pEnc := pickle.NewEncoder(&buf)
-		err = pEnc.Encode(response)
-		b = buf.Bytes()
-	}
-
-	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Infof("[carbonserver] failed to create %s data for %s: %s", format, "<metric>", err)
-		return
-	}
-	wr.Write(b)
-
-	logger.Debugf("[carbonserver] fetch: served %q from %d to %d in %v", metric, fromTime, untilTime, time.Since(t0))
+	return &multi, nil
 }
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
