@@ -299,6 +299,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
+		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {

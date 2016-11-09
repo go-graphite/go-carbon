@@ -132,6 +132,26 @@ enabled = true
 # Close inactive connections after "read-timeout"
 read-timeout = "30s"
 
+[carbonserver]
+listen = "127.0.0.1:8080"
+# Carbonserver support is still experimental and may contain bugs
+# Or be incompatible with github.com/grobian/carbonserver
+enabled = false
+# Buckets to track response times
+buckets = 10
+# Maximum amount of globs in a single metric
+max-globs = 100
+# carbonserver-specific metrics will be sent as counters
+# For compatibility with grobian/carbonserver
+metrics-as-counters = false
+# Read and Write timeouts for HTTP server
+read-timeout = "60s"
+write-timeout = "60s"
+# carbonserver keeps track of all available whisper files
+# in memory. This determines how often it will check FS
+# for new metrics.
+scan-frequency = "5m0s"
+
 [dump]
 # Enable dump/restore function on USR2 signal
 enabled = false
@@ -178,6 +198,16 @@ With settings above applied, best write-strategy to use is "noop"
 | metric | description |
 | --- | --- |
 | cache.queueWriteoutTime | Time in seconds to make a full cycle writing all metrics |
+| carbonserver.cache\_partial\_hit | Requests that was partially served from cache |
+| carbonserver.cache\_miss | Total cache misses |
+| carbonserver.cache\_only\_hit | Requests fully served from the cache |
+| carbonserver.cache\_wait\_time\_overhead\_ns | Time spent getting copy of the cache |
+| carbonserver.cache\_wait\_time\_ns | Time spent waiting for cache, including overhead |
+| carbonserver.cache\_requests | Total metrics we've tried to fetch from cache |
+| carbonserver.disk\_wait\_time\_ns | Time spent reading data from disk |
+| carbonserver.disk\_requests | Amount of metrics we've tried to fetch from disk |
+| carbonserver.points\_returned | Datapoints returned by carbonserver |
+| carbonserver.metrics\_returned | Metrics returned by carbonserver |
 
 
 ## Changelog

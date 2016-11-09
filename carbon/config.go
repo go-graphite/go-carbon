@@ -94,6 +94,7 @@ type carbonserverConfig struct {
 	Listen            string    `toml:"listen"`
 	Enabled           bool      `toml:"enabled"`
 	ReadTimeout       *Duration `toml:"read-timeout"`
+	WriteTimeout      *Duration `toml:"write-timeout"`
 	ScanFrequency     *Duration `toml:"scan-frequency"`
 	Buckets           int       `toml:"buckets"`
 	MaxGlobs          int       `toml:"max-globs"`
@@ -176,7 +177,10 @@ func NewConfig() *Config {
 				Duration: 300 * time.Second,
 			},
 			ReadTimeout: &Duration{
-				Duration: 30 * time.Second,
+				Duration: 60 * time.Second,
+			},
+			WriteTimeout: &Duration{
+				Duration: 60 * time.Second,
 			},
 		},
 		Carbonlink: carbonlinkConfig{
