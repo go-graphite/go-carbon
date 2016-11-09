@@ -186,6 +186,7 @@ With settings above applied, best write-strategy to use is "noop"
 * Removed flush to whisper and stop on `USR2` signal. Use dump/restore instead
 * Removed global queue (channel) between receivers and cache, added optional per-receiver queues
 * Built-in [carbonserver](https://github.com/grobian/carbonserver) (thanks [Vladimir Smirnov](https://github.com/Civil))
+* Slight regression: Metrics have become invisible to carbonlink in the moment of saving to disk. (Up to `persister.workers` metrics at moment)
 
 ##### version 0.8.1
 * Bug fix: The synchronous config reload (HUP signal) and launch of the internal collecting statistics procedure (every "metric-interval") could cause deadlock (thanks [Maxim Ivanov](https://github.com/redbaron))
