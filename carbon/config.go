@@ -61,7 +61,6 @@ type whisperConfig struct {
 
 type cacheConfig struct {
 	MaxSize       uint32 `toml:"max-size"`
-	InputBuffer   int    `toml:"input-buffer"`
 	WriteStrategy string `toml:"write-strategy"`
 }
 
@@ -86,17 +85,15 @@ type pickleConfig struct {
 }
 
 type carbonlinkConfig struct {
-	Listen       string    `toml:"listen"`
-	Enabled      bool      `toml:"enabled"`
-	ReadTimeout  *Duration `toml:"read-timeout"`
-	QueryTimeout *Duration `toml:"query-timeout"`
+	Listen      string    `toml:"listen"`
+	Enabled     bool      `toml:"enabled"`
+	ReadTimeout *Duration `toml:"read-timeout"`
 }
 
 type carbonserverConfig struct {
 	Listen            string    `toml:"listen"`
 	Enabled           bool      `toml:"enabled"`
 	ReadTimeout       *Duration `toml:"read-timeout"`
-	QueryTimeout      *Duration `toml:"query-timeout"`
 	ScanFrequency     *Duration `toml:"scan-frequency"`
 	Buckets           int       `toml:"buckets"`
 	MaxGlobs          int       `toml:"max-globs"`
@@ -153,7 +150,6 @@ func NewConfig() *Config {
 		},
 		Cache: cacheConfig{
 			MaxSize:       1000000,
-			InputBuffer:   51200,
 			WriteStrategy: "max",
 		},
 		Udp: udpConfig{
@@ -182,18 +178,12 @@ func NewConfig() *Config {
 			ReadTimeout: &Duration{
 				Duration: 30 * time.Second,
 			},
-			QueryTimeout: &Duration{
-				Duration: 100 * time.Millisecond,
-			},
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
 			Enabled: true,
 			ReadTimeout: &Duration{
 				Duration: 30 * time.Second,
-			},
-			QueryTimeout: &Duration{
-				Duration: 100 * time.Millisecond,
 			},
 		},
 		Pprof: pprofConfig{
