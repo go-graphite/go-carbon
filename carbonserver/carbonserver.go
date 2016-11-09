@@ -777,8 +777,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("cache_requests", &listener.metrics.CacheRequestsTotal, send)
 	sender("disk_wait_time_ns", &listener.metrics.DiskWaitTimeNS, send)
 	sender("disk_requests", &listener.metrics.DiskRequests, send)
-	sender("points_fetched", &listener.metrics.PointsReturned, send)
-	sender("metrics_fetched", &listener.metrics.MetricsReturned, send)
+	sender("points_returned", &listener.metrics.PointsReturned, send)
+	sender("metrics_returned", &listener.metrics.MetricsReturned, send)
 
 	sender("alloc", &alloc, send)
 	sender("total_alloc", &totalAlloc, send)
