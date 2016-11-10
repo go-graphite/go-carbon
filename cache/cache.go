@@ -53,18 +53,25 @@ type Cache struct {
 
 // A "thread" safe string to anything map.
 type Shard struct {
-	sync.RWMutex // Read Write mutex, guards access to internal map.
-	items        map[string]*points.Points
+	sync.RWMutex     // Read Write mutex, guards access to internal map.
+	items            map[string]*points.Points
+	notConfirmed     []*points.Points // linear search for value/slot
+	notConfirmedUsed int              // search value in notConfirmed[:notConfirmedUsed]
 }
 
 // Creates a new cache instance
 func New() *Cache {
 	c := &Cache{
-		data: make([]*Shard, shardCount),
+		data:          make([]*Shard, shardCount),
+		writeStrategy: Noop,
+		maxSize:       1000000,
 	}
 
 	for i := 0; i < shardCount; i++ {
-		c.data[i] = &Shard{items: make(map[string]*points.Points)}
+		c.data[i] = &Shard{
+			items:        make(map[string]*points.Points),
+			notConfirmed: make([]*points.Points, 4),
+		}
 	}
 
 	c.writeoutQueue = NewWriteoutQueue(c)
@@ -103,11 +110,38 @@ func (c *Cache) Stat(send helper.StatCallback) {
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
+
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
-
 	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
-
 	helper.SendUint32("queueWriteoutTime", &c.stat.queueWriteoutTime, send)
+
+	// confirm tracker stats
+	notConfirmedUsedTotal := 0
+	notConfirmedLenTotal := 0
+	notConfirmedShardUsedMax := 0
+	notConfirmedShardLenMax := 0
+
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+
+		l := len(shard.notConfirmed)
+
+		notConfirmedUsedTotal += shard.notConfirmedUsed
+		notConfirmedLenTotal += l
+		if shard.notConfirmedUsed > notConfirmedShardUsedMax {
+			notConfirmedShardUsedMax = shard.notConfirmedUsed
+		}
+		if l > notConfirmedShardLenMax {
+			notConfirmedShardLenMax = l
+		}
+		shard.Unlock()
+	}
+
+	send("notConfirmedUsedTotal", float64(notConfirmedUsedTotal))
+	send("notConfirmedLenTotal", float64(notConfirmedLenTotal))
+	send("notConfirmedShardUsedMax", float64(notConfirmedShardUsedMax))
+	send("notConfirmedShardLenMax", float64(notConfirmedShardLenMax))
 }
 
 // hash function
@@ -135,11 +169,44 @@ func (c *Cache) Get(key string) []points.Point {
 
 	var data []points.Point
 	shard.Lock()
+	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+		if p != nil {
+			if data == nil {
+				data = p.Data
+			} else {
+				data = append(data, p.Data...)
+			}
+		}
+	}
+
 	if p, exists := shard.items[key]; exists {
-		data = p.Data
+		if data == nil {
+			data = p.Data
+		} else {
+			data = append(data, p.Data...)
+		}
 	}
 	shard.Unlock()
 	return data
+}
+
+func (c *Cache) Confirm(p *points.Points) {
+	var i, j int
+	shard := c.GetShard(p.Metric)
+
+	shard.Lock()
+	for i = 0; i < shard.notConfirmedUsed; i++ {
+		if shard.notConfirmed[i] == p {
+			shard.notConfirmed[i] = nil
+
+			for j = i + 1; j < shard.notConfirmedUsed; j++ {
+				shard.notConfirmed[j-1] = shard.notConfirmed[j]
+			}
+
+			shard.notConfirmedUsed--
+		}
+	}
+	shard.Unlock()
 }
 
 func (c *Cache) Len() int32 {
@@ -166,11 +233,19 @@ func (c *Cache) Dump(w io.Writer) error {
 		shard := c.data[i]
 		shard.Lock()
 
+		for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+			if p == nil {
+				continue
+			}
+			if _, err := p.WriteTo(w); err != nil {
+				return err
+			}
+		}
+
 		for _, p := range shard.items {
 			if _, err := p.WriteTo(w); err != nil {
 				return err
 			}
-
 		}
 
 		shard.Unlock()
@@ -215,6 +290,30 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	shard.Lock()
 	p, exists = shard.items[key]
 	delete(shard.items, key)
+	shard.Unlock()
+
+	if exists {
+		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
+	}
+
+	return p, exists
+}
+
+func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
+	// Try to get shard.
+	shard := c.GetShard(key)
+	shard.Lock()
+	p, exists = shard.items[key]
+	delete(shard.items, key)
+
+	if exists {
+		if shard.notConfirmedUsed < len(shard.notConfirmed) {
+			shard.notConfirmed[shard.notConfirmedUsed] = p
+		} else {
+			shard.notConfirmed = append(shard.notConfirmed, p)
+		}
+		shard.notConfirmedUsed++
+	}
 	shard.Unlock()
 
 	if exists {

@@ -24,6 +24,7 @@ type Whisper struct {
 	updateOperations    uint32
 	committedPoints     uint32
 	recv                func(chan bool) *points.Points
+	confirm             func(*points.Points)
 	schemas             WhisperSchemas
 	aggregation         *WhisperAggregation
 	workersCount        int
@@ -41,9 +42,16 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas WhisperSchemas, aggregation *WhisperAggregation, recv func(chan bool) *points.Points) *Whisper {
+func NewWhisper(
+	rootPath string,
+	schemas WhisperSchemas,
+	aggregation *WhisperAggregation,
+	recv func(chan bool) *points.Points,
+	confirm func(*points.Points)) *Whisper {
+
 	return &Whisper{
 		recv:                recv,
+		confirm:             confirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
 		workersCount:        1,
@@ -166,7 +174,7 @@ func store(p *Whisper, values *points.Points) {
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 }
 
-func (p *Whisper) worker(recv func(chan bool) *points.Points, exit chan bool) {
+func (p *Whisper) worker(recv func(chan bool) *points.Points, confirm func(*points.Points), exit chan bool) {
 	storeFunc := store
 	var doneCb func()
 	if p.mockStore != nil {
@@ -194,6 +202,9 @@ LOOP:
 		storeFunc(p, points)
 		if doneCb != nil {
 			doneCb()
+		}
+		if confirm != nil {
+			confirm(points)
 		}
 	}
 }
@@ -228,16 +239,14 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 // Start worker
 func (p *Whisper) Start() error {
 	return p.StartFunc(func() error {
-		p.WithExit(func(exitChan chan bool) {
-			p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
-			for i := 0; i < p.workersCount; i++ {
-				p.Go(func(exit chan bool) {
-					p.worker(p.recv, exit)
-				})
-			}
+		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
-		})
+		for i := 0; i < p.workersCount; i++ {
+			p.Go(func(exit chan bool) {
+				p.worker(p.recv, p.confirm, exit)
+			})
+		}
 
 		return nil
 	})
