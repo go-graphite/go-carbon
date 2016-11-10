@@ -5,12 +5,13 @@ import (
 	"io/ioutil"
 	"math"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 
 	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
-	"github.com/dgryski/go-trigram"
+	trigram "github.com/dgryski/go-trigram"
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
@@ -59,13 +60,13 @@ func TestExtractTrigrams(t *testing.T) {
 	}
 }
 
-func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) (error) {
+func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error {
 	var wsp *whisper.Whisper
 	var p []*whisper.TimeSeriesPoint
 	retentions, err := whisper.ParseRetentionDefs("1m:10m,2m:30m")
 
 	if testData.createWhisper {
-		wsp, err = whisper.Create(testData.path+testData.name+".wsp", retentions, whisper.Last, 0.0)
+		wsp, err = whisper.Create(filepath.Join(testData.path, testData.name+".wsp"), retentions, whisper.Last, 0.0)
 		if err != nil {
 			return err
 		}
@@ -93,14 +94,13 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) (error
 }
 
 func generalFetchSingleMetricRemove(testData FetchTest) {
-	os.Remove(testData.path + testData.name + ".wsp")
+	os.Remove(filepath.Join(testData.path, testData.name+".wsp"))
 }
 
 func generalFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
 	data, err := carbonserver.fetchSingleMetric(testData.name, int32(testData.from), int32(testData.until))
 	return data, err
 }
-
 
 func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
 	err := generalFetchSingleMetricInit(testData, cache)
@@ -119,7 +119,7 @@ func TestFetchSingleMetric(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(path)
-	path += "/"
+
 	carbonserver := CarbonserverListener{
 		whisperData: path,
 		cache:       cache,
@@ -266,7 +266,7 @@ func BenchmarkFetchSingleMetric(t *testing.B) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(path)
-	path += "/"
+
 	carbonserver := CarbonserverListener{
 		whisperData: path,
 		cache:       cache,
