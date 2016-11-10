@@ -1,36 +1,36 @@
 package carbonserver
 
 import (
+	"fmt"
+	"io/ioutil"
+	"math"
+	"os"
 	"reflect"
 	"testing"
 	"time"
-	"os"
-	"fmt"
-	"math"
-	"io/ioutil"
 
+	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
 	"github.com/dgryski/go-trigram"
-	whisper "github.com/lomik/go-whisper"
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/points"
-	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
+	whisper "github.com/lomik/go-whisper"
 )
 
-type FetchTest struct{
-		path string
-		name string
-		now int
-		from int
-		until int
-		createWhisper bool
-		fillWhisper bool
-		fillCache bool
-		errIsNil bool
-		dataIsNil bool
-		expectedStep int32
-		expectedErr string
-		expectedValues []float64
-		expectedIsAbsent []bool
+type FetchTest struct {
+	path             string
+	name             string
+	now              int
+	from             int
+	until            int
+	createWhisper    bool
+	fillWhisper      bool
+	fillCache        bool
+	errIsNil         bool
+	dataIsNil        bool
+	expectedStep     int32
+	expectedErr      string
+	expectedValues   []float64
+	expectedIsAbsent []bool
 }
 
 func TestExtractTrigrams(t *testing.T) {
@@ -64,7 +64,7 @@ func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbons
 	var p []*whisper.TimeSeriesPoint
 	retentions, err := whisper.ParseRetentionDefs("1m:10m,2m:30m")
 	if testData.createWhisper {
-		wsp, err = whisper.Create(testData.path + testData.name + ".wsp", retentions, whisper.Last, 0.0)
+		wsp, err = whisper.Create(testData.path+testData.name+".wsp", retentions, whisper.Last, 0.0)
 		if err != nil {
 			return nil, err
 		}
@@ -72,7 +72,7 @@ func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbons
 
 		val := float64(0.0)
 		if testData.fillWhisper {
-			for i := testData.from; i < testData.now - 120; i += 60 {
+			for i := testData.from; i < testData.now-120; i += 60 {
 				p = append(p, &whisper.TimeSeriesPoint{i, val})
 				val += 0.1
 			}
@@ -83,10 +83,10 @@ func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbons
 		}
 		wsp.Close()
 		if testData.fillCache {
-			cache.Add(points.OnePoint(testData.name, 7.0, int64(testData.now - 123)))
-			cache.Add(points.OnePoint(testData.name, 7.1, int64(testData.now - 119)))
-			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now - 67)))
-			cache.Add(points.OnePoint(testData.name, 7.3, int64(testData.now - 45)))
+			cache.Add(points.OnePoint(testData.name, 7.0, int64(testData.now-123)))
+			cache.Add(points.OnePoint(testData.name, 7.1, int64(testData.now-119)))
+			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now-67)))
+			cache.Add(points.OnePoint(testData.name, 7.3, int64(testData.now-45)))
 		}
 	}
 	data, err := carbonserver.fetchSingleMetric(testData.name, int32(testData.from), int32(testData.until))
@@ -103,94 +103,94 @@ func TestFetchSingleMetric(t *testing.T) {
 	path += "/"
 	carbonserver := CarbonserverListener{
 		whisperData: path,
-		cache: cache,
+		cache:       cache,
 	}
 	now := int(time.Now().Unix())
 	now = now - now%120
 	precision := 0.000001
 	tests := []FetchTest{
 		{
-			path: path,
-			name: "non-existing",
+			path:          path,
+			name:          "non-existing",
 			createWhisper: false,
-			fillWhisper: false,
-			fillCache: true,
-			errIsNil: false,
-			dataIsNil: true,
-			expectedErr: "Can't open metric",
+			fillWhisper:   false,
+			fillCache:     true,
+			errIsNil:      false,
+			dataIsNil:     true,
+			expectedErr:   "Can't open metric",
 		},
 		{
-			path: path,
-			name: "no-proper-archive",
+			path:          path,
+			name:          "no-proper-archive",
 			createWhisper: true,
-			fillWhisper: true,
-			fillCache: false,
-			from: 1,
-			until: 10,
-			now: now,
-			errIsNil: false,
-			dataIsNil: true,
-			expectedErr: "Can't find proper archive",
+			fillWhisper:   true,
+			fillCache:     false,
+			from:          1,
+			until:         10,
+			now:           now,
+			errIsNil:      false,
+			dataIsNil:     true,
+			expectedErr:   "Can't find proper archive",
 		},
-/*		{
-			path: path,
-			name: "cross-retention",
-			createWhisper: true,
-			fillWhisper: true,
-			fillCache: true,
-			from: now - 1200,
-			until: now,
-			now: now,
-			errIsNil: true,
-			dataIsNil: false,
-			expectedStep: 120,
-			expectedValues: []float64{0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.7, 0.0, 0.0},
-			expectedIsAbsent: []bool{false, false, false, false, false, false, false, false, true, true},
-		},
-*/
+		/*		{
+					path: path,
+					name: "cross-retention",
+					createWhisper: true,
+					fillWhisper: true,
+					fillCache: true,
+					from: now - 1200,
+					until: now,
+					now: now,
+					errIsNil: true,
+					dataIsNil: false,
+					expectedStep: 120,
+					expectedValues: []float64{0.3, 0.5, 0.7, 0.9, 1.1, 1.3, 1.5, 1.7, 0.0, 0.0},
+					expectedIsAbsent: []bool{false, false, false, false, false, false, false, false, true, true},
+				},
+		*/
 		{
-			path: path,
-			name: "data-file",
-			createWhisper: true,
-			fillWhisper: true,
-			fillCache: false,
-			from: now - 300,
-			until: now,
-			now: now,
-			errIsNil: true,
-			dataIsNil: false,
-			expectedStep: 60,
-			expectedValues: []float64{0.1, 0.2, 0.0, 0.0, 0.0},
+			path:             path,
+			name:             "data-file",
+			createWhisper:    true,
+			fillWhisper:      true,
+			fillCache:        false,
+			from:             now - 300,
+			until:            now,
+			now:              now,
+			errIsNil:         true,
+			dataIsNil:        false,
+			expectedStep:     60,
+			expectedValues:   []float64{0.1, 0.2, 0.0, 0.0, 0.0},
 			expectedIsAbsent: []bool{false, false, true, true, true},
 		},
 		{
-			path: path,
-			name: "data-file-cache",
-			createWhisper: true,
-			fillWhisper: true,
-			fillCache: true,
-			from: now - 300,
-			until: now,
-			now: now,
-			errIsNil: true,
-			dataIsNil: false,
-			expectedStep: 60,
-			expectedValues: []float64{0.1, 0.2, 7.0, 7.1, 7.3},
+			path:             path,
+			name:             "data-file-cache",
+			createWhisper:    true,
+			fillWhisper:      true,
+			fillCache:        true,
+			from:             now - 300,
+			until:            now,
+			now:              now,
+			errIsNil:         true,
+			dataIsNil:        false,
+			expectedStep:     60,
+			expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
 			expectedIsAbsent: []bool{false, false, false, false, false},
 		},
 		{
-			path: path,
-			name: "data-cache",
-			createWhisper: true,
-			fillWhisper: false,
-			fillCache: true,
-			from: now - 300,
-			until: now,
-			now: now,
-			errIsNil: true,
-			dataIsNil: false,
-			expectedStep: 60,
-			expectedValues: []float64{0.0, 0.0, 7.0, 7.1, 7.3},
+			path:             path,
+			name:             "data-cache",
+			createWhisper:    true,
+			fillWhisper:      false,
+			fillCache:        true,
+			from:             now - 300,
+			until:            now,
+			now:              now,
+			errIsNil:         true,
+			dataIsNil:        false,
+			expectedStep:     60,
+			expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
 			expectedIsAbsent: []bool{true, true, false, false, false},
 		},
 	}
@@ -227,7 +227,7 @@ func TestFetchSingleMetric(t *testing.T) {
 				continue
 			}
 			for i := range test.expectedValues {
-				if math.Abs(test.expectedValues[i] - data.Values[i]) > precision {
+				if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
 					t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
 				}
 				if test.expectedIsAbsent[i] != data.IsAbsent[i] {
