@@ -59,16 +59,16 @@ func TestExtractTrigrams(t *testing.T) {
 	}
 }
 
-func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
+func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) (error) {
 	var wsp *whisper.Whisper
 	var p []*whisper.TimeSeriesPoint
 	retentions, err := whisper.ParseRetentionDefs("1m:10m,2m:30m")
+
 	if testData.createWhisper {
 		wsp, err = whisper.Create(testData.path+testData.name+".wsp", retentions, whisper.Last, 0.0)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		defer os.Remove(testData.path + testData.name + ".wsp")
 
 		val := float64(0.0)
 		if testData.fillWhisper {
@@ -78,7 +78,7 @@ func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbons
 			}
 			err := wsp.UpdateMany(p)
 			if err != nil {
-				return nil, err
+				return err
 			}
 		}
 		wsp.Close()
@@ -89,7 +89,26 @@ func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbons
 			cache.Add(points.OnePoint(testData.name, 7.3, int64(testData.now-45)))
 		}
 	}
+	return nil
+}
+
+func generalFetchSingleMetricRemove(testData FetchTest) {
+	os.Remove(testData.path + testData.name + ".wsp")
+}
+
+func generalFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
 	data, err := carbonserver.fetchSingleMetric(testData.name, int32(testData.from), int32(testData.until))
+	return data, err
+}
+
+
+func testFetchSingleMetricHelper(testData FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
+	err := generalFetchSingleMetricInit(testData, cache)
+	if err != nil {
+		return nil, err
+	}
+	defer generalFetchSingleMetricRemove(testData)
+	data, err := generalFetchSingleMetricHelper(testData, cache, carbonserver)
 	return data, err
 }
 
@@ -198,42 +217,132 @@ func TestFetchSingleMetric(t *testing.T) {
 
 	// Non-existing metric
 	for _, test := range tests {
-		fmt.Println("Performing test ", test.name)
-		data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
-		if !test.errIsNil {
-			if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
-				t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
-			}
-		} else {
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-				continue
-			}
-			if data == nil {
-				t.Errorf("Unexpected empty data")
-				continue
-			}
-			fmt.Printf("%+v\n\n", data)
-			if *(data.StepTime) != test.expectedStep {
-				t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
-				continue
-			}
-			if len(test.expectedValues) != len(data.Values) {
-				t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
-				continue
-			}
-			if len(data.Values) != len(data.IsAbsent) {
-				t.Errorf("len of Values should match len of IsAbsent! Expected: (%v, %v), got (%v, %v)", len(test.expectedValues), len(test.expectedIsAbsent), len(data.Values), len(data.IsAbsent))
-				continue
-			}
-			for i := range test.expectedValues {
-				if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
-					t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
+		t.Run(test.name, func(t *testing.T) {
+			fmt.Println("Performing test ", test.name)
+			data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
+			if !test.errIsNil {
+				if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
+					t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
 				}
-				if test.expectedIsAbsent[i] != data.IsAbsent[i] {
-					t.Errorf("test=%v, position %v, got isAbsent=%v, expected %v", test.name, i, data.IsAbsent[i], test.expectedIsAbsent[i])
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+					return
+				}
+				if data == nil {
+					t.Errorf("Unexpected empty data")
+					return
+				}
+				fmt.Printf("%+v\n\n", data)
+				if *(data.StepTime) != test.expectedStep {
+					t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
+					return
+				}
+				if len(test.expectedValues) != len(data.Values) {
+					t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
+					return
+				}
+				if len(data.Values) != len(data.IsAbsent) {
+					t.Errorf("len of Values should match len of IsAbsent! Expected: (%v, %v), got (%v, %v)", len(test.expectedValues), len(test.expectedIsAbsent), len(data.Values), len(data.IsAbsent))
+					return
+				}
+				for i := range test.expectedValues {
+					if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
+						t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
+					}
+					if test.expectedIsAbsent[i] != data.IsAbsent[i] {
+						t.Errorf("test=%v, position %v, got isAbsent=%v, expected %v", test.name, i, data.IsAbsent[i], test.expectedIsAbsent[i])
+					}
 				}
 			}
+		})
+	}
+}
+
+func BenchmarkFetchSingleMetric(t *testing.B) {
+	cache := cache.New()
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(path)
+	path += "/"
+	carbonserver := CarbonserverListener{
+		whisperData: path,
+		cache:       cache,
+	}
+	now := int(time.Now().Unix())
+	now = now - now%120
+	tests := []FetchTest{
+		{
+			path:             path,
+			name:             "data-file",
+			createWhisper:    true,
+			fillWhisper:      true,
+			fillCache:        false,
+			from:             now - 300,
+			until:            now,
+			now:              now,
+			errIsNil:         true,
+			dataIsNil:        false,
+			expectedStep:     60,
+			expectedValues:   []float64{0.1, 0.2, 0.0, 0.0, 0.0},
+			expectedIsAbsent: []bool{false, false, true, true, true},
+		},
+		{
+			path:             path,
+			name:             "data-file-cache",
+			createWhisper:    true,
+			fillWhisper:      true,
+			fillCache:        true,
+			from:             now - 300,
+			until:            now,
+			now:              now,
+			errIsNil:         true,
+			dataIsNil:        false,
+			expectedStep:     60,
+			expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
+			expectedIsAbsent: []bool{false, false, false, false, false},
+		},
+		{
+			path:             path,
+			name:             "data-cache",
+			createWhisper:    true,
+			fillWhisper:      false,
+			fillCache:        true,
+			from:             now - 300,
+			until:            now,
+			now:              now,
+			errIsNil:         true,
+			dataIsNil:        false,
+			expectedStep:     60,
+			expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
+			expectedIsAbsent: []bool{true, true, false, false, false},
+		},
+	}
+	// common
+
+	// Non-existing metric
+	for _, test := range tests {
+
+		err := generalFetchSingleMetricInit(test, cache)
+		if err != nil {
+			t.Fatalf("Unexpected error %v\n", err)
 		}
+
+		t.Run(test.name, func(t *testing.B) {
+			for runs := 0; runs < t.N; runs++ {
+				data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+					return
+				}
+				if data == nil {
+					t.Errorf("Unexpected empty data")
+					return
+				}
+			}
+		})
+		generalFetchSingleMetricRemove(test)
 	}
 }
