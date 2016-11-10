@@ -396,12 +396,12 @@ func fetchCachedData(data []points.Point, fetchFromTime, fetchUntilTime, step in
 	}
 
 	for _, item := range data {
-		ts := int32(item.Timestamp) - int32(item.Timestamp)%step
+		ts := int32(item.Timestamp) + (step - int32(item.Timestamp)%step)
 		// Data not from requested range, we don't need it.
-		if ts >= fetchUntilTime || ts <= fetchFromTime || prevTs == ts {
+		if ts > fetchUntilTime || ts < fetchFromTime || prevTs == ts {
 			continue
 		}
-		for i := prevTs; prevTs != 0 && i < ts; i += step {
+		for i := prevTs; prevTs != 0 && i < ts-step; i += step {
 			cachedValues = append(cachedValues, math.NaN())
 		}
 		prevTs = ts
@@ -413,6 +413,7 @@ func fetchCachedData(data []points.Point, fetchFromTime, fetchUntilTime, step in
 			cacheUntilTime = ts
 		}
 	}
+
 	return cachedValues, cacheFromTime, cacheUntilTime
 }
 
