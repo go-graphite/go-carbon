@@ -88,10 +88,14 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error 
 		}
 		wsp.Close()
 		if testData.fillCache {
+			// We can't guarantee the order of the points in cache, so add them in random order.
 			cache.Add(points.OnePoint(testData.name, 7.0, int64(testData.now-123)))
 			cache.Add(points.OnePoint(testData.name, 7.1, int64(testData.now-119)))
-			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now-67)))
 			cache.Add(points.OnePoint(testData.name, 7.3, int64(testData.now-45)))
+			// We have one point gap in our cache. This simulates replacing points from the past.
+			cache.Add(points.OnePoint(testData.name, 6.9, int64(testData.now-243)))
+			// Timestamp of this point should be treated in the same way as for "7.1"
+			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now-67)))
 		}
 	}
 	return nil
@@ -192,14 +196,14 @@ func TestFetchSingleMetric(t *testing.T) {
 			createWhisper:    true,
 			fillWhisper:      true,
 			fillCache:        true,
-			from:             now - 300,
+			from:             now - 420,
 			until:            now,
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
 			expectedStep:     60,
-			expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
-			expectedIsAbsent: []bool{false, false, false, false, false},
+			expectedValues:   []float64{0.1, 0.2, 6.9, 0.4, 7.0, 7.2, 7.3},
+			expectedIsAbsent: []bool{false, false, false, false, false, false, false},
 		},
 		{
 			path:             path,
@@ -207,14 +211,14 @@ func TestFetchSingleMetric(t *testing.T) {
 			createWhisper:    true,
 			fillWhisper:      false,
 			fillCache:        true,
-			from:             now - 300,
+			from:             now - 420,
 			until:            now,
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
 			expectedStep:     60,
-			expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
-			expectedIsAbsent: []bool{true, true, false, false, false},
+			expectedValues:   []float64{0.0, 0.0, 6.9, 0.0, 7.0, 7.2, 7.3},
+			expectedIsAbsent: []bool{true, true, false, true, false, false, false},
 		},
 	}
 	// common
