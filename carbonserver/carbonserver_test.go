@@ -73,7 +73,11 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error 
 
 		val := float64(0.0)
 		if testData.fillWhisper {
-			for i := testData.from; i < testData.now-120; i += 60 {
+			until := testData.until - 120
+			if until < 0 {
+				until = testData.until
+			}
+			for i := testData.from; i < until; i += 60 {
 				p = append(p, &whisper.TimeSeriesPoint{i, val})
 				val += 0.1
 			}
