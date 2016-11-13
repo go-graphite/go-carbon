@@ -156,3 +156,21 @@ func BenchmarkGetNotConfirmed100(b *testing.B) {
 		b.FailNow()
 	}
 }
+
+func BenchmarkGetNotConfirmed100Miss(b *testing.B) {
+	c := New()
+
+	for i := 0; i < 100; i++ {
+		c.Add(points.OnePoint("hello.world", 42, 10))
+		c.PopNotConfirmed("hello.world")
+	}
+
+	var d []points.Point
+	for n := 0; n < b.N; n++ {
+		d = c.Get("metric.name")
+	}
+
+	if d != nil {
+		b.FailNow()
+	}
+}
