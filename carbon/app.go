@@ -293,7 +293,7 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonserver := carbonserver.NewCarbonserverListener(core)
+		carbonserver := carbonserver.NewCarbonserverListener(core.Get)
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)

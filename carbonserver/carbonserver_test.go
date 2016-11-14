@@ -130,7 +130,7 @@ func TestFetchSingleMetric(t *testing.T) {
 
 	carbonserver := CarbonserverListener{
 		whisperData: path,
-		cache:       cache,
+		cacheGet:    cache.Get,
 	}
 	now := int(time.Now().Unix())
 	now = now - now%120
@@ -283,7 +283,7 @@ func BenchmarkFetchSingleMetric(t *testing.B) {
 
 	carbonserver := CarbonserverListener{
 		whisperData: path,
-		cache:       cache,
+		cacheGet:    cache.Get,
 	}
 	now := int(time.Now().Unix())
 	now = now - now%120

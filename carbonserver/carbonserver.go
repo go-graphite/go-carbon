@@ -41,7 +41,6 @@ import (
 	"github.com/dgryski/httputil"
 	"github.com/gogo/protobuf/proto"
 	pickle "github.com/kisielk/og-rek"
-	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
@@ -69,7 +68,7 @@ type metricStruct struct {
 
 type CarbonserverListener struct {
 	helper.Stoppable
-	cache             *cache.Cache
+	cacheGet          func (key string) []points.Point
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	whisperData       string
@@ -91,11 +90,11 @@ type fileIndex struct {
 	files []string
 }
 
-func NewCarbonserverListener(cache *cache.Cache) *CarbonserverListener {
+func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *CarbonserverListener {
 	return &CarbonserverListener{
 		// Config variables
 		metricsAsCounters: false,
-		cache:             cache,
+		cacheGet:          cacheGetFunc,
 	}
 }
 
@@ -567,7 +566,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		logger.Debugf("[carbonserver] Cache is not supported for this query (required step != best step). path=%q fromTime=%v untilTime=%v step=%v bestStep=%v", path, fromTime, untilTime, step, bestStep)
 	} else {
 		// query cache
-		cacheData = listener.cache.Get(metric)
+		cacheData = listener.cacheGet(metric)
 		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
 		atomic.AddUint64(&listener.metrics.CacheWaitTimeOverheadNS, waitTime)
 	}
