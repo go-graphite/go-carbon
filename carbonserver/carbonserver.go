@@ -526,15 +526,11 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		}
 	}
 
-	fetchUntilTime := untilTime
-	fetchFromTime := fromTime
-
 	if step == 0 {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Infof("[carbonserver] Can't find proper archive for the request for metric %q", path)
 		return nil, errors.New("Can't find proper archive")
 	}
-	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 
 	var cacheData []points.Point
 	if step != bestStep {
@@ -552,9 +548,9 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 
 	atomic.AddUint64(&listener.metrics.DiskRequests, 1)
 	diskStartTime := time.Now()
-	logger.Debugf("[carbonserver] fetching disk metric=%v from=%v until=%v", metric, fetchFromTime, fetchUntilTime)
+	logger.Debugf("[carbonserver] fetching disk metric=%v from=%v until=%v", metric, fromTime, untilTime)
 
-	points, err := w.Fetch(int(fetchFromTime), int(fetchUntilTime))
+	points, err := w.Fetch(int(fromTime), int(untilTime))
 	w.Close()
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
@@ -567,23 +563,21 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		logger.Debugf("[carbonserver] Metric time range not found: metric=%s from=%d to=%d ", metric, fromTime, untilTime)
 		return nil, errors.New("time range not found")
 	}
+	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 	values = points.Values()
 
-	fetchFromTime = int32(points.FromTime())
-	fetchUntilTime = int32(points.UntilTime())
+	fromTime = int32(points.FromTime())
+	untilTime = int32(points.UntilTime())
 	step = int32(points.Step())
 
 	waitTime := uint64(time.Since(diskStartTime).Nanoseconds())
 	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, waitTime)
+	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
 
-	startTime := fetchFromTime
-	stopTime := fetchUntilTime
-	amountOfPoints := (stopTime - startTime) / step
-	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(amountOfPoints))
 	response := pb.FetchResponse{
 		Name:      proto.String(metric),
-		StartTime: &startTime,
-		StopTime:  &stopTime,
+		StartTime: &fromTime,
+		StopTime:  &untilTime,
 		StepTime:  &step,
 		Values:    make([]float64, len(values)),
 		IsAbsent:  make([]bool, len(values)),
@@ -604,10 +598,10 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		cacheStartTime := time.Now()
 		for _, item := range cacheData {
 			ts := int32(item.Timestamp) - int32(item.Timestamp)%step
-			if ts < startTime || ts > stopTime {
+			if ts < fromTime || ts > untilTime {
 				continue
 			}
-			index := (ts - startTime) / step
+			index := (ts - fromTime) / step
 			response.Values[index] = item.Value
 			response.IsAbsent[index] = false
 		}
