@@ -17,6 +17,11 @@ import (
 	whisper "github.com/lomik/go-whisper"
 )
 
+type point struct {
+	Timestamp int
+	Value float64
+}
+
 type FetchTest struct {
 	path             string
 	name             string
@@ -28,6 +33,7 @@ type FetchTest struct {
 	fillCache        bool
 	errIsNil         bool
 	dataIsNil        bool
+	cachePoints	 []point
 	expectedStep     int32
 	expectedErr      string
 	expectedValues   []float64
@@ -92,14 +98,9 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error 
 		}
 		wsp.Close()
 		if testData.fillCache {
-			// We can't guarantee the order of the points in cache, so add them in random order.
-			cache.Add(points.OnePoint(testData.name, 7.0, int64(testData.now-123)))
-			cache.Add(points.OnePoint(testData.name, 7.1, int64(testData.now-119)))
-			cache.Add(points.OnePoint(testData.name, 7.3, int64(testData.now-45)))
-			// We have one point gap in our cache. This simulates replacing points from the past.
-			cache.Add(points.OnePoint(testData.name, 6.9, int64(testData.now-243)))
-			// Timestamp of this point should be treated in the same way as for "7.1"
-			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now-67)))
+			for _, p := range testData.cachePoints {
+				cache.Add(points.OnePoint(testData.name, p.Value, int64(p.Timestamp)))
+			}
 		}
 	}
 	return nil
@@ -205,6 +206,7 @@ func TestFetchSingleMetric(t *testing.T) {
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
+			cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
 			expectedStep:     60,
 			expectedValues:   []float64{0.1, 6.9, 0.3, 7.0, 7.2, 7.3, 0.0},
 			expectedIsAbsent: []bool{false, false, false, false, false, false, true},
@@ -220,6 +222,7 @@ func TestFetchSingleMetric(t *testing.T) {
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
+			cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
 			expectedStep:     60,
 			expectedValues:   []float64{0.0, 6.9, 0.0, 7.0, 7.2, 7.3, 0.0},
 			expectedIsAbsent: []bool{true, false, true, false, false, false, true},
@@ -359,6 +362,7 @@ func BenchmarkFetchSingleMetricDataFileCache(t *testing.B) {
 		now:              now,
 		errIsNil:         true,
 		dataIsNil:        false,
+		cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
 		expectedStep:     60,
 		expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
 		expectedIsAbsent: []bool{false, false, false, false, false},
@@ -387,9 +391,49 @@ func BenchmarkFetchSingleMetricDataCache(t *testing.B) {
 		now:              now,
 		errIsNil:         true,
 		dataIsNil:        false,
+		cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
 		expectedStep:     60,
 		expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
 		expectedIsAbsent: []bool{true, true, false, false, false},
+	}
+
+	benchmarkFetchSingleMetricMain(t, now, test)
+}
+
+
+func BenchmarkFetchSingleMetricDataCacheLong(t *testing.B) {
+	now := int(time.Now().Unix())
+	now = now - now%60
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(path)
+
+	// Fetch and fill 6 days
+	// Cache contains one day
+	day := 60 * 60 * 24
+	test := FetchTest{
+		path:             path,
+		name:             "data-cache",
+		createWhisper:    true,
+		fillWhisper:      false,
+		fillCache:        true,
+		from:             now - 6*day,
+		until:            now,
+		now:              now,
+		errIsNil:         true,
+		dataIsNil:        false,
+		expectedStep:     60,
+		retention:        "1m:7d",
+	}
+
+	l := 1*day / int(test.expectedStep)
+	test.cachePoints = make([]point, 0, l)
+	val := float64(70)
+	for t := now - l * int(test.expectedStep); t < now; t+=int(test.expectedStep) {
+		test.cachePoints = append(test.cachePoints, point{t, val})
+		val += 10
 	}
 
 	benchmarkFetchSingleMetricMain(t, now, test)
