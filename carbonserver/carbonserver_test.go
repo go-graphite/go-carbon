@@ -202,8 +202,8 @@ func TestFetchSingleMetric(t *testing.T) {
 			errIsNil:         true,
 			dataIsNil:        false,
 			expectedStep:     60,
-			expectedValues:   []float64{0.1, 0.2, 6.9, 0.4, 7.0, 7.2, 7.3},
-			expectedIsAbsent: []bool{false, false, false, false, false, false, false},
+			expectedValues:   []float64{0.1, 6.9, 0.3, 7.0, 7.2, 7.3, 0.0},
+			expectedIsAbsent: []bool{false, false, false, false, false, false, true},
 		},
 		{
 			path:             path,
@@ -217,53 +217,59 @@ func TestFetchSingleMetric(t *testing.T) {
 			errIsNil:         true,
 			dataIsNil:        false,
 			expectedStep:     60,
-			expectedValues:   []float64{0.0, 0.0, 6.9, 0.0, 7.0, 7.2, 7.3},
-			expectedIsAbsent: []bool{true, true, false, true, false, false, false},
+			expectedValues:   []float64{0.0, 6.9, 0.0, 7.0, 7.2, 7.3, 0.0},
+			expectedIsAbsent: []bool{true, false, true, false, false, false, true},
 		},
 	}
 	// common
 
 	// Non-existing metric
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fmt.Println("Performing test ", test.name)
-			data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
-			if !test.errIsNil {
-				if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
-					t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
+		/*
+		 *	Go 1.7+ Only
+		 */
+		// t.Run(test.name, func(t *testing.T) {
+		fmt.Println("Performing test ", test.name)
+		data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
+		if !test.errIsNil {
+			if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
+				t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+			if data == nil {
+				t.Errorf("Unexpected empty data")
+				return
+			}
+			fmt.Printf("%+v\n\n", data)
+			if *(data.StepTime) != test.expectedStep {
+				t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
+				return
+			}
+			if len(test.expectedValues) != len(data.Values) {
+				t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
+				return
+			}
+			if len(data.Values) != len(data.IsAbsent) {
+				t.Errorf("len of Values should match len of IsAbsent! Expected: (%v, %v), got (%v, %v)", len(test.expectedValues), len(test.expectedIsAbsent), len(data.Values), len(data.IsAbsent))
+				return
+			}
+			for i := range test.expectedValues {
+				if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
+					t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
 				}
-			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-					return
-				}
-				if data == nil {
-					t.Errorf("Unexpected empty data")
-					return
-				}
-				fmt.Printf("%+v\n\n", data)
-				if *(data.StepTime) != test.expectedStep {
-					t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
-					return
-				}
-				if len(test.expectedValues) != len(data.Values) {
-					t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
-					return
-				}
-				if len(data.Values) != len(data.IsAbsent) {
-					t.Errorf("len of Values should match len of IsAbsent! Expected: (%v, %v), got (%v, %v)", len(test.expectedValues), len(test.expectedIsAbsent), len(data.Values), len(data.IsAbsent))
-					return
-				}
-				for i := range test.expectedValues {
-					if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
-						t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
-					}
-					if test.expectedIsAbsent[i] != data.IsAbsent[i] {
-						t.Errorf("test=%v, position %v, got isAbsent=%v, expected %v", test.name, i, data.IsAbsent[i], test.expectedIsAbsent[i])
-					}
+				if test.expectedIsAbsent[i] != data.IsAbsent[i] {
+					t.Errorf("test=%v, position %v, got isAbsent=%v, expected %v", test.name, i, data.IsAbsent[i], test.expectedIsAbsent[i])
 				}
 			}
-		})
+		}
+		/*
+		 *	Go 1.7 Only
+		 */
+		//})
 	}
 }
 
@@ -338,19 +344,25 @@ func BenchmarkFetchSingleMetric(t *testing.B) {
 			t.Fatalf("Unexpected error %v\n", err)
 		}
 
-		t.Run(test.name, func(t *testing.B) {
-			for runs := 0; runs < t.N; runs++ {
-				data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-					return
-				}
-				if data == nil {
-					t.Errorf("Unexpected empty data")
-					return
-				}
+		/*
+		 *	Go 1.7+ Only
+		 */
+		// t.Run(test.name, func(t *testing.B) {
+		for runs := 0; runs < t.N; runs++ {
+			data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
 			}
-		})
+			if data == nil {
+				t.Errorf("Unexpected empty data")
+				return
+			}
+		}
+		/*
+		 *	Go 1.7+ Only
+		 */
+		//})
 		generalFetchSingleMetricRemove(test)
 	}
 }
