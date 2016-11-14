@@ -58,8 +58,8 @@ type metricStruct struct {
 	CacheHit                uint64
 	CacheMiss               uint64
 	CacheRequestsTotal      uint64
-	CacheWaitTimeNS         uint64
-	CacheWaitTimeOverheadNS uint64
+	CacheWorkTimeNS         uint64
+	CacheWaitTimeFetchNS    uint64
 	DiskWaitTimeNS          uint64
 	DiskRequests            uint64
 	PointsReturned          uint64
@@ -385,26 +385,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	return
 }
 
-type cachedData map[int32]float64
-
-func fetchCachedData(data []points.Point, fetchFromTime, fetchUntilTime, step int32) cachedData {
-	cachedData := make(cachedData)
-	if len(data) == 0 {
-		return cachedData
-	}
-
-	for _, item := range data {
-		ts := int32(item.Timestamp) - int32(item.Timestamp)%step
-		// Data not from requested range, we don't need it.
-		if ts > fetchUntilTime || ts < fetchFromTime {
-			continue
-		}
-		cachedData[ts] = item.Value
-	}
-
-	return cachedData
-}
-
 func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /render/?target=the.metric.name&format=pickle&from=1396008021&until=1396022421
 	t0 := time.Now()
@@ -523,8 +503,6 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 
 func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime, untilTime int32) (*pb.FetchResponse, error) {
 	var step int32
-	var cacheFromTime int32
-	var cacheUntilTime int32
 
 	// We need to obtain the metadata from whisper file anyway.
 	path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
@@ -558,32 +536,15 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	}
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 
-	var cachedValues cachedData
 	var cacheData []points.Point
-
-	cacheStartTime := time.Now()
 	if step != bestStep {
 		logger.Debugf("[carbonserver] Cache is not supported for this query (required step != best step). path=%q fromTime=%v untilTime=%v step=%v bestStep=%v", path, fromTime, untilTime, step, bestStep)
 	} else {
 		// query cache
+		cacheStartTime := time.Now()
 		cacheData = listener.cacheGet(metric)
 		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
-		atomic.AddUint64(&listener.metrics.CacheWaitTimeOverheadNS, waitTime)
-	}
-
-	if cacheData != nil {
-		atomic.AddUint64(&listener.metrics.CacheRequestsTotal, 1)
-
-		cachedValues = fetchCachedData(cacheData, fetchFromTime, fetchUntilTime, step)
-		logger.Debugf("[carbonserver] fetched cached metric=%v from=%v until=%v", metric, cacheFromTime, cacheUntilTime)
-
-		if cachedValues != nil {
-			atomic.AddUint64(&listener.metrics.CacheHit, 1)
-		} else {
-			atomic.AddUint64(&listener.metrics.CacheMiss, 1)
-		}
-		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
-		atomic.AddUint64(&listener.metrics.CacheWaitTimeNS, waitTime)
+		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, waitTime)
 	}
 
 	// End of cache query
@@ -624,25 +585,11 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		StartTime: &startTime,
 		StopTime:  &stopTime,
 		StepTime:  &step,
-		Values:    make([]float64, amountOfPoints),
-		IsAbsent:  make([]bool, amountOfPoints),
+		Values:    make([]float64, len(values)),
+		IsAbsent:  make([]bool, len(values)),
 	}
 
-	ts := startTime
-	diskCursor := 0
-	var ok bool
-	for i := range response.Values {
-		p := math.NaN()
-		if cachedValues != nil {
-			p, ok = cachedValues[ts]
-			if !ok {
-				p = values[diskCursor]
-			}
-		} else {
-			p = values[diskCursor]
-		}
-		diskCursor++
-
+	for i, p := range values {
 		if math.IsNaN(p) {
 			response.Values[i] = 0
 			response.IsAbsent[i] = true
@@ -650,7 +597,22 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 			response.Values[i] = p
 			response.IsAbsent[i] = false
 		}
-		ts += step
+	}
+
+	if cacheData != nil {
+		atomic.AddUint64(&listener.metrics.CacheRequestsTotal, 1)
+		cacheStartTime := time.Now()
+		for _, item := range cacheData {
+			ts := int32(item.Timestamp) - int32(item.Timestamp)%step
+			if ts < startTime || ts > stopTime {
+				continue
+			}
+			index := (ts-startTime)/step
+			response.Values[index] = item.Value
+			response.IsAbsent[index] = false
+		}
+		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
+		atomic.AddUint64(&listener.metrics.CacheWorkTimeNS, waitTime)
 	}
 	return &response, nil
 }
@@ -763,8 +725,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("find_zero", &listener.metrics.FindZero, send)
 	sender("cache_hit", &listener.metrics.CacheHit, send)
 	sender("cache_miss", &listener.metrics.CacheMiss, send)
-	sender("cache_wait_time_ns", &listener.metrics.CacheWaitTimeNS, send)
-	sender("cache_wait_time_overhead_ns", &listener.metrics.CacheWaitTimeOverheadNS, send)
+	sender("cache_work_time_ns", &listener.metrics.CacheWorkTimeNS, send)
+	sender("cache_wait_time_fetch_ns", &listener.metrics.CacheWaitTimeFetchNS, send)
 	sender("cache_requests", &listener.metrics.CacheRequestsTotal, send)
 	sender("disk_wait_time_ns", &listener.metrics.DiskWaitTimeNS, send)
 	sender("disk_requests", &listener.metrics.DiskRequests, send)
