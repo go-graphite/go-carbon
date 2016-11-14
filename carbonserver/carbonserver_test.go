@@ -73,7 +73,11 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error 
 
 		val := float64(0.0)
 		if testData.fillWhisper {
-			for i := testData.from; i < testData.now-120; i += 60 {
+			until := testData.until - 120
+			if until < 0 {
+				until = testData.until
+			}
+			for i := testData.from; i < until; i += 60 {
 				p = append(p, &whisper.TimeSeriesPoint{i, val})
 				val += 0.1
 			}
@@ -84,10 +88,14 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error 
 		}
 		wsp.Close()
 		if testData.fillCache {
+			// We can't guarantee the order of the points in cache, so add them in random order.
 			cache.Add(points.OnePoint(testData.name, 7.0, int64(testData.now-123)))
 			cache.Add(points.OnePoint(testData.name, 7.1, int64(testData.now-119)))
-			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now-67)))
 			cache.Add(points.OnePoint(testData.name, 7.3, int64(testData.now-45)))
+			// We have one point gap in our cache. This simulates replacing points from the past.
+			cache.Add(points.OnePoint(testData.name, 6.9, int64(testData.now-243)))
+			// Timestamp of this point should be treated in the same way as for "7.1"
+			cache.Add(points.OnePoint(testData.name, 7.2, int64(testData.now-67)))
 		}
 	}
 	return nil
@@ -122,7 +130,7 @@ func TestFetchSingleMetric(t *testing.T) {
 
 	carbonserver := CarbonserverListener{
 		whisperData: path,
-		cache:       cache,
+		cacheGet:    cache.Get,
 	}
 	now := int(time.Now().Unix())
 	now = now - now%120
@@ -188,14 +196,14 @@ func TestFetchSingleMetric(t *testing.T) {
 			createWhisper:    true,
 			fillWhisper:      true,
 			fillCache:        true,
-			from:             now - 300,
+			from:             now - 420,
 			until:            now,
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
 			expectedStep:     60,
-			expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
-			expectedIsAbsent: []bool{false, false, false, false, false},
+			expectedValues:   []float64{0.1, 6.9, 0.3, 7.0, 7.2, 7.3, 0.0},
+			expectedIsAbsent: []bool{false, false, false, false, false, false, true},
 		},
 		{
 			path:             path,
@@ -203,59 +211,65 @@ func TestFetchSingleMetric(t *testing.T) {
 			createWhisper:    true,
 			fillWhisper:      false,
 			fillCache:        true,
-			from:             now - 300,
+			from:             now - 420,
 			until:            now,
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
 			expectedStep:     60,
-			expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
-			expectedIsAbsent: []bool{true, true, false, false, false},
+			expectedValues:   []float64{0.0, 6.9, 0.0, 7.0, 7.2, 7.3, 0.0},
+			expectedIsAbsent: []bool{true, false, true, false, false, false, true},
 		},
 	}
 	// common
 
 	// Non-existing metric
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			fmt.Println("Performing test ", test.name)
-			data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
-			if !test.errIsNil {
-				if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
-					t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
+		/*
+		 *	Go 1.7+ Only
+		 */
+		// t.Run(test.name, func(t *testing.T) {
+		fmt.Println("Performing test ", test.name)
+		data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
+		if !test.errIsNil {
+			if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
+				t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
+			}
+			if data == nil {
+				t.Errorf("Unexpected empty data")
+				return
+			}
+			fmt.Printf("%+v\n\n", data)
+			if *(data.StepTime) != test.expectedStep {
+				t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
+				return
+			}
+			if len(test.expectedValues) != len(data.Values) {
+				t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
+				return
+			}
+			if len(data.Values) != len(data.IsAbsent) {
+				t.Errorf("len of Values should match len of IsAbsent! Expected: (%v, %v), got (%v, %v)", len(test.expectedValues), len(test.expectedIsAbsent), len(data.Values), len(data.IsAbsent))
+				return
+			}
+			for i := range test.expectedValues {
+				if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
+					t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
 				}
-			} else {
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-					return
-				}
-				if data == nil {
-					t.Errorf("Unexpected empty data")
-					return
-				}
-				fmt.Printf("%+v\n\n", data)
-				if *(data.StepTime) != test.expectedStep {
-					t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
-					return
-				}
-				if len(test.expectedValues) != len(data.Values) {
-					t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
-					return
-				}
-				if len(data.Values) != len(data.IsAbsent) {
-					t.Errorf("len of Values should match len of IsAbsent! Expected: (%v, %v), got (%v, %v)", len(test.expectedValues), len(test.expectedIsAbsent), len(data.Values), len(data.IsAbsent))
-					return
-				}
-				for i := range test.expectedValues {
-					if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
-						t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
-					}
-					if test.expectedIsAbsent[i] != data.IsAbsent[i] {
-						t.Errorf("test=%v, position %v, got isAbsent=%v, expected %v", test.name, i, data.IsAbsent[i], test.expectedIsAbsent[i])
-					}
+				if test.expectedIsAbsent[i] != data.IsAbsent[i] {
+					t.Errorf("test=%v, position %v, got isAbsent=%v, expected %v", test.name, i, data.IsAbsent[i], test.expectedIsAbsent[i])
 				}
 			}
-		})
+		}
+		/*
+		 *	Go 1.7 Only
+		 */
+		//})
 	}
 }
 
@@ -269,7 +283,7 @@ func BenchmarkFetchSingleMetric(t *testing.B) {
 
 	carbonserver := CarbonserverListener{
 		whisperData: path,
-		cache:       cache,
+		cacheGet:    cache.Get,
 	}
 	now := int(time.Now().Unix())
 	now = now - now%120
@@ -330,19 +344,25 @@ func BenchmarkFetchSingleMetric(t *testing.B) {
 			t.Fatalf("Unexpected error %v\n", err)
 		}
 
-		t.Run(test.name, func(t *testing.B) {
-			for runs := 0; runs < t.N; runs++ {
-				data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
-				if err != nil {
-					t.Errorf("Unexpected error: %v", err)
-					return
-				}
-				if data == nil {
-					t.Errorf("Unexpected empty data")
-					return
-				}
+		/*
+		 *	Go 1.7+ Only
+		 */
+		// t.Run(test.name, func(t *testing.B) {
+		for runs := 0; runs < t.N; runs++ {
+			data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
+			if err != nil {
+				t.Errorf("Unexpected error: %v", err)
+				return
 			}
-		})
+			if data == nil {
+				t.Errorf("Unexpected empty data")
+				return
+			}
+		}
+		/*
+		 *	Go 1.7+ Only
+		 */
+		//})
 		generalFetchSingleMetricRemove(test)
 	}
 }
