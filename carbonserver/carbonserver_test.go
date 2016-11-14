@@ -32,6 +32,7 @@ type FetchTest struct {
 	expectedErr      string
 	expectedValues   []float64
 	expectedIsAbsent []bool
+	retention        string
 }
 
 func TestExtractTrigrams(t *testing.T) {
@@ -63,7 +64,10 @@ func TestExtractTrigrams(t *testing.T) {
 func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error {
 	var wsp *whisper.Whisper
 	var p []*whisper.TimeSeriesPoint
-	retentions, err := whisper.ParseRetentionDefs("1m:10m,2m:30m")
+	if testData.retention == "" {
+		testData.retention="1m:10m,2m:30m"
+	}
+	retentions, err := whisper.ParseRetentionDefs(testData.retention)
 
 	if testData.createWhisper {
 		wsp, err = whisper.Create(filepath.Join(testData.path, testData.name+".wsp"), retentions, whisper.Last, 0.0)
@@ -273,96 +277,120 @@ func TestFetchSingleMetric(t *testing.T) {
 	}
 }
 
-func BenchmarkFetchSingleMetric(t *testing.B) {
+/*
+ * TODO: Merge it together when we'll have subtests (Go 1.7+)
+ */
+func benchmarkFetchSingleMetricMain(t *testing.B, now int, test FetchTest) {
 	cache := cache.New()
+
+	carbonserver := CarbonserverListener{
+		whisperData: test.path,
+		cacheGet:    cache.Get,
+	}
+	// common
+
+	// Non-existing metric
+	err := generalFetchSingleMetricInit(test, cache)
+	if err != nil {
+		t.Fatalf("Unexpected error %v\n", err)
+	}
+	defer os.RemoveAll(test.path)
+
+	for runs := 0; runs < t.N; runs++ {
+		data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
+		if err != nil {
+			t.Errorf("Unexpected error: %v", err)
+			return
+		}
+		if data == nil {
+			t.Errorf("Unexpected empty data")
+			return
+		}
+	}
+	generalFetchSingleMetricRemove(test)
+}
+
+
+func BenchmarkFetchSingleMetricDataFile(t *testing.B) {
+	now := int(time.Now().Unix())
+	now = now - now%120
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(path)
 
-	carbonserver := CarbonserverListener{
-		whisperData: path,
-		cacheGet:    cache.Get,
+	test := FetchTest{
+		path:             path,
+		name:             "data-file",
+		createWhisper:    true,
+		fillWhisper:      true,
+		fillCache:        false,
+		from:             now - 300,
+		until:            now,
+		now:              now,
+		errIsNil:         true,
+		dataIsNil:        false,
+		expectedStep:     60,
+		expectedValues:   []float64{0.1, 0.2, 0.0, 0.0, 0.0},
+		expectedIsAbsent: []bool{false, false, true, true, true},
 	}
+
+	benchmarkFetchSingleMetricMain(t, now, test)
+}
+
+func BenchmarkFetchSingleMetricDataFileCache(t *testing.B) {
 	now := int(time.Now().Unix())
 	now = now - now%120
-	tests := []FetchTest{
-		{
-			path:             path,
-			name:             "data-file",
-			createWhisper:    true,
-			fillWhisper:      true,
-			fillCache:        false,
-			from:             now - 300,
-			until:            now,
-			now:              now,
-			errIsNil:         true,
-			dataIsNil:        false,
-			expectedStep:     60,
-			expectedValues:   []float64{0.1, 0.2, 0.0, 0.0, 0.0},
-			expectedIsAbsent: []bool{false, false, true, true, true},
-		},
-		{
-			path:             path,
-			name:             "data-file-cache",
-			createWhisper:    true,
-			fillWhisper:      true,
-			fillCache:        true,
-			from:             now - 300,
-			until:            now,
-			now:              now,
-			errIsNil:         true,
-			dataIsNil:        false,
-			expectedStep:     60,
-			expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
-			expectedIsAbsent: []bool{false, false, false, false, false},
-		},
-		{
-			path:             path,
-			name:             "data-cache",
-			createWhisper:    true,
-			fillWhisper:      false,
-			fillCache:        true,
-			from:             now - 300,
-			until:            now,
-			now:              now,
-			errIsNil:         true,
-			dataIsNil:        false,
-			expectedStep:     60,
-			expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
-			expectedIsAbsent: []bool{true, true, false, false, false},
-		},
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// common
+	defer os.RemoveAll(path)
 
-	// Non-existing metric
-	for _, test := range tests {
-
-		err := generalFetchSingleMetricInit(test, cache)
-		if err != nil {
-			t.Fatalf("Unexpected error %v\n", err)
-		}
-
-		/*
-		 *	Go 1.7+ Only
-		 */
-		// t.Run(test.name, func(t *testing.B) {
-		for runs := 0; runs < t.N; runs++ {
-			data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
-			if err != nil {
-				t.Errorf("Unexpected error: %v", err)
-				return
-			}
-			if data == nil {
-				t.Errorf("Unexpected empty data")
-				return
-			}
-		}
-		/*
-		 *	Go 1.7+ Only
-		 */
-		//})
-		generalFetchSingleMetricRemove(test)
+	test := FetchTest{
+		path:             path,
+		name:             "data-file-cache",
+		createWhisper:    true,
+		fillWhisper:      true,
+		fillCache:        true,
+		from:             now - 300,
+		until:            now,
+		now:              now,
+		errIsNil:         true,
+		dataIsNil:        false,
+		expectedStep:     60,
+		expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
+		expectedIsAbsent: []bool{false, false, false, false, false},
 	}
+
+	benchmarkFetchSingleMetricMain(t, now, test)
+}
+
+func BenchmarkFetchSingleMetricDataCache(t *testing.B) {
+	now := int(time.Now().Unix())
+	now = now - now%120
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(path)
+
+	test := FetchTest{
+		path:             path,
+		name:             "data-cache",
+		createWhisper:    true,
+		fillWhisper:      false,
+		fillCache:        true,
+		from:             now - 300,
+		until:            now,
+		now:              now,
+		errIsNil:         true,
+		dataIsNil:        false,
+		expectedStep:     60,
+		expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
+		expectedIsAbsent: []bool{true, true, false, false, false},
+	}
+
+	benchmarkFetchSingleMetricMain(t, now, test)
 }
