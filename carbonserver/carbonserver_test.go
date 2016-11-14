@@ -10,16 +10,16 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/lomik/go-carbon/cache"
+	pb "github.com/lomik/go-carbon/carbonzipperpb"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 )
 
 type point struct {
 	Timestamp int
-	Value float64
+	Value     float64
 }
 
 type FetchTest struct {
@@ -33,7 +33,7 @@ type FetchTest struct {
 	fillCache        bool
 	errIsNil         bool
 	dataIsNil        bool
-	cachePoints	 []point
+	cachePoints      []point
 	expectedStep     int32
 	expectedErr      string
 	expectedValues   []float64
@@ -71,7 +71,7 @@ func generalFetchSingleMetricInit(testData FetchTest, cache *cache.Cache) error 
 	var wsp *whisper.Whisper
 	var p []*whisper.TimeSeriesPoint
 	if testData.retention == "" {
-		testData.retention="1m:10m,2m:30m"
+		testData.retention = "1m:10m,2m:30m"
 	}
 	retentions, err := whisper.ParseRetentionDefs(testData.retention)
 
@@ -206,7 +206,7 @@ func TestFetchSingleMetric(t *testing.T) {
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
-			cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
+			cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}},
 			expectedStep:     60,
 			expectedValues:   []float64{0.1, 6.9, 0.3, 7.0, 7.2, 7.3, 0.0},
 			expectedIsAbsent: []bool{false, false, false, false, false, false, true},
@@ -222,7 +222,7 @@ func TestFetchSingleMetric(t *testing.T) {
 			now:              now,
 			errIsNil:         true,
 			dataIsNil:        false,
-			cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
+			cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}},
 			expectedStep:     60,
 			expectedValues:   []float64{0.0, 6.9, 0.0, 7.0, 7.2, 7.3, 0.0},
 			expectedIsAbsent: []bool{true, false, true, false, false, false, true},
@@ -313,7 +313,6 @@ func benchmarkFetchSingleMetricMain(t *testing.B, now int, test FetchTest) {
 	generalFetchSingleMetricRemove(test)
 }
 
-
 func BenchmarkFetchSingleMetricDataFile(t *testing.B) {
 	now := int(time.Now().Unix())
 	now = now - now%120
@@ -362,7 +361,7 @@ func BenchmarkFetchSingleMetricDataFileCache(t *testing.B) {
 		now:              now,
 		errIsNil:         true,
 		dataIsNil:        false,
-		cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
+		cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}},
 		expectedStep:     60,
 		expectedValues:   []float64{0.1, 0.2, 7.0, 7.1, 7.3},
 		expectedIsAbsent: []bool{false, false, false, false, false},
@@ -391,7 +390,7 @@ func BenchmarkFetchSingleMetricDataCache(t *testing.B) {
 		now:              now,
 		errIsNil:         true,
 		dataIsNil:        false,
-		cachePoints:      []point{{now-123, 7.0}, {now-119, 7.1}, {now-45, 7.3}, {now-243, 6.9}, {now-67, 7.2}},
+		cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}},
 		expectedStep:     60,
 		expectedValues:   []float64{0.0, 0.0, 7.0, 7.1, 7.3},
 		expectedIsAbsent: []bool{true, true, false, false, false},
@@ -399,7 +398,6 @@ func BenchmarkFetchSingleMetricDataCache(t *testing.B) {
 
 	benchmarkFetchSingleMetricMain(t, now, test)
 }
-
 
 func BenchmarkFetchSingleMetricDataCacheLong(t *testing.B) {
 	now := int(time.Now().Unix())
@@ -414,24 +412,24 @@ func BenchmarkFetchSingleMetricDataCacheLong(t *testing.B) {
 	// Cache contains one day
 	day := 60 * 60 * 24
 	test := FetchTest{
-		path:             path,
-		name:             "data-cache",
-		createWhisper:    true,
-		fillWhisper:      false,
-		fillCache:        true,
-		from:             now - 6*day,
-		until:            now,
-		now:              now,
-		errIsNil:         true,
-		dataIsNil:        false,
-		expectedStep:     60,
-		retention:        "1m:7d",
+		path:          path,
+		name:          "data-cache",
+		createWhisper: true,
+		fillWhisper:   false,
+		fillCache:     true,
+		from:          now - 6*day,
+		until:         now,
+		now:           now,
+		errIsNil:      true,
+		dataIsNil:     false,
+		expectedStep:  60,
+		retention:     "1m:7d",
 	}
 
-	l := 1*day / int(test.expectedStep)
+	l := 1 * day / int(test.expectedStep)
 	test.cachePoints = make([]point, 0, l)
 	val := float64(70)
-	for t := now - l * int(test.expectedStep); t < now; t+=int(test.expectedStep) {
+	for t := now - l*int(test.expectedStep); t < now; t += int(test.expectedStep) {
 		test.cachePoints = append(test.cachePoints, point{t, val})
 		val += 10
 	}

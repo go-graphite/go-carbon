@@ -36,39 +36,39 @@ import (
 
 	"github.com/NYTimes/gziphandler"
 	logger "github.com/Sirupsen/logrus"
-	pb "github.com/dgryski/carbonzipper/carbonzipperpb"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
 	"github.com/gogo/protobuf/proto"
 	pickle "github.com/kisielk/og-rek"
+	pb "github.com/lomik/go-carbon/carbonzipperpb"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 )
 
 type metricStruct struct {
-	RenderRequests          uint64
-	RenderErrors            uint64
-	NotFound                uint64
-	FindRequests            uint64
-	FindErrors              uint64
-	FindZero                uint64
-	InfoRequests            uint64
-	InfoErrors              uint64
-	CacheHit                uint64
-	CacheMiss               uint64
-	CacheRequestsTotal      uint64
-	CacheWorkTimeNS         uint64
-	CacheWaitTimeFetchNS    uint64
-	DiskWaitTimeNS          uint64
-	DiskRequests            uint64
-	PointsReturned          uint64
-	MetricsReturned         uint64
+	RenderRequests       uint64
+	RenderErrors         uint64
+	NotFound             uint64
+	FindRequests         uint64
+	FindErrors           uint64
+	FindZero             uint64
+	InfoRequests         uint64
+	InfoErrors           uint64
+	CacheHit             uint64
+	CacheMiss            uint64
+	CacheRequestsTotal   uint64
+	CacheWorkTimeNS      uint64
+	CacheWaitTimeFetchNS uint64
+	DiskWaitTimeNS       uint64
+	DiskRequests         uint64
+	PointsReturned       uint64
+	MetricsReturned      uint64
 }
 
 type CarbonserverListener struct {
 	helper.Stoppable
-	cacheGet          func (key string) []points.Point
+	cacheGet          func(key string) []points.Point
 	readTimeout       time.Duration
 	writeTimeout      time.Duration
 	whisperData       string
@@ -607,7 +607,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 			if ts < startTime || ts > stopTime {
 				continue
 			}
-			index := (ts-startTime)/step
+			index := (ts - startTime) / step
 			response.Values[index] = item.Value
 			response.IsAbsent[index] = false
 		}
