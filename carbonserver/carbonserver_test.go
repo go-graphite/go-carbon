@@ -318,10 +318,10 @@ func TestFetchSingleMetricDataCache(t *testing.T) {
 	testFetchSingleMetricCommon(t, test)
 }
 
-func benchmarkFetchSingleMetricCommon(t *testing.B, test *FetchTest) {
+func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
-		t.Fatal(err)
+		b.Fatal(err)
 	}
 	defer os.RemoveAll(path)
 	test.path = path
@@ -336,40 +336,42 @@ func benchmarkFetchSingleMetricCommon(t *testing.B, test *FetchTest) {
 	// Non-existing metric
 	err = generalFetchSingleMetricInit(test, cache)
 	if err != nil {
-		t.Fatalf("Unexpected error %v\n", err)
+		b.Fatalf("Unexpected error %v\n", err)
 	}
 	defer os.RemoveAll(test.path)
 
-	for runs := 0; runs < t.N; runs++ {
+	b.ResetTimer()
+	for runs := 0; runs < b.N; runs++ {
 		data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
 		if err != nil {
-			t.Errorf("Unexpected error: %v", err)
+			b.Errorf("Unexpected error: %v", err)
 			return
 		}
 		if data == nil {
-			t.Errorf("Unexpected empty data")
+			b.Errorf("Unexpected empty data")
 			return
 		}
 	}
+	b.StopTimer()
 	generalFetchSingleMetricRemove(test)
 }
 
-func BenchmarkFetchSingleMetricDataFile(t *testing.B) {
+func BenchmarkFetchSingleMetricDataFile(b *testing.B) {
 	test := getSingleMetricTest("data-file")
-	benchmarkFetchSingleMetricCommon(t, test)
+	benchmarkFetchSingleMetricCommon(b, test)
 }
 
-func BenchmarkFetchSingleMetricDataFileCache(t *testing.B) {
+func BenchmarkFetchSingleMetricDataFileCache(b *testing.B) {
 	test := getSingleMetricTest("data-file-cache")
-	benchmarkFetchSingleMetricCommon(t, test)
+	benchmarkFetchSingleMetricCommon(b, test)
 }
 
-func BenchmarkFetchSingleMetricDataCache(t *testing.B) {
+func BenchmarkFetchSingleMetricDataCache(b *testing.B) {
 	test := getSingleMetricTest("data-cache")
-	benchmarkFetchSingleMetricCommon(t, test)
+	benchmarkFetchSingleMetricCommon(b, test)
 }
 
-func BenchmarkFetchSingleMetricDataCacheLong(t *testing.B) {
+func BenchmarkFetchSingleMetricDataCacheLong(b *testing.B) {
 	// Fetch and fill 6 days
 	// Cache contains one day
 	test := getSingleMetricTest("data-file-cache-long")
@@ -382,5 +384,5 @@ func BenchmarkFetchSingleMetricDataCacheLong(t *testing.B) {
 		val += 10
 	}
 
-	benchmarkFetchSingleMetricCommon(t, test)
+	benchmarkFetchSingleMetricCommon(b, test)
 }
