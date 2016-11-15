@@ -543,13 +543,9 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, waitTime)
 	}
 
-	// End of cache query
-	var values []float64
-
+	logger.Debugf("[carbonserver] fetching disk metric=%v from=%v until=%v", metric, fromTime, untilTime)
 	atomic.AddUint64(&listener.metrics.DiskRequests, 1)
 	diskStartTime := time.Now()
-	logger.Debugf("[carbonserver] fetching disk metric=%v from=%v until=%v", metric, fromTime, untilTime)
-
 	points, err := w.Fetch(int(fromTime), int(untilTime))
 	w.Close()
 	if err != nil {
@@ -564,7 +560,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		return nil, errors.New("time range not found")
 	}
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
-	values = points.Values()
+	values := points.Values()
 
 	fromTime = int32(points.FromTime())
 	untilTime = int32(points.UntilTime())
