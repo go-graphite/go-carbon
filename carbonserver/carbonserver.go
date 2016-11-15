@@ -554,9 +554,10 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		return nil, errors.New("failed to fetch points")
 	}
 
+	// Should never happen, because we have a check for proper archive now
 	if points == nil {
-		atomic.AddUint64(&listener.metrics.NotFound, 1)
-		logger.Debugf("[carbonserver] Metric time range not found: metric=%s from=%d to=%d ", metric, fromTime, untilTime)
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		logger.Infof("[carbonserver] Metric time range not found: metric=%s from=%d to=%d ", metric, fromTime, untilTime)
 		return nil, errors.New("time range not found")
 	}
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
