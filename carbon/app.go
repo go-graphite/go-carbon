@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -116,6 +117,8 @@ func (app *App) ReloadConfig() error {
 	if err = app.configure(); err != nil {
 		return err
 	}
+
+	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
 
 	if app.Persister != nil {
 		app.Persister.Stop()
@@ -232,6 +235,8 @@ func (app *App) Start() (err error) {
 	}()
 
 	conf := app.Config
+
+	runtime.GOMAXPROCS(conf.Common.MaxCPU)
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)

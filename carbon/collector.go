@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"runtime"
 	"time"
 
 	"github.com/Sirupsen/logrus"
@@ -25,6 +26,11 @@ type Collector struct {
 	endpoint       string
 	data           chan *points.Points
 	stats          []statFunc
+}
+
+func RuntimeStat(send helper.StatCallback) {
+	send("GOMAXPROCS", float64(runtime.GOMAXPROCS(-1)))
+	send("NumGoroutine", float64(runtime.NumGoroutine()))
 }
 
 func NewCollector(app *App) *Collector {
@@ -59,6 +65,10 @@ func NewCollector(app *App) *Collector {
 			moduleObj.Stat(sendCallback(moduleName))
 		}
 	}
+
+	c.stats = append(c.stats, func() {
+		RuntimeStat(sendCallback("runtime"))
+	})
 
 	if app.Cache != nil {
 		c.stats = append(c.stats, moduleCallback("cache", app.Cache))

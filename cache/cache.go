@@ -107,6 +107,7 @@ func (c *Cache) Stop() {}
 func (c *Cache) Stat(send helper.StatCallback) {
 	send("size", float64(c.Size()))
 	send("metrics", float64(c.Len()))
+	send("maxSize", float64(c.maxSize))
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)

@@ -135,9 +135,6 @@ func main() {
 
 		runtime.UnlockOSThread()
 	}
-
-	runtime.GOMAXPROCS(cfg.Common.MaxCPU)
-
 	/* CONFIG end */
 
 	// pprof

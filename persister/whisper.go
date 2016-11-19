@@ -229,6 +229,9 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 
+	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
+	send("workers", float64(p.workersCount))
+
 	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
 	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
 	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)

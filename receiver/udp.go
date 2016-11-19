@@ -136,6 +136,7 @@ func (rcv *UDP) Stat(send helper.StatCallback) {
 
 	if rcv.buffer != nil {
 		send("bufferLen", float64(len(rcv.buffer)))
+		send("bufferCap", float64(cap(rcv.buffer)))
 	}
 }
 
