@@ -197,6 +197,9 @@ With settings above applied, best write-strategy to use is "noop"
 
 | metric | description |
 | --- | --- |
+| cache.maxSize | |
+| cache.metrics | |
+| cache.size | |
 | cache.queueWriteoutTime | Time in seconds to make a full cycle writing all metrics |
 | carbonserver.cache\_partial\_hit | Requests that was partially served from cache |
 | carbonserver.cache\_miss | Total cache misses |
@@ -208,6 +211,10 @@ With settings above applied, best write-strategy to use is "noop"
 | carbonserver.disk\_requests | Amount of metrics we've tried to fetch from disk |
 | carbonserver.points\_returned | Datapoints returned by carbonserver |
 | carbonserver.metrics\_returned | Metrics returned by carbonserver |
+| persister.maxUpdatesPerSecond | |
+| persister.workers | |
+| runtime.GOMAXPROCS | |
+| runtime.NumGoroutine | |
 
 
 ## Changelog
