@@ -363,11 +363,18 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		var metrics []map[string]interface{}
 		var m map[string]interface{}
 
+		intervals := &IntervalSet{Start: 0, End: int32(time.Now().Unix()) + 60}
+
 		for i, p := range files {
 			m = make(map[string]interface{})
+			// graphite 0.9.x
 			m["metric_path"] = p
-			// m["intervals"] = dunno how to do a tuple here
 			m["isLeaf"] = leafs[i]
+
+			// graphite master
+			m["path"] = p
+			m["is_leaf"] = leafs[i]
+			m["intervals"] = intervals
 			metrics = append(metrics, m)
 		}
 

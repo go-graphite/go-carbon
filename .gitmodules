@@ -78,7 +78,7 @@
 	url = https://github.com/dgryski/httputil
 [submodule "vendor/github.com/kisielk/og-rek"]
 	path = vendor/github.com/kisielk/og-rek
-	url = https://github.com/kisielk/og-rek
+	url = https://github.com/lomik/og-rek.git
 [submodule "vendor/github.com/lomik/go-whisper"]
 	path = vendor/github.com/lomik/go-whisper
 	url = https://github.com/lomik/go-whisper
