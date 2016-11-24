@@ -1,7 +1,7 @@
 package receiver
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/binary"
 	"io"
 	"net"
@@ -48,7 +48,6 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 	defer atomic.AddInt32(&rcv.active, -1)
 
 	defer conn.Close()
-	reader := bufio.NewReader(conn)
 
 	finished := make(chan bool)
 	defer close(finished)
@@ -63,15 +62,20 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 		}
 	})
 
+	buffer := make([]byte, 256*1024)
+	var offset, i, j, n, index int
+	var err error
+	var chunk []byte
+
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
-
-		line, err := reader.ReadBytes('\n')
+		n, err = conn.Read(buffer[offset:])
+		conn.SetDeadline(time.Time{})
 
 		if err != nil {
 			if err == io.EOF {
-				if len(line) > 0 {
-					logrus.Warningf("[tcp] Unfinished line: %#v", line)
+				if offset > 0 {
+					logrus.Warningf("[tcp] Unfinished line: %#v", string(buffer[:offset]))
 				}
 			} else {
 				atomic.AddUint32(&rcv.errors, 1)
@@ -79,13 +83,34 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			}
 			break
 		}
-		if len(line) > 0 { // skip empty lines
-			if msg, err := points.ParseText(string(line)); err != nil {
-				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Info(err)
+
+		chunk = buffer[:offset+n]
+		index = 0
+	ChunkParseLoop:
+		for {
+			i = bytes.IndexByte(chunk[index:], '\n')
+			if i < 0 {
+				// move unfinished line to buffer begin and break chunk loop
+				offset = offset + n - index
+				// copy(chunk, buffer[:offset])
+				for j = 0; j < offset; j++ {
+					buffer[j] = chunk[index+j]
+				}
+				break ChunkParseLoop
+
+			} else if i == 0 {
+				// skip empty line
+				index++
+
 			} else {
-				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out(msg)
+				if msg, err := points.ParseBytes(chunk[index : index+i+1]); err != nil {
+					atomic.AddUint32(&rcv.errors, 1)
+					logrus.Info(err)
+				} else {
+					atomic.AddUint32(&rcv.metricsReceived, 1)
+					rcv.out(msg)
+				}
+				index += i + 1
 			}
 		}
 	}

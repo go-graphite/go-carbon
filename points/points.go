@@ -8,22 +8,11 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/hydrogen18/stalecucumber"
 )
-
-var Pool = sync.Pool{
-	New: func() interface{} {
-		return &Points{
-			Data: []Point{
-				Point{},
-			},
-		}
-	},
-}
 
 // Point value/time pair
 type Point struct {
@@ -44,13 +33,6 @@ func New() *Points {
 
 // OnePoint create Points instance with single point
 func OnePoint(metric string, value float64, timestamp int64) *Points {
-	// p := Pool.Get().(*Points)
-	// p.Metric = metric
-	// p.Data = p.Data[:1]
-	// p.Data[0].Value = value
-	// p.Data[0].Timestamp = timestamp
-	// return p
-
 	return &Points{
 		Metric: metric,
 		Data: []Point{
