@@ -8,10 +8,22 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/hydrogen18/stalecucumber"
 )
+
+var Pool = sync.Pool{
+	New: func() interface{} {
+		return &Points{
+			Data: []Point{
+				Point{},
+			},
+		}
+	},
+}
 
 // Point value/time pair
 type Point struct {
@@ -32,6 +44,13 @@ func New() *Points {
 
 // OnePoint create Points instance with single point
 func OnePoint(metric string, value float64, timestamp int64) *Points {
+	// p := Pool.Get().(*Points)
+	// p.Metric = metric
+	// p.Data = p.Data[:1]
+	// p.Data[0].Value = value
+	// p.Data[0].Timestamp = timestamp
+	// return p
+
 	return &Points{
 		Metric: metric,
 		Data: []Point{
@@ -214,4 +233,42 @@ func (p *Points) Eq(other *Points) bool {
 		}
 	}
 	return true
+}
+
+// https://github.com/golang/go/issues/2632#issuecomment-66061057
+func unsafeString(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+// ParseBytes parse text protocol Point from bytes slice
+//  host.Point.value 42 1422641531\n
+func ParseBytes(p []byte) (*Points, error) {
+
+	i1 := bytes.IndexByte(p, ' ')
+	if i1 < 1 {
+		return nil, fmt.Errorf("bad message: %#v", string(p))
+	}
+
+	i2 := bytes.IndexByte(p[i1+1:], ' ')
+	if i2 < 1 {
+		return nil, fmt.Errorf("bad message: %#v", string(p))
+	}
+	i2 += i1 + 1
+
+	i3 := len(p)
+	if p[i3-1] == '\n' {
+		i3--
+	}
+
+	value, err := strconv.ParseFloat(unsafeString(p[i1+1:i2]), 64)
+	if err != nil || math.IsNaN(value) {
+		return nil, fmt.Errorf("bad message: %#v", string(p))
+	}
+
+	tsf, err := strconv.ParseFloat(unsafeString(p[i2+1:i3]), 64)
+	if err != nil || math.IsNaN(tsf) {
+		return nil, fmt.Errorf("bad message: %#v", string(p))
+	}
+
+	return OnePoint(string(p[:i1]), value, int64(tsf)), nil
 }
