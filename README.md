@@ -218,11 +218,12 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
-##### master
+##### version 0.9.0-rc1
 * Completely new internal architecture
 * Removed flush to whisper and stop on `USR2` signal. Use dump/restore instead
 * Removed global queue (channel) between receivers and cache, added optional per-receiver queues
 * Built-in [carbonserver](https://github.com/grobian/carbonserver) (thanks [Vladimir Smirnov](https://github.com/Civil))
+* Added runtime tunables to internal metrics #70
 
 ##### version 0.8.1
 * Bug fix: The synchronous config reload (HUP signal) and launch of the internal collecting statistics procedure (every "metric-interval") could cause deadlock (thanks [Maxim Ivanov](https://github.com/redbaron))
