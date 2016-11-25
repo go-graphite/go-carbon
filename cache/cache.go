@@ -171,13 +171,11 @@ func (c *Cache) Get(key string) []points.Point {
 	var data []points.Point
 	shard.Lock()
 	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
-		if p.Metric == key {
-			if p != nil {
-				if data == nil {
-					data = p.Data
-				} else {
-					data = append(data, p.Data...)
-				}
+		if p != nil && p.Metric == key {
+			if data == nil {
+				data = p.Data
+			} else {
+				data = append(data, p.Data...)
 			}
 		}
 	}
