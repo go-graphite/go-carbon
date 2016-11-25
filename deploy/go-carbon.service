@@ -1,0 +1,16 @@
+[Unit]
+Description=Golang implementation of Graphite/Carbon server
+Requires=var-run.mount
+After=var-run.mount
+
+[Service]
+User=_graphite
+
+ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf
+ExecReload=/bin/kill -USR2 $MAINPID
+
+EnvironmentFile=-/etc/sysconfig/go-carbon
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
