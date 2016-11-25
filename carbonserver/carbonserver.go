@@ -39,7 +39,7 @@ import (
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
 	"github.com/gogo/protobuf/proto"
-	pickle "github.com/kisielk/og-rek"
+	pickle "github.com/lomik/og-rek"
 	pb "github.com/lomik/go-carbon/carbonzipperpb"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"

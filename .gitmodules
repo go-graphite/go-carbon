@@ -91,3 +91,6 @@
 [submodule "vendor/github.com/hydrogen18/stalecucumber"]
 	path = vendor/github.com/hydrogen18/stalecucumber
 	url = https://github.com/hydrogen18/stalecucumber
+[submodule "vendor/github.com/lomik/og-rek"]
+	path = vendor/github.com/lomik/og-rek
+	url = https://github.com/lomik/og-rek
