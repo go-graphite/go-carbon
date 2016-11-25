@@ -602,7 +602,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		cacheStartTime := time.Now()
 		for _, item := range cacheData {
 			ts := int32(item.Timestamp) - int32(item.Timestamp)%step
-			if ts < fromTime || ts > untilTime {
+			if ts < fromTime || ts >= untilTime {
 				continue
 			}
 			index := (ts - fromTime) / step
