@@ -187,10 +187,10 @@ var singleMetricTests = []FetchTest{
 		now:              now,
 		errIsNil:         true,
 		dataIsNil:        false,
-		cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}},
+		cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}, {now + 3, 7.4}, {now + 67, 7.5}},
 		expectedStep:     60,
-		expectedValues:   []float64{0.1, 6.9, 0.3, 7.0, 7.2, 7.3, 0.0},
-		expectedIsAbsent: []bool{false, false, false, false, false, false, true},
+		expectedValues:   []float64{0.1, 6.9, 0.3, 7.0, 7.2, 7.3, 7.4},
+		expectedIsAbsent: []bool{false, false, false, false, false, false, false},
 	},
 	{
 		name:             "data-cache",
