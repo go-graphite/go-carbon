@@ -6,16 +6,19 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 ![Architecture](doc/design.png)
 
 ### Features
-* Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
-* Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
-* [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
-* [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf)
-* Carbonlink (requests to cache from graphite-web)
-* Logging with rotation (reopen log by HUP signal or inotify event)
-* Many persister workers (using many cpu cores)
-* Run as daemon
-* Optional dump/restore restart on `USR2` signal (config `dump` section): stop persister, start write new data to file, dump cache to file, stop all (and restore from files after next start)
-* Reload persister config (whisper section of main config, storage-schemas.conf and storage-aggregation.conf) on HUP signal
+- Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
+- Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
+- [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
+- [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf)
+- Carbonlink (requests to cache from graphite-web)
+- Logging with rotation (reopen log by HUP signal or inotify event)
+- Many persister workers (using many cpu cores)
+- Run as daemon
+- Optional dump/restore restart on `USR2` signal (config `dump` section): stop persister, start write new data to file, dump cache to file, stop all (and restore from files after next start)
+- Reload some config options without restart (HUP signal):
+  - `whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`
+  - `graph-prefix`, `metric-interval`, `metric-endpoint`, `max-cpu` from `common` section
+  - `dump` section
 
 ## Performance
 
