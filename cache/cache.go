@@ -1,306 +1,329 @@
 package cache
 
+/*
+Based on https://github.com/orcaman/concurrent-map
+*/
+
 import (
 	"fmt"
-	"sort"
+	"io"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
-
-	"github.com/Sirupsen/logrus"
 )
 
-type queue []*queueItem
+type WriteStrategy int
 
-func (v queue) Len() int           { return len(v) }
-func (v queue) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v queue) Less(i, j int) bool { return v[i].count < v[j].count }
+const (
+	MaximumLength WriteStrategy = iota
+	TimestampOrder
+	Noop
+)
 
-// Cache stores and aggregate metrics in memory
+const shardCount = 1024
+
+// A "thread" safe map of type string:Anything.
+// To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
-	helper.Stoppable
-	data           map[string]*points.Points
-	size           int
-	maxSize        int
-	inputChan      chan *points.Points // from receivers
-	inputCapacity  int                 // buffer size of inputChan
-	outputChan     chan *points.Points // to persisters
-	queryChan      chan *Query         // from carbonlink
-	metricInterval time.Duration       // checkpoint interval
-	graphPrefix    string
-	queryCnt       int
-	overflowCnt    int // drop packages if cache full
-	queue          queue
+	sync.Mutex
+
+	queueLastBuild time.Time
+
+	data []*Shard
+
+	maxSize       int32
+	writeStrategy WriteStrategy
+
+	writeoutQueue *WriteoutQueue
+
+	xlog atomic.Value // io.Writer
+
+	stat struct {
+		size              int32  // changing via atomic
+		queueBuildCnt     uint32 // number of times writeout queue was built
+		queueBuildTimeMs  uint32 // time spent building writeout queue in milliseconds
+		queueWriteoutTime uint32 // in milliseconds
+		overflowCnt       uint32 // drop packages if cache full
+		queryCnt          uint32 // number of queries
+	}
 }
 
-// New create Cache instance and run in/out goroutine
+// A "thread" safe string to anything map.
+type Shard struct {
+	sync.RWMutex     // Read Write mutex, guards access to internal map.
+	items            map[string]*points.Points
+	notConfirmed     []*points.Points // linear search for value/slot
+	notConfirmedUsed int              // search value in notConfirmed[:notConfirmedUsed]
+}
+
+// Creates a new cache instance
 func New() *Cache {
-	cache := &Cache{
-		data:           make(map[string]*points.Points, 0),
-		size:           0,
-		maxSize:        1000000,
-		metricInterval: time.Minute,
-		queryChan:      make(chan *Query, 16),
-		graphPrefix:    "carbon.",
-		queryCnt:       0,
-		queue:          make(queue, 0),
-		inputCapacity:  51200,
-		// inputChan:   make(chan *points.Points, 51200), create in In() getter
+	c := &Cache{
+		data:          make([]*Shard, shardCount),
+		writeStrategy: Noop,
+		maxSize:       1000000,
 	}
-	return cache
-}
 
-// SetInputCapacity set buffer size of input channel. Call before In() getter
-func (c *Cache) SetInputCapacity(size int) {
-	c.inputCapacity = size
-}
-
-// SetMetricInterval sets doChekpoint interval
-func (c *Cache) SetMetricInterval(interval time.Duration) {
-	c.metricInterval = interval
-}
-
-func (c *Cache) getNext() *points.Points {
-	for {
-		size := len(c.queue)
-		if size == 0 {
-			break
-		}
-		cacheRecord := c.queue[size-1]
-		c.queue = c.queue[:size-1]
-
-		if values, ok := c.data[cacheRecord.metric]; ok {
-			return values
+	for i := 0; i < shardCount; i++ {
+		c.data[i] = &Shard{
+			items:        make(map[string]*points.Points),
+			notConfirmed: make([]*points.Points, 4),
 		}
 	}
+
+	c.writeoutQueue = NewWriteoutQueue(c)
+	return c
+}
+
+// SetWriteStrategy ...
+func (c *Cache) SetWriteStrategy(s string) (err error) {
+	c.Lock()
+	defer c.Unlock()
+
+	switch s {
+	case "max":
+		c.writeStrategy = MaximumLength
+	case "sort":
+		c.writeStrategy = TimestampOrder
+	case "noop":
+		c.writeStrategy = Noop
+	default:
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
+	}
 	return nil
-}
-
-func (c *Cache) getAny() *points.Points {
-	for _, values := range c.data {
-		return values
-	}
-	return nil
-}
-
-// Get any key/values pair from Cache
-func (c *Cache) Get() *points.Points {
-	if values := c.getNext(); values != nil {
-		return values
-	}
-
-	c.updateQueue()
-
-	if values := c.getNext(); values != nil {
-		return values
-	}
-
-	return c.getAny()
-}
-
-// Remove key from cache
-func (c *Cache) Remove(key string) {
-	if value, exists := c.data[key]; exists {
-		c.size -= len(value.Data)
-		delete(c.data, key)
-	}
-}
-
-// Pop return and remove next for save point from cache
-func (c *Cache) Pop() *points.Points {
-	if c.size == 0 {
-		return nil
-	}
-	v := c.Get()
-	if v != nil {
-		c.Remove(v.Metric)
-	}
-	return v
-}
-
-// Add points to cache
-func (c *Cache) Add(p *points.Points) {
-	if values, exists := c.data[p.Metric]; exists {
-		values.Data = append(values.Data, p.Data...)
-	} else {
-		c.data[p.Metric] = p
-	}
-	c.size += len(p.Data)
-}
-
-// SetGraphPrefix for internal cache metrics
-func (c *Cache) SetGraphPrefix(prefix string) {
-	c.graphPrefix = prefix
 }
 
 // SetMaxSize of cache
-func (c *Cache) SetMaxSize(maxSize int) {
-	c.maxSize = maxSize
+func (c *Cache) SetMaxSize(maxSize uint32) {
+	c.maxSize = int32(maxSize)
 }
 
-// Size returns size
-func (c *Cache) Size() int {
-	return c.size
-}
+func (c *Cache) Stop() {}
 
-type queueItem struct {
-	metric string
-	count  int
-}
+// Collect cache metrics
+func (c *Cache) Stat(send helper.StatCallback) {
+	send("size", float64(c.Size()))
+	send("metrics", float64(c.Len()))
+	send("maxSize", float64(c.maxSize))
 
-// stat send internal statistics of cache
-func (c *Cache) stat(metric string, value float64) {
-	key := fmt.Sprintf("%scache.%s", c.graphPrefix, metric)
-	c.Add(points.OnePoint(key, value, time.Now().Unix()))
-	c.queue = append(c.queue, &queueItem{key, 1})
-}
+	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
+	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
 
-func (c *Cache) updateQueue() {
-	newQueue := make(queue, 0)
+	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
+	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
+	helper.SendUint32("queueWriteoutTime", &c.stat.queueWriteoutTime, send)
 
-	for key, values := range c.data {
-		newQueue = append(newQueue, &queueItem{key, len(values.Data)})
+	// confirm tracker stats
+	notConfirmedUsedTotal := 0
+	notConfirmedLenTotal := 0
+	notConfirmedShardUsedMax := 0
+	notConfirmedShardLenMax := 0
+
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+
+		l := len(shard.notConfirmed)
+
+		notConfirmedUsedTotal += shard.notConfirmedUsed
+		notConfirmedLenTotal += l
+		if shard.notConfirmedUsed > notConfirmedShardUsedMax {
+			notConfirmedShardUsedMax = shard.notConfirmedUsed
+		}
+		if l > notConfirmedShardLenMax {
+			notConfirmedShardLenMax = l
+		}
+		shard.Unlock()
 	}
 
-	sort.Sort(newQueue)
-
-	c.queue = newQueue
+	send("notConfirmedUsedTotal", float64(notConfirmedUsedTotal))
+	send("notConfirmedLenTotal", float64(notConfirmedLenTotal))
+	send("notConfirmedShardUsedMax", float64(notConfirmedShardUsedMax))
+	send("notConfirmedShardLenMax", float64(notConfirmedShardLenMax))
 }
 
-// doCheckpoint reorder save queue, add carbon metrics to queue
-func (c *Cache) doCheckpoint() {
-	start := time.Now()
-
-	inputLenBeforeCheckpoint := len(c.inputChan)
-
-	c.updateQueue()
-
-	inputLenAfterCheckpoint := len(c.inputChan)
-
-	worktime := time.Now().Sub(start)
-
-	c.stat("size", float64(c.size))
-	c.stat("metrics", float64(len(c.data)))
-	c.stat("queries", float64(c.queryCnt))
-	c.stat("overflow", float64(c.overflowCnt))
-	c.stat("checkpointTime", worktime.Seconds())
-	c.stat("inputLenBeforeCheckpoint", float64(inputLenBeforeCheckpoint))
-	c.stat("inputLenAfterCheckpoint", float64(inputLenAfterCheckpoint))
-
-	logrus.WithFields(logrus.Fields{
-		"time":                     worktime.String(),
-		"size":                     c.size,
-		"metrics":                  len(c.data),
-		"queries":                  c.queryCnt,
-		"overflow":                 c.overflowCnt,
-		"inputLenBeforeCheckpoint": inputLenBeforeCheckpoint,
-		"inputLenAfterCheckpoint":  inputLenAfterCheckpoint,
-		"inputCapacity":            cap(c.inputChan),
-	}).Info("[cache] doCheckpoint()")
-
-	c.queryCnt = 0
-	c.overflowCnt = 0
+// hash function
+// @TODO: try crc32 or something else?
+func fnv32(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime32 = uint32(16777619)
+	for i := 0; i < len(key); i++ {
+		hash *= prime32
+		hash ^= uint32(key[i])
+	}
+	return hash
 }
 
-func (c *Cache) worker(exitChan chan bool) {
-	var values *points.Points
-	var sendTo chan *points.Points
-	var forceReceive bool
+// Returns shard under given key
+func (c *Cache) GetShard(key string) *Shard {
+	// @TODO: remove type casts?
+	return c.data[uint(fnv32(key))%uint(shardCount)]
+}
 
-	forceReceiveThreshold := cap(c.inputChan) / 10
+func (c *Cache) Get(key string) []points.Point {
+	atomic.AddUint32(&c.stat.queryCnt, 1)
 
-	ticker := time.NewTicker(c.metricInterval)
-	defer ticker.Stop()
+	shard := c.GetShard(key)
 
-MAIN_LOOP:
-	for {
-
-		if len(c.inputChan) > forceReceiveThreshold {
-			forceReceive = true
-		} else {
-			forceReceive = false
-		}
-
-		if values == nil && !forceReceive {
-			values = c.Pop()
-		}
-
-		if values != nil {
-			sendTo = c.outputChan
-		} else {
-			sendTo = nil
-		}
-
-		select {
-		case <-ticker.C: // checkpoint
-			c.doCheckpoint()
-		case query := <-c.queryChan: // carbonlink
-			c.queryCnt++
-			reply := NewReply()
-
-			if values != nil && values.Metric == query.Metric {
-				reply.Points = values.Copy()
-			} else if v, ok := c.data[query.Metric]; ok {
-				reply.Points = v.Copy()
-			}
-
-			query.ReplyChan <- reply
-		case sendTo <- values: // to persister
-			values = nil
-		case msg := <-c.inputChan: // from receiver
-			if c.maxSize == 0 || c.size < c.maxSize {
-				c.Add(msg)
+	var data []points.Point
+	shard.Lock()
+	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+		if p != nil && p.Metric == key {
+			if data == nil {
+				data = p.Data
 			} else {
-				c.overflowCnt++
+				data = append(data, p.Data...)
 			}
-		case <-exitChan: // exit
-			break MAIN_LOOP
 		}
 	}
 
-}
-
-// In returns input channel
-func (c *Cache) In() chan *points.Points {
-	if c.inputChan == nil {
-		c.inputChan = make(chan *points.Points, c.inputCapacity)
-	}
-	return c.inputChan
-}
-
-// Out returns output channel
-func (c *Cache) Out() chan *points.Points {
-	if c.outputChan == nil {
-		c.outputChan = make(chan *points.Points, 1024)
-	}
-	return c.outputChan
-}
-
-// Query returns carbonlink query channel
-func (c *Cache) Query() chan *Query {
-	return c.queryChan
-}
-
-// SetOutputChanSize ...
-func (c *Cache) SetOutputChanSize(size int) {
-	c.outputChan = make(chan *points.Points, size)
-}
-
-// Start worker
-func (c *Cache) Start() {
-	c.StartFunc(func() error {
-		if c.inputChan == nil {
-			c.inputChan = make(chan *points.Points, c.inputCapacity)
+	if p, exists := shard.items[key]; exists {
+		if data == nil {
+			data = p.Data
+		} else {
+			data = append(data, p.Data...)
 		}
-		if c.outputChan == nil {
-			c.outputChan = make(chan *points.Points, 1024)
+	}
+	shard.Unlock()
+	return data
+}
+
+func (c *Cache) Confirm(p *points.Points) {
+	var i, j int
+	shard := c.GetShard(p.Metric)
+
+	shard.Lock()
+	for i = 0; i < shard.notConfirmedUsed; i++ {
+		if shard.notConfirmed[i] == p {
+			shard.notConfirmed[i] = nil
+
+			for j = i + 1; j < shard.notConfirmedUsed; j++ {
+				shard.notConfirmed[j-1] = shard.notConfirmed[j]
+			}
+
+			shard.notConfirmedUsed--
+		}
+	}
+	shard.Unlock()
+}
+
+func (c *Cache) Len() int32 {
+	l := 0
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+		l += len(shard.items)
+		shard.Unlock()
+	}
+	return int32(l)
+}
+
+func (c *Cache) Size() int32 {
+	return atomic.LoadInt32(&c.stat.size)
+}
+
+func (c *Cache) DivertToXlog(w io.Writer) {
+	c.xlog.Store(w)
+}
+
+func (c *Cache) Dump(w io.Writer) error {
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+
+		for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+			if p == nil {
+				continue
+			}
+			if _, err := p.WriteTo(w); err != nil {
+				return err
+			}
 		}
 
-		c.Go(func(exit chan bool) {
-			c.worker(exit)
-		})
+		for _, p := range shard.items {
+			if _, err := p.WriteTo(w); err != nil {
+				return err
+			}
+		}
 
-		return nil
-	})
+		shard.Unlock()
+	}
+
+	return nil
+}
+
+// Sets the given value under the specified key.
+func (c *Cache) Add(p *points.Points) {
+	xlog := c.xlog.Load()
+
+	if xlog != nil {
+		p.WriteTo(xlog.(io.Writer))
+	}
+
+	// Get map shard.
+	count := len(p.Data)
+
+	if c.maxSize > 0 && c.Size() > c.maxSize {
+		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
+		return
+	}
+
+	shard := c.GetShard(p.Metric)
+
+	shard.Lock()
+	if values, exists := shard.items[p.Metric]; exists {
+		values.Data = append(values.Data, p.Data...)
+	} else {
+		shard.items[p.Metric] = p
+	}
+	shard.Unlock()
+
+	atomic.AddInt32(&c.stat.size, int32(count))
+}
+
+// Removes an element from the map and returns it
+func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
+	// Try to get shard.
+	shard := c.GetShard(key)
+	shard.Lock()
+	p, exists = shard.items[key]
+	delete(shard.items, key)
+	shard.Unlock()
+
+	if exists {
+		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
+	}
+
+	return p, exists
+}
+
+func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
+	// Try to get shard.
+	shard := c.GetShard(key)
+	shard.Lock()
+	p, exists = shard.items[key]
+	delete(shard.items, key)
+
+	if exists {
+		if shard.notConfirmedUsed < len(shard.notConfirmed) {
+			shard.notConfirmed[shard.notConfirmedUsed] = p
+		} else {
+			shard.notConfirmed = append(shard.notConfirmed, p)
+		}
+		shard.notConfirmedUsed++
+	}
+	shard.Unlock()
+
+	if exists {
+		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
+	}
+
+	return p, exists
+}
+
+func (c *Cache) WriteoutQueue() *WriteoutQueue {
+	return c.writeoutQueue
 }

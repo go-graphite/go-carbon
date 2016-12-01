@@ -1,8 +1,8 @@
+// this is a parser for graphite's storage-schemas.conf
+// it supports old and new retention format
+// see https://graphite.readthedocs.io/en/0.9.9/config-carbon.html#storage-schemas-conf
+// based on https://github.com/grobian/carbonwriter but with some improvements
 package persister
-
-/*
-Schemas read code from https://github.com/grobian/carbonwriter/
-*/
 
 import (
 	"fmt"
@@ -11,49 +11,57 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/alyu/configparser"
 	"github.com/lomik/go-whisper"
 )
 
-type whisperSchemaItem struct {
-	name         string
-	pattern      *regexp.Regexp
-	retentionStr string
-	retentions   whisper.Retentions
-	priority     int64
+// Schema represents one schema setting
+type Schema struct {
+	Name         string
+	Pattern      *regexp.Regexp
+	RetentionStr string
+	Retentions   whisper.Retentions
+	Priority     int64
 }
 
-type whisperSchemaItemByPriority []*whisperSchemaItem
+// WhisperSchemas contains schema settings
+type WhisperSchemas []Schema
 
-func (v whisperSchemaItemByPriority) Len() int           { return len(v) }
-func (v whisperSchemaItemByPriority) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
-func (v whisperSchemaItemByPriority) Less(i, j int) bool { return v[i].priority >= v[j].priority }
+func (s WhisperSchemas) Len() int           { return len(s) }
+func (s WhisperSchemas) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func (s WhisperSchemas) Less(i, j int) bool { return s[i].Priority >= s[j].Priority }
 
-// WhisperSchemas ...
-type WhisperSchemas struct {
-	Data []*whisperSchemaItem
+// Match finds the schema for metric or returns false if none found
+func (s WhisperSchemas) Match(metric string) (Schema, bool) {
+	for _, schema := range s {
+		if schema.Pattern.MatchString(metric) {
+			return schema, true
+		}
+	}
+	return Schema{}, false
 }
 
-// ParseRetentionDefs copy of original ParseRetentionDefs from go-whisper
-// With support where old format:
-//   secondsPerPoint:numberOfPoints
+// ParseRetentionDefs parses retention definitions into a Retentions structure
 func ParseRetentionDefs(retentionDefs string) (whisper.Retentions, error) {
 	retentions := make(whisper.Retentions, 0)
 	for _, retentionDef := range strings.Split(retentionDefs, ",") {
 		retentionDef = strings.TrimSpace(retentionDef)
-		// check if old format
-		row := strings.Split(retentionDef, ":")
-		if len(row) == 2 {
-			val1, err1 := strconv.ParseInt(row[0], 10, 0)
-			val2, err2 := strconv.ParseInt(row[1], 10, 0)
-
-			if err1 == nil && err2 == nil {
-				retentionDef = fmt.Sprintf("%d:%d", val1, val1*val2)
-			}
+		parts := strings.Split(retentionDef, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("bad retentions spec %q", retentionDef)
 		}
 
-		// new format
+		// try old format
+		val1, err1 := strconv.ParseInt(parts[0], 10, 0)
+		val2, err2 := strconv.ParseInt(parts[1], 10, 0)
+
+		if err1 == nil && err2 == nil {
+			retention := whisper.NewRetention(int(val1), int(val2))
+			retentions = append(retentions, &retention)
+			continue
+		}
+
+		// try new format
 		retention, err := whisper.ParseRetentionDef(retentionDef)
 		if err != nil {
 			return nil, err
@@ -63,15 +71,10 @@ func ParseRetentionDefs(retentionDefs string) (whisper.Retentions, error) {
 	return retentions, nil
 }
 
-// NewWhisperSchemas create instance of WhisperSchemas
-func NewWhisperSchemas() *WhisperSchemas {
-	return &WhisperSchemas{
-		Data: make([]*whisperSchemaItem, 0),
-	}
-}
-
-// ReadWhisperSchemas ...
-func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
+// ReadWhisperSchemas reads and parses a storage-schemas.conf file and returns a sorted
+// schemas structure
+// see https://graphite.readthedocs.io/en/0.9.9/config-carbon.html#storage-schemas-conf
+func ReadWhisperSchemas(file string) (WhisperSchemas, error) {
 	config, err := configparser.Read(file)
 	if err != nil {
 		return nil, err
@@ -82,65 +85,47 @@ func ReadWhisperSchemas(file string) (*WhisperSchemas, error) {
 		return nil, err
 	}
 
-	result := NewWhisperSchemas()
+	var schemas WhisperSchemas
 
-	for index, s := range sections {
-		item := &whisperSchemaItem{}
-		// this is mildly stupid, but I don't feel like forking
-		// configparser just for this
-		item.name =
-			strings.Trim(strings.SplitN(s.String(), "\n", 2)[0], " []")
-		if item.name == "" || strings.HasPrefix(item.name, "#") {
+	for i, sec := range sections {
+		schema := Schema{}
+		schema.Name =
+			strings.Trim(strings.SplitN(sec.String(), "\n", 2)[0], " []")
+		if schema.Name == "" || strings.HasPrefix(schema.Name, "#") {
 			continue
 		}
 
-		patternStr := s.ValueOf("pattern")
+		patternStr := sec.ValueOf("pattern")
 		if patternStr == "" {
-			return nil, fmt.Errorf("[persister] Empty pattern '%s' for [%s]", item.name)
+			return nil, fmt.Errorf("[persister] Empty pattern for [%s]", schema.Name)
 		}
-		item.pattern, err = regexp.Compile(patternStr)
+		schema.Pattern, err = regexp.Compile(patternStr)
 		if err != nil {
-			return nil, fmt.Errorf("[persister] Failed to parse pattern '%s' for [%s]: %s",
-				s.ValueOf("pattern"), item.name, err.Error())
+			return nil, fmt.Errorf("[persister] Failed to parse pattern %q for [%s]: %s",
+				sec.ValueOf("pattern"), schema.Name, err.Error())
 		}
-		item.retentionStr = s.ValueOf("retentions")
-		item.retentions, err = ParseRetentionDefs(item.retentionStr)
+		schema.RetentionStr = sec.ValueOf("retentions")
+		schema.Retentions, err = ParseRetentionDefs(schema.RetentionStr)
 
 		if err != nil {
-			return nil, fmt.Errorf("[persister] Failed to parse retentions '%s' for [%s]: %s",
-				s.ValueOf("retentions"), item.name, err.Error())
+			return nil, fmt.Errorf("[persister] Failed to parse retentions %q for [%s]: %s",
+				sec.ValueOf("retentions"), schema.Name, err.Error())
 		}
 
-		priorityStr := s.ValueOf("priority")
+		priorityStr := sec.ValueOf("priority")
 
-		var p int64
-		if priorityStr == "" {
-			p = 0
-		} else {
+		p := int64(0)
+		if priorityStr != "" {
 			p, err = strconv.ParseInt(priorityStr, 10, 0)
 			if err != nil {
-				return nil, fmt.Errorf("[persister] wrong priority in schema: %s", err)
+				return nil, fmt.Errorf("[persister] Failed to parse priority %q for [%s]: %s", priorityStr, schema.Name, err)
 			}
 		}
-		item.priority = int64(p)<<32 - int64(index) // for sort records with same priority
-		// item.priority = (s.ValueOf("priority"))
-		logrus.Debugf("[persister] Adding schema [%s] pattern = %s retentions = %s",
-			item.name, s.ValueOf("pattern"), item.retentionStr)
+		schema.Priority = int64(p)<<32 - int64(i) // to sort records with same priority by position in file
 
-		result.Data = append(result.Data, item)
+		schemas = append(schemas, schema)
 	}
 
-	sort.Sort(whisperSchemaItemByPriority(result.Data))
-
-	return result, nil
-}
-
-// Match find schema for metric
-func (s *WhisperSchemas) match(metric string) *whisperSchemaItem {
-	for _, s := range s.Data {
-		if s.pattern.MatchString(metric) {
-			return s
-		}
-	}
-	return nil
+	sort.Sort(schemas)
+	return schemas, nil
 }

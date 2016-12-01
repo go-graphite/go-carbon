@@ -1,3 +1,75 @@
+go-carbon (0.9.0-rc1) unstable; urgency=low
+  * Completely new internal architecture
+  * Removed flush to whisper and stop on `USR2` signal. Use dump/restore instead
+  * Removed global queue (channel) between receivers and cache, added optional per-receiver queues
+  * Built-in [carbonserver](https://github.com/grobian/carbonserver) (thanks Vladimir Smirnov)
+  * Added runtime tunables to internal metrics #70
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 25 Nov 2016 23:00:00 +0300
+
+go-carbon (0.8.1) stable; urgency=low
+  * Bug fix: The synchronous config reload (HUP signal) and launch of the
+    internal collecting statistics procedure (every "metric-interval") could
+    cause deadlock (thanks Maxim Ivanov)
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 7 Oct 2016 01:00:00 +0300
+
+go-carbon (0.8.0) unstable; urgency=low
+  * Fully refactored and optimizer cache module (core of go-carbon) (thanks
+    Maxim Ivanov)
+  * Added noop cache.write-strategy (thanks Maxim Ivanov)
+  * New optional dump/restore functional for minimize data loss on restart
+  * Refactored internal stat mechanics. common.graph-prefix and
+    common.metric-interval now can be changed without restart (on HUP signal)
+  * Customizable internal metrics endpoint. common.metric-endpoint param.
+    Valid values: "local" and "" (write directly to whisper),
+    "tcp://host:port", "udp://host:port"
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 24 Aug 2016 22:30:00 +0300
+
+go-carbon (0.7.3) stable; urgency=low
+  * Added cache.write-strategy option (values "max" or "sorted") (thanks
+    Alexander Akulov)
+  * commitedPoints metric renamed to committedPoints
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Thu, 9 Aug 2016 23:45:00 +0300
+
+go-carbon (0.7.2) stable; urgency=low
+  * Added sparse file creation (whisper.sparse-create config option)
+  * Enable reload in init script (thanks Jose Riguera)
+  * Clean up schemas parser code (thanks Dieter Plaetinck)
+  * Better go-whisper error handling (thanks Hiroaki Nakamura)
+  * Don't try to create whisper file if exists with bad permissions #21
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 17 Jun 2016 22:45:00 +0300
+
+go-carbon (0.7.1) stable; urgency=low
+  * Fixed problem: Points in queue (channel) between cache and persister
+    subsystems was invisible for carbonlink
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 5 Apr 2016 22:00:00 +0300
+
+go-carbon (0.7) stable; urgency=low
+  * Improved throttling (max-updates-per-second) performance #32
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Wed, 3 Feb 2016 00:50:00 +0300
+
+go-carbon (0.7-beta4) unstable; urgency=low
+  * Fix bug: may crash on bad pickle message with big message size in header
+    #30. Added option `pickle.max-message-size` with 64 MB default value
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 8 Jan 2016 00:50:00 +0300
+
+go-carbon (0.7-beta3) unstable; urgency=low
+  * Missing error handling
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 5 Jan 2016 19:00:00 +0300
+
+go-carbon (0.7-beta2) unstable; urgency=low
+  * Code refactoring
+
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Mon, 28 Dec 2015 21:30:00 +0300
+
 go-carbon (0.7-beta1) unstable; urgency=low
   * Grace stop on USR2 signal: close all socket listeners, flush cache to disk
     and stop carbon

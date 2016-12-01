@@ -16,13 +16,13 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/carbon"
 	"github.com/lomik/go-carbon/logging"
-	"github.com/lomik/go-daemon"
+	daemon "github.com/sevlyar/go-daemon"
 )
 
 import _ "net/http/pprof"
 
 // Version of go-carbon
-const Version = "0.7-beta1"
+const Version = "0.9.0-rc1"
 
 func httpServe(addr string) (func(), error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
@@ -135,15 +135,12 @@ func main() {
 
 		runtime.UnlockOSThread()
 	}
-
-	runtime.GOMAXPROCS(cfg.Common.MaxCPU)
-
 	/* CONFIG end */
 
 	// pprof
-	httpStop := func() {}
+	// httpStop := func() {}
 	if cfg.Pprof.Enabled {
-		httpStop, err = httpServe(cfg.Pprof.Listen)
+		_, err = httpServe(cfg.Pprof.Listen)
 		if err != nil {
 			logrus.Fatal(err)
 		}
@@ -158,9 +155,10 @@ func main() {
 	go func() {
 		c := make(chan os.Signal, 1)
 		signal.Notify(c, syscall.SIGUSR2)
-		<-c
-		httpStop()
-		app.GraceStop()
+		for {
+			<-c
+			app.DumpStop()
+		}
 	}()
 
 	go func() {

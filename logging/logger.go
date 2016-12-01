@@ -31,7 +31,7 @@ func init() {
 				err := std.Reopen()
 				logrus.Infof("HUP received, reopen log %#v", std.Filename())
 				if err != nil {
-					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+					logrus.Errorf("Reopen log %#v failed: %s", std.Filename(), err.Error())
 				}
 			}
 		}
@@ -102,7 +102,7 @@ func (l *FileLogger) fsWatch(filename string, quit chan bool) {
 
 				logrus.Infof("Reopen log %#v by fsnotify event", std.Filename())
 				if err != nil {
-					logrus.Errorf("Reopen log %#v failed: %#s", std.Filename(), err.Error())
+					logrus.Errorf("Reopen log %#v failed: %s", std.Filename(), err.Error())
 				}
 
 			case <-quit:
@@ -210,9 +210,30 @@ func PrepareFile(filename string, owner *user.User) error {
 	return nil
 }
 
+type TestOut interface {
+	Write(p []byte) (n int, err error)
+	String() string
+}
+
+type buffer struct {
+	sync.Mutex
+	b bytes.Buffer
+}
+
+func (b *buffer) Write(p []byte) (n int, err error) {
+	b.Lock()
+	defer b.Unlock()
+	return b.b.Write(p)
+}
+func (b *buffer) String() string {
+	b.Lock()
+	defer b.Unlock()
+	return b.b.String()
+}
+
 // Test run callable with changed logging output
-func Test(callable func(*bytes.Buffer)) {
-	buf := &bytes.Buffer{}
+func Test(callable func(TestOut)) {
+	buf := &buffer{}
 	logrus.SetOutput(buf)
 
 	callable(buf)
@@ -228,7 +249,7 @@ func Test(callable func(*bytes.Buffer)) {
 }
 
 // TestWithLevel run callable with changed logging output and log level
-func TestWithLevel(level string, callable func(*bytes.Buffer)) {
+func TestWithLevel(level string, callable func(TestOut)) {
 	originalLevel := logrus.GetLevel()
 	defer logrus.SetLevel(originalLevel)
 	SetLevel(level)

@@ -1,39 +1,43 @@
 package persister
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/lomik/go-carbon/points"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestThrottleChan(t *testing.T) {
-	perSecond := 100
-	timestamp := time.Now().Unix()
-
-	chIn := make(chan *points.Points)
-	chOut := throttleChan(chIn, perSecond, nil)
+func doTestThrottleTicker(perSecond int) (bw int) {
+	// start := time.Now()
 	wait := time.After(time.Second)
 
-	bw := 0
+	ticker := NewThrottleTicker(perSecond)
+	defer ticker.Stop()
 
 LOOP:
 	for {
 		select {
 		case <-wait:
 			break LOOP
-		default:
+		case <-ticker.C:
+			bw++
 		}
-		chIn <- points.OnePoint("metric", 1, timestamp)
-		<-chOut
-		bw++
 	}
-	close(chIn)
+	// stop := time.Now()
 
-	max := float64(perSecond) * 1.05
-	min := float64(perSecond) * 0.95
+	return bw
+}
 
-	assert.True(t, float64(bw) >= min)
-	assert.True(t, float64(bw) <= max)
+func TestThrottleChan(t *testing.T) {
+	// perSecondTable := []int{100, 1000, 10000, 100000, 200000, 400000}
+	perSecondTable := []int{100, 1000, 10000, 100000, 200000}
+
+	for _, perSecond := range perSecondTable {
+		bw := doTestThrottleTicker(perSecond)
+		max := float64(perSecond) * 1.05
+		min := float64(perSecond) * 0.95
+		assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+		assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+	}
 }

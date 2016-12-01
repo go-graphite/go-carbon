@@ -1,54 +1,63 @@
 package persister
 
 import (
-	"fmt"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/lomik/go-whisper"
+	whisper "github.com/lomik/go-whisper"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
 
+const storeMutexCount = 32768
+
+type StoreFunc func(p *Whisper, values *points.Points)
+
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
 	updateOperations    uint32
-	commitedPoints      uint32
-	in                  chan *points.Points
-	schemas             *WhisperSchemas
+	committedPoints     uint32
+	recv                func(chan bool) *points.Points
+	confirm             func(*points.Points)
+	schemas             WhisperSchemas
 	aggregation         *WhisperAggregation
-	metricInterval      time.Duration // checkpoint interval
 	workersCount        int
 	rootPath            string
-	graphPrefix         string
 	created             uint32 // counter
+	sparse              bool
 	maxUpdatesPerSecond int
-	mockStore           func(p *Whisper, values *points.Points)
+	throttleTicker      *ThrottleTicker
+	storeMutex          [storeMutexCount]sync.Mutex
+	mockStore           func() (StoreFunc, func())
+	// blockThrottleNs        uint64 // sum ns counter
+	// blockQueueGetNs        uint64 // sum ns counter
+	// blockAvoidConcurrentNs uint64 // sum ns counter
+	// blockUpdateManyNs      uint64 // sum ns counter
 }
 
 // NewWhisper create instance of Whisper
-func NewWhisper(rootPath string, schemas *WhisperSchemas, aggregation *WhisperAggregation, in chan *points.Points) *Whisper {
+func NewWhisper(
+	rootPath string,
+	schemas WhisperSchemas,
+	aggregation *WhisperAggregation,
+	recv func(chan bool) *points.Points,
+	confirm func(*points.Points)) *Whisper {
+
 	return &Whisper{
-		in:                  in,
+		recv:                recv,
+		confirm:             confirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
-		metricInterval:      time.Minute,
 		workersCount:        1,
 		rootPath:            rootPath,
 		maxUpdatesPerSecond: 0,
 	}
-}
-
-// SetGraphPrefix for internal cache metrics
-func (p *Whisper) SetGraphPrefix(prefix string) {
-	p.graphPrefix = prefix
 }
 
 // SetMaxUpdatesPerSecond enable throttling
@@ -63,30 +72,53 @@ func (p *Whisper) GetMaxUpdatesPerSecond() int {
 
 // SetWorkers count
 func (p *Whisper) SetWorkers(count int) {
-	p.workersCount = count
+	if count >= 1 {
+		p.workersCount = count
+	} else {
+		p.workersCount = 1
+	}
 }
 
-// SetMetricInterval sets doChekpoint interval
-func (p *Whisper) SetMetricInterval(interval time.Duration) {
-	p.metricInterval = interval
+// SetSparse creation
+func (p *Whisper) SetSparse(sparse bool) {
+	p.sparse = sparse
 }
 
-// Stat sends internal statistics to cache
-func (p *Whisper) Stat(metric string, value float64) {
-	p.in <- points.OnePoint(
-		fmt.Sprintf("%spersister.%s", p.graphPrefix, metric),
-		value,
-		time.Now().Unix(),
-	)
+func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
+	p.mockStore = fn
+}
+
+func fnv32(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime32 = uint32(16777619)
+	for i := 0; i < len(key); i++ {
+		hash *= prime32
+		hash ^= uint32(key[i])
+	}
+	return hash
 }
 
 func store(p *Whisper, values *points.Points) {
+	// avoid concurrent store same metric
+	// @TODO: may be flock?
+	// start := time.Now()
+	mutexIndex := fnv32(values.Metric) % storeMutexCount
+	p.storeMutex[mutexIndex].Lock()
+	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
+	defer p.storeMutex[mutexIndex].Unlock()
+
 	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 
 	w, err := whisper.Open(path)
 	if err != nil {
-		schema := p.schemas.match(values.Metric)
-		if schema == nil {
+		// create new whisper if file not exists
+		if !os.IsNotExist(err) {
+			logrus.Errorf("[persister] Failed to open whisper file %s: %s", path, err.Error())
+			return
+		}
+
+		schema, ok := p.schemas.Match(values.Metric)
+		if !ok {
 			logrus.Errorf("[persister] No storage schema defined for %s", values.Metric)
 			return
 		}
@@ -98,8 +130,8 @@ func store(p *Whisper, values *points.Points) {
 		}
 
 		logrus.WithFields(logrus.Fields{
-			"retention":    schema.retentionStr,
-			"schema":       schema.name,
+			"retention":    schema.RetentionStr,
+			"schema":       schema.Name,
 			"aggregation":  aggr.name,
 			"xFilesFactor": aggr.xFilesFactor,
 			"method":       aggr.aggregationMethodStr,
@@ -110,7 +142,9 @@ func store(p *Whisper, values *points.Points) {
 			return
 		}
 
-		w, err = whisper.Create(path, schema.retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor))
+		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
+			Sparse: p.sparse,
+		})
 		if err != nil {
 			logrus.Errorf("[persister] Failed to create new whisper file %s: %s", path, err.Error())
 			return
@@ -124,7 +158,7 @@ func store(p *Whisper, values *points.Points) {
 		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
 	}
 
-	atomic.AddUint32(&p.commitedPoints, uint32(len(values.Data)))
+	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
 	atomic.AddUint32(&p.updateOperations, 1)
 
 	defer w.Close()
@@ -134,174 +168,95 @@ func store(p *Whisper, values *points.Points) {
 			logrus.Errorf("[persister] UpdateMany %s recovered: %s", path, r)
 		}
 	}()
+
+	// start = time.Now()
 	w.UpdateMany(points)
+	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 }
 
-func (p *Whisper) worker(in chan *points.Points, exit chan bool) {
+func (p *Whisper) worker(recv func(chan bool) *points.Points, confirm func(*points.Points), exit chan bool) {
 	storeFunc := store
+	var doneCb func()
 	if p.mockStore != nil {
-		storeFunc = p.mockStore
+		storeFunc, doneCb = p.mockStore()
 	}
 
 LOOP:
 	for {
+		// start := time.Now()
 		select {
+		case <-p.throttleTicker.C:
+			// atomic.AddUint64(&p.blockThrottleNs, uint64(time.Since(start).Nanoseconds()))
+			// pass
 		case <-exit:
+			return
+		}
+
+		// start = time.Now()
+		points := recv(exit)
+		// atomic.AddUint64(&p.blockQueueGetNs, uint64(time.Since(start).Nanoseconds()))
+		if points == nil {
+			// exit closed
 			break LOOP
-		case values, ok := <-in:
-			if !ok {
-				break LOOP
-			}
-			storeFunc(p, values)
+		}
+		storeFunc(p, points)
+		if doneCb != nil {
+			doneCb()
+		}
+		if confirm != nil {
+			confirm(points)
 		}
 	}
 }
 
-func (p *Whisper) shuffler(in chan *points.Points, out [](chan *points.Points), exit chan bool) {
-	workers := uint32(len(out))
-
-LOOP:
-	for {
-		select {
-		case <-exit:
-			break LOOP
-		case values, ok := <-in:
-			if !ok {
-				break LOOP
-			}
-			index := crc32.ChecksumIEEE([]byte(values.Metric)) % workers
-			out[index] <- values
-		}
-	}
-
-	for _, ch := range out {
-		close(ch)
-	}
-}
-
-// save stat
-func (p *Whisper) doCheckpoint() {
+// Stat callback
+func (p *Whisper) Stat(send helper.StatCallback) {
 	updateOperations := atomic.LoadUint32(&p.updateOperations)
-	commitedPoints := atomic.LoadUint32(&p.commitedPoints)
+	committedPoints := atomic.LoadUint32(&p.committedPoints)
 	atomic.AddUint32(&p.updateOperations, -updateOperations)
-	atomic.AddUint32(&p.commitedPoints, -commitedPoints)
+	atomic.AddUint32(&p.committedPoints, -committedPoints)
 
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
-	logrus.WithFields(logrus.Fields{
-		"updateOperations": int(updateOperations),
-		"commitedPoints":   int(commitedPoints),
-		"created":          int(created),
-	}).Info("[persister] doCheckpoint()")
-
-	p.Stat("updateOperations", float64(updateOperations))
-	p.Stat("commitedPoints", float64(commitedPoints))
+	send("updateOperations", float64(updateOperations))
+	send("committedPoints", float64(committedPoints))
 	if updateOperations > 0 {
-		p.Stat("pointsPerUpdate", float64(commitedPoints)/float64(updateOperations))
+		send("pointsPerUpdate", float64(committedPoints)/float64(updateOperations))
 	} else {
-		p.Stat("pointsPerUpdate", 0.0)
+		send("pointsPerUpdate", 0.0)
 	}
 
-	p.Stat("created", float64(created))
+	send("created", float64(created))
 
-}
+	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
+	send("workers", float64(p.workersCount))
 
-// stat timer
-func (p *Whisper) statWorker(exit chan bool) {
-	ticker := time.NewTicker(p.metricInterval)
-	defer ticker.Stop()
+	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
+	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
+	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)
+	// helper.SendAndSubstractUint64("blockUpdateManyNs", &p.blockUpdateManyNs, send)
 
-LOOP:
-	for {
-		select {
-		case <-exit:
-			break LOOP
-		case <-ticker.C:
-			go p.doCheckpoint()
-		}
-	}
-}
-
-func throttleChan(in chan *points.Points, ratePerSec int, exit chan bool) chan *points.Points {
-	out := make(chan *points.Points, cap(in))
-
-	step := time.Duration(1e9/ratePerSec) * time.Nanosecond
-
-	go func() {
-		var p *points.Points
-		var ok bool
-
-		defer close(out)
-
-		// start flight
-		throttleTicker := time.NewTicker(step)
-		defer throttleTicker.Stop()
-
-	LOOP:
-		for {
-			select {
-			case <-throttleTicker.C:
-				select {
-				case p, ok = <-in:
-					if !ok {
-						break LOOP
-					}
-				case <-exit:
-					break LOOP
-				}
-				out <- p
-			case <-exit:
-				break LOOP
-			}
-		}
-	}()
-
-	return out
 }
 
 // Start worker
-func (p *Whisper) Start() {
+func (p *Whisper) Start() error {
+	return p.StartFunc(func() error {
 
-	p.StartFunc(func() error {
+		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
-		p.Go(func(exitChan chan bool) {
-			p.statWorker(exitChan)
-		})
-
-		p.WithExit(func(exitChan chan bool) {
-
-			inChan := p.in
-
-			readerExit := exitChan
-
-			if p.maxUpdatesPerSecond > 0 {
-				inChan = throttleChan(inChan, p.maxUpdatesPerSecond, exitChan)
-				readerExit = nil // read all before channel is closed
-			}
-
-			if p.workersCount <= 1 { // solo worker
-				p.Go(func(e chan bool) {
-					p.worker(inChan, readerExit)
-				})
-			} else {
-				var channels [](chan *points.Points)
-
-				for i := 0; i < p.workersCount; i++ {
-					ch := make(chan *points.Points, 32)
-					channels = append(channels, ch)
-					p.Go(func(e chan bool) {
-						p.worker(ch, nil)
-					})
-				}
-
-				p.Go(func(e chan bool) {
-					p.shuffler(inChan, channels, readerExit)
-				})
-			}
-
-		})
+		for i := 0; i < p.workersCount; i++ {
+			p.Go(func(exit chan bool) {
+				p.worker(p.recv, p.confirm, exit)
+			})
+		}
 
 		return nil
+	})
+}
+
+func (p *Whisper) Stop() {
+	p.StopFunc(func() {
+		p.throttleTicker.Stop()
 	})
 }

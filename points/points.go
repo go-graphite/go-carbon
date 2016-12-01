@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"strings"
@@ -21,7 +22,7 @@ type Point struct {
 // Points from carbon clients
 type Points struct {
 	Metric string
-	Data   []*Point
+	Data   []Point
 }
 
 // New creates new instance of Points
@@ -33,8 +34,8 @@ func New() *Points {
 func OnePoint(metric string, value float64, timestamp int64) *Points {
 	return &Points{
 		Metric: metric,
-		Data: []*Point{
-			&Point{
+		Data: []Point{
+			Point{
 				Value:     value,
 				Timestamp: timestamp,
 			},
@@ -53,6 +54,18 @@ func (p *Points) Copy() *Points {
 		Metric: p.Metric,
 		Data:   p.Data,
 	}
+}
+
+func (p *Points) WriteTo(w io.Writer) (n int64, err error) {
+	var c int
+	for _, d := range p.Data { // every metric point
+		c, err = w.Write([]byte(fmt.Sprintf("%s %v %v\n", p.Metric, d.Value, d.Timestamp)))
+		n += int64(c)
+		if err != nil {
+			return
+		}
+	}
+	return
 }
 
 // ParseText parse text protocol Point
@@ -161,14 +174,14 @@ func ParsePickle(pkt []byte) ([]*Points, error) {
 }
 
 // Append point
-func (p *Points) Append(onePoint *Point) *Points {
+func (p *Points) Append(onePoint Point) *Points {
 	p.Data = append(p.Data, onePoint)
 	return p
 }
 
 // Add value/timestamp pair to points
 func (p *Points) Add(value float64, timestamp int64) *Points {
-	p.Data = append(p.Data, &Point{
+	p.Data = append(p.Data, Point{
 		Value:     value,
 		Timestamp: timestamp,
 	})

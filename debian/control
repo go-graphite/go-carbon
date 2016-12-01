@@ -1,8 +1,8 @@
 Source: go-carbon
 Section: utils
 Priority: optional
-Maintainer: Dave Rawks <dave@pandora.com>
-Build-Depends: debhelper (>= 9), make, golang
+Maintainer: Roman Lomonosov <r.lomonosov@gmail.com>
+Build-Depends: debhelper (>= 9), make
 Standards-Version: 3.9.5
 Homepage: https://github.com/lomik/go-carbon
 Vcs-Git: https://github.com/lomik/go-carbon.git

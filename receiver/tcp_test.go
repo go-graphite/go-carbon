@@ -15,7 +15,7 @@ type tcpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
-func newTCPTestCase(t *testing.T) *tcpTestCase {
+func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 	test := &tcpTestCase{
 		T: t,
 	}
@@ -25,13 +25,19 @@ func newTCPTestCase(t *testing.T) *tcpTestCase {
 		t.Fatal(err)
 	}
 
-	test.rcvChan = make(chan *points.Points, 128)
-	test.receiver = NewTCP(test.rcvChan)
-	// defer receiver.Stop()
+	scheme := "tcp"
+	if isPickle {
+		scheme = "pickle"
+	}
 
-	if err = test.receiver.Listen(addr); err != nil {
+	test.rcvChan = make(chan *points.Points, 128)
+
+	r, err := New(scheme+"://"+addr.String(), OutChan(test.rcvChan))
+	if err != nil {
 		t.Fatal(err)
 	}
+
+	test.receiver = r.(*TCP)
 
 	test.conn, err = net.Dial("tcp", test.receiver.Addr().String())
 	if err != nil {
@@ -65,7 +71,7 @@ func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
 }
 
 func TestTCP1(t *testing.T) {
-	test := newTCPTestCase(t)
+	test := newTCPTestCase(t, false)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\n")
@@ -81,7 +87,7 @@ func TestTCP1(t *testing.T) {
 }
 
 func TestTCP2(t *testing.T) {
-	test := newTCPTestCase(t)
+	test := newTCPTestCase(t, false)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")

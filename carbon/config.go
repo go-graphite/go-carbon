@@ -11,6 +11,8 @@ import (
 	"github.com/lomik/go-carbon/persister"
 )
 
+const MetricEndpointLocal = "local"
+
 // Duration wrapper time.Duration for TOML
 type Duration struct {
 	time.Duration
@@ -41,6 +43,7 @@ type commonConfig struct {
 	LogLevel       string    `toml:"log-level"`
 	GraphPrefix    string    `toml:"graph-prefix"`
 	MetricInterval *Duration `toml:"metric-interval"`
+	MetricEndpoint string    `toml:"metric-endpoint"`
 	MaxCPU         int       `toml:"max-cpu"`
 }
 
@@ -50,32 +53,52 @@ type whisperConfig struct {
 	AggregationFilename string `toml:"aggregation-file"`
 	Workers             int    `toml:"workers"`
 	MaxUpdatesPerSecond int    `toml:"max-updates-per-second"`
+	Sparse              bool   `toml:"sparse-create"`
 	Enabled             bool   `toml:"enabled"`
-	Schemas             *persister.WhisperSchemas
+	Schemas             persister.WhisperSchemas
 	Aggregation         *persister.WhisperAggregation
 }
 
 type cacheConfig struct {
-	MaxSize     int `toml:"max-size"`
-	InputBuffer int `toml:"input-buffer"`
+	MaxSize       uint32 `toml:"max-size"`
+	WriteStrategy string `toml:"write-strategy"`
 }
 
 type udpConfig struct {
 	Listen        string `toml:"listen"`
 	Enabled       bool   `toml:"enabled"`
 	LogIncomplete bool   `toml:"log-incomplete"`
+	BufferSize    int    `toml:"buffer-size"`
 }
 
 type tcpConfig struct {
-	Listen  string `toml:"listen"`
-	Enabled bool   `toml:"enabled"`
+	Listen     string `toml:"listen"`
+	Enabled    bool   `toml:"enabled"`
+	BufferSize int    `toml:"buffer-size"`
+}
+
+type pickleConfig struct {
+	Listen         string `toml:"listen"`
+	MaxMessageSize int    `toml:"max-message-size"`
+	Enabled        bool   `toml:"enabled"`
+	BufferSize     int    `toml:"buffer-size"`
 }
 
 type carbonlinkConfig struct {
-	Listen       string    `toml:"listen"`
-	Enabled      bool      `toml:"enabled"`
-	ReadTimeout  *Duration `toml:"read-timeout"`
-	QueryTimeout *Duration `toml:"query-timeout"`
+	Listen      string    `toml:"listen"`
+	Enabled     bool      `toml:"enabled"`
+	ReadTimeout *Duration `toml:"read-timeout"`
+}
+
+type carbonserverConfig struct {
+	Listen            string    `toml:"listen"`
+	Enabled           bool      `toml:"enabled"`
+	ReadTimeout       *Duration `toml:"read-timeout"`
+	WriteTimeout      *Duration `toml:"write-timeout"`
+	ScanFrequency     *Duration `toml:"scan-frequency"`
+	Buckets           int       `toml:"buckets"`
+	MaxGlobs          int       `toml:"max-globs"`
+	MetricsAsCounters bool      `toml:"metrics-as-counters"`
 }
 
 type pprofConfig struct {
@@ -83,16 +106,24 @@ type pprofConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
+type dumpConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	Path             string `toml:"path"`
+	RestorePerSecond int    `toml:"restore-per-second"`
+}
+
 // Config ...
 type Config struct {
-	Common     commonConfig     `toml:"common"`
-	Whisper    whisperConfig    `toml:"whisper"`
-	Cache      cacheConfig      `toml:"cache"`
-	Udp        udpConfig        `toml:"udp"`
-	Tcp        tcpConfig        `toml:"tcp"`
-	Pickle     tcpConfig        `toml:"pickle"`
-	Carbonlink carbonlinkConfig `toml:"carbonlink"`
-	Pprof      pprofConfig      `toml:"pprof"`
+	Common       commonConfig       `toml:"common"`
+	Whisper      whisperConfig      `toml:"whisper"`
+	Cache        cacheConfig        `toml:"cache"`
+	Udp          udpConfig          `toml:"udp"`
+	Tcp          tcpConfig          `toml:"tcp"`
+	Pickle       pickleConfig       `toml:"pickle"`
+	Carbonlink   carbonlinkConfig   `toml:"carbonlink"`
+	Carbonserver carbonserverConfig `toml:"carbonserver"`
+	Dump         dumpConfig         `toml:"dump"`
+	Pprof        pprofConfig        `toml:"pprof"`
 }
 
 // NewConfig ...
@@ -101,12 +132,13 @@ func NewConfig() *Config {
 		Common: commonConfig{
 			Logfile:     "/var/log/go-carbon/go-carbon.log",
 			LogLevel:    "info",
-			GraphPrefix: "carbon.agents.{host}.",
+			GraphPrefix: "carbon.agents.{host}",
 			MetricInterval: &Duration{
 				Duration: time.Minute,
 			},
-			MaxCPU: 1,
-			User:   "",
+			MetricEndpoint: MetricEndpointLocal,
+			MaxCPU:         1,
+			User:           "",
 		},
 		Whisper: whisperConfig{
 			DataDir:             "/data/graphite/whisper/",
@@ -115,10 +147,11 @@ func NewConfig() *Config {
 			MaxUpdatesPerSecond: 0,
 			Enabled:             true,
 			Workers:             1,
+			Sparse:              false,
 		},
 		Cache: cacheConfig{
-			MaxSize:     1000000,
-			InputBuffer: 51200,
+			MaxSize:       1000000,
+			WriteStrategy: "max",
 		},
 		Udp: udpConfig{
 			Listen:        ":2003",
@@ -129,9 +162,26 @@ func NewConfig() *Config {
 			Listen:  ":2003",
 			Enabled: true,
 		},
-		Pickle: tcpConfig{
-			Listen:  ":2004",
-			Enabled: true,
+		Pickle: pickleConfig{
+			Listen:         ":2004",
+			Enabled:        true,
+			MaxMessageSize: 67108864, // 64 Mb
+		},
+		Carbonserver: carbonserverConfig{
+			Listen:            "127.0.0.1:8080",
+			Enabled:           false,
+			Buckets:           10,
+			MaxGlobs:          100,
+			MetricsAsCounters: false,
+			ScanFrequency: &Duration{
+				Duration: 300 * time.Second,
+			},
+			ReadTimeout: &Duration{
+				Duration: 60 * time.Second,
+			},
+			WriteTimeout: &Duration{
+				Duration: 60 * time.Second,
+			},
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
@@ -139,14 +189,12 @@ func NewConfig() *Config {
 			ReadTimeout: &Duration{
 				Duration: 30 * time.Second,
 			},
-			QueryTimeout: &Duration{
-				Duration: 100 * time.Millisecond,
-			},
 		},
 		Pprof: pprofConfig{
 			Listen:  "localhost:7007",
 			Enabled: false,
 		},
+		Dump: dumpConfig{},
 	}
 
 	return cfg

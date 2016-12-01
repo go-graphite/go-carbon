@@ -1,7 +1,6 @@
 package receiver
 
 import (
-	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ type udpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
-func newUDPTestCase(t *testing.T) *udpTestCase {
+func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 	test := &udpTestCase{
 		T: t,
 	}
@@ -29,12 +28,12 @@ func newUDPTestCase(t *testing.T) *udpTestCase {
 	}
 
 	test.rcvChan = make(chan *points.Points, 128)
-	test.receiver = NewUDP(test.rcvChan)
-	// defer receiver.Stop()
 
-	if err = test.receiver.Listen(addr); err != nil {
+	r, err := New("udp://"+addr.String(), UDPLogIncomplete(logIncomplete), OutChan(test.rcvChan))
+	if err != nil {
 		t.Fatal(err)
 	}
+	test.receiver = r.(*UDP)
 
 	test.conn, err = net.Dial("udp", test.receiver.Addr().String())
 	if err != nil {
@@ -46,9 +45,12 @@ func newUDPTestCase(t *testing.T) *udpTestCase {
 	return test
 }
 
-func (test *udpTestCase) EnableIncompleteLogging() *udpTestCase {
-	test.receiver.SetLogIncomplete(true)
-	return test
+func newUDPTestCase(t *testing.T) *udpTestCase {
+	return newUDPTestCaseWithOptions(t, false)
+}
+
+func newUDPTestCaseLogIncomplete(t *testing.T) *udpTestCase {
+	return newUDPTestCaseWithOptions(t, true)
 }
 
 func (test *udpTestCase) Finish() {
@@ -136,8 +138,8 @@ func TestLogIncompleteMessage(t *testing.T) {
 	assert := assert.New(t)
 
 	// 3 lines
-	logging.Test(func(log *bytes.Buffer) {
-		test := newUDPTestCase(t).EnableIncompleteLogging()
+	logging.Test(func(log logging.TestOut) {
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 4")
@@ -145,8 +147,8 @@ func TestLogIncompleteMessage(t *testing.T) {
 	})
 
 	// > 3 lines
-	logging.Test(func(log *bytes.Buffer) {
-		test := newUDPTestCase(t).EnableIncompleteLogging()
+	logging.Test(func(log logging.TestOut) {
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 44 1422698155\nmetric4 45 ")
@@ -154,8 +156,8 @@ func TestLogIncompleteMessage(t *testing.T) {
 	})
 
 	// 2 lines
-	logging.Test(func(log *bytes.Buffer) {
-		test := newUDPTestCase(t).EnableIncompleteLogging()
+	logging.Test(func(log logging.TestOut) {
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 14226981")
@@ -163,8 +165,8 @@ func TestLogIncompleteMessage(t *testing.T) {
 	})
 
 	// single line
-	logging.Test(func(log *bytes.Buffer) {
-		test := newUDPTestCase(t).EnableIncompleteLogging()
+	logging.Test(func(log logging.TestOut) {
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155")

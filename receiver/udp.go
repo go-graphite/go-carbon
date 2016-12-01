@@ -2,7 +2,6 @@ package receiver
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -18,22 +17,19 @@ import (
 // UDP receive metrics from UDP socket
 type UDP struct {
 	helper.Stoppable
-	out                chan *points.Points
-	graphPrefix        string
+	out                func(*points.Points)
+	name               string
 	metricsReceived    uint32
 	incompleteReceived uint32
 	errors             uint32
 	logIncomplete      bool
 	conn               *net.UDPConn
-	metricInterval     time.Duration
+	buffer             chan *points.Points
 }
 
-// NewUDP create new instance of UDP
-func NewUDP(out chan *points.Points) *UDP {
-	return &UDP{
-		out:            out,
-		metricInterval: time.Minute,
-	}
+// Name returns receiver name (for store internal metrics)
+func (rcv *UDP) Name() string {
+	return rcv.name
 }
 
 type incompleteRecord struct {
@@ -97,36 +93,12 @@ func (storage *incompleteStorage) checkAndClear() {
 	storage.purge()
 }
 
-// SetLogIncomplete enable or disable incomplete messages logging
-func (rcv *UDP) SetLogIncomplete(value bool) {
-	rcv.logIncomplete = value
-}
-
-// SetMetricInterval sets doChekpoint interval
-func (rcv *UDP) SetMetricInterval(interval time.Duration) {
-	rcv.metricInterval = interval
-}
-
 // Addr returns binded socket address. For bind port 0 in tests
 func (rcv *UDP) Addr() net.Addr {
 	if rcv.conn == nil {
 		return nil
 	}
 	return rcv.conn.LocalAddr()
-}
-
-// SetGraphPrefix for internal cache metrics
-func (rcv *UDP) SetGraphPrefix(prefix string) {
-	rcv.graphPrefix = prefix
-}
-
-// Stat sends internal statistics to cache
-func (rcv *UDP) Stat(metric string, value float64) {
-	rcv.out <- points.OnePoint(
-		fmt.Sprintf("%s%s", rcv.graphPrefix, metric),
-		value,
-		time.Now().Unix(),
-	)
 }
 
 func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
@@ -149,35 +121,22 @@ func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
 	}
 }
 
-func (rcv *UDP) statWorker(exit chan bool) {
-	ticker := time.NewTicker(rcv.metricInterval)
-	defer ticker.Stop()
+func (rcv *UDP) Stat(send helper.StatCallback) {
+	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
+	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
+	send("metricsReceived", float64(metricsReceived))
 
-	for {
-		select {
-		case <-ticker.C:
-			metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
-			atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-			rcv.Stat("udp.metricsReceived", float64(metricsReceived))
+	incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
+	atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
+	send("incompleteReceived", float64(incompleteReceived))
 
-			incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
-			atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
-			rcv.Stat("udp.incompleteReceived", float64(incompleteReceived))
+	errors := atomic.LoadUint32(&rcv.errors)
+	atomic.AddUint32(&rcv.errors, -errors)
+	send("errors", float64(errors))
 
-			errors := atomic.LoadUint32(&rcv.errors)
-			atomic.AddUint32(&rcv.errors, -errors)
-			rcv.Stat("udp.errors", float64(errors))
-
-			logrus.WithFields(logrus.Fields{
-				"metricsReceived":    int(metricsReceived),
-				"incompleteReceived": int(incompleteReceived),
-				"errors":             int(errors),
-			}).Info("[udp] doCheckpoint()")
-
-		case <-exit:
-			rcv.conn.Close()
-			return
-		}
+	if rcv.buffer != nil {
+		send("bufferLen", float64(len(rcv.buffer)))
+		send("bufferCap", float64(cap(rcv.buffer)))
 	}
 }
 
@@ -236,7 +195,7 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 					logrus.Info(err)
 				} else {
 					atomic.AddUint32(&rcv.metricsReceived, 1)
-					rcv.out <- msg
+					rcv.out(msg)
 				}
 			}
 		}
@@ -252,12 +211,32 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 			return err
 		}
 
-		rcv.Go(rcv.statWorker)
+		rcv.Go(func(exit chan bool) {
+			<-exit
+			rcv.conn.Close()
+		})
+
+		if rcv.buffer != nil {
+			originalOut := rcv.out
+
+			rcv.Go(func(exit chan bool) {
+				for {
+					select {
+					case <-exit:
+						return
+					case p := <-rcv.buffer:
+						originalOut(p)
+					}
+				}
+			})
+
+			rcv.out = func(p *points.Points) {
+				rcv.buffer <- p
+			}
+		}
 
 		rcv.Go(rcv.receiveWorker)
 
 		return nil
 	})
-
-	return nil
 }

@@ -1,14 +1,17 @@
 package carbon
 
 import (
+	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
+	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
 )
@@ -18,11 +21,13 @@ type App struct {
 	ConfigFilename string
 	Config         *Config
 	Cache          *cache.Cache
-	UDP            *receiver.UDP
-	TCP            *receiver.TCP
-	Pickle         *receiver.TCP
+	UDP            receiver.Receiver
+	TCP            receiver.Receiver
+	Pickle         receiver.Receiver
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
+	Carbonserver   *carbonserver.CarbonserverListener
+	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	exit           chan bool
 }
 
@@ -68,6 +73,27 @@ func (app *App) configure() error {
 			cfg.Whisper.Aggregation = persister.NewWhisperAggregation()
 		}
 	}
+	if !(cfg.Cache.WriteStrategy == "max" ||
+		cfg.Cache.WriteStrategy == "sorted" ||
+		cfg.Cache.WriteStrategy == "noop") {
+		return fmt.Errorf("go-carbon support only \"max\", \"sorted\"  or \"noop\" write-strategy")
+	}
+
+	if cfg.Common.MetricEndpoint == "" {
+		cfg.Common.MetricEndpoint = MetricEndpointLocal
+	}
+
+	if cfg.Common.MetricEndpoint != MetricEndpointLocal {
+		u, err := url.Parse(cfg.Common.MetricEndpoint)
+
+		if err != nil {
+			return fmt.Errorf("common.metric-endpoint parse error: %s", err.Error())
+		}
+
+		if u.Scheme != "tcp" && u.Scheme != "udp" {
+			return fmt.Errorf("common.metric-endpoint supports only tcp and udp protocols. %#v is unsupported", u.Scheme)
+		}
+	}
 
 	app.Config = cfg
 
@@ -92,11 +118,20 @@ func (app *App) ReloadConfig() error {
 		return err
 	}
 
+	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
+
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
 	}
 	app.startPersister()
+
+	if app.Collector != nil {
+		app.Collector.Stop()
+		app.Collector = nil
+	}
+
+	app.Collector = NewCollector(app)
 
 	return nil
 }
@@ -126,6 +161,12 @@ func (app *App) stopListeners() {
 		app.CarbonLink = nil
 		logrus.Debug("[carbonlink] finished")
 	}
+
+	if app.Carbonserver != nil {
+		app.Carbonserver.Stop()
+		app.Carbonserver = nil
+		logrus.Debug("[carbonserver] finished")
+	}
 }
 
 func (app *App) stopAll() {
@@ -143,6 +184,12 @@ func (app *App) stopAll() {
 		logrus.Debug("[cache] finished")
 	}
 
+	if app.Collector != nil {
+		app.Collector.Stop()
+		app.Collector = nil
+		logrus.Debug("[stat] finished")
+	}
+
 	if app.exit != nil {
 		close(app.exit)
 		app.exit = nil
@@ -157,76 +204,17 @@ func (app *App) Stop() {
 	app.stopAll()
 }
 
-// GraceStop implements gracefully stop. Close all listening sockets, flush cache, stop application
-func (app *App) GraceStop() {
-	app.Lock()
-	defer app.Unlock()
-
-	logrus.Info("grace stop inited")
-
-	app.stopListeners()
-
-	// Flush cache
-	if app.Cache != nil && app.Persister != nil {
-
-		if app.Persister.GetMaxUpdatesPerSecond() > 0 {
-			logrus.Debug("[persister] stop old throttled persister, start new unlimited")
-			app.Persister.Stop()
-			logrus.Debug("[persister] old persister finished")
-			app.Persister.SetMaxUpdatesPerSecond(0)
-			app.Persister.Start()
-			logrus.Debug("[persister] new persister started")
-		}
-		// @TODO: disable throttling in persister
-
-		flushStart := time.Now()
-
-		logrus.WithFields(logrus.Fields{
-			"size":     app.Cache.Size(),
-			"inputLen": len(app.Cache.In()),
-		}).Info("[cache] start flush")
-
-		checkTicker := time.NewTicker(10 * time.Millisecond)
-		defer checkTicker.Stop()
-
-		statTicker := time.NewTicker(time.Second)
-		defer statTicker.Stop()
-
-	FLUSH_LOOP:
-		for {
-			select {
-			case <-checkTicker.C:
-				if app.Cache.Size()+len(app.Cache.In()) == 0 {
-					break FLUSH_LOOP
-				}
-			case <-statTicker.C:
-				logrus.WithFields(logrus.Fields{
-					"size":     app.Cache.Size(),
-					"inputLen": len(app.Cache.In()),
-				}).Info("[cache] flush checkpoint")
-			}
-		}
-
-		flushWorktime := time.Now().Sub(flushStart)
-		logrus.WithFields(logrus.Fields{
-			"time": flushWorktime.String(),
-		}).Info("[cache] finish flush")
-	}
-
-	app.stopAll()
-}
-
 func (app *App) startPersister() {
 	if app.Config.Whisper.Enabled {
 		p := persister.NewWhisper(
 			app.Config.Whisper.DataDir,
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
-			app.Cache.Out(),
+			app.Cache.WriteoutQueue().GetNotConfirmed,
+			app.Cache.Confirm,
 		)
-		p.SetGraphPrefix(app.Config.Common.GraphPrefix)
-		p.SetMetricInterval(app.Config.Common.MetricInterval.Value())
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
+		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetWorkers(app.Config.Whisper.Workers)
 
 		p.Start()
@@ -248,12 +236,11 @@ func (app *App) Start() (err error) {
 
 	conf := app.Config
 
+	runtime.GOMAXPROCS(conf.Common.MaxCPU)
+
 	core := cache.New()
-	core.SetGraphPrefix(conf.Common.GraphPrefix)
-	core.SetMetricInterval(conf.Common.MetricInterval.Value())
 	core.SetMaxSize(conf.Cache.MaxSize)
-	core.SetInputCapacity(conf.Cache.InputBuffer)
-	core.Start()
+	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 
 	app.Cache = core
 
@@ -263,70 +250,71 @@ func (app *App) Start() (err error) {
 
 	/* UDP start */
 	if conf.Udp.Enabled {
-		var udpAddr *net.UDPAddr
+		app.UDP, err = receiver.New(
+			"udp://"+conf.Udp.Listen,
+			receiver.OutFunc(core.Add),
+			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
+			receiver.BufferSize(conf.Udp.BufferSize),
+		)
 
-		udpAddr, err = net.ResolveUDPAddr("udp", conf.Udp.Listen)
 		if err != nil {
 			return
 		}
-
-		udpListener := receiver.NewUDP(core.In())
-		udpListener.SetGraphPrefix(conf.Common.GraphPrefix)
-		udpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
-
-		if conf.Udp.LogIncomplete {
-			udpListener.SetLogIncomplete(true)
-		}
-
-		err = udpListener.Listen(udpAddr)
-		if err != nil {
-			return
-		}
-
-		app.UDP = udpListener
 	}
 	/* UDP end */
 
 	/* TCP start */
 	if conf.Tcp.Enabled {
-		var tcpAddr *net.TCPAddr
-		tcpAddr, err = net.ResolveTCPAddr("tcp", conf.Tcp.Listen)
+		app.TCP, err = receiver.New(
+			"tcp://"+conf.Tcp.Listen,
+			receiver.OutFunc(core.Add),
+			receiver.BufferSize(conf.Tcp.BufferSize),
+		)
+
 		if err != nil {
 			return
 		}
-
-		tcpListener := receiver.NewTCP(core.In())
-		tcpListener.SetGraphPrefix(conf.Common.GraphPrefix)
-		tcpListener.SetMetricInterval(conf.Common.MetricInterval.Value())
-
-		if err = tcpListener.Listen(tcpAddr); err != nil {
-			return
-		}
-
-		app.TCP = tcpListener
 	}
 	/* TCP end */
 
 	/* PICKLE start */
-
 	if conf.Pickle.Enabled {
-		var pickleAddr *net.TCPAddr
-		pickleAddr, err = net.ResolveTCPAddr("tcp", conf.Pickle.Listen)
+		app.Pickle, err = receiver.New(
+			"pickle://"+conf.Pickle.Listen,
+			receiver.OutFunc(core.Add),
+			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
+			receiver.BufferSize(conf.Pickle.BufferSize),
+		)
+
+		if err != nil {
+			return
+		}
+	}
+	/* PICKLE end */
+
+	/* CARBONLINK start */
+	if conf.Carbonserver.Enabled {
 		if err != nil {
 			return
 		}
 
-		pickleListener := receiver.NewPickle(core.In())
-		pickleListener.SetGraphPrefix(conf.Common.GraphPrefix)
-		pickleListener.SetMetricInterval(conf.Common.MetricInterval.Value())
+		carbonserver := carbonserver.NewCarbonserverListener(core.Get)
+		carbonserver.SetWhisperData(conf.Whisper.DataDir)
+		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
+		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
+		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
+		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
+		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
+		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
+		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
-		if err = pickleListener.Listen(pickleAddr); err != nil {
+		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
 			return
 		}
 
-		app.Pickle = pickleListener
+		app.Carbonserver = carbonserver
 	}
-	/* PICKLE end */
+	/* CARBONLINK end */
 
 	/* CARBONLINK start */
 	if conf.Carbonlink.Enabled {
@@ -336,9 +324,9 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonlink := cache.NewCarbonlinkListener(core.Query())
+		carbonlink := cache.NewCarbonlinkListener(core)
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
-		carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
+		// carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 
 		if err = carbonlink.Listen(linkAddr); err != nil {
 			return
@@ -347,6 +335,16 @@ func (app *App) Start() (err error) {
 		app.CarbonLink = carbonlink
 	}
 	/* CARBONLINK end */
+
+	/* RESTORE start */
+	if conf.Dump.Enabled {
+		go app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	}
+	/* RESTORE end */
+
+	/* COLLECTOR start */
+	app.Collector = NewCollector(app)
+	/* COLLECTOR end */
 
 	return
 }

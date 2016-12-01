@@ -12,6 +12,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func makeRecvFromChan(ch chan *points.Points) func(chan bool) *points.Points {
+	return func(abort chan bool) *points.Points {
+		select {
+		case <-abort:
+			return nil
+		case p := <-ch:
+			return p
+		}
+	}
+}
+
 func TestGracefullyStop(t *testing.T) {
 	assert := assert.New(t)
 
@@ -19,16 +30,18 @@ func TestGracefullyStop(t *testing.T) {
 		ch := make(chan *points.Points, 1000)
 
 		qa.Root(t, func(root string) {
-			p := NewWhisper(root, nil, nil, ch)
+			p := NewWhisper(root, nil, nil, makeRecvFromChan(ch), nil)
 			p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 			p.SetWorkers(workers)
 
 			storeWait := make(chan bool)
 			var storeCount uint32
 
-			p.mockStore = func(p *Whisper, values *points.Points) {
-				<-storeWait
-				atomic.AddUint32(&storeCount, 1)
+			p.mockStore = func() (StoreFunc, func()) {
+				return func(p *Whisper, values *points.Points) {
+					<-storeWait
+					atomic.AddUint32(&storeCount, 1)
+				}, nil
 			}
 
 			var sentCount int
@@ -78,11 +91,13 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 			qa.Root(t, func(root string) {
 
 				ch := make(chan *points.Points, 10)
-				p := NewWhisper(root, nil, nil, ch)
+				p := NewWhisper(root, nil, nil, makeRecvFromChan(ch), nil)
 				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 				p.SetWorkers(workers)
 
-				p.mockStore = func(p *Whisper, values *points.Points) {}
+				p.mockStore = func() (StoreFunc, func()) {
+					return func(p *Whisper, values *points.Points) {}, nil
+				}
 
 				p.Start()
 				time.Sleep(10 * time.Millisecond)
