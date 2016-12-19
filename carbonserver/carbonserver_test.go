@@ -88,7 +88,7 @@ func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache) error
 				until = testData.until
 			}
 			for i := testData.from; i < until; i += 60 {
-				p = append(p, &whisper.TimeSeriesPoint{i, val})
+				p = append(p, &whisper.TimeSeriesPoint{Time: i, Value: val})
 				val += 0.1
 			}
 			err := wsp.UpdateMany(p)
