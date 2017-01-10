@@ -221,7 +221,7 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
-##### version 0.9.0-rc1
+##### version 0.9.0
 * Completely new internal architecture
 * Removed flush to whisper and stop on `USR2` signal. Use dump/restore instead
 * Removed global queue (channel) between receivers and cache, added optional per-receiver queues

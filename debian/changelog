@@ -1,11 +1,11 @@
-go-carbon (0.9.0-rc1) unstable; urgency=low
+go-carbon (0.9.0) stable; urgency=low
   * Completely new internal architecture
   * Removed flush to whisper and stop on `USR2` signal. Use dump/restore instead
   * Removed global queue (channel) between receivers and cache, added optional per-receiver queues
   * Built-in [carbonserver](https://github.com/grobian/carbonserver) (thanks Vladimir Smirnov)
   * Added runtime tunables to internal metrics #70
 
- -- Roman Lomonosov <r.lomonosov@gmail.com>  Fri, 25 Nov 2016 23:00:00 +0300
+ -- Roman Lomonosov <r.lomonosov@gmail.com>  Tue, 10 Jan 2017 08:00:00 +0300
 
 go-carbon (0.8.1) stable; urgency=low
   * Bug fix: The synchronous config reload (HUP signal) and launch of the

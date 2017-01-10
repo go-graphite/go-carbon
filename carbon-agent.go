@@ -22,7 +22,7 @@ import (
 import _ "net/http/pprof"
 
 // Version of go-carbon
-const Version = "0.9.0-rc1"
+const Version = "0.9.0"
 
 func httpServe(addr string) (func(), error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
