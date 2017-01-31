@@ -56,7 +56,7 @@ func main() {
 	flag.Parse()
 
 	if *printVersion {
-		fmt.Print(Version)
+		fmt.Println(Version)
 		return
 	}
 
