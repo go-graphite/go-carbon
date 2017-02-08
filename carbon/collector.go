@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
@@ -26,6 +26,7 @@ type Collector struct {
 	endpoint       string
 	data           chan *points.Points
 	stats          []statFunc
+	logger         *zap.Logger
 }
 
 func RuntimeStat(send helper.StatCallback) {
@@ -42,6 +43,7 @@ func NewCollector(app *App) *Collector {
 		data:           make(chan *points.Points, 4096),
 		endpoint:       app.Config.Common.MetricEndpoint,
 		stats:          make([]statFunc, 0),
+		logger:         app.RootLogger.Named("stat"),
 	}
 
 	c.Start()
@@ -49,13 +51,13 @@ func NewCollector(app *App) *Collector {
 	sendCallback := func(moduleName string) func(metric string, value float64) {
 		return func(metric string, value float64) {
 			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, moduleName, metric)
-			logrus.Infof("[stat] %s=%#v", key, value)
+			c.logger.Info("stat", zap.String("metric", key), zap.Float64("value", value))
 			select {
 			case c.data <- points.NowPoint(key, value):
 				// pass
 			default:
-				logrus.WithField("key", key).WithField("value", value).
-					Warn("[stat] send queue is full. Metric dropped")
+				c.logger.Warn("send queue is full. metric dropped",
+					zap.String("key", key), zap.Float64("value", value))
 			}
 		}
 	}
@@ -111,9 +113,11 @@ func NewCollector(app *App) *Collector {
 
 	endpoint, err := url.Parse(c.endpoint)
 	if err != nil {
-		logrus.Errorf("[stat] metric-endpoint parse error: %s", err.Error())
+		c.logger.Error("metric-endpoint parse error", zap.Error(err))
 		c.endpoint = MetricEndpointLocal
 	}
+
+	c.logger = c.logger.With(zap.String("endpoint", c.endpoint))
 
 	if c.endpoint == MetricEndpointLocal {
 		// sender worker
@@ -162,21 +166,21 @@ func NewCollector(app *App) *Collector {
 
 					conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
 					if err != nil {
-						logrus.Errorf("[stat] dial %s failed: %s", c.endpoint, err.Error())
+						c.logger.Error("dial failed", zap.Error(err))
 						time.Sleep(time.Second)
 						continue SendLoop
 					}
 
 					err = conn.SetDeadline(time.Now().Add(defaultTimeout))
 					if err != nil {
-						logrus.Errorf("[stat] conn.SetDeadline failed: %s", err.Error())
+						c.logger.Error("conn.SetDeadline failed", zap.Error(err))
 						time.Sleep(time.Second)
 						continue SendLoop
 					}
 
 					_, err := conn.Write(chunk)
 					if err != nil {
-						logrus.Errorf("[stat] conn.Write failed: %s", err.Error())
+						c.logger.Error("conn.Write failed", zap.Error(err))
 						time.Sleep(time.Second)
 						continue SendLoop
 					}

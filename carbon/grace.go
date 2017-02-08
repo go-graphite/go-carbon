@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"go.uber.org/zap"
+
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/points"
 )
@@ -53,15 +54,15 @@ func (app *App) DumpStop() error {
 		app.Persister = nil
 	}
 
-	logrus.Info("grace stop with dump inited")
+	app.logger.Info("grace stop with dump inited")
 
 	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s", filenamePostfix))
 	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s", filenamePostfix))
 
 	// start dumpers
-	logrus.Infof("start cache dump to %s", dumpFilename)
-	logrus.Infof("start input dump to %s", xlogFilename)
+	app.logger.Info("start cache dump", zap.String("filename", dumpFilename))
+	app.logger.Info("start wal write", zap.String("filename", xlogFilename))
 
 	// open dump file
 	dump, err := os.Create(dumpFilename)
@@ -81,10 +82,7 @@ func (app *App) DumpStop() error {
 
 	// stop cache
 	dumpStart := time.Now()
-
-	logrus.WithFields(logrus.Fields{
-		"size": app.Cache.Size(),
-	}).Info("[cache] start dump")
+	cacheSize := app.Cache.Size()
 
 	// dump cache
 	err = app.Cache.Dump(dumpWriter)
@@ -92,10 +90,10 @@ func (app *App) DumpStop() error {
 		return err
 	}
 
-	dumpWorktime := time.Since(dumpStart)
-	logrus.WithFields(logrus.Fields{
-		"time": dumpWorktime.String(),
-	}).Info("[cache] finish dump")
+	app.logger.Info("cache dump finished",
+		zap.Int("records", int(cacheSize)),
+		zap.Duration("runtime", time.Since(dumpStart)),
+	)
 
 	if err = dumpWriter.Flush(); err != nil {
 		return err
@@ -106,7 +104,7 @@ func (app *App) DumpStop() error {
 	}
 
 	// cache dump finished
-	logrus.Info("stop listeners")
+	app.logger.Info("stop listeners")
 	app.stopListeners()
 
 	if err = xlogWriter.Flush(); err != nil {
@@ -117,32 +115,35 @@ func (app *App) DumpStop() error {
 		return err
 	}
 
-	logrus.Info("dump finished")
+	app.logger.Info("dump finished")
 
-	logrus.Info("stop all")
+	app.logger.Info("stop all")
 	app.stopAll()
 
 	return nil
 }
 
 // RestoreFromFile read and parse data from single file
-func RestoreFromFile(filename string, storeFunc func(*points.Points)) error {
+func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points)) error {
 	var pointsCount int
 	startTime := time.Now()
 
-	logrus.Infof("[restore] start %s", filename)
+	logger := app.logger.With(zap.String("filename", filename))
+
+	logger.Info("restore started")
 
 	defer func() {
 		finishTime := time.Now()
 
-		logrus.
-			WithField("points", pointsCount).
-			WithField("time", finishTime.Sub(startTime).String()).
-			Infof("[restore] finish %s", filename)
+		logger.Info("restore finished",
+			zap.Int("point", pointsCount),
+			zap.Duration("runtime", time.Since(startTime)),
+		)
 	}()
 
 	file, err := os.Open(filename)
 	if err != nil {
+		logger.Error("open failed", zap.Error(err))
 		return err
 	}
 	defer file.Close()
@@ -156,6 +157,7 @@ func RestoreFromFile(filename string, storeFunc func(*points.Points)) error {
 		}
 
 		if err != nil {
+			logger.Error("read failed", zap.Error(err))
 			return err
 		}
 
@@ -163,7 +165,7 @@ func RestoreFromFile(filename string, storeFunc func(*points.Points)) error {
 			p, err := points.ParseText(string(line))
 
 			if err != nil {
-				logrus.Warnf("[restore] wrong message %#v", string(line))
+				logger.Warn("bad message", zap.String("value", string(line)))
 			} else {
 				pointsCount++
 				storeFunc(p)
@@ -175,16 +177,20 @@ func RestoreFromFile(filename string, storeFunc func(*points.Points)) error {
 }
 
 // RestoreFromDir cache and input dumps from disk to memory
-func RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
+func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
 	startTime := time.Now()
+
+	logger := app.logger.With(zap.String("dir", dumpDir))
+
 	defer func() {
-		finishTime := time.Now()
-		logrus.WithField("time", finishTime.Sub(startTime).String()).Info("[restore] finished")
+		logger.Info("restore finished",
+			zap.Duration("runtime", time.Since(startTime)),
+		)
 	}()
 
 	files, err := ioutil.ReadDir(dumpDir)
 	if err != nil {
-		logrus.Errorf("readdir %s failed: %s", dumpDir, err.Error())
+		logger.Error("readdir failed", zap.Error(err))
 		return
 	}
 
@@ -217,7 +223,7 @@ FilesLoop:
 	}
 
 	if len(list) == 0 {
-		logrus.Infof("[restore] nothing to do from %s", dumpDir)
+		logger.Info("nothing for restore")
 		return
 	}
 
@@ -227,18 +233,15 @@ FilesLoop:
 		list[index] = strings.SplitN(fileWithSortPrefix, ":", 2)[1]
 	}
 
-	logrus.WithField("files", list).Infof("[restore] start from %s", dumpDir)
+	logger.Info("start restore", zap.Int("files", len(list)))
 
 	for _, fn := range list {
 		filename := path.Join(dumpDir, fn)
-		err := RestoreFromFile(filename, storeFunc)
-		if err != nil {
-			logrus.Errorf("[restore] read %s failed: %s", filename, err.Error())
-		}
+		app.RestoreFromFile(filename, storeFunc)
 
 		err = os.Remove(filename)
 		if err != nil {
-			logrus.Errorf("[restore] remove %s failed: %s", filename, err.Error())
+			logger.Error("remove failed", zap.String("filename", filename), zap.Error(err))
 		}
 	}
 }
@@ -254,8 +257,8 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 			storeFunc(p)
 		}
 
-		RestoreFromDir(path, throttledStoreFunc)
+		app.RestoreFromDir(path, throttledStoreFunc)
 	} else {
-		RestoreFromDir(path, storeFunc)
+		app.RestoreFromDir(path, storeFunc)
 	}
 }

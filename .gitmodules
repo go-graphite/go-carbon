@@ -94,3 +94,21 @@
 [submodule "vendor/github.com/lomik/og-rek"]
 	path = vendor/github.com/lomik/og-rek
 	url = https://github.com/lomik/og-rek
+[submodule "vendor/github.com/uber-go/zap"]
+	path = vendor/github.com/uber-go/zap
+	url = https://github.com/uber-go/zap
+[submodule "vendor/github.com/uber-go/zapwriter"]
+	path = vendor/github.com/uber-go/zapwriter
+	url = https://github.com/lomik/zapwriter
+[submodule "vendor/github.com/lomik/zapwriter"]
+	path = vendor/github.com/lomik/zapwriter
+	url = https://github.com/lomik/zapwriter
+[submodule "vendor/github.com/uber-go/atomic"]
+	path = vendor/github.com/uber-go/atomic
+	url = https://github.com/uber-go/atomic
+[submodule "vendor/go.uber.org/zap"]
+	path = vendor/go.uber.org/zap
+	url = https://github.com/uber-go/zap
+[submodule "vendor/go.uber.org/atomic"]
+	path = vendor/go.uber.org/atomic
+	url = https://github.com/uber-go/atomic

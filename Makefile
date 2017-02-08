@@ -4,7 +4,7 @@ GO ?= go
 export GOPATH := $(CURDIR)/_vendor
 
 go-carbon:
-	$(GO) build
+	$(GO) build github.com/lomik/go-carbon
 
 tmp/go-carbon.tar.gz: go-carbon
 	mkdir -p tmp/

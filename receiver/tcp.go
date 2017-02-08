@@ -3,17 +3,18 @@ package receiver
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
-
-	"github.com/Sirupsen/logrus"
 )
 
 // TCP receive metrics from TCP connections
@@ -28,6 +29,7 @@ type TCP struct {
 	listener             *net.TCPListener
 	isPickle             bool
 	buffer               chan *points.Points
+	logger               *zap.Logger
 }
 
 // Name returns receiver name (for store internal metrics)
@@ -71,18 +73,18 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 		if err != nil {
 			if err == io.EOF {
 				if len(line) > 0 {
-					logrus.Warningf("[tcp] Unfinished line: %#v", line)
+					rcv.logger.Warn("unfinished line", zap.String("line", string(line)))
 				}
 			} else {
 				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Error(err)
+				rcv.logger.Error("read error", zap.Error(err))
 			}
 			break
 		}
 		if len(line) > 0 { // skip empty lines
 			if msg, err := points.ParseText(string(line)); err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Info(err)
+				rcv.logger.Info("parse failed", zap.Error(err))
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
 				rcv.out(msg)
@@ -95,7 +97,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
 	defer func() {
 		if r := recover(); r != nil {
-			logrus.Errorf("[pickle] Unknown error recovered: %s", r)
+			rcv.logger.Error("panic recovered", zap.String("traceback", fmt.Sprint(r)))
 		}
 	}()
 
@@ -124,11 +126,11 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 		data, err := framedConn.ReadFrame()
 		if err == framing.ErrPrefixLength {
 			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Warningf("[pickle] Bad message size")
+			rcv.logger.Warn("bad message size")
 			return
 		} else if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Warningf("[pickle] Can't read message body: %s", err.Error())
+			rcv.logger.Warn("can't read message body", zap.Error(err))
 			return
 		}
 
@@ -136,8 +138,10 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 
 		if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Infof("[pickle] Can't unpickle message: %s", err.Error())
-			logrus.Debugf("[pickle] Bad message: %#v", string(data))
+			rcv.logger.Info("can't unpickle message",
+				zap.String("data", string(data)),
+				zap.Error(err),
+			)
 			return
 		}
 
@@ -214,7 +218,9 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						break
 					}
-					logrus.Warningf("[tcp] Failed to accept connection: %s", err)
+					rcv.logger.Warn("failed to accept connection",
+						zap.Error(err),
+					)
 					continue
 				}
 

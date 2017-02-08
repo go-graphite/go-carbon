@@ -18,7 +18,7 @@ const sampleCacheQuery3 = "\x00\x00\x00R\x80\x02}(U\x06metricX,\x00\x00\x00carbo
 func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
 
-	cache := New()
+	cache := New(nil)
 
 	msg1 := points.OnePoint(
 		"carbon.agents.carbon_agent_server.cache.size",
@@ -47,7 +47,7 @@ func TestCarbonlink(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache)
+	carbonlink := NewCarbonlinkListener(cache, nil)
 	defer carbonlink.Stop()
 
 	assert.NoError(carbonlink.Listen(addr))
@@ -165,12 +165,12 @@ func TestCarbonlink(t *testing.T) {
 func TestCarbonlinkErrors(t *testing.T) {
 	assert := assert.New(t)
 
-	cache := New()
+	cache := New(nil)
 
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	assert.NoError(err)
 
-	carbonlink := NewCarbonlinkListener(cache)
+	carbonlink := NewCarbonlinkListener(cache, nil)
 	listenerTimeout := 10 * time.Millisecond
 	carbonlink.SetReadTimeout(listenerTimeout)
 	defer carbonlink.Stop()

@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/url"
 
+	"go.uber.org/zap"
+
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
@@ -86,6 +88,23 @@ func Name(name string) Option {
 		}
 		if t, ok := r.(*UDP); ok {
 			t.name = name
+		}
+		return nil
+	}
+}
+
+// Logger creates option for New contructor
+func Logger(logger *zap.Logger) Option {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	return func(r Receiver) error {
+		if t, ok := r.(*TCP); ok {
+			t.logger = logger
+		}
+		if t, ok := r.(*UDP); ok {
+			t.logger = logger
 		}
 		return nil
 	}
