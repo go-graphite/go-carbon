@@ -39,11 +39,11 @@ import (
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
 	"github.com/gogo/protobuf/proto"
-	pickle "github.com/lomik/og-rek"
 	pb "github.com/lomik/go-carbon/carbonzipperpb"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
+	pickle "github.com/lomik/og-rek"
 )
 
 type metricStruct struct {
@@ -64,6 +64,9 @@ type metricStruct struct {
 	DiskRequests         uint64
 	PointsReturned       uint64
 	MetricsReturned      uint64
+	MetricsKnown         uint64
+	FileScanTimeNS       uint64
+	IndexBuildTimeNS     uint64
 }
 
 type CarbonserverListener struct {
@@ -157,12 +160,19 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 			return nil
 		})
 
-		logger.Debugln("[carbonserver] file scan took", time.Since(t0), ",", len(files), "items")
+		waitTime := uint64(time.Since(t0).Nanoseconds())
+		metricsKnown := uint64(len(files))
+		atomic.AddUint64(&listener.metrics.FileScanTimeNS, waitTime)
+		atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
+
+		logger.Debugln("[carbonserver] file scan took", waitTime, " ns,", metricsKnown, "items")
 		t0 = time.Now()
 
 		idx := trigram.NewIndex(files)
 
-		logger.Debugln("[carbonserver] indexing took", time.Since(t0), len(idx), "trigrams")
+		waitTime = uint64(time.Since(t0).Nanoseconds())
+		atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, waitTime)
+		logger.Debugln("[carbonserver] indexing took", waitTime, " ns, ", len(idx), "trigrams")
 
 		pruned := idx.Prune(0.95)
 
@@ -730,6 +740,10 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("disk_requests", &listener.metrics.DiskRequests, send)
 	sender("points_returned", &listener.metrics.PointsReturned, send)
 	sender("metrics_returned", &listener.metrics.MetricsReturned, send)
+
+	sender("metrics_known", &listener.metrics.MetricsKnown, send)
+	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
+	sender("file_scan_time_ns", &listener.metrics.FileScanTimeNS, send)
 
 	sender("alloc", &alloc, send)
 	sender("total_alloc", &totalAlloc, send)
