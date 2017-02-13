@@ -47,3 +47,7 @@ message ServerInfoResponse {
 message ZipperInfoResponse {
 	repeated ServerInfoResponse responses = 1;
 }
+
+message ListMetricsResponse {
+	repeated string Metrics = 1;
+}

@@ -55,6 +55,8 @@ type metricStruct struct {
 	FindZero             uint64
 	InfoRequests         uint64
 	InfoErrors           uint64
+	ListRequests         uint64
+	ListErrors           uint64
 	CacheHit             uint64
 	CacheMiss            uint64
 	CacheRequestsTotal   uint64
@@ -311,6 +313,77 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	}
 
 	return files, leafs
+}
+
+var metricsListEmptyError = fmt.Errorf("File index is empty or disabled")
+
+func (listener *CarbonserverListener) getMetricsList() ([]string, error) {
+	fidx := listener.CurrentFileIndex()
+	var metrics []string
+
+	if fidx == nil {
+		atomic.AddUint64(&listener.metrics.ListErrors, 1)
+		return nil, metricsListEmptyError
+	}
+
+	for _, p := range fidx.files {
+		if !strings.HasSuffix(p, ".wsp") {
+			continue
+		}
+		p = p[1 : len(p)-4]
+		metrics = append(metrics, strings.Replace(p, "/", ".", -1))
+	}
+	return metrics, nil
+}
+
+func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *http.Request) {
+	// URL: /metrics/list/?format=json
+	t0 := time.Now()
+
+	atomic.AddUint64(&listener.metrics.ListRequests, 1)
+
+	req.ParseForm()
+	format := req.FormValue("format")
+
+	if format != "json" && format != "protobuf" {
+		atomic.AddUint64(&listener.metrics.ListErrors, 1)
+		logger.Infof("[carbonserver] dropping invalid uri (format=%s): %s",
+			format, req.URL.RequestURI())
+		http.Error(wr, "Bad request (unsupported format)",
+			http.StatusBadRequest)
+		return
+	}
+
+	var err error
+	var response pb.ListMetricsResponse
+
+	response.Metrics, err = listener.getMetricsList()
+	if err != nil {
+		logger.Debugf("[carbonserver] %s", err)
+		http.Error(wr, fmt.Sprintf("Can't fetch metrics list: %s", err), http.StatusInternalServerError)
+		return
+	}
+
+	var b []byte
+	switch format {
+	case "json":
+		b, err = json.Marshal(response)
+	case "protobuf":
+		b, err = proto.Marshal(&response)
+	}
+
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.ListErrors, 1)
+		logger.Errorf("[carbonserver] failed to create %s list: %s",
+			format, err)
+		http.Error(wr, fmt.Sprintf("An internal error has occured: %s", err), http.StatusInternalServerError)
+		return
+	}
+	wr.Write(b)
+
+	logger.Debugf("[carbonserver] list: took %v", time.Since(t0))
+	return
+
 }
 
 func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *http.Request) {
@@ -731,6 +804,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("find_requests", &listener.metrics.FindRequests, send)
 	sender("find_errors", &listener.metrics.FindErrors, send)
 	sender("find_zero", &listener.metrics.FindZero, send)
+	sender("list_requests", &listener.metrics.ListRequests, send)
+	sender("list_errors", &listener.metrics.ListErrors, send)
 	sender("cache_hit", &listener.metrics.CacheHit, send)
 	sender("cache_miss", &listener.metrics.CacheMiss, send)
 	sender("cache_work_time_ns", &listener.metrics.CacheWorkTimeNS, send)
@@ -781,6 +856,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 
 	carbonserverMux := http.NewServeMux()
 	carbonserverMux.HandleFunc("/metrics/find/", httputil.TrackConnections(httputil.TimeHandler(listener.findHandler, listener.bucketRequestTimes)))
+	carbonserverMux.HandleFunc("/metrics/list/", httputil.TrackConnections(httputil.TimeHandler(listener.listHandler, listener.bucketRequestTimes)))
 	carbonserverMux.HandleFunc("/render/", httputil.TrackConnections(httputil.TimeHandler(listener.fetchHandler, listener.bucketRequestTimes)))
 	carbonserverMux.HandleFunc("/info/", httputil.TrackConnections(httputil.TimeHandler(listener.infoHandler, listener.bucketRequestTimes)))
 
