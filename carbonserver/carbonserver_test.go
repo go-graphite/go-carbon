@@ -318,6 +318,61 @@ func TestFetchSingleMetricDataCache(t *testing.T) {
 	testFetchSingleMetricCommon(t, test)
 }
 
+func TestGetMetricsListEmpty(t *testing.T) {
+	cache := cache.New()
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(path)
+
+	carbonserver := CarbonserverListener{
+		whisperData: path,
+		cacheGet:    cache.Get,
+	}
+
+	metrics, err := carbonserver.getMetricsList()
+	if err != metricsListEmptyError {
+		t.Errorf("err: '%v', expected: '%v'", err, metricsListEmptyError)
+	}
+	if metrics != nil {
+		t.Errorf("metrics: '%v', expected: 'nil'", err)
+	}
+}
+
+func TestGetMetricsListWithData(t *testing.T) {
+	cache := cache.New()
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(path)
+
+	carbonserver := CarbonserverListener{
+		whisperData: path,
+		cacheGet:    cache.Get,
+	}
+
+	fidx := fileIndex{}
+	fidx.files = append(fidx.files, "/foo/bar.wsp")
+	fidx.files = append(fidx.files, "/foo/baz.wsp")
+	carbonserver.UpdateFileIndex(&fidx)
+
+	metrics, err := carbonserver.getMetricsList()
+	if err != nil {
+		t.Errorf("err: '%v', expected: 'nil'", err)
+	}
+
+	if metrics == nil {
+		t.Errorf("metrics: 'nil', but shouldn't be")
+		return
+	}
+
+	if metrics[0] != "foo.bar" || metrics[1] != "foo.baz" {
+		t.Errorf("metrics: '%+v', expected [%s %s]", metrics, fidx.files[0], fidx.files[1])
+	}
+}
+
 func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
