@@ -1,7 +1,7 @@
 [Unit]
 Description=Golang implementation of Graphite/Carbon server
 Requires=var-run.mount
-After=var-run.mount
+After=var-run.mount,network-online.target
 
 [Service]
 User=_graphite
@@ -11,6 +11,10 @@ ExecReload=/bin/kill -USR2 $MAINPID
 
 EnvironmentFile=-/etc/sysconfig/go-carbon
 Restart=on-failure
+
+TimeoutStopSec=600 # Default value is 90s. Because dump saving may take longer, you should increase this number.
+LimitNOFILE=55555 # Default limit is 1024. If you don't use relay in front of go-carbon, you might hit this limit.
+LimitMEMLOCK=infinity # Cache size may be huge
 
 [Install]
 WantedBy=multi-user.target
