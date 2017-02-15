@@ -617,9 +617,14 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	}
 
 	if step == 0 {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Infof("[carbonserver] Can't find proper archive for the request for metric %q", path)
-		return nil, errors.New("Can't find proper archive")
+		maxRetention := int32(retentions[len(retentions)-1].MaxRetention())
+		if now-maxRetention > untilTime {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			logger.Infof("[carbonserver] Can't find proper archive for the request for metric %q", path)
+			return nil, errors.New("Can't find proper archive")
+		}
+		logger.Debugf("[carbonserver] Can't find archive that contains full set of data, using the least precise one, metric %q", path)
+		step = maxRetention
 	}
 
 	var cacheData []points.Point
@@ -699,6 +704,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 }
 
 func (listener *CarbonserverListener) fetchData(metric string, fromTime, untilTime int32) (*pb.MultiFetchResponse, error) {
+	logger.Infof("[carbonserver] fetching data...")
 	files, leafs := listener.expandGlobs(metric)
 	var multi pb.MultiFetchResponse
 	for i, metric := range files {
