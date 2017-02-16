@@ -385,6 +385,7 @@ func TestGetMetricsListWithData(t *testing.T) {
 	metrics, err := carbonserver.getMetricsList()
 	if err != nil {
 		t.Errorf("err: '%v', expected: 'nil'", err)
+		return
 	}
 
 	if metrics == nil {
@@ -392,8 +393,14 @@ func TestGetMetricsListWithData(t *testing.T) {
 		return
 	}
 
+	if len(metrics) != 2 {
+		t.Errorf("amount of metrics: %v, expected: 2", len(metrics))
+		return
+	}
+
 	if metrics[0] != "foo.bar" || metrics[1] != "foo.baz" {
 		t.Errorf("metrics: '%+v', expected [%s %s]", metrics, fidx.files[0], fidx.files[1])
+		return
 	}
 }
 
