@@ -149,23 +149,27 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 
 		t0 := time.Now()
 
+		metricsKnown := uint64(0)
 		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
 				logger.Infof("[carbonserver] error processing %q: %v", p, err)
 				return nil
 			}
 
-			if info.IsDir() || strings.HasSuffix(info.Name(), ".wsp") {
+			hasSuffix := strings.HasSuffix(info.Name(), ".wsp")
+			if info.IsDir() || hasSuffix {
 				files = append(files, strings.TrimPrefix(p, listener.whisperData))
+				if hasSuffix {
+					metricsKnown++
+				}
 			}
 
 			return nil
 		})
 
 		waitTime := uint64(time.Since(t0).Nanoseconds())
-		metricsKnown := uint64(len(files))
-		atomic.AddUint64(&listener.metrics.FileScanTimeNS, waitTime)
 		atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
+		atomic.AddUint64(&listener.metrics.FileScanTimeNS, waitTime)
 
 		logger.Debugln("[carbonserver] file scan took", waitTime, " ns,", metricsKnown, "items")
 		t0 = time.Now()
@@ -617,9 +621,14 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	}
 
 	if step == 0 {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Infof("[carbonserver] Can't find proper archive for the request for metric %q", path)
-		return nil, errors.New("Can't find proper archive")
+		maxRetention := int32(retentions[len(retentions)-1].MaxRetention())
+		if now-maxRetention > untilTime {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			logger.Infof("[carbonserver] Can't find proper archive for the request for metric %q", path)
+			return nil, errors.New("Can't find proper archive")
+		}
+		logger.Debugf("[carbonserver] Can't find archive that contains full set of data, using the least precise one, metric %q", path)
+		step = maxRetention
 	}
 
 	var cacheData []points.Point
@@ -699,6 +708,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 }
 
 func (listener *CarbonserverListener) fetchData(metric string, fromTime, untilTime int32) (*pb.MultiFetchResponse, error) {
+	logger.Infof("[carbonserver] fetching data...")
 	files, leafs := listener.expandGlobs(metric)
 	var multi pb.MultiFetchResponse
 	for i, metric := range files {

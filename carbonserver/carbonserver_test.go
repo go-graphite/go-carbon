@@ -164,6 +164,21 @@ var singleMetricTests = []FetchTest{
 		expectedIsAbsent: []bool{false, false, false, false, false, false, false, false, true, true},
 	},
 	{
+		name:             "data-file-not-even",
+		createWhisper:    true,
+		fillWhisper:      true,
+		fillCache:        false,
+		from:             now - 300,
+		until:            now,
+		now:              now,
+		errIsNil:         true,
+		dataIsNil:        false,
+		expectedStep:     60,
+		expectedValues:   []float64{0.2, 0.3, 0.0, 0.0, 0.0},
+		expectedIsAbsent: []bool{false, false, true, true, true},
+		retention:        "1m:5m",
+	},
+	{
 		name:             "data-file",
 		createWhisper:    true,
 		fillWhisper:      true,
@@ -297,6 +312,7 @@ func TestFetchSingleMetricNonProperArchive(t *testing.T) {
 }
 
 /*
+ * Test is fuzzy, until https://github.com/lomik/go-whisper/pull/5 is fixed
 func TestFetchSingleMetricCrossRetention(t *testing.T) {
 	test := getSingleMetricTest("cross-retention")
 	testFetchSingleMetricCommon(t, test)
@@ -307,6 +323,14 @@ func TestFetchSingleMetricDataFile(t *testing.T) {
 	test := getSingleMetricTest("data-file")
 	testFetchSingleMetricCommon(t, test)
 }
+
+/*
+ * Test is fuzzy, until https://github.com/lomik/go-whisper/pull/5 is fixed
+func TestFetchSingleMetricDataFileNotEven(t *testing.T) {
+	test := getSingleMetricTest("data-file-not-even")
+	testFetchSingleMetricCommon(t, test)
+}
+*/
 
 func TestFetchSingleMetricDataFileCache(t *testing.T) {
 	test := getSingleMetricTest("data-file-cache")
@@ -361,6 +385,7 @@ func TestGetMetricsListWithData(t *testing.T) {
 	metrics, err := carbonserver.getMetricsList()
 	if err != nil {
 		t.Errorf("err: '%v', expected: 'nil'", err)
+		return
 	}
 
 	if metrics == nil {
@@ -368,8 +393,14 @@ func TestGetMetricsListWithData(t *testing.T) {
 		return
 	}
 
+	if len(metrics) != 2 {
+		t.Errorf("amount of metrics: %v, expected: 2", len(metrics))
+		return
+	}
+
 	if metrics[0] != "foo.bar" || metrics[1] != "foo.baz" {
 		t.Errorf("metrics: '%+v', expected [%s %s]", metrics, fidx.files[0], fidx.files[1])
+		return
 	}
 }
 
