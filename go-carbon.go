@@ -158,6 +158,7 @@ func main() {
 		for {
 			<-c
 			app.DumpStop()
+			os.Exit(1)
 		}
 	}()
 
