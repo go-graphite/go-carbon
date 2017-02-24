@@ -75,6 +75,7 @@ type CarbonserverListener struct {
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
 	readTimeout       time.Duration
+	idleTimeout       time.Duration
 	writeTimeout      time.Duration
 	whisperData       string
 	buckets           int
@@ -117,6 +118,9 @@ func (listener *CarbonserverListener) SetScanFrequency(scanFrequency time.Durati
 }
 func (listener *CarbonserverListener) SetReadTimeout(readTimeout time.Duration) {
 	listener.readTimeout = readTimeout
+}
+func (listener *CarbonserverListener) SetIdleTimeout(idleTimeout time.Duration) {
+	listener.idleTimeout = idleTimeout
 }
 func (listener *CarbonserverListener) SetWriteTimeout(writeTimeout time.Duration) {
 	listener.writeTimeout = writeTimeout
@@ -887,6 +891,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	srv := &http.Server{
 		Handler:      gziphandler.GzipHandler(carbonserverMux),
 		ReadTimeout:  listener.readTimeout,
+		IdleTimeout:  listener.idleTimeout,
 		WriteTimeout: listener.writeTimeout,
 	}
 
