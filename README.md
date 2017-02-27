@@ -43,7 +43,8 @@ make rpm
 # build debian/ubuntu package
 make deb
 
-Install debian dependencies: 
+# Install debian dependencies: 
+# You need to have golang >= 1.8 (debian testing, ubuntu 17.04+, or use godeb to get newest version)
 apt-get install golang 
 
 # hand-made install
@@ -221,6 +222,10 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
+##### Current
+* IdleTimeout is now configurable in carbonserver part
+* Requires Go 1.8 or newer
+
 ##### version 0.9.1
 * Always stop on USR2 signal (previously did not stop with disabled dump/restore) #135
 
