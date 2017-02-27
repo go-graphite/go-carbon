@@ -305,6 +305,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
+		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
