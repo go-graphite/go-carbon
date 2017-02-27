@@ -12,7 +12,7 @@ import (
 
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/lomik/go-carbon/cache"
-	pb "github.com/lomik/go-carbon/carbonzipperpb"
+	pb "github.com/lomik/go-carbon/carbonzipperpb3"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 )
@@ -277,8 +277,8 @@ func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 			return
 		}
 		fmt.Printf("%+v\n\n", data)
-		if *(data.StepTime) != test.expectedStep {
-			t.Errorf("Unepxected step: '%v', expected: '%v'\n", *(data.StepTime), test.expectedStep)
+		if data.StepTime != test.expectedStep {
+			t.Errorf("Unepxected step: '%v', expected: '%v'\n", data.StepTime, test.expectedStep)
 			return
 		}
 		if len(test.expectedValues) != len(data.Values) {
