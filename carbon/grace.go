@@ -133,8 +133,6 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 	logger.Info("restore started")
 
 	defer func() {
-		finishTime := time.Now()
-
 		logger.Info("restore finished",
 			zap.Int("point", pointsCount),
 			zap.Duration("runtime", time.Since(startTime)),

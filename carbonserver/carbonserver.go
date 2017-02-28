@@ -180,13 +180,13 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 
 		fileScanRuntime := time.Since(t0)
 		atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
-		atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(waitTime.Nanoseconds()))
+		atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 
 		t0 = time.Now()
 		idx := trigram.NewIndex(files)
 
 		indexingRuntime := time.Since(t0)
-		atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(waitTime.Nanoseconds()))
+		atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
 		indexSize := len(idx)
 
 		pruned := idx.Prune(0.95)
@@ -361,13 +361,17 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	atomic.AddUint64(&listener.metrics.ListRequests, 1)
 
+	logger := listener.logger.With(
+		zap.String("url", req.URL.RequestURI()),
+		zap.String("peer", req.RemoteAddr),
+	)
+
 	req.ParseForm()
 	format := req.FormValue("format")
 
 	if format != "json" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
-		logger.Infof("[carbonserver] dropping invalid uri (format=%s): %s",
-			format, req.URL.RequestURI())
+		logger.Info("unsupported format")
 		http.Error(wr, "Bad request (unsupported format)",
 			http.StatusBadRequest)
 		return
@@ -377,7 +381,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	metrics, err := listener.getMetricsList()
 	if err != nil {
-		logger.Debugf("[carbonserver] %s", err)
+		logger.Debug("getMetricsList failed", zap.Error(err))
 		http.Error(wr, fmt.Sprintf("Can't fetch metrics list: %s", err), http.StatusInternalServerError)
 		return
 	}
@@ -397,14 +401,13 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
-		logger.Errorf("[carbonserver] failed to create %s list: %s",
-			format, err)
+		logger.Error("failed to create list", zap.Error(err))
 		http.Error(wr, fmt.Sprintf("An internal error has occured: %s", err), http.StatusInternalServerError)
 		return
 	}
 	wr.Write(b)
 
-	logger.Debugf("[carbonserver] list: took %v", time.Since(t0))
+	logger.Debug("list served", zap.Duration("runtime", time.Since(t0)))
 	return
 
 }
@@ -787,12 +790,12 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 }
 
 func (listener *CarbonserverListener) fetchDataPB2(metric string, fromTime, untilTime int32) (*pb2.MultiFetchResponse, error) {
-	logger.Infof("[carbonserver] fetching data...")
+	listener.logger.Info("fetching data...")
 	files, leafs := listener.expandGlobs(metric)
 	var multi pb2.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
-			logger.Debugf("[carbonserver] skipping directory = %q", metric)
+			listener.logger.Debug("skipping directory", zap.String("metric", metric))
 			// can't fetch a directory
 			continue
 		}
@@ -813,7 +816,7 @@ func (listener *CarbonserverListener) fetchDataPB2(metric string, fromTime, unti
 }
 
 func (listener *CarbonserverListener) fetchDataPB3(metric string, fromTime, untilTime int32) (*pb3.MultiFetchResponse, error) {
-	logger.Infof("[carbonserver] fetching data...")
+	listener.logger.Info("fetching data...")
 	files, leafs := listener.expandGlobs(metric)
 	var multi pb3.MultiFetchResponse
 	for i, metric := range files {

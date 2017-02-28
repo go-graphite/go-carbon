@@ -345,7 +345,7 @@ func TestFetchSingleMetricDataCache(t *testing.T) {
 }
 
 func TestGetMetricsListEmpty(t *testing.T) {
-	cache := cache.New()
+	cache := cache.New(nil)
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +367,7 @@ func TestGetMetricsListEmpty(t *testing.T) {
 }
 
 func TestGetMetricsListWithData(t *testing.T) {
-	cache := cache.New()
+	cache := cache.New(nil)
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
