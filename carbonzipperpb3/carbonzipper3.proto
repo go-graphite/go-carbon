@@ -1,0 +1,53 @@
+syntax = "proto3";
+package carbonzipperpb3;
+
+// Regenerate with  protoc --gogo_out=. carbonzipper3.proto 
+
+message FetchResponse {
+    string name = 1;
+    int32 startTime = 2;
+    int32 stopTime = 3;
+    int32 stepTime = 4;
+    repeated double values = 5;
+    repeated bool isAbsent = 6;
+}
+
+message MultiFetchResponse {
+    repeated FetchResponse metrics = 1;
+}
+
+message GlobMatch {
+    string path = 1;
+    bool isLeaf = 2;
+}
+
+message GlobResponse {
+    string name = 1;
+    repeated GlobMatch matches = 2;
+}
+
+message Retention {
+	int32 secondsPerPoint = 1;
+	int32 numberOfPoints = 2;
+}
+
+message InfoResponse {
+	string name = 1;
+	string aggregationMethod = 2;
+	int32 maxRetention = 3;
+	float xFilesFactor = 4;
+	repeated Retention retentions = 5;
+}
+
+message ServerInfoResponse {
+	string server = 1;
+	InfoResponse info = 2;
+}
+
+message ZipperInfoResponse {
+	repeated ServerInfoResponse responses = 1;
+}
+
+message ListMetricsResponse {
+	repeated string Metrics = 1;
+}
