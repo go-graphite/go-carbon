@@ -82,7 +82,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 		if len(line) > 0 { // skip empty lines
 			if msg, err := points.ParseText(string(line)); err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				logrus.Info(err)
+				logrus.Debug(err)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
 				rcv.out(msg)
