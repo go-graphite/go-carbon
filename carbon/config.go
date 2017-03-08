@@ -9,6 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/lomik/go-carbon/persister"
+	"github.com/lomik/zapwriter"
 )
 
 const MetricEndpointLocal = "local"
@@ -113,6 +114,10 @@ type dumpConfig struct {
 	RestorePerSecond int    `toml:"restore-per-second"`
 }
 
+type loggingConfig struct {
+	zapwriter.Config
+}
+
 // Config ...
 type Config struct {
 	Common       commonConfig       `toml:"common"`
@@ -125,14 +130,13 @@ type Config struct {
 	Carbonserver carbonserverConfig `toml:"carbonserver"`
 	Dump         dumpConfig         `toml:"dump"`
 	Pprof        pprofConfig        `toml:"pprof"`
+	Logging      loggingConfig      `toml:"logging"`
 }
 
 // NewConfig ...
 func NewConfig() *Config {
 	cfg := &Config{
 		Common: commonConfig{
-			Logfile:     "/var/log/go-carbon/go-carbon.log",
-			LogLevel:    "info",
 			GraphPrefix: "carbon.agents.{host}",
 			MetricInterval: &Duration{
 				Duration: time.Minute,
@@ -198,7 +202,8 @@ func NewConfig() *Config {
 			Listen:  "localhost:7007",
 			Enabled: false,
 		},
-		Dump: dumpConfig{},
+		Dump:    dumpConfig{},
+		Logging: loggingConfig{zapwriter.NewConfig()},
 	}
 
 	return cfg

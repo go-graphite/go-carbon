@@ -5,13 +5,13 @@ Schemas read code from https://github.com/grobian/carbonwriter/
 */
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/alyu/configparser"
-	"github.com/lomik/go-whisper"
+	whisper "github.com/lomik/go-whisper"
 )
 
 type whisperAggregationItem struct {
@@ -68,16 +68,14 @@ func ReadWhisperAggregation(file string) (*WhisperAggregation, error) {
 
 		item.pattern, err = regexp.Compile(s.ValueOf("pattern"))
 		if err != nil {
-			logrus.Errorf("[persister] Failed to parse pattern '%s'for [%s]: %s",
+			return nil, fmt.Errorf("failed to parse pattern %#v for [%s]: %s",
 				s.ValueOf("pattern"), item.name, err.Error())
-			return nil, err
 		}
 
 		item.xFilesFactor, err = strconv.ParseFloat(s.ValueOf("xFilesFactor"), 64)
 		if err != nil {
-			logrus.Errorf("failed to parse xFilesFactor '%s' in %s: %s",
+			return nil, fmt.Errorf("failed to parse xFilesFactor %#v in %s: %s",
 				s.ValueOf("xFilesFactor"), item.name, err.Error())
-			continue
 		}
 
 		item.aggregationMethodStr = s.ValueOf("aggregationMethod")
@@ -93,14 +91,9 @@ func ReadWhisperAggregation(file string) (*WhisperAggregation, error) {
 		case "min":
 			item.aggregationMethod = whisper.Min
 		default:
-			logrus.Errorf("unknown aggregation method '%s'",
+			return nil, fmt.Errorf("unknown aggregation method '%s'",
 				s.ValueOf("aggregationMethod"))
-			continue
 		}
-
-		logrus.Debugf("[persister] Adding aggregation [%s] pattern = %s aggregationMethod = %s xFilesFactor = %f",
-			item.name, s.ValueOf("pattern"),
-			item.aggregationMethodStr, item.xFilesFactor)
 
 		result.Data = append(result.Data, item)
 	}

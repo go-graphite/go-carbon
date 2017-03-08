@@ -5,9 +5,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lomik/go-carbon/logging"
-	"github.com/lomik/go-carbon/points"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+
+	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/go-carbon/qa"
 )
 
 type udpTestCase struct {
@@ -17,7 +19,7 @@ type udpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
-func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
+func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool, logger *zap.Logger) *udpTestCase {
 	test := &udpTestCase{
 		T: t,
 	}
@@ -29,7 +31,13 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 
 	test.rcvChan = make(chan *points.Points, 128)
 
-	r, err := New("udp://"+addr.String(), UDPLogIncomplete(logIncomplete), OutChan(test.rcvChan))
+	r, err := New(
+		"udp://"+addr.String(),
+		UDPLogIncomplete(logIncomplete),
+		OutChan(test.rcvChan),
+		Logger(logger),
+	)
+
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,11 +54,11 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 }
 
 func newUDPTestCase(t *testing.T) *udpTestCase {
-	return newUDPTestCaseWithOptions(t, false)
+	return newUDPTestCaseWithOptions(t, false, nil)
 }
 
-func newUDPTestCaseLogIncomplete(t *testing.T) *udpTestCase {
-	return newUDPTestCaseWithOptions(t, true)
+func newUDPTestCaseLogIncomplete(t *testing.T, logger *zap.Logger) *udpTestCase {
+	return newUDPTestCaseWithOptions(t, true, logger)
 }
 
 func (test *udpTestCase) Finish() {
@@ -138,38 +146,42 @@ func TestLogIncompleteMessage(t *testing.T) {
 	assert := assert.New(t)
 
 	// 3 lines
-	logging.Test(func(log logging.TestOut) {
-		test := newUDPTestCaseLogIncomplete(t)
+	func() {
+		log, logOut := qa.Logger()
+		test := newUDPTestCaseLogIncomplete(t, log)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 4")
-		assert.Contains(log.String(), "metric1 42 1422698155\\n...(21 bytes)...\\nmetric3 4")
-	})
+		assert.Contains(logOut(), "metric1 42 1422698155\\\\n...(21 bytes)...\\\\nmetric3 4")
+	}()
 
 	// > 3 lines
-	logging.Test(func(log logging.TestOut) {
-		test := newUDPTestCaseLogIncomplete(t)
+	func() {
+		log, logOut := qa.Logger()
+		test := newUDPTestCaseLogIncomplete(t, log)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 44 1422698155\nmetric4 45 ")
-		assert.Contains(log.String(), "metric1 42 1422698155\\n...(43 bytes)...\\nmetric4 45 ")
-	})
+		assert.Contains(logOut(), "metric1 42 1422698155\\\\n...(43 bytes)...\\\\nmetric4 45 ")
+	}()
 
 	// 2 lines
-	logging.Test(func(log logging.TestOut) {
-		test := newUDPTestCaseLogIncomplete(t)
+	func() {
+		log, logOut := qa.Logger()
+		test := newUDPTestCaseLogIncomplete(t, log)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 14226981")
-		assert.Contains(log.String(), "metric1 42 1422698155\\nmetric2 43 14226981")
-	})
+		assert.Contains(logOut(), "metric1 42 1422698155\\nmetric2 43 14226981")
+	}()
 
 	// single line
-	logging.Test(func(log logging.TestOut) {
-		test := newUDPTestCaseLogIncomplete(t)
+	func() {
+		log, logOut := qa.Logger()
+		test := newUDPTestCaseLogIncomplete(t, log)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155")
-		assert.Contains(log.String(), "metric1 42 1422698155")
-	})
+		assert.Contains(logOut(), "metric1 42 1422698155")
+	}()
 }

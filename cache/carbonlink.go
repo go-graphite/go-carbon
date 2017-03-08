@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Sirupsen/logrus"
+	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/framing"
@@ -143,13 +143,19 @@ type CarbonlinkListener struct {
 	cache       *Cache
 	readTimeout time.Duration
 	tcpListener *net.TCPListener
+	logger      *zap.Logger
 }
 
 // NewCarbonlinkListener create new instance of CarbonlinkListener
-func NewCarbonlinkListener(cache *Cache) *CarbonlinkListener {
+func NewCarbonlinkListener(cache *Cache, logger *zap.Logger) *CarbonlinkListener {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	return &CarbonlinkListener{
 		cache:       cache,
 		readTimeout: 30 * time.Second,
+		logger:      logger,
 	}
 }
 
@@ -216,6 +222,7 @@ func packReply(data []points.Point) []byte {
 
 func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 	defer conn.Close()
+	logger := listener.logger.With(zap.String("peer", conn.RemoteAddr().String()))
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(listener.readTimeout))
@@ -223,7 +230,7 @@ func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 
 		if err != nil {
 			conn.Conn.(*net.TCPConn).SetLinger(0)
-			logrus.Debugf("[carbonlink] read carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
+			logger.Debug("request read failed", zap.Error(err))
 			break
 		}
 
@@ -231,12 +238,12 @@ func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 
 		if err != nil {
 			conn.Conn.(*net.TCPConn).SetLinger(0)
-			logrus.Warningf("[carbonlink] parse carbonlink request from %s: %s", conn.RemoteAddr().String(), err.Error())
+			logger.Warn("request parse failed", zap.Error(err))
 			break
 		}
 		if req != nil {
 			if req.Type != "cache-query" {
-				logrus.Warningf("[carbonlink] unknown query type: %#v", req.Type)
+				logger.Warn("unknown query", zap.String("type", req.Type))
 				conn.Write([]byte(fmt.Sprintf("\x80\x02}q\x00U\x05errorq\x01U\x1aInvalid request type %qq\x02s.", req.Type)))
 				break
 			}
@@ -249,7 +256,7 @@ func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 					break
 				}
 				if _, err := conn.Write(packed); err != nil {
-					logrus.Infof("[carbonlink] reply error: %s", err)
+					logger.Info("reply error", zap.Error(err))
 					break
 				}
 			}
@@ -291,7 +298,7 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						break
 					}
-					logrus.Warningf("[carbonlink] Failed to accept connection: %s", err)
+					listener.logger.Error("failed to accept connection", zap.Error(err))
 					continue
 				}
 				framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)

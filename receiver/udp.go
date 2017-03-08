@@ -2,16 +2,17 @@ package receiver
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
-
-	"github.com/Sirupsen/logrus"
 )
 
 // UDP receive metrics from UDP socket
@@ -25,6 +26,7 @@ type UDP struct {
 	logIncomplete      bool
 	conn               *net.UDPConn
 	buffer             chan *points.Points
+	logger             *zap.Logger
 }
 
 // Name returns receiver name (for store internal metrics)
@@ -101,24 +103,24 @@ func (rcv *UDP) Addr() net.Addr {
 	return rcv.conn.LocalAddr()
 }
 
-func logIncomplete(peer *net.UDPAddr, message []byte, lastLine []byte) {
+func logIncomplete(logger *zap.Logger, peer *net.UDPAddr, message []byte, lastLine []byte) {
 	p1 := bytes.IndexByte(message, 0xa) // find first "\n"
 
+	var m string
 	if p1 != -1 && p1+len(lastLine) < len(message)-10 { // print short version
-		logrus.Warningf(
-			"[udp] incomplete message from %s: \"%s\\n...(%d bytes)...\\n%s\"",
-			peer.String(),
+		m = fmt.Sprintf("%s\\n...(%d bytes)...\\n%s",
 			string(message[:p1]),
 			len(message)-p1-len(lastLine)-2,
 			string(lastLine),
 		)
 	} else { // print full
-		logrus.Warningf(
-			"[udp] incomplete message from %s: %#v",
-			peer.String(),
-			string(message),
-		)
+		m = string(message)
 	}
+
+	logger.Warn("incomplete message",
+		zap.String("peer", peer.String()),
+		zap.String("message", m),
+	)
 }
 
 func (rcv *UDP) Stat(send helper.StatCallback) {
@@ -156,7 +158,7 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 				break
 			}
 			atomic.AddUint32(&rcv.errors, 1)
-			logrus.Error(err)
+			rcv.logger.Error("read error", zap.Error(err))
 			continue
 		}
 
@@ -177,7 +179,7 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 					if len(line) > 0 { // incomplete line received
 
 						if rcv.logIncomplete {
-							logIncomplete(peer, buf[:rlen], line)
+							logIncomplete(rcv.logger, peer, buf[:rlen], line)
 						}
 
 						lines.store(peer.String(), line)
@@ -185,14 +187,14 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 					}
 				} else {
 					atomic.AddUint32(&rcv.errors, 1)
-					logrus.Error(err)
+					rcv.logger.Error("read error", zap.Error(err))
 				}
 				break
 			}
 			if len(line) > 0 { // skip empty lines
 				if msg, err := points.ParseText(string(line)); err != nil {
 					atomic.AddUint32(&rcv.errors, 1)
-					logrus.Info(err)
+					rcv.logger.Info("parse failed", zap.Error(err))
 				} else {
 					atomic.AddUint32(&rcv.metricsReceived, 1)
 					rcv.out(msg)

@@ -9,7 +9,7 @@ import (
 func TestInFlight(t *testing.T) {
 	var data []points.Point
 
-	c := New()
+	c := New(nil)
 
 	c.Add(points.OnePoint("hello.world", 42, 10))
 
@@ -58,7 +58,7 @@ func TestInFlight(t *testing.T) {
 }
 
 func BenchmarkPopNotConfirmed(b *testing.B) {
-	c := New()
+	c := New(nil)
 	p1 := points.OnePoint("hello.world", 42, 10)
 	var p2 *points.Points
 
@@ -74,7 +74,7 @@ func BenchmarkPopNotConfirmed(b *testing.B) {
 }
 
 func BenchmarkPopNotConfirmed100(b *testing.B) {
-	c := New()
+	c := New(nil)
 
 	for i := 0; i < 100; i++ {
 		c.Add(points.OnePoint("hello.world", 42, 10))
@@ -96,7 +96,7 @@ func BenchmarkPopNotConfirmed100(b *testing.B) {
 }
 
 func BenchmarkPop(b *testing.B) {
-	c := New()
+	c := New(nil)
 	p1 := points.OnePoint("hello.world", 42, 10)
 	var p2 *points.Points
 
@@ -110,7 +110,7 @@ func BenchmarkPop(b *testing.B) {
 	}
 }
 func BenchmarkGet(b *testing.B) {
-	c := New()
+	c := New(nil)
 	c.Add(points.OnePoint("hello.world", 42, 10))
 
 	var d []points.Point
@@ -124,7 +124,7 @@ func BenchmarkGet(b *testing.B) {
 }
 
 func BenchmarkGetNotConfirmed1(b *testing.B) {
-	c := New()
+	c := New(nil)
 
 	c.Add(points.OnePoint("hello.world", 42, 10))
 	c.PopNotConfirmed("hello.world")
@@ -140,7 +140,7 @@ func BenchmarkGetNotConfirmed1(b *testing.B) {
 }
 
 func BenchmarkGetNotConfirmed100(b *testing.B) {
-	c := New()
+	c := New(nil)
 
 	for i := 0; i < 100; i++ {
 		c.Add(points.OnePoint("hello.world", 42, 10))
@@ -158,7 +158,7 @@ func BenchmarkGetNotConfirmed100(b *testing.B) {
 }
 
 func BenchmarkGetNotConfirmed100Miss(b *testing.B) {
-	c := New()
+	c := New(nil)
 
 	for i := 0; i < 100; i++ {
 		c.Add(points.OnePoint("hello.world", 42, 10))

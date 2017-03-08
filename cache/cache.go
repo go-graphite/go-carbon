@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
@@ -30,6 +32,7 @@ const shardCount = 1024
 type Cache struct {
 	sync.Mutex
 
+	logger         *zap.Logger
 	queueLastBuild time.Time
 
 	data []*Shard
@@ -60,11 +63,16 @@ type Shard struct {
 }
 
 // Creates a new cache instance
-func New() *Cache {
+func New(logger *zap.Logger) *Cache {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	c := &Cache{
 		data:          make([]*Shard, shardCount),
 		writeStrategy: Noop,
 		maxSize:       1000000,
+		logger:        logger,
 	}
 
 	for i := 0; i < shardCount; i++ {

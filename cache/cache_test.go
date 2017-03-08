@@ -10,7 +10,7 @@ import (
 
 func TestCache(t *testing.T) {
 
-	c := New()
+	c := New(nil)
 
 	c.Add(points.OnePoint("hello.world", 42, 10))
 
@@ -46,7 +46,7 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 	if cache != nil {
 		return cache
 	}
-	cache = New()
+	cache = New(nil)
 
 	for i := 0; i < metricsCount; i++ {
 		m := fmt.Sprintf("%d.metric.name.for.bench.test.%d", rand.Intn(metricsCount), i)

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
+	"go.uber.org/zap"
 )
 
 type App struct {
@@ -28,6 +28,8 @@ type App struct {
 	Persister      *persister.Whisper
 	Carbonserver   *carbonserver.CarbonserverListener
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
+	RootLogger     *zap.Logger
+	logger         *zap.Logger
 	exit           chan bool
 }
 
@@ -141,31 +143,31 @@ func (app *App) stopListeners() {
 	if app.TCP != nil {
 		app.TCP.Stop()
 		app.TCP = nil
-		logrus.Debug("[tcp] finished")
+		app.logger.Debug("tcp stopped")
 	}
 
 	if app.Pickle != nil {
 		app.Pickle.Stop()
 		app.Pickle = nil
-		logrus.Debug("[pickle] finished")
+		app.logger.Debug("pickle stopped")
 	}
 
 	if app.UDP != nil {
 		app.UDP.Stop()
 		app.UDP = nil
-		logrus.Debug("[udp] finished")
+		app.logger.Debug("udp stopped")
 	}
 
 	if app.CarbonLink != nil {
 		app.CarbonLink.Stop()
 		app.CarbonLink = nil
-		logrus.Debug("[carbonlink] finished")
+		app.logger.Debug("carbonlink stopped")
 	}
 
 	if app.Carbonserver != nil {
 		app.Carbonserver.Stop()
 		app.Carbonserver = nil
-		logrus.Debug("[carbonserver] finished")
+		app.logger.Debug("carbonserver stopped")
 	}
 }
 
@@ -175,25 +177,25 @@ func (app *App) stopAll() {
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
-		logrus.Debug("[persister] finished")
+		app.logger.Debug("persister stopped")
 	}
 
 	if app.Cache != nil {
 		app.Cache.Stop()
 		app.Cache = nil
-		logrus.Debug("[cache] finished")
+		app.logger.Debug("cache stopped")
 	}
 
 	if app.Collector != nil {
 		app.Collector.Stop()
 		app.Collector = nil
-		logrus.Debug("[stat] finished")
+		app.logger.Debug("collector stopped")
 	}
 
 	if app.exit != nil {
 		close(app.exit)
 		app.exit = nil
-		logrus.Debug("[app] close(exit)")
+		app.logger.Debug("close(exit)")
 	}
 }
 
@@ -212,6 +214,7 @@ func (app *App) startPersister() {
 			app.Config.Whisper.Aggregation,
 			app.Cache.WriteoutQueue().GetNotConfirmed,
 			app.Cache.Confirm,
+			app.RootLogger.Named("persister"),
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
@@ -224,7 +227,7 @@ func (app *App) startPersister() {
 }
 
 // Start starts
-func (app *App) Start() (err error) {
+func (app *App) Start(logger *zap.Logger) (err error) {
 	app.Lock()
 	defer app.Unlock()
 
@@ -234,11 +237,17 @@ func (app *App) Start() (err error) {
 		}
 	}()
 
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	app.RootLogger = logger
+	app.logger = app.RootLogger.Named("app")
+
 	conf := app.Config
 
 	runtime.GOMAXPROCS(conf.Common.MaxCPU)
 
-	core := cache.New()
+	core := cache.New(app.RootLogger.Named("cache"))
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 
@@ -255,6 +264,7 @@ func (app *App) Start() (err error) {
 			receiver.OutFunc(core.Add),
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
 			receiver.BufferSize(conf.Udp.BufferSize),
+			receiver.Logger(app.RootLogger.Named("udp")),
 		)
 
 		if err != nil {
@@ -269,6 +279,7 @@ func (app *App) Start() (err error) {
 			"tcp://"+conf.Tcp.Listen,
 			receiver.OutFunc(core.Add),
 			receiver.BufferSize(conf.Tcp.BufferSize),
+			receiver.Logger(app.RootLogger.Named("tcp")),
 		)
 
 		if err != nil {
@@ -284,6 +295,7 @@ func (app *App) Start() (err error) {
 			receiver.OutFunc(core.Add),
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
 			receiver.BufferSize(conf.Pickle.BufferSize),
+			receiver.Logger(app.RootLogger.Named("pickle")),
 		)
 
 		if err != nil {
@@ -307,6 +319,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
 		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
+		carbonserver.SetLogger(app.RootLogger.Named("carbonserver"))
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
@@ -325,7 +338,10 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		carbonlink := cache.NewCarbonlinkListener(core)
+		carbonlink := cache.NewCarbonlinkListener(
+			core,
+			app.RootLogger.Named("carbonlink"),
+		)
 		carbonlink.SetReadTimeout(conf.Carbonlink.ReadTimeout.Value())
 		// carbonlink.SetQueryTimeout(conf.Carbonlink.QueryTimeout.Value())
 

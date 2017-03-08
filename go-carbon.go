@@ -13,13 +13,14 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/lomik/go-carbon/carbon"
-	"github.com/lomik/go-carbon/logging"
+	"github.com/lomik/zapwriter"
 	daemon "github.com/sevlyar/go-daemon"
-)
+	"go.uber.org/zap"
 
-import _ "net/http/pprof"
+	"github.com/lomik/go-carbon/carbon"
+
+	_ "net/http/pprof"
+)
 
 // Version of go-carbon
 const Version = "0.9.1"
@@ -37,6 +38,20 @@ func httpServe(addr string) (func(), error) {
 
 	go http.Serve(listener, nil)
 	return func() { listener.Close() }, nil
+}
+
+func loggingConfigCheck(cfg *carbon.Config) error {
+	if cfg.Common.LogLevel != "" {
+		log.Println("[WARNING] `common.log-level` is DEPRICATED. Use `logging` config section")
+		cfg.Logging.Level = cfg.Common.LogLevel
+	}
+
+	if cfg.Common.Logfile != "" {
+		log.Println("[WARNING] `common.logfile` is DEPRICATED. Use `logging` config section")
+		cfg.Logging.File = cfg.Common.Logfile
+	}
+
+	return cfg.Logging.Check()
 }
 
 func main() {
@@ -83,7 +98,7 @@ func main() {
 		}
 	}
 
-	if err := logging.SetLevel(cfg.Common.LogLevel); err != nil {
+	if err = loggingConfigCheck(cfg); err != nil {
 		log.Fatal(err)
 	}
 
@@ -92,13 +107,18 @@ func main() {
 		return
 	}
 
-	if err := logging.PrepareFile(cfg.Common.Logfile, runAsUser); err != nil {
-		logrus.Fatal(err)
+	if err := zapwriter.PrepareFileForUser(cfg.Logging.File, runAsUser); err != nil {
+		log.Fatal(err)
 	}
 
-	if err := logging.SetFile(cfg.Common.Logfile); err != nil {
-		logrus.Fatal(err)
+	logger, err := cfg.Logging.BuildLogger()
+	if err != nil {
+		log.Fatal(err)
 	}
+
+	zap.ReplaceGlobals(logger)
+
+	mainLogger := zap.L().Named("main")
 
 	if *isDaemon {
 		runtime.LockOSThread()
@@ -112,12 +132,12 @@ func main() {
 		if runAsUser != nil {
 			uid, err := strconv.ParseInt(runAsUser.Uid, 10, 0)
 			if err != nil {
-				log.Fatal(err)
+				mainLogger.Fatal(err.Error())
 			}
 
 			gid, err := strconv.ParseInt(runAsUser.Gid, 10, 0)
 			if err != nil {
-				log.Fatal(err)
+				mainLogger.Fatal(err.Error())
 			}
 
 			context.Credential = &syscall.Credential{
@@ -142,14 +162,14 @@ func main() {
 	if cfg.Pprof.Enabled {
 		_, err = httpServe(cfg.Pprof.Listen)
 		if err != nil {
-			logrus.Fatal(err)
+			mainLogger.Fatal(err.Error())
 		}
 	}
 
-	if err = app.Start(); err != nil {
-		logrus.Fatal(err)
+	if err = app.Start(zap.L()); err != nil {
+		mainLogger.Fatal(err.Error())
 	} else {
-		logrus.Info("started")
+		mainLogger.Info("started")
 	}
 
 	go func() {
@@ -167,16 +187,16 @@ func main() {
 		signal.Notify(c, syscall.SIGHUP)
 		for {
 			<-c
-			logrus.Info("HUP received. Reload config")
+			zap.L().Named("main").Info("HUP received. Reload config")
 			if err := app.ReloadConfig(); err != nil {
-				logrus.Errorf("Config reload failed: %s", err.Error())
+				zap.L().Named("main").Error("config reload failed", zap.Error(err))
 			} else {
-				logrus.Info("Config successfully reloaded")
+				zap.L().Named("main").Info("config successfully reloaded")
 			}
 		}
 	}()
 
 	app.Loop()
 
-	logrus.Info("stopped")
+	mainLogger.Info("stopped")
 }
