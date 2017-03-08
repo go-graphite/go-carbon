@@ -222,9 +222,10 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
-##### Current
+##### master
 * IdleTimeout is now configurable in carbonserver part
 * Requires Go 1.8 or newer
+* Logging refactored. Format changed to structured JSON
 
 ##### version 0.9.1
 * Always stop on USR2 signal (previously did not stop with disabled dump/restore) #135
