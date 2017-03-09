@@ -206,6 +206,8 @@ func NewConfig() *Config {
 		Logging: loggingConfig{zapwriter.NewConfig()},
 	}
 
+	cfg.Logging.Config.File = "/var/log/go-carbon/go-carbon.log"
+
 	return cfg
 }
 
