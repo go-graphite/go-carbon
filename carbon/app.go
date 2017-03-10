@@ -47,8 +47,8 @@ func New(configFilename string) *App {
 func (app *App) configure() error {
 	var err error
 
-	cfg := NewConfig()
-	if err := ParseConfig(app.ConfigFilename, cfg); err != nil {
+	cfg, err := ReadConfig(app.ConfigFilename)
+	if err != nil {
 		return err
 	}
 

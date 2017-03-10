@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -116,7 +118,7 @@ type dumpConfig struct {
 	RestorePerSecond int    `toml:"restore-per-second"`
 }
 
-type loggingConfig struct {
+type LoggingConfig struct {
 	zapwriter.Config
 }
 
@@ -132,7 +134,13 @@ type Config struct {
 	Carbonserver carbonserverConfig `toml:"carbonserver"`
 	Dump         dumpConfig         `toml:"dump"`
 	Pprof        pprofConfig        `toml:"pprof"`
-	Logging      loggingConfig      `toml:"logging"`
+	Logging      []*LoggingConfig   `toml:"logging"`
+}
+
+func NewLoggingConfig() *LoggingConfig {
+	l := &LoggingConfig{zapwriter.NewConfig()}
+	l.File = "/var/log/go-carbon/go-carbon.log"
+	return l
 }
 
 // NewConfig ...
@@ -207,17 +215,24 @@ func NewConfig() *Config {
 			Enabled: false,
 		},
 		Dump:    dumpConfig{},
-		Logging: loggingConfig{zapwriter.NewConfig()},
+		Logging: nil,
 	}
-
-	cfg.Logging.Config.File = "/var/log/go-carbon/go-carbon.log"
 
 	return cfg
 }
 
 // PrintConfig ...
-func PrintConfig(cfg interface{}) error {
+func PrintDefaultConfig() error {
+	cfg := NewConfig()
 	buf := new(bytes.Buffer)
+
+	if cfg.Logging == nil {
+		cfg.Logging = make([]*LoggingConfig, 0)
+	}
+
+	if len(cfg.Logging) == 0 {
+		cfg.Logging = append(cfg.Logging, NewLoggingConfig())
+	}
 
 	encoder := toml.NewEncoder(buf)
 	encoder.Indent = ""
@@ -230,14 +245,50 @@ func PrintConfig(cfg interface{}) error {
 	return nil
 }
 
-// ParseConfig ...
-func ParseConfig(filename string, cfg interface{}) error {
+// ReadConfig ...
+func ReadConfig(filename string) (*Config, error) {
+	cfg := NewConfig()
 	if filename != "" {
-		if _, err := toml.DecodeFile(filename, cfg); err != nil {
-			return err
+		b, err := ioutil.ReadFile(filename)
+		if err != nil {
+			return nil, err
+		}
+
+		body := string(b)
+
+		body = strings.Replace(body, "\n[logging]\n", "\n[[logging]]\n", -1)
+
+		if _, err := toml.Decode(body, cfg); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+
+	if cfg.Logging == nil {
+		cfg.Logging = make([]*LoggingConfig, 0)
+	}
+
+	if cfg.Common.LogLevel != "" || cfg.Common.Logfile != "" {
+		log.Println("[WARNING] `common.log-level` and `common.logfile` is DEPRICATED. Use `logging` config section")
+
+		l := NewLoggingConfig()
+		l.File = cfg.Common.Logfile
+		l.Level = cfg.Common.LogLevel
+
+		cfg.Logging = append(cfg.Logging, l)
+	}
+
+	if len(cfg.Logging) == 0 {
+		cfg.Logging = append(cfg.Logging, NewLoggingConfig())
+	}
+
+	for _, l := range cfg.Logging {
+		err := l.Check()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return cfg, nil
 }
 
 // TestConfig creates config with all files in root directory

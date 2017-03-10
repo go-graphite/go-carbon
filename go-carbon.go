@@ -40,20 +40,6 @@ func httpServe(addr string) (func(), error) {
 	return func() { listener.Close() }, nil
 }
 
-func loggingConfigCheck(cfg *carbon.Config) error {
-	if cfg.Common.LogLevel != "" {
-		log.Println("[WARNING] `common.log-level` is DEPRICATED. Use `logging` config section")
-		cfg.Logging.Level = cfg.Common.LogLevel
-	}
-
-	if cfg.Common.Logfile != "" {
-		log.Println("[WARNING] `common.logfile` is DEPRICATED. Use `logging` config section")
-		cfg.Logging.File = cfg.Common.Logfile
-	}
-
-	return cfg.Logging.Check()
-}
-
 func main() {
 	var err error
 
@@ -76,7 +62,7 @@ func main() {
 	}
 
 	if *printDefaultConfig {
-		if err = carbon.PrintConfig(carbon.NewConfig()); err != nil {
+		if err = carbon.PrintDefaultConfig(); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -98,20 +84,16 @@ func main() {
 		}
 	}
 
-	if err = loggingConfigCheck(cfg); err != nil {
-		log.Fatal(err)
-	}
-
 	// config parsed successfully. Exit in check-only mode
 	if *checkConfig {
 		return
 	}
 
-	if err := zapwriter.PrepareFileForUser(cfg.Logging.File, runAsUser); err != nil {
+	if err := zapwriter.PrepareFileForUser(cfg.Logging[0].File, runAsUser); err != nil {
 		log.Fatal(err)
 	}
 
-	logger, err := cfg.Logging.BuildLogger()
+	logger, err := cfg.Logging[0].BuildLogger()
 	if err != nil {
 		log.Fatal(err)
 	}
