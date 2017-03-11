@@ -71,6 +71,9 @@ type metricStruct struct {
 	MetricsKnown         uint64
 	FileScanTimeNS       uint64
 	IndexBuildTimeNS     uint64
+	MetricsFetched       uint64
+	MetricsFound         uint64
+	FetchSize            uint64
 }
 
 type CarbonserverListener struct {
@@ -417,6 +420,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	t0 := time.Now()
 	logger := listener.logger.With(
+		zap.String("handler", "findhHandler"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 	)
@@ -443,6 +447,20 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	}
 
 	files, leafs := listener.expandGlobs(query)
+
+	metricsCount := uint64(0)
+	for i := range files {
+		if leafs[i] {
+			metricsCount++
+		}
+	}
+	atomic.AddUint64(&listener.metrics.MetricsFound, metricsCount)
+	listener.logger.Debug("expandGlobs result",
+		zap.String("handler", "findHandler"),
+		zap.String("action", "expandGlobs"),
+		zap.String("metric", query),
+		zap.Uint64("metrics_count", metricsCount),
+	)
 
 	if format == "json" || format == "protobuf" || format == "protobuf3" {
 		name := req.FormValue("query")
@@ -518,7 +536,8 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		atomic.AddUint64(&listener.metrics.FindZero, 1)
 	}
 
-	logger.Debug("find success",
+	logger.Info("find success",
+		zap.String("query", query),
 		zap.Int("files", len(files)),
 		zap.Duration("runtime", time.Since(t0)),
 	)
@@ -530,6 +549,7 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 	t0 := time.Now()
 
 	logger := listener.logger.With(
+		zap.String("handler", "fetchHandler"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 	)
@@ -583,6 +603,9 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		return
 	}
 
+	metricsFetched := 0
+	memoryUsed := 0
+	valuesFetched := 0
 	var b []byte
 	if format == "protobuf3" {
 		multi, err := listener.fetchDataPB3(metric, fromTime, untilTime)
@@ -591,6 +614,12 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 			logger.Info("fetchData error", zap.Error(err))
 			http.Error(wr, fmt.Sprintf("Bad request (%s)", err),
 				http.StatusBadRequest)
+		}
+
+		metricsFetched = len(multi.Metrics)
+		for i := range multi.Metrics {
+			memoryUsed += multi.Metrics[i].Size()
+			valuesFetched += len(multi.Metrics[i].Values)
 		}
 
 		wr.Header().Set("Content-Type", "application/protobuf")
@@ -603,6 +632,12 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 			logger.Info("fetchData error", zap.Error(err))
 			http.Error(wr, fmt.Sprintf("Bad request (%s)", err),
 				http.StatusBadRequest)
+		}
+
+		metricsFetched = len(multi.Metrics)
+		for i := range multi.Metrics {
+			memoryUsed += multi.Metrics[i].Size()
+			valuesFetched += len(multi.Metrics[i].Values)
 		}
 
 		switch format {
@@ -659,10 +694,15 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 	}
 	wr.Write(b)
 
-	logger.Debug("fetch served",
+	atomic.AddUint64(&listener.metrics.FetchSize, uint64(memoryUsed))
+	logger.Info("fetch served",
+		zap.Int("metricsFetched", metricsFetched),
+		zap.Int("valuesFetched", valuesFetched),
+		zap.Int("memoryUsed", memoryUsed),
 		zap.String("metric", metric),
 		zap.String("from", from),
 		zap.String("until", until),
+		zap.String("format", format),
 		zap.Duration("runtime", time.Since(t0)),
 	)
 
@@ -792,6 +832,22 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 func (listener *CarbonserverListener) fetchDataPB2(metric string, fromTime, untilTime int32) (*pb2.MultiFetchResponse, error) {
 	listener.logger.Info("fetching data...")
 	files, leafs := listener.expandGlobs(metric)
+
+	metricsCount := 0
+	for i := range files {
+		if leafs[i] {
+			metricsCount++
+		}
+	}
+	listener.logger.Debug("expandGlobs result",
+		zap.String("handler", "fetchHandler"),
+		zap.String("action", "expandGlobs"),
+		zap.String("metric", metric),
+		zap.Int("metrics_count", metricsCount),
+		zap.Int32("from", fromTime),
+		zap.Int32("until", untilTime),
+	)
+
 	var multi pb2.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
@@ -818,6 +874,22 @@ func (listener *CarbonserverListener) fetchDataPB2(metric string, fromTime, unti
 func (listener *CarbonserverListener) fetchDataPB3(metric string, fromTime, untilTime int32) (*pb3.MultiFetchResponse, error) {
 	listener.logger.Info("fetching data...")
 	files, leafs := listener.expandGlobs(metric)
+
+	metricsCount := 0
+	for i := range files {
+		if leafs[i] {
+			metricsCount++
+		}
+	}
+	listener.logger.Debug("expandGlobs result",
+		zap.String("handler", "fetchHandler"),
+		zap.String("action", "expandGlobs"),
+		zap.String("metric", metric),
+		zap.Int("metrics_count", metricsCount),
+		zap.Int32("from", fromTime),
+		zap.Int32("until", untilTime),
+	)
+
 	var multi pb3.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
@@ -837,6 +909,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	// URL: /info/?target=the.metric.name&format=json
 
 	logger := listener.logger.With(
+		zap.String("handler", "infoHandler"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 	)
@@ -961,6 +1034,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("disk_requests", &listener.metrics.DiskRequests, send)
 	sender("points_returned", &listener.metrics.PointsReturned, send)
 	sender("metrics_returned", &listener.metrics.MetricsReturned, send)
+	sender("metrics_found", &listener.metrics.MetricsFound, send)
+	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
 
 	sender("metrics_known", &listener.metrics.MetricsKnown, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
