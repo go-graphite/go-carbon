@@ -5,8 +5,6 @@ import (
 	"path"
 	"testing"
 
-	"go.uber.org/zap"
-
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/qa"
 )
@@ -79,7 +77,7 @@ func TestRestore(t *testing.T) {
 
 		ch := make(chan *points.Points, 1024)
 
-		app := &App{logger: zap.NewNop()}
+		app := &App{}
 		app.RestoreFromDir(root, func(p *points.Points) { ch <- p })
 
 		close(ch)

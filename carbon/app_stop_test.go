@@ -23,7 +23,7 @@ func TestStartStop(t *testing.T) {
 			app := New(configFile)
 
 			assert.NoError(app.ParseConfig())
-			assert.NoError(app.Start(nil))
+			assert.NoError(app.Start())
 
 			app.Stop()
 		})
@@ -51,7 +51,7 @@ func TestReloadAndCollectorDeadlock(t *testing.T) {
 		assert.NoError(t, app.ParseConfig())
 
 		app.Config.Common.MetricInterval = &Duration{time.Microsecond}
-		assert.NoError(t, app.Start(nil))
+		assert.NoError(t, app.Start())
 
 		reloadChan := make(chan struct{}, 1)
 		N := 1024

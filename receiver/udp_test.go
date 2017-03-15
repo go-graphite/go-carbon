@@ -6,10 +6,9 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/points"
-	"github.com/lomik/go-carbon/qa"
+	"github.com/lomik/zapwriter"
 )
 
 type udpTestCase struct {
@@ -19,7 +18,7 @@ type udpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
-func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool, logger *zap.Logger) *udpTestCase {
+func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 	test := &udpTestCase{
 		T: t,
 	}
@@ -35,7 +34,6 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool, logger *zap.Log
 		"udp://"+addr.String(),
 		UDPLogIncomplete(logIncomplete),
 		OutChan(test.rcvChan),
-		Logger(logger),
 	)
 
 	if err != nil {
@@ -54,11 +52,11 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool, logger *zap.Log
 }
 
 func newUDPTestCase(t *testing.T) *udpTestCase {
-	return newUDPTestCaseWithOptions(t, false, nil)
+	return newUDPTestCaseWithOptions(t, false)
 }
 
-func newUDPTestCaseLogIncomplete(t *testing.T, logger *zap.Logger) *udpTestCase {
-	return newUDPTestCaseWithOptions(t, true, logger)
+func newUDPTestCaseLogIncomplete(t *testing.T) *udpTestCase {
+	return newUDPTestCaseWithOptions(t, true)
 }
 
 func (test *udpTestCase) Finish() {
@@ -147,41 +145,41 @@ func TestLogIncompleteMessage(t *testing.T) {
 
 	// 3 lines
 	func() {
-		log, logOut := qa.Logger()
-		test := newUDPTestCaseLogIncomplete(t, log)
+		defer zapwriter.Test()()
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 4")
-		assert.Contains(logOut(), "metric1 42 1422698155\\\\n...(21 bytes)...\\\\nmetric3 4")
+		assert.Contains(zapwriter.TestString(), "metric1 42 1422698155\\\\n...(21 bytes)...\\\\nmetric3 4")
 	}()
 
 	// > 3 lines
 	func() {
-		log, logOut := qa.Logger()
-		test := newUDPTestCaseLogIncomplete(t, log)
+		defer zapwriter.Test()()
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 1422698155\nmetric3 44 1422698155\nmetric4 45 ")
-		assert.Contains(logOut(), "metric1 42 1422698155\\\\n...(43 bytes)...\\\\nmetric4 45 ")
+		assert.Contains(zapwriter.TestString(), "metric1 42 1422698155\\\\n...(43 bytes)...\\\\nmetric4 45 ")
 	}()
 
 	// 2 lines
 	func() {
-		log, logOut := qa.Logger()
-		test := newUDPTestCaseLogIncomplete(t, log)
+		defer zapwriter.Test()()
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155\nmetric2 43 14226981")
-		assert.Contains(logOut(), "metric1 42 1422698155\\nmetric2 43 14226981")
+		assert.Contains(zapwriter.TestString(), "metric1 42 1422698155\\nmetric2 43 14226981")
 	}()
 
 	// single line
 	func() {
-		log, logOut := qa.Logger()
-		test := newUDPTestCaseLogIncomplete(t, log)
+		defer zapwriter.Test()()
+		test := newUDPTestCaseLogIncomplete(t)
 		defer test.Finish()
 
 		test.Send("metric1 42 1422698155")
-		assert.Contains(logOut(), "metric1 42 1422698155")
+		assert.Contains(zapwriter.TestString(), "metric1 42 1422698155")
 	}()
 }

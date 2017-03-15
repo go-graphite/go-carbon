@@ -248,7 +248,7 @@ func getSingleMetricTest(name string) *FetchTest {
 }
 
 func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
-	cache := cache.New(nil)
+	cache := cache.New()
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
@@ -345,7 +345,7 @@ func TestFetchSingleMetricDataCache(t *testing.T) {
 }
 
 func TestGetMetricsListEmpty(t *testing.T) {
-	cache := cache.New(nil)
+	cache := cache.New()
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
@@ -367,7 +367,7 @@ func TestGetMetricsListEmpty(t *testing.T) {
 }
 
 func TestGetMetricsListWithData(t *testing.T) {
-	cache := cache.New(nil)
+	cache := cache.New()
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		t.Fatal(err)
@@ -413,7 +413,7 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	}
 	defer os.RemoveAll(path)
 	test.path = path
-	cache := cache.New(nil)
+	cache := cache.New()
 
 	carbonserver := CarbonserverListener{
 		whisperData: test.path,

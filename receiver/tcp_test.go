@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -17,7 +15,7 @@ type tcpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
-func newTCPTestCase(t *testing.T, isPickle bool, logger *zap.Logger) *tcpTestCase {
+func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 	test := &tcpTestCase{
 		T: t,
 	}
@@ -34,7 +32,7 @@ func newTCPTestCase(t *testing.T, isPickle bool, logger *zap.Logger) *tcpTestCas
 
 	test.rcvChan = make(chan *points.Points, 128)
 
-	r, err := New(scheme+"://"+addr.String(), OutChan(test.rcvChan), Logger(logger))
+	r, err := New(scheme+"://"+addr.String(), OutChan(test.rcvChan))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +71,7 @@ func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
 }
 
 func TestTCP1(t *testing.T) {
-	test := newTCPTestCase(t, false, nil)
+	test := newTCPTestCase(t, false)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\n")
@@ -89,7 +87,7 @@ func TestTCP1(t *testing.T) {
 }
 
 func TestTCP2(t *testing.T) {
-	test := newTCPTestCase(t, false, nil)
+	test := newTCPTestCase(t, false)
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
