@@ -98,6 +98,8 @@ type carbonserverConfig struct {
 	IdleTimeout       *Duration `toml:"idle-timeout"`
 	WriteTimeout      *Duration `toml:"write-timeout"`
 	ScanFrequency     *Duration `toml:"scan-frequency"`
+	QueryCacheEnabled bool	    `toml:"query-cache-enabled"`
+	QueryCacheSizeMB  int       `toml:"query-cache-size-mb"`
 	Buckets           int       `toml:"buckets"`
 	MaxGlobs          int       `toml:"max-globs"`
 	MetricsAsCounters bool      `toml:"metrics-as-counters"`
@@ -190,6 +192,8 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
+			QueryCacheEnabled: true,
+			QueryCacheSizeMB:  0,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

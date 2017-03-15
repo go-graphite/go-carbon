@@ -320,6 +320,8 @@ func (app *App) Start(logger *zap.Logger) (err error) {
 		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 		carbonserver.SetLogger(app.RootLogger.Named("carbonserver"))
+		carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
+		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
