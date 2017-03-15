@@ -1096,6 +1096,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 }
 
 func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
+	senderRaw := helper.SendUint64
 	sender := helper.SendAndSubstractUint64
 	if listener.metricsAsCounters {
 		sender = helper.SendUint64
@@ -1127,7 +1128,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("metrics_found", &listener.metrics.MetricsFound, send)
 	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
 
-	sender("metrics_known", &listener.metrics.MetricsKnown, send)
+	senderRaw("metrics_known", &listener.metrics.MetricsKnown, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
 	sender("file_scan_time_ns", &listener.metrics.FileScanTimeNS, send)
 
