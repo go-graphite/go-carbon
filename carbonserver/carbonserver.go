@@ -732,8 +732,27 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 	metricsFetched := 0
 	memoryUsed := 0
 	valuesFetched := 0
+
+	listener.logger.Debug("fetching data...")
+	files, leafs := listener.expandGlobs(metric)
+
+	metricsCount := 0
+	for i := range files {
+		if leafs[i] {
+			metricsCount++
+		}
+	}
+	listener.logger.Debug("expandGlobs result",
+		zap.String("handler", "fetchHandler"),
+		zap.String("action", "expandGlobs"),
+		zap.String("metric", metric),
+		zap.Int("metrics_count", metricsCount),
+		zap.Int32("from", fromTime),
+		zap.Int32("until", untilTime),
+	)
+
 	if format == "protobuf3" {
-		multi, err := listener.fetchDataPB3(metric, fromTime, untilTime)
+		multi, err := listener.fetchDataPB3(metric, files, leafs, fromTime, untilTime)
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			return fetchResponse{nil, contentType, 0, 0, 0}, err
@@ -750,7 +769,7 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 		b, err = multi.Marshal()
 
 	} else {
-		multi, err := listener.fetchDataPB2(metric, fromTime, untilTime)
+		multi, err := listener.fetchDataPB2(metric, files, leafs, fromTime, untilTime)
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			return fetchResponse{nil, contentType, 0, 0, 0}, err
@@ -936,25 +955,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	return &response, nil
 }
 
-func (listener *CarbonserverListener) fetchDataPB2(metric string, fromTime, untilTime int32) (*pb2.MultiFetchResponse, error) {
-	listener.logger.Info("fetching data...")
-	files, leafs := listener.expandGlobs(metric)
-
-	metricsCount := 0
-	for i := range files {
-		if leafs[i] {
-			metricsCount++
-		}
-	}
-	listener.logger.Debug("expandGlobs result",
-		zap.String("handler", "fetchHandler"),
-		zap.String("action", "expandGlobs"),
-		zap.String("metric", metric),
-		zap.Int("metrics_count", metricsCount),
-		zap.Int32("from", fromTime),
-		zap.Int32("until", untilTime),
-	)
-
+func (listener *CarbonserverListener) fetchDataPB2(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*pb2.MultiFetchResponse, error) {
 	var multi pb2.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
@@ -978,25 +979,7 @@ func (listener *CarbonserverListener) fetchDataPB2(metric string, fromTime, unti
 	return &multi, nil
 }
 
-func (listener *CarbonserverListener) fetchDataPB3(metric string, fromTime, untilTime int32) (*pb3.MultiFetchResponse, error) {
-	listener.logger.Info("fetching data...")
-	files, leafs := listener.expandGlobs(metric)
-
-	metricsCount := 0
-	for i := range files {
-		if leafs[i] {
-			metricsCount++
-		}
-	}
-	listener.logger.Debug("expandGlobs result",
-		zap.String("handler", "fetchHandler"),
-		zap.String("action", "expandGlobs"),
-		zap.String("metric", metric),
-		zap.Int("metrics_count", metricsCount),
-		zap.Int32("from", fromTime),
-		zap.Int32("until", untilTime),
-	)
-
+func (listener *CarbonserverListener) fetchDataPB3(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*pb3.MultiFetchResponse, error) {
 	var multi pb3.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
