@@ -256,6 +256,7 @@ func ReadConfig(filename string) (*Config, error) {
 
 		body := string(b)
 
+		// @TODO: fix for config starts with [logging]
 		body = strings.Replace(body, "\n[logging]\n", "\n[[logging]]\n", -1)
 
 		if _, err := toml.Decode(body, cfg); err != nil {
