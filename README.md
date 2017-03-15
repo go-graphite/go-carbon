@@ -223,9 +223,11 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
-* IdleTimeout is now configurable in carbonserver part
-* Requires Go 1.8 or newer
-* Logging refactored. Format changed to structured JSON
+* common: Requires Go 1.8 or newer
+* common: Logging refactored. Format changed to structured JSON
+* carbonserver: [feature] IdleTimeout is now configurable in carbonserver part
+* carbonserver: [feature] support /render query cache (query-cache options in config file)
+* carbonserver: [fix] fix #146 (metrics_known was broken if metrics were not sent as counters)
 
 ##### version 0.9.1
 * Always stop on USR2 signal (previously did not stop with disabled dump/restore) #135
