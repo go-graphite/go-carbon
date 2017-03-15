@@ -75,6 +75,8 @@ type metricStruct struct {
 	MetricsFetched       uint64
 	MetricsFound         uint64
 	FetchSize            uint64
+	QueryCacheHit        uint64
+	QueryCacheMiss       uint64
 
 	averageResponseSize float64
 }
@@ -636,6 +638,10 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 			var buf [4096]byte
 			runtime.Stack(buf[:], false)
 			logger.Info("panic recovered",
+				zap.String("metric", metric),
+				zap.String("from", from),
+				zap.String("until", until),
+				zap.String("format", format),
 				zap.String("error", fmt.Sprintf("%v", r)),
 				zap.String("stack", string(buf[:])),
 			)
@@ -644,18 +650,31 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 
 	if format != "json" && format != "pickle" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Info("invalid format")
+		logger.Info("invalid format",
+			zap.String("metric", metric),
+			zap.String("from", from),
+			zap.String("until", until),
+			zap.String("format", format),
+			zap.Duration("runtime", time.Since(t0)),
+		)
 		http.Error(wr, "Bad request (unsupported format)",
 			http.StatusBadRequest)
 		return
 	}
 
-	response, err := listener.fetchWithCache(logger, format, metric, from, until)
+	response, fromCache, err := listener.fetchWithCache(logger, format, metric, from, until)
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Info("fetchData error", zap.Error(err))
+		logger.Info("fetch failed",
+			zap.String("metric", metric),
+			zap.String("from", from),
+			zap.String("until", until),
+			zap.String("format", format),
+			zap.Duration("runtime", time.Since(t0)),
+			zap.Error(err),
+		)
 		http.Error(wr, fmt.Sprintf("Bad request (%s)", err),
 			http.StatusBadRequest)
 	}
@@ -664,30 +683,36 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 
 	atomic.AddUint64(&listener.metrics.FetchSize, uint64(response.memoryUsed))
 	logger.Info("fetch served",
-		zap.Int("metricsFetched", response.metricsFetched),
-		zap.Int("valuesFetched", response.valuesFetched),
-		zap.Int("memoryUsed", response.memoryUsed),
 		zap.String("metric", metric),
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
 		zap.Duration("runtime", time.Since(t0)),
+		zap.Bool("query_cache_enabled", listener.queryCacheEnabled),
+		zap.Bool("from_query_cache", fromCache),
+		zap.Int("metricsFetched", response.metricsFetched),
+		zap.Int("valuesFetched", response.valuesFetched),
+		zap.Int("memoryUsed", response.memoryUsed),
 	)
 
 }
 
-func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format, metric, from, until string) (fetchResponse, error) {
+func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format, metric, from, until string) (fetchResponse, bool, error) {
+	logger = logger.With(
+		zap.String("function", "fetchWithCache"),
+	)
+	fromCache := false
 	var badTime bool
 
 	i, err := strconv.Atoi(from)
 	if err != nil {
-		logger.Info("invalid fromTime", zap.Error(err))
+		logger.Debug("invalid fromTime", zap.Error(err))
 		badTime = true
 	}
 	fromTime := int32(i)
 	i, err = strconv.Atoi(until)
 	if err != nil {
-		logger.Info("invalid untilTime", zap.Error(err))
+		logger.Debug("invalid untilTime", zap.Error(err))
 		badTime = true
 	}
 	untilTime := int32(i)
@@ -695,12 +720,11 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 	if badTime {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		err = errors.New("Bad request (invalid from/until time)")
-		return fetchResponse{nil, "application/text", 0, 0, 0}, err
+		return fetchResponse{nil, "application/text", 0, 0, 0}, fromCache, err
 	}
 
 	var response fetchResponse
 	if listener.queryCacheEnabled {
-		logger.Debug("query cache enabled")
 		key := metric + "&" + format + "&" + from + "&" + until
 		size := uint64(100 * 1024 * 1024)
 		renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
@@ -712,17 +736,19 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 		res, ok := item.FetchOrLock()
 		if !ok {
 			logger.Debug("query cache miss")
+			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
 			response, err = listener.prepareData(format, metric, fromTime, untilTime)
 			item.StoreAndUnlock(response)
 		} else {
 			logger.Debug("query cache hit")
+			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 			response = res.(fetchResponse)
+			fromCache = true
 		}
 	} else {
-		logger.Debug("query cache disabled")
 		response, err = listener.prepareData(format, metric, fromTime, untilTime)
 	}
-	return response, err
+	return response, fromCache, err
 }
 
 func (listener *CarbonserverListener) prepareData(format, metric string, fromTime, untilTime int32) (fetchResponse, error) {
