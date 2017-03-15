@@ -76,7 +76,7 @@ type metricStruct struct {
 	MetricsFound         uint64
 	FetchSize            uint64
 
-	averageResponseSize  float64
+	averageResponseSize float64
 }
 
 const (
@@ -85,7 +85,7 @@ const (
 )
 
 type QueryItem struct {
-	Data          interface{}
+	Data          atomic.Value
 	Flags         uint64 // DataIsAvailable or QueryIsPending
 	QueryFinished chan struct{}
 }
@@ -99,31 +99,27 @@ type fetchResponse struct {
 }
 
 func (q *QueryItem) FetchOrLock() (interface{}, bool) {
+	d := q.Data.Load()
+	if d != nil {
+		return d, true
+	}
+
 	ok := atomic.CompareAndSwapUint64(&q.Flags, 0, QueryIsPending)
 	if ok {
 		// We are the leader now and will be fetching the data
 		return nil, false
 	}
 
-	ok = atomic.CompareAndSwapUint64(&q.Flags, QueryIsPending, QueryIsPending)
-	if ok {
-		// We need to wait for the data to be fetched
-		select {
-		case <-q.QueryFinished:
-			return q.Data, true
-		}
+	select {
+	case <-q.QueryFinished:
+		break
 	}
 
-	ok = atomic.CompareAndSwapUint64(&q.Flags, DataIsAvailable, DataIsAvailable)
-	if ok {
-		return q.Data, true
-	}
-
-	return q.Data, true
+	return q.Data.Load(), true
 }
 
 func (q *QueryItem) StoreAndUnlock(data interface{}) {
-	q.Data = data
+	q.Data.Store(data)
 	atomic.StoreUint64(&q.Flags, DataIsAvailable)
 	close(q.QueryFinished)
 }
@@ -1207,7 +1203,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		return err
 	}
 
-	go listener.queryCache.ec.StoppableApproximateCleaner(10 * time.Second, listener.exitChan)
+	go listener.queryCache.ec.StoppableApproximateCleaner(10*time.Second, listener.exitChan)
 
 	srv := &http.Server{
 		Handler:      gziphandler.GzipHandler(carbonserverMux),
