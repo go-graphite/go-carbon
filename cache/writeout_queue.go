@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 type WriteoutQueue struct {
@@ -18,14 +19,12 @@ type WriteoutQueue struct {
 	// p := cache.Pop(q.Metric)
 	queue   chan *points.Points
 	rebuild func(abort chan bool) chan bool // return chan waiting for complete
-	logger  *zap.Logger
 }
 
 func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 	q := &WriteoutQueue{
-		cache:  cache,
-		queue:  nil,
-		logger: cache.logger,
+		cache: cache,
+		queue: nil,
 	}
 	q.rebuild = q.makeRebuildCallback(time.Time{})
 	return q
@@ -39,13 +38,15 @@ func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime time.Time) func(chan
 		// next rebuild
 		nextRebuildOnce.Do(func() {
 			now := time.Now()
-			q.logger.Debug("WriteoutQueue.nextRebuildOnce.Do",
+			logger := zapwriter.Logger("cache")
+
+			logger.Debug("WriteoutQueue.nextRebuildOnce.Do",
 				zap.String("now", now.String()),
 				zap.String("next", nextRebuildTime.String()),
 			)
 			if now.Before(nextRebuildTime) {
 				sleepTime := nextRebuildTime.Sub(now)
-				q.logger.Debug("WriteoutQueue sleep before rebuild",
+				logger.Debug("WriteoutQueue sleep before rebuild",
 					zap.String("sleepTime", sleepTime.String()),
 				)
 

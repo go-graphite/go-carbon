@@ -42,8 +42,8 @@ func (d *Duration) Value() time.Duration {
 
 type commonConfig struct {
 	User           string    `toml:"user"`
-	Logfile        string    `toml:"logfile"`
-	LogLevel       string    `toml:"log-level"`
+	Logfile        *string   `toml:"logfile"`
+	LogLevel       *string   `toml:"log-level"`
 	GraphPrefix    string    `toml:"graph-prefix"`
 	MetricInterval *Duration `toml:"metric-interval"`
 	MetricEndpoint string    `toml:"metric-endpoint"`
@@ -118,10 +118,6 @@ type dumpConfig struct {
 	RestorePerSecond int    `toml:"restore-per-second"`
 }
 
-type LoggingConfig struct {
-	zapwriter.Config
-}
-
 // Config ...
 type Config struct {
 	Common       commonConfig       `toml:"common"`
@@ -134,13 +130,13 @@ type Config struct {
 	Carbonserver carbonserverConfig `toml:"carbonserver"`
 	Dump         dumpConfig         `toml:"dump"`
 	Pprof        pprofConfig        `toml:"pprof"`
-	Logging      []*LoggingConfig   `toml:"logging"`
+	Logging      []zapwriter.Config `toml:"logging"`
 }
 
-func NewLoggingConfig() *LoggingConfig {
-	l := &LoggingConfig{zapwriter.NewConfig()}
-	l.File = "/var/log/go-carbon/go-carbon.log"
-	return l
+func NewLoggingConfig() zapwriter.Config {
+	cfg := zapwriter.NewConfig()
+	cfg.File = "/var/log/go-carbon/go-carbon.log"
+	return cfg
 }
 
 // NewConfig ...
@@ -227,7 +223,7 @@ func PrintDefaultConfig() error {
 	buf := new(bytes.Buffer)
 
 	if cfg.Logging == nil {
-		cfg.Logging = make([]*LoggingConfig, 0)
+		cfg.Logging = make([]zapwriter.Config, 0)
 	}
 
 	if len(cfg.Logging) == 0 {
@@ -265,28 +261,29 @@ func ReadConfig(filename string) (*Config, error) {
 	}
 
 	if cfg.Logging == nil {
-		cfg.Logging = make([]*LoggingConfig, 0)
+		cfg.Logging = make([]zapwriter.Config, 0)
 	}
 
-	if cfg.Common.LogLevel != "" || cfg.Common.Logfile != "" {
+	if cfg.Common.LogLevel != nil || cfg.Common.Logfile != nil {
 		log.Println("[WARNING] `common.log-level` and `common.logfile` is DEPRICATED. Use `logging` config section")
 
 		l := NewLoggingConfig()
-		l.File = cfg.Common.Logfile
-		l.Level = cfg.Common.LogLevel
+		if cfg.Common.Logfile != nil {
+			l.File = *cfg.Common.Logfile
+		}
+		if cfg.Common.LogLevel != nil {
+			l.Level = *cfg.Common.LogLevel
+		}
 
-		cfg.Logging = append(cfg.Logging, l)
+		cfg.Logging = []zapwriter.Config{l}
 	}
 
 	if len(cfg.Logging) == 0 {
 		cfg.Logging = append(cfg.Logging, NewLoggingConfig())
 	}
 
-	for _, l := range cfg.Logging {
-		err := l.Check()
-		if err != nil {
-			return nil, err
-		}
+	if err := zapwriter.CheckConfig(cfg.Logging, nil); err != nil {
+		return nil, err
 	}
 
 	return cfg, nil
@@ -296,7 +293,8 @@ func ReadConfig(filename string) (*Config, error) {
 func TestConfig(rootDir string) string {
 	cfg := NewConfig()
 
-	cfg.Common.Logfile = filepath.Join(rootDir, "go-carbon.log")
+	p := filepath.Join(rootDir, "go-carbon.log")
+	cfg.Common.Logfile = &p
 
 	cfg.Whisper.DataDir = rootDir
 	cfg.Whisper.SchemasFilename = filepath.Join(rootDir, "schemas.conf")

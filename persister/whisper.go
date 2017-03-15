@@ -13,6 +13,7 @@ import (
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 const storeMutexCount = 32768
@@ -49,12 +50,7 @@ func NewWhisper(
 	schemas WhisperSchemas,
 	aggregation *WhisperAggregation,
 	recv func(chan bool) *points.Points,
-	confirm func(*points.Points),
-	logger *zap.Logger) *Whisper {
-
-	if logger == nil {
-		logger = zap.NewNop()
-	}
+	confirm func(*points.Points)) *Whisper {
 
 	return &Whisper{
 		recv:                recv,
@@ -64,7 +60,7 @@ func NewWhisper(
 		workersCount:        1,
 		rootPath:            rootPath,
 		maxUpdatesPerSecond: 0,
-		logger:              logger,
+		logger:              zapwriter.Logger("persister"),
 	}
 }
 

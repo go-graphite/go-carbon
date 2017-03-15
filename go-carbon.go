@@ -89,18 +89,17 @@ func main() {
 		return
 	}
 
-	if err := zapwriter.PrepareFileForUser(cfg.Logging[0].File, runAsUser); err != nil {
+	for i := 0; i < len(cfg.Logging); i++ {
+		if err := zapwriter.PrepareFileForUser(cfg.Logging[i].File, runAsUser); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if err = zapwriter.ApplyConfig(cfg.Logging); err != nil {
 		log.Fatal(err)
 	}
 
-	logger, err := cfg.Logging[0].BuildLogger()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	zap.ReplaceGlobals(logger)
-
-	mainLogger := zap.L().Named("main")
+	mainLogger := zapwriter.Logger("main")
 
 	if *isDaemon {
 		runtime.LockOSThread()
@@ -148,7 +147,7 @@ func main() {
 		}
 	}
 
-	if err = app.Start(zap.L()); err != nil {
+	if err = app.Start(); err != nil {
 		mainLogger.Fatal(err.Error())
 	} else {
 		mainLogger.Info("started")
@@ -169,11 +168,11 @@ func main() {
 		signal.Notify(c, syscall.SIGHUP)
 		for {
 			<-c
-			zap.L().Named("main").Info("HUP received. Reload config")
+			mainLogger.Info("HUP received. Reload config")
 			if err := app.ReloadConfig(); err != nil {
-				zap.L().Named("main").Error("config reload failed", zap.Error(err))
+				mainLogger.Error("config reload failed", zap.Error(err))
 			} else {
-				zap.L().Named("main").Info("config successfully reloaded")
+				mainLogger.Info("config successfully reloaded")
 			}
 		}
 	}()

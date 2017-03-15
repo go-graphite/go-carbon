@@ -11,6 +11,7 @@ import (
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 type statFunc func()
@@ -43,20 +44,107 @@ func NewCollector(app *App) *Collector {
 		data:           make(chan *points.Points, 4096),
 		endpoint:       app.Config.Common.MetricEndpoint,
 		stats:          make([]statFunc, 0),
-		logger:         app.RootLogger.Named("stat"),
 	}
 
 	c.Start()
 
+	logger := zapwriter.Logger("stat")
+
+	endpoint, err := url.Parse(c.endpoint)
+	if err != nil {
+		logger.Error("metric-endpoint parse error", zap.Error(err))
+		c.endpoint = MetricEndpointLocal
+	}
+
+	logger = logger.With(zap.String("endpoint", c.endpoint))
+
+	if c.endpoint == MetricEndpointLocal {
+		// sender worker
+		storeFunc := app.Cache.Add
+
+		c.Go(func(exit chan bool) {
+			for {
+				select {
+				case <-exit:
+					return
+				case p := <-c.data:
+					storeFunc(p)
+				}
+			}
+		})
+	} else {
+		chunkSize := 32768
+		if endpoint.Scheme == "udp" {
+			chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
+		}
+
+		c.Go(func(exit chan bool) {
+			points.Glue(exit, c.data, chunkSize, time.Second, func(chunk []byte) {
+
+				var conn net.Conn
+				var err error
+				defaultTimeout := 5 * time.Second
+
+				// send data to endpoint
+			SendLoop:
+				for {
+
+					// check exit
+					select {
+					case <-exit:
+						break SendLoop
+					default:
+						// pass
+					}
+
+					// close old broken connection
+					if conn != nil {
+						conn.Close()
+						conn = nil
+					}
+
+					conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
+					if err != nil {
+						logger.Error("dial failed", zap.Error(err))
+						time.Sleep(time.Second)
+						continue SendLoop
+					}
+
+					err = conn.SetDeadline(time.Now().Add(defaultTimeout))
+					if err != nil {
+						logger.Error("conn.SetDeadline failed", zap.Error(err))
+						time.Sleep(time.Second)
+						continue SendLoop
+					}
+
+					_, err := conn.Write(chunk)
+					if err != nil {
+						logger.Error("conn.Write failed", zap.Error(err))
+						time.Sleep(time.Second)
+						continue SendLoop
+					}
+
+					break SendLoop
+				}
+
+				if conn != nil {
+					conn.Close()
+					conn = nil
+				}
+			})
+		})
+
+	}
+
 	sendCallback := func(moduleName string) func(metric string, value float64) {
 		return func(metric string, value float64) {
 			key := fmt.Sprintf("%s.%s.%s", c.graphPrefix, moduleName, metric)
-			c.logger.Info("stat", zap.String("metric", key), zap.Float64("value", value))
+			logger.Info("collect", zap.String("metric", key), zap.Float64("value", value))
 			select {
 			case c.data <- points.NowPoint(key, value):
 				// pass
 			default:
-				c.logger.Warn("send queue is full. metric dropped",
+				logger.Warn("send queue is full. metric dropped",
 					zap.String("key", key), zap.Float64("value", value))
 			}
 		}
@@ -110,92 +198,6 @@ func NewCollector(app *App) *Collector {
 			}
 		}
 	})
-
-	endpoint, err := url.Parse(c.endpoint)
-	if err != nil {
-		c.logger.Error("metric-endpoint parse error", zap.Error(err))
-		c.endpoint = MetricEndpointLocal
-	}
-
-	c.logger = c.logger.With(zap.String("endpoint", c.endpoint))
-
-	if c.endpoint == MetricEndpointLocal {
-		// sender worker
-		storeFunc := app.Cache.Add
-
-		c.Go(func(exit chan bool) {
-			for {
-				select {
-				case <-exit:
-					return
-				case p := <-c.data:
-					storeFunc(p)
-				}
-			}
-		})
-	} else {
-		chunkSize := 32768
-		if endpoint.Scheme == "udp" {
-			chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
-		}
-
-		c.Go(func(exit chan bool) {
-			points.Glue(exit, c.data, chunkSize, time.Second, func(chunk []byte) {
-
-				var conn net.Conn
-				var err error
-				defaultTimeout := 5 * time.Second
-
-				// send data to endpoint
-			SendLoop:
-				for {
-
-					// check exit
-					select {
-					case <-exit:
-						break SendLoop
-					default:
-						// pass
-					}
-
-					// close old broken connection
-					if conn != nil {
-						conn.Close()
-						conn = nil
-					}
-
-					conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
-					if err != nil {
-						c.logger.Error("dial failed", zap.Error(err))
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					err = conn.SetDeadline(time.Now().Add(defaultTimeout))
-					if err != nil {
-						c.logger.Error("conn.SetDeadline failed", zap.Error(err))
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					_, err := conn.Write(chunk)
-					if err != nil {
-						c.logger.Error("conn.Write failed", zap.Error(err))
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					break SendLoop
-				}
-
-				if conn != nil {
-					conn.Close()
-					conn = nil
-				}
-			})
-		})
-
-	}
 
 	return c
 }

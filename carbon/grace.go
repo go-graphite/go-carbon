@@ -16,6 +16,7 @@ import (
 
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 type SyncWriter struct {
@@ -54,15 +55,17 @@ func (app *App) DumpStop() error {
 		app.Persister = nil
 	}
 
-	app.logger.Info("grace stop with dump inited")
+	logger := zapwriter.Logger("dump")
+
+	logger.Info("grace stop with dump inited")
 
 	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s", filenamePostfix))
 	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s", filenamePostfix))
 
 	// start dumpers
-	app.logger.Info("start cache dump", zap.String("filename", dumpFilename))
-	app.logger.Info("start wal write", zap.String("filename", xlogFilename))
+	logger.Info("start cache dump", zap.String("filename", dumpFilename))
+	logger.Info("start wal write", zap.String("filename", xlogFilename))
 
 	// open dump file
 	dump, err := os.Create(dumpFilename)
@@ -90,7 +93,7 @@ func (app *App) DumpStop() error {
 		return err
 	}
 
-	app.logger.Info("cache dump finished",
+	logger.Info("cache dump finished",
 		zap.Int("records", int(cacheSize)),
 		zap.Duration("runtime", time.Since(dumpStart)),
 	)
@@ -104,7 +107,7 @@ func (app *App) DumpStop() error {
 	}
 
 	// cache dump finished
-	app.logger.Info("stop listeners")
+	logger.Info("stop listeners")
 	app.stopListeners()
 
 	if err = xlogWriter.Flush(); err != nil {
@@ -115,9 +118,9 @@ func (app *App) DumpStop() error {
 		return err
 	}
 
-	app.logger.Info("dump finished")
+	logger.Info("dump finished")
 
-	app.logger.Info("stop all")
+	logger.Info("stop all")
 	app.stopAll()
 
 	return nil
@@ -128,8 +131,7 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 	var pointsCount int
 	startTime := time.Now()
 
-	logger := app.logger.With(zap.String("filename", filename))
-
+	logger := zapwriter.Logger("restore").With(zap.String("filename", filename))
 	logger.Info("restore started")
 
 	defer func() {
@@ -178,7 +180,7 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
 	startTime := time.Now()
 
-	logger := app.logger.With(zap.String("dir", dumpDir))
+	logger := zapwriter.Logger("restore").With(zap.String("dir", dumpDir))
 
 	defer func() {
 		logger.Info("restore finished",
