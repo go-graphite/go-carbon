@@ -14,6 +14,7 @@ import (
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 // CarbonlinkRequest ...
@@ -143,19 +144,13 @@ type CarbonlinkListener struct {
 	cache       *Cache
 	readTimeout time.Duration
 	tcpListener *net.TCPListener
-	logger      *zap.Logger
 }
 
 // NewCarbonlinkListener create new instance of CarbonlinkListener
-func NewCarbonlinkListener(cache *Cache, logger *zap.Logger) *CarbonlinkListener {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-
+func NewCarbonlinkListener(cache *Cache) *CarbonlinkListener {
 	return &CarbonlinkListener{
 		cache:       cache,
 		readTimeout: 30 * time.Second,
-		logger:      logger,
 	}
 }
 
@@ -222,7 +217,7 @@ func packReply(data []points.Point) []byte {
 
 func (listener *CarbonlinkListener) HandleConnection(conn framing.Conn) {
 	defer conn.Close()
-	logger := listener.logger.With(zap.String("peer", conn.RemoteAddr().String()))
+	logger := zapwriter.Logger("carbonlink").With(zap.String("peer", conn.RemoteAddr().String()))
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(listener.readTimeout))
@@ -298,7 +293,7 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 					if strings.Contains(err.Error(), "use of closed network connection") {
 						break
 					}
-					listener.logger.Error("failed to accept connection", zap.Error(err))
+					zapwriter.Logger("carbonlink").Error("failed to accept connection", zap.Error(err))
 					continue
 				}
 				framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)

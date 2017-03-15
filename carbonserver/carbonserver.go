@@ -47,6 +47,7 @@ import (
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
+	"github.com/lomik/zapwriter"
 )
 
 type metricStruct struct {
@@ -170,7 +171,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		// Config variables
 		metricsAsCounters: false,
 		cacheGet:          cacheGetFunc,
-		logger:            zap.NewNop(),
+		logger:            zapwriter.Logger("carbonserver"),
 		queryCache:        queryCache{ec: expirecache.New(0)},
 	}
 }
@@ -198,9 +199,6 @@ func (listener *CarbonserverListener) SetWriteTimeout(writeTimeout time.Duration
 }
 func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters bool) {
 	listener.metricsAsCounters = metricsAsCounters
-}
-func (listener *CarbonserverListener) SetLogger(logger *zap.Logger) {
-	listener.logger = logger
 }
 func (listener *CarbonserverListener) SetQueryCacheEnabled(enabled bool) {
 	listener.queryCacheEnabled = enabled

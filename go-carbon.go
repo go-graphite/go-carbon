@@ -40,20 +40,6 @@ func httpServe(addr string) (func(), error) {
 	return func() { listener.Close() }, nil
 }
 
-func loggingConfigCheck(cfg *carbon.Config) error {
-	if cfg.Common.LogLevel != "" {
-		log.Println("[WARNING] `common.log-level` is DEPRICATED. Use `logging` config section")
-		cfg.Logging.Level = cfg.Common.LogLevel
-	}
-
-	if cfg.Common.Logfile != "" {
-		log.Println("[WARNING] `common.logfile` is DEPRICATED. Use `logging` config section")
-		cfg.Logging.File = cfg.Common.Logfile
-	}
-
-	return cfg.Logging.Check()
-}
-
 func main() {
 	var err error
 
@@ -76,7 +62,7 @@ func main() {
 	}
 
 	if *printDefaultConfig {
-		if err = carbon.PrintConfig(carbon.NewConfig()); err != nil {
+		if err = carbon.PrintDefaultConfig(); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -98,27 +84,22 @@ func main() {
 		}
 	}
 
-	if err = loggingConfigCheck(cfg); err != nil {
-		log.Fatal(err)
-	}
-
 	// config parsed successfully. Exit in check-only mode
 	if *checkConfig {
 		return
 	}
 
-	if err := zapwriter.PrepareFileForUser(cfg.Logging.File, runAsUser); err != nil {
+	for i := 0; i < len(cfg.Logging); i++ {
+		if err := zapwriter.PrepareFileForUser(cfg.Logging[i].File, runAsUser); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	if err = zapwriter.ApplyConfig(cfg.Logging); err != nil {
 		log.Fatal(err)
 	}
 
-	logger, err := cfg.Logging.BuildLogger()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	zap.ReplaceGlobals(logger)
-
-	mainLogger := zap.L().Named("main")
+	mainLogger := zapwriter.Logger("main")
 
 	if *isDaemon {
 		runtime.LockOSThread()
@@ -166,7 +147,7 @@ func main() {
 		}
 	}
 
-	if err = app.Start(zap.L()); err != nil {
+	if err = app.Start(); err != nil {
 		mainLogger.Fatal(err.Error())
 	} else {
 		mainLogger.Info("started")
@@ -187,11 +168,11 @@ func main() {
 		signal.Notify(c, syscall.SIGHUP)
 		for {
 			<-c
-			zap.L().Named("main").Info("HUP received. Reload config")
+			mainLogger.Info("HUP received. Reload config")
 			if err := app.ReloadConfig(); err != nil {
-				zap.L().Named("main").Error("config reload failed", zap.Error(err))
+				mainLogger.Error("config reload failed", zap.Error(err))
 			} else {
-				zap.L().Named("main").Info("config successfully reloaded")
+				mainLogger.Info("config successfully reloaded")
 			}
 		}
 	}()

@@ -5,10 +5,9 @@ import (
 	"net"
 	"net/url"
 
-	"go.uber.org/zap"
-
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 type Receiver interface {
@@ -93,23 +92,6 @@ func Name(name string) Option {
 	}
 }
 
-// Logger creates option for New contructor
-func Logger(logger *zap.Logger) Option {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-
-	return func(r Receiver) error {
-		if t, ok := r.(*TCP); ok {
-			t.logger = logger
-		}
-		if t, ok := r.(*UDP); ok {
-			t.logger = logger
-		}
-		return nil
-	}
-}
-
 func blackhole(p *points.Points) {}
 
 // New creates udp, tcp, pickle receiver
@@ -126,8 +108,9 @@ func New(dsn string, opts ...Option) (Receiver, error) {
 		}
 
 		r := &TCP{
-			out:  blackhole,
-			name: u.Scheme,
+			out:    blackhole,
+			name:   u.Scheme,
+			logger: zapwriter.Logger(u.Scheme),
 		}
 
 		if u.Scheme == "pickle" {
@@ -153,8 +136,9 @@ func New(dsn string, opts ...Option) (Receiver, error) {
 		}
 
 		r := &UDP{
-			out:  blackhole,
-			name: u.Scheme,
+			out:    blackhole,
+			name:   u.Scheme,
+			logger: zapwriter.Logger(u.Scheme),
 		}
 
 		for _, optApply := range opts {

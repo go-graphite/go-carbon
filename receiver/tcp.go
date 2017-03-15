@@ -15,6 +15,7 @@ import (
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/zapwriter"
 )
 
 // TCP receive metrics from TCP connections
@@ -84,7 +85,11 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 		if len(line) > 0 { // skip empty lines
 			if msg, err := points.ParseText(string(line)); err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				rcv.logger.Info("parse failed", zap.Error(err))
+				zapwriter.Logger("parser").Info("parse failed",
+					zap.Error(err),
+					zap.String("protocol", rcv.name),
+					zap.String("peer", conn.RemoteAddr().String()),
+				)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
 				rcv.out(msg)
