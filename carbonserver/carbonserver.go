@@ -940,17 +940,24 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	if cacheData != nil {
 		atomic.AddUint64(&listener.metrics.CacheRequestsTotal, 1)
 		cacheStartTime := time.Now()
+		pointsFetchedFromCache := 0
 		for _, item := range cacheData {
 			ts := int32(item.Timestamp) - int32(item.Timestamp)%step
 			if ts < fromTime || ts >= untilTime {
 				continue
 			}
+			pointsFetchedFromCache++
 			index := (ts - fromTime) / step
 			response.Values[index] = item.Value
 			response.IsAbsent[index] = false
 		}
 		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
 		atomic.AddUint64(&listener.metrics.CacheWorkTimeNS, waitTime)
+		if pointsFetchedFromCache > 0 {
+			atomic.AddUint64(&listener.metrics.CacheHit, 1)
+		} else {
+			atomic.AddUint64(&listener.metrics.CacheMiss, 1)
+		}
 	}
 	return &response, nil
 }
