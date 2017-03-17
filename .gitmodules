@@ -112,6 +112,6 @@
 [submodule "vendor/go.uber.org/atomic"]
 	path = vendor/go.uber.org/atomic
 	url = https://github.com/uber-go/atomic
-[submodule "vendor/github.com/Civil/go-expirecache"]
-	path = vendor/github.com/Civil/go-expirecache
-	url = https://github.com/Civil/go-expirecache
+[submodule "vendor/github.com/dgryski/go-expirecache"]
+	path = vendor/github.com/dgryski/go-expirecache
+	url = https://github.com/dgryski/go-expirecache.git

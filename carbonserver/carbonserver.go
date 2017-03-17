@@ -36,7 +36,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/Civil/go-expirecache" // TODO: change to dgryski/go-expirecache, once PR is merged.
+	"github.com/dgryski/go-expirecache"
 	"github.com/NYTimes/gziphandler"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
