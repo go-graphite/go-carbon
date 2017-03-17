@@ -155,6 +155,13 @@ write-timeout = "60s"
 # in memory. This determines how often it will check FS
 # for new metrics.
 scan-frequency = "5m0s"
+# Enable /render cache, it will cache the result for 1 minute
+query-cache-enabled = true
+# 0 for unlimited
+query-cache-size-mb = 0
+# Enable /metrics/find cache, it will cache the result for 5 minutes
+find-cache-enabled = true
+
 
 [dump]
 # Enable dump/restore function on USR2 signal
@@ -226,7 +233,8 @@ With settings above applied, best write-strategy to use is "noop"
 * common: Requires Go 1.8 or newer
 * common: Logging refactored. Format changed to structured JSON. Added support of multiple logging handlers with separate output, level and encoding
 * carbonserver: [feature] IdleTimeout is now configurable in carbonserver part
-* carbonserver: [feature] support /render query cache (query-cache options in config file)
+* carbonserver: [feature] support /render query cache (query-cache-* options in config file)
+* carbonserver: [feature] support /metrics/find cache (find-cache-* option in config file)
 * carbonserver: [fix] fix #146 (metrics_known was broken if metrics were not sent as counters)
 
 ##### version 0.9.1

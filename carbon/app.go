@@ -312,6 +312,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 		carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
+		carbonserver.SetFindCacheEnabled(conf.Carbonserver.FindCacheEnabled)
 		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
