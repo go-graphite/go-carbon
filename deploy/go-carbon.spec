@@ -29,7 +29,7 @@ rm -rf %{buildroot}
 %build
 
 %pre
-%{__id} _graphite || /usr/sbin/useradd -U -s /bin/false -c "User for Graphite daemon" _graphite
+%{__id} carbon || /usr/sbin/useradd -U -s /bin/false -c "User for Graphite daemon" carbon
 
 %install
 [ "%{buildroot}" != "/" ] && rm -fr %{buildroot}
@@ -66,13 +66,13 @@ rm -rf $RPM_BUILD_ROOT
 %config(noreplace) %{_sysconfdir}/%{name}/storage-schemas.conf
 %config(noreplace) %{_sysconfdir}/%{name}/storage-aggregation.conf
 
-%defattr(-,_graphite,_graphite,-)
+%defattr(-,carbon,carbon,-)
 %{_var}/log/%{name}
 %{_var}/lib/graphite/whisper
 
 %changelog
 
-* Fri Oct 25 2016 Mathieu Grzybek <vmathieu@grzybek.fr> 0.8.1-1 RPM compliance
+* Mon Mar 20 2016 Mathieu Grzybek <mathieu@grzybek.fr> 0.10-1 RPM compliance
   systemd-aware build
 	create a dedicated user to run the daemon
 	create some standard files and directories (conf,log,lib)

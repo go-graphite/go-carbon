@@ -4,7 +4,7 @@ Requires=var-run.mount
 After=var-run.mount,network-online.target
 
 [Service]
-User=_graphite
+User=carbon
 
 ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf
 ExecReload=/bin/kill -USR2 $MAINPID
