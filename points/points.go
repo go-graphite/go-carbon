@@ -2,6 +2,7 @@ package points
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -65,6 +66,59 @@ func (p *Points) WriteTo(w io.Writer) (n int64, err error) {
 			return
 		}
 	}
+	return
+}
+
+func encodeVarint(value int64) []byte {
+	var buf [10]byte
+	l := binary.PutVarint(buf[:], value)
+	return buf[:l]
+}
+
+func (p *Points) WriteBinaryTo(w io.Writer) (n int, err error) {
+	var c int
+
+	writeVarint := func(value int64) bool {
+		c, err = w.Write(encodeVarint(value))
+		n += c
+		if err != nil {
+			return false
+		}
+		return true
+	}
+
+	if !writeVarint(int64(len(p.Metric))) {
+		return
+	}
+
+	c, err = io.WriteString(w, p.Metric)
+	n += c
+	if err != nil {
+		return
+	}
+
+	if !writeVarint(int64(len(p.Data))) {
+		return
+	}
+
+	if len(p.Data) > 0 {
+		if !writeVarint(int64(math.Float64bits(p.Data[0].Value))) {
+			return
+		}
+		if !writeVarint(p.Data[0].Timestamp) {
+			return
+		}
+	}
+
+	for i := 1; i < len(p.Data); i++ {
+		if !writeVarint(int64(math.Float64bits(p.Data[i].Value)) - int64(math.Float64bits(p.Data[i-1].Value))) {
+			return
+		}
+		if !writeVarint(p.Data[i].Timestamp - p.Data[i-1].Timestamp) {
+			return
+		}
+	}
+
 	return
 }
 

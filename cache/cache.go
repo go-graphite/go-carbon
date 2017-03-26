@@ -229,32 +229,6 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 	c.xlog.Store(w)
 }
 
-func (c *Cache) Dump(w io.Writer) error {
-	for i := 0; i < shardCount; i++ {
-		shard := c.data[i]
-		shard.Lock()
-
-		for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
-			if p == nil {
-				continue
-			}
-			if _, err := p.WriteTo(w); err != nil {
-				return err
-			}
-		}
-
-		for _, p := range shard.items {
-			if _, err := p.WriteTo(w); err != nil {
-				return err
-			}
-		}
-
-		shard.Unlock()
-	}
-
-	return nil
-}
-
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
 	xlog := c.xlog.Load()
