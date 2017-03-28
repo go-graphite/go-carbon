@@ -66,7 +66,7 @@
 	url = https://github.com/NYTimes/gziphandler
 [submodule "vendor/github.com/dgryski/carbonzipper"]
 	path = vendor/github.com/dgryski/carbonzipper
-	url = https://github.com/dgryski/carbonzipper
+	url = https://github.com/dgryski/carbonzipper.git
 [submodule "vendor/github.com/gogo/protobuf"]
 	path = vendor/github.com/gogo/protobuf
 	url = https://github.com/gogo/protobuf
@@ -115,3 +115,6 @@
 [submodule "vendor/github.com/dgryski/go-expirecache"]
 	path = vendor/github.com/dgryski/go-expirecache
 	url = https://github.com/dgryski/go-expirecache.git
+[submodule "vendor/github.com/dgryski/carbonapi"]
+	path = vendor/github.com/dgryski/carbonapi
+	url = https://github.com/dgryski/carbonapi.git

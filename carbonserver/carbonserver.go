@@ -48,6 +48,9 @@ import (
 	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
 	"github.com/lomik/zapwriter"
+
+	carbonapictx "github.com/dgryski/carbonapi/util"
+	carbonzipperctx "github.com/dgryski/carbonzipper/util"
 )
 
 type metricStruct struct {
@@ -434,6 +437,7 @@ func (listener *CarbonserverListener) getMetricsList() ([]string, error) {
 func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /metrics/list/?format=json
 	t0 := time.Now()
+	ctx := req.Context()
 
 	atomic.AddUint64(&listener.metrics.ListRequests, 1)
 
@@ -445,6 +449,8 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("format", format),
+		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
+		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
 	)
 
 	if format != "json" && format != "protobuf" && format != "protobuf3" {
@@ -513,6 +519,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	// URL: /metrics/find/?local=1&format=pickle&query=the.metric.path.with.glob
 
 	t0 := time.Now()
+	ctx := req.Context()
 
 	atomic.AddUint64(&listener.metrics.FindRequests, 1)
 
@@ -528,6 +535,8 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
 		zap.String("format", format),
+		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
+		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
 	)
 
 	if format != "json" && format != "pickle" && format != "protobuf" && format != "protobuf3" {
@@ -689,6 +698,7 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /render/?target=the.metric.name&format=pickle&from=1396008021&until=1396022421
 	t0 := time.Now()
+	ctx := req.Context()
 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
@@ -706,6 +716,8 @@ func (listener *CarbonserverListener) fetchHandler(wr http.ResponseWriter, req *
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
+		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
+		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
 	)
 
 	// Make sure we log which metric caused a panic()
@@ -1094,6 +1106,7 @@ func (listener *CarbonserverListener) fetchDataPB3(metric string, files []string
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /info/?target=the.metric.name&format=json
 	t0 := time.Now()
+	ctx := req.Context()
 
 	atomic.AddUint64(&listener.metrics.InfoRequests, 1)
 	req.ParseForm()
@@ -1106,6 +1119,8 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		zap.String("peer", req.RemoteAddr),
 		zap.String("target", metric),
 		zap.String("format", format),
+		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
+		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
 	)
 
 	if format == "" {
@@ -1286,10 +1301,10 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
 
 	carbonserverMux := http.NewServeMux()
-	carbonserverMux.HandleFunc("/metrics/find/", httputil.TrackConnections(httputil.TimeHandler(listener.findHandler, listener.bucketRequestTimes)))
-	carbonserverMux.HandleFunc("/metrics/list/", httputil.TrackConnections(httputil.TimeHandler(listener.listHandler, listener.bucketRequestTimes)))
-	carbonserverMux.HandleFunc("/render/", httputil.TrackConnections(httputil.TimeHandler(listener.fetchHandler, listener.bucketRequestTimes)))
-	carbonserverMux.HandleFunc("/info/", httputil.TrackConnections(httputil.TimeHandler(listener.infoHandler, listener.bucketRequestTimes)))
+	carbonserverMux.HandleFunc("/metrics/find/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.findHandler)), listener.bucketRequestTimes)))
+	carbonserverMux.HandleFunc("/metrics/list/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.listHandler)), listener.bucketRequestTimes)))
+	carbonserverMux.HandleFunc("/render/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.fetchHandler)), listener.bucketRequestTimes)))
+	carbonserverMux.HandleFunc("/info/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.infoHandler)), listener.bucketRequestTimes)))
 
 	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
