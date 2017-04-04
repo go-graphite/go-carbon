@@ -11,7 +11,15 @@ URL:		https://github.com/lomik/go-carbon
 Source0:	%{name}.tar.gz
 BuildRoot:      %{_tmppath}/%{name}-%{version}
 
-Requires:  /etc/init.d/functions
+%if 0%{?fedora} >= 19 || 0%{?rhel} >= 7
+%bcond_without systemd
+%endif
+
+%if %{with systemd}
+Requires: systemd
+%else
+Requires: initscripts
+%endif
 
 %description
 Golang implementation of Graphite/Carbon server with classic architecture: Agent -> Cache -> Persister
@@ -28,22 +36,35 @@ rm -rf %{buildroot}
 
 %install
 [ "%{buildroot}" != "/" ] && rm -fr %{buildroot}
-%{__mkdir} -p %{buildroot}%{__bindir}
+%{__mkdir_p} %{buildroot}%{__bindir}
+%{__mkdir_p} %{buildroot}%{_sysconfdir}/%{name}
 
+%if %{with systemd}
+%{__mkdir_p} %{buildroot}/etc/sysconfig
+%{__mkdir_p} %{buildroot}%{_unitdir}
+%{__install} -pD -m 755 %{name} %{buildroot}%{__bindir}/%{name}
+%{__install} -pD -m 755 %{name}.systemd %{buildroot}%{_unitdir}/%{name}.service
+%else
+%{__mkdir_p} %{buildroot}%{_initddir}
 %{__install} -pD -m 755 %{name} %{buildroot}/%{__bindir}/%{name}
+%{__install} -pD -m 755 %{name}.init %{buildroot}/%{_initddir}/%{name}
+%endif
+
 %{__install} -pD -m 644 %{name}.conf %{buildroot}/%{__etcdir}/%{name}.conf
-%{__install} -pD -m 755 %{name}.init %{buildroot}/etc/init.d/%{name}
 
 %clean
 rm -rf $RPM_BUILD_ROOT
 
-
 %files
 %defattr(-,root,root,-)
 %{__bindir}/%{name}
-/etc/init.d/*
+%if %{with systemd}
+%{_unitdir}/%{name}.service
+%else
+%{_initddir}/%{name}
+%endif
 %config(noreplace) %{__etcdir}/%{name}.conf
 
-
 %changelog
-
+* Mon Apr  04 2017 - Tim Ehlers <ehlerst@gmail.com> 0.9.1-1
+- Added systemd for centos7
