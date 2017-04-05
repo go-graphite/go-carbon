@@ -14,7 +14,7 @@ BuildRoot:      %{_tmppath}/%{name}-%{version}
 %if systemd_requires
 %systemd_requires
 %else
-Requires:  /etc/init.d/functions
+Requires: initscripts
 %endif
 
 
@@ -45,7 +45,7 @@ rm -rf %{buildroot}
 %if systemd_requires
 %{__install} -pD -m 644 %{name}.service %{buildroot}%{_unitdir}/%{name}.service
 %else
-%{__install} -pD -m 755 %{name}.init %{buildroot}/etc/init.d/%{name}
+%{__install} -pD -m 755 %{name}.init %{buildroot}/%{_initddir}/%{name}
 %endif
 
 %clean
@@ -72,7 +72,7 @@ rm -rf $RPM_BUILD_ROOT
 
 %changelog
 
-* Mon Mar 20 2016 Mathieu Grzybek <mathieu@grzybek.fr> 0.10-1 RPM compliance
+* Wed Apr 05 2017 Mathieu Grzybek <mathieu@grzybek.fr> 0.10-1 RPM compliance
   systemd-aware build
 	create a dedicated user to run the daemon
 	create some standard files and directories (conf,log,lib)
