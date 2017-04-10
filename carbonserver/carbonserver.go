@@ -532,7 +532,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	var response *findResponse
 
 	logger := listener.logger.With(
-		zap.String("handler", "findhHandler"),
+		zap.String("handler", "find"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
@@ -542,7 +542,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	)
 
 	accessLogger := listener.logger.With(
-		zap.String("handler", "findhHandler"),
+		zap.String("handler", "find"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
@@ -888,7 +888,7 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 		}
 	}
 	listener.logger.Debug("expandGlobs result",
-		zap.String("handler", "fetchHandler"),
+		zap.String("handler", "render"),
 		zap.String("action", "expandGlobs"),
 		zap.String("metric", metric),
 		zap.Int("metrics_count", metricsCount),
