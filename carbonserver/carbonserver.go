@@ -40,8 +40,6 @@ import (
 	"github.com/dgryski/go-expirecache"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
-	"github.com/gogo/protobuf/proto"
-	pb2 "github.com/lomik/go-carbon/carbonzipperpb"
 	pb3 "github.com/lomik/go-carbon/carbonzipperpb3"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
@@ -152,7 +150,7 @@ type CarbonserverListener struct {
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
 	logger            *zap.Logger
-	accessLogger            *zap.Logger
+	accessLogger      *zap.Logger
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -480,15 +478,13 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	}
 
 	var b []byte
+	response := &pb3.ListMetricsResponse{Metrics: metrics}
 	switch format {
 	case "json":
-		response := pb2.ListMetricsResponse{Metrics: metrics}
 		b, err = json.Marshal(response)
 	case "protobuf":
-		response := &pb2.ListMetricsResponse{Metrics: metrics}
-		b, err = proto.Marshal(response)
+		b, err = response.Marshal()
 	case "protobuf3":
-		response := &pb3.ListMetricsResponse{Metrics: metrics}
 		b, err = response.Marshal()
 	}
 
@@ -532,7 +528,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	var response *findResponse
 
 	logger := listener.logger.With(
-		zap.String("handler", "findhHandler"),
+		zap.String("handler", "find"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
@@ -542,7 +538,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	)
 
 	accessLogger := listener.logger.With(
-		zap.String("handler", "findhHandler"),
+		zap.String("handler", "find"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
@@ -646,36 +642,22 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 
 	if format == "json" || format == "protobuf" || format == "protobuf3" {
 		var err error
-		if format == "protobuf3" {
-			response := pb3.GlobResponse{
-				Name:    name,
-				Matches: make([]*pb3.GlobMatch, 0),
-			}
+		response := pb3.GlobResponse{
+			Name:    name,
+			Matches: make([]*pb3.GlobMatch, 0),
+		}
 
-			for i, p := range files {
-				response.Matches = append(response.Matches, &pb3.GlobMatch{Path: p, IsLeaf: leafs[i]})
-			}
+		for i, p := range files {
+			response.Matches = append(response.Matches, &pb3.GlobMatch{Path: p, IsLeaf: leafs[i]})
+		}
 
+		switch format {
+		case "json":
+			result.contentType = "application/json"
+			result.data, err = json.Marshal(response)
+		case "protobuf3", "protobuf":
 			result.contentType = "application/protobuf"
 			result.data, err = response.Marshal()
-		} else {
-			response := pb2.GlobResponse{
-				Name:    &name,
-				Matches: make([]*pb2.GlobMatch, 0),
-			}
-
-			for i, p := range files {
-				response.Matches = append(response.Matches, &pb2.GlobMatch{Path: proto.String(p), IsLeaf: proto.Bool(leafs[i])})
-			}
-
-			switch format {
-			case "json":
-				result.contentType = "application/json"
-				result.data, err = json.Marshal(response)
-			case "protobuf":
-				result.contentType = "application/protobuf"
-				result.data, err = proto.Marshal(&response)
-			}
 		}
 
 		if err != nil {
@@ -888,7 +870,7 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 		}
 	}
 	listener.logger.Debug("expandGlobs result",
-		zap.String("handler", "fetchHandler"),
+		zap.String("handler", "render"),
 		zap.String("action", "expandGlobs"),
 		zap.String("metric", metric),
 		zap.Int("metrics_count", metricsCount),
@@ -896,81 +878,61 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 		zap.Int32("until", untilTime),
 	)
 
-	if format == "protobuf3" {
-		multi, err := listener.fetchDataPB3(metric, files, leafs, fromTime, untilTime)
-		if err != nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-			return fetchResponse{nil, contentType, 0, 0, 0}, err
+	multi, err := listener.fetchDataPB3(metric, files, leafs, fromTime, untilTime)
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		return fetchResponse{nil, contentType, 0, 0, 0}, err
 
-		}
+	}
 
-		metricsFetched = len(multi.Metrics)
-		for i := range multi.Metrics {
-			memoryUsed += multi.Metrics[i].Size()
-			valuesFetched += len(multi.Metrics[i].Values)
-		}
+	metricsFetched = len(multi.Metrics)
+	for i := range multi.Metrics {
+		memoryUsed += multi.Metrics[i].Size()
+		valuesFetched += len(multi.Metrics[i].Values)
+	}
 
+	switch format {
+	case "json":
+		contentType = "application/json"
+		b, err = json.Marshal(multi)
+	case "protobuf3", "protobuf":
 		contentType = "application/protobuf"
 		b, err = multi.Marshal()
+	case "pickle":
+		// transform protobuf data into what pickle expects
+		//[{'start': 1396271100, 'step': 60, 'name': 'metric',
+		//'values': [9.0, 19.0, None], 'end': 1396273140}
 
-	} else {
-		multi, err := listener.fetchDataPB2(metric, files, leafs, fromTime, untilTime)
-		if err != nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-			return fetchResponse{nil, contentType, 0, 0, 0}, err
-		}
+		var response []map[string]interface{}
 
-		metricsFetched = len(multi.Metrics)
-		for i := range multi.Metrics {
-			memoryUsed += multi.Metrics[i].Size()
-			valuesFetched += len(multi.Metrics[i].Values)
-		}
+		for _, metric := range multi.GetMetrics() {
 
-		switch format {
-		case "json":
-			contentType = "application/json"
-			b, err = json.Marshal(multi)
+			var m map[string]interface{}
 
-		case "protobuf":
-			contentType = "application/protobuf"
-			b, err = proto.Marshal(multi)
+			m = make(map[string]interface{})
+			m["start"] = metric.StartTime
+			m["step"] = metric.StepTime
+			m["end"] = metric.StopTime
+			m["name"] = metric.Name
 
-		case "pickle":
-			// transform protobuf data into what pickle expects
-			//[{'start': 1396271100, 'step': 60, 'name': 'metric',
-			//'values': [9.0, 19.0, None], 'end': 1396273140}
-
-			var response []map[string]interface{}
-
-			for _, metric := range multi.GetMetrics() {
-
-				var m map[string]interface{}
-
-				m = make(map[string]interface{})
-				m["start"] = metric.StartTime
-				m["step"] = metric.StepTime
-				m["end"] = metric.StopTime
-				m["name"] = metric.Name
-
-				mv := make([]interface{}, len(metric.Values))
-				for i, p := range metric.Values {
-					if metric.IsAbsent[i] {
-						mv[i] = nil
-					} else {
-						mv[i] = p
-					}
+			mv := make([]interface{}, len(metric.Values))
+			for i, p := range metric.Values {
+				if metric.IsAbsent[i] {
+					mv[i] = nil
+				} else {
+					mv[i] = p
 				}
-
-				m["values"] = mv
-				response = append(response, m)
 			}
 
-			contentType = "application/pickle"
-			var buf bytes.Buffer
-			pEnc := pickle.NewEncoder(&buf)
-			err = pEnc.Encode(response)
-			b = buf.Bytes()
+			m["values"] = mv
+			response = append(response, m)
 		}
+
+		contentType = "application/pickle"
+		var buf bytes.Buffer
+		pEnc := pickle.NewEncoder(&buf)
+		err = pEnc.Encode(response)
+		b = buf.Bytes()
 	}
 
 	if err != nil {
@@ -1107,30 +1069,6 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	return &response, nil
 }
 
-func (listener *CarbonserverListener) fetchDataPB2(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*pb2.MultiFetchResponse, error) {
-	var multi pb2.MultiFetchResponse
-	for i, metric := range files {
-		if !leafs[i] {
-			listener.logger.Debug("skipping directory", zap.String("metric", metric))
-			// can't fetch a directory
-			continue
-		}
-		response, err := listener.fetchSingleMetric(metric, fromTime, untilTime)
-		if err == nil {
-			pb2FetchResponse := &pb2.FetchResponse{
-				Name:      proto.String(response.Name),
-				StartTime: &response.StartTime,
-				StopTime:  &response.StopTime,
-				StepTime:  &response.StepTime,
-				Values:    response.Values,
-				IsAbsent:  response.IsAbsent,
-			}
-			multi.Metrics = append(multi.Metrics, pb2FetchResponse)
-		}
-	}
-	return &multi, nil
-}
-
 func (listener *CarbonserverListener) fetchDataPB3(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*pb3.MultiFetchResponse, error) {
 	var multi pb3.MultiFetchResponse
 	for i, metric := range files {
@@ -1204,52 +1142,31 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	xfiles := float32(w.XFilesFactor())
 
 	var b []byte
-	if format == "protobuf3" {
-		rets := make([]*pb3.Retention, 0, 4)
-		for _, retention := range w.Retentions() {
-			spp := int32(retention.SecondsPerPoint())
-			nop := int32(retention.NumberOfPoints())
-			rets = append(rets, &pb3.Retention{
-				SecondsPerPoint: spp,
-				NumberOfPoints:  nop,
-			})
-		}
-
-		response := pb3.InfoResponse{
-			Name:              metric,
-			AggregationMethod: aggr,
-			MaxRetention:      maxr,
-			XFilesFactor:      xfiles,
-			Retentions:        rets,
-		}
-
-		b, err = response.Marshal()
-	} else {
-		rets := make([]*pb2.Retention, 0, 4)
-		for _, retention := range w.Retentions() {
-			spp := int32(retention.SecondsPerPoint())
-			nop := int32(retention.NumberOfPoints())
-			rets = append(rets, &pb2.Retention{
-				SecondsPerPoint: &spp,
-				NumberOfPoints:  &nop,
-			})
-		}
-
-		response := pb2.InfoResponse{
-			Name:              &metric,
-			AggregationMethod: &aggr,
-			MaxRetention:      &maxr,
-			XFilesFactor:      &xfiles,
-			Retentions:        rets,
-		}
-
-		switch format {
-		case "json":
-			b, err = json.Marshal(response)
-		case "protobuf":
-			b, err = proto.Marshal(&response)
-		}
+	rets := make([]*pb3.Retention, 0, 4)
+	for _, retention := range w.Retentions() {
+		spp := int32(retention.SecondsPerPoint())
+		nop := int32(retention.NumberOfPoints())
+		rets = append(rets, &pb3.Retention{
+			SecondsPerPoint: spp,
+			NumberOfPoints:  nop,
+		})
 	}
+
+	response := pb3.InfoResponse{
+		Name:              metric,
+		AggregationMethod: aggr,
+		MaxRetention:      maxr,
+		XFilesFactor:      xfiles,
+		Retentions:        rets,
+	}
+
+	switch format {
+	case "json":
+		b, err = json.Marshal(response)
+	case "protobuf3", "protobuf":
+		b, err = response.Marshal()
+	}
+
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Info("info failed",
@@ -1257,7 +1174,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			zap.Int("http_code", http.StatusInternalServerError),
 			zap.Error(err),
 		)
-		http.Error(wr, "Failed to encode response: " + err.Error(),
+		http.Error(wr, "Failed to encode response: "+err.Error(),
 			http.StatusInternalServerError)
 		return
 	}
