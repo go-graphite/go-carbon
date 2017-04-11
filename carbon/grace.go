@@ -3,7 +3,6 @@ package carbon
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"path"
@@ -60,7 +59,7 @@ func (app *App) DumpStop() error {
 	logger.Info("grace stop with dump inited")
 
 	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
-	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s", filenamePostfix))
+	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s.bin", filenamePostfix))
 	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s", filenamePostfix))
 
 	// start dumpers
@@ -88,7 +87,7 @@ func (app *App) DumpStop() error {
 	cacheSize := app.Cache.Size()
 
 	// dump cache
-	err = app.Cache.Dump(dumpWriter)
+	err = app.Cache.DumpBinary(dumpWriter)
 	if err != nil {
 		return err
 	}
@@ -136,44 +135,17 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 
 	defer func() {
 		logger.Info("restore finished",
-			zap.Int("point", pointsCount),
+			zap.Int("points", pointsCount),
 			zap.Duration("runtime", time.Since(startTime)),
 		)
 	}()
 
-	file, err := os.Open(filename)
-	if err != nil {
-		logger.Error("open failed", zap.Error(err))
-		return err
-	}
-	defer file.Close()
+	err := points.ReadFromFile(filename, func(p *points.Points) {
+		pointsCount += len(p.Data)
+		storeFunc(p)
+	})
 
-	reader := bufio.NewReaderSize(file, 1024*1024)
-
-	for {
-		line, _, err := reader.ReadLine()
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
-			logger.Error("read failed", zap.Error(err))
-			return err
-		}
-
-		if len(line) > 0 {
-			p, err := points.ParseText(string(line))
-
-			if err != nil {
-				logger.Warn("bad message", zap.String("value", string(line)))
-			} else {
-				pointsCount++
-				storeFunc(p)
-			}
-		}
-	}
-
-	return nil
+	return err
 }
 
 // RestoreFromDir cache and input dumps from disk to memory
@@ -253,7 +225,9 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 		defer ticker.Stop()
 
 		throttledStoreFunc := func(p *points.Points) {
-			<-ticker.C
+			for i := 0; i < len(p.Data); i++ {
+				<-ticker.C
+			}
 			storeFunc(p)
 		}
 
