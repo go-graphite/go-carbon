@@ -1,4 +1,4 @@
-package framing_test
+package framing
 
 import (
 	"bytes"
@@ -9,8 +9,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/lomik/go-carbon/helper/framing"
 )
 
 func Test1BigEndian(t *testing.T) {
@@ -52,7 +50,7 @@ func run(t *testing.T, size byte, endianess binary.ByteOrder) {
 			t.Fatal(err)
 		}
 
-		framed, err := framing.NewConn(conn, size, endianess)
+		framed, err := NewConn(conn, size, endianess)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -69,7 +67,7 @@ func run(t *testing.T, size byte, endianess binary.ByteOrder) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	framed, err := framing.NewConn(conn, size, endianess)
+	framed, err := NewConn(conn, size, endianess)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,8 +95,8 @@ func run(t *testing.T, size byte, endianess binary.ByteOrder) {
 }
 
 func TestInvalidFrameSiz(t *testing.T) {
-	_, err := framing.NewConn(nil, 3, nil)
-	if err != framing.ErrPrefixLength {
+	_, err := NewConn(nil, 3, nil)
+	if err != ErrPrefixLength {
 		t.Fail()
 	}
 }
@@ -106,21 +104,21 @@ func TestInvalidFrameSiz(t *testing.T) {
 func TestPacketTooLarge(t *testing.T) {
 	max := uint(16)
 	size := byte(4)
-	conn, err := framing.NewConn(nil, size, nil)
+	conn, err := NewConn(nil, size, nil)
 	conn.MaxFrameSize = max
 	if err != nil {
 		t.Fatal(err)
 	}
 	b := make([]byte, max+1)
 	_, err = conn.Write(b)
-	if err != framing.ErrFrameTooLarge {
+	if err != ErrFrameTooLarge {
 		t.Fail()
 	}
 }
 
 func TestMessageSmallerThanBuffer(t *testing.T) {
 	conn := &fake{ReadWriter: bytes.NewBuffer([]byte{4, 0, 1, 2, 3})}
-	framed, _ := framing.NewConn(&fake{ReadWriter: conn}, 1, nil)
+	framed, _ := NewConn(&fake{ReadWriter: conn}, 1, nil)
 
 	b1 := make([]byte, 6)
 	n1, err1 := framed.Read(b1)
@@ -142,7 +140,7 @@ func TestMessageBiggerThanBuffer(t *testing.T) {
 		// ^ second read ends
 		//          ^ third read ends
 	})}
-	framed, _ := framing.NewConn(&fake{ReadWriter: conn}, 1, nil)
+	framed, _ := NewConn(&fake{ReadWriter: conn}, 1, nil)
 
 	b1 := make([]byte, 4)
 	n1, err1 := framed.Read(b1)
@@ -184,7 +182,7 @@ func TestInnerReadSizeError(t *testing.T) {
 		ReadWriter: bytes.NewBuffer([]byte{}),
 		err:        errors.New("InnerReadSizeError"),
 	}
-	framed, _ := framing.NewConn(conn, 1, nil)
+	framed, _ := NewConn(conn, 1, nil)
 	b := make([]byte, 4)
 	_, err := framed.Read(b)
 	if err.Error() != "InnerReadSizeError" {
@@ -197,7 +195,7 @@ func TestInnerReadError(t *testing.T) {
 		ReadWriter: bytes.NewBuffer([]byte{4}),
 		err:        errors.New("InnerReadError"),
 	}
-	framed, _ := framing.NewConn(conn, 1, nil)
+	framed, _ := NewConn(conn, 1, nil)
 	b := make([]byte, 4)
 	_, err := framed.Read(b)
 	if err.Error() != "InnerReadError" {
@@ -210,7 +208,7 @@ func TestInnerReadFrameSizeError(t *testing.T) {
 		ReadWriter: bytes.NewBuffer([]byte{}),
 		err:        errors.New("InnerReadFrameSizeError"),
 	}
-	framed, _ := framing.NewConn(conn, 1, nil)
+	framed, _ := NewConn(conn, 1, nil)
 	_, err := framed.ReadFrame()
 	if err.Error() != "InnerReadFrameSizeError" {
 		t.Fatal(err)
@@ -222,7 +220,7 @@ func TestInnerReadFrameError(t *testing.T) {
 		ReadWriter: bytes.NewBuffer([]byte{4}),
 		err:        errors.New("InnerReadFrameError"),
 	}
-	framed, _ := framing.NewConn(conn, 1, nil)
+	framed, _ := NewConn(conn, 1, nil)
 	_, err := framed.ReadFrame()
 	if err.Error() != "InnerReadFrameError" {
 		t.Fatal(err)
@@ -234,7 +232,7 @@ func TestWriteError(t *testing.T) {
 		ReadWriter: bytes.NewBuffer([]byte{}),
 		err:        errors.New("WriteError"),
 	}
-	framed, _ := framing.NewConn(conn, 1, nil)
+	framed, _ := NewConn(conn, 1, nil)
 	_, err := framed.Write([]byte{0})
 	if err.Error() != "WriteError" {
 		t.Fatal(err)
