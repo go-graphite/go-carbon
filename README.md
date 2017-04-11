@@ -232,6 +232,7 @@ With settings above applied, best write-strategy to use is "noop"
 ##### master
 * common: Requires Go 1.8 or newer
 * common: Logging refactored. Format changed to structured JSON. Added support of multiple logging handlers with separate output, level and encoding
+* dump/restore: New dump format
 * carbonserver: [feature] IdleTimeout is now configurable in carbonserver part
 * carbonserver: [feature] support /render query cache (query-cache-* options in config file)
 * carbonserver: [feature] support /metrics/find cache (find-cache-* option in config file)
