@@ -45,7 +45,6 @@ func TestWriteRead(t *testing.T) {
 
 	for testID, tt := range table {
 		func() {
-			var binaryBuf [20]byte
 			wb := new(bytes.Buffer)
 
 			// Write to buffer
@@ -55,7 +54,7 @@ func TestWriteRead(t *testing.T) {
 					case "plain":
 						p.WriteTo(wb)
 					case "binary":
-						p.WriteBinaryTo(wb, binaryBuf[:])
+						p.WriteBinaryTo(wb)
 					}
 				}
 			}
