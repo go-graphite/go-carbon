@@ -1,17 +1,13 @@
 package points
 
 import (
-	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"math"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/hydrogen18/stalecucumber"
 )
 
 // Point value/time pair
@@ -160,71 +156,6 @@ func ParseText(line string) (*Points, error) {
 	// }
 
 	return OnePoint(row[0], value, int64(tsf)), nil
-}
-
-// ParsePickle ...
-func ParsePickle(pkt []byte) ([]*Points, error) {
-	result, err := stalecucumber.Unpickle(bytes.NewReader(pkt))
-
-	list, err := stalecucumber.ListOrTuple(result, err)
-	if err != nil {
-		return nil, err
-	}
-
-	msgs := []*Points{}
-	for i := 0; i < len(list); i++ {
-		metric, err := stalecucumber.ListOrTuple(list[i], nil)
-		if err != nil {
-			return nil, err
-		}
-
-		if len(metric) < 2 {
-			return nil, errors.New("Unexpected array length while unpickling metric")
-		}
-
-		name, err := stalecucumber.String(metric[0], nil)
-		if err != nil {
-			return nil, err
-		}
-
-		msg := New()
-		msg.Metric = name
-
-		for j := 1; j < len(metric); j++ {
-			v, err := stalecucumber.ListOrTuple(metric[j], nil)
-			if err != nil {
-				return nil, err
-			}
-			if len(v) != 2 {
-				return nil, errors.New("Unexpected array length while unpickling data point")
-			}
-			timestamp, err := stalecucumber.Int(v[0], nil)
-			if err != nil {
-				timestampFloat, err := stalecucumber.Float(v[0], nil)
-				if err != nil {
-					return nil, err
-				}
-				timestamp = int64(timestampFloat)
-			}
-			if timestamp > math.MaxUint32 || timestamp < 0 {
-				err = errors.New("Unexpected value for timestamp, cannot be cast to uint32")
-				return nil, err
-			}
-
-			value, err := stalecucumber.Float(v[1], nil)
-			if err != nil {
-				valueInt, err := stalecucumber.Int(v[1], nil)
-				if err != nil {
-					return nil, err
-				}
-				value = float64(valueInt)
-			}
-
-			msg.Add(value, timestamp)
-		}
-		msgs = append(msgs, msg)
-	}
-	return msgs, nil
 }
 
 // Append point
