@@ -18,6 +18,7 @@ package carbonserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,9 +47,6 @@ import (
 	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
 	"github.com/lomik/zapwriter"
-
-	carbonapictx "github.com/dgryski/carbonapi/util"
-	carbonzipperctx "github.com/dgryski/carbonzipper/util"
 )
 
 type metricStruct struct {
@@ -100,6 +98,41 @@ type fetchResponse struct {
 	metricsFetched int
 	valuesFetched  int
 	memoryUsed     int
+}
+
+var TraceHeaders = map[string]string{
+	"X-CTX-CarbonAPI-UUID":    "carbonapi_uuid",
+	"X-CTX-CarbonZipper-UUID": "carbonzipper_uuid",
+	"X-Request-ID":            "request_id",
+}
+
+func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
+	for header, field := range TraceHeaders {
+		v := ctx.Value(header)
+		if v == nil {
+			continue
+		}
+
+		if value, ok := v.(string); ok {
+			logger = logger.With(zap.String(field, value))
+		}
+	}
+
+	return logger
+}
+
+func TraceHandler(h http.HandlerFunc) http.HandlerFunc {
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		ctx := req.Context()
+		for header := range TraceHeaders {
+			v := req.Header.Get(header)
+			if v != "" {
+				ctx = context.WithValue(ctx, header, v)
+			}
+		}
+
+		h.ServeHTTP(rw, req.WithContext(ctx))
+	})
 }
 
 func (q *QueryItem) FetchOrLock() (interface{}, bool) {
@@ -444,14 +477,12 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	req.ParseForm()
 	format := req.FormValue("format")
 
-	accessLogger := listener.logger.With(
+	accessLogger := TraceContextToZap(ctx, listener.logger.With(
 		zap.String("handler", "list"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("format", format),
-		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
-		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
-	)
+	))
 
 	if format != "json" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
@@ -527,25 +558,21 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	var response *findResponse
 
-	logger := listener.logger.With(
+	logger := TraceContextToZap(ctx, listener.logger.With(
 		zap.String("handler", "find"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
 		zap.String("format", format),
-		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
-		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
-	)
+	))
 
-	accessLogger := listener.logger.With(
+	accessLogger := TraceContextToZap(ctx, listener.logger.With(
 		zap.String("handler", "find"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("query", query),
 		zap.String("format", format),
-		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
-		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
-	)
+	))
 
 	if format != "json" && format != "pickle" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.FindErrors, 1)
@@ -712,7 +739,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	from := req.FormValue("from")
 	until := req.FormValue("until")
 
-	logger := listener.accessLogger.With(
+	logger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
@@ -720,11 +747,9 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
-		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
-		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
-	)
+	))
 
-	accessLogger := listener.accessLogger.With(
+	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
@@ -732,9 +757,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
-		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
-		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
-	)
+	))
 
 	// Make sure we log which metric caused a panic()
 	defer func() {
@@ -1095,15 +1118,13 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	metric := req.FormValue("target")
 	format := req.FormValue("format")
 
-	accessLogger := listener.accessLogger.With(
+	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "info"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.String("target", metric),
 		zap.String("format", format),
-		zap.String("carbonapi_uuid", carbonapictx.GetUUID(ctx)),
-		zap.String("carbonzipper_uuid", carbonzipperctx.GetUUID(ctx)),
-	)
+	))
 
 	if format == "" {
 		format = "json"
@@ -1268,10 +1289,21 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
 
 	carbonserverMux := http.NewServeMux()
-	carbonserverMux.HandleFunc("/metrics/find/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.findHandler)), listener.bucketRequestTimes)))
-	carbonserverMux.HandleFunc("/metrics/list/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.listHandler)), listener.bucketRequestTimes)))
-	carbonserverMux.HandleFunc("/render/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.renderHandler)), listener.bucketRequestTimes)))
-	carbonserverMux.HandleFunc("/info/", httputil.TrackConnections(httputil.TimeHandler(carbonapictx.ParseCtx(carbonzipperctx.ParseCtx(listener.infoHandler)), listener.bucketRequestTimes)))
+
+	wrapHandler := func(h http.HandlerFunc) http.HandlerFunc {
+		return httputil.TrackConnections(
+			httputil.TimeHandler(
+				TraceHandler(
+					h,
+				),
+				listener.bucketRequestTimes,
+			),
+		)
+	}
+	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler))
+	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler))
+	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler))
+	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler))
 
 	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
