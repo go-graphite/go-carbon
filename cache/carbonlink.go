@@ -12,8 +12,8 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/helper"
-	"github.com/lomik/go-carbon/helper/framing"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
 )
 
