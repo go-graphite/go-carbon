@@ -41,8 +41,8 @@ import (
 	"github.com/dgryski/go-expirecache"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
-	pb3 "github.com/lomik/go-carbon/carbonzipperpb3"
 	"github.com/lomik/go-carbon/helper"
+	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
@@ -509,7 +509,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	}
 
 	var b []byte
-	response := &pb3.ListMetricsResponse{Metrics: metrics}
+	response := &pb.ListMetricsResponse{Metrics: metrics}
 	switch format {
 	case "json":
 		b, err = json.Marshal(response)
@@ -669,13 +669,13 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 
 	if format == "json" || format == "protobuf" || format == "protobuf3" {
 		var err error
-		response := pb3.GlobResponse{
+		response := pb.GlobResponse{
 			Name:    name,
-			Matches: make([]*pb3.GlobMatch, 0),
+			Matches: make([]*pb.GlobMatch, 0),
 		}
 
 		for i, p := range files {
-			response.Matches = append(response.Matches, &pb3.GlobMatch{Path: p, IsLeaf: leafs[i]})
+			response.Matches = append(response.Matches, &pb.GlobMatch{Path: p, IsLeaf: leafs[i]})
 		}
 
 		switch format {
@@ -901,7 +901,7 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 		zap.Int32("until", untilTime),
 	)
 
-	multi, err := listener.fetchDataPB3(metric, files, leafs, fromTime, untilTime)
+	multi, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		return fetchResponse{nil, contentType, 0, 0, 0}, err
@@ -964,7 +964,7 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed}, nil
 }
 
-func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime, untilTime int32) (*pb3.FetchResponse, error) {
+func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime, untilTime int32) (*pb.FetchResponse, error) {
 	var step int32
 
 	// We need to obtain the metadata from whisper file anyway.
@@ -1048,7 +1048,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, waitTime)
 	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
 
-	response := pb3.FetchResponse{
+	response := pb.FetchResponse{
 		Name:      metric,
 		StartTime: fromTime,
 		StopTime:  untilTime,
@@ -1092,8 +1092,8 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	return &response, nil
 }
 
-func (listener *CarbonserverListener) fetchDataPB3(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*pb3.MultiFetchResponse, error) {
-	var multi pb3.MultiFetchResponse
+func (listener *CarbonserverListener) fetchDataPB(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*pb.MultiFetchResponse, error) {
+	var multi pb.MultiFetchResponse
 	for i, metric := range files {
 		if !leafs[i] {
 			listener.logger.Debug("skipping directory", zap.String("metric", metric))
@@ -1163,17 +1163,17 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	xfiles := float32(w.XFilesFactor())
 
 	var b []byte
-	rets := make([]*pb3.Retention, 0, 4)
+	rets := make([]*pb.Retention, 0, 4)
 	for _, retention := range w.Retentions() {
 		spp := int32(retention.SecondsPerPoint())
 		nop := int32(retention.NumberOfPoints())
-		rets = append(rets, &pb3.Retention{
+		rets = append(rets, &pb.Retention{
 			SecondsPerPoint: spp,
 			NumberOfPoints:  nop,
 		})
 	}
 
-	response := pb3.InfoResponse{
+	response := pb.InfoResponse{
 		Name:              metric,
 		AggregationMethod: aggr,
 		MaxRetention:      maxr,

@@ -12,7 +12,7 @@ import (
 
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/lomik/go-carbon/cache"
-	pb "github.com/lomik/go-carbon/carbonzipperpb3"
+	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 	"go.uber.org/zap"

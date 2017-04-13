@@ -5,8 +5,8 @@ import (
 	"path"
 	"testing"
 
+	"github.com/lomik/go-carbon/helper/qa"
 	"github.com/lomik/go-carbon/points"
-	"github.com/lomik/go-carbon/qa"
 )
 
 func TestRestore(t *testing.T) {

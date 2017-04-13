@@ -1,7 +1,7 @@
 syntax = "proto3";
-package carbonzipperpb3;
+package carbonzipperpb;
 
-// Regenerate with  protoc --gogo_out=. carbonzipper3.proto 
+// Regenerate with  protoc --gogo_out=. carbonzipper.proto 
 
 message FetchResponse {
     string name = 1;

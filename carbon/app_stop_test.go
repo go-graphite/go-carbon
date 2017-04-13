@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lomik/go-carbon/qa"
+	"github.com/lomik/go-carbon/helper/qa"
 	"github.com/stretchr/testify/assert"
 )
 

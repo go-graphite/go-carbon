@@ -52,7 +52,6 @@ func asInt64(value interface{}) (int64, bool) {
 	default:
 		return 0, false
 	}
-	return 0, false
 }
 
 func asFloat64(value interface{}) (float64, bool) {
@@ -84,7 +83,6 @@ func asFloat64(value interface{}) (float64, bool) {
 	default:
 		return 0, false
 	}
-	return 0, false
 }
 
 var BadPickleError = errors.New("bad pickle message")
