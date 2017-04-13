@@ -118,3 +118,6 @@
 [submodule "vendor/github.com/dgryski/carbonapi"]
 	path = vendor/github.com/dgryski/carbonapi
 	url = https://github.com/dgryski/carbonapi.git
+[submodule "vendor/github.com/lomik/graphite-pickle"]
+	path = vendor/github.com/lomik/graphite-pickle
+	url = https://github.com/lomik/graphite-pickle

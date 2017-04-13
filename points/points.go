@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	pickle "github.com/lomik/graphite-pickle"
 )
 
 // Point value/time pair
@@ -199,4 +201,18 @@ func (p *Points) Eq(other *Points) bool {
 		}
 	}
 	return true
+}
+
+func ParsePickle(pkt []byte) ([]*Points, error) {
+	result := []*Points{}
+
+	err := pickle.ParseMessage(pkt, func(name string, value float64, timestamp int64) {
+		if len(result) == 0 || result[len(result)-1].Metric != name {
+			result = append(result, OnePoint(name, value, timestamp))
+		} else {
+			result[len(result)-1].Add(value, timestamp)
+		}
+	})
+
+	return result, err
 }
