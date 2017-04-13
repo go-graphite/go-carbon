@@ -24,7 +24,7 @@ func TestRestore(t *testing.T) {
 		w("input.15.1470687188677488571", "bad_message\nm3 3 1470687217\n")
 		w("cache.15.1470687188677488571", "m4 4 1470687217\n")
 
-		w("input.33.1470687188677488570", "m5 5 1470687217")
+		w("input.33.1470687188677488570", "m5 5 1470687217\n")
 		w("cache.33.1470687188677488570", "")
 
 		expected := []*points.Points{
@@ -78,7 +78,9 @@ func TestRestore(t *testing.T) {
 		ch := make(chan *points.Points, 1024)
 
 		app := &App{}
-		app.RestoreFromDir(root, func(p *points.Points) { ch <- p })
+		app.RestoreFromDir(root, func(p *points.Points) {
+			ch <- p
+		})
 
 		close(ch)
 

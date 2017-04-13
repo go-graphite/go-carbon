@@ -295,9 +295,6 @@ func ReadConfig(filename string) (*Config, error) {
 func TestConfig(rootDir string) string {
 	cfg := NewConfig()
 
-	p := filepath.Join(rootDir, "go-carbon.log")
-	cfg.Common.Logfile = &p
-
 	cfg.Whisper.DataDir = rootDir
 	cfg.Whisper.SchemasFilename = filepath.Join(rootDir, "schemas.conf")
 	// cfg.Whisper.Aggregation = filepath.Join(rootDir, "aggregation.conf")
