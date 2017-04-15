@@ -38,6 +38,7 @@ type Whisper struct {
 	storeMutex          [storeMutexCount]sync.Mutex
 	mockStore           func() (StoreFunc, func())
 	logger              *zap.Logger
+	createLogger        *zap.Logger
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -61,6 +62,7 @@ func NewWhisper(
 		rootPath:            rootPath,
 		maxUpdatesPerSecond: 0,
 		logger:              zapwriter.Logger("persister"),
+		createLogger:        zapwriter.Logger("whisper:new"),
 	}
 }
 
@@ -133,17 +135,12 @@ func store(p *Whisper, values *points.Points) {
 			return
 		}
 
-		p.logger.Debug("create whisper",
-			zap.String("path", path),
-			zap.String("retention", schema.RetentionStr),
-			zap.String("schema", schema.Name),
-			zap.String("aggregation", aggr.name),
-			zap.Float64("xFilesFactor", aggr.xFilesFactor),
-			zap.String("method", aggr.aggregationMethodStr),
-		)
-
 		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
-			p.logger.Error("mkdir failed", zap.String("dir", filepath.Dir(path)), zap.Error(err))
+			p.logger.Error("mkdir failed",
+				zap.String("dir", filepath.Dir(path)),
+				zap.Error(err),
+				zap.String("path", path),
+			)
 			return
 		}
 
@@ -151,9 +148,26 @@ func store(p *Whisper, values *points.Points) {
 			Sparse: p.sparse,
 		})
 		if err != nil {
-			p.logger.Error("create new whisper file failed", zap.String("path", path), zap.Error(err))
+			p.logger.Error("create new whisper file failed",
+				zap.String("path", path),
+				zap.Error(err),
+				zap.String("retention", schema.RetentionStr),
+				zap.String("schema", schema.Name),
+				zap.String("aggregation", aggr.name),
+				zap.Float64("xFilesFactor", aggr.xFilesFactor),
+				zap.String("method", aggr.aggregationMethodStr),
+			)
 			return
 		}
+
+		p.createLogger.Debug("created",
+			zap.String("path", path),
+			zap.String("retention", schema.RetentionStr),
+			zap.String("schema", schema.Name),
+			zap.String("aggregation", aggr.name),
+			zap.Float64("xFilesFactor", aggr.xFilesFactor),
+			zap.String("method", aggr.aggregationMethodStr),
+		)
 
 		atomic.AddUint32(&p.created, 1)
 	}
