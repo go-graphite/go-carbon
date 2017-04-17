@@ -284,7 +284,7 @@ func TestParseCarbonlinkRequest(t *testing.T) {
 func BenchmarkCarbonLinkPickleParse(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			ParseCarbonlinkRequest([]byte(sampleCacheQuery))
+			ParseCarbonlinkRequest([]byte(sampleCacheQuery)[4:])
 		}
 	})
 }
