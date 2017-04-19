@@ -13,6 +13,8 @@ tmp/go-carbon.tar.gz: go-carbon
 	cp go-carbon tmp/go-carbon/go-carbon
 	./go-carbon --config-print-default > tmp/go-carbon/go-carbon.conf
 	cp deploy/go-carbon.init.centos tmp/go-carbon/go-carbon.init
+	cp deploy/go-carbon.systemd.centos tmp/go-carbon/go-carbon.systemd
+	cp deploy/go-carbon.sysconfig.centos tmp/go-carbon/go-carbon.sysconfig
 	cd tmp && tar czf go-carbon.tar.gz go-carbon/
 
 rpm: tmp/go-carbon.tar.gz

@@ -1,0 +1,18 @@
+[Unit]
+Description=go-carbon daemon
+Documentation=https://github.com/lomik/go-carbon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+User=go-carbon
+Group=go-carbon
+EnvironmentFile=/etc/sysconfig/go-carbon
+Type=simple
+ExecStart=/usr/local/bin/go-carbon --config=${CONF_FILE} 
+
+[Install]
+WantedBy=multi-user.target

@@ -33,6 +33,8 @@ rm -rf %{buildroot}
 %{__install} -pD -m 755 %{name} %{buildroot}/%{__bindir}/%{name}
 %{__install} -pD -m 644 %{name}.conf %{buildroot}/%{__etcdir}/%{name}.conf
 %{__install} -pD -m 755 %{name}.init %{buildroot}/etc/init.d/%{name}
+%{__install} -pD -m 644 %{name}.systemd %{buildroot}/usr/lib/systemd/system/%{name}.service
+%{__install} -pD -m 644 %{name}.sysconfig %{buildroot}/etc/sysconfig/%{name}
 
 %clean
 rm -rf $RPM_BUILD_ROOT
@@ -42,6 +44,8 @@ rm -rf $RPM_BUILD_ROOT
 %defattr(-,root,root,-)
 %{__bindir}/%{name}
 /etc/init.d/*
+/etc/sysconfig/*
+/usr/lib/systemd/system/*
 %config(noreplace) %{__etcdir}/%{name}.conf
 
 
