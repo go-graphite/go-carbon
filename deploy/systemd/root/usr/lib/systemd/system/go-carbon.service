@@ -1,0 +1,25 @@
+[Unit]
+Description=Golang implementation of Graphite/Carbon server.
+Documentation=https://github.com/lomik/go-carbon
+Requires=var-run.mount
+After=var-run.mount,network.target
+
+[Service]
+User=carbon
+PermissionsStartOnly=true
+EnvironmentFile=-/etc/default/go-carbon
+
+ExecStartPre=/usr/bin/mkdir -p /var/log/go-carbon/
+ExecStartPre=/usr/bin/chown -R carbon /var/log/go-carbon/
+
+ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf
+ExecStop=/bin/kill -USR2 $MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+TimeoutStopSec=600 # Default value is 90s. Because dump saving may take longer, you should increase this number.
+LimitNOFILE=55555 # Default limit is 1024. If you don't use relay in front of go-carbon, you might hit this limit.
+LimitMEMLOCK=infinity # Cache size may be huge
+
+[Install]
+WantedBy=multi-user.target
