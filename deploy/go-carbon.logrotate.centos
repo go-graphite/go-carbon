@@ -1,0 +1,9 @@
+/var/log/go-carbon/go-carbon.log {
+    weekly
+    rotate 4
+    compress
+    missingok
+    notifempty
+    nocreate
+    copytruncate
+}

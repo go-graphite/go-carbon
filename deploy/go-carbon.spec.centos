@@ -33,6 +33,8 @@ rm -rf %{buildroot}
 %{__install} -pD -m 755 %{name} %{buildroot}/%{__bindir}/%{name}
 %{__install} -pD -m 644 %{name}.conf %{buildroot}/%{__etcdir}/%{name}.conf
 %{__install} -pD -m 755 %{name}.init %{buildroot}/etc/init.d/%{name}
+%{__install} -d -m 755 %{buildroot}/etc/logrotate.d
+%{__install} -pD -m 644 %{name}.logrotate %{buildroot}/etc/logrotate.d/%{name}
 
 %clean
 rm -rf $RPM_BUILD_ROOT
@@ -43,7 +45,7 @@ rm -rf $RPM_BUILD_ROOT
 %{__bindir}/%{name}
 /etc/init.d/*
 %config(noreplace) %{__etcdir}/%{name}.conf
-
+/etc/logrotate.d/*
 
 %changelog
 
