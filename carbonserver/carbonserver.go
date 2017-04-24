@@ -300,7 +300,7 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics []string)
 }
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
-	logger := listener.logger
+	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	for {
 
 		select {
@@ -309,11 +309,10 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 		case <-tick:
 		case <-force:
 		}
+		t0 := time.Now()
 
 		var files []string
 		details := make(map[string]*pb.MetricDetails)
-
-		t0 := time.Now()
 
 		metricsKnown := uint64(0)
 		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
@@ -340,6 +339,11 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 
 			return nil
 		})
+		if err != nil {
+			logger.Error("error getting file list",
+				zap.Error(err),
+			)
+		}
 
 		var stat syscall.Statfs_t
 		err = syscall.Statfs(dir, &stat)
@@ -348,6 +352,7 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 				zap.String("dir", dir),
 				zap.Error(err),
 			)
+			continue
 		}
 
 		freeSpace := stat.Bavail * uint64(stat.Bsize)
@@ -380,25 +385,24 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 		}
 		rdTimeUpdateRuntime := time.Since(tl)
 
-		logger.Info("file list updated",
-			zap.Duration("fileScanRuntime", fileScanRuntime),
-			zap.Int("files", len(files)),
-			zap.Duration("indexingRuntime", indexingRuntime),
-			zap.Duration("rdTimeUpdateRuntime", rdTimeUpdateRuntime),
-			zap.Int("indexSize", indexSize),
-			zap.Int("prunedTrigrams", pruned),
-		)
+		listener.UpdateFileIndex(&fileIndex{
+			idx:idx,
+			files: files,
+			details: details,
+			freeSpace: freeSpace,
+			totalSpace: totalSpace,
+			accessedMetrics: accessedMetrics,
+		})
 
-		if err == nil {
-			listener.UpdateFileIndex(&fileIndex{
-				idx:idx,
-				files: files,
-				details: details,
-				freeSpace: freeSpace,
-				totalSpace: totalSpace,
-				accessedMetrics: accessedMetrics,
-			})
-		}
+		logger.Info("file list updated",
+			zap.Duration("file_scan_runtime", fileScanRuntime),
+			zap.Duration("indexing_runtime", indexingRuntime),
+			zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
+			zap.Duration("total_runtime", time.Since(t0)),
+			zap.Int("files", len(files)),
+			zap.Int("index_size", indexSize),
+			zap.Int("pruned_trigrams", pruned),
+		)
 	}
 }
 
