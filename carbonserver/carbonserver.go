@@ -376,12 +376,14 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 		accessedMetrics := make(map[string]struct{})
 		if fidx != nil {
 			fidx.Lock()
-			accessedMetrics = fidx.accessedMetrics
-			fidx.Unlock()
+			for m := range fidx.accessedMetrics {
+				accessedMetrics[m] = struct{}{}
+			}
 
 			for m := range fidx.accessedMetrics {
 				details[m].RdTime = fidx.details[m].RdTime
 			}
+			fidx.Unlock()
 		}
 		rdTimeUpdateRuntime := time.Since(tl)
 
