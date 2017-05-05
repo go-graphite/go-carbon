@@ -174,7 +174,7 @@ func main() {
 		for {
 			<-c
 			app.DumpStop()
-			os.Exit(1)
+			os.Exit(0)
 		}
 	}()
 

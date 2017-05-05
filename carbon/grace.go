@@ -78,7 +78,7 @@ func (app *App) DumpStop() error {
 	if err != nil {
 		return err
 	}
-	xlogWriter := &SyncWriter{w: bufio.NewWriterSize(xlog, 1048576)} // 1Mb
+	xlogWriter := &SyncWriter{w: bufio.NewWriterSize(xlog, 4096)} // 4kb
 
 	app.Cache.DivertToXlog(xlogWriter)
 
@@ -89,6 +89,7 @@ func (app *App) DumpStop() error {
 	// dump cache
 	err = app.Cache.DumpBinary(dumpWriter)
 	if err != nil {
+		logger.Info("dump failed", zap.Error(err))
 		return err
 	}
 
@@ -98,29 +99,48 @@ func (app *App) DumpStop() error {
 	)
 
 	if err = dumpWriter.Flush(); err != nil {
+		logger.Info("dump flush failed", zap.Error(err))
 		return err
 	}
 
 	if err = dump.Close(); err != nil {
+		logger.Info("dump close failed", zap.Error(err))
 		return err
 	}
 
 	// cache dump finished
-	logger.Info("stop listeners")
-	app.stopListeners()
-
-	if err = xlogWriter.Flush(); err != nil {
-		return err
-	}
-
-	if err = xlog.Close(); err != nil {
-		return err
-	}
 
 	logger.Info("dump finished")
 
-	logger.Info("stop all")
-	app.stopAll()
+	logger.Info("stop listeners")
+
+	stopped := make(chan struct{})
+
+	go func() {
+		app.stopListeners()
+
+		if err := xlogWriter.Flush(); err != nil {
+			logger.Info("xlog flush failed", zap.Error(err))
+			return
+		}
+
+		if err := xlog.Close(); err != nil {
+			logger.Info("xlog close failed", zap.Error(err))
+			return
+		}
+
+		close(stopped)
+	}()
+
+	select {
+	case <-time.After(5 * time.Second):
+		logger.Info("stop listeners timeout, force stop daemon")
+	case <-stopped:
+		logger.Info("listeners stopped")
+	}
+
+	// logger.Info("stop all")
+	// app.stopAll()
 
 	return nil
 }
