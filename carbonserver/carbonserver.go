@@ -198,6 +198,7 @@ type CarbonserverListener struct {
 	tcpListener       *net.TCPListener
 	logger            *zap.Logger
 	accessLogger      *zap.Logger
+	graphiteweb10     bool
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -244,6 +245,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		accessLogger:      zapwriter.Logger("access"),
 		findCache:         queryCache{ec: expirecache.New(0)},
 		trigramIndex:      true,
+		graphiteweb10:     false,
 	}
 }
 
@@ -279,6 +281,9 @@ func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 }
 func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 	listener.findCacheEnabled = enabled
+}
+func (listener *CarbonserverListener) SetGraphiteWeb10(enabled bool) {
+	listener.graphiteweb10 = enabled
 }
 
 func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
@@ -915,14 +920,17 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 
 		for i, p := range files {
 			m = make(map[string]interface{})
-			// graphite 0.9.x
-			m["metric_path"] = p
-			m["isLeaf"] = leafs[i]
+			if listener.graphiteweb10 {
+				// graphite master
+				m["path"] = p
+				m["is_leaf"] = leafs[i]
+				m["intervals"] = intervals
+			} else {
+				// graphite 0.9.x
+				m["metric_path"] = p
+				m["isLeaf"] = leafs[i]
+			}
 
-			// graphite master
-			m["path"] = p
-			m["is_leaf"] = leafs[i]
-			m["intervals"] = intervals
 			metrics = append(metrics, m)
 		}
 		var buf bytes.Buffer
