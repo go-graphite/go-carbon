@@ -1486,7 +1486,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 }
 
 func (listener *CarbonserverListener) Stop() error {
-	listener.exitChan <- struct{}{}
+	close(listener.exitChan)
 	listener.tcpListener.Close()
 	return nil
 }
@@ -1500,9 +1500,9 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		zap.String("scanFrequency", listener.scanFrequency.String()),
 	)
 
+	listener.exitChan = make(chan struct{})
 	if listener.trigramIndex && listener.scanFrequency != 0 {
 		force := make(chan struct{})
-		listener.exitChan = make(chan struct{})
 		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), force, listener.exitChan)
 		force <- struct{}{}
 	}
