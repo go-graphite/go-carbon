@@ -165,9 +165,12 @@ func (app *App) stopListeners() {
 	}
 
 	if app.Carbonserver != nil {
-		app.Carbonserver.Stop()
+		carbonserver := app.Carbonserver
+		go func() {
+			carbonserver.Stop()
+			logger.Debug("carbonserver stopped")
+		}()
 		app.Carbonserver = nil
-		logger.Debug("carbonserver stopped")
 	}
 }
 
