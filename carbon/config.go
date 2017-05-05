@@ -106,6 +106,7 @@ type carbonserverConfig struct {
 	Buckets           int       `toml:"buckets"`
 	MaxGlobs          int       `toml:"max-globs"`
 	MetricsAsCounters bool      `toml:"metrics-as-counters"`
+	TrigramIndex      bool      `toml:"trigram-index"`
 }
 
 type pprofConfig struct {
@@ -200,6 +201,7 @@ func NewConfig() *Config {
 			QueryCacheEnabled: true,
 			QueryCacheSizeMB:  0,
 			FindCacheEnabled:  true,
+			TrigramIndex:      true,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

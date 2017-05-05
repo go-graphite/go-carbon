@@ -137,30 +137,41 @@ enabled = true
 read-timeout = "30s"
 
 [carbonserver]
+# Please NOTE: carbonserver is not intended to fully replace graphite-web
+# It acts as a "REMOTE_STORAGE" for graphite-web or carbonzipper/carbonapi
 listen = "127.0.0.1:8080"
 # Carbonserver support is still experimental and may contain bugs
 # Or be incompatible with github.com/grobian/carbonserver
 enabled = false
 # Buckets to track response times
 buckets = 10
-# Maximum amount of globs in a single metric
-max-globs = 100
 # carbonserver-specific metrics will be sent as counters
 # For compatibility with grobian/carbonserver
 metrics-as-counters = false
 # Read and Write timeouts for HTTP server
 read-timeout = "60s"
 write-timeout = "60s"
-# carbonserver keeps track of all available whisper files
-# in memory. This determines how often it will check FS
-# for new metrics.
-scan-frequency = "5m0s"
 # Enable /render cache, it will cache the result for 1 minute
 query-cache-enabled = true
 # 0 for unlimited
 query-cache-size-mb = 0
 # Enable /metrics/find cache, it will cache the result for 5 minutes
 find-cache-enabled = true
+# Control trigram index
+#  This index is used to speed-up /find requests
+#  However, it will lead to increased memory consumption
+#  Estimated memory consumption is approx. 500 bytes per each metric on disk
+#  Another drawback is that it will recreate index every scan-frequency interval
+#  All new/deleted metrics will still be searchable until index is recreated
+trigram-index = true
+# carbonserver keeps track of all available whisper files
+# in memory. This determines how often it will check FS
+# for new or deleted metrics.
+scan-frequency = "5m0s"
+# Maximum amount of globs in a single metric in index
+# This value is used to speed-up /find requests with
+# a lot of globs, but will lead to increased memory consumption
+max-globs = 100
 
 
 [dump]
@@ -234,8 +245,10 @@ With settings above applied, best write-strategy to use is "noop"
 * common: Logging refactored. Format changed to structured JSON. Added support of multiple logging handlers with separate output, level and encoding
 * dump/restore: New dump format
 * carbonserver: [feature] IdleTimeout is now configurable in carbonserver part
-* carbonserver: [feature] support /render query cache (query-cache-* options in config file)
-* carbonserver: [feature] support /metrics/find cache (find-cache-* option in config file)
+* carbonserver: [feature] support /render query cache (query-cache-\* options in config file)
+* carbonserver: [feature] support /metrics/find cache (find-cache-\* option in config file)
+* carbonserver: [feature] support /metrics/details handler, that returns information about metrics (require enabled trigram-index)
+* carbonserver: [feature] Add config option to disable trigram index (before that to disable index you should set scan-interval to 0)
 * carbonserver: [fix] fix #146 (metrics_known was broken if metrics were not sent as counters)
 
 ##### version 0.9.1

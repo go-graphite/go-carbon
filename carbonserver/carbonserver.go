@@ -44,8 +44,8 @@ import (
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
 	"github.com/lomik/go-carbon/helper"
-	"github.com/lomik/go-carbon/helper/stat"
 	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
+	"github.com/lomik/go-carbon/helper/stat"
 	"github.com/lomik/go-carbon/points"
 	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
@@ -103,7 +103,7 @@ type fetchResponse struct {
 	metricsFetched int
 	valuesFetched  int
 	memoryUsed     int
-	metrics []string
+	metrics        []string
 }
 
 var TraceHeaders = map[string]string{
@@ -162,6 +162,13 @@ func (q *QueryItem) FetchOrLock() (interface{}, bool) {
 	return q.Data.Load(), true
 }
 
+func (q *QueryItem) StoreAbort() {
+	oldChan := q.QueryFinished
+	q.QueryFinished = make(chan struct{})
+	close(oldChan)
+	atomic.StoreUint64(&q.Flags, 0)
+}
+
 func (q *QueryItem) StoreAndUnlock(data interface{}) {
 	q.Data.Store(data)
 	atomic.StoreUint64(&q.Flags, DataIsAvailable)
@@ -197,6 +204,7 @@ type CarbonserverListener struct {
 	queryCache        queryCache
 	findCacheEnabled  bool
 	findCache         queryCache
+	trigramIndex      bool
 
 	fileIdx atomic.Value
 
@@ -211,21 +219,20 @@ type metricDetailsFlat struct {
 }
 
 type jsonMetricDetailsResponse struct {
-	Metrics []metricDetailsFlat
-	FreeSpace uint64
+	Metrics    []metricDetailsFlat
+	FreeSpace  uint64
 	TotalSpace uint64
 }
-
 
 type fileIndex struct {
 	sync.Mutex
 
-	idx        trigram.Index
-	files      []string
-	details    map[string]*pb.MetricDetails
+	idx             trigram.Index
+	files           []string
+	details         map[string]*pb.MetricDetails
 	accessedMetrics map[string]struct{}
-	freeSpace  uint64
-	totalSpace uint64
+	freeSpace       uint64
+	totalSpace      uint64
 }
 
 func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *CarbonserverListener {
@@ -236,6 +243,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		logger:            zapwriter.Logger("carbonserver"),
 		accessLogger:      zapwriter.Logger("access"),
 		findCache:         queryCache{ec: expirecache.New(0)},
+		trigramIndex:      true,
 	}
 }
 
@@ -271,6 +279,10 @@ func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 }
 func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 	listener.findCacheEnabled = enabled
+}
+
+func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
+	listener.trigramIndex = enabled
 }
 
 func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
@@ -328,11 +340,11 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 				files = append(files, trimmedName)
 				if hasSuffix {
 					metricsKnown++
-					trimmedName = strings.Replace(trimmedName[1 : len(trimmedName)-4], "/", ".", -1)
+					trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
 					details[trimmedName] = &pb.MetricDetails{
-						Size_: i.RealSize,
+						Size_:   i.RealSize,
 						ModTime: i.MTime,
-						ATime: i.ATime,
+						ATime:   i.ATime,
 					}
 				}
 			}
@@ -388,11 +400,11 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 		rdTimeUpdateRuntime := time.Since(tl)
 
 		listener.UpdateFileIndex(&fileIndex{
-			idx:idx,
-			files: files,
-			details: details,
-			freeSpace: freeSpace,
-			totalSpace: totalSpace,
+			idx:             idx,
+			files:           files,
+			details:         details,
+			freeSpace:       freeSpace,
+			totalSpace:      totalSpace,
 			accessedMetrics: accessedMetrics,
 		})
 
@@ -410,10 +422,12 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 
 func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []bool) {
 	var useGlob bool
+	logger := zapwriter.Logger("carbonserver")
 
 	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
 		useGlob = true
 	}
+	logger = logger.With(zap.Bool("use_glob", useGlob))
 
 	/* things to glob:
 	 * - carbon.relays  -> carbon.relays
@@ -429,6 +443,9 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	var globs []string
 	if !strings.HasSuffix(query, "*") {
 		globs = append(globs, query+".wsp")
+		logger.Debug("appending to globs",
+			zap.Strings("globs", globs),
+		)
 	}
 	globs = append(globs, query)
 	// TODO(dgryski): move this loop into its own function + add tests
@@ -472,6 +489,11 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 
 	fidx := listener.CurrentFileIndex()
 
+	fallbackToFS := false
+	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) != 0) {
+		fallbackToFS = true
+	}
+
 	if fidx != nil && !useGlob {
 		// use the index
 		docs := make(map[trigram.DocID]struct{})
@@ -508,7 +530,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	// Not an 'else' clause because the trigram-searching code might want
 	// to fall back to the file-system glob
 
-	if useGlob || fidx == nil {
+	if useGlob || fallbackToFS {
 		// no index or we were asked to hit the filesystem
 		for _, g := range globs {
 			nfiles, err := filepath.Glob(listener.whisperData + "/" + g)
@@ -604,19 +626,19 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 	switch format {
 	case "json":
 		response := jsonMetricDetailsResponse{
-			FreeSpace: fidx.freeSpace,
+			FreeSpace:  fidx.freeSpace,
 			TotalSpace: fidx.totalSpace,
 		}
 		for m, v := range fidx.details {
 			response.Metrics = append(response.Metrics, metricDetailsFlat{
-				Name: m,
+				Name:          m,
 				MetricDetails: v,
 			})
 		}
 		b, err = json.Marshal(response)
 	case "protobuf", "protobuf3":
 		response := &pb.MetricDetailsResponse{
-			Metrics:  fidx.details,
+			Metrics:    fidx.details,
 			FreeSpace:  fidx.freeSpace,
 			TotalSpace: fidx.totalSpace,
 		}
@@ -784,8 +806,12 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 			logger.Debug("find cache miss")
 			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
 			response, err = listener.findMetrics(logger, t0, format, query)
-			item.StoreAndUnlock(response)
-		} else {
+			if err != nil {
+				item.StoreAbort()
+			} else {
+				item.StoreAndUnlock(response)
+			}
+		} else if res != nil {
 			logger.Debug("query cache hit")
 			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
 			response = res.(*findResponse)
@@ -824,6 +850,8 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	)
 	return
 }
+
+var findMetricsNoMetricsError = fmt.Errorf("no metrics available for this query")
 
 func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Time, format, name string) (*findResponse, error) {
 	var result findResponse
@@ -872,6 +900,10 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 				zap.Error(err),
 			)
 			return nil, err
+		} else {
+			if len(response.Matches) == 0 {
+				err = findMetricsNoMetricsError
+			}
 		}
 		return &result, err
 	} else if format == "pickle" {
@@ -898,7 +930,6 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 		pEnc.Encode(metrics)
 		return &findResponse{buf.Bytes(), "application/pickle", len(files)}, nil
 	}
-	// This should not happen!
 	return nil, nil
 }
 
@@ -1040,7 +1071,11 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 			response, err = listener.prepareData(format, metric, fromTime, untilTime)
-			item.StoreAndUnlock(response)
+			if err != nil {
+				item.StoreAbort()
+			} else {
+				item.StoreAndUnlock(response)
+			}
 		} else {
 			logger.Debug("query cache hit")
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
@@ -1457,7 +1492,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		zap.String("scanFrequency", listener.scanFrequency.String()),
 	)
 
-	if listener.scanFrequency != 0 {
+	if listener.trigramIndex && listener.scanFrequency != 0 {
 		force := make(chan struct{})
 		listener.exitChan = make(chan struct{})
 		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), force, listener.exitChan)
