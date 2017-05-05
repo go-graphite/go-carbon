@@ -140,24 +140,6 @@ func (app *App) ReloadConfig() error {
 func (app *App) stopListeners() {
 	logger := zapwriter.Logger("app")
 
-	if app.TCP != nil {
-		app.TCP.Stop()
-		app.TCP = nil
-		logger.Debug("tcp stopped")
-	}
-
-	if app.Pickle != nil {
-		app.Pickle.Stop()
-		app.Pickle = nil
-		logger.Debug("pickle stopped")
-	}
-
-	if app.UDP != nil {
-		app.UDP.Stop()
-		app.UDP = nil
-		logger.Debug("udp stopped")
-	}
-
 	if app.CarbonLink != nil {
 		app.CarbonLink.Stop()
 		app.CarbonLink = nil
@@ -171,6 +153,24 @@ func (app *App) stopListeners() {
 			logger.Debug("carbonserver stopped")
 		}()
 		app.Carbonserver = nil
+	}
+
+	if app.Pickle != nil {
+		app.Pickle.Stop()
+		app.Pickle = nil
+		logger.Debug("pickle stopped")
+	}
+
+	if app.TCP != nil {
+		app.TCP.Stop()
+		app.TCP = nil
+		logger.Debug("tcp stopped")
+	}
+
+	if app.UDP != nil {
+		app.UDP.Stop()
+		app.UDP = nil
+		logger.Debug("udp stopped")
 	}
 }
 
