@@ -94,18 +94,20 @@ type carbonlinkConfig struct {
 }
 
 type carbonserverConfig struct {
-	Listen            string    `toml:"listen"`
-	Enabled           bool      `toml:"enabled"`
-	ReadTimeout       *Duration `toml:"read-timeout"`
-	IdleTimeout       *Duration `toml:"idle-timeout"`
-	WriteTimeout      *Duration `toml:"write-timeout"`
-	ScanFrequency     *Duration `toml:"scan-frequency"`
-	QueryCacheEnabled bool      `toml:"query-cache-enabled"`
-	QueryCacheSizeMB  int       `toml:"query-cache-size-mb"`
-	FindCacheEnabled  bool      `toml:"find-cache-enabled"`
-	Buckets           int       `toml:"buckets"`
-	MaxGlobs          int       `toml:"max-globs"`
-	MetricsAsCounters bool      `toml:"metrics-as-counters"`
+	Listen                  string    `toml:"listen"`
+	Enabled                 bool      `toml:"enabled"`
+	ReadTimeout             *Duration `toml:"read-timeout"`
+	IdleTimeout             *Duration `toml:"idle-timeout"`
+	WriteTimeout            *Duration `toml:"write-timeout"`
+	ScanFrequency           *Duration `toml:"scan-frequency"`
+	QueryCacheEnabled       bool      `toml:"query-cache-enabled"`
+	QueryCacheSizeMB        int       `toml:"query-cache-size-mb"`
+	FindCacheEnabled        bool      `toml:"find-cache-enabled"`
+	Buckets                 int       `toml:"buckets"`
+	MaxGlobs                int       `toml:"max-globs"`
+	MetricsAsCounters       bool      `toml:"metrics-as-counters"`
+	TrigramIndex            bool      `toml:"trigram-index"`
+	GraphiteWeb10StrictMode bool      `toml:"graphtie-web-10-strict-mode"`
 }
 
 type pprofConfig struct {
@@ -197,9 +199,11 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
-			QueryCacheEnabled: true,
-			QueryCacheSizeMB:  0,
-			FindCacheEnabled:  true,
+			QueryCacheEnabled:       true,
+			QueryCacheSizeMB:        0,
+			FindCacheEnabled:        true,
+			TrigramIndex:            true,
+			GraphiteWeb10StrictMode: true,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

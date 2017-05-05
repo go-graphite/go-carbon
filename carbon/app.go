@@ -317,6 +317,8 @@ func (app *App) Start() (err error) {
 		carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
 		carbonserver.SetFindCacheEnabled(conf.Carbonserver.FindCacheEnabled)
 		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
+		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
+		carbonserver.SetGraphiteWeb10(conf.Carbonserver.GraphiteWeb10StrictMode)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
