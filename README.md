@@ -1,3 +1,16 @@
+Table of Contents
+=================
+
+  * [go\-carbon](#go-carbon-)
+      * [Features](#features)
+    * [Performance](#performance)
+    * [Installation](#installation)
+    * [Configuration](#configuration)
+      * [OS tuning](#os-tuning)
+    * [Reported stats](#reported-stats)
+    * [Changelog](#changelog)
+          * [master](#master)
+
 go-carbon [![Build Status](https://travis-ci.org/lomik/go-carbon.svg?branch=master)](https://travis-ci.org/lomik/go-carbon)
 ============
 
