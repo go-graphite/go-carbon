@@ -172,13 +172,13 @@ scan-frequency = "5m0s"
 # This value is used to speed-up /find requests with
 # a lot of globs, but will lead to increased memory consumption
 max-globs = 100
-# graphtie-web-10-mode
+# graphite-web-10-mode
 # Use Graphite-web 1.0 native structs for pickle response
 # This mode will break compatibility with graphite-web 0.9.x
 # If false, carbonserver won't send graphite-web 1.0 specific structs
 # That might degrade performance of the cluster
 # But will be compatible with both graphite-web 1.0 and 0.9.x
-graphtie-web-10-strict-mode = true
+graphite-web-10-strict-mode = true
 
 
 [dump]

@@ -107,7 +107,7 @@ type carbonserverConfig struct {
 	MaxGlobs                int       `toml:"max-globs"`
 	MetricsAsCounters       bool      `toml:"metrics-as-counters"`
 	TrigramIndex            bool      `toml:"trigram-index"`
-	GraphiteWeb10StrictMode bool      `toml:"graphtie-web-10-strict-mode"`
+	GraphiteWeb10StrictMode bool      `toml:"graphite-web-10-strict-mode"`
 }
 
 type pprofConfig struct {
