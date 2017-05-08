@@ -1,0 +1,19 @@
+[Unit]
+Description=go-carbon, a golang implementation of Graphite/Carbon server
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Load env vars from /etc/default/ and /etc/sysconfig/ if they exist.
+# Prefixing the path with '-' makes it try to load, but if the file doesn't
+# exist, it continues onward.
+EnvironmentFile=-/etc/default/go-carbon
+EnvironmentFile=-/etc/sysconfig/go-carbon
+ExecStart=/usr/local/bin/go-carbon -config /usr/local/etc/go-carbon.conf 
+Restart=always
+WorkingDirectory=/
+Nice=0
+
+[Install]
+WantedBy=multi-user.target
