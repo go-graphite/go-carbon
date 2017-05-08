@@ -36,22 +36,6 @@ git clone https://github.com/lomik/go-carbon.git
 cd go-carbon
 make submodules
 make
-
-# build rpm (centos 6)
-make rpm
-
-# build debian/ubuntu package
-make deb
-
-# Install debian dependencies: 
-# You need to have golang >= 1.8 (debian testing, ubuntu 17.04+, or use godeb to get newest version)
-apt-get install golang 
-
-# hand-made install
-sudo install -m 0755 go-carbon /usr/local/bin/go-carbon
-sudo go-carbon --config-print-default > /usr/local/etc/carbon.conf
-sudo vim /usr/local/etc/carbon.conf
-sudo go-carbon --config /usr/local/etc/carbon.conf --daemon
 ```
 
 ## Configuration
