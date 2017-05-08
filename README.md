@@ -68,29 +68,26 @@ Usage of go-carbon:
 
 ```
 [common]
+[common]
 # Run as user. Works only in daemon mode
-user = ""
-# If logfile is empty use stderr
-logfile = "/var/log/go-carbon/go-carbon.log"
-# Logging error level. Valid values: "debug", "info", "warn", "warning", "error"
-log-level = "info"
+user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}"
+# Endpoint for store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
+metric-endpoint = "local"
 # Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
 metric-interval = "1m0s"
-# Endpoint for store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
-metric-endpoint = ""
-# Increase for configuration with multi persisters
-max-cpu = 1
+# Increase for configuration with multi persister workers
+max-cpu = 4
 
 [whisper]
-data-dir = "/data/graphite/whisper/"
+data-dir = "/var/lib/graphite/whisper"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf. Required
-schemas-file = "/data/graphite/schemas"
+schemas-file = "/etc/go-carbon/storage-schemas.conf"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional
-aggregation-file = ""
-# Workers count. Metrics sharded by "crc32(metricName) % workers"
-workers = 1
+aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
+# Worker threads count. Metrics sharded by "crc32(metricName) % workers"
+workers = 8
 # Limits the number of whisper update_many() calls per second. 0 - no limit
 max-updates-per-second = 0
 # Sparse file creation
@@ -124,9 +121,9 @@ buffer-size = 0
 
 [pickle]
 listen = ":2004"
-enabled = true
 # Limit message size for prevent memory overflow
 max-message-size = 67108864
+enabled = true
 # Optional internal queue between receiver and cache
 buffer-size = 0
 
@@ -180,18 +177,46 @@ max-globs = 100
 # But will be compatible with both graphite-web 1.0 and 0.9.x
 graphite-web-10-strict-mode = true
 
-
 [dump]
 # Enable dump/restore function on USR2 signal
 enabled = false
 # Directory for store dump data. Should be writeable for carbon
-path = ""
+path = "/var/lib/graphite/dump/"
 # Restore speed. 0 - unlimited
 restore-per-second = 0
 
 [pprof]
 listen = "localhost:7007"
 enabled = false
+
+# Default logger
+[[logging]]
+# logger name
+# available loggers:
+# * "" - default logger for all messages without configured special logger
+# @TODO
+logger = ""
+# Log output: filename, "stderr", "stdout", "none", "" (same as "stderr")
+file = "/var/log/go-carbon/go-carbon.log"
+# Log level: "debug", "info", "warn", "error", "dpanic", "panic", and "fatal"
+level = "info"
+# Log format: "json", "console", "mixed"
+encoding = "mixed"
+# Log time format: "millis", "nanos", "epoch", "iso8601"
+encoding-time = "iso8601"
+# Log duration format: "seconds", "nanos", "string"
+encoding-duration = "seconds"
+
+# You can define multiply loggers:
+
+# Copy errors to stderr for systemd
+# [[logging]]
+# logger = ""
+# file = "stderr"
+# level = "error"
+# encoding = "mixed"
+# encoding-time = "iso8601"
+# encoding-duration = "seconds"
 ```
 
 ### OS tuning
@@ -248,9 +273,24 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+Breaking changes:
+
+* common: logfile and log-level in common config section are deprecated
+* changed config defaults:
+  * user changed to `carbon`
+  * whisper directory changed to `/var/lib/graphite/whisper/`
+  * schemas config changed to `/etc/go-carbon/storage-schemas.conf`
+* rpm:
+  * binary moved to `/usr/bin/go-carbon`
+  * configs moved to `/etc/go-carbon/`
+* deb:
+  * binary moved to `/usr/bin/go-carbon`
+
+Other changes:
+
 * common: Requires Go 1.8 or newer
 * common: Logging refactored. Format changed to structured JSON. Added support of multiple logging handlers with separate output, level and encoding
-* dump/restore: New dump format
+* dump/restore: New dump format. Added `go-carbon -cat filename` command for printing dump to console. New version of go-carbon can read old dump
 * carbonserver: [feature] IdleTimeout is now configurable in carbonserver part
 * carbonserver: [feature] support /render query cache (query-cache-\* options in config file)
 * carbonserver: [feature] support /metrics/find cache (find-cache-\* option in config file)

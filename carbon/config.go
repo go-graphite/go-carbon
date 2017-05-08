@@ -152,11 +152,11 @@ func NewConfig() *Config {
 			},
 			MetricEndpoint: MetricEndpointLocal,
 			MaxCPU:         1,
-			User:           "",
+			User:           "carbon",
 		},
 		Whisper: whisperConfig{
-			DataDir:             "/data/graphite/whisper/",
-			SchemasFilename:     "/data/graphite/schemas",
+			DataDir:             "/var/lib/graphite/whisper/",
+			SchemasFilename:     "/etc/go-carbon/storage-schemas.conf",
 			AggregationFilename: "",
 			MaxUpdatesPerSecond: 0,
 			Enabled:             true,
@@ -216,7 +216,9 @@ func NewConfig() *Config {
 			Listen:  "localhost:7007",
 			Enabled: false,
 		},
-		Dump:    dumpConfig{},
+		Dump: dumpConfig{
+			Path: "/var/lib/graphite/dump/",
+		},
 		Logging: nil,
 	}
 
