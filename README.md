@@ -1,15 +1,15 @@
 Table of Contents
 =================
 
-  * [go\-carbon](#go-carbon-)
-      * [Features](#features)
-    * [Performance](#performance)
-    * [Installation](#installation)
-    * [Configuration](#configuration)
-      * [OS tuning](#os-tuning)
-    * [Reported stats](#reported-stats)
-    * [Changelog](#changelog)
-          * [master](#master)
+* [Features](#features)
+* [Performance](#performance)
+* [Installation](#installation)
+* [Configuration](#configuration)
+  * [OS tuning](#os-tuning)
+* [Reported stats](#reported-stats)
+* [Changelog](#changelog)
+  * [master](#master)
+
 
 go-carbon [![Build Status](https://travis-ci.org/lomik/go-carbon.svg?branch=master)](https://travis-ci.org/lomik/go-carbon)
 ============
@@ -18,7 +18,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 
 ![Architecture](doc/design.png)
 
-### Features
+## Features
 - Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
 - Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
 - [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
