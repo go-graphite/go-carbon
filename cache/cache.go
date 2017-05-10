@@ -86,12 +86,12 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 	switch s {
 	case "max":
 		c.writeStrategy = MaximumLength
-	case "sort":
+	case "sorted":
 		c.writeStrategy = TimestampOrder
 	case "noop":
 		c.writeStrategy = Noop
 	default:
-		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sort, noop", s)
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sorted, noop", s)
 	}
 	return nil
 }
