@@ -115,34 +115,6 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
 	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
 	helper.SendUint32("queueWriteoutTime", &c.stat.queueWriteoutTime, send)
-
-	// confirm tracker stats
-	notConfirmedUsedTotal := 0
-	notConfirmedLenTotal := 0
-	notConfirmedShardUsedMax := 0
-	notConfirmedShardLenMax := 0
-
-	for i := 0; i < shardCount; i++ {
-		shard := c.data[i]
-		shard.Lock()
-
-		l := len(shard.notConfirmed)
-
-		notConfirmedUsedTotal += shard.notConfirmedUsed
-		notConfirmedLenTotal += l
-		if shard.notConfirmedUsed > notConfirmedShardUsedMax {
-			notConfirmedShardUsedMax = shard.notConfirmedUsed
-		}
-		if l > notConfirmedShardLenMax {
-			notConfirmedShardLenMax = l
-		}
-		shard.Unlock()
-	}
-
-	send("notConfirmedUsedTotal", float64(notConfirmedUsedTotal))
-	send("notConfirmedLenTotal", float64(notConfirmedLenTotal))
-	send("notConfirmedShardUsedMax", float64(notConfirmedShardUsedMax))
-	send("notConfirmedShardLenMax", float64(notConfirmedShardLenMax))
 }
 
 // hash function
