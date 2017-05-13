@@ -312,7 +312,11 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics []string)
 	now := time.Now().Unix()
 	for _, m := range metrics {
 		idx.accessedMetrics[m] = struct{}{}
-		idx.details[m].RdTime = now
+		if _, ok := idx.details[m]; ok {
+			idx.details[m].RdTime = now
+		} else {
+			idx.details[m] = &pb.MetricDetails{RdTime: now}
+		}
 	}
 }
 
