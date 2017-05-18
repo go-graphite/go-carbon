@@ -21,7 +21,9 @@ deploy:
   api_key:
     secure: OO3/6sJknXKzMVK5n188Vy/MYWuWXP7r6Dbl0nnym55340seo8n5e8EjrjC+AJ9LHa7vLM9VsiX6Q8klHHFXJxl9Vj3/Eh5c/WKWMohUSixTsI+M2ZaVJkvz0uwntC2/wgkYQEA4PIJn8/G8mxL74TxffsI/tlkxUXfeWijBmX4=
   file_glob: true
-  file: "*.{deb,rpm}"
+  file:
+    - "*.{deb,rpm}"
+    - "build/go-carbon-*"
   on:
     repo: lomik/go-carbon
     tags: true
