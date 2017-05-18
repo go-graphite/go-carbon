@@ -60,7 +60,7 @@ fpm-rpm:
 fpm-build-deb:
 	fpm -s dir -t deb -n $(NAME) -v $(VERSION) \
 		--deb-priority optional --category admin \
-		--package $(NAME)_$(VERSION)_$(ARCH)_$(INIT).deb \
+		--package $(NAME)_$(VERSION)_$(ARCH).deb \
 		--force \
 		--deb-compression bzip2 \
 		--url https://github.com/lomik/$(NAME) \
@@ -82,7 +82,7 @@ fpm-build-deb:
 
 fpm-build-rpm:
 	fpm -s dir -t rpm -n $(NAME) -v $(VERSION) \
-		--package $(NAME)-$(VERSION)-1.$(INIT).$(FILE_ARCH).rpm \
+		--package $(NAME)-$(VERSION)-1.$(FILE_ARCH).rpm \
 		--force \
 		--rpm-compression bzip2 --rpm-os linux \
 		--url https://github.com/lomik/$(NAME) \
