@@ -50,16 +50,12 @@ image:
 	docker build -t go-carbon .
 
 fpm-deb:
-	make fpm-build-deb ARCH=amd64 INIT=systemd
-	make fpm-build-deb ARCH=386 INIT=systemd
-	make fpm-build-deb ARCH=amd64 INIT=initd
-	make fpm-build-deb ARCH=386 INIT=initd
+	make fpm-build-deb ARCH=amd64
+	make fpm-build-deb ARCH=386
 
 fpm-rpm:
-	make fpm-build-rpm ARCH=amd64 FILE_ARCH=x86_64 INIT=systemd
-	make fpm-build-rpm ARCH=386 FILE_ARCH=386 INIT=systemd
-	make fpm-build-rpm ARCH=amd64 FILE_ARCH=x86_64 INIT=initd
-	make fpm-build-rpm ARCH=386 FILE_ARCH=386 INIT=initd
+	make fpm-build-rpm ARCH=amd64 FILE_ARCH=x86_64
+	make fpm-build-rpm ARCH=386 FILE_ARCH=386
 
 fpm-build-deb:
 	fpm -s dir -t deb -n $(NAME) -v $(VERSION) \
@@ -72,15 +68,17 @@ fpm-build-deb:
 		-m $(MAINTAINER) \
 		--license "MIT" \
 		-a $(ARCH) \
-		--before-install deploy/$(INIT)/scripts/before_install.sh \
-		--before-upgrade deploy/$(INIT)/scripts/before_install.sh \
-		--after-install deploy/$(INIT)/scripts/after_install.sh \
-		--after-upgrade deploy/$(INIT)/scripts/after_install.sh \
-		--config-files /etc/$(NAME)/$(NAME).conf \
+		--before-install deploy/before_install.sh \
+		--before-upgrade deploy/before_install.sh \
+		--after-install deploy/after_install.sh \
+		--after-upgrade deploy/after_install.sh \
+		--config-files /etc/$(NAME)/ \
+		--deb-init deploy/$(NAME).init \
 		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME) \
-		deploy/$(INIT)/root/=/ \
-		deploy/etc/=/etc/$(NAME)/ \
-		build/root/=/
+		deploy/$(NAME).service=/lib/systemd/system/$(NAME).service
+		deploy/$(NAME).conf=/etc/$(NAME)/$(NAME).conf \
+		deploy/storage-schemas.conf=/etc/$(NAME)/storage-schemas.conf \
+		deploy/storage-aggregation.conf=/etc/$(NAME)/storage-aggregation.conf
 
 fpm-build-rpm:
 	fpm -s dir -t rpm -n $(NAME) -v $(VERSION) \
@@ -92,12 +90,14 @@ fpm-build-rpm:
 		-m $(MAINTAINER) \
 		--license "MIT" \
 		-a $(ARCH) \
-		--before-install deploy/$(INIT)/scripts/before_install.sh \
-		--before-upgrade deploy/$(INIT)/scripts/before_install.sh \
-		--after-install deploy/$(INIT)/scripts/after_install.sh \
-		--after-upgrade deploy/$(INIT)/scripts/after_install.sh \
-		--config-files /etc/$(NAME)/$(NAME).conf \
+		--before-install deploy/before_install.sh \
+		--before-upgrade deploy/before_install.sh \
+		--after-install deploy/after_install.sh \
+		--after-upgrade deploy/after_install.sh \
+		--config-files /etc/$(NAME)/ \
+		--rpm-init deploy/$(NAME).init \
 		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME) \
-		deploy/$(INIT)/root/=/ \
-		deploy/etc/=/etc/$(NAME)/ \
-		build/root/=/
+		deploy/$(NAME).service=/lib/systemd/system/$(NAME).service
+		deploy/$(NAME).conf=/etc/$(NAME)/$(NAME).conf \
+		deploy/storage-schemas.conf=/etc/$(NAME)/storage-schemas.conf \
+		deploy/storage-aggregation.conf=/etc/$(NAME)/storage-aggregation.conf
