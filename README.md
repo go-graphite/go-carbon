@@ -288,6 +288,7 @@ Other changes:
 * common: Requires Go 1.8 or newer
 * common: Logging refactored. Format changed to structured JSON. Added support of multiple logging handlers with separate output, level and encoding
 * dump/restore: New dump format. Added `go-carbon -cat filename` command for printing dump to console. New version of go-carbon can read old dump
+* dump/restore: [fix] go-carbon can not stop after dump (with enabled dump and carbonserver)
 * carbonserver: [feature] IdleTimeout is now configurable in carbonserver part
 * carbonserver: [feature] support /render query cache (query-cache-\* options in config file)
 * carbonserver: [feature] support /metrics/find cache (find-cache-\* option in config file)
