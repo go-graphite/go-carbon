@@ -24,7 +24,7 @@ import (
 )
 
 // Version of go-carbon
-const Version = "0.9.1"
+const Version = "0.10.0-beta1"
 
 func httpServe(addr string) (func(), error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
