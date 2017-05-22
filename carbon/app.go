@@ -299,7 +299,7 @@ func (app *App) Start() (err error) {
 	}
 	/* PICKLE end */
 
-	/* CARBONLINK start */
+	/* CARBONSERVER start */
 	if conf.Carbonserver.Enabled {
 		if err != nil {
 			return
@@ -327,7 +327,7 @@ func (app *App) Start() (err error) {
 
 		app.Carbonserver = carbonserver
 	}
-	/* CARBONLINK end */
+	/* CARBONSERVER end */
 
 	/* CARBONLINK start */
 	if conf.Carbonlink.Enabled {
