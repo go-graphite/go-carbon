@@ -65,7 +65,6 @@ Usage of go-carbon:
 
 ```
 [common]
-[common]
 # Run as user. Works only in daemon mode
 user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
