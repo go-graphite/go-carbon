@@ -129,7 +129,9 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		data, err := framedConn.ReadFrame()
-		if err == framing.ErrPrefixLength {
+		if err == io.EOF {
+			return
+		} else if err == framing.ErrPrefixLength {
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("bad message size")
 			return
