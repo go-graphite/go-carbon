@@ -16,7 +16,9 @@ func GetStat(i os.FileInfo) FileStats {
 	}
 
 	s := i.Sys().(*syscall.Stat_t)
-	res.RealSize = s.Blocks * 512
+	if s != nil {
+		res.RealSize = s.Blocks * 512
+	}
 
 	return res
 }

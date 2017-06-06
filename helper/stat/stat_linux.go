@@ -13,10 +13,12 @@ func GetStat(i os.FileInfo) FileStats {
 	}
 
 	s := i.Sys().(*syscall.Stat_t)
-	res.MTime, res.MTimeNS = s.Mtim.Unix()
-	res.ATime, res.ATimeNS = s.Atim.Unix()
-	res.CTime, res.CTimeNS = s.Ctim.Unix()
-	res.RealSize = int64(s.Blocks) * 512
+	if s != nil {
+		res.MTime, res.MTimeNS = s.Mtim.Unix()
+		res.ATime, res.ATimeNS = s.Atim.Unix()
+		res.CTime, res.CTimeNS = s.Ctim.Unix()
+		res.RealSize = int64(s.Blocks) * 512
+	}
 
 	return res
 }
