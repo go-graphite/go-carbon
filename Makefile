@@ -73,10 +73,12 @@ fpm-build-deb:
 		--after-install deploy/after_install.sh \
 		--after-upgrade deploy/after_install.sh \
 		--config-files /etc/$(NAME)/ \
+		--config-files /etc/logrotate.d/$(NAME) \
 		--deb-init deploy/$(NAME).init \
 		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME) \
 		deploy/$(NAME).service=/lib/systemd/system/$(NAME).service \
 		deploy/$(NAME).conf=/etc/$(NAME)/$(NAME).conf \
+		deploy/$(NAME).logrotate=/etc/logrotate.d/$(NAME) \
 		deploy/storage-schemas.conf=/etc/$(NAME)/storage-schemas.conf \
 		deploy/storage-aggregation.conf=/etc/$(NAME)/storage-aggregation.conf
 
@@ -95,9 +97,11 @@ fpm-build-rpm:
 		--after-install deploy/after_install.sh \
 		--after-upgrade deploy/after_install.sh \
 		--config-files /etc/$(NAME)/ \
+		--config-files /etc/logrotate.d/$(NAME) \
 		--rpm-init deploy/$(NAME).init \
 		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME) \
 		deploy/$(NAME).service=/lib/systemd/system/$(NAME).service \
 		deploy/$(NAME).conf=/etc/$(NAME)/$(NAME).conf \
+		deploy/$(NAME).logrotate=/etc/logrotate.d/$(NAME) \
 		deploy/storage-schemas.conf=/etc/$(NAME)/storage-schemas.conf \
 		deploy/storage-aggregation.conf=/etc/$(NAME)/storage-aggregation.conf
