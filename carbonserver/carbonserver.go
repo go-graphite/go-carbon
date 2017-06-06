@@ -321,112 +321,123 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics []string)
 }
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
-	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	for {
-
 		select {
 		case <-exit:
 			return
 		case <-tick:
 		case <-force:
 		}
-		t0 := time.Now()
+		listener.updateFileList(dir)
+	}
+}
 
-		var files []string
-		details := make(map[string]*pb.MetricDetails)
+func (listener *CarbonserverListener) updateFileList(dir string) {
+	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("panic encountered",
+				zap.Stack("stack"),
+				zap.Any("error", r),
+			)
+		}
+	}()
+	t0 := time.Now()
 
-		metricsKnown := uint64(0)
-		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-			if err != nil {
-				logger.Info("error processing", zap.String("path", p), zap.Error(err))
-				return nil
-			}
-			i := stat.GetStat(info)
+	var files []string
+	details := make(map[string]*pb.MetricDetails)
 
-			hasSuffix := strings.HasSuffix(info.Name(), ".wsp")
-			if info.IsDir() || hasSuffix {
-				trimmedName := strings.TrimPrefix(p, listener.whisperData)
-				files = append(files, trimmedName)
-				if hasSuffix {
-					metricsKnown++
-					trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
-					details[trimmedName] = &pb.MetricDetails{
-						Size_:   i.RealSize,
-						ModTime: i.MTime,
-						ATime:   i.ATime,
-					}
+	metricsKnown := uint64(0)
+	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			logger.Info("error processing", zap.String("path", p), zap.Error(err))
+			return nil
+		}
+		i := stat.GetStat(info)
+
+		hasSuffix := strings.HasSuffix(info.Name(), ".wsp")
+		if info.IsDir() || hasSuffix {
+			trimmedName := strings.TrimPrefix(p, listener.whisperData)
+			files = append(files, trimmedName)
+			if hasSuffix {
+				metricsKnown++
+				trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
+				details[trimmedName] = &pb.MetricDetails{
+					Size_:   i.RealSize,
+					ModTime: i.MTime,
+					ATime:   i.ATime,
 				}
 			}
-
-			return nil
-		})
-		if err != nil {
-			logger.Error("error getting file list",
-				zap.Error(err),
-			)
 		}
 
-		var stat syscall.Statfs_t
-		err = syscall.Statfs(dir, &stat)
-		if err != nil {
-			logger.Info("error getting FS Stats",
-				zap.String("dir", dir),
-				zap.Error(err),
-			)
-			continue
-		}
-
-		freeSpace := stat.Bavail * uint64(stat.Bsize)
-		totalSpace := stat.Blocks * uint64(stat.Bsize)
-
-		fileScanRuntime := time.Since(t0)
-		atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
-		atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
-
-		t0 = time.Now()
-		idx := trigram.NewIndex(files)
-
-		indexingRuntime := time.Since(t0)
-		atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
-		indexSize := len(idx)
-
-		pruned := idx.Prune(0.95)
-
-		tl := time.Now()
-		fidx := listener.CurrentFileIndex()
-		accessedMetrics := make(map[string]struct{})
-		if fidx != nil {
-			fidx.Lock()
-			for m := range fidx.accessedMetrics {
-				accessedMetrics[m] = struct{}{}
-			}
-
-			for m := range fidx.accessedMetrics {
-				details[m].RdTime = fidx.details[m].RdTime
-			}
-			fidx.Unlock()
-		}
-		rdTimeUpdateRuntime := time.Since(tl)
-
-		listener.UpdateFileIndex(&fileIndex{
-			idx:             idx,
-			files:           files,
-			details:         details,
-			freeSpace:       freeSpace,
-			totalSpace:      totalSpace,
-			accessedMetrics: accessedMetrics,
-		})
-
-		logger.Info("file list updated",
-			zap.Duration("file_scan_runtime", fileScanRuntime),
-			zap.Duration("indexing_runtime", indexingRuntime),
-			zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
-			zap.Duration("total_runtime", time.Since(t0)),
-			zap.Int("files", len(files)),
-			zap.Int("index_size", indexSize),
-			zap.Int("pruned_trigrams", pruned),
+		return nil
+	})
+	if err != nil {
+		logger.Error("error getting file list",
+			zap.Error(err),
 		)
 	}
+
+	var stat syscall.Statfs_t
+	err = syscall.Statfs(dir, &stat)
+	if err != nil {
+		logger.Info("error getting FS Stats",
+			zap.String("dir", dir),
+			zap.Error(err),
+		)
+		return
+	}
+
+	freeSpace := stat.Bavail * uint64(stat.Bsize)
+	totalSpace := stat.Blocks * uint64(stat.Bsize)
+
+	fileScanRuntime := time.Since(t0)
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
+	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
+
+	t0 = time.Now()
+	idx := trigram.NewIndex(files)
+
+	indexingRuntime := time.Since(t0)
+	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
+	indexSize := len(idx)
+
+	pruned := idx.Prune(0.95)
+
+	tl := time.Now()
+	fidx := listener.CurrentFileIndex()
+	accessedMetrics := make(map[string]struct{})
+	if fidx != nil {
+		fidx.Lock()
+		for m := range fidx.accessedMetrics {
+			accessedMetrics[m] = struct{}{}
+		}
+
+		for m := range fidx.accessedMetrics {
+			details[m].RdTime = fidx.details[m].RdTime
+		}
+		fidx.Unlock()
+	}
+	rdTimeUpdateRuntime := time.Since(tl)
+
+	listener.UpdateFileIndex(&fileIndex{
+		idx:             idx,
+		files:           files,
+		details:         details,
+		freeSpace:       freeSpace,
+		totalSpace:      totalSpace,
+		accessedMetrics: accessedMetrics,
+	})
+
+	logger.Info("file list updated",
+		zap.Duration("file_scan_runtime", fileScanRuntime),
+		zap.Duration("indexing_runtime", indexingRuntime),
+		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
+		zap.Duration("total_runtime", time.Since(t0)),
+		zap.Int("files", len(files)),
+		zap.Int("index_size", indexSize),
+		zap.Int("pruned_trigrams", pruned),
+	)
 }
 
 func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []bool) {
