@@ -60,6 +60,9 @@ func TestParseText(t *testing.T) {
 	assertOk("metric.name 42.15 1422642189\n",
 		OnePoint("metric.name", 42.15, 1422642189))
 
+	assertOk("metric.name 1.003392e+06 1422642189\n",
+		OnePoint("metric.name", 1003392.0, 1422642189))
+
 }
 
 func TestCopyAndEq(t *testing.T) {
