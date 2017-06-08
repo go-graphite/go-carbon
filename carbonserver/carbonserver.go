@@ -510,7 +510,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	fidx := listener.CurrentFileIndex()
 
 	fallbackToFS := false
-	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) != 0) {
+	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) == 0) {
 		fallbackToFS = true
 	}
 
