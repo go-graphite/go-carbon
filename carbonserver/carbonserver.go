@@ -414,7 +414,9 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		}
 
 		for m := range fidx.accessedMetrics {
-			details[m].RdTime = fidx.details[m].RdTime
+			if d, ok := details[m]; ok {
+				d.RdTime = fidx.details[m].RdTime
+			}
 		}
 		fidx.Unlock()
 	}
