@@ -269,6 +269,8 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+
+##### version 0.10.0
 Breaking changes:
 
 * common: logfile and log-level in common config section are deprecated
