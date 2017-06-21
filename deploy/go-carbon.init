@@ -10,7 +10,6 @@ DAEMON="/usr/bin/go-carbon"
 NAME=$(basename $DAEMON)
 PIDFILE="/var/run/go-carbon.pid"
 CONFIG="/etc/go-carbon/go-carbon.conf"
-LOCKFILE=/var/lock/subsys/$NAME
 
 # Avoid using root's TMPDIR
 unset TMPDIR
@@ -134,7 +133,7 @@ start() {
   else
     $DAEMON $ARGS
     RETVAL=$?
-    [ $RETVAL -eq 0 ] && touch $LOCKFILE && success || failure
+    [ $RETVAL -eq 0 ] && success || failure
     echo
   fi
 }
