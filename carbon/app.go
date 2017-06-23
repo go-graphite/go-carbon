@@ -319,6 +319,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
 		carbonserver.SetGraphiteWeb10(conf.Carbonserver.GraphiteWeb10StrictMode)
+		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
