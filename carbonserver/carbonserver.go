@@ -19,6 +19,7 @@ package carbonserver
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +51,9 @@ import (
 	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
 	"github.com/lomik/zapwriter"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/filter"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
 type metricStruct struct {
@@ -199,6 +203,7 @@ type CarbonserverListener struct {
 	logger            *zap.Logger
 	accessLogger      *zap.Logger
 	graphiteweb10     bool
+	internalStatsDir  string
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -212,6 +217,8 @@ type CarbonserverListener struct {
 	metrics     metricStruct
 	exitChan    chan struct{}
 	timeBuckets []uint64
+
+	db *leveldb.DB
 }
 
 type metricDetailsFlat struct {
@@ -228,12 +235,13 @@ type jsonMetricDetailsResponse struct {
 type fileIndex struct {
 	sync.Mutex
 
-	idx             trigram.Index
-	files           []string
-	details         map[string]*pb.MetricDetails
-	accessedMetrics map[string]struct{}
-	freeSpace       uint64
-	totalSpace      uint64
+	idx     trigram.Index
+	files   []string
+	details map[string]*pb.MetricDetails
+
+	accessTimes map[string]int64
+	freeSpace   uint64
+	totalSpace  uint64
 }
 
 func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *CarbonserverListener {
@@ -290,6 +298,10 @@ func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 	listener.trigramIndex = enabled
 }
 
+func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
+	listener.internalStatsDir = dbPath
+}
+
 func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 	p := listener.fileIdx.Load()
 	if p == nil {
@@ -300,7 +312,7 @@ func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 
 func (listener *CarbonserverListener) UpdateFileIndex(fidx *fileIndex) { listener.fileIdx.Store(fidx) }
 
-func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics []string) {
+func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[string]int64) {
 	p := listener.fileIdx.Load()
 	if p == nil {
 		return
@@ -309,13 +321,44 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics []string)
 	idx.Lock()
 	defer idx.Unlock()
 
+	for m, t := range metrics {
+		if _, ok := idx.details[m]; ok {
+			idx.details[m].RdTime = t
+		} else {
+			idx.details[m] = &pb.MetricDetails{RdTime: t}
+		}
+		idx.accessTimes[m] = t
+	}
+}
+
+func (listener *CarbonserverListener) UpdateMetricsAccessTimesByString(metrics []string) {
+	p := listener.fileIdx.Load()
+	if p == nil {
+		return
+	}
+	idx := p.(*fileIndex)
+	idx.Lock()
+	defer idx.Unlock()
+
+	batch := new(leveldb.Batch)
 	now := time.Now().Unix()
 	for _, m := range metrics {
-		idx.accessedMetrics[m] = struct{}{}
 		if _, ok := idx.details[m]; ok {
 			idx.details[m].RdTime = now
 		} else {
 			idx.details[m] = &pb.MetricDetails{RdTime: now}
+		}
+		idx.accessTimes[m] = now
+		buf := make([]byte, 10)
+		binary.PutVarint(buf, now)
+		batch.Put([]byte(m), buf)
+	}
+	if listener.db != nil {
+		err := listener.db.Write(batch, nil)
+		if err != nil {
+			listener.logger.Info("Error updating database",
+				zap.Error(err),
+			)
 		}
 	}
 }
@@ -406,29 +449,32 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 
 	tl := time.Now()
 	fidx := listener.CurrentFileIndex()
-	accessedMetrics := make(map[string]struct{})
+
+	oldAccessTimes := make(map[string]int64)
 	if fidx != nil {
 		fidx.Lock()
-		for m := range fidx.accessedMetrics {
-			accessedMetrics[m] = struct{}{}
-		}
-
-		for m := range fidx.accessedMetrics {
+		for m := range fidx.accessTimes {
 			if d, ok := details[m]; ok {
-				d.RdTime = fidx.details[m].RdTime
+				d.RdTime = fidx.accessTimes[m]
+			} else {
+				delete(fidx.accessTimes, m)
+				if listener.db != nil {
+					listener.db.Delete([]byte(m), nil)
+				}
 			}
 		}
+		oldAccessTimes = fidx.accessTimes
 		fidx.Unlock()
 	}
 	rdTimeUpdateRuntime := time.Since(tl)
 
 	listener.UpdateFileIndex(&fileIndex{
-		idx:             idx,
-		files:           files,
-		details:         details,
-		freeSpace:       freeSpace,
-		totalSpace:      totalSpace,
-		accessedMetrics: accessedMetrics,
+		idx:         idx,
+		files:       files,
+		details:     details,
+		freeSpace:   freeSpace,
+		totalSpace:  totalSpace,
+		accessTimes: oldAccessTimes,
 	})
 
 	logger.Info("file list updated",
@@ -1038,7 +1084,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	listener.UpdateMetricsAccessTimes(response.metrics)
+	listener.UpdateMetricsAccessTimesByString(response.metrics)
 
 	wr.Write(response.data)
 
@@ -1504,7 +1550,70 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 func (listener *CarbonserverListener) Stop() error {
 	close(listener.exitChan)
+	if listener.db != nil {
+		listener.db.Close()
+	}
 	listener.tcpListener.Close()
+	return nil
+}
+
+func removeDirectory(dir string) error {
+	// A small safety check, it doesn't cover all the cases, but will help a little bit in case of misconfiguration
+	switch strings.TrimSuffix(dir, "/") {
+	case "/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/bin", "/usr/sbin", "C:", "C:\\":
+		return fmt.Errorf("Can't remove system directory: %s", dir)
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+
+	files, err := d.Readdirnames(-1)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range files {
+		err = os.RemoveAll(filepath.Join(dir, f))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (listener *CarbonserverListener) initStatsDB() error {
+	var err error
+	if listener.internalStatsDir != "" {
+		o := &opt.Options{
+			Filter: filter.NewBloomFilter(10),
+		}
+
+		listener.db, err = leveldb.OpenFile(listener.internalStatsDir, o)
+		if err != nil {
+			listener.logger.Error("Can't open statistics database",
+				zap.Error(err),
+			)
+
+			err = removeDirectory(listener.internalStatsDir)
+			if err != nil {
+				listener.logger.Error("Can't remove old statistics database",
+					zap.Error(err),
+				)
+				return err
+			}
+
+			listener.db, err = leveldb.OpenFile(listener.internalStatsDir, o)
+			if err != nil {
+				listener.logger.Error("Can't recreate statistics database",
+					zap.Error(err),
+				)
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -1561,6 +1670,53 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		return err
 	}
 
+	if listener.internalStatsDir != "" {
+		err = listener.initStatsDB()
+		if err != nil {
+			logger.Error("Failed to reinitialize statistics database")
+		} else {
+			accessTimes := make(map[string]int64)
+			iter := listener.db.NewIterator(nil, nil)
+			for iter.Next() {
+				// Remember that the contents of the returned slice should not be modified, and
+				// only valid until the next call to Next.
+				key := iter.Key()
+				value := iter.Value()
+
+				v, r := binary.Varint(value)
+				if r <= 0 {
+					logger.Error("Can't parse value",
+						zap.String("key", string(key)),
+					)
+					continue
+				}
+				accessTimes[string(key)] = v
+			}
+			iter.Release()
+			err = iter.Error()
+			if err != nil {
+				logger.Info("Error reading from statistics database",
+					zap.Error(err),
+				)
+				listener.db.Close()
+				err = removeDirectory(listener.internalStatsDir)
+				if err != nil {
+					logger.Error("Failed to reinitialize statistics database",
+						zap.Error(err),
+					)
+				} else {
+					err = listener.initStatsDB()
+					if err != nil {
+						logger.Error("Failed to reinitialize statistics database",
+							zap.Error(err),
+						)
+					}
+				}
+			}
+			listener.UpdateMetricsAccessTimes(accessTimes)
+		}
+	}
+
 	go listener.queryCache.ec.StoppableApproximateCleaner(10*time.Second, listener.exitChan)
 
 	srv := &http.Server{
@@ -1571,6 +1727,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	}
 
 	go srv.Serve(listener.tcpListener)
+
 	return nil
 }
 

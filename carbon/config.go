@@ -108,6 +108,7 @@ type carbonserverConfig struct {
 	MetricsAsCounters       bool      `toml:"metrics-as-counters"`
 	TrigramIndex            bool      `toml:"trigram-index"`
 	GraphiteWeb10StrictMode bool      `toml:"graphite-web-10-strict-mode"`
+	InternalStatsDir        string    `toml:"internal-stats-dir"`
 }
 
 type pprofConfig struct {

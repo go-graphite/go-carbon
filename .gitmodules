@@ -121,3 +121,9 @@
 [submodule "vendor/github.com/lomik/graphite-pickle"]
 	path = vendor/github.com/lomik/graphite-pickle
 	url = https://github.com/lomik/graphite-pickle
+[submodule "vendor/github.com/syndtr/goleveldb"]
+	path = vendor/github.com/syndtr/goleveldb
+	url = https://github.com/syndtr/goleveldb
+[submodule "vendor/github.com/golang/snappy"]
+	path = vendor/github.com/golang/snappy
+	url = https://github.com/golang/snappy
