@@ -12,7 +12,6 @@ import (
 
 type Receiver interface {
 	Stop()
-	Name() string
 	Stat(helper.StatCallback)
 }
 

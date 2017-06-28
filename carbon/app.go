@@ -18,12 +18,17 @@ import (
 	"github.com/lomik/zapwriter"
 )
 
+type NamedReceiver struct {
+	receiver.Receiver
+	Name string
+}
+
 type App struct {
 	sync.RWMutex
 	ConfigFilename string
 	Config         *Config
 	Cache          *cache.Cache
-	Receivers      []receiver.Receiver
+	Receivers      []*NamedReceiver
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
 	Carbonserver   *carbonserver.CarbonserverListener
@@ -157,9 +162,8 @@ func (app *App) stopListeners() {
 
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {
-			name := app.Receivers[i].Name()
 			app.Receivers[i].Stop()
-			logger.Debug("receiver stopped", zap.String("name", name))
+			logger.Debug("receiver stopped", zap.String("name", app.Receivers[i].Name))
 		}
 		app.Receivers = nil
 	}
@@ -246,7 +250,7 @@ func (app *App) Start() (err error) {
 	app.startPersister()
 	/* WHISPER end */
 
-	app.Receivers = make([]receiver.Receiver, 0)
+	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver
 
 	/* UDP start */
@@ -263,7 +267,10 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		app.Receivers = append(app.Receivers, rcv)
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     "udp",
+		})
 	}
 	/* UDP end */
 
@@ -280,7 +287,10 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		app.Receivers = append(app.Receivers, rcv)
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     "tcp",
+		})
 	}
 	/* TCP end */
 
@@ -298,7 +308,10 @@ func (app *App) Start() (err error) {
 			return
 		}
 
-		app.Receivers = append(app.Receivers, rcv)
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     "pickle",
+		})
 	}
 	/* PICKLE end */
 

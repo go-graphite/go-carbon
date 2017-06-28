@@ -30,11 +30,6 @@ type UDP struct {
 	logger             *zap.Logger
 }
 
-// Name returns receiver name (for store internal metrics)
-func (rcv *UDP) Name() string {
-	return rcv.name
-}
-
 type incompleteRecord struct {
 	deadline time.Time
 	data     []byte

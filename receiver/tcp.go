@@ -33,11 +33,6 @@ type TCP struct {
 	logger               *zap.Logger
 }
 
-// Name returns receiver name (for store internal metrics)
-func (rcv *TCP) Name() string {
-	return rcv.name
-}
-
 // Addr returns binded socket address. For bind port 0 in tests
 func (rcv *TCP) Addr() net.Addr {
 	if rcv.listener == nil {

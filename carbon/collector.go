@@ -170,7 +170,7 @@ func NewCollector(app *App) *Collector {
 
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {
-			c.stats = append(c.stats, moduleCallback(app.Receivers[i].Name(), app.Receivers[i]))
+			c.stats = append(c.stats, moduleCallback(app.Receivers[i].Name, app.Receivers[i]))
 		}
 	}
 
