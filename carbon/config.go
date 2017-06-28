@@ -93,6 +93,10 @@ type carbonlinkConfig struct {
 	ReadTimeout *Duration `toml:"read-timeout"`
 }
 
+type receiverConfig struct {
+	DSN string `toml:"dsn"`
+}
+
 type carbonserverConfig struct {
 	Listen                  string    `toml:"listen"`
 	Enabled                 bool      `toml:"enabled"`
@@ -124,17 +128,18 @@ type dumpConfig struct {
 
 // Config ...
 type Config struct {
-	Common       commonConfig       `toml:"common"`
-	Whisper      whisperConfig      `toml:"whisper"`
-	Cache        cacheConfig        `toml:"cache"`
-	Udp          udpConfig          `toml:"udp"`
-	Tcp          tcpConfig          `toml:"tcp"`
-	Pickle       pickleConfig       `toml:"pickle"`
-	Carbonlink   carbonlinkConfig   `toml:"carbonlink"`
-	Carbonserver carbonserverConfig `toml:"carbonserver"`
-	Dump         dumpConfig         `toml:"dump"`
-	Pprof        pprofConfig        `toml:"pprof"`
-	Logging      []zapwriter.Config `toml:"logging"`
+	Common       commonConfig               `toml:"common"`
+	Whisper      whisperConfig              `toml:"whisper"`
+	Cache        cacheConfig                `toml:"cache"`
+	Udp          udpConfig                  `toml:"udp"`
+	Tcp          tcpConfig                  `toml:"tcp"`
+	Pickle       pickleConfig               `toml:"pickle"`
+	Receiver     map[string]*receiverConfig `toml:"receiver"`
+	Carbonlink   carbonlinkConfig           `toml:"carbonlink"`
+	Carbonserver carbonserverConfig         `toml:"carbonserver"`
+	Dump         dumpConfig                 `toml:"dump"`
+	Pprof        pprofConfig                `toml:"pprof"`
+	Logging      []zapwriter.Config         `toml:"logging"`
 }
 
 func NewLoggingConfig() zapwriter.Config {
