@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
@@ -21,9 +23,7 @@ type App struct {
 	ConfigFilename string
 	Config         *Config
 	Cache          *cache.Cache
-	UDP            receiver.Receiver
-	TCP            receiver.Receiver
-	Pickle         receiver.Receiver
+	Receivers      []receiver.Receiver
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
 	Carbonserver   *carbonserver.CarbonserverListener
@@ -155,22 +155,13 @@ func (app *App) stopListeners() {
 		app.Carbonserver = nil
 	}
 
-	if app.Pickle != nil {
-		app.Pickle.Stop()
-		app.Pickle = nil
-		logger.Debug("pickle stopped")
-	}
-
-	if app.TCP != nil {
-		app.TCP.Stop()
-		app.TCP = nil
-		logger.Debug("tcp stopped")
-	}
-
-	if app.UDP != nil {
-		app.UDP.Stop()
-		app.UDP = nil
-		logger.Debug("udp stopped")
+	if app.Receivers != nil {
+		for i := 0; i < len(app.Receivers); i++ {
+			name := app.Receivers[i].Name()
+			app.Receivers[i].Stop()
+			logger.Debug("receiver stopped", zap.String("name", name))
+		}
+		app.Receivers = nil
 	}
 }
 
@@ -255,47 +246,59 @@ func (app *App) Start() (err error) {
 	app.startPersister()
 	/* WHISPER end */
 
+	app.Receivers = make([]receiver.Receiver, 0)
+	var rcv receiver.Receiver
+
 	/* UDP start */
 	if conf.Udp.Enabled {
-		app.UDP, err = receiver.New(
+		rcv, err = receiver.New(
 			"udp://"+conf.Udp.Listen,
 			receiver.OutFunc(core.Add),
 			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
 			receiver.BufferSize(conf.Udp.BufferSize),
+			receiver.Name("udp"),
 		)
 
 		if err != nil {
 			return
 		}
+
+		app.Receivers = append(app.Receivers, rcv)
 	}
 	/* UDP end */
 
 	/* TCP start */
 	if conf.Tcp.Enabled {
-		app.TCP, err = receiver.New(
+		rcv, err = receiver.New(
 			"tcp://"+conf.Tcp.Listen,
 			receiver.OutFunc(core.Add),
 			receiver.BufferSize(conf.Tcp.BufferSize),
+			receiver.Name("tcp"),
 		)
 
 		if err != nil {
 			return
 		}
+
+		app.Receivers = append(app.Receivers, rcv)
 	}
 	/* TCP end */
 
 	/* PICKLE start */
 	if conf.Pickle.Enabled {
-		app.Pickle, err = receiver.New(
+		rcv, err = receiver.New(
 			"pickle://"+conf.Pickle.Listen,
 			receiver.OutFunc(core.Add),
 			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
 			receiver.BufferSize(conf.Pickle.BufferSize),
+			receiver.Name("pickle"),
 		)
 
 		if err != nil {
 			return
 		}
+
+		app.Receivers = append(app.Receivers, rcv)
 	}
 	/* PICKLE end */
 
