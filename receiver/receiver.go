@@ -1,12 +1,14 @@
 package receiver
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
 	"sync"
 
+	"github.com/BurntSushi/toml"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/zapwriter"
@@ -17,10 +19,18 @@ type Receiver interface {
 	Stat(helper.StatCallback)
 }
 
-var protocolMap = map[string](func(name string, dsn string, store func(*points.Points)) (Receiver, error)){}
+type protocolRecord struct {
+	newOptions  func() interface{}
+	newReceiver func(name string, options interface{}, store func(*points.Points)) (Receiver, error)
+}
+
+var protocolMap = map[string]*protocolRecord{}
 var protocolMapMutex sync.Mutex
 
-func Register(protocol string, constructor func(name string, dsn string, store func(*points.Points)) (Receiver, error)) {
+func Register(protocol string,
+	newOptions func() interface{},
+	newReceiver func(name string, options interface{}, store func(*points.Points)) (Receiver, error)) {
+
 	protocolMapMutex.Lock()
 	defer protocolMapMutex.Unlock()
 
@@ -29,24 +39,47 @@ func Register(protocol string, constructor func(name string, dsn string, store f
 		log.Fatalf("protocol %#v already registered", protocol)
 	}
 
-	protocolMap[protocol] = constructor
+	protocolMap[protocol] = &protocolRecord{
+		newOptions:  newOptions,
+		newReceiver: newReceiver,
+	}
 }
 
-func New(name string, dsn string, store func(*points.Points)) (Receiver, error) {
-	u, err := url.Parse(dsn)
-	if err != nil {
-		return nil, err
+func Start(name string, opts map[string]interface{}, store func(*points.Points)) (Receiver, error) {
+	protocolNameObj, ok := opts["protocol"]
+	if !ok {
+		return nil, fmt.Errorf("protocol unspecified")
+	}
+
+	protocolName, ok := protocolNameObj.(string)
+	if !ok {
+		fmt.Errorf("bad protocol option %#v", protocolNameObj)
 	}
 
 	protocolMapMutex.Lock()
-	constructor, ok := protocolMap[u.Scheme]
+	protocol, ok := protocolMap[protocolName]
 	protocolMapMutex.Unlock()
 
 	if !ok {
-		return nil, fmt.Errorf("unknown protocol %#v", u.Scheme)
+		return nil, fmt.Errorf("unknown protocol %#v", protocolName)
 	}
 
-	return constructor(name, dsn, store)
+	delete(opts, protocolName)
+
+	buf := new(bytes.Buffer)
+	encoder := toml.NewEncoder(buf)
+	encoder.Indent = ""
+	if err := encoder.Encode(opts); err != nil {
+		return nil, err
+	}
+
+	options := protocol.newOptions()
+
+	if _, err := toml.Decode(buf.String(), options); err != nil {
+		return nil, err
+	}
+
+	return protocol.newReceiver(name, options, store)
 }
 
 type Option func(Receiver) error
@@ -128,7 +161,7 @@ func Name(name string) Option {
 func blackhole(p *points.Points) {}
 
 // New creates udp, tcp, pickle receiver
-func _New(dsn string, opts ...Option) (Receiver, error) {
+func New(dsn string, opts ...Option) (Receiver, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return nil, err

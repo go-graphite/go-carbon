@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"syscall"
 
+	"github.com/k0kubun/pp"
 	"github.com/lomik/zapwriter"
 	daemon "github.com/sevlyar/go-daemon"
 	"go.uber.org/zap"
@@ -103,6 +104,8 @@ func main() {
 	if *checkConfig {
 		return
 	}
+
+	pp.Println(cfg)
 
 	for i := 0; i < len(cfg.Logging); i++ {
 		if err := zapwriter.PrepareFileForUser(cfg.Logging[i].File, runAsUser); err != nil {
