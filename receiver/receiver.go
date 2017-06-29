@@ -45,7 +45,7 @@ func Register(protocol string,
 	}
 }
 
-func Start(name string, opts map[string]interface{}, store func(*points.Points)) (Receiver, error) {
+func NewNew(name string, opts map[string]interface{}, store func(*points.Points)) (Receiver, error) {
 	protocolNameObj, ok := opts["protocol"]
 	if !ok {
 		return nil, fmt.Errorf("protocol unspecified")
