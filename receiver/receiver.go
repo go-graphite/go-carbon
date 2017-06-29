@@ -2,8 +2,10 @@ package receiver
 
 import (
 	"fmt"
+	"log"
 	"net"
 	"net/url"
+	"sync"
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
@@ -13,6 +15,38 @@ import (
 type Receiver interface {
 	Stop()
 	Stat(helper.StatCallback)
+}
+
+var protocolMap = map[string](func(name string, dsn string, store func(*points.Points)) (Receiver, error)){}
+var protocolMapMutex sync.Mutex
+
+func Register(protocol string, constructor func(name string, dsn string, store func(*points.Points)) (Receiver, error)) {
+	protocolMapMutex.Lock()
+	defer protocolMapMutex.Unlock()
+
+	_, ok := protocolMap[protocol]
+	if ok {
+		log.Fatalf("protocol %#v already registered", protocol)
+	}
+
+	protocolMap[protocol] = constructor
+}
+
+func New(name string, dsn string, store func(*points.Points)) (Receiver, error) {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	protocolMapMutex.Lock()
+	constructor, ok := protocolMap[u.Scheme]
+	protocolMapMutex.Unlock()
+
+	if !ok {
+		return nil, fmt.Errorf("unknown protocol %#v", u.Scheme)
+	}
+
+	return constructor(name, dsn, store)
 }
 
 type Option func(Receiver) error
@@ -94,7 +128,7 @@ func Name(name string) Option {
 func blackhole(p *points.Points) {}
 
 // New creates udp, tcp, pickle receiver
-func New(dsn string, opts ...Option) (Receiver, error) {
+func _New(dsn string, opts ...Option) (Receiver, error) {
 	u, err := url.Parse(dsn)
 	if err != nil {
 		return nil, err
