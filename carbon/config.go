@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/lomik/go-carbon/persister"
+	"github.com/lomik/go-carbon/receiver/udp"
 	"github.com/lomik/zapwriter"
 )
 
@@ -131,7 +132,7 @@ type Config struct {
 	Common       commonConfig                        `toml:"common"`
 	Whisper      whisperConfig                       `toml:"whisper"`
 	Cache        cacheConfig                         `toml:"cache"`
-	Udp          udpConfig                           `toml:"udp"`
+	Udp          *udp.Options                        `toml:"udp"`
 	Tcp          tcpConfig                           `toml:"tcp"`
 	Pickle       pickleConfig                        `toml:"pickle"`
 	Receiver     map[string](map[string]interface{}) `toml:"receiver"`
@@ -173,11 +174,7 @@ func NewConfig() *Config {
 			MaxSize:       1000000,
 			WriteStrategy: "max",
 		},
-		Udp: udpConfig{
-			Listen:        ":2003",
-			Enabled:       true,
-			LogIncomplete: false,
-		},
+		Udp: udp.NewOptions(),
 		Tcp: tcpConfig{
 			Listen:  ":2003",
 			Enabled: true,

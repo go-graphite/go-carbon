@@ -15,6 +15,7 @@ import (
 	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/lomik/go-carbon/receiver/udp"
 	"github.com/lomik/zapwriter"
 )
 
@@ -255,15 +256,7 @@ func (app *App) Start() (err error) {
 
 	/* UDP start */
 	if conf.Udp.Enabled {
-		rcv, err = receiver.New(
-			"udp://"+conf.Udp.Listen,
-			receiver.OutFunc(core.Add),
-			receiver.UDPLogIncomplete(conf.Udp.LogIncomplete),
-			receiver.BufferSize(conf.Udp.BufferSize),
-			receiver.Name("udp"),
-		)
-
-		if err != nil {
+		if rcv, err = udp.NewUDP("udp", conf.Udp, core.Add); err != nil {
 			return
 		}
 

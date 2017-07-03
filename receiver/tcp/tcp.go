@@ -1,4 +1,4 @@
-package receiver
+package tcp
 
 import (
 	"bufio"
@@ -14,23 +14,73 @@ import (
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
 )
 
+func init() {
+	receiver.Register(
+		"tcp",
+		func() interface{} { return NewOptions() },
+		func(name string, options interface{}, store func(*points.Points)) (receiver.Receiver, error) {
+			return NewTCP(name, options.(*Options), store)
+		},
+	)
+
+	receiver.Register(
+		"pickle",
+		func() interface{} { return NewFramingOptions() },
+		func(name string, options interface{}, store func(*points.Points)) (receiver.Receiver, error) {
+			return NewFraming("pickle", name, options.(*FramingOptions), store)
+		},
+	)
+}
+
+type Options struct {
+	Listen     string `toml:"listen"`
+	Enabled    bool   `toml:"enabled"`
+	BufferSize int    `toml:"buffer-size"`
+}
+
+func NewOptions() *Options {
+	return &Options{
+		Listen:     ":2003",
+		Enabled:    true,
+		BufferSize: 0,
+	}
+}
+
+type FramingOptions struct {
+	Listen         string `toml:"listen"`
+	MaxMessageSize uint32 `toml:"max-message-size"`
+	Enabled        bool   `toml:"enabled"`
+	BufferSize     int    `toml:"buffer-size"`
+}
+
+func NewFramingOptions() *FramingOptions {
+	return &FramingOptions{
+		Listen:         ":2003",
+		MaxMessageSize: 67108864, // 64 Mb
+		Enabled:        true,
+		BufferSize:     0,
+	}
+}
+
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
-	out                  func(*points.Points)
-	name                 string // name for store metrics
-	maxPickleMessageSize uint32
-	metricsReceived      uint32
-	errors               uint32
-	active               int32 // counter
-	listener             *net.TCPListener
-	isPickle             bool
-	buffer               chan *points.Points
-	logger               *zap.Logger
+	out             func(*points.Points)
+	name            string // name for store metrics
+	maxMessageSize  uint32
+	metricsReceived uint32
+	errors          uint32
+	active          int32 // counter
+	listener        *net.TCPListener
+	isFraming       bool
+	frameParser     string
+	buffer          chan *points.Points
+	logger          *zap.Logger
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -39,6 +89,65 @@ func (rcv *TCP) Addr() net.Addr {
 		return nil
 	}
 	return rcv.listener.Addr()
+}
+
+func NewTCP(name string, options *Options, store func(*points.Points)) (*TCP, error) {
+	if !options.Enabled {
+		return nil, nil
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", options.Listen)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &TCP{
+		out:    store,
+		name:   name,
+		logger: zapwriter.Logger(name),
+	}
+
+	if options.BufferSize > 0 {
+		r.buffer = make(chan *points.Points, options.BufferSize)
+	}
+
+	err = r.Listen(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return r, err
+}
+
+func NewFraming(parser string, name string, options *FramingOptions, store func(*points.Points)) (*TCP, error) {
+	if !options.Enabled {
+		return nil, nil
+	}
+
+	addr, err := net.ResolveTCPAddr("tcp", options.Listen)
+	if err != nil {
+		return nil, err
+	}
+
+	r := &TCP{
+		out:            store,
+		name:           name,
+		logger:         zapwriter.Logger(name),
+		maxMessageSize: options.MaxMessageSize,
+		isFraming:      true,
+		frameParser:    parser,
+	}
+
+	if options.BufferSize > 0 {
+		r.buffer = make(chan *points.Points, options.BufferSize)
+	}
+
+	err = r.Listen(addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return r, err
 }
 
 func (rcv *TCP) HandleConnection(conn net.Conn) {
@@ -93,7 +202,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 	}
 }
 
-func (rcv *TCP) handlePickle(conn net.Conn) {
+func (rcv *TCP) handleFraming(conn net.Conn) {
 	framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
 	defer func() {
 		if r := recover(); r != nil {
@@ -119,7 +228,7 @@ func (rcv *TCP) handlePickle(conn net.Conn) {
 		}
 	})
 
-	framedConn.MaxFrameSize = uint(rcv.maxPickleMessageSize)
+	framedConn.MaxFrameSize = uint(rcv.maxMessageSize)
 
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
@@ -187,8 +296,8 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 		})
 
 		handler := rcv.HandleConnection
-		if rcv.isPickle {
-			handler = rcv.handlePickle
+		if rcv.isFraming {
+			handler = rcv.handleFraming
 		}
 
 		if rcv.buffer != nil {

@@ -1,4 +1,4 @@
-package receiver
+package tcp
 
 import (
 	"net"
@@ -6,22 +6,9 @@ import (
 	"time"
 
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/go-carbon/receiver"
 	"github.com/stretchr/testify/assert"
 )
-
-func TestStopUDP(t *testing.T) {
-	assert := assert.New(t)
-
-	addr, err := net.ResolveUDPAddr("udp", ":0")
-	assert.NoError(err)
-
-	for i := 0; i < 10; i++ {
-		r, err := New("udp://" + addr.String())
-		assert.NoError(err)
-		addr = r.(*UDP).Addr().(*net.UDPAddr) // listen same port in next iteration
-		r.Stop()
-	}
-}
 
 func TestStopTCP(t *testing.T) {
 	assert := assert.New(t)
@@ -30,7 +17,12 @@ func TestStopTCP(t *testing.T) {
 	assert.NoError(err)
 
 	for i := 0; i < 10; i++ {
-		r, err := New("tcp://" + addr.String())
+		r, err := receiver.New("tcp", map[string]interface{}{
+			"protocol": "tcp",
+			"listen":   addr.String(),
+		},
+			nil,
+		)
 		assert.NoError(err)
 		addr = r.(*TCP).Addr().(*net.TCPAddr) // listen same port in next iteration
 		r.Stop()
@@ -44,7 +36,12 @@ func TestStopPickle(t *testing.T) {
 	assert.NoError(err)
 
 	for i := 0; i < 10; i++ {
-		r, err := New("pickle://" + addr.String())
+		r, err := receiver.New("pickle", map[string]interface{}{
+			"protocol": "pickle",
+			"listen":   addr.String(),
+		},
+			nil,
+		)
 		assert.NoError(err)
 		addr = r.(*TCP).Addr().(*net.TCPAddr) // listen same port in next iteration
 		r.Stop()

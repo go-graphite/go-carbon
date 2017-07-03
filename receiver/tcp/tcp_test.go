@@ -1,4 +1,4 @@
-package receiver
+package tcp
 
 import (
 	"net"
@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/go-carbon/receiver"
 )
 
 type tcpTestCase struct {
@@ -25,14 +26,22 @@ func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 		t.Fatal(err)
 	}
 
-	scheme := "tcp"
-	if isPickle {
-		scheme = "pickle"
-	}
-
 	test.rcvChan = make(chan *points.Points, 128)
 
-	r, err := New(scheme+"://"+addr.String(), OutChan(test.rcvChan))
+	protocol := "tcp"
+	if isPickle {
+		protocol = "pickle"
+	}
+
+	r, err := receiver.New(protocol, map[string]interface{}{
+		"protocol": protocol,
+		"listen":   addr.String(),
+	},
+		func(p *points.Points) {
+			test.rcvChan <- p
+		},
+	)
+
 	if err != nil {
 		t.Fatal(err)
 	}
