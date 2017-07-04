@@ -305,6 +305,19 @@ func (app *App) Start() (err error) {
 	}
 	/* PICKLE end */
 
+	/* CUSTOM RECEIVERS start */
+	for receiverName, receiverOptions := range conf.Receiver {
+		if rcv, err = receiver.New(receiverName, receiverOptions, core.Add); err != nil {
+			return
+		}
+
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     receiverName,
+		})
+	}
+	/* CUSTOM RECEIVERS end */
+
 	/* CARBONSERVER start */
 	if conf.Carbonserver.Enabled {
 		if err != nil {

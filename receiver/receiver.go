@@ -65,7 +65,7 @@ func WithProtocol(options interface{}, protocol string) (map[string]interface{},
 func New(name string, opts map[string]interface{}, store func(*points.Points)) (Receiver, error) {
 	protocolNameObj, ok := opts["protocol"]
 	if !ok {
-		return nil, fmt.Errorf("protocol unspecified")
+		return nil, fmt.Errorf("protocol unspecified for receiver %#v", name)
 	}
 
 	protocolName, ok := protocolNameObj.(string)
