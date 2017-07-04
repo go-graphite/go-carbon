@@ -42,6 +42,26 @@ func Register(protocol string,
 	}
 }
 
+// WithProtocol marshal options to toml, unmarshal to map[string]interface{} and add "protocol" key to them
+func WithProtocol(options interface{}, protocol string) (map[string]interface{}, error) {
+	buf := new(bytes.Buffer)
+	encoder := toml.NewEncoder(buf)
+	encoder.Indent = ""
+	if err := encoder.Encode(options); err != nil {
+		return nil, err
+	}
+
+	res := make(map[string]interface{})
+
+	if _, err := toml.Decode(buf.String(), &res); err != nil {
+		return nil, err
+	}
+
+	res["protocol"] = protocol
+
+	return res, nil
+}
+
 func New(name string, opts map[string]interface{}, store func(*points.Points)) (Receiver, error) {
 	protocolNameObj, ok := opts["protocol"]
 	if !ok {
@@ -50,8 +70,10 @@ func New(name string, opts map[string]interface{}, store func(*points.Points)) (
 
 	protocolName, ok := protocolNameObj.(string)
 	if !ok {
-		fmt.Errorf("bad protocol option %#v", protocolNameObj)
+		return nil, fmt.Errorf("bad protocol option %#v", protocolNameObj)
 	}
+
+	delete(opts, "protocol")
 
 	protocolMapMutex.Lock()
 	protocol, ok := protocolMap[protocolName]
@@ -60,8 +82,6 @@ func New(name string, opts map[string]interface{}, store func(*points.Points)) (
 	if !ok {
 		return nil, fmt.Errorf("unknown protocol %#v", protocolName)
 	}
-
-	delete(opts, protocolName)
 
 	buf := new(bytes.Buffer)
 	encoder := toml.NewEncoder(buf)

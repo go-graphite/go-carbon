@@ -11,6 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/lomik/go-carbon/persister"
+	"github.com/lomik/go-carbon/receiver/tcp"
 	"github.com/lomik/go-carbon/receiver/udp"
 	"github.com/lomik/zapwriter"
 )
@@ -68,26 +69,6 @@ type cacheConfig struct {
 	WriteStrategy string `toml:"write-strategy"`
 }
 
-type udpConfig struct {
-	Listen        string `toml:"listen"`
-	Enabled       bool   `toml:"enabled"`
-	LogIncomplete bool   `toml:"log-incomplete"`
-	BufferSize    int    `toml:"buffer-size"`
-}
-
-type tcpConfig struct {
-	Listen     string `toml:"listen"`
-	Enabled    bool   `toml:"enabled"`
-	BufferSize int    `toml:"buffer-size"`
-}
-
-type pickleConfig struct {
-	Listen         string `toml:"listen"`
-	MaxMessageSize int    `toml:"max-message-size"`
-	Enabled        bool   `toml:"enabled"`
-	BufferSize     int    `toml:"buffer-size"`
-}
-
 type carbonlinkConfig struct {
 	Listen      string    `toml:"listen"`
 	Enabled     bool      `toml:"enabled"`
@@ -133,8 +114,8 @@ type Config struct {
 	Whisper      whisperConfig                       `toml:"whisper"`
 	Cache        cacheConfig                         `toml:"cache"`
 	Udp          *udp.Options                        `toml:"udp"`
-	Tcp          tcpConfig                           `toml:"tcp"`
-	Pickle       pickleConfig                        `toml:"pickle"`
+	Tcp          *tcp.Options                        `toml:"tcp"`
+	Pickle       *tcp.FramingOptions                 `toml:"pickle"`
 	Receiver     map[string](map[string]interface{}) `toml:"receiver"`
 	Carbonlink   carbonlinkConfig                    `toml:"carbonlink"`
 	Carbonserver carbonserverConfig                  `toml:"carbonserver"`
@@ -174,16 +155,9 @@ func NewConfig() *Config {
 			MaxSize:       1000000,
 			WriteStrategy: "max",
 		},
-		Udp: udp.NewOptions(),
-		Tcp: tcpConfig{
-			Listen:  ":2003",
-			Enabled: true,
-		},
-		Pickle: pickleConfig{
-			Listen:         ":2004",
-			Enabled:        true,
-			MaxMessageSize: 67108864, // 64 Mb
-		},
+		Udp:    udp.NewOptions(),
+		Tcp:    tcp.NewOptions(),
+		Pickle: tcp.NewFramingOptions(),
 		Carbonserver: carbonserverConfig{
 			Listen:            "127.0.0.1:8080",
 			Enabled:           false,

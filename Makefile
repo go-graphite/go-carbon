@@ -29,6 +29,8 @@ run-test:
 	$(GO) $(COMMAND) $(MODULE)/persister
 	$(GO) $(COMMAND) $(MODULE)/points
 	$(GO) $(COMMAND) $(MODULE)/receiver
+	$(GO) $(COMMAND) $(MODULE)/receiver/tcp
+	$(GO) $(COMMAND) $(MODULE)/receiver/udp
 
 test:
 	make run-test COMMAND="test"

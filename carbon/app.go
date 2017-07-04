@@ -15,7 +15,6 @@ import (
 	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
-	"github.com/lomik/go-carbon/receiver/udp"
 	"github.com/lomik/zapwriter"
 )
 
@@ -253,10 +252,15 @@ func (app *App) Start() (err error) {
 
 	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver
+	var rcvOptions map[string]interface{}
 
 	/* UDP start */
 	if conf.Udp.Enabled {
-		if rcv, err = udp.NewUDP("udp", conf.Udp, core.Add); err != nil {
+		if rcvOptions, err = receiver.WithProtocol(conf.Udp, "udp"); err != nil {
+			return
+		}
+
+		if rcv, err = receiver.New("udp", rcvOptions, core.Add); err != nil {
 			return
 		}
 
@@ -269,14 +273,11 @@ func (app *App) Start() (err error) {
 
 	/* TCP start */
 	if conf.Tcp.Enabled {
-		rcv, err = receiver.New(
-			"tcp://"+conf.Tcp.Listen,
-			receiver.OutFunc(core.Add),
-			receiver.BufferSize(conf.Tcp.BufferSize),
-			receiver.Name("tcp"),
-		)
+		if rcvOptions, err = receiver.WithProtocol(conf.Tcp, "tcp"); err != nil {
+			return
+		}
 
-		if err != nil {
+		if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
 			return
 		}
 
@@ -289,15 +290,11 @@ func (app *App) Start() (err error) {
 
 	/* PICKLE start */
 	if conf.Pickle.Enabled {
-		rcv, err = receiver.New(
-			"pickle://"+conf.Pickle.Listen,
-			receiver.OutFunc(core.Add),
-			receiver.PickleMaxMessageSize(uint32(conf.Pickle.MaxMessageSize)),
-			receiver.BufferSize(conf.Pickle.BufferSize),
-			receiver.Name("pickle"),
-		)
+		if rcvOptions, err = receiver.WithProtocol(conf.Pickle, "pickle"); err != nil {
+			return
+		}
 
-		if err != nil {
+		if rcv, err = receiver.New("pickle", rcvOptions, core.Add); err != nil {
 			return
 		}
 

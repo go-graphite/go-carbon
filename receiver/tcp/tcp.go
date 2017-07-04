@@ -60,7 +60,7 @@ type FramingOptions struct {
 
 func NewFramingOptions() *FramingOptions {
 	return &FramingOptions{
-		Listen:         ":2003",
+		Listen:         ":2004",
 		MaxMessageSize: 67108864, // 64 Mb
 		Enabled:        true,
 		BufferSize:     0,

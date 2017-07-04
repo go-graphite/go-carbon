@@ -31,7 +31,7 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 
 	test.rcvChan = make(chan *points.Points, 128)
 
-	r, err := receiver.NewNew("udp", map[string]interface{}{
+	r, err := receiver.New("udp", map[string]interface{}{
 		"protocol":       "udp",
 		"log-incomplete": logIncomplete,
 		"listen":         addr.String(),
