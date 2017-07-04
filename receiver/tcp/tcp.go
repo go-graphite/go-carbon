@@ -78,7 +78,7 @@ type TCP struct {
 	active          int32 // counter
 	listener        *net.TCPListener
 	isFraming       bool
-	frameParser     string
+	frameParser     func(body []byte) ([]*points.Points, error)
 	buffer          chan *points.Points
 	logger          *zap.Logger
 }
@@ -135,7 +135,13 @@ func newFraming(parser string, name string, options *FramingOptions, store func(
 		logger:         zapwriter.Logger(name),
 		maxMessageSize: options.MaxMessageSize,
 		isFraming:      true,
-		frameParser:    parser,
+	}
+
+	switch parser {
+	case "pickle":
+		r.frameParser = ParsePickle
+	default:
+		return nil, fmt.Errorf("unknown frame parser %#v", parser)
 	}
 
 	if options.BufferSize > 0 {
@@ -245,7 +251,7 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 			return
 		}
 
-		msgs, err := points.ParsePickle(data)
+		msgs, err := rcv.frameParser(data)
 
 		if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
