@@ -21,7 +21,7 @@ func init() {
 		"udp",
 		func() interface{} { return NewOptions() },
 		func(name string, options interface{}, store func(*points.Points)) (receiver.Receiver, error) {
-			return NewUDP(name, options.(*Options), store)
+			return newUDP(name, options.(*Options), store)
 		},
 	)
 }
@@ -64,7 +64,7 @@ func (rcv *UDP) Addr() net.Addr {
 	return rcv.conn.LocalAddr()
 }
 
-func NewUDP(name string, options *Options, store func(*points.Points)) (*UDP, error) {
+func newUDP(name string, options *Options, store func(*points.Points)) (*UDP, error) {
 	if !options.Enabled {
 		return nil, nil
 	}

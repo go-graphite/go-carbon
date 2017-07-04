@@ -24,7 +24,7 @@ func init() {
 		"tcp",
 		func() interface{} { return NewOptions() },
 		func(name string, options interface{}, store func(*points.Points)) (receiver.Receiver, error) {
-			return NewTCP(name, options.(*Options), store)
+			return newTCP(name, options.(*Options), store)
 		},
 	)
 
@@ -32,7 +32,7 @@ func init() {
 		"pickle",
 		func() interface{} { return NewFramingOptions() },
 		func(name string, options interface{}, store func(*points.Points)) (receiver.Receiver, error) {
-			return NewFraming("pickle", name, options.(*FramingOptions), store)
+			return newFraming("pickle", name, options.(*FramingOptions), store)
 		},
 	)
 }
@@ -91,7 +91,7 @@ func (rcv *TCP) Addr() net.Addr {
 	return rcv.listener.Addr()
 }
 
-func NewTCP(name string, options *Options, store func(*points.Points)) (*TCP, error) {
+func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, error) {
 	if !options.Enabled {
 		return nil, nil
 	}
@@ -119,7 +119,7 @@ func NewTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	return r, err
 }
 
-func NewFraming(parser string, name string, options *FramingOptions, store func(*points.Points)) (*TCP, error) {
+func newFraming(parser string, name string, options *FramingOptions, store func(*points.Points)) (*TCP, error) {
 	if !options.Enabled {
 		return nil, nil
 	}
