@@ -271,6 +271,7 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+* Added support for an unlimited number of receivers
 
 ##### version 0.10.0
 Breaking changes:
