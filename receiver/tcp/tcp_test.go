@@ -16,7 +16,7 @@ type tcpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
-func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
+func newTCPTestCase(t *testing.T, protocol string) *tcpTestCase {
 	test := &tcpTestCase{
 		T: t,
 	}
@@ -27,11 +27,6 @@ func newTCPTestCase(t *testing.T, isPickle bool) *tcpTestCase {
 	}
 
 	test.rcvChan = make(chan *points.Points, 128)
-
-	protocol := "tcp"
-	if isPickle {
-		protocol = "pickle"
-	}
 
 	r, err := receiver.New(protocol, map[string]interface{}{
 		"protocol": protocol,
@@ -80,7 +75,7 @@ func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
 }
 
 func TestTCP1(t *testing.T) {
-	test := newTCPTestCase(t, false)
+	test := newTCPTestCase(t, "tcp")
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\n")
@@ -96,7 +91,7 @@ func TestTCP1(t *testing.T) {
 }
 
 func TestTCP2(t *testing.T) {
-	test := newTCPTestCase(t, false)
+	test := newTCPTestCase(t, "tcp")
 	defer test.Finish()
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
@@ -119,7 +114,7 @@ func TestTCP2(t *testing.T) {
 }
 
 func TestTCPIssue176(t *testing.T) {
-	test := newTCPTestCase(t, false)
+	test := newTCPTestCase(t, "tcp")
 	defer test.Finish()
 
 	test.Send("hello.world 1.096378e+06 1422698155\nmetric.name 1.096378e+06 1422698155\n")

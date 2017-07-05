@@ -49,7 +49,7 @@ func TestStopPickle(t *testing.T) {
 }
 
 func TestStopConnectedTCP(t *testing.T) {
-	test := newTCPTestCase(t, false)
+	test := newTCPTestCase(t, "tcp")
 	defer test.Finish()
 
 	ch := test.rcvChan

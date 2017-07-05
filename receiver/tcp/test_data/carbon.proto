@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+// https://github.com/graphite-project/carbon/blob/master/lib/carbon/carbon.proto
+
+message Point {
+  uint32 timestamp = 1;
+  double value = 2;
+}
+
+message Metric {
+  string metric = 1;
+  repeated Point points = 2;
+}
+
+message Payload {
+  repeated Metric metrics = 1;
+}

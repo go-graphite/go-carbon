@@ -12,16 +12,7 @@ import (
 )
 
 func TestPickle(t *testing.T) {
-	// > python
-	// >>> import pickle, struct
-	// >>> listOfMetricTuples = [("hello.world", (1452200952, 42))]
-	// >>> payload = pickle.dumps(listOfMetricTuples, protocol=2)
-	// >>> header = struct.pack("!L", len(payload))
-	// >>> message = header + payload
-	// >>> print repr(message)
-	// '\x00\x00\x00#\x80\x02]q\x00U\x0bhello.worldq\x01J\xf8\xd3\x8eVK*\x86q\x02\x86q\x03a.'
-
-	test := newTCPTestCase(t, true)
+	test := newTCPTestCase(t, "pickle")
 	defer test.Finish()
 
 	test.Send("\x00\x00\x00#\x80\x02]q\x00U\x0bhello.worldq\x01J\xf8\xd3\x8eVK*\x86q\x02\x86q\x03a.")
@@ -40,7 +31,7 @@ func TestBadPickle(t *testing.T) {
 	defer zapwriter.Test()()
 
 	assert := assert.New(t)
-	test := newTCPTestCase(t, true)
+	test := newTCPTestCase(t, "pickle")
 	defer test.Finish()
 
 	test.Send("\x00\x00\x00#\x80\x02]q\x00q\x0bhello.worldq\x01Rixf8\xd3\x8eVK*\x86q\x02\x86q\x03a.")
@@ -53,7 +44,7 @@ func TestPickleMemoryError(t *testing.T) {
 	defer zapwriter.Test()()
 
 	assert := assert.New(t)
-	test := newTCPTestCase(t, true)
+	test := newTCPTestCase(t, "pickle")
 	defer test.Finish()
 
 	test.Send("\x80\x00\x00\x01") // 2Gb message length
@@ -77,22 +68,18 @@ var (
 		},
 		// [("param1", (1423931224, 60.2), (1423931225, 50.2), (1423931226, 40.2))]
 		testcase{"One metric with multiple datapoints",
-			[]byte("(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\n(I14239" +
-				"31225\nF50.2\ntp3\n(I1423931226\nF40.2\ntp4\ntp5\na."),
+			[]byte("(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\n(I1423931225\nF50.2\ntp3\n(I1423931226\nF40.2\ntp4\ntp5\na."),
 			[]*points.Points{points.OnePoint("param1", 60.2, 1423931224).Add(50.2, 1423931225).Add(40.2, 1423931226)}},
 		// [("param1", (1423931224, 60.2)), ("param2", (1423931224, -15))]
 		testcase{"Multiple metrics with single datapoints",
-			[]byte("(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\ntp3\na(S'param2" +
-				"'\np4\n(I1423931224\nI-15\ntp5\ntp6\na."),
+			[]byte("(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\ntp3\na(S'param2'\np4\n(I1423931224\nI-15\ntp5\ntp6\na."),
 			[]*points.Points{
 				points.OnePoint("param1", 60.2, 1423931224),
 				points.OnePoint("param2", -15, 1423931224),
 			}},
 		// [("param1", (1423931224, 60.2), (1423931284, 42)), ("param2", (1423931224, -15))]
 		testcase{"Complex update",
-			[]byte("(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2" +
-				"\n(I1423931284\nI42\ntp3\ntp4\na(S'param2'\np5\n(I1423931224\nI-15\ntp6" +
-				"\ntp7\na."),
+			[]byte("(lp0\n(S'param1'\np1\n(I1423931224\nF60.2\ntp2\n(I1423931284\nI42\ntp3\ntp4\na(S'param2'\np5\n(I1423931224\nI-15\ntp6\ntp7\na."),
 			[]*points.Points{
 				points.OnePoint("param1", 60.2, 1423931224).Add(42, 1423931284),
 				points.OnePoint("param2", -15, 1423931224),

@@ -35,6 +35,14 @@ func init() {
 			return newFraming("pickle", name, options.(*FramingOptions), store)
 		},
 	)
+
+	receiver.Register(
+		"protobuf",
+		func() interface{} { return NewFramingOptions() },
+		func(name string, options interface{}, store func(*points.Points)) (receiver.Receiver, error) {
+			return newFraming("protobuf", name, options.(*FramingOptions), store)
+		},
+	)
 }
 
 type Options struct {
@@ -140,6 +148,8 @@ func newFraming(parser string, name string, options *FramingOptions, store func(
 	switch parser {
 	case "pickle":
 		r.frameParser = ParsePickle
+	case "protobuf":
+		r.frameParser = ParseProtobuf
 	default:
 		return nil, fmt.Errorf("unknown frame parser %#v", parser)
 	}
