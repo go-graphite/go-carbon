@@ -82,7 +82,7 @@ func ParsePlain(body []byte) ([]*Points, error) {
 	size := len(body)
 	offset := 0
 
-	result := make([]*Points, 4)
+	result := make([]*Points, 0, 4)
 
 MainLoop:
 	for offset < size {
