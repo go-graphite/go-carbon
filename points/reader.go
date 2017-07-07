@@ -2,7 +2,6 @@ package points
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -114,36 +113,4 @@ func ReadFromFile(filename string, callback func(*Points)) error {
 	}
 
 	return ReadPlain(file, callback)
-}
-
-func ParsePlainV0(body []byte) ([]*Points, error) {
-	result := make([]*Points, 4)
-
-	reader := bytes.NewBuffer(body)
-
-	for {
-		line, err := reader.ReadBytes('\n')
-
-		if err != nil && err != io.EOF {
-			return result, err
-		}
-
-		if len(line) == 0 {
-			break
-		}
-
-		if line[len(line)-1] != '\n' {
-			return result, errors.New("unfinished line in file")
-		}
-
-		p, err := ParseText(string(line))
-
-		if err != nil {
-			return result, err
-		}
-
-		result = append(result, p)
-	}
-
-	return result, nil
 }

@@ -1,11 +1,6 @@
-package points
+package parse
 
-import (
-	"bytes"
-	"fmt"
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestRemoveDoubleDot(t *testing.T) {
 	table := [](struct {
@@ -27,7 +22,7 @@ func TestRemoveDoubleDot(t *testing.T) {
 	}
 }
 
-func TestPlainParseLine(t *testing.T) {
+func TestPlainLine(t *testing.T) {
 	table := [](struct {
 		b         string
 		name      string
@@ -51,7 +46,7 @@ func TestPlainParseLine(t *testing.T) {
 	}
 
 	for _, p := range table {
-		name, value, timestamp, err := PlainParseLine([]byte(p.b))
+		name, value, timestamp, err := PlainLine([]byte(p.b))
 		if p.name == "" {
 			// expected error
 			if err == nil {
@@ -67,39 +62,6 @@ func TestPlainParseLine(t *testing.T) {
 			if timestamp != p.timestamp {
 				t.Fatalf("%d != %d", timestamp, p.timestamp)
 			}
-		}
-	}
-}
-
-func BenchmarkParsePlain(b *testing.B) {
-	now := time.Now().Unix()
-
-	msg := fmt.Sprintf("carbon.agents.localhost.cache.size 1412351 %d\n", now)
-	buf1 := new(bytes.Buffer)
-	for i := 0; i < 50; i++ {
-		buf1.Write([]byte(msg))
-	}
-
-	msg2 := fmt.Sprintf("carbon.agents.server.udp.received 42 %d\n", now)
-	buf2 := new(bytes.Buffer)
-	for i := 0; i < 50; i++ {
-		buf2.Write([]byte(msg2))
-	}
-
-	body1 := buf1.Bytes()
-	body2 := buf2.Bytes()
-
-	var err error
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i += 100 {
-		_, err = ParsePlain(body1)
-		if err != nil {
-			b.Fatal(err)
-		}
-		_, err = ParsePlain(body2)
-		if err != nil {
-			b.Fatal(err)
 		}
 	}
 }

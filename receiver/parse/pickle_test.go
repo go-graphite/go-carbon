@@ -77,21 +77,3 @@ var pickles = []testcase{
 func TestPickle(t *testing.T) {
 	run(t, pickles, Pickle)
 }
-
-func BenchmarkPickle(b *testing.B) {
-	goodPickles := make([]testcase, 0)
-	for i := 0; i < len(pickles); i++ {
-		if !pickles[i].wantError {
-			goodPickles = append(goodPickles, pickles[i])
-		}
-	}
-	b.ResetTimer()
-
-	// run function b.N times
-	for n := 0; n < b.N; n++ {
-		_, err := Pickle(goodPickles[n%len(goodPickles)].input)
-		if err != nil {
-			b.Fatalf("Error raised while benchmarking")
-		}
-	}
-}

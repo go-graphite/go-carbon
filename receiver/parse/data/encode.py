@@ -28,6 +28,13 @@ for i, r in enumerate(data):
 	msg = payload.SerializeToString()
 	print "protobuf #{0}: {1} (len={2})".format(i, repr(msg), len(msg))
 
+for i, r in enumerate(data):
+	msg = ""
+	for m in r:
+		for p in m[1:]:
+			msg += "%s %s %s\n" % (m[0], p[1], p[0])
+	print "plain #{0}: {1} (len={2})".format(i, repr(msg), len(msg))
+
 
 listOfMetricTuples = [("hello.world", (1452200952, 42))]
 payload = pickle.dumps(listOfMetricTuples, protocol=2)

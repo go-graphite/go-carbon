@@ -42,21 +42,3 @@ var protobufs = []testcase{
 func TestProtobuf(t *testing.T) {
 	run(t, protobufs, Protobuf)
 }
-
-func BenchmarkProtobuf(b *testing.B) {
-	goodPb := make([]testcase, 0)
-	for i := 0; i < len(protobufs); i++ {
-		if !protobufs[i].wantError {
-			goodPb = append(goodPb, protobufs[i])
-		}
-	}
-	b.ResetTimer()
-
-	// run function b.N times
-	for n := 0; n < b.N; n++ {
-		_, err := Protobuf(goodPb[n%len(goodPb)].input)
-		if err != nil {
-			b.Fatalf("Error raised while benchmarking")
-		}
-	}
-}
