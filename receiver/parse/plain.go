@@ -17,37 +17,6 @@ func unsafeString(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-func HasDoubleDot(p []byte) bool {
-	for i := 1; i < len(p); i += 2 {
-		if p[i] == '.' {
-			if p[i-1] == '.' {
-				return true
-			}
-			if i+1 < len(p) && p[i+1] == '.' {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func RemoveDoubleDot(p []byte) []byte {
-	if !HasDoubleDot(p) {
-		return p
-	}
-
-	shift := 0
-	for i := 1; i < len(p); i++ {
-		if p[i] == '.' && p[i-1-shift] == '.' {
-			shift++
-		} else if shift > 0 {
-			p[i-shift] = p[i]
-		}
-	}
-
-	return p[:len(p)-shift]
-}
-
 func PlainLine(p []byte) ([]byte, float64, int64, error) {
 	i1 := bytes.IndexByte(p, ' ')
 	if i1 < 1 {
@@ -78,7 +47,7 @@ func PlainLine(p []byte) ([]byte, float64, int64, error) {
 		return nil, 0, 0, fmt.Errorf("bad message: %#v", string(p))
 	}
 
-	return RemoveDoubleDot(p[:i1]), value, int64(tsf), nil
+	return p[:i1], value, int64(tsf), nil
 }
 
 func Plain(body []byte) ([]*points.Points, error) {
