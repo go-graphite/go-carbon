@@ -35,7 +35,7 @@ func TestBadPickle(t *testing.T) {
 
 	test.Send("\x00\x00\x00#\x80\x02]q\x00q\x0bhello.worldq\x01Rixf8\xd3\x8eVK*\x86q\x02\x86q\x03a.")
 	time.Sleep(10 * time.Millisecond)
-	assert.Contains(zapwriter.TestString(), "can't unpickle message")
+	assert.Contains(zapwriter.TestString(), "can't parse message")
 }
 
 // https://github.com/lomik/go-carbon/issues/30
