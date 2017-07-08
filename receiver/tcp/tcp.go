@@ -204,16 +204,16 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			break
 		}
 		if len(line) > 0 { // skip empty lines
-			if msg, err := points.ParseText(string(line)); err != nil {
+			name, value, timestamp, err := parse.PlainLine(line)
+			if err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				zapwriter.Logger("parser").Info("parse failed",
+				rcv.logger.Info("parse failed",
 					zap.Error(err),
-					zap.String("protocol", rcv.name),
 					zap.String("peer", conn.RemoteAddr().String()),
 				)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out(msg)
+				rcv.out(points.OnePoint(string(name), value, timestamp))
 			}
 		}
 	}

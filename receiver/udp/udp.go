@@ -13,6 +13,7 @@ import (
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
 )
 
@@ -139,8 +140,6 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 
 	var data *bytes.Buffer
 
-	parserLogger := zapwriter.Logger("parser")
-
 	lines := newIncompleteStorage()
 
 	for {
@@ -184,16 +183,16 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 				break
 			}
 			if len(line) > 0 { // skip empty lines
-				if msg, err := points.ParseText(string(line)); err != nil {
+				name, value, timestamp, err := parse.PlainLine(line)
+				if err != nil {
 					atomic.AddUint32(&rcv.errors, 1)
-					parserLogger.Info("parse failed",
+					rcv.logger.Info("parse failed",
 						zap.Error(err),
-						zap.String("protocol", rcv.name),
 						zap.String("peer", peer.String()),
 					)
 				} else {
 					atomic.AddUint32(&rcv.metricsReceived, 1)
-					rcv.out(msg)
+					rcv.out(points.OnePoint(string(name), value, timestamp))
 				}
 			}
 		}
