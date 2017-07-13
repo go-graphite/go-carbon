@@ -16,6 +16,11 @@ import (
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/zapwriter"
+
+	// register receivers
+	_ "github.com/lomik/go-carbon/receiver/http"
+	_ "github.com/lomik/go-carbon/receiver/tcp"
+	_ "github.com/lomik/go-carbon/receiver/udp"
 )
 
 type NamedReceiver struct {

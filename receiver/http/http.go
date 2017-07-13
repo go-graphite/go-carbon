@@ -13,6 +13,7 @@ import (
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
 )
 
@@ -137,8 +138,12 @@ func (rcv *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var data []*points.Points
 
 	switch r.Header.Get("Content-Type") {
+	case "application/python-pickle":
+		data, err = parse.Pickle(body)
+	case "application/protobuf":
+		data, err = parse.Protobuf(body)
 	default:
-		data, err = points.ParsePlain(body)
+		data, err = parse.Plain(body)
 	}
 
 	if err != nil {

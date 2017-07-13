@@ -31,6 +31,8 @@ run-test:
 	$(GO) $(COMMAND) $(MODULE)/receiver
 	$(GO) $(COMMAND) $(MODULE)/receiver/tcp
 	$(GO) $(COMMAND) $(MODULE)/receiver/udp
+	$(GO) $(COMMAND) $(MODULE)/receiver/parse
+	$(GO) $(COMMAND) $(MODULE)/receiver/http
 
 test:
 	make run-test COMMAND="test"
