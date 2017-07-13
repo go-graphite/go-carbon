@@ -272,7 +272,18 @@ With settings above applied, best write-strategy to use is "noop"
 ## Changelog
 ##### master
 * Added support for an unlimited number of receivers
-* Protobuf protocol was added
+* Protobuf protocol was added. Sample configuration:
+```
+[receiver.protobuf]
+protocol = "protobuf"
+listen = ":2005"
+```
+* HTTP protocol was added. It receives data from POST requests body. Data can be encoded in plain, pickle (Content-Type: application/python-pickle) and protobuf (Content-Type: application/protobuf) formats. Sample configuration:
+```
+[receiver.http]
+protocol = "http"
+listen = ":2006"
+```
 
 ##### version 0.10.0
 Breaking changes:
