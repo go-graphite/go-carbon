@@ -1,11 +1,11 @@
-package tcp
+package parse
 
 import (
 	"github.com/lomik/go-carbon/points"
 	pickle "github.com/lomik/graphite-pickle"
 )
 
-func ParsePickle(body []byte) ([]*points.Points, error) {
+func Pickle(body []byte) ([]*points.Points, error) {
 	result := []*points.Points{}
 
 	err := pickle.ParseMessage(body, func(name string, value float64, timestamp int64) {

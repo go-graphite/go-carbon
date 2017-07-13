@@ -15,6 +15,7 @@ import (
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
 )
@@ -147,9 +148,9 @@ func newFraming(parser string, name string, options *FramingOptions, store func(
 
 	switch parser {
 	case "pickle":
-		r.frameParser = ParsePickle
+		r.frameParser = parse.Pickle
 	case "protobuf":
-		r.frameParser = ParseProtobuf
+		r.frameParser = parse.Protobuf
 	default:
 		return nil, fmt.Errorf("unknown frame parser %#v", parser)
 	}
@@ -203,16 +204,16 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			break
 		}
 		if len(line) > 0 { // skip empty lines
-			if msg, err := points.ParseText(string(line)); err != nil {
+			name, value, timestamp, err := parse.PlainLine(line)
+			if err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				zapwriter.Logger("parser").Info("parse failed",
+				rcv.logger.Info("parse failed",
 					zap.Error(err),
-					zap.String("protocol", rcv.name),
 					zap.String("peer", conn.RemoteAddr().String()),
 				)
 			} else {
 				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out(msg)
+				rcv.out(points.OnePoint(string(name), value, timestamp))
 			}
 		}
 	}
@@ -265,7 +266,7 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 
 		if err != nil {
 			atomic.AddUint32(&rcv.errors, 1)
-			rcv.logger.Info("can't unpickle message",
+			rcv.logger.Info("can't parse message",
 				zap.String("data", string(data)),
 				zap.Error(err),
 			)

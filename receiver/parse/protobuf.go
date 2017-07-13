@@ -1,4 +1,4 @@
-package tcp
+package parse
 
 import (
 	"errors"
@@ -8,7 +8,7 @@ import (
 	"github.com/lomik/go-carbon/points"
 )
 
-func ParseProtobuf(body []byte) ([]*points.Points, error) {
+func Protobuf(body []byte) ([]*points.Points, error) {
 
 	payload := &carbonpb.Payload{}
 	err := proto.Unmarshal(body, payload)
