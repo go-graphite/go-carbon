@@ -53,6 +53,18 @@ image:
 	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
 	docker build -t go-carbon .
 
+package-tree:
+	install -m 0755 -d build/root/lib/systemd/system
+	install -m 0755 -d build/root/etc/$(NAME)
+	install -m 0755 -d build/root/etc/logrotate.d
+	install -m 0755 -d build/root/etc/init.d
+	install -m 0644 deploy/$(NAME).service build/root/lib/systemd/system/$(NAME).service
+	install -m 0644 deploy/$(NAME).conf build/root/etc/$(NAME)/$(NAME).conf
+	install -m 0644 deploy/storage-schemas.conf build/root/etc/$(NAME)/storage-schemas.conf
+	install -m 0644 deploy/storage-aggregation.conf build/root/etc/$(NAME)/storage-aggregation.conf
+	install -m 0644 deploy/$(NAME).logrotate build/root/etc/logrotate.d/$(NAME)
+	install -m 0755 deploy/$(NAME).init build/root/etc/init.d/$(NAME)
+
 fpm-deb:
 	make fpm-build-deb ARCH=amd64
 	make fpm-build-deb ARCH=386
@@ -62,6 +74,8 @@ fpm-rpm:
 	make fpm-build-rpm ARCH=386 FILE_ARCH=386
 
 fpm-build-deb:
+	make package-tree
+	chmod 0755 build/$(NAME)-linux-$(ARCH)
 	fpm -s dir -t deb -n $(NAME) -v $(VERSION) \
 		--deb-priority optional --category admin \
 		--package $(NAME)_$(VERSION)_$(ARCH).deb \
@@ -76,17 +90,13 @@ fpm-build-deb:
 		--before-upgrade deploy/before_install.sh \
 		--after-install deploy/after_install.sh \
 		--after-upgrade deploy/after_install.sh \
-		--config-files /etc/$(NAME)/ \
-		--config-files /etc/logrotate.d/$(NAME) \
-		--deb-init deploy/$(NAME).init \
-		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME) \
-		deploy/$(NAME).service=/lib/systemd/system/$(NAME).service \
-		deploy/$(NAME).conf=/etc/$(NAME)/$(NAME).conf \
-		deploy/$(NAME).logrotate=/etc/logrotate.d/$(NAME) \
-		deploy/storage-schemas.conf=/etc/$(NAME)/storage-schemas.conf \
-		deploy/storage-aggregation.conf=/etc/$(NAME)/storage-aggregation.conf
+		--config-files /etc/ \
+		build/root/=/ \
+		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
 
 fpm-build-rpm:
+	make package-tree
+	chmod 0755 build/$(NAME)-linux-$(ARCH)
 	fpm -s dir -t rpm -n $(NAME) -v $(VERSION) \
 		--package $(NAME)-$(VERSION)-1.$(FILE_ARCH).rpm \
 		--force \
@@ -100,12 +110,6 @@ fpm-build-rpm:
 		--before-upgrade deploy/before_install.sh \
 		--after-install deploy/after_install.sh \
 		--after-upgrade deploy/after_install.sh \
-		--config-files /etc/$(NAME)/ \
-		--config-files /etc/logrotate.d/$(NAME) \
-		--rpm-init deploy/$(NAME).init \
-		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME) \
-		deploy/$(NAME).service=/lib/systemd/system/$(NAME).service \
-		deploy/$(NAME).conf=/etc/$(NAME)/$(NAME).conf \
-		deploy/$(NAME).logrotate=/etc/logrotate.d/$(NAME) \
-		deploy/storage-schemas.conf=/etc/$(NAME)/storage-schemas.conf \
-		deploy/storage-aggregation.conf=/etc/$(NAME)/storage-aggregation.conf
+		--config-files /etc/ \
+		build/root/=/ \
+		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)

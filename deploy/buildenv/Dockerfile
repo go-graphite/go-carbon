@@ -7,4 +7,4 @@ RUN wget -o /dev/null https://storage.googleapis.com/golang/go1.8.3.linux-amd64.
     ln -s /usr/local/go/bin/go /usr/local/bin/go && \
     go get github.com/mitchellh/gox && \
     mv /root/go/bin/gox /usr/local/bin/gox && \
-    gem install fpm
+    gem install fpm -v 1.8.1

@@ -11,7 +11,7 @@ script:
 before_deploy:
 - sudo apt-get install -y rpm ruby ruby-dev
 - go get github.com/mitchellh/gox
-- gem install fpm
+- gem install fpm -v 1.8.1
 - make gox-build
 - make fpm-deb
 - make fpm-rpm
