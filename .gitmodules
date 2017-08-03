@@ -127,3 +127,27 @@
 [submodule "vendor/github.com/golang/snappy"]
 	path = vendor/github.com/golang/snappy
 	url = https://github.com/golang/snappy
+[submodule "vendor/github.com/Shopify/sarama"]
+	path = vendor/github.com/Shopify/sarama
+	url = https://github.com/Shopify/sarama
+[submodule "vendor/github.com/rcrowley/go-metrics"]
+	path = vendor/github.com/rcrowley/go-metrics
+	url = https://github.com/rcrowley/go-metrics
+[submodule "vendor/github.com/davecgh/go-spew"]
+	path = vendor/github.com/davecgh/go-spew
+	url = https://github.com/davecgh/go-spew/
+[submodule "vendor/github.com/eapache/go-resiliency"]
+	path = vendor/github.com/eapache/go-resiliency
+	url = https://github.com/eapache/go-resiliency
+[submodule "vendor/github.com/eapache/go-xerial-snappy"]
+	path = vendor/github.com/eapache/go-xerial-snappy
+	url = https://github.com/eapache/go-xerial-snappy
+[submodule "vendor/github.com/eapache/queue"]
+	path = vendor/github.com/eapache/queue
+	url = https://github.com/eapache/queue
+[submodule "vendor/github.com/pierrec/lz4"]
+	path = vendor/github.com/pierrec/lz4
+	url = https://github.com/pierrec/lz4
+[submodule "vendor/github.com/pierrec/xxHash"]
+	path = vendor/github.com/pierrec/xxHash
+	url = https://github.com/pierrec/xxHash

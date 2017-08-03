@@ -1,6 +1,7 @@
 syntax = "proto3";
 package carbonpb;
 
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
 // https://github.com/graphite-project/carbon/blob/master/lib/carbon/carbon.proto
 
 message Point {
@@ -10,7 +11,7 @@ message Point {
 
 message Metric {
   string metric = 1;
-  repeated Point points = 2;
+  repeated Point points = 2 [(gogoproto.nullable) = false];
 }
 
 message Payload {
