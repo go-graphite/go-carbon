@@ -19,6 +19,7 @@ import (
 
 	// register receivers
 	_ "github.com/lomik/go-carbon/receiver/http"
+	_ "github.com/lomik/go-carbon/receiver/kafka"
 	_ "github.com/lomik/go-carbon/receiver/tcp"
 	_ "github.com/lomik/go-carbon/receiver/udp"
 )

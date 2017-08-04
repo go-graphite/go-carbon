@@ -162,6 +162,34 @@ buffer-size = 0
 # # protobuf (with Content-Type: application/protobuf header) or
 # # pickle (with Content-Type: application/python-pickle header).
 # max-message-size = 67108864
+#
+# [receiver.kafka]
+# protocol = "kafka
+# # This receiver receives data from kafka
+# # You can use Partitions and Topics to do sharding
+# # State is saved in local file to avoid problems with multiple consumers
+#
+# # Encoding of messages
+# # Available options: "plain" (default), "protobuf", "pickle"
+# #   Please note that for "plain" you must pass metrics with leading "\n".
+# #   e.x.
+# #    echo "test.metric $(date +%s) $(date +%s)" | kafkacat -D $'\0' -z snappy -T -b localhost:9092 -t graphite
+# parse-protocol = "protobuf"
+# # Kafka connection parameters
+# brokers = [ "host1:9092", "host2:9092" ]
+# topic = "graphite"
+# partition = 0
+#
+# # Specify how often receiver will try to connect to kafka in case of network problems
+# reconnect-interval = "5m"
+# # How often receiver will ask Kafka for new data (in case there was no messages available to read)
+# fetch-interval = "200ms"
+# 
+# # Path to saved kafka state. Used for restarts
+# state-file = "/var/lib/graphite/kafka.state"
+# # Initial offset, if there is no saved state. Can be relative time or "newest" or "oldest".
+# # In case offset is unavailable (in future, etc) fallback is "oldest"
+# initial-offset = "-30m"
 
 [carbonlink]
 listen = "127.0.0.1:7002"
@@ -324,6 +352,18 @@ listen = ":2005"
 [receiver.http]
 protocol = "http"
 listen = ":2006"
+```
+
+* Kafka protocol was added. It receives data from Kafka and can decode protobuf, plain or pickle messages. You need manually specify message format in the config file. Sample configuration:
+```
+[receiver.kafka]
+protocol = "kafka"
+parse-protocol = "protobuf" # can be also "plain" or "pickle"
+brokers = [ "localhost:9092" ]
+topic = "graphite"
+partition = 0
+state-file = "/var/lib/graphite/kafka.state"
+initial-offset = "-30m" # In case of absent or damaged state file fetch last 30 mins of messages
 ```
 
 ##### version 0.10.0
