@@ -345,6 +345,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
 		carbonserver.SetGraphiteWeb10(conf.Carbonserver.GraphiteWeb10StrictMode)
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
+		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {

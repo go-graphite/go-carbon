@@ -95,6 +95,7 @@ type carbonserverConfig struct {
 	TrigramIndex            bool      `toml:"trigram-index"`
 	GraphiteWeb10StrictMode bool      `toml:"graphite-web-10-strict-mode"`
 	InternalStatsDir        string    `toml:"internal-stats-dir"`
+	Percentiles             []int     `toml:"stats-percentiles"`
 }
 
 type pprofConfig struct {

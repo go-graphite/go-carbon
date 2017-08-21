@@ -88,6 +88,12 @@ type metricStruct struct {
 	QueryCacheMiss       uint64
 	FindCacheHit         uint64
 	FindCacheMiss        uint64
+
+	requestsTimes struct {
+		sync.RWMutex
+
+		list []int64
+	}
 }
 
 const (
@@ -197,6 +203,7 @@ type CarbonserverListener struct {
 	whisperData       string
 	buckets           int
 	maxGlobs          int
+	percentiles       []int
 	scanFrequency     time.Duration
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
@@ -254,6 +261,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		findCache:         queryCache{ec: expirecache.New(0)},
 		trigramIndex:      true,
 		graphiteweb10:     false,
+		percentiles:       []int{100, 99, 98, 95, 75, 50},
 	}
 }
 
@@ -300,6 +308,10 @@ func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
+}
+
+func (listener *CarbonserverListener) SetPercentiles(percentiles []int) {
+	listener.percentiles = percentiles
 }
 
 func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
@@ -1546,6 +1558,29 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	for i := 0; i <= listener.buckets; i++ {
 		sender(fmt.Sprintf("requests_in_%dms_to_%dms", i*100, (i+1)*100), &listener.timeBuckets[i], send)
 	}
+
+	// Computing response percentiles
+	if len(listener.percentiles) > 0 {
+		listener.metrics.requestsTimes.Lock()
+		list := listener.metrics.requestsTimes.list
+		listener.metrics.requestsTimes.list = make([]int64, 0, len(list))
+		listener.metrics.requestsTimes.Unlock()
+		if len(list) == 0 {
+			for _, p := range listener.percentiles {
+				send(fmt.Sprintf("request_time_%vth_percentile_ns", p), 0)
+			}
+		} else {
+			sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
+
+			for _, p := range listener.percentiles {
+				key := int(float64(p)/100*float64(len(list))) - 1
+				if key < 0 {
+					key = 0
+				}
+				send(fmt.Sprintf("request_time_%vth_percentile_ns", p), float64(list[key]))
+			}
+		}
+	}
 }
 
 func (listener *CarbonserverListener) Stop() error {
@@ -1738,6 +1773,12 @@ func (listener *CarbonserverListener) renderTimeBuckets() interface{} {
 func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t time.Duration) {
 
 	ms := t.Nanoseconds() / int64(time.Millisecond)
+
+	if len(listener.percentiles) > 0 {
+		listener.metrics.requestsTimes.Lock()
+		listener.metrics.requestsTimes.list = append(listener.metrics.requestsTimes.list, t.Nanoseconds())
+		listener.metrics.requestsTimes.Unlock()
+	}
 
 	bucket := int(math.Log(float64(ms)) * math.Log10E)
 
