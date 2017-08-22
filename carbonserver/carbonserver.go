@@ -122,6 +122,29 @@ var TraceHeaders = map[string]string{
 	"X-Request-ID":            "request_id",
 }
 
+var statusCodes = map[string][]uint64{
+	"combined": make([]uint64, 5),
+	"find":     make([]uint64, 5),
+	"list":     make([]uint64, 5),
+	"render":   make([]uint64, 5),
+	"details":  make([]uint64, 5),
+	"info":     make([]uint64, 5),
+}
+
+type responseWriterWithStatus struct {
+	http.ResponseWriter
+	statusCodeMajor int
+}
+
+func newResponseWriterWithStatus(w http.ResponseWriter) *responseWriterWithStatus {
+	return &responseWriterWithStatus{w, http.StatusOK/100 - 1}
+}
+
+func (w *responseWriterWithStatus) WriteHeader(code int) {
+	w.statusCodeMajor = (code / 100) - 1
+	w.ResponseWriter.WriteHeader(code)
+}
+
 func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
 	for header, field := range TraceHeaders {
 		v := ctx.Value(header)
@@ -137,7 +160,7 @@ func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
 	return logger
 }
 
-func TraceHandler(h http.HandlerFunc) http.HandlerFunc {
+func TraceHandler(h http.HandlerFunc, globalStatusCodes []uint64, handlerStatusCodes []uint64) http.HandlerFunc {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		for header := range TraceHeaders {
@@ -147,7 +170,14 @@ func TraceHandler(h http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		h.ServeHTTP(rw, req.WithContext(ctx))
+		lrw := newResponseWriterWithStatus(rw)
+
+		h.ServeHTTP(lrw, req.WithContext(ctx))
+
+		if lrw.statusCodeMajor < len(globalStatusCodes) {
+			atomic.AddUint64(&globalStatusCodes[lrw.statusCodeMajor], 1)
+			atomic.AddUint64(&handlerStatusCodes[lrw.statusCodeMajor], 1)
+		}
 	})
 }
 
@@ -1552,6 +1582,12 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("total_alloc", &totalAlloc, send)
 	sender("num_gc", &numGC, send)
 	sender("pause_ns", &pauseNS, send)
+
+	for name, codes := range statusCodes {
+		for i := range codes {
+			sender(fmt.Sprintf("request_codes.%s.%vxx", name, i+1), &codes[i], send)
+		}
+	}
 	for i := 0; i <= listener.buckets; i++ {
 		sender(fmt.Sprintf("requests_in_%dms_to_%dms", i*100, (i+1)*100), &listener.timeBuckets[i], send)
 	}
@@ -1672,21 +1708,23 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 
 	carbonserverMux := http.NewServeMux()
 
-	wrapHandler := func(h http.HandlerFunc) http.HandlerFunc {
+	wrapHandler := func(h http.HandlerFunc, handlerStatusCodes []uint64) http.HandlerFunc {
 		return httputil.TrackConnections(
 			httputil.TimeHandler(
 				TraceHandler(
 					h,
+					statusCodes["combined"],
+					handlerStatusCodes,
 				),
 				listener.bucketRequestTimes,
 			),
 		)
 	}
-	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler))
-	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler))
-	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler))
-	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler))
-	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler))
+	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler, statusCodes["find"]))
+	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler, statusCodes["list"]))
+	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler, statusCodes["details"]))
+	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler, statusCodes["render"]))
+	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler, statusCodes["info"]))
 
 	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
