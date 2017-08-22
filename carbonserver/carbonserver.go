@@ -212,7 +212,8 @@ type CarbonserverListener struct {
 	findCache         queryCache
 	trigramIndex      bool
 
-	fileIdx atomic.Value
+	fileIdx      atomic.Value
+	fileIdxMutex sync.Mutex
 
 	metrics     metricStruct
 	exitChan    chan struct{}
@@ -233,8 +234,6 @@ type jsonMetricDetailsResponse struct {
 }
 
 type fileIndex struct {
-	sync.Mutex
-
 	idx     trigram.Index
 	files   []string
 	details map[string]*pb.MetricDetails
@@ -312,15 +311,15 @@ func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 
 func (listener *CarbonserverListener) UpdateFileIndex(fidx *fileIndex) { listener.fileIdx.Store(fidx) }
 
-func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[string]int64) {
-	p := listener.fileIdx.Load()
-	if p == nil {
+func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[string]int64, initial bool) {
+	idx := listener.CurrentFileIndex()
+	if idx == nil {
 		return
 	}
-	idx := p.(*fileIndex)
-	idx.Lock()
-	defer idx.Unlock()
+	listener.fileIdxMutex.Lock()
+	defer listener.fileIdxMutex.Unlock()
 
+	batch := new(leveldb.Batch)
 	for m, t := range metrics {
 		if _, ok := idx.details[m]; ok {
 			idx.details[m].RdTime = t
@@ -328,32 +327,15 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[strin
 			idx.details[m] = &pb.MetricDetails{RdTime: t}
 		}
 		idx.accessTimes[m] = t
-	}
-}
 
-func (listener *CarbonserverListener) UpdateMetricsAccessTimesByString(metrics []string) {
-	p := listener.fileIdx.Load()
-	if p == nil {
-		return
-	}
-	idx := p.(*fileIndex)
-	idx.Lock()
-	defer idx.Unlock()
-
-	batch := new(leveldb.Batch)
-	now := time.Now().Unix()
-	for _, m := range metrics {
-		if _, ok := idx.details[m]; ok {
-			idx.details[m].RdTime = now
-		} else {
-			idx.details[m] = &pb.MetricDetails{RdTime: now}
+		if !initial && listener.db != nil {
+			buf := make([]byte, 10)
+			binary.PutVarint(buf, t)
+			batch.Put([]byte(m), buf)
 		}
-		idx.accessTimes[m] = now
-		buf := make([]byte, 10)
-		binary.PutVarint(buf, now)
-		batch.Put([]byte(m), buf)
 	}
-	if listener.db != nil {
+
+	if !initial && listener.db != nil {
 		err := listener.db.Write(batch, nil)
 		if err != nil {
 			listener.logger.Info("Error updating database",
@@ -361,6 +343,17 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimesByString(metrics [
 			)
 		}
 	}
+}
+
+func (listener *CarbonserverListener) UpdateMetricsAccessTimesByRequest(metrics []string) {
+	now := time.Now().Unix()
+
+	var accessTimes map[string]int64
+	for _, m := range metrics {
+		accessTimes[m] = now
+	}
+
+	listener.UpdateMetricsAccessTimes(accessTimes, false)
 }
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
@@ -452,7 +445,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 
 	oldAccessTimes := make(map[string]int64)
 	if fidx != nil {
-		fidx.Lock()
+		listener.fileIdxMutex.Lock()
 		for m := range fidx.accessTimes {
 			if d, ok := details[m]; ok {
 				d.RdTime = fidx.accessTimes[m]
@@ -464,7 +457,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 			}
 		}
 		oldAccessTimes = fidx.accessTimes
-		fidx.Unlock()
+		listener.fileIdxMutex.Unlock()
 	}
 	rdTimeUpdateRuntime := time.Since(tl)
 
@@ -697,6 +690,7 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 			FreeSpace:  fidx.freeSpace,
 			TotalSpace: fidx.totalSpace,
 		}
+		listener.fileIdxMutex.Lock()
 		for m, v := range fidx.details {
 			response.Metrics = append(response.Metrics, metricDetailsFlat{
 				Name:          m,
@@ -704,13 +698,16 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 			})
 		}
 		b, err = json.Marshal(response)
+		listener.fileIdxMutex.Unlock()
 	case "protobuf", "protobuf3":
+		listener.fileIdxMutex.Lock()
 		response := &pb.MetricDetailsResponse{
 			Metrics:    fidx.details,
 			FreeSpace:  fidx.freeSpace,
 			TotalSpace: fidx.totalSpace,
 		}
 		b, err = response.Marshal()
+		listener.fileIdxMutex.Unlock()
 	}
 
 	if err != nil {
@@ -1084,7 +1081,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	listener.UpdateMetricsAccessTimesByString(response.metrics)
+	listener.UpdateMetricsAccessTimesByRequest(response.metrics)
 
 	wr.Write(response.data)
 
@@ -1713,7 +1710,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 					}
 				}
 			}
-			listener.UpdateMetricsAccessTimes(accessTimes)
+			listener.UpdateMetricsAccessTimes(accessTimes, true)
 		}
 	}
 
