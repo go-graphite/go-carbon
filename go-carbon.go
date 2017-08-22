@@ -1,6 +1,7 @@
 package main
 
 import (
+	"expvar"
 	"flag"
 	"fmt"
 	"log"
@@ -25,6 +26,8 @@ import (
 
 // Version of go-carbon
 const Version = "0.10.1"
+
+var BuildVersion = "(development version)"
 
 func httpServe(addr string) (func(), error) {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
@@ -160,6 +163,10 @@ func main() {
 		if err != nil {
 			mainLogger.Fatal(err.Error())
 		}
+
+		expvar.NewString("GoVersion").Set(runtime.Version())
+		expvar.NewString("BuildVersion").Set(BuildVersion)
+		expvar.Publish("Config", expvar.Func(func() interface{} { return cfg }))
 	}
 
 	if err = app.Start(); err != nil {
