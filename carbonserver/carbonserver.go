@@ -360,7 +360,7 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[strin
 func (listener *CarbonserverListener) UpdateMetricsAccessTimesByRequest(metrics []string) {
 	now := time.Now().Unix()
 
-	var accessTimes map[string]int64
+	accessTimes := make(map[string]int64)
 	for _, m := range metrics {
 		accessTimes[m] = now
 	}
