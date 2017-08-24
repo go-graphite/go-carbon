@@ -2,6 +2,7 @@ package api
 
 import (
 	"net"
+	"sync/atomic"
 
 	"golang.org/x/net/context"
 
@@ -91,10 +92,16 @@ func (api *Api) CacheQuery(ctx context.Context, req *carbonpb.CacheRequest) (*ca
 		Metrics: make([]*carbonpb.Metric, 0),
 	}
 
+	resMetrics := 0
+	resPoints := 0
+
 	for i := 0; i < len(req.Metrics); i++ {
 		data := api.cache.Get(req.Metrics[i])
 
 		if len(data) > 0 {
+			resMetrics++
+			resPoints += len(data)
+
 			m := &carbonpb.Metric{
 				Metric: req.Metrics[i],
 				Points: make([]*carbonpb.Point, len(data)),
@@ -109,6 +116,11 @@ func (api *Api) CacheQuery(ctx context.Context, req *carbonpb.CacheRequest) (*ca
 			res.Metrics = append(res.Metrics, m)
 		}
 	}
+
+	atomic.AddUint32(&api.stat.cacheRequests, 1)
+	atomic.AddUint32(&api.stat.cacheRequestMetrics, uint32(len(req.Metrics)))
+	atomic.AddUint32(&api.stat.cacheResponseMetrics, uint32(resMetrics))
+	atomic.AddUint32(&api.stat.cacheResponsePoints, uint32(resPoints))
 
 	return res, nil
 }
