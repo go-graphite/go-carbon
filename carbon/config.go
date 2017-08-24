@@ -75,6 +75,11 @@ type carbonlinkConfig struct {
 	ReadTimeout *Duration `toml:"read-timeout"`
 }
 
+type grpcConfig struct {
+	Listen  string `toml:"listen"`
+	Enabled bool   `toml:"enabled"`
+}
+
 type receiverConfig struct {
 	DSN string `toml:"dsn"`
 }
@@ -119,6 +124,7 @@ type Config struct {
 	Pickle       *tcp.FramingOptions                 `toml:"pickle"`
 	Receiver     map[string](map[string]interface{}) `toml:"receiver"`
 	Carbonlink   carbonlinkConfig                    `toml:"carbonlink"`
+	Grpc         grpcConfig                          `toml:"grpc"`
 	Carbonserver carbonserverConfig                  `toml:"carbonserver"`
 	Dump         dumpConfig                          `toml:"dump"`
 	Pprof        pprofConfig                         `toml:"pprof"`
@@ -190,8 +196,12 @@ func NewConfig() *Config {
 				Duration: 30 * time.Second,
 			},
 		},
+		Grpc: grpcConfig{
+			Listen:  "127.0.0.1:7003",
+			Enabled: true,
+		},
 		Pprof: pprofConfig{
-			Listen:  "localhost:7007",
+			Listen:  "127.0.0.1:7007",
 			Enabled: false,
 		},
 		Dump: dumpConfig{

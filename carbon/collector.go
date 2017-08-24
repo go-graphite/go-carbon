@@ -178,6 +178,10 @@ func NewCollector(app *App) *Collector {
 		c.stats = append(c.stats, moduleCallback("persister", app.Persister))
 	}
 
+	if app.Api != nil {
+		c.stats = append(c.stats, moduleCallback("grpc", app.Api))
+	}
+
 	// collector worker
 	c.Go(func(exit chan bool) {
 		ticker := time.NewTicker(c.metricInterval)

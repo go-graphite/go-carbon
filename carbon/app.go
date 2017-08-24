@@ -11,6 +11,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/lomik/go-carbon/api"
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
@@ -33,6 +34,7 @@ type App struct {
 	sync.RWMutex
 	ConfigFilename string
 	Config         *Config
+	Api            *api.Api
 	Cache          *cache.Cache
 	Receivers      []*NamedReceiver
 	CarbonLink     *cache.CarbonlinkListener
@@ -151,6 +153,12 @@ func (app *App) ReloadConfig() error {
 func (app *App) stopListeners() {
 	logger := zapwriter.Logger("app")
 
+	if app.Api != nil {
+		app.Api.Stop()
+		app.Api = nil
+		logger.Debug("api stopped")
+	}
+
 	if app.CarbonLink != nil {
 		app.CarbonLink.Stop()
 		app.CarbonLink = nil
@@ -251,6 +259,24 @@ func (app *App) Start() (err error) {
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 
 	app.Cache = core
+
+	/* API start */
+	if conf.Grpc.Enabled {
+		var grpcAddr *net.TCPAddr
+		grpcAddr, err = net.ResolveTCPAddr("tcp", conf.Grpc.Listen)
+		if err != nil {
+			return
+		}
+
+		grpcApi := api.New(core)
+
+		if err = grpcApi.Listen(grpcAddr); err != nil {
+			return
+		}
+
+		app.Api = grpcApi
+	}
+	/* API end */
 
 	/* WHISPER start */
 	app.startPersister()
