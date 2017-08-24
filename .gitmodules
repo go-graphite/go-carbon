@@ -163,3 +163,6 @@
 [submodule "_vendor/src/golang.org/x/net"]
 	path = _vendor/src/golang.org/x/net
 	url = https://github.com/golang/net
+[submodule "_vendor/src/github.com/lomik/stop"]
+	path = _vendor/src/github.com/lomik/stop
+	url = https://github.com/lomik/stop
