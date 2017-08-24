@@ -9,13 +9,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"go.uber.org/zap"
-
 	"github.com/lomik/go-carbon/cache"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/carbonpb"
 	"github.com/lomik/stop"
-	"github.com/lomik/zapwriter"
 )
 
 // Api receive metrics from GRPC connections
@@ -76,7 +73,8 @@ func (api *Api) Listen(addr *net.TCPAddr) error {
 			defer s.Stop()
 
 			if err := s.Serve(tcpListener); err != nil {
-				zapwriter.Logger("api").Fatal("failed to serve", zap.Error(err))
+				// may be stopped - not error
+				// zapwriter.Logger("api").Fatal("failed to serve", zap.Error(err))
 			}
 
 		})
