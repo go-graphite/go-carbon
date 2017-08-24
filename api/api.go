@@ -102,13 +102,11 @@ func (api *Api) CacheQuery(ctx context.Context, req *carbonpb.CacheRequest) (*ca
 
 			m := &carbonpb.Metric{
 				Metric: req.Metrics[i],
-				Points: make([]*carbonpb.Point, len(data)),
+				Points: make([]carbonpb.Point, len(data)),
 			}
 			for j := 0; j < len(data); j++ {
-				m.Points[j] = &carbonpb.Point{
-					Timestamp: uint32(data[j].Timestamp),
-					Value:     data[j].Value,
-				}
+				m.Points[j].Timestamp = uint32(data[j].Timestamp)
+				m.Points[j].Value = data[j].Value
 			}
 
 			res.Metrics = append(res.Metrics, m)
