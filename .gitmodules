@@ -152,20 +152,20 @@
 	path = vendor/github.com/pierrec/xxHash
 	url = https://github.com/pierrec/xxHash
 [submodule "_vendor/src/google.golang.org/grpc"]
-	path = _vendor/src/google.golang.org/grpc
+	path = vendor/google.golang.org/grpc
 	url = https://github.com/grpc/grpc-go
 [submodule "_vendor/src/github.com/golang/protobuf"]
-	path = _vendor/src/github.com/golang/protobuf
+	path = vendor/github.com/golang/protobuf
 	url = https://github.com/golang/protobuf
 [submodule "_vendor/src/golang.org/x/text"]
-	path = _vendor/src/golang.org/x/text
+	path = vendor/golang.org/x/text
 	url = https://github.com/golang/text
 [submodule "_vendor/src/golang.org/x/net"]
-	path = _vendor/src/golang.org/x/net
+	path = vendor/golang.org/x/net
 	url = https://github.com/golang/net
 [submodule "_vendor/src/github.com/lomik/stop"]
-	path = _vendor/src/github.com/lomik/stop
+	path = vendor/github.com/lomik/stop
 	url = https://github.com/lomik/stop
 [submodule "_vendor/src/google.golang.org/genproto"]
-	path = _vendor/src/google.golang.org/genproto
+	path = vendor/google.golang.org/genproto
 	url = https://github.com/google/go-genproto
