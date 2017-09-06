@@ -21,9 +21,12 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 ## Features
 - Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
 - Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
+- Receive metrics from HTTP
+- Receive metrics from Apache Kafka
 - [storage-schemas.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf)
 - [storage-aggregation.conf](http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf)
 - Carbonlink (requests to cache from graphite-web)
+- Carbonlink-like GRPC api
 - Logging with rotation support (reopen log if it moves)
 - Many persister workers (using many cpu cores)
 - Run as daemon
