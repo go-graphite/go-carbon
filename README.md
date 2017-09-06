@@ -63,7 +63,7 @@ Usage of go-carbon:
   -version=false: Print version
 ```
 
-```
+```toml
 [common]
 # Run as user. Works only in daemon mode
 user = "carbon"
@@ -128,7 +128,7 @@ buffer-size = 0
 # [receiver.<any receiver name>]
 # protocol = "<any supported protocol>"
 # <protocol specific options>
-# 
+#
 # All available protocols:
 #
 # [receiver.udp2]
@@ -140,7 +140,7 @@ buffer-size = 0
 # [receiver.tcp2]
 # protocol = "tcp"
 # listen = ":2003"
-# 
+#
 # [receiver.pickle2]
 # protocol = "pickle"
 # listen = ":2004"
@@ -184,7 +184,7 @@ buffer-size = 0
 # reconnect-interval = "5m"
 # # How often receiver will ask Kafka for new data (in case there was no messages available to read)
 # fetch-interval = "200ms"
-# 
+#
 # # Path to saved kafka state. Used for restarts
 # state-file = "/var/lib/graphite/kafka.state"
 # # Initial offset, if there is no saved state. Can be relative time or "newest" or "oldest".
@@ -196,6 +196,13 @@ listen = "127.0.0.1:7002"
 enabled = true
 # Close inactive connections after "read-timeout"
 read-timeout = "30s"
+
+# grpc api
+# protocol: https://github.com/lomik/go-carbon/blob/master/helper/carbonpb/carbon.proto
+# samples: https://github.com/lomik/go-carbon/tree/master/api/sample
+[grpc]
+listen = "127.0.0.1:7003"
+enabled = true
 
 [carbonserver]
 # Please NOTE: carbonserver is not intended to fully replace graphite-web
@@ -342,6 +349,7 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+* GRPC api for query cache was added
 * Added support for an unlimited number of receivers
 * Protobuf protocol was added. Sample configuration:
 ```
