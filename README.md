@@ -348,6 +348,9 @@ With settings above applied, best write-strategy to use is "noop"
 
 
 ## Changelog
+##### master
+
+
 ##### version 0.11.0
 * GRPC api for query cache was added
 * Added support for an unlimited number of receivers
