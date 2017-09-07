@@ -243,6 +243,8 @@ scan-frequency = "5m0s"
 # This value is used to speed-up /find requests with
 # a lot of globs, but will lead to increased memory consumption
 max-globs = 100
+# Fail if amount of globs more than max-globs
+fail-on-max-globs = false
 # graphite-web-10-mode
 # Use Graphite-web 1.0 native structs for pickle response
 # This mode will break compatibility with graphite-web 0.9.x

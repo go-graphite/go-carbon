@@ -233,6 +233,7 @@ type CarbonserverListener struct {
 	whisperData       string
 	buckets           int
 	maxGlobs          int
+	failOnMaxGlobs    bool
 	percentiles       []int
 	scanFrequency     time.Duration
 	metricsAsCounters bool
@@ -300,6 +301,10 @@ func (listener *CarbonserverListener) SetWhisperData(whisperData string) {
 func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 	listener.maxGlobs = maxGlobs
 }
+func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
+	listener.failOnMaxGlobs = failOnMaxGlobs
+}
+
 func (listener *CarbonserverListener) SetBuckets(buckets int) {
 	listener.buckets = buckets
 }
@@ -523,7 +528,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	)
 }
 
-func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []bool) {
+func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []bool, error) {
 	var useGlob bool
 	logger := zapwriter.Logger("carbonserver")
 
@@ -571,12 +576,18 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 				parts := strings.Split(expansion, ",")
 				for _, sub := range parts {
 					if len(newglobs) > listener.maxGlobs {
+						if listener.failOnMaxGlobs {
+							return nil, nil, errMaxGlobsExhausted
+						}
 						break
 					}
 					newglobs = append(newglobs, glob[:lbrace]+sub+glob[rbrace+1:])
 				}
 			} else {
 				if len(newglobs) > listener.maxGlobs {
+					if listener.failOnMaxGlobs {
+						return nil, nil, errMaxGlobsExhausted
+					}
 					break
 				}
 				newglobs = append(newglobs, glob)
@@ -659,9 +670,10 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 		files[i] = strings.Replace(p, "/", ".", -1)
 	}
 
-	return files, leafs
+	return files, leafs, nil
 }
 
+var errMaxGlobsExhausted = fmt.Errorf("maxGlobs in request exhausted, kindly refusing to perform the request")
 var errMetricsListEmpty = fmt.Errorf("File index is empty or disabled")
 
 func (listener *CarbonserverListener) getMetricsList() ([]string, error) {
@@ -962,7 +974,17 @@ var findMetricsNoMetricsError = fmt.Errorf("no metrics available for this query"
 
 func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Time, format, name string) (*findResponse, error) {
 	var result findResponse
-	files, leafs := listener.expandGlobs(name)
+	files, leafs, err := listener.expandGlobs(name)
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.FindErrors, 1)
+
+		logger.Info("find failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "can't expand globs"),
+			zap.Error(err),
+		)
+		return nil, err
+	}
 
 	metricsCount := uint64(0)
 	for i := range files {
@@ -1207,7 +1229,10 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 	var valuesFetched int
 
 	listener.logger.Debug("fetching data...")
-	files, leafs := listener.expandGlobs(metric)
+	files, leafs, err := listener.expandGlobs(metric)
+	if err != nil {
+		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+	}
 
 	metricsCount := 0
 	for i := range files {
