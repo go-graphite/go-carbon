@@ -96,6 +96,7 @@ type carbonserverConfig struct {
 	FindCacheEnabled        bool      `toml:"find-cache-enabled"`
 	Buckets                 int       `toml:"buckets"`
 	MaxGlobs                int       `toml:"max-globs"`
+	FailOnMaxGlobs          bool      `toml:"fail-on-max-globs"`
 	MetricsAsCounters       bool      `toml:"metrics-as-counters"`
 	TrigramIndex            bool      `toml:"trigram-index"`
 	GraphiteWeb10StrictMode bool      `toml:"graphite-web-10-strict-mode"`
@@ -170,6 +171,7 @@ func NewConfig() *Config {
 			Enabled:           false,
 			Buckets:           10,
 			MaxGlobs:          100,
+			FailOnMaxGlobs:    false,
 			MetricsAsCounters: false,
 			ScanFrequency: &Duration{
 				Duration: 300 * time.Second,
