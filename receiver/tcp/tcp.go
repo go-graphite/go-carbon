@@ -187,8 +187,16 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 		}
 	})
 
+	lastDeadline := time.Now()
+	readTimeout := 2 * time.Minute
+	conn.SetReadDeadline(lastDeadline.Add(readTimeout))
+
 	for {
-		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
+		now := time.Now()
+		if now.Sub(lastDeadline) > (readTimeout / 4) {
+			conn.SetReadDeadline(now.Add(readTimeout))
+			lastDeadline = now
+		}
 
 		line, err := reader.ReadBytes('\n')
 
