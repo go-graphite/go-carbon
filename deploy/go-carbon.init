@@ -21,8 +21,8 @@ if [ -f /etc/rc.d/init.d/functions ]; then
   . /etc/rc.d/init.d/functions
 fi
 
-if [ -f /etc/sysconfig/$prog ]; then
-   . /etc/sysconfig/$prog
+if [ -f /etc/sysconfig/$NAME ]; then
+   . /etc/sysconfig/$NAME
 fi
 
 ARGS="-config $CONFIG -pidfile $PIDFILE -daemon"
