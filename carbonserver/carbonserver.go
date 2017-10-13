@@ -88,12 +88,11 @@ type metricStruct struct {
 	QueryCacheMiss       uint64
 	FindCacheHit         uint64
 	FindCacheMiss        uint64
+}
 
-	requestsTimes struct {
-		sync.RWMutex
-
-		list []int64
-	}
+type requestsTimes struct {
+	sync.RWMutex
+	list []int64
 }
 
 const (
@@ -253,9 +252,10 @@ type CarbonserverListener struct {
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
 
-	metrics     metricStruct
-	exitChan    chan struct{}
-	timeBuckets []uint64
+	metrics       *metricStruct
+	requestsTimes requestsTimes
+	exitChan      chan struct{}
+	timeBuckets   []uint64
 
 	db *leveldb.DB
 }
@@ -284,6 +284,7 @@ type fileIndex struct {
 func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *CarbonserverListener {
 	return &CarbonserverListener{
 		// Config variables
+		metrics:           &metricStruct{},
 		metricsAsCounters: false,
 		cacheGet:          cacheGetFunc,
 		logger:            zapwriter.Logger("carbonserver"),
@@ -1619,10 +1620,10 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 	// Computing response percentiles
 	if len(listener.percentiles) > 0 {
-		listener.metrics.requestsTimes.Lock()
-		list := listener.metrics.requestsTimes.list
-		listener.metrics.requestsTimes.list = make([]int64, 0, len(list))
-		listener.metrics.requestsTimes.Unlock()
+		listener.requestsTimes.Lock()
+		list := listener.requestsTimes.list
+		listener.requestsTimes.list = make([]int64, 0, len(list))
+		listener.requestsTimes.Unlock()
 		if len(list) == 0 {
 			for _, p := range listener.percentiles {
 				send(fmt.Sprintf("request_time_%vth_percentile_ns", p), 0)
@@ -1835,9 +1836,9 @@ func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t ti
 	ms := t.Nanoseconds() / int64(time.Millisecond)
 
 	if len(listener.percentiles) > 0 {
-		listener.metrics.requestsTimes.Lock()
-		listener.metrics.requestsTimes.list = append(listener.metrics.requestsTimes.list, t.Nanoseconds())
-		listener.metrics.requestsTimes.Unlock()
+		listener.requestsTimes.Lock()
+		listener.requestsTimes.list = append(listener.requestsTimes.list, t.Nanoseconds())
+		listener.requestsTimes.Unlock()
 	}
 
 	bucket := int(math.Log(float64(ms)) * math.Log10E)
