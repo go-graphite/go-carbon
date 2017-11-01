@@ -259,6 +259,7 @@ func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 		whisperData: path,
 		cacheGet:    cache.Get,
 		logger:      zap.NewNop(),
+		metrics:     &metricStruct{},
 	}
 	precision := 0.000001
 
@@ -355,6 +356,7 @@ func TestGetMetricsListEmpty(t *testing.T) {
 	carbonserver := CarbonserverListener{
 		whisperData: path,
 		cacheGet:    cache.Get,
+		metrics:     &metricStruct{},
 	}
 
 	metrics, err := carbonserver.getMetricsList()
@@ -377,6 +379,7 @@ func TestGetMetricsListWithData(t *testing.T) {
 	carbonserver := CarbonserverListener{
 		whisperData: path,
 		cacheGet:    cache.Get,
+		metrics:     &metricStruct{},
 	}
 
 	fidx := fileIndex{}
@@ -418,6 +421,7 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	carbonserver := CarbonserverListener{
 		whisperData: test.path,
 		cacheGet:    cache.Get,
+		metrics:     &metricStruct{},
 	}
 	// common
 
