@@ -44,6 +44,14 @@ The result of replacing "carbon" to "go-carbon" on a server with a load up to 90
 
 ![Success story](doc/success1.png)
 
+There were some efforts to find out maximum possible performance of go-carbon on a hardware (2xE5-2620v3, 128GB RAM, local SSDs).
+
+The result of that effort (in points per second):
+
+![Performance](doc/performance.png)
+
+Stable performance was around 950k points per second with short-term peak performance of 1.2M points/sec.
+
 ## Installation
 Use binary packages from [releases page](https://github.com/lomik/go-carbon/releases) or build manually (requires golang 1.8+):
 ```
