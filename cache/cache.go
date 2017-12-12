@@ -13,6 +13,7 @@ import (
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/go-carbon/tags"
 )
 
 type WriteStrategy int
@@ -25,6 +26,12 @@ const (
 
 const shardCount = 1024
 
+type cacheSettings struct {
+	maxSize     int32
+	xlog        io.Writer
+	tagsEnabled bool
+}
+
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
@@ -34,20 +41,19 @@ type Cache struct {
 
 	data []*Shard
 
-	maxSize       int32
 	writeStrategy WriteStrategy
-
 	writeoutQueue *WriteoutQueue
 
-	xlog atomic.Value // io.Writer
+	settings atomic.Value // cacheSettings
 
 	stat struct {
-		size              int32  // changing via atomic
-		queueBuildCnt     uint32 // number of times writeout queue was built
-		queueBuildTimeMs  uint32 // time spent building writeout queue in milliseconds
-		queueWriteoutTime uint32 // in milliseconds
-		overflowCnt       uint32 // drop packages if cache full
-		queryCnt          uint32 // number of queries
+		size                int32  // changing via atomic
+		queueBuildCnt       uint32 // number of times writeout queue was built
+		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
+		queueWriteoutTime   uint32 // in milliseconds
+		overflowCnt         uint32 // drop packages if cache full
+		queryCnt            uint32 // number of queries
+		tagsNormalizeErrors uint32 // tags normalize errors count
 	}
 }
 
@@ -64,7 +70,6 @@ func New() *Cache {
 	c := &Cache{
 		data:          make([]*Shard, shardCount),
 		writeStrategy: Noop,
-		maxSize:       1000000,
 	}
 
 	for i := 0; i < shardCount; i++ {
@@ -73,6 +78,14 @@ func New() *Cache {
 			notConfirmed: make([]*points.Points, 4),
 		}
 	}
+
+	settings := cacheSettings{
+		maxSize:     1000000,
+		tagsEnabled: false,
+		xlog:        nil,
+	}
+
+	c.settings.Store(&settings)
 
 	c.writeoutQueue = NewWriteoutQueue(c)
 	return c
@@ -98,18 +111,31 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 
 // SetMaxSize of cache
 func (c *Cache) SetMaxSize(maxSize uint32) {
-	c.maxSize = int32(maxSize)
+	s := c.settings.Load().(*cacheSettings)
+	newSettings := *s
+	newSettings.maxSize = int32(maxSize)
+	c.settings.Store(&newSettings)
+}
+
+func (c *Cache) SetTagsEnabled(value bool) {
+	s := c.settings.Load().(*cacheSettings)
+	newSettings := *s
+	newSettings.tagsEnabled = value
+	c.settings.Store(&newSettings)
 }
 
 func (c *Cache) Stop() {}
 
 // Collect cache metrics
 func (c *Cache) Stat(send helper.StatCallback) {
+	s := c.settings.Load().(*cacheSettings)
+
 	send("size", float64(c.Size()))
 	send("metrics", float64(c.Len()))
-	send("maxSize", float64(c.maxSize))
+	send("maxSize", float64(s.maxSize))
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
+	helper.SendAndSubstractUint32("tagsNormalizeErrors", &c.stat.tagsNormalizeErrors, send)
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
 
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
@@ -198,21 +224,34 @@ func (c *Cache) Size() int32 {
 }
 
 func (c *Cache) DivertToXlog(w io.Writer) {
-	c.xlog.Store(w)
+	s := c.settings.Load().(*cacheSettings)
+	newSettings := *s
+	newSettings.xlog = w
+	c.settings.Store(&newSettings)
 }
 
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
-	xlog := c.xlog.Load()
+	s := c.settings.Load().(*cacheSettings)
 
-	if xlog != nil {
-		p.WriteTo(xlog.(io.Writer))
+	if s.xlog != nil {
+		p.WriteTo(s.xlog)
+		return
+	}
+
+	if s.tagsEnabled {
+		var err error
+		p.Metric, err = tags.Normalize(p.Metric)
+		if err != nil {
+			atomic.AddUint32(&c.stat.tagsNormalizeErrors, 1)
+			return
+		}
 	}
 
 	// Get map shard.
 	count := len(p.Data)
 
-	if c.maxSize > 0 && c.Size() > c.maxSize {
+	if s.maxSize > 0 && c.Size() > s.maxSize {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
 		return
 	}

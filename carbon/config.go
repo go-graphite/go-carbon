@@ -84,6 +84,14 @@ type receiverConfig struct {
 	DSN string `toml:"dsn"`
 }
 
+type tagsConfig struct {
+	Enabled        bool      `toml:"enabled"`
+	TagDB          string    `toml:"tagdb-url"`
+	TagDBTimeout   *Duration `toml:"tagdb-timeout"`
+	TagDBChunkSize int       `toml:"tagdb-chunk-size"`
+	LocalDir       string    `toml:"local-dir"`
+}
+
 type carbonserverConfig struct {
 	Listen                  string    `toml:"listen"`
 	Enabled                 bool      `toml:"enabled"`
@@ -126,6 +134,7 @@ type Config struct {
 	Receiver     map[string](map[string]interface{}) `toml:"receiver"`
 	Carbonlink   carbonlinkConfig                    `toml:"carbonlink"`
 	Grpc         grpcConfig                          `toml:"grpc"`
+	Tags         tagsConfig                          `toml:"tags"`
 	Carbonserver carbonserverConfig                  `toml:"carbonserver"`
 	Dump         dumpConfig                          `toml:"dump"`
 	Pprof        pprofConfig                         `toml:"pprof"`
@@ -201,6 +210,15 @@ func NewConfig() *Config {
 		Grpc: grpcConfig{
 			Listen:  "127.0.0.1:7003",
 			Enabled: true,
+		},
+		Tags: tagsConfig{
+			Enabled: false,
+			TagDB:   "http://127.0.0.1:8000",
+			TagDBTimeout: &Duration{
+				Duration: time.Second,
+			},
+			TagDBChunkSize: 32,
+			LocalDir:       "/var/lib/graphite/tagging/",
 		},
 		Pprof: pprofConfig{
 			Listen:  "127.0.0.1:7007",

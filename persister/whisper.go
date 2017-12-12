@@ -13,6 +13,7 @@ import (
 
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/lomik/go-carbon/tags"
 	"github.com/lomik/zapwriter"
 )
 
@@ -27,6 +28,8 @@ type Whisper struct {
 	committedPoints     uint32
 	recv                func(chan bool) *points.Points
 	confirm             func(*points.Points)
+	onCreateTagged      func(string)
+	tagsEnabled         bool
 	schemas             WhisperSchemas
 	aggregation         *WhisperAggregation
 	workersCount        int
@@ -94,6 +97,14 @@ func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
 	p.mockStore = fn
 }
 
+func (p *Whisper) SetTagsEnabled(v bool) {
+	p.tagsEnabled = v
+}
+
+func (p *Whisper) SetOnCreateTagged(fn func(string)) {
+	p.onCreateTagged = fn
+}
+
 func fnv32(key string) uint32 {
 	hash := uint32(2166136261)
 	const prime32 = uint32(16777619)
@@ -113,7 +124,12 @@ func store(p *Whisper, values *points.Points) {
 	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
 	defer p.storeMutex[mutexIndex].Unlock()
 
-	path := filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
+	var path string
+	if p.tagsEnabled && strings.IndexByte(values.Metric, ';') >= 0 {
+		path = tags.FilePath(p.rootPath, values.Metric) + ".wsp"
+	} else {
+		path = filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
+	}
 
 	w, err := whisper.Open(path)
 	if err != nil {
@@ -158,6 +174,10 @@ func store(p *Whisper, values *points.Points) {
 				zap.String("method", aggr.aggregationMethodStr),
 			)
 			return
+		}
+
+		if p.tagsEnabled && p.onCreateTagged != nil && strings.IndexByte(values.Metric, ';') >= 0 {
+			p.onCreateTagged(values.Metric)
 		}
 
 		p.createLogger.Debug("created",

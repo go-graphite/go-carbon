@@ -16,6 +16,7 @@ import (
 	"github.com/lomik/go-carbon/carbonserver"
 	"github.com/lomik/go-carbon/persister"
 	"github.com/lomik/go-carbon/receiver"
+	"github.com/lomik/go-carbon/tags"
 	"github.com/lomik/zapwriter"
 
 	// register receivers
@@ -40,6 +41,7 @@ type App struct {
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
 	Carbonserver   *carbonserver.CarbonserverListener
+	Tags           *tags.Tags
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	exit           chan bool
 }
@@ -133,10 +135,20 @@ func (app *App) ReloadConfig() error {
 
 	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
 
+	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
+	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
+	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
+
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
 	}
+
+	if app.Tags != nil {
+		app.Tags.Stop()
+		app.Tags = nil
+	}
+
 	app.startPersister()
 
 	if app.Collector != nil {
@@ -194,6 +206,12 @@ func (app *App) stopAll() {
 		logger.Debug("persister stopped")
 	}
 
+	if app.Tags != nil {
+		app.Tags.Stop()
+		app.Tags = nil
+		logger.Debug("tags stopped")
+	}
+
 	if app.Cache != nil {
 		app.Cache.Stop()
 		app.Cache = nil
@@ -221,6 +239,15 @@ func (app *App) Stop() {
 }
 
 func (app *App) startPersister() {
+	if app.Config.Tags.Enabled {
+		app.Tags = tags.New(&tags.Options{
+			LocalPath:      app.Config.Tags.LocalDir,
+			TagDB:          app.Config.Tags.TagDB,
+			TagDBTimeout:   app.Config.Tags.TagDBTimeout.Value(),
+			TagDBChunkSize: app.Config.Tags.TagDBChunkSize,
+		})
+	}
+
 	if app.Config.Whisper.Enabled {
 		p := persister.NewWhisper(
 			app.Config.Whisper.DataDir,
@@ -232,6 +259,11 @@ func (app *App) startPersister() {
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetWorkers(app.Config.Whisper.Workers)
+
+		if app.Tags != nil {
+			p.SetTagsEnabled(true)
+			p.SetOnCreateTagged(app.Tags.Add)
+		}
 
 		p.Start()
 
@@ -257,6 +289,7 @@ func (app *App) Start() (err error) {
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
+	core.SetTagsEnabled(conf.Tags.Enabled)
 
 	app.Cache = core
 
@@ -278,9 +311,9 @@ func (app *App) Start() (err error) {
 	}
 	/* API end */
 
-	/* WHISPER start */
+	/* WHISPER and TAGS start */
 	app.startPersister()
-	/* WHISPER end */
+	/* WHISPER and TAGS end */
 
 	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver
