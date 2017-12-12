@@ -14,10 +14,12 @@ func TestQueue(t *testing.T) {
 
 		buf := make(chan string, 100)
 
-		q, err := NewQueue(dir, func(metric string) error {
-			buf <- metric
+		q, err := NewQueue(dir, func(series []string) error {
+			for i := 0; i < len(series); i++ {
+				buf <- series[i]
+			}
 			return nil
-		})
+		}, 1)
 		assert.NoError(err)
 		assert.NotNil(q)
 
