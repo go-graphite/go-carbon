@@ -247,7 +247,7 @@ func (q *Queue) sendWorker(exit chan bool) {
 
 // Remove key from queue
 func (q *Queue) delete(key []byte) {
-	err := q.db.Delete([]byte("key"), nil)
+	err := q.db.Delete([]byte(key), nil)
 	atomic.AddUint32(&q.stat.deleteCount, 1)
 	if err != nil {
 		atomic.AddUint32(&q.stat.deleteErrors, 1)
