@@ -2,6 +2,7 @@ package tags
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -30,5 +31,27 @@ func TestQueue(t *testing.T) {
 
 		assert.Equal("hello.world;key=value", <-buf)
 		assert.Equal("hello.world;key=value2", <-buf)
+	})
+}
+
+func TestQueueLag(t *testing.T) {
+	qa.Root(t, func(dir string) {
+		assert := assert.New(t)
+
+		exit := make(chan bool, 0)
+
+		q, err := NewQueue(dir, func(series []string) error {
+			<-exit
+			return nil
+		}, 1)
+		assert.NoError(err)
+		assert.NotNil(q)
+
+		defer q.Stop()
+
+		q.Add("hello.world;key=value")
+
+		assert.True(q.Lag() < time.Second)
+		close(exit)
 	})
 }

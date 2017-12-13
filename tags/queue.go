@@ -143,6 +143,25 @@ func (q *Queue) Add(metric string) {
 	}
 }
 
+func (q *Queue) Lag() time.Duration {
+	iter := q.db.NewIterator(nil, nil)
+
+	var res time.Duration
+
+	if iter.Next() {
+		key := iter.Key()
+		if len(key) >= 8 {
+			t := int64(binary.BigEndian.Uint64(key[:8]))
+			tm := time.Unix(t/1000000000, t%1000000000)
+			res = time.Since(tm)
+		}
+	}
+
+	iter.Release()
+
+	return res
+}
+
 func (q *Queue) sendAll(exit chan bool) {
 	iter := q.db.NewIterator(nil, nil)
 	defer iter.Release()

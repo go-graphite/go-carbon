@@ -85,4 +85,6 @@ func (t *Tags) Stat(send helper.StatCallback) {
 	helper.SendAndSubstractUint32("queueDeleteCount", &t.q.stat.deleteCount, send)
 	helper.SendAndSubstractUint32("tagdbSendFail", &t.q.stat.sendFail, send)
 	helper.SendAndSubstractUint32("tagdbSendSuccess", &t.q.stat.sendSuccess, send)
+
+	send("queueLag", t.q.Lag().Seconds())
 }
