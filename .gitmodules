@@ -135,7 +135,7 @@
 	url = https://github.com/rcrowley/go-metrics
 [submodule "vendor/github.com/davecgh/go-spew"]
 	path = vendor/github.com/davecgh/go-spew
-	url = https://github.com/davecgh/go-spew/
+	url = https://github.com/davecgh/go-spew
 [submodule "vendor/github.com/eapache/go-resiliency"]
 	path = vendor/github.com/eapache/go-resiliency
 	url = https://github.com/eapache/go-resiliency

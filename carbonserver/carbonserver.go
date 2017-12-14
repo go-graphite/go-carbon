@@ -472,7 +472,10 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		return
 	}
 
-	freeSpace := stat.Bavail * uint64(stat.Bsize)
+	var freeSpace uint64
+	if stat.Bavail >= 0 {
+		freeSpace = uint64(stat.Bavail) * uint64(stat.Bsize)
+	}
 	totalSpace := stat.Blocks * uint64(stat.Bsize)
 
 	fileScanRuntime := time.Since(t0)
