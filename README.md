@@ -374,7 +374,8 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
-
+* [Tags](http://graphite.readthedocs.io/en/latest/tags.html) support (only with [graphite-web](https://github.com/graphite-project/graphite-web)) was added
+* `cache.max-size` and `cache.write-strategy` can be changed without restart (HUP signal)
 
 ##### version 0.11.0
 * GRPC api for query cache was added
