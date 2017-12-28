@@ -7,6 +7,12 @@ import (
 
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/BurntSushi/toml"
 	"github.com/Shopify/sarama"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/atomicfiles"
@@ -14,10 +20,6 @@ import (
 	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
-	"io/ioutil"
-	"strings"
-	"sync"
-	"time"
 )
 
 func init() {
@@ -125,17 +127,36 @@ const (
 	ProtocolPickle = 2
 )
 
+// Duration wrapper time.Duration for TOML
+type Duration struct {
+	time.Duration
+}
+
+var _ toml.TextMarshaler = &Duration{}
+
+// UnmarshalText from TOML
+func (d *Duration) UnmarshalText(text []byte) error {
+	var err error
+	d.Duration, err = time.ParseDuration(string(text))
+	return err
+}
+
+// MarshalText encode text with TOML format
+func (d *Duration) MarshalText() ([]byte, error) {
+	return []byte(d.Duration.String()), nil
+}
+
 // Options contains all receiver's options that can be changed by user
 type Options struct {
-	Brokers           []string      `toml:"brokers"`
-	Topic             string        `toml:"topic"`
-	Partition         int32         `toml:"partition"`
-	Protocol          Protocol      `toml:"parse-protocol"`
-	StateFile         string        `toml:"state-file"`
-	InitialOffset     Offset        `toml:"initial-offset"`
-	StateSaveInterval time.Duration `toml:"state-save-interval"`
-	ReconnectInterval time.Duration `toml:"reconnect-interval"`
-	FetchInterval     time.Duration `toml:"fetch-interval"`
+	Brokers           []string  `toml:"brokers"`
+	Topic             string    `toml:"topic"`
+	Partition         int32     `toml:"partition"`
+	Protocol          Protocol  `toml:"parse-protocol"`
+	StateFile         string    `toml:"state-file"`
+	InitialOffset     Offset    `toml:"initial-offset"`
+	StateSaveInterval *Duration `toml:"state-save-interval"`
+	ReconnectInterval *Duration `toml:"reconnect-interval"`
+	FetchInterval     *Duration `toml:"fetch-interval"`
 }
 
 // NewOptions returns Options struct filled with default values.
@@ -146,9 +167,9 @@ func NewOptions() *Options {
 		Partition:         0,
 		Protocol:          ProtocolPlain,
 		InitialOffset:     OffsetOldest,
-		StateSaveInterval: 60 * time.Second,
-		ReconnectInterval: 60 * time.Second,
-		FetchInterval:     250 * time.Millisecond,
+		StateSaveInterval: &Duration{Duration: 60 * time.Second},
+		ReconnectInterval: &Duration{Duration: 60 * time.Second},
+		FetchInterval:     &Duration{Duration: 250 * time.Millisecond},
 	}
 }
 
@@ -256,10 +277,10 @@ func newKafka(name string, options *Options, store func(*points.Points)) (*Kafka
 		workerClosed:      make(chan struct{}),
 		closed:            make(chan struct{}),
 		forceReconnect:    make(chan struct{}),
-		fetchInterval:     options.FetchInterval,
+		fetchInterval:     options.FetchInterval.Duration,
 		kafkaState:        state,
-		stateSaveInterval: options.StateSaveInterval,
-		reconnectInterval: options.ReconnectInterval,
+		stateSaveInterval: options.StateSaveInterval.Duration,
+		reconnectInterval: options.ReconnectInterval.Duration,
 		connectOptions: optionsKafka{
 			brokers:       options.Brokers,
 			topic:         options.Topic,
