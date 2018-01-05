@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/alyu/configparser"
-	"github.com/lomik/go-whisper"
+	"github.com/go-graphite/go-whisper"
 )
 
 // Schema represents one schema setting

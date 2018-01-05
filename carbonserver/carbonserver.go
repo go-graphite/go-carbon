@@ -44,11 +44,11 @@ import (
 	"github.com/dgryski/go-expirecache"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
+	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/go-carbon/helper"
 	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
 	"github.com/lomik/go-carbon/helper/stat"
 	"github.com/lomik/go-carbon/points"
-	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
 	"github.com/lomik/zapwriter"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -241,6 +241,7 @@ type CarbonserverListener struct {
 	accessLogger      *zap.Logger
 	graphiteweb10     bool
 	internalStatsDir  string
+	flock             bool
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -304,6 +305,10 @@ func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 }
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs
+}
+
+func (listener *CarbonserverListener) SetFLock(flock bool) {
+	listener.flock = flock
 }
 
 func (listener *CarbonserverListener) SetBuckets(buckets int) {
@@ -1337,7 +1342,9 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 
 	// We need to obtain the metadata from whisper file anyway.
 	path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
-	w, err := whisper.Open(path)
+	w, err := whisper.OpenWithOptions(path, &whisper.Options{
+		FLock: listener.flock,
+	})
 	if err != nil {
 		// the FE/carbonzipper often requests metrics we don't have
 		// We shouldn't really see this any more -- expandGlobs() should filter them out

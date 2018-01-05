@@ -11,10 +11,10 @@ import (
 	"time"
 
 	trigram "github.com/dgryski/go-trigram"
+	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/go-carbon/cache"
 	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
 	"github.com/lomik/go-carbon/points"
-	whisper "github.com/lomik/go-whisper"
 	"go.uber.org/zap"
 )
 

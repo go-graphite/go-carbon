@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	whisper "github.com/lomik/go-whisper"
+	whisper "github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/helper"
@@ -36,6 +36,7 @@ type Whisper struct {
 	rootPath            string
 	created             uint32 // counter
 	sparse              bool
+	flock               bool
 	maxUpdatesPerSecond int
 	throttleTicker      *ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
@@ -93,6 +94,11 @@ func (p *Whisper) SetSparse(sparse bool) {
 	p.sparse = sparse
 }
 
+// SetFLock on create and open
+func (p *Whisper) SetFLock(flock bool) {
+	p.flock = flock
+}
+
 func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
 	p.mockStore = fn
 }
@@ -131,7 +137,9 @@ func store(p *Whisper, values *points.Points) {
 		path = filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 	}
 
-	w, err := whisper.Open(path)
+	w, err := whisper.OpenWithOptions(path, &whisper.Options{
+		FLock: p.flock,
+	})
 	if err != nil {
 		// create new whisper if file not exists
 		if !os.IsNotExist(err) {
@@ -162,6 +170,7 @@ func store(p *Whisper, values *points.Points) {
 
 		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
 			Sparse: p.sparse,
+			FLock:  p.flock,
 		})
 		if err != nil {
 			p.logger.Error("create new whisper file failed",
