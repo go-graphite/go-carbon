@@ -1238,6 +1238,9 @@ func (listener *CarbonserverListener) prepareData(format string, targets []strin
 		listener.logger.Debug("fetching data...")
 		files, leafs, err := listener.expandGlobs(metric)
 		if err != nil {
+			listener.logger.Debug("expand globs returned an error",
+				zap.Error(err),
+			)
 			continue
 		}
 
@@ -1259,9 +1262,10 @@ func (listener *CarbonserverListener) prepareData(format string, targets []strin
 		res, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			listener.logger.Error("error while fetching the data",
+				zap.Error(err),
+			)
 			continue
-			// return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
-
 		}
 
 		multi.Metrics = append(multi.Metrics, res.Metrics...)
