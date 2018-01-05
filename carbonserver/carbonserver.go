@@ -536,6 +536,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	var useGlob bool
 	logger := zapwriter.Logger("carbonserver")
 
+	// TODO: Find out why we have set 'useGlob' if 'star == -1'
 	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
 		useGlob = true
 	}
@@ -555,7 +556,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	var globs []string
 	if !strings.HasSuffix(query, "*") {
 		globs = append(globs, query+".wsp")
-		logger.Debug("appending to globs",
+		logger.Debug("appending file to globs struct",
 			zap.Strings("globs", globs),
 		)
 	}
@@ -1077,7 +1078,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
 	req.ParseForm()
-	metric := req.FormValue("target")
+	targets := req.Form["target"]
 	format := req.FormValue("format")
 	from := req.FormValue("from")
 	until := req.FormValue("until")
@@ -1086,7 +1087,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
-		zap.String("metric", metric),
+		zap.Strings("targets", targets),
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
@@ -1096,7 +1097,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
-		zap.String("metric", metric),
+		zap.Strings("targets", targets),
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
@@ -1133,7 +1134,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	response, fromCache, err := listener.fetchWithCache(logger, format, metric, from, until)
+	response, fromCache, err := listener.fetchWithCache(logger, format, targets, from, until)
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
@@ -1166,7 +1167,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 }
 
-func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format, metric, from, until string) (fetchResponse, bool, error) {
+func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format string, targets []string, from, until string) (fetchResponse, bool, error) {
 	logger = logger.With(
 		zap.String("function", "fetchWithCache"),
 	)
@@ -1194,7 +1195,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 
 	var response fetchResponse
 	if listener.queryCacheEnabled {
-		key := metric + "&" + format + "&" + from + "&" + until
+		key := strings.Join(targets, "&") + "&" + format + "&" + from + "&" + until
 		size := uint64(100 * 1024 * 1024)
 		renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
 		fetchSize := atomic.LoadUint64(&listener.metrics.FetchSize)
@@ -1206,7 +1207,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 		if !ok {
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
-			response, err = listener.prepareData(format, metric, fromTime, untilTime)
+			response, err = listener.prepareData(format, targets, fromTime, untilTime)
 			if err != nil {
 				item.StoreAbort()
 			} else {
@@ -1219,12 +1220,12 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 			fromCache = true
 		}
 	} else {
-		response, err = listener.prepareData(format, metric, fromTime, untilTime)
+		response, err = listener.prepareData(format, targets, fromTime, untilTime)
 	}
 	return response, fromCache, err
 }
 
-func (listener *CarbonserverListener) prepareData(format, metric string, fromTime, untilTime int32) (fetchResponse, error) {
+func (listener *CarbonserverListener) prepareData(format string, targets []string, fromTime, untilTime int32) (fetchResponse, error) {
 	contentType := "application/text"
 	var b []byte
 	var err error
@@ -1232,32 +1233,41 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 	var memoryUsed int
 	var valuesFetched int
 
-	listener.logger.Debug("fetching data...")
-	files, leafs, err := listener.expandGlobs(metric)
-	if err != nil {
-		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
-	}
-
-	metricsCount := 0
-	for i := range files {
-		if leafs[i] {
-			metricsCount++
+	var multi pb.MultiFetchResponse
+	for _, metric := range targets {
+		listener.logger.Debug("fetching data...")
+		files, leafs, err := listener.expandGlobs(metric)
+		if err != nil {
+			continue
 		}
+
+		metricsCount := 0
+		for i := range files {
+			if leafs[i] {
+				metricsCount++
+			}
+		}
+		listener.logger.Debug("expandGlobs result",
+			zap.String("handler", "render"),
+			zap.String("action", "expandGlobs"),
+			zap.String("metric", metric),
+			zap.Int("metrics_count", metricsCount),
+			zap.Int32("from", fromTime),
+			zap.Int32("until", untilTime),
+		)
+
+		res, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
+		if err != nil {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			continue
+			// return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+
+		}
+
+		multi.Metrics = append(multi.Metrics, res.Metrics...)
 	}
-	listener.logger.Debug("expandGlobs result",
-		zap.String("handler", "render"),
-		zap.String("action", "expandGlobs"),
-		zap.String("metric", metric),
-		zap.Int("metrics_count", metricsCount),
-		zap.Int32("from", fromTime),
-		zap.Int32("until", untilTime),
-	)
-
-	multi, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
-	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+	if len(multi.Metrics) == 0 {
 		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
-
 	}
 
 	var metrics []string
@@ -1718,6 +1728,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	logger := listener.logger
 
 	logger.Info("starting carbonserver",
+		zap.String("listen", listen),
 		zap.String("whisperData", listener.whisperData),
 		zap.Int("maxGlobs", listener.maxGlobs),
 		zap.String("scanFrequency", listener.scanFrequency.String()),
@@ -1759,7 +1770,6 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
 	})
 
-	logger.Info(fmt.Sprintf("listening on %s", listen))
 	tcpAddr, err := net.ResolveTCPAddr("tcp", listen)
 	if err != nil {
 		return err
