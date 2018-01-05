@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/alyu/configparser"
-	whisper "github.com/lomik/go-whisper"
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 type whisperAggregationItem struct {

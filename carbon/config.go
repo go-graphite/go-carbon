@@ -59,6 +59,7 @@ type whisperConfig struct {
 	Workers             int    `toml:"workers"`
 	MaxUpdatesPerSecond int    `toml:"max-updates-per-second"`
 	Sparse              bool   `toml:"sparse-create"`
+	FLock               bool   `toml:"flock"`
 	Enabled             bool   `toml:"enabled"`
 	Schemas             persister.WhisperSchemas
 	Aggregation         *persister.WhisperAggregation
@@ -167,6 +168,7 @@ func NewConfig() *Config {
 			Enabled:             true,
 			Workers:             1,
 			Sparse:              false,
+			FLock:               false,
 		},
 		Cache: cacheConfig{
 			MaxSize:       1000000,

@@ -44,11 +44,11 @@ import (
 	"github.com/dgryski/go-expirecache"
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
+	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/go-carbon/helper"
 	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
 	"github.com/lomik/go-carbon/helper/stat"
 	"github.com/lomik/go-carbon/points"
-	whisper "github.com/lomik/go-whisper"
 	pickle "github.com/lomik/og-rek"
 	"github.com/lomik/zapwriter"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -241,6 +241,7 @@ type CarbonserverListener struct {
 	accessLogger      *zap.Logger
 	graphiteweb10     bool
 	internalStatsDir  string
+	flock             bool
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -304,6 +305,10 @@ func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 }
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs
+}
+
+func (listener *CarbonserverListener) SetFLock(flock bool) {
+	listener.flock = flock
 }
 
 func (listener *CarbonserverListener) SetBuckets(buckets int) {
@@ -536,6 +541,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	var useGlob bool
 	logger := zapwriter.Logger("carbonserver")
 
+	// TODO: Find out why we have set 'useGlob' if 'star == -1'
 	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
 		useGlob = true
 	}
@@ -555,7 +561,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 	var globs []string
 	if !strings.HasSuffix(query, "*") {
 		globs = append(globs, query+".wsp")
-		logger.Debug("appending to globs",
+		logger.Debug("appending file to globs struct",
 			zap.Strings("globs", globs),
 		)
 	}
@@ -717,7 +723,7 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 
 	if format != "json" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.DetailsErrors, 1)
-		accessLogger.Info("list failed",
+		accessLogger.Error("details failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
 		)
@@ -731,7 +737,7 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil {
 		atomic.AddUint64(&listener.metrics.DetailsErrors, 1)
-		accessLogger.Info("details failed",
+		accessLogger.Error("details failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "can't fetch metrics list"),
 			zap.Error(errMetricsListEmpty),
@@ -770,7 +776,7 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
-		accessLogger.Info("details failed",
+		accessLogger.Error("details failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "response encode failed"),
 			zap.Error(err),
@@ -806,7 +812,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	if format != "json" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
-		accessLogger.Info("list failed",
+		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
 		)
@@ -820,7 +826,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	metrics, err := listener.getMetricsList()
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
-		accessLogger.Info("list failed",
+		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "can't fetch metrics list"),
 			zap.Error(err),
@@ -842,7 +848,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.ListErrors, 1)
-		accessLogger.Info("list failed",
+		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "response encode failed"),
 			zap.Error(err),
@@ -897,7 +903,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	if format != "json" && format != "pickle" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.FindErrors, 1)
-		accessLogger.Info("find failed",
+		accessLogger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
 			zap.Int("http_code", http.StatusBadRequest),
@@ -909,7 +915,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	if query == "" {
 		atomic.AddUint64(&listener.metrics.FindErrors, 1)
-		accessLogger.Info("find failed",
+		accessLogger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "empty query"),
 			zap.Int("http_code", http.StatusBadRequest),
@@ -945,7 +951,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	}
 
 	if response == nil {
-		accessLogger.Info("find failed",
+		accessLogger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "internal error while processing request"),
 			zap.Error(err),
@@ -982,7 +988,7 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.FindErrors, 1)
 
-		logger.Info("find failed",
+		logger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "can't expand globs"),
 			zap.Error(err),
@@ -1027,7 +1033,7 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.FindErrors, 1)
 
-			logger.Info("find failed",
+			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "response encode failed"),
 				zap.Error(err),
@@ -1077,7 +1083,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
 	req.ParseForm()
-	metric := req.FormValue("target")
+	targets := req.Form["target"]
 	format := req.FormValue("format")
 	from := req.FormValue("from")
 	until := req.FormValue("until")
@@ -1086,7 +1092,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
-		zap.String("metric", metric),
+		zap.Strings("targets", targets),
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
@@ -1096,7 +1102,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
-		zap.String("metric", metric),
+		zap.Strings("targets", targets),
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
@@ -1123,7 +1129,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	if format != "json" && format != "pickle" && format != "protobuf" && format != "protobuf3" {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		accessLogger.Info("fetch failed",
+		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
 			zap.Int("http_code", http.StatusBadRequest),
@@ -1133,12 +1139,12 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	response, fromCache, err := listener.fetchWithCache(logger, format, metric, from, until)
+	response, fromCache, err := listener.fetchWithCache(logger, format, targets, from, until)
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		accessLogger.Info("fetch failed",
+		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "failed to read data"),
 			zap.Int("http_code", http.StatusBadRequest),
@@ -1166,7 +1172,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 }
 
-func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format, metric, from, until string) (fetchResponse, bool, error) {
+func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format string, targets []string, from, until string) (fetchResponse, bool, error) {
 	logger = logger.With(
 		zap.String("function", "fetchWithCache"),
 	)
@@ -1194,7 +1200,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 
 	var response fetchResponse
 	if listener.queryCacheEnabled {
-		key := metric + "&" + format + "&" + from + "&" + until
+		key := strings.Join(targets, "&") + "&" + format + "&" + from + "&" + until
 		size := uint64(100 * 1024 * 1024)
 		renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
 		fetchSize := atomic.LoadUint64(&listener.metrics.FetchSize)
@@ -1206,7 +1212,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 		if !ok {
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
-			response, err = listener.prepareData(format, metric, fromTime, untilTime)
+			response, err = listener.prepareData(format, targets, fromTime, untilTime)
 			if err != nil {
 				item.StoreAbort()
 			} else {
@@ -1219,12 +1225,12 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format,
 			fromCache = true
 		}
 	} else {
-		response, err = listener.prepareData(format, metric, fromTime, untilTime)
+		response, err = listener.prepareData(format, targets, fromTime, untilTime)
 	}
 	return response, fromCache, err
 }
 
-func (listener *CarbonserverListener) prepareData(format, metric string, fromTime, untilTime int32) (fetchResponse, error) {
+func (listener *CarbonserverListener) prepareData(format string, targets []string, fromTime, untilTime int32) (fetchResponse, error) {
 	contentType := "application/text"
 	var b []byte
 	var err error
@@ -1232,32 +1238,45 @@ func (listener *CarbonserverListener) prepareData(format, metric string, fromTim
 	var memoryUsed int
 	var valuesFetched int
 
-	listener.logger.Debug("fetching data...")
-	files, leafs, err := listener.expandGlobs(metric)
-	if err != nil {
-		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
-	}
-
-	metricsCount := 0
-	for i := range files {
-		if leafs[i] {
-			metricsCount++
+	var multi pb.MultiFetchResponse
+	for _, metric := range targets {
+		listener.logger.Debug("fetching data...")
+		files, leafs, err := listener.expandGlobs(metric)
+		if err != nil {
+			listener.logger.Debug("expand globs returned an error",
+				zap.Error(err),
+			)
+			continue
 		}
+
+		metricsCount := 0
+		for i := range files {
+			if leafs[i] {
+				metricsCount++
+			}
+		}
+		listener.logger.Debug("expandGlobs result",
+			zap.String("handler", "render"),
+			zap.String("action", "expandGlobs"),
+			zap.String("metric", metric),
+			zap.Int("metrics_count", metricsCount),
+			zap.Int32("from", fromTime),
+			zap.Int32("until", untilTime),
+		)
+
+		res, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
+		if err != nil {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			listener.logger.Error("error while fetching the data",
+				zap.Error(err),
+			)
+			continue
+		}
+
+		multi.Metrics = append(multi.Metrics, res.Metrics...)
 	}
-	listener.logger.Debug("expandGlobs result",
-		zap.String("handler", "render"),
-		zap.String("action", "expandGlobs"),
-		zap.String("metric", metric),
-		zap.Int("metrics_count", metricsCount),
-		zap.Int32("from", fromTime),
-		zap.Int32("until", untilTime),
-	)
-
-	multi, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
-	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+	if len(multi.Metrics) == 0 {
 		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
-
 	}
 
 	var metrics []string
@@ -1323,12 +1342,14 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 
 	// We need to obtain the metadata from whisper file anyway.
 	path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
-	w, err := whisper.Open(path)
+	w, err := whisper.OpenWithOptions(path, &whisper.Options{
+		FLock: listener.flock,
+	})
 	if err != nil {
 		// the FE/carbonzipper often requests metrics we don't have
 		// We shouldn't really see this any more -- expandGlobs() should filter them out
 		atomic.AddUint64(&listener.metrics.NotFound, 1)
-		listener.logger.Info("open error", zap.String("path", path), zap.Error(err))
+		listener.logger.Error("open error", zap.String("path", path), zap.Error(err))
 		return nil, errors.New("Can't open metric")
 	}
 
@@ -1353,7 +1374,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 		maxRetention := int32(retentions[len(retentions)-1].MaxRetention())
 		if now-maxRetention > untilTime {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-			logger.Info("can't find proper archive for the request")
+			logger.Warn("can't find proper archive for the request")
 			return nil, errors.New("Can't find proper archive")
 		}
 		logger.Debug("can't find archive that contains full set of data, using the least precise one")
@@ -1381,14 +1402,14 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, fromTime,
 	w.Close()
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Info("failed to fetch points", zap.Error(err))
+		logger.Warn("failed to fetch points", zap.Error(err))
 		return nil, errors.New("failed to fetch points")
 	}
 
 	// Should never happen, because we have a check for proper archive now
 	if points == nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Info("metric time range not found")
+		logger.Warn("metric time range not found")
 		return nil, errors.New("time range not found")
 	}
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
@@ -1501,7 +1522,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.NotFound, 1)
-		accessLogger.Info("info served",
+		accessLogger.Error("info served",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "metric not found"),
 			zap.Int("http_code", http.StatusNotFound),
@@ -1544,7 +1565,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		accessLogger.Info("info failed",
+		accessLogger.Error("info failed",
 			zap.String("reason", "response encode failed"),
 			zap.Int("http_code", http.StatusInternalServerError),
 			zap.Error(err),
@@ -1718,6 +1739,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	logger := listener.logger
 
 	logger.Info("starting carbonserver",
+		zap.String("listen", listen),
 		zap.String("whisperData", listener.whisperData),
 		zap.Int("maxGlobs", listener.maxGlobs),
 		zap.String("scanFrequency", listener.scanFrequency.String()),
@@ -1759,7 +1781,6 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
 	})
 
-	logger.Info(fmt.Sprintf("listening on %s", listen))
 	tcpAddr, err := net.ResolveTCPAddr("tcp", listen)
 	if err != nil {
 		return err
