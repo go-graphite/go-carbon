@@ -235,6 +235,7 @@ type CarbonserverListener struct {
 	failOnMaxGlobs    bool
 	percentiles       []int
 	scanFrequency     time.Duration
+	forceScanChan     chan struct{}
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
 	logger            *zap.Logger
@@ -1667,6 +1668,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 }
 
 func (listener *CarbonserverListener) Stop() error {
+	close(listener.forceScanChan)
 	close(listener.exitChan)
 	if listener.db != nil {
 		listener.db.Close()
@@ -1747,9 +1749,9 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 
 	listener.exitChan = make(chan struct{})
 	if listener.trigramIndex && listener.scanFrequency != 0 {
-		force := make(chan struct{})
-		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), force, listener.exitChan)
-		force <- struct{}{}
+		listener.forceScanChan = make(chan struct{})
+		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan)
+		listener.forceScanChan <- struct{}{}
 	}
 
 	listener.queryCache = queryCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
@@ -1776,6 +1778,15 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler, statusCodes["details"]))
 	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler, statusCodes["render"]))
 	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler, statusCodes["info"]))
+
+	carbonserverMux.HandleFunc("/forcescan", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case listener.forceScanChan <- struct{}{}:
+			w.WriteHeader(http.StatusAccepted)
+		case <-time.After(time.Second):
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})
 
 	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
