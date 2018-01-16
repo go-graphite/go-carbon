@@ -12,6 +12,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/snappy"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/go-carbon/receiver"
@@ -47,9 +49,10 @@ func init() {
 }
 
 type Options struct {
-	Listen     string `toml:"listen"`
-	Enabled    bool   `toml:"enabled"`
-	BufferSize int    `toml:"buffer-size"`
+	Listen      string `toml:"listen"`
+	Enabled     bool   `toml:"enabled"`
+	BufferSize  int    `toml:"buffer-size"`
+	Compression string `toml:"compression"`
 }
 
 func NewOptions() *Options {
@@ -90,6 +93,7 @@ type TCP struct {
 	frameParser     func(body []byte) ([]*points.Points, error)
 	buffer          chan *points.Points
 	logger          *zap.Logger
+	decompressor    decompressor
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -119,6 +123,8 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	if options.BufferSize > 0 {
 		r.buffer = make(chan *points.Points, options.BufferSize)
 	}
+
+	r.decompressor = newDecompressor(options.Compression)
 
 	err = r.Listen(addr)
 	if err != nil {
@@ -172,7 +178,13 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 	defer atomic.AddInt32(&rcv.active, -1)
 
 	defer conn.Close()
-	reader := bufio.NewReader(conn)
+
+	bconn, err := rcv.decompressor(conn)
+	if err != nil {
+		rcv.logger.Error("failed init decompressor", zap.Error(err))
+		return
+	}
+	reader := bufio.NewReader(bconn)
 
 	finished := make(chan bool)
 	defer close(finished)
@@ -371,4 +383,23 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 
 		return nil
 	})
+}
+
+type decompressor func(net.Conn) (io.Reader, error)
+
+func newDecompressor(typ string) decompressor {
+	switch typ {
+	case "snappy":
+		return func(c net.Conn) (io.Reader, error) {
+			return snappy.NewReader(c), nil
+		}
+	case "gzip":
+		return func(c net.Conn) (io.Reader, error) {
+			return gzip.NewReader(c)
+		}
+	default:
+		return func(c net.Conn) (io.Reader, error) {
+			return c, nil
+		}
+	}
 }
