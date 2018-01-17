@@ -169,3 +169,6 @@
 [submodule "vendor/github.com/klauspost/compress"]
 	path = vendor/github.com/klauspost/compress
 	url = https://github.com/klauspost/compress.git
+[submodule "vendor/github.com/klauspost/cpuid"]
+	path = vendor/github.com/klauspost/cpuid
+	url = https://github.com/klauspost/cpuid.git
