@@ -204,6 +204,23 @@ buffer-size = 0
 # # Initial offset, if there is no saved state. Can be relative time or "newest" or "oldest".
 # # In case offset is unavailable (in future, etc) fallback is "oldest"
 # initial-offset = "-30m"
+#
+# # Specify kafka feature level (default: 0.11.0.0).
+# # Please note that some features (consuming lz4 compressed streams) requires kafka >0.11
+# # You must specify version in full. E.x. '0.11.0.0' - ok, but '0.11' is not.
+# # Supported version (as of 22 Jan 2018):
+# #   0.8.2.0
+# #   0.8.2.1
+# #   0.8.2.2
+# #   0.9.0.0
+# #   0.9.0.1
+# #   0.10.0.0
+# #   0.10.0.1
+# #   0.10.1.0
+# #   0.10.2.0
+# #   0.11.0.0
+# #   1.0.0
+# kafka-version = "0.11.0.0"
 
 [carbonlink]
 listen = "127.0.0.1:7002"

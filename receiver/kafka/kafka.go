@@ -157,6 +157,7 @@ type Options struct {
 	StateSaveInterval *Duration `toml:"state-save-interval"`
 	ReconnectInterval *Duration `toml:"reconnect-interval"`
 	FetchInterval     *Duration `toml:"fetch-interval"`
+	KafkaVersion      string    `toml:"kafka-version"`
 }
 
 // NewOptions returns Options struct filled with default values.
@@ -170,6 +171,7 @@ func NewOptions() *Options {
 		StateSaveInterval: &Duration{Duration: 60 * time.Second},
 		ReconnectInterval: &Duration{Duration: 60 * time.Second},
 		FetchInterval:     &Duration{Duration: 250 * time.Millisecond},
+		KafkaVersion:      "0.11.0.0",
 	}
 }
 
@@ -208,6 +210,7 @@ type Kafka struct {
 	forceReconnect    chan struct{}
 	protocol          Protocol
 	statsAsCounters   bool
+	version           sarama.KafkaVersion
 }
 
 func (s *state) SaveState() error {
@@ -267,6 +270,14 @@ func newKafka(name string, options *Options, store func(*points.Points)) (*Kafka
 			zap.Int64("offset", state.Offset),
 		)
 	}
+	ver, err := sarama.ParseKafkaVersion(options.KafkaVersion)
+	if err != nil {
+		logger.Error("invalid kafka version",
+			zap.String("kafkaVersion", options.KafkaVersion),
+			zap.Error(err),
+		)
+		return nil, err
+	}
 
 	rcv := &Kafka{
 		out:               store,
@@ -287,6 +298,7 @@ func newKafka(name string, options *Options, store func(*points.Points)) (*Kafka
 			partition:     options.Partition,
 			initialOffset: options.InitialOffset,
 		},
+		version: ver,
 	}
 
 	go func() {
@@ -308,6 +320,7 @@ func (rcv *Kafka) consume() {
 	rcv.logger.Info("connecting to kafka")
 
 	consumerConfig := sarama.NewConfig()
+	consumerConfig.Version = rcv.version
 	client, err := sarama.NewClient(rcv.connectOptions.brokers, consumerConfig)
 	if err != nil {
 		rcv.logger.Error("failed to connect to kafka",
