@@ -172,3 +172,21 @@
 [submodule "vendor/github.com/klauspost/cpuid"]
 	path = vendor/github.com/klauspost/cpuid
 	url = https://github.com/klauspost/cpuid.git
+[submodule "vendor/cloud.google.com/go"]
+	path = vendor/cloud.google.com/go
+	url = https://code.googlesource.com/gocloud
+[submodule "vendor/github.com/googleapis/gax-go"]
+	path = vendor/github.com/googleapis/gax-go
+	url = https://github.com/googleapis/gax-go
+[submodule "vendor/google.golang.org/api"]
+	path = vendor/google.golang.org/api
+	url = https://code.googlesource.com/google-api-go-client
+[submodule "vendor/golang.org/x/oauth2"]
+	path = vendor/golang.org/x/oauth2
+	url = https://go.googlesource.com/oauth2
+[submodule "vendor/golang.org/x/sync"]
+	path = vendor/golang.org/x/sync
+	url = https://go.googlesource.com/sync
+[submodule "vendor/github.com/google/go-cmp"]
+	path = vendor/github.com/google/go-cmp
+	url = https://github.com/google/go-cmp
