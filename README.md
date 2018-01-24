@@ -221,6 +221,15 @@ buffer-size = 0
 # #   0.11.0.0
 # #   1.0.0
 # kafka-version = "0.11.0.0"
+#
+# [receiver.pubsub]
+# # This receiver receives data from Google PubSub
+# # Authentication is managed through APPLICATION_DEFAULT_CREDENTIALS:
+# # - https://cloud.google.com/docs/authentication/production#providing_credentials_to_your_application
+# # Currently the subscription must exist before running go-carbon.
+# protocol = "pubsub"
+# project = "project-name"
+# subscription = "subscription-name"
 
 [carbonlink]
 listen = "127.0.0.1:7002"
@@ -397,6 +406,17 @@ With settings above applied, best write-strategy to use is "noop"
 * carbonserver: support multiple targets in /render queries (graphite-web 1.1.x compatibility)
 * flock support for persister and carbonserver
 * `cache.max-size` and `cache.write-strategy` can be changed without restart (HUP signal)
+* Google PubSub protocl was added. It receives data from PubSub Subscriptions and can decode protobuf, plan, or pickle messages.
+  * The default format is plain. Specify protobuf or pickle by adding an attribute named 'content-type' to the PubSub messsages:
+    * application/protobuf
+    * application/python-pickle
+  * Sample configuration:
+```
+[receiver.pubsub]
+protocol = "pubsub"
+project = "project-name"
+subscription = "subscription-name"
+```
 
 ##### version 0.11.0
 * GRPC api for query cache was added
