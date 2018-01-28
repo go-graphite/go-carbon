@@ -27,15 +27,21 @@ func init() {
 
 // Options contains all receiver's options that can be changed by user
 type Options struct {
-	Project      string `toml:"project"`
-	Subscription string `toml:"subscription"`
+	Project             string `toml:"project"`
+	Subscription        string `toml:"subscription"`
+	ReceiverGoRoutines  int    `toml:"receiver_go_routines"`
+	ReceiverMaxMessages int    `toml:"receiver_max_messages"`
+	ReceiverMaxBytes    int    `toml:"receiver_max_bytes"`
 }
 
 // NewOptions returns Options struct filled with default values.
 func NewOptions() *Options {
 	return &Options{
-		Project:      "",
-		Subscription: "",
+		Project:             "",
+		Subscription:        "",
+		ReceiverGoRoutines:  4,
+		ReceiverMaxMessages: 1000,
+		ReceiverMaxBytes:    500e6, // 500MB
 	}
 }
 
@@ -86,6 +92,18 @@ func newPubSub(client *pubsub.Client, name string, options *Options, store func(
 		// TODO: try to create subscription
 		return nil, fmt.Errorf("subscription %s in project %s does not exist", options.Subscription, options.Project)
 	}
+
+	if options.ReceiverGoRoutines != 0 {
+		sub.ReceiveSettings.NumGoroutines = options.ReceiverGoRoutines
+	}
+	if options.ReceiverMaxBytes != 0 {
+		sub.ReceiveSettings.MaxOutstandingBytes = options.ReceiverMaxBytes
+	}
+	if options.ReceiverMaxMessages != 0 {
+		sub.ReceiveSettings.MaxOutstandingMessages = options.ReceiverMaxMessages
+	}
+
+	// cancel() will be called to signal the subscription Receive() goroutines to finish and shutdown
 	cctx, cancel := context.WithCancel(ctx)
 
 	rcv := &PubSub{

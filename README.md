@@ -224,12 +224,21 @@ buffer-size = 0
 #
 # [receiver.pubsub]
 # # This receiver receives data from Google PubSub
-# # Authentication is managed through APPLICATION_DEFAULT_CREDENTIALS:
-# # - https://cloud.google.com/docs/authentication/production#providing_credentials_to_your_application
-# # Currently the subscription must exist before running go-carbon.
+# # - Authentication is managed through APPLICATION_DEFAULT_CREDENTIALS:
+# #   - https://cloud.google.com/docs/authentication/production#providing_credentials_to_your_application
+# # - Currently the subscription must exist before running go-carbon.
+# # - The "receiver_*" settings are optional and directly map to the google pubsub
+# #   libraries ReceiveSettings (https://godoc.org/cloud.google.com/go/pubsub#ReceiveSettings)
+# #   - How to think about the "receiver_*" settings: In an attempt to maximize throughput the
+# #     pubsub library will spawn 'receiver_go_routines' to fetch messages from the server.
+# #     These goroutines simply buffer them into memory until 'receiver_max_messages' or 'receiver_max_bytes'
+# #     have been read. This does not affect the actual handling of these messages which are processed by other goroutines.
 # protocol = "pubsub"
 # project = "project-name"
 # subscription = "subscription-name"
+# receiver_go_routines = 4
+# receiver_max_messages = 1000
+# receiver_max_bytes = 500000000 # default 500MB
 
 [carbonlink]
 listen = "127.0.0.1:7002"
@@ -416,6 +425,9 @@ With settings above applied, best write-strategy to use is "noop"
 protocol = "pubsub"
 project = "project-name"
 subscription = "subscription-name"
+# receiver_go_routines = 4
+# receiver_max_messages = 1000
+# receiver_max_bytes = 500000000 # default 500MB
 ```
 
 ##### version 0.11.0
