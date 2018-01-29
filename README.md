@@ -240,6 +240,7 @@ buffer-size = 0
 # receiver_max_messages = 1000
 # receiver_max_bytes = 500000000 # default 500MB
 
+
 [carbonlink]
 listen = "127.0.0.1:7002"
 enabled = true
@@ -415,7 +416,7 @@ With settings above applied, best write-strategy to use is "noop"
 * carbonserver: support multiple targets in /render queries (graphite-web 1.1.x compatibility)
 * flock support for persister and carbonserver
 * `cache.max-size` and `cache.write-strategy` can be changed without restart (HUP signal)
-* Google PubSub protocl was added. It receives data from PubSub Subscriptions and can decode protobuf, plan, or pickle messages.
+* Google PubSub protocol was added. It receives data from PubSub Subscriptions and can decode protobuf, plain, or pickle messages.
   * The default format is plain. Specify protobuf or pickle by adding an attribute named 'content-type' to the PubSub messsages:
     * application/protobuf
     * application/python-pickle
