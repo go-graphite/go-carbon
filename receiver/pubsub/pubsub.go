@@ -50,7 +50,7 @@ func NewOptions() *Options {
 		Subscription:        "",
 		ReceiverGoRoutines:  4,
 		ReceiverMaxMessages: 1000,
-		ReceiverMaxBytes:    500e6, // 500MB
+		ReceiverMaxBytes:    100e6, // 100MB
 	}
 }
 
