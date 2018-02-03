@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"cloud.google.com/go/pubsub"
 	"go.uber.org/zap"
@@ -125,15 +126,24 @@ func newPubSub(client *pubsub.Client, name string, options *Options, store func(
 		closed:       make(chan struct{}),
 	}
 
+	// Receive() will create goroutines as necessary to handle incoming messages. Reconnect
+	// on error. Stop processing messages only if Stop() is called
 	go func() {
-		err := rcv.subscription.Receive(cctx, func(ctx context.Context, m *pubsub.Message) {
-			rcv.handleMessage(m)
-			m.Ack()
-		})
-		if err != nil {
-			rcv.logger.Error(err.Error())
+		for {
+			err := rcv.subscription.Receive(cctx, func(ctx context.Context, m *pubsub.Message) {
+				rcv.handleMessage(m)
+				m.Ack()
+			})
+			if err == context.Canceled {
+				close(rcv.closed)
+				rcv.Stop()
+				break
+			}
+			if err != nil {
+				rcv.logger.Error(err.Error())
+			}
+			time.Sleep(1 * time.Second)
 		}
-		close(rcv.closed)
 	}()
 
 	return rcv, nil
