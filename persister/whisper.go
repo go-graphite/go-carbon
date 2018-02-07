@@ -37,6 +37,7 @@ type Whisper struct {
 	created             uint32 // counter
 	sparse              bool
 	flock               bool
+	hashFilenames       bool
 	maxUpdatesPerSecond int
 	throttleTicker      *ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
@@ -99,6 +100,10 @@ func (p *Whisper) SetFLock(flock bool) {
 	p.flock = flock
 }
 
+func (p *Whisper) SetHashFilenames(v bool) {
+	p.hashFilenames = v
+}
+
 func (p *Whisper) SetMockStore(fn func() (StoreFunc, func())) {
 	p.mockStore = fn
 }
@@ -132,7 +137,7 @@ func store(p *Whisper, values *points.Points) {
 
 	var path string
 	if p.tagsEnabled && strings.IndexByte(values.Metric, ';') >= 0 {
-		path = tags.FilePath(p.rootPath, values.Metric) + ".wsp"
+		path = tags.FilePath(p.rootPath, values.Metric, p.hashFilenames) + ".wsp"
 	} else {
 		path = filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
 	}

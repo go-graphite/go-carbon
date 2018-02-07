@@ -260,6 +260,7 @@ func (app *App) startPersister() {
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetWorkers(app.Config.Whisper.Workers)
+		p.SetHashFilenames(app.Config.Whisper.HashFilenames)
 
 		if app.Tags != nil {
 			p.SetTagsEnabled(true)

@@ -55,8 +55,14 @@ func TestNormalize(t *testing.T) {
 
 func TestFilePath(t *testing.T) {
 	assert := assert.New(t)
-	p := FilePath("/data/", "some.metric;tag1=value2;tag2=value.2")
+	p := FilePath("/data/", "some.metric;tag1=value2;tag2=value.2", false)
 	assert.Equal("/data/_tagged/eff/aae/some_DOT_metric;tag1=value2;tag2=value_DOT_2", p)
+}
+
+func TestFilePathHashed(t *testing.T) {
+	assert := assert.New(t)
+	p := FilePath("/data/", "some.metric;tag1=value2;tag2=value.2", true)
+	assert.Equal("/data/_tagged/eff/aae/effaae5b55950b150a7493d2f5430772ca2460bf7cccb4d9e523643df54c010f", p)
 }
 
 func BenchmarkNormalizeOriginal(b *testing.B) {
@@ -82,7 +88,7 @@ func BenchmarkFilePath(b *testing.B) {
 	var x string
 
 	for i := 0; i < b.N; i++ {
-		x = FilePath("/data", m)
+		x = FilePath("/data", m, false)
 	}
 
 	if len(x) < 0 {

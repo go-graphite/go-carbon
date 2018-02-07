@@ -61,6 +61,7 @@ type whisperConfig struct {
 	Sparse              bool   `toml:"sparse-create"`
 	FLock               bool   `toml:"flock"`
 	Enabled             bool   `toml:"enabled"`
+	HashFilenames       bool   `toml:"hash-filenames"`
 	Schemas             persister.WhisperSchemas
 	Aggregation         *persister.WhisperAggregation
 }
@@ -169,6 +170,7 @@ func NewConfig() *Config {
 			Workers:             1,
 			Sparse:              false,
 			FLock:               false,
+			HashFilenames:       true,
 		},
 		Cache: cacheConfig{
 			MaxSize:       1000000,
