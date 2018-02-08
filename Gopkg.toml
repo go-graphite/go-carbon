@@ -1,0 +1,118 @@
+# Gopkg.toml example
+#
+# Refer to https://github.com/golang/dep/blob/master/docs/Gopkg.toml.md
+# for detailed Gopkg.toml documentation.
+#
+# required = ["github.com/user/thing/cmd/thing"]
+# ignored = ["github.com/user/project/pkgX", "bitbucket.org/user/project/pkgA/pkgY"]
+#
+# [[constraint]]
+#   name = "github.com/user/project"
+#   version = "1.0.0"
+#
+# [[constraint]]
+#   name = "github.com/user/project2"
+#   branch = "dev"
+#   source = "github.com/myfork/project2"
+#
+# [[override]]
+#   name = "github.com/x/y"
+#   version = "2.4.0"
+#
+# [prune]
+#   non-go = false
+#   go-tests = true
+#   unused-packages = true
+
+
+[[constraint]]
+  name = "cloud.google.com/go"
+  version = "0.18.0"
+
+[[constraint]]
+  name = "github.com/BurntSushi/toml"
+  version = "0.3.0"
+
+[[constraint]]
+  name = "github.com/NYTimes/gziphandler"
+  version = "1.0.0"
+
+[[constraint]]
+  name = "github.com/Shopify/sarama"
+  version = "1.15.0"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/alyu/configparser"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/dgryski/go-expirecache"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/dgryski/go-trigram"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/dgryski/httputil"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/go-graphite/go-whisper"
+
+[[constraint]]
+  name = "github.com/gogo/protobuf"
+  version = "1.0.0"
+
+[[constraint]]
+  name = "github.com/klauspost/compress"
+  version = "1.2.1"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/lomik/graphite-pickle"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/lomik/og-rek"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/lomik/stop"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/lomik/zapwriter"
+
+[[constraint]]
+  name = "github.com/sevlyar/go-daemon"
+  version = "0.1.2"
+
+[[constraint]]
+  name = "github.com/stretchr/testify"
+  version = "1.2.1"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/syndtr/goleveldb"
+
+[[constraint]]
+  name = "go.uber.org/zap"
+  version = "1.7.1"
+
+[[constraint]]
+  branch = "master"
+  name = "golang.org/x/net"
+
+[[constraint]]
+  branch = "master"
+  name = "google.golang.org/api"
+
+[[constraint]]
+  name = "google.golang.org/grpc"
+  version = "1.9.2"
+
+[prune]
+  go-tests = true
+  unused-packages = true
