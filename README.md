@@ -58,7 +58,6 @@ Use binary packages from [releases page](https://github.com/lomik/go-carbon/rele
 # build binary
 git clone https://github.com/lomik/go-carbon.git
 cd go-carbon
-make submodules
 make
 ```
 

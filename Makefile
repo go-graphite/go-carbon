@@ -11,10 +11,6 @@ BUILD ?= $(shell git describe --abbrev=4 --dirty --always --tags)
 
 all: $(NAME)
 
-submodules:
-	git submodule sync
-	git submodule update --init --recursive
-
 $(NAME):
 	$(GO) build --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
