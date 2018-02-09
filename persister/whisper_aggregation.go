@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 
-	"github.com/alyu/configparser"
 	whisper "github.com/go-graphite/go-whisper"
 )
 
@@ -43,42 +41,33 @@ func NewWhisperAggregation() *WhisperAggregation {
 }
 
 // ReadWhisperAggregation ...
-func ReadWhisperAggregation(file string) (*WhisperAggregation, error) {
-	config, err := configparser.Read(file)
-	if err != nil {
-		return nil, err
-	}
-	// pp.Println(config)
-	sections, err := config.AllSections()
+func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
+	config, err := parseIniFile(filename)
 	if err != nil {
 		return nil, err
 	}
 
 	result := NewWhisperAggregation()
 
-	for _, s := range sections {
+	for _, section := range config {
 		item := &whisperAggregationItem{}
 		// this is mildly stupid, but I don't feel like forking
 		// configparser just for this
-		item.name =
-			strings.Trim(strings.SplitN(s.String(), "\n", 2)[0], " []")
-		if item.name == "" || strings.HasPrefix(item.name, "#") {
-			continue
-		}
+		item.name = section["name"]
 
-		item.pattern, err = regexp.Compile(s.ValueOf("pattern"))
+		item.pattern, err = regexp.Compile(section["pattern"])
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse pattern %#v for [%s]: %s",
-				s.ValueOf("pattern"), item.name, err.Error())
+				section["pattern"], item.name, err.Error())
 		}
 
-		item.xFilesFactor, err = strconv.ParseFloat(s.ValueOf("xFilesFactor"), 64)
+		item.xFilesFactor, err = strconv.ParseFloat(section["xfilesfactor"], 64)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse xFilesFactor %#v in %s: %s",
-				s.ValueOf("xFilesFactor"), item.name, err.Error())
+				section["xfilesfactor"], item.name, err.Error())
 		}
 
-		item.aggregationMethodStr = s.ValueOf("aggregationMethod")
+		item.aggregationMethodStr = section["aggregationmethod"]
 		switch item.aggregationMethodStr {
 		case "average", "avg":
 			item.aggregationMethod = whisper.Average
@@ -92,7 +81,7 @@ func ReadWhisperAggregation(file string) (*WhisperAggregation, error) {
 			item.aggregationMethod = whisper.Min
 		default:
 			return nil, fmt.Errorf("unknown aggregation method '%s'",
-				s.ValueOf("aggregationMethod"))
+				section["aggregationmethod"])
 		}
 
 		result.Data = append(result.Data, item)

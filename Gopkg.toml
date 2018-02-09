@@ -43,10 +43,6 @@
 
 [[constraint]]
   branch = "master"
-  name = "github.com/alyu/configparser"
-
-[[constraint]]
-  branch = "master"
   name = "github.com/dgryski/go-expirecache"
 
 [[constraint]]

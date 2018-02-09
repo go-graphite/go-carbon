@@ -35,12 +35,6 @@
   version = "v1.15.0"
 
 [[projects]]
-  branch = "master"
-  name = "github.com/alyu/configparser"
-  packages = ["."]
-  revision = "26b2fe18bee125de2a3090d6fadb7e280e63eba6"
-
-[[projects]]
   name = "github.com/davecgh/go-spew"
   packages = ["spew"]
   revision = "346938d642f2ec3594ed81d874461961cd0faa76"
@@ -408,6 +402,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "8490ba4345ed0ba542495c7290f21b11a5445eb855a4b1828175c761b5fb66ec"
+  inputs-digest = "387eddb39b1726449694a3fc99d5403be8135cfd5695cceaf382d7a954e7d7f7"
   solver-name = "gps-cdcl"
   solver-version = 1

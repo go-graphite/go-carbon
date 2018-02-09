@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alyu/configparser"
 	"github.com/go-graphite/go-whisper"
 )
 
@@ -74,51 +73,39 @@ func ParseRetentionDefs(retentionDefs string) (whisper.Retentions, error) {
 // ReadWhisperSchemas reads and parses a storage-schemas.conf file and returns a sorted
 // schemas structure
 // see https://graphite.readthedocs.io/en/0.9.9/config-carbon.html#storage-schemas-conf
-func ReadWhisperSchemas(file string) (WhisperSchemas, error) {
-	config, err := configparser.Read(file)
-	if err != nil {
-		return nil, err
-	}
-
-	sections, err := config.AllSections()
+func ReadWhisperSchemas(filename string) (WhisperSchemas, error) {
+	config, err := parseIniFile(filename)
 	if err != nil {
 		return nil, err
 	}
 
 	var schemas WhisperSchemas
 
-	for i, sec := range sections {
+	for i, section := range config {
 		schema := Schema{}
-		schema.Name =
-			strings.Trim(strings.SplitN(sec.String(), "\n", 2)[0], " []")
-		if schema.Name == "" || strings.HasPrefix(schema.Name, "#") {
-			continue
-		}
+		schema.Name = section["name"]
 
-		patternStr := sec.ValueOf("pattern")
-		if patternStr == "" {
+		if section["pattern"] == "" {
 			return nil, fmt.Errorf("[persister] Empty pattern for [%s]", schema.Name)
 		}
-		schema.Pattern, err = regexp.Compile(patternStr)
+		schema.Pattern, err = regexp.Compile(section["pattern"])
 		if err != nil {
 			return nil, fmt.Errorf("[persister] Failed to parse pattern %q for [%s]: %s",
-				sec.ValueOf("pattern"), schema.Name, err.Error())
+				section["pattern"], schema.Name, err.Error())
 		}
-		schema.RetentionStr = sec.ValueOf("retentions")
+		schema.RetentionStr = section["retentions"]
 		schema.Retentions, err = ParseRetentionDefs(schema.RetentionStr)
 
 		if err != nil {
 			return nil, fmt.Errorf("[persister] Failed to parse retentions %q for [%s]: %s",
-				sec.ValueOf("retentions"), schema.Name, err.Error())
+				schema.RetentionStr, schema.Name, err.Error())
 		}
 
-		priorityStr := sec.ValueOf("priority")
-
 		p := int64(0)
-		if priorityStr != "" {
-			p, err = strconv.ParseInt(priorityStr, 10, 0)
+		if section["priority"] != "" {
+			p, err = strconv.ParseInt(section["priority"], 10, 0)
 			if err != nil {
-				return nil, fmt.Errorf("[persister] Failed to parse priority %q for [%s]: %s", priorityStr, schema.Name, err)
+				return nil, fmt.Errorf("[persister] Failed to parse priority %q for [%s]: %s", section["priority"], schema.Name, err)
 			}
 		}
 		schema.Priority = int64(p)<<32 - int64(i) // to sort records with same priority by position in file
