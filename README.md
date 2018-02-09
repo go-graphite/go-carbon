@@ -101,6 +101,9 @@ sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
 flock = false
 enabled = true
+# Use hashed filenames for tagged metrics instead of human readable
+# https://github.com/lomik/go-carbon/pull/225
+hash-filenames = true
 
 [cache]
 # Limit of in-memory stored points (not metrics)
@@ -238,7 +241,6 @@ buffer-size = 0
 # receiver_go_routines = 4
 # receiver_max_messages = 1000
 # receiver_max_bytes = 500000000 # default 500MB
-
 
 [carbonlink]
 listen = "127.0.0.1:7002"

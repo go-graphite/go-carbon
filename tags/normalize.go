@@ -98,10 +98,10 @@ func Normalize(s string) (string, error) {
 	return strings.Join(arr[:len(arr)-toDel], ";"), nil
 }
 
-func FilePath(root string, s string, hash_only bool) string {
+func FilePath(root string, s string, hashOnly bool) string {
 	sum := sha256.Sum256([]byte(s))
 	hash := fmt.Sprintf("%x", sum)
-	if hash_only == true {
+	if hashOnly == true {
 		return filepath.Join(root, "_tagged", hash[:3], hash[3:6], hash)
 	} else {
 		return filepath.Join(root, "_tagged", hash[:3], hash[3:6],  strings.Replace(s, ".", "_DOT_", -1))
