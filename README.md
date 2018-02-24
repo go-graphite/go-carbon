@@ -414,7 +414,6 @@ With settings above applied, best write-strategy to use is "noop"
 ## Changelog
 ##### master
 * [Tags](http://graphite.readthedocs.io/en/latest/tags.html) support was added (only with [graphite-web](https://github.com/graphite-project/graphite-web))
-* carbonserver: support multiple targets in /render queries (graphite-web 1.1.x compatibility)
 * flock support for persister and carbonserver
 * `cache.max-size` and `cache.write-strategy` can be changed without restart (HUP signal)
 * Google PubSub protocol was added. It receives data from PubSub Subscriptions and can decode protobuf, plain, or pickle messages.
