@@ -413,6 +413,8 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+
+##### version 0.12.0
 * [Tags](http://graphite.readthedocs.io/en/latest/tags.html) support was added (only with [graphite-web](https://github.com/graphite-project/graphite-web))
 * flock support for persister and carbonserver
 * `cache.max-size` and `cache.write-strategy` can be changed without restart (HUP signal)
