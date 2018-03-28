@@ -1,0 +1,69 @@
+syntax = "proto3";
+package carbonapi_v2_pb;
+
+// Regenerate with  protoc --gogo_out=. carbonapi_v2_pb.proto
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+
+message FetchResponse {
+    string name = 1;
+    int32 startTime = 2;
+    int32 stopTime = 3;
+    int32 stepTime = 4;
+    repeated double values = 5;
+    repeated bool isAbsent = 6;
+}
+
+message MultiFetchResponse {
+    repeated FetchResponse metrics = 1 [(gogoproto.nullable) = false];
+}
+
+message GlobMatch {
+    string path = 1;
+    bool isLeaf = 2;
+}
+
+message GlobResponse {
+    string name = 1;
+    repeated GlobMatch matches = 2 [(gogoproto.nullable) = false];
+}
+
+message Retention {
+	int32 secondsPerPoint = 1;
+	int32 numberOfPoints = 2;
+}
+
+message InfoResponse {
+	string name = 1;
+	string aggregationMethod = 2;
+	int32 maxRetention = 3;
+	float xFilesFactor = 4;
+	repeated Retention retentions = 5 [(gogoproto.nullable) = false];
+}
+
+message ServerInfoResponse {
+	string server = 1;
+	InfoResponse info = 2;
+}
+
+message ZipperInfoResponse {
+	repeated ServerInfoResponse responses = 1 [(gogoproto.nullable) = false];
+}
+
+message ListMetricsResponse {
+	repeated string Metrics = 1;
+}
+
+// MetricDetails and MetricDetailsResponse is not guaranteed to stay the same in future releases
+// But we'll do our best to make them stable and only to extend them if that's necessary
+message MetricDetails {
+	int64 Size = 2;
+	int64 ModTime = 3;
+	int64 ATime = 4;
+	int64 RdTime = 5;
+}
+
+message MetricDetailsResponse {
+	map<string, MetricDetails> metrics = 1;
+	uint64 FreeSpace = 2;
+	uint64 TotalSpace = 3;
+}

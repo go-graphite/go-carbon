@@ -77,17 +77,33 @@
   version = "v1.1.0"
 
 [[projects]]
+  name = "github.com/go-graphite/carbonzipper"
+  packages = ["zipper/httpHeaders"]
+  revision = "53bd3ef082320cad7ecdfa8e7b5d34a9bc70a0a1"
+  version = "1.0.0-beta.2"
+
+[[projects]]
   branch = "master"
   name = "github.com/go-graphite/go-whisper"
   packages = ["."]
   revision = "73c5cbd69142cbef9bd8ef9c6d485a8d34b4554c"
 
 [[projects]]
+  name = "github.com/go-graphite/protocol"
+  packages = [
+    "carbonapi_v2_pb",
+    "carbonapi_v3_pb"
+  ]
+  revision = "76bf6fd3ebb246d60f8afa562f75a36c74411dec"
+  version = "v0.2.2"
+
+[[projects]]
   name = "github.com/gogo/protobuf"
   packages = [
     "gogoproto",
     "proto",
-    "protoc-gen-gogo/descriptor"
+    "protoc-gen-gogo/descriptor",
+    "sortkeys"
   ]
   revision = "1adfc126b41513cc696b209667c8656ea7aac67c"
   version = "v1.0.0"
@@ -402,6 +418,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "387eddb39b1726449694a3fc99d5403be8135cfd5695cceaf382d7a954e7d7f7"
+  inputs-digest = "54f0b954782ef701c4afe0129360c3393af6191618e15486a54751a5ccdab218"
   solver-name = "gps-cdcl"
   solver-version = 1

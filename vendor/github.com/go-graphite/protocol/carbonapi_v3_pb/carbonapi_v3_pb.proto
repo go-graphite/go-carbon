@@ -1,0 +1,133 @@
+syntax = "proto3";
+package carbonapi_v3_pb;
+
+// Regenerate with protoc --gogofast_out=plugins=grpc:. carbonapi_v3_grpc.proto --proto_path=../vendor/ --proto_path=.
+import "github.com/gogo/protobuf/gogoproto/gogo.proto";
+
+message FilteringFunction {
+    string name = 1;
+    repeated string arguments = 2;
+}
+
+// Fetch Storage Capabilities
+message CapabilityRequest {
+}
+
+// Storage capability information
+message CapabilityResponse {
+    int64 version = 1;
+    // server name
+    string name = 2;
+    bool highPrecisionTimestamps = 3;
+    bool supportFilteringFunctions = 4;
+    // true if storage will behave normally if request is splitted by maxGlobs
+    bool likeSplittedRequests = 5;
+    bool supportStreaming = 6;
+}
+
+// Fetch Data
+message FetchRequest {
+    string name = 1;
+    int64 startTime = 2;
+    int64 stopTime = 3;
+    // Should be true if our request requires more precision than seconds.
+    bool highPrecisionTimestamps = 5;
+    repeated FilteringFunction filterFunctions = 4;
+}
+
+message MultiFetchRequest {
+    repeated FetchRequest metrics = 1 [(gogoproto.nullable) = false];
+}
+
+// Stop time can be computed by stepTime*len(values)
+message FetchResponse {
+    string name = 1;
+    string pathExpression = 2;
+    string consolidationFunc = 3;
+    int64 startTime = 4;
+    int64 stopTime = 5;
+    int64 stepTime = 6;
+    float xFilesFactor = 7;
+    // Should be true if timestamps have better precision than seconds.
+    bool highPrecisionTimestamps = 8;
+    repeated double values = 9;
+    repeated string appliedFunctions = 10;
+}
+
+message MultiFetchResponse {
+    repeated FetchResponse metrics = 1 [(gogoproto.nullable) = false];
+}
+
+// Find Metrics
+message MultiGlobRequest {
+    repeated string metrics = 1;
+}
+
+message GlobMatch {
+    string path = 1;
+    bool isLeaf = 2;
+}
+
+// request name to metrics
+message GlobResponse {
+    string name = 1;
+    repeated GlobMatch matches = 2 [(gogoproto.nullable) = false];
+}
+
+message MultiGlobResponse {
+    repeated GlobResponse metrics = 1 [(gogoproto.nullable) = false];
+}
+
+// Information about metrics
+message MetricsInfoRequest {
+    string name = 1;
+}
+
+message MultiMetricsInfoRequest {
+    repeated string names = 1;
+}
+
+message Retention {
+    int64 secondsPerPoint = 1;
+    int64 numberOfPoints = 2;
+}
+
+message MetricsInfoResponse {
+    string name = 1;
+    string consolidationFunc = 2;
+    float xFilesFactor = 4;
+    int64 maxRetention = 3;
+    repeated Retention retentions = 5 [(gogoproto.nullable) = false];
+}
+
+message MultiMetricsInfoResponse {
+    repeated MetricsInfoResponse metrics = 1 [(gogoproto.nullable) = false];
+}
+
+// key = server, value = metric
+message ZipperInfoResponse {
+    map<string, MultiMetricsInfoResponse> info = 1 [(gogoproto.nullable) = false];
+}
+
+// List all metrics
+message ListMetricsResponse {
+    repeated string Metrics = 1;
+}
+
+// Get stats about metrics
+message MetricDetails {
+    int64 Size = 2;
+    int64 ModTime = 3;
+    int64 ATime = 4;
+    int64 RdTime = 5;
+}
+
+message MetricDetailsResponse {
+    map<string, MetricDetails> metrics = 1;
+    uint64 FreeSpace = 2;
+    uint64 TotalSpace = 3;
+}
+
+message MultiDetailsResponse {
+    map<string, MetricDetailsResponse> metrics = 1;
+}
