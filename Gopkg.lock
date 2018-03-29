@@ -25,14 +25,14 @@
 [[projects]]
   name = "github.com/NYTimes/gziphandler"
   packages = ["."]
-  revision = "d6f46609c7629af3a02d791a4666866eed3cbd3e"
-  version = "v1.0.0"
+  revision = "2600fb119af974220d3916a5916d6e31176aac1b"
+  version = "v1.0.1"
 
 [[projects]]
   name = "github.com/Shopify/sarama"
   packages = ["."]
-  revision = "3b1b38866a79f06deddf0487d5c27ba0697ccd65"
-  version = "v1.15.0"
+  revision = "f7be6aa2bc7b2e38edf816b08b582782194a1c02"
+  version = "v1.16.0"
 
 [[projects]]
   name = "github.com/davecgh/go-spew"
@@ -61,8 +61,8 @@
 [[projects]]
   name = "github.com/eapache/go-resiliency"
   packages = ["breaker"]
-  revision = "6800482f2c813e689c88b7ed3282262385011890"
-  version = "v1.0.0"
+  revision = "ea41b0fad31007accc7f806884dcdf3da98b79ce"
+  version = "v1.1.0"
 
 [[projects]]
   branch = "master"
@@ -77,17 +77,33 @@
   version = "v1.1.0"
 
 [[projects]]
+  name = "github.com/go-graphite/carbonzipper"
+  packages = ["zipper/httpHeaders"]
+  revision = "53bd3ef082320cad7ecdfa8e7b5d34a9bc70a0a1"
+  version = "1.0.0-beta.2"
+
+[[projects]]
   branch = "master"
   name = "github.com/go-graphite/go-whisper"
   packages = ["."]
   revision = "73c5cbd69142cbef9bd8ef9c6d485a8d34b4554c"
 
 [[projects]]
+  name = "github.com/go-graphite/protocol"
+  packages = [
+    "carbonapi_v2_pb",
+    "carbonapi_v3_pb"
+  ]
+  revision = "88203c2cac82ff944b49ec5144d5627c7859618b"
+  version = "v0.3"
+
+[[projects]]
   name = "github.com/gogo/protobuf"
   packages = [
     "gogoproto",
     "proto",
-    "protoc-gen-gogo/descriptor"
+    "protoc-gen-gogo/descriptor",
+    "sortkeys"
   ]
   revision = "1adfc126b41513cc696b209667c8656ea7aac67c"
   version = "v1.0.0"
@@ -120,8 +136,8 @@
     "cmp/internal/function",
     "cmp/internal/value"
   ]
-  revision = "8099a9787ce5dc5984ed879a3bda47dc730a8e97"
-  version = "v0.1.0"
+  revision = "3af367b6b30c263d47e8895973edcca9a49cf029"
+  version = "v0.2.0"
 
 [[projects]]
   name = "github.com/googleapis/gax-go"
@@ -182,7 +198,7 @@
   branch = "master"
   name = "github.com/lomik/zapwriter"
   packages = ["."]
-  revision = "d4499a33b5929c4a2e7e169165f594f35b39638c"
+  revision = "3b568a1c89582d7059d81f13aa9e3f97aa9af97e"
 
 [[projects]]
   name = "github.com/pierrec/lz4"
@@ -211,8 +227,8 @@
 [[projects]]
   name = "github.com/sevlyar/go-daemon"
   packages = ["."]
-  revision = "e49ef56654f54139c4dc0285f973f74e9649e729"
-  version = "v0.1.2"
+  revision = "97491df6ec974d292cb82c61906a1a4c6f29958b"
+  version = "v0.1.3"
 
 [[projects]]
   name = "github.com/stretchr/testify"
@@ -237,7 +253,26 @@
     "leveldb/table",
     "leveldb/util"
   ]
-  revision = "211f780988068502fe874c44dae530528ebd840f"
+  revision = "169b1b37be738edb2813dab48c97a549bcf99bb5"
+
+[[projects]]
+  name = "go.opencensus.io"
+  packages = [
+    "exporter/stackdriver/propagation",
+    "internal",
+    "internal/tagencoding",
+    "plugin/ocgrpc",
+    "plugin/ochttp",
+    "plugin/ochttp/propagation/b3",
+    "stats",
+    "stats/internal",
+    "stats/view",
+    "tag",
+    "trace",
+    "trace/propagation"
+  ]
+  revision = "6e3f034057826b530038d93267906ec3c012183f"
+  version = "v0.6.0"
 
 [[projects]]
   name = "go.uber.org/atomic"
@@ -277,7 +312,7 @@
     "lex/httplex",
     "trace"
   ]
-  revision = "f5dfe339be1d06f81b22525fe34671ee7d2c8904"
+  revision = "6078986fec03a1dcc236c34816c71b0e05018fda"
 
 [[projects]]
   branch = "master"
@@ -289,7 +324,7 @@
     "jws",
     "jwt"
   ]
-  revision = "543e37812f10c46c622c9575afd7ad22f22a12ba"
+  revision = "fdc9e635145ae97e6c2cb777c48305600cf515cb"
 
 [[projects]]
   branch = "master"
@@ -298,10 +333,9 @@
     "errgroup",
     "semaphore"
   ]
-  revision = "fd80eb99c8f653c847d294a001bdf2a3a6f768f5"
+  revision = "1d60e4601c6fd243af51cc01ddf169918a5407ca"
 
 [[projects]]
-  branch = "master"
   name = "golang.org/x/text"
   packages = [
     "collate",
@@ -319,7 +353,8 @@
     "unicode/norm",
     "unicode/rangetable"
   ]
-  revision = "4e4a3210bb54bb31f6ab2cdca2edcc0b50c420c1"
+  revision = "f21a4dfb5e38f5895301dc265a8def02365cc3d0"
+  version = "v0.3.0"
 
 [[projects]]
   branch = "master"
@@ -334,7 +369,7 @@
     "transport/grpc",
     "transport/http"
   ]
-  revision = "e771abbff930c1ae3c6e2c35117fc88856f11b2f"
+  revision = "a213db537ac9b393526194a5c85ad6e546f7923f"
 
 [[projects]]
   name = "google.golang.org/appengine"
@@ -365,7 +400,7 @@
     "googleapis/rpc/status",
     "protobuf/field_mask"
   ]
-  revision = "2b5a72b8730b0b16380010cfe5286c42108d88e7"
+  revision = "ab0870e398d5dd054b868c0db1481ab029b9a9f2"
 
 [[projects]]
   name = "google.golang.org/grpc"
@@ -379,6 +414,7 @@
     "credentials",
     "credentials/oauth",
     "encoding",
+    "encoding/proto",
     "grpclb/grpc_lb_v1/messages",
     "grpclog",
     "internal",
@@ -396,12 +432,12 @@
     "tap",
     "transport"
   ]
-  revision = "6b51017f791ae1cfbec89c52efdf444b13b550ef"
-  version = "v1.9.2"
+  revision = "afc05b9e1d36f289ea16ba294894486a3e458246"
+  version = "v1.11.0"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "387eddb39b1726449694a3fc99d5403be8135cfd5695cceaf382d7a954e7d7f7"
+  inputs-digest = "54f0b954782ef701c4afe0129360c3393af6191618e15486a54751a5ccdab218"
   solver-name = "gps-cdcl"
   solver-version = 1

@@ -7,13 +7,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
-	trigram "github.com/dgryski/go-trigram"
-	whisper "github.com/go-graphite/go-whisper"
+	"github.com/dgryski/go-trigram"
+	"github.com/go-graphite/go-whisper"
+	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"github.com/lomik/go-carbon/cache"
-	pb "github.com/lomik/go-carbon/helper/carbonzipperpb"
 	"github.com/lomik/go-carbon/points"
 	"go.uber.org/zap"
 )
@@ -112,7 +113,7 @@ func generalFetchSingleMetricRemove(testData *FetchTest) {
 }
 
 func generalFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
-	data, err := carbonserver.fetchSingleMetric(testData.name, int32(testData.from), int32(testData.until))
+	data, err := carbonserver.fetchSingleMetricV2(testData.name, int32(testData.from), int32(testData.until))
 	return data, err
 }
 
@@ -136,7 +137,7 @@ var singleMetricTests = []FetchTest{
 		fillCache:     true,
 		errIsNil:      false,
 		dataIsNil:     true,
-		expectedErr:   "Can't open metric",
+		expectedErr:   "open %f: no such file or directory",
 	},
 	{
 		name:          "no-proper-archive",
@@ -267,8 +268,10 @@ func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 	fmt.Println("Performing test ", test.name)
 	data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
 	if !test.errIsNil {
-		if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
-			t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
+		filePath := filepath.Join(test.path, test.name+".wsp")
+		realExpectedErr := strings.Replace(test.expectedErr, "%f", filePath, -1)
+		if err == nil || err.Error() != realExpectedErr || (data == nil) != test.dataIsNil {
+			t.Errorf("err: '%#v', expected: '%v'", err, test.expectedErr)
 		}
 	} else {
 		if err != nil {

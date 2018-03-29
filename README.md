@@ -413,6 +413,8 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+* Support multiple targets in carbonserver
+* Support new `carbonapi_v3_pb` protocol. This allows recent versions of carbonapi to get metadata alongside with data
 
 ##### version 0.12.0
 * [Tags](http://graphite.readthedocs.io/en/latest/tags.html) support was added (only with [graphite-web](https://github.com/graphite-project/graphite-web))
