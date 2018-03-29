@@ -15,14 +15,14 @@ import (
 
 type Metadata struct {
 	ConsolidationFunc string
-	XFilesFactor float32
+	XFilesFactor      float32
 }
 
 type metricFromDisk struct {
 	DiskStartTime time.Time
 	CacheData     []points.Point
 	Timeseries    *whisper.TimeSeries
-	Metadata Metadata
+	Metadata      Metadata
 }
 
 func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
@@ -72,7 +72,7 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	res := &metricFromDisk{
 		Metadata: Metadata{
 			ConsolidationFunc: w.AggregationMethod(),
-			XFilesFactor: w.XFilesFactor(),
+			XFilesFactor:      w.XFilesFactor(),
 		},
 	}
 	if step != bestStep {

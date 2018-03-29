@@ -25,10 +25,10 @@ const (
 )
 
 var knownFormats = map[string]responseFormat{
-	"json": jsonFormat,
-	"pickle": pickleFormat,
-	"protobuf": protoV2Format,
-	"protobuf3": protoV2Format,
+	"json":            jsonFormat,
+	"pickle":          pickleFormat,
+	"protobuf":        protoV2Format,
+	"protobuf3":       protoV2Format,
 	"carbonapi_v2_pb": protoV2Format,
 	"carbonapi_v3_pb": protoV3Format,
 }

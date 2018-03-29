@@ -219,7 +219,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 
 	var response fetchResponse
 	if listener.queryCacheEnabled {
-		targetsKey := make([]byte, len(targets) * 20)
+		targetsKey := make([]byte, len(targets)*20)
 		for i := range targets {
 			if i != 0 {
 				targetsKey = append(targetsKey, byte('&'))
@@ -424,7 +424,6 @@ func (listener *CarbonserverListener) fetchDataPB3(pathExpression string, files 
 	}
 	return &multi, nil
 }
-
 
 func (listener *CarbonserverListener) fetchDataPB(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*protov2.MultiFetchResponse, error) {
 	var multi protov2.MultiFetchResponse

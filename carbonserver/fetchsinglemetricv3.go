@@ -42,14 +42,14 @@ func (listener *CarbonserverListener) fetchSingleMetricV3(metric string, pathExp
 	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
 
 	response := protov3.FetchResponse{
-		Name:      metric,
-		StartTime: from,
-		StopTime:  until,
-		StepTime:  step,
-		Values:    values,
-		PathExpression: pathExpression,
+		Name:              metric,
+		StartTime:         from,
+		StopTime:          until,
+		StepTime:          step,
+		Values:            values,
+		PathExpression:    pathExpression,
 		ConsolidationFunc: m.Metadata.ConsolidationFunc,
-		XFilesFactor: m.Metadata.XFilesFactor,
+		XFilesFactor:      m.Metadata.XFilesFactor,
 	}
 
 	if m.CacheData != nil {

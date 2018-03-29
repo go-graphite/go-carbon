@@ -13,13 +13,11 @@ import (
 
 	"go.uber.org/zap"
 
-
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
 )
-
 
 type findResponse struct {
 	data        []byte
@@ -179,7 +177,7 @@ var findMetricsNoMetricsError = fmt.Errorf("no metrics available for this query"
 
 type findError struct {
 	name string
-	err error
+	err  error
 }
 
 type globs struct {
@@ -226,7 +224,6 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 		}
 	}
 
-
 	atomic.AddUint64(&listener.metrics.MetricsFound, metricsCount)
 	logger.Debug("expandGlobs result",
 		zap.String("action", "expandGlobs"),
@@ -236,55 +233,55 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 
 	switch format {
 	case protoV3Format, jsonFormat:
-			var err error
-			multiResponse := protov3.MultiGlobResponse{}
-			for _, glob := range expandedGlobs {
-				logger.Debug("glib",
-					zap.Any("glob", glob),
-				)
-				result.files += len(glob.Files)
-				response := protov3.GlobResponse{
-					Name:    glob.Name,
-					Matches: make([]protov3.GlobMatch, 0),
-				}
-
-				for i, p := range glob.Files {
-					if glob.Leafs[i] {
-						metricsCount++
-					}
-					response.Matches = append(response.Matches, protov3.GlobMatch{Path: p, IsLeaf: glob.Leafs[i]})
-				}
-				multiResponse.Metrics = append(multiResponse.Metrics, response)
+		var err error
+		multiResponse := protov3.MultiGlobResponse{}
+		for _, glob := range expandedGlobs {
+			logger.Debug("glib",
+				zap.Any("glob", glob),
+			)
+			result.files += len(glob.Files)
+			response := protov3.GlobResponse{
+				Name:    glob.Name,
+				Matches: make([]protov3.GlobMatch, 0),
 			}
 
-			logger.Debug("will send out response",
-				zap.Any("response", multiResponse),
-				)
-
-			switch format {
-			case jsonFormat:
-				result.contentType = httpHeaders.ContentTypeJSON
-				result.data, err = json.Marshal(multiResponse)
-			case protoV3Format:
-				result.contentType = httpHeaders.ContentTypeCarbonAPIv3PB
-				result.data, err = multiResponse.Marshal()
-			}
-
-			if err != nil {
-				atomic.AddUint64(&listener.metrics.FindErrors, 1)
-
-				logger.Error("find failed",
-					zap.Duration("runtime_seconds", time.Since(t0)),
-					zap.String("reason", "response encode failed"),
-					zap.Error(err),
-				)
-				return nil, err
-			} else {
-				if len(multiResponse.Metrics) == 0 {
-					err = findMetricsNoMetricsError
+			for i, p := range glob.Files {
+				if glob.Leafs[i] {
+					metricsCount++
 				}
+				response.Matches = append(response.Matches, protov3.GlobMatch{Path: p, IsLeaf: glob.Leafs[i]})
 			}
-			return &result, err
+			multiResponse.Metrics = append(multiResponse.Metrics, response)
+		}
+
+		logger.Debug("will send out response",
+			zap.Any("response", multiResponse),
+		)
+
+		switch format {
+		case jsonFormat:
+			result.contentType = httpHeaders.ContentTypeJSON
+			result.data, err = json.Marshal(multiResponse)
+		case protoV3Format:
+			result.contentType = httpHeaders.ContentTypeCarbonAPIv3PB
+			result.data, err = multiResponse.Marshal()
+		}
+
+		if err != nil {
+			atomic.AddUint64(&listener.metrics.FindErrors, 1)
+
+			logger.Error("find failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "response encode failed"),
+				zap.Error(err),
+			)
+			return nil, err
+		} else {
+			if len(multiResponse.Metrics) == 0 {
+				err = findMetricsNoMetricsError
+			}
+		}
+		return &result, err
 	case protoV2Format:
 		result.contentType = httpHeaders.ContentTypeProtobuf
 		var err error
@@ -318,28 +315,28 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 			}
 		}
 		return &result, err
-		case pickleFormat:
-			// [{'metric_path': 'metric', 'intervals': [(x,y)], 'isLeaf': True},]
-			var metrics []map[string]interface{}
-			var m map[string]interface{}
-			files := 0
+	case pickleFormat:
+		// [{'metric_path': 'metric', 'intervals': [(x,y)], 'isLeaf': True},]
+		var metrics []map[string]interface{}
+		var m map[string]interface{}
+		files := 0
 
-			glob := expandedGlobs[0]
-			files += len(glob.Files)
-			for i, p := range glob.Files {
-				if glob.Leafs[i] {
-					metricsCount++
-				}
-				m = make(map[string]interface{})
-				m["path"] = p
-				m["is_leaf"] = glob.Leafs[i]
-
-				metrics = append(metrics, m)
+		glob := expandedGlobs[0]
+		files += len(glob.Files)
+		for i, p := range glob.Files {
+			if glob.Leafs[i] {
+				metricsCount++
 			}
-			var buf bytes.Buffer
-			pEnc := pickle.NewEncoder(&buf)
-			pEnc.Encode(metrics)
-			return &findResponse{buf.Bytes(), httpHeaders.ContentTypePickle, files}, nil
+			m = make(map[string]interface{})
+			m["path"] = p
+			m["is_leaf"] = glob.Leafs[i]
+
+			metrics = append(metrics, m)
 		}
+		var buf bytes.Buffer
+		pEnc := pickle.NewEncoder(&buf)
+		pEnc.Encode(metrics)
+		return &findResponse{buf.Bytes(), httpHeaders.ContentTypePickle, files}, nil
+	}
 	return nil, nil
 }
