@@ -31,8 +31,9 @@ message FetchRequest {
     int64 startTime = 2;
     int64 stopTime = 3;
     // Should be true if our request requires more precision than seconds.
-    bool highPrecisionTimestamps = 5;
-    repeated FilteringFunction filterFunctions = 4;
+    bool highPrecisionTimestamps = 4;
+    string pathExpression = 5;
+    repeated FilteringFunction filterFunctions = 6;
 }
 
 message MultiFetchRequest {
