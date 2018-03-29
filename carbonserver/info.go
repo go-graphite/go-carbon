@@ -141,7 +141,12 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		} else {
 			contentType = httpHeaders.ContentTypeCarbonAPIv2PB
 		}
-		r := response.Metrics[0]
+
+		var r protov3.MetricsInfoResponse
+		if len(response.Metrics) > 0 {
+			r = response.Metrics[0]
+		}
+
 		response := protov2.InfoResponse{
 			Name:              r.Name,
 			AggregationMethod: r.ConsolidationFunc,

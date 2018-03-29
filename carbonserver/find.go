@@ -14,7 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
-	protov2 "github.com/go-graphite/protocol/carbonapi_v3_pb"
+	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
 )
@@ -193,6 +193,7 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 	var err error
 	metricsCount := uint64(0)
 	for _, name := range names {
+
 		glob := globs{
 			Name: name,
 		}
@@ -228,6 +229,7 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 	logger.Debug("expandGlobs result",
 		zap.String("action", "expandGlobs"),
 		zap.Strings("metrics", names),
+		zap.String("format", format.String()),
 		zap.Any("result", expandedGlobs),
 	)
 
@@ -236,9 +238,6 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 		var err error
 		multiResponse := protov3.MultiGlobResponse{}
 		for _, glob := range expandedGlobs {
-			logger.Debug("glib",
-				zap.Any("glob", glob),
-			)
 			result.files += len(glob.Files)
 			response := protov3.GlobResponse{
 				Name:    glob.Name,
@@ -287,7 +286,7 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 		var err error
 		response := protov2.GlobResponse{
 			Name:    names[0],
-			Matches: make([]protov3.GlobMatch, 0),
+			Matches: make([]protov2.GlobMatch, 0),
 		}
 
 		result.files += len(expandedGlobs[0].Files)
@@ -295,9 +294,9 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 			if expandedGlobs[0].Leafs[i] {
 				metricsCount++
 			}
-			response.Matches = append(response.Matches, protov3.GlobMatch{Path: p, IsLeaf: expandedGlobs[0].Leafs[i]})
+			response.Matches = append(response.Matches, protov2.GlobMatch{Path: p, IsLeaf: expandedGlobs[0].Leafs[i]})
 		}
-
+		result.data, err = response.Marshal()
 		result.contentType = httpHeaders.ContentTypeProtobuf
 
 		if err != nil {
