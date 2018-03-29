@@ -9,7 +9,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +29,11 @@ type fetchResponse struct {
 	metrics        []string
 }
 
+type target struct {
+	Name           string
+	PathExpression string
+}
+
 func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /render/?target=the.metric.Name&format=pickle&from=1396008021&until=1396022421
 	t0 := time.Now()
@@ -38,10 +42,15 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
 	req.ParseForm()
-	targets := req.Form["target"]
+	targetsStr := req.Form["target"]
 	format := req.FormValue("format")
 	from := req.FormValue("from")
 	until := req.FormValue("until")
+
+	var targets []target
+	for _, t := range targetsStr {
+		targets = append(targets, target{Name: t, PathExpression: t})
+	}
 
 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "render"),
@@ -107,9 +116,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 			return
 		}
 		untilTime = int32(i)
-	}
-
-	if formatCode == protoV3Format {
+	} else {
 		body, err := ioutil.ReadAll(req.Body)
 		if err != nil {
 			accessLogger.Error("info failed",
@@ -131,12 +138,12 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 				from = strconv.FormatInt(t.StartTime, 10)
 				until = strconv.FormatInt(t.StopTime, 10)
 			}
-			targets = append(targets, t.Name)
+			targets = append(targets, target{Name: t.Name, PathExpression: t.PathExpression})
 		}
 	}
 
 	accessLogger = accessLogger.With(
-		zap.Strings("targets", targets),
+		zap.Any("targets", targets),
 		zap.String("from", from),
 		zap.String("until", until),
 	)
@@ -145,7 +152,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
-		zap.Strings("targets", targets),
+		zap.Any("targets", targets),
 		zap.String("from", from),
 		zap.String("until", until),
 		zap.String("format", format),
@@ -203,7 +210,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 }
 
-func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format responseFormat, targets []string, from, until string, fromTime, untilTime int32) (fetchResponse, bool, error) {
+func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format responseFormat, targets []target, from, until string, fromTime, untilTime int32) (fetchResponse, bool, error) {
 	logger = logger.With(
 		zap.String("function", "fetchWithCache"),
 	)
@@ -212,7 +219,14 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 
 	var response fetchResponse
 	if listener.queryCacheEnabled {
-		key := strings.Join(targets, "&") + "&" + format.String() + "&" + from + "&" + until
+		targetsKey := make([]byte, len(targets) * 20)
+		for i := range targets {
+			if i != 0 {
+				targetsKey = append(targetsKey, byte('&'))
+			}
+			targetsKey = append(targetsKey, []byte(targets[i].Name)...)
+		}
+		key := string(targetsKey) + "&" + format.String() + "&" + from + "&" + until
 		size := uint64(100 * 1024 * 1024)
 		renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
 		fetchSize := atomic.LoadUint64(&listener.metrics.FetchSize)
@@ -242,7 +256,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 	return response, fromCache, err
 }
 
-func (listener *CarbonserverListener) prepareDataProto(format responseFormat, targets []string, fromTime, untilTime int32) (fetchResponse, error) {
+func (listener *CarbonserverListener) prepareDataProto(format responseFormat, targets []target, fromTime, untilTime int32) (fetchResponse, error) {
 	contentType := "application/text"
 	var b []byte
 	var err error
@@ -256,7 +270,7 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 	var metrics []string
 	for _, metric := range targets {
 		listener.logger.Debug("fetching data...")
-		files, leafs, err := listener.expandGlobs(metric)
+		files, leafs, err := listener.expandGlobs(metric.Name)
 		if err != nil {
 			listener.logger.Debug("expand globs returned an error",
 				zap.Error(err),
@@ -273,14 +287,14 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 		listener.logger.Debug("expandGlobs result",
 			zap.String("handler", "render"),
 			zap.String("action", "expandGlobs"),
-			zap.String("metric", metric),
+			zap.String("metric", metric.Name),
 			zap.Int("metrics_count", metricsCount),
 			zap.Int32("from", fromTime),
 			zap.Int32("until", untilTime),
 		)
 
 		if format == protoV2Format || format == jsonFormat {
-			res, err := listener.fetchDataPB(metric, files, leafs, fromTime, untilTime)
+			res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
 			if err != nil {
 				atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 				listener.logger.Error("error while fetching the data",
@@ -303,13 +317,16 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 			continue
 		}
 
-		res, err := listener.fetchDataPB3(metric, files, leafs, fromTime, untilTime)
+		res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			listener.logger.Error("error while fetching the data",
 				zap.Error(err),
 			)
 			continue
+		}
+		for i := range res.Metrics {
+			res.Metrics[i].PathExpression = metric.PathExpression
 		}
 		multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
 
@@ -389,7 +406,7 @@ func (listener *CarbonserverListener) fetchDataPB3(pathExpression string, files 
 	var errs []error
 	for i, fileName := range files {
 		if !leafs[i] {
-			listener.logger.Debug("skipping directory", zap.String("pathExpression", pathExpression))
+			listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression))
 			// can't fetch a directory
 			continue
 		}
