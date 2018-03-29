@@ -15,7 +15,8 @@ message CapabilityRequest {
 
 // Storage capability information
 message CapabilityResponse {
-    int64 version = 1;
+    // carbonapi_v2_pb, carbonapi_v3_pb, etc.
+    repeated string supportedProtocols = 1;
     // server name
     string name = 2;
     bool highPrecisionTimestamps = 3;

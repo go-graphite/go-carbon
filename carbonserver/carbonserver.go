@@ -107,12 +107,13 @@ var TraceHeaders = map[string]string{
 }
 
 var statusCodes = map[string][]uint64{
-	"combined": make([]uint64, 5),
-	"find":     make([]uint64, 5),
-	"list":     make([]uint64, 5),
-	"render":   make([]uint64, 5),
-	"details":  make([]uint64, 5),
-	"info":     make([]uint64, 5),
+	"combined":     make([]uint64, 5),
+	"find":         make([]uint64, 5),
+	"list":         make([]uint64, 5),
+	"render":       make([]uint64, 5),
+	"details":      make([]uint64, 5),
+	"info":         make([]uint64, 5),
+	"capabilities": make([]uint64, 5),
 }
 
 type responseWriterWithStatus struct {
@@ -847,6 +848,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 			),
 		)
 	}
+	carbonserverMux.HandleFunc("/_internal/capabilities/", wrapHandler(listener.capabilityHandler, statusCodes["capabilities"]))
 	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler, statusCodes["find"]))
 	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler, statusCodes["list"]))
 	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler, statusCodes["details"]))
