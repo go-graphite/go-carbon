@@ -109,7 +109,6 @@ type carbonserverConfig struct {
 	FailOnMaxGlobs          bool      `toml:"fail-on-max-globs"`
 	MetricsAsCounters       bool      `toml:"metrics-as-counters"`
 	TrigramIndex            bool      `toml:"trigram-index"`
-	GraphiteWeb10StrictMode bool      `toml:"graphite-web-10-strict-mode"`
 	InternalStatsDir        string    `toml:"internal-stats-dir"`
 	Percentiles             []int     `toml:"stats-percentiles"`
 }
@@ -202,7 +201,6 @@ func NewConfig() *Config {
 			QueryCacheSizeMB:        0,
 			FindCacheEnabled:        true,
 			TrigramIndex:            true,
-			GraphiteWeb10StrictMode: true,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

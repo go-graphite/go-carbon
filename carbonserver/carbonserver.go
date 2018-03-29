@@ -225,7 +225,6 @@ type CarbonserverListener struct {
 	tcpListener       *net.TCPListener
 	logger            *zap.Logger
 	accessLogger      *zap.Logger
-	graphiteweb10     bool
 	internalStatsDir  string
 	flock             bool
 
@@ -278,7 +277,6 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		accessLogger:      zapwriter.Logger("access"),
 		findCache:         queryCache{ec: expirecache.New(0)},
 		trigramIndex:      true,
-		graphiteweb10:     false,
 		percentiles:       []int{100, 99, 98, 95, 75, 50},
 	}
 }
@@ -292,11 +290,9 @@ func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs
 }
-
 func (listener *CarbonserverListener) SetFLock(flock bool) {
 	listener.flock = flock
 }
-
 func (listener *CarbonserverListener) SetBuckets(buckets int) {
 	listener.buckets = buckets
 }
@@ -324,22 +320,15 @@ func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 	listener.findCacheEnabled = enabled
 }
-func (listener *CarbonserverListener) SetGraphiteWeb10(enabled bool) {
-	listener.graphiteweb10 = enabled
-}
-
 func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 	listener.trigramIndex = enabled
 }
-
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
 }
-
 func (listener *CarbonserverListener) SetPercentiles(percentiles []int) {
 	listener.percentiles = percentiles
 }
-
 func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 	p := listener.fileIdx.Load()
 	if p == nil {

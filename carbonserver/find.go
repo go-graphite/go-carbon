@@ -324,8 +324,6 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 			var m map[string]interface{}
 			files := 0
 
-			intervals := &IntervalSet{Start: 0, End: int32(time.Now().Unix()) + 60}
-
 			glob := expandedGlobs[0]
 			files += len(glob.Files)
 			for i, p := range glob.Files {
@@ -333,16 +331,8 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 					metricsCount++
 				}
 				m = make(map[string]interface{})
-				if listener.graphiteweb10 {
-					// graphite master
-					m["path"] = p
-					m["is_leaf"] = glob.Leafs[i]
-					m["intervals"] = intervals
-				} else {
-					// graphite 0.9.x
-					m["metric_path"] = p
-					m["isLeaf"] = glob.Leafs[i]
-				}
+				m["path"] = p
+				m["is_leaf"] = glob.Leafs[i]
 
 				metrics = append(metrics, m)
 			}
