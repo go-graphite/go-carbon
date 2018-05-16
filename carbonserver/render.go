@@ -303,33 +303,34 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 				continue
 			}
 			multiv2.Metrics = append(multiv2.Metrics, res.Metrics...)
-
-			if len(multiv2.Metrics) == 0 {
-				return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+		} else {
+			res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
+			if err != nil {
+				atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+				listener.logger.Error("error while fetching the data",
+					zap.Error(err),
+				)
+				continue
 			}
-
-			metricsFetched = len(multiv2.Metrics)
-			for i := range multiv2.Metrics {
-				metrics = append(metrics, multiv2.Metrics[i].Name)
-				memoryUsed += multiv2.Metrics[i].Size()
-				valuesFetched += len(multiv2.Metrics[i].Values)
+			for i := range res.Metrics {
+				res.Metrics[i].PathExpression = metric.PathExpression
 			}
-			continue
+			multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
+		}
+	}
+
+	if format == protoV2Format || format == jsonFormat {
+		if len(multiv2.Metrics) == 0 {
+			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 		}
 
-		res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
-		if err != nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-			listener.logger.Error("error while fetching the data",
-				zap.Error(err),
-			)
-			continue
+		metricsFetched = len(multiv2.Metrics)
+		for i := range multiv2.Metrics {
+			metrics = append(metrics, multiv2.Metrics[i].Name)
+			memoryUsed += multiv2.Metrics[i].Size()
+			valuesFetched += len(multiv2.Metrics[i].Values)
 		}
-		for i := range res.Metrics {
-			res.Metrics[i].PathExpression = metric.PathExpression
-		}
-		multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
-
+	} else {
 		if len(multiv3.Metrics) == 0 {
 			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 		}
