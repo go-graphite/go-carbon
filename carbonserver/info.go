@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"go.uber.org/zap"
 
@@ -18,10 +17,6 @@ import (
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 )
-
-func retentionsV3toV2(ptr *[]protov3.Retention) *[]protov2.Retention {
-	return (*[]protov2.Retention)(unsafe.Pointer(ptr))
-}
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /info/?target=the.metric.Name&format=json
@@ -88,7 +83,8 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	)
 
 	response := protov3.MultiMetricsInfoResponse{}
-	for _, metric := range metrics {
+	var retentionsV2 []protov2.Retention
+	for i, metric := range metrics {
 		path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
 		w, err := whisper.Open(path)
 
@@ -117,6 +113,14 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 				SecondsPerPoint: spp,
 				NumberOfPoints:  nop,
 			})
+			//only one metric is enough - first metric
+			//TODO include support for multiple metrics
+			if i == 0 && formatCode == protoV2Format {
+				retentionsV2 = append(retentionsV2, protov2.Retention{
+					SecondsPerPoint: int32(retention.SecondsPerPoint()),
+					NumberOfPoints:  int32(retention.NumberOfPoints()),
+				})
+			}
 		}
 
 		response.Metrics = append(response.Metrics, protov3.MetricsInfoResponse{
@@ -135,12 +139,8 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	case jsonFormat:
 		contentType = httpHeaders.ContentTypeJSON
 		b, err = json.Marshal(response)
-	case protoV2Format, protoV3Format:
-		if formatCode == protoV3Format {
-			contentType = httpHeaders.ContentTypeCarbonAPIv3PB
-		} else {
-			contentType = httpHeaders.ContentTypeCarbonAPIv2PB
-		}
+	case protoV2Format:
+		contentType = httpHeaders.ContentTypeCarbonAPIv2PB
 
 		var r protov3.MetricsInfoResponse
 		if len(response.Metrics) > 0 {
@@ -152,8 +152,11 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			AggregationMethod: r.ConsolidationFunc,
 			MaxRetention:      int32(r.MaxRetention),
 			XFilesFactor:      r.XFilesFactor,
-			Retentions:        *retentionsV3toV2(&r.Retentions),
+			Retentions:        retentionsV2,
 		}
+		b, err = response.Marshal()
+	case protoV3Format:
+		contentType = httpHeaders.ContentTypeCarbonAPIv3PB
 		b, err = response.Marshal()
 	}
 
