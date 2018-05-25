@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-whisper"
@@ -16,7 +17,6 @@ import (
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 )
-
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /info/?target=the.metric.Name&format=json
@@ -115,7 +115,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			})
 			//only one metric is enough - first metric
 			//TODO include support for multiple metrics
-			if i == 0 {
+			if i == 0 && formatCode == protoV2Format {
 				retentionsV2 = append(retentionsV2, protov2.Retention{
 					SecondsPerPoint: int32(retention.SecondsPerPoint()),
 					NumberOfPoints:  int32(retention.NumberOfPoints()),
