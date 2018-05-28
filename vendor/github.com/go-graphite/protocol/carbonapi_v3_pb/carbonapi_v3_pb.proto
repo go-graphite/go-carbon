@@ -122,6 +122,8 @@ message MetricDetails {
     int64 ModTime = 3;
     int64 ATime = 4;
     int64 RdTime = 5;
+        int64 RealSize = 6;
+
 }
 
 message MetricDetailsResponse {

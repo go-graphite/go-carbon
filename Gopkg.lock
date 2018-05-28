@@ -94,8 +94,8 @@
     "carbonapi_v2_pb",
     "carbonapi_v3_pb"
   ]
-  revision = "ab0e99d2197d8fae6e1f6119d13c7da526b2bd6d"
-  version = "v0.4"
+  revision = "04163aeda58c52ca98829ffd1df25c40824597e0"
+  version = "v0.4.1"
 
 [[projects]]
   name = "github.com/gogo/protobuf"
