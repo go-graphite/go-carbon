@@ -9,6 +9,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -34,6 +35,54 @@ type target struct {
 	PathExpression string
 }
 
+type timeRange struct {
+	from  int32
+	until int32
+}
+
+func getDefaultTargets(targets []string, tr timeRange) map[timeRange][]target {
+	var defaultTargets map[timeRange][]target
+
+	for _, t := range targets {
+		defaultTargets[tr] = append(defaultTargets[tr], target{Name: t, PathExpression: t})
+	}
+
+	return defaultTargets
+}
+
+func stringToInt32(t string) (int32, error) {
+	i, err := strconv.Atoi(t)
+
+	if err != nil {
+		return int32(i), err
+	}
+
+	return int32(i), nil
+}
+
+func getFormat(req *http.Request) (responseFormat, error) {
+	req.ParseForm() // idempotent
+
+	format := req.FormValue("format")
+	if format == "" {
+		format = "json"
+	}
+
+	for _, accept := range req.Header["Accept"] {
+		if accept == httpHeaders.ContentTypeCarbonAPIv3PB {
+			format = "carbonapi_v3_pb"
+			break
+		}
+	}
+
+	formatCode, ok := knownFormats[format]
+	if !ok {
+		return formatCode, fmt.Errorf("Unknown format")
+	}
+
+	return formatCode, nil
+}
+
 func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /render/?target=the.metric.Name&format=pickle&from=1396008021&until=1396022421
 	t0 := time.Now()
@@ -41,41 +90,40 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
-	req.ParseForm()
-	targetsStr := req.Form["target"]
-	format := req.FormValue("format")
-	from := req.FormValue("from")
-	until := req.FormValue("until")
-
-	var targets []target
-	for _, t := range targetsStr {
-		targets = append(targets, target{Name: t, PathExpression: t})
-	}
-
 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 	))
 
-	accepts := req.Header["Accept"]
-	for _, accept := range accepts {
-		if accept == httpHeaders.ContentTypeCarbonAPIv3PB {
-			format = "carbonapi_v3_pb"
-			break
-		}
+	req.ParseForm()
+
+	from, err := stringToInt32(req.FormValue("from"))
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		accessLogger.Error("fetch failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "invalid 'from' time"),
+			zap.Int("http_code", http.StatusBadRequest),
+		)
+		http.Error(wr, "invalid 'from' time", http.StatusBadRequest)
+		return
 	}
 
-	if format == "" {
-		format = "json"
+	until, err := stringToInt32(req.FormValue("until"))
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		accessLogger.Error("fetch failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "invalid 'until' time"),
+			zap.Int("http_code", http.StatusBadRequest),
+		)
+		http.Error(wr, "invalid 'until' time", http.StatusBadRequest)
+		return
 	}
 
-	accessLogger = accessLogger.With(
-		zap.String("format", format),
-	)
-
-	formatCode, ok := knownFormats[format]
-	if !ok {
+	format, err := getFormat(req)
+	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
@@ -87,36 +135,16 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	var fromTime int32
-	var untilTime int32
-	if formatCode != protoV3Format {
-		i, err := strconv.Atoi(from)
-		if err != nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-			accessLogger.Error("fetch failed",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", "invalid 'from' time"),
-				zap.Int("http_code", http.StatusBadRequest),
-			)
-			http.Error(wr, "invalid 'from' time",
-				http.StatusBadRequest)
-			return
-		}
-		fromTime = int32(i)
-		i, err = strconv.Atoi(until)
-		if err != nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-			accessLogger.Error("fetch failed",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", "invalid 'until' time"),
-				zap.Int("http_code", http.StatusBadRequest),
-			)
-			http.Error(wr, "invalid 'until' time",
-				http.StatusBadRequest)
-			return
-		}
-		untilTime = int32(i)
-	} else {
+	accessLogger = accessLogger.With(
+		zap.String("format", format.String()),
+	)
+
+	targets := getDefaultTargets(req.Form["target"], timeRange{
+		from:  from,
+		until: until,
+	})
+
+	if format == protoV3Format {
 		body, err := ioutil.ReadAll(req.Body)
 		if err != nil {
 			accessLogger.Error("info failed",
@@ -124,28 +152,25 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 				zap.String("reason", err.Error()),
 				zap.Int("http_code", http.StatusBadRequest),
 			)
-			http.Error(wr, "Bad request (unsupported format)",
-				http.StatusBadRequest)
+			http.Error(wr, "Bad request (unsupported format)", http.StatusBadRequest)
+
+			return
 		}
 
 		var pv3Request protov3.MultiFetchRequest
 		pv3Request.Unmarshal(body)
 
-		for i, t := range pv3Request.Metrics {
-			if i == 0 {
-				fromTime = int32(t.StartTime)
-				untilTime = int32(t.StopTime)
-				from = strconv.FormatInt(t.StartTime, 10)
-				until = strconv.FormatInt(t.StopTime, 10)
+		for _, t := range pv3Request.Metrics {
+			tr := timeRange{
+				from:  int32(t.StartTime),
+				until: int32(t.StopTime),
 			}
-			targets = append(targets, target{Name: t.Name, PathExpression: t.PathExpression})
+			targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
 		}
 	}
 
 	accessLogger = accessLogger.With(
 		zap.Any("targets", targets),
-		zap.String("from", from),
-		zap.String("until", until),
 	)
 
 	logger := TraceContextToZap(ctx, listener.accessLogger.With(
@@ -153,9 +178,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 		zap.Any("targets", targets),
-		zap.String("from", from),
-		zap.String("until", until),
-		zap.String("format", format),
+		zap.String("format", format.String()),
 	))
 
 	// Make sure we log which metric caused a panic()
@@ -172,12 +195,11 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 				zap.Any("error", r),
 				zap.Int("http_code", http.StatusInternalServerError),
 			)
-			http.Error(wr, fmt.Sprintf("Panic occured, see logs for more information"),
-				http.StatusInternalServerError)
+			http.Error(wr, fmt.Sprintf("Panic occured, see logs for more information"), http.StatusInternalServerError)
 		}
 	}()
 
-	response, fromCache, err := listener.fetchWithCache(logger, formatCode, targets, from, until, fromTime, untilTime)
+	response, fromCache, err := listener.fetchWithCache(logger, format, targets)
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
@@ -210,7 +232,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 }
 
-func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format responseFormat, targets []target, from, until string, fromTime, untilTime int32) (fetchResponse, bool, error) {
+func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format responseFormat, targets map[timeRange][]target) (fetchResponse, bool, error) {
 	logger = logger.With(
 		zap.String("function", "fetchWithCache"),
 	)
@@ -219,26 +241,29 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 
 	var response fetchResponse
 	if listener.queryCacheEnabled {
-		targetsKey := make([]byte, len(targets)*20)
-		for i := range targets {
-			if i != 0 {
-				targetsKey = append(targetsKey, byte('&'))
+		targetKeys := make([]string, 0, len(targets))
+		for tr, ts := range targets {
+			names := make([]string, 0, len(ts))
+			for _, t := range ts {
+				names = append(names, t.Name)
 			}
-			targetsKey = append(targetsKey, []byte(targets[i].Name)...)
+			targetKeys = append(targetKeys, fmt.Sprintf("%s&%d&%d", strings.Join(names, "&"), tr.from, tr.until))
 		}
-		key := string(targetsKey) + "&" + format.String() + "&" + from + "&" + until
+		key := fmt.Sprintf("%s&%s", strings.Join(targetKeys, "&"), format)
+
 		size := uint64(100 * 1024 * 1024)
 		renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
 		fetchSize := atomic.LoadUint64(&listener.metrics.FetchSize)
 		if renderRequests > 0 {
 			size = fetchSize / renderRequests
 		}
+
 		item := listener.queryCache.getQueryItem(key, size, 60)
 		res, ok := item.FetchOrLock()
 		if !ok {
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
-			response, err = listener.prepareDataProto(format, targets, fromTime, untilTime)
+			response, err = listener.prepareDataProto(format, targets)
 			if err != nil {
 				item.StoreAbort()
 			} else {
@@ -251,12 +276,12 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 			fromCache = true
 		}
 	} else {
-		response, err = listener.prepareDataProto(format, targets, fromTime, untilTime)
+		response, err = listener.prepareDataProto(format, targets)
 	}
 	return response, fromCache, err
 }
 
-func (listener *CarbonserverListener) prepareDataProto(format responseFormat, targets []target, fromTime, untilTime int32) (fetchResponse, error) {
+func (listener *CarbonserverListener) prepareDataProto(format responseFormat, targets map[timeRange][]target) (fetchResponse, error) {
 	contentType := "application/text"
 	var b []byte
 	var err error
@@ -268,54 +293,59 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 	var multiv2 protov2.MultiFetchResponse
 
 	var metrics []string
-	for _, metric := range targets {
-		listener.logger.Debug("fetching data...")
-		files, leafs, err := listener.expandGlobs(metric.Name)
-		if err != nil {
-			listener.logger.Debug("expand globs returned an error",
-				zap.Error(err),
+	for tr, ts := range targets {
+		for _, metric := range ts {
+			fromTime := tr.from
+			untilTime := tr.until
+
+			listener.logger.Debug("fetching data...")
+			files, leafs, err := listener.expandGlobs(metric.Name)
+			if err != nil {
+				listener.logger.Debug("expand globs returned an error",
+					zap.Error(err),
+				)
+				continue
+			}
+
+			metricsCount := 0
+			for i := range files {
+				if leafs[i] {
+					metricsCount++
+				}
+			}
+			listener.logger.Debug("expandGlobs result",
+				zap.String("handler", "render"),
+				zap.String("action", "expandGlobs"),
+				zap.String("metric", metric.Name),
+				zap.Int("metrics_count", metricsCount),
+				zap.Int32("from", fromTime),
+				zap.Int32("until", untilTime),
 			)
-			continue
-		}
 
-		metricsCount := 0
-		for i := range files {
-			if leafs[i] {
-				metricsCount++
+			if format == protoV2Format || format == jsonFormat {
+				res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
+				if err != nil {
+					atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+					listener.logger.Error("error while fetching the data",
+						zap.Error(err),
+					)
+					continue
+				}
+				multiv2.Metrics = append(multiv2.Metrics, res.Metrics...)
+			} else {
+				res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
+				if err != nil {
+					atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+					listener.logger.Error("error while fetching the data",
+						zap.Error(err),
+					)
+					continue
+				}
+				for i := range res.Metrics {
+					res.Metrics[i].PathExpression = metric.PathExpression
+				}
+				multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
 			}
-		}
-		listener.logger.Debug("expandGlobs result",
-			zap.String("handler", "render"),
-			zap.String("action", "expandGlobs"),
-			zap.String("metric", metric.Name),
-			zap.Int("metrics_count", metricsCount),
-			zap.Int32("from", fromTime),
-			zap.Int32("until", untilTime),
-		)
-
-		if format == protoV2Format || format == jsonFormat {
-			res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
-			if err != nil {
-				atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-				listener.logger.Error("error while fetching the data",
-					zap.Error(err),
-				)
-				continue
-			}
-			multiv2.Metrics = append(multiv2.Metrics, res.Metrics...)
-		} else {
-			res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
-			if err != nil {
-				atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-				listener.logger.Error("error while fetching the data",
-					zap.Error(err),
-				)
-				continue
-			}
-			for i := range res.Metrics {
-				res.Metrics[i].PathExpression = metric.PathExpression
-			}
-			multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
 		}
 	}
 
