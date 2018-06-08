@@ -14,6 +14,9 @@ all: $(NAME)
 $(NAME):
 	$(GO) build --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
+debug:
+	$(GO) build -gcflags=all='-l -N' $(MODULE)
+
 run-test:
 	$(GO) $(COMMAND) $(MODULE)
 	$(GO) $(COMMAND) $(MODULE)/cache
