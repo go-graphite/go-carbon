@@ -258,6 +258,21 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 			size = fetchSize / renderRequests
 		}
 
+		// TODO(gmagnusson): Our cache key changes if we permute any of the
+		// metric names while keeping the from/until pairs fixed, or permute
+		// any combination of metric names and from/until pairs as a unit.
+		// These permutations to not change the response, so we should be more
+		// clever about how we construct the cache key.
+		//
+		// An option is to sort the metric names within each from/until pair,
+		// and to order (names,from,until) triples by the from timestamp.
+		//
+		// This is probably worth doing, as the only source of differences in
+		// from/until pairs I know of comes from using timeShift or timeStack,
+		// which again probably comes from trying to compare trends from last
+		// week to what's going on now, which is something people are generally
+		// interested in. It wouldn't be good to start adding false negative
+		// cache misses to those kinds of queries.
 		item := listener.queryCache.getQueryItem(key, size, 60)
 		res, ok := item.FetchOrLock()
 		if !ok {
