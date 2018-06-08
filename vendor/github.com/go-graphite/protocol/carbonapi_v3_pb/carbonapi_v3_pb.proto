@@ -54,6 +54,8 @@ message FetchResponse {
     bool highPrecisionTimestamps = 8;
     repeated double values = 9;
     repeated string appliedFunctions = 10;
+    int64 requestStartTime = 11;
+    int64 requestStopTime = 12;
 }
 
 message MultiFetchResponse {

@@ -89,13 +89,13 @@
   revision = "73c5cbd69142cbef9bd8ef9c6d485a8d34b4554c"
 
 [[projects]]
+  branch = "master"
   name = "github.com/go-graphite/protocol"
   packages = [
     "carbonapi_v2_pb",
     "carbonapi_v3_pb"
   ]
-  revision = "04163aeda58c52ca98829ffd1df25c40824597e0"
-  version = "v0.4.1"
+  revision = "1378a7c8b09d54e7d55cd546114b98523ab9cc5f"
 
 [[projects]]
   name = "github.com/gogo/protobuf"
@@ -438,6 +438,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "54f0b954782ef701c4afe0129360c3393af6191618e15486a54751a5ccdab218"
+  inputs-digest = "60c6e15e4d2861ef17d8aab42cc1c2edc2eb3e834b50b786d41c6fde63c1868b"
   solver-name = "gps-cdcl"
   solver-version = 1
