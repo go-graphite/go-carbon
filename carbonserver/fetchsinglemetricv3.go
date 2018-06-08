@@ -50,6 +50,8 @@ func (listener *CarbonserverListener) fetchSingleMetricV3(metric string, pathExp
 		PathExpression:    pathExpression,
 		ConsolidationFunc: m.Metadata.ConsolidationFunc,
 		XFilesFactor:      m.Metadata.XFilesFactor,
+		RequestStartTime:  int64(fromTime),
+		RequestStopTime:   int64(untilTime),
 	}
 
 	if m.CacheData != nil {
