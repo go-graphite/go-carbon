@@ -98,6 +98,23 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	req.ParseForm()
 
+	format, err := getFormat(req)
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		accessLogger.Error("fetch failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "unsupported format"),
+			zap.Int("http_code", http.StatusBadRequest),
+		)
+		http.Error(wr, "Bad request (unsupported format)",
+			http.StatusBadRequest)
+		return
+	}
+
+	accessLogger = accessLogger.With(
+		zap.String("format", format.String()),
+	)
+
 	from, err := stringToInt32(req.FormValue("from"))
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
@@ -121,23 +138,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		http.Error(wr, "invalid 'until' time", http.StatusBadRequest)
 		return
 	}
-
-	format, err := getFormat(req)
-	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		accessLogger.Error("fetch failed",
-			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "unsupported format"),
-			zap.Int("http_code", http.StatusBadRequest),
-		)
-		http.Error(wr, "Bad request (unsupported format)",
-			http.StatusBadRequest)
-		return
-	}
-
-	accessLogger = accessLogger.With(
-		zap.String("format", format.String()),
-	)
 
 	targets := getDefaultTargets(req.Form["target"], timeRange{
 		from:  from,
