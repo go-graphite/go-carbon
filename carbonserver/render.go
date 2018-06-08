@@ -40,16 +40,6 @@ type timeRange struct {
 	until int32
 }
 
-func getDefaultTargets(targets []string, tr timeRange) map[timeRange][]target {
-	var defaultTargets map[timeRange][]target
-
-	for _, t := range targets {
-		defaultTargets[tr] = append(defaultTargets[tr], target{Name: t, PathExpression: t})
-	}
-
-	return defaultTargets
-}
-
 func stringToInt32(t string) (int32, error) {
 	i, err := strconv.Atoi(t)
 
@@ -83,6 +73,52 @@ func getFormat(req *http.Request) (responseFormat, error) {
 	return formatCode, nil
 }
 
+func getTargets(req *http.Request, format responseFormat) (map[timeRange][]target, error) {
+	req.ParseForm() // idempotent
+
+	targets := make(map[timeRange][]target)
+
+	switch format {
+	case protoV3Format:
+		body, err := ioutil.ReadAll(req.Body)
+		if err != nil {
+			return targets, fmt.Errorf("error reading body: %s", err.Error())
+		}
+
+		var pv3Request protov3.MultiFetchRequest
+		if err := pv3Request.Unmarshal(body); err != nil {
+			return targets, fmt.Errorf("invalid payload: %s", err.Error())
+		}
+
+		for _, t := range pv3Request.Metrics {
+			tr := timeRange{
+				from:  int32(t.StartTime),
+				until: int32(t.StopTime),
+			}
+			targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
+		}
+
+	default:
+		from, err := stringToInt32(req.FormValue("from"))
+		if err != nil {
+			return targets, fmt.Errorf("invalid 'from' time")
+		}
+
+		until, err := stringToInt32(req.FormValue("until"))
+		if err != nil {
+			return targets, fmt.Errorf("invalid 'until' time")
+		}
+
+		tr := timeRange{from: from, until: until}
+
+		for _, t := range req.Form["target"] {
+			targets[tr] = append(targets[tr], target{Name: t, PathExpression: t})
+		}
+	}
+
+	return targets, nil
+}
+
 func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /render/?target=the.metric.Name&format=pickle&from=1396008021&until=1396022421
 	t0 := time.Now()
@@ -103,11 +139,10 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "unsupported format"),
+			zap.String("reason", err.Error()),
 			zap.Int("http_code", http.StatusBadRequest),
 		)
-		http.Error(wr, "Bad request (unsupported format)",
-			http.StatusBadRequest)
+		http.Error(wr, fmt.Sprintf("Bad request: %s", err), http.StatusBadRequest)
 		return
 	}
 
@@ -115,58 +150,16 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("format", format.String()),
 	)
 
-	from, err := stringToInt32(req.FormValue("from"))
+	targets, err := getTargets(req, format)
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "invalid 'from' time"),
+			zap.String("reason", err.Error()),
 			zap.Int("http_code", http.StatusBadRequest),
 		)
-		http.Error(wr, "invalid 'from' time", http.StatusBadRequest)
+		http.Error(wr, fmt.Sprintf("Bad request: %s", err), http.StatusBadRequest)
 		return
-	}
-
-	until, err := stringToInt32(req.FormValue("until"))
-	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		accessLogger.Error("fetch failed",
-			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "invalid 'until' time"),
-			zap.Int("http_code", http.StatusBadRequest),
-		)
-		http.Error(wr, "invalid 'until' time", http.StatusBadRequest)
-		return
-	}
-
-	targets := getDefaultTargets(req.Form["target"], timeRange{
-		from:  from,
-		until: until,
-	})
-
-	if format == protoV3Format {
-		body, err := ioutil.ReadAll(req.Body)
-		if err != nil {
-			accessLogger.Error("info failed",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", err.Error()),
-				zap.Int("http_code", http.StatusBadRequest),
-			)
-			http.Error(wr, "Bad request (unsupported format)", http.StatusBadRequest)
-
-			return
-		}
-
-		var pv3Request protov3.MultiFetchRequest
-		pv3Request.Unmarshal(body)
-
-		for _, t := range pv3Request.Metrics {
-			tr := timeRange{
-				from:  int32(t.StartTime),
-				until: int32(t.StopTime),
-			}
-			targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
-		}
 	}
 
 	accessLogger = accessLogger.With(
@@ -210,8 +203,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 			zap.Int("http_code", http.StatusBadRequest),
 			zap.Error(err),
 		)
-		http.Error(wr, fmt.Sprintf("Bad request (%s)", err),
-			http.StatusBadRequest)
+		http.Error(wr, fmt.Sprintf("Bad request (%s)", err), http.StatusBadRequest)
 		return
 	}
 
