@@ -259,6 +259,7 @@ func (app *App) startPersister() {
 			app.Cache.Confirm,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
+		p.SetMaxCreatesPerSecond(app.Config.Whisper.MaxCreatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetWorkers(app.Config.Whisper.Workers)

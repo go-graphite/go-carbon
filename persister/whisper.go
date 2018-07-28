@@ -24,8 +24,6 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
-	updateOperations    uint32
-	committedPoints     uint32
 	recv                func(chan bool) string
 	pop                 func(string) (*points.Points, bool)
 	confirm             func(*points.Points)
@@ -36,11 +34,16 @@ type Whisper struct {
 	workersCount        int
 	rootPath            string
 	created             uint32 // counter
+	throttledCreates    uint32 // counter
+	updateOperations    uint32 // counter
+	committedPoints     uint32 // counter
 	sparse              bool
 	flock               bool
 	hashFilenames       bool
 	maxUpdatesPerSecond int
+	maxCreatesPerSecond int
 	throttleTicker      *ThrottleTicker
+	maxCreatesTicker    *ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
 	mockStore           func() (StoreFunc, func())
 	logger              *zap.Logger
@@ -77,6 +80,11 @@ func NewWhisper(
 // SetMaxUpdatesPerSecond enable throttling
 func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
 	p.maxUpdatesPerSecond = maxUpdatesPerSecond
+}
+
+// SetMaxCreatesPerSecond enable throttling
+func (p *Whisper) SetMaxCreatesPerSecond(maxCreatesPerSecond int) {
+	p.maxCreatesPerSecond = maxCreatesPerSecond
 }
 
 // GetMaxUpdatesPerSecond returns current throttling speed
@@ -169,6 +177,15 @@ func (p *Whisper) store(metric string) {
 			return
 		}
 
+		// max creates throttling
+		select {
+		case <-p.maxCreatesTicker.C:
+			// pass
+		default:
+			atomic.AddUint32(&p.throttledCreates, 1)
+			return
+		}
+
 		schema, ok := p.schemas.Match(metric)
 		if !ok {
 			p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
@@ -243,10 +260,6 @@ func (p *Whisper) store(metric string) {
 	p.updateMany(w, path, points)
 
 	w.Close()
-
-	if p.confirm != nil {
-		p.confirm(values)
-	}
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 }
 
@@ -292,6 +305,9 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
+	throttledCreates := atomic.LoadUint32(&p.throttledCreates)
+	atomic.AddUint32(&p.throttledCreates, -throttledCreates)
+
 	send("updateOperations", float64(updateOperations))
 	send("committedPoints", float64(committedPoints))
 	if updateOperations > 0 {
@@ -301,6 +317,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	}
 
 	send("created", float64(created))
+	send("throttledCreates", float64(throttledCreates))
 
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
@@ -317,6 +334,7 @@ func (p *Whisper) Start() error {
 	return p.StartFunc(func() error {
 
 		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
+		p.maxCreatesTicker = NewThrottleTicker(p.maxCreatesPerSecond)
 
 		for i := 0; i < p.workersCount; i++ {
 			p.Go(p.worker)
@@ -329,5 +347,6 @@ func (p *Whisper) Start() error {
 func (p *Whisper) Stop() {
 	p.StopFunc(func() {
 		p.throttleTicker.Stop()
+		p.maxCreatesTicker.Stop()
 	})
 }
