@@ -19,14 +19,15 @@ import (
 
 const storeMutexCount = 32768
 
-type StoreFunc func(p *Whisper, values *points.Points)
+type StoreFunc func(metric string)
 
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
 	updateOperations    uint32
 	committedPoints     uint32
-	recv                func(chan bool) *points.Points
+	recv                func(chan bool) string
+	pop                 func(string) (*points.Points, bool)
 	confirm             func(*points.Points)
 	onCreateTagged      func(string)
 	tagsEnabled         bool
@@ -55,11 +56,13 @@ func NewWhisper(
 	rootPath string,
 	schemas WhisperSchemas,
 	aggregation *WhisperAggregation,
-	recv func(chan bool) *points.Points,
+	recv func(chan bool) string,
+	pop func(string) (*points.Points, bool),
 	confirm func(*points.Points)) *Whisper {
 
 	return &Whisper{
 		recv:                recv,
+		pop:                 pop,
 		confirm:             confirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
@@ -126,20 +129,34 @@ func fnv32(key string) uint32 {
 	return hash
 }
 
-func store(p *Whisper, values *points.Points) {
+func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.TimeSeriesPoint) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Error("UpdateMany panic recovered",
+				zap.String("path", path),
+				zap.String("traceback", fmt.Sprint(r)),
+			)
+		}
+	}()
+
+	// start = time.Now()
+	w.UpdateMany(points)
+}
+
+func (p *Whisper) store(metric string) {
 	// avoid concurrent store same metric
 	// @TODO: may be flock?
 	// start := time.Now()
-	mutexIndex := fnv32(values.Metric) % storeMutexCount
+	mutexIndex := fnv32(metric) % storeMutexCount
 	p.storeMutex[mutexIndex].Lock()
 	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
 	defer p.storeMutex[mutexIndex].Unlock()
 
 	var path string
-	if p.tagsEnabled && strings.IndexByte(values.Metric, ';') >= 0 {
-		path = tags.FilePath(p.rootPath, values.Metric, p.hashFilenames) + ".wsp"
+	if p.tagsEnabled && strings.IndexByte(metric, ';') >= 0 {
+		path = tags.FilePath(p.rootPath, metric, p.hashFilenames) + ".wsp"
 	} else {
-		path = filepath.Join(p.rootPath, strings.Replace(values.Metric, ".", "/", -1)+".wsp")
+		path = filepath.Join(p.rootPath, strings.Replace(metric, ".", "/", -1)+".wsp")
 	}
 
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
@@ -152,15 +169,15 @@ func store(p *Whisper, values *points.Points) {
 			return
 		}
 
-		schema, ok := p.schemas.Match(values.Metric)
+		schema, ok := p.schemas.Match(metric)
 		if !ok {
-			p.logger.Error("no storage schema defined for metric", zap.String("metric", values.Metric))
+			p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
 			return
 		}
 
-		aggr := p.aggregation.match(values.Metric)
+		aggr := p.aggregation.match(metric)
 		if aggr == nil {
-			p.logger.Error("no storage aggregation defined for metric", zap.String("metric", values.Metric))
+			p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
 			return
 		}
 
@@ -190,8 +207,8 @@ func store(p *Whisper, values *points.Points) {
 			return
 		}
 
-		if p.tagsEnabled && p.onCreateTagged != nil && strings.IndexByte(values.Metric, ';') >= 0 {
-			p.onCreateTagged(values.Metric)
+		if p.tagsEnabled && p.onCreateTagged != nil && strings.IndexByte(metric, ';') >= 0 {
+			p.onCreateTagged(metric)
 		}
 
 		p.createLogger.Debug("created",
@@ -206,6 +223,14 @@ func store(p *Whisper, values *points.Points) {
 		atomic.AddUint32(&p.created, 1)
 	}
 
+	values, exists := p.pop(metric)
+	if !exists {
+		return
+	}
+	if p.confirm != nil {
+		defer p.confirm(values)
+	}
+
 	points := make([]*whisper.TimeSeriesPoint, len(values.Data))
 	for i, r := range values.Data {
 		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
@@ -214,24 +239,19 @@ func store(p *Whisper, values *points.Points) {
 	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
 	atomic.AddUint32(&p.updateOperations, 1)
 
-	defer w.Close()
-
-	defer func() {
-		if r := recover(); r != nil {
-			p.logger.Error("UpdateMany panic recovered",
-				zap.String("path", path),
-				zap.String("traceback", fmt.Sprint(r)),
-			)
-		}
-	}()
-
 	// start = time.Now()
-	w.UpdateMany(points)
+	p.updateMany(w, path, points)
+
+	w.Close()
+
+	if p.confirm != nil {
+		p.confirm(values)
+	}
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 }
 
-func (p *Whisper) worker(recv func(chan bool) *points.Points, confirm func(*points.Points), exit chan bool) {
-	storeFunc := store
+func (p *Whisper) worker(exit chan bool) {
+	storeFunc := p.store
 	var doneCb func()
 	if p.mockStore != nil {
 		storeFunc, doneCb = p.mockStore()
@@ -249,18 +269,15 @@ LOOP:
 		}
 
 		// start = time.Now()
-		points := recv(exit)
+		metric := p.recv(exit)
 		// atomic.AddUint64(&p.blockQueueGetNs, uint64(time.Since(start).Nanoseconds()))
-		if points == nil {
+		if metric == "" {
 			// exit closed
 			break LOOP
 		}
-		storeFunc(p, points)
+		storeFunc(metric)
 		if doneCb != nil {
 			doneCb()
-		}
-		if confirm != nil {
-			confirm(points)
 		}
 	}
 }
@@ -302,9 +319,7 @@ func (p *Whisper) Start() error {
 		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 
 		for i := 0; i < p.workersCount; i++ {
-			p.Go(func(exit chan bool) {
-				p.worker(p.recv, p.confirm, exit)
-			})
+			p.Go(p.worker)
 		}
 
 		return nil

@@ -6,7 +6,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/lomik/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
 
@@ -76,7 +75,7 @@ func (q *WriteoutQueue) update() {
 	q.Unlock()
 }
 
-func (q *WriteoutQueue) get(abort chan bool, pop func(key string) (p *points.Points, exists bool)) *points.Points {
+func (q *WriteoutQueue) get(abort chan bool) string {
 QueueLoop:
 	for {
 		q.RLock()
@@ -84,35 +83,25 @@ QueueLoop:
 		rebuild := q.rebuild
 		q.RUnlock()
 
-	FetchLoop:
-		for {
+		select {
+		case metric := <-queue:
+			// pop from cache
+			return metric
+		case <-abort:
+			return ""
+		default:
+			// queue is empty, create new
 			select {
-			case metric := <-queue:
-				// pop from cache
-				if p, exists := pop(metric); exists {
-					return p
-				}
-				continue FetchLoop
+			case <-rebuild(abort):
+				// wait for rebuild
+				continue QueueLoop
 			case <-abort:
-				return nil
-			default:
-				// queue is empty, create new
-				select {
-				case <-rebuild(abort):
-					// wait for rebuild
-					continue QueueLoop
-				case <-abort:
-					return nil
-				}
+				return ""
 			}
 		}
 	}
 }
 
-func (q *WriteoutQueue) Get(abort chan bool) *points.Points {
-	return q.get(abort, q.cache.Pop)
-}
-
-func (q *WriteoutQueue) GetNotConfirmed(abort chan bool) *points.Points {
-	return q.get(abort, q.cache.PopNotConfirmed)
+func (q *WriteoutQueue) Get(abort chan bool) string {
+	return q.get(abort)
 }

@@ -254,7 +254,8 @@ func (app *App) startPersister() {
 			app.Config.Whisper.DataDir,
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
-			app.Cache.WriteoutQueue().GetNotConfirmed,
+			app.Cache.WriteoutQueue().Get,
+			app.Cache.PopNotConfirmed,
 			app.Cache.Confirm,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
