@@ -96,6 +96,8 @@ aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
 workers = 8
 # Limits the number of whisper update_many() calls per second. 0 - no limit
 max-updates-per-second = 0
+# Softly limits the number of whisper files that get created each second. 0 - no limit
+max-creates-per-second = 0
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
@@ -413,6 +415,7 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+* Added `whisper.max-creates-per-second` option
 * Support multiple targets in carbonserver
 * Support new `carbonapi_v3_pb` protocol. This allows recent versions of carbonapi to get metadata alongside with data
 
