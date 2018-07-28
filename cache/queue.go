@@ -9,7 +9,7 @@ import (
 )
 
 type queueItem struct {
-	points   *points.Points
+	metric   string
 	orderKey int64
 }
 
@@ -21,7 +21,7 @@ func (v byOrderKey) Len() int           { return len(v) }
 func (v byOrderKey) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 
-func (c *Cache) makeQueue() chan *points.Points {
+func (c *Cache) makeQueue() chan string {
 	c.Lock()
 	writeStrategy := c.writeStrategy
 	prevBuild := c.queueLastBuild
@@ -68,10 +68,10 @@ func (c *Cache) makeQueue() chan *points.Points {
 
 		for _, p := range shard.items {
 			if index < size {
-				q[index].points = p
+				q[index].metric = p.Metric
 				q[index].orderKey = orderKey(p)
 			} else {
-				q = append(q, queueItem{p, orderKey(p)})
+				q = append(q, queueItem{p.Metric, orderKey(p)})
 			}
 			index++
 		}
@@ -93,9 +93,9 @@ func (c *Cache) makeQueue() chan *points.Points {
 		return nil
 	}
 
-	ch := make(chan *points.Points, l)
+	ch := make(chan string, l)
 	for _, i := range q {
-		ch <- i.points
+		ch <- i.metric
 	}
 
 	return ch

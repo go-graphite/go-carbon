@@ -17,7 +17,7 @@ type WriteoutQueue struct {
 	// Writeout queue. Usage:
 	// q := <- queue
 	// p := cache.Pop(q.Metric)
-	queue   chan *points.Points
+	queue   chan string
 	rebuild func(abort chan bool) chan bool // return chan waiting for complete
 }
 
@@ -87,9 +87,9 @@ QueueLoop:
 	FetchLoop:
 		for {
 			select {
-			case qp := <-queue:
+			case metric := <-queue:
 				// pop from cache
-				if p, exists := pop(qp.Metric); exists {
+				if p, exists := pop(metric); exists {
 					return p
 				}
 				continue FetchLoop
