@@ -3,6 +3,7 @@ package persister
 import (
 	"fmt"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,15 +13,32 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func makeRecvFromChan(ch chan *points.Points) func(chan bool) *points.Points {
-	return func(abort chan bool) *points.Points {
+func makeRecvPopFromChan(ch chan *points.Points) (func(chan bool) string, func(string) (*points.Points, bool)) {
+	cache := make(map[string]*points.Points)
+	var m sync.Mutex
+
+	recv := func(abort chan bool) string {
 		select {
 		case <-abort:
-			return nil
+			return ""
 		case p := <-ch:
-			return p
+			m.Lock()
+			cache[p.Metric] = p
+			m.Unlock()
+			return p.Metric
 		}
 	}
+
+	pop := func(metric string) (*points.Points, bool) {
+		m.Lock()
+		p, exists := cache[metric]
+		if exists {
+			delete(cache, metric)
+		}
+		m.Unlock()
+		return p, exists
+	}
+	return recv, pop
 }
 
 func TestGracefullyStop(t *testing.T) {
@@ -30,7 +48,8 @@ func TestGracefullyStop(t *testing.T) {
 		ch := make(chan *points.Points, 1000)
 
 		qa.Root(t, func(root string) {
-			p := NewWhisper(root, nil, nil, makeRecvFromChan(ch), nil)
+			recv, pop := makeRecvPopFromChan(ch)
+			p := NewWhisper(root, nil, nil, recv, pop, nil)
 			p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 			p.SetWorkers(workers)
 
@@ -38,7 +57,8 @@ func TestGracefullyStop(t *testing.T) {
 			var storeCount uint32
 
 			p.mockStore = func() (StoreFunc, func()) {
-				return func(p *Whisper, values *points.Points) {
+				return func(metric string) {
+					pop(metric)
 					<-storeWait
 					atomic.AddUint32(&storeCount, 1)
 				}, nil
@@ -91,12 +111,13 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 			qa.Root(t, func(root string) {
 
 				ch := make(chan *points.Points, 10)
-				p := NewWhisper(root, nil, nil, makeRecvFromChan(ch), nil)
+				recv, pop := makeRecvPopFromChan(ch)
+				p := NewWhisper(root, nil, nil, recv, pop, nil)
 				p.SetMaxUpdatesPerSecond(maxUpdatesPerSecond)
 				p.SetWorkers(workers)
 
 				p.mockStore = func() (StoreFunc, func()) {
-					return func(p *Whisper, values *points.Points) {}, nil
+					return func(string) {}, nil
 				}
 
 				p.Start()

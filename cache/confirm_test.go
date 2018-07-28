@@ -13,7 +13,8 @@ func TestInFlight(t *testing.T) {
 
 	c.Add(points.OnePoint("hello.world", 42, 10))
 
-	p1 := c.WriteoutQueue().GetNotConfirmed(nil)
+	m1 := c.WriteoutQueue().Get(nil)
+	p1, _ := c.PopNotConfirmed(m1)
 	if !p1.Eq(points.OnePoint("hello.world", 42, 10)) {
 		t.FailNow()
 	}
@@ -31,7 +32,8 @@ func TestInFlight(t *testing.T) {
 		t.FailNow()
 	}
 
-	p2 := c.WriteoutQueue().GetNotConfirmed(nil)
+	m2 := c.WriteoutQueue().Get(nil)
+	p2, _ := c.PopNotConfirmed(m2)
 	if !p2.Eq(points.OnePoint("hello.world", 43, 10)) {
 		t.FailNow()
 	}
@@ -45,7 +47,8 @@ func TestInFlight(t *testing.T) {
 	c.Confirm(p1)
 
 	c.Add(points.OnePoint("hello.world", 44, 10))
-	p3 := c.WriteoutQueue().GetNotConfirmed(nil)
+	m3 := c.WriteoutQueue().Get(nil)
+	p3, _ := c.PopNotConfirmed(m3)
 	if !p3.Eq(points.OnePoint("hello.world", 44, 10)) {
 		t.FailNow()
 	}
