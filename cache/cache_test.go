@@ -25,9 +25,15 @@ func TestCache(t *testing.T) {
 	}
 
 	q := c.WriteoutQueue()
-	values := q.Get(nil)
+	metric := q.Get(nil)
 
-	if values.Metric != "hello.world" {
+	if metric != "hello.world" {
+		t.FailNow()
+	}
+
+	values, exists := c.PopNotConfirmed(metric)
+
+	if !exists {
 		t.FailNow()
 	}
 
