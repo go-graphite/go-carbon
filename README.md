@@ -415,6 +415,8 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+
+##### version 0.13.0
 * Added `whisper.max-creates-per-second` option
 * Support multiple targets in carbonserver
 * Support new `carbonapi_v3_pb` protocol. This allows recent versions of carbonapi to get metadata alongside with data
