@@ -189,11 +189,22 @@ func (p *Whisper) store(metric string) {
 			if !keep {
 				p.pop(metric)
 				atomic.AddUint32(&p.throttledCreates, 1)
+				p.logger.Error("metric creation throttled",
+					zap.String("name", metric),
+					zap.String("operation", "create"),
+					zap.Bool("dropped", true),
+				)
 				return
 			}
+
 			// pass
 		default:
 			atomic.AddUint32(&p.throttledCreates, 1)
+			p.logger.Error("metric creation throttled",
+				zap.String("name", metric),
+				zap.String("operation", "create"),
+				zap.Bool("dropped", false),
+			)
 			return
 		}
 
