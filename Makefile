@@ -9,12 +9,14 @@ TEMPDIR:=$(shell mktemp -d)
 VERSION:=$(shell sh -c 'grep "const Version" $(NAME).go  | cut -d\" -f2')
 BUILD ?= $(shell git describe --abbrev=4 --dirty --always --tags)
 
+SOURCES=$(shell find . -name "*.go")
+
 all: $(NAME)
 
-$(NAME):
+$(NAME): $(SOURCES)
 	$(GO) build --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
-debug:
+debug: $(SOURCES)
 	$(GO) build -gcflags=all='-l -N' $(MODULE)
 
 run-test:

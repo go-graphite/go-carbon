@@ -8,20 +8,22 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func doTestThrottleTicker(perSecond int) (bw int) {
+func doTestThrottleTicker(perSecond int, wait time.Duration, hard bool) (bw int) {
 	// start := time.Now()
-	wait := time.After(time.Second)
+	w := time.After(wait)
 
-	ticker := NewThrottleTicker(perSecond)
+	ticker := newThrottleTicker(perSecond, hard)
 	defer ticker.Stop()
 
 LOOP:
 	for {
 		select {
-		case <-wait:
+		case <-w:
 			break LOOP
-		case <-ticker.C:
-			bw++
+		case keep := <-ticker.C:
+			if keep {
+				bw++
+			}
 		}
 	}
 	// stop := time.Now()
@@ -34,10 +36,23 @@ func TestThrottleChan(t *testing.T) {
 	perSecondTable := []int{100, 1000, 10000, 100000, 200000}
 
 	for _, perSecond := range perSecondTable {
-		bw := doTestThrottleTicker(perSecond)
+		bw := doTestThrottleTicker(perSecond, time.Second, false)
 		max := float64(perSecond) * 1.05
 		min := float64(perSecond) * 0.95
 		assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
 		assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+	}
+}
+
+func TestHardThrottleChan(t *testing.T) {
+	perSecondTable := []int{100, 1000, 10000, 100000, 200000}
+
+	for _, perSecond := range perSecondTable {
+		// Wait for slightly more than a second
+		kept := doTestThrottleTicker(perSecond, 1100*time.Millisecond, true)
+		max := float64(perSecond) * 1.05
+		min := float64(perSecond) * 0.95
+		assert.True(t, float64(kept) >= min, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
+		assert.True(t, float64(kept) <= max, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
 	}
 }

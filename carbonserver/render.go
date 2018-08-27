@@ -40,6 +40,22 @@ type timeRange struct {
 	until int32
 }
 
+func getTargetNames(targets map[timeRange][]target) []string {
+	c := 0
+	for _, v := range targets {
+		c += len(v)
+	}
+
+	names := make([]string, 0, c)
+	for _, v := range targets {
+		for _, t := range v {
+			names = append(names, t.Name)
+		}
+	}
+
+	return names
+}
+
 func stringToInt32(t string) (int32, error) {
 	i, err := strconv.Atoi(t)
 
@@ -162,15 +178,16 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
+	tgs := getTargetNames(targets)
 	accessLogger = accessLogger.With(
-		zap.Any("targets", targets),
+		zap.Strings("targets", tgs),
 	)
 
 	logger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
-		zap.Any("targets", targets),
+		zap.Strings("targets", tgs),
 		zap.String("format", format.String()),
 	))
 

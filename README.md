@@ -98,6 +98,8 @@ workers = 8
 max-updates-per-second = 0
 # Softly limits the number of whisper files that get created each second. 0 - no limit
 max-creates-per-second = 0
+# Make max-creates-per-second a hard limit. Extra new metrics are dropped. A hard throttle of 0 drops all new metrics.
+hard-max-creates-per-second = false
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
