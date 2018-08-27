@@ -53,18 +53,19 @@ type commonConfig struct {
 }
 
 type whisperConfig struct {
-	DataDir             string `toml:"data-dir"`
-	SchemasFilename     string `toml:"schemas-file"`
-	AggregationFilename string `toml:"aggregation-file"`
-	Workers             int    `toml:"workers"`
-	MaxUpdatesPerSecond int    `toml:"max-updates-per-second"`
-	MaxCreatesPerSecond int    `toml:"max-creates-per-second"`
-	Sparse              bool   `toml:"sparse-create"`
-	FLock               bool   `toml:"flock"`
-	Enabled             bool   `toml:"enabled"`
-	HashFilenames       bool   `toml:"hash-filenames"`
-	Schemas             persister.WhisperSchemas
-	Aggregation         *persister.WhisperAggregation
+	DataDir                 string `toml:"data-dir"`
+	SchemasFilename         string `toml:"schemas-file"`
+	AggregationFilename     string `toml:"aggregation-file"`
+	Workers                 int    `toml:"workers"`
+	MaxUpdatesPerSecond     int    `toml:"max-updates-per-second"`
+	MaxCreatesPerSecond     int    `toml:"max-creates-per-second"`
+	HardMaxCreatesPerSecond bool   `toml:"hard-max-creates-per-second"`
+	Sparse                  bool   `toml:"sparse-create"`
+	FLock                   bool   `toml:"flock"`
+	Enabled                 bool   `toml:"enabled"`
+	HashFilenames           bool   `toml:"hash-filenames"`
+	Schemas                 persister.WhisperSchemas
+	Aggregation             *persister.WhisperAggregation
 }
 
 type cacheConfig struct {

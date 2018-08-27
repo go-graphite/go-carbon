@@ -260,6 +260,7 @@ func (app *App) startPersister() {
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetMaxCreatesPerSecond(app.Config.Whisper.MaxCreatesPerSecond)
+		p.SetHardMaxCreatesPerSecond(app.Config.Whisper.HardMaxCreatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetWorkers(app.Config.Whisper.Workers)

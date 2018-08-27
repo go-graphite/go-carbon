@@ -24,30 +24,31 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
-	recv                func(chan bool) string
-	pop                 func(string) (*points.Points, bool)
-	confirm             func(*points.Points)
-	onCreateTagged      func(string)
-	tagsEnabled         bool
-	schemas             WhisperSchemas
-	aggregation         *WhisperAggregation
-	workersCount        int
-	rootPath            string
-	created             uint32 // counter
-	throttledCreates    uint32 // counter
-	updateOperations    uint32 // counter
-	committedPoints     uint32 // counter
-	sparse              bool
-	flock               bool
-	hashFilenames       bool
-	maxUpdatesPerSecond int
-	maxCreatesPerSecond int
-	throttleTicker      *ThrottleTicker
-	maxCreatesTicker    *ThrottleTicker
-	storeMutex          [storeMutexCount]sync.Mutex
-	mockStore           func() (StoreFunc, func())
-	logger              *zap.Logger
-	createLogger        *zap.Logger
+	recv                    func(chan bool) string
+	pop                     func(string) (*points.Points, bool)
+	confirm                 func(*points.Points)
+	onCreateTagged          func(string)
+	tagsEnabled             bool
+	schemas                 WhisperSchemas
+	aggregation             *WhisperAggregation
+	workersCount            int
+	rootPath                string
+	created                 uint32 // counter
+	throttledCreates        uint32 // counter
+	updateOperations        uint32 // counter
+	committedPoints         uint32 // counter
+	sparse                  bool
+	flock                   bool
+	hashFilenames           bool
+	maxUpdatesPerSecond     int
+	maxCreatesPerSecond     int
+	hardMaxCreatesPerSecond bool
+	throttleTicker          *ThrottleTicker
+	maxCreatesTicker        *ThrottleTicker
+	storeMutex              [storeMutexCount]sync.Mutex
+	mockStore               func() (StoreFunc, func())
+	logger                  *zap.Logger
+	createLogger            *zap.Logger
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -85,6 +86,11 @@ func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
 // SetMaxCreatesPerSecond enable throttling
 func (p *Whisper) SetMaxCreatesPerSecond(maxCreatesPerSecond int) {
 	p.maxCreatesPerSecond = maxCreatesPerSecond
+}
+
+// SetHardMaxCreatesPerSecond enable throttling
+func (p *Whisper) SetHardMaxCreatesPerSecond(hardMaxCreatesPerSecond bool) {
+	p.hardMaxCreatesPerSecond = hardMaxCreatesPerSecond
 }
 
 // GetMaxUpdatesPerSecond returns current throttling speed
@@ -179,7 +185,12 @@ func (p *Whisper) store(metric string) {
 
 		// max creates throttling
 		select {
-		case <-p.maxCreatesTicker.C:
+		case keep := <-p.maxCreatesTicker.C:
+			if !keep {
+				p.pop(metric)
+				atomic.AddUint32(&p.throttledCreates, 1)
+				return
+			}
 			// pass
 		default:
 			atomic.AddUint32(&p.throttledCreates, 1)
@@ -334,7 +345,11 @@ func (p *Whisper) Start() error {
 	return p.StartFunc(func() error {
 
 		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
-		p.maxCreatesTicker = NewThrottleTicker(p.maxCreatesPerSecond)
+		if p.hardMaxCreatesPerSecond {
+			p.maxCreatesTicker = NewHardThrottleTicker(p.maxCreatesPerSecond)
+		} else {
+			p.maxCreatesTicker = NewThrottleTicker(p.maxCreatesPerSecond)
+		}
 
 		for i := 0; i < p.workersCount; i++ {
 			p.Go(p.worker)
