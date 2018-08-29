@@ -167,6 +167,7 @@ func main() {
 		expvar.NewString("GoVersion").Set(runtime.Version())
 		expvar.NewString("BuildVersion").Set(BuildVersion)
 		expvar.Publish("Config", expvar.Func(func() interface{} { return cfg }))
+		expvar.Publish("GoroutineCount", expvar.Func(func() interface{} { return runtime.NumGoroutine() }))
 	}
 
 	if err = app.Start(); err != nil {
