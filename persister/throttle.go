@@ -1,7 +1,6 @@
 package persister
 
 import (
-	"context"
 	"time"
 
 	"github.com/lomik/go-carbon/helper"
@@ -105,39 +104,23 @@ func hardThrottle(throttle chan bool, ratePerSec int) func(chan bool) {
 	return func(exit chan bool) {
 		defer close(throttle)
 
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		var ctx context.Context
-		var cancel context.CancelFunc = func() {}
-
+		tick := time.Now().Add(time.Second)
+		sent := 0
 		for {
 			select {
-			case <-ticker.C:
-				cancel()
-
-				ctx, cancel = context.WithTimeout(context.Background(), time.Second)
-				go func(ctx context.Context, keepValue chan bool) {
-					c := 0
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-exit:
-							return
-						default:
-							if c < ratePerSec {
-								keepValue <- true
-								c++
-							} else {
-								keepValue <- false
-							}
-						}
+			case throttle <- sent < ratePerSec:
+				if time.Now().Before(tick) {
+					// Let's not overflow in case computers get wonderfully
+					// better, however improbable that is
+					if sent < ratePerSec {
+						sent++
 					}
-				}(ctx, throttle)
+				} else {
+					sent = 0
+					tick = time.Now().Add(time.Second)
+				}
 
 			case <-exit:
-				cancel()
 				return
 			}
 		}

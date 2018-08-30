@@ -48,8 +48,9 @@ func TestHardThrottleChan(t *testing.T) {
 	perSecondTable := []int{100, 1000, 10000, 100000, 200000}
 
 	for _, perSecond := range perSecondTable {
-		// Wait for slightly more than a second
-		kept := doTestThrottleTicker(perSecond, 1100*time.Millisecond, true)
+		// A little less than a second, as the hard throttle front-loads
+		// its payloads
+		kept := doTestThrottleTicker(perSecond, 900*time.Millisecond, true)
 		max := float64(perSecond) * 1.05
 		min := float64(perSecond) * 0.95
 		assert.True(t, float64(kept) >= min, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
