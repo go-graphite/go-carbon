@@ -340,6 +340,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 	send("throttledCreates", float64(throttledCreates))
+	send("maxCreatesPerSecond", float64(p.maxCreatesPerSecond))
 
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
