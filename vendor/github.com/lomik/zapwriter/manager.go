@@ -154,7 +154,12 @@ func makeManager(conf []Config, checkOnly bool, allowNames []string) (Manager, e
 			m.writers[u.Path] = ws
 		}
 
-		m.cores[cfg.Logger] = append(m.cores[cfg.Logger], zapcore.NewCore(encoder, ws, atomicLevel))
+		core, err := cfg.core(encoder, ws, atomicLevel)
+		if err != nil {
+			return nil, err
+		}
+
+		m.cores[cfg.Logger] = append(m.cores[cfg.Logger], core)
 	}
 
 	// make loggers

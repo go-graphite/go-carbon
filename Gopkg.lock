@@ -198,7 +198,7 @@
   branch = "master"
   name = "github.com/lomik/zapwriter"
   packages = ["."]
-  revision = "3b568a1c89582d7059d81f13aa9e3f97aa9af97e"
+  revision = "2ec2b9a616807f3fe930c075c48fcf32d1f2d250"
 
 [[projects]]
   name = "github.com/pierrec/lz4"
