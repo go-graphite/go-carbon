@@ -59,7 +59,7 @@
 
 [[constraint]]
   name = "github.com/gogo/protobuf"
-  version = "1.0.0"
+  branch = "master"
 
 [[constraint]]
   name = "github.com/klauspost/compress"
@@ -95,7 +95,7 @@
 
 [[constraint]]
   name = "go.uber.org/zap"
-  version = "1.7.1"
+  version = "1.9.1"
 
 [[constraint]]
   branch = "master"

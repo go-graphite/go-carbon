@@ -3,6 +3,7 @@ package zapwriter
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"os"
 	"sync"
@@ -20,6 +21,18 @@ type closeable interface {
 type Output interface {
 	io.Writer
 	Sync() error
+}
+
+var knownSchemes = make(map[string](func(string) (Output, error)))
+var knownSchemesMutex sync.RWMutex
+
+func RegisterScheme(scheme string, constructor func(path string) (Output, error)) {
+	knownSchemesMutex.Lock()
+	if _, exists := knownSchemes[scheme]; exists {
+		log.Fatalf("scheme %#v already registered", scheme)
+	}
+	knownSchemes[scheme] = constructor
+	knownSchemesMutex.Unlock()
 }
 
 type output struct {
@@ -65,7 +78,21 @@ func (o *output) apply(dsn string) error {
 			}
 			newCloseable = true
 		} else {
-			return fmt.Errorf("unknown scheme %#v", u.Scheme)
+			knownSchemesMutex.RLock()
+			newFunc, exists := knownSchemes[u.Scheme]
+			knownSchemesMutex.RUnlock()
+
+			if !exists {
+				return fmt.Errorf("unknown scheme %#v", u.Scheme)
+			}
+
+			newOut, err = newFunc(u.String())
+			if err != nil {
+				return err
+			}
+			if _, ok := newOut.(closeable); ok {
+				newCloseable = true
+			}
 		}
 	}
 
