@@ -95,7 +95,7 @@
 
 [[constraint]]
   name = "go.uber.org/zap"
-  version = "1.7.1"
+  version = "1.9.1"
 
 [[constraint]]
   branch = "master"

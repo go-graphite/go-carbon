@@ -16,6 +16,7 @@ package ochttp
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"strconv"
 	"sync"
@@ -27,16 +28,19 @@ import (
 	"go.opencensus.io/trace/propagation"
 )
 
-// Handler is a http.Handler that is aware of the incoming request's span.
+// Handler is an http.Handler wrapper to instrument your HTTP server with
+// OpenCensus. It supports both stats and tracing.
 //
+// Tracing
+//
+// This handler is aware of the incoming request's span, reading it from request
+// headers as configured using the Propagation field.
 // The extracted span can be accessed from the incoming request's
 // context.
 //
 //    span := trace.FromContext(r.Context())
 //
 // The server span will be automatically ended at the end of ServeHTTP.
-//
-// Incoming propagation mechanism is determined by the given HTTP propagators.
 type Handler struct {
 	// Propagation defines how traces are propagated. If unspecified,
 	// B3 propagation will be used.
@@ -57,6 +61,11 @@ type Handler struct {
 	// be added as a linked trace instead of being added as a parent of the
 	// current trace.
 	IsPublicEndpoint bool
+
+	// FormatSpanName holds the function to use for generating the span name
+	// from the information found in the incoming HTTP Request. By default the
+	// name equals the URL Path.
+	FormatSpanName func(*http.Request) string
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +74,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer traceEnd()
 	w, statsEnd = h.startStats(w, r)
 	defer statsEnd()
-
 	handler := h.Handler
 	if handler == nil {
 		handler = http.DefaultServeMux
@@ -74,20 +82,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) startTrace(w http.ResponseWriter, r *http.Request) (*http.Request, func()) {
-	opts := trace.StartOptions{
-		Sampler:  h.StartOptions.Sampler,
-		SpanKind: trace.SpanKindServer,
+	if isHealthEndpoint(r.URL.Path) {
+		return r, func() {}
 	}
-
-	name := spanNameFromURL(r.URL)
+	var name string
+	if h.FormatSpanName == nil {
+		name = spanNameFromURL(r)
+	} else {
+		name = h.FormatSpanName(r)
+	}
 	ctx := r.Context()
 	var span *trace.Span
 	sc, ok := h.extractSpanContext(r)
 	if ok && !h.IsPublicEndpoint {
-		span = trace.NewSpanWithRemoteParent(name, sc, opts)
-		ctx = trace.WithSpan(ctx, span)
+		ctx, span = trace.StartSpanWithRemoteParent(ctx, name, sc,
+			trace.WithSampler(h.StartOptions.Sampler),
+			trace.WithSpanKind(trace.SpanKindServer))
 	} else {
-		span = trace.NewSpan(name, nil, opts)
+		ctx, span = trace.StartSpan(ctx, name,
+			trace.WithSampler(h.StartOptions.Sampler),
+			trace.WithSpanKind(trace.SpanKindServer),
+		)
 		if ok {
 			span.AddLink(trace.Link{
 				TraceID:    sc.TraceID,
@@ -97,9 +112,8 @@ func (h *Handler) startTrace(w http.ResponseWriter, r *http.Request) (*http.Requ
 			})
 		}
 	}
-	ctx = trace.WithSpan(ctx, span)
 	span.AddAttributes(requestAttrs(r)...)
-	return r.WithContext(trace.WithSpan(r.Context(), span)), span.End
+	return r.WithContext(ctx), span.End
 }
 
 func (h *Handler) extractSpanContext(r *http.Request) (trace.SpanContext, bool) {
@@ -126,7 +140,7 @@ func (h *Handler) startStats(w http.ResponseWriter, r *http.Request) (http.Respo
 		track.reqSize = r.ContentLength
 	}
 	stats.Record(ctx, ServerRequestCount.M(1))
-	return track, track.end
+	return track.wrappedResponseWriter(), track.end
 }
 
 type trackingResponseWriter struct {
@@ -135,10 +149,12 @@ type trackingResponseWriter struct {
 	respSize   int64
 	start      time.Time
 	statusCode int
+	statusLine string
 	endOnce    sync.Once
 	writer     http.ResponseWriter
 }
 
+// Compile time assertion for ResponseWriter interface
 var _ http.ResponseWriter = (*trackingResponseWriter)(nil)
 
 func (t *trackingResponseWriter) end() {
@@ -146,6 +162,10 @@ func (t *trackingResponseWriter) end() {
 		if t.statusCode == 0 {
 			t.statusCode = 200
 		}
+
+		span := trace.FromContext(t.ctx)
+		span.SetStatus(TraceStatus(t.statusCode, t.statusLine))
+
 		m := []stats.Measurement{
 			ServerLatency.M(float64(time.Since(t.start)) / float64(time.Millisecond)),
 			ServerResponseBytes.M(t.respSize),
@@ -171,10 +191,234 @@ func (t *trackingResponseWriter) Write(data []byte) (int, error) {
 func (t *trackingResponseWriter) WriteHeader(statusCode int) {
 	t.writer.WriteHeader(statusCode)
 	t.statusCode = statusCode
+	t.statusLine = http.StatusText(t.statusCode)
 }
 
-func (t *trackingResponseWriter) Flush() {
-	if flusher, ok := t.writer.(http.Flusher); ok {
-		flusher.Flush()
+// wrappedResponseWriter returns a wrapped version of the original
+//  ResponseWriter and only implements the same combination of additional
+// interfaces as the original.
+// This implementation is based on https://github.com/felixge/httpsnoop.
+func (t *trackingResponseWriter) wrappedResponseWriter() http.ResponseWriter {
+	var (
+		hj, i0 = t.writer.(http.Hijacker)
+		cn, i1 = t.writer.(http.CloseNotifier)
+		pu, i2 = t.writer.(http.Pusher)
+		fl, i3 = t.writer.(http.Flusher)
+		rf, i4 = t.writer.(io.ReaderFrom)
+	)
+
+	switch {
+	case !i0 && !i1 && !i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+		}{t}
+	case !i0 && !i1 && !i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			io.ReaderFrom
+		}{t, rf}
+	case !i0 && !i1 && !i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Flusher
+		}{t, fl}
+	case !i0 && !i1 && !i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Flusher
+			io.ReaderFrom
+		}{t, fl, rf}
+	case !i0 && !i1 && i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Pusher
+		}{t, pu}
+	case !i0 && !i1 && i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Pusher
+			io.ReaderFrom
+		}{t, pu, rf}
+	case !i0 && !i1 && i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Pusher
+			http.Flusher
+		}{t, pu, fl}
+	case !i0 && !i1 && i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Pusher
+			http.Flusher
+			io.ReaderFrom
+		}{t, pu, fl, rf}
+	case !i0 && i1 && !i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+		}{t, cn}
+	case !i0 && i1 && !i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			io.ReaderFrom
+		}{t, cn, rf}
+	case !i0 && i1 && !i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			http.Flusher
+		}{t, cn, fl}
+	case !i0 && i1 && !i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			http.Flusher
+			io.ReaderFrom
+		}{t, cn, fl, rf}
+	case !i0 && i1 && i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			http.Pusher
+		}{t, cn, pu}
+	case !i0 && i1 && i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			http.Pusher
+			io.ReaderFrom
+		}{t, cn, pu, rf}
+	case !i0 && i1 && i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			http.Pusher
+			http.Flusher
+		}{t, cn, pu, fl}
+	case !i0 && i1 && i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.CloseNotifier
+			http.Pusher
+			http.Flusher
+			io.ReaderFrom
+		}{t, cn, pu, fl, rf}
+	case i0 && !i1 && !i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+		}{t, hj}
+	case i0 && !i1 && !i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			io.ReaderFrom
+		}{t, hj, rf}
+	case i0 && !i1 && !i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.Flusher
+		}{t, hj, fl}
+	case i0 && !i1 && !i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.Flusher
+			io.ReaderFrom
+		}{t, hj, fl, rf}
+	case i0 && !i1 && i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.Pusher
+		}{t, hj, pu}
+	case i0 && !i1 && i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.Pusher
+			io.ReaderFrom
+		}{t, hj, pu, rf}
+	case i0 && !i1 && i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.Pusher
+			http.Flusher
+		}{t, hj, pu, fl}
+	case i0 && !i1 && i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.Pusher
+			http.Flusher
+			io.ReaderFrom
+		}{t, hj, pu, fl, rf}
+	case i0 && i1 && !i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+		}{t, hj, cn}
+	case i0 && i1 && !i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			io.ReaderFrom
+		}{t, hj, cn, rf}
+	case i0 && i1 && !i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			http.Flusher
+		}{t, hj, cn, fl}
+	case i0 && i1 && !i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			http.Flusher
+			io.ReaderFrom
+		}{t, hj, cn, fl, rf}
+	case i0 && i1 && i2 && !i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			http.Pusher
+		}{t, hj, cn, pu}
+	case i0 && i1 && i2 && !i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			http.Pusher
+			io.ReaderFrom
+		}{t, hj, cn, pu, rf}
+	case i0 && i1 && i2 && i3 && !i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			http.Pusher
+			http.Flusher
+		}{t, hj, cn, pu, fl}
+	case i0 && i1 && i2 && i3 && i4:
+		return struct {
+			http.ResponseWriter
+			http.Hijacker
+			http.CloseNotifier
+			http.Pusher
+			http.Flusher
+			io.ReaderFrom
+		}{t, hj, cn, pu, fl, rf}
+	default:
+		return struct {
+			http.ResponseWriter
+		}{t}
 	}
 }

@@ -17,6 +17,12 @@
   version = "v0.18.0"
 
 [[projects]]
+  name = "contrib.go.opencensus.io/exporter/stackdriver"
+  packages = ["propagation"]
+  revision = "2b93072101d466aa4120b3c23c2e1b08af01541c"
+  version = "v0.6.0"
+
+[[projects]]
   name = "github.com/BurntSushi/toml"
   packages = ["."]
   revision = "b26d9c308763d68093482582cea63d69be07a0f0"
@@ -37,8 +43,8 @@
 [[projects]]
   name = "github.com/davecgh/go-spew"
   packages = ["spew"]
-  revision = "346938d642f2ec3594ed81d874461961cd0faa76"
-  version = "v1.1.0"
+  revision = "8991bc29aa16c548c550c7ff78260e27b9ab7c73"
+  version = "v1.1.1"
 
 [[projects]]
   branch = "master"
@@ -68,7 +74,7 @@
   branch = "master"
   name = "github.com/eapache/go-xerial-snappy"
   packages = ["."]
-  revision = "bb955e01b9346ac19dc29eb16586c90ded99a98c"
+  revision = "776d5712da21bc4762676d614db1d8a64f4238b0"
 
 [[projects]]
   name = "github.com/eapache/queue"
@@ -79,8 +85,8 @@
 [[projects]]
   name = "github.com/go-graphite/carbonzipper"
   packages = ["zipper/httpHeaders"]
-  revision = "53bd3ef082320cad7ecdfa8e7b5d34a9bc70a0a1"
-  version = "1.0.0-beta.2"
+  revision = "fedce067a7947b2fc5b2c759a04d608354286e89"
+  version = "1.0.0-rc.1"
 
 [[projects]]
   branch = "master"
@@ -119,14 +125,14 @@
     "ptypes/empty",
     "ptypes/timestamp"
   ]
-  revision = "925541529c1fa6821df4e44ce2723319eb2be768"
-  version = "v1.0.0"
+  revision = "aa810b61a9c79d51363740d207bb46cf8e620ed5"
+  version = "v1.2.0"
 
 [[projects]]
   branch = "master"
   name = "github.com/golang/snappy"
   packages = ["."]
-  revision = "553a641470496b2327abcac10b36396bd98e45c9"
+  revision = "2e65f85255dbc3072edf28d6b5b8efc472979f5a"
 
 [[projects]]
   name = "github.com/google/go-cmp"
@@ -158,19 +164,13 @@
     "gzip",
     "snappy"
   ]
-  revision = "6c8db69c4b49dd4df1fff66996cf556176d0b9bf"
-  version = "v1.2.1"
+  revision = "b939724e787a27c0005cabe3f78e7ed7987ac74f"
+  version = "v1.4.0"
 
 [[projects]]
   name = "github.com/klauspost/cpuid"
   packages = ["."]
   revision = "ae7887de9fa5d2db4eaa8174a7eff2c1ac00f2da"
-  version = "v1.1"
-
-[[projects]]
-  name = "github.com/klauspost/crc32"
-  packages = ["."]
-  revision = "cb6bfca970f6908083f26f39a79009d608efd5cd"
   version = "v1.1"
 
 [[projects]]
@@ -202,15 +202,12 @@
 
 [[projects]]
   name = "github.com/pierrec/lz4"
-  packages = ["."]
-  revision = "2fcda4cb7018ce05a25959d2fe08c83e3329f169"
-  version = "v1.1"
-
-[[projects]]
-  name = "github.com/pierrec/xxHash"
-  packages = ["xxHash32"]
-  revision = "f051bb7f1d1aaf1b5a665d74fb6b0217712c69f7"
-  version = "v0.1.1"
+  packages = [
+    ".",
+    "internal/xxh32"
+  ]
+  revision = "ea731401f5c95a8ba30f15787e5e0fb77c60c66b"
+  version = "v2.0.5"
 
 [[projects]]
   name = "github.com/pmezard/go-difflib"
@@ -222,19 +219,19 @@
   branch = "master"
   name = "github.com/rcrowley/go-metrics"
   packages = ["."]
-  revision = "8732c616f52954686704c8645fe1a9d59e9df7c1"
+  revision = "e2704e165165ec55d062f5919b4b29494e9fa790"
 
 [[projects]]
   name = "github.com/sevlyar/go-daemon"
   packages = ["."]
-  revision = "97491df6ec974d292cb82c61906a1a4c6f29958b"
-  version = "v0.1.3"
+  revision = "f9261e73885de99b1647d68bedadf2b9a99ad11f"
+  version = "v0.1.4"
 
 [[projects]]
   name = "github.com/stretchr/testify"
   packages = ["assert"]
-  revision = "12b6f73e6084dad08a7c6e575284b177ecafbc71"
-  version = "v1.2.1"
+  revision = "f35b8ab0b5a2cef36673838d662e249dd9c94686"
+  version = "v1.2.2"
 
 [[projects]]
   branch = "master"
@@ -253,12 +250,12 @@
     "leveldb/table",
     "leveldb/util"
   ]
-  revision = "169b1b37be738edb2813dab48c97a549bcf99bb5"
+  revision = "ae2bd5eed72d46b28834ec3f60db3a3ebedd8dbd"
 
 [[projects]]
   name = "go.opencensus.io"
   packages = [
-    "exporter/stackdriver/propagation",
+    ".",
     "internal",
     "internal/tagencoding",
     "plugin/ocgrpc",
@@ -269,16 +266,17 @@
     "stats/view",
     "tag",
     "trace",
+    "trace/internal",
     "trace/propagation"
   ]
-  revision = "6e3f034057826b530038d93267906ec3c012183f"
-  version = "v0.6.0"
+  revision = "7b558058b7cc960667590e5413ef55157b06652e"
+  version = "v0.15.0"
 
 [[projects]]
   name = "go.uber.org/atomic"
   packages = ["."]
-  revision = "8474b86a5a6f79c443ce4b2992817ff32cf208b8"
-  version = "v1.3.1"
+  revision = "1ea20fb1cbb1cc08cbd0d913a96dead89aa18289"
+  version = "v1.3.2"
 
 [[projects]]
   name = "go.uber.org/multierr"
@@ -305,14 +303,14 @@
   packages = [
     "context",
     "context/ctxhttp",
+    "http/httpguts",
     "http2",
     "http2/hpack",
     "idna",
     "internal/timeseries",
-    "lex/httplex",
     "trace"
   ]
-  revision = "6078986fec03a1dcc236c34816c71b0e05018fda"
+  revision = "8a410e7b638dca158bf9e766925842f6651ff828"
 
 [[projects]]
   branch = "master"
@@ -324,7 +322,7 @@
     "jws",
     "jwt"
   ]
-  revision = "fdc9e635145ae97e6c2cb777c48305600cf515cb"
+  revision = "d2e6202438beef2727060aa7cabdd924d92ebfd9"
 
 [[projects]]
   branch = "master"
@@ -334,6 +332,12 @@
     "semaphore"
   ]
   revision = "1d60e4601c6fd243af51cc01ddf169918a5407ca"
+
+[[projects]]
+  branch = "master"
+  name = "golang.org/x/sys"
+  packages = ["unix"]
+  revision = "ebe1bf3edb3325c393447059974de898d5133eb8"
 
 [[projects]]
   name = "golang.org/x/text"
@@ -369,7 +373,7 @@
     "transport/grpc",
     "transport/http"
   ]
-  revision = "a213db537ac9b393526194a5c85ad6e546f7923f"
+  revision = "49a9310a91459e9e5d4187bfb5a591434de572f7"
 
 [[projects]]
   name = "google.golang.org/appengine"
@@ -387,8 +391,8 @@
     "socket",
     "urlfetch"
   ]
-  revision = "150dc57a1b433e64154302bdc40b6bb8aefa313a"
-  version = "v1.0.0"
+  revision = "b1f26356af11148e710935ed1ac8a7f5702c7612"
+  version = "v1.1.0"
 
 [[projects]]
   branch = "master"
@@ -400,7 +404,7 @@
     "googleapis/rpc/status",
     "protobuf/field_mask"
   ]
-  revision = "ab0870e398d5dd054b868c0db1481ab029b9a9f2"
+  revision = "11092d34479b07829b72e10713b159248caf5dad"
 
 [[projects]]
   name = "google.golang.org/grpc"
@@ -415,9 +419,13 @@
     "credentials/oauth",
     "encoding",
     "encoding/proto",
-    "grpclb/grpc_lb_v1/messages",
     "grpclog",
     "internal",
+    "internal/backoff",
+    "internal/channelz",
+    "internal/envconfig",
+    "internal/grpcrand",
+    "internal/transport",
     "keepalive",
     "metadata",
     "naming",
@@ -429,15 +437,14 @@
     "resolver/passthrough",
     "stats",
     "status",
-    "tap",
-    "transport"
+    "tap"
   ]
-  revision = "afc05b9e1d36f289ea16ba294894486a3e458246"
-  version = "v1.11.0"
+  revision = "32fb0ac620c32ba40a4626ddf94d90d12cce3455"
+  version = "v1.14.0"
 
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "a91705fdf94ecdd4e6a06ed56f1a86efdda79c9a70bd6f9cb514a083874d52fb"
+  inputs-digest = "24014dcbede7c21e50d04aae05d266fd0d42a98c57682fa0844e51d5d401a2ec"
   solver-name = "gps-cdcl"
   solver-version = 1
