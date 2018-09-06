@@ -95,9 +95,10 @@
     "carbonapi_v2_pb",
     "carbonapi_v3_pb"
   ]
-  revision = "1378a7c8b09d54e7d55cd546114b98523ab9cc5f"
+  revision = "5ae324d480670ee5d15e22eff87e1cabab74069b"
 
 [[projects]]
+  branch = "master"
   name = "github.com/gogo/protobuf"
   packages = [
     "gogoproto",
@@ -105,8 +106,7 @@
     "protoc-gen-gogo/descriptor",
     "sortkeys"
   ]
-  revision = "1adfc126b41513cc696b209667c8656ea7aac67c"
-  version = "v1.0.0"
+  revision = "5669497fd64452f28d142899eeb1bfd7e8b26ac8"
 
 [[projects]]
   name = "github.com/golang/protobuf"
@@ -438,6 +438,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "60c6e15e4d2861ef17d8aab42cc1c2edc2eb3e834b50b786d41c6fde63c1868b"
+  inputs-digest = "a91705fdf94ecdd4e6a06ed56f1a86efdda79c9a70bd6f9cb514a083874d52fb"
   solver-name = "gps-cdcl"
   solver-version = 1
