@@ -296,8 +296,8 @@
     "internal/exit",
     "zapcore"
   ]
-  revision = "35aad584952c3e7020db7b839f6b102de6271f89"
-  version = "v1.7.1"
+  revision = "ff33455a0e382e8a81d14dd7c922020b6b5e7982"
+  version = "v1.9.1"
 
 [[projects]]
   branch = "master"
