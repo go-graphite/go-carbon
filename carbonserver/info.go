@@ -24,7 +24,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	ctx := req.Context()
 
 	atomic.AddUint64(&listener.metrics.InfoRequests, 1)
-	req.ParseForm()
+
 	metrics := req.Form["target"]
 	format := req.FormValue("format")
 

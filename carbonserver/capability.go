@@ -29,7 +29,6 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		zap.String("peer", req.RemoteAddr),
 	))
 
-	req.ParseForm()
 	format := req.FormValue("format")
 
 	accepts := req.Header["Accept"]

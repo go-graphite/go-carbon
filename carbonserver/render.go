@@ -67,8 +67,6 @@ func stringToInt32(t string) (int32, error) {
 }
 
 func getFormat(req *http.Request) (responseFormat, error) {
-	req.ParseForm() // idempotent
-
 	format := req.FormValue("format")
 	if format == "" {
 		format = "json"
@@ -90,8 +88,6 @@ func getFormat(req *http.Request) (responseFormat, error) {
 }
 
 func getTargets(req *http.Request, format responseFormat) (map[timeRange][]target, error) {
-	req.ParseForm() // idempotent
-
 	targets := make(map[timeRange][]target)
 
 	switch format {
@@ -147,8 +143,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 	))
-
-	req.ParseForm()
 
 	format, err := getFormat(req)
 	if err != nil {
