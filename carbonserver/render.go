@@ -374,7 +374,7 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 	}
 
 	if format == protoV2Format || format == jsonFormat {
-		if len(multiv2.Metrics) == 0 {
+		if len(multiv2.Metrics) == 0 && format == protoV2Format {
 			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 		}
 
@@ -385,7 +385,7 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 			valuesFetched += len(multiv2.Metrics[i].Values)
 		}
 	} else {
-		if len(multiv3.Metrics) == 0 {
+		if len(multiv3.Metrics) == 0 && format == protoV3Format{
 			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 		}
 
