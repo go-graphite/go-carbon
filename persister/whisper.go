@@ -185,8 +185,8 @@ func (p *Whisper) store(metric string) {
 
 		// max creates throttling
 		select {
-		case keep := <-p.maxCreatesTicker.C:
-			if !keep {
+		case keep, open := <-p.maxCreatesTicker.C:
+			if open && !keep {
 				p.pop(metric)
 				atomic.AddUint32(&p.throttledCreates, 1)
 				p.logger.Error("metric creation throttled",
