@@ -17,7 +17,7 @@ $(NAME): $(SOURCES)
 	$(GO) build --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
 debug: $(SOURCES)
-	$(GO) build -gcflags=all='-l -N' $(MODULE)
+	$(GO) build -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
 
 run-test:
 	$(GO) $(COMMAND) $(MODULE)
