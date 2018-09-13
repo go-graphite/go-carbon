@@ -183,28 +183,18 @@ func (p *Whisper) store(metric string) {
 			return
 		}
 
-		// max creates throttling
-		select {
-		case keep, open := <-p.maxCreatesTicker.C:
-			if open && !keep {
+		if t := p.maxCreatesThrottling(); t != throttlingOff {
+			if t == throttlingHard {
 				p.pop(metric)
-				atomic.AddUint32(&p.throttledCreates, 1)
-				p.logger.Error("metric creation throttled",
-					zap.String("name", metric),
-					zap.String("operation", "create"),
-					zap.Bool("dropped", true),
-				)
-				return
 			}
 
-			// pass
-		default:
 			atomic.AddUint32(&p.throttledCreates, 1)
 			p.logger.Error("metric creation throttled",
 				zap.String("name", metric),
 				zap.String("operation", "create"),
-				zap.Bool("dropped", false),
+				zap.Bool("dropped", t == throttlingHard),
 			)
+
 			return
 		}
 
@@ -283,6 +273,50 @@ func (p *Whisper) store(metric string) {
 
 	w.Close()
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
+}
+
+type throttleMode int
+
+const (
+	throttlingOff  throttleMode = iota
+	throttlingSoft throttleMode = iota
+	throttlingHard throttleMode = iota
+)
+
+// For test error messages
+func (t throttleMode) String() string {
+	if t == throttlingHard {
+		return "hard"
+	}
+
+	if t == throttlingSoft {
+		return "soft"
+	}
+
+	return "off"
+}
+
+func (p *Whisper) maxCreatesThrottling() throttleMode {
+	if p.hardMaxCreatesPerSecond {
+		keep, open := <-p.maxCreatesTicker.C
+		if !open {
+			return throttlingHard
+		}
+
+		if keep {
+			return throttlingOff
+		}
+
+		return throttlingHard
+	} else {
+		select {
+		case <-p.maxCreatesTicker.C:
+			return throttlingOff
+
+		default:
+			return throttlingSoft
+		}
+	}
 }
 
 func (p *Whisper) worker(exit chan bool) {
