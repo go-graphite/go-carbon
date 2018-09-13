@@ -218,6 +218,18 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
+	if response.metricsFetched == 0 {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		accessLogger.Error("fetch failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "no metrics found"),
+			zap.Int("http_code", http.StatusNotFound),
+			zap.Error(err),
+		)
+		http.Error(wr, "Bad request (Not Found)", http.StatusNotFound)
+		return
+	}
+
 	listener.UpdateMetricsAccessTimesByRequest(response.metrics)
 
 	wr.Write(response.data)
@@ -379,7 +391,7 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 			valuesFetched += len(multiv2.Metrics[i].Values)
 		}
 	} else {
-		if len(multiv3.Metrics) == 0 && format == protoV3Format{
+		if len(multiv3.Metrics) == 0 && format == protoV3Format {
 			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 		}
 
