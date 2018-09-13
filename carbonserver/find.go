@@ -142,15 +142,25 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		response, err = listener.findMetrics(logger, t0, formatCode, query)
 	}
 
-	if response == nil {
+	if err != nil || response == nil {
+		var code int
+		var reason string
+		if _, ok := err.(errorNotFound); ok {
+			reason = "Not Found"
+			code = http.StatusNotFound
+		} else {
+			reason = "Internal error while processing request"
+			code = http.StatusInternalServerError
+		}
+
 		accessLogger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "internal error while processing request"),
+			zap.String("reason", reason),
 			zap.Error(err),
-			zap.Int("http_code", http.StatusInternalServerError),
+			zap.Int("http_code", code),
 		)
-		http.Error(wr, fmt.Sprintf("Internal error while processing request (%v)", err),
-			http.StatusInternalServerError)
+		http.Error(wr, fmt.Sprintf("%s (%v)", reason, err), code)
+
 		return
 	}
 
@@ -172,7 +182,11 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	return
 }
 
-var findMetricsNoMetricsError = fmt.Errorf("no metrics available for this query")
+type errorNotFound struct{}
+
+func (err errorNotFound) Error() string {
+	return "Not Found"
+}
 
 type findError struct {
 	name string
@@ -274,12 +288,14 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 				zap.Error(err),
 			)
 			return nil, err
-		} else {
-			if len(multiResponse.Metrics) == 0 {
-				err = findMetricsNoMetricsError
-			}
 		}
+
+		if len(multiResponse.Metrics) == 0 {
+			return nil, errorNotFound{}
+		}
+
 		return &result, err
+
 	case protoV2Format:
 		result.contentType = httpHeaders.ContentTypeProtobuf
 		var err error
@@ -307,12 +323,14 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 				zap.Error(err),
 			)
 			return nil, err
-		} else {
-			if len(response.Matches) == 0 {
-				err = findMetricsNoMetricsError
-			}
 		}
+
+		if len(response.Matches) == 0 {
+			return nil, errorNotFound{}
+		}
+
 		return &result, err
+
 	case pickleFormat:
 		// [{'metric_path': 'metric', 'intervals': [(x,y)], 'isLeaf': True},]
 		var metrics []map[string]interface{}
