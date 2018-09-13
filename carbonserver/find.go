@@ -33,7 +33,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	atomic.AddUint64(&listener.metrics.FindRequests, 1)
 
-	req.ParseForm()
 	format := req.FormValue("format")
 	query := req.Form["query"]
 

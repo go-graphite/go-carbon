@@ -43,7 +43,6 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	atomic.AddUint64(&listener.metrics.ListRequests, 1)
 
-	req.ParseForm()
 	format := req.FormValue("format")
 
 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
