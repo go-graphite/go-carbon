@@ -25,8 +25,8 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 	atomic.AddUint64(&listener.metrics.InfoRequests, 1)
 
-	metrics := req.Form["target"]
 	format := req.FormValue("format")
+	metrics := req.Form["target"]
 
 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "info"),
