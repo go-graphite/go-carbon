@@ -265,6 +265,7 @@ enabled = false
 # TagDB url. It should support /tags/tagMultiSeries endpoint
 tagdb-url = "http://127.0.0.1:8000"
 tagdb-chunk-size = 32
+tagdb-update-interval = 100
 # Directory for send queue (based on leveldb)
 local-dir = "/var/lib/graphite/tagging/"
 # POST timeout

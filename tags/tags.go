@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -14,23 +15,27 @@ import (
 )
 
 type Options struct {
-	LocalPath      string
-	TagDB          string
-	TagDBTimeout   time.Duration
-	TagDBChunkSize int
+	LocalPath           string
+	TagDB               string
+	TagDBTimeout        time.Duration
+	TagDBChunkSize      int
+	TagDBUpdateInterval uint64
 }
 
 type Tags struct {
-	q      *Queue
-	qErr   error // queue initialization error
-	logger *zap.Logger
+	q             *Queue
+	qErr          error // queue initialization error
+	logger        *zap.Logger
+	options       *Options
+	updateCounter uint64
 }
 
 func New(options *Options) *Tags {
 	var send func([]string) error
 
 	t := &Tags{
-		logger: zapwriter.Logger("tags"),
+		logger:  zapwriter.Logger("tags"),
+		options: options,
 	}
 
 	u, urlErr := url.Parse(options.TagDB)
@@ -49,9 +54,11 @@ func New(options *Options) *Tags {
 
 			resp, err := client.PostForm(s, url.Values{"path": paths})
 			if err != nil {
+				t.logger.Error("failed to post tags", zap.Error(err))
 				return err
 			}
 			if resp.StatusCode != http.StatusOK {
+				t.logger.Error("failed to post tags", zap.Int("status-code", resp.StatusCode))
 				return fmt.Errorf("bad status code: %d", resp.StatusCode)
 			}
 
@@ -61,6 +68,9 @@ func New(options *Options) *Tags {
 	}
 
 	t.q, t.qErr = NewQueue(options.LocalPath, send, options.TagDBChunkSize)
+	if options.TagDBUpdateInterval < 1 {
+		options.TagDBUpdateInterval = 1
+	}
 
 	return t
 }
@@ -69,11 +79,13 @@ func (t *Tags) Stop() {
 	t.q.Stop()
 }
 
-func (t *Tags) Add(value string) {
-	if t.q != nil {
-		t.q.Add(value)
-	} else {
+func (t *Tags) Add(value string, now bool) {
+	if t.q == nil {
 		t.logger.Error("queue database not initialized", zap.Error(t.qErr))
+		return
+	}
+	if now || (atomic.AddUint64(&t.updateCounter, 1) % t.options.TagDBUpdateInterval == 0) {
+		t.q.Add(value)
 	}
 }
 

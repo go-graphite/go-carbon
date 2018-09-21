@@ -89,11 +89,12 @@ type receiverConfig struct {
 }
 
 type tagsConfig struct {
-	Enabled        bool      `toml:"enabled"`
-	TagDB          string    `toml:"tagdb-url"`
-	TagDBTimeout   *Duration `toml:"tagdb-timeout"`
-	TagDBChunkSize int       `toml:"tagdb-chunk-size"`
-	LocalDir       string    `toml:"local-dir"`
+	Enabled             bool      `toml:"enabled"`
+	TagDB               string    `toml:"tagdb-url"`
+	TagDBTimeout        *Duration `toml:"tagdb-timeout"`
+	TagDBChunkSize      int       `toml:"tagdb-chunk-size"`
+	TagDBUpdateInterval uint64    `toml:"tagdb-update-interval"`
+	LocalDir            string    `toml:"local-dir"`
 }
 
 type carbonserverConfig struct {
@@ -221,8 +222,9 @@ func NewConfig() *Config {
 			TagDBTimeout: &Duration{
 				Duration: time.Second,
 			},
-			TagDBChunkSize: 32,
-			LocalDir:       "/var/lib/graphite/tagging/",
+			TagDBChunkSize:      32,
+			TagDBUpdateInterval: 100,
+			LocalDir:            "/var/lib/graphite/tagging/",
 		},
 		Pprof: pprofConfig{
 			Listen:  "127.0.0.1:7007",
