@@ -27,8 +27,8 @@ type Whisper struct {
 	recv                    func(chan bool) string
 	pop                     func(string) (*points.Points, bool)
 	confirm                 func(*points.Points)
-	onCreateTagged          func(string)
 	tagsEnabled             bool
+	taggedFn                func(string, bool)
 	schemas                 WhisperSchemas
 	aggregation             *WhisperAggregation
 	workersCount            int
@@ -129,8 +129,8 @@ func (p *Whisper) SetTagsEnabled(v bool) {
 	p.tagsEnabled = v
 }
 
-func (p *Whisper) SetOnCreateTagged(fn func(string)) {
-	p.onCreateTagged = fn
+func (p *Whisper) SetTaggedFn(fn func(string, bool)) {
+	p.taggedFn = fn
 }
 
 func fnv32(key string) uint32 {
@@ -236,8 +236,8 @@ func (p *Whisper) store(metric string) {
 			return
 		}
 
-		if p.tagsEnabled && p.onCreateTagged != nil && strings.IndexByte(metric, ';') >= 0 {
-			p.onCreateTagged(metric)
+		if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
+			p.taggedFn(metric, true)
 		}
 
 		p.createLogger.Debug("created",
@@ -270,9 +270,12 @@ func (p *Whisper) store(metric string) {
 
 	// start = time.Now()
 	p.updateMany(w, path, points)
-
 	w.Close()
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
+
+	if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
+		p.taggedFn(metric, false)
+	}
 }
 
 type throttleMode int

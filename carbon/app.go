@@ -242,10 +242,11 @@ func (app *App) Stop() {
 func (app *App) startPersister() {
 	if app.Config.Tags.Enabled {
 		app.Tags = tags.New(&tags.Options{
-			LocalPath:      app.Config.Tags.LocalDir,
-			TagDB:          app.Config.Tags.TagDB,
-			TagDBTimeout:   app.Config.Tags.TagDBTimeout.Value(),
-			TagDBChunkSize: app.Config.Tags.TagDBChunkSize,
+			LocalPath:           app.Config.Tags.LocalDir,
+			TagDB:               app.Config.Tags.TagDB,
+			TagDBTimeout:        app.Config.Tags.TagDBTimeout.Value(),
+			TagDBChunkSize:      app.Config.Tags.TagDBChunkSize,
+			TagDBUpdateInterval: app.Config.Tags.TagDBUpdateInterval,
 		})
 	}
 
@@ -268,7 +269,7 @@ func (app *App) startPersister() {
 
 		if app.Tags != nil {
 			p.SetTagsEnabled(true)
-			p.SetOnCreateTagged(app.Tags.Add)
+			p.SetTaggedFn(app.Tags.Add)
 		}
 
 		p.Start()
