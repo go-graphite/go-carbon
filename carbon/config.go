@@ -127,6 +127,12 @@ type dumpConfig struct {
 	RestorePerSecond int    `toml:"restore-per-second"`
 }
 
+type prometheusConfig struct {
+	Enabled  bool              `toml:"enabled"`
+	Endpoint string            `toml:"endpoint"`
+	Labels   map[string]string `toml:"labels"`
+}
+
 // Config ...
 type Config struct {
 	Common       commonConfig                        `toml:"common"`
@@ -143,6 +149,7 @@ type Config struct {
 	Dump         dumpConfig                          `toml:"dump"`
 	Pprof        pprofConfig                         `toml:"pprof"`
 	Logging      []zapwriter.Config                  `toml:"logging"`
+	Prometheus   prometheusConfig                    `toml:"prometheus"`
 }
 
 func NewLoggingConfig() zapwriter.Config {
@@ -232,6 +239,11 @@ func NewConfig() *Config {
 		},
 		Dump: dumpConfig{
 			Path: "/var/lib/graphite/dump/",
+		},
+		Prometheus: prometheusConfig{
+			Enabled:  false,
+			Endpoint: "/metrics",
+			Labels:   make(map[string]string),
 		},
 		Logging: nil,
 	}
