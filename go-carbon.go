@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	daemon "github.com/sevlyar/go-daemon"
 	"go.uber.org/zap"
 
@@ -158,16 +159,22 @@ func main() {
 
 	// pprof
 	// httpStop := func() {}
-	if cfg.Pprof.Enabled {
+	if cfg.Pprof.Enabled || cfg.Prometheus.Enabled {
 		_, err = httpServe(cfg.Pprof.Listen)
 		if err != nil {
 			mainLogger.Fatal(err.Error())
 		}
+	}
 
+	if cfg.Pprof.Enabled {
 		expvar.NewString("GoVersion").Set(runtime.Version())
 		expvar.NewString("BuildVersion").Set(BuildVersion)
 		expvar.Publish("Config", expvar.Func(func() interface{} { return cfg }))
 		expvar.Publish("GoroutineCount", expvar.Func(func() interface{} { return runtime.NumGoroutine() }))
+	}
+
+	if cfg.Prometheus.Enabled {
+		http.Handle(cfg.Prometheus.Endpoint, promhttp.Handler())
 	}
 
 	if err = app.Start(); err != nil {
