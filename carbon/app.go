@@ -415,6 +415,10 @@ func (app *App) Start() (err error) {
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
+		if conf.Prometheus.Enabled {
+			carbonserver.InitPrometheus()
+		}
+
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
 			return
 		}

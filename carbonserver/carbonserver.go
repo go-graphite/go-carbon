@@ -25,15 +25,18 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	prom "github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
 	"github.com/NYTimes/gziphandler"
@@ -118,15 +121,22 @@ var statusCodes = map[string][]uint64{
 
 type responseWriterWithStatus struct {
 	http.ResponseWriter
-	statusCodeMajor int
+	statusCode int
+}
+
+func (rw responseWriterWithStatus) statusCodeMajor() int {
+	return rw.statusCode/100 - 1
 }
 
 func newResponseWriterWithStatus(w http.ResponseWriter) *responseWriterWithStatus {
-	return &responseWriterWithStatus{w, http.StatusOK/100 - 1}
+	return &responseWriterWithStatus{
+		w,
+		http.StatusOK,
+	}
 }
 
 func (w *responseWriterWithStatus) WriteHeader(code int) {
-	w.statusCodeMajor = (code / 100) - 1
+	w.statusCode = code
 	w.ResponseWriter.WriteHeader(code)
 }
 
@@ -145,7 +155,7 @@ func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
 	return logger
 }
 
-func TraceHandler(h http.HandlerFunc, globalStatusCodes []uint64, handlerStatusCodes []uint64) http.HandlerFunc {
+func TraceHandler(h http.HandlerFunc, globalStatusCodes []uint64, handlerStatusCodes []uint64, promRequest func(string, int)) http.HandlerFunc {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		ctx := req.Context()
 		for header := range TraceHeaders {
@@ -159,10 +169,13 @@ func TraceHandler(h http.HandlerFunc, globalStatusCodes []uint64, handlerStatusC
 
 		h.ServeHTTP(lrw, req.WithContext(ctx))
 
-		if lrw.statusCodeMajor < len(globalStatusCodes) {
-			atomic.AddUint64(&globalStatusCodes[lrw.statusCodeMajor], 1)
-			atomic.AddUint64(&handlerStatusCodes[lrw.statusCodeMajor], 1)
+		if lrw.statusCodeMajor() < len(globalStatusCodes) {
+			atomic.AddUint64(&globalStatusCodes[lrw.statusCodeMajor()], 1)
+			atomic.AddUint64(&handlerStatusCodes[lrw.statusCodeMajor()], 1)
 		}
+
+		endpoint := path.Clean(req.URL.Path)
+		promRequest(endpoint, lrw.statusCode)
 	})
 }
 
@@ -244,7 +257,52 @@ type CarbonserverListener struct {
 	exitChan      chan struct{}
 	timeBuckets   []uint64
 
+	prometheus prometheus
+
 	db *leveldb.DB
+}
+
+type prometheus struct {
+	enabled bool
+
+	requests *prom.CounterVec
+	request  func(string, int)
+
+	durations prom.Histogram
+	duration  func(time.Duration)
+}
+
+func (c *CarbonserverListener) InitPrometheus() {
+	c.prometheus = prometheus{
+		enabled: true,
+
+		requests: prom.NewCounterVec(
+			prom.CounterOpts{
+				Name: "http_requests_total",
+				Help: "How many HTTP requests processed, partitioned by status code and handler",
+			},
+			[]string{"code", "handler"},
+		),
+
+		durations: prom.NewHistogram(
+			prom.HistogramOpts{
+				Name:    "http_request_duration_seconds_exp",
+				Help:    "Duration of HTTP requests (exponential buckets)",
+				Buckets: prom.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 20),
+			},
+		),
+	}
+
+	c.prometheus.request = func(endpoint string, code int) {
+		c.prometheus.requests.WithLabelValues(strconv.Itoa(code), endpoint).Inc()
+	}
+
+	c.prometheus.duration = func(t time.Duration) {
+		c.prometheus.durations.Observe(t.Seconds())
+	}
+
+	prom.MustRegister(c.prometheus.requests)
+	prom.MustRegister(c.prometheus.durations)
 }
 
 type metricDetailsFlat struct {
@@ -279,6 +337,10 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		findCache:         queryCache{ec: expirecache.New(0)},
 		trigramIndex:      true,
 		percentiles:       []int{100, 99, 98, 95, 75, 50},
+		prometheus: prometheus{
+			request:  func(string, int) {},
+			duration: func(time.Duration) {},
+		},
 	}
 }
 
@@ -428,9 +490,9 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 				metricsKnown++
 				trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
 				details[trimmedName] = &protov3.MetricDetails{
-					Size_:   i.Size,
-					ModTime: i.MTime,
-					ATime:   i.ATime,
+					Size_:    i.Size,
+					ModTime:  i.MTime,
+					ATime:    i.ATime,
 					RealSize: i.RealSize,
 				}
 			}
@@ -844,6 +906,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 					h,
 					statusCodes["combined"],
 					handlerStatusCodes,
+					listener.prometheus.request,
 				),
 				listener.bucketRequestTimes,
 			),
@@ -944,6 +1007,7 @@ func (listener *CarbonserverListener) renderTimeBuckets() interface{} {
 }
 
 func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t time.Duration) {
+	listener.prometheus.duration(t)
 
 	ms := t.Nanoseconds() / int64(time.Millisecond)
 
