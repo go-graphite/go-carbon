@@ -231,10 +231,11 @@
   name = "github.com/prometheus/client_golang"
   packages = [
     "prometheus",
+    "prometheus/internal",
     "prometheus/promhttp"
   ]
-  revision = "c5b7fccd204277076155f10851dad72b76a49317"
-  version = "v0.8.0"
+  revision = "abad2d1bd44235a26707c172eab6bca5bf2dbad3"
+  version = "v0.9.1"
 
 [[projects]]
   branch = "master"
@@ -250,7 +251,7 @@
     "internal/bitbucket.org/ww/goautoneg",
     "model"
   ]
-  revision = "c7de2306084e37d54b8be01f3541a8464345e9a5"
+  revision = "41aa239b4cce3c56ab88fc366ae8b0a6423fa239"
 
 [[projects]]
   branch = "master"
@@ -493,6 +494,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "30038533e45db1b00434e404c37cd47c9c4afca30a9882dd22a878497434d287"
+  inputs-digest = "a482f948e0a87f2f0bad9e297c45b1e7085e35ae23a70c3f63e1db5ea7544d4f"
   solver-name = "gps-cdcl"
   solver-version = 1

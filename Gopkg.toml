@@ -116,3 +116,7 @@
 [[constraint]]
   branch = "master"
   name = "github.com/go-graphite/protocol"
+
+[[constraint]]
+  name = "github.com/prometheus/client_golang"
+  version = "0.9.1"
