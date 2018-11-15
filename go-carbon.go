@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	daemon "github.com/sevlyar/go-daemon"
 	"go.uber.org/zap"
@@ -174,7 +175,9 @@ func main() {
 	}
 
 	if cfg.Prometheus.Enabled {
-		http.Handle(cfg.Prometheus.Endpoint, promhttp.Handler())
+		app.PromRegisterer.MustRegister(prometheus.NewGoCollector())
+		app.PromRegisterer.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+		http.Handle(cfg.Prometheus.Endpoint, promhttp.HandlerFor(app.PromRegistry, promhttp.HandlerOpts{}))
 	}
 
 	if err = app.Start(); err != nil {

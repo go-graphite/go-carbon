@@ -272,7 +272,7 @@ type prometheus struct {
 	duration  func(time.Duration)
 }
 
-func (c *CarbonserverListener) InitPrometheus() {
+func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	c.prometheus = prometheus{
 		enabled: true,
 
@@ -301,8 +301,8 @@ func (c *CarbonserverListener) InitPrometheus() {
 		c.prometheus.durations.Observe(t.Seconds())
 	}
 
-	prom.MustRegister(c.prometheus.requests)
-	prom.MustRegister(c.prometheus.durations)
+	reg.MustRegister(c.prometheus.requests)
+	reg.MustRegister(c.prometheus.durations)
 }
 
 type metricDetailsFlat struct {
