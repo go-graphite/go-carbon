@@ -270,6 +270,16 @@ type prometheus struct {
 
 	durations prom.Histogram
 	duration  func(time.Duration)
+
+	diskRequests      prom.Counter
+	diskRequest       func()
+	diskWaitDurations prom.Histogram
+	diskWaitDuration  func(time.Duration)
+
+	returnedMetrics prom.Counter
+	returnedMetric  func()
+	returnedPoints  prom.Counter
+	returnedPoint   func(int)
 }
 
 func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
@@ -291,6 +301,27 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 				Buckets: prom.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 20),
 			},
 		),
+
+		diskRequests: prom.NewCounter(prom.CounterOpts{
+			Name: "disk_requests_total",
+			Help: "Number of times disk has been hit",
+		}),
+		diskWaitDurations: prom.NewHistogram(
+			prom.HistogramOpts{
+				Name:    "disk_wait_seconds_exp",
+				Help:    "Duration of disk wait times (exponential buckets)",
+				Buckets: prom.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 20),
+			},
+		),
+
+		returnedMetrics: prom.NewCounter(prom.CounterOpts{
+			Name: "returned_metrics_total",
+			Help: "Number of metrics returned",
+		}),
+		returnedPoints: prom.NewCounter(prom.CounterOpts{
+			Name: "returned_points_total",
+			Help: "Number of points returned",
+		}),
 	}
 
 	c.prometheus.request = func(endpoint string, code int) {
@@ -301,8 +332,28 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 		c.prometheus.durations.Observe(t.Seconds())
 	}
 
+	c.prometheus.diskRequest = func() {
+		c.prometheus.diskRequests.Inc()
+	}
+
+	c.prometheus.diskWaitDuration = func(t time.Duration) {
+		c.prometheus.diskWaitDurations.Observe(t.Seconds())
+	}
+
+	c.prometheus.returnedMetric = func() {
+		c.prometheus.returnedMetrics.Inc()
+	}
+
+	c.prometheus.returnedPoint = func(i int) {
+		c.prometheus.returnedPoints.Add(float64(i))
+	}
+
 	reg.MustRegister(c.prometheus.requests)
 	reg.MustRegister(c.prometheus.durations)
+	reg.MustRegister(c.prometheus.diskRequests)
+	reg.MustRegister(c.prometheus.diskWaitDurations)
+	reg.MustRegister(c.prometheus.returnedMetrics)
+	reg.MustRegister(c.prometheus.returnedPoints)
 }
 
 type metricDetailsFlat struct {
@@ -338,8 +389,12 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		trigramIndex:      true,
 		percentiles:       []int{100, 99, 98, 95, 75, 50},
 		prometheus: prometheus{
-			request:  func(string, int) {},
-			duration: func(time.Duration) {},
+			request:          func(string, int) {},
+			duration:         func(time.Duration) {},
+			diskRequest:      func() {},
+			diskWaitDuration: func(time.Duration) {},
+			returnedMetric:   func() {},
+			returnedPoint:    func(int) {},
 		},
 	}
 }

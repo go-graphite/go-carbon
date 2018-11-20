@@ -90,6 +90,8 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 	logger.Debug("fetching disk metric")
 	atomic.AddUint64(&listener.metrics.DiskRequests, 1)
+	listener.prometheus.diskRequest()
+
 	res.DiskStartTime = time.Now()
 	points, err := w.Fetch(int(fromTime), int(untilTime))
 	w.Close()
@@ -105,16 +107,22 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 		logger.Warn("metric time range not found")
 		return nil, errors.New("time range not found")
 	}
+
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
+	listener.prometheus.returnedMetric()
 	values := points.Values()
 
 	fromTime = int32(points.FromTime())
 	untilTime = int32(points.UntilTime())
 	step = int32(points.Step())
 
-	waitTime := uint64(time.Since(res.DiskStartTime).Nanoseconds())
-	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, waitTime)
+	waitTime := time.Since(res.DiskStartTime)
+	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, uint64(waitTime.Nanoseconds()))
+	listener.prometheus.diskWaitDuration(waitTime)
+
 	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
+	listener.prometheus.returnedPoint(len(values))
+
 	res.Timeseries = points
 
 	return res, nil
