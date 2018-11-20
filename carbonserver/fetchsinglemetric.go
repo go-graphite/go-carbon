@@ -105,15 +105,11 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		logger.Warn("metric time range not found")
 		return response{}, errors.New("time range not found")
 	}
-	values := m.Timeseries.Values()
 
+	values := m.Timeseries.Values()
 	from := int64(m.Timeseries.FromTime())
 	until := int64(m.Timeseries.UntilTime())
 	step := int64(m.Timeseries.Step())
-
-	waitTime := uint64(time.Since(m.DiskStartTime).Nanoseconds())
-	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, waitTime)
-	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
 
 	resp := response{
 		Name:              metric,
