@@ -105,7 +105,6 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		logger.Warn("metric time range not found")
 		return response{}, errors.New("time range not found")
 	}
-	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 	values := m.Timeseries.Values()
 
 	from := int64(m.Timeseries.FromTime())
