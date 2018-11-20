@@ -107,16 +107,12 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 	listener.prometheus.returnedMetric()
-	values := points.Values()
-
-	fromTime = int32(points.FromTime())
-	untilTime = int32(points.UntilTime())
-	step = int32(points.Step())
 
 	waitTime := time.Since(res.DiskStartTime)
 	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, uint64(waitTime.Nanoseconds()))
 	listener.prometheus.diskWaitDuration(waitTime)
 
+	values := points.Values()
 	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
 	listener.prometheus.returnedPoint(len(values))
 
