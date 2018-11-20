@@ -61,7 +61,6 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	if step == 0 {
 		maxRetention := int32(retentions[len(retentions)-1].MaxRetention())
 		if now-maxRetention > untilTime {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			logger.Warn("can't find proper archive for the request")
 			return nil, errors.New("Can't find proper archive")
 		}
@@ -96,14 +95,12 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	points, err := w.Fetch(int(fromTime), int(untilTime))
 	w.Close()
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("failed to fetch points", zap.Error(err))
 		return nil, errors.New("failed to fetch points")
 	}
 
 	// Should never happen, because we have a check for proper archive now
 	if points == nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("metric time range not found")
 		return nil, errors.New("time range not found")
 	}
