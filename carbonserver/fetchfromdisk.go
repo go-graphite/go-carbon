@@ -83,8 +83,9 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 		// query cache
 		cacheStartTime := time.Now()
 		res.CacheData = listener.cacheGet(metric)
-		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
-		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, waitTime)
+		waitTime := time.Since(cacheStartTime)
+		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, uint64(waitTime.Nanoseconds()))
+		listener.prometheus.cacheDuration("wait", waitTime)
 	}
 
 	logger.Debug("fetching disk metric")
