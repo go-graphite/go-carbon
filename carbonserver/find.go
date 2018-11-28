@@ -123,6 +123,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		size := uint64(100 * 1024 * 1024)
 		item := listener.findCache.getQueryItem(key, size, 300)
 		res, ok := item.FetchOrLock()
+		listener.prometheus.cacheRequest("find", ok)
 		if !ok {
 			logger.Debug("find cache miss")
 			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)

@@ -290,9 +290,11 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 		// cache misses to those kinds of queries.
 		item := listener.queryCache.getQueryItem(key, size, 60)
 		res, ok := item.FetchOrLock()
+		listener.prometheus.cacheRequest("query", ok)
 		if !ok {
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
+
 			response, err = listener.prepareDataProto(format, targets)
 			if err != nil {
 				item.StoreAbort()
@@ -302,6 +304,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 		} else {
 			logger.Debug("query cache hit")
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
+
 			response = res.(fetchResponse)
 			fromCache = true
 		}

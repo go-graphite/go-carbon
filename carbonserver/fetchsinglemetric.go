@@ -44,6 +44,8 @@ func (r response) enrichFromCache(listener *CarbonserverListener, m *metricFromD
 	}
 	waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
 	atomic.AddUint64(&listener.metrics.CacheWorkTimeNS, waitTime)
+
+	listener.prometheus.cacheRequest("metric", pointsFetchedFromCache > 0)
 	if pointsFetchedFromCache > 0 {
 		atomic.AddUint64(&listener.metrics.CacheHit, 1)
 	} else {

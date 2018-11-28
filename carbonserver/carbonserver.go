@@ -268,6 +268,9 @@ type prometheus struct {
 	requests *prom.CounterVec
 	request  func(string, int)
 
+	cacheRequests *prom.CounterVec
+	cacheRequest  func(string, bool)
+
 	durations prom.Histogram
 	duration  func(time.Duration)
 
@@ -292,6 +295,14 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 				Help: "How many HTTP requests processed, partitioned by status code and handler",
 			},
 			[]string{"code", "handler"},
+		),
+
+		cacheRequests: prom.NewCounterVec(
+			prom.CounterOpts{
+				Name: "cache_requests_total",
+				Help: "Cache counts, partitioned by type and hit/miss",
+			},
+			[]string{"type", "hit"},
 		),
 
 		durations: prom.NewHistogram(
@@ -328,6 +339,10 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 		c.prometheus.requests.WithLabelValues(strconv.Itoa(code), endpoint).Inc()
 	}
 
+	c.prometheus.cacheRequest = func(kind string, hit bool) {
+		c.prometheus.cacheRequests.WithLabelValues(kind, strconv.FormatBool(hit))
+	}
+
 	c.prometheus.duration = func(t time.Duration) {
 		c.prometheus.durations.Observe(t.Seconds())
 	}
@@ -349,6 +364,7 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	}
 
 	reg.MustRegister(c.prometheus.requests)
+	reg.MustRegister(c.prometheus.cacheRequests)
 	reg.MustRegister(c.prometheus.durations)
 	reg.MustRegister(c.prometheus.diskRequests)
 	reg.MustRegister(c.prometheus.diskWaitDurations)
@@ -391,6 +407,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		prometheus: prometheus{
 			request:          func(string, int) {},
 			duration:         func(time.Duration) {},
+			cacheRequest:     func(string, bool) {},
 			diskRequest:      func() {},
 			diskWaitDuration: func(time.Duration) {},
 			returnedMetric:   func() {},
