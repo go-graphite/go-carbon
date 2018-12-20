@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	whisper "github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
@@ -180,6 +181,9 @@ func (p *Whisper) store(metric string) {
 		// create new whisper if file not exists
 		if !os.IsNotExist(err) {
 			p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(err))
+			if err.(*os.PathError).Err == syscall.ENAMETOOLONG {
+				p.pop(metric)
+			}
 			return
 		}
 
