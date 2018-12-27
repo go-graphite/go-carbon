@@ -241,6 +241,7 @@ type CarbonserverListener struct {
 	accessLogger      *zap.Logger
 	internalStatsDir  string
 	flock             bool
+	compressed        bool
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -459,6 +460,9 @@ func (listener *CarbonserverListener) SetIdleTimeout(idleTimeout time.Duration) 
 }
 func (listener *CarbonserverListener) SetWriteTimeout(writeTimeout time.Duration) {
 	listener.writeTimeout = writeTimeout
+}
+func (listener *CarbonserverListener) SetCompressed(compressed bool) {
+	listener.compressed = compressed
 }
 func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters bool) {
 	listener.metricsAsCounters = metricsAsCounters

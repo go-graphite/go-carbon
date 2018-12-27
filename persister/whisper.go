@@ -40,6 +40,7 @@ type Whisper struct {
 	committedPoints         uint32 // counter
 	sparse                  bool
 	flock                   bool
+	compressed              bool
 	hashFilenames           bool
 	maxUpdatesPerSecond     int
 	maxCreatesPerSecond     int
@@ -118,6 +119,10 @@ func (p *Whisper) SetFLock(flock bool) {
 	p.flock = flock
 }
 
+func (p *Whisper) SetCompressed(compressed bool) {
+	p.compressed = compressed
+}
+
 func (p *Whisper) SetHashFilenames(v bool) {
 	p.hashFilenames = v
 }
@@ -175,7 +180,8 @@ func (p *Whisper) store(metric string) {
 	}
 
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
-		FLock: p.flock,
+		FLock:      p.flock,
+		Compressed: p.compressed,
 	})
 	if err != nil {
 		// create new whisper if file not exists
