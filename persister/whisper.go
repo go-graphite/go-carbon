@@ -160,7 +160,12 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	}()
 
 	// start = time.Now()
-	w.UpdateMany(points)
+	if err := w.UpdateMany(points); err != nil {
+		p.logger.Error("fail to update metric",
+			zap.String("path", path),
+			zap.Error(err),
+		)
+	}
 }
 
 func (p *Whisper) store(metric string) {
