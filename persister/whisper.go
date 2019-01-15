@@ -235,8 +235,9 @@ func (p *Whisper) store(metric string) {
 		}
 
 		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
-			Sparse: p.sparse,
-			FLock:  p.flock,
+			Sparse:     p.sparse,
+			FLock:      p.flock,
+			Compressed: p.compressed,
 		})
 		if err != nil {
 			p.logger.Error("create new whisper file failed",
