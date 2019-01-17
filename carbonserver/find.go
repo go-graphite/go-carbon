@@ -344,8 +344,8 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 				metricsCount++
 			}
 			m = make(map[string]interface{})
-			m["path"] = p
-			m["is_leaf"] = glob.Leafs[i]
+			m["metric_path"] = p
+			m["isLeaf"] = glob.Leafs[i]
 
 			metrics = append(metrics, m)
 		}
