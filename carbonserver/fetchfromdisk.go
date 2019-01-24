@@ -61,7 +61,6 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	if step == 0 {
 		maxRetention := int32(retentions[len(retentions)-1].MaxRetention())
 		if now-maxRetention > untilTime {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			logger.Warn("can't find proper archive for the request")
 			return nil, errors.New("Can't find proper archive")
 		}
@@ -84,37 +83,40 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 		// query cache
 		cacheStartTime := time.Now()
 		res.CacheData = listener.cacheGet(metric)
-		waitTime := uint64(time.Since(cacheStartTime).Nanoseconds())
-		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, waitTime)
+		waitTime := time.Since(cacheStartTime)
+		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, uint64(waitTime.Nanoseconds()))
+		listener.prometheus.cacheDuration("wait", waitTime)
 	}
 
 	logger.Debug("fetching disk metric")
 	atomic.AddUint64(&listener.metrics.DiskRequests, 1)
+	listener.prometheus.diskRequest()
+
 	res.DiskStartTime = time.Now()
 	points, err := w.Fetch(int(fromTime), int(untilTime))
 	w.Close()
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("failed to fetch points", zap.Error(err))
 		return nil, errors.New("failed to fetch points")
 	}
 
 	// Should never happen, because we have a check for proper archive now
 	if points == nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("metric time range not found")
 		return nil, errors.New("time range not found")
 	}
+
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
+	listener.prometheus.returnedMetric()
+
+	waitTime := time.Since(res.DiskStartTime)
+	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, uint64(waitTime.Nanoseconds()))
+	listener.prometheus.diskWaitDuration(waitTime)
+
 	values := points.Values()
-
-	fromTime = int32(points.FromTime())
-	untilTime = int32(points.UntilTime())
-	step = int32(points.Step())
-
-	waitTime := uint64(time.Since(res.DiskStartTime).Nanoseconds())
-	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, waitTime)
 	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(values)))
+	listener.prometheus.returnedPoint(len(values))
+
 	res.Timeseries = points
 
 	return res, nil

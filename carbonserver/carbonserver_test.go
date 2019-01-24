@@ -256,17 +256,15 @@ func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 	}
 	defer os.RemoveAll(path)
 
-	carbonserver := CarbonserverListener{
-		whisperData: path,
-		cacheGet:    cache.Get,
-		logger:      zap.NewNop(),
-		metrics:     &metricStruct{},
-	}
+	carbonserver := NewCarbonserverListener(cache.Get)
+	carbonserver.whisperData = path
+	carbonserver.logger = zap.NewNop()
+	carbonserver.metrics = &metricStruct{}
 	precision := 0.000001
 
 	test.path = path
 	fmt.Println("Performing test ", test.name)
-	data, err := testFetchSingleMetricHelper(test, cache, &carbonserver)
+	data, err := testFetchSingleMetricHelper(test, cache, carbonserver)
 	if !test.errIsNil {
 		filePath := filepath.Join(test.path, test.name+".wsp")
 		realExpectedErr := strings.Replace(test.expectedErr, "%f", filePath, -1)

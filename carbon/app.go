@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
 	"github.com/lomik/go-carbon/api"
@@ -44,6 +45,8 @@ type App struct {
 	Carbonserver   *carbonserver.CarbonserverListener
 	Tags           *tags.Tags
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
+	PromRegisterer prometheus.Registerer
+	PromRegistry   *prometheus.Registry
 	exit           chan bool
 }
 
@@ -52,8 +55,10 @@ func New(configFilename string) *App {
 	app := &App{
 		ConfigFilename: configFilename,
 		Config:         NewConfig(),
+		PromRegistry:   prometheus.NewPedanticRegistry(),
 		exit:           make(chan bool),
 	}
+
 	return app
 }
 
@@ -121,7 +126,16 @@ func (app *App) ParseConfig() error {
 	app.Lock()
 	defer app.Unlock()
 
-	return app.configure()
+	err := app.configure()
+
+	if app.PromRegisterer == nil {
+		app.PromRegisterer = prometheus.WrapRegistererWith(
+			prometheus.Labels(app.Config.Prometheus.Labels),
+			app.PromRegistry,
+		)
+	}
+
+	return err
 }
 
 // ReloadConfig reloads some settings from config
@@ -414,6 +428,10 @@ func (app *App) Start() (err error) {
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+
+		if conf.Prometheus.Enabled {
+			carbonserver.InitPrometheus(app.PromRegisterer)
+		}
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
 			return
