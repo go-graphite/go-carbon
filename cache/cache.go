@@ -155,7 +155,7 @@ func fnv32(key string) uint32 {
 	return hash
 }
 
-// Returns shard under given key
+// GetShard returns shard under given key
 func (c *Cache) GetShard(key string) *Shard {
 	// @TODO: remove type casts?
 	return c.data[uint(fnv32(key))%uint(shardCount)]
@@ -269,7 +269,7 @@ func (c *Cache) Add(p *points.Points) {
 	atomic.AddInt32(&c.stat.size, int32(count))
 }
 
-// Removes an element from the map and returns it
+// Pop removes an element from the map and returns it
 func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
 	shard := c.GetShard(key)
