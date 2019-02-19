@@ -251,7 +251,7 @@ func NewConfig() *Config {
 	return cfg
 }
 
-// PrintConfig ...
+// PrintDefaultConfig ...
 func PrintDefaultConfig() error {
 	cfg := NewConfig()
 	buf := new(bytes.Buffer)
