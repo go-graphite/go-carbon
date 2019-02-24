@@ -123,8 +123,6 @@ write-strategy = "max"
 [udp]
 listen = ":2003"
 enabled = true
-# Enable optional logging of incomplete messages (chunked by max UDP packet size)
-log-incomplete = false
 # Optional internal queue between receiver and cache
 buffer-size = 0
 
