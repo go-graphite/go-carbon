@@ -123,8 +123,6 @@ write-strategy = "max"
 [udp]
 listen = ":2003"
 enabled = true
-# Enable optional logging of incomplete messages (chunked by max UDP packet size)
-log-incomplete = false
 # Optional internal queue between receiver and cache
 buffer-size = 0
 
@@ -418,6 +416,8 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+* No longer trying to combine separate UDP messages from one sender into single stream
+* Accept UDP messages in plain protocol without trailing newline
 
 ##### version 0.13.0
 * Added `whisper.max-creates-per-second` option
