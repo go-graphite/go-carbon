@@ -2,8 +2,6 @@ package udp
 
 import (
 	"bytes"
-	"fmt"
-	"io"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -28,32 +26,29 @@ func init() {
 }
 
 type Options struct {
-	Listen        string `toml:"listen"`
-	Enabled       bool   `toml:"enabled"`
-	LogIncomplete bool   `toml:"log-incomplete"`
-	BufferSize    int    `toml:"buffer-size"`
+	Listen     string `toml:"listen"`
+	Enabled    bool   `toml:"enabled"`
+	BufferSize int    `toml:"buffer-size"`
 }
 
 // UDP receive metrics from UDP socket
 type UDP struct {
 	helper.Stoppable
-	out                func(*points.Points)
-	name               string
-	metricsReceived    uint32
-	incompleteReceived uint32
-	errors             uint32
-	logIncomplete      bool
-	conn               *net.UDPConn
-	buffer             chan *points.Points
-	logger             *zap.Logger
+	out             func(*points.Points)
+	name            string
+	metricsReceived uint32
+	errors          uint32
+	logIncomplete   bool
+	conn            *net.UDPConn
+	buffer          chan *points.Points
+	logger          *zap.Logger
 }
 
 func NewOptions() *Options {
 	return &Options{
-		Listen:        ":2003",
-		Enabled:       true,
-		LogIncomplete: false,
-		BufferSize:    0,
+		Listen:     ":2003",
+		Enabled:    true,
+		BufferSize: 0,
 	}
 }
 
@@ -76,10 +71,9 @@ func newUDP(name string, options *Options, store func(*points.Points)) (*UDP, er
 	}
 
 	r := &UDP{
-		out:           store,
-		name:          name,
-		logIncomplete: options.LogIncomplete,
-		logger:        zapwriter.Logger(name),
+		out:    store,
+		name:   name,
+		logger: zapwriter.Logger(name),
 	}
 
 	if options.BufferSize > 0 {
@@ -94,34 +88,10 @@ func newUDP(name string, options *Options, store func(*points.Points)) (*UDP, er
 	return r, err
 }
 
-func logIncomplete(logger *zap.Logger, peer *net.UDPAddr, message []byte, lastLine []byte) {
-	p1 := bytes.IndexByte(message, 0xa) // find first "\n"
-
-	var m string
-	if p1 != -1 && p1+len(lastLine) < len(message)-10 { // print short version
-		m = fmt.Sprintf("%s\\n...(%d bytes)...\\n%s",
-			string(message[:p1]),
-			len(message)-p1-len(lastLine)-2,
-			string(lastLine),
-		)
-	} else { // print full
-		m = string(message)
-	}
-
-	logger.Warn("incomplete message",
-		zap.String("peer", peer.String()),
-		zap.String("message", m),
-	)
-}
-
 func (rcv *UDP) Stat(send helper.StatCallback) {
 	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
 	send("metricsReceived", float64(metricsReceived))
-
-	incompleteReceived := atomic.LoadUint32(&rcv.incompleteReceived)
-	atomic.AddUint32(&rcv.incompleteReceived, -incompleteReceived)
-	send("incompleteReceived", float64(incompleteReceived))
 
 	errors := atomic.LoadUint32(&rcv.errors)
 	atomic.AddUint32(&rcv.errors, -errors)
@@ -140,8 +110,6 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 
 	var data *bytes.Buffer
 
-	lines := newIncompleteStorage()
-
 	for {
 		rlen, peer, err := rcv.conn.ReadFromUDP(buf[:])
 		if err != nil {
@@ -153,36 +121,12 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 			continue
 		}
 
-		prev := lines.pop(peer.String())
-
-		if prev != nil {
-			data = bytes.NewBuffer(prev)
-			data.Write(buf[:rlen])
-		} else {
-			data = bytes.NewBuffer(buf[:rlen])
-		}
+		data = bytes.NewBuffer(buf[:rlen])
 
 		for {
 			line, err := data.ReadBytes('\n')
 
-			if err != nil {
-				if err == io.EOF {
-					if len(line) > 0 { // incomplete line received
-
-						if rcv.logIncomplete {
-							logIncomplete(rcv.logger, peer, buf[:rlen], line)
-						}
-
-						lines.store(peer.String(), line)
-						atomic.AddUint32(&rcv.incompleteReceived, 1)
-					}
-				} else {
-					atomic.AddUint32(&rcv.errors, 1)
-					rcv.logger.Error("read error", zap.Error(err))
-				}
-				break
-			}
-			if len(line) > 0 { // skip empty lines
+			if len(line) > 0 {
 				name, value, timestamp, err := parse.PlainLine(line)
 				if err != nil {
 					atomic.AddUint32(&rcv.errors, 1)
@@ -194,6 +138,10 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 					atomic.AddUint32(&rcv.metricsReceived, 1)
 					rcv.out(points.OnePoint(string(name), value, timestamp))
 				}
+			}
+
+			if err != nil {
+				break
 			}
 		}
 	}
