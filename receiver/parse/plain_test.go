@@ -23,6 +23,7 @@ func TestPlainLine(t *testing.T) {
 		{"metric..name 42.15 1422642189\n", "metric..name", 42.15, 1422642189},
 		{"metric...name 42.15 1422642189\n", "metric...name", 42.15, 1422642189},
 		{"metric.name 42.15 1422642189\r\n", "metric.name", 42.15, 1422642189},
+		{"aerospike-test1.host.test-as04.context.histogram.objsz.bucket_15 0 1553244874 \n", "aerospike-test1.host.test-as04.context.histogram.objsz.bucket_15", 0, 1553244874},
 	}
 
 	for _, p := range table {

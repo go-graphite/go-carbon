@@ -18,6 +18,8 @@ func unsafeString(b []byte) string {
 }
 
 func PlainLine(p []byte) ([]byte, float64, int64, error) {
+	p = bytes.Trim(p, " \n\r")
+
 	i1 := bytes.IndexByte(p, ' ')
 	if i1 < 1 {
 		return nil, 0, 0, fmt.Errorf("bad message: %#v", string(p))
@@ -30,12 +32,6 @@ func PlainLine(p []byte) ([]byte, float64, int64, error) {
 	i2 += i1 + 1
 
 	i3 := len(p)
-	if p[i3-1] == '\n' {
-		i3--
-	}
-	if p[i3-1] == '\r' {
-		i3--
-	}
 
 	value, err := strconv.ParseFloat(unsafeString(p[i1+1:i2]), 64)
 	if err != nil || math.IsNaN(value) {
