@@ -3,3 +3,4 @@ tmp/
 _vendor/pkg
 .vscode
 _gopath
+.DS_Store
