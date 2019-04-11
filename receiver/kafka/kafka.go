@@ -448,6 +448,7 @@ func (rcv *Kafka) worker() {
 		select {
 		case <-rcv.closed:
 			saveTimer.Stop()
+			fetchTimer.Stop()
 			rcv.saveState()
 			err := rcv.consumer.Close()
 			if err != nil {

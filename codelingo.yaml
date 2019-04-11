@@ -1,3 +1,5 @@
 tenets:
   - import: codelingo/code-review-comments
   - import: codelingo/effective-go
+  - import: codelingo/lomik-go-carbon
+
