@@ -38,6 +38,7 @@ type Whisper struct {
 	throttledCreates        uint32 // counter
 	updateOperations        uint32 // counter
 	committedPoints         uint32 // counter
+	extended                uint32 // counter
 	sparse                  bool
 	flock                   bool
 	compressed              bool
@@ -166,6 +167,10 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 			zap.Error(err),
 		)
 	}
+	if w.Extended {
+		atomic.AddUint32(&p.extended, 1)
+		p.logger.Info("cwhisper file has extended", zap.String("path", path))
+	}
 }
 
 func (p *Whisper) store(metric string) {
@@ -286,6 +291,7 @@ func (p *Whisper) store(metric string) {
 
 	// start = time.Now()
 	p.updateMany(w, path, points)
+
 	w.Close()
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 
@@ -380,6 +386,9 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
 
+	extended := atomic.LoadUint32(&p.extended)
+	atomic.AddUint32(&p.extended, -extended)
+
 	throttledCreates := atomic.LoadUint32(&p.throttledCreates)
 	atomic.AddUint32(&p.throttledCreates, -throttledCreates)
 
@@ -397,6 +406,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
+	send("extended", float64(extended))
 
 	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
 	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
@@ -408,7 +418,6 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 // Start worker
 func (p *Whisper) Start() error {
 	return p.StartFunc(func() error {
-
 		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
 		if p.hardMaxCreatesPerSecond {
 			p.maxCreatesTicker = NewHardThrottleTicker(p.maxCreatesPerSecond)
