@@ -370,17 +370,17 @@ params on Linux systems:
 ```bash
 # percentage of your RAM which can be left unwritten to disk. MUST be much more than
 # your write rate, which is usually one FS block size (4KB) per metric.
-sysctl -w vm.dirty_ratio = 80
+sysctl -w vm.dirty_ratio=80
 
 # percentage of yout RAM when background writer have to kick in and
 # start writes to disk. Make it way above the value you see in `/proc/meminfo|grep Dirty`
 # so that it doesn't interefere with dirty_expire_centisecs explained below
-sysctl -w vm.dirty_background_ratio = 50
+sysctl -w vm.dirty_background_ratio=50
 
 # allow page to be left dirty no longer than 10 mins
 # if unwritten page stays longer than time set here,
 # kernel starts writing it out
-sysctl -w vm.dirty_expire_centisecs = $(( 10*60*100 ))
+sysctl -w vm.dirty_expire_centisecs=$(( 10*60*100 ))
 ```
 
 Net effect of these 3 params is that with `dirty_*_ratio` params set high
