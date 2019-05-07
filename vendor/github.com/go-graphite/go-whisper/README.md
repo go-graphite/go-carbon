@@ -2,7 +2,7 @@
 
 [![Build Status](https://travis-ci.org/robyoung/go-whisper.png?branch=master)](https://travis-ci.org/robyoung/go-whisper?branch=master)
 
-Go Whisper is a [Go](http://golang.org/) implementation of the [Whisper](https://github.com/graphite-project/whisper) database, which is part of the [Graphite Project](http://graphite.wikidot.com/). 
+Go Whisper is a [Go](http://golang.org/) implementation of the [Whisper](https://github.com/graphite-project/whisper) database, which is part of the [Graphite Project](http://graphite.wikidot.com/).
 
 To create a new whisper database you must define it's retention levels (see: [storage schemas](http://graphite.readthedocs.org/en/1.0/config-carbon.html#storage-schemas-conf)), aggregation method and the xFilesFactor. The xFilesFactor specifies the fraction of data points in a propagation interval that must have known values for a propagation to occur.
 
@@ -40,6 +40,57 @@ for _, point := range series.Points() {
 ## Thread Safety
 
 This implementation is *not* thread safe. Writing to a database concurrently will cause bad things to happen. It is up to the user to manage this in their application as they need to.
+
+## Compressed Format
+
+An compression example:
+
+1s:2d
+1m:28d
+1h:2y
+
+metric_header (63)
+archive_0_header (96)
+archive_1_header (96)
+archive_2_header (96)
+[
+	archive_0_block_0_info (16)
+	archive_0_block_1_info (16)
+	...
+	archive_0_block_23_info (16)
+
+	archive_0_buffer (120)
+]
+[
+	archive_1_block_0_info (16)
+	archive_1_block_1_info (16)
+	...
+	archive_1_block_5_info (16)
+
+	archive_1_buffer (120)
+]
+[
+	archive_2_block_0_info (16)
+	archive_2_block_1_info (16)
+	archive_2_block_3_info (16)
+]
+[
+	archive_0_block_0 (14400)
+	archive_0_block_1 (14400)
+	...
+	archive_0_block_3 (14400)
+]
+[
+	archive_1_block_0 (14400)
+	archive_1_block_1 (14400)
+	...
+	archive_1_block_5 (14400)
+]
+[
+	archive_2_block_0 (14400)
+	archive_2_block_1 (14400)
+	archive_2_block_3 (14400)
+]
 
 ## Licence
 
