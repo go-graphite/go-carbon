@@ -416,8 +416,13 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
-* No longer trying to combine separate UDP messages from one sender into single stream
+
+##### version 0.14.0
 * Accept UDP messages in plain protocol without trailing newline
+* Added `whisper.hard-max-creates-per-second` option #242
+* No longer trying to combine separate UDP messages from one sender into single stream
+* [carbonserver] Added metrics for prometheus
+* [carbonserver] Improved compatibility with graphite-web (#250, #251)
 
 ##### version 0.13.0
 * Added `whisper.max-creates-per-second` option
