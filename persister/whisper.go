@@ -239,10 +239,14 @@ func (p *Whisper) store(metric string) {
 			return
 		}
 
+		compressed := p.compressed
+		if schema.Compressed != nil {
+			compressed = *schema.Compressed
+		}
 		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
 			Sparse:     p.sparse,
 			FLock:      p.flock,
-			Compressed: p.compressed,
+			Compressed: compressed,
 		})
 		if err != nil {
 			p.logger.Error("create new whisper file failed",
@@ -253,6 +257,7 @@ func (p *Whisper) store(metric string) {
 				zap.String("aggregation", aggr.name),
 				zap.Float64("xFilesFactor", aggr.xFilesFactor),
 				zap.String("method", aggr.aggregationMethodStr),
+				zap.Bool("compressed", compressed),
 			)
 			return
 		}
@@ -268,6 +273,7 @@ func (p *Whisper) store(metric string) {
 			zap.String("aggregation", aggr.name),
 			zap.Float64("xFilesFactor", aggr.xFilesFactor),
 			zap.String("method", aggr.aggregationMethodStr),
+			zap.Bool("compressed", compressed),
 		)
 
 		atomic.AddUint32(&p.created, 1)
