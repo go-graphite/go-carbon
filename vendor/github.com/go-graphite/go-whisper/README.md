@@ -43,54 +43,42 @@ This implementation is *not* thread safe. Writing to a database concurrently wil
 
 ## Compressed Format
 
-An compression example:
+go-whisper library supports a compressed format, which maintains the same functionality of standard whisper file, while keeping data in a much smaller size. This compressed format is called `cwhisper`.
 
-1s:2d
-1m:28d
-1h:2y
+Compression algorithm source: [4.1 Time series compression in Gorilla: A Fast, Scalable, In-Memory Time Series Database](https://www.vldb.org/pvldb/vol8/p1816-teller.pdf).
 
-metric_header (63)
-archive_0_header (96)
-archive_1_header (96)
-archive_2_header (96)
-[
-	archive_0_block_0_info (16)
-	archive_0_block_1_info (16)
-	...
-	archive_0_block_23_info (16)
+Data point in cwhisper ranges from 2 - 14 bytes (12 bytes for standard format). So in theory, cwhisper file size could be 16.67% - 116.67% of standard file size. So the theoretical compression ratio is 6 - 0.86.
 
-	archive_0_buffer (120)
-]
-[
-	archive_1_block_0_info (16)
-	archive_1_block_1_info (16)
-	...
-	archive_1_block_5_info (16)
+In random data point testing, compressed/uncompressed ratio is between 18.88% and 113.25%.
 
-	archive_1_buffer (120)
-]
-[
-	archive_2_block_0_info (16)
-	archive_2_block_1_info (16)
-	archive_2_block_3_info (16)
-]
-[
-	archive_0_block_0 (14400)
-	archive_0_block_1 (14400)
-	...
-	archive_0_block_3 (14400)
-]
-[
-	archive_1_block_0 (14400)
-	archive_1_block_1 (14400)
-	...
-	archive_1_block_5 (14400)
-]
-[
-	archive_2_block_0 (14400)
-	archive_2_block_1 (14400)
-	archive_2_block_3 (14400)
-]
+In real production payload, we are seeing 50%+ less disk space usage.
+
+Read/Write Performance between standard and compressed formats:
+
+```
+BenchmarkWriteStandard-8           	   50000	     33824 ns/op
+BenchmarkWriteCompressed-8         	 1000000	      1630 ns/op
+
+BenchmarkReadStandard-8            	     500	   2270392 ns/op
+BenchmarkReadCompressed-8          	   10000	    260862 ns/op
+```
+
+### Drawbacks
+
+* cwhisper is faster and smaller, but unlike standard format, you can't easily backfill/update/rewrite old data points because it's not data-point addressable.
+* file size could grow if data points are irregular.
+
+### Suitable Application
+
+* cwhisper is most suitable for metrics that are mostly regular and less likely needed to backfill/rewrite old data, like system metrics. cwhisper also works nicely for sparse metrics.
+
+### How does it work in a nutshell
+
+An example format: https://github.com/go-graphite/go-whisper/blob/master/doc/compressed.md
+
+In cwhisper, archives are broken down into multiple blocks (by default 7200 data points per block as recommended by the gorilla paper), and data points are compressed into blocks. cwhisper assumes 2 as the default data point size, but when it detects that the default size is too small, it would grow the file.
+
+cwhisper still has one file per metric, it's doing round-robin update, instead of rotating data points, block is rotation unit for archives.
 
 ## Licence
 

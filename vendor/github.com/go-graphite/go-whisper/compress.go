@@ -1199,8 +1199,6 @@ func dumpBits(data ...uint64) string {
 	return fmt.Sprintf("%08b len(%d) end_bit_pos(%d)", bw.buf[:bw.index+1], l, bw.bitPos)
 }
 
-// TODO: refactor err handling. there is a risk of open file leakage.
-//
 // For archive.Buffer handling, CompressTo assumes a simple archive layout that
 // higher archive will propagate to lower archive. [wrong]
 //
@@ -1246,6 +1244,7 @@ func (whisper *Whisper) CompressTo(dstPath string) error {
 	if err != nil {
 		return err
 	}
+	defer dst.Close()
 
 	// TODO: consider support moving the last data points to buffer
 	for i := len(whisper.archives) - 1; i >= 0; i-- {
@@ -1260,9 +1259,6 @@ func (whisper *Whisper) CompressTo(dstPath string) error {
 	}
 
 	// TODO: check if compression is done correctly
-	if err := dst.Close(); err != nil {
-		return err
-	}
 
 	return err
 }
@@ -1381,4 +1377,95 @@ func (mf *memFile) Write(b []byte) (n int, err error) {
 	return
 }
 
+func (mf *memFile) Truncate(size int64) error {
+	if int64(len(mf.data)) >= size {
+		mf.data = mf.data[:size]
+	} else {
+		mf.data = append(mf.data, make([]byte, size-int64(len(mf.data)))...)
+	}
+	return nil
+}
+
 func (mf *memFile) dumpOnDisk(fpath string) error { return ioutil.WriteFile(fpath, mf.data, 0644) }
+
+func (dstw *Whisper) FillCompressed(srcw *Whisper) error {
+	defer dstw.Close()
+
+	var rets []*Retention
+	for _, arc := range dstw.archives {
+		rets = append(rets, &Retention{secondsPerPoint: arc.secondsPerPoint, numberOfPoints: arc.numberOfPoints})
+	}
+
+	var pointsByArchives = make([][]dataPoint, len(dstw.archives))
+	for i, srcArc := range srcw.archives {
+		until := int(Now().Unix())
+		from := until - srcArc.MaxRetention()
+
+		srcPoints, err := srcw.Fetch(from, until)
+		if err != nil {
+			return err
+		}
+		dstPoints, err := dstw.Fetch(from, until)
+		if err != nil {
+			return err
+		}
+
+		points := make([]dataPoint, len(dstPoints.values))
+		var lenp int
+		for i, val := range dstPoints.values {
+			if !math.IsNaN(val) {
+			} else if !math.IsNaN(srcPoints.values[i]) {
+				val = srcPoints.values[i]
+			} else {
+				continue
+			}
+
+			points[lenp].interval = srcPoints.fromTime + i*srcArc.secondsPerPoint
+			points[lenp].value = val
+			lenp++
+		}
+		points = points[:lenp]
+
+		pointsByArchives[i] = points
+		rets[i].avgCompressedPointSize = estimatePointSize(points, rets[i], DefaultPointsPerBlock)
+	}
+
+	newDst, err := CreateWithOptions(
+		dstw.file.Name()+".fill", rets,
+		dstw.aggregationMethod, dstw.xFilesFactor,
+		&Options{
+			FLock: true, Compressed: true,
+			PointsPerBlock: DefaultPointsPerBlock,
+			InMemory:       true, // need to close file if switch to non in-memory
+		},
+	)
+	if err != nil {
+		return err
+	}
+	defer releaseMemFile(newDst.file.Name())
+
+	for i := len(dstw.archives) - 1; i >= 0; i-- {
+		points := pointsByArchives[i]
+		if err := newDst.archives[i].appendToBlockAndRotate(points); err != nil {
+			return err
+		}
+		copy(newDst.archives[i].buffer, dstw.archives[i].buffer)
+	}
+	if err := newDst.WriteHeaderCompressed(); err != nil {
+		return err
+	}
+
+	data := newDst.file.(*memFile).data
+	if err := dstw.file.Truncate(int64(len(data))); err != nil {
+		fmt.Printf("convert: failed to truncate %s: %s", dstw.file.Name(), err)
+	}
+	if err := dstw.fileWriteAt(data, 0); err != nil {
+		return err
+	}
+
+	f := dstw.file
+	*dstw = *newDst
+	dstw.file = f
+
+	return nil
+}
