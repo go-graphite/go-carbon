@@ -278,6 +278,7 @@ func (app *App) startPersister() {
 		p.SetHardMaxCreatesPerSecond(app.Config.Whisper.HardMaxCreatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
+		p.SetCompressed(app.Config.Whisper.Compressed)
 		p.SetWorkers(app.Config.Whisper.Workers)
 		p.SetHashFilenames(app.Config.Whisper.HashFilenames)
 
@@ -414,6 +415,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 		carbonserver.SetFLock(app.Config.Whisper.FLock)
+		carbonserver.SetCompressed(app.Config.Whisper.Compressed)
 		carbonserver.SetFailOnMaxGlobs(conf.Carbonserver.FailOnMaxGlobs)
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)

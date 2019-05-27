@@ -103,11 +103,13 @@ hard-max-creates-per-second = false
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
-flock = false
+flock = true
 enabled = true
 # Use hashed filenames for tagged metrics instead of human readable
 # https://github.com/lomik/go-carbon/pull/225
 hash-filenames = true
+# specify to enable/disable compressed format. IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
+compressed = false
 
 [cache]
 # Limit of in-memory stored points (not metrics)
@@ -416,6 +418,7 @@ With settings above applied, best write-strategy to use is "noop"
 
 ## Changelog
 ##### master
+* Added new options and upgraded go-whisper library to have compressed format (cwhisper) support
 
 ##### version 0.14.0
 * Accept UDP messages in plain protocol without trailing newline
@@ -539,7 +542,7 @@ Other changes:
 
 ##### version 0.7
 * Grace stop on `USR2` signal: close all socket listeners, flush cache to disk and stop carbon
-* Reload persister config (`whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`) on `HUP` signal 
+* Reload persister config (`whisper` section of main config, `storage-schemas.conf` and `storage-aggregation.conf`) on `HUP` signal
 * Fix bug: Cache may start save points only after first checkpoint
 * Decimal numbers in log files instead of hexademical #22
 * Fix bug: NaN values being saved in Whisper datafiles #17 (thanks [Andrew Hayworth](https://github.com/ahayworth))
@@ -547,7 +550,7 @@ Other changes:
 * Improved throttling (max-updates-per-second) performance #32
 
 ##### version 0.6
-* `metric-interval` option 
+* `metric-interval` option
 
 ##### version 0.5.5
 * Cache module optimization

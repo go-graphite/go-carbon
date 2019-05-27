@@ -62,6 +62,7 @@ type whisperConfig struct {
 	HardMaxCreatesPerSecond bool   `toml:"hard-max-creates-per-second"`
 	Sparse                  bool   `toml:"sparse-create"`
 	FLock                   bool   `toml:"flock"`
+	Compressed              bool   `toml:"compressed"`
 	Enabled                 bool   `toml:"enabled"`
 	HashFilenames           bool   `toml:"hash-filenames"`
 	Schemas                 persister.WhisperSchemas
