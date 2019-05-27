@@ -103,7 +103,7 @@ hard-max-creates-per-second = false
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
-flock = false
+flock = true
 enabled = true
 # Use hashed filenames for tagged metrics instead of human readable
 # https://github.com/lomik/go-carbon/pull/225
