@@ -196,11 +196,27 @@ func (p *Whisper) store(metric string) {
 	if err != nil {
 		// create new whisper if file not exists
 		if !os.IsNotExist(err) {
-			p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(err))
-			if pathErr, isPathErr := err.(*os.PathError); isPathErr && pathErr.Err == syscall.ENAMETOOLONG {
-				p.pop(metric)
+			// There are cases that new files are created but data are not saved
+			// on disk due to edge issues like server panics/reboot. So it's
+			// better to treat empty files as NotExist to work around this
+			// problem.
+			stat, err2 := os.Stat(path)
+			if err2 != nil {
+				p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(err2))
 			}
-			return
+			if err2 != nil || stat.Size() > 0 {
+				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(err))
+				if pathErr, isPathErr := err.(*os.PathError); isPathErr && pathErr.Err == syscall.ENAMETOOLONG {
+					p.pop(metric)
+				}
+				return
+			}
+			if err := os.Remove(path); err != nil {
+				p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(err))
+				p.pop(metric)
+				return
+			}
+			p.logger.Warn("deleted empty whisper file", zap.String("path", path))
 		}
 
 		if t := p.maxCreatesThrottling(); t != throttlingOff {
