@@ -43,6 +43,7 @@ type Whisper struct {
 	flock                   bool
 	compressed              bool
 	hashFilenames           bool
+	removeEmptyFile         bool
 	maxUpdatesPerSecond     int
 	maxCreatesPerSecond     int
 	hardMaxCreatesPerSecond bool
@@ -122,6 +123,10 @@ func (p *Whisper) SetFLock(flock bool) {
 
 func (p *Whisper) SetCompressed(compressed bool) {
 	p.compressed = compressed
+}
+
+func (p *Whisper) SetRemoveEmptyFile(remove bool) {
+	p.removeEmptyFile = remove
 }
 
 func (p *Whisper) SetHashFilenames(v bool) {
@@ -204,7 +209,7 @@ func (p *Whisper) store(metric string) {
 			if err2 != nil {
 				p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(err2))
 			}
-			if err2 != nil || stat.Size() > 0 {
+			if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
 				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(err))
 				if pathErr, isPathErr := err.(*os.PathError); isPathErr && pathErr.Err == syscall.ENAMETOOLONG {
 					p.pop(metric)
