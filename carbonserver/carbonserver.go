@@ -258,6 +258,7 @@ type CarbonserverListener struct {
 	findCacheEnabled  bool
 	findCache         queryCache
 	trigramIndex      bool
+	trieIndex         bool
 
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
@@ -423,11 +424,20 @@ type jsonMetricDetailsResponse struct {
 	TotalSpace uint64
 }
 
-type fileIndex struct {
-	idx     trigram.Index
-	files   []string
-	details map[string]*protov3.MetricDetails
+const (
+	indexTypeTrigram = iota
+	indexTypeTrie
+)
 
+type fileIndex struct {
+	typ int
+
+	idx   trigram.Index
+	files []string
+
+	trieIdx *trieIndex
+
+	details     map[string]*protov3.MetricDetails
 	accessTimes map[string]int64
 	freeSpace   uint64
 	totalSpace  uint64
@@ -506,6 +516,9 @@ func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 }
 func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 	listener.trigramIndex = enabled
+}
+func (listener *CarbonserverListener) SetTrieIndex(enabled bool) {
+	listener.trieIndex = enabled
 }
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
@@ -649,19 +662,36 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
 	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 
-	t0 = time.Now()
-	idx := trigram.NewIndex(files)
+	nfidx := &fileIndex{
+		// idx:         idx,
+		// files:       files,
+		details:     details,
+		freeSpace:   freeSpace,
+		totalSpace:  totalSpace,
+		accessTimes: make(map[string]int64),
+	}
 
+	var pruned int
+	var indexType = "trigram"
+	t0 = time.Now()
+	if listener.trieIndex {
+		indexType = "trie"
+		nfidx.trieIdx = newTrie(".wsp")
+		for _, file := range files {
+			nfidx.trieIdx.insert(file)
+		}
+	} else {
+		nfidx.files = files
+		nfidx.idx = trigram.NewIndex(files)
+		pruned = nfidx.idx.Prune(0.95)
+	}
+	indexSize := len(nfidx.idx)
 	indexingRuntime := time.Since(t0)
 	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
-	indexSize := len(idx)
-
-	pruned := idx.Prune(0.95)
 
 	tl := time.Now()
 	fidx := listener.CurrentFileIndex()
 
-	oldAccessTimes := make(map[string]int64)
 	if fidx != nil && listener.internalStatsDir != "" {
 		listener.fileIdxMutex.Lock()
 		for m := range fidx.accessTimes {
@@ -674,19 +704,12 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 				}
 			}
 		}
-		oldAccessTimes = fidx.accessTimes
+		nfidx.accessTimes = fidx.accessTimes
 		listener.fileIdxMutex.Unlock()
 	}
 	rdTimeUpdateRuntime := time.Since(tl)
 
-	listener.UpdateFileIndex(&fileIndex{
-		idx:         idx,
-		files:       files,
-		details:     details,
-		freeSpace:   freeSpace,
-		totalSpace:  totalSpace,
-		accessTimes: oldAccessTimes,
-	})
+	listener.UpdateFileIndex(nfidx)
 
 	logger.Info("file list updated",
 		zap.Duration("file_scan_runtime", fileScanRuntime),
@@ -696,6 +719,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		zap.Int("Files", len(files)),
 		zap.Int("index_size", indexSize),
 		zap.Int("pruned_trigrams", pruned),
+		zap.String("index_type", indexType),
 	)
 }
 
@@ -771,10 +795,20 @@ func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- 
 		}
 	}
 
-	var files []string
-
 	fidx := listener.CurrentFileIndex()
 
+	if fidx != nil && listener.trieIndex {
+		var files []string
+		var leafs []bool
+		for _, g := range globs {
+			f, l := fidx.trieIdx.search(g, math.MaxInt64)
+			files = append(files, f...)
+			leafs = append(leafs, l...)
+		}
+		return files, leafs, nil
+	}
+
+	var files []string
 	fallbackToFS := false
 	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) == 0) {
 		fallbackToFS = true
@@ -785,16 +819,13 @@ func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- 
 		docs := make(map[trigram.DocID]struct{})
 
 		for _, g := range globs {
-
 			gpath := "/" + g
-
 			ts := extractTrigrams(g)
 
 			// TODO(dgryski): If we have 'not enough trigrams' we
 			// should bail and use the file-system glob instead
 
 			ids := fidx.idx.QueryTrigrams(ts)
-
 			for _, id := range ids {
 				docid := trigram.DocID(id)
 				if _, ok := docs[docid]; !ok {
@@ -1009,7 +1040,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	)
 
 	listener.exitChan = make(chan struct{})
-	if listener.trigramIndex && listener.scanFrequency != 0 {
+	if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
 		listener.forceScanChan = make(chan struct{})
 		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan)
 		listener.forceScanChan <- struct{}{}
