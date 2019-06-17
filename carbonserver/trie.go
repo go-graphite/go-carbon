@@ -11,6 +11,8 @@ type trieIndex struct {
 	depth     int
 	fileExt   string
 	fileCount int
+
+	// stringIDs map[string]int
 }
 
 type trieNode struct {
@@ -21,7 +23,11 @@ type trieNode struct {
 }
 
 func newTrie(fileExt string) *trieIndex {
-	return &trieIndex{root: &trieNode{}, fileExt: fileExt}
+	return &trieIndex{
+		root:    &trieNode{},
+		fileExt: fileExt,
+		// stringIDs: map[string]int{},
+	}
 }
 
 func (ti *trieIndex) insert(path string) {
@@ -84,13 +90,17 @@ func (ti *trieIndex) search(pattern string, limit int) (matched []string, isFile
 			goto parent
 		}
 
+		// TODO:
+		//  * quit early for exact match
+		//  * use string id for exact match
+
 		// rework
 		if ok, _ := filepath.Match(nodes[curLevel-1], cur.val); ok {
 			if curLevel < len(nodes) {
 				continue
 			}
 
-			matched = append(matched, cur.fullPath("."))
+			matched = append(matched, cur.fullPath(".", ti.depth))
 			isFile = append(isFile, cur.isFile)
 			if len(matched) >= limit {
 				break
@@ -117,8 +127,8 @@ func (ti *trieIndex) search(pattern string, limit int) (matched []string, isFile
 	return matched, isFile
 }
 
-func (tn *trieNode) fullPath(sep string) string {
-	var nodes []string
+func (tn *trieNode) fullPath(sep string, depth int) string {
+	var nodes = make([]string, 0, depth)
 	cur := tn
 	for cur.parent != nil {
 		nodes = append(nodes, cur.val)
@@ -140,7 +150,7 @@ func (ti *trieIndex) allFiles(sep string) []string {
 	var cur = ti.root
 	for {
 		if len(cur.childrens) == 0 {
-			files = append(files, cur.fullPath(sep))
+			files = append(files, cur.fullPath(sep, ti.depth))
 			goto parent
 		}
 
