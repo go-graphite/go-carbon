@@ -333,6 +333,13 @@ restore-per-second = 0
 listen = "localhost:7007"
 enabled = false
 
+#[prometheus]
+#enabled = true
+
+#[prometheus.labels]
+#foo = "test"
+#bar = "baz"
+
 # Default logger
 [[logging]]
 # logger name
