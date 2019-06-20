@@ -279,6 +279,7 @@ func (app *App) startPersister() {
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetCompressed(app.Config.Whisper.Compressed)
+		p.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
 		p.SetWorkers(app.Config.Whisper.Workers)
 		p.SetHashFilenames(app.Config.Whisper.HashFilenames)
 
@@ -416,6 +417,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 		carbonserver.SetFLock(app.Config.Whisper.FLock)
 		carbonserver.SetCompressed(app.Config.Whisper.Compressed)
+		carbonserver.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
 		carbonserver.SetFailOnMaxGlobs(conf.Carbonserver.FailOnMaxGlobs)
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)

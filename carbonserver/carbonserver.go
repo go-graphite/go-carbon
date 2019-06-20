@@ -242,6 +242,7 @@ type CarbonserverListener struct {
 	internalStatsDir  string
 	flock             bool
 	compressed        bool
+	removeEmptyFile   bool
 
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
@@ -463,6 +464,9 @@ func (listener *CarbonserverListener) SetWriteTimeout(writeTimeout time.Duration
 }
 func (listener *CarbonserverListener) SetCompressed(compressed bool) {
 	listener.compressed = compressed
+}
+func (listener *CarbonserverListener) SetRemoveEmptyFile(remove bool) {
+	listener.removeEmptyFile = remove
 }
 func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters bool) {
 	listener.metricsAsCounters = metricsAsCounters
