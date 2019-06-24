@@ -184,12 +184,11 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
-			query:  "*.*.metric-namespace-001.*",
+			// query: "*.*.metric-namespace-001.*",
+			query: "*",
 			expect: []string{
-				// "service-00.server-000.metric-namespace-005.cpu",
-				// "service-00.server-001.metric-namespace-005.cpu",
-				// "service-00.server-002.metric-namespace-005.cpu",
-				// "service-01.server-000.metric-namespace-005.cpu",
+				"service-00/server-000/metric-namespace-001/d218bc1539f2cf8",
+				"service-00/server-000/metric-namespace-001/cpu",
 			},
 		},
 
@@ -208,39 +207,41 @@ func TestTrieIndex(t *testing.T) {
 		// "*.*.{metric-namespace-1,metric-namespace-3}.*",
 	}
 	for _, c := range cases {
-		t.Logf("case: %s", c.query)
+		t.Run(c.query, func(t *testing.T) {
+			t.Logf("case: %s", c.query)
 
-		trieFiles, _, err := trieServer.expandGlobs(c.query)
-		if err != nil {
-			t.Errorf("failed to trie.expandGlobs: %s", err)
-		}
+			trieFiles, _, err := trieServer.expandGlobs(c.query)
+			if err != nil {
+				t.Errorf("failed to trie.expandGlobs: %s", err)
+			}
 
-		// trigramFiles, _, err := trigramServer.expandGlobs(target)
-		// if err != nil {
-		// 	t.Errorf("failed to trigram.expandGlobs: %s", err)
-		// }
-		// for i, f := range trigramFiles {
-		// 	f = f[len(trigramServer.whisperData+"/"):]
-		// 	f = f[:len(f)-4]
-		// 	trigramFiles[i] = strings.Replace(f, "/", ".", -1)
-		// }
+			// trigramFiles, _, err := trigramServer.expandGlobs(target)
+			// if err != nil {
+			// 	t.Errorf("failed to trigram.expandGlobs: %s", err)
+			// }
+			// for i, f := range trigramFiles {
+			// 	f = f[len(trigramServer.whisperData+"/"):]
+			// 	f = f[:len(f)-4]
+			// 	trigramFiles[i] = strings.Replace(f, "/", ".", -1)
+			// }
 
-		sort.Strings(trieFiles)
-		// sort.Strings(trigramFiles)
+			sort.Strings(trieFiles)
+			// sort.Strings(trigramFiles)
 
-		if len(trieFiles) == 0 {
-			t.Errorf("trie.expandGlobs fetched 0 files")
-		}
-		// if len(trigramFiles) == 0 {
-		// 	t.Errorf("trigram.expandGlobs fetched 0 files")
-		// }
+			if len(trieFiles) == 0 {
+				t.Errorf("trie.expandGlobs fetched 0 files")
+			}
+			// if len(trigramFiles) == 0 {
+			// 	t.Errorf("trigram.expandGlobs fetched 0 files")
+			// }
 
-		// if !reflect.DeepEqual(trieFiles, trigramFiles) {
-		// 	t.Errorf("trie.expandGlobs returns:\t%s\ntrigram.expandGlobs returns:\t%s\n", trieFiles, trigramFiles)
-		// }
-		if !reflect.DeepEqual(trieFiles, c.expect) {
-			t.Errorf("incorrect files retrieved\nreturns:\t%s\nexpect:\t%s\n", trieFiles, c.expect)
-		}
+			// if !reflect.DeepEqual(trieFiles, trigramFiles) {
+			// 	t.Errorf("trie.expandGlobs returns:\t%s\ntrigram.expandGlobs returns:\t%s\n", trieFiles, trigramFiles)
+			// }
+			if !reflect.DeepEqual(trieFiles, c.expect) {
+				t.Errorf("incorrect files retrieved\nreturns: %s\nexpect:  %s\n", trieFiles, c.expect)
+			}
+		})
 	}
 }
 

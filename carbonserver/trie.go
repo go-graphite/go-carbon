@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"errors"
+	"log"
 	"path/filepath"
 	"strings"
 	"unsafe"
@@ -120,6 +121,7 @@ type trieNode struct {
 	parent    *trieNode
 	childrens []*trieNode
 	isFile    bool
+	isNodeEnd bool
 }
 
 func newTrie(fileExt string) *trieIndex {
@@ -176,10 +178,12 @@ outer:
 		tnode := &trieNode{c: c, parent: cur}
 		cur.childrens = append(cur.childrens, tnode)
 		cur = tnode
+		cur.parent.isNodeEnd = c == '/'
 	}
 
 	if isFile {
 		cur.isFile = true
+		cur.isNodeEnd = true
 		ti.fileCount++
 	}
 
@@ -312,7 +316,8 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 		// log.Printf("c = %s matched %t\n", string(cur.c), curGS.children[cur.c] != nil)
 
-		if !gst.end {
+		curGS.cur = gst
+		if !curGS.cur.end {
 			// if !matchedByStar {
 			// 	curGS.cur = gst
 			// 	continue
@@ -321,8 +326,15 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			// if gst.children['/'] != nil {
 			// 	//
 			// }
+			continue
+		}
 
-			curGS.cur = gst
+		// continue matching if the current glob state a trailing star
+		log.Printf("cur.c = %+v\n", string(cur.c))
+		log.Printf("!cur.isNodeEnd  = %+v\n", !cur.isNodeEnd)
+		log.Printf("curGS.cur.parent != nil  = %+v\n", curGS.cur.parent != nil)
+		log.Printf("curGS.cur == curGS.cur.parent.children['*'] = %+v\n", curGS.cur == curGS.cur.parent.children['*'])
+		if !cur.isNodeEnd && curGS.cur.parent != nil && curGS.cur == curGS.cur.parent.children['*'] {
 			continue
 		}
 
