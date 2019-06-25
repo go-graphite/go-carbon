@@ -230,7 +230,9 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	listener.UpdateMetricsAccessTimesByRequest(response.metrics)
+	if listener.internalStatsDir != "" {
+		listener.UpdateMetricsAccessTimesByRequest(response.metrics)
+	}
 
 	wr.Write(response.data)
 
