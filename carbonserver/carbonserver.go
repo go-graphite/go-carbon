@@ -577,7 +577,6 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 			logger.Info("error processing", zap.String("path", p), zap.Error(err))
 			return nil
 		}
-		i := stat.GetStat(info)
 
 		hasSuffix := strings.HasSuffix(info.Name(), ".wsp")
 		if info.IsDir() || hasSuffix {
@@ -585,12 +584,15 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 			files = append(files, trimmedName)
 			if hasSuffix {
 				metricsKnown++
-				trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
-				details[trimmedName] = &protov3.MetricDetails{
-					Size_:    i.Size,
-					ModTime:  i.MTime,
-					ATime:    i.ATime,
-					RealSize: i.RealSize,
+				if listener.internalStatsDir != "" {
+					i := stat.GetStat(info)
+					trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
+					details[trimmedName] = &protov3.MetricDetails{
+						Size_:    i.Size,
+						ModTime:  i.MTime,
+						ATime:    i.ATime,
+						RealSize: i.RealSize,
+					}
 				}
 			}
 		}
@@ -636,7 +638,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	fidx := listener.CurrentFileIndex()
 
 	oldAccessTimes := make(map[string]int64)
-	if fidx != nil {
+	if fidx != nil && listener.internalStatsDir != "" {
 		listener.fileIdxMutex.Lock()
 		for m := range fidx.accessTimes {
 			if d, ok := details[m]; ok {
