@@ -131,6 +131,10 @@ func TestTrieIndex(t *testing.T) {
 		"/service-01/server-000/metric-namespace-004/6f31f9305c67895c.wsp",
 		"/service-01/server-000/metric-namespace-004/cpu.wsp",
 		"/service-01/server-000/metric-namespace-005/cpu.wsp",
+
+		"/service-01/server-110/metric-namespace-007/cpu.wsp",
+		"/service-01/server-120/metric-namespace-007/cpu.wsp",
+		"/service-01/server-170/metric-namespace-007/cpu.wsp",
 	})
 	var cases = []struct {
 		query  string
@@ -175,6 +179,13 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			query: "service-00.server-1[0-2]0.metric-namespace-005.cpu",
+			expect: []string{
+				"service-00.server-110.metric-namespace-007.cpu",
+				"service-00.server-120.metric-namespace-007.cpu",
+			},
+		},
+		{
 			query: "service-0*.*.metric-namespace-005.cpu",
 			expect: []string{
 				"service-00.server-000.metric-namespace-005.cpu",
@@ -187,8 +198,9 @@ func TestTrieIndex(t *testing.T) {
 			// query: "*.*.metric-namespace-001.*",
 			query: "*",
 			expect: []string{
-				"service-00/server-000/metric-namespace-001/d218bc1539f2cf8",
-				"service-00/server-000/metric-namespace-001/cpu",
+				"service-00",
+				"service-01",
+				"something",
 			},
 		},
 

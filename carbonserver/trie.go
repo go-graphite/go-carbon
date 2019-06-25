@@ -20,6 +20,7 @@ type globState struct {
 
 type globNode struct {
 	end        bool
+	star       bool
 	parent     *globNode
 	starParent *globNode
 	children   [256]*globNode // make it smaller
@@ -69,7 +70,7 @@ func newGlobState(expr string) (*globState, error) {
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
 			}
-			s := &globNode{parent: cur, starParent: curStar}
+			s := &globNode{parent: cur, starParent: curStar, star: true}
 			cur.children[c] = s
 			if curStar == nil {
 				s.starParent = s
@@ -253,7 +254,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		// 	}
 
 		// TODO: not right?
-		// log.Printf("cur.c = %+v\n", string(cur.c))
+		log.Printf("cur.c = %+v\n", string(cur.c))
 		if cur.c == '/' {
 			// if !gstates[gsIndex].cur.end || gsIndex+1 >= len(gstates) {
 			// 	goto parent
@@ -299,9 +300,14 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		matchedByStar = false
 
 		if !matched {
-			gst = curGS.cur.children['*']
-			matchedByStar = gst != nil
-			matched = matchedByStar
+			if !curGS.cur.star {
+				gst = curGS.cur.children['*']
+				matchedByStar = gst != nil
+				matched = matchedByStar
+			} else {
+				gst = curGS.cur
+				matched = true
+			}
 		}
 
 		if !matched {
@@ -330,11 +336,13 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 
 		// continue matching if the current glob state a trailing star
-		log.Printf("cur.c = %+v\n", string(cur.c))
-		log.Printf("!cur.isNodeEnd  = %+v\n", !cur.isNodeEnd)
-		log.Printf("curGS.cur.parent != nil  = %+v\n", curGS.cur.parent != nil)
-		log.Printf("curGS.cur == curGS.cur.parent.children['*'] = %+v\n", curGS.cur == curGS.cur.parent.children['*'])
-		if !cur.isNodeEnd && curGS.cur.parent != nil && curGS.cur == curGS.cur.parent.children['*'] {
+		// log.Printf("cur.c = %+v\n", string(cur.c))
+		// log.Printf("!cur.isNodeEnd  = %+v\n", !cur.isNodeEnd)
+		// log.Printf("curGS.cur.parent != nil  = %+v\n", curGS.cur.parent != nil)
+		// log.Printf("curGS.cur == curGS.cur.parent.children['*'] = %+v\n", curGS.cur == curGS.cur.parent.children['*'])
+
+		if !cur.isNodeEnd && curGS.cur.star {
+			// .parent != nil && curGS.cur == curGS.cur.parent.children['*']
 			continue
 		}
 
