@@ -15,7 +15,8 @@ type globState struct {
 	exact bool
 	root  *globNode
 
-	cur *globNode
+	cur  *globNode
+	expr string
 }
 
 type globNode struct {
@@ -24,15 +25,21 @@ type globNode struct {
 	parent     *globNode
 	starParent *globNode
 	children   [256]*globNode // make it smaller
+
+	posStart, posEnd int
 }
 
 func (gn *globNode) isNodeEnd() bool {
 	return gn.end || gn.children['/'] != nil
 }
 
+func (gs *globState) state(gn *globNode) string {
+	return gs.expr[gn.posStart:gn.posEnd]
+}
+
 // TODO: add range value validation
 func newGlobState(expr string) (*globState, error) {
-	var gs = globState{root: &globNode{}, exact: true}
+	var gs = globState{root: &globNode{}, exact: true, expr: expr}
 	var cur = gs.root
 	var curStar *globNode
 	for i := 0; i < len(expr); i++ {
@@ -41,7 +48,7 @@ func newGlobState(expr string) (*globState, error) {
 		case '[':
 			gs.exact = false
 			// var ranges [256]bool
-			s := &globNode{parent: cur, starParent: curStar}
+			s := &globNode{parent: cur, starParent: curStar, posStart: i}
 			for i < len(expr) && expr[i] != ']' {
 				if expr[i] == '-' {
 					if i+1 >= len(expr) {
@@ -63,14 +70,14 @@ func newGlobState(expr string) (*globState, error) {
 				return nil, errors.New("glob: missing ]")
 			}
 
-			// cur.children[c] = s
+			s.posEnd = i + 1
 			cur = s
 		case '*':
 			gs.exact = false
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
 			}
-			s := &globNode{parent: cur, starParent: curStar, star: true}
+			s := &globNode{parent: cur, starParent: curStar, star: true, posStart: i, posEnd: i + 1}
 			cur.children[c] = s
 			if curStar == nil {
 				s.starParent = s
@@ -79,7 +86,7 @@ func newGlobState(expr string) (*globState, error) {
 			cur = s
 			curStar = cur
 		default:
-			s := &globNode{parent: cur, starParent: curStar}
+			s := &globNode{parent: cur, starParent: curStar, posStart: i, posEnd: i + 1}
 			cur.children[c] = s
 			cur = s
 		}
@@ -239,6 +246,8 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		cur = cur.childrens[childIndex[curLevel]]
 		curLevel++
 
+		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
+
 		// if curLevel > len(pattern) {
 		// 	goto parent
 		// }
@@ -254,7 +263,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		// 	}
 
 		// TODO: not right?
-		log.Printf("cur.c = %+v\n", string(cur.c))
+		// log.Printf("cur.c = %+v\n", string(cur.c))
 		if cur.c == '/' {
 			// if !gstates[gsIndex].cur.end || gsIndex+1 >= len(gstates) {
 			// 	goto parent
@@ -299,14 +308,18 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		matched = gst != nil
 		matchedByStar = false
 
+		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
+		log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
+		log.Printf("matched = %+v\n", matched)
+
 		if !matched {
-			if !curGS.cur.star {
+			if curGS.cur.star {
+				gst = curGS.cur
+				matched = true
+			} else {
 				gst = curGS.cur.children['*']
 				matchedByStar = gst != nil
 				matched = matchedByStar
-			} else {
-				gst = curGS.cur
-				matched = true
 			}
 		}
 
@@ -374,10 +387,16 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 		childIndex[curLevel]++
 		cur = cur.parent
+		// if curGS.cur != nil {
+		// 	curGS.cur = curGS.cur.parent
+		// }
+
+		log.Printf("cur.parent.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 
 		if cur.c == '/' && childIndex[curLevel] >= len(cur.childrens) {
 			gsIndex--
 			curGS = gstates[gsIndex]
+			curGS.cur = curGS.cur.parent
 			goto parent
 		}
 		continue
