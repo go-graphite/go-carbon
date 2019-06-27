@@ -57,7 +57,8 @@ func newGlobState(expr string) (*globState, error) {
 						return nil, errors.New("glob: missing closing range")
 					}
 
-					for j := expr[i-1]; j <= expr[i+1]; j++ {
+					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
+						log.Printf("j = %+v\n", string(j))
 						cur.children[j] = s
 					}
 
@@ -65,6 +66,7 @@ func newGlobState(expr string) (*globState, error) {
 					continue
 				}
 
+				log.Printf("expr[i] = %+v\n", string(expr[i]))
 				cur.children[expr[i]] = s
 				i++
 			}
@@ -230,7 +232,6 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 	var cur = ti.root
 	var curGS = gstates[0]
 	curGS.cur = curGS.root
-	// var prevGS = gs
 
 	var gst *globNode
 	var matched bool
@@ -242,7 +243,8 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			goto parent
 		}
 
-		if childIndex[curLevel] == len(cur.childrens) {
+		if childIndex[curLevel] >= len(cur.childrens) {
+			log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 			log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
 			if curGS.cur.ranges {
 				curGS.cur = curGS.cur.parent
@@ -262,42 +264,14 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 		// TODO: not right?
 		if cur.c == '/' {
-			// if !gstates[gsIndex].cur.end || gsIndex+1 >= len(gstates) {
-			// 	goto parent
-			// }
-
-			// gsIndex++
-			// curGS = gstates[gsIndex]
-			// curGS.cur = curGS.root
-
-			// if gsIndex+1 < len(gstates) {
-			// 	// nextNode:
-			// 	// 	for _, child := range cur.childrens {
-			// 	// 		if child.c == '/' {
-			// 	// 			gsIndex++
-			// 	// 			curGS = gstates[gsIndex]
-			// 	// 			curGS.cur = curGS.root
-
-			// 	// 			cur = child
-			// 	// 			curLevel++
-
-			// 	// 			break nextNode
-			// 	// 		}
-			// 	// 	}
-			// 	// 	continue
-			// }
-
 			if gsIndex+1 >= len(gstates) {
 				goto parent
 			}
+
 			gsIndex++
 			curGS = gstates[gsIndex]
 			curGS.cur = curGS.root
 
-			// log.Printf("gsIndex = %+v\n", gsIndex)
-
-			// cur = cur.childrens[childIndex[curLevel]]
-			// curLevel++
 			continue
 		}
 
@@ -378,8 +352,6 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 		goto parent
 
-		// continue
-
 	parent:
 		// use exact for fast exit
 		childIndex[curLevel] = 0
@@ -389,13 +361,11 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 		childIndex[curLevel]++
 		cur = cur.parent
-		// if curGS.cur != nil {
-		// 	curGS.cur = curGS.cur.parent
-		// }
 
-		log.Printf("cur.parent.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
+		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 
 		if cur.c == '/' && childIndex[curLevel] >= len(cur.childrens) {
+			log.Println("gs going back")
 			gsIndex--
 			curGS = gstates[gsIndex]
 			curGS.cur = curGS.cur.parent

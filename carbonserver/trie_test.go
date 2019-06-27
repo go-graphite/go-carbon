@@ -138,7 +138,8 @@ func TestTrieIndex(t *testing.T) {
 
 		"/service-01/server-114/metric-namespace-007/cpu.wsp",
 		"/service-01/server-125/metric-namespace-007/cpu.wsp",
-		"/service-01/server-12a/metric-namespace-007/cpu.wsp",
+		"/service-01/server-12b/metric-namespace-007/cpu.wsp",
+		"/service-01/server-129/metric-namespace-007/cpu.wsp",
 	})
 	var cases = []struct {
 		query  string
