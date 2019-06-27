@@ -22,6 +22,7 @@ type globState struct {
 type globNode struct {
 	end        bool
 	star       bool
+	ranges     bool
 	parent     *globNode
 	starParent *globNode
 	children   [256]*globNode // make it smaller
@@ -48,7 +49,8 @@ func newGlobState(expr string) (*globState, error) {
 		case '[':
 			gs.exact = false
 			// var ranges [256]bool
-			s := &globNode{parent: cur, starParent: curStar, posStart: i}
+			s := &globNode{parent: cur, starParent: curStar, posStart: i, ranges: true}
+			i++
 			for i < len(expr) && expr[i] != ']' {
 				if expr[i] == '-' {
 					if i+1 >= len(expr) {
@@ -70,6 +72,7 @@ func newGlobState(expr string) (*globState, error) {
 				return nil, errors.New("glob: missing ]")
 			}
 
+			log.Printf("s.children = %+v\n", cur.children)
 			s.posEnd = i + 1
 			cur = s
 		case '*':
@@ -240,6 +243,11 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 
 		if childIndex[curLevel] == len(cur.childrens) {
+			log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
+			if curGS.cur.ranges {
+				curGS.cur = curGS.cur.parent
+				log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
+			}
 			goto parent
 		}
 
@@ -248,22 +256,11 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 
-		// if curLevel > len(pattern) {
-		// 	goto parent
-		// }
-
 		// TODO:
 		//  * quit early for exact match
 		//  * use string id for exact match
 
-		// rework
-		// if ok, _ := filepath.Match(nodes[curLevel-1], cur.val); ok {
-		// 	if curLevel < len(nodes) {
-		// 		continue
-		// 	}
-
 		// TODO: not right?
-		// log.Printf("cur.c = %+v\n", string(cur.c))
 		if cur.c == '/' {
 			// if !gstates[gsIndex].cur.end || gsIndex+1 >= len(gstates) {
 			// 	goto parent
@@ -310,7 +307,12 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 		log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
+		log.Printf("curGS.cur.ranges = %+v\n", curGS.cur.ranges)
 		log.Printf("matched = %+v\n", matched)
+		if curGS.state(curGS.cur) == "[4-5a-z]" {
+			log.Println(curGS.cur.children)
+			log.Println(curGS.cur.parent.children)
+		}
 
 		if !matched {
 			if curGS.cur.star {

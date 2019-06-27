@@ -135,6 +135,10 @@ func TestTrieIndex(t *testing.T) {
 		"/service-01/server-110/metric-namespace-007/cpu.wsp",
 		"/service-01/server-120/metric-namespace-007/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007/cpu.wsp",
+
+		"/service-01/server-114/metric-namespace-007/cpu.wsp",
+		"/service-01/server-125/metric-namespace-007/cpu.wsp",
+		"/service-01/server-12a/metric-namespace-007/cpu.wsp",
 	})
 	var cases = []struct {
 		query  string
@@ -179,10 +183,31 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
-			query: "service-00.server-1[0-2]0.metric-namespace-005.cpu",
+			query: "service-01.server-1[0-2]0.metric-namespace-007.cpu",
 			expect: []string{
-				"service-00.server-110.metric-namespace-007.cpu",
-				"service-00.server-120.metric-namespace-007.cpu",
+				"service-01.server-110.metric-namespace-007.cpu",
+				"service-01.server-120.metric-namespace-007.cpu",
+			},
+		},
+		{
+			query: "service-01.server-1[0-2][4-5a-z].metric-namespace-007.cpu",
+			expect: []string{
+				"service-01.server-114.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespace-007.cpu",
+				"service-01.server-12a.metric-namespace-007.cpu",
+			},
+		},
+		{
+			query: "service-01.server-1[1]4.metric-namespace-007.cpu",
+			expect: []string{
+				"service-01.server-114.metric-namespace-007.cpu",
+			},
+		},
+		{
+			query: "service-01.server-1[0-2][4-5].metric-namespace-007.cpu",
+			expect: []string{
+				"service-01.server-114.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespace-007.cpu",
 			},
 		},
 		{
@@ -218,6 +243,7 @@ func TestTrieIndex(t *testing.T) {
 		// "service-[0-2].***.*-001.*",
 		// "*.*.{metric-namespace-1,metric-namespace-3}.*",
 	}
+	log.SetFlags(log.Lshortfile)
 	for _, c := range cases {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: %s", c.query)
