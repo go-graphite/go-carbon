@@ -27,9 +27,9 @@ func getTestFileList() []string {
 
 	rand.Seed(time.Now().Unix())
 	// 10/100/50000
-	limit0 := 1 // 0
-	limit1 := 1 // 0
-	limit2 := 5 // 00
+	limit0 := 50
+	limit1 := 50
+	limit2 := 100
 	limit3 := 1
 	filesForIndex = make([]string, 0, limit0*limit1*limit2*limit3)
 	for i := 0; i < limit0; i++ {
@@ -43,7 +43,7 @@ func getTestFileList() []string {
 		}
 	}
 
-	pretty.Println(filesForIndex)
+	// fmt.Println(filesForIndex[len(filesForIndex)-30:])
 
 	return filesForIndex
 }
@@ -113,6 +113,7 @@ func init() {
 
 func TestTrieIndex(t *testing.T) {
 	initServersForGlob([]string{
+		// service-0*.*.metric-*-00[5-7].cpu
 		"/something/else/server.wsp",
 		"/service-00/server-000/metric-namespace-000/43081e003a315b88.wsp",
 		"/service-00/server-000/metric-namespace-000/cpu.wsp",
@@ -121,13 +122,16 @@ func TestTrieIndex(t *testing.T) {
 		"/service-00/server-000/metric-namespace-005/cpu.wsp",
 		"/service-00/server-000/metric-namespace-002/29370bc791c0fccb.wsp",
 		"/service-00/server-000/metric-namespace-002/cpu.wsp",
+
 		"/service-00/server-001/metric-namespace-002/cpu.wsp",
 		"/service-00/server-001/metric-namespace-005/cpu.wsp",
+
 		"/service-00/server-002/metric-namespace-003/64cd3228c99afc54.wsp",
 		"/service-00/server-002/metric-namespace-003/cpu.wsp",
 		"/service-00/server-002/metric-namespace-005/cpu.wsp",
 		"/service-00/server-002/metric-namespace-004/6f31f9305c67895c.wsp",
 		"/service-00/server-002/metric-namespace-004/cpu.wsp",
+
 		"/service-01/server-000/metric-namespace-004/6f31f9305c67895c.wsp",
 		"/service-01/server-000/metric-namespace-004/cpu.wsp",
 		"/service-01/server-000/metric-namespace-005/cpu.wsp",
@@ -140,8 +144,15 @@ func TestTrieIndex(t *testing.T) {
 		"/service-01/server-125/metric-namespace-007/cpu.wsp",
 		"/service-01/server-12a/metric-namespace-007/cpu.wsp",
 		"/service-01/server-149/metric-namespace-007/cpu.wsp",
+
+		"/service-01/server-125/metric-namespzce-007/cpu.wsp",
+
+		"/service-01/server-170/metric-namespace-007-007-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-007-005-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
 	})
 	var cases = []struct {
+		input  []string
 		query  string
 		expect []string
 	}{
@@ -158,6 +169,7 @@ func TestTrieIndex(t *testing.T) {
 			query:  "service-00.server-000.metric-namespace-000.cpu",
 			expect: []string{"service-00.server-000.metric-namespace-000.cpu"},
 		},
+
 		{
 			query: "service-00.server-000.metric-namespace-00[0-2].cpu",
 			expect: []string{
@@ -173,14 +185,6 @@ func TestTrieIndex(t *testing.T) {
 				"service-00.server-000.metric-namespace-001.cpu",
 				"service-00.server-000.metric-namespace-002.cpu",
 				"service-00.server-001.metric-namespace-002.cpu",
-			},
-		},
-		{
-			query: "service-00.*.metric-namespace-005.cpu",
-			expect: []string{
-				"service-00.server-000.metric-namespace-005.cpu",
-				"service-00.server-001.metric-namespace-005.cpu",
-				"service-00.server-002.metric-namespace-005.cpu",
 			},
 		},
 		{
@@ -212,6 +216,33 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			query: "service-01.server-1[0-2][4-5].metric-n[a-z]mesp[a-z1-9]ce-007.cpu",
+			expect: []string{
+				"service-01.server-114.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespzce-007.cpu",
+			},
+		},
+
+		{
+			query: "service-00.*.metric-namespace-005.cpu",
+			expect: []string{
+				"service-00.server-000.metric-namespace-005.cpu",
+				"service-00.server-001.metric-namespace-005.cpu",
+				"service-00.server-002.metric-namespace-005.cpu",
+			},
+		},
+
+		{
+			// query: "*.*.metric-namespace-001.*",
+			query: "*",
+			expect: []string{
+				"service-00",
+				"service-01",
+				"something",
+			},
+		},
+		{
 			query: "service-0*.*.metric-namespace-005.cpu",
 			expect: []string{
 				"service-00.server-000.metric-namespace-005.cpu",
@@ -220,13 +251,23 @@ func TestTrieIndex(t *testing.T) {
 				"service-01.server-000.metric-namespace-005.cpu",
 			},
 		},
+		// {
+		// 	query: "service-0*.*.metric-*-00[5-7].cpu",
+		// 	expect: []string{
+		// 		"service-00.server-000.metric-namespace-005.cpu",
+		// 		"service-00.server-001.metric-namespace-005.cpu",
+		// 		"service-00.server-002.metric-namespace-005.cpu",
+		// 		"service-01.server-000.metric-namespace-005.cpu",
+		// 	},
+		// },
 		{
-			// query: "*.*.metric-namespace-001.*",
-			query: "*",
+			query: "service-0*.*.metric-*-00[5-7]-xdp.cpu",
 			expect: []string{
-				"service-00",
-				"service-01",
-				"something",
+				// "service-00.server-000.metric-namespace-005.cpu",
+				// "service-00.server-001.metric-namespace-005.cpu",
+				// "service-00.server-002.metric-namespace-005.cpu",
+				// "service-01.server-000.metric-namespace-005.cpu",
+				"service-01.server-170.metric-1namespace-007-007-xdp.cpu",
 			},
 		},
 
@@ -301,11 +342,11 @@ func TestTrieIndex(t *testing.T) {
 // /service-00/server-000/metric-namespace-000/355bf71b128f1749.wsp
 func BenchmarkTrieIndexGlob1(b *testing.B) {
 	// start := time.Now()
-	// f, _, _ := trieServer.expandGlobs("service-*.server-*.metric-namespace-40*.*")
+	// f, _, _ := trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-40*.*")
 	// b.Logf("len(f) = %+v\n", len(f))
 	// b.Logf("search took: %s", time.Now().Sub(start))
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobs("service-*.server-*.metric-namespace-40*.*")
+		trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-40*.*")
 	}
 }
 
@@ -318,10 +359,10 @@ func BenchmarkTrigramIndexGlob1(b *testing.B) {
 }
 
 func BenchmarkTrieIndexGlob2(b *testing.B) {
-	// f, _, _ := trieServer.expandGlobs("service-*.server-*.metric-namespace-[4]0*.*")
+	// f, _, _ := trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-[4]0*.*")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobs("service-*.server-*.metric-namespace-[4]0*.*")
+		trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-[4]0*.*")
 	}
 }
 
@@ -334,10 +375,10 @@ func BenchmarkTrigramIndexGlob2(b *testing.B) {
 }
 
 func BenchmarkTrieIndexGlob3(b *testing.B) {
-	// f, _, _ := trieServer.expandGlobs("service-*.server-*.*.cpu")
+	// f, _, _ := trieServer.expandGlobsTrie("service-*.server-*.*.cpu")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobs("service-*.server-*.*.cpu")
+		trieServer.expandGlobsTrie("service-*.server-*.*.cpu")
 	}
 }
 
@@ -346,6 +387,24 @@ func BenchmarkTrigramIndexGlob3(b *testing.B) {
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
 		trigramServer.expandGlobs("service-*.server-*.*.cpu")
+	}
+}
+
+// /service-49/server-049/metric-namespace-099/cpu.wsp
+func BenchmarkTrieIndexGlob4(b *testing.B) {
+	f, _, _ := trieServer.expandGlobsTrie("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+	b.Logf("len(f) = %+v\n", len(f))
+	// fmt.Println(f)
+	for i := 0; i < b.N; i++ {
+		trieServer.expandGlobsTrie("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+	}
+}
+
+func BenchmarkTrigramIndexGlob4(b *testing.B) {
+	f, _, _ := trigramServer.expandGlobs("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+	b.Logf("len(f) = %+v\n", len(f))
+	for i := 0; i < b.N; i++ {
+		trigramServer.expandGlobs("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
 	}
 }
 

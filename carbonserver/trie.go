@@ -3,9 +3,13 @@ package carbonserver
 import (
 	"errors"
 	"log"
+	"math"
 	"path/filepath"
 	"strings"
 	"unsafe"
+
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 type globState struct {
@@ -26,6 +30,8 @@ type globNode struct {
 	parent     *globNode
 	starParent *globNode
 	children   [256]*globNode // make it smaller
+
+	matchFrom *trieNode
 
 	posStart, posEnd int
 }
@@ -58,7 +64,7 @@ func newGlobState(expr string) (*globState, error) {
 					}
 
 					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
-						log.Printf("j = %+v\n", string(j))
+						// log.Printf("j = %+v\n", string(j))
 						cur.children[j] = s
 					}
 
@@ -66,7 +72,7 @@ func newGlobState(expr string) (*globState, error) {
 					continue
 				}
 
-				log.Printf("expr[i] = %+v\n", string(expr[i]))
+				// log.Printf("expr[i] = %+v\n", string(expr[i]))
 				cur.children[expr[i]] = s
 				i++
 			}
@@ -74,7 +80,7 @@ func newGlobState(expr string) (*globState, error) {
 				return nil, errors.New("glob: missing ]")
 			}
 
-			log.Printf("s.children = %+v\n", cur.children)
+			// log.Printf("s.children = %+v\n", cur.children)
 			s.posEnd = i + 1
 			cur = s
 		case '*':
@@ -241,17 +247,11 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 	_ = matched
 	_ = matchedByStar
 	for {
-		if len(cur.childrens) == 0 {
-			goto parent
-		}
-
 		if childIndex[curLevel] >= len(cur.childrens) {
-			log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-			log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
-			if curGS.cur.ranges {
+			if curGS.cur.parent != nil {
 				curGS.cur = curGS.cur.parent
-				log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
 			}
+
 			goto parent
 		}
 
@@ -259,6 +259,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		curLevel++
 
 		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
+		log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
 
 		// TODO:
 		//  * quit early for exact match
@@ -266,7 +267,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 		// TODO: not right?
 		if cur.c == '/' {
-			if gsIndex+1 >= len(gstates) {
+			if gsIndex+1 >= len(gstates) || !curGS.cur.end {
 				goto parent
 			}
 
@@ -281,15 +282,6 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		matched = gst != nil
 		matchedByStar = false
 
-		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-		log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
-		log.Printf("curGS.cur.ranges = %+v\n", curGS.cur.ranges)
-		log.Printf("matched = %+v\n", matched)
-		if curGS.state(curGS.cur) == "[4-5a-z]" {
-			log.Println(curGS.cur.children)
-			log.Println(curGS.cur.parent.children)
-		}
-
 		if !matched {
 			if curGS.cur.star {
 				gst = curGS.cur
@@ -302,36 +294,25 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 
 		if !matched {
-			// if curGS.cur.starParent == nil {
+			if curGS.cur.starParent == nil {
+				goto parent
+			}
 			// goto parent
-			// }
-			goto parent
 
-			// gst = curGS.cur.starParent
+			gst = curGS.cur.starParent
 			// continue
 		}
 
 		// log.Printf("c = %s matched %t\n", string(cur.c), curGS.children[cur.c] != nil)
 
+		gst.matchFrom = cur
+
 		curGS.cur = gst
 		if !curGS.cur.end {
-			// if !matchedByStar {
-			// 	curGS.cur = gst
-			// 	continue
-			// }
-
-			// if gst.children['/'] != nil {
-			// 	//
-			// }
 			continue
 		}
 
 		// continue matching if the current glob state a trailing star
-		// log.Printf("cur.c = %+v\n", string(cur.c))
-		// log.Printf("!cur.isNodeEnd  = %+v\n", !cur.isNodeEnd)
-		// log.Printf("curGS.cur.parent != nil  = %+v\n", curGS.cur.parent != nil)
-		// log.Printf("curGS.cur == curGS.cur.parent.children['*'] = %+v\n", curGS.cur == curGS.cur.parent.children['*'])
-
 		if !cur.isNodeEnd && curGS.cur.star {
 			// .parent != nil && curGS.cur == curGS.cur.parent.children['*']
 			continue
@@ -364,7 +345,9 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		childIndex[curLevel]++
 		cur = cur.parent
 
-		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
+		// log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
+
+		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 
 		if cur.c == '/' && childIndex[curLevel] >= len(cur.childrens) {
 			gsIndex--
@@ -374,8 +357,11 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			goto parent
 		}
 
-		// if curGS.cur != nil {
+		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
+		// log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
+		// if curGS.cur.ranges {
 		// 	curGS.cur = curGS.cur.parent
+		// 	log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
 		// }
 
 		continue
@@ -446,4 +432,85 @@ func (ti *trieIndex) allFiles(sep byte) []string {
 		continue
 	}
 	return files
+}
+
+func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
+	var useGlob bool
+	logger := zapwriter.Logger("carbonserver")
+
+	// TODO: Find out why we have set 'useGlob' if 'star == -1'
+	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
+		useGlob = true
+	}
+	logger = logger.With(zap.Bool("use_glob", useGlob))
+
+	/* things to glob:
+	 * - carbon.relays  -> carbon.relays
+	 * - carbon.re      -> carbon.relays, carbon.rewhatever
+	 * - carbon.[rz]    -> carbon.relays, carbon.zipper
+	 * - carbon.{re,zi} -> carbon.relays, carbon.zipper
+	 * - match is either dir or .wsp file
+	 * unfortunately, filepath.Glob doesn't handle the curly brace
+	 * expansion for us */
+
+	query = strings.Replace(query, ".", "/", -1)
+
+	var globs []string
+	globs = append(globs, query)
+	// TODO(dgryski): move this loop into its own function + add tests
+	for {
+		bracematch := false
+		var newglobs []string
+		for _, glob := range globs {
+			lbrace := strings.Index(glob, "{")
+			rbrace := -1
+			if lbrace > -1 {
+				rbrace = strings.Index(glob[lbrace:], "}")
+				if rbrace > -1 {
+					rbrace += lbrace
+				}
+			}
+
+			if lbrace > -1 && rbrace > -1 {
+				bracematch = true
+				expansion := glob[lbrace+1 : rbrace]
+				parts := strings.Split(expansion, ",")
+				for _, sub := range parts {
+					if len(newglobs) > listener.maxGlobs {
+						if listener.failOnMaxGlobs {
+							return nil, nil, errMaxGlobsExhausted
+						}
+						break
+					}
+					newglobs = append(newglobs, glob[:lbrace]+sub+glob[rbrace+1:])
+				}
+			} else {
+				if len(newglobs) > listener.maxGlobs {
+					if listener.failOnMaxGlobs {
+						return nil, nil, errMaxGlobsExhausted
+					}
+					break
+				}
+				newglobs = append(newglobs, glob)
+			}
+		}
+		globs = newglobs
+		if !bracematch {
+			break
+		}
+	}
+
+	fidx := listener.CurrentFileIndex()
+
+	var files []string
+	var leafs []bool
+	for _, g := range globs {
+		f, l, err := fidx.trieIdx.search(g, math.MaxInt64)
+		if err != nil {
+			panic(err)
+		}
+		files = append(files, f...)
+		leafs = append(leafs, l...)
+	}
+	return files, leafs, nil
 }
