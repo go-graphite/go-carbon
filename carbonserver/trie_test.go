@@ -138,8 +138,8 @@ func TestTrieIndex(t *testing.T) {
 
 		"/service-01/server-114/metric-namespace-007/cpu.wsp",
 		"/service-01/server-125/metric-namespace-007/cpu.wsp",
-		"/service-01/server-12b/metric-namespace-007/cpu.wsp",
-		"/service-01/server-129/metric-namespace-007/cpu.wsp",
+		"/service-01/server-12a/metric-namespace-007/cpu.wsp",
+		"/service-01/server-149/metric-namespace-007/cpu.wsp",
 	})
 	var cases = []struct {
 		query  string
@@ -191,7 +191,7 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
-			query: "service-01.server-1[0-2][4-5a-z].metric-namespace-007.cpu",
+			query: "service-01.server-1[0-5][4-5a-z].metric-namespace-007.cpu",
 			expect: []string{
 				"service-01.server-114.metric-namespace-007.cpu",
 				"service-01.server-125.metric-namespace-007.cpu",

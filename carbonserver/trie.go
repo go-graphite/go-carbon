@@ -211,6 +211,7 @@ outer:
 // depth first search
 func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile []bool, err error) {
 	var gstates []*globState
+	var exact bool
 	for _, node := range strings.Split(pattern, "/") {
 		if node == "" {
 			return nil, nil, errors.New("empty node in query")
@@ -219,6 +220,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		if err != nil {
 			return nil, nil, err
 		}
+		exact = exact && gs.exact
 		gstates = append(gstates, gs)
 	}
 
@@ -347,7 +349,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 		files = append(files, cur.fullPath('.', ti.depth))
 		isFile = append(isFile, cur.isFile)
-		if len(files) >= limit {
+		if len(files) >= limit || exact {
 			break
 		}
 		goto parent
@@ -365,12 +367,17 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
 
 		if cur.c == '/' && childIndex[curLevel] >= len(cur.childrens) {
-			log.Println("gs going back")
 			gsIndex--
 			curGS = gstates[gsIndex]
-			curGS.cur = curGS.cur.parent
+			// curGS.cur = curGS.cur.parent
+
 			goto parent
 		}
+
+		// if curGS.cur != nil {
+		// 	curGS.cur = curGS.cur.parent
+		// }
+
 		continue
 	}
 
