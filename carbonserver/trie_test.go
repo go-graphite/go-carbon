@@ -27,17 +27,17 @@ func getTestFileList() []string {
 
 	rand.Seed(time.Now().Unix())
 	// 10/100/50000
-	limit0 := 50
-	limit1 := 50
-	limit2 := 100
+	limit0 := 10
+	limit1 := 10
+	limit2 := 10000
 	limit3 := 1
 	filesForIndex = make([]string, 0, limit0*limit1*limit2*limit3)
 	for i := 0; i < limit0; i++ {
 		for j := 0; j < limit1; j++ {
 			for k := 0; k < limit2; k++ {
-				for l := 0; l < limit3; l++ {
-					filesForIndex = append(filesForIndex, fmt.Sprintf("/service-%02d/server-%03d/metric-namespace-%03d/%x.wsp", i, j, k, rand.Int()))
-				}
+				// for l := 0; l < limit3; l++ {
+				// 	filesForIndex = append(filesForIndex, fmt.Sprintf("/service-%02d/server-%03d/metric-namespace-%03d/%x.wsp", i, j, k, rand.Int()))
+				// }
 				filesForIndex = append(filesForIndex, fmt.Sprintf("/service-%02d/server-%03d/metric-namespace-%03d/cpu.wsp", i, j, k))
 			}
 		}
@@ -147,9 +147,12 @@ func TestTrieIndex(t *testing.T) {
 
 		"/service-01/server-125/metric-namespzce-007/cpu.wsp",
 
+		// service-0*.*.metric-*-00[5-7]-xdp.cpu
+		"/service-01/server-170/metric-namespace-004-007-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007-007-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007-005-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	})
 	var cases = []struct {
 		input  []string

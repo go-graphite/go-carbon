@@ -31,7 +31,7 @@ type globNode struct {
 	starParent *globNode
 	children   [256]*globNode // make it smaller
 
-	matchFrom *trieNode
+	matchFrom, matchUntil *trieNode
 
 	posStart, posEnd int
 }
@@ -44,7 +44,28 @@ func (gs *globState) state(gn *globNode) string {
 	return gs.expr[gn.posStart:gn.posEnd]
 }
 
-// TODO: add range value validation
+func (gs *globState) reset() {
+	gs.cur = gs.root
+
+	cur := gs.root
+reset:
+	for cur != nil {
+		cur.matchFrom = nil
+		cur.matchUntil = nil
+		for i := 0; i < 256; i++ {
+			if cur.children[i] != nil {
+				cur = cur.children[i]
+				continue reset
+			}
+		}
+
+		break
+	}
+}
+
+// TODO:
+//     add range value validation
+//     add ^ in range match
 func newGlobState(expr string) (*globState, error) {
 	var gs = globState{root: &globNode{}, exact: true, expr: expr}
 	var cur = gs.root
@@ -88,8 +109,11 @@ func newGlobState(expr string) (*globState, error) {
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
 			}
+
 			s := &globNode{parent: cur, starParent: curStar, star: true, posStart: i, posEnd: i + 1}
-			cur.children[c] = s
+			for i := 0; i < 256; i++ {
+				cur.children[c] = s
+			}
 			if curStar == nil {
 				s.starParent = s
 			}
@@ -239,7 +263,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 	var curLevel int
 	var cur = ti.root
 	var curGS = gstates[0]
-	curGS.cur = curGS.root
+	curGS.reset()
 
 	var gst *globNode
 	var matched bool
@@ -248,7 +272,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 	_ = matchedByStar
 	for {
 		if childIndex[curLevel] >= len(cur.childrens) {
-			if curGS.cur.parent != nil {
+			if curGS.cur.parent != nil && curGS.cur.matchFrom == cur {
 				curGS.cur = curGS.cur.parent
 			}
 
@@ -273,7 +297,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 			gsIndex++
 			curGS = gstates[gsIndex]
-			curGS.cur = curGS.root
+			curGS.reset()
 
 			continue
 		}
@@ -286,10 +310,10 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			if curGS.cur.star {
 				gst = curGS.cur
 				matched = true
-			} else {
-				gst = curGS.cur.children['*']
-				matchedByStar = gst != nil
-				matched = matchedByStar
+				// } else {
+				// 	gst = curGS.cur.children['*']
+				// 	matchedByStar = gst != nil
+				// 	matched = matchedByStar
 			}
 		}
 
@@ -300,12 +324,16 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			// goto parent
 
 			gst = curGS.cur.starParent
+			// gst.matchUntil = cur
+
 			// continue
 		}
 
 		// log.Printf("c = %s matched %t\n", string(cur.c), curGS.children[cur.c] != nil)
 
-		gst.matchFrom = cur
+		if gst.matchFrom == nil {
+			gst.matchFrom = cur
+		}
 
 		curGS.cur = gst
 		if !curGS.cur.end {
