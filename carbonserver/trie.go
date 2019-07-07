@@ -2,7 +2,6 @@ package carbonserver
 
 import (
 	"errors"
-	"log"
 	"math"
 	"path/filepath"
 	"strings"
@@ -12,72 +11,149 @@ import (
 	"go.uber.org/zap"
 )
 
-type globState struct {
-	// c        byte
-	// ranges   *[256]bool      // [a-z0-9A-Z]
-	// depth int
-	exact bool
-	root  *globNode
+const (
+	gstateSplit  = 128
+	gstateMatch  = 129
+	gstateRanges = 130
+)
 
-	cur  *globNode
-	expr string
+var endGstate = &gstate{}
+
+type gmatcher struct {
+	exact   bool
+	root    *gstate
+	expr    string
+	dstates []*gdstate
+	dsindex int
 }
 
-type globNode struct {
-	end        bool
-	star       bool
-	ranges     bool
-	parent     *globNode
-	starParent *globNode
-	children   [256]*globNode // make it smaller
-
-	matchFrom, matchUntil *trieNode
-
-	posStart, posEnd int
+func (g *gmatcher) dstate() *gdstate { return g.dstates[len(g.dstates)-1] }
+func (g *gmatcher) push(s *gdstate)  { g.dstates = append(g.dstates, s) }
+func (g *gmatcher) pop() {
+	if len(g.dstates) <= 1 {
+		return
+	}
+	g.dstates = g.dstates[:len(g.dstates)-1]
 }
 
-func (gn *globNode) isNodeEnd() bool {
-	return gn.end || gn.children['/'] != nil
+type gstate struct {
+	// TODO: make c compact
+	c    [131]bool
+	next []*gstate
 }
 
-func (gs *globState) state(gn *globNode) string {
-	return gs.expr[gn.posStart:gn.posEnd]
-}
+func (g *gstate) String() string {
+	var toStr func(g *gstate) string
 
-func (gs *globState) reset() {
-	gs.cur = gs.root
-
-	cur := gs.root
-reset:
-	for cur != nil {
-		cur.matchFrom = nil
-		cur.matchUntil = nil
-		for i := 0; i < 256; i++ {
-			if cur.children[i] != nil {
-				cur = cur.children[i]
-				continue reset
-			}
+	ref := map[*gstate]string{}
+	toStr = func(g *gstate) string {
+		if r, ok := ref[g]; ok {
+			return r
 		}
 
-		break
+		if g == endGstate {
+			ref[g] = "end"
+			return "end"
+		}
+		var b []byte
+		for c, t := range g.c {
+			if t {
+				if isAlphanumeric(byte(c)) {
+					b = append(b, byte(c))
+				} else {
+					b = append(b, '.')
+				}
+			}
+		}
+		var r = string(b)
+		ref[g] = r + "(...)"
+		for _, n := range g.next {
+			r += "(" + toStr(n) + ")"
+		}
+
+		ref[g] = r
+		return r
 	}
+
+	return toStr(g)
+}
+
+type gdstate struct {
+	next    [131]*gdstate
+	gstates []*gstate
+
+	cacheHit int
+}
+
+func (g gdstate) String() string {
+	var r []string
+	for _, s := range g.gstates {
+		r = append(r, s.String())
+	}
+	return strings.Join(r, ",")
+}
+
+func (g *gdstate) step(c byte) *gdstate {
+	if g.next[c] != nil {
+		g.cacheHit++
+		return g.next[c]
+	}
+
+	var ng gdstate
+	for _, s := range g.gstates {
+		if s.c[c] || s.c['*'] {
+			for _, ns := range s.next {
+				ng.gstates = g.add(ng.gstates, ns)
+			}
+		}
+	}
+	g.next[c] = &ng
+	return &ng
+}
+
+func (g *gdstate) add(list []*gstate, s *gstate) []*gstate {
+	if s.c[gstateSplit] {
+		for _, ns := range s.next {
+			list = g.add(list, ns)
+		}
+
+		return list
+	}
+
+	list = append(list, s)
+	return list
+}
+
+func (g *gdstate) matched() bool {
+	for _, s := range g.gstates {
+		if s == endGstate {
+			return true
+		}
+	}
+	return false
 }
 
 // TODO:
 //     add range value validation
 //     add ^ in range match
-func newGlobState(expr string) (*globState, error) {
-	var gs = globState{root: &globNode{}, exact: true, expr: expr}
-	var cur = gs.root
-	var curStar *globNode
+//     support {} cases
+func newGlobState(expr string) (*gmatcher, error) {
+	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
+	var cur = m.root
+	// var inAlternate bool
 	for i := 0; i < len(expr); i++ {
 		c := expr[i]
 		switch c {
+		// case '{':
+		// case '}':
 		case '[':
-			gs.exact = false
-			// var ranges [256]bool
-			s := &globNode{parent: cur, starParent: curStar, posStart: i, ranges: true}
+			m.exact = false
+			s := &gstate{}
 			i++
+			negative := expr[i] == '^'
+			if negative {
+				i++
+			}
 			for i < len(expr) && expr[i] != ']' {
 				if expr[i] == '-' {
 					if i+1 >= len(expr) {
@@ -85,79 +161,76 @@ func newGlobState(expr string) (*globState, error) {
 					}
 
 					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
-						// log.Printf("j = %+v\n", string(j))
-						cur.children[j] = s
+						s.c[j] = true
 					}
 
 					i += 2
 					continue
 				}
 
-				// log.Printf("expr[i] = %+v\n", string(expr[i]))
-				cur.children[expr[i]] = s
+				s.c[expr[i]] = true
 				i++
 			}
 			if expr[i] != ']' {
 				return nil, errors.New("glob: missing ]")
 			}
 
-			// log.Printf("s.children = %+v\n", cur.children)
-			s.posEnd = i + 1
+			if negative {
+				// TODO: revisit
+				for i := 33; i <= 126; i++ {
+					s.c[i] = !s.c[i]
+				}
+			}
+
+			cur.next = append(cur.next, s)
 			cur = s
 		case '*':
-			gs.exact = false
+			m.exact = false
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
 			}
 
-			s := &globNode{parent: cur, starParent: curStar, star: true, posStart: i, posEnd: i + 1}
-			for i := 0; i < 256; i++ {
-				cur.children[c] = s
-			}
-			if curStar == nil {
-				s.starParent = s
-			}
+			s := &gstate{}
+			s.c['*'] = true
 
-			cur = s
-			curStar = cur
+			var split, star gstate
+			star.c['*'] = true
+			split.c[gstateSplit] = true
+			split.next = append(split.next, &star)
+			cur.next = append(cur.next, &split)
+			star.next = append(star.next, &split)
+
+			cur = &split
 		default:
-			s := &globNode{parent: cur, starParent: curStar, posStart: i, posEnd: i + 1}
-			cur.children[c] = s
+			s := &gstate{}
+			s.c[c] = true
+			cur.next = append(cur.next, s)
 			cur = s
 		}
 	}
-	cur.end = true
+	cur.next = append(cur.next, endGstate)
 
-	return &gs, nil
+	var droot gdstate
+	for _, s := range m.root.next {
+		droot.gstates = droot.add(droot.gstates, s)
+	}
+	m.dstates = append(m.dstates, &droot)
+
+	return &m, nil
 }
 
-// func (gs *globState) dump() string {
-// 	var r string
-// 	cur := gs
-// 	for cur != nil {
-// 		var v string
-// 		if cur.c != 0 {
-// 			v = string(cur.c)
-// 		} else {
-// 			for c, ok := range cur.ranges {
-
-// 			}
-// 		}
-// 		fmt.Printf("%s%s", pad, v)
-// 	}
-// }
+func isAlphanumeric(c byte) bool {
+	return 33 <= c && c <= 127
+}
 
 type trieIndex struct {
-	root *trieNode
-	// nodeDepth int
-	// byteDepth int
+	root      *trieNode
 	depth     int
 	fileExt   string
 	fileCount int
-
-	// stringIDs map[string]int
 }
 
+// TODO: use compact c (string/[]byte rather than byte)
 type trieNode struct {
 	c byte
 	// node      string
@@ -167,11 +240,13 @@ type trieNode struct {
 	isNodeEnd bool
 }
 
+var fileNode = &trieNode{}
+var dirNode = &trieNode{}
+
 func newTrie(fileExt string) *trieIndex {
 	return &trieIndex{
 		root:    &trieNode{},
 		fileExt: fileExt,
-		// stringIDs: map[string]int{},
 	}
 }
 
@@ -186,18 +261,7 @@ func (ti *trieIndex) insert(path string) {
 		return
 	}
 
-	// nodes := strings.Split(path, string(os.PathSeparator))
 	cur := ti.root
-	// if len(nodes) > ti.nodeDepth {
-	// 	ti.nodeDepth = len(nodes)
-	// }
-	// var bdepth int
-	// for _, node := range nodes {
-	// 	bdepth += len(node)
-	// }
-	// if bdepth > ti.byteDepth {
-	// 	ti.byteDepth = bdepth
-	// }
 	if len(path) > ti.depth {
 		ti.depth = len(path)
 	}
@@ -212,7 +276,6 @@ outer:
 		c := path[i]
 		for _, child := range cur.childrens {
 			if child.c == byte(c) {
-				// if child.val == node {
 				cur = child
 				continue outer
 			}
@@ -224,23 +287,19 @@ outer:
 		cur.parent.isNodeEnd = c == '/'
 	}
 
-	if isFile {
-		cur.isFile = true
-		cur.isNodeEnd = true
-		ti.fileCount++
+	if !isFile {
+		return
 	}
 
-	// var isFile bool
-	// if i == len(path)-1 {
-	// 	isFile = strings.HasSuffix(node, ti.fileExt)
-	// 	node = strings.TrimSuffix(node, ti.fileExt)
-	// 	ti.fileCount++
-	// }
+	cur.isFile = true
+	cur.isNodeEnd = true
+	cur.childrens = append(cur.childrens, fileNode)
+	ti.fileCount++
 }
 
 // depth first search
 func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile []bool, err error) {
-	var gstates []*globState
+	var matchers []*gmatcher
 	var exact bool
 	for _, node := range strings.Split(pattern, "/") {
 		if node == "" {
@@ -251,109 +310,57 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			return nil, nil, err
 		}
 		exact = exact && gs.exact
-		gstates = append(gstates, gs)
+		matchers = append(matchers, gs)
 	}
 
-	// matched = make([]string, 0, limit)
-	// isFile = make([]bool, 0, limit)
-
-	// var nodes = strings.Split(pattern, "/")
-	var childIndex = make([]int, ti.depth+1)
-	var gsIndex int
-	var curLevel int
 	var cur = ti.root
-	var curGS = gstates[0]
-	curGS.reset()
+	var nindex = make([]int, ti.depth+1)
+	var ncindex int
+	var mindex int
+	var curm = matchers[0]
+	var ndstate *gdstate
 
-	var gst *globNode
-	var matched bool
-	var matchedByStar bool
-	_ = matched
-	_ = matchedByStar
 	for {
-		if childIndex[curLevel] >= len(cur.childrens) {
-			if curGS.cur.parent != nil && curGS.cur.matchFrom == cur {
-				curGS.cur = curGS.cur.parent
-			}
-
+		if nindex[ncindex] >= len(cur.childrens) {
+			curm.pop()
 			goto parent
 		}
 
-		cur = cur.childrens[childIndex[curLevel]]
-		curLevel++
-
-		log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-		log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
-
-		// TODO:
-		//  * quit early for exact match
-		//  * use string id for exact match
-
-		// TODO: not right?
-		if cur.c == '/' {
-			if gsIndex+1 >= len(gstates) || !curGS.cur.end {
-				goto parent
-			}
-
-			gsIndex++
-			curGS = gstates[gsIndex]
-			curGS.reset()
-
-			continue
-		}
-
-		gst = curGS.cur.children[cur.c]
-		matched = gst != nil
-		matchedByStar = false
-
-		if !matched {
-			if curGS.cur.star {
-				gst = curGS.cur
-				matched = true
-				// } else {
-				// 	gst = curGS.cur.children['*']
-				// 	matchedByStar = gst != nil
-				// 	matched = matchedByStar
-			}
-		}
-
-		if !matched {
-			if curGS.cur.starParent == nil {
-				goto parent
-			}
-			// goto parent
-
-			gst = curGS.cur.starParent
-			// gst.matchUntil = cur
-
-			// continue
-		}
-
-		// log.Printf("c = %s matched %t\n", string(cur.c), curGS.children[cur.c] != nil)
-
-		if gst.matchFrom == nil {
-			gst.matchFrom = cur
-		}
-
-		curGS.cur = gst
-		if !curGS.cur.end {
-			continue
-		}
-
-		// continue matching if the current glob state a trailing star
-		if !cur.isNodeEnd && curGS.cur.star {
-			// .parent != nil && curGS.cur == curGS.cur.parent.children['*']
-			continue
-		}
+		cur = cur.childrens[nindex[ncindex]]
+		ncindex++
 
 		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-		// log.Printf("gst.end = %+v\n", gst.end)
-		// log.Printf("gsIndex = %+v\n", gsIndex)
-		if gsIndex+1 < len(gstates) {
-			// gsIndex++
-			// curGS = gstates[gsIndex]
-			// curGS.cur = curGS.root
+		// log.Printf("curm.dstate = %+v\n", curm.dstate())
+
+		if cur.c == '/' {
+			if mindex+1 >= len(matchers) || !curm.dstate().matched() {
+				goto parent
+			}
+
+			mindex++
+			curm = matchers[mindex]
+			curm.dstates = curm.dstates[:1]
+
 			continue
+		}
+
+		ndstate = curm.dstate().step(cur.c)
+		if len(ndstate.gstates) == 0 {
+			goto parent
+		}
+
+		curm.push(ndstate)
+
+		if mindex+1 < len(matchers) {
+			continue
+		}
+
+		if !cur.isNodeEnd && !cur.isFile {
+			continue
+		}
+
+		if !curm.dstate().matched() {
+			goto parent
 		}
 
 		files = append(files, cur.fullPath('.', ti.depth))
@@ -365,32 +372,20 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 	parent:
 		// use exact for fast exit
-		childIndex[curLevel] = 0
-		curLevel--
-		if curLevel < 0 {
+		nindex[ncindex] = 0
+		ncindex--
+		if ncindex < 0 {
 			break
 		}
-		childIndex[curLevel]++
+		nindex[ncindex]++
 		cur = cur.parent
 
-		// log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
-
-		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-
-		if cur.c == '/' && childIndex[curLevel] >= len(cur.childrens) {
-			gsIndex--
-			curGS = gstates[gsIndex]
-			// curGS.cur = curGS.cur.parent
+		if cur.c == '/' && nindex[ncindex] >= len(cur.childrens) {
+			mindex--
+			curm = matchers[mindex]
 
 			goto parent
 		}
-
-		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-		// log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
-		// if curGS.cur.ranges {
-		// 	curGS.cur = curGS.cur.parent
-		// 	log.Printf("curGS.state(curGS.cur) = %+v\n", curGS.state(curGS.cur))
-		// }
 
 		continue
 	}
@@ -399,20 +394,6 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 }
 
 func (tn *trieNode) fullPath(sep byte, depth int) string {
-	// var nodes = make([]string, 0, depth)
-	// cur := tn
-	// for cur.parent != nil {
-	// 	nodes = append(nodes, cur.val)
-	// 	cur = cur.parent
-	// }
-	// for i := 0; i < len(nodes)/2; i++ {
-	// 	tmp := nodes[i]
-	// 	nodes[i] = nodes[len(nodes)-i-1]
-	// 	nodes[len(nodes)-i-1] = tmp
-	// }
-
-	// return strings.Join(nodes, sep)
-
 	var r = make([]byte, depth)
 	var index = depth - 1
 	var cur = tn

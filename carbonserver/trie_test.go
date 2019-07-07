@@ -14,7 +14,6 @@ import (
 
 	"github.com/OneOfOne/go-utils/memory"
 	"github.com/dgryski/go-trigram"
-	"github.com/kr/pretty"
 	"go.uber.org/zap"
 )
 
@@ -27,9 +26,9 @@ func getTestFileList() []string {
 
 	rand.Seed(time.Now().Unix())
 	// 10/100/50000
-	limit0 := 10
-	limit1 := 10
-	limit2 := 10000
+	limit0 := 50
+	limit1 := 50
+	limit2 := 100
 	limit3 := 1
 	filesForIndex = make([]string, 0, limit0*limit1*limit2*limit3)
 	for i := 0; i < limit0; i++ {
@@ -48,59 +47,68 @@ func getTestFileList() []string {
 	return filesForIndex
 }
 
-var trieServer *CarbonserverListener
-var trigramServer *CarbonserverListener
+var btrieServer *CarbonserverListener
+var btrigramServer *CarbonserverListener
+
+func newTrieServer(files []string) *CarbonserverListener {
+	var listener CarbonserverListener
+	listener.logger, _ = zap.NewDevelopment()
+	listener.accessLogger, _ = zap.NewDevelopment()
+	listener.trieIndex = true
+	listener.whisperData = "./testdata"
+	listener.maxGlobs = 100
+	listener.failOnMaxGlobs = true
+
+	start := time.Now()
+	trieIndex := newTrie(".wsp")
+	for _, file := range files {
+		trieIndex.insert(file)
+	}
+	fmt.Printf("trie index took %s\n", time.Now().Sub(start))
+
+	listener.UpdateFileIndex(&fileIndex{
+		trieIdx: trieIndex,
+	})
+
+	return &listener
+}
+
+func newTrigramServer(files []string) *CarbonserverListener {
+	var listener CarbonserverListener
+	listener.logger, _ = zap.NewDevelopment()
+	listener.accessLogger, _ = zap.NewDevelopment()
+	listener.trigramIndex = true
+	listener.whisperData = "./testdata"
+	listener.maxGlobs = 100
+	listener.failOnMaxGlobs = true
+
+	start := time.Now()
+	idx := trigram.NewIndex(files)
+	fmt.Printf("trigram index took %s\n", time.Now().Sub(start))
+
+	listener.UpdateFileIndex(&fileIndex{
+		idx:   idx,
+		files: files,
+	})
+
+	return &listener
+}
 
 func initServersForGlob(files []string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		var listener CarbonserverListener
-		listener.logger, _ = zap.NewDevelopment()
-		listener.accessLogger, _ = zap.NewDevelopment()
-		listener.trieIndex = true
-		listener.whisperData = "./testdata"
-		listener.maxGlobs = 100
-		listener.failOnMaxGlobs = true
-
-		start := time.Now()
-		trieIndex := newTrie(".wsp")
-		for _, file := range files {
-			trieIndex.insert(file)
-		}
-		fmt.Printf("trie index took %s\n", time.Now().Sub(start))
-
-		listener.UpdateFileIndex(&fileIndex{
-			trieIdx: trieIndex,
-		})
-		trieServer = &listener
-
+		btrieServer = newTrieServer(files)
 		wg.Done()
 	}()
 	go func() {
-		var listener CarbonserverListener
-		listener.logger, _ = zap.NewDevelopment()
-		listener.accessLogger, _ = zap.NewDevelopment()
-		listener.trigramIndex = true
-		listener.whisperData = "./testdata"
-		listener.maxGlobs = 100
-		listener.failOnMaxGlobs = true
-
-		start := time.Now()
-		idx := trigram.NewIndex(files)
-		fmt.Printf("trigram index took %s\n", time.Now().Sub(start))
-
-		listener.UpdateFileIndex(&fileIndex{
-			idx:   idx,
-			files: files,
-		})
-		trigramServer = &listener
+		btrigramServer = newTrigramServer(files)
 		wg.Done()
 	}()
 
 	wg.Wait()
-	log.Printf("memory.Sizeof(trieServer)    = %+v\n", memory.Sizeof(trieServer))
-	log.Printf("memory.Sizeof(trigramServer) = %+v\n", memory.Sizeof(trigramServer))
+	log.Printf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(btrieServer))
+	log.Printf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(btrigramServer))
 }
 
 func init() {
@@ -112,7 +120,7 @@ func init() {
 }
 
 func TestTrieIndex(t *testing.T) {
-	initServersForGlob([]string{
+	commonFiles := []string{
 		// service-0*.*.metric-*-00[5-7].cpu
 		"/something/else/server.wsp",
 		"/service-00/server-000/metric-namespace-000/43081e003a315b88.wsp",
@@ -153,7 +161,7 @@ func TestTrieIndex(t *testing.T) {
 		"/service-01/server-170/metric-namespace-007-005-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
-	})
+	}
 	var cases = []struct {
 		input  []string
 		query  string
@@ -165,15 +173,18 @@ func TestTrieIndex(t *testing.T) {
 		// "service-01.*",
 
 		{
+			input:  commonFiles,
 			query:  "service-00",
 			expect: []string{"service-00"},
 		},
 		{
+			input:  commonFiles,
 			query:  "service-00.server-000.metric-namespace-000.cpu",
 			expect: []string{"service-00.server-000.metric-namespace-000.cpu"},
 		},
 
 		{
+			input: commonFiles,
 			query: "service-00.server-000.metric-namespace-00[0-2].cpu",
 			expect: []string{
 				"service-00.server-000.metric-namespace-000.cpu",
@@ -182,6 +193,7 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: commonFiles,
 			query: "service-00.server-00[0-2].metric-namespace-00[0-2].cpu",
 			expect: []string{
 				"service-00.server-000.metric-namespace-000.cpu",
@@ -191,6 +203,7 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: commonFiles,
 			query: "service-01.server-1[0-2]0.metric-namespace-007.cpu",
 			expect: []string{
 				"service-01.server-110.metric-namespace-007.cpu",
@@ -198,6 +211,7 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: commonFiles,
 			query: "service-01.server-1[0-5][4-5a-z].metric-namespace-007.cpu",
 			expect: []string{
 				"service-01.server-114.metric-namespace-007.cpu",
@@ -206,12 +220,14 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: commonFiles,
 			query: "service-01.server-1[1]4.metric-namespace-007.cpu",
 			expect: []string{
 				"service-01.server-114.metric-namespace-007.cpu",
 			},
 		},
 		{
+			input: commonFiles,
 			query: "service-01.server-1[0-2][4-5].metric-namespace-007.cpu",
 			expect: []string{
 				"service-01.server-114.metric-namespace-007.cpu",
@@ -219,6 +235,24 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: []string{
+				"/service-01/server-114/metric-namespace-007/cpu.wsp",
+				"/service-01/server-125/metric-namespace-007/cpu.wsp",
+				"/service-01/server-125/metric-namespace-006/cpu.wsp",
+				"/service-01/server-111/metric-namespace-007/cpu.wsp",
+				"/service-01/server-11a/metric-namespace-007/cpu.wsp",
+				"/service-01/something-125/metric-namespace-007/cpu.wsp",
+			},
+			query: "service-01.server-1[0-2][^4-5].metric-namespace-007.cpu",
+			expect: []string{
+				"service-01.server-111.metric-namespace-007.cpu",
+				"service-01.server-114.metric-namespace-007.cpu",
+				"service-01.server-11a.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespace-007.cpu",
+			},
+		},
+		{
+			input: commonFiles,
 			query: "service-01.server-1[0-2][4-5].metric-n[a-z]mesp[a-z1-9]ce-007.cpu",
 			expect: []string{
 				"service-01.server-114.metric-namespace-007.cpu",
@@ -228,6 +262,7 @@ func TestTrieIndex(t *testing.T) {
 		},
 
 		{
+			input: commonFiles,
 			query: "service-00.*.metric-namespace-005.cpu",
 			expect: []string{
 				"service-00.server-000.metric-namespace-005.cpu",
@@ -237,6 +272,7 @@ func TestTrieIndex(t *testing.T) {
 		},
 
 		{
+			input: commonFiles,
 			// query: "*.*.metric-namespace-001.*",
 			query: "*",
 			expect: []string{
@@ -246,6 +282,7 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: commonFiles,
 			query: "service-0*.*.metric-namespace-005.cpu",
 			expect: []string{
 				"service-00.server-000.metric-namespace-005.cpu",
@@ -255,6 +292,7 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		// {
+		//  input: commonFiles,
 		// 	query: "service-0*.*.metric-*-00[5-7].cpu",
 		// 	expect: []string{
 		// 		"service-00.server-000.metric-namespace-005.cpu",
@@ -264,13 +302,21 @@ func TestTrieIndex(t *testing.T) {
 		// 	},
 		// },
 		{
+			input: commonFiles,
 			query: "service-0*.*.metric-*-00[5-7]-xdp.cpu",
 			expect: []string{
-				// "service-00.server-000.metric-namespace-005.cpu",
-				// "service-00.server-001.metric-namespace-005.cpu",
-				// "service-00.server-002.metric-namespace-005.cpu",
-				// "service-01.server-000.metric-namespace-005.cpu",
-				"service-01.server-170.metric-1namespace-007-007-xdp.cpu",
+				"service-01.server-170.metric-namespace-004-007-xdp.cpu",
+				"service-01.server-170.metric-namespace-006-xdp.cpu",
+				"service-01.server-170.metric-namespace-007-005-xdp.cpu",
+				"service-01.server-170.metric-namespace-007-007-xdp.cpu",
+			},
+		},
+		{
+			input: commonFiles,
+			query: "service-0*.*.{metric-namespace-004-007-xdp,metric-namespace-007-007-xdp}.cpu",
+			expect: []string{
+				"service-01.server-170.metric-namespace-004-007-xdp.cpu",
+				"service-01.server-170.metric-namespace-007-007-xdp.cpu",
 			},
 		},
 
@@ -293,17 +339,19 @@ func TestTrieIndex(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: %s", c.query)
 
-			trieFiles, _, err := trieServer.expandGlobs(c.query)
+			trieServer := newTrieServer(c.input)
+			trieFiles, _, err := trieServer.expandGlobsTrie(c.query)
 			if err != nil {
 				t.Errorf("failed to trie.expandGlobs: %s", err)
 			}
 
+			// trigramServer := newTrigramServer(c.input)
 			// trigramFiles, _, err := trigramServer.expandGlobs(target)
 			// if err != nil {
 			// 	t.Errorf("failed to trigram.expandGlobs: %s", err)
 			// }
 			// for i, f := range trigramFiles {
-			// 	f = f[len(trigramServer.whisperData+"/"):]
+			// 	f = f[len(btrigramServer.whisperData+"/"):]
 			// 	f = f[:len(f)-4]
 			// 	trigramFiles[i] = strings.Replace(f, "/", ".", -1)
 			// }
@@ -331,90 +379,100 @@ func TestTrieIndex(t *testing.T) {
 // func BenchmarkTrieIndexExact(b *testing.B) {
 // 	for i := 0; i < b.N; i++ {
 // 		target := filesForIndex[rand.Intn(len(filesForIndex))]
-// 		trieServer.expandGlobs(target[1 : len(target)-4])
+// 		btrieServer.expandGlobs(target[1 : len(target)-4])
 // 	}
 // }
 //
 // func BenchmarkTrigramIndexExact(b *testing.B) {
 // 	for i := 0; i < b.N; i++ {
 // 		target := filesForIndex[rand.Intn(len(filesForIndex))]
-// 		trigramServer.expandGlobs(target[1 : len(target)-4])
+// 		btrigramServer.expandGlobs(target[1 : len(target)-4])
 // 	}
 // }
 
 // /service-00/server-000/metric-namespace-000/355bf71b128f1749.wsp
 func BenchmarkTrieIndexGlob1(b *testing.B) {
 	// start := time.Now()
-	// f, _, _ := trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-40*.*")
+	// f, _, _ := btrieServer.expandGlobsTrie("service-*.server-*.metric-namespace-40*.*")
 	// b.Logf("len(f) = %+v\n", len(f))
 	// b.Logf("search took: %s", time.Now().Sub(start))
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-40*.*")
+		btrieServer.expandGlobsTrie("service-*.server-*.metric-namespace-40*.*")
 	}
 }
 
 func BenchmarkTrigramIndexGlob1(b *testing.B) {
-	// f, _, _ := trigramServer.expandGlobs("service-*.server-*.metric-namespace-40*.*")
+	// f, _, _ := btrigramServer.expandGlobs("service-*.server-*.metric-namespace-40*.*")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trigramServer.expandGlobs("service-*.server-*.metric-namespace-40*.*")
+		btrigramServer.expandGlobs("service-*.server-*.metric-namespace-40*.*")
 	}
 }
 
 func BenchmarkTrieIndexGlob2(b *testing.B) {
-	// f, _, _ := trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-[4]0*.*")
+	// f, _, _ := btrieServer.expandGlobsTrie("service-*.server-*.metric-namespace-[4]0*.*")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobsTrie("service-*.server-*.metric-namespace-[4]0*.*")
+		btrieServer.expandGlobsTrie("service-*.server-*.metric-namespace-[4]0*.*")
 	}
 }
 
 func BenchmarkTrigramIndexGlob2(b *testing.B) {
-	// f, _, _ := trigramServer.expandGlobs("service-*.server-*.metric-namespace-[4]0*.*")
+	// f, _, _ := btrigramServer.expandGlobs("service-*.server-*.metric-namespace-[4]0*.*")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trigramServer.expandGlobs("service-*.server-*.metric-namespace-[4]0*.*")
+		btrigramServer.expandGlobs("service-*.server-*.metric-namespace-[4]0*.*")
 	}
 }
 
 func BenchmarkTrieIndexGlob3(b *testing.B) {
-	// f, _, _ := trieServer.expandGlobsTrie("service-*.server-*.*.cpu")
+	// f, _, _ := btrieServer.expandGlobsTrie("service-*.server-*.*.cpu")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobsTrie("service-*.server-*.*.cpu")
+		btrieServer.expandGlobsTrie("service-*.server-*.*.cpu")
 	}
 }
 
 func BenchmarkTrigramIndexGlob3(b *testing.B) {
-	// f, _, _ := trigramServer.expandGlobs("service-*.server-*.*.cpu")
+	// f, _, _ := btrigramServer.expandGlobs("service-*.server-*.*.cpu")
 	// b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trigramServer.expandGlobs("service-*.server-*.*.cpu")
+		btrigramServer.expandGlobs("service-*.server-*.*.cpu")
 	}
 }
 
 // /service-49/server-049/metric-namespace-099/cpu.wsp
 func BenchmarkTrieIndexGlob4(b *testing.B) {
-	f, _, _ := trieServer.expandGlobsTrie("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+	f, _, _ := btrieServer.expandGlobsTrie("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
 	b.Logf("len(f) = %+v\n", len(f))
 	// fmt.Println(f)
 	for i := 0; i < b.N; i++ {
-		trieServer.expandGlobsTrie("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+		btrieServer.expandGlobsTrie("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
 	}
 }
 
 func BenchmarkTrigramIndexGlob4(b *testing.B) {
-	f, _, _ := trigramServer.expandGlobs("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+	f, _, _ := btrigramServer.expandGlobs("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
 	b.Logf("len(f) = %+v\n", len(f))
 	for i := 0; i < b.N; i++ {
-		trigramServer.expandGlobs("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
+		btrigramServer.expandGlobs("service-2[3-4].server-02[1-9].metric-namespace-0[2-3]0.cpu")
 	}
 }
 
-func TestGlobState(t *testing.T) {
-	gs, err := newGlobState("a.[a-z0-9]bcd.*.d[0-9]")
-	if err != nil {
-		t.Fatal(err)
+// /service-49/server-049/metric-namespace-099/cpu.wsp
+func BenchmarkTrieIndexGlob5(b *testing.B) {
+	f, _, _ := btrieServer.expandGlobsTrie("service-23.server-029.metric-namespace-030.cpu")
+	b.Logf("len(f) = %+v\n", len(f))
+	// fmt.Println(f)
+	for i := 0; i < b.N; i++ {
+		btrieServer.expandGlobsTrie("service-23.server-029.metric-namespace-030.cpu")
 	}
-	pretty.Println(gs)
+}
+
+func BenchmarkTrigramIndexGlob5(b *testing.B) {
+	f, _, _ := btrigramServer.expandGlobs("service-23.server-029.metric-namespace-030.cpu")
+	b.Logf("len(f) = %+v\n", len(f))
+	for i := 0; i < b.N; i++ {
+		btrigramServer.expandGlobs("service-23.server-029.metric-namespace-030.cpu")
+	}
 }
