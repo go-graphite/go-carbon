@@ -319,6 +319,23 @@ func TestTrieIndex(t *testing.T) {
 				"service-01.server-170.metric-namespace-007-007-xdp.cpu",
 			},
 		},
+		{
+			input: []string{
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_5xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/tcp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/udp.wsp",
+			},
+			query: "services.groups.*.*.nginx.type.*.frontend.random-404_xoxo.http*",
+			expect: []string{
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_3xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_4xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_5xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
+			},
+		},
 
 		// "*.*.metric-namespace-001.*",
 		// "*.*.metric-namespace-*.*",

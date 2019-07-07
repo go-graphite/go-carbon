@@ -360,6 +360,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 
 		if !curm.dstate().matched() {
+			curm.pop()
 			goto parent
 		}
 
@@ -368,6 +369,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		if len(files) >= limit || exact {
 			break
 		}
+		curm.pop()
 		goto parent
 
 	parent:
