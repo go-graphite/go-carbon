@@ -5,8 +5,10 @@ import (
 	"io/ioutil"
 	"log"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OneOfOne/go-utils/memory"
 )
@@ -37,29 +39,54 @@ func TestTrieGlobRealData(t *testing.T) {
 	trigramServer.whisperData = *carbonPath
 
 	if *checkMemory {
-		log.Printf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(btrieServer))
-		log.Printf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(btrigramServer))
+		log.Printf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
+		log.Printf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(trigramServer))
 	}
 
 	queries := readFile(*targetQueryPath)
 	for _, query := range queries {
 		t.Run(query, func(t *testing.T) {
+			start1 := time.Now()
 			trieFiles, trieLeafs, err := trieServer.expandGlobsTrie(query)
 			if err != nil {
 				t.Errorf("trie search errro: %s", err)
 			}
+			t.Logf("trie took %s", time.Now().Sub(start1))
 
+			start2 := time.Now()
 			trigramFiles, trigramLeafs, err := trigramServer.expandGlobs(query)
 			if err != nil {
 				t.Errorf("trigram search errro: %s", err)
 			}
+			t.Logf("trigram took %s", time.Now().Sub(start2))
+
+			t.Logf("trie %d trigram %d", len(trieFiles), len(trigramFiles))
+
+			sortFilesLeafs(trieFiles, trieLeafs)
+			sortFilesLeafs(trigramFiles, trigramLeafs)
 
 			if !reflect.DeepEqual(trieFiles, trigramFiles) {
-				t.Errorf("files diff\n\ttrie: %v\n\ttrigram: %v\n", trieFiles, trigramFiles)
+				t.Errorf("files diff\n\ttrie:    %v\n\ttrigram: %v\n", trieFiles, trigramFiles)
 			}
-			if !reflect.DeepEqual(trieLeafs, trigramLeafs) {
-				t.Errorf("leafs diff\n\ttrie: %v\n\ttrigram: %v\n", trieLeafs, trigramLeafs)
+			if trieLeafs == nil {
+				trieLeafs = []bool{}
+			}
+			if !reflect.DeepEqual(trieLeafs, trigramLeafs[:]) {
+				t.Errorf("leafs diff\n\ttrie:    %#v\n\ttrigram: %#v\n", trieLeafs, trigramLeafs)
 			}
 		})
+	}
+}
+
+func sortFilesLeafs(files []string, leafs []bool) {
+	oldIndex := map[string]int{}
+	for i, f := range files {
+		oldIndex[f] = i
+	}
+	sort.Strings(files)
+	oldLeafs := make([]bool, len(leafs))
+	copy(leafs, oldLeafs)
+	for i, f := range files {
+		leafs[i] = oldLeafs[oldIndex[f]]
 	}
 }
