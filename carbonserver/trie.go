@@ -232,16 +232,12 @@ type trieIndex struct {
 
 // TODO: use compact c (string/[]byte rather than byte)
 type trieNode struct {
-	c byte
-	// node      string
+	c         byte
 	parent    *trieNode
 	childrens []*trieNode
-	isFile    bool
-	isNodeEnd bool
 }
 
 var fileNode = &trieNode{}
-var dirNode = &trieNode{}
 
 func newTrie(fileExt string) *trieIndex {
 	return &trieIndex{
@@ -284,15 +280,15 @@ outer:
 		tnode := &trieNode{c: c, parent: cur}
 		cur.childrens = append(cur.childrens, tnode)
 		cur = tnode
-		cur.parent.isNodeEnd = c == '/'
 	}
 
 	if !isFile {
+		if cur.c != '/' {
+			cur.childrens = append(cur.childrens, &trieNode{c: '/', parent: cur})
+		}
 		return
 	}
 
-	cur.isFile = true
-	cur.isNodeEnd = true
 	cur.childrens = append(cur.childrens, fileNode)
 	ti.fileCount++
 }
@@ -355,7 +351,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			continue
 		}
 
-		if !cur.isNodeEnd && !cur.isFile {
+		if !(cur.childrens[0].c == '/' || cur.childrens[0] == fileNode) {
 			continue
 		}
 
@@ -365,7 +361,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		}
 
 		files = append(files, cur.fullPath('.', ti.depth))
-		isFile = append(isFile, cur.isFile)
+		isFile = append(isFile, cur.childrens[0] == fileNode)
 		if len(files) >= limit || exact {
 			break
 		}
