@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"unsafe"
-
-	"github.com/lomik/zapwriter"
 )
 
 const (
@@ -441,9 +439,6 @@ func (ti *trieIndex) allFiles(sep byte) []string {
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
-	var useGlob bool
-	logger := zapwriter.Logger("carbonserver")
-
 	/* things to glob:
 	 * - carbon.relays  -> carbon.relays
 	 * - carbon.re      -> carbon.relays, carbon.rewhatever

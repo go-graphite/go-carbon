@@ -724,12 +724,14 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 }
 
 func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse) {
+	logger := zapwriter.Logger("carbonserver")
+	defer func(start time.Time) { logger.Info("expandGlobs", zap.Duration("time", time.Now().Sub(start))) }(time.Now())
+
 	if listener.trieIndex {
 		return listener.expandGlobsTrie(query)
 	}
 
 	var useGlob bool
-	logger := zapwriter.Logger("carbonserver")
 
 	// // TODO: Find out why we have set 'useGlob' if 'star == -1'
 	// if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
