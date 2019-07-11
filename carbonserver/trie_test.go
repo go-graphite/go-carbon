@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OneOfOne/go-utils/memory"
 	"github.com/dgryski/go-trigram"
 	"go.uber.org/zap"
 )
@@ -60,7 +61,6 @@ func newTrigramServer(files []string) *CarbonserverListener {
 
 func TestTrieIndex(t *testing.T) {
 	commonFiles := []string{
-		// service-0*.*.metric-*-00[5-7].cpu
 		"/something/else/server.wsp",
 		"/service-00/server-000/metric-namespace-000/43081e003a315b88.wsp",
 		"/service-00/server-000/metric-namespace-000/cpu.wsp",
@@ -94,7 +94,6 @@ func TestTrieIndex(t *testing.T) {
 
 		"/service-01/server-125/metric-namespzce-007/cpu.wsp",
 
-		// service-0*.*.metric-*-00[5-7]-xdp.cpu
 		"/service-01/server-170/metric-namespace-004-007-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007-007-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-007-005-xdp/cpu.wsp",
@@ -106,11 +105,6 @@ func TestTrieIndex(t *testing.T) {
 		query  string
 		expect []string
 	}{
-		// trigram index falls back to file system globbing for these cases
-		// "*",
-		// "*.*.*",
-		// "service-01.*",
-
 		{
 			input:  commonFiles,
 			query:  "service-00",
@@ -212,7 +206,6 @@ func TestTrieIndex(t *testing.T) {
 
 		{
 			input: commonFiles,
-			// query: "*.*.metric-namespace-001.*",
 			query: "*",
 			expect: []string{
 				"service-00",
@@ -230,16 +223,24 @@ func TestTrieIndex(t *testing.T) {
 				"service-01.server-000.metric-namespace-005.cpu",
 			},
 		},
-		// {
-		//  input: commonFiles,
-		// 	query: "service-0*.*.metric-*-00[5-7].cpu",
-		// 	expect: []string{
-		// 		"service-00.server-000.metric-namespace-005.cpu",
-		// 		"service-00.server-001.metric-namespace-005.cpu",
-		// 		"service-00.server-002.metric-namespace-005.cpu",
-		// 		"service-01.server-000.metric-namespace-005.cpu",
-		// 	},
-		// },
+		{
+			input: commonFiles,
+			query: "service-0*.*.metric-*-00[5-7].cpu",
+			expect: []string{
+				"service-00.server-000.metric-namespace-005.cpu",
+				"service-00.server-001.metric-namespace-005.cpu",
+				"service-00.server-002.metric-namespace-005.cpu",
+				"service-01.server-000.metric-namespace-005.cpu",
+				"service-01.server-110.metric-namespace-007.cpu",
+				"service-01.server-114.metric-namespace-007.cpu",
+				"service-01.server-120.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespace-007.cpu",
+				"service-01.server-125.metric-namespzce-007.cpu",
+				"service-01.server-12a.metric-namespace-007.cpu",
+				"service-01.server-149.metric-namespace-007.cpu",
+				"service-01.server-170.metric-namespace-007.cpu",
+			},
+		},
 		{
 			input: commonFiles,
 			query: "service-0*.*.metric-*-00[5-7]-xdp.cpu",
@@ -253,6 +254,14 @@ func TestTrieIndex(t *testing.T) {
 		{
 			input: commonFiles,
 			query: "service-0*.*.{metric-namespace-004-007-xdp,metric-namespace-007-007-xdp}.cpu",
+			expect: []string{
+				"service-01.server-170.metric-namespace-004-007-xdp.cpu",
+				"service-01.server-170.metric-namespace-007-007-xdp.cpu",
+			},
+		},
+		{
+			input: commonFiles,
+			query: "service-0*.*.metric-namespace-{004,007}{-007}-xdp.cpu",
 			expect: []string{
 				"service-01.server-170.metric-namespace-004-007-xdp.cpu",
 				"service-01.server-170.metric-namespace-007-007-xdp.cpu",
@@ -275,20 +284,26 @@ func TestTrieIndex(t *testing.T) {
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
 			},
 		},
-
-		// "*.*.metric-namespace-001.*",
-		// "*.*.metric-namespace-*.*",
-		// "*.*.metric-namespace-*1.*",
-		// "service-00.server-000.metric-*-0-*-xxx.cpu",
-		// "service-00.server-000.metric-*-0-*-0-*-xxx.cpu",
-		// "service-00.server-000.metric-*-0-*-[a-z]-*-xxx.cpu",
-
-		// "service-00.server-000.metric-1-0-2-A-3-0-4-xxx.cpu",
-		// "*.*.*-001.*",
-		// "service-*.*.*-001.*",
-		// "service-[0-2].*.*-001.*",
-		// "service-[0-2].***.*-001.*",
-		// "*.*.{metric-namespace-1,metric-namespace-3}.*",
+		{
+			input: []string{
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_5xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/tcp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/udp.wsp",
+			},
+			query: "services.groups.*.*.nginx.type.*.frontend.{random-404_xoxo,random.404.xoxo}.http*",
+			expect: []string{
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_3xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_4xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_5xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random.404.xoxo.http_other",
+			},
+		},
 	}
 	log.SetFlags(log.Lshortfile)
 	for _, c := range cases {
@@ -347,6 +362,9 @@ func BenchmarkGlobIndex(b *testing.B) {
 	}()
 
 	wg.Wait()
+
+	b.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(btrieServer))
+	b.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(btrigramServer))
 
 	var cases = []struct {
 		input string

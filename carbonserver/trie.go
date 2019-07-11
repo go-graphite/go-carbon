@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"errors"
+	"log"
 	"math"
 	"path/filepath"
 	"strings"
@@ -137,12 +138,11 @@ func (g *gdstate) matched() bool {
 func newGlobState(expr string) (*gmatcher, error) {
 	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
 	var cur = m.root
-	// var inAlternate bool
+	var inAlter bool
+	var alterStart, alterEnd *gstate
 	for i := 0; i < len(expr); i++ {
 		c := expr[i]
 		switch c {
-		// case '{':
-		// case '}':
 		case '[':
 			m.exact = false
 			s := &gstate{}
@@ -198,6 +198,25 @@ func newGlobState(expr string) (*gmatcher, error) {
 			star.next = append(star.next, &split)
 
 			cur = &split
+		case '{':
+			inAlter = true
+			alterStart = &gstate{c: [131]bool{gstateSplit: true}}
+			alterEnd = &gstate{c: [131]bool{gstateSplit: true}}
+			cur.next = append(cur.next, alterStart)
+			cur = alterStart
+		case '}':
+			inAlter = false
+			cur.next = append(cur.next, alterEnd)
+			cur = alterEnd
+		case ',':
+			if inAlter {
+				cur.next = append(cur.next, alterEnd)
+				cur = alterStart
+				continue
+			}
+
+			// TODO: should return error?
+			fallthrough
 		default:
 			s := &gstate{}
 			s.c[c] = true
@@ -439,64 +458,30 @@ func (ti *trieIndex) allFiles(sep byte) []string {
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
-	/* things to glob:
-	 * - carbon.relays  -> carbon.relays
-	 * - carbon.re      -> carbon.relays, carbon.rewhatever
-	 * - carbon.[rz]    -> carbon.relays, carbon.zipper
-	 * - carbon.{re,zi} -> carbon.relays, carbon.zipper
-	 * - match is either dir or .wsp file
-	 * unfortunately, filepath.Glob doesn't handle the curly brace
-	 * expansion for us */
-
 	query = strings.Replace(query, ".", "/", -1)
+	globs := []string{query}
 
-	var globs []string
-	globs = append(globs, query)
-	// TODO(dgryski): move this loop into its own function + add tests
-	for {
-		bracematch := false
-		var newglobs []string
-		for _, glob := range globs {
-			lbrace := strings.Index(glob, "{")
-			rbrace := -1
-			if lbrace > -1 {
-				rbrace = strings.Index(glob[lbrace:], "}")
-				if rbrace > -1 {
-					rbrace += lbrace
-				}
-			}
-
-			if lbrace > -1 && rbrace > -1 {
-				bracematch = true
-				expansion := glob[lbrace+1 : rbrace]
-				parts := strings.Split(expansion, ",")
-				for _, sub := range parts {
-					if len(newglobs) > listener.maxGlobs {
-						if listener.failOnMaxGlobs {
-							return nil, nil, errMaxGlobsExhausted
-						}
-						break
-					}
-					newglobs = append(newglobs, glob[:lbrace]+sub+glob[rbrace+1:])
-				}
-			} else {
-				if len(newglobs) > listener.maxGlobs {
-					if listener.failOnMaxGlobs {
-						return nil, nil, errMaxGlobsExhausted
-					}
-					break
-				}
-				newglobs = append(newglobs, glob)
-			}
-		}
-		globs = newglobs
-		if !bracematch {
+	var bracesContainsSlash, inAlter bool
+	for _, c := range query {
+		if c == '{' {
+			inAlter = true
+		} else if c == '}' {
+			inAlter = false
+		} else if inAlter && c == '/' {
+			bracesContainsSlash = true
 			break
 		}
 	}
+	if bracesContainsSlash {
+		var err error
+		globs, err = listener.expandGlobBraces(globs)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	log.Printf("globs = %+v\n", globs)
 
-	fidx := listener.CurrentFileIndex()
-
+	var fidx = listener.CurrentFileIndex()
 	var files []string
 	var leafs []bool
 	for _, g := range globs {

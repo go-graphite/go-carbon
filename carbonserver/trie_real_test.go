@@ -5,7 +5,6 @@ package carbonserver
 import (
 	"flag"
 	"io/ioutil"
-	"log"
 	"reflect"
 	"sort"
 	"strings"
@@ -44,8 +43,8 @@ func TestTrieGlobRealData(t *testing.T) {
 	trigramServer.whisperData = *carbonPath
 
 	if *checkMemory {
-		log.Printf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
-		log.Printf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(trigramServer))
+		t.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
+		t.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(trigramServer))
 	}
 
 	queries := readFile(*targetQueryPath)
