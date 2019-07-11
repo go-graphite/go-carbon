@@ -1,3 +1,5 @@
+// +build real
+
 package carbonserver
 
 import (
@@ -30,6 +32,9 @@ func readFile(path string) []string {
 	return lines
 }
 
+// TestTrieGlobRealData is built for benchmarking against real data, for two reasons:
+// 		* trigram index solution invokes stat syscall
+// 		* can't share production data in open source project
 func TestTrieGlobRealData(t *testing.T) {
 	files := readFile(*testDataPath)
 	var trieServer, trigramServer *CarbonserverListener
