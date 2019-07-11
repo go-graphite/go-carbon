@@ -8,7 +8,6 @@ import (
 	"unsafe"
 
 	"github.com/lomik/zapwriter"
-	"go.uber.org/zap"
 )
 
 const (
@@ -445,12 +444,6 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var useGlob bool
 	logger := zapwriter.Logger("carbonserver")
 
-	// TODO: Find out why we have set 'useGlob' if 'star == -1'
-	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
-		useGlob = true
-	}
-	logger = logger.With(zap.Bool("use_glob", useGlob))
-
 	/* things to glob:
 	 * - carbon.relays  -> carbon.relays
 	 * - carbon.re      -> carbon.relays, carbon.rewhatever
@@ -519,5 +512,6 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 		files = append(files, f...)
 		leafs = append(leafs, l...)
 	}
+
 	return files, leafs, nil
 }
