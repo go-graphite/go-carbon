@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -44,7 +45,7 @@ func newTrigramServer(files []string) *CarbonserverListener {
 	listener.accessLogger, _ = zap.NewDevelopment()
 	listener.trigramIndex = true
 	listener.whisperData = "./testdata"
-	listener.maxGlobs = 100
+	listener.maxGlobs = 10000
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
@@ -396,5 +397,28 @@ func BenchmarkGlobIndex(b *testing.B) {
 				btrigramServer.expandGlobs(c.input)
 			}
 		})
+	}
+}
+
+func TestAllFiles(t *testing.T) {
+	files := []string{
+		"/something/else/server.wsp",
+		"/service-00/server-000/metric-namespace-000/43081e003a315b88.wsp",
+		"/service-00/server-000/metric-namespace-000/cpu.wsp",
+		"/service-00/server-000/metric-namespace-001/d218bc1539f2cf8.wsp",
+		"/service-00/server-000/metric-namespace-001/cpu.wsp",
+		"/service-00/server-000/metric-namespace-005/cpu.wsp",
+		"/service-00/server-000/metric-namespace-002/29370bc791c0fccb.wsp",
+		"/service-00/server-000/metric-namespace-002/cpu.wsp",
+	}
+	trie := newTrieServer(files)
+	metrics := trie.CurrentFileIndex().trieIdx.allMetrics('.')
+	for i := range files {
+		files[i] = files[i][:len(files[i])-4]
+		files[i] = files[i][1:]
+		files[i] = strings.Replace(files[i], "/", ".", -1)
+	}
+	if !reflect.DeepEqual(files, metrics) {
+		t.Errorf("trie.allMetrics:\nwant %s\ngot:  %s\n", files, metrics)
 	}
 }

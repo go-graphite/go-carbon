@@ -18,6 +18,7 @@ var testDataPath = flag.String("testdata", "files.txt", "path to test file")
 var checkMemory = flag.Bool("memory-size", false, "show index memory size")
 var targetQueryPath = flag.String("query-data", "queries.txt", "queries for testing")
 var carbonPath = flag.String("carbon", "/var/lib/carbon/whisper", "carbon data path")
+var noTrigram = flag.Bool("no-trigram", false, "disable trigram search")
 
 func readFile(path string) []string {
 	data, err := ioutil.ReadFile(path)
@@ -38,9 +39,12 @@ func TestTrieGlobRealData(t *testing.T) {
 	files := readFile(*testDataPath)
 	var trieServer, trigramServer *CarbonserverListener
 	trieServer = newTrieServer(files)
-	trigramServer = newTrigramServer(files)
 	trieServer.whisperData = *carbonPath
-	trigramServer.whisperData = *carbonPath
+
+	if !*noTrigram {
+		trigramServer = newTrigramServer(files)
+		trigramServer.whisperData = *carbonPath
+	}
 
 	if *checkMemory {
 		t.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
@@ -55,14 +59,26 @@ func TestTrieGlobRealData(t *testing.T) {
 			if err != nil {
 				t.Errorf("trie search errro: %s", err)
 			}
-			t.Logf("trie took %s", time.Now().Sub(start1))
+			trieTime := time.Now().Sub(start1)
+			t.Logf("trie took %s", trieTime)
+
+			if *noTrigram {
+				return
+			}
 
 			start2 := time.Now()
 			trigramFiles, trigramLeafs, err := trigramServer.expandGlobs(query)
 			if err != nil {
 				t.Errorf("trigram search errro: %s", err)
 			}
-			t.Logf("trigram took %s", time.Now().Sub(start2))
+			trigramTime := time.Now().Sub(start2)
+			t.Logf("trigram took %s", trigramTime)
+
+			if trieTime < trigramTime {
+				t.Logf("trie is %f times faster", float64(trigramTime)/float64(trieTime))
+			} else {
+				t.Logf("trie is %f times slower", float64(trieTime)/float64(trigramTime))
+			}
 
 			t.Logf("trie %d trigram %d", len(trieFiles), len(trigramFiles))
 

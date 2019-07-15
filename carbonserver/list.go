@@ -27,7 +27,7 @@ func (listener *CarbonserverListener) getMetricsList() ([]string, error) {
 	}
 
 	if listener.trieIndex {
-		return fidx.trieIdx.allFiles('.'), nil
+		return fidx.trieIdx.allMetrics('.'), nil
 	}
 
 	for _, p := range fidx.files {

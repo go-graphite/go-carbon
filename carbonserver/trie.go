@@ -2,7 +2,6 @@ package carbonserver
 
 import (
 	"errors"
-	"log"
 	"math"
 	"path/filepath"
 	"strings"
@@ -25,6 +24,19 @@ type gmatcher struct {
 	dsindex int
 }
 
+type gstate struct {
+	// TODO: make c compact
+	c    [131]bool
+	next []*gstate
+}
+
+type gdstate struct {
+	next    [131]*gdstate
+	gstates []*gstate
+
+	cacheHit int
+}
+
 func (g *gmatcher) dstate() *gdstate { return g.dstates[len(g.dstates)-1] }
 func (g *gmatcher) push(s *gdstate)  { g.dstates = append(g.dstates, s) }
 func (g *gmatcher) pop() {
@@ -32,12 +44,6 @@ func (g *gmatcher) pop() {
 		return
 	}
 	g.dstates = g.dstates[:len(g.dstates)-1]
-}
-
-type gstate struct {
-	// TODO: make c compact
-	c    [131]bool
-	next []*gstate
 }
 
 func (g *gstate) String() string {
@@ -74,13 +80,6 @@ func (g *gstate) String() string {
 	}
 
 	return toStr(g)
-}
-
-type gdstate struct {
-	next    [131]*gdstate
-	gstates []*gstate
-
-	cacheHit int
 }
 
 func (g gdstate) String() string {
@@ -133,8 +132,6 @@ func (g *gdstate) matched() bool {
 
 // TODO:
 //     add range value validation
-//     add ^ in range match
-//     support {} cases
 func newGlobState(expr string) (*gmatcher, error) {
 	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
 	var cur = m.root
@@ -174,7 +171,7 @@ func newGlobState(expr string) (*gmatcher, error) {
 
 			if negative {
 				// TODO: revisit
-				for i := 33; i <= 126; i++ {
+				for i := 32; i <= 126; i++ {
 					s.c[i] = !s.c[i]
 				}
 			}
@@ -236,7 +233,7 @@ func newGlobState(expr string) (*gmatcher, error) {
 }
 
 func isAlphanumeric(c byte) bool {
-	return 33 <= c && c <= 127
+	return 32 <= c && c <= 126
 }
 
 type trieIndex struct {
@@ -249,7 +246,6 @@ type trieIndex struct {
 // TODO: use compact c (string/[]byte rather than byte)
 type trieNode struct {
 	c         byte
-	parent    *trieNode
 	childrens []*trieNode
 }
 
@@ -293,14 +289,14 @@ outer:
 			}
 		}
 
-		tnode := &trieNode{c: c, parent: cur}
+		tnode := &trieNode{c: c /*parent: cur*/}
 		cur.childrens = append(cur.childrens, tnode)
 		cur = tnode
 	}
 
 	if !isFile {
 		if cur.c != '/' {
-			cur.childrens = append(cur.childrens, &trieNode{c: '/', parent: cur})
+			cur.childrens = append(cur.childrens, &trieNode{c: '/' /*parent: cur*/})
 		}
 		return
 	}
@@ -327,6 +323,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 
 	var cur = ti.root
 	var nindex = make([]int, ti.depth+1)
+	var trieNodes = make([]*trieNode, ti.depth+1)
 	var ncindex int
 	var mindex int
 	var curm = matchers[0]
@@ -338,6 +335,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			goto parent
 		}
 
+		trieNodes[ncindex] = cur
 		cur = cur.childrens[nindex[ncindex]]
 		ncindex++
 
@@ -367,7 +365,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			continue
 		}
 
-		if !(cur.childrens[0].c == '/' || cur.childrens[0] == fileNode) {
+		if !(len(cur.childrens) > 0 && (cur.childrens[0].c == '/' || cur.childrens[0] == fileNode)) {
 			continue
 		}
 
@@ -376,7 +374,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			goto parent
 		}
 
-		files = append(files, cur.fullPath('.', ti.depth))
+		files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
 		isFile = append(isFile, cur.childrens[0] == fileNode)
 		if len(files) >= limit || exact {
 			break
@@ -392,7 +390,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			break
 		}
 		nindex[ncindex]++
-		cur = cur.parent
+		cur = trieNodes[ncindex]
 
 		if cur.c == '/' && nindex[ncindex] >= len(cur.childrens) {
 			mindex--
@@ -407,51 +405,50 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 	return files, isFile, nil
 }
 
-func (tn *trieNode) fullPath(sep byte, depth int) string {
-	var r = make([]byte, depth)
-	var index = depth - 1
-	var cur = tn
-	for cur.parent != nil {
-		if cur.c == '/' {
-			r[index] = sep
+func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
+	var r = make([]byte, len(parents))
+	for i, n := range parents[1:] {
+		if n.c == '/' {
+			r[i] = sep
 		} else {
-			r[index] = cur.c
+			r[i] = n.c
 		}
-		index--
-		cur = cur.parent
 	}
-	r = r[index+1:]
+	r[len(parents)-1] = tn.c
 
 	return *(*string)(unsafe.Pointer(&r))
 }
 
-func (ti *trieIndex) allFiles(sep byte) []string {
+func (ti *trieIndex) allMetrics(sep byte) []string {
 	var files = make([]string, 0, ti.fileCount)
-	var childIndex = make([]int, ti.depth+1)
-	var curLevel int
+	var nindex = make([]int, ti.depth+1)
+	var ncindex int
 	var cur = ti.root
+	var trieNodes = make([]*trieNode, ti.depth+1)
 	for {
-		if len(cur.childrens) == 0 {
-			files = append(files, cur.fullPath(sep, ti.depth))
+		if nindex[ncindex] >= len(cur.childrens) {
 			goto parent
 		}
 
-		if childIndex[curLevel] == len(cur.childrens) {
+		trieNodes[ncindex] = cur
+		cur = cur.childrens[nindex[ncindex]]
+		ncindex++
+
+		if len(cur.childrens) == 1 && cur.childrens[0] == fileNode {
+			files = append(files, cur.fullPath(sep, trieNodes[:ncindex]))
 			goto parent
 		}
 
-		cur = cur.childrens[childIndex[curLevel]]
-		curLevel++
 		continue
 
 	parent:
-		childIndex[curLevel] = 0
-		curLevel--
-		if curLevel < 0 {
+		nindex[ncindex] = 0
+		ncindex--
+		if ncindex < 0 {
 			break
 		}
-		childIndex[curLevel]++
-		cur = cur.parent
+		nindex[ncindex]++
+		cur = trieNodes[ncindex]
 		continue
 	}
 	return files
@@ -479,7 +476,6 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 			return nil, nil, err
 		}
 	}
-	log.Printf("globs = %+v\n", globs)
 
 	var fidx = listener.CurrentFileIndex()
 	var files []string
