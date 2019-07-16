@@ -43,9 +43,14 @@ var (
 	debugCompress  bool
 	debugBitsWrite bool
 	debugExtend    bool
+
+	avgCompressedPointSize float32 = 2
 )
 
-var avgCompressedPointSize float32 = 2
+// In worst case scenario all data points would required 2 bytes more space
+// after compression, this buffer size make sure that it's always big enough
+// to contain the compressed result
+const MaxCompressedPointSize = PointSize + 2
 
 func Debug(compress, bitsWrite bool) {
 	debugCompress = compress
@@ -441,11 +446,7 @@ func (archive *archiveInfo) getBufferByUnit(unit int) []byte {
 func (archive *archiveInfo) appendToBlockAndRotate(dps []dataPoint) error {
 	whisper := archive.whisper // TODO: optimize away?
 
-	// In worst case scenario all data points would required 2 bytes more space
-	// after compression, this buffer size make sure that it's always big enough
-	// to contain the compressed result
-	const extraPointSize = 2
-	blockBuffer := make([]byte, len(dps)*(PointSize+extraPointSize)+endOfBlockSize)
+	blockBuffer := make([]byte, len(dps)*(MaxCompressedPointSize)+endOfBlockSize)
 
 	for {
 		offset := archive.cblock.lastByteOffset // lastByteOffset is updated in AppendPointsToBlock
@@ -515,7 +516,9 @@ func (whisper *Whisper) extendIfNeeded() error {
 				if avgPointSize-arc.avgCompressedPointSize < 0.618 {
 					avgPointSize += 0.618
 				}
-				msg += fmt.Sprintf("%s:%v->%v ", ret, ret.avgCompressedPointSize, avgPointSize)
+				if debugExtend {
+					msg += fmt.Sprintf("%s:%v->%v ", ret, ret.avgCompressedPointSize, avgPointSize)
+				}
 				ret.avgCompressedPointSize = avgPointSize
 				arc.stats.extended++
 			}
@@ -1266,7 +1269,9 @@ func (whisper *Whisper) CompressTo(dstPath string) error {
 // estimatePointSize calculates point size estimation by doing an on-the-fly
 // compression without changing archiveInfo state.
 func estimatePointSize(ps []dataPoint, ret *Retention, pointsPerBlock int) float32 {
-	const extraPointSize = 2
+	if len(ps) == 0 {
+		return avgCompressedPointSize
+	}
 
 	var sum int
 	for i := 0; i < len(ps); {
@@ -1275,7 +1280,7 @@ func estimatePointSize(ps []dataPoint, ret *Retention, pointsPerBlock int) float
 			end = len(ps)
 		}
 
-		buf := make([]byte, pointsPerBlock*(PointSize+extraPointSize)+endOfBlockSize)
+		buf := make([]byte, pointsPerBlock*(MaxCompressedPointSize)+endOfBlockSize)
 		na := archiveInfo{
 			Retention:   *ret,
 			offset:      0,
@@ -1296,8 +1301,11 @@ func estimatePointSize(ps []dataPoint, ret *Retention, pointsPerBlock int) float
 		}
 		sum += size
 	}
-
-	return float32(sum) / float32(len(ps))
+	size := float32(sum) / float32(len(ps))
+	if math.IsNaN(float64(size)) || size <= 0 {
+		size = avgCompressedPointSize
+	}
+	return size
 }
 
 func (whisper *Whisper) IsCompressed() bool { return whisper.compressed }

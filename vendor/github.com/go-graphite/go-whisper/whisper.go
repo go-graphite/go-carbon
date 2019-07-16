@@ -71,6 +71,7 @@ type Options struct {
 	PointsPerBlock int
 	PointSize      float32
 	InMemory       bool
+	OpenFileFlag   *int
 }
 
 func unitMultiplier(s string) (int, error) {
@@ -283,6 +284,13 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 		archive.offset = offset
 
 		if whisper.compressed {
+			if math.IsNaN(float64(archive.avgCompressedPointSize)) || archive.avgCompressedPointSize <= 0 {
+				archive.avgCompressedPointSize = avgCompressedPointSize
+			}
+			if archive.avgCompressedPointSize > MaxCompressedPointSize {
+				archive.avgCompressedPointSize = MaxCompressedPointSize
+			}
+
 			archive.cblock.lastByteBitPos = 7
 			archive.blockSize = int(math.Ceil(float64(whisper.pointsPerBlock)*float64(archive.avgCompressedPointSize))) + endOfBlockSize
 			archive.blockRanges = make([]blockRange, archive.blockCount)
@@ -388,7 +396,11 @@ func OpenWithOptions(path string, options *Options) (whisper *Whisper, err error
 	if options.InMemory {
 		file = newMemFile(path)
 	} else {
-		file, err = os.OpenFile(path, os.O_RDWR, 0666)
+		flag := os.O_RDWR
+		if options.OpenFileFlag != nil {
+			flag = *options.OpenFileFlag
+		}
+		file, err = os.OpenFile(path, flag, 0666)
 	}
 	if err != nil {
 		return
