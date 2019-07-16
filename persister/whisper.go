@@ -439,7 +439,6 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
 	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)
 	// helper.SendAndSubstractUint64("blockUpdateManyNs", &p.blockUpdateManyNs, send)
-
 }
 
 // Start worker
