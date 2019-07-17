@@ -103,6 +103,14 @@ type QueryItem struct {
 	QueryFinished chan struct{}
 }
 
+//type GlobResponse struct {
+type ExpandedGlobResponse struct {
+	Name  string
+	Files []string
+	Leafs []bool
+	Err   error
+}
+
 var TraceHeaders = map[string]string{
 	"X-CTX-CarbonAPI-UUID":    "carbonapi_uuid",
 	"X-CTX-CarbonZipper-UUID": "carbonzipper_uuid",
@@ -675,7 +683,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	)
 }
 
-func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []bool, error) {
+func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse, done chan<- struct{}) {
 	var useGlob bool
 	logger := zapwriter.Logger("carbonserver")
 
@@ -725,7 +733,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 				for _, sub := range parts {
 					if len(newglobs) > listener.maxGlobs {
 						if listener.failOnMaxGlobs {
-							return nil, nil, errMaxGlobsExhausted
+							resultCh <- &ExpandedGlobResponse{query, nil, nil, errMaxGlobsExhausted}
 						}
 						break
 					}
@@ -734,7 +742,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 			} else {
 				if len(newglobs) > listener.maxGlobs {
 					if listener.failOnMaxGlobs {
-						return nil, nil, errMaxGlobsExhausted
+						resultCh <- &ExpandedGlobResponse{query, nil, nil, errMaxGlobsExhausted}
 					}
 					break
 				}
@@ -818,7 +826,7 @@ func (listener *CarbonserverListener) expandGlobs(query string) ([]string, []boo
 		files[i] = strings.Replace(p, "/", ".", -1)
 	}
 
-	return files, leafs, nil
+	resultCh <- &ExpandedGlobResponse{query, files, leafs, nil}
 }
 
 func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
