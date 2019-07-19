@@ -335,8 +335,10 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		}
 	}
 	metricNames := make([]string, len(metricMap))
+	i := 0
 	for k := range metricMap {
-		metricNames = append(metricNames, k)
+		metricNames[i] = k
+		i++
 	}
 	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
 
@@ -346,7 +348,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 
 	metricGlobMap := make(map[string]globs)
 	for _, expandedGlob := range expandedGlobs {
-		metricGlobMap[expandedGlob.Name] = expandedGlob
+		metricGlobMap[strings.Replace(expandedGlob.Name, "/", ".", -1)] = expandedGlob
 	}
 
 	var metrics []string
