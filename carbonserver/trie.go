@@ -714,7 +714,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	for _, g := range globs {
 		f, l, err := fidx.trieIdx.walk(g, math.MaxInt64)
 		if err != nil {
-			panic(err)
+			return nil, nil, err
 		}
 		files = append(files, f...)
 		leafs = append(leafs, l...)
