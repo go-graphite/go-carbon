@@ -5,16 +5,20 @@ import (
 	"log"
 	"math/rand"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/OneOfOne/go-utils/memory"
 	"github.com/dgryski/go-trigram"
 	"go.uber.org/zap"
 )
+
+func init() {
+	log.SetFlags(log.Lshortfile)
+}
 
 func newTrieServer(files []string) *CarbonserverListener {
 	var listener CarbonserverListener
@@ -74,15 +78,15 @@ func TestTrieIndex(t *testing.T) {
 		"/service-00/server-001/metric-namespace-002/cpu.wsp",
 		"/service-00/server-001/metric-namespace-005/cpu.wsp",
 
+		"/service-01/server-000/metric-namespace-004/6f31f9305c67895c.wsp",
+		"/service-01/server-000/metric-namespace-004/cpu.wsp",
+		"/service-01/server-000/metric-namespace-005/cpu.wsp",
+
 		"/service-00/server-002/metric-namespace-003/64cd3228c99afc54.wsp",
 		"/service-00/server-002/metric-namespace-003/cpu.wsp",
 		"/service-00/server-002/metric-namespace-005/cpu.wsp",
 		"/service-00/server-002/metric-namespace-004/6f31f9305c67895c.wsp",
 		"/service-00/server-002/metric-namespace-004/cpu.wsp",
-
-		"/service-01/server-000/metric-namespace-004/6f31f9305c67895c.wsp",
-		"/service-01/server-000/metric-namespace-004/cpu.wsp",
-		"/service-01/server-000/metric-namespace-005/cpu.wsp",
 
 		"/service-01/server-110/metric-namespace-007/cpu.wsp",
 		"/service-01/server-120/metric-namespace-007/cpu.wsp",
@@ -215,6 +219,96 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: append(commonFiles,
+				"/ooo/abc.wsp",
+				"/ooo/abc/xxx.wsp",
+				"/ooo/abd/xxx.wsp",
+				"/ooo/ab/xxx.wsp",
+				"/ooo/abcd/xxx.wsp",
+				"/ooo/xyz/xxx.wsp",
+				"/ooo/xy/xxx.wsp",
+			),
+			query: "*.*",
+			expect: []string{
+				"ooo.ab",
+				"ooo.abc",
+				"ooo.abc",
+				"ooo.abcd",
+				"ooo.abd",
+				"ooo.xy",
+				"ooo.xyz",
+				"service-00.server-000",
+				"service-00.server-001",
+				"service-00.server-002",
+				"service-01.server-000",
+				"service-01.server-110",
+				"service-01.server-114",
+				"service-01.server-120",
+				"service-01.server-125",
+				"service-01.server-12a",
+				"service-01.server-149",
+				"service-01.server-170",
+				"something.else",
+			},
+		},
+		{
+			// case 1:
+			// 	abc . xxx
+			// 	ab  . xxx
+			// case 2:
+			// 	ab  . xxx
+			// 	abc . xxx
+			// case 3:
+			// 	abc . xxx
+			// 	abc . xxx
+			// case 4:
+			// 	abc . xxx
+			// 	xyz . xxx
+			// case 5:
+			// 	abc . xxx
+			// 	acc . xxx
+			// case 6:
+			//  abc . xxx
+			//  abd . xxx
+			// case 7:
+			//  abc  . xxx
+			//  abde . xxx
+			input: append(commonFiles,
+				"/ooo/abc/xxx.wsp",
+				"/ooo/ab/xxx.wsp",
+			),
+			query: "*.*.*",
+			expect: []string{
+				"ooo.ab.xxx",
+				"ooo.abc.xxx",
+				"service-00.server-000.metric-namespace-000",
+				"service-00.server-000.metric-namespace-001",
+				"service-00.server-000.metric-namespace-002",
+				"service-00.server-000.metric-namespace-005",
+				"service-00.server-001.metric-namespace-002",
+				"service-00.server-001.metric-namespace-005",
+				"service-00.server-002.metric-namespace-003",
+				"service-00.server-002.metric-namespace-004",
+				"service-00.server-002.metric-namespace-005",
+				"service-01.server-000.metric-namespace-004",
+				"service-01.server-000.metric-namespace-005",
+				"service-01.server-110.metric-namespace-007",
+				"service-01.server-114.metric-namespace-007",
+				"service-01.server-120.metric-namespace-007",
+				"service-01.server-125.metric-namespace-007",
+				"service-01.server-125.metric-namespzce-007",
+				"service-01.server-12a.metric-namespace-007",
+				"service-01.server-149.metric-namespace-007",
+				"service-01.server-170.metric-namespace-004-007-xdp",
+				"service-01.server-170.metric-namespace-006-xdp",
+				"service-01.server-170.metric-namespace-007",
+				"service-01.server-170.metric-namespace-007-005-xdp",
+				"service-01.server-170.metric-namespace-007-007-xdp",
+				"service-01.server-170.metric-namespace-007-008-xdp",
+				"something.else.server",
+			},
+		},
+		{
 			input: commonFiles,
 			query: "service-0*.*.metric-namespace-005.cpu",
 			expect: []string{
@@ -305,11 +399,37 @@ func TestTrieIndex(t *testing.T) {
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random.404.xoxo.http_other",
 			},
 		},
+		{
+			input: []string{
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_5xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-403_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/tcp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/401/xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/403/xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/4044/xoxo/http.wsp",
+			},
+			query: "services.groups.*.*.nginx.type.*.frontend.{random-40?_xoxo,random.40?.xoxo}.http*",
+			expect: []string{
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-403_xoxo.http_4xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_3xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_4xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_5xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random.401.xoxo.http_other",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random.404.xoxo.http_other",
+			},
+		},
 	}
-	log.SetFlags(log.Lshortfile)
+
 	for _, c := range cases {
 		t.Run(c.query, func(t *testing.T) {
-			t.Logf("case: %s", c.query)
+			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
 			trieServer := newTrieServer(c.input)
 			trieFiles, _, err := trieServer.expandGlobsTrie(c.query)
@@ -334,10 +454,10 @@ func BenchmarkGlobIndex(b *testing.B) {
 	var btrigramServer *CarbonserverListener
 
 	// 10/100/50000
-	limit0 := 50
-	limit1 := 50
-	limit2 := 100
-	limit3 := 1
+	limit0 := 1      // 50
+	limit1 := 150000 // 50
+	limit2 := 1      // 100
+	limit3 := 1      // 1
 	files := make([]string, 0, limit0*limit1*limit2*limit3)
 	rand.Seed(time.Now().Unix())
 	for i := 0; i < limit0; i++ {
@@ -364,8 +484,8 @@ func BenchmarkGlobIndex(b *testing.B) {
 
 	wg.Wait()
 
-	b.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(btrieServer))
-	b.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(btrigramServer))
+	// b.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(btrieServer))
+	// b.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(btrigramServer))
 
 	var cases = []struct {
 		input string
@@ -384,6 +504,7 @@ func BenchmarkGlobIndex(b *testing.B) {
 		// to scan every third nodes because of leading star in the query
 		// "*-40*"
 		{"service-*.server-*.*-40*.*"},
+		{"service-*.*server-300*.*-40*.*"},
 	}
 
 	for _, c := range cases {
@@ -400,8 +521,13 @@ func BenchmarkGlobIndex(b *testing.B) {
 	}
 }
 
-func TestAllFiles(t *testing.T) {
+func TestDumpAllMetrics(t *testing.T) {
 	files := []string{
+		"/bobo.wsp",
+		"/bobododo/xxx.wsp",
+
+		"/something.wsp",
+		"/somet/xxx.wsp",
 		"/something/else/server.wsp",
 		"/service-00/server-000/metric-namespace-000/43081e003a315b88.wsp",
 		"/service-00/server-000/metric-namespace-000/cpu.wsp",
@@ -410,6 +536,29 @@ func TestAllFiles(t *testing.T) {
 		"/service-00/server-000/metric-namespace-005/cpu.wsp",
 		"/service-00/server-000/metric-namespace-002/29370bc791c0fccb.wsp",
 		"/service-00/server-000/metric-namespace-002/cpu.wsp",
+		"/service-01/server-000/metric-namespace-002/cpu.wsp",
+		"/service-01/switch-000/metric-namespace-002/cpu.wsp",
+
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_5xx.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_other.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_4xx.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/tcp.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/udp.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/http_other.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/udp.wsp",
+		"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_koko_abc/xoxo/udp.wsp",
+
+		"/service-01/server-114/metric-namespace-007/cpu.wsp",
+		"/service-01/server-125/metric-namespace-007/cpu.wsp",
+		"/service-01/server-12a/metric-namespace-007/cpu.wsp",
+		"/service-01/server-149/metric-namespace-007/cpu.wsp",
+		"/service-01/server-125/metric-namespzce-007/cpu.wsp",
+		"/service-01/server-170/metric-namespace-004-007-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-007-007-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-007-005-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
+		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
 	trie := newTrieServer(files)
 	metrics := trie.CurrentFileIndex().trieIdx.allMetrics('.')
@@ -418,7 +567,9 @@ func TestAllFiles(t *testing.T) {
 		files[i] = files[i][1:]
 		files[i] = strings.Replace(files[i], "/", ".", -1)
 	}
+	sort.Strings(files)
+	sort.Strings(metrics)
 	if !reflect.DeepEqual(files, metrics) {
-		t.Errorf("trie.allMetrics:\nwant %s\ngot:  %s\n", files, metrics)
+		t.Errorf("trie.allMetrics:\nwant: %s\ngot:  %s\n", files, metrics)
 	}
 }

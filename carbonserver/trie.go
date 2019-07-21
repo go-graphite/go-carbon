@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"path/filepath"
 	"strings"
@@ -39,17 +40,17 @@ type gdstate struct {
 
 func (g *gmatcher) dstate() *gdstate { return g.dstates[len(g.dstates)-1] }
 func (g *gmatcher) push(s *gdstate)  { g.dstates = append(g.dstates, s) }
-func (g *gmatcher) pop() {
-	if len(g.dstates) <= 1 {
+func (g *gmatcher) pop(i int) {
+	if len(g.dstates) <= i {
+		g.dstates = g.dstates[:1]
 		return
 	}
-	g.dstates = g.dstates[:len(g.dstates)-1]
+	g.dstates = g.dstates[:len(g.dstates)-i]
 }
 
 func (g *gstate) String() string {
 	var toStr func(g *gstate) string
-
-	ref := map[*gstate]string{}
+	var ref = map[*gstate]string{}
 	toStr = func(g *gstate) string {
 		if r, ok := ref[g]; ok {
 			return r
@@ -178,14 +179,17 @@ func newGlobState(expr string) (*gmatcher, error) {
 
 			cur.next = append(cur.next, s)
 			cur = s
+		case '?':
+			m.exact = false
+			var star gstate
+			star.c['*'] = true
+			cur.next = append(cur.next, &star)
+			cur = &star
 		case '*':
 			m.exact = false
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
 			}
-
-			s := &gstate{}
-			s.c['*'] = true
 
 			var split, star gstate
 			star.c['*'] = true
@@ -241,26 +245,41 @@ type trieIndex struct {
 	depth     int
 	fileExt   string
 	fileCount int
+
+	// leading star expansions
+	// lseCache map[string]string
 }
+
+// type lesCacheEntry struct {
+// 	query     string
+// 	createdAt int
+// }
 
 // TODO: use compact c (string/[]byte rather than byte)
 type trieNode struct {
-	c         byte
+	c         []byte
 	childrens []*trieNode
 }
 
 var fileNode = &trieNode{}
 
+func (tn *trieNode) dir() bool { return len(tn.c) == 1 && tn.c[0] == '/' }
+
 func newTrie(fileExt string) *trieIndex {
 	return &trieIndex{
 		root:    &trieNode{},
 		fileExt: fileExt,
+		// lseCache: map[string][]string{},
 	}
 }
 
 // abc.def.ghi
 // abc.def2.ghi
+// abc.daf2.ghi
+// efg.cjk
 func (ti *trieIndex) insert(path string) {
+	// log.Printf("path = %+v\n", path)
+
 	path = filepath.Clean(path)
 	if path[0] == '/' {
 		path = path[1:]
@@ -279,34 +298,165 @@ func (ti *trieIndex) insert(path string) {
 		path = path[:len(path)-len(ti.fileExt)]
 	}
 
+	var start, match, nlen int
+	var sn, newn *trieNode
 outer:
-	for i := 0; i < len(path); i++ {
-		c := path[i]
+	for i := 0; i < len(path)+1; i++ {
+		if i < len(path) && path[i] != '/' {
+			continue
+		}
+
+		// log.Printf("\n")
+		// log.Printf("  %s\n", path[start:i])
+
+		// case 1:
+		// 	abc . xxx
+		// 	ab  . xxx
+		// case 2:
+		// 	ab  . xxx
+		// 	abc . xxx
+		// case 3:
+		// 	abc . xxx
+		// 	abc . xxx
+		// case 4:
+		// 	abc . xxx
+		// 	xyz . xxx
+		// case 5:
+		// 	abc . xxx
+		// 	acc . xxx
+		// case 6:
+		//  abc . xxx
+		//  abd . xxx
+		// case 7:
+		//  abc  . xxx
+		//  abde . xxx
+
+	inner:
+		for ci := 0; ci < len(cur.childrens); ci++ {
+			child := cur.childrens[ci]
+			match = 0
+
+			// log.Printf("    child.c = %s\n", child.c)
+			// log.Printf("    path[start:i] = %+v\n", path[start:i])
+			// for _, child := range child.childrens {
+			// 	log.Printf("      cur.child.c = %s\n", child.c)
+			// }
+
+			if len(child.c) == 0 || child.c[0] != path[start] {
+				continue
+			}
+
+			nlen = i - start
+			start++
+			for match = 1; match < len(child.c) && match < nlen; match++ {
+				// log.Printf("    path[start] = %s\n", string(path[start]))
+
+				if child.c[match] != path[start] {
+					break
+				}
+				start++
+			}
+			// log.Printf("match = %+v\n", match)
+			// log.Printf("nlen = %+v\n", nlen)
+
+			if match == nlen {
+				// log.Printf("child.c = %s\n", child.c)
+				// log.Printf("len(child.c) = %+v\n", len(child.c))
+
+				// case 1
+				if len(child.c) > match {
+					cur = child
+					goto split
+				}
+
+				// case 3
+				if len(child.c) == match {
+					cur = child
+					goto dir
+				}
+
+				panic(fmt.Sprintf("match == nlen = %d: unknwon case", nlen))
+			}
+
+			if match == len(child.c) && len(child.c) < nlen { // case 2
+				cur = child
+				goto inner
+			}
+
+		split:
+			// case 5, 6, 7
+			// log.Printf("split\n")
+			prefix, suffix := child.c[:match], child.c[match:]
+			sn = &trieNode{c: suffix, childrens: child.childrens}
+
+			child.c = prefix
+			child.childrens = []*trieNode{sn}
+
+			cur = child
+
+			if nlen-match > 0 {
+				// log.Printf("nlen-match = %+v\n", nlen-match)
+				// log.Printf("path[start:i] = %+v\n", path[start:i])
+				// log.Printf("len(path[start:i]) = %+v\n", len(path[start:i]))
+
+				newn = &trieNode{c: make([]byte, nlen-match)}
+				copy(newn.c, []byte(path[start:i]))
+
+				cur.childrens = append(cur.childrens, newn)
+				cur = newn
+			}
+
+			goto dir
+		}
+
+		// case 4 & 2
+		if i-start > 0 {
+			// log.Printf("new_node = %s\n", path[start:i])
+
+			newn = &trieNode{c: make([]byte, i-start)}
+			copy(newn.c, []byte(path[start:i]))
+			cur.childrens = append(cur.childrens, newn)
+			cur = newn
+		}
+
+	dir:
+		start = i + 1
 		for _, child := range cur.childrens {
-			if child.c == byte(c) {
+			if child.dir() {
 				cur = child
 				continue outer
 			}
 		}
+		if i < len(path) {
+			// log.Printf("append /\n")
 
-		tnode := &trieNode{c: c /*parent: cur*/}
-		cur.childrens = append(cur.childrens, tnode)
-		cur = tnode
+			newn = &trieNode{c: []byte{'/'}}
+			cur.childrens = append(cur.childrens, newn)
+			cur = newn
+		}
 	}
 
 	if !isFile {
-		if cur.c != '/' {
-			cur.childrens = append(cur.childrens, &trieNode{c: '/' /*parent: cur*/})
+		if cur.dir() {
+			cur.childrens = append(cur.childrens, &trieNode{c: []byte{'/'}})
 		}
 		return
 	}
 
 	cur.childrens = append(cur.childrens, fileNode)
 	ti.fileCount++
+
+	// if path == "/sys/resarcdb-1004_ams4_prod_booking_com/mysql/user_connections/diamond/count.wsp" {
+	// 	log.Printf("\n")
+	// 	log.Printf("--- all metrics start\n")
+	// 	ti.allMetrics('.')
+	// 	log.Printf("--- all metrics end\n")
+	// 	log.Printf("\n")
+	// }
 }
 
 // depth first search
-func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile []bool, err error) {
+func (ti *trieIndex) walk(pattern string, limit int) (files []string, isFiles []bool, err error) {
 	var matchers []*gmatcher
 	var exact bool
 	for _, node := range strings.Split(pattern, "/") {
@@ -328,21 +478,33 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 	var mindex int
 	var curm = matchers[0]
 	var ndstate *gdstate
+	var isFile, isDir, hasMoreNodes bool
 
 	for {
 		if nindex[ncindex] >= len(cur.childrens) {
-			curm.pop()
+			// log.Println("pop", len(cur.c)) // walk debug
+			curm.pop(len(cur.c))
 			goto parent
 		}
+
+		// if ncindex > 0 { // walk debug
+		// log.Printf("parent.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
+		// } // walk debug
 
 		trieNodes[ncindex] = cur
 		cur = cur.childrens[nindex[ncindex]]
 		ncindex++
 
-		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', ti.depth))
-		// log.Printf("curm.dstate = %+v\n", curm.dstate())
+		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
+		// log.Printf("curm.dstate = %+v\n", curm.dstate())                                        // walk debug
+		// for _, child := range cur.childrens {                                                   // walk debug
+		// log.Printf("child.c = %s\n", child.c)          // walk debug
+		// log.Printf("child.dir() = %+v\n", child.dir()) // walk debug
+		// } // walk debug
 
-		if cur.c == '/' {
+		if cur.dir() {
+			// log.Printf("curm.dstate = %+v\n", curm.dstate())                       // walk debug
+			// log.Printf("curm.dstate().matched() = %+v\n", curm.dstate().matched()) // walk debug
 			if mindex+1 >= len(matchers) || !curm.dstate().matched() {
 				goto parent
 			}
@@ -354,32 +516,73 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 			continue
 		}
 
-		ndstate = curm.dstate().step(cur.c)
-		if len(ndstate.gstates) == 0 {
-			goto parent
+		// log.Printf("cur.c = %s\n", cur.c) // walk debug
+		for i := 0; i < len(cur.c); i++ {
+			ndstate = curm.dstate().step(cur.c[i])
+			if len(ndstate.gstates) == 0 {
+				if i > 0 {
+					// log.Println("pop", i) // walk debug
+
+					// TODO: add test case
+					curm.pop(i)
+				}
+				goto parent
+			}
+			// log.Println("push") // walk debug
+			curm.push(ndstate)
+
+			// log.Printf("curm.dstate = %+v\n", curm.dstate()) // walk debug
 		}
 
-		curm.push(ndstate)
+		// log.Printf("mindex+1 = %+v\n", mindex+1)           // walk debug
+		// log.Printf("len(matchers) = %+v\n", len(matchers)) // walk debug
 
 		if mindex+1 < len(matchers) {
 			continue
 		}
 
-		if !(len(cur.childrens) > 0 && (cur.childrens[0].c == '/' || cur.childrens[0] == fileNode)) {
+		isFile = false
+		isDir = false
+		hasMoreNodes = false
+		for _, child := range cur.childrens {
+			if child == fileNode {
+				isFile = true
+			} else if child.dir() {
+				isDir = true
+			} else {
+				hasMoreNodes = true
+			}
+		}
+
+		if !(isFile || isDir) {
 			continue
 		}
 
 		if !curm.dstate().matched() {
-			curm.pop()
+			// log.Println("pop", len(cur.c)) // walk debug
+			curm.pop(len(cur.c))
 			goto parent
 		}
 
-		files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
-		isFile = append(isFile, cur.childrens[0] == fileNode)
+		if isFile {
+			files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
+			isFiles = append(isFiles, isFile)
+		}
+		if isDir {
+			files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
+			isFiles = append(isFiles, false)
+		}
+
 		if len(files) >= limit || exact {
 			break
 		}
-		curm.pop()
+
+		if hasMoreNodes {
+			continue
+		}
+
+		// log.Println("pop", len(cur.c)) // walk debug
+		curm.pop(len(cur.c))
 		goto parent
 
 	parent:
@@ -392,7 +595,7 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		nindex[ncindex]++
 		cur = trieNodes[ncindex]
 
-		if cur.c == '/' && nindex[ncindex] >= len(cur.childrens) {
+		if cur.dir() && nindex[ncindex] >= len(cur.childrens) {
 			mindex--
 			curm = matchers[mindex]
 
@@ -402,19 +605,27 @@ func (ti *trieIndex) search(pattern string, limit int) (files []string, isFile [
 		continue
 	}
 
-	return files, isFile, nil
+	return files, isFiles, nil
 }
 
 func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
-	var r = make([]byte, len(parents))
-	for i, n := range parents[1:] {
-		if n.c == '/' {
+	var size = len(tn.c)
+	for _, n := range parents {
+		size += len(n.c)
+	}
+	var r = make([]byte, size)
+	var i int
+	for _, n := range parents[1:] {
+		if n.dir() {
 			r[i] = sep
+			i++
 		} else {
-			r[i] = n.c
+			copy(r[i:], n.c)
+			i += len(n.c)
+
 		}
 	}
-	r[len(parents)-1] = tn.c
+	copy(r[i:], tn.c)
 
 	return *(*string)(unsafe.Pointer(&r))
 }
@@ -434,7 +645,12 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		cur = cur.childrens[nindex[ncindex]]
 		ncindex++
 
-		if len(cur.childrens) == 1 && cur.childrens[0] == fileNode {
+		// log.Printf("cur.fullPath(sep, trieNodes[:ncindex]) = %+v\n", cur.fullPath(sep, trieNodes[:ncindex]))
+		// for _, cur := range cur.childrens {
+		// 	log.Printf("cur.c = %s\n", cur.c)
+		// }
+
+		if cur == fileNode {
 			files = append(files, cur.fullPath(sep, trieNodes[:ncindex]))
 			goto parent
 		}
@@ -458,18 +674,19 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	query = strings.Replace(query, ".", "/", -1)
 	globs := []string{query}
 
-	var bracesContainsSlash, inAlter bool
+	var slashInBraces, inAlter bool
 	for _, c := range query {
 		if c == '{' {
 			inAlter = true
 		} else if c == '}' {
 			inAlter = false
 		} else if inAlter && c == '/' {
-			bracesContainsSlash = true
+			slashInBraces = true
 			break
 		}
 	}
-	if bracesContainsSlash {
+	// for complex queries like {a.b.c,x}.o.p.q, fall back to simple expansion
+	if slashInBraces {
 		var err error
 		globs, err = listener.expandGlobBraces(globs)
 		if err != nil {
@@ -480,8 +697,9 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var fidx = listener.CurrentFileIndex()
 	var files []string
 	var leafs []bool
+
 	for _, g := range globs {
-		f, l, err := fidx.trieIdx.search(g, math.MaxInt64)
+		f, l, err := fidx.trieIdx.walk(g, math.MaxInt64)
 		if err != nil {
 			panic(err)
 		}

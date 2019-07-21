@@ -25,6 +25,11 @@ func readFile(path string) []string {
 	if err != nil {
 		panic(err)
 	}
+
+	// if strings.HasSuffix(path, ".tar.gz") || strings.HasSuffix(path, ".tgz") {
+	// 	tar.NewReader()
+	// }
+
 	lines := strings.Split(string(data), "\n")
 	if lines[len(lines)-1] == "" {
 		return lines[:len(lines)-1]
@@ -61,6 +66,10 @@ func TestTrieGlobRealData(t *testing.T) {
 			}
 			trieTime := time.Now().Sub(start1)
 			t.Logf("trie took %s", trieTime)
+
+			// for i, str := range trieFiles {
+			// 	log.Printf("%d: %s\n", i, str)
+			// }
 
 			if *noTrigram {
 				return
