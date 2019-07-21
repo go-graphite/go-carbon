@@ -136,8 +136,9 @@ func (g *gdstate) matched() bool {
 func newGlobState(expr string) (*gmatcher, error) {
 	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
 	var cur = m.root
-	var inAlter bool
-	var alterStart, alterEnd *gstate
+	// var inAlter bool
+	var alters [][2]*gstate
+	// var alterStart, alterEnd *gstate
 	for i := 0; i < len(expr); i++ {
 		c := expr[i]
 		switch c {
@@ -200,19 +201,29 @@ func newGlobState(expr string) (*gmatcher, error) {
 
 			cur = &split
 		case '{':
-			inAlter = true
-			alterStart = &gstate{c: [131]bool{gstateSplit: true}}
-			alterEnd = &gstate{c: [131]bool{gstateSplit: true}}
+			// inAlter = true
+			alterStart := &gstate{c: [131]bool{gstateSplit: true}}
+			alterEnd := &gstate{c: [131]bool{gstateSplit: true}}
 			cur.next = append(cur.next, alterStart)
 			cur = alterStart
+			alters = append(alters, [2]*gstate{alterStart, alterEnd})
 		case '}':
-			inAlter = false
-			cur.next = append(cur.next, alterEnd)
-			cur = alterEnd
+			if len(alters) == 0 {
+				return nil, errors.New("glob: missing {")
+			}
+			// inAlter = false
+			// cur.next = append(cur.next, alterEnd)
+			// cur = alterEnd
+			cur.next = append(cur.next, alters[len(alters)-1][1])
+			cur = alters[len(alters)-1][1]
+			alters = alters[:len(alters)-1]
 		case ',':
-			if inAlter {
-				cur.next = append(cur.next, alterEnd)
-				cur = alterStart
+			// if inAlter {
+			if len(alters) > 0 {
+				// cur.next = append(cur.next, alterEnd)
+				// cur = alterStart
+				cur.next = append(cur.next, alters[len(alters)-1][1])
+				cur = alters[len(alters)-1][0]
 				continue
 			}
 
@@ -226,6 +237,10 @@ func newGlobState(expr string) (*gmatcher, error) {
 		}
 	}
 	cur.next = append(cur.next, endGstate)
+
+	if len(alters) > 0 {
+		return nil, errors.New("glob: missing }")
+	}
 
 	var droot gdstate
 	for _, s := range m.root.next {
@@ -446,13 +461,11 @@ outer:
 	cur.childrens = append(cur.childrens, fileNode)
 	ti.fileCount++
 
-	// if path == "/sys/resarcdb-1004_ams4_prod_booking_com/mysql/user_connections/diamond/count.wsp" {
 	// 	log.Printf("\n")
 	// 	log.Printf("--- all metrics start\n")
 	// 	ti.allMetrics('.')
 	// 	log.Printf("--- all metrics end\n")
 	// 	log.Printf("\n")
-	// }
 }
 
 // depth first search

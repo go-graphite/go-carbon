@@ -356,10 +356,31 @@ func TestTrieIndex(t *testing.T) {
 		},
 		{
 			input: commonFiles,
-			query: "service-0*.*.metric-namespace-{004,007}{-007}-xdp.cpu",
+			query: "service-0*.*.metric-namespace-{{004,007}}{-007}-xdp.cpu",
 			expect: []string{
 				"service-01.server-170.metric-namespace-004-007-xdp.cpu",
 				"service-01.server-170.metric-namespace-007-007-xdp.cpu",
+			},
+		},
+		{
+			input: []string{
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_5xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/tcp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/backend/random-404_xoxo/http_xxx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/os/random-404_xoxo/http_xxx.wsp",
+			},
+			query: "services.groups.*.*.nginx.type.*.{{frontend,backend},os}.random-404_xoxo.http*",
+			expect: []string{
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_3xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_4xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_5xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
+				"services.groups.xyz.xxx_404.nginx.type.prod.backend.random-404_xoxo.http_xxx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.os.random-404_xoxo.http_xxx",
 			},
 		},
 		{
