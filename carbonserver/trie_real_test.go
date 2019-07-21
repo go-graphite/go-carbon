@@ -59,6 +59,11 @@ func TestTrieGlobRealData(t *testing.T) {
 	queries := readFile(*targetQueryPath)
 	for _, query := range queries {
 		t.Run(query, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("%q: %s", query, r)
+				}
+			}()
 			start1 := time.Now()
 			trieFiles, trieLeafs, err := trieServer.expandGlobsTrie(query)
 			if err != nil {
