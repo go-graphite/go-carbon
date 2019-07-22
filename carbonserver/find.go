@@ -351,7 +351,6 @@ GATHER:
 			}
 
 		case <-ctx.Done():
-			done <- struct{}{}
 			return nil, fmt.Errorf("find failed, timeout")
 		}
 	}
