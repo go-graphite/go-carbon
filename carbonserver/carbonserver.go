@@ -683,7 +683,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	)
 }
 
-func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse, done chan<- struct{}) {
+func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse) {
 	var useGlob bool
 	logger := zapwriter.Logger("carbonserver")
 
