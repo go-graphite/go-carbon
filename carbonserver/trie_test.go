@@ -375,11 +375,11 @@ func TestTrieIndex(t *testing.T) {
 			},
 			query: "services.groups.*.*.nginx.type.*.{{frontend,backend},os}.random-404_xoxo.http*",
 			expect: []string{
+				"services.groups.xyz.xxx_404.nginx.type.prod.backend.random-404_xoxo.http_xxx",
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_3xx",
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_4xx",
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_5xx",
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
-				"services.groups.xyz.xxx_404.nginx.type.prod.backend.random-404_xoxo.http_xxx",
 				"services.groups.xyz.xxx_404.nginx.type.prod.os.random-404_xoxo.http_xxx",
 			},
 		},

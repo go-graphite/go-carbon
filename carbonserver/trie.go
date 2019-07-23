@@ -32,10 +32,9 @@ type gstate struct {
 }
 
 type gdstate struct {
-	next    [131]*gdstate
 	gstates []*gstate
-
-	cacheHit int
+	// next    [131]*gdstate
+	// cacheHit int
 }
 
 func (g *gmatcher) dstate() *gdstate { return g.dstates[len(g.dstates)-1] }
@@ -92,10 +91,10 @@ func (g gdstate) String() string {
 }
 
 func (g *gdstate) step(c byte) *gdstate {
-	if g.next[c] != nil {
-		g.cacheHit++
-		return g.next[c]
-	}
+	// if g.next[c] != nil {
+	// 	g.cacheHit++
+	// 	return g.next[c]
+	// }
 
 	var ng gdstate
 	for _, s := range g.gstates {
@@ -105,7 +104,7 @@ func (g *gdstate) step(c byte) *gdstate {
 			}
 		}
 	}
-	g.next[c] = &ng
+	// g.next[c] = &ng
 	return &ng
 }
 
@@ -566,12 +565,20 @@ func (ti *trieIndex) walk(pattern string, limit int) (files []string, isFiles []
 				hasMoreNodes = true
 			}
 		}
+		// log.Printf("isFile = %+v\n", isFile)             // walk debug
+		// log.Printf("isDir = %+v\n", isDir)               // walk debug
+		// log.Printf("hasMoreNodes = %+v\n", hasMoreNodes) // walk debug
 
 		if !(isFile || isDir) {
 			continue
 		}
 
+		// log.Printf("curm.dstate().matched() = %+v\n", curm.dstate().matched()) // walk debug
 		if !curm.dstate().matched() {
+			if hasMoreNodes {
+				continue
+			}
+
 			// log.Println("pop", len(cur.c)) // walk debug
 			curm.pop(len(cur.c))
 			goto parent
@@ -635,7 +642,6 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 		} else {
 			copy(r[i:], n.c)
 			i += len(n.c)
-
 		}
 	}
 	copy(r[i:], tn.c)
