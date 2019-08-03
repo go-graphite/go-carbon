@@ -3,6 +3,7 @@ package carbonserver
 import (
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"reflect"
 	"regexp"
@@ -26,7 +27,8 @@ func newTrieServer(files []string) *CarbonserverListener {
 	listener.accessLogger, _ = zap.NewDevelopment()
 	listener.trieIndex = true
 	listener.whisperData = "./testdata"
-	listener.maxGlobs = 100
+	listener.maxGlobs = math.MaxInt64
+	listener.maxFilesGlobbed = math.MaxInt64
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
@@ -49,7 +51,8 @@ func newTrigramServer(files []string) *CarbonserverListener {
 	listener.accessLogger, _ = zap.NewDevelopment()
 	listener.trigramIndex = true
 	listener.whisperData = "./testdata"
-	listener.maxGlobs = 10000
+	listener.maxGlobs = math.MaxInt64
+	listener.maxFilesGlobbed = math.MaxInt64
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()

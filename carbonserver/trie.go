@@ -3,7 +3,6 @@ package carbonserver
 import (
 	"errors"
 	"fmt"
-	"math"
 	"path/filepath"
 	"strings"
 	"unsafe"
@@ -718,7 +717,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var leafs []bool
 
 	for _, g := range globs {
-		f, l, err := fidx.trieIdx.walk(g, math.MaxInt64)
+		f, l, err := fidx.trieIdx.walk(g, listener.maxFilesGlobbed-len(files))
 		if err != nil {
 			return nil, nil, err
 		}
