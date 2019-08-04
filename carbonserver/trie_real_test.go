@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,18 +44,33 @@ func readFile(path string) []string {
 func TestTrieGlobRealData(t *testing.T) {
 	files := readFile(*testDataPath)
 	var trieServer, trigramServer *CarbonserverListener
-	trieServer = newTrieServer(files)
-	trieServer.whisperData = *carbonPath
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		trieServer = newTrieServer(files)
+		trieServer.whisperData = *carbonPath
+
+		if *checkMemory {
+			t.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
+		}
+		wg.Done()
+	}()
 
 	if !*noTrigram {
-		trigramServer = newTrigramServer(files)
-		trigramServer.whisperData = *carbonPath
-	}
+		wg.Add(1)
+		go func() {
+			trigramServer = newTrigramServer(files)
+			trigramServer.whisperData = *carbonPath
 
-	if *checkMemory {
-		t.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
-		t.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(trigramServer))
+			if *checkMemory {
+				memory.Sizeof(trigramServer)
+				t.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(trigramServer))
+			}
+			wg.Done()
+		}()
 	}
+	wg.Wait()
 
 	queries := readFile(*targetQueryPath)
 	for _, query := range queries {
