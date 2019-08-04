@@ -1203,7 +1203,6 @@ func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t ti
 }
 
 func extractTrigrams(query string) []trigram.T {
-
 	if len(query) < 3 {
 		return nil
 	}

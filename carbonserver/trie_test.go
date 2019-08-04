@@ -36,6 +36,7 @@ func newTrieServer(files []string) *CarbonserverListener {
 	for _, file := range files {
 		trieIndex.insert(file)
 	}
+	trieIndex.setTrigrams()
 	fmt.Printf("trie index took %s\n", time.Now().Sub(start))
 
 	listener.UpdateFileIndex(&fileIndex{
@@ -449,6 +450,28 @@ func TestTrieIndex(t *testing.T) {
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random.404.xoxo.http_other",
 			},
 		},
+		{
+			input: []string{
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-403_xoxo/http_5xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-403_xoxo/http_4xx.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/tcp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/401/xoxo/http_other.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/404/xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/403/xoxo/udp.wsp",
+				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random/4044/xoxo/http.wsp",
+			},
+			query: "services.groups.*.*.nginx.type.*.frontend.*404_xoxo.http*",
+			expect: []string{
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_3xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_4xx",
+				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
+			},
+		},
 	}
 
 	for _, c := range cases {
@@ -529,19 +552,24 @@ func BenchmarkGlobIndex(b *testing.B) {
 		// "*-40*"
 		{"service-*.server-*.*-40*.*"},
 		{"service-*.*server-300*.*-40*.*"},
+		{"service-*.*server-300*.*-4*.*"},
 	}
 
 	for _, c := range cases {
+		var ctrie, ctrigram int
 		b.Run("trie/"+c.input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				btrieServer.expandGlobsTrie(c.input)
+				f, _, _ := btrieServer.expandGlobsTrie(c.input)
+				ctrie = len(f)
 			}
 		})
 		b.Run("trigram/"+c.input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				btrigramServer.expandGlobs(c.input)
+				f, _, _ := btrigramServer.expandGlobs(c.input)
+				ctrigram = len(f)
 			}
 		})
+		b.Logf("trie.len = %d trigram.len = %d", ctrie, ctrigram)
 	}
 }
 

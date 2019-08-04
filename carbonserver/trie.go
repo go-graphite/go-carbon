@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unsafe"
+
+	"github.com/RoaringBitmap/roaring"
 )
 
 const (
@@ -22,6 +24,11 @@ type gmatcher struct {
 	expr    string
 	dstates []*gdstate
 	dsindex int
+
+	// has leading star following by complex expressions
+	lsComplex bool
+	// trigrams  roaring.Bitmap
+	trigrams []uint32
 }
 
 type gstate struct {
@@ -186,6 +193,11 @@ func newGlobState(expr string) (*gmatcher, error) {
 			cur = &star
 		case '*':
 			m.exact = false
+			if i == 0 && len(expr) > 2 {
+				// TODO: check dup stars
+				m.lsComplex = true
+			}
+
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
 			}
@@ -246,6 +258,15 @@ func newGlobState(expr string) (*gmatcher, error) {
 	}
 	m.dstates = append(m.dstates, &droot)
 
+	if m.lsComplex {
+		var trigrams = extractTrigrams(expr)
+		m.trigrams = make([]uint32, 0, len(trigrams))
+		for _, t := range trigrams {
+			// m.trigrams.Add(uint32(t))
+			m.trigrams = append(m.trigrams, uint32(t))
+		}
+	}
+
 	return &m, nil
 }
 
@@ -272,6 +293,7 @@ type trieIndex struct {
 type trieNode struct {
 	c         []byte
 	childrens []*trieNode
+	trigrams  roaring.Bitmap
 }
 
 var fileNode = &trieNode{}
@@ -509,8 +531,8 @@ func (ti *trieIndex) walk(pattern string, limit int) (files []string, isFiles []
 		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
 		// log.Printf("curm.dstate = %+v\n", curm.dstate())                                        // walk debug
 		// for _, child := range cur.childrens {                                                   // walk debug
-		// log.Printf("child.c = %s\n", child.c)          // walk debug
-		// log.Printf("child.dir() = %+v\n", child.dir()) // walk debug
+		// 	log.Printf("child.c = %s\n", child.c)          // walk debug
+		// 	log.Printf("child.dir() = %+v\n", child.dir()) // walk debug
 		// } // walk debug
 
 		if cur.dir() {
@@ -525,6 +547,22 @@ func (ti *trieIndex) walk(pattern string, limit int) (files []string, isFiles []
 			curm.dstates = curm.dstates[:1]
 
 			continue
+		}
+
+		if curm.lsComplex && len(curm.trigrams) > 0 {
+			// iter := cur.trigrams.Iterator()
+			// var ts []trigram.T
+			// for iter.HasNext() {
+			// 	ts = append(ts, trigram.T(iter.Next()))
+			// }
+			// log.Printf("ts = %+v\n", ts)
+
+			for _, t := range curm.trigrams {
+				// log.Printf("trigram.T(t) = %s\n", trigram.T(t))
+				if !cur.trigrams.Contains(t) {
+					goto parent
+				}
+			}
 		}
 
 		// log.Printf("cur.c = %s\n", cur.c) // walk debug
@@ -686,6 +724,83 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		continue
 	}
 	return files
+}
+
+func (ti *trieIndex) setTrigrams() {
+	// var files = make([]string, 0, ti.fileCount)
+	var nindex = make([]int, ti.depth+1)
+	var ncindex int
+	var cur = ti.root
+	var trieNodes = make([]*trieNode, ti.depth+1)
+	var trigrams []uint32
+	for {
+		if nindex[ncindex] >= len(cur.childrens) {
+			goto parent
+		}
+
+		trieNodes[ncindex] = cur
+		cur = cur.childrens[nindex[ncindex]]
+		ncindex++
+
+		// log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
+		// for _, child := range cur.childrens {                                                   // walk debug
+		// 	log.Printf("child.c = %s\n", child.c)          // walk debug
+		// 	log.Printf("child.dir() = %+v\n", child.dir()) // walk debug
+		// } // walk debug
+
+		// abc.mno.xyz
+		trigrams = trigrams[:]
+		if ncindex > 1 && len(cur.c) > 0 {
+			cur1 := trieNodes[ncindex-1]
+			if len(cur1.c) > 1 {
+				t := uint32(uint32(cur1.c[len(cur1.c)-2])<<16 | uint32(cur1.c[len(cur1.c)-1])<<8 | uint32(cur.c[0]))
+				trieNodes[ncindex-1].trigrams.Add(t)
+				trigrams = append(trigrams, t)
+			} else if cur2 := trieNodes[ncindex-2]; ncindex-2 >= 0 && len(cur2.c) > 1 && len(cur1.c) > 0 {
+				t := uint32(uint32(cur2.c[len(cur2.c)-1])<<16 | uint32(cur1.c[len(cur1.c)-1])<<8 | uint32(cur.c[0]))
+				trieNodes[ncindex-2].trigrams.Add(t)
+				trigrams = append(trigrams, t)
+			}
+
+			if len(cur.c) > 1 {
+				t := uint32(uint32(cur1.c[len(cur1.c)-1])<<16 | uint32(cur.c[0])<<8 | uint32(cur.c[1]))
+				trieNodes[ncindex-1].trigrams.Add(t)
+				trigrams = append(trigrams, t)
+			}
+		}
+
+		if len(cur.c) > 2 {
+			for i := 0; i < len(cur.c)-2; i++ {
+				t := uint32(uint32(cur.c[i])<<16 | uint32(cur.c[i+1])<<8 | uint32(cur.c[i+2]))
+				cur.trigrams.Add(t)
+				trigrams = append(trigrams, t)
+			}
+		}
+
+		for i := 0; i < ncindex-1; i++ {
+			for _, t := range trigrams {
+				trieNodes[i].trigrams.Add(t)
+			}
+		}
+
+		if cur == fileNode {
+			// files = append(files, cur.fullPath(sep, trieNodes[:ncindex]))
+			goto parent
+		}
+
+		continue
+
+	parent:
+		nindex[ncindex] = 0
+		ncindex--
+		if ncindex < 0 {
+			break
+		}
+		nindex[ncindex]++
+		cur = trieNodes[ncindex]
+		continue
+	}
+	// return files
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
