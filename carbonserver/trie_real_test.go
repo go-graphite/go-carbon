@@ -52,7 +52,8 @@ func TestTrieGlobRealData(t *testing.T) {
 		trieServer.whisperData = *carbonPath
 
 		if *checkMemory {
-			t.Logf("memory.Sizeof(btrieServer)    = %+v\n", memory.Sizeof(trieServer))
+			start := time.Now()
+			t.Logf("memory.Sizeof(btrieServer)    = %+v took %s\n", memory.Sizeof(trieServer), time.Now().Sub(start))
 		}
 		wg.Done()
 	}()
@@ -64,8 +65,8 @@ func TestTrieGlobRealData(t *testing.T) {
 			trigramServer.whisperData = *carbonPath
 
 			if *checkMemory {
-				memory.Sizeof(trigramServer)
-				t.Logf("memory.Sizeof(btrigramServer) = %+v\n", memory.Sizeof(trigramServer))
+				start := time.Now()
+				t.Logf("memory.Sizeof(btrigramServer)    = %+v took %s\n", memory.Sizeof(trigramServer), time.Now().Sub(start))
 			}
 			wg.Done()
 		}()

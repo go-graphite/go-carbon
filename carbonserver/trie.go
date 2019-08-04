@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"unsafe"
-
-	"github.com/RoaringBitmap/roaring"
 )
 
 const (
@@ -293,12 +291,20 @@ type trieIndex struct {
 type trieNode struct {
 	c         []byte
 	childrens []*trieNode
-	trigrams  roaring.Bitmap
+	trigrams  []uint32
 }
 
 var fileNode = &trieNode{}
 
 func (tn *trieNode) dir() bool { return len(tn.c) == 1 && tn.c[0] == '/' }
+func (tn *trieNode) trigramsContains(t uint32) bool {
+	for _, i := range tn.trigrams {
+		if i == t {
+			return true
+		}
+	}
+	return false
+}
 
 func newTrie(fileExt string) *trieIndex {
 	return &trieIndex{
@@ -557,10 +563,18 @@ func (ti *trieIndex) walk(pattern string, limit int) (files []string, isFiles []
 			// }
 			// log.Printf("ts = %+v\n", ts)
 
-			for _, t := range curm.trigrams {
-				// log.Printf("trigram.T(t) = %s\n", trigram.T(t))
-				if !cur.trigrams.Contains(t) {
-					goto parent
+			// var ts []trigram.T
+			// for _, t := range cur.trigrams {
+			// 	ts = append(ts, trigram.T(t))
+			// }
+			// log.Printf("ts = %+v\n", ts)
+
+			if len(cur.trigrams) > len(curm.trigrams) {
+				for _, t := range curm.trigrams {
+					// log.Printf("trigram.T(t) = %s\n", trigram.T(t))
+					if !cur.trigramsContains(t) {
+						goto parent
+					}
 				}
 			}
 		}
@@ -749,39 +763,54 @@ func (ti *trieIndex) setTrigrams() {
 		// } // walk debug
 
 		// abc.mno.xyz
-		trigrams = trigrams[:]
-		if ncindex > 1 && len(cur.c) > 0 {
+		trigrams = []uint32{}
+		if ncindex > 1 && len(cur.c) > 0 && !cur.dir() {
 			cur1 := trieNodes[ncindex-1]
-			if len(cur1.c) > 1 {
-				t := uint32(uint32(cur1.c[len(cur1.c)-2])<<16 | uint32(cur1.c[len(cur1.c)-1])<<8 | uint32(cur.c[0]))
-				trieNodes[ncindex-1].trigrams.Add(t)
-				trigrams = append(trigrams, t)
-			} else if cur2 := trieNodes[ncindex-2]; ncindex-2 >= 0 && len(cur2.c) > 1 && len(cur1.c) > 0 {
-				t := uint32(uint32(cur2.c[len(cur2.c)-1])<<16 | uint32(cur1.c[len(cur1.c)-1])<<8 | uint32(cur.c[0]))
-				trieNodes[ncindex-2].trigrams.Add(t)
-				trigrams = append(trigrams, t)
-			}
+			if !cur1.dir() {
+				if len(cur1.c) > 1 {
+					t := uint32(uint32(cur1.c[len(cur1.c)-2])<<16 | uint32(cur1.c[len(cur1.c)-1])<<8 | uint32(cur.c[0]))
+					cur1.trigrams = append(cur1.trigrams, t)
+					trigrams = append(trigrams, t)
+				} else if ncindex-2 >= 0 {
+					cur2 := trieNodes[ncindex-2]
+					if !cur2.dir() && len(cur2.c) > 0 && len(cur1.c) > 0 {
+						t := uint32(uint32(cur2.c[len(cur2.c)-1])<<16 | uint32(cur1.c[len(cur1.c)-1])<<8 | uint32(cur.c[0]))
+						cur2.trigrams = append(cur2.trigrams, t)
+						trigrams = append(trigrams, t)
+					}
+				}
 
-			if len(cur.c) > 1 {
-				t := uint32(uint32(cur1.c[len(cur1.c)-1])<<16 | uint32(cur.c[0])<<8 | uint32(cur.c[1]))
-				trieNodes[ncindex-1].trigrams.Add(t)
-				trigrams = append(trigrams, t)
+				if len(cur.c) > 1 {
+					t := uint32(uint32(cur1.c[len(cur1.c)-1])<<16 | uint32(cur.c[0])<<8 | uint32(cur.c[1]))
+					cur1.trigrams = append(cur1.trigrams, t)
+					trigrams = append(trigrams, t)
+				}
 			}
 		}
-
-		if len(cur.c) > 2 {
+		if !cur.dir() && len(cur.c) > 2 {
 			for i := 0; i < len(cur.c)-2; i++ {
 				t := uint32(uint32(cur.c[i])<<16 | uint32(cur.c[i+1])<<8 | uint32(cur.c[i+2]))
-				cur.trigrams.Add(t)
+				cur.trigrams = append(cur.trigrams, t)
 				trigrams = append(trigrams, t)
 			}
 		}
 
-		for i := 0; i < ncindex-1; i++ {
+		for i := ncindex - 1; i >= 0; i-- {
+			if trieNodes[i].dir() {
+				break
+			}
 			for _, t := range trigrams {
-				trieNodes[i].trigrams.Add(t)
+				trieNodes[i].trigrams = append(trieNodes[i].trigrams, t)
 			}
 		}
+
+		// {
+		// 	var str string
+		// 	for _, t := range trigrams {
+		// 		str += fmt.Sprintf("%s ", trigram.T(t))
+		// 	}
+		// 	log.Printf("trigrams = %s\n", str)
+		// }
 
 		if cur == fileNode {
 			// files = append(files, cur.fullPath(sep, trieNodes[:ncindex]))

@@ -36,8 +36,11 @@ func newTrieServer(files []string) *CarbonserverListener {
 	for _, file := range files {
 		trieIndex.insert(file)
 	}
-	trieIndex.setTrigrams()
 	fmt.Printf("trie index took %s\n", time.Now().Sub(start))
+
+	start = time.Now()
+	trieIndex.setTrigrams()
+	fmt.Printf("trie setTrigrams took %s\n", time.Now().Sub(start))
 
 	listener.UpdateFileIndex(&fileIndex{
 		trieIdx: trieIndex,
