@@ -115,9 +115,11 @@ type carbonserverConfig struct {
 	MaxFilesGlobbed   int       `toml:"max-files-globbed"`
 	MetricsAsCounters bool      `toml:"metrics-as-counters"`
 	TrigramIndex      bool      `toml:"trigram-index"`
-	TrieIndex         bool      `toml:"trie-index"`
 	InternalStatsDir  string    `toml:"internal-stats-dir"`
 	Percentiles       []int     `toml:"stats-percentiles"`
+
+	TrieIndex             bool `toml:"trie-index"`
+	TrieIndexWithTrigrams bool `toml:"trie-index-with-trigrams"`
 }
 
 type pprofConfig struct {

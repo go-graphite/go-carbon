@@ -435,6 +435,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
 		carbonserver.SetTrieIndex(conf.Carbonserver.TrieIndex)
+		carbonserver.SetTrieIndexWithTrigrams(conf.Carbonserver.TrieIndexWithTrigrams)
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())

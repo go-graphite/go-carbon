@@ -53,7 +53,7 @@ func TestTrieGlobRealData(t *testing.T) {
 
 		if *checkMemory {
 			start := time.Now()
-			t.Logf("memory.Sizeof(btrieServer)    = %+v took %s\n", memory.Sizeof(trieServer), time.Now().Sub(start))
+			t.Logf("memory.Sizeof(btrieServer)\t\t= %+v took %s\n", memory.Sizeof(trieServer), time.Now().Sub(start))
 		}
 		wg.Done()
 	}()
@@ -66,7 +66,7 @@ func TestTrieGlobRealData(t *testing.T) {
 
 			if *checkMemory {
 				start := time.Now()
-				t.Logf("memory.Sizeof(btrigramServer)    = %+v took %s\n", memory.Sizeof(trigramServer), time.Now().Sub(start))
+				t.Logf("memory.Sizeof(btrigramServer)\t\t= %+v took %s\n", memory.Sizeof(trigramServer), time.Now().Sub(start))
 			}
 			wg.Done()
 		}()

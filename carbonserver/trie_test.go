@@ -475,6 +475,22 @@ func TestTrieIndex(t *testing.T) {
 				"services.groups.xyz.xxx_404.nginx.type.prod.frontend.random-404_xoxo.http_other",
 			},
 		},
+		{
+			input: []string{
+				"/fe/series/abc_101/xyz/haproxy/host/cjk-1018_main7_internet_com/traffic.wsp",
+				"/fe/series/abc_101/xyz/haproxy/host/cjk-1019_main7_internet_com/traffic.wsp",
+				"/fe/series/abc_101/xyz/haproxy/host/cjk-1020_main7_internet_com/traffic.wsp",
+				"/fe/series/abc_101/xyz/haproxy/host/cjk-2022_expr1_internet_com/traffic.wsp",
+				"/fe/series/abc_101/xyz/haproxy/host/mno-2022_expr1_internet_com/traffic.wsp",
+			},
+			query: "fe.series.*.*.haproxy.host.*cjk-*_internet_com.traffic",
+			expect: []string{
+				"fe.series.abc_101.xyz.haproxy.host.cjk-1018_main7_internet_com.traffic",
+				"fe.series.abc_101.xyz.haproxy.host.cjk-1019_main7_internet_com.traffic",
+				"fe.series.abc_101.xyz.haproxy.host.cjk-1020_main7_internet_com.traffic",
+				"fe.series.abc_101.xyz.haproxy.host.cjk-2022_expr1_internet_com.traffic",
+			},
+		},
 	}
 
 	for _, c := range cases {
