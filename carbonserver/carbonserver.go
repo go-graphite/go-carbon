@@ -289,6 +289,10 @@ type prometheus struct {
 
 	diskRequests      prom.Counter
 	diskRequest       func()
+	cancelledRequests prom.Counter
+	cancelledRequest  func()
+	timeoutRequests   prom.Counter
+	timeoutRequest    func()
 	diskWaitDurations prom.Histogram
 	diskWaitDuration  func(time.Duration)
 
@@ -338,6 +342,14 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 		diskRequests: prom.NewCounter(prom.CounterOpts{
 			Name: "disk_requests_total",
 			Help: "Number of times disk has been hit",
+		}),
+		cancelledRequests: prom.NewCounter(prom.CounterOpts{
+			Name: "cancelled_requests_total",
+			Help: "Number of times a request has been cancelled",
+		}),
+		timeoutRequests: prom.NewCounter(prom.CounterOpts{
+			Name: "timeout_requests_total",
+			Help: "Number of times a request has been timeout",
 		}),
 		diskWaitDurations: prom.NewHistogram(
 			prom.HistogramOpts{
@@ -391,6 +403,8 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 
 	reg.MustRegister(c.prometheus.requests)
 	reg.MustRegister(c.prometheus.cacheRequests)
+	reg.MustRegister(c.prometheus.cancelledRequests)
+	reg.MustRegister(c.prometheus.timeoutRequests)
 	reg.MustRegister(c.prometheus.durations)
 	reg.MustRegister(c.prometheus.diskRequests)
 	reg.MustRegister(c.prometheus.diskWaitDurations)
@@ -436,6 +450,8 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 			cacheRequest:     func(string, bool) {},
 			cacheDuration:    func(string, time.Duration) {},
 			diskRequest:      func() {},
+			cancelledRequest: func() {},
+			timeoutRequest:   func() {},
 			diskWaitDuration: func(time.Duration) {},
 			returnedMetric:   func() {},
 			returnedPoint:    func(int) {},

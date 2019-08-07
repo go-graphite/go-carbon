@@ -119,9 +119,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	var err error
 	fromCache := false
-	//rch := make(chan *findResponse)
-	//response := make(chan findResponse)
-	//var resp findResponse
 	if listener.findCacheEnabled {
 		key := strings.Join(query, ",") + "&" + format
 		size := uint64(100 * 1024 * 1024)
@@ -351,7 +348,13 @@ GATHER:
 			}
 
 		case <-ctx.Done():
-			return nil, fmt.Errorf("find failed, timeout")
+			switch ctx.Err() {
+			case context.DeadlineExceeded:
+				listener.prometheus.timeoutRequests.Inc()
+			case context.Canceled:
+				listener.prometheus.cancelledRequests.Inc()
+			}
+			return nil, fmt.Errorf("could not expand globs - %s", ctx.Err().Error())
 		}
 	}
 
