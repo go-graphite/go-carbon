@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -127,7 +128,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		if !ok {
 			logger.Debug("find cache miss")
 			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
-			response, err = listener.findMetrics(logger, t0, formatCode, query)
+			response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
 			if err != nil {
 				item.StoreAbort()
 			} else {
@@ -140,7 +141,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 			fromCache = true
 		}
 	} else {
-		response, err = listener.findMetrics(logger, t0, formatCode, query)
+		response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
 	}
 
 	if err != nil || response == nil {
@@ -200,53 +201,14 @@ type globs struct {
 	Leafs []bool
 }
 
-func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
+func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
 	var result findResponse
-	var expandedGlobs []globs
-	var errors []findError
-	var err error
 	metricsCount := uint64(0)
-	for _, name := range names {
-
-		glob := globs{
-			Name: name,
-		}
-		glob.Files, glob.Leafs, err = listener.expandGlobs(name)
-		if err != nil {
-			errors = append(errors, findError{name: name, err: err})
-			continue
-		}
-
-		expandedGlobs = append(expandedGlobs, glob)
+	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, t0, names)
+	if expandedGlobs == nil {
+		return nil, err
 	}
-
-	if len(errors) > 0 {
-		atomic.AddUint64(&listener.metrics.FindErrors, uint64(len(errors)))
-
-		if len(errors) == len(names) {
-			logger.Error("find failed",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", "can't expand globs"),
-				zap.Any("errors", errors),
-			)
-			return nil, fmt.Errorf("find failed, can't expand globs")
-		} else {
-			logger.Warn("find partly failed",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", "can't expand globs for some metrics"),
-				zap.Any("errors", errors),
-			)
-		}
-	}
-
 	atomic.AddUint64(&listener.metrics.MetricsFound, metricsCount)
-	logger.Debug("expandGlobs result",
-		zap.String("action", "expandGlobs"),
-		zap.Strings("metrics", names),
-		zap.String("format", format.String()),
-		zap.Any("result", expandedGlobs),
-	)
-
 	switch format {
 	case protoV3Format, jsonFormat:
 		var err error
@@ -356,4 +318,70 @@ func (listener *CarbonserverListener) findMetrics(logger *zap.Logger, t0 time.Ti
 		return &findResponse{buf.Bytes(), httpHeaders.ContentTypePickle, files}, nil
 	}
 	return nil, nil
+}
+
+func (listener *CarbonserverListener) getExpandedGlobs(ctx context.Context, logger *zap.Logger, t0 time.Time, names []string) ([]globs, error) {
+	var expandedGlobs []globs
+	var errors []findError
+	var err error
+	expGlobResultChan := make(chan *ExpandedGlobResponse, len(names))
+
+	for _, name := range names {
+		go listener.expandGlobs(name, expGlobResultChan)
+	}
+	responseCount := 0
+GATHER:
+	for {
+		select {
+		case expandedResult := <-expGlobResultChan:
+			responseCount++
+			glob := globs{
+				Name: expandedResult.Name,
+			}
+			glob.Files, glob.Leafs, err = expandedResult.Files, expandedResult.Leafs, expandedResult.Err
+			if err != nil {
+				errors = append(errors, findError{name: expandedResult.Name, err: err})
+			}
+			expandedGlobs = append(expandedGlobs, glob)
+			if responseCount == len(names) {
+				break GATHER
+			}
+
+		case <-ctx.Done():
+			switch ctx.Err() {
+			case context.DeadlineExceeded:
+				listener.prometheus.timeoutRequests.Inc()
+			case context.Canceled:
+				listener.prometheus.cancelledRequests.Inc()
+			}
+			return nil, fmt.Errorf("could not expand globs - %s", ctx.Err().Error())
+		}
+	}
+
+	if len(errors) > 0 {
+		atomic.AddUint64(&listener.metrics.FindErrors, uint64(len(errors)))
+
+		if len(errors) == len(names) {
+			logger.Error("find failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "can't expand globs"),
+				zap.Any("errors", errors),
+			)
+			return nil, fmt.Errorf("find failed, can't expand globs")
+		} else {
+			logger.Warn("find partly failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "can't expand globs for some metrics"),
+				zap.Any("errors", errors),
+			)
+		}
+	}
+
+	logger.Debug("expandGlobs result",
+		zap.String("action", "expandGlobs"),
+		zap.Strings("metrics", names),
+		//zap.String("format", format.String()),
+		zap.Any("result", expandedGlobs),
+	)
+	return expandedGlobs, nil
 }

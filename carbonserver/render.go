@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -203,7 +204,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		}
 	}()
 
-	response, fromCache, err := listener.fetchWithCache(logger, format, targets)
+	response, fromCache, err := listener.fetchWithCache(ctx, logger, format, targets)
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
@@ -249,7 +250,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 }
 
-func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format responseFormat, targets map[timeRange][]target) (fetchResponse, bool, error) {
+func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target) (fetchResponse, bool, error) {
 	logger = logger.With(
 		zap.String("function", "fetchWithCache"),
 	)
@@ -297,7 +298,7 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 
-			response, err = listener.prepareDataProto(format, targets)
+			response, err = listener.prepareDataProto(ctx, logger, format, targets)
 			if err != nil {
 				item.StoreAbort()
 			} else {
@@ -311,21 +312,44 @@ func (listener *CarbonserverListener) fetchWithCache(logger *zap.Logger, format 
 			fromCache = true
 		}
 	} else {
-		response, err = listener.prepareDataProto(format, targets)
+		response, err = listener.prepareDataProto(ctx, logger, format, targets)
 	}
 	return response, fromCache, err
 }
 
-func (listener *CarbonserverListener) prepareDataProto(format responseFormat, targets map[timeRange][]target) (fetchResponse, error) {
+func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target) (fetchResponse, error) {
 	contentType := "application/text"
 	var b []byte
-	var err error
 	var metricsFetched int
 	var memoryUsed int
 	var valuesFetched int
 
 	var multiv3 protov3.MultiFetchResponse
 	var multiv2 protov2.MultiFetchResponse
+
+	metricMap := make(map[string]bool)
+
+	for _, ts := range targets {
+		for _, metric := range ts {
+			metricMap[metric.Name] = true
+		}
+	}
+	metricNames := make([]string, len(metricMap))
+	i := 0
+	for k := range metricMap {
+		metricNames[i] = k
+		i++
+	}
+	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+
+	if expandedGlobs == nil {
+		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+	}
+
+	metricGlobMap := make(map[string]globs)
+	for _, expandedGlob := range expandedGlobs {
+		metricGlobMap[strings.Replace(expandedGlob.Name, "/", ".", -1)] = expandedGlob
+	}
 
 	var metrics []string
 	for tr, ts := range targets {
@@ -334,53 +358,56 @@ func (listener *CarbonserverListener) prepareDataProto(format responseFormat, ta
 			untilTime := tr.until
 
 			listener.logger.Debug("fetching data...")
-			files, leafs, err := listener.expandGlobs(metric.Name)
-			if err != nil {
+
+			if expandedResult, ok := metricGlobMap[metric.Name]; ok {
+				files, leafs := expandedResult.Files, expandedResult.Leafs
+
+				metricsCount := 0
+				for i := range files {
+					if leafs[i] {
+						metricsCount++
+					}
+				}
+				listener.logger.Debug("expandGlobs result",
+					zap.String("handler", "render"),
+					zap.String("action", "expandGlobs"),
+					zap.String("metric", metric.Name),
+					zap.Int("metrics_count", metricsCount),
+					zap.Int32("from", fromTime),
+					zap.Int32("until", untilTime),
+				)
+
+				if format == protoV2Format || format == jsonFormat {
+					res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
+					if err != nil {
+						atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+						listener.logger.Error("error while fetching the data",
+							zap.Error(err),
+						)
+						continue
+					}
+					multiv2.Metrics = append(multiv2.Metrics, res.Metrics...)
+				} else {
+					res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
+					if err != nil {
+						atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+						listener.logger.Error("error while fetching the data",
+							zap.Error(err),
+						)
+						continue
+					}
+					for i := range res.Metrics {
+						res.Metrics[i].PathExpression = metric.PathExpression
+					}
+					multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
+				}
+			} else {
 				listener.logger.Debug("expand globs returned an error",
 					zap.Error(err),
 				)
 				continue
 			}
 
-			metricsCount := 0
-			for i := range files {
-				if leafs[i] {
-					metricsCount++
-				}
-			}
-			listener.logger.Debug("expandGlobs result",
-				zap.String("handler", "render"),
-				zap.String("action", "expandGlobs"),
-				zap.String("metric", metric.Name),
-				zap.Int("metrics_count", metricsCount),
-				zap.Int32("from", fromTime),
-				zap.Int32("until", untilTime),
-			)
-
-			if format == protoV2Format || format == jsonFormat {
-				res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
-				if err != nil {
-					atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-					listener.logger.Error("error while fetching the data",
-						zap.Error(err),
-					)
-					continue
-				}
-				multiv2.Metrics = append(multiv2.Metrics, res.Metrics...)
-			} else {
-				res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
-				if err != nil {
-					atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-					listener.logger.Error("error while fetching the data",
-						zap.Error(err),
-					)
-					continue
-				}
-				for i := range res.Metrics {
-					res.Metrics[i].PathExpression = metric.PathExpression
-				}
-				multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
-			}
 		}
 	}
 
