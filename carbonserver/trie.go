@@ -291,7 +291,6 @@ var fileNode = &trieNode{}
 func (tn *trieNode) dir() bool { return len(tn.c) == 1 && tn.c[0] == '/' }
 
 func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
-	// TODO: test if a sorted search would spice things up more
 	for _, i := range ti.trigrams[tn] {
 		if i == t {
 			return true
@@ -736,7 +735,10 @@ func (ti *trieIndex) setTrigrams() {
 	var trigrams = make([][]uint32, ti.depth+1)
 
 	// chosen semi-randomly, balanced by space and efficiency comparing to a
-	// pure trigram index. This value *doubles* the trie index memory usages.
+	// pure trie index. This value *doubles* the trie index memory usages
+	// and delivers similar performance comparing to trigram index in
+	// queries contains a leading star fowllowing by keywords in one of its
+	// nodes.
 	const factor = 11
 
 	for {
@@ -826,8 +828,6 @@ func (ti *trieIndex) setTrigrams() {
 		cur = trieNodes[ncindex]
 		continue
 	}
-
-	// TODO: sort and uniq trigrams
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
@@ -859,7 +859,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var leafs []bool
 
 	for _, g := range globs {
-		f, l, err := fidx.trieIdx.walk(g, listener.maxFilesGlobbed-len(files))
+		f, l, err := fidx.trieIdx.walk(g, listener.maxMetricsGlobbed-len(files))
 		if err != nil {
 			return nil, nil, err
 		}

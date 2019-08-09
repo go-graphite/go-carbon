@@ -112,11 +112,13 @@ type carbonserverConfig struct {
 	Buckets           int       `toml:"buckets"`
 	MaxGlobs          int       `toml:"max-globs"`
 	FailOnMaxGlobs    bool      `toml:"fail-on-max-globs"`
-	MaxFilesGlobbed   int       `toml:"max-files-globbed"`
 	MetricsAsCounters bool      `toml:"metrics-as-counters"`
 	TrigramIndex      bool      `toml:"trigram-index"`
 	InternalStatsDir  string    `toml:"internal-stats-dir"`
 	Percentiles       []int     `toml:"stats-percentiles"`
+
+	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
+	MaxMetricsRendered int `toml:"max-metrics-rendered"`
 
 	TrieIndex             bool `toml:"trie-index"`
 	TrieIndexWithTrigrams bool `toml:"trie-index-with-trigrams"`
@@ -213,11 +215,12 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
-			QueryCacheEnabled: true,
-			QueryCacheSizeMB:  0,
-			FindCacheEnabled:  true,
-			TrigramIndex:      true,
-			MaxFilesGlobbed:   10000,
+			QueryCacheEnabled:  true,
+			QueryCacheSizeMB:   0,
+			FindCacheEnabled:   true,
+			TrigramIndex:       true,
+			MaxMetricsGlobbed:  30000,
+			MaxMetricsRendered: 1000,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
