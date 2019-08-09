@@ -17,18 +17,17 @@ import (
 	"go.uber.org/zap"
 )
 
-func init() {
-	log.SetFlags(log.Lshortfile)
-}
+func init() { log.SetFlags(log.Lshortfile) }
 
-func newTrieServer(files []string) *CarbonserverListener {
+func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger, _ = zap.NewDevelopment()
 	listener.accessLogger, _ = zap.NewDevelopment()
 	listener.trieIndex = true
 	listener.whisperData = "./testdata"
 	listener.maxGlobs = math.MaxInt64
-	listener.maxFilesGlobbed = math.MaxInt64
+	listener.maxMetricsGlobbed = math.MaxInt64
+	listener.maxMetricsRendered = math.MaxInt64
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
@@ -38,9 +37,11 @@ func newTrieServer(files []string) *CarbonserverListener {
 	}
 	fmt.Printf("trie index took %s\n", time.Now().Sub(start))
 
-	start = time.Now()
-	trieIndex.setTrigrams()
-	fmt.Printf("trie setTrigrams took %s\n", time.Now().Sub(start))
+	if withTrigram {
+		start = time.Now()
+		trieIndex.setTrigrams()
+		fmt.Printf("trie setTrigrams took %s\n", time.Now().Sub(start))
+	}
 
 	listener.UpdateFileIndex(&fileIndex{
 		trieIdx: trieIndex,
@@ -56,7 +57,8 @@ func newTrigramServer(files []string) *CarbonserverListener {
 	listener.trigramIndex = true
 	listener.whisperData = "./testdata"
 	listener.maxGlobs = math.MaxInt64
-	listener.maxFilesGlobbed = math.MaxInt64
+	listener.maxMetricsGlobbed = math.MaxInt64
+	listener.maxMetricsRendered = math.MaxInt64
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
@@ -497,7 +499,7 @@ func TestTrieIndex(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
-			trieServer := newTrieServer(c.input)
+			trieServer := newTrieServer(c.input, true)
 			trieFiles, _, err := trieServer.expandGlobsTrie(c.query)
 			if err != nil {
 				t.Errorf("failed to trie.expandGlobs: %s", err)
@@ -540,7 +542,7 @@ func BenchmarkGlobIndex(b *testing.B) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		btrieServer = newTrieServer(files)
+		btrieServer = newTrieServer(files, true)
 		wg.Done()
 	}()
 	go func() {
@@ -631,7 +633,7 @@ func TestDumpAllMetrics(t *testing.T) {
 		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
-	trie := newTrieServer(files)
+	trie := newTrieServer(files, true)
 	metrics := trie.CurrentFileIndex().trieIdx.allMetrics('.')
 	for i := range files {
 		files[i] = files[i][:len(files[i])-4]

@@ -20,6 +20,7 @@ var checkMemory = flag.Bool("memory-size", false, "show index memory size")
 var targetQueryPath = flag.String("query-data", "queries.txt", "queries for testing")
 var carbonPath = flag.String("carbon", "/var/lib/carbon/whisper", "carbon data path")
 var noTrigram = flag.Bool("no-trigram", false, "disable trigram search")
+var pureTrie = flag.Bool("no-trie-with-trigram", false, "enable trigram in trie")
 
 func readFile(path string) []string {
 	data, err := ioutil.ReadFile(path)
@@ -48,7 +49,7 @@ func TestTrieGlobRealData(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		trieServer = newTrieServer(files)
+		trieServer = newTrieServer(files, !*pureTrie)
 		trieServer.whisperData = *carbonPath
 
 		if *checkMemory {
