@@ -19,6 +19,7 @@ import (
 	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // gzipPool provides a sync.Pool of initialized gzip.Readers's to avoid
@@ -245,4 +246,8 @@ func acquireGzipReader(r io.Reader) (*gzip.Reader, error) {
 func releaseGzipReader(zr *gzip.Reader) {
 	zr.Close()
 	gzipPool.Put(zr)
+}
+
+// InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
+func (rcv *PubSub) InitPrometheus(reg prometheus.Registerer) {
 }

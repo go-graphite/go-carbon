@@ -15,6 +15,7 @@ import (
 	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
@@ -159,4 +160,8 @@ func (rcv *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	atomic.AddUint32(&rcv.metricsReceived, uint32(cnt))
+}
+
+// InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
+func (rcv *HTTP) InitPrometheus(reg prometheus.Registerer) {
 }

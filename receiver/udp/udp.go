@@ -13,6 +13,7 @@ import (
 	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
@@ -184,4 +185,8 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 
 		return nil
 	})
+}
+
+// InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
+func (rcv *UDP) InitPrometheus(reg prometheus.Registerer) {
 }

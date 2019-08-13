@@ -20,6 +20,7 @@ import (
 	"github.com/lomik/go-carbon/receiver"
 	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
@@ -498,4 +499,8 @@ func (rcv *Kafka) worker() {
 			rcv.Unlock()
 		}
 	}
+}
+
+// InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
+func (rcv *Kafka) InitPrometheus(reg prometheus.Registerer) {
 }

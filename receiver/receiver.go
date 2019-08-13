@@ -9,11 +9,13 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type Receiver interface {
 	Stop()
 	Stat(helper.StatCallback)
+	InitPrometheus(prometheus.Registerer)
 }
 
 type protocolRecord struct {
