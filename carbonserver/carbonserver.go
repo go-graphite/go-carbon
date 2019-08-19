@@ -261,9 +261,7 @@ type CarbonserverListener struct {
 	findCacheEnabled  bool
 	findCache         queryCache
 	trigramIndex      bool
-
-	trieIndex             bool
-	trieIndexWithTrigrams bool
+	trieIndex         bool
 
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
@@ -531,9 +529,6 @@ func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 func (listener *CarbonserverListener) SetTrieIndex(enabled bool) {
 	listener.trieIndex = enabled
 }
-func (listener *CarbonserverListener) SetTrieIndexWithTrigrams(enabled bool) {
-	listener.trieIndexWithTrigrams = enabled
-}
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
 }
@@ -694,7 +689,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		for _, file := range files {
 			nfidx.trieIdx.insert(file)
 		}
-		if listener.trieIndexWithTrigrams {
+		if listener.trigramIndex {
 			nfidx.trieIdx.setTrigrams()
 		}
 	} else {
@@ -744,7 +739,20 @@ func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- 
 	logger := zapwriter.Logger("carbonserver")
 	matchedCount := 0
 	defer func(start time.Time) {
-		logger.Info("expandGlobs", zap.Duration("time", time.Now().Sub(start)), zap.String("query", query), zap.Int("matched_count", matchedCount))
+		dur := time.Now().Sub(start)
+		if dur <= time.Second {
+			return
+		}
+		var itype string
+		if listener.trieIndex {
+			itype = "trie"
+			if listener.trigramIndex {
+				itype = "trie-trigram"
+			}
+		} else if listener.trigramIndex {
+			itype = "trigram"
+		}
+		logger.Info("slow_expand_globs", zap.Duration("time", dur), zap.String("query", query), zap.Int("matched_count", matchedCount), zap.String("index_type", itype))
 	}(time.Now())
 
 	if listener.trieIndex {

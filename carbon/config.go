@@ -120,8 +120,7 @@ type carbonserverConfig struct {
 	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
 	MaxMetricsRendered int `toml:"max-metrics-rendered"`
 
-	TrieIndex             bool `toml:"trie-index"`
-	TrieIndexWithTrigrams bool `toml:"trie-index-with-trigrams"`
+	TrieIndex bool `toml:"trie-index"`
 }
 
 type pprofConfig struct {
