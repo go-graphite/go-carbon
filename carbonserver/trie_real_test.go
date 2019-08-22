@@ -93,6 +93,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			// for i, str := range trieFiles {
 			// 	log.Printf("%d: %s\n", i, str)
 			// }
+			// log.Printf("len(trieFiles) = %+v\n", len(trieFiles))
 
 			if *noTrigram {
 				return

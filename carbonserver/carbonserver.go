@@ -672,8 +672,6 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 
 	nfidx := &fileIndex{
-		// idx:         idx,
-		// files:       files,
 		details:     details,
 		freeSpace:   freeSpace,
 		totalSpace:  totalSpace,
@@ -682,15 +680,29 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 
 	var pruned int
 	var indexType = "trigram"
+	var infos []zap.Field
 	t0 = time.Now()
 	if listener.trieIndex {
 		indexType = "trie"
 		nfidx.trieIdx = newTrie(".wsp")
+		var errs []error
 		for _, file := range files {
-			nfidx.trieIdx.insert(file)
+			if err := nfidx.trieIdx.insert(file); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		infos = append(
+			infos,
+			zap.Int("trie_depth", nfidx.trieIdx.depth),
+			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
+		)
+		if len(errs) > 0 {
+			infos = append(infos, zap.Errors("trie_index_errors", errs))
 		}
 		if listener.trigramIndex {
+			start := time.Now()
 			nfidx.trieIdx.setTrigrams()
+			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start)))
 		}
 	} else {
 		nfidx.files = files
@@ -723,7 +735,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 
 	listener.UpdateFileIndex(nfidx)
 
-	logger.Info("file list updated",
+	infos = append(infos,
 		zap.Duration("file_scan_runtime", fileScanRuntime),
 		zap.Duration("indexing_runtime", indexingRuntime),
 		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
@@ -733,6 +745,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		zap.Int("pruned_trigrams", pruned),
 		zap.String("index_type", indexType),
 	)
+	logger.Info("file list updated", infos...)
 }
 
 func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse) {

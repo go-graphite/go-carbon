@@ -40,8 +40,10 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	if withTrigram {
 		start = time.Now()
 		trieIndex.setTrigrams()
-		fmt.Printf("trie setTrigrams took %s\n", time.Now().Sub(start))
+		fmt.Printf("trie setTrigrams took %s size %d\n", time.Now().Sub(start), len(trieIndex.trigrams))
 	}
+
+	fmt.Printf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
 
 	listener.UpdateFileIndex(&fileIndex{
 		trieIdx: trieIndex,
