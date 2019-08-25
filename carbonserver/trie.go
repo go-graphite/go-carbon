@@ -10,6 +10,8 @@ import (
 	trigram "github.com/dgryski/go-trigram"
 )
 
+// debug codes diff: https://play.golang.org/p/ggljkZUj6dr
+
 // TODO: remove commented-out debug codes
 
 const (
@@ -140,12 +142,11 @@ func (g *gdstate) matched() bool {
 
 // TODO:
 //     add range value validation
-func newGlobState(expr string) (*gmatcher, error) {
+func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*gmatcher, error) {
 	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
 	var cur = m.root
-	// var inAlter bool
 	var alters [][2]*gstate
-	// var alterStart, alterEnd *gstate
+
 	for i := 0; i < len(expr); i++ {
 		c := expr[i]
 		switch c {
@@ -261,11 +262,22 @@ func newGlobState(expr string) (*gmatcher, error) {
 	m.dstates = append(m.dstates, &droot)
 
 	if m.lsComplex {
-		var trigrams = extractTrigrams(expr)
-		m.trigrams = make([]uint32, 0, len(trigrams))
-		for _, t := range trigrams {
-			// m.trigrams.Add(uint32(t))
-			m.trigrams = append(m.trigrams, uint32(t))
+		es, err := expand([]string{expr})
+		if err != nil {
+			return nil, nil
+		}
+		for _, e := range es {
+			trigrams := extractTrigrams(e)
+
+		appendt:
+			for i := 0; i < len(trigrams); i++ {
+				for _, t := range m.trigrams {
+					if t == uint32(trigrams[i]) {
+						continue appendt
+					}
+				}
+				m.trigrams = append(m.trigrams, uint32(trigrams[i]))
+			}
 		}
 	}
 
@@ -318,7 +330,6 @@ func newTrie(fileExt string) *trieIndex {
 // abc.daf2.ghi
 // efg.cjk
 func (ti *trieIndex) insert(path string) error {
-	// log.Printf("path = %+v\n", path)
 
 	path = filepath.Clean(path)
 	if path[0] == '/' {
@@ -347,9 +358,6 @@ outer:
 			continue
 		}
 
-		// log.Printf("\n")
-		// log.Printf("  %s\n", path[start:i])
-
 		// case 1:
 		// 	abc . xxx
 		// 	ab  . xxx
@@ -377,12 +385,6 @@ outer:
 			child := cur.childrens[ci]
 			match = 0
 
-			// log.Printf("    child.c = %s\n", child.c)
-			// log.Printf("    path[start:i] = %+v\n", path[start:i])
-			// for _, child := range child.childrens {
-			// 	log.Printf("      cur.child.c = %s\n", child.c)
-			// }
-
 			if len(child.c) == 0 || child.c[0] != path[start] {
 				continue
 			}
@@ -397,12 +399,8 @@ outer:
 				}
 				start++
 			}
-			// log.Printf("match = %+v\n", match)
-			// log.Printf("nlen = %+v\n", nlen)
 
 			if match == nlen {
-				// log.Printf("child.c = %s\n", child.c)
-				// log.Printf("len(child.c) = %+v\n", len(child.c))
 
 				// case 1
 				if len(child.c) > match {
@@ -426,7 +424,6 @@ outer:
 
 		split:
 			// case 5, 6, 7
-			// log.Printf("split\n")
 			prefix, suffix := child.c[:match], child.c[match:]
 			sn = &trieNode{c: suffix, childrens: child.childrens}
 
@@ -436,9 +433,6 @@ outer:
 			cur = child
 
 			if nlen-match > 0 {
-				// log.Printf("nlen-match = %+v\n", nlen-match)
-				// log.Printf("path[start:i] = %+v\n", path[start:i])
-				// log.Printf("len(path[start:i]) = %+v\n", len(path[start:i]))
 
 				newn = &trieNode{c: make([]byte, nlen-match)}
 				copy(newn.c, []byte(path[start:i]))
@@ -452,7 +446,6 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-			// log.Printf("new_node = %s\n", path[start:i])
 
 			newn = &trieNode{c: make([]byte, i-start)}
 			copy(newn.c, []byte(path[start:i]))
@@ -469,7 +462,6 @@ outer:
 			}
 		}
 		if i < len(path) {
-			// log.Printf("append /\n")
 
 			newn = &trieNode{c: []byte{'/'}}
 			cur.childrens = append(cur.childrens, newn)
@@ -487,25 +479,19 @@ outer:
 	cur.childrens = append(cur.childrens, fileNode)
 	ti.fileCount++
 
-	// 	log.Printf("\n")
-	// 	log.Printf("--- all metrics start\n")
-	// 	ti.allMetrics('.')
-	// 	log.Printf("--- all metrics end\n")
-	// 	log.Printf("\n")
-
 	return nil
 }
 
 // TODO: add some defensive logics agains bad queries?
 // depth first search
-func (ti *trieIndex) query(expr string, limit int) (files []string, isFiles []bool, err error) {
+func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, err error) {
 	var matchers []*gmatcher
 	var exact bool
 	for _, node := range strings.Split(expr, "/") {
 		if node == "" {
 			return nil, nil, errors.New("empty node in query")
 		}
-		gs, err := newGlobState(node)
+		gs, err := newGlobState(node, expand)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -522,36 +508,17 @@ func (ti *trieIndex) query(expr string, limit int) (files []string, isFiles []bo
 	var ndstate *gdstate
 	var isFile, isDir, hasMoreNodes bool
 
-	// var dump bool
 	for {
 		if nindex[ncindex] >= len(cur.childrens) {
-			// log.Println("pop", len(cur.c)) // walk debug
 			curm.pop(len(cur.c))
 			goto parent
 		}
-
-		// if ncindex > 0 { // walk debug
-		// log.Printf("parent.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
-		// } // walk debug
 
 		trieNodes[ncindex] = cur
 		cur = cur.childrens[nindex[ncindex]]
 		ncindex++
 
-		// dump = false
-		// if strings.Contains(cur.fullPath('.', trieNodes[:ncindex]), "") {
-		// 	dump = true
-		// 	log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
-		// 	log.Printf("curm.dstate = %+v\n", curm.dstate())                                        // walk debug
-		// 	for _, child := range cur.childrens {                                                   // walk debug
-		// 		log.Printf("child.c = %s\n", child.c)          // walk debug
-		// 		log.Printf("child.dir() = %+v\n", child.dir()) // walk debug
-		// 	} // walk debug
-		// }
-
 		if cur.dir() {
-			// log.Printf("curm.dstate = %+v\n", curm.dstate())                       // walk debug
-			// log.Printf("curm.dstate().matched() = %+v\n", curm.dstate().matched()) // walk debug
 			if mindex+1 >= len(matchers) || !curm.dstate().matched() {
 				goto parent
 			}
@@ -564,55 +531,29 @@ func (ti *trieIndex) query(expr string, limit int) (files []string, isFiles []bo
 		}
 
 		if curm.lsComplex && len(curm.trigrams) > 0 {
-			// if dump {
-			// 	var ts []trigram.T
-			// 	// for _, t := range ti.trigrams[cur] {
-			// 	for t := range ti.trigrams[cur] {
-			// 		ts = append(ts, trigram.T(t))
-			// 	}
-			// 	log.Printf("ti.trigrams[cur] = %+v\n", ts)
-			// }
-			// if dump {
-			// 	var ts []trigram.T
-			// 	for _, t := range curm.trigrams {
-			// 		ts = append(ts, trigram.T(t))
-			// 	}
-			// 	log.Printf("curm.trigrams = %+v\n", ts)
-			// }
 
 			if _, ok := ti.trigrams[cur]; ok {
 				for _, t := range curm.trigrams {
-					// log.Printf("trigram.T(t) = %s\n", trigram.T(t))
 					if !ti.trigramsContains(cur, t) {
-						// if dump {
-						// 	log.Printf("trigram %s not found", trigram.T(t))
-						// }
 						goto parent
 					}
 				}
 			}
 		}
 
-		// log.Printf("cur.c = %s\n", cur.c) // walk debug
 		for i := 0; i < len(cur.c); i++ {
 			ndstate = curm.dstate().step(cur.c[i])
 			if len(ndstate.gstates) == 0 {
 				if i > 0 {
-					// log.Println("pop", i) // walk debug
 
 					// TODO: add test case
 					curm.pop(i)
 				}
 				goto parent
 			}
-			// log.Println("push") // walk debug
 			curm.push(ndstate)
 
-			// log.Printf("curm.dstate = %+v\n", curm.dstate()) // walk debug
 		}
-
-		// log.Printf("mindex+1 = %+v\n", mindex+1)           // walk debug
-		// log.Printf("len(matchers) = %+v\n", len(matchers)) // walk debug
 
 		if mindex+1 < len(matchers) {
 			continue
@@ -630,21 +571,16 @@ func (ti *trieIndex) query(expr string, limit int) (files []string, isFiles []bo
 				hasMoreNodes = true
 			}
 		}
-		// log.Printf("isFile = %+v\n", isFile)             // walk debug
-		// log.Printf("isDir = %+v\n", isDir)               // walk debug
-		// log.Printf("hasMoreNodes = %+v\n", hasMoreNodes) // walk debug
 
 		if !(isFile || isDir) {
 			continue
 		}
 
-		// log.Printf("curm.dstate().matched() = %+v\n", curm.dstate().matched()) // walk debug
 		if !curm.dstate().matched() {
 			if hasMoreNodes {
 				continue
 			}
 
-			// log.Println("pop", len(cur.c)) // walk debug
 			curm.pop(len(cur.c))
 			goto parent
 		}
@@ -666,7 +602,6 @@ func (ti *trieIndex) query(expr string, limit int) (files []string, isFiles []bo
 			continue
 		}
 
-		// log.Println("pop", len(cur.c)) // walk debug
 		curm.pop(len(cur.c))
 		goto parent
 
@@ -737,11 +672,6 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		cur = cur.childrens[nindex[ncindex]]
 		ncindex++
 
-		// log.Printf("cur.fullPath(sep, trieNodes[:ncindex]) = %+v\n", cur.fullPath(sep, trieNodes[:ncindex]))
-		// for _, cur := range cur.childrens {
-		// 	log.Printf("cur.c = %s\n", cur.c)
-		// }
-
 		if cur == fileNode {
 			files = append(files, cur.fullPath(sep, trieNodes[:ncindex]))
 			goto parent
@@ -762,8 +692,10 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 	return files
 }
 
+// statNodes returns the how many files/dirs a dir node has (doesn't go over dir
+// boundary)
 func (ti *trieIndex) statNodes() map[*trieNode]int {
-	var stat = map[*trieNode]int{}
+	var stats = map[*trieNode]int{}
 	var nindex = make([]int, ti.depth+1)
 	var ncindex int
 	var cur = ti.root
@@ -774,7 +706,7 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 	for {
 		if nindex[ncindex] >= len(cur.childrens) {
 			if cur.dir() {
-				stat[cur] = curdirs[curindex]
+				stats[cur] = curdirs[curindex]
 				curdirs[curindex] = 0
 				curindex--
 			}
@@ -809,23 +741,7 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 		continue
 	}
 
-	// {
-	// 	var counts = make([]int, 0, len(stat))
-	// 	for _, c := range stat {
-	// 		counts = append(counts, c)
-	// 	}
-	// 	sort.Sort(sort.Reverse(sort.IntSlice(counts)))
-	//
-	// 	var counter int
-	// 	for i := 0; i < len(counts) && counts[i] > 30; i++ {
-	// 		// for i := 0; i < 100; i++ {
-	// 		// fmt.Printf("%d: %d ", i, counts[i])
-	// 		counter++
-	// 	}
-	// 	fmt.Println("nodes > 30:", counter)
-	// }
-
-	return stat
+	return stats
 }
 
 func (ti *trieIndex) setTrigrams() {
@@ -842,7 +758,6 @@ func (ti *trieIndex) setTrigrams() {
 
 	gent := func(b1, b2, b3 byte) uint32 { return uint32(uint32(b1)<<16 | uint32(b2)<<8 | uint32(b3)) }
 
-	// var dump bool
 	for {
 		if nindex[ncindex] >= len(cur.childrens) {
 			goto parent
@@ -852,17 +767,6 @@ func (ti *trieIndex) setTrigrams() {
 		cur = cur.childrens[nindex[ncindex]]
 		ncindex++
 		trieNodes[ncindex] = cur
-
-		// dump = false
-		// if strings.Contains(cur.fullPath('.', trieNodes[:ncindex]), "") {
-		// 	log.Println("===")
-		// 	log.Printf("cur.fullPath(., ti.depth) = %+v\n", cur.fullPath('.', trieNodes[:ncindex])) // walk debug
-		// 	dump = true
-		// 	for _, child := range cur.childrens { // walk debug
-		// 		log.Printf("child.c = %s\n", child.c)          // walk debug
-		// 		log.Printf("child.dir() = %+v\n", child.dir()) // walk debug
-		// 	} // walk debug
-		// }
 
 		// abc.xyz.cjk
 		trigrams[ncindex] = []uint32{}
@@ -893,40 +797,30 @@ func (ti *trieIndex) setTrigrams() {
 			}
 		}
 
-		// if dump {
-		// 	log.Printf("dumpTrigrams(trigrams[ncindex]) = %+v\n", dumpTrigrams(trigrams[ncindex]))
-		// 	log.Printf("ncindex - 1 = %+v\n", ncindex-1)
-		// 	log.Printf("trieNodes = %v\n", trieNodes[:ncindex+1])
-		// }
-
 		for i := ncindex - 1; i >= 0 && len(trigrams[ncindex]) > 0; i-- {
 			if trieNodes[i] == nil || !trieNodes[i].dir() {
 				continue
 			}
-			// if dump {
-			// 	log.Printf("cur.fullPath('.', trieNodes[:i+1]) = %+v\n", cur.fullPath('.', trieNodes[:i+1]))
-			// 	log.Printf("cur.fullPath('.', trieNodes[:ncindex]) = %+v\n", cur.fullPath('.', trieNodes[:ncindex]))
-			// 	log.Printf("trieNodes[i] = %p\n", trieNodes[i])
-			// 	log.Printf("stats[trieNodes[i]] %+v\n", stats[trieNodes[i]])
-			// 	log.Printf("factor = %+v\n", factor)
-			// 	log.Printf("i+1 = %+v\n", i+1)
-			// 	log.Printf("ncindex = %+v\n", ncindex)
-			// 	log.Printf("len(trieNodes) = %+v\n", len(trieNodes))
-			// }
-			if stats[trieNodes[i]] > factor && i+1 < len(trieNodes) {
-			append_trigram:
-				for _, t := range trigrams[ncindex] {
-					for _, tit := range ti.trigrams[trieNodes[i+1]] {
-						if t == tit {
-							continue append_trigram
-						}
-					}
-					ti.trigrams[trieNodes[i+1]] = append(ti.trigrams[trieNodes[i+1]], t)
-				}
 
-				// if dump {
-				// 	log.Printf("trieNodes[i+1] = %p\n", trieNodes[i+1])
-				// }
+			// TODO: index not just the first node, but also the 5th, 9th, etc.
+			if stats[trieNodes[i]] > factor {
+				// the current trigrams strategy only works for dir nodes contains many direct children
+				// but should be able to change to handle deep-nested children
+				for _, pos := range []int{1} {
+					if i+pos >= len(trieNodes) || trieNodes[i+pos] == nil {
+						break
+					}
+				appendt:
+					for _, t := range trigrams[ncindex] {
+						for _, tit := range ti.trigrams[trieNodes[i+pos]] {
+							if t == tit {
+								continue appendt
+							}
+						}
+						ti.trigrams[trieNodes[i+pos]] = append(ti.trigrams[trieNodes[i+pos]], t)
+					}
+
+				}
 			}
 			break
 		}
@@ -949,14 +843,6 @@ func (ti *trieIndex) setTrigrams() {
 		continue
 	}
 
-	// var counters []int
-	// for _, v := range ti.trigrams {
-	// 	counters = append(counters, len(v))
-	// }
-	// sort.Sort(sort.Reverse(sort.IntSlice(counters)))
-	// for i := 0; i < 100 && i < len(counters); i++ {
-	// 	log.Printf("i = %d\n", counters[i])
-	// }
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
@@ -988,7 +874,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var leafs []bool
 
 	for _, g := range globs {
-		f, l, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files))
+		f, l, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
 		if err != nil {
 			return nil, nil, err
 		}
