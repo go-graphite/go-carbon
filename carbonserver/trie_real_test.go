@@ -5,6 +5,7 @@ package carbonserver
 import (
 	"flag"
 	"io/ioutil"
+	"log"
 	"reflect"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ var targetQueryPath = flag.String("query-data", "queries.txt", "queries for test
 var carbonPath = flag.String("carbon", "/var/lib/carbon/whisper", "carbon data path")
 var noTrigram = flag.Bool("no-trigram", false, "disable trigram search")
 var pureTrie = flag.Bool("no-trie-with-trigram", false, "enable trigram in trie")
+var localTest = flag.Bool("local-test", false, "trim prefix and replace / with . on trigram result")
 
 func readFile(path string) []string {
 	data, err := ioutil.ReadFile(path)
@@ -93,7 +95,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			// for i, str := range trieFiles {
 			// 	log.Printf("%d: %s\n", i, str)
 			// }
-			// log.Printf("len(trieFiles) = %+v\n", len(trieFiles))
+			log.Printf("len(trieFiles) = %+v\n", len(trieFiles))
 
 			if *noTrigram {
 				return
@@ -106,6 +108,14 @@ func TestTrieGlobRealData(t *testing.T) {
 			}
 			trigramTime := time.Now().Sub(start2)
 			t.Logf("trigram took %s", trigramTime)
+
+			if *localTest {
+				for i := range trigramFiles {
+					trigramFiles[i] = strings.TrimPrefix(trigramFiles[i], *carbonPath+"/")
+					trigramFiles[i] = strings.TrimSuffix(trigramFiles[i], ".wsp")
+					trigramFiles[i] = strings.Replace(trigramFiles[i], "/", ".", -1)
+				}
+			}
 
 			if trieTime < trigramTime {
 				t.Logf("trie is %f times faster", float64(trigramTime)/float64(trieTime))
