@@ -776,10 +776,10 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 
 	var useGlob bool
 
-	// // TODO: Find out why we have set 'useGlob' if 'star == -1'
-	// if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
-	// 	useGlob = true
-	// }
+	// TODO: Find out why we have set 'useGlob' if 'star == -1'
+	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
+		useGlob = true
+	}
 	logger = logger.With(zap.Bool("use_glob", useGlob))
 
 	/* things to glob:
