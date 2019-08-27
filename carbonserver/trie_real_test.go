@@ -87,7 +87,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			start1 := time.Now()
 			trieFiles, trieLeafs, err := trieServer.expandGlobsTrie(query)
 			if err != nil {
-				t.Errorf("trie search errro: %s", err)
+				t.Errorf("trie search error: %s", err)
 			}
 			trieTime := time.Now().Sub(start1)
 			t.Logf("trie took %s", trieTime)
@@ -104,7 +104,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			start2 := time.Now()
 			trigramFiles, trigramLeafs, err := trigramServer.expandGlobs(query)
 			if err != nil {
-				t.Errorf("trigram search errro: %s", err)
+				t.Errorf("trigram search error: %s", err)
 			}
 			trigramTime := time.Now().Sub(start2)
 			t.Logf("trigram took %s", trigramTime)
