@@ -582,14 +582,16 @@ func BenchmarkGlobIndex(b *testing.B) {
 		var ctrie, ctrigram int
 		b.Run("trie/"+c.input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				f, _, _ := btrieServer.expandGlobsTrie(c.input)
-				ctrie = len(f)
+				resultCh := make(chan *ExpandedGlobResponse, 1)
+				btrieServer.expandGlobs(c.input, resultCh)
+				ctrie = len((<-resultCh).Files)
 			}
 		})
 		b.Run("trigram/"+c.input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				f, _, _ := btrigramServer.expandGlobs(c.input)
-				ctrigram = len(f)
+				resultCh := make(chan *ExpandedGlobResponse, 1)
+				btrigramServer.expandGlobs(c.input, resultCh)
+				ctrigram = len((<-resultCh).Files)
 			}
 		})
 		b.Logf("trie.len = %d trigram.len = %d", ctrie, ctrigram)

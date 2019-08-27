@@ -85,7 +85,10 @@ func TestTrieGlobRealData(t *testing.T) {
 				}
 			}()
 			start1 := time.Now()
-			trieFiles, trieLeafs, err := trieServer.expandGlobsTrie(query)
+			trierc := make(chan *ExpandedGlobResponse, 1)
+			trieServer.expandGlobs(query, trierc)
+			trier := <-trierc
+			trieFiles, trieLeafs, err := trier.Files, trier.Leafs, trier.Err
 			if err != nil {
 				t.Errorf("trie search error: %s", err)
 			}
@@ -102,7 +105,10 @@ func TestTrieGlobRealData(t *testing.T) {
 			}
 
 			start2 := time.Now()
-			trigramFiles, trigramLeafs, err := trigramServer.expandGlobs(query)
+			trigramrc := make(chan *ExpandedGlobResponse, 1)
+			trigramServer.expandGlobs(query, trigramrc)
+			trigramr := <-trigramrc
+			trigramFiles, trigramLeafs, err := trigramr.Files, trigramr.Leafs, trigramr.Err
 			if err != nil {
 				t.Errorf("trigram search error: %s", err)
 			}
