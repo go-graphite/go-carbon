@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"math"
@@ -21,8 +22,8 @@ func init() { log.SetFlags(log.Lshortfile) }
 
 func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	var listener CarbonserverListener
-	listener.logger, _ = zap.NewDevelopment()
-	listener.accessLogger, _ = zap.NewDevelopment()
+	listener.logger = zap.NewNop()
+	listener.accessLogger = zap.NewNop()
 	listener.trieIndex = true
 	listener.whisperData = "./testdata"
 	listener.maxGlobs = math.MaxInt64
@@ -54,8 +55,8 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 
 func newTrigramServer(files []string) *CarbonserverListener {
 	var listener CarbonserverListener
-	listener.logger, _ = zap.NewDevelopment()
-	listener.accessLogger, _ = zap.NewDevelopment()
+	listener.logger = zap.NewNop()
+	listener.accessLogger = zap.NewNop()
 	listener.trigramIndex = true
 	listener.whisperData = "./testdata"
 	listener.maxGlobs = math.MaxInt64
@@ -583,14 +584,14 @@ func BenchmarkGlobIndex(b *testing.B) {
 		b.Run("trie/"+c.input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				resultCh := make(chan *ExpandedGlobResponse, 1)
-				btrieServer.expandGlobs(c.input, resultCh)
+				btrieServer.expandGlobs(context.TODO(), c.input, resultCh)
 				ctrie = len((<-resultCh).Files)
 			}
 		})
 		b.Run("trigram/"+c.input, func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				resultCh := make(chan *ExpandedGlobResponse, 1)
-				btrigramServer.expandGlobs(c.input, resultCh)
+				btrigramServer.expandGlobs(context.TODO(), c.input, resultCh)
 				ctrigram = len((<-resultCh).Files)
 			}
 		})

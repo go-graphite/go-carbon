@@ -3,6 +3,7 @@
 package carbonserver
 
 import (
+	"context"
 	"flag"
 	"io/ioutil"
 	"log"
@@ -86,7 +87,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			}()
 			start1 := time.Now()
 			trierc := make(chan *ExpandedGlobResponse, 1)
-			trieServer.expandGlobs(query, trierc)
+			trieServer.expandGlobs(context.TODO(), query, trierc)
 			trier := <-trierc
 			trieFiles, trieLeafs, err := trier.Files, trier.Leafs, trier.Err
 			if err != nil {
@@ -106,7 +107,7 @@ func TestTrieGlobRealData(t *testing.T) {
 
 			start2 := time.Now()
 			trigramrc := make(chan *ExpandedGlobResponse, 1)
-			trigramServer.expandGlobs(query, trigramrc)
+			trigramServer.expandGlobs(context.TODO(), query, trigramrc)
 			trigramr := <-trigramrc
 			trigramFiles, trigramLeafs, err := trigramr.Files, trigramr.Leafs, trigramr.Err
 			if err != nil {

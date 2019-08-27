@@ -748,8 +748,8 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	logger.Info("file list updated", infos...)
 }
 
-func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse) {
-	logger := zapwriter.Logger("carbonserver")
+func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {
+	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
 	defer func(start time.Time) {
 		dur := time.Now().Sub(start)
