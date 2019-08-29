@@ -10,8 +10,7 @@ import (
 	trigram "github.com/dgryski/go-trigram"
 )
 
-// debug codes diff: https://play.golang.org/p/ggljkZUj6dr
-
+// debug codes diff: https://play.golang.org/p/FxuvRyosk3U
 // TODO: remove commented-out debug codes
 
 const (
@@ -165,7 +164,9 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 					}
 
 					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
-						s.c[j] = true
+						if j != '*' {
+							s.c[j] = true
+						}
 					}
 
 					i += 2
@@ -182,18 +183,24 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			if negative {
 				// TODO: revisit
 				for i := 32; i <= 126; i++ {
-					s.c[i] = !s.c[i]
+					if i != '*' {
+						s.c[i] = !s.c[i]
+					}
 				}
 			}
 
 			cur.next = append(cur.next, s)
 			cur = s
+
+			m.lsComplex = false
 		case '?':
 			m.exact = false
 			var star gstate
 			star.c['*'] = true
 			cur.next = append(cur.next, &star)
 			cur = &star
+
+			m.lsComplex = false
 		case '*':
 			m.exact = false
 			if i == 0 && len(expr) > 2 {
@@ -220,6 +227,8 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			cur.next = append(cur.next, alterStart)
 			cur = alterStart
 			alters = append(alters, [2]*gstate{alterStart, alterEnd})
+
+			m.lsComplex = false
 		case '}':
 			if len(alters) == 0 {
 				return nil, errors.New("glob: missing {")
@@ -230,6 +239,8 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			cur.next = append(cur.next, alters[len(alters)-1][1])
 			cur = alters[len(alters)-1][1]
 			alters = alters[:len(alters)-1]
+
+			m.lsComplex = false
 		case ',':
 			// if inAlter {
 			if len(alters) > 0 {
@@ -545,7 +556,6 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			ndstate = curm.dstate().step(cur.c[i])
 			if len(ndstate.gstates) == 0 {
 				if i > 0 {
-
 					// TODO: add test case
 					curm.pop(i)
 				}
