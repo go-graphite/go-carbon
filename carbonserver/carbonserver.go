@@ -768,7 +768,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		logger.Info("slow_expand_globs", zap.Duration("time", dur), zap.String("query", query), zap.Int("matched_count", matchedCount), zap.String("index_type", itype))
 	}(time.Now())
 
-	if listener.trieIndex {
+	if listener.trieIndex && listener.CurrentFileIndex() != nil {
 		files, leafs, err := listener.expandGlobsTrie(query)
 		resultCh <- &ExpandedGlobResponse{query, files, leafs, err}
 		return
@@ -810,7 +810,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	fidx := listener.CurrentFileIndex()
 	var files []string
 	fallbackToFS := false
-	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) == 0) {
+	if listener.trigramIndex == false || fidx == nil || len(fidx.files) == 0 {
 		fallbackToFS = true
 	}
 
