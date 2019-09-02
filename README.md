@@ -312,9 +312,8 @@ scan-frequency = "5m0s"
 #  time and less memory usage (around 2 - 5 times). For most of the queries,
 #  trie is faster than trigram. For queries with keyword wrap around by widcards
 #  (like ns1.ns2.*keywork*.metric), trigram index performs better. Trie index
-#  could be speeded up by enabling adding trigrams to trie, at the cost of
-#  memory usage (depends on the facotr, the memory usage of trie would be at
-#  least doubled to enable this, set both trie-index and trigram-index to true).
+#  could be speeded up by enabling adding trigrams to trie, at the some costs of
+#  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
 
 # Maximum amount of globs in a single metric in index
