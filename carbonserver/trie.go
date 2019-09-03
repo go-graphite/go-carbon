@@ -221,7 +221,6 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 
 			cur = &split
 		case '{':
-			// inAlter = true
 			alterStart := &gstate{c: [131]bool{gstateSplit: true}}
 			alterEnd := &gstate{c: [131]bool{gstateSplit: true}}
 			cur.next = append(cur.next, alterStart)
@@ -233,19 +232,13 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			if len(alters) == 0 {
 				return nil, errors.New("glob: missing {")
 			}
-			// inAlter = false
-			// cur.next = append(cur.next, alterEnd)
-			// cur = alterEnd
 			cur.next = append(cur.next, alters[len(alters)-1][1])
 			cur = alters[len(alters)-1][1]
 			alters = alters[:len(alters)-1]
 
 			m.lsComplex = false
 		case ',':
-			// if inAlter {
 			if len(alters) > 0 {
-				// cur.next = append(cur.next, alterEnd)
-				// cur = alterStart
 				cur.next = append(cur.next, alters[len(alters)-1][1])
 				cur = alters[len(alters)-1][0]
 				continue
@@ -403,8 +396,6 @@ outer:
 			nlen = i - start
 			start++
 			for match = 1; match < len(child.c) && match < nlen; match++ {
-				// log.Printf("    path[start] = %s\n", string(path[start]))
-
 				if child.c[match] != path[start] {
 					break
 				}
