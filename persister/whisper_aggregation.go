@@ -12,7 +12,8 @@ import (
 	whisper "github.com/go-graphite/go-whisper"
 )
 
-type whisperAggregationItem struct {
+// WhisperAggregationItem ...
+type WhisperAggregationItem struct {
 	name                 string
 	pattern              *regexp.Regexp
 	xFilesFactor         float64
@@ -22,15 +23,15 @@ type whisperAggregationItem struct {
 
 // WhisperAggregation ...
 type WhisperAggregation struct {
-	Data    []*whisperAggregationItem
-	Default *whisperAggregationItem
+	Data    []*WhisperAggregationItem
+	Default *WhisperAggregationItem
 }
 
 // NewWhisperAggregation create instance of WhisperAggregation
 func NewWhisperAggregation() *WhisperAggregation {
 	return &WhisperAggregation{
-		Data: make([]*whisperAggregationItem, 0),
-		Default: &whisperAggregationItem{
+		Data: make([]*WhisperAggregationItem, 0),
+		Default: &WhisperAggregationItem{
 			name:                 "default",
 			pattern:              nil,
 			xFilesFactor:         0.5,
@@ -38,6 +39,26 @@ func NewWhisperAggregation() *WhisperAggregation {
 			aggregationMethod:    whisper.Average,
 		},
 	}
+}
+
+// Name get name of aggregation method
+func (wai *WhisperAggregationItem) Name() string {
+	return wai.name
+}
+
+// Pattern get aggregation pattern
+func (wai *WhisperAggregationItem) Pattern() *regexp.Regexp {
+	return wai.pattern
+}
+
+// XFilesFactor get aggregation xFilesFactor
+func (wai *WhisperAggregationItem) XFilesFactor() float64 {
+	return wai.xFilesFactor
+}
+
+// AggregationMethod get aggregation method
+func (wai *WhisperAggregationItem) AggregationMethod() whisper.AggregationMethod {
+	return wai.aggregationMethod
 }
 
 // ReadWhisperAggregation ...
@@ -50,7 +71,7 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 	result := NewWhisperAggregation()
 
 	for _, section := range config {
-		item := &whisperAggregationItem{}
+		item := &WhisperAggregationItem{}
 		// this is mildly stupid, but I don't feel like forking
 		// configparser just for this
 		item.name = section["name"]
@@ -91,7 +112,7 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 }
 
 // Match find schema for metric
-func (a *WhisperAggregation) match(metric string) *whisperAggregationItem {
+func (a *WhisperAggregation) Match(metric string) *WhisperAggregationItem {
 	for _, s := range a.Data {
 		if s.pattern.MatchString(metric) {
 			return s

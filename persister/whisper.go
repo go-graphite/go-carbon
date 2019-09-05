@@ -245,7 +245,7 @@ func (p *Whisper) store(metric string) {
 			return
 		}
 
-		aggr := p.aggregation.match(metric)
+		aggr := p.aggregation.Match(metric)
 		if aggr == nil {
 			p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
 			return
