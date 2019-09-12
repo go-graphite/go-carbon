@@ -491,7 +491,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	var exact bool
 	for _, node := range strings.Split(expr, "/") {
 		if node == "" {
-			return nil, nil, errors.New("empty node in query")
+			continue
 		}
 		gs, err := newGlobState(node, expand)
 		if err != nil {
