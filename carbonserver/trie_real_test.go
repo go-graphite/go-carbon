@@ -24,6 +24,7 @@ var carbonPath = flag.String("carbon", "/var/lib/carbon/whisper", "carbon data p
 var noTrigram = flag.Bool("no-trigram", false, "disable trigram search")
 var pureTrie = flag.Bool("no-trie-with-trigram", false, "enable trigram in trie")
 var localTest = flag.Bool("local-test", false, "trim prefix and replace / with . on trigram result")
+var excludeFilesNotInTestData = flag.Bool("exclude-non-test-files", false, "filter out files trigram matched by using filepath.Glob")
 
 func readFile(path string) []string {
 	data, err := ioutil.ReadFile(path)
@@ -47,6 +48,17 @@ func readFile(path string) []string {
 // 		* can't share production data in open source project
 func TestTrieGlobRealData(t *testing.T) {
 	files := readFile(*testDataPath)
+	filesm := make(map[string]bool)
+	dirm := make(map[string]bool)
+	for _, f := range files {
+		f = strings.TrimSuffix(f, ".wsp")
+		f = strings.TrimPrefix(f, "/")
+		filesm[f] = true
+		dirs := strings.Split(f, "/")
+		for i := range dirs[:len(dirs)-1] {
+			dirm[strings.Join(dirs[:i+1], "/")] = true
+		}
+	}
 	var trieServer, trigramServer *CarbonserverListener
 
 	var wg sync.WaitGroup
@@ -110,6 +122,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			trigramServer.expandGlobs(context.TODO(), query, trigramrc)
 			trigramr := <-trigramrc
 			trigramFiles, trigramLeafs, err := trigramr.Files, trigramr.Leafs, trigramr.Err
+			log.Printf("trigramLeafs = %+v\n", trigramLeafs)
 			if err != nil {
 				t.Errorf("trigram search error: %s", err)
 			}
@@ -123,6 +136,22 @@ func TestTrieGlobRealData(t *testing.T) {
 					trigramFiles[i] = strings.Replace(trigramFiles[i], "/", ".", -1)
 				}
 			}
+			if *excludeFilesNotInTestData {
+				var index int
+				for i := range trigramFiles {
+					name := strings.Replace(trigramFiles[i], ".", "/", -1)
+					if (trigramLeafs[i] && filesm[name]) || (!trigramLeafs[i] && dirm[name]) {
+						trigramFiles[index] = trigramFiles[i]
+						trigramLeafs[index] = trigramLeafs[i]
+						index++
+					}
+				}
+				// if index == 0 {
+				// 	index = 1
+				// }
+				trigramFiles = trigramFiles[:index]
+				trigramLeafs = trigramLeafs[:index]
+			}
 
 			if trieTime < trigramTime {
 				t.Logf("trie is %f times faster", float64(trigramTime)/float64(trieTime))
@@ -134,6 +163,19 @@ func TestTrieGlobRealData(t *testing.T) {
 
 			sortFilesLeafs(trieFiles, trieLeafs)
 			sortFilesLeafs(trigramFiles, trigramLeafs)
+
+			if trieFiles == nil {
+				trieFiles = []string{}
+			}
+			if trigramFiles == nil {
+				trigramFiles = []string{}
+			}
+			if trieLeafs == nil {
+				trieLeafs = []bool{}
+			}
+			if trigramLeafs == nil {
+				trigramLeafs = []bool{}
+			}
 
 			if !reflect.DeepEqual(trieFiles, trigramFiles) {
 				t.Errorf("files diff\n\ttrie:    %v\n\ttrigram: %v\n", trieFiles, trigramFiles)
@@ -149,6 +191,10 @@ func TestTrieGlobRealData(t *testing.T) {
 }
 
 func sortFilesLeafs(files []string, leafs []bool) {
+	if len(files) <= 1 {
+		return
+	}
+
 	oldIndex := map[string]int{}
 	for i, f := range files {
 		oldIndex[f] = i
