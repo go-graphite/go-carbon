@@ -87,7 +87,7 @@ type TCP struct {
 	name                string // name for store metrics
 	maxMessageSize      uint32
 	metricsReceived     uint32
-	promMetricsReceived prometheus.Gauge
+	promMetricsReceived prometheus.Counter
 	errors              uint32
 	active              int32 // counter
 	listener            *net.TCPListener
@@ -307,7 +307,7 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
 	send("metricsReceived", float64(metricsReceived))
 	if rcv.promMetricsReceived != nil {
-		rcv.promMetricsReceived.Set(float64(metricsReceived))
+		rcv.promMetricsReceived.Add(float64(metricsReceived))
 	}
 
 	active := float64(atomic.LoadInt32(&rcv.active))
@@ -410,10 +410,10 @@ func newDecompressor(typ string) decompressor {
 }
 
 func (rcv *TCP) InitPrometheus(reg prometheus.Registerer) {
-	rcv.promMetricsReceived = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "metrics_received_tcp",
-			Help: "How many metrics were received by the TCP endpoint.",
+	rcv.promMetricsReceived = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "metrics_received_tcp_total",
+			Help: "Counter of metrics received via the TCP endpoint.",
 		},
 	)
 
