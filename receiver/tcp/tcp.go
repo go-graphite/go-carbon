@@ -20,6 +20,7 @@ import (
 	"github.com/lomik/go-carbon/receiver/parse"
 	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func init() {
@@ -82,18 +83,19 @@ func NewFramingOptions() *FramingOptions {
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
-	out             func(*points.Points)
-	name            string // name for store metrics
-	maxMessageSize  uint32
-	metricsReceived uint32
-	errors          uint32
-	active          int32 // counter
-	listener        *net.TCPListener
-	isFraming       bool
-	frameParser     func(body []byte) ([]*points.Points, error)
-	buffer          chan *points.Points
-	logger          *zap.Logger
-	decompressor    decompressor
+	out                 func(*points.Points)
+	name                string // name for store metrics
+	maxMessageSize      uint32
+	metricsReceived     uint32
+	promMetricsReceived prometheus.Counter
+	errors              uint32
+	active              int32 // counter
+	listener            *net.TCPListener
+	isFraming           bool
+	frameParser         func(body []byte) ([]*points.Points, error)
+	buffer              chan *points.Points
+	logger              *zap.Logger
+	decompressor        decompressor
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -304,6 +306,9 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
 	send("metricsReceived", float64(metricsReceived))
+	if rcv.promMetricsReceived != nil {
+		rcv.promMetricsReceived.Add(float64(metricsReceived))
+	}
 
 	active := float64(atomic.LoadInt32(&rcv.active))
 	send("active", active)
@@ -402,4 +407,15 @@ func newDecompressor(typ string) decompressor {
 			return c, nil
 		}
 	}
+}
+
+func (rcv *TCP) InitPrometheus(reg prometheus.Registerer) {
+	rcv.promMetricsReceived = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "metrics_received_tcp_total",
+			Help: "Counter of metrics received via the TCP endpoint.",
+		},
+	)
+
+	reg.MustRegister(rcv.promMetricsReceived)
 }

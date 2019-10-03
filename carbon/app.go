@@ -369,6 +369,10 @@ func (app *App) Start() (err error) {
 			return
 		}
 
+		if conf.Prometheus.Enabled {
+			rcv.InitPrometheus(app.PromRegisterer)
+		}
+
 		app.Receivers = append(app.Receivers, &NamedReceiver{
 			Receiver: rcv,
 			Name:     "tcp",
