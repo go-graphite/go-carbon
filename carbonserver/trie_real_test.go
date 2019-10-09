@@ -6,8 +6,8 @@ import (
 	"context"
 	"flag"
 	"io/ioutil"
-	"log"
 	"reflect"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -95,6 +95,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			defer func() {
 				if r := recover(); r != nil {
 					t.Errorf("%q: %s", query, r)
+					debug.PrintStack()
 				}
 			}()
 			start1 := time.Now()
@@ -111,7 +112,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			// for i, str := range trieFiles {
 			// 	log.Printf("%d: %s\n", i, str)
 			// }
-			log.Printf("len(trieFiles) = %+v\n", len(trieFiles))
+			// log.Printf("len(trieFiles) = %+v\n", len(trieFiles))
 
 			if *noTrigram {
 				return
@@ -122,7 +123,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			trigramServer.expandGlobs(context.TODO(), query, trigramrc)
 			trigramr := <-trigramrc
 			trigramFiles, trigramLeafs, err := trigramr.Files, trigramr.Leafs, trigramr.Err
-			log.Printf("trigramLeafs = %+v\n", trigramLeafs)
+			// log.Printf("trigramLeafs = %+v\n", trigramLeafs)
 			if err != nil {
 				t.Errorf("trigram search error: %s", err)
 			}

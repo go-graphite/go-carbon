@@ -487,6 +487,10 @@ outer:
 // TODO: add some defensive logics agains bad queries?
 // depth first search
 func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, err error) {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		expr = "*"
+	}
 	var matchers []*gmatcher
 	var exact bool
 	for _, node := range strings.Split(expr, "/") {
