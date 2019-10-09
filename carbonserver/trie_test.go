@@ -229,6 +229,33 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			input: commonFiles,
+			query: "",
+			expect: []string{
+				"service-00",
+				"service-01",
+				"something",
+			},
+		},
+		{
+			input: commonFiles,
+			query: "\t",
+			expect: []string{
+				"service-00",
+				"service-01",
+				"something",
+			},
+		},
+		{
+			input: commonFiles,
+			query: " ",
+			expect: []string{
+				"service-00",
+				"service-01",
+				"something",
+			},
+		},
+		{
 			input: append(commonFiles,
 				"/ooo/abc.wsp",
 				"/ooo/abc/xxx.wsp",
