@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -749,6 +750,12 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 }
 
 func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {
+	defer func() {
+		if err := recover(); err != nil {
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, fmt.Errorf("%s\n%s", err, debug.Stack())}
+		}
+	}()
+
 	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
 	defer func(start time.Time) {

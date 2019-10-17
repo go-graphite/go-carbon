@@ -118,9 +118,10 @@ func TestTrieIndex(t *testing.T) {
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
 	var cases = []struct {
-		input  []string
-		query  string
-		expect []string
+		input    []string
+		query    string
+		hasError bool
+		expect   []string
 	}{
 		{
 			input:  commonFiles,
@@ -400,6 +401,12 @@ func TestTrieIndex(t *testing.T) {
 			},
 		},
 		{
+			// reason: should no panic over bad queries
+			input:    commonFiles,
+			query:    "service-01.server-170.metric-namespace-004-007-xdp.cp[u",
+			hasError: true,
+		},
+		{
 			input: []string{
 				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_3xx.wsp",
 				"/services/groups/xyz/xxx_404/nginx/type/prod/frontend/random-404_xoxo/http_5xx.wsp",
@@ -601,16 +608,16 @@ func TestTrieIndex(t *testing.T) {
 			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
 			trieServer := newTrieServer(c.input, true)
-			trieFiles, _, err := trieServer.expandGlobsTrie(c.query)
-			if err != nil {
+			resultCh := make(chan *ExpandedGlobResponse, 1)
+			trieServer.expandGlobs(context.TODO(), c.query, resultCh)
+			result := <-resultCh
+			trieFiles, err := result.Files, result.Err
+			// trieFiles, _, err := trieServer.expandGlobsTrie(c.query)
+			if err != nil && !c.hasError {
 				t.Errorf("failed to trie.expandGlobs: %s", err)
 			}
 
 			sort.Strings(trieFiles)
-
-			if len(trieFiles) == 0 {
-				t.Errorf("trie.expandGlobs fetched 0 files")
-			}
 			if !reflect.DeepEqual(trieFiles, c.expect) {
 				t.Errorf("incorrect files retrieved\nreturns: %s\nexpect:  %s\n", trieFiles, c.expect)
 			}

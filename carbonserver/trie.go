@@ -176,7 +176,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 				s.c[expr[i]] = true
 				i++
 			}
-			if expr[i] != ']' {
+			if i >= len(expr) || expr[i] != ']' {
 				return nil, errors.New("glob: missing ]")
 			}
 
