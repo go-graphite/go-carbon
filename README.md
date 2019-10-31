@@ -405,9 +405,9 @@ With settings above applied, best write-strategy to use is "noop"
 
 | metric | description |
 | --- | --- |
-| cache.maxSize | |
-| cache.metrics | |
-| cache.size | |
+| cache.maxSize | Maximum number of datapoints stored in cache before overflow|
+| cache.metrics | Total number of unique metrics stored in cache |
+| cache.size | Total number of datapoints stored in cache|
 | cache.queueWriteoutTime | Time in seconds to make a full cycle writing all metrics |
 | carbonserver.cache\_partial\_hit | Requests that was partially served from cache |
 | carbonserver.cache\_miss | Total cache misses |
