@@ -322,9 +322,12 @@ trie-index = false
 max-globs = 100
 # Fail if amount of globs more than max-globs
 fail-on-max-globs = false
-# Maximum metrics could be returned by glob/wildcard in find request
+
+# Maximum metrics could be returned by glob/wildcard in find request (currently
+# works only for trie index)
 max-metrics-globbed  = 30000
-# Maximum metrics could be returned in render request
+# Maximum metrics could be returned in render request (works both all types of
+# indexes)
 max-metrics-rendered = 1000
 
 # graphite-web-10-mode
