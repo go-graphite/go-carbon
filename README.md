@@ -62,6 +62,7 @@ make
 ```
 
 ## Configuration
+
 ```
 $ go-carbon --help
 Usage of go-carbon:
@@ -79,7 +80,8 @@ Usage of go-carbon:
 user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}"
-# Endpoint for store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
+# Endpoint fo
+# r store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
 metric-endpoint = "local"
 # Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
 metric-interval = "1m0s"
@@ -305,12 +307,29 @@ trigram-index = true
 # in memory. This determines how often it will check FS
 # for new or deleted metrics.
 scan-frequency = "5m0s"
+# Control trie index
+#  This index is built as an alternative to trigram index, with shorter indexing
+#  time and less memory usage (around 2 - 5 times). For most of the queries,
+#  trie is faster than trigram. For queries with keyword wrap around by widcards
+#  (like ns1.ns2.*keywork*.metric), trigram index performs better. Trie index
+#  could be speeded up by enabling adding trigrams to trie, at the some costs of
+#  memory usage (by setting both trie-index and trigram-index to true).
+trie-index = false
+
 # Maximum amount of globs in a single metric in index
 # This value is used to speed-up /find requests with
 # a lot of globs, but will lead to increased memory consumption
 max-globs = 100
 # Fail if amount of globs more than max-globs
 fail-on-max-globs = false
+
+# Maximum metrics could be returned by glob/wildcard in find request (currently
+# works only for trie index)
+max-metrics-globbed  = 30000
+# Maximum metrics could be returned in render request (works both all types of
+# indexes)
+max-metrics-rendered = 1000
+
 # graphite-web-10-mode
 # Use Graphite-web 1.0 native structs for pickle response
 # This mode will break compatibility with graphite-web 0.9.x

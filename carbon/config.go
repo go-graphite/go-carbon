@@ -116,6 +116,11 @@ type carbonserverConfig struct {
 	TrigramIndex      bool      `toml:"trigram-index"`
 	InternalStatsDir  string    `toml:"internal-stats-dir"`
 	Percentiles       []int     `toml:"stats-percentiles"`
+
+	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
+	MaxMetricsRendered int `toml:"max-metrics-rendered"`
+
+	TrieIndex bool `toml:"trie-index"`
 }
 
 type pprofConfig struct {
@@ -209,10 +214,12 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
-			QueryCacheEnabled: true,
-			QueryCacheSizeMB:  0,
-			FindCacheEnabled:  true,
-			TrigramIndex:      true,
+			QueryCacheEnabled:  true,
+			QueryCacheSizeMB:   0,
+			FindCacheEnabled:   true,
+			TrigramIndex:       true,
+			MaxMetricsGlobbed:  30000,
+			MaxMetricsRendered: 1000,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

@@ -26,6 +26,10 @@ func (listener *CarbonserverListener) getMetricsList() ([]string, error) {
 		return nil, errMetricsListEmpty
 	}
 
+	if listener.trieIndex {
+		return fidx.trieIdx.allMetrics('.'), nil
+	}
+
 	for _, p := range fidx.files {
 		if !strings.HasSuffix(p, ".wsp") {
 			continue

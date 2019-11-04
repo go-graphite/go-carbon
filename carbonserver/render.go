@@ -358,9 +358,12 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 			untilTime := tr.until
 
 			listener.logger.Debug("fetching data...")
-
 			if expandedResult, ok := metricGlobMap[metric.Name]; ok {
 				files, leafs := expandedResult.Files, expandedResult.Leafs
+				if len(files) > listener.maxMetricsRendered {
+					files = files[:listener.maxMetricsRendered]
+					leafs = leafs[:listener.maxMetricsRendered]
+				}
 
 				metricsCount := 0
 				for i := range files {

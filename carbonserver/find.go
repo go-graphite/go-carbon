@@ -327,7 +327,7 @@ func (listener *CarbonserverListener) getExpandedGlobs(ctx context.Context, logg
 	expGlobResultChan := make(chan *ExpandedGlobResponse, len(names))
 
 	for _, name := range names {
-		go listener.expandGlobs(name, expGlobResultChan)
+		go listener.expandGlobs(ctx, name, expGlobResultChan)
 	}
 	responseCount := 0
 GATHER:

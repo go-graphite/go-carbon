@@ -28,6 +28,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -252,12 +253,16 @@ type CarbonserverListener struct {
 	compressed        bool
 	removeEmptyFile   bool
 
+	maxMetricsGlobbed  int
+	maxMetricsRendered int
+
 	queryCacheEnabled bool
 	queryCacheSizeMB  int
 	queryCache        queryCache
 	findCacheEnabled  bool
 	findCache         queryCache
 	trigramIndex      bool
+	trieIndex         bool
 
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
@@ -423,11 +428,20 @@ type jsonMetricDetailsResponse struct {
 	TotalSpace uint64
 }
 
-type fileIndex struct {
-	idx     trigram.Index
-	files   []string
-	details map[string]*protov3.MetricDetails
+const (
+	indexTypeTrigram = iota
+	indexTypeTrie
+)
 
+type fileIndex struct {
+	typ int
+
+	idx   trigram.Index
+	files []string
+
+	trieIdx *trieIndex
+
+	details     map[string]*protov3.MetricDetails
 	accessTimes map[string]int64
 	freeSpace   uint64
 	totalSpace  uint64
@@ -468,6 +482,12 @@ func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs
 }
+func (listener *CarbonserverListener) SetMaxMetricsGlobbed(max int) {
+	listener.maxMetricsGlobbed = max
+}
+func (listener *CarbonserverListener) SetMaxMetricsRendered(max int) {
+	listener.maxMetricsRendered = max
+}
 func (listener *CarbonserverListener) SetFLock(flock bool) {
 	listener.flock = flock
 }
@@ -506,6 +526,9 @@ func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 }
 func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 	listener.trigramIndex = enabled
+}
+func (listener *CarbonserverListener) SetTrieIndex(enabled bool) {
+	listener.trieIndex = enabled
 }
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
@@ -649,19 +672,51 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
 	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 
-	t0 = time.Now()
-	idx := trigram.NewIndex(files)
+	nfidx := &fileIndex{
+		details:     details,
+		freeSpace:   freeSpace,
+		totalSpace:  totalSpace,
+		accessTimes: make(map[string]int64),
+	}
 
+	var pruned int
+	var indexType = "trigram"
+	var infos []zap.Field
+	t0 = time.Now()
+	if listener.trieIndex {
+		indexType = "trie"
+		nfidx.trieIdx = newTrie(".wsp")
+		var errs []error
+		for _, file := range files {
+			if err := nfidx.trieIdx.insert(file); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		infos = append(
+			infos,
+			zap.Int("trie_depth", nfidx.trieIdx.depth),
+			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
+		)
+		if len(errs) > 0 {
+			infos = append(infos, zap.Errors("trie_index_errors", errs))
+		}
+		if listener.trigramIndex {
+			start := time.Now()
+			nfidx.trieIdx.setTrigrams()
+			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start)))
+		}
+	} else {
+		nfidx.files = files
+		nfidx.idx = trigram.NewIndex(files)
+		pruned = nfidx.idx.Prune(0.95)
+	}
+	indexSize := len(nfidx.idx)
 	indexingRuntime := time.Since(t0)
 	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
-	indexSize := len(idx)
-
-	pruned := idx.Prune(0.95)
 
 	tl := time.Now()
 	fidx := listener.CurrentFileIndex()
 
-	oldAccessTimes := make(map[string]int64)
 	if fidx != nil && listener.internalStatsDir != "" {
 		listener.fileIdxMutex.Lock()
 		for m := range fidx.accessTimes {
@@ -674,21 +729,14 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 				}
 			}
 		}
-		oldAccessTimes = fidx.accessTimes
+		nfidx.accessTimes = fidx.accessTimes
 		listener.fileIdxMutex.Unlock()
 	}
 	rdTimeUpdateRuntime := time.Since(tl)
 
-	listener.UpdateFileIndex(&fileIndex{
-		idx:         idx,
-		files:       files,
-		details:     details,
-		freeSpace:   freeSpace,
-		totalSpace:  totalSpace,
-		accessTimes: oldAccessTimes,
-	})
+	listener.UpdateFileIndex(nfidx)
 
-	logger.Info("file list updated",
+	infos = append(infos,
 		zap.Duration("file_scan_runtime", fileScanRuntime),
 		zap.Duration("indexing_runtime", indexingRuntime),
 		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
@@ -696,12 +744,44 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		zap.Int("Files", len(files)),
 		zap.Int("index_size", indexSize),
 		zap.Int("pruned_trigrams", pruned),
+		zap.String("index_type", indexType),
 	)
+	logger.Info("file list updated", infos...)
 }
 
-func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- *ExpandedGlobResponse) {
+func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {
+	defer func() {
+		if err := recover(); err != nil {
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, fmt.Errorf("%s\n%s", err, debug.Stack())}
+		}
+	}()
+
+	logger := TraceContextToZap(ctx, listener.logger)
+	matchedCount := 0
+	defer func(start time.Time) {
+		dur := time.Now().Sub(start)
+		if dur <= time.Second {
+			return
+		}
+		var itype string
+		if listener.trieIndex {
+			itype = "trie"
+			if listener.trigramIndex {
+				itype = "trie-trigram"
+			}
+		} else if listener.trigramIndex {
+			itype = "trigram"
+		}
+		logger.Info("slow_expand_globs", zap.Duration("time", dur), zap.String("query", query), zap.Int("matched_count", matchedCount), zap.String("index_type", itype))
+	}(time.Now())
+
+	if listener.trieIndex && listener.CurrentFileIndex() != nil {
+		files, leafs, err := listener.expandGlobsTrie(query)
+		resultCh <- &ExpandedGlobResponse{query, files, leafs, err}
+		return
+	}
+
 	var useGlob bool
-	logger := zapwriter.Logger("carbonserver")
 
 	// TODO: Find out why we have set 'useGlob' if 'star == -1'
 	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
@@ -728,55 +808,16 @@ func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- 
 		)
 	}
 	globs = append(globs, query)
-	// TODO(dgryski): move this loop into its own function + add tests
-	for {
-		bracematch := false
-		var newglobs []string
-		for _, glob := range globs {
-			lbrace := strings.Index(glob, "{")
-			rbrace := -1
-			if lbrace > -1 {
-				rbrace = strings.Index(glob[lbrace:], "}")
-				if rbrace > -1 {
-					rbrace += lbrace
-				}
-			}
-
-			if lbrace > -1 && rbrace > -1 {
-				bracematch = true
-				expansion := glob[lbrace+1 : rbrace]
-				parts := strings.Split(expansion, ",")
-				for _, sub := range parts {
-					if len(newglobs) > listener.maxGlobs {
-						if listener.failOnMaxGlobs {
-							resultCh <- &ExpandedGlobResponse{query, nil, nil, errMaxGlobsExhausted}
-						}
-						break
-					}
-					newglobs = append(newglobs, glob[:lbrace]+sub+glob[rbrace+1:])
-				}
-			} else {
-				if len(newglobs) > listener.maxGlobs {
-					if listener.failOnMaxGlobs {
-						resultCh <- &ExpandedGlobResponse{query, nil, nil, errMaxGlobsExhausted}
-					}
-					break
-				}
-				newglobs = append(newglobs, glob)
-			}
-		}
-		globs = newglobs
-		if !bracematch {
-			break
-		}
+	globs, err := listener.expandGlobBraces(globs)
+	if err != nil {
+		resultCh <- &ExpandedGlobResponse{query, nil, nil, err}
+		return
 	}
 
-	var files []string
-
 	fidx := listener.CurrentFileIndex()
-
+	var files []string
 	fallbackToFS := false
-	if listener.trigramIndex == false || (fidx != nil && len(fidx.files) == 0) {
+	if listener.trigramIndex == false || fidx == nil || len(fidx.files) == 0 {
 		fallbackToFS = true
 	}
 
@@ -785,16 +826,13 @@ func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- 
 		docs := make(map[trigram.DocID]struct{})
 
 		for _, g := range globs {
-
 			gpath := "/" + g
-
 			ts := extractTrigrams(g)
 
 			// TODO(dgryski): If we have 'not enough trigrams' we
 			// should bail and use the file-system glob instead
 
 			ids := fidx.idx.QueryTrigrams(ts)
-
 			for _, id := range ids {
 				docid := trigram.DocID(id)
 				if _, ok := docs[docid]; !ok {
@@ -842,7 +880,54 @@ func (listener *CarbonserverListener) expandGlobs(query string, resultCh chan<- 
 		files[i] = strings.Replace(p, "/", ".", -1)
 	}
 
+	matchedCount = len(files)
 	resultCh <- &ExpandedGlobResponse{query, files, leafs, nil}
+}
+
+// TODO(dgryski): add tests
+func (listener *CarbonserverListener) expandGlobBraces(globs []string) ([]string, error) {
+	for {
+		bracematch := false
+		var newglobs []string
+		for _, glob := range globs {
+			lbrace := strings.Index(glob, "{")
+			rbrace := -1
+			if lbrace > -1 {
+				rbrace = strings.Index(glob[lbrace:], "}")
+				if rbrace > -1 {
+					rbrace += lbrace
+				}
+			}
+
+			if lbrace > -1 && rbrace > -1 {
+				bracematch = true
+				expansion := glob[lbrace+1 : rbrace]
+				parts := strings.Split(expansion, ",")
+				for _, sub := range parts {
+					if len(newglobs) > listener.maxGlobs {
+						if listener.failOnMaxGlobs {
+							return nil, errMaxGlobsExhausted
+						}
+						break
+					}
+					newglobs = append(newglobs, glob[:lbrace]+sub+glob[rbrace+1:])
+				}
+			} else {
+				if len(newglobs) > listener.maxGlobs {
+					if listener.failOnMaxGlobs {
+						return nil, errMaxGlobsExhausted
+					}
+					break
+				}
+				newglobs = append(newglobs, glob)
+			}
+		}
+		globs = newglobs
+		if !bracematch {
+			break
+		}
+	}
+	return globs, nil
 }
 
 func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
@@ -1009,7 +1094,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	)
 
 	listener.exitChan = make(chan struct{})
-	if listener.trigramIndex && listener.scanFrequency != 0 {
+	if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
 		listener.forceScanChan = make(chan struct{})
 		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan)
 		listener.forceScanChan <- struct{}{}
@@ -1159,7 +1244,6 @@ func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t ti
 }
 
 func extractTrigrams(query string) []trigram.T {
-
 	if len(query) < 3 {
 		return nil
 	}
