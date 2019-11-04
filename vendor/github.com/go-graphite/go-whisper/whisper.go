@@ -292,7 +292,8 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 			}
 
 			archive.cblock.lastByteBitPos = 7
-			archive.blockSize = int(math.Ceil(float64(whisper.pointsPerBlock)*float64(archive.avgCompressedPointSize))) + endOfBlockSize
+			ppb := archive.calculateSuitablePointsPerBlock(whisper.pointsPerBlock)
+			archive.blockSize = int(math.Ceil(float64(ppb)*float64(archive.avgCompressedPointSize))) + endOfBlockSize
 			archive.blockRanges = make([]blockRange, archive.blockCount)
 			offset += archive.blockSize * archive.blockCount
 
@@ -335,7 +336,7 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 }
 
 func (whisper *Whisper) blockCount(archive *archiveInfo) int {
-	return int(math.Ceil(float64(archive.numberOfPoints)/float64(whisper.pointsPerBlock))) + 1
+	return int(math.Ceil(float64(archive.numberOfPoints)/float64(archive.calculateSuitablePointsPerBlock(whisper.pointsPerBlock)))) + 1
 }
 
 func allocateDiskSpace(file file, remaining int) error {
@@ -1163,20 +1164,23 @@ type Retention struct {
 	blockCount             int
 }
 
-func (retention *Retention) MaxRetention() int {
-	return retention.secondsPerPoint * retention.numberOfPoints
-}
+func (r *Retention) MaxRetention() int                      { return r.secondsPerPoint * r.numberOfPoints }
+func (r *Retention) Size() int                              { return r.numberOfPoints * PointSize }
+func (r *Retention) SecondsPerPoint() int                   { return r.secondsPerPoint }
+func (r *Retention) NumberOfPoints() int                    { return r.numberOfPoints }
+func (r *Retention) SetAvgCompressedPointSize(size float32) { r.avgCompressedPointSize = size }
 
-func (retention *Retention) Size() int {
-	return retention.numberOfPoints * PointSize
-}
+func (r *Retention) calculateSuitablePointsPerBlock(defaultSize int) int {
+	if defaultSize == 0 {
+		defaultSize = DefaultPointsPerBlock
+	}
 
-func (retention *Retention) SecondsPerPoint() int {
-	return retention.secondsPerPoint
-}
-
-func (retention *Retention) NumberOfPoints() int {
-	return retention.numberOfPoints
+	if r.numberOfPoints >= defaultSize*3 {
+		return defaultSize
+	} else if r.numberOfPoints > 256 {
+		return (r.numberOfPoints + 16) / 4
+	}
+	return r.numberOfPoints + 16
 }
 
 func (r Retention) String() string {

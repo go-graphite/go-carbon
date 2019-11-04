@@ -43,6 +43,14 @@
   version = "v1.0.1"
 
 [[projects]]
+  branch = "master"
+  digest = "1:98a5cf2aba9e4e752878ffa2f18870650e6e552737eba5c083cd8c68c13c0bd8"
+  name = "github.com/OneOfOne/go-utils"
+  packages = ["memory"]
+  pruneopts = "UT"
+  revision = "6019ff89a94ec143c5b0d449d0615708a19b4f63"
+
+[[projects]]
   digest = "1:66b8ed452b31eb9075bc53295952487c333a9cb555de57ed61f5664c058d9050"
   name = "github.com/Shopify/sarama"
   packages = ["."]
@@ -124,11 +132,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:b70f6246ed9bd3483d1c841a61c206d4d7d80a9a915375d7a09fdf1b70ebda6d"
+  digest = "1:fb9ee23f92c262942cc298f42b6e33cf66fa39c2e6a49e0dc55c5be8655fc2af"
   name = "github.com/go-graphite/go-whisper"
   packages = ["."]
   pruneopts = "UT"
-  revision = "1ab6a3545b689444a1f5e7bb3033c3268a6096bf"
+  revision = "bcb7b71bb9531815d307bd94ea811e0f094235c9"
 
 [[projects]]
   branch = "master"
@@ -603,6 +611,7 @@
     "cloud.google.com/go/pubsub/pstest",
     "github.com/BurntSushi/toml",
     "github.com/NYTimes/gziphandler",
+    "github.com/OneOfOne/go-utils/memory",
     "github.com/Shopify/sarama",
     "github.com/dgryski/go-expirecache",
     "github.com/dgryski/go-trigram",
