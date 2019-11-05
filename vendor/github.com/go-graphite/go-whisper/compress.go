@@ -1269,7 +1269,12 @@ func (whisper *Whisper) CompressTo(dstPath string) error {
 // estimatePointSize calculates point size estimation by doing an on-the-fly
 // compression without changing archiveInfo state.
 func estimatePointSize(ps []dataPoint, ret *Retention, pointsPerBlock int) float32 {
-	if len(ps) == 0 {
+	// Certain number of datapoints is needed in order to  calculate a good size.
+	// Because when there is not enough data point for calculation, it would make a
+	// inaccurately big size.
+	//
+	// 30 is semi-ramdonly chosen based on a simple test.
+	if len(ps) < 30 {
 		return avgCompressedPointSize
 	}
 
@@ -1435,7 +1440,7 @@ func (dstw *Whisper) FillCompressed(srcw *Whisper) error {
 		points = points[:lenp]
 
 		pointsByArchives[i] = points
-		rets[i].avgCompressedPointSize = estimatePointSize(points, rets[i], DefaultPointsPerBlock)
+		rets[i].avgCompressedPointSize = estimatePointSize(points, rets[i], rets[i].calculateSuitablePointsPerBlock(dstw.pointsPerBlock))
 	}
 
 	newDst, err := CreateWithOptions(

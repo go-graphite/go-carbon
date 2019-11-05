@@ -103,6 +103,8 @@ func (archive *archiveInfo) dumpInfoCompressed() {
 	fmt.Printf("block_size:        %d\n", archive.blockSize)
 	fmt.Printf("point_size:        %f\n", archive.avgCompressedPointSize)
 	fmt.Printf("block_count:       %d\n", archive.blockCount)
+	fmt.Printf("points_per_block:  %d\n", archive.calculateSuitablePointsPerBlock(archive.whisper.pointsPerBlock))
+	fmt.Printf("compression_ratio: %f (%d/%d)\n", float64(archive.blockSize*archive.blockCount)/float64(archive.Size()), archive.blockSize*archive.blockCount, archive.Size())
 	fmt.Printf("cblock\n")
 	fmt.Printf("  index:     %d\n", archive.cblock.index)
 	fmt.Printf("  p[0].interval:     %d\n", archive.cblock.p0.interval)
