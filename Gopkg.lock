@@ -132,11 +132,11 @@
 
 [[projects]]
   branch = "master"
-  digest = "1:fb9ee23f92c262942cc298f42b6e33cf66fa39c2e6a49e0dc55c5be8655fc2af"
+  digest = "1:69d5b00bca6fda23eda8d145e0317aa693e3092832c584787c505a594d638069"
   name = "github.com/go-graphite/go-whisper"
   packages = ["."]
   pruneopts = "UT"
-  revision = "bcb7b71bb9531815d307bd94ea811e0f094235c9"
+  revision = "e6f9842c9bd9bc60736235d5f41738056cd87d2b"
 
 [[projects]]
   branch = "master"
