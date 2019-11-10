@@ -28,6 +28,7 @@ type Whisper struct {
 	recv                    func(chan bool) string
 	pop                     func(string) (*points.Points, bool)
 	confirm                 func(*points.Points)
+	popConfirm              func(string) (*points.Points, bool)
 	tagsEnabled             bool
 	taggedFn                func(string, bool)
 	schemas                 WhisperSchemas
@@ -66,12 +67,14 @@ func NewWhisper(
 	aggregation *WhisperAggregation,
 	recv func(chan bool) string,
 	pop func(string) (*points.Points, bool),
-	confirm func(*points.Points)) *Whisper {
+	confirm func(*points.Points),
+	popConfirm func(string) (*points.Points, bool)) *Whisper {
 
 	return &Whisper{
 		recv:                recv,
 		pop:                 pop,
 		confirm:             confirm,
+		popConfirm:          popConfirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
 		workersCount:        1,
@@ -212,13 +215,13 @@ func (p *Whisper) store(metric string) {
 			if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
 				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(err))
 				if pathErr, isPathErr := err.(*os.PathError); isPathErr && pathErr.Err == syscall.ENAMETOOLONG {
-					p.pop(metric)
+					p.popConfirm(metric)
 				}
 				return
 			}
 			if err := os.Remove(path); err != nil {
 				p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(err))
-				p.pop(metric)
+				p.popConfirm(metric)
 				return
 			}
 			p.logger.Warn("deleted empty whisper file", zap.String("path", path))
@@ -226,7 +229,7 @@ func (p *Whisper) store(metric string) {
 
 		if t := p.maxCreatesThrottling(); t != throttlingOff {
 			if t == throttlingHard {
-				p.pop(metric)
+				p.popConfirm(metric)
 			}
 
 			atomic.AddUint32(&p.throttledCreates, 1)
