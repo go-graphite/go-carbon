@@ -272,6 +272,7 @@ func (app *App) startPersister() {
 			app.Cache.WriteoutQueue().Get,
 			app.Cache.PopNotConfirmed,
 			app.Cache.Confirm,
+			app.Cache.Pop,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetMaxCreatesPerSecond(app.Config.Whisper.MaxCreatesPerSecond)
