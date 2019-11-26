@@ -999,6 +999,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 			for _, p := range listener.percentiles {
 				send(fmt.Sprintf("request_time_%vth_percentile_ns", p), 0)
 			}
+			send("max_request_time_ns", 0.0)
 		} else {
 			sort.Slice(list, func(i, j int) bool { return list[i] < list[j] })
 
@@ -1009,6 +1010,15 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 				}
 				send(fmt.Sprintf("request_time_%vth_percentile_ns", p), float64(list[key]))
 			}
+
+			var maxDuration int64
+			if len(list) > 0 {
+				maxDuration = list[len(list)-1]
+			} else {
+				maxDuration = 0
+			}
+
+			send("max_request_time_ns", float64(maxDuration))
 		}
 	}
 }
