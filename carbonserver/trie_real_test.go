@@ -110,7 +110,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			t.Logf("trie took %s", trieTime)
 
 			// for i, str := range trieFiles {
-			// 	log.Printf("%d: %s\n", i, str)
+			// 	log.Printf("%d: %s %t\n", i, str, trieLeafs[i])
 			// }
 			// log.Printf("len(trieFiles) = %+v\n", len(trieFiles))
 
@@ -160,10 +160,16 @@ func TestTrieGlobRealData(t *testing.T) {
 				t.Logf("trie is %f times slower", float64(trieTime)/float64(trigramTime))
 			}
 
-			t.Logf("trie %d trigram %d", len(trieFiles), len(trigramFiles))
+			t.Logf("trie %d trigram %d (raw)", len(trieFiles), len(trigramFiles))
 
 			sortFilesLeafs(trieFiles, trieLeafs)
 			sortFilesLeafs(trigramFiles, trigramLeafs)
+
+			// trigram index is returning duplicated result, might be due to my test
+			// environment, adding a simple de-duplication here to reduce noise.
+			trigramFiles, trigramLeafs = uniqFilesLeafs(trigramFiles, trigramLeafs)
+
+			t.Logf("trie %d trigram %d (unique)", len(trieFiles), len(trigramFiles))
 
 			if trieFiles == nil {
 				trieFiles = []string{}
@@ -202,8 +208,24 @@ func sortFilesLeafs(files []string, leafs []bool) {
 	}
 	sort.Strings(files)
 	oldLeafs := make([]bool, len(leafs))
-	copy(leafs, oldLeafs)
+	copy(oldLeafs, leafs)
 	for i, f := range files {
 		leafs[i] = oldLeafs[oldIndex[f]]
 	}
+}
+
+func uniqFilesLeafs(files []string, leafs []bool) ([]string, []bool) {
+	if len(files) <= 1 {
+		return files, leafs
+	}
+	var index = 0
+	for i := 1; i < len(files); i++ {
+		if files[index] == files[i] {
+			continue
+		}
+		index++
+		files[index] = files[i]
+		leafs[index] = leafs[i]
+	}
+	return files[:index+1], leafs[:index+1]
 }
