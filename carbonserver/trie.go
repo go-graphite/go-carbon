@@ -10,8 +10,9 @@ import (
 	trigram "github.com/dgryski/go-trigram"
 )
 
-// debug codes diff: https://play.golang.org/p/FxuvRyosk3U
-// TODO: remove commented-out debug codes
+// debug codes diff for reference: https://play.golang.org/p/FxuvRyosk3U
+
+// dfa inspiration: https://swtch.com/~rsc/regexp/
 
 const (
 	gstateSplit  = 128
@@ -334,9 +335,8 @@ func newTrie(fileExt string) *trieIndex {
 // abc.daf2.ghi
 // efg.cjk
 func (ti *trieIndex) insert(path string) error {
-
 	path = filepath.Clean(path)
-	if path[0] == '/' {
+	if len(path) > 0 && path[0] == '/' {
 		path = path[1:]
 	}
 	if path == "" || path == "." {
@@ -358,6 +358,7 @@ func (ti *trieIndex) insert(path string) error {
 	var sn, newn *trieNode
 outer:
 	for i := 0; i < len(path)+1; i++ {
+		// getting a full node
 		if i < len(path) && path[i] != '/' {
 			continue
 		}
@@ -383,6 +384,9 @@ outer:
 		// case 7:
 		//  abc  . xxx
 		//  abde . xxx
+		// case 8:
+		//  abc . xxx
+		//  abc
 
 	inner:
 		for ci := 0; ci < len(cur.childrens); ci++ {
@@ -403,7 +407,6 @@ outer:
 			}
 
 			if match == nlen {
-
 				// case 1
 				if len(child.c) > match {
 					cur = child
@@ -435,7 +438,6 @@ outer:
 			cur = child
 
 			if nlen-match > 0 {
-
 				newn = &trieNode{c: make([]byte, nlen-match)}
 				copy(newn.c, []byte(path[start:i]))
 
@@ -448,7 +450,6 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-
 			newn = &trieNode{c: make([]byte, i-start)}
 			copy(newn.c, []byte(path[start:i]))
 			cur.childrens = append(cur.childrens, newn)
@@ -456,6 +457,11 @@ outer:
 		}
 
 	dir:
+		// case 8
+		if i == len(path) {
+			break outer
+		}
+
 		start = i + 1
 		for _, child := range cur.childrens {
 			if child.dir() {
@@ -463,8 +469,8 @@ outer:
 				continue outer
 			}
 		}
-		if i < len(path) {
 
+		if i < len(path) {
 			newn = &trieNode{c: []byte{'/'}}
 			cur.childrens = append(cur.childrens, newn)
 			cur = newn
@@ -537,7 +543,6 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		}
 
 		if curm.lsComplex && len(curm.trigrams) > 0 {
-
 			if _, ok := ti.trigrams[cur]; ok {
 				for _, t := range curm.trigrams {
 					if !ti.trigramsContains(cur, t) {
@@ -557,7 +562,6 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 				goto parent
 			}
 			curm.push(ndstate)
-
 		}
 
 		if mindex+1 < len(matchers) {
