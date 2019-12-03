@@ -14,6 +14,27 @@
  * limitations under the License.
  */
 
+// Copyright (c) 2016 Igor Afanasyev, https://github.com/iafan/cwalk
+
+//  Permission is hereby granted, free of charge, to any person obtaining
+//  a copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to
+// permit persons to whom the Software is furnished to do so, subject to
+// the following conditions:
+
+// The above copyright notice and this permission notice shall be
+// included in all copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+// NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+// LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+// OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+// WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 package carbonserver
 
 import (
@@ -52,6 +73,8 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+
+	"github.com/iafan/cwalk"
 )
 
 type metricStruct struct {
@@ -619,7 +642,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	details := make(map[string]*protov3.MetricDetails)
 
 	metricsKnown := uint64(0)
-	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+	err := cwalk.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			logger.Info("error processing", zap.String("path", p), zap.Error(err))
 			return nil
