@@ -45,6 +45,7 @@ import (
 	"github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
+	"github.com/iafan/cwalk"
 	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/helper/stat"
 	"github.com/lomik/go-carbon/points"
@@ -619,7 +620,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	details := make(map[string]*protov3.MetricDetails)
 
 	metricsKnown := uint64(0)
-	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+	err := cwalk.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			logger.Info("error processing", zap.String("path", p), zap.Error(err))
 			return nil
