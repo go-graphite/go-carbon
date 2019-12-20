@@ -45,6 +45,7 @@ const (
 	Last
 	Max
 	Min
+	First
 )
 
 func (am AggregationMethod) String() string {
@@ -53,6 +54,8 @@ func (am AggregationMethod) String() string {
 		return "average"
 	case Sum:
 		return "sum"
+	case First:
+		return "first"
 	case Last:
 		return "last"
 	case Max:
@@ -583,6 +586,8 @@ func (whisper *Whisper) AggregationMethod() string {
 		aggr = "Average"
 	case Sum:
 		aggr = "Sum"
+	case First:
+		aggr = "First"
 	case Last:
 		aggr = "Last"
 	case Max:
@@ -1382,6 +1387,8 @@ func aggregate(method AggregationMethod, knownValues []float64) float64 {
 		return sum(knownValues) / float64(len(knownValues))
 	case Sum:
 		return sum(knownValues)
+	case First:
+		return knownValues[0]
 	case Last:
 		return knownValues[len(knownValues)-1]
 	case Max:

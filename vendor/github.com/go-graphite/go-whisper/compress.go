@@ -9,6 +9,7 @@ import (
 	"math/bits"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 	"unsafe"
@@ -291,6 +292,8 @@ func (a *archiveInfo) blockOffset(blockIndex int) int {
 	return a.offset + blockIndex*a.blockSize
 }
 
+const maxInt = 1<<uint(strconv.IntSize-1) - 1
+
 func (archive *archiveInfo) getSortedBlockRanges() []blockRange {
 	brs := make([]blockRange, len(archive.blockRanges))
 	copy(brs, archive.blockRanges)
@@ -298,11 +301,11 @@ func (archive *archiveInfo) getSortedBlockRanges() []blockRange {
 	sort.SliceStable(brs, func(i, j int) bool {
 		istart := brs[i].start
 		if brs[i].start == 0 {
-			istart = math.MaxInt64
+			istart = maxInt
 		}
 		jstart := brs[j].start
 		if brs[j].start == 0 {
-			jstart = math.MaxInt64
+			jstart = maxInt
 		}
 
 		return istart < jstart
@@ -358,6 +361,7 @@ func (whisper *Whisper) archiveUpdateManyCompressed(archive *archiveInfo, points
 		// increasing in time
 		if minInterval != 0 && bpBaseInterval < minInterval {
 			archive.stats.discard.oldInterval++
+			aindex++
 			continue
 		}
 
@@ -366,6 +370,7 @@ func (whisper *Whisper) archiveUpdateManyCompressed(archive *archiveInfo, points
 			aindex++
 			baseIntervalsPerUnit[currentUnit] = bpBaseInterval
 
+			// TODO: not efficient if many data points are being written in one call
 			offset := currentUnit*bufferUnitPointsCount + (dp.interval-bpBaseInterval)/archive.secondsPerPoint
 			copy(archive.buffer[offset*PointSize:], dp.Bytes())
 
@@ -431,7 +436,7 @@ func (archive *archiveInfo) getBufferInfo() (units []int, index, min int) {
 			max = v
 			index = i
 		}
-		if min > v {
+		if min == 0 || min > v {
 			min = v
 		}
 	}
@@ -559,7 +564,7 @@ func (whisper *Whisper) extendIfNeeded() error {
 			if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].file.read: %s", i, block.index, err)
 			}
-			dst, _, err := archive.ReadFromBlock(buf, []dataPoint{}, block.start, block.end)
+			dst, _, err := archive.ReadFromBlock(buf, []dataPoint{}, 0, maxInt)
 			if err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
 			}

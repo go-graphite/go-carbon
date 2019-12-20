@@ -29,7 +29,7 @@ func (whisper *Whisper) CheckIntegrity() {
 			if err := whisper.fileReadAt(buf, int64(arc.blockOffset(block.index))); err != nil {
 				panic(err)
 			}
-			_, _, err := arc.ReadFromBlock(buf, []dataPoint{}, block.start, block.end)
+			_, _, err := arc.ReadFromBlock(buf, []dataPoint{}, 0, maxInt)
 			if err != nil {
 				panic(err)
 			}
@@ -59,12 +59,21 @@ func (whisper *Whisper) Dump(all, showDecompressionInfo bool) {
 	fmt.Printf("aggregation_method:        %s\n", whisper.aggregationMethod)
 	fmt.Printf("max_retention:             %d\n", whisper.maxRetention)
 	fmt.Printf("x_files_factor:            %f\n", whisper.xFilesFactor)
-
 	if whisper.compressed {
+		whisper.compressed = false
+		ssize := whisper.Size()
+		whisper.compressed = true
+		csize := whisper.Size()
+		var ratio float64
+		if ssize != 0 {
+			ratio = float64(csize) / float64(ssize)
+		}
+
 		fmt.Printf("comp_version:              %d\n", whisper.compVersion)
 		fmt.Printf("points_per_block:          %d\n", whisper.pointsPerBlock)
 		fmt.Printf("avg_compressed_point_size: %f\n", whisper.avgCompressedPointSize)
 		fmt.Printf("crc32:                     %X\n", whisper.crc32)
+		fmt.Printf("compression_ratio:         %f (compressed/standard: %d/%d)\n", ratio, csize, ssize)
 	}
 
 	fmt.Printf("archives:                  %d\n", len(whisper.archives))
@@ -135,11 +144,7 @@ func (archive *archiveInfo) dumpInfoCompressed() {
 
 func (arc *archiveInfo) dumpDataPointsCompressed() {
 	if arc.hasBuffer() {
-		fmt.Printf("archive %s buffer[%d]:\n", arc.Retention, len(arc.buffer)/PointSize)
-		dps := unpackDataPoints(arc.buffer)
-		for i, p := range dps {
-			fmt.Printf("  % 4d %d: %f\n", i, p.interval, p.value)
-		}
+		arc.dumpBuffer()
 	}
 
 	for _, block := range arc.blockRanges {
@@ -154,7 +159,7 @@ func (arc *archiveInfo) dumpDataPointsCompressed() {
 			panic(err)
 		}
 
-		dps, _, err := arc.ReadFromBlock(buf, []dataPoint{}, block.start, block.end)
+		dps, _, err := arc.ReadFromBlock(buf, []dataPoint{}, 0, maxInt)
 		if err != nil {
 			panic(err)
 		}
@@ -172,6 +177,14 @@ func (arc *archiveInfo) dumpDataPointsCompressed() {
 			// continue
 			fmt.Printf("  % 4d %d: %v\n", i, p.interval, p.value)
 		}
+	}
+}
+
+func (arc *archiveInfo) dumpBuffer() {
+	fmt.Printf("archive %s buffer[%d]:\n", arc.Retention, len(arc.buffer)/PointSize)
+	dps := unpackDataPoints(arc.buffer)
+	for i, p := range dps {
+		fmt.Printf("  % 4d %d: %f\n", i, p.interval, p.value)
 	}
 }
 
