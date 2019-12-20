@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"errors"
+	"fmt"
 	_ "net/http/pprof"
 	"strings"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-whisper"
+	"github.com/lomik/go-carbon/helper"
 	"github.com/lomik/go-carbon/points"
 )
 
@@ -27,6 +29,13 @@ type metricFromDisk struct {
 
 func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
 	var step int32
+
+	var aggregationSpec string
+	if strings.Contains(metric, "@") {
+		a := strings.Split(metric, "@")
+		metric = a[0]
+		aggregationSpec = a[1]
+	}
 
 	// We need to obtain the metadata from whisper file anyway.
 	path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
@@ -93,11 +102,20 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	listener.prometheus.diskRequest()
 
 	res.DiskStartTime = time.Now()
-	points, err := w.Fetch(int(fromTime), int(untilTime))
+	var points *whisper.TimeSeries
+	if aggregationSpec == "" {
+		points, err = w.Fetch(int(fromTime), int(untilTime))
+	} else {
+		var spec whisper.MixAggregationSpec
+		spec.Method, spec.Percentile, err = helper.ParseAggregationMethod(aggregationSpec)
+		if err == nil {
+			points, err = w.FetchByAggregation(int(fromTime), int(untilTime), &spec)
+		}
+	}
 	w.Close()
 	if err != nil {
 		logger.Warn("failed to fetch points", zap.Error(err))
-		return nil, errors.New("failed to fetch points")
+		return nil, fmt.Errorf("failed to fetch points: %s", err)
 	}
 
 	// Should never happen, because we have a check for proper archive now
