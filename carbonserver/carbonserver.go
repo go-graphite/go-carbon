@@ -616,7 +616,12 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	t0 := time.Now()
 
 	var files []string
+	var filesLen int
 	details := make(map[string]*protov3.MetricDetails)
+	var trieIdx *trieIndex
+	if listener.trieIndex {
+		trieIdx = newTrie(".wsp")
+	}
 
 	metricsKnown := uint64(0)
 	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
@@ -628,7 +633,16 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		hasSuffix := strings.HasSuffix(info.Name(), ".wsp")
 		if info.IsDir() || hasSuffix {
 			trimmedName := strings.TrimPrefix(p, listener.whisperData)
-			files = append(files, trimmedName)
+			filesLen++
+
+			if listener.trieIndex {
+				if err := trieIdx.insert(trimmedName); err != nil {
+					return fmt.Errorf("updateFileList.trie: %s", err)
+				}
+			} else {
+				files = append(files, trimmedName)
+			}
+
 			if hasSuffix {
 				metricsKnown++
 				if listener.internalStatsDir != "" {
@@ -685,21 +699,12 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	t0 = time.Now()
 	if listener.trieIndex {
 		indexType = "trie"
-		nfidx.trieIdx = newTrie(".wsp")
-		var errs []error
-		for _, file := range files {
-			if err := nfidx.trieIdx.insert(file); err != nil {
-				errs = append(errs, err)
-			}
-		}
+		nfidx.trieIdx = trieIdx
 		infos = append(
 			infos,
 			zap.Int("trie_depth", nfidx.trieIdx.depth),
 			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
 		)
-		if len(errs) > 0 {
-			infos = append(infos, zap.Errors("trie_index_errors", errs))
-		}
 		if listener.trigramIndex {
 			start := time.Now()
 			nfidx.trieIdx.setTrigrams()
@@ -741,7 +746,7 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		zap.Duration("indexing_runtime", indexingRuntime),
 		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
 		zap.Duration("total_runtime", time.Since(t0)),
-		zap.Int("Files", len(files)),
+		zap.Int("Files", filesLen),
 		zap.Int("index_size", indexSize),
 		zap.Int("pruned_trigrams", pruned),
 		zap.String("index_type", indexType),
