@@ -118,10 +118,11 @@ func TestTrieIndex(t *testing.T) {
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
 	var cases = []struct {
-		input    []string
-		query    string
-		hasError bool
-		expect   []string
+		input       []string
+		query       string
+		hasError    bool
+		expect      []string
+		expectLeafs []bool
 	}{
 		{
 			input:  commonFiles,
@@ -601,6 +602,31 @@ func TestTrieIndex(t *testing.T) {
 				"fe.series.abc_101.xyz.haproxy.host.cjk-2022_expr1_internet_com.traffic",
 			},
 		},
+		{
+			input: []string{
+				// NOTE: ordering here is important, for trieIndex.insert case 8
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle/val.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+			},
+			query: "ns1.ns2.ns3.ns4.ns5.ns6.*",
+			expect: []string{
+				"ns1.ns2.ns3.ns4.ns5.ns6.ns7_handle",
+				"ns1.ns2.ns3.ns4.ns5.ns6.ns7_handle",
+			},
+			expectLeafs: []bool{false, true},
+		},
+		{
+			input: []string{
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7.wsp",
+			},
+			query: "ns1.ns2.ns3.ns4.ns5.ns6.*",
+			expect: []string{
+				"ns1.ns2.ns3.ns4.ns5.ns6.ns7_handle",
+				"ns1.ns2.ns3.ns4.ns5.ns6.ns7",
+			},
+			expectLeafs: []bool{true, true},
+		},
 	}
 
 	for _, c := range cases {
@@ -612,12 +638,23 @@ func TestTrieIndex(t *testing.T) {
 			trieServer.expandGlobs(context.TODO(), c.query, resultCh)
 			result := <-resultCh
 			trieFiles, err := result.Files, result.Err
+
 			// trieFiles, _, err := trieServer.expandGlobsTrie(c.query)
 			if err != nil && !c.hasError {
 				t.Errorf("failed to trie.expandGlobs: %s", err)
 			}
 
+			if c.expectLeafs != nil {
+				for i := range c.expect {
+					c.expect[i] += fmt.Sprintf(" %t", c.expectLeafs[i])
+				}
+				for i := range trieFiles {
+					trieFiles[i] += fmt.Sprintf(" %t", result.Leafs[i])
+				}
+			}
+
 			sort.Strings(trieFiles)
+			sort.Strings(c.expect)
 			if !reflect.DeepEqual(trieFiles, c.expect) {
 				t.Errorf("incorrect files retrieved\nreturns: %s\nexpect:  %s\n", trieFiles, c.expect)
 			}
