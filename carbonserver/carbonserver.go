@@ -788,6 +788,13 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 
 	var useGlob bool
 
+	var aggregationSpec string
+	if strings.Contains(query, "@") {
+		a := strings.Split(query, "@")
+		query = a[0]
+		aggregationSpec = a[1]
+	}
+
 	// TODO: Find out why we have set 'useGlob' if 'star == -1'
 	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
 		useGlob = true
@@ -883,6 +890,13 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 			leafs[i] = false
 		}
 		files[i] = strings.Replace(p, "/", ".", -1)
+	}
+
+	if aggregationSpec != "" {
+		for i := range files {
+			files[i] += "@" + aggregationSpec
+		}
+		query += "@" + aggregationSpec
 	}
 
 	matchedCount = len(files)

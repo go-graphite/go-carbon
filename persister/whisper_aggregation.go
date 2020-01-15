@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 
 	whisper "github.com/go-graphite/go-whisper"
+	"github.com/lomik/go-carbon/helper"
 )
 
 // WhisperAggregationItem ...
@@ -19,6 +21,7 @@ type WhisperAggregationItem struct {
 	xFilesFactor         float64
 	aggregationMethodStr string
 	aggregationMethod    whisper.AggregationMethod
+	mixAggregationSpecs  []whisper.MixAggregationSpec
 }
 
 // WhisperAggregation ...
@@ -88,21 +91,24 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 				section["xfilesfactor"], item.name, err.Error())
 		}
 
+		var err error
 		item.aggregationMethodStr = section["aggregationmethod"]
-		switch item.aggregationMethodStr {
-		case "average", "avg":
-			item.aggregationMethod = whisper.Average
-		case "sum":
-			item.aggregationMethod = whisper.Sum
-		case "last":
-			item.aggregationMethod = whisper.Last
-		case "max":
-			item.aggregationMethod = whisper.Max
-		case "min":
-			item.aggregationMethod = whisper.Min
-		default:
-			return nil, fmt.Errorf("unknown aggregation method '%s'",
-				section["aggregationmethod"])
+		if strings.Contains(item.aggregationMethodStr, ",") {
+			item.aggregationMethod = whisper.Mix
+			specStrs := strings.Split(item.aggregationMethodStr, ",")
+			for _, specStr := range specStrs {
+				var spec whisper.MixAggregationSpec
+				spec.Method, spec.Percentile, err = helper.ParseAggregationMethod(specStr)
+				if err != nil {
+					break
+				}
+				item.mixAggregationSpecs = append(item.mixAggregationSpecs, spec)
+			}
+		} else {
+			item.aggregationMethod, _, err = helper.ParseAggregationMethod(item.aggregationMethodStr)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse aggregation method '%s': %s", section["aggregationmethod"], err)
 		}
 
 		result.Data = append(result.Data, item)

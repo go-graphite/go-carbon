@@ -253,7 +253,6 @@ func (p *Whisper) store(metric string) {
 			p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
 			return
 		}
-
 		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
 			p.logger.Error("mkdir failed",
 				zap.String("dir", filepath.Dir(path)),
@@ -267,10 +266,19 @@ func (p *Whisper) store(metric string) {
 		if schema.Compressed != nil {
 			compressed = *schema.Compressed
 		}
+		if !compressed && aggr.aggregationMethod == whisper.Mix {
+			// intended to be less intrusive, just logging an error
+			p.logger.Error("bad aggregation match",
+				zap.String("path", path),
+				zap.Error(fmt.Errorf("mix aggregation currently only support cwhisper format, resetting it to default aggregation policy %s", p.aggregation.Default.aggregationMethod)),
+			)
+			aggr = p.aggregation.Default
+		}
 		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
-			Sparse:     p.sparse,
-			FLock:      p.flock,
-			Compressed: compressed,
+			Sparse:              p.sparse,
+			FLock:               p.flock,
+			Compressed:          compressed,
+			MixAggregationSpecs: aggr.mixAggregationSpecs,
 		})
 		if err != nil {
 			p.logger.Error("create new whisper file failed",
