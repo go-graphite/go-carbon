@@ -633,7 +633,7 @@ func TestTrieIndex(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
-			trieServer := newTrieServer(c.input, true)
+			trieServer := newTrieServer(c.input, false)
 			resultCh := make(chan *ExpandedGlobResponse, 1)
 			trieServer.expandGlobs(context.TODO(), c.query, resultCh)
 			result := <-resultCh
@@ -659,6 +659,86 @@ func TestTrieIndex(t *testing.T) {
 				t.Errorf("incorrect files retrieved\nreturns: %s\nexpect:  %s\n", trieFiles, c.expect)
 			}
 		})
+	}
+}
+
+func TestTrieConcurrentReadWrite(t *testing.T) {
+	trieIndex := newTrie(".wsp")
+
+	rand.Seed(time.Now().Unix())
+
+	var donec = make(chan bool)
+	// var filec = make(chan string)
+	var filem sync.Map
+	var factor = 100
+	go func() {
+		for i := 0; i < factor; i++ {
+			for j := 0; j < factor; j++ {
+				for k := 0; k < factor; k++ {
+					filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
+					trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k))
+					// if (i+j+k)%5 == 0 {
+					// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
+					// }
+				}
+			}
+		}
+		donec <- true
+	}()
+
+	// time.Sleep(time.Second)
+
+	var zero int
+	for {
+		select {
+		case <-donec:
+			t.Logf("total zero result: %d/%d", zero, factor*factor*factor)
+			return
+		// case <-filec:
+		default:
+			files, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
+			if err != nil {
+				panic(err)
+			}
+			if len(files) > 0 {
+				for _, f := range files {
+					if _, ok := filem.Load(f); !ok {
+						t.Errorf("trie index returned an unknown file: %s", f)
+					}
+				}
+			} else {
+				zero++
+			}
+		}
+	}
+}
+
+func TestTriePrune(t *testing.T) {
+	trieIndex := newTrie(".wsp")
+
+	trieIndex.insert("/level-0/level-1/level-2/memory.wsp")
+	trieIndex.insert("/level-0/level-1/level-2-1/memory.wsp")
+	trieIndex.insert("/level-0/level-1/level-2-2/memory.wsp")
+	trieIndex.insert("/level-0/level-1/cpu.wsp")
+	trieIndex.insert("/level-0/disk.wsp")
+
+	// trieIndex.dump(os.Stdout)
+
+	trieIndex.root.mark++
+	trieIndex.insert("/level-0/level-1/cpu.wsp")
+	trieIndex.insert("/level-0/level-1/level-2-2/memory.wsp")
+	trieIndex.insert("/level-0/disk.wsp")
+
+	// trieIndex.dump(os.Stdout)
+
+	trieIndex.prune()
+	// trieIndex.dump(os.Stdout)
+	if got, want := trieIndex.allMetrics('.'), []string{
+		"level-0.level-1.level-2-2.memory",
+		"level-0.level-1.cpu",
+		"level-0.disk",
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("g = %s; want %s", got, want)
 	}
 }
 

@@ -619,12 +619,17 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		}
 	}()
 
+	fidx := listener.CurrentFileIndex()
+
 	var files []string
 	var filesLen int
 	details := make(map[string]*protov3.MetricDetails)
 	var trieIdx *trieIndex
-	if listener.trieIndex {
+	if listener.trieIndex && fidx == nil {
 		trieIdx = newTrie(".wsp")
+	} else {
+		trieIdx = fidx.trieIdx
+		trieIdx.root.mark++
 	}
 
 	metricsKnown := uint64(0)
@@ -748,7 +753,6 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
 
 	tl := time.Now()
-	fidx := listener.CurrentFileIndex()
 
 	if fidx != nil && listener.internalStatsDir != "" {
 		listener.fileIdxMutex.Lock()

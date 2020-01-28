@@ -3,8 +3,10 @@ package carbonserver
 import (
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"unsafe"
 
 	trigram "github.com/dgryski/go-trigram"
@@ -302,12 +304,39 @@ type trieIndex struct {
 
 type trieNode struct {
 	c         []byte // TODO: look for a more compact/compressed formats
-	childrens []*trieNode
+	childrens *[]*trieNode
+	mark      uint8 // TODO: for deletion walk
 }
 
-var fileNode = &trieNode{}
+var fileNode = &trieNode{childrens: &[]*trieNode{}}
 
 func (tn *trieNode) dir() bool { return len(tn.c) == 1 && tn.c[0] == '/' }
+
+func (tn *trieNode) getChildrens() []*trieNode {
+	// log.Printf("len(tn.childrens) = %+v\n", len(*tn.childrens))
+	c := *(*[]*trieNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&tn.childrens))))
+	// log.Printf("len(c) = %+v\n", len(c))
+	return c
+}
+
+func (tn *trieNode) getChild(i int) *trieNode {
+	return (*trieNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&(*tn.childrens)[i]))))
+}
+
+func (tn *trieNode) setChildrens(cs []*trieNode) {
+	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&tn.childrens)), unsafe.Pointer(&cs))
+}
+
+func (tn *trieNode) addChild(n *trieNode) {
+	tn.setChildrens(append(*tn.childrens, n))
+}
+
+func (tn *trieNode) setChild(i int, n *trieNode) {
+	atomic.StorePointer(
+		(*unsafe.Pointer)(unsafe.Pointer(&(*tn.childrens)[i])),
+		unsafe.Pointer(n),
+	)
+}
 
 func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
 	for _, i := range ti.trigrams[tn] {
@@ -320,7 +349,7 @@ func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
 
 func newTrie(fileExt string) *trieIndex {
 	return &trieIndex{
-		root:     &trieNode{},
+		root:     &trieNode{childrens: &[]*trieNode{}},
 		fileExt:  fileExt,
 		trigrams: map[*trieNode][]uint32{},
 	}
@@ -387,12 +416,15 @@ outer:
 		//  abc
 
 	inner:
-		for ci := 0; ci < len(cur.childrens); ci++ {
-			child := cur.childrens[ci]
+		for ci := 0; ci < len(*cur.childrens); ci++ {
+			child := (*cur.childrens)[ci]
+			match = 0
 
 			if len(child.c) == 0 || child.c[0] != path[start] {
 				continue
 			}
+
+			child.mark = ti.root.mark
 
 			nlen = i - start
 			start++
@@ -406,7 +438,6 @@ outer:
 			if match == nlen {
 				// case 1
 				if len(child.c) > match {
-					cur = child
 					goto split
 				}
 
@@ -427,18 +458,16 @@ outer:
 		split:
 			// case 5, 6, 7
 			prefix, suffix := child.c[:match], child.c[match:]
-			sn = &trieNode{c: suffix, childrens: child.childrens}
+			sn = &trieNode{c: suffix, childrens: child.childrens, mark: ti.root.mark}
 
-			child.c = prefix
-			child.childrens = []*trieNode{sn}
-
-			cur = child
+			cur.setChild(ci, &trieNode{c: prefix, childrens: &[]*trieNode{sn}, mark: ti.root.mark})
+			cur = (*cur.childrens)[ci]
 
 			if nlen-match > 0 {
-				newn = &trieNode{c: make([]byte, nlen-match)}
+				newn = &trieNode{c: make([]byte, nlen-match), childrens: &[]*trieNode{}, mark: ti.root.mark}
 				copy(newn.c, []byte(path[start:i]))
 
-				cur.childrens = append(cur.childrens, newn)
+				cur.addChild(newn)
 				cur = newn
 			}
 
@@ -447,9 +476,9 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-			newn = &trieNode{c: make([]byte, i-start)}
+			newn = &trieNode{c: make([]byte, i-start), childrens: &[]*trieNode{}, mark: ti.root.mark}
 			copy(newn.c, []byte(path[start:i]))
-			cur.childrens = append(cur.childrens, newn)
+			cur.addChild(newn)
 			cur = newn
 		}
 
@@ -460,29 +489,42 @@ outer:
 		}
 
 		start = i + 1
-		for _, child := range cur.childrens {
+		for _, child := range *cur.childrens {
 			if child.dir() {
 				cur = child
+				cur.mark = ti.root.mark
 				continue outer
 			}
 		}
 
 		if i < len(path) {
-			newn = &trieNode{c: []byte{'/'}}
-			cur.childrens = append(cur.childrens, newn)
+			newn = &trieNode{c: []byte{'/'}, childrens: &[]*trieNode{}, mark: ti.root.mark}
+			cur.addChild(newn)
 			cur = newn
 		}
 	}
 
+	// TODO: there seems to be a problem of fetching a directory node without files
+
 	if !isFile {
+		// TODO: should double check if / already exists
 		if cur.dir() {
-			cur.childrens = append(cur.childrens, &trieNode{c: []byte{'/'}})
+			cur.addChild(&trieNode{c: []byte{'/'}, childrens: &[]*trieNode{}, mark: ti.root.mark})
 		}
 		return nil
 	}
 
-	cur.childrens = append(cur.childrens, fileNode)
-	ti.fileCount++
+	var hasFileNode bool
+	for _, c := range *cur.childrens {
+		if c == fileNode {
+			hasFileNode = true
+			break
+		}
+	}
+	if !hasFileNode {
+		cur.addChild(fileNode)
+		ti.fileCount++
+	}
 
 	return nil
 }
@@ -509,8 +551,11 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	}
 
 	var cur = ti.root
+	// TODO: need to cache them in an array/stack
+	var curChildrens = cur.getChildrens()
 	var nindex = make([]int, ti.depth+1)
 	var trieNodes = make([]*trieNode, ti.depth+1)
+	var childrensStack = make([][]*trieNode, ti.depth+1)
 	var ncindex int
 	var mindex int
 	var curm = matchers[0]
@@ -518,13 +563,15 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	var isFile, isDir, hasMoreNodes bool
 
 	for {
-		if nindex[ncindex] >= len(cur.childrens) {
+		if nindex[ncindex] >= len(curChildrens) {
 			curm.pop(len(cur.c))
 			goto parent
 		}
 
 		trieNodes[ncindex] = cur
-		cur = cur.childrens[nindex[ncindex]]
+		childrensStack[ncindex] = curChildrens
+		cur = cur.getChild(nindex[ncindex])
+		curChildrens = cur.getChildrens()
 		ncindex++
 
 		if cur.dir() {
@@ -568,7 +615,8 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		isFile = false
 		isDir = false
 		hasMoreNodes = false
-		for _, child := range cur.childrens {
+		for i := 0; i < len(curChildrens); i++ {
+			child := cur.getChild(i)
 			switch {
 			case child == fileNode:
 				isFile = true
@@ -621,8 +669,9 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		}
 		nindex[ncindex]++
 		cur = trieNodes[ncindex]
+		curChildrens = childrensStack[ncindex]
 
-		if cur.dir() && nindex[ncindex] >= len(cur.childrens) {
+		if cur.dir() && nindex[ncindex] >= len(curChildrens) {
 			mindex--
 			curm = matchers[mindex]
 
@@ -669,14 +718,16 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 	var nindex = make([]int, ti.depth+1)
 	var ncindex int
 	var cur = ti.root
+	var curChildrens = cur.getChildrens()
 	var trieNodes = make([]*trieNode, ti.depth+1)
 	for {
-		if nindex[ncindex] >= len(cur.childrens) {
+		if nindex[ncindex] >= len(curChildrens) {
 			goto parent
 		}
 
 		trieNodes[ncindex] = cur
-		cur = cur.childrens[nindex[ncindex]]
+		cur = cur.getChild(nindex[ncindex])
+		curChildrens = cur.getChildrens()
 		ncindex++
 
 		if cur == fileNode {
@@ -694,9 +745,52 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		}
 		nindex[ncindex]++
 		cur = trieNodes[ncindex]
+		curChildrens = cur.getChildrens()
 		continue
 	}
 	return files
+}
+
+func (ti *trieIndex) dump(w io.Writer) {
+	var nindex = make([]int, ti.depth+1)
+	var ncindex int
+	var cur = ti.root
+	var curChildrens = cur.getChildrens()
+	var trieNodes = make([]*trieNode, ti.depth+1)
+	var ident []byte
+	for {
+		if nindex[ncindex] >= len(curChildrens) {
+			goto parent
+		}
+
+		trieNodes[ncindex] = cur
+		cur = cur.getChild(nindex[ncindex])
+		curChildrens = cur.getChildrens()
+		ncindex++
+
+		fmt.Fprintf(w, "%s%s %d\n", ident, cur.c, cur.mark)
+		ident = append(ident, ' ', ' ')
+
+		if cur == fileNode {
+			goto parent
+		}
+
+		continue
+
+	parent:
+		nindex[ncindex] = 0
+		ncindex--
+		if ncindex < 0 {
+			break
+		}
+		nindex[ncindex]++
+		cur = trieNodes[ncindex]
+		curChildrens = cur.getChildrens()
+
+		ident = ident[:len(ident)-2]
+
+		continue
+	}
 }
 
 // statNodes returns the how many files/dirs a dir node has (doesn't go over dir
@@ -706,12 +800,13 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 	var nindex = make([]int, ti.depth+1)
 	var ncindex int
 	var cur = ti.root
+	var curChildrens = cur.getChildrens()
 	var trieNodes = make([]*trieNode, ti.depth+1)
 	var curdirs = make([]int, ti.depth+1)
 	var curindex int
 
 	for {
-		if nindex[ncindex] >= len(cur.childrens) {
+		if nindex[ncindex] >= len(curChildrens) {
 			if cur.dir() {
 				stats[cur] = curdirs[curindex]
 				curdirs[curindex] = 0
@@ -722,7 +817,7 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 		}
 
 		trieNodes[ncindex] = cur
-		cur = cur.childrens[nindex[ncindex]]
+		cur = cur.getChild(nindex[ncindex])
 		ncindex++
 
 		if cur.dir() {
@@ -745,12 +840,14 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 		}
 		nindex[ncindex]++
 		cur = trieNodes[ncindex]
+		curChildrens = cur.getChildrens()
 		continue
 	}
 
 	return stats
 }
 
+// TODO: support ctrie
 func (ti *trieIndex) setTrigrams() {
 	var nindex = make([]int, ti.depth+1)
 	var ncindex int
@@ -766,12 +863,12 @@ func (ti *trieIndex) setTrigrams() {
 	gent := func(b1, b2, b3 byte) uint32 { return uint32(uint32(b1)<<16 | uint32(b2)<<8 | uint32(b3)) }
 
 	for {
-		if nindex[ncindex] >= len(cur.childrens) {
+		if nindex[ncindex] >= len(*cur.childrens) {
 			goto parent
 		}
 
 		trieNodes[ncindex] = cur
-		cur = cur.childrens[nindex[ncindex]]
+		cur = (*cur.childrens)[nindex[ncindex]]
 		ncindex++
 		trieNodes[ncindex] = cur
 
@@ -849,7 +946,67 @@ func (ti *trieIndex) setTrigrams() {
 		cur = trieNodes[ncindex]
 		continue
 	}
+}
 
+func (ti *trieIndex) prune() {
+	type state struct {
+		next      int
+		node      *trieNode
+		childrens *[]*trieNode
+	}
+
+	var cur state
+	cur.node = ti.root
+	cur.childrens = cur.node.childrens
+
+	var idx int
+	var states = make([]state, ti.depth+1)
+
+	for {
+		if cur.next >= len(*cur.childrens) {
+			goto parent
+		}
+
+		states[idx] = cur
+		idx++
+
+		cur.next = 0
+		cur.node = (*cur.childrens)[states[idx-1].next]
+		cur.childrens = cur.node.childrens
+
+		if cur.node == fileNode {
+			goto parent
+		}
+
+		if cur.node.mark != ti.root.mark {
+			nc := make([]*trieNode, len(*states[idx-1].childrens)-1)
+			for i, j := 0, 0; i < len(*states[idx-1].childrens); i++ {
+				if i == states[idx-1].next {
+					continue
+				}
+
+				nc[j] = (*states[idx-1].childrens)[i]
+				j++
+			}
+			states[idx-1].node.setChildrens(nc)
+
+			goto parent
+		}
+
+		continue
+
+	parent:
+		states[idx] = state{}
+		idx--
+		if idx < 0 {
+			break
+		}
+
+		states[idx].next++
+		cur = states[idx]
+
+		continue
+	}
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
