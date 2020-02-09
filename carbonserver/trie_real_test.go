@@ -5,7 +5,9 @@ package carbonserver
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"reflect"
 	"runtime/debug"
 	"sort"
@@ -228,4 +230,37 @@ func uniqFilesLeafs(files []string, leafs []bool) ([]string, []bool) {
 		leafs[index] = leafs[i]
 	}
 	return files[:index+1], leafs[:index+1]
+}
+
+func TestTrieContinuousUpdate(t *testing.T) {
+	files := readFile(*testDataPath)
+	ptrie := newTrie(".wsp")
+	for i := 0; i < 100; i++ {
+		ttrie := newTrie(".wsp")
+		ptrie.root.mark++
+		var count int
+		for _, f := range files {
+			if rand.Intn(10) != 7 {
+				continue
+			}
+			count++
+			ptrie.insert(f)
+			ttrie.insert(f)
+		}
+		println("--- run", i, count)
+
+		count0, files0, dirs0, onec0, onefc0, onedc0, nodesByMark := ptrie.countNodes()
+		fmt.Println("before prune:  ", count0, files0, dirs0, onec0, onefc0, onedc0, nodesByMark)
+
+		ptrie.prune()
+
+		count1, files1, dirs1, onec1, onefc1, onedc1, nodesByMark := ptrie.countNodes()
+		fmt.Println("after prune:   ", count1, files1, dirs1, onec1, onefc1, onedc1, nodesByMark)
+
+		count2, files2, dirs2, onec2, onefc2, onedc2, nodesByMark := ttrie.countNodes()
+		fmt.Println("non-concurrent:", count2, files2, dirs2, onec2, onefc2, onedc2, nodesByMark)
+
+		fmt.Println("reduction:", float64(count1)*100/float64(count0))
+		fmt.Println("extra:    ", float64(count2)*100/float64(count1))
+	}
 }

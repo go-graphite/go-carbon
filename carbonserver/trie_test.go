@@ -718,11 +718,16 @@ func TestTriePrune(t *testing.T) {
 
 	trieIndex.insert("/level-0/level-1/level-2/memory.wsp")
 	trieIndex.insert("/level-0/level-1/level-2-1/memory.wsp")
+	trieIndex.insert("/level-0/level-1/level-2-2.wsp")
+	trieIndex.insert("/level-0/level-1/level-2-2/memory1.wsp")
 	trieIndex.insert("/level-0/level-1/level-2-2/memory.wsp")
+	trieIndex.insert("/level-0/level-1/level-2-2/memory2.wsp")
 	trieIndex.insert("/level-0/level-1/cpu.wsp")
 	trieIndex.insert("/level-0/disk.wsp")
 
 	// trieIndex.dump(os.Stdout)
+
+	// println(trieIndex.countNodes())
 
 	trieIndex.root.mark++
 	trieIndex.insert("/level-0/level-1/cpu.wsp")
@@ -731,8 +736,13 @@ func TestTriePrune(t *testing.T) {
 
 	// trieIndex.dump(os.Stdout)
 
+	// println(trieIndex.countNodes())
+
 	trieIndex.prune()
 	// trieIndex.dump(os.Stdout)
+
+	// println(trieIndex.countNodes())
+
 	if got, want := trieIndex.allMetrics('.'), []string{
 		"level-0.level-1.level-2-2.memory",
 		"level-0.level-1.cpu",
