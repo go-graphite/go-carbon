@@ -119,7 +119,7 @@ type carbonserverConfig struct {
 
 	TrieIndex       bool   `toml:"trie-index"`
 	ConcurrentIndex bool   `toml:"concurrent-index"`
-	FileListCache   string `toml:"flie-list-cache"`
+	FileListCache   string `toml:"file-list-cache"`
 }
 
 type pprofConfig struct {
