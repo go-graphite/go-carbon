@@ -133,6 +133,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("size", float64(c.Size()))
 	send("metrics", float64(c.Len()))
 	send("maxSize", float64(s.maxSize))
+	send("notConfirmed", float64(c.NotConfirmedLength()))
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("tagsNormalizeErrors", &c.stat.tagsNormalizeErrors, send)
@@ -214,6 +215,17 @@ func (c *Cache) Len() int32 {
 		shard := c.data[i]
 		shard.Lock()
 		l += len(shard.items)
+		shard.Unlock()
+	}
+	return int32(l)
+}
+
+func (c *Cache) NotConfirmedLength() int32 {
+	l := 0
+	for i := 0; i < shardCount; i++ {
+		shard := c.data[i]
+		shard.Lock()
+		l += len(shard.notConfirmed)
 		shard.Unlock()
 	}
 	return int32(l)
