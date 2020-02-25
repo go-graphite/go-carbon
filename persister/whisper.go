@@ -54,6 +54,7 @@ type Whisper struct {
 	mockStore               func() (StoreFunc, func())
 	logger                  *zap.Logger
 	createLogger            *zap.Logger
+	ephemeralFilter         *ephemeralFilter
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -65,10 +66,11 @@ func NewWhisper(
 	rootPath string,
 	schemas WhisperSchemas,
 	aggregation *WhisperAggregation,
+	ephemeralFilter *EphemeralFilter,
 	recv func(chan bool) string,
 	pop func(string) (*points.Points, bool),
 	confirm func(*points.Points),
-	popConfirm func(string) (*points.Points, bool)) *Whisper {
+	popConfirm func(string) (*points.Points, bool)) (*Whisper, error) {
 
 	return &Whisper{
 		recv:                recv,
@@ -77,6 +79,7 @@ func NewWhisper(
 		popConfirm:          popConfirm,
 		schemas:             schemas,
 		aggregation:         aggregation,
+		ephemeralFilter:     ephemeralFilter,
 		workersCount:        1,
 		rootPath:            rootPath,
 		maxUpdatesPerSecond: 0,

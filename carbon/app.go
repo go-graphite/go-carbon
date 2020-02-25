@@ -93,6 +93,13 @@ func (app *App) configure() error {
 		} else {
 			cfg.Whisper.Aggregation = persister.NewWhisperAggregation()
 		}
+
+		if cfg.Whisper.EphemeralFilename != "" {
+			cfg.Whisper.ephemeralFilter, err = persister.NewEphemeralFilter(app.Config.Whisper.DataDir, cfg.Whisper.EphemeralFilename, cfg.Whisper.RecycleThreshold)
+			if err != nil {
+				return err
+			}
+		}
 	}
 	if !(cfg.Cache.WriteStrategy == "max" ||
 		cfg.Cache.WriteStrategy == "sorted" ||
@@ -269,6 +276,7 @@ func (app *App) startPersister() {
 			app.Config.Whisper.DataDir,
 			app.Config.Whisper.Schemas,
 			app.Config.Whisper.Aggregation,
+			app.Config.Whisper.ephemeralFilter,
 			app.Cache.WriteoutQueue().Get,
 			app.Cache.PopNotConfirmed,
 			app.Cache.Confirm,

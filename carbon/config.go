@@ -67,7 +67,11 @@ type whisperConfig struct {
 	HashFilenames           bool   `toml:"hash-filenames"`
 	Schemas                 persister.WhisperSchemas
 	Aggregation             *persister.WhisperAggregation
+	ephemeralFilter         *persister.EphemeralFilter
 	RemoveEmptyFile         bool `toml:"remove-empty-file"`
+
+	EphemeralFilename string `toml:"ephemeral-file"`
+	RecycleThreshold  string `toml:"recycle-threshold"`
 }
 
 type cacheConfig struct {
