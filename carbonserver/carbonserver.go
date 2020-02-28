@@ -128,6 +128,13 @@ var statusCodes = map[string][]uint64{
 	"capabilities": make([]uint64, 5),
 }
 
+// interface to retrive retention and aggregation
+// schema from persister.
+type configRetriever interface {
+	MetricRetentionPeriod(string) (int, bool)
+	MetricAggrConf(string) (string, float64, bool)
+}
+
 type responseWriterWithStatus struct {
 	http.ResponseWriter
 	statusCode int
@@ -271,6 +278,9 @@ type CarbonserverListener struct {
 	requestsTimes requestsTimes
 	exitChan      chan struct{}
 	timeBuckets   []uint64
+
+	cacheGetRecentMetrics func() []map[string]struct{}
+	whisperGetConfig configRetriever
 
 	prometheus prometheus
 
@@ -530,6 +540,12 @@ func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 func (listener *CarbonserverListener) SetTrieIndex(enabled bool) {
 	listener.trieIndex = enabled
 }
+func (listener *CarbonserverListener) SetCacheGetMetricsFunc(recentMetricsFunc func() []map[string]struct{}) {
+	listener.cacheGetRecentMetrics = recentMetricsFunc
+}
+func (listener *CarbonserverListener) SetConfigRetriever(retriever configRetriever) {
+	listener.whisperGetConfig = retriever
+}
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
 }
@@ -591,7 +607,33 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimesByRequest(metrics 
 	listener.UpdateMetricsAccessTimes(accessTimes, false)
 }
 
+func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []map[string]struct{}) map[string]struct{} {
+	// splits each new metric from cache-scan and inserts
+	// into the current cacheMetricNames map
+	// in: new.metric.name1 --> split by "."
+	// insert "/new" , "/new/metric", "/new/metric/name1.wsp" into the
+	// metricsName map. This is inline with the inserts
+	// during filescan walk
+	for _, shardAddMap := range newCacheMetricNames {
+		for newMetric := range shardAddMap{
+			split := strings.Split(newMetric, ".")
+			fileName := "/"
+			for i, seg := range split {
+				fileName = filepath.Join(fileName, seg)
+				if i == len(split) - 1 {
+					fileName = fileName + ".wsp"
+				}
+				if _, ok := cacheMetricNames[fileName]; !ok {
+					cacheMetricNames[fileName] = struct{}{}
+				}
+			}
+		}
+	}
+	return cacheMetricNames
+}
+
 func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+	cacheMetrics := make(map[string]struct{})
 	for {
 		select {
 		case <-exit:
@@ -599,11 +641,17 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 		case <-tick:
 		case <-force:
 		}
-		listener.updateFileList(dir)
+		if listener.cacheGetRecentMetrics != nil{
+			// cacheMetrics maintains all new metric names added in cache
+			// when cache-scan is enabled in conf
+			newCacheMetricNames := listener.cacheGetRecentMetrics()
+			cacheMetrics = splitAndInsert(cacheMetrics, newCacheMetricNames)
+		}
+		listener.updateFileList(dir, cacheMetrics)
 	}
 }
 
-func (listener *CarbonserverListener) updateFileList(dir string) {
+func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}) {
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
 		if r := recover(); r != nil {
@@ -613,7 +661,6 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 			)
 		}
 	}()
-	t0 := time.Now()
 
 	var files []string
 	var filesLen int
@@ -624,6 +671,24 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	}
 
 	metricsKnown := uint64(0)
+
+	// populate index for all the metric names in cache
+	// the iteration takes place only when cache-scan is enabled in conf
+	for fileName := range cacheMetricNames {
+		if listener.trieIndex {
+			if err := trieIdx.insert(fileName); err != nil {
+				logger.Error("error populating index from cache indexMap",
+				zap.Error(err),)
+			}
+		} else {
+				files = append(files, fileName)
+		}
+		if strings.HasSuffix(fileName, ".wsp"){
+			metricsKnown++
+		}
+	}
+
+	t0 := time.Now()
 	err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			logger.Info("error processing", zap.String("path", p), zap.Error(err))
@@ -634,17 +699,22 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 		if info.IsDir() || hasSuffix {
 			trimmedName := strings.TrimPrefix(p, listener.whisperData)
 			filesLen++
-
-			if listener.trieIndex {
-				if err := trieIdx.insert(trimmedName); err != nil {
-					return fmt.Errorf("updateFileList.trie: %s", err)
+			// use cacheMetricNames to check and prevent appending duplicate metrics
+			// into the index when cacheMetricNamesIndex is enabled
+			if _, present := cacheMetricNames[trimmedName]; !present{
+				if listener.trieIndex {
+					if err := trieIdx.insert(trimmedName); err != nil {
+						return fmt.Errorf("updateFileList.trie: %s", err)
+					}
+				} else {
+					files = append(files, trimmedName)
 				}
-			} else {
-				files = append(files, trimmedName)
+				if hasSuffix {
+					metricsKnown++
+				}
 			}
 
 			if hasSuffix {
-				metricsKnown++
 				if listener.internalStatsDir != "" {
 					i := stat.GetStat(info)
 					trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
@@ -826,6 +896,23 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		fallbackToFS = true
 	}
 
+	if useGlob || fallbackToFS {
+		// no index or we were asked to hit the filesystem
+		for _, g := range globs {
+			nfiles, err := filepath.Glob(listener.whisperData + "/" + g)
+			if err == nil && nfiles != nil {
+				files = append(files, nfiles...)
+			} else {
+				// when cache-scan is enabled in the config, fallback to
+				// trigram-searching code when there is no whisper file
+				// to see if the metric exists only in cache
+				if listener.cacheGetRecentMetrics != nil{
+					useGlob = false
+				}
+			}
+		}
+	}
+
 	if fidx != nil && !useGlob {
 		// use the index
 		docs := make(map[trigram.DocID]struct{})
@@ -856,33 +943,33 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		sort.Strings(files)
 	}
 
-	// Not an 'else' clause because the trigram-searching code might want
-	// to fall back to the file-system glob
-
-	if useGlob || fallbackToFS {
-		// no index or we were asked to hit the filesystem
-		for _, g := range globs {
-			nfiles, err := filepath.Glob(listener.whisperData + "/" + g)
-			if err == nil {
-				files = append(files, nfiles...)
-			}
-		}
-	}
-
 	leafs := make([]bool, len(files))
 	for i, p := range files {
 		s, err := os.Stat(p)
-		if err != nil {
+		if err == nil {
+			// exists on disk
+			p = p[len(listener.whisperData+"/"):]
+			if !s.IsDir() && strings.HasSuffix(p, ".wsp") {
+				p = p[:len(p)-4]
+				leafs[i] = true
+			} else {
+				leafs[i] = false
+			}
+			files[i] = strings.Replace(p, "/", ".", -1)
+		} else if os.IsNotExist(err){
+			// cache-only, so no fileinfo
+			// mark "leafs" based on wsp suffix
+			p = p[len(listener.whisperData+"/"):]
+			if strings.HasSuffix(p, ".wsp") {
+				p = p[:len(p)-4]
+				leafs[i] = true
+			} else {
+				leafs[i] = false
+			}
+			files[i] = strings.Replace(p, "/", ".", -1)
+		} else{
 			continue
 		}
-		p = p[len(listener.whisperData+"/"):]
-		if !s.IsDir() && strings.HasSuffix(p, ".wsp") {
-			p = p[:len(p)-4]
-			leafs[i] = true
-		} else {
-			leafs[i] = false
-		}
-		files[i] = strings.Replace(p, "/", ".", -1)
 	}
 
 	matchedCount = len(files)

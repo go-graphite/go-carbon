@@ -63,6 +63,7 @@ type Shard struct {
 	items            map[string]*points.Points
 	notConfirmed     []*points.Points // linear search for value/slot
 	notConfirmedUsed int              // search value in notConfirmed[:notConfirmedUsed]
+	adds             map[string]struct{} // map to maintain all the new metric names
 }
 
 // Creates a new cache instance
@@ -76,6 +77,7 @@ func New() *Cache {
 		c.data[i] = &Shard{
 			items:        make(map[string]*points.Points),
 			notConfirmed: make([]*points.Points, 4),
+			adds:         make(map[string]struct{}),
 		}
 	}
 
@@ -275,6 +277,7 @@ func (c *Cache) Add(p *points.Points) {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
+		shard.adds[p.Metric] = struct{}{}
 	}
 	shard.Unlock()
 
@@ -323,4 +326,21 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 
 func (c *Cache) WriteoutQueue() *WriteoutQueue {
 	return c.writeoutQueue
+}
+
+// called at every scan-frequency by fileListUpdater in carbonserver. 
+// Iterates over every shard to:
+// - collect the new metric names (append shard.adds map to slice)
+// - replace shard.adds with new empty map
+func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
+	metricNames := make([]map[string]struct{},shardCount)
+	for i:=0; i<shardCount ; i++ {
+		shard, newAdds := c.data[i], make(map[string]struct{})
+		shard.Lock()
+		currNames := shard.adds
+		shard.adds = newAdds
+		shard.Unlock()
+		metricNames[i] = currNames
+	}
+	return metricNames
 }
