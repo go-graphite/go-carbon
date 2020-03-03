@@ -859,7 +859,10 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	var useGlob bool
 
 	// TODO: Find out why we have set 'useGlob' if 'star == -1'
-	if star := strings.IndexByte(query, '*'); strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1) {
+	if star := strings.IndexByte(query, '*'); listener.cacheGetRecentMetrics == nil &&
+		strings.IndexByte(query, '[') == -1 &&
+		strings.IndexByte(query, '?') == -1 &&
+		(star == -1 || star == len(query)-1) {
 		useGlob = true
 	}
 	logger = logger.With(zap.Bool("use_glob", useGlob))
@@ -896,23 +899,6 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		fallbackToFS = true
 	}
 
-	if useGlob || fallbackToFS {
-		// no index or we were asked to hit the filesystem
-		for _, g := range globs {
-			nfiles, err := filepath.Glob(listener.whisperData + "/" + g)
-			if err == nil && nfiles != nil {
-				files = append(files, nfiles...)
-			} else {
-				// when cache-scan is enabled in the config, fallback to
-				// trigram-searching code when there is no whisper file
-				// to see if the metric exists only in cache
-				if listener.cacheGetRecentMetrics != nil{
-					useGlob = false
-				}
-			}
-		}
-	}
-
 	if fidx != nil && !useGlob {
 		// use the index
 		docs := make(map[trigram.DocID]struct{})
@@ -941,6 +927,19 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		}
 
 		sort.Strings(files)
+	}
+
+	// Not an 'else' clause because the trigram-searching code might want
+	// to fall back to the file-system glob
+
+	if useGlob || fallbackToFS {
+		// no index or we were asked to hit the filesystem
+		for _, g := range globs {
+			nfiles, err := filepath.Glob(listener.whisperData + "/" + g)
+			if err == nil {
+				files = append(files, nfiles...)
+			}
+		}
 	}
 
 	leafs := make([]bool, len(files))
