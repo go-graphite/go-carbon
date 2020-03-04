@@ -318,8 +318,8 @@ trie-index = false
 
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
-# populates index with metrics with or without corresponding wsp files.
-# Disabled by default.
+# populates index with metrics with or without corresponding wsp files,
+# but will lead to increased memory consumption. Disabled by default.
 cache-scan = false
 
 # Maximum amount of globs in a single metric in index
