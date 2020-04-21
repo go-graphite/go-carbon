@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io/ioutil"
 	"math"
 	"net"
 	"strings"
@@ -33,6 +34,8 @@ func NewCarbonlinkRequest() *CarbonlinkRequest {
 func pickleMaybeMemo(b *[]byte) bool { //"consumes" memo tokens
 	if len(*b) > 1 && (*b)[0] == 'q' {
 		*b = (*b)[2:]
+	} else if len(*b) > 1 && bytes.Index(*b, []byte("\x94")) == 0 {
+		*b = (*b)[1:]
 	}
 	return true
 }
@@ -59,6 +62,14 @@ func pickleGetStr(buf *[]byte) (string, bool) {
 				return string(b[5 : 5+sLen]), true
 			}
 		}
+	} else if bytes.Index(b, []byte("\x8c")) == 0 {
+		if len(b) >= 2 {
+			sLen := int(uint8(b[1]))
+			if len(b) >= 2+sLen {
+				*buf = b[2+sLen:]
+				return string(b[2 : 2+sLen]), true
+			}
+		}
 	}
 	return "", false
 }
@@ -72,13 +83,35 @@ func expectBytes(b *[]byte, v []byte) bool {
 	}
 }
 
+func protocolFourOrFiveFirstBytes(b *[]byte) bool {
+	// Parse and drop first 12 bytes of Pickle that is using protocol 4 and 5
+	if (bytes.Index(*b, []byte("\x80\x04")) == 0 ||
+		bytes.Index(*b, []byte("\x80\x05")) == 0) && bytes.Index(*b, []byte("}")) == 11 {
+		*b = (*b)[12:]
+		return true
+	} else {
+		return false
+	}
+}
+
 var badErr error = fmt.Errorf("Bad pickle message")
 
 // ParseCarbonlinkRequest from pickle encoded data
 func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
+	ioutil.WriteFile("/tmp/pickle_msg", d, 0644)
+	var unicodePklMetricBytes, unicodePklTypeBytes []byte
 
-	if !(expectBytes(&d, []byte("\x80\x02}")) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("("))) {
-		return nil, badErr
+	if (expectBytes(&d, []byte("\x80\x02}")) ||
+		expectBytes(&d, []byte("\x80\x03}"))) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")) {
+		// message using pickle protocol 2 or 3
+		unicodePklMetricBytes = []byte("X\x06\x00\x00\x00metric")
+		unicodePklTypeBytes = []byte("X\x04\x00\x00\x00type")
+	} else if protocolFourOrFiveFirstBytes(&d) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")) {
+		// message using pickle protocol 4, or 5
+		unicodePklMetricBytes = []byte("\x8c\x06metric")
+		unicodePklTypeBytes = []byte("\x8c\x04type")
+	} else {
+		return nil, fmt.Errorf("Bad pickle message, unknown pickle protocol")
 	}
 
 	req := NewCarbonlinkRequest()
@@ -86,7 +119,7 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 	var Metric, Type string
 	var ok bool
 
-	if expectBytes(&d, []byte("U\x06metric")) {
+	if expectBytes(&d, []byte("U\x06metric")) || expectBytes(&d, unicodePklMetricBytes) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
@@ -94,7 +127,8 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 			return nil, badErr
 		}
 
-		if !(pickleMaybeMemo(&d) && expectBytes(&d, []byte("U\x04type")) && pickleMaybeMemo(&d)) {
+		if !(pickleMaybeMemo(&d) && (expectBytes(&d, []byte("U\x04type")) ||
+			expectBytes(&d, unicodePklTypeBytes)) && pickleMaybeMemo(&d)) {
 			return nil, badErr
 		}
 
@@ -105,10 +139,9 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
-
 		req.Metric = Metric
 		req.Type = Type
-	} else if expectBytes(&d, []byte("U\x04type")) {
+	} else if expectBytes(&d, []byte("U\x04type")) || expectBytes(&d, unicodePklTypeBytes) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
@@ -117,7 +150,8 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 			return nil, badErr
 		}
 
-		if !(pickleMaybeMemo(&d) && expectBytes(&d, []byte("U\x06metric")) && pickleMaybeMemo(&d)) {
+		if !(pickleMaybeMemo(&d) && (expectBytes(&d, []byte("U\x06metric")) ||
+			expectBytes(&d, unicodePklMetricBytes)) && pickleMaybeMemo(&d)) {
 			return nil, badErr
 		}
 
@@ -128,7 +162,6 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
-
 		req.Metric = Metric
 		req.Type = Type
 	} else {
