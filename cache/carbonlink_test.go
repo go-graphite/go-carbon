@@ -223,7 +223,6 @@ func TestCarbonlink(t *testing.T) {
 	assert.NoError(err)
 
 	// {'datapoints': [(1582950001, 5431.0)]}
-
 	assert.Equal("\x80\x02}U\ndatapoints]Jq\xe6Y^G@\xb57\x00\x00\x00\x00\x00\x86as.", string(data))
 	cleanup()
 
@@ -242,7 +241,6 @@ func TestCarbonlink(t *testing.T) {
 	assert.NoError(err)
 
 	// {'datapoints': [(1587356401, 3600.0)]}
-
 	assert.Equal("\x80\x02}U\ndatapoints]J\xf1\"\x9d^G@\xac \x00\x00\x00\x00\x00\x86as.", string(data))
 	cleanup()
 

@@ -98,8 +98,10 @@ var badErr error = fmt.Errorf("Bad pickle message")
 // ParseCarbonlinkRequest from pickle encoded data
 func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 
-	var unicodePklMetricBytes, unicodePklTypeBytes []byte
+	asciiPklMetricBytes := []byte("U\x06metric")
+	asciiPklTypeBytes := []byte("U\x04type")
 
+	var unicodePklMetricBytes, unicodePklTypeBytes []byte
 	if (expectBytes(&d, []byte("\x80\x02}")) ||
 		expectBytes(&d, []byte("\x80\x03}"))) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")) {
 		// message is using pickle protocol 2 or 3.
@@ -119,7 +121,7 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 	var Metric, Type string
 	var ok bool
 
-	if expectBytes(&d, []byte("U\x06metric")) || expectBytes(&d, unicodePklMetricBytes) {
+	if expectBytes(&d, asciiPklMetricBytes) || expectBytes(&d, unicodePklMetricBytes) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
@@ -127,8 +129,9 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 			return nil, badErr
 		}
 
-		if !(pickleMaybeMemo(&d) && (expectBytes(&d, []byte("U\x04type")) ||
-			expectBytes(&d, unicodePklTypeBytes)) && pickleMaybeMemo(&d)) {
+		if !(pickleMaybeMemo(&d) &&
+			(expectBytes(&d, asciiPklTypeBytes) || expectBytes(&d, unicodePklTypeBytes)) &&
+			pickleMaybeMemo(&d)) {
 			return nil, badErr
 		}
 
@@ -139,9 +142,11 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
+
 		req.Metric = Metric
 		req.Type = Type
-	} else if expectBytes(&d, []byte("U\x04type")) || expectBytes(&d, unicodePklTypeBytes) {
+
+	} else if expectBytes(&d, asciiPklTypeBytes) || expectBytes(&d, unicodePklTypeBytes) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
@@ -150,8 +155,9 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 			return nil, badErr
 		}
 
-		if !(pickleMaybeMemo(&d) && (expectBytes(&d, []byte("U\x06metric")) ||
-			expectBytes(&d, unicodePklMetricBytes)) && pickleMaybeMemo(&d)) {
+		if !(pickleMaybeMemo(&d) &&
+			(expectBytes(&d, asciiPklMetricBytes) || expectBytes(&d, unicodePklMetricBytes)) &&
+			pickleMaybeMemo(&d)) {
 			return nil, badErr
 		}
 
@@ -162,8 +168,10 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
+
 		req.Metric = Metric
 		req.Type = Type
+
 	} else {
 		return nil, badErr
 	}
