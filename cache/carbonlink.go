@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"net"
 	"strings"
@@ -98,7 +97,7 @@ var badErr error = fmt.Errorf("Bad pickle message")
 
 // ParseCarbonlinkRequest from pickle encoded data
 func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
-	ioutil.WriteFile("/tmp/pickle_msg", d, 0644)
+
 	var unicodePklMetricBytes, unicodePklTypeBytes []byte
 
 	if (expectBytes(&d, []byte("\x80\x02}")) ||
