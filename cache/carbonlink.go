@@ -83,9 +83,9 @@ func expectBytes(b *[]byte, v []byte) bool {
 }
 
 func protocolFourOrFiveFirstBytes(b *[]byte) bool {
-	// Parse and drop first 12 bytes of Pickle that is using protocol 4 or 5
+	// Parse and drop first 12 bytes of Pickle protocol 4 or 5, 12th byte must be "}"
 	if (bytes.Index(*b, []byte("\x80\x04")) == 0 ||
-		bytes.Index(*b, []byte("\x80\x05")) == 0) && bytes.Index(*b, []byte("}")) == 11 {
+		bytes.Index(*b, []byte("\x80\x05")) == 0) && bytes.Index((*b)[11:12], []byte("}")) == 0 {
 		*b = (*b)[12:]
 		return true
 	} else {

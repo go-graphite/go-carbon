@@ -23,6 +23,7 @@ const unicodeQueryPklProtocol2 = "\x00\x00\x00h\x80\x02}q\x00(X\x04\x00\x00\x00t
 const unicodeQueryPklProtocol3 = "\x00\x00\x00h\x80\x03}q\x00(X\x04\x00\x00\x00typeq\x01X\x0b\x00\x00\x00cache-queryq\x02X\x06\x00\x00\x00metricq\x03X/\x00\x00\x00carbon.agents.carbon_agent_server.cache.metricsq\x04u."
 const unicodeQueryPklProtocol4 = "\x00\x00\x00e\x80\x04\x95Z\x00\x00\x00\x00\x00\x00\x00}\x94(\x8c\x06metric\x94\x8c4operations.mining.minerals.carbon.graphite.weight.kg\x94\x8c\x04type\x94\x8c\x0bcache-query\x94u."
 const unicodeQueryPklProtocol5 = "\x00\x00\x00Y\x80\x05\x95Q\x00\x00\x00\x00\x00\x00\x00}\x94(\x8c\x04type\x94\x8c\x0bcache-query\x94\x8c\x06metric\x94\x8c+pogoda.goroda.dozhd.prodolzhitelnost.sekund\x94u."
+const protocol4ContainsBracket = "\x00\x00\x00\x88\x80\x04\x95}\x00\x00\x00\x00\x00\x00\x00}\x94(\x8c\x04type\x94\x8c\x0bcache-query\x94\x8c\x06metric\x94\x8cWcarbon.agents.gc-dev-graphite-graphite-go-carbon-5b4bc456f8-nx57q.cache.queueBuildCount\x94u."
 
 func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
@@ -71,6 +72,12 @@ func TestCarbonlink(t *testing.T) {
 		1587356401,
 	)
 
+	msgProtocol4ContainsBracket := points.OnePoint(
+		"carbon.agents.gc-dev-graphite-graphite-go-carbon-5b4bc456f8-nx57q.cache.queueBuildCount",
+		25,
+		1587356901,
+	)
+
 	cache.Add(msg1)
 	cache.Add(msg2)
 	cache.Add(msg3)
@@ -78,6 +85,7 @@ func TestCarbonlink(t *testing.T) {
 	cache.Add(msgUnicodePklProtocol3)
 	cache.Add(msgUnicodePklProtocol4)
 	cache.Add(msgUnicodePklProtocol5)
+	cache.Add(msgProtocol4ContainsBracket)
 
 	defer cache.Stop()
 
@@ -224,6 +232,24 @@ func TestCarbonlink(t *testing.T) {
 
 	// {'datapoints': [(1582950001, 5431.0)]}
 	assert.Equal("\x80\x02}U\ndatapoints]Jq\xe6Y^G@\xb57\x00\x00\x00\x00\x00\x86as.", string(data))
+	cleanup()
+
+	/* Pickle Protocol 4 Message Contains '}' in first 12 bytes */
+	conn, cleanup = NewClient()
+
+	_, err = conn.Write([]byte(protocol4ContainsBracket))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1582950001, 5431.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints]J\xe5$\x9d^G@9\x00\x00\x00\x00\x00\x00\x86as.", string(data))
 	cleanup()
 
 	/* Pickle Protocol 5 Message */
