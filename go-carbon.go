@@ -66,6 +66,7 @@ func main() {
 
 	if *printVersion {
 		fmt.Println(Version)
+		fmt.Println(BuildVersion)
 		return
 	}
 
@@ -170,6 +171,7 @@ func main() {
 	if cfg.Pprof.Enabled {
 		expvar.NewString("GoVersion").Set(runtime.Version())
 		expvar.NewString("BuildVersion").Set(BuildVersion)
+		expvar.NewString("Version").Set(Version)
 		expvar.Publish("Config", expvar.Func(func() interface{} { return cfg }))
 		expvar.Publish("GoroutineCount", expvar.Func(func() interface{} { return runtime.NumGoroutine() }))
 	}
