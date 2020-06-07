@@ -11,9 +11,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Python 2.x ASCII protocol 2 Pickles
 const sampleCacheQuery = "\x00\x00\x00Y\x80\x02}q\x01(U\x06metricq\x02U,carbon.agents.carbon_agent_server.cache.sizeq\x03U\x04typeq\x04U\x0bcache-queryq\x05u."
 const sampleCacheQuery2 = "\x00\x00\x00Y\x80\x02}q\x01(U\x04typeq\x04U\x0bcache-queryq\x05U\x06metricq\x02U,carbon.agents.carbon_agent_server.param.sizeq\x03u."
-const sampleCacheQuery3 = "\x00\x00\x00R\x80\x02}(U\x06metricX,\x00\x00\x00carbon.agents.carbon_agent_server.param.sizeU\x04typeU\x0bcache-queryu." // unicode metric
+const sampleCacheQuery3 = "\x00\x00\x00R\x80\x02}(U\x06metricX,\x00\x00\x00carbon.agents.carbon_agent_server.param.sizeU\x04typeU\x0bcache-queryu." // unicode metric string, but not whole pickle message
+
+// Full unicode pickle ( Python 3.0+ )
+const unicodeQueryPklProtocol2 = "\x00\x00\x00h\x80\x02}q\x00(X\x04\x00\x00\x00typeq\x01X\x0b\x00\x00\x00cache-queryq\x02X\x06\x00\x00\x00metricq\x03X/\x00\x00\x00carbon.agents.carbon_agent_server.cache.metricsq\x04u."
+
+// Pickles with  protocols >2 ( Python 3.0 + )
+const unicodeQueryPklProtocol3 = "\x00\x00\x00h\x80\x03}q\x00(X\x04\x00\x00\x00typeq\x01X\x0b\x00\x00\x00cache-queryq\x02X\x06\x00\x00\x00metricq\x03X/\x00\x00\x00carbon.agents.carbon_agent_server.cache.metricsq\x04u."
+const unicodeQueryPklProtocol4 = "\x00\x00\x00e\x80\x04\x95Z\x00\x00\x00\x00\x00\x00\x00}\x94(\x8c\x06metric\x94\x8c4operations.mining.minerals.carbon.graphite.weight.kg\x94\x8c\x04type\x94\x8c\x0bcache-query\x94u."
+const unicodeQueryPklProtocol5 = "\x00\x00\x00Y\x80\x05\x95Q\x00\x00\x00\x00\x00\x00\x00}\x94(\x8c\x04type\x94\x8c\x0bcache-query\x94\x8c\x06metric\x94\x8c+pogoda.goroda.dozhd.prodolzhitelnost.sekund\x94u."
+const protocol4ContainsBracket = "\x00\x00\x00\x88\x80\x04\x95}\x00\x00\x00\x00\x00\x00\x00}\x94(\x8c\x04type\x94\x8c\x0bcache-query\x94\x8c\x06metric\x94\x8cWcarbon.agents.gc-dev-graphite-graphite-go-carbon-5b4bc456f8-nx57q.cache.queueBuildCount\x94u."
 
 func TestCarbonlink(t *testing.T) {
 	assert := assert.New(t)
@@ -38,9 +48,44 @@ func TestCarbonlink(t *testing.T) {
 		1422795966,
 	)
 
+	msgUnicodePklProtocol2 := points.OnePoint(
+		"carbon.agents.carbon_agent_server.cache.metrics",
+		1234,
+		1582129201,
+	)
+
+	msgUnicodePklProtocol3 := points.OnePoint(
+		"carbon.agents.carbon_agent_server.cache.metrics",
+		5555,
+		1582215601,
+	)
+
+	msgUnicodePklProtocol4 := points.OnePoint(
+		"operations.mining.minerals.carbon.graphite.weight.kg",
+		5431,
+		1582950001,
+	)
+
+	msgUnicodePklProtocol5 := points.OnePoint(
+		"pogoda.goroda.dozhd.prodolzhitelnost.sekund",
+		3600,
+		1587356401,
+	)
+
+	msgProtocol4ContainsBracket := points.OnePoint(
+		"carbon.agents.gc-dev-graphite-graphite-go-carbon-5b4bc456f8-nx57q.cache.queueBuildCount",
+		25,
+		1587356901,
+	)
+
 	cache.Add(msg1)
 	cache.Add(msg2)
 	cache.Add(msg3)
+	cache.Add(msgUnicodePklProtocol2)
+	cache.Add(msgUnicodePklProtocol3)
+	cache.Add(msgUnicodePklProtocol4)
+	cache.Add(msgUnicodePklProtocol5)
+	cache.Add(msgProtocol4ContainsBracket)
 
 	defer cache.Stop()
 
@@ -133,6 +178,96 @@ func TestCarbonlink(t *testing.T) {
 	assert.NoError(err)
 
 	assert.Equal("\x80\x02}U\ndatapoints]s.", string(data))
+	cleanup()
+
+	/* Unicode Python 3.0+ Pickle Protocol 2 Message */
+	conn, cleanup = NewClient()
+
+	_, err = conn.Write([]byte(unicodeQueryPklProtocol2))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1582129201, 1234.0), (1582215601, 5555.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints](J1`M^G@\x93H\x00\x00\x00\x00\x00\x86J\xb1\xb1N^G@\xb5\xb3\x00\x00\x00\x00\x00\x86es.", string(data))
+	cleanup()
+
+	/* Pickle Protocol 3 Message */
+	conn, cleanup = NewClient()
+
+	_, err = conn.Write([]byte(unicodeQueryPklProtocol3))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1582129201, 1234.0), (1582215601, 5555.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints](J1`M^G@\x93H\x00\x00\x00\x00\x00\x86J\xb1\xb1N^G@\xb5\xb3\x00\x00\x00\x00\x00\x86es.", string(data))
+	cleanup()
+
+	/* Pickle Protocol 4 Message */
+	conn, cleanup = NewClient()
+
+	_, err = conn.Write([]byte(unicodeQueryPklProtocol4))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1582950001, 5431.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints]Jq\xe6Y^G@\xb57\x00\x00\x00\x00\x00\x86as.", string(data))
+	cleanup()
+
+	/* Pickle Protocol 4 Message Contains '}' in first 12 bytes */
+	conn, cleanup = NewClient()
+
+	_, err = conn.Write([]byte(protocol4ContainsBracket))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1582950001, 5431.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints]J\xe5$\x9d^G@9\x00\x00\x00\x00\x00\x00\x86as.", string(data))
+	cleanup()
+
+	/* Pickle Protocol 5 Message */
+	conn, cleanup = NewClient()
+
+	_, err = conn.Write([]byte(unicodeQueryPklProtocol5))
+	assert.NoError(err)
+
+	err = binary.Read(conn, binary.BigEndian, &replyLength)
+	assert.NoError(err)
+
+	data = make([]byte, replyLength)
+
+	err = binary.Read(conn, binary.BigEndian, data)
+	assert.NoError(err)
+
+	// {'datapoints': [(1587356401, 3600.0)]}
+	assert.Equal("\x80\x02}U\ndatapoints]J\xf1\"\x9d^G@\xac \x00\x00\x00\x00\x00\x86as.", string(data))
 	cleanup()
 
 	/* WRONG MESSAGE TEST */
