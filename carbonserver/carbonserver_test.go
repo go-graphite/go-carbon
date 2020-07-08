@@ -419,11 +419,10 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	test.path = path
 	cache := cache.New()
 
-	carbonserver := CarbonserverListener{
-		whisperData: test.path,
-		cacheGet:    cache.Get,
-		metrics:     &metricStruct{},
-	}
+	carbonserver := NewCarbonserverListener(cache.Get)
+	carbonserver.whisperData = path
+	carbonserver.logger = zap.NewNop()
+	carbonserver.metrics = &metricStruct{}
 	// common
 
 	// Non-existing metric
@@ -435,7 +434,7 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 
 	b.ResetTimer()
 	for runs := 0; runs < b.N; runs++ {
-		data, err := generalFetchSingleMetricHelper(test, cache, &carbonserver)
+		data, err := generalFetchSingleMetricHelper(test, cache, carbonserver)
 		if err != nil {
 			b.Errorf("Unexpected error: %v", err)
 			return
