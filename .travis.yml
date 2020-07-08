@@ -1,7 +1,7 @@
 language: go
 
 go:
-- 1.9.2
+- 1.14.4
 
 script:
 - make test
@@ -9,7 +9,7 @@ script:
 before_deploy:
 - sudo apt-get install -y rpm ruby ruby-dev
 - go get github.com/mitchellh/gox
-- gem install fpm -v 1.8.1
+- gem install fpm -v 1.11.0
 - make gox-build
 - make fpm-deb
 - make fpm-rpm
