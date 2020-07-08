@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/lomik/go-carbon/helper/qa"
+	"github.com/go-graphite/go-carbon/helper/qa"
 )
 
 func TestQueue(t *testing.T) {

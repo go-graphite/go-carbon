@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/lomik/go-carbon/points"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
 
@@ -38,7 +38,7 @@ func TestBadPickle(t *testing.T) {
 	assert.Contains(zapwriter.TestString(), "can't parse message")
 }
 
-// https://github.com/lomik/go-carbon/issues/30
+// https://github.com/go-graphite/go-carbon/issues/30
 func TestPickleMemoryError(t *testing.T) {
 	defer zapwriter.Test()()
 

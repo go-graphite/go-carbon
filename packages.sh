@@ -3,7 +3,7 @@
 cd `dirname $0`
 ROOT=$PWD
 
-docker run -ti --rm -v $ROOT:/root/go/src/github.com/lomik/go-carbon ubuntu:18.10 bash -c '
+docker run -ti --rm -v $ROOT:/root/go/src/github.com/go-graphite/go-carbon ubuntu:18.10 bash -c '
     cd /root/
     export GO_VERSION=1.10.3
     apt-get update
@@ -20,7 +20,7 @@ docker run -ti --rm -v $ROOT:/root/go/src/github.com/lomik/go-carbon ubuntu:18.1
     go get github.com/mitchellh/gox
     ln -s /root/go/bin/gox /usr/local/bin/gox
 
-    cd /root/go/src/github.com/lomik/go-carbon
+    cd /root/go/src/github.com/go-graphite/go-carbon
 
     make gox-build
     make fpm-deb

@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/lomik/go-carbon/points"
-	"github.com/lomik/go-carbon/receiver"
+	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/stretchr/testify/assert"
 )
 

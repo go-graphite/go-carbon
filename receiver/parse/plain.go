@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"unsafe"
 
-	"github.com/lomik/go-carbon/points"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 // https://github.com/golang/go/issues/2632#issuecomment-66061057

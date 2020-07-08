@@ -24,5 +24,5 @@ deploy:
     - "*.{deb,rpm}"
     - "build/go-carbon-*"
   on:
-    repo: lomik/go-carbon
+    repo: go-graphite/go-carbon
     tags: true

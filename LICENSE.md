@@ -1,6 +1,8 @@
 The MIT License (MIT)
 
-Copyright (c) 2015 Lomonosov Roman
+Copyright (c) 2015-2020 Lomonosov Roman
+
+Copyright (c) 2020- Go-Graphite project
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

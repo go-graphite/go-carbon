@@ -11,7 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/lomik/go-carbon/helper/carbonpb"
+	"github.com/go-graphite/go-carbon/helper/carbonpb"
 )
 
 func main() {

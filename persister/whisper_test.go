@@ -4,7 +4,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"github.com/lomik/go-carbon/points"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func randomPoints(num int, out chan *points.Points) {
