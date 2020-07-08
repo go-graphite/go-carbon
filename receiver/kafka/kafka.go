@@ -14,11 +14,11 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/Shopify/sarama"
-	"github.com/lomik/go-carbon/helper"
-	"github.com/lomik/go-carbon/helper/atomicfiles"
-	"github.com/lomik/go-carbon/points"
-	"github.com/lomik/go-carbon/receiver"
-	"github.com/lomik/go-carbon/receiver/parse"
+	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/helper/atomicfiles"
+	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver"
+	"github.com/go-graphite/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
 )

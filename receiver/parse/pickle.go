@@ -1,7 +1,7 @@
 package parse
 
 import (
-	"github.com/lomik/go-carbon/points"
+	"github.com/go-graphite/go-carbon/points"
 	pickle "github.com/lomik/graphite-pickle"
 )
 

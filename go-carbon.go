@@ -20,8 +20,8 @@ import (
 	daemon "github.com/sevlyar/go-daemon"
 	"go.uber.org/zap"
 
-	"github.com/lomik/go-carbon/carbon"
-	"github.com/lomik/go-carbon/points"
+	"github.com/go-graphite/go-carbon/carbon"
+	"github.com/go-graphite/go-carbon/points"
 
 	_ "net/http/pprof"
 )

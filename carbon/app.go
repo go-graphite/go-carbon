@@ -12,20 +12,20 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
-	"github.com/lomik/go-carbon/api"
-	"github.com/lomik/go-carbon/cache"
-	"github.com/lomik/go-carbon/carbonserver"
-	"github.com/lomik/go-carbon/persister"
-	"github.com/lomik/go-carbon/receiver"
-	"github.com/lomik/go-carbon/tags"
+	"github.com/go-graphite/go-carbon/api"
+	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/persister"
+	"github.com/go-graphite/go-carbon/receiver"
+	"github.com/go-graphite/go-carbon/tags"
 	"github.com/lomik/zapwriter"
 
 	// register receivers
-	_ "github.com/lomik/go-carbon/receiver/http"
-	_ "github.com/lomik/go-carbon/receiver/kafka"
-	_ "github.com/lomik/go-carbon/receiver/pubsub"
-	_ "github.com/lomik/go-carbon/receiver/tcp"
-	_ "github.com/lomik/go-carbon/receiver/udp"
+	_ "github.com/go-graphite/go-carbon/receiver/http"
+	_ "github.com/go-graphite/go-carbon/receiver/kafka"
+	_ "github.com/go-graphite/go-carbon/receiver/pubsub"
+	_ "github.com/go-graphite/go-carbon/receiver/tcp"
+	_ "github.com/go-graphite/go-carbon/receiver/udp"
 )
 
 type NamedReceiver struct {

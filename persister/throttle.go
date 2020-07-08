@@ -3,7 +3,7 @@ package persister
 import (
 	"time"
 
-	"github.com/lomik/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/helper"
 )
 
 // ThrottleTicker is a ticker that can be used for hard or soft rate-limiting.

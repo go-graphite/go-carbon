@@ -1,7 +1,7 @@
 NAME:=go-carbon
 MAINTAINER:="Roman Lomonosov <r.lomonosov@gmail.com>"
 DESCRIPTION:="Golang implementation of Graphite/Carbon server"
-MODULE:=github.com/lomik/go-carbon
+MODULE:=github.com/go-graphite/go-carbon
 
 GO ?= go
 export GOPATH := $(CURDIR)/_vendor
@@ -84,7 +84,7 @@ fpm-build-deb:
 		--package $(NAME)_$(VERSION)_$(ARCH).deb \
 		--force \
 		--deb-compression bzip2 \
-		--url https://github.com/lomik/$(NAME) \
+		--url https://github.com/go-graphite/$(NAME) \
 		--description $(DESCRIPTION) \
 		-m $(MAINTAINER) \
 		--license "MIT" \
@@ -104,7 +104,7 @@ fpm-build-rpm:
 		--package $(NAME)-$(VERSION)-1.$(FILE_ARCH).rpm \
 		--force \
 		--rpm-compression bzip2 --rpm-os linux \
-		--url https://github.com/lomik/$(NAME) \
+		--url https://github.com/go-graphite/$(NAME) \
 		--description $(DESCRIPTION) \
 		-m $(MAINTAINER) \
 		--license "MIT" \

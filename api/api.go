@@ -9,9 +9,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/lomik/go-carbon/cache"
-	"github.com/lomik/go-carbon/helper"
-	"github.com/lomik/go-carbon/helper/carbonpb"
+	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/helper/carbonpb"
 	"github.com/lomik/stop"
 )
 

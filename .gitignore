@@ -4,3 +4,4 @@ _vendor/pkg
 .vscode
 _gopath
 .DS_Store
+.idea

@@ -1,6 +1,6 @@
 [Unit]
 Description=Golang implementation of Graphite/Carbon server.
-Documentation=https://github.com/lomik/go-carbon
+Documentation=https://github.com/go-graphite/go-carbon
 After=network.target
 
 [Service]
