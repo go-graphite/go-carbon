@@ -1,3 +1,66 @@
+## Changelog
+##### master
+* Added new options and upgraded go-whisper library to have compressed format (cwhisper) support
+
+##### version 0.14.0
+* Accept UDP messages in plain protocol without trailing newline
+* Added `whisper.hard-max-creates-per-second` option #242
+* No longer trying to combine separate UDP messages from one sender into single stream
+* [carbonserver] Added metrics for prometheus
+* [carbonserver] Improved compatibility with graphite-web (#250, #251)
+
+##### version 0.13.0
+* Added `whisper.max-creates-per-second` option
+* Support multiple targets in carbonserver
+* Support new `carbonapi_v3_pb` protocol. This allows recent versions of carbonapi to get metadata alongside with data
+
+##### version 0.12.0
+* [Tags](http://graphite.readthedocs.io/en/latest/tags.html) support was added (only with [graphite-web](https://github.com/graphite-project/graphite-web))
+* flock support for persister and carbonserver
+* `cache.max-size` and `cache.write-strategy` can be changed without restart (HUP signal)
+* Google PubSub protocol was added. It receives data from PubSub Subscriptions and can decode protobuf, plain, or pickle messages.
+  * The default format is plain. Specify protobuf or pickle by adding an attribute named 'content-type' to the PubSub messsages:
+    * application/protobuf
+    * application/python-pickle
+  * Sample configuration:
+```
+[receiver.pubsub]
+protocol = "pubsub"
+project = "project-name"
+subscription = "subscription-name"
+# receiver_go_routines = 4
+# receiver_max_messages = 1000
+# receiver_max_bytes = 500000000 # default 500MB
+```
+
+##### version 0.11.0
+* GRPC api for query cache was added
+* Added support for an unlimited number of receivers
+* Protobuf protocol was added. Sample configuration:
+```
+[receiver.protobuf]
+protocol = "protobuf"
+listen = ":2005"
+```
+* HTTP protocol was added. It receives data from POST requests body. Data can be encoded in plain, pickle (Content-Type: application/python-pickle) and protobuf (Content-Type: application/protobuf) formats. Sample configuration:
+```
+[receiver.http]
+protocol = "http"
+listen = ":2006"
+```
+
+* Kafka protocol was added. It receives data from Kafka and can decode protobuf, plain or pickle messages. You need manually specify message format in the config file. Sample configuration:
+```
+[receiver.kafka]
+protocol = "kafka"
+parse-protocol = "protobuf" # can be also "plain" or "pickle"
+brokers = [ "localhost:9092" ]
+topic = "graphite"
+partition = 0
+state-file = "/var/lib/graphite/kafka.state"
+initial-offset = "-30m" # In case of absent or damaged state file fetch last 30 mins of messages
+```
+
 ##### version 0.10.0
 Breaking changes:
 
