@@ -15,9 +15,9 @@ import (
 	"github.com/dgryski/go-trigram"
 	"github.com/go-graphite/go-whisper"
 	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
-	"github.com/lomik/go-carbon/cache"
-	"github.com/lomik/go-carbon/persister"
-	"github.com/lomik/go-carbon/points"
+	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/persister"
+	"github.com/go-graphite/go-carbon/points"
 	"go.uber.org/zap"
 )
 
@@ -506,7 +506,7 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	// common
 
 	// Non-existing metric
-	err = generalFetchSingleMetricInit(test, cache, &carbonserver)
+	err = generalFetchSingleMetricInit(test, cache, carbonserver)
 	if err != nil {
 		b.Fatalf("Unexpected error %v\n", err)
 	}
