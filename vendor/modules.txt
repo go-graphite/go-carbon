@@ -23,6 +23,8 @@ github.com/OneOfOne/go-utils/memory
 # github.com/Shopify/sarama v1.17.0
 ## explicit
 github.com/Shopify/sarama
+# github.com/Shopify/toxiproxy v2.1.4+incompatible
+## explicit
 # github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973
 ## explicit
 github.com/beorn7/perks/quantile
@@ -63,8 +65,9 @@ github.com/gogo/protobuf/gogoproto
 github.com/gogo/protobuf/proto
 github.com/gogo/protobuf/protoc-gen-gogo/descriptor
 github.com/gogo/protobuf/sortkeys
-# github.com/golang/protobuf v1.2.0
+# github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
 ## explicit
+# github.com/golang/protobuf v1.4.2
 github.com/golang/protobuf/proto
 github.com/golang/protobuf/protoc-gen-go/descriptor
 github.com/golang/protobuf/ptypes
@@ -75,10 +78,10 @@ github.com/golang/protobuf/ptypes/timestamp
 # github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db
 ## explicit
 github.com/golang/snappy
-# github.com/google/go-cmp v0.2.0
-## explicit
+# github.com/google/go-cmp v0.4.0
 github.com/google/go-cmp/cmp
 github.com/google/go-cmp/cmp/internal/diff
+github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
 # github.com/googleapis/gax-go v2.0.0+incompatible
@@ -95,6 +98,8 @@ github.com/klauspost/compress/snappy
 # github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5
 ## explicit
 github.com/klauspost/cpuid
+# github.com/kr/pretty v0.2.0
+## explicit
 # github.com/lomik/graphite-pickle v0.0.0-20171221213606-614e8df42119
 ## explicit
 github.com/lomik/graphite-pickle
@@ -111,10 +116,14 @@ github.com/lomik/zapwriter
 # github.com/matttproud/golang_protobuf_extensions v1.0.1
 ## explicit
 github.com/matttproud/golang_protobuf_extensions/pbutil
+# github.com/onsi/ginkgo v1.14.0
+## explicit
 # github.com/pierrec/lz4 v2.0.5+incompatible
 ## explicit
 github.com/pierrec/lz4
 github.com/pierrec/lz4/internal/xxh32
+# github.com/pkg/errors v0.9.1
+## explicit
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
@@ -189,7 +198,7 @@ go.uber.org/zap/internal/bufferpool
 go.uber.org/zap/internal/color
 go.uber.org/zap/internal/exit
 go.uber.org/zap/zapcore
-# golang.org/x/net v0.0.0-20180826012351-8a410e7b638d
+# golang.org/x/net v0.0.0-20200520004742-59133d7f0dd7
 ## explicit
 golang.org/x/net/context
 golang.org/x/net/context/ctxhttp
@@ -207,14 +216,12 @@ golang.org/x/oauth2/internal
 golang.org/x/oauth2/jws
 golang.org/x/oauth2/jwt
 # golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f
-## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.0.0-20180905080454-ebe1bf3edb33
-## explicit
+# golang.org/x/sys v0.0.0-20200519105757-fe76b779f299
+golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
-# golang.org/x/text v0.3.0
-## explicit
+# golang.org/x/text v0.3.2
 golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
@@ -281,3 +288,36 @@ google.golang.org/grpc/resolver/passthrough
 google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
+# google.golang.org/protobuf v1.23.0
+google.golang.org/protobuf/encoding/prototext
+google.golang.org/protobuf/encoding/protowire
+google.golang.org/protobuf/internal/descfmt
+google.golang.org/protobuf/internal/descopts
+google.golang.org/protobuf/internal/detrand
+google.golang.org/protobuf/internal/encoding/defval
+google.golang.org/protobuf/internal/encoding/messageset
+google.golang.org/protobuf/internal/encoding/tag
+google.golang.org/protobuf/internal/encoding/text
+google.golang.org/protobuf/internal/errors
+google.golang.org/protobuf/internal/fieldnum
+google.golang.org/protobuf/internal/fieldsort
+google.golang.org/protobuf/internal/filedesc
+google.golang.org/protobuf/internal/filetype
+google.golang.org/protobuf/internal/flags
+google.golang.org/protobuf/internal/genname
+google.golang.org/protobuf/internal/impl
+google.golang.org/protobuf/internal/mapsort
+google.golang.org/protobuf/internal/pragma
+google.golang.org/protobuf/internal/set
+google.golang.org/protobuf/internal/strs
+google.golang.org/protobuf/internal/version
+google.golang.org/protobuf/proto
+google.golang.org/protobuf/reflect/protoreflect
+google.golang.org/protobuf/reflect/protoregistry
+google.golang.org/protobuf/runtime/protoiface
+google.golang.org/protobuf/runtime/protoimpl
+google.golang.org/protobuf/types/descriptorpb
+google.golang.org/protobuf/types/known/anypb
+google.golang.org/protobuf/types/known/durationpb
+google.golang.org/protobuf/types/known/emptypb
+google.golang.org/protobuf/types/known/timestamppb
