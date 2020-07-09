@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/go-graphite/go-whisper"
 	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"go.uber.org/zap"
 )
@@ -22,6 +24,19 @@ import (
 type point struct {
 	Timestamp int
 	Value     float64
+}
+
+type wspConfigTestRetriever struct{
+	getRetentionFunc func(string) (int, bool)
+	getAggrNameFunc func(string) (string, float64, bool)
+}
+
+func (r *wspConfigTestRetriever) MetricRetentionPeriod(metric string) (int, bool) {
+	return r.getRetentionFunc(metric)
+}
+
+func (r *wspConfigTestRetriever) MetricAggrConf(metric string) (string, float64, bool) {
+	return r.getAggrNameFunc(metric)
 }
 
 type FetchTest struct {
@@ -35,6 +50,7 @@ type FetchTest struct {
 	fillCache        bool
 	errIsNil         bool
 	dataIsNil        bool
+	fillCacheIndex   bool
 	cachePoints      []point
 	expectedStep     int32
 	expectedErr      string
@@ -69,7 +85,37 @@ func TestExtractTrigrams(t *testing.T) {
 	}
 }
 
-func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache) error {
+func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper{
+	retentionStr := "60s:90d,300s:30d"
+	pattern, _ := regexp.Compile(".*")
+	retentions, _ := persister.ParseRetentionDefs(retentionStr)
+	f := false
+	schema := persister.Schema{
+		Name:         "test",
+		Pattern:      pattern,
+		RetentionStr: retentionStr,
+		Retentions:   retentions,
+		Priority:     10,
+		Compressed:   &f,
+	}
+
+	var testSchemas persister.WhisperSchemas
+	testSchemas = append(testSchemas,schema)
+
+	testPersister := persister.NewWhisper(
+		dataDir,
+		testSchemas,
+		persister.NewWhisperAggregation(),
+		cache.WriteoutQueue().Get,
+		cache.PopNotConfirmed,
+		cache.Confirm,
+		cache.Pop,
+	)
+
+	return testPersister
+}
+
+func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) error {
 	var wsp *whisper.Whisper
 	var p []*whisper.TimeSeriesPoint
 	if testData.retention == "" {
@@ -99,12 +145,25 @@ func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache) error
 			}
 		}
 		wsp.Close()
-		if testData.fillCache {
-			for _, p := range testData.cachePoints {
-				cache.Add(points.OnePoint(testData.name, p.Value, int64(p.Timestamp)))
-			}
+	}
+
+	if testData.fillCache {
+		for _, p := range testData.cachePoints {
+			cache.Add(points.OnePoint(testData.name, p.Value, int64(p.Timestamp)))
 		}
 	}
+
+	if testData.fillCacheIndex{
+		// enable cache-scan to support queries for cache-only metrics
+		carbonserver.SetCacheGetMetricsFunc(cache.GetRecentNewMetrics)
+		testPersister := getTestPersister(testData.path, cache)
+		retriever := &wspConfigTestRetriever{
+			getRetentionFunc: testPersister.GetRetentionPeriod,
+			getAggrNameFunc: testPersister.GetAggrConf,
+		}
+		carbonserver.SetConfigRetriever(retriever)
+	}
+
 	return nil
 }
 
@@ -118,7 +177,7 @@ func generalFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, car
 }
 
 func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
-	err := generalFetchSingleMetricInit(testData, cache)
+	err := generalFetchSingleMetricInit(testData, cache, carbonserver)
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +273,22 @@ var singleMetricTests = []FetchTest{
 		createWhisper:    true,
 		fillWhisper:      false,
 		fillCache:        true,
+		from:             now - 420,
+		until:            now,
+		now:              now,
+		errIsNil:         true,
+		dataIsNil:        false,
+		cachePoints:      []point{{now - 123, 7.0}, {now - 119, 7.1}, {now - 45, 7.3}, {now - 243, 6.9}, {now - 67, 7.2}},
+		expectedStep:     60,
+		expectedValues:   []float64{0.0, 6.9, 0.0, 7.0, 7.2, 7.3, 0.0},
+		expectedIsAbsent: []bool{true, false, true, false, false, false, true},
+	},
+	{
+		name:             "data-cache-only",
+		createWhisper:    false,
+		fillWhisper:      false,
+		fillCache:        true,
+		fillCacheIndex:   true,
 		from:             now - 420,
 		until:            now,
 		now:              now,
@@ -346,6 +421,11 @@ func TestFetchSingleMetricDataCache(t *testing.T) {
 	testFetchSingleMetricCommon(t, test)
 }
 
+func TestFetchSingleMetricDataCacheOnly(t *testing.T) {
+	test := getSingleMetricTest("data-cache-only")
+	testFetchSingleMetricCommon(t, test)
+}
+
 func TestGetMetricsListEmpty(t *testing.T) {
 	cache := cache.New()
 	path, err := ioutil.TempDir("", "")
@@ -426,7 +506,7 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	// common
 
 	// Non-existing metric
-	err = generalFetchSingleMetricInit(test, cache)
+	err = generalFetchSingleMetricInit(test, cache, carbonserver)
 	if err != nil {
 		b.Fatalf("Unexpected error %v\n", err)
 	}

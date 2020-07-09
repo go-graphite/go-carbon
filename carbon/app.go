@@ -33,6 +33,19 @@ type NamedReceiver struct {
 	Name string
 }
 
+type wspConfigRetriever struct{
+	getRetentionFunc func(string) (int, bool)
+	getAggrNameFunc func(string) (string, float64, bool)
+}
+
+func (r *wspConfigRetriever) MetricRetentionPeriod(metric string) (int, bool) {
+	return r.getRetentionFunc(metric)
+}
+
+func (r *wspConfigRetriever) MetricAggrConf(metric string) (string, float64, bool) {
+	return r.getAggrNameFunc(metric)
+}
+
 type App struct {
 	sync.RWMutex
 	ConfigFilename string
@@ -440,6 +453,16 @@ func (app *App) Start() (err error) {
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+
+		if conf.Carbonserver.CacheScan{
+			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
+
+			retriever := &wspConfigRetriever{
+				getRetentionFunc: app.Persister.GetRetentionPeriod,
+				getAggrNameFunc: app.Persister.GetAggrConf,
+			}
+			carbonserver.SetConfigRetriever(retriever)
+		}
 
 		if conf.Prometheus.Enabled {
 			carbonserver.InitPrometheus(app.PromRegisterer)

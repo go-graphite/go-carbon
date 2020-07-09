@@ -3,11 +3,13 @@ package carbonserver
 import (
 	"errors"
 	"math"
+	"os"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/go-graphite/go-carbon/points"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 )
@@ -25,15 +27,15 @@ type response struct {
 	RequestStopTime   int64
 }
 
-func (r response) enrichFromCache(listener *CarbonserverListener, m *metricFromDisk) {
-	if m.CacheData == nil {
+func (r response) enrichFromCache(listener *CarbonserverListener, cacheData []points.Point) {
+	if cacheData == nil {
 		return
 	}
 
 	atomic.AddUint64(&listener.metrics.CacheRequestsTotal, 1)
 	cacheStartTime := time.Now()
 	pointsFetchedFromCache := 0
-	for _, item := range m.CacheData {
+	for _, item := range cacheData {
 		ts := int64(item.Timestamp) - int64(item.Timestamp)%r.StepTime
 		if ts < r.StartTime || ts >= r.StopTime {
 			continue
@@ -96,44 +98,63 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		zap.Int("untilTime", int(untilTime)),
 	)
 	m, err := listener.fetchFromDisk(metric, fromTime, untilTime)
-	if err != nil {
+	if err == nil {
+		// Should never happen, because we have a check for proper archive now
+		if m.Timeseries == nil {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			logger.Warn("metric time range not found")
+			return response{}, errors.New("time range not found")
+		}
+
+		values := m.Timeseries.Values()
+		from := int64(m.Timeseries.FromTime())
+		until := int64(m.Timeseries.UntilTime())
+		step := int64(m.Timeseries.Step())
+
+		resp := response{
+			Name:              metric,
+			StartTime:         from,
+			StopTime:          until,
+			StepTime:          step,
+			Values:            values,
+			PathExpression:    pathExpression,
+			ConsolidationFunc: m.Metadata.ConsolidationFunc,
+			XFilesFactor:      m.Metadata.XFilesFactor,
+			RequestStartTime:  int64(fromTime),
+			RequestStopTime:   int64(untilTime),
+		}
+
+		resp.enrichFromCache(listener, m.CacheData)
+
+		logger.Debug("fetched",
+			zap.Any("response", resp),
+		)
+
+		return resp, nil
+	} else if os.IsNotExist(err) && listener.cacheGetRecentMetrics != nil {
+		//Failed to fetch from disk, try to fetch from cache
+		resp := response{
+			Name:           metric,
+			PathExpression: pathExpression,
+		}
+		cacheData, cerr := listener.fetchFromCache(metric, fromTime, untilTime, &resp)
+		if cerr != nil {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			logger.Warn("metric not found even in Cache", zap.Error(err))
+			// Metric has no Whisper file and/or has no datapoints in Cache
+			return response{}, cerr
+		}
+		resp.enrichFromCache(listener, cacheData)
+		logger.Debug("fetched cache-only",
+			zap.Any("response", resp),
+		)
+
+		return resp, nil
+	} else {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("failed to fetch points", zap.Error(err))
 		return response{}, err
 	}
-
-	// Should never happen, because we have a check for proper archive now
-	if m.Timeseries == nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-		logger.Warn("metric time range not found")
-		return response{}, errors.New("time range not found")
-	}
-
-	values := m.Timeseries.Values()
-	from := int64(m.Timeseries.FromTime())
-	until := int64(m.Timeseries.UntilTime())
-	step := int64(m.Timeseries.Step())
-
-	resp := response{
-		Name:              metric,
-		StartTime:         from,
-		StopTime:          until,
-		StepTime:          step,
-		Values:            values,
-		PathExpression:    pathExpression,
-		ConsolidationFunc: m.Metadata.ConsolidationFunc,
-		XFilesFactor:      m.Metadata.XFilesFactor,
-		RequestStartTime:  int64(fromTime),
-		RequestStopTime:   int64(untilTime),
-	}
-
-	resp.enrichFromCache(listener, m)
-
-	logger.Debug("fetched",
-		zap.Any("response", resp),
-	)
-
-	return resp, nil
 }
 
 func (listener *CarbonserverListener) fetchSingleMetricV2(metric string, fromTime, untilTime int32) (*protov2.FetchResponse, error) {

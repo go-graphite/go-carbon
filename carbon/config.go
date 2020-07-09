@@ -116,6 +116,7 @@ type carbonserverConfig struct {
 	TrigramIndex      bool      `toml:"trigram-index"`
 	InternalStatsDir  string    `toml:"internal-stats-dir"`
 	Percentiles       []int     `toml:"stats-percentiles"`
+	CacheScan         bool      `toml:"cache-scan"`
 
 	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
 	MaxMetricsRendered int `toml:"max-metrics-rendered"`
@@ -218,6 +219,7 @@ func NewConfig() *Config {
 			QueryCacheSizeMB:   0,
 			FindCacheEnabled:   true,
 			TrigramIndex:       true,
+			CacheScan:          false,
 			MaxMetricsGlobbed:  30000,
 			MaxMetricsRendered: 1000,
 		},
