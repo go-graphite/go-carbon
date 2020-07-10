@@ -1,0 +1,10 @@
+version = 1
+
+[[analyzers]]
+name = "go"
+enabled = true
+
+  [analyzers.meta]
+  import_paths = ["github.com/go-graphite/go-carbon"]
+  dependencies_vendored = true
+  
