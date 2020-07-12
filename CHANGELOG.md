@@ -1,5 +1,7 @@
 ## Changelog
 ##### master
+
+##### version 0.15.0
 * Migrate to go modules (#351)
 * Moving to go-graphite organization (#347)
 * Carbonlink support fixed with Python 3 Pickle Compatible Metric Request Parser (#340)
