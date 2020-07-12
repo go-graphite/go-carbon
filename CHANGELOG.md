@@ -1,6 +1,15 @@
 ## Changelog
 ##### master
-* Added new options and upgraded go-whisper library to have compressed format (cwhisper) support
+* Migrate to go modules (#351)
+* Moving to go-graphite organization (#347)
+* Carbonlink support fixed with Python 3 Pickle Compatible Metric Request Parser (#340)
+* (EXPERIMENTAL) Adding ability to update index for metrics even if there is no whisper file created on disk (#338)
+* bugfix: unconfirmed metrics (#319)
+* Implement context cancellations for find and find part of render (#307)
+* (EXPERIMENTAL) Trie Index (#303)
+* Populate metric details and access times only if stats are enabled (#299)
+* Automatically delete empty whisper file caused by edge cases like server reboot (#293)
+* (EXPERIMENTAL) Added new options and upgraded go-whisper library to have [compressed format](https://github.com/go-graphite/go-whisper#compressed-format) ([cwhisper](https://github.com/go-graphite/go-whisper/blob/master/doc/compressed.md)) support
 
 ##### version 0.14.0
 * Accept UDP messages in plain protocol without trailing newline
