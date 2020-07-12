@@ -110,7 +110,10 @@ enabled = true
 # Use hashed filenames for tagged metrics instead of human readable
 # https://github.com/go-graphite/go-carbon/pull/225
 hash-filenames = true
-# specify to enable/disable compressed format. IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
+# specify to enable/disable compressed format (EXPERIMENTAL)
+# See details and limitations in https://github.com/go-graphite/go-whisper#compressed-format
+# IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are
+# rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
 compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
@@ -307,7 +310,7 @@ trigram-index = true
 # in memory. This determines how often it will check FS
 # for new or deleted metrics.
 scan-frequency = "5m0s"
-# Control trie index
+# Control trie index (EXPERIMENTAL)
 #  This index is built as an alternative to trigram index, with shorter indexing
 #  time and less memory usage (around 2 - 5 times). For most of the queries,
 #  trie is faster than trigram. For queries with keyword wrap around by widcards
@@ -320,6 +323,7 @@ trie-index = false
 # i.e query for metrics present only in cache. Does a cache-scan and
 # populates index with metrics with or without corresponding wsp files,
 # but will lead to increased memory consumption. Disabled by default.
+# (EXPERIMENTAL)
 cache-scan = false
 
 # Maximum amount of globs in a single metric in index
