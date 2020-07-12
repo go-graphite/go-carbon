@@ -1,6 +1,6 @@
 FROM golang:1.14.4-alpine3.12 AS build
 
-ARG gocarbon_version=0.14.0
+ARG gocarbon_version=0.15.0
 ARG gocarbon_repo=https://github.com/go-graphite/go-carbon.git
 RUN apk add --update git make \
  && git clone "${gocarbon_repo}" /usr/local/src/go-carbon \
