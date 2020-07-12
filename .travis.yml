@@ -8,7 +8,7 @@ script:
 
 before_deploy:
 - lsb_release -a
-- sudo apt-get install -y ruby
+- sudo apt-get install -y ruby ruby-dev rpm
 - go get github.com/mitchellh/gox
 - gem install fpm -v 1.11.0
 - make gox-build
