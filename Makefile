@@ -20,22 +20,7 @@ debug: $(SOURCES)
 	$(GO) build -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
 
 run-test:
-	$(GO) $(COMMAND) $(MODULE)
-	$(GO) $(COMMAND) $(MODULE)/cache
-	$(GO) $(COMMAND) $(MODULE)/carbon
-	$(GO) $(COMMAND) $(MODULE)/carbonserver
-	$(GO) $(COMMAND) $(MODULE)/helper/carbonzipperpb
-	$(GO) $(COMMAND) $(MODULE)/helper
-	$(GO) $(COMMAND) $(MODULE)/helper/qa
-	$(GO) $(COMMAND) $(MODULE)/helper/stat
-	$(GO) $(COMMAND) $(MODULE)/persister
-	$(GO) $(COMMAND) $(MODULE)/points
-	$(GO) $(COMMAND) $(MODULE)/tags
-	$(GO) $(COMMAND) $(MODULE)/receiver
-	$(GO) $(COMMAND) $(MODULE)/receiver/tcp
-	$(GO) $(COMMAND) $(MODULE)/receiver/udp
-	$(GO) $(COMMAND) $(MODULE)/receiver/parse
-	$(GO) $(COMMAND) $(MODULE)/receiver/http
+	$(GO) $(COMMAND) ./...
 
 test:
 	make run-test COMMAND="test"
