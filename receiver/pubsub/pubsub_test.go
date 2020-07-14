@@ -79,10 +79,12 @@ func Test_handleMessage(t *testing.T) {
 			},
 		},
 		{
-			Desc:     "linemode, invalid body",
-			Data:     "hello.world 42.15 1422698155\nmetric.nam",
-			Error:    true,
-			Expected: []*points.Points{},
+			Desc:  "linemode, invalid body",
+			Data:  "hello.world 42.15 1422698155\nmetric.nam",
+			Error: true,
+			Expected: []*points.Points{
+				points.OnePoint("hello.world", 42.15, 1422698155),
+			},
 		},
 		{
 			Desc: "pickle, invalid body",

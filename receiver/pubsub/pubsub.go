@@ -135,7 +135,7 @@ func newPubSub(client *pubsub.Client, name string, options *Options, store func(
 				rcv.handleMessage(m)
 				m.Ack()
 			})
-			if err == context.Canceled {
+			if cctx.Err() == context.Canceled {
 				close(rcv.closed)
 				rcv.Stop()
 				break
