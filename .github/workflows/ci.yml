@@ -19,7 +19,7 @@ jobs:
 
       - name: prepare build
         run: |
-          go get github.com/mitchellh/gox
+          go get -v github.com/mitchellh/gox
           ls -al ${GOPATH}
           ls -al ${GOPATH}/bin/
           sudo cp ${GOPATH}/bin/gox /usr/bin/gox
