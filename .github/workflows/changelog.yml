@@ -1,5 +1,3 @@
-name: Changelog
-
 on:
   pull_request:
     types: [closed]
@@ -9,6 +7,8 @@ on:
 
   issues:
     types: [closed, edited]
+
+name: Changelog
 
 jobs:
   generate_changelog:
