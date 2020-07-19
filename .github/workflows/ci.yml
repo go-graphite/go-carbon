@@ -1,0 +1,37 @@
+on: [push, pull_request]
+name: CI
+jobs:
+  test:
+    strategy:
+      matrix:
+        go-version: [1.14.x]
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: install Go
+        uses: actions/setup-go@v1
+        with:
+          go-version: ${{ matrix.go-version }}
+      - name: prepare build
+        run: |
+          lsb_release -a
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rpm
+          go get github.com/mitchellh/gox
+          go mod vendor
+          gem install rake
+          gem install fpm -v 1.11.0
+      - name: checkout code
+        uses: actions/checkout@v2
+      - name: run tests
+        run: make test
+      - name: Build and push Docker images
+        uses: docker/build-push-action@v1
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: gographite/go-carbon
+          tag_with_ref: true
+          push: ${{ startsWith(github.ref, 'refs/tags/') }}
+      - name: build binary
+        run: make gox-build

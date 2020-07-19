@@ -5,3 +5,4 @@ _vendor/pkg
 _gopath
 .DS_Store
 .idea
+build/*

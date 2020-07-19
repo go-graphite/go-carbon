@@ -1,0 +1,54 @@
+on:
+  push:
+    # Sequence of patterns matched against refs/tags
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+
+name: Create Release and upload release assets
+
+jobs:
+  build:
+    name: Upload Release Asset
+    runs-on: ubuntu-latest
+    steps:
+      - name: prepare build
+        run: |
+          lsb_release -a
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rpm
+          go get github.com/mitchellh/gox
+          go mod vendor
+          gem install rake
+          gem install fpm -v 1.11.0
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: build binary
+        run: make gox-build
+      - name: Build DEB packages
+        run: make fpm-deb
+      - name: Build RPM packages
+        run: make fpm-rpm
+      - name: Update changelog
+          id: update_changelog
+        uses: heinrichreimer/github-changelog-generator-action@v2.1.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+          body: ${{ steps.update_changelog.outputs.changelog }}
+      - name: Upload binaries to release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: "*.{deb,rpm}"
+          tag: ${{ github.ref }}
+          overwrite: true
+          file_glob: true

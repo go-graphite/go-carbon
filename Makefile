@@ -25,7 +25,7 @@ run-test:
 test:
 	make run-test COMMAND="test"
 	make run-test COMMAND="vet"
-	# make run-test COMMAND="test -race"
+	make run-test COMMAND="test -race"
 
 gox-build:
 	rm -rf build
@@ -39,7 +39,13 @@ clean:
 
 image:
 	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
-	docker build -t go-carbon .
+	DOCKER_BUILDKIT=1 docker build -t go-carbon:$(VERSION) .
+	docker push go-carbon:$(VERSION) || true
+
+image-dev:
+	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
+	DOCKER_BUILDKIT=1 docker build -t go-carbon:$(BUILD) .
+	docker push go-carbon:$(BUILD)
 
 package-tree:
 	install -m 0755 -d build/root/lib/systemd/system
