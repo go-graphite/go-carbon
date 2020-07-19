@@ -9,7 +9,9 @@ name: Release
 jobs:
   build:
     name: Upload Release Asset
+
     runs-on: ubuntu-latest
+
     steps:
       - name: prepare build
         run: |

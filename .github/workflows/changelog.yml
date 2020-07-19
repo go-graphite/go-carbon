@@ -13,7 +13,9 @@ name: Changelog
 jobs:
   generate_changelog:
     runs-on: ubuntu-latest
+
     name: Generate changelog for master branch
+
     steps:
       - uses: actions/checkout@v1
 
