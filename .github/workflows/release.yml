@@ -4,7 +4,7 @@ on:
     tags:
       - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
 
-name: Create Release and upload release assets
+name: Release
 
 jobs:
   build:
@@ -20,6 +20,11 @@ jobs:
           go mod vendor
           gem install rake
           gem install fpm -v 1.11.0
+      - name: Get version from tag
+        id: tag_name
+        run: |
+          echo ::set-output name=current_version::${GITHUB_REF#refs/tags/v}
+        shell: bash
       - name: Checkout code
         uses: actions/checkout@v2
       - name: build binary
@@ -28,11 +33,12 @@ jobs:
         run: make fpm-deb
       - name: Build RPM packages
         run: make fpm-rpm
-      - name: Update changelog
-          id: update_changelog
-        uses: heinrichreimer/github-changelog-generator-action@v2.1.1
+      - name: Get Changelog Entry
+        id: changelog_reader
+        uses: mindsers/changelog-reader-action@v1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          version: ${{ steps.tag_name.outputs.current_version }}
+          path: ./CHANGELOG.md
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -41,9 +47,9 @@ jobs:
         with:
           tag_name: ${{ github.ref }}
           release_name: Release ${{ github.ref }}
+          body: ${{ steps.changelog_reader.outputs.log_entry }} # This pulls from the GET CHANGELOG ENTRY step above, referencing it's ID to get its outputs object, which include a `log_entry`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps
           draft: false
           prerelease: false
-          body: ${{ steps.update_changelog.outputs.changelog }}
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
         with:

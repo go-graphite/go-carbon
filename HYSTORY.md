@@ -1,9 +1,3 @@
-## Changelog
-##### master
-* [travis-ci] Add apt-get update and go mod vendor to sync gox installation in Travis (#361)
-* Fix pubsub test (#360)
-* fix packages.sh (#359)
-
 ##### version 0.15.0
 * Migrate to go modules (#351)
 * Moving to go-graphite organization (#347)
