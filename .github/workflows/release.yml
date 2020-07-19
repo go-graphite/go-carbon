@@ -15,12 +15,8 @@ jobs:
     steps:
       - name: prepare build
         run: |
-          lsb_release -a
-          sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev rpm
           go get github.com/mitchellh/gox
-          gem install rake
-          gem install fpm -v 1.11.0
+          sudo gem install fpm -v 1.11.0
 
       - name: Get version from tag
         id: tag_name
