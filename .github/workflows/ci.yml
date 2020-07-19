@@ -20,7 +20,8 @@ jobs:
       - name: prepare build
         run: |
           go get github.com/mitchellh/gox
-          ls -al /opt/hostedtoolcache/go/1.14.6/x64/
+          ls -al /opt/hostedtoolcache/go/1.14.6/x64/bin
+          pwd && ls -al
           sudo cp ${GOROOT}/bin/gox /usr/bin/gox
           sudo gem install fpm -v 1.11.0
 
