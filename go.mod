@@ -34,6 +34,7 @@ require (
 	github.com/lomik/stop v0.0.0-20161127103810-188e98d969bd
 	github.com/lomik/zapwriter v0.0.0-20180906104450-2ec2b9a61680
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
+	github.com/mitchellh/gox v1.0.1 // indirect
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/pierrec/lz4 v2.0.5+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
