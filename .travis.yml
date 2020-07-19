@@ -13,7 +13,8 @@ before_deploy:
 - sudo apt-get install -y ruby ruby-dev rpm
 - go get github.com/mitchellh/gox
 - go mod vendor
-- gem install fpm -v 1.11.0
+- gem install rake
+- gem install fpm:1.10.2 # newer fpm is broken https://github.com/jordansissel/fpm/issues/1612
 - make gox-build
 - make fpm-deb
 - make fpm-rpm
