@@ -33,9 +33,9 @@ type NamedReceiver struct {
 	Name string
 }
 
-type wspConfigRetriever struct{
+type wspConfigRetriever struct {
 	getRetentionFunc func(string) (int, bool)
-	getAggrNameFunc func(string) (string, float64, bool)
+	getAggrNameFunc  func(string) (string, float64, bool)
 }
 
 func (r *wspConfigRetriever) MetricRetentionPeriod(metric string) (int, bool) {
@@ -454,18 +454,21 @@ func (app *App) Start() (err error) {
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
-		if conf.Carbonserver.CacheScan{
+		if conf.Carbonserver.CacheScan {
 			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
 
 			retriever := &wspConfigRetriever{
 				getRetentionFunc: app.Persister.GetRetentionPeriod,
-				getAggrNameFunc: app.Persister.GetAggrConf,
+				getAggrNameFunc:  app.Persister.GetAggrConf,
 			}
 			carbonserver.SetConfigRetriever(retriever)
 		}
 
 		if conf.Prometheus.Enabled {
 			carbonserver.InitPrometheus(app.PromRegisterer)
+		}
+		if conf.Tracing.Enabled {
+			carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, conf.Tracing.SendTimeout.Value())
 		}
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {

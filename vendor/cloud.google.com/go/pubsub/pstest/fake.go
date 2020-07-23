@@ -1,4 +1,4 @@
-// Copyright 2017 Google Inc. All Rights Reserved.
+// Copyright 2017 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,8 +23,10 @@
 package pstest
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -35,10 +37,9 @@ import (
 	"github.com/golang/protobuf/ptypes"
 	durpb "github.com/golang/protobuf/ptypes/duration"
 	emptypb "github.com/golang/protobuf/ptypes/empty"
-	"golang.org/x/net/context"
 	pb "google.golang.org/genproto/googleapis/pubsub/v1"
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // For testing. Note that even though changes to the now variable are atomic, a call
@@ -49,18 +50,23 @@ var now atomic.Value
 
 func init() {
 	now.Store(time.Now)
+	ResetMinAckDeadline()
 }
 
 func timeNow() time.Time {
 	return now.Load().(func() time.Time)()
 }
 
+// Server is a fake Pub/Sub server.
 type Server struct {
-	Addr    string // The address that the server is listening on.
-	gServer gServer
+	srv     *testutil.Server
+	Addr    string  // The address that the server is listening on.
+	GServer GServer // Not intended to be used directly.
 }
 
-type gServer struct {
+// GServer is the underlying service implementor. It is not intended to be used
+// directly.
+type GServer struct {
 	pb.PublisherServer
 	pb.SubscriberServer
 
@@ -81,15 +87,16 @@ func NewServer() *Server {
 		panic(fmt.Sprintf("pstest.NewServer: %v", err))
 	}
 	s := &Server{
+		srv:  srv,
 		Addr: srv.Addr,
-		gServer: gServer{
+		GServer: GServer{
 			topics:   map[string]*topic{},
 			subs:     map[string]*subscription{},
 			msgsByID: map[string]*Message{},
 		},
 	}
-	pb.RegisterPublisherServer(srv.Gsrv, &s.gServer)
-	pb.RegisterSubscriberServer(srv.Gsrv, &s.gServer)
+	pb.RegisterPublisherServer(srv.Gsrv, &s.GServer)
+	pb.RegisterSubscriberServer(srv.Gsrv, &s.GServer)
 	srv.Start()
 	return s
 }
@@ -100,12 +107,20 @@ func NewServer() *Server {
 //
 // Publish panics if there is an error, which is appropriate for testing.
 func (s *Server) Publish(topic string, data []byte, attrs map[string]string) string {
-	_, _ = s.gServer.CreateTopic(nil, &pb.Topic{Name: topic})
+	const topicPattern = "projects/*/topics/*"
+	ok, err := path.Match(topicPattern, topic)
+	if err != nil {
+		panic(err)
+	}
+	if !ok {
+		panic(fmt.Sprintf("topic name must be of the form %q", topicPattern))
+	}
+	_, _ = s.GServer.CreateTopic(context.TODO(), &pb.Topic{Name: topic})
 	req := &pb.PublishRequest{
 		Topic:    topic,
 		Messages: []*pb.PubsubMessage{{Data: data, Attributes: attrs}},
 	}
-	res, err := s.gServer.Publish(nil, req)
+	res, err := s.GServer.Publish(context.TODO(), req)
 	if err != nil {
 		panic(fmt.Sprintf("pstest.Server.Publish: %v", err))
 	}
@@ -117,9 +132,9 @@ func (s *Server) Publish(topic string, data []byte, attrs map[string]string) str
 // minutes. If SetStreamTimeout is never called or is passed zero, streams never shut
 // down.
 func (s *Server) SetStreamTimeout(d time.Duration) {
-	s.gServer.mu.Lock()
-	defer s.gServer.mu.Unlock()
-	s.gServer.streamTimeout = d
+	s.GServer.mu.Lock()
+	defer s.GServer.mu.Unlock()
+	s.GServer.streamTimeout = d
 }
 
 // A Message is a message that was published to the server.
@@ -134,15 +149,24 @@ type Message struct {
 	// protected by server mutex
 	deliveries int
 	acks       int
+	Modacks    []Modack // modacks received by server for this message
+
+}
+
+// Modack represents a modack sent to the server.
+type Modack struct {
+	AckID       string
+	AckDeadline int32
+	ReceivedAt  time.Time
 }
 
 // Messages returns information about all messages ever published.
 func (s *Server) Messages() []*Message {
-	s.gServer.mu.Lock()
-	defer s.gServer.mu.Unlock()
+	s.GServer.mu.Lock()
+	defer s.GServer.mu.Unlock()
 
 	var msgs []*Message
-	for _, m := range s.gServer.msgs {
+	for _, m := range s.GServer.msgs {
 		m.Deliveries = m.deliveries
 		m.Acks = m.acks
 		msgs = append(msgs, m)
@@ -153,10 +177,10 @@ func (s *Server) Messages() []*Message {
 // Message returns the message with the given ID, or nil if no message
 // with that ID was published.
 func (s *Server) Message(id string) *Message {
-	s.gServer.mu.Lock()
-	defer s.gServer.mu.Unlock()
+	s.GServer.mu.Lock()
+	defer s.GServer.mu.Unlock()
 
-	m := s.gServer.msgsByID[id]
+	m := s.GServer.msgsByID[id]
 	if m != nil {
 		m.Deliveries = m.deliveries
 		m.Acks = m.acks
@@ -166,36 +190,73 @@ func (s *Server) Message(id string) *Message {
 
 // Wait blocks until all server activity has completed.
 func (s *Server) Wait() {
-	s.gServer.wg.Wait()
+	s.GServer.wg.Wait()
 }
 
-func (s *gServer) CreateTopic(_ context.Context, t *pb.Topic) (*pb.Topic, error) {
+// ClearMessages removes all published messages
+// from internal containers.
+func (s *Server) ClearMessages() {
+	s.GServer.mu.Lock()
+	s.GServer.msgs = nil
+	s.GServer.msgsByID = make(map[string]*Message)
+	s.GServer.mu.Unlock()
+}
+
+// Close shuts down the server and releases all resources.
+func (s *Server) Close() error {
+	s.srv.Close()
+	s.GServer.mu.Lock()
+	defer s.GServer.mu.Unlock()
+	for _, sub := range s.GServer.subs {
+		sub.stop()
+	}
+	return nil
+}
+
+func (s *GServer) CreateTopic(_ context.Context, t *pb.Topic) (*pb.Topic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if s.topics[t.Name] != nil {
-		return nil, grpc.Errorf(codes.AlreadyExists, "topic %q", t.Name)
+		return nil, status.Errorf(codes.AlreadyExists, "topic %q", t.Name)
 	}
 	top := newTopic(t)
 	s.topics[t.Name] = top
 	return top.proto, nil
 }
 
-func (s *gServer) GetTopic(_ context.Context, req *pb.GetTopicRequest) (*pb.Topic, error) {
+func (s *GServer) GetTopic(_ context.Context, req *pb.GetTopicRequest) (*pb.Topic, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if t := s.topics[req.Topic]; t != nil {
 		return t.proto, nil
 	}
-	return nil, grpc.Errorf(codes.NotFound, "topic %q", req.Topic)
+	return nil, status.Errorf(codes.NotFound, "topic %q", req.Topic)
 }
 
-func (s *gServer) UpdateTopic(_ context.Context, req *pb.UpdateTopicRequest) (*pb.Topic, error) {
-	return nil, grpc.Errorf(codes.Unimplemented, "unimplemented")
+func (s *GServer) UpdateTopic(_ context.Context, req *pb.UpdateTopicRequest) (*pb.Topic, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	t := s.topics[req.Topic.Name]
+	if t == nil {
+		return nil, status.Errorf(codes.NotFound, "topic %q", req.Topic.Name)
+	}
+	for _, path := range req.UpdateMask.Paths {
+		switch path {
+		case "labels":
+			t.proto.Labels = req.Topic.Labels
+		case "message_storage_policy":
+			t.proto.MessageStoragePolicy = req.Topic.MessageStoragePolicy
+		default:
+			return nil, status.Errorf(codes.InvalidArgument, "unknown field name %q", path)
+		}
+	}
+	return t.proto, nil
 }
 
-func (s *gServer) ListTopics(_ context.Context, req *pb.ListTopicsRequest) (*pb.ListTopicsResponse, error) {
+func (s *GServer) ListTopics(_ context.Context, req *pb.ListTopicsRequest) (*pb.ListTopicsResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -217,7 +278,7 @@ func (s *gServer) ListTopics(_ context.Context, req *pb.ListTopicsRequest) (*pb.
 	return res, nil
 }
 
-func (s *gServer) ListTopicSubscriptions(_ context.Context, req *pb.ListTopicSubscriptionsRequest) (*pb.ListTopicSubscriptionsResponse, error) {
+func (s *GServer) ListTopicSubscriptions(_ context.Context, req *pb.ListTopicSubscriptionsRequest) (*pb.ListTopicSubscriptionsResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -238,35 +299,35 @@ func (s *gServer) ListTopicSubscriptions(_ context.Context, req *pb.ListTopicSub
 	}, nil
 }
 
-func (s *gServer) DeleteTopic(_ context.Context, req *pb.DeleteTopicRequest) (*emptypb.Empty, error) {
+func (s *GServer) DeleteTopic(_ context.Context, req *pb.DeleteTopicRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	t := s.topics[req.Topic]
 	if t == nil {
-		return nil, grpc.Errorf(codes.NotFound, "topic %q", req.Topic)
+		return nil, status.Errorf(codes.NotFound, "topic %q", req.Topic)
 	}
 	t.stop()
 	delete(s.topics, req.Topic)
 	return &emptypb.Empty{}, nil
 }
 
-func (s *gServer) CreateSubscription(_ context.Context, ps *pb.Subscription) (*pb.Subscription, error) {
+func (s *GServer) CreateSubscription(_ context.Context, ps *pb.Subscription) (*pb.Subscription, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if ps.Name == "" {
-		return nil, grpc.Errorf(codes.InvalidArgument, "missing name")
+		return nil, status.Errorf(codes.InvalidArgument, "missing name")
 	}
 	if s.subs[ps.Name] != nil {
-		return nil, grpc.Errorf(codes.AlreadyExists, "subscription %q", ps.Name)
+		return nil, status.Errorf(codes.AlreadyExists, "subscription %q", ps.Name)
 	}
 	if ps.Topic == "" {
-		return nil, grpc.Errorf(codes.InvalidArgument, "missing topic")
+		return nil, status.Errorf(codes.InvalidArgument, "missing topic")
 	}
 	top := s.topics[ps.Topic]
 	if top == nil {
-		return nil, grpc.Errorf(codes.NotFound, "topic %q", ps.Topic)
+		return nil, status.Errorf(codes.NotFound, "topic %q", ps.Topic)
 	}
 	if err := checkAckDeadline(ps.AckDeadlineSeconds); err != nil {
 		return nil, err
@@ -288,10 +349,31 @@ func (s *gServer) CreateSubscription(_ context.Context, ps *pb.Subscription) (*p
 	return ps, nil
 }
 
+// Can be set for testing.
+var minAckDeadlineSecs int32
+
+// SetMinAckDeadline changes the minack deadline to n. Must be
+// greater than or equal to 1 second. Remember to reset this value
+// to the default after your test changes it. Example usage:
+// 		pstest.SetMinAckDeadlineSecs(1)
+// 		defer pstest.ResetMinAckDeadlineSecs()
+func SetMinAckDeadline(n time.Duration) {
+	if n < time.Second {
+		panic("SetMinAckDeadline expects a value greater than 1 second")
+	}
+
+	minAckDeadlineSecs = int32(n / time.Second)
+}
+
+// ResetMinAckDeadline resets the minack deadline to the default.
+func ResetMinAckDeadline() {
+	minAckDeadlineSecs = 10
+}
+
 func checkAckDeadline(ads int32) error {
-	if ads < 10 || ads > 600 {
+	if ads < minAckDeadlineSecs || ads > 600 {
 		// PubSub service returns Unknown.
-		return grpc.Errorf(codes.Unknown, "bad ack_deadline_seconds: %d", ads)
+		return status.Errorf(codes.Unknown, "bad ack_deadline_seconds: %d", ads)
 	}
 	return nil
 }
@@ -306,30 +388,31 @@ var defaultMessageRetentionDuration = ptypes.DurationProto(maxMessageRetentionDu
 func checkMRD(pmrd *durpb.Duration) error {
 	mrd, err := ptypes.Duration(pmrd)
 	if err != nil || mrd < minMessageRetentionDuration || mrd > maxMessageRetentionDuration {
-		return grpc.Errorf(codes.InvalidArgument, "bad message_retention_duration %+v", pmrd)
+		return status.Errorf(codes.InvalidArgument, "bad message_retention_duration %+v", pmrd)
 	}
 	return nil
 }
 
-func (s *gServer) GetSubscription(_ context.Context, req *pb.GetSubscriptionRequest) (*pb.Subscription, error) {
+func (s *GServer) GetSubscription(_ context.Context, req *pb.GetSubscriptionRequest) (*pb.Subscription, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	if sub := s.subs[req.Subscription]; sub != nil {
-		return sub.proto, nil
+	sub, err := s.findSubscription(req.Subscription)
+	if err != nil {
+		return nil, err
 	}
-	return nil, grpc.Errorf(codes.NotFound, "subscription %q", req.Subscription)
+	return sub.proto, nil
 }
 
-func (s *gServer) UpdateSubscription(_ context.Context, req *pb.UpdateSubscriptionRequest) (*pb.Subscription, error) {
+func (s *GServer) UpdateSubscription(_ context.Context, req *pb.UpdateSubscriptionRequest) (*pb.Subscription, error) {
+	if req.Subscription == nil {
+		return nil, status.Errorf(codes.InvalidArgument, "missing subscription")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	sub := s.subs[req.Subscription.Name]
-	if sub == nil {
-		return nil, grpc.Errorf(codes.NotFound, "subscription %q", req.Subscription.Name)
+	sub, err := s.findSubscription(req.Subscription.Name)
+	if err != nil {
+		return nil, err
 	}
-
 	for _, path := range req.UpdateMask.Paths {
 		switch path {
 		case "push_config":
@@ -351,15 +434,20 @@ func (s *gServer) UpdateSubscription(_ context.Context, req *pb.UpdateSubscripti
 			}
 			sub.proto.MessageRetentionDuration = req.Subscription.MessageRetentionDuration
 
-			// TODO(jba): labels
+		case "labels":
+			sub.proto.Labels = req.Subscription.Labels
+
+		case "expiration_policy":
+			sub.proto.ExpirationPolicy = req.Subscription.ExpirationPolicy
+
 		default:
-			return nil, grpc.Errorf(codes.InvalidArgument, "unknown field name %q", path)
+			return nil, status.Errorf(codes.InvalidArgument, "unknown field name %q", path)
 		}
 	}
 	return sub.proto, nil
 }
 
-func (s *gServer) ListSubscriptions(_ context.Context, req *pb.ListSubscriptionsRequest) (*pb.ListSubscriptionsResponse, error) {
+func (s *GServer) ListSubscriptions(_ context.Context, req *pb.ListSubscriptionsRequest) (*pb.ListSubscriptionsResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -381,13 +469,12 @@ func (s *gServer) ListSubscriptions(_ context.Context, req *pb.ListSubscriptions
 	return res, nil
 }
 
-func (s *gServer) DeleteSubscription(_ context.Context, req *pb.DeleteSubscriptionRequest) (*emptypb.Empty, error) {
+func (s *GServer) DeleteSubscription(_ context.Context, req *pb.DeleteSubscriptionRequest) (*emptypb.Empty, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	sub := s.subs[req.Subscription]
-	if sub == nil {
-		return nil, grpc.Errorf(codes.NotFound, "subscription %q", req.Subscription)
+	sub, err := s.findSubscription(req.Subscription)
+	if err != nil {
+		return nil, err
 	}
 	sub.stop()
 	delete(s.subs, req.Subscription)
@@ -395,16 +482,16 @@ func (s *gServer) DeleteSubscription(_ context.Context, req *pb.DeleteSubscripti
 	return &emptypb.Empty{}, nil
 }
 
-func (s *gServer) Publish(_ context.Context, req *pb.PublishRequest) (*pb.PublishResponse, error) {
+func (s *GServer) Publish(_ context.Context, req *pb.PublishRequest) (*pb.PublishResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if req.Topic == "" {
-		return nil, grpc.Errorf(codes.InvalidArgument, "missing topic")
+		return nil, status.Errorf(codes.InvalidArgument, "missing topic")
 	}
 	top := s.topics[req.Topic]
 	if top == nil {
-		return nil, grpc.Errorf(codes.NotFound, "topic %q", req.Topic)
+		return nil, status.Errorf(codes.NotFound, "topic %q", req.Topic)
 	}
 	var ids []string
 	for _, pm := range req.Messages {
@@ -414,7 +501,7 @@ func (s *gServer) Publish(_ context.Context, req *pb.PublishRequest) (*pb.Publis
 		pubTime := timeNow()
 		tsPubTime, err := ptypes.TimestampProto(pubTime)
 		if err != nil {
-			return nil, grpc.Errorf(codes.Internal, err.Error())
+			return nil, status.Errorf(codes.Internal, err.Error())
 		}
 		pm.PublishTime = tsPubTime
 		m := &Message{
@@ -471,7 +558,7 @@ func (t *topic) publish(pm *pb.PubsubMessage, m *Message) {
 
 type subscription struct {
 	topic      *topic
-	mu         *sync.Mutex
+	mu         *sync.Mutex // the server mutex, here for convenience
 	proto      *pb.Subscription
 	ackTimeout time.Duration
 	msgs       map[string]*message // unacked messages by message ID
@@ -480,11 +567,15 @@ type subscription struct {
 }
 
 func newSubscription(t *topic, mu *sync.Mutex, ps *pb.Subscription) *subscription {
+	at := time.Duration(ps.AckDeadlineSeconds) * time.Second
+	if at == 0 {
+		at = 10 * time.Second
+	}
 	return &subscription{
 		topic:      t,
 		mu:         mu,
 		proto:      ps,
-		ackTimeout: 10 * time.Second,
+		ackTimeout: at,
 		msgs:       map[string]*message{},
 		done:       make(chan struct{}),
 	}
@@ -498,7 +589,7 @@ func (s *subscription) start(wg *sync.WaitGroup) {
 			select {
 			case <-s.done:
 				return
-			case <-time.After(1 * time.Second):
+			case <-time.After(10 * time.Millisecond):
 				s.deliver()
 			}
 		}
@@ -509,20 +600,86 @@ func (s *subscription) stop() {
 	close(s.done)
 }
 
-func (s *gServer) StreamingPull(sps pb.Subscriber_StreamingPullServer) error {
+func (s *GServer) Acknowledge(_ context.Context, req *pb.AcknowledgeRequest) (*emptypb.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sub, err := s.findSubscription(req.Subscription)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range req.AckIds {
+		sub.ack(id)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *GServer) ModifyAckDeadline(_ context.Context, req *pb.ModifyAckDeadlineRequest) (*emptypb.Empty, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, err := s.findSubscription(req.Subscription)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	for _, id := range req.AckIds {
+		s.msgsByID[id].Modacks = append(s.msgsByID[id].Modacks, Modack{AckID: id, AckDeadline: req.AckDeadlineSeconds, ReceivedAt: now})
+	}
+	dur := secsToDur(req.AckDeadlineSeconds)
+	for _, id := range req.AckIds {
+		sub.modifyAckDeadline(id, dur)
+	}
+	return &emptypb.Empty{}, nil
+}
+
+func (s *GServer) Pull(ctx context.Context, req *pb.PullRequest) (*pb.PullResponse, error) {
+	s.mu.Lock()
+	sub, err := s.findSubscription(req.Subscription)
+	if err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	max := int(req.MaxMessages)
+	if max < 0 {
+		s.mu.Unlock()
+		return nil, status.Error(codes.InvalidArgument, "MaxMessages cannot be negative")
+	}
+	if max == 0 { // MaxMessages not specified; use a default.
+		max = 1000
+	}
+	msgs := sub.pull(max)
+	s.mu.Unlock()
+	// Implement the spec from the pubsub proto:
+	// "If ReturnImmediately set to true, the system will respond immediately even if
+	// it there are no messages available to return in the `Pull` response.
+	// Otherwise, the system may wait (for a bounded amount of time) until at
+	// least one message is available, rather than returning no messages."
+	if len(msgs) == 0 && !req.ReturnImmediately {
+		// Wait for a short amount of time for a message.
+		// TODO: signal when a message arrives, so we don't wait the whole time.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			s.mu.Lock()
+			msgs = sub.pull(max)
+			s.mu.Unlock()
+		}
+	}
+	return &pb.PullResponse{ReceivedMessages: msgs}, nil
+}
+
+func (s *GServer) StreamingPull(sps pb.Subscriber_StreamingPullServer) error {
 	// Receive initial message configuring the pull.
 	req, err := sps.Recv()
 	if err != nil {
 		return err
 	}
-	if req.Subscription == "" {
-		return grpc.Errorf(codes.InvalidArgument, "missing subscription")
-	}
 	s.mu.Lock()
-	sub := s.subs[req.Subscription]
+	sub, err := s.findSubscription(req.Subscription)
 	s.mu.Unlock()
-	if sub == nil {
-		return grpc.Errorf(codes.NotFound, "subscription %s", req.Subscription)
+	if err != nil {
+		return err
 	}
 	// Create a new stream to handle the pull.
 	st := sub.newStream(sps, s.streamTimeout)
@@ -531,42 +688,115 @@ func (s *gServer) StreamingPull(sps pb.Subscriber_StreamingPullServer) error {
 	return err
 }
 
-var retentionDuration = 10 * time.Minute
+func (s *GServer) Seek(ctx context.Context, req *pb.SeekRequest) (*pb.SeekResponse, error) {
+	// Only handle time-based seeking for now.
+	// This fake doesn't deal with snapshots.
+	var target time.Time
+	switch v := req.Target.(type) {
+	case nil:
+		return nil, status.Errorf(codes.InvalidArgument, "missing Seek target type")
+	case *pb.SeekRequest_Time:
+		var err error
+		target, err = ptypes.Timestamp(v.Time)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "bad Time target: %v", err)
+		}
+	default:
+		return nil, status.Errorf(codes.Unimplemented, "unhandled Seek target type %T", v)
+	}
+
+	// The entire server must be locked while doing the work below,
+	// because the messages don't have any other synchronization.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sub, err := s.findSubscription(req.Subscription)
+	if err != nil {
+		return nil, err
+	}
+	// Drop all messages from sub that were published before the target time.
+	for id, m := range sub.msgs {
+		if m.publishTime.Before(target) {
+			delete(sub.msgs, id)
+			(*m.acks)++
+		}
+	}
+	// Un-ack any already-acked messages after this time;
+	// redelivering them to the subscription is the closest analogue here.
+	for _, m := range s.msgs {
+		if m.PublishTime.Before(target) {
+			continue
+		}
+		sub.msgs[m.ID] = &message{
+			publishTime: m.PublishTime,
+			proto: &pb.ReceivedMessage{
+				AckId: m.ID,
+				// This was not preserved!
+				//Message: pm,
+			},
+			deliveries:  &m.deliveries,
+			acks:        &m.acks,
+			streamIndex: -1,
+		}
+	}
+	return &pb.SeekResponse{}, nil
+}
+
+// Gets a subscription that must exist.
+// Must be called with the lock held.
+func (s *GServer) findSubscription(name string) (*subscription, error) {
+	if name == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "missing subscription")
+	}
+	sub := s.subs[name]
+	if sub == nil {
+		return nil, status.Errorf(codes.NotFound, "subscription %s", name)
+	}
+	return sub, nil
+}
+
+// Must be called with the lock held.
+func (s *subscription) pull(max int) []*pb.ReceivedMessage {
+	now := timeNow()
+	s.maintainMessages(now)
+	var msgs []*pb.ReceivedMessage
+	for _, m := range s.msgs {
+		if m.outstanding() {
+			continue
+		}
+		(*m.deliveries)++
+		m.ackDeadline = now.Add(s.ackTimeout)
+		msgs = append(msgs, m.proto)
+		if len(msgs) >= max {
+			break
+		}
+	}
+	return msgs
+}
 
 func (s *subscription) deliver() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tNow := timeNow()
-	for id, m := range s.msgs {
-		// Mark a message as re-deliverable if its ack deadline has expired.
-		if m.outstanding() && tNow.After(m.ackDeadline) {
-			m.makeAvailable()
-		}
-		pubTime, err := ptypes.Timestamp(m.proto.Message.PublishTime)
-		if err != nil {
-			panic(err)
-		}
-		// Remove messages that have been undelivered for a long time.
-		if !m.outstanding() && tNow.Sub(pubTime) > retentionDuration {
-			delete(s.msgs, id)
-		}
-	}
+	now := timeNow()
+	s.maintainMessages(now)
 	// Try to deliver each remaining message.
 	curIndex := 0
 	for _, m := range s.msgs {
+		if m.outstanding() {
+			continue
+		}
 		// If the message was never delivered before, start with the stream at
 		// curIndex. If it was delivered before, start with the stream after the one
 		// that owned it.
 		if m.streamIndex < 0 {
-			delIndex, ok := s.deliverMessage(m, curIndex, tNow)
+			delIndex, ok := s.tryDeliverMessage(m, curIndex, now)
 			if !ok {
 				break
 			}
 			curIndex = delIndex + 1
 			m.streamIndex = curIndex
 		} else {
-			delIndex, ok := s.deliverMessage(m, m.streamIndex, tNow)
+			delIndex, ok := s.tryDeliverMessage(m, m.streamIndex, now)
 			if !ok {
 				break
 			}
@@ -575,27 +805,53 @@ func (s *subscription) deliver() {
 	}
 }
 
-// deliverMessage attempts to deliver m to the stream at index i. If it can't, it
-// tries streams i+1, i+2, ..., wrapping around. It returns the index of the stream
-// it delivered the message to, or 0, false if it didn't deliver the message because
-// there are no active streams.
-func (s *subscription) deliverMessage(m *message, i int, tNow time.Time) (int, bool) {
-	for len(s.streams) > 0 {
-		if i >= len(s.streams) {
-			i = 0
-		}
-		st := s.streams[i]
+// tryDeliverMessage attempts to deliver m to the stream at index i. If it can't, it
+// tries streams i+1, i+2, ..., wrapping around. Once it's tried all streams, it
+// exits.
+//
+// It returns the index of the stream it delivered the message to, or 0, false if
+// it didn't deliver the message.
+//
+// Must be called with the lock held.
+func (s *subscription) tryDeliverMessage(m *message, start int, now time.Time) (int, bool) {
+	for i := 0; i < len(s.streams); i++ {
+		idx := (i + start) % len(s.streams)
+
+		st := s.streams[idx]
 		select {
 		case <-st.done:
-			s.streams = deleteStreamAt(s.streams, i)
+			s.streams = deleteStreamAt(s.streams, idx)
+			i--
 
 		case st.msgc <- m.proto:
 			(*m.deliveries)++
-			m.ackDeadline = tNow.Add(st.ackTimeout)
-			return i, true
+			m.ackDeadline = now.Add(st.ackTimeout)
+			return idx, true
+
+		default:
 		}
 	}
 	return 0, false
+}
+
+var retentionDuration = 10 * time.Minute
+
+// Must be called with the lock held.
+func (s *subscription) maintainMessages(now time.Time) {
+	for id, m := range s.msgs {
+		// Mark a message as re-deliverable if its ack deadline has expired.
+		if m.outstanding() && now.After(m.ackDeadline) {
+			m.makeAvailable()
+		}
+		pubTime, err := ptypes.Timestamp(m.proto.Message.PublishTime)
+		if err != nil {
+			panic(err)
+		}
+		// Remove messages that have been undelivered for a long time.
+		if !m.outstanding() && now.Sub(pubTime) > retentionDuration {
+			delete(s.msgs, id)
+		}
+	}
 }
 
 func (s *subscription) newStream(gs pb.Subscriber_StreamingPullServer, timeout time.Duration) *stream {
@@ -640,6 +896,7 @@ type message struct {
 	streamIndex int // index of stream that currently owns msg, for round-robin delivery
 }
 
+// A message is outstanding if it is owned by some stream.
 func (m *message) outstanding() bool {
 	return !m.ackDeadline.IsZero()
 }
@@ -726,6 +983,7 @@ func (s *subscription) handleStreamingPullRequest(st *stream, req *pb.StreamingP
 	}
 }
 
+// Must be called with the lock held.
 func (s *subscription) ack(id string) {
 	m := s.msgs[id]
 	if m != nil {
@@ -734,6 +992,7 @@ func (s *subscription) ack(id string) {
 	}
 }
 
+// Must be called with the lock held.
 func (s *subscription) modifyAckDeadline(id string, d time.Duration) {
 	m := s.msgs[id]
 	if m == nil { // already acked: ignore.

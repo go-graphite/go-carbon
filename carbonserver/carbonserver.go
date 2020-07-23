@@ -25,7 +25,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"path"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
@@ -44,10 +43,10 @@ import (
 	"github.com/dgryski/go-expirecache"
 	"github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
-	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/stat"
 	"github.com/go-graphite/go-carbon/points"
+	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"github.com/lomik/zapwriter"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/filter"
@@ -112,12 +111,6 @@ type ExpandedGlobResponse struct {
 	Err   error
 }
 
-var TraceHeaders = map[string]string{
-	"X-CTX-CarbonAPI-UUID":    "carbonapi_uuid",
-	"X-CTX-CarbonZipper-UUID": "carbonzipper_uuid",
-	"X-Request-ID":            "request_id",
-}
-
 var statusCodes = map[string][]uint64{
 	"combined":     make([]uint64, 5),
 	"find":         make([]uint64, 5),
@@ -154,45 +147,6 @@ func newResponseWriterWithStatus(w http.ResponseWriter) *responseWriterWithStatu
 func (w *responseWriterWithStatus) WriteHeader(code int) {
 	w.statusCode = code
 	w.ResponseWriter.WriteHeader(code)
-}
-
-func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
-	for header, field := range TraceHeaders {
-		v := ctx.Value(header)
-		if v == nil {
-			continue
-		}
-
-		if value, ok := v.(string); ok {
-			logger = logger.With(zap.String(field, value))
-		}
-	}
-
-	return logger
-}
-
-func TraceHandler(h http.HandlerFunc, globalStatusCodes []uint64, handlerStatusCodes []uint64, promRequest func(string, int)) http.HandlerFunc {
-	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		ctx := req.Context()
-		for header := range TraceHeaders {
-			v := req.Header.Get(header)
-			if v != "" {
-				ctx = context.WithValue(ctx, header, v)
-			}
-		}
-
-		lrw := newResponseWriterWithStatus(rw)
-
-		h.ServeHTTP(lrw, req.WithContext(ctx))
-
-		if lrw.statusCodeMajor() < len(globalStatusCodes) {
-			atomic.AddUint64(&globalStatusCodes[lrw.statusCodeMajor()], 1)
-			atomic.AddUint64(&handlerStatusCodes[lrw.statusCodeMajor()], 1)
-		}
-
-		endpoint := path.Clean(req.URL.Path)
-		promRequest(endpoint, lrw.statusCode)
-	})
 }
 
 func (q *QueryItem) FetchOrLock() (interface{}, bool) {
@@ -280,7 +234,7 @@ type CarbonserverListener struct {
 	timeBuckets   []uint64
 
 	cacheGetRecentMetrics func() []map[string]struct{}
-	whisperGetConfig configRetriever
+	whisperGetConfig      configRetriever
 
 	prometheus prometheus
 
@@ -615,12 +569,12 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 	// metricsName map. This is inline with the inserts
 	// during filescan walk
 	for _, shardAddMap := range newCacheMetricNames {
-		for newMetric := range shardAddMap{
+		for newMetric := range shardAddMap {
 			split := strings.Split(newMetric, ".")
 			fileName := "/"
 			for i, seg := range split {
 				fileName = filepath.Join(fileName, seg)
-				if i == len(split) - 1 {
+				if i == len(split)-1 {
 					fileName = fileName + ".wsp"
 				}
 				if _, ok := cacheMetricNames[fileName]; !ok {
@@ -641,7 +595,7 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 		case <-tick:
 		case <-force:
 		}
-		if listener.cacheGetRecentMetrics != nil{
+		if listener.cacheGetRecentMetrics != nil {
 			// cacheMetrics maintains all new metric names added in cache
 			// when cache-scan is enabled in conf
 			newCacheMetricNames := listener.cacheGetRecentMetrics()
@@ -678,12 +632,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		if listener.trieIndex {
 			if err := trieIdx.insert(fileName); err != nil {
 				logger.Error("error populating index from cache indexMap",
-				zap.Error(err),)
+					zap.Error(err))
 			}
 		} else {
-				files = append(files, fileName)
+			files = append(files, fileName)
 		}
-		if strings.HasSuffix(fileName, ".wsp"){
+		if strings.HasSuffix(fileName, ".wsp") {
 			metricsKnown++
 		}
 	}
@@ -701,7 +655,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			filesLen++
 			// use cacheMetricNames to check and prevent appending duplicate metrics
 			// into the index when cacheMetricNamesIndex is enabled
-			if _, present := cacheMetricNames[trimmedName]; !present{
+			if _, present := cacheMetricNames[trimmedName]; !present {
 				if listener.trieIndex {
 					if err := trieIdx.insert(trimmedName); err != nil {
 						return fmt.Errorf("updateFileList.trie: %s", err)
@@ -955,7 +909,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 				leafs[i] = false
 			}
 			files[i] = strings.Replace(p, "/", ".", -1)
-		} else if os.IsNotExist(err){
+		} else if os.IsNotExist(err) {
 			// cache-only, so no fileinfo
 			// mark "leafs" based on wsp suffix
 			p = p[len(listener.whisperData+"/"):]
@@ -966,7 +920,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 				leafs[i] = false
 			}
 			files[i] = strings.Replace(p, "/", ".", -1)
-		} else{
+		} else {
 			continue
 		}
 	}

@@ -3,14 +3,16 @@ module github.com/go-graphite/go-carbon
 go 1.14
 
 require (
-	cloud.google.com/go v0.18.0
+	cloud.google.com/go v0.56.0 // indirect
+	cloud.google.com/go/pubsub v1.2.0
 	contrib.go.opencensus.io/exporter/stackdriver v0.6.0 // indirect
-	github.com/BurntSushi/toml v0.3.0
+	github.com/BurntSushi/toml v0.3.1
 	github.com/NYTimes/gziphandler v1.0.1
 	github.com/OneOfOne/go-utils v0.0.0-20180319162427-6019ff89a94e
 	github.com/Shopify/sarama v1.17.0
 	github.com/Shopify/toxiproxy v2.1.4+incompatible // indirect
 	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973 // indirect
+	github.com/bookingcom/carbonapi v0.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb
 	github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0
@@ -39,21 +41,18 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_golang v0.9.1
-	github.com/prometheus/client_model v0.0.0-20180712105110-5c3871d89910 // indirect
 	github.com/prometheus/common v0.0.0-20181113130724-41aa239b4cce // indirect
 	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20180503174638-e2704e165165 // indirect
 	github.com/sevlyar/go-daemon v0.1.4
-	github.com/stretchr/testify v1.2.2
+	github.com/stretchr/testify v1.6.1
 	github.com/syndtr/goleveldb v0.0.0-20180815032940-ae2bd5eed72d
-	go.opencensus.io v0.15.0 // indirect
+	go.opentelemetry.io/otel v0.9.0
+	go.opentelemetry.io/otel/exporters/trace/jaeger v0.9.0
 	go.uber.org/atomic v1.3.2 // indirect
 	go.uber.org/multierr v1.1.0 // indirect
 	go.uber.org/zap v1.9.1
 	golang.org/x/net v0.0.0-20200520004742-59133d7f0dd7
-	golang.org/x/oauth2 v0.0.0-20180821212333-d2e6202438be // indirect
-	google.golang.org/api v0.0.0-20180906000440-49a9310a9145
-	google.golang.org/appengine v1.1.0 // indirect
-	google.golang.org/genproto v0.0.0-20180831171423-11092d34479b // indirect
-	google.golang.org/grpc v1.14.0
+	google.golang.org/api v0.29.0
+	google.golang.org/grpc v1.30.0
 )

@@ -7,7 +7,9 @@
 
 OpenCensus Go is a Go implementation of OpenCensus, a toolkit for
 collecting application performance and behavior monitoring data.
-Currently it consists of three major components: tags, stats, and tracing.
+Currently it consists of three major components: tags, stats and tracing.
+
+#### OpenCensus and OpenTracing have merged to form OpenTelemetry, which serves as the next major version of OpenCensus and OpenTracing. OpenTelemetry will offer backwards compatibility with existing OpenCensus integrations, and we will continue to make security patches to existing OpenCensus libraries for two years. Read more about the merger [here](https://medium.com/opentracing/a-roadmap-to-convergence-b074e5815289).
 
 ## Installation
 
@@ -29,7 +31,7 @@ integration with your RPC framework:
 
 * [net/http](https://godoc.org/go.opencensus.io/plugin/ochttp)
 * [gRPC](https://godoc.org/go.opencensus.io/plugin/ocgrpc)
-* [database/sql](https://godoc.org/github.com/basvanbeek/ocsql)
+* [database/sql](https://godoc.org/github.com/opencensus-integrations/ocsql)
 * [Go kit](https://godoc.org/github.com/go-kit/kit/tracing/opencensus)
 * [Groupcache](https://godoc.org/github.com/orijtech/groupcache)
 * [Caddy webserver](https://godoc.org/github.com/orijtech/caddy)
@@ -38,7 +40,7 @@ integration with your RPC framework:
 * [Redis goredis/redis](https://godoc.org/github.com/orijtech/redis)
 * [Memcache](https://godoc.org/github.com/orijtech/gomemcache)
 
-If you're a framework not listed here, you could either implement your own middleware for your
+If you're using a framework not listed here, you could either implement your own middleware for your
 framework or use [custom stats](#stats) and [spans](#spans) directly in your application.
 
 ## Exporters
@@ -55,6 +57,9 @@ can implement their own exporters by implementing the exporter interfaces
 * [Jaeger][exporter-jaeger] for traces
 * [AWS X-Ray][exporter-xray] for traces
 * [Datadog][exporter-datadog] for stats and traces
+* [Graphite][exporter-graphite] for stats
+* [Honeycomb][exporter-honeycomb] for traces
+* [New Relic][exporter-newrelic] for stats and traces
 
 ## Overview
 
@@ -72,11 +77,11 @@ in the same process or can be encoded to be transmitted on the wire. Usually, th
 be handled by an integration plugin, e.g. `ocgrpc.ServerHandler` and `ocgrpc.ClientHandler`
 for gRPC.
 
-Package tag allows adding or modifying tags in the current context.
+Package `tag` allows adding or modifying tags in the current context.
 
 [embedmd]:# (internal/readme/tags.go new)
 ```go
-ctx, err = tag.New(ctx,
+ctx, err := tag.New(ctx,
 	tag.Insert(osKey, "macOS-10.12.5"),
 	tag.Upsert(userIDKey, "cde36753ed"),
 )
@@ -121,7 +126,7 @@ Currently three types of aggregations are supported:
 
 [embedmd]:# (internal/readme/stats.go aggs)
 ```go
-distAgg := view.Distribution(0, 1<<32, 2<<32, 3<<32)
+distAgg := view.Distribution(1<<32, 2<<32, 3<<32)
 countAgg := view.Count()
 sumAgg := view.Sum()
 ```
@@ -134,7 +139,7 @@ if err := view.Register(&view.View{
 	Name:        "example.com/video_size_distribution",
 	Description: "distribution of processed video size over time",
 	Measure:     videoSize,
-	Aggregation: view.Distribution(0, 1<<32, 2<<32, 3<<32),
+	Aggregation: view.Distribution(1<<32, 2<<32, 3<<32),
 }); err != nil {
 	log.Fatalf("Failed to register view: %v", err)
 }
@@ -176,8 +181,8 @@ Spans can have parents or can be root spans if they don't have any parents.
 The current span is propagated in-process and across the network to allow associating
 new child spans with the parent.
 
-In the same process, context.Context is used to propagate spans.
-trace.StartSpan creates a new span as a root if the current context
+In the same process, `context.Context` is used to propagate spans.
+`trace.StartSpan` creates a new span as a root if the current context
 doesn't contain a span. Or, it creates a child of the span that is
 already in current context. The returned context can be used to keep
 propagating the newly created span in the current context.
@@ -193,8 +198,8 @@ defer span.End()
 Across the network, OpenCensus provides different propagation
 methods for different protocols.
 
-* gRPC integrations uses the OpenCensus' [binary propagation format](https://godoc.org/go.opencensus.io/trace/propagation).
-* HTTP integrations uses Zipkin's [B3](https://github.com/openzipkin/b3-propagation)
+* gRPC integrations use the OpenCensus' [binary propagation format](https://godoc.org/go.opencensus.io/trace/propagation).
+* HTTP integrations use Zipkin's [B3](https://github.com/openzipkin/b3-propagation)
   by default but can be configured to use a custom propagation method by setting another
   [propagation.HTTPFormat](https://godoc.org/go.opencensus.io/trace/propagation#HTTPFormat).
 
@@ -251,9 +256,12 @@ release in which the functionality was marked *Deprecated*.
 [new-ex]: https://godoc.org/go.opencensus.io/tag#example-NewMap
 [new-replace-ex]: https://godoc.org/go.opencensus.io/tag#example-NewMap--Replace
 
-[exporter-prom]: https://godoc.org/go.opencensus.io/exporter/prometheus
+[exporter-prom]: https://godoc.org/contrib.go.opencensus.io/exporter/prometheus
 [exporter-stackdriver]: https://godoc.org/contrib.go.opencensus.io/exporter/stackdriver
-[exporter-zipkin]: https://godoc.org/go.opencensus.io/exporter/zipkin
-[exporter-jaeger]: https://godoc.org/go.opencensus.io/exporter/jaeger
-[exporter-xray]: https://github.com/census-instrumentation/opencensus-go-exporter-aws
+[exporter-zipkin]: https://godoc.org/contrib.go.opencensus.io/exporter/zipkin
+[exporter-jaeger]: https://godoc.org/contrib.go.opencensus.io/exporter/jaeger
+[exporter-xray]: https://github.com/census-ecosystem/opencensus-go-exporter-aws
 [exporter-datadog]: https://github.com/DataDog/opencensus-go-exporter-datadog
+[exporter-graphite]: https://github.com/census-ecosystem/opencensus-go-exporter-graphite
+[exporter-honeycomb]: https://github.com/honeycombio/opencensus-exporter
+[exporter-newrelic]: https://github.com/newrelic/newrelic-opencensus-exporter-go

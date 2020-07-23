@@ -20,6 +20,8 @@ import (
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
+	"go.opentelemetry.io/otel/api/kv"
+	"go.opentelemetry.io/otel/api/trace"
 )
 
 type fetchResponse struct {
@@ -246,6 +248,14 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.Int("values_fetched", response.valuesFetched),
 		zap.Int("memory_used_bytes", response.memoryUsed),
 		zap.Int("http_code", http.StatusOK),
+	)
+
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(
+		kv.Bool("graphite.from_cache", fromCache),
+		kv.Int("graphite.metrics", response.metricsFetched),
+		kv.Int("graphite.values", response.valuesFetched),
+		kv.Int("graphite.memory_used", response.memoryUsed),
 	)
 
 }
