@@ -3,17 +3,13 @@ module github.com/go-graphite/go-carbon
 go 1.14
 
 require (
-	cloud.google.com/go v0.56.0 // indirect
 	cloud.google.com/go/pubsub v1.2.0
-	contrib.go.opencensus.io/exporter/stackdriver v0.6.0 // indirect
 	github.com/BurntSushi/toml v0.3.1
 	github.com/NYTimes/gziphandler v1.0.1
 	github.com/OneOfOne/go-utils v0.0.0-20180319162427-6019ff89a94e
 	github.com/Shopify/sarama v1.17.0
 	github.com/Shopify/toxiproxy v2.1.4+incompatible // indirect
 	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973 // indirect
-	github.com/bookingcom/carbonapi v0.1.0 // indirect
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb
 	github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
@@ -24,9 +20,7 @@ require (
 	github.com/go-graphite/go-whisper v0.0.0-20191220103904-f154aca40cdb
 	github.com/go-graphite/protocol v0.4.3-0.20180731190405-5ae324d48067
 	github.com/gogo/protobuf v1.1.2-0.20180830160456-5669497fd644
-	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b // indirect
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
-	github.com/googleapis/gax-go v2.0.0+incompatible // indirect
 	github.com/kardianos/osext v0.0.0-20170510131534-ae77be60afb1 // indirect
 	github.com/klauspost/compress v1.4.0
 	github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5 // indirect
@@ -39,7 +33,6 @@ require (
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/pierrec/lz4 v2.0.5+incompatible // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/prometheus/client_golang v0.9.1
 	github.com/prometheus/common v0.0.0-20181113130724-41aa239b4cce // indirect
 	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d // indirect

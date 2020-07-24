@@ -1,5 +1,4 @@
 # cloud.google.com/go v0.56.0
-## explicit
 cloud.google.com/go
 cloud.google.com/go/compute/metadata
 cloud.google.com/go/iam
@@ -12,8 +11,6 @@ cloud.google.com/go/pubsub
 cloud.google.com/go/pubsub/apiv1
 cloud.google.com/go/pubsub/internal/distribution
 cloud.google.com/go/pubsub/pstest
-# contrib.go.opencensus.io/exporter/stackdriver v0.6.0
-## explicit
 # github.com/BurntSushi/toml v0.3.1
 ## explicit
 github.com/BurntSushi/toml
@@ -33,10 +30,7 @@ github.com/apache/thrift/lib/go/thrift
 # github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973
 ## explicit
 github.com/beorn7/perks/quantile
-# github.com/bookingcom/carbonapi v0.1.0
-## explicit
 # github.com/davecgh/go-spew v1.1.1
-## explicit
 github.com/davecgh/go-spew/spew
 # github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb
 ## explicit
@@ -72,8 +66,6 @@ github.com/gogo/protobuf/gogoproto
 github.com/gogo/protobuf/proto
 github.com/gogo/protobuf/protoc-gen-gogo/descriptor
 github.com/gogo/protobuf/sortkeys
-# github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
-## explicit
 # github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e
 github.com/golang/groupcache/lru
 # github.com/golang/protobuf v1.4.2
@@ -95,8 +87,6 @@ github.com/google/go-cmp/cmp/internal/diff
 github.com/google/go-cmp/cmp/internal/flags
 github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
-# github.com/googleapis/gax-go v2.0.0+incompatible
-## explicit
 # github.com/googleapis/gax-go/v2 v2.0.5
 github.com/googleapis/gax-go/v2
 # github.com/jstemmer/go-junit-report v0.9.1
@@ -141,7 +131,6 @@ github.com/pierrec/lz4/internal/xxh32
 # github.com/pkg/errors v0.9.1
 ## explicit
 # github.com/pmezard/go-difflib v1.0.0
-## explicit
 github.com/pmezard/go-difflib/difflib
 # github.com/prometheus/client_golang v0.9.1
 ## explicit
