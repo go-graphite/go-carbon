@@ -141,6 +141,13 @@ type prometheusConfig struct {
 	Labels   map[string]string `toml:"labels"`
 }
 
+type tracingConfig struct {
+	Enabled        bool      `toml:"enabled"`
+	JaegerEndpoint string    `toml:"jaegerEndpoint"`
+	Stdout         bool      `toml:"stdout"`
+	SendTimeout    *Duration `toml:"send_timeout"`
+}
+
 // Config ...
 type Config struct {
 	Common       commonConfig                        `toml:"common"`
@@ -158,6 +165,7 @@ type Config struct {
 	Pprof        pprofConfig                         `toml:"pprof"`
 	Logging      []zapwriter.Config                  `toml:"logging"`
 	Prometheus   prometheusConfig                    `toml:"prometheus"`
+	Tracing      tracingConfig                       `toml:"tracing"`
 }
 
 func NewLoggingConfig() zapwriter.Config {
@@ -255,6 +263,12 @@ func NewConfig() *Config {
 			Enabled:  false,
 			Endpoint: "/metrics",
 			Labels:   make(map[string]string),
+		},
+		Tracing: tracingConfig{
+			Enabled: false,
+			SendTimeout: &Duration{
+				Duration: time.Second * 10,
+			},
 		},
 		Logging: nil,
 	}

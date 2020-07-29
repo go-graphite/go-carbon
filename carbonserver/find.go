@@ -18,6 +18,8 @@ import (
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
+	"go.opentelemetry.io/otel/api/kv"
+	"go.opentelemetry.io/otel/api/trace"
 )
 
 type findResponse struct {
@@ -31,6 +33,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	t0 := time.Now()
 	ctx := req.Context()
+	span := trace.SpanFromContext(ctx)
 
 	atomic.AddUint64(&listener.metrics.FindRequests, 1)
 
@@ -104,6 +107,11 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	accessLogger = accessLogger.With(
 		zap.Strings("query", query),
 		zap.String("format", format),
+	)
+
+	span.SetAttributes(
+		kv.String("graphite.query", strings.Join(query, ",")),
+		kv.String("graphite.format", format),
 	)
 
 	if len(query) == 0 {
@@ -181,6 +189,11 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		zap.Bool("from_cache", fromCache),
 		zap.Int("http_code", http.StatusOK),
 	)
+	span.SetAttributes(
+		kv.Int("graphite.files", response.files),
+		kv.Bool("graphite.from_cache", fromCache),
+	)
+
 	return
 }
 

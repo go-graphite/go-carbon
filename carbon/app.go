@@ -33,9 +33,9 @@ type NamedReceiver struct {
 	Name string
 }
 
-type wspConfigRetriever struct{
+type wspConfigRetriever struct {
 	getRetentionFunc func(string) (int, bool)
-	getAggrNameFunc func(string) (string, float64, bool)
+	getAggrNameFunc  func(string) (string, float64, bool)
 }
 
 func (r *wspConfigRetriever) MetricRetentionPeriod(metric string) (int, bool) {
@@ -61,6 +61,7 @@ type App struct {
 	PromRegisterer prometheus.Registerer
 	PromRegistry   *prometheus.Registry
 	exit           chan bool
+	FlushTraces    func()
 }
 
 // New App instance
@@ -190,6 +191,7 @@ func (app *App) ReloadConfig() error {
 }
 
 // Stop all socket listeners
+// Assumes we are holding app.Lock()
 func (app *App) stopListeners() {
 	logger := zapwriter.Logger("app")
 
@@ -220,6 +222,11 @@ func (app *App) stopListeners() {
 			logger.Debug("receiver stopped", zap.String("name", app.Receivers[i].Name))
 		}
 		app.Receivers = nil
+	}
+
+	if app.FlushTraces != nil {
+		app.FlushTraces()
+		logger.Debug("traces flushed")
 	}
 }
 
@@ -454,18 +461,21 @@ func (app *App) Start() (err error) {
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
-		if conf.Carbonserver.CacheScan{
+		if conf.Carbonserver.CacheScan {
 			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
 
 			retriever := &wspConfigRetriever{
 				getRetentionFunc: app.Persister.GetRetentionPeriod,
-				getAggrNameFunc: app.Persister.GetAggrConf,
+				getAggrNameFunc:  app.Persister.GetAggrConf,
 			}
 			carbonserver.SetConfigRetriever(retriever)
 		}
 
 		if conf.Prometheus.Enabled {
 			carbonserver.InitPrometheus(app.PromRegisterer)
+		}
+		if conf.Tracing.Enabled {
+			app.FlushTraces = carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, conf.Tracing.SendTimeout.Value())
 		}
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {

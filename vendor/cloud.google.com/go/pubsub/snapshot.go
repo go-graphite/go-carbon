@@ -1,4 +1,4 @@
-// Copyright 2017 Google Inc. All Rights Reserved.
+// Copyright 2017 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,12 +15,12 @@
 package pubsub
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/golang/protobuf/ptypes"
-	"golang.org/x/net/context"
 	pb "google.golang.org/genproto/googleapis/pubsub/v1"
 )
 
@@ -84,8 +84,8 @@ func (snaps *SnapshotConfigIterator) Next() (*SnapshotConfig, error) {
 }
 
 // Delete deletes a snapshot.
-func (snap *Snapshot) Delete(ctx context.Context) error {
-	return snap.c.subc.DeleteSnapshot(ctx, &pb.DeleteSnapshotRequest{Snapshot: snap.name})
+func (s *Snapshot) Delete(ctx context.Context) error {
+	return s.c.subc.DeleteSnapshot(ctx, &pb.DeleteSnapshotRequest{Snapshot: s.name})
 }
 
 // SeekToTime seeks the subscription to a point in time.
@@ -106,7 +106,7 @@ func (s *Subscription) SeekToTime(ctx context.Context, t time.Time) error {
 	}
 	_, err = s.c.subc.Seek(ctx, &pb.SeekRequest{
 		Subscription: s.name,
-		Target:       &pb.SeekRequest_Time{ts},
+		Target:       &pb.SeekRequest_Time{Time: ts},
 	})
 	return err
 }
@@ -142,7 +142,7 @@ func (s *Subscription) CreateSnapshot(ctx context.Context, name string) (*Snapsh
 func (s *Subscription) SeekToSnapshot(ctx context.Context, snap *Snapshot) error {
 	_, err := s.c.subc.Seek(ctx, &pb.SeekRequest{
 		Subscription: s.name,
-		Target:       &pb.SeekRequest_Snapshot{snap.name},
+		Target:       &pb.SeekRequest_Snapshot{Snapshot: snap.name},
 	})
 	return err
 }

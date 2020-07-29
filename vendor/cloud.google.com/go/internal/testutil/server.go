@@ -1,5 +1,5 @@
 /*
-Copyright 2016 Google Inc. All Rights Reserved.
+Copyright 2016 Google LLC
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,11 +17,15 @@ limitations under the License.
 package testutil
 
 import (
+	"fmt"
+	"log"
 	"net"
+	"regexp"
 	"strconv"
 
-	grpc "google.golang.org/grpc"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // A Server is an in-process gRPC server, listening on a system-chosen port on
@@ -43,6 +47,7 @@ import (
 //	...
 type Server struct {
 	Addr string
+	Port int
 	l    net.Listener
 	Gsrv *grpc.Server
 }
@@ -50,12 +55,19 @@ type Server struct {
 // NewServer creates a new Server. The Server will be listening for gRPC connections
 // at the address named by the Addr field, without TLS.
 func NewServer(opts ...grpc.ServerOption) (*Server, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	return NewServerWithPort(0, opts...)
+}
+
+// NewServerWithPort creates a new Server at a specific port. The Server will be listening
+// for gRPC connections at the address named by the Addr field, without TLS.
+func NewServerWithPort(port int, opts ...grpc.ServerOption) (*Server, error) {
+	l, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", port))
 	if err != nil {
 		return nil, err
 	}
 	s := &Server{
 		Addr: l.Addr().String(),
+		Port: parsePort(l.Addr().String()),
 		l:    l,
 		Gsrv: grpc.NewServer(opts...),
 	}
@@ -65,7 +77,11 @@ func NewServer(opts ...grpc.ServerOption) (*Server, error) {
 // Start causes the server to start accepting incoming connections.
 // Call Start after registering handlers.
 func (s *Server) Start() {
-	go s.Gsrv.Serve(s.l)
+	go func() {
+		if err := s.Gsrv.Serve(s.l); err != nil {
+			log.Printf("testutil.Server.Start: %v", err)
+		}
+	}()
 }
 
 // Close shuts down the server.
@@ -90,7 +106,7 @@ func PageBounds(pageSize int, pageToken string, length int) (from, to int, nextP
 	if pageToken != "" {
 		from, err = strconv.Atoi(pageToken)
 		if err != nil {
-			return 0, 0, "", grpc.Errorf(codes.InvalidArgument, "bad page token: %v", err)
+			return 0, 0, "", status.Errorf(codes.InvalidArgument, "bad page token: %v", err)
 		}
 		if from >= length {
 			return length, length, "", nil
@@ -101,4 +117,19 @@ func PageBounds(pageSize int, pageToken string, length int) (from, to int, nextP
 		nextPageToken = strconv.Itoa(to)
 	}
 	return from, to, nextPageToken, nil
+}
+
+var portParser = regexp.MustCompile(`:[0-9]+`)
+
+func parsePort(addr string) int {
+	res := portParser.FindAllString(addr, -1)
+	if len(res) == 0 {
+		panic(fmt.Errorf("parsePort: found no numbers in %s", addr))
+	}
+	stringPort := res[0][1:] // strip the :
+	p, err := strconv.ParseInt(stringPort, 10, 32)
+	if err != nil {
+		panic(err)
+	}
+	return int(p)
 }
