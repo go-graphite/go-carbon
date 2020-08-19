@@ -88,6 +88,9 @@ type metricStruct struct {
 	QueryCacheMiss       uint64
 	FindCacheHit         uint64
 	FindCacheMiss        uint64
+	TrieNodes            uint64
+	TrieFiles            uint64
+	TrieDirs             uint64
 }
 
 type requestsTimes struct {
@@ -637,12 +640,13 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var details = make(map[string]*protov3.MetricDetails)
 	var trieIdx *trieIndex
 	var metricsKnown uint64
+	var infos []zap.Field
 	if listener.trieIndex {
 		if fidx == nil || !listener.concurrentIndex {
 			trieIdx = newTrie(".wsp")
 		} else {
 			trieIdx = fidx.trieIdx
-			trieIdx.root.mark++
+			trieIdx.root.gen++
 		}
 	}
 
@@ -774,8 +778,15 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		}
 	}
 
-	if listener.concurrentIndex && fidx != nil {
+	if listener.concurrentIndex && trieIdx != nil {
 		trieIdx.prune()
+
+		start := time.Now()
+		count, files, dirs, _, _, _, _, _ := trieIdx.countNodes()
+		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
+		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
+		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
+		infos = append(infos, zap.Duration("trie_count_nodes_time", time.Now().Sub(start)))
 	}
 
 	var stat syscall.Statfs_t
@@ -807,14 +818,13 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	var pruned int
 	var indexType = "trigram"
-	var infos []zap.Field
 	t0 = time.Now()
 	if listener.trieIndex {
 		indexType = "trie"
 		nfidx.trieIdx = trieIdx
 		infos = append(
 			infos,
-			zap.Int("trie_depth", nfidx.trieIdx.depth),
+			zap.Int("trie_depth", int(nfidx.trieIdx.depth)),
 			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
 		)
 		if listener.trigramIndex && !listener.concurrentIndex {
@@ -1107,6 +1117,12 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 	sender("find_cache_hit", &listener.metrics.FindCacheHit, send)
 	sender("find_cache_miss", &listener.metrics.FindCacheMiss, send)
+
+	if listener.concurrentIndex {
+		senderRaw("trie_index_nodes", &listener.metrics.TrieNodes, send)
+		senderRaw("trie_index_files", &listener.metrics.TrieFiles, send)
+		senderRaw("trie_index_dirs", &listener.metrics.TrieDirs, send)
+	}
 
 	sender("alloc", &alloc, send)
 	sender("total_alloc", &totalAlloc, send)

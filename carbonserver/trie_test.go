@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -672,17 +673,23 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 	var filem sync.Map
 	var factor = 100
 	go func() {
-		for i := 0; i < factor; i++ {
-			for j := 0; j < factor; j++ {
-				for k := 0; k < factor; k++ {
-					filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
-					trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k))
-					// if (i+j+k)%5 == 0 {
-					// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
-					// }
+		for run := 0; run < 3; run++ {
+			for i := 0; i < factor; i++ {
+				for j := 0; j < factor; j++ {
+					for k := 0; k < factor; k++ {
+						filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
+						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k))
+						// if (i+j+k)%5 == 0 {
+						// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
+						// }
+					}
 				}
 			}
+
+			trieIndex.prune()
+			trieIndex.root.gen++
 		}
+
 		donec <- true
 	}()
 
@@ -714,41 +721,116 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 }
 
 func TestTriePrune(t *testing.T) {
-	trieIndex := newTrie(".wsp")
+	cases := []struct {
+		files1 []string
+		files2 []string
+		expect []string
+	}{
+		0: {
+			files1: []string{
+				"/level-0/level-1/level-2/memory.wsp",
+				"/level-0/level-1/level-2-1/memory.wsp",
+				"/level-0/level-1/level-2-2.wsp",
+				"/level-0/level-1/level-2-2/memory1.wsp",
+				"/level-0/level-1/level-2-2/memory.wsp",
+				"/level-0/level-1/level-2-2/memory2.wsp",
+				"/level-0/level-1/cpu.wsp",
+				"/level-0/disk.wsp",
+			},
+			files2: []string{
+				"/level-0/level-1/cpu.wsp",
+				"/level-0/level-1/level-2-2/memory.wsp",
+				"/level-0/disk.wsp",
+			},
+			expect: []string{
+				"level-0.disk",
+				"level-0.level-1.cpu",
+				"level-0.level-1.level-2-2.memory",
+			},
+		},
+		1: {
+			files1: []string{
+				"/abc.wsp",
+				"/abd.wsp",
+				"/adc.wsp",
+			},
+			files2: []string{
+				"/abc.wsp",
+				"/xyz.wsp",
+			},
+			expect: []string{
+				"abc",
+				"xyz",
+			},
+		},
+		2: {
+			files1: []string{
+				"prefix-1006_xxx/rate.wsp",
+			},
+			files2: []string{
+				"prefix-1010_xxx/chkdown.wsp",
+				"prefix-1005_xxx/bin.wsp",
+				"prefix-1001_xxx/lbtot.wsp",
+				"prefix-1003_xxx/hrsp_1xx.wsp",
+				"prefix-1007_xxx/smax.wsp",
+				"prefix-1008_xxx/bout.wsp",
+			},
+			expect: []string{
+				"prefix-1001_xxx.lbtot",
+				"prefix-1003_xxx.hrsp_1xx",
+				"prefix-1005_xxx.bin",
+				"prefix-1007_xxx.smax",
+				"prefix-1008_xxx.bout",
+				"prefix-1010_xxx.chkdown",
+			},
+		},
+	}
 
-	trieIndex.insert("/level-0/level-1/level-2/memory.wsp")
-	trieIndex.insert("/level-0/level-1/level-2-1/memory.wsp")
-	trieIndex.insert("/level-0/level-1/level-2-2.wsp")
-	trieIndex.insert("/level-0/level-1/level-2-2/memory1.wsp")
-	trieIndex.insert("/level-0/level-1/level-2-2/memory.wsp")
-	trieIndex.insert("/level-0/level-1/level-2-2/memory2.wsp")
-	trieIndex.insert("/level-0/level-1/cpu.wsp")
-	trieIndex.insert("/level-0/disk.wsp")
+	for i, c := range cases {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			ctrieIndex := newTrie(".wsp")
+			strieIndex := newTrie(".wsp")
 
-	// trieIndex.dump(os.Stdout)
+			for _, f := range c.files1 {
+				ctrieIndex.insert(f)
+			}
 
-	// println(trieIndex.countNodes())
+			ctrieIndex.root.gen++
+			for _, f := range c.files2 {
+				ctrieIndex.insert(f)
+				strieIndex.insert(f)
+			}
 
-	trieIndex.root.mark++
-	trieIndex.insert("/level-0/level-1/cpu.wsp")
-	trieIndex.insert("/level-0/level-1/level-2-2/memory.wsp")
-	trieIndex.insert("/level-0/disk.wsp")
+			ctrieIndex.prune()
 
-	// trieIndex.dump(os.Stdout)
+			if got, want := ctrieIndex.allMetrics('.'), c.expect; !reflect.DeepEqual(got, want) {
+				t.Errorf("g = %s; want %s", got, want)
+			}
 
-	// println(trieIndex.countNodes())
-
-	trieIndex.prune()
-	// trieIndex.dump(os.Stdout)
-
-	// println(trieIndex.countNodes())
-
-	if got, want := trieIndex.allMetrics('.'), []string{
-		"level-0.level-1.level-2-2.memory",
-		"level-0.level-1.cpu",
-		"level-0.disk",
-	}; !reflect.DeepEqual(got, want) {
-		t.Errorf("g = %s; want %s", got, want)
+			ccount, cfiles, cdirs, conec, conefc, conedc, ccountByChildren, _ := ctrieIndex.countNodes()
+			scount, sfiles, sdirs, sonec, sonefc, sonedc, scountByChildren, _ := strieIndex.countNodes()
+			if ccount != scount {
+				t.Errorf("ccount = %v; scount %v", ccount, scount)
+			}
+			if cfiles != sfiles {
+				t.Errorf("cfiles = %v; sfiles %v", cfiles, sfiles)
+			}
+			if cdirs != sdirs {
+				t.Errorf("cdirs = %v; sdirs %v", cdirs, sdirs)
+			}
+			if conec != sonec {
+				t.Errorf("conec = %v; sonec %v", conec, sonec)
+			}
+			if conefc != sonefc {
+				t.Errorf("conefc = %v; sonefc %v", conefc, sonefc)
+			}
+			if conedc != sonedc {
+				t.Errorf("conedc = %v; sonedc %v", conedc, sonedc)
+			}
+			if ccountByChildren != scountByChildren {
+				t.Errorf("ccountByChildren = %s; scountByChildren %s", ccountByChildren, scountByChildren)
+			}
+		})
 	}
 }
 
