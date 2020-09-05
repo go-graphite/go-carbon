@@ -12,12 +12,12 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/klauspost/compress/gzip"
-	"github.com/klauspost/compress/snappy"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/snappy"
 	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"

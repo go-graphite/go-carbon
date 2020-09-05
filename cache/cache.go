@@ -61,8 +61,8 @@ type Cache struct {
 type Shard struct {
 	sync.RWMutex     // Read Write mutex, guards access to internal map.
 	items            map[string]*points.Points
-	notConfirmed     []*points.Points // linear search for value/slot
-	notConfirmedUsed int              // search value in notConfirmed[:notConfirmedUsed]
+	notConfirmed     []*points.Points    // linear search for value/slot
+	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
 	adds             map[string]struct{} // map to maintain all the new metric names
 }
 
@@ -328,13 +328,13 @@ func (c *Cache) WriteoutQueue() *WriteoutQueue {
 	return c.writeoutQueue
 }
 
-// called at every scan-frequency by fileListUpdater in carbonserver. 
+// called at every scan-frequency by fileListUpdater in carbonserver.
 // Iterates over every shard to:
 // - collect the new metric names (append shard.adds map to slice)
 // - replace shard.adds with new empty map
 func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
-	metricNames := make([]map[string]struct{},shardCount)
-	for i:=0; i<shardCount ; i++ {
+	metricNames := make([]map[string]struct{}, shardCount)
+	for i := 0; i < shardCount; i++ {
 		shard, newAdds := c.data[i], make(map[string]struct{})
 		shard.Lock()
 		currNames := shard.adds

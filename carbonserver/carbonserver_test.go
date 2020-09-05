@@ -13,11 +13,11 @@ import (
 	"time"
 
 	"github.com/dgryski/go-trigram"
-	"github.com/go-graphite/go-whisper"
-	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-whisper"
+	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	"go.uber.org/zap"
 )
 
@@ -26,9 +26,9 @@ type point struct {
 	Value     float64
 }
 
-type wspConfigTestRetriever struct{
+type wspConfigTestRetriever struct {
 	getRetentionFunc func(string) (int, bool)
-	getAggrNameFunc func(string) (string, float64, bool)
+	getAggrNameFunc  func(string) (string, float64, bool)
 }
 
 func (r *wspConfigTestRetriever) MetricRetentionPeriod(metric string) (int, bool) {
@@ -85,7 +85,7 @@ func TestExtractTrigrams(t *testing.T) {
 	}
 }
 
-func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper{
+func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper {
 	retentionStr := "60s:90d,300s:30d"
 	pattern, _ := regexp.Compile(".*")
 	retentions, _ := persister.ParseRetentionDefs(retentionStr)
@@ -100,7 +100,7 @@ func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper{
 	}
 
 	var testSchemas persister.WhisperSchemas
-	testSchemas = append(testSchemas,schema)
+	testSchemas = append(testSchemas, schema)
 
 	testPersister := persister.NewWhisper(
 		dataDir,
@@ -153,13 +153,13 @@ func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache, carbo
 		}
 	}
 
-	if testData.fillCacheIndex{
+	if testData.fillCacheIndex {
 		// enable cache-scan to support queries for cache-only metrics
 		carbonserver.SetCacheGetMetricsFunc(cache.GetRecentNewMetrics)
 		testPersister := getTestPersister(testData.path, cache)
 		retriever := &wspConfigTestRetriever{
 			getRetentionFunc: testPersister.GetRetentionPeriod,
-			getAggrNameFunc: testPersister.GetAggrConf,
+			getAggrNameFunc:  testPersister.GetAggrConf,
 		}
 		carbonserver.SetConfigRetriever(retriever)
 	}

@@ -70,8 +70,8 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 			hostname = "(unknown)"
 		}
 		pvResponse := protov3.CapabilityResponse{
-			SupportedProtocols: []string{"carbonapi_v3_pb", "carbonapi_v2_pb", "graphite-web-pickle", "graphite-web-pickle-1.1", "carbonapi_v2_json"},
-			Name:               hostname,
+			SupportedProtocols:        []string{"carbonapi_v3_pb", "carbonapi_v2_pb", "graphite-web-pickle", "graphite-web-pickle-1.1", "carbonapi_v2_json"},
+			Name:                      hostname,
 			HighPrecisionTimestamps:   false,
 			SupportFilteringFunctions: false,
 			LikeSplittedRequests:      true,

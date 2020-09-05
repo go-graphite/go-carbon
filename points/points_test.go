@@ -32,7 +32,7 @@ func TestCopyAndEq(t *testing.T) {
 		OnePoint("metric.name", 42.16, timestamp),
 		OnePoint("metric.name", 42.15, timestamp+1),
 		New(),
-		&Points{
+		{
 			Metric: "metric.name",
 		},
 		points.Copy().Append(Point{

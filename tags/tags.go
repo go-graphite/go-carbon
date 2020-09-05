@@ -84,7 +84,7 @@ func (t *Tags) Add(value string, now bool) {
 		t.logger.Error("queue database not initialized", zap.Error(t.qErr))
 		return
 	}
-	if now || (atomic.AddUint64(&t.updateCounter, 1) % t.options.TagDBUpdateInterval == 0) {
+	if now || (atomic.AddUint64(&t.updateCounter, 1)%t.options.TagDBUpdateInterval == 0) {
 		t.q.Add(value)
 	}
 }

@@ -469,21 +469,21 @@ func (p *Whisper) Stop() {
 	})
 }
 
-func (p *Whisper) GetRetentionPeriod(metric string) (int, bool){
+func (p *Whisper) GetRetentionPeriod(metric string) (int, bool) {
 	schema, ok := p.schemas.Match(metric)
 	if !ok {
-		return 0,false
+		return 0, false
 	}
 
 	retentionStep := schema.Retentions[0].SecondsPerPoint()
 
-	return retentionStep,true
+	return retentionStep, true
 }
 
-func (p *Whisper) GetAggrConf(metric string) (string, float64, bool){
+func (p *Whisper) GetAggrConf(metric string) (string, float64, bool) {
 	aggr := p.aggregation.Match(metric)
 	if aggr == nil {
-			return "",float64(0),false
+		return "", float64(0), false
 	}
 
 	return aggr.Name(), aggr.XFilesFactor(), true

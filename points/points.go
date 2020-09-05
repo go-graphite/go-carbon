@@ -32,7 +32,7 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 	return &Points{
 		Metric: metric,
 		Data: []Point{
-			Point{
+			{
 				Value:     value,
 				Timestamp: timestamp,
 			},

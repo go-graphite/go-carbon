@@ -3,9 +3,9 @@ package parse
 import (
 	"errors"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/go-graphite/go-carbon/helper/carbonpb"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/gogo/protobuf/proto"
 )
 
 func Protobuf(body []byte) ([]*points.Points, error) {
