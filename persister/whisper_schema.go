@@ -111,13 +111,15 @@ func ReadWhisperSchemas(filename string) (WhisperSchemas, error) {
 		}
 		schema.Priority = int64(p)<<32 - int64(i) // to sort records with same priority by position in file
 
-		if val, ok := section["compressed"]; ok && val == "true" {
+		val, ok := section["compressed"]
+		switch {
+		case ok && val == "true":
 			compressed := true
 			schema.Compressed = &compressed
-		} else if ok && val == "false" {
+		case ok && val == "false":
 			compressed := false
 			schema.Compressed = &compressed
-		} else if ok {
+		case ok:
 			return nil, fmt.Errorf("[persister] Failed to parse compressed %q for [%s]: %s", section["compressed"], schema.Name, "unknown value, please use true/false")
 		}
 

@@ -272,13 +272,14 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		data, err := framedConn.ReadFrame()
-		if err == io.EOF {
+		switch {
+		case err == io.EOF:
 			return
-		} else if err == framing.ErrPrefixLength {
+		case err == framing.ErrPrefixLength:
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("bad message size")
 			return
-		} else if err != nil {
+		case err != nil:
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("can't read message body", zap.Error(err))
 			return

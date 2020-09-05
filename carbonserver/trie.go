@@ -572,11 +572,12 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		isDir = false
 		hasMoreNodes = false
 		for _, child := range cur.childrens {
-			if child == fileNode {
+			switch {
+			case child == fileNode:
 				isFile = true
-			} else if child.dir() {
+			case child.dir():
 				isDir = true
-			} else {
+			default:
 				hasMoreNodes = true
 			}
 		}
@@ -860,11 +861,12 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 
 	var slashInBraces, inAlter bool
 	for _, c := range query {
-		if c == '{' {
+		switch {
+		case c == '{':
 			inAlter = true
-		} else if c == '}' {
+		case c == '}':
 			inAlter = false
-		} else if inAlter && c == '/' {
+		case inAlter && c == '/':
 			slashInBraces = true
 			break
 		}

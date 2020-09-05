@@ -87,7 +87,7 @@ func TestExtractTrigrams(t *testing.T) {
 
 func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper {
 	retentionStr := "60s:90d,300s:30d"
-	pattern, _ := regexp.Compile(".*")
+	pattern := regexp.MustCompile(".*")
 	retentions, _ := persister.ParseRetentionDefs(retentionStr)
 	f := false
 	schema := persister.Schema{

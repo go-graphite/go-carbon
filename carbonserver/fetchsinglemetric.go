@@ -98,7 +98,8 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		zap.Int("untilTime", int(untilTime)),
 	)
 	m, err := listener.fetchFromDisk(metric, fromTime, untilTime)
-	if err == nil {
+	switch {
+	case err == nil:
 		// Should never happen, because we have a check for proper archive now
 		if m.Timeseries == nil {
 			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
@@ -131,7 +132,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		)
 
 		return resp, nil
-	} else if os.IsNotExist(err) && listener.cacheGetRecentMetrics != nil {
+	case os.IsNotExist(err) && listener.cacheGetRecentMetrics != nil:
 		//Failed to fetch from disk, try to fetch from cache
 		resp := response{
 			Name:           metric,
@@ -150,7 +151,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		)
 
 		return resp, nil
-	} else {
+	default:
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("failed to fetch points", zap.Error(err))
 		return response{}, err

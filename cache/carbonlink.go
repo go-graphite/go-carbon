@@ -45,7 +45,8 @@ func pickleGetStr(buf *[]byte) (string, bool) {
 	}
 	b := *buf
 
-	if b[0] == 'U' { // short string
+	switch {
+	case b[0] == 'U': // short string
 		if len(b) >= 2 {
 			sLen := int(uint8(b[1]))
 			if len(b) >= 2+sLen {
@@ -53,7 +54,7 @@ func pickleGetStr(buf *[]byte) (string, bool) {
 				return string(b[2 : 2+sLen]), true
 			}
 		}
-	} else if b[0] == 'T' || b[0] == 'X' { //long string or utf8 string
+	case b[0] == 'T' || b[0] == 'X': //long string or utf8 string
 		if len(b) >= 5 {
 			sLen := int(binary.LittleEndian.Uint32(b[1:]))
 			if len(b) >= 5+sLen {
@@ -61,7 +62,7 @@ func pickleGetStr(buf *[]byte) (string, bool) {
 				return string(b[5 : 5+sLen]), true
 			}
 		}
-	} else if bytes.Index(b, []byte("\x8c")) == 0 { // Pickle protocol 4 or 5
+	case bytes.Index(b, []byte("\x8c")) == 0: // Pickle protocol 4 or 5
 		if len(b) >= 2 {
 			sLen := int(uint8(b[1]))
 			if len(b) >= 2+sLen {
@@ -102,17 +103,18 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 	asciiPklTypeBytes := []byte("U\x04type")
 
 	var unicodePklMetricBytes, unicodePklTypeBytes []byte
-	if (expectBytes(&d, []byte("\x80\x02}")) ||
-		expectBytes(&d, []byte("\x80\x03}"))) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")) {
+	switch {
+	case (expectBytes(&d, []byte("\x80\x02}")) ||
+		expectBytes(&d, []byte("\x80\x03}"))) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")):
 		// message is using pickle protocol 2 or 3.
 		// unicode bytes if Pickle request came from Python 3.0+
 		unicodePklMetricBytes = []byte("X\x06\x00\x00\x00metric")
 		unicodePklTypeBytes = []byte("X\x04\x00\x00\x00type")
-	} else if protocolFourOrFiveFirstBytes(&d) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")) {
+	case protocolFourOrFiveFirstBytes(&d) && pickleMaybeMemo(&d) && expectBytes(&d, []byte("(")):
 		// message is using pickle protocol 4, or 5
 		unicodePklMetricBytes = []byte("\x8c\x06metric")
 		unicodePklTypeBytes = []byte("\x8c\x04type")
-	} else {
+	default:
 		return nil, fmt.Errorf("Bad pickle message, unknown pickle protocol")
 	}
 
@@ -121,7 +123,8 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 	var Metric, Type string
 	var ok bool
 
-	if expectBytes(&d, asciiPklMetricBytes) || expectBytes(&d, unicodePklMetricBytes) {
+	switch {
+	case expectBytes(&d, asciiPklMetricBytes) || expectBytes(&d, unicodePklMetricBytes):
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
@@ -145,8 +148,7 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 
 		req.Metric = Metric
 		req.Type = Type
-
-	} else if expectBytes(&d, asciiPklTypeBytes) || expectBytes(&d, unicodePklTypeBytes) {
+	case expectBytes(&d, asciiPklTypeBytes) || expectBytes(&d, unicodePklTypeBytes):
 		if !pickleMaybeMemo(&d) {
 			return nil, badErr
 		}
@@ -171,8 +173,7 @@ func ParseCarbonlinkRequest(d []byte) (*CarbonlinkRequest, error) {
 
 		req.Metric = Metric
 		req.Type = Type
-
-	} else {
+	default:
 		return nil, badErr
 	}
 
@@ -245,11 +246,12 @@ func packReply(data []points.Point) []byte {
 		}
 	}
 
-	if numPoints == 0 {
+	switch {
+	case numPoints == 0:
 		buf.Write([]byte{'s', '.'})
-	} else if numPoints == 1 {
+	case numPoints == 1:
 		buf.Write([]byte{'a', 's', '.'})
-	} else if numPoints > 1 {
+	case numPoints > 1:
 		buf.Write([]byte{'e', 's', '.'})
 	}
 

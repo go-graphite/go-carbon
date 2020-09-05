@@ -575,7 +575,7 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 			for i, seg := range split {
 				fileName = filepath.Join(fileName, seg)
 				if i == len(split)-1 {
-					fileName = fileName + ".wsp"
+					fileName += ".wsp"
 				}
 				if _, ok := cacheMetricNames[fileName]; !ok {
 					cacheMetricNames[fileName] = struct{}{}
@@ -899,7 +899,8 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	leafs := make([]bool, len(files))
 	for i, p := range files {
 		s, err := os.Stat(p)
-		if err == nil {
+		switch {
+		case err == nil:
 			// exists on disk
 			p = p[len(listener.whisperData+"/"):]
 			if !s.IsDir() && strings.HasSuffix(p, ".wsp") {
@@ -909,7 +910,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 				leafs[i] = false
 			}
 			files[i] = strings.Replace(p, "/", ".", -1)
-		} else if os.IsNotExist(err) {
+		case os.IsNotExist(err):
 			// cache-only, so no fileinfo
 			// mark "leafs" based on wsp suffix
 			p = p[len(listener.whisperData+"/"):]
@@ -920,7 +921,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 				leafs[i] = false
 			}
 			files[i] = strings.Replace(p, "/", ".", -1)
-		} else {
+		default:
 			continue
 		}
 	}
