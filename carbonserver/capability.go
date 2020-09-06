@@ -83,7 +83,7 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		switch formatCode {
 		case jsonFormat:
 			contentType = httpHeaders.ContentTypeJSON
-			data, err = json.Marshal(pvResponse)
+			data, _ = json.Marshal(pvResponse)
 		case protoV3Format:
 			contentType = httpHeaders.ContentTypeCarbonAPIv3PB
 			data, err = pvResponse.Marshal()

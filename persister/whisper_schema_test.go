@@ -53,7 +53,7 @@ func TestParseRetentionDefs(t *testing.T) {
 	}
 
 	// unknown letter
-	ret, err = ParseRetentionDefs("10s:24v")
+	_, err = ParseRetentionDefs("10s:24v")
 	assert.Error(err)
 }
 

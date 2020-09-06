@@ -696,7 +696,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	}
 
 	var freeSpace uint64
-	if stat.Bavail >= 0 {
+	// diskspace can be negative and Bavail is therefore int64
+	if stat.Bavail >= 0 { // nolint:staticcheck
 		freeSpace = uint64(stat.Bavail) * uint64(stat.Bsize)
 	}
 	totalSpace := stat.Blocks * uint64(stat.Bsize)
@@ -1137,7 +1138,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	listener.exitChan = make(chan struct{})
 	if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
 		listener.forceScanChan = make(chan struct{})
-		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan)
+		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan) //nolint:staticcheck
 		listener.forceScanChan <- struct{}{}
 	}
 

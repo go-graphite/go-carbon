@@ -72,7 +72,7 @@ func (api *Api) Listen(addr *net.TCPAddr) error {
 		api.Go(func(exit chan struct{}) {
 			defer s.Stop()
 
-			if err := s.Serve(tcpListener); err != nil {
+			if err := s.Serve(tcpListener); err != nil { //nolint:staticcheck
 				// may be stopped - not error
 				// zapwriter.Logger("api").Fatal("failed to serve", zap.Error(err))
 			}
