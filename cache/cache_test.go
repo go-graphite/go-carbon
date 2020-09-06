@@ -67,8 +67,6 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 	return cache
 }
 
-var gp *points.Points
-
 func benchmarkStrategy(b *testing.B, strategy string) {
 	cache := createCacheAndPopulate(1000*1000, 100)
 	if err := cache.SetWriteStrategy(strategy); err != nil {

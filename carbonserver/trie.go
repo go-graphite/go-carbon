@@ -15,9 +15,7 @@ import (
 // dfa inspiration: https://swtch.com/~rsc/regexp/
 
 const (
-	gstateSplit  = 128
-	gstateMatch  = 129
-	gstateRanges = 130
+	gstateSplit = 128
 )
 
 var endGstate = &gstate{}

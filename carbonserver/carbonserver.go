@@ -392,11 +392,6 @@ type jsonMetricDetailsResponse struct {
 	TotalSpace uint64
 }
 
-const (
-	indexTypeTrigram = iota
-	indexTypeTrie
-)
-
 type fileIndex struct {
 	typ int
 
