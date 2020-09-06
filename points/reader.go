@@ -73,7 +73,7 @@ func ReadBinary(r io.Reader, callback func(*Points)) error {
 
 		io.ReadAtLeast(reader, buf[:l], int(l))
 
-		cnt, err := binary.ReadVarint(reader)
+		cnt, _ := binary.ReadVarint(reader)
 
 		var v, t, v0, t0 int64
 

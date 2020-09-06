@@ -121,7 +121,7 @@ func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache, carbo
 	if testData.retention == "" {
 		testData.retention = "1m:10m,2m:30m"
 	}
-	retentions, err := whisper.ParseRetentionDefs(testData.retention)
+	retentions, err := whisper.ParseRetentionDefs(testData.retention) //nolint
 
 	if testData.createWhisper {
 		wsp, err = whisper.Create(filepath.Join(testData.path, testData.name+".wsp"), retentions, whisper.Last, 0.0)

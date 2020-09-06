@@ -389,7 +389,6 @@ outer:
 	inner:
 		for ci := 0; ci < len(cur.childrens); ci++ {
 			child := cur.childrens[ci]
-			match = 0
 
 			if len(child.c) == 0 || child.c[0] != path[start] {
 				continue
