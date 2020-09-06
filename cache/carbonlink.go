@@ -306,7 +306,7 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 
 		listener.Go(func(exit chan bool) {
 			<-exit
-			tcpListener.Close()
+			tcpListener.Close() //skipcq: GSC-G104
 		})
 
 		listener.Go(func(exit chan bool) {

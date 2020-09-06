@@ -92,7 +92,7 @@ func BenchmarkFilePath(b *testing.B) {
 		x = FilePath("/data", m, false)
 	}
 
-	if len(x) == 0 {
+	if x == "" {
 		b.FailNow()
 	}
 }

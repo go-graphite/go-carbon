@@ -335,7 +335,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 
 		rcv.Go(func(exit chan bool) {
 			<-exit
-			tcpListener.Close()
+			tcpListener.Close() //skipcq: GSC-G104
 		})
 
 		handler := rcv.HandleConnection
