@@ -27,7 +27,7 @@ type Collector struct {
 	endpoint       string
 	data           chan *points.Points
 	stats          []statFunc
-	logger         *zap.Logger
+	logger         *zap.Logger //nolint:unused,structcheck
 }
 
 func RuntimeStat(send helper.StatCallback) {

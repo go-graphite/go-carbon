@@ -393,7 +393,7 @@ type jsonMetricDetailsResponse struct {
 }
 
 type fileIndex struct {
-	typ int
+	typ int //nolint:unused,structcheck
 
 	idx   trigram.Index
 	files []string
@@ -1250,10 +1250,6 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	go srv.Serve(listener.tcpListener)
 
 	return nil
-}
-
-func (listener *CarbonserverListener) renderTimeBuckets() interface{} {
-	return listener.timeBuckets
 }
 
 func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t time.Duration) {

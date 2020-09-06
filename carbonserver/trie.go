@@ -25,7 +25,7 @@ type gmatcher struct {
 	root    *gstate
 	expr    string
 	dstates []*gdstate
-	dsindex int
+	dsindex int //nolint:unused,structcheck
 
 	// has leading star following by complex expressions
 	lsComplex bool
@@ -656,7 +656,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	return *(*string)(unsafe.Pointer(&r))
 }
 
-func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode
+func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode,unused
 	var ts []trigram.T
 	for _, t := range data {
 		ts = append(ts, trigram.T(t))
