@@ -656,7 +656,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	return *(*string)(unsafe.Pointer(&r))
 }
 
-func dumpTrigrams(data []uint32) []trigram.T {
+func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode
 	var ts []trigram.T
 	for _, t := range data {
 		ts = append(ts, trigram.T(t))

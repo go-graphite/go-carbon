@@ -201,20 +201,6 @@ func (listener *CarbonlinkListener) SetReadTimeout(timeout time.Duration) {
 	listener.readTimeout = timeout
 }
 
-func pickleWriteMemo(b *bytes.Buffer, memo *uint32) {
-	if *memo < 256 {
-		b.WriteByte('q')
-		b.WriteByte(uint8(*memo))
-	} else {
-		b.WriteByte('r')
-		var buf [4]byte
-		s := buf[:]
-		binary.LittleEndian.PutUint32(s, *memo)
-		b.Write(s)
-	}
-	*memo += 1
-}
-
 func picklePoint(b *bytes.Buffer, p points.Point) {
 	var buf [8]byte
 	s := buf[:]

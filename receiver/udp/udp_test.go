@@ -57,10 +57,6 @@ func newUDPTestCase(t *testing.T) *udpTestCase {
 	return newUDPTestCaseWithOptions(t, false)
 }
 
-func newUDPTestCaseLogIncomplete(t *testing.T) *udpTestCase {
-	return newUDPTestCaseWithOptions(t, true)
-}
-
 func (test *udpTestCase) Finish() {
 	if test.conn != nil {
 		test.conn.Close()
