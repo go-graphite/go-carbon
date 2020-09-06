@@ -240,10 +240,8 @@ func packReply(data []points.Point) []byte {
 		buf.WriteByte('(')
 	}
 
-	if data != nil {
-		for _, point := range data {
-			picklePoint(buf, point)
-		}
+	for _, point := range data {
+		picklePoint(buf, point)
 	}
 
 	switch {
@@ -321,10 +319,8 @@ func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 		listener.tcpListener = tcpListener
 
 		listener.Go(func(exit chan bool) {
-			select {
-			case <-exit:
-				tcpListener.Close()
-			}
+			<-exit
+			tcpListener.Close()
 		})
 
 		listener.Go(func(exit chan bool) {

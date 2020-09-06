@@ -125,7 +125,7 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 
 				start := time.Now()
 				p.Stop()
-				worktime := time.Now().Sub(start)
+				worktime := time.Now().Sub(start) //nolint:gosimple
 
 				assert.True(worktime.Seconds() < 1, "maxUpdatesPerSecond: %d, workers: %d", maxUpdatesPerSecond, workers)
 			})

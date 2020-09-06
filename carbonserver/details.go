@@ -125,6 +125,5 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 	accessLogger.Info("details served",
 		zap.Duration("runtime_seconds", time.Since(t0)),
 	)
-	return
 
 }

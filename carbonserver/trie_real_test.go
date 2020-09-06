@@ -69,7 +69,7 @@ func TestTrieGlobRealData(t *testing.T) {
 
 		if *checkMemory {
 			start := time.Now()
-			t.Logf("memory.Sizeof(btrieServer)\t\t= %+v took %s\n", memory.Sizeof(trieServer), time.Now().Sub(start))
+			t.Logf("memory.Sizeof(btrieServer)\t\t= %+v took %s\n", memory.Sizeof(trieServer), time.Now().Sub(start)) //nolint:gosimple
 		}
 		wg.Done()
 	}()
@@ -82,7 +82,7 @@ func TestTrieGlobRealData(t *testing.T) {
 
 			if *checkMemory {
 				start := time.Now()
-				t.Logf("memory.Sizeof(btrigramServer)\t\t= %+v took %s\n", memory.Sizeof(trigramServer), time.Now().Sub(start))
+				t.Logf("memory.Sizeof(btrigramServer)\t\t= %+v took %s\n", memory.Sizeof(trigramServer), time.Now().Sub(start)) //nolint:gosimple
 			}
 			wg.Done()
 		}()
@@ -106,7 +106,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			if err != nil {
 				t.Errorf("trie search error: %s", err)
 			}
-			trieTime := time.Now().Sub(start1)
+			trieTime := time.Now().Sub(start1) //nolint:gosimple
 			t.Logf("trie took %s", trieTime)
 
 			// for i, str := range trieFiles {
@@ -127,7 +127,7 @@ func TestTrieGlobRealData(t *testing.T) {
 			if err != nil {
 				t.Errorf("trigram search error: %s", err)
 			}
-			trigramTime := time.Now().Sub(start2)
+			trigramTime := time.Now().Sub(start2) //nolint:gosimple
 			t.Logf("trigram took %s", trigramTime)
 
 			if *localTest {

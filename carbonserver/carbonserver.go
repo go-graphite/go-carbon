@@ -161,7 +161,7 @@ func (q *QueryItem) FetchOrLock() (interface{}, bool) {
 		return nil, false
 	}
 
-	select {
+	select { //nolint:gosimple
 	// TODO: Add timeout support
 	case <-q.QueryFinished:
 		break
@@ -727,7 +727,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		if listener.trigramIndex {
 			start := time.Now()
 			nfidx.trieIdx.setTrigrams()
-			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start)))
+			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start))) //nolint:gosimple
 		}
 	} else {
 		nfidx.files = files
@@ -783,7 +783,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
 	defer func(start time.Time) {
-		dur := time.Now().Sub(start)
+		dur := time.Now().Sub(start) //nolint:gosimple
 		if dur <= time.Second {
 			return
 		}
@@ -844,7 +844,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	fidx := listener.CurrentFileIndex()
 	var files []string
 	fallbackToFS := false
-	if listener.trigramIndex == false || fidx == nil || len(fidx.files) == 0 {
+	if !listener.trigramIndex || fidx == nil || len(fidx.files) == 0 {
 		fallbackToFS = true
 	}
 

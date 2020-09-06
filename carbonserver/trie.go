@@ -865,7 +865,6 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 			inAlter = false
 		case inAlter && c == '/':
 			slashInBraces = true
-			break
 		}
 	}
 	// for complex queries like {a.b.c,x}.o.p.q, fall back to simple expansion

@@ -101,7 +101,7 @@ func Normalize(s string) (string, error) {
 func FilePath(root string, s string, hashOnly bool) string {
 	sum := sha256.Sum256([]byte(s))
 	hash := fmt.Sprintf("%x", sum)
-	if hashOnly == true {
+	if hashOnly {
 		return filepath.Join(root, "_tagged", hash[:3], hash[3:6], hash)
 	} else {
 		return filepath.Join(root, "_tagged", hash[:3], hash[3:6], strings.Replace(s, ".", "_DOT_", -1))

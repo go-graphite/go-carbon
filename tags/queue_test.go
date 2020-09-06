@@ -38,7 +38,7 @@ func TestQueueLag(t *testing.T) {
 	qa.Root(t, func(dir string) {
 		assert := assert.New(t)
 
-		exit := make(chan bool, 0)
+		exit := make(chan bool)
 
 		q, err := NewQueue(dir, func(series []string) error {
 			<-exit

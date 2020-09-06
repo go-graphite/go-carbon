@@ -202,7 +202,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 				zap.Any("error", r),
 				zap.Int("http_code", http.StatusInternalServerError),
 			)
-			http.Error(wr, fmt.Sprintf("Panic occured, see logs for more information"), http.StatusInternalServerError)
+			http.Error(wr, "Panic occured, see logs for more information", http.StatusInternalServerError)
 		}
 	}()
 
@@ -468,7 +468,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 
 		for _, metric := range multiv3.GetMetrics() {
 
-			var m map[string]interface{}
+			var m map[string]interface{} //nolint:gosimple
 
 			m = make(map[string]interface{})
 			m["start"] = metric.StartTime
