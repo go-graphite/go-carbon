@@ -70,8 +70,8 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 			hostname = "(unknown)"
 		}
 		pvResponse := protov3.CapabilityResponse{
-			SupportedProtocols: []string{"carbonapi_v3_pb", "carbonapi_v2_pb", "graphite-web-pickle", "graphite-web-pickle-1.1", "carbonapi_v2_json"},
-			Name:               hostname,
+			SupportedProtocols:        []string{"carbonapi_v3_pb", "carbonapi_v2_pb", "graphite-web-pickle", "graphite-web-pickle-1.1", "carbonapi_v2_json"},
+			Name:                      hostname,
 			HighPrecisionTimestamps:   false,
 			SupportFilteringFunctions: false,
 			LikeSplittedRequests:      true,
@@ -83,7 +83,7 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		switch formatCode {
 		case jsonFormat:
 			contentType = httpHeaders.ContentTypeJSON
-			data, err = json.Marshal(pvResponse)
+			data, _ = json.Marshal(pvResponse)
 		case protoV3Format:
 			contentType = httpHeaders.ContentTypeCarbonAPIv3PB
 			data, err = pvResponse.Marshal()
@@ -116,5 +116,4 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		zap.Duration("runtime_seconds", time.Since(t0)),
 		zap.Int("http_code", http.StatusOK),
 	)
-	return
 }

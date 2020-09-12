@@ -12,12 +12,12 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/klauspost/compress/gzip"
-	"github.com/klauspost/compress/snappy"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
+	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/snappy"
 	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
@@ -272,13 +272,14 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 	for {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		data, err := framedConn.ReadFrame()
-		if err == io.EOF {
+		switch {
+		case err == io.EOF:
 			return
-		} else if err == framing.ErrPrefixLength {
+		case err == framing.ErrPrefixLength:
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("bad message size")
 			return
-		} else if err != nil {
+		case err != nil:
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("can't read message body", zap.Error(err))
 			return
@@ -334,7 +335,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 
 		rcv.Go(func(exit chan bool) {
 			<-exit
-			tcpListener.Close()
+			tcpListener.Close() //skipcq: GSC-G104
 		})
 
 		handler := rcv.HandleConnection

@@ -194,7 +194,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		kv.Bool("graphite.from_cache", fromCache),
 	)
 
-	return
 }
 
 type errorNotFound struct{}

@@ -15,9 +15,7 @@ import (
 // dfa inspiration: https://swtch.com/~rsc/regexp/
 
 const (
-	gstateSplit  = 128
-	gstateMatch  = 129
-	gstateRanges = 130
+	gstateSplit = 128
 )
 
 var endGstate = &gstate{}
@@ -27,7 +25,7 @@ type gmatcher struct {
 	root    *gstate
 	expr    string
 	dstates []*gdstate
-	dsindex int
+	dsindex int //nolint:unused,structcheck
 
 	// has leading star following by complex expressions
 	lsComplex bool
@@ -391,7 +389,6 @@ outer:
 	inner:
 		for ci := 0; ci < len(cur.childrens); ci++ {
 			child := cur.childrens[ci]
-			match = 0
 
 			if len(child.c) == 0 || child.c[0] != path[start] {
 				continue
@@ -572,11 +569,12 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		isDir = false
 		hasMoreNodes = false
 		for _, child := range cur.childrens {
-			if child == fileNode {
+			switch {
+			case child == fileNode:
 				isFile = true
-			} else if child.dir() {
+			case child.dir():
 				isDir = true
-			} else {
+			default:
 				hasMoreNodes = true
 			}
 		}
@@ -658,7 +656,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	return *(*string)(unsafe.Pointer(&r))
 }
 
-func dumpTrigrams(data []uint32) []trigram.T {
+func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode,unused
 	var ts []trigram.T
 	for _, t := range data {
 		ts = append(ts, trigram.T(t))
@@ -860,13 +858,13 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 
 	var slashInBraces, inAlter bool
 	for _, c := range query {
-		if c == '{' {
+		switch {
+		case c == '{':
 			inAlter = true
-		} else if c == '}' {
+		case c == '}':
 			inAlter = false
-		} else if inAlter && c == '/' {
+		case inAlter && c == '/':
 			slashInBraces = true
-			break
 		}
 	}
 	// for complex queries like {a.b.c,x}.o.p.q, fall back to simple expansion

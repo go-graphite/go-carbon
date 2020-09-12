@@ -32,7 +32,7 @@ func OnePoint(metric string, value float64, timestamp int64) *Points {
 	return &Points{
 		Metric: metric,
 		Data: []Point{
-			Point{
+			{
 				Value:     value,
 				Timestamp: timestamp,
 			},
@@ -77,10 +77,7 @@ func (p *Points) WriteBinaryTo(w io.Writer) (n int, err error) {
 	writeVarint := func(value int64) bool {
 		c, err = w.Write(encodeVarint(value))
 		n += c
-		if err != nil {
-			return false
-		}
-		return true
+		return err == nil
 	}
 
 	if !writeVarint(int64(len(p.Metric))) {

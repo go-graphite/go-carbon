@@ -9,8 +9,8 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/go-graphite/go-whisper"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-whisper"
 )
 
 type Metadata struct {

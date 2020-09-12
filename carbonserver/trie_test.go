@@ -36,12 +36,12 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	for _, file := range files {
 		trieIndex.insert(file)
 	}
-	fmt.Printf("trie index took %s\n", time.Now().Sub(start))
+	fmt.Printf("trie index took %s\n", time.Now().Sub(start)) //nolint:gosimple
 
 	if withTrigram {
 		start = time.Now()
 		trieIndex.setTrigrams()
-		fmt.Printf("trie setTrigrams took %s size %d\n", time.Now().Sub(start), len(trieIndex.trigrams))
+		fmt.Printf("trie setTrigrams took %s size %d\n", time.Now().Sub(start), len(trieIndex.trigrams)) //nolint:gosimple
 	}
 
 	fmt.Printf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
@@ -66,7 +66,7 @@ func newTrigramServer(files []string) *CarbonserverListener {
 
 	start := time.Now()
 	idx := trigram.NewIndex(files)
-	fmt.Printf("trigram index took %s\n", time.Now().Sub(start))
+	fmt.Printf("trigram index took %s\n", time.Now().Sub(start)) //nolint:gosimple
 
 	listener.UpdateFileIndex(&fileIndex{
 		idx:   idx,

@@ -126,11 +126,9 @@ func (f *testInfo) checkExpandGlobs(t *testing.T, query string, shdExist bool) {
 			t.Errorf("files: '%v', epxected: '%s'\n", file, query)
 			return
 		}
-	} else {
-		if len(expandedGlobs[0].Files) != 0 {
-			t.Errorf("expected no files but found - '%v'\n", expandedGlobs[0].Files)
-			return
-		}
+	} else if len(expandedGlobs[0].Files) != 0 {
+		t.Errorf("expected no files but found - '%v'\n", expandedGlobs[0].Files)
+		return
 	}
 }
 

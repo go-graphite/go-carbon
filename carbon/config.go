@@ -86,10 +86,6 @@ type grpcConfig struct {
 	Enabled bool   `toml:"enabled"`
 }
 
-type receiverConfig struct {
-	DSN string `toml:"dsn"`
-}
-
 type tagsConfig struct {
 	Enabled             bool      `toml:"enabled"`
 	TagDB               string    `toml:"tagdb-url"`

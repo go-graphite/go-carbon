@@ -161,7 +161,7 @@ func (q *QueryItem) FetchOrLock() (interface{}, bool) {
 		return nil, false
 	}
 
-	select {
+	select { //nolint:gosimple
 	// TODO: Add timeout support
 	case <-q.QueryFinished:
 		break
@@ -392,13 +392,8 @@ type jsonMetricDetailsResponse struct {
 	TotalSpace uint64
 }
 
-const (
-	indexTypeTrigram = iota
-	indexTypeTrie
-)
-
 type fileIndex struct {
-	typ int
+	typ int //nolint:unused,structcheck
 
 	idx   trigram.Index
 	files []string
@@ -575,7 +570,7 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 			for i, seg := range split {
 				fileName = filepath.Join(fileName, seg)
 				if i == len(split)-1 {
-					fileName = fileName + ".wsp"
+					fileName += ".wsp"
 				}
 				if _, ok := cacheMetricNames[fileName]; !ok {
 					cacheMetricNames[fileName] = struct{}{}
@@ -701,7 +696,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	}
 
 	var freeSpace uint64
-	if stat.Bavail >= 0 {
+	// diskspace can be negative and Bavail is therefore int64
+	if stat.Bavail >= 0 { // nolint:staticcheck skipcq: SCC-SA4003
 		freeSpace = uint64(stat.Bavail) * uint64(stat.Bsize)
 	}
 	totalSpace := stat.Blocks * uint64(stat.Bsize)
@@ -732,7 +728,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		if listener.trigramIndex {
 			start := time.Now()
 			nfidx.trieIdx.setTrigrams()
-			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start)))
+			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start))) //nolint:gosimple
 		}
 	} else {
 		nfidx.files = files
@@ -788,7 +784,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
 	defer func(start time.Time) {
-		dur := time.Now().Sub(start)
+		dur := time.Now().Sub(start) //nolint:gosimple
 		if dur <= time.Second {
 			return
 		}
@@ -849,7 +845,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	fidx := listener.CurrentFileIndex()
 	var files []string
 	fallbackToFS := false
-	if listener.trigramIndex == false || fidx == nil || len(fidx.files) == 0 {
+	if !listener.trigramIndex || fidx == nil || len(fidx.files) == 0 {
 		fallbackToFS = true
 	}
 
@@ -899,7 +895,8 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	leafs := make([]bool, len(files))
 	for i, p := range files {
 		s, err := os.Stat(p)
-		if err == nil {
+		switch {
+		case err == nil:
 			// exists on disk
 			p = p[len(listener.whisperData+"/"):]
 			if !s.IsDir() && strings.HasSuffix(p, ".wsp") {
@@ -909,7 +906,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 				leafs[i] = false
 			}
 			files[i] = strings.Replace(p, "/", ".", -1)
-		} else if os.IsNotExist(err) {
+		case os.IsNotExist(err):
 			// cache-only, so no fileinfo
 			// mark "leafs" based on wsp suffix
 			p = p[len(listener.whisperData+"/"):]
@@ -920,7 +917,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 				leafs[i] = false
 			}
 			files[i] = strings.Replace(p, "/", ".", -1)
-		} else {
+		default:
 			continue
 		}
 	}
@@ -1141,7 +1138,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	listener.exitChan = make(chan struct{})
 	if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
 		listener.forceScanChan = make(chan struct{})
-		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan)
+		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan) //nolint:staticcheck
 		listener.forceScanChan <- struct{}{}
 	}
 
@@ -1253,10 +1250,6 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	go srv.Serve(listener.tcpListener)
 
 	return nil
-}
-
-func (listener *CarbonserverListener) renderTimeBuckets() interface{} {
-	return listener.timeBuckets
 }
 
 func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t time.Duration) {

@@ -125,6 +125,5 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	accessLogger.Info("list served",
 		zap.Duration("runtime_seconds", time.Since(t0)),
 	)
-	return
 
 }

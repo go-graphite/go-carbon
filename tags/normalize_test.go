@@ -1,8 +1,9 @@
 package tags
 
 import (
-	"github.com/stretchr/testify/assert"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type normalizeTestCase struct {
@@ -91,7 +92,7 @@ func BenchmarkFilePath(b *testing.B) {
 		x = FilePath("/data", m, false)
 	}
 
-	if len(x) < 0 {
+	if x == "" {
 		b.FailNow()
 	}
 }

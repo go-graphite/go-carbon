@@ -7,18 +7,12 @@ import (
 	_ "net/http/pprof"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
-	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 )
-
-func metricDetailsV2toV3(ptr *map[string]*protov2.MetricDetails) *map[string]*protov3.MetricDetails {
-	return (*map[string]*protov3.MetricDetails)(unsafe.Pointer(ptr))
-}
 
 func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /metrics/details/?format=json
@@ -125,6 +119,5 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 	accessLogger.Info("details served",
 		zap.Duration("runtime_seconds", time.Since(t0)),
 	)
-	return
 
 }

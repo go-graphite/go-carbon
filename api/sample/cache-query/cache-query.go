@@ -19,7 +19,8 @@ func main() {
 	timeout := flag.Duration("timeout", time.Second, "connect and read timeout")
 	flag.Parse()
 
-	conn, err := grpc.Dial(*server, grpc.WithInsecure(), grpc.WithTimeout(*timeout))
+	// TODO: grpc.WithTimeout deprecated
+	conn, err := grpc.Dial(*server, grpc.WithInsecure(), grpc.WithTimeout(*timeout)) //nolint:staticcheck skipcq:SCC-SA1019
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}

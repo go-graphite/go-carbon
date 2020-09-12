@@ -189,5 +189,4 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		zap.Duration("runtime_seconds", time.Since(t0)),
 		zap.Int("http_code", http.StatusOK),
 	)
-	return
 }

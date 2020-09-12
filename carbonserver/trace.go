@@ -25,9 +25,9 @@ import (
 )
 
 var TraceHeaders = map[headerName]string{
-	headerName{"X-CTX-CarbonAPI-UUID"}:    "carbonapi_uuid",
-	headerName{"X-CTX-CarbonZipper-UUID"}: "carbonzipper_uuid",
-	headerName{"X-Request-ID"}:            "request_id",
+	{"X-CTX-CarbonAPI-UUID"}:    "carbonapi_uuid",
+	{"X-CTX-CarbonZipper-UUID"}: "carbonzipper_uuid",
+	{"X-Request-ID"}:            "request_id",
 }
 
 type headerName struct {

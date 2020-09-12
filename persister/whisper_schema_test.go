@@ -53,7 +53,7 @@ func TestParseRetentionDefs(t *testing.T) {
 	}
 
 	// unknown letter
-	ret, err = ParseRetentionDefs("10s:24v")
+	_, err = ParseRetentionDefs("10s:24v")
 	assert.Error(err)
 }
 
@@ -108,8 +108,8 @@ pattern = .*
 retentions = 1m:30d,1h:5y
 	`,
 		[]testcase{
-			testcase{"carbon", "^carbon\\.", "60s:90d"},
-			testcase{"default", ".*", "1m:30d,1h:5y"},
+			{"carbon", "^carbon\\.", "60s:90d"},
+			{"default", ".*", "1m:30d,1h:5y"},
 		},
 	)
 }
@@ -122,7 +122,7 @@ pattern = ^carbon\.
 retentions = 60s:90d
 	`,
 		[]testcase{
-			testcase{"carbon", "^carbon\\.", "60s:90d"},
+			{"carbon", "^carbon\\.", "60s:90d"},
 		},
 	)
 }
@@ -156,11 +156,11 @@ retentions = 1s:7d
 priority = 10
 	`,
 		[]testcase{
-			testcase{"gitlab", "^gitlab\\.", "1s:7d"},
-			testcase{"collector", "^.*\\.collector\\.", "5s:5m,5m:30d"},
-			testcase{"jira", "^server\\.", "1s:7d"},
-			testcase{"carbon", "^carbon\\.", "1m:90d"},
-			testcase{"db", "^db\\.", "1m:30d,1h:5y"},
+			{"gitlab", "^gitlab\\.", "1s:7d"},
+			{"collector", "^.*\\.collector\\.", "5s:5m,5m:30d"},
+			{"jira", "^server\\.", "1s:7d"},
+			{"carbon", "^carbon\\.", "1m:90d"},
+			{"db", "^db\\.", "1m:30d,1h:5y"},
 		},
 	)
 
