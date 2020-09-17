@@ -555,9 +555,10 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 
 	var cur = ti.root
 	var curChildrens = cur.getChildrens()
-	var nindex = make([]int, atomic.LoadUint64(&ti.depth)+1)
-	var trieNodes = make([]*trieNode, atomic.LoadUint64(&ti.depth)+1)
-	var childrensStack = make([][]*trieNode, atomic.LoadUint64(&ti.depth)+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var nindex = make([]int, depth+1)
+	var trieNodes = make([]*trieNode, depth+1)
+	var childrensStack = make([][]*trieNode, depth+1)
 	var ncindex int
 	var mindex int
 	var curm = matchers[0]
@@ -724,11 +725,12 @@ func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode,unused
 
 func (ti *trieIndex) allMetrics(sep byte) []string {
 	var files = make([]string, 0, ti.fileCount)
-	var nindex = make([]int, ti.depth+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var nindex = make([]int, depth+1)
 	var ncindex int
 	var cur = ti.root
 	var curChildrens = cur.getChildrens()
-	var trieNodes = make([]*trieNode, ti.depth+1)
+	var trieNodes = make([]*trieNode, depth+1)
 	for {
 		if nindex[ncindex] >= len(curChildrens) {
 			goto parent
@@ -738,6 +740,9 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		cur = cur.getChild(curChildrens, nindex[ncindex])
 		curChildrens = cur.getChildrens()
 		ncindex++
+		if ncindex >= len(nindex)-1 {
+			goto parent
+		}
 
 		if cur.file() {
 			files = append(files, cur.fullPath(sep, trieNodes[:ncindex]))
@@ -764,11 +769,12 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 }
 
 func (ti *trieIndex) dump(w io.Writer) {
-	var nindex = make([]int, ti.depth+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var nindex = make([]int, depth+1)
 	var ncindex int
 	var cur = ti.root
 	var curChildrens = cur.getChildrens()
-	var trieNodes = make([]*trieNode, ti.depth+1)
+	var trieNodes = make([]*trieNode, depth+1)
 	var ident []byte
 	for {
 		if nindex[ncindex] >= len(curChildrens) {
@@ -779,6 +785,9 @@ func (ti *trieIndex) dump(w io.Writer) {
 		cur = cur.getChild(curChildrens, nindex[ncindex])
 		curChildrens = cur.getChildrens()
 		ncindex++
+		if ncindex >= len(nindex)-1 {
+			goto parent
+		}
 
 		if cur.file() {
 			fmt.Fprintf(w, "%s$ (%d/%d)\n", ident, len(*cur.childrens), cur.gen)
@@ -813,12 +822,13 @@ func (ti *trieIndex) dump(w io.Writer) {
 // boundary)
 func (ti *trieIndex) statNodes() map[*trieNode]int {
 	var stats = map[*trieNode]int{}
-	var nindex = make([]int, ti.depth+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var nindex = make([]int, depth+1)
 	var ncindex int
 	var cur = ti.root
 	var curChildrens = cur.getChildrens()
-	var trieNodes = make([]*trieNode, ti.depth+1)
-	var curdirs = make([]int, ti.depth+1)
+	var trieNodes = make([]*trieNode, depth+1)
+	var curdirs = make([]int, depth+1)
 	var curindex int
 
 	for {
@@ -835,6 +845,9 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 		trieNodes[ncindex] = cur
 		cur = cur.getChild(curChildrens, nindex[ncindex])
 		ncindex++
+		if ncindex >= len(nindex)-1 {
+			goto parent
+		}
 
 		if cur.dir() {
 			curdirs[curindex]++
@@ -865,11 +878,12 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 
 // TODO: support ctrie
 func (ti *trieIndex) setTrigrams() {
-	var nindex = make([]int, ti.depth+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var nindex = make([]int, depth+1)
 	var ncindex int
 	var cur = ti.root
-	var trieNodes = make([]*trieNode, ti.depth+1)
-	var trigrams = make([][]uint32, ti.depth+1)
+	var trieNodes = make([]*trieNode, depth+1)
+	var trigrams = make([][]uint32, depth+1)
 	var stats = ti.statNodes()
 
 	// chosen semi-randomly. maybe we could turn this into a configurations
@@ -886,6 +900,9 @@ func (ti *trieIndex) setTrigrams() {
 		trieNodes[ncindex] = cur
 		cur = (*cur.childrens)[nindex[ncindex]]
 		ncindex++
+		if ncindex >= len(nindex)-1 {
+			goto parent
+		}
 		trieNodes[ncindex] = cur
 
 		// abc.xyz.cjk
@@ -978,7 +995,8 @@ func (ti *trieIndex) prune() {
 	cur.childrens = *cur.node.childrens
 
 	var idx int
-	var states = make([]state, ti.depth+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var states = make([]state, depth+1)
 
 	for {
 		if cur.next >= len(cur.childrens) {
@@ -1006,6 +1024,9 @@ func (ti *trieIndex) prune() {
 
 		states[idx] = cur
 		idx++
+		if idx >= len(states)-1 {
+			goto parent
+		}
 
 		cur.next = 0
 		cur.node = (cur.childrens)[states[idx-1].next]
@@ -1071,7 +1092,8 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 	cur.childrens = cur.node.childrens
 
 	var idx int
-	var states = make([]state, ti.depth+1)
+	var depth = atomic.LoadUint64(&ti.depth)
+	var states = make([]state, depth+1)
 
 	for {
 		if cur.next >= len(*cur.childrens) {
@@ -1089,6 +1111,9 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 
 		states[idx] = cur
 		idx++
+		if idx >= len(states)-1 {
+			goto parent
+		}
 
 		cur.next = 0
 		cur.node = (*cur.childrens)[states[idx-1].next]
