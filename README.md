@@ -52,6 +52,14 @@ The result of that effort (in points per second):
 
 Stable performance was around 950k points per second with short-term peak performance of 1.2M points/sec.
 
+### Efficient metric namespace patterns for trie index
+
+Putting the most common namespaces at the beginning of the metric name could be beneficial for scaling. This doesn't affect the performance of trigram index. But when you decide to switch to trie index for serving higher number metrics in a single go-carbon instance, your query would be more efficient. At the same time, this naming pattern could lead to better metric namespace hierarchy.
+
+For example: querying `sys.cpu.loadavg.app.host-0001` would be faster than querying `sys.app.host-0001.cpu.loadavg` using trie index. Especially when you have tens of thousands hosts (host-0001, ..., host-9999), they all share the same prefix of `sys.cpu.loadavg.app.host-` in trie index, and they are compared only once during query. So this patterns leads to better memory usage and query performance when using trie+nfa/dfa index.
+
+More details could be found in this blog: [To glob 10M metrics: Trie * DFA = Tree² for Go-Carbon](https://www.xhu.buzz/to-glob-10m-metrics-using-trie-and-dfa/).
+
 ## Installation
 Use binary packages from [releases page](https://github.com/lomik/go-carbon/releases) or build manually (requires golang 1.8+):
 ```
