@@ -1,5 +1,9 @@
 ## Changelog
 ##### master
+* trie: add a little documentation about efficient metric naming patterns (#370)
+* Implementing linters (#368)
+* Go v1.15.1 (#367)
+* Tracing/Opentelemetry (#364)
 * [travis-ci] Add apt-get update and go mod vendor to sync gox installation in Travis (#361)
 * Fix pubsub test (#360)
 * fix packages.sh (#359)
