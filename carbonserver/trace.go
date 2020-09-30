@@ -35,7 +35,7 @@ type headerName struct {
 }
 
 // initTracer creates a new trace provider instance and registers it as global trace provider.
-func (c *CarbonserverListener) InitTracing(jaegerEndpoint string, sendtoStdout bool,  version string, timeout time.Duration) func() {
+func (c *CarbonserverListener) InitTracing(jaegerEndpoint string, sendtoStdout bool, version string, timeout time.Duration) func() {
 	logger := zapwriter.Logger("app")
 
 	propagator := trace.B3{}
