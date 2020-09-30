@@ -181,8 +181,8 @@ func main() {
 		app.PromRegisterer.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 		http.Handle(cfg.Prometheus.Endpoint, promhttp.HandlerFor(app.PromRegistry, promhttp.HandlerOpts{}))
 	}
-
-	if err = app.Start(); err != nil {
+	version := Version + "-"  + BuildVersion
+	if err = app.Start(version); err != nil {
 		mainLogger.Fatal(err.Error())
 	} else {
 		mainLogger.Info("started")

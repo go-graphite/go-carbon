@@ -35,7 +35,7 @@ type headerName struct {
 }
 
 // initTracer creates a new trace provider instance and registers it as global trace provider.
-func (c *CarbonserverListener) InitTracing(jaegerEndpoint string, sendtoStdout bool, timeout time.Duration) func() {
+func (c *CarbonserverListener) InitTracing(jaegerEndpoint string, sendtoStdout bool,  version string, timeout time.Duration) func() {
 	logger := zapwriter.Logger("app")
 
 	propagator := trace.B3{}
@@ -64,6 +64,7 @@ func (c *CarbonserverListener) InitTracing(jaegerEndpoint string, sendtoStdout b
 				Tags: []kv.KeyValue{
 					kv.String("exporter", "jaeger"),
 					kv.String("host.hostname", fqdn),
+					kv.String("service.version", version),
 				},
 			}),
 			jaeger.RegisterAsGlobal(),

@@ -316,7 +316,7 @@ func (app *App) startPersister() {
 }
 
 // Start starts
-func (app *App) Start() (err error) {
+func (app *App) Start(version string) (err error) {
 	app.Lock()
 	defer app.Unlock()
 
@@ -475,7 +475,7 @@ func (app *App) Start() (err error) {
 			carbonserver.InitPrometheus(app.PromRegisterer)
 		}
 		if conf.Tracing.Enabled {
-			app.FlushTraces = carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, conf.Tracing.SendTimeout.Value())
+			app.FlushTraces = carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, version, conf.Tracing.SendTimeout.Value())
 		}
 
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
