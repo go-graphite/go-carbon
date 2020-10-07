@@ -1,5 +1,6 @@
 ## Changelog
 ##### master
+* carbonserver: fix two panics related to prometheus #374 (#376)
 * trie: add a little documentation about efficient metric naming patterns (#370)
 * Implementing linters (#368)
 * Go v1.15.1 (#367)
