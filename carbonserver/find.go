@@ -362,9 +362,9 @@ GATHER:
 		case <-ctx.Done():
 			switch ctx.Err() {
 			case context.DeadlineExceeded:
-				listener.prometheus.timeoutRequests.Inc()
+				listener.prometheus.timeoutRequest()
 			case context.Canceled:
-				listener.prometheus.cancelledRequests.Inc()
+				listener.prometheus.cancelledRequest()
 			}
 			return nil, fmt.Errorf("could not expand globs - %s", ctx.Err().Error())
 		}
