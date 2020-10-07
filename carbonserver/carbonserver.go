@@ -358,6 +358,14 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 		c.prometheus.diskRequests.Inc()
 	}
 
+	c.prometheus.cancelledRequest = func() {
+		c.prometheus.cancelledRequests.Inc()
+	}
+
+	c.prometheus.timeoutRequest = func() {
+		c.prometheus.timeoutRequests.Inc()
+	}
+
 	c.prometheus.diskWaitDuration = func(t time.Duration) {
 		c.prometheus.diskWaitDurations.Observe(t.Seconds())
 	}
