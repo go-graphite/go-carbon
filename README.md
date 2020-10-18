@@ -327,6 +327,17 @@ scan-frequency = "5m0s"
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
 
+# Enable concurrently building index without maintaining a new copy
+# index structure. More memory efficient.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+concurrent-idnex = false
+
+# Set to larger than 0 to enable realtime indexing of new metrics,
+# The value controls how many new metrics could be buffered at once. Suitable to
+# adjust it higher if there are high number of new metrics being produced.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+realtime-index = 0
+
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
 # populates index with metrics with or without corresponding wsp files,

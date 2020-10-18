@@ -233,6 +233,9 @@ type CarbonserverListener struct {
 	concurrentIndex   bool
 	fileListCache     string
 
+	realtimeIndex  int
+	newMetricsChan chan string
+
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
 
@@ -514,6 +517,11 @@ func (listener *CarbonserverListener) SetConfigRetriever(retriever configRetriev
 func (listener *CarbonserverListener) SetConcurrentIndex(enabled bool) {
 	listener.concurrentIndex = enabled
 }
+func (listener *CarbonserverListener) SetRealtimeIndex(num int) chan string {
+	listener.realtimeIndex = num
+	listener.newMetricsChan = make(chan string, num)
+	return listener.newMetricsChan
+}
 func (listener *CarbonserverListener) SetFileListCache(path string) {
 	listener.fileListCache = path
 }
@@ -605,19 +613,32 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
 	cacheMetrics := make(map[string]struct{})
+
+uloop:
 	for {
 		select {
 		case <-exit:
 			return
 		case <-tick:
 		case <-force:
+		case m := <-listener.newMetricsChan:
+			fidx := listener.CurrentFileIndex()
+			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
+				metric := filepath.Clean(strings.ReplaceAll(m, ".", "/") + ".wsp")
+				if err := fidx.trieIdx.insert(metric); err != nil {
+					listener.logger.Warn("failed to insert new metrics for realtime indexing", zap.String("metric", metric), zap.Error(err))
+				}
+			}
+			continue uloop
 		}
+
 		if listener.cacheGetRecentMetrics != nil {
 			// cacheMetrics maintains all new metric names added in cache
 			// when cache-scan is enabled in conf
 			newCacheMetricNames := listener.cacheGetRecentMetrics()
 			cacheMetrics = splitAndInsert(cacheMetrics, newCacheMetricNames)
 		}
+
 		listener.updateFileList(dir, cacheMetrics)
 	}
 }
@@ -717,6 +738,20 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
 				return nil
+			}
+
+			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
+			newMetricsLoop:
+				for {
+					select {
+					case m := <-listener.newMetricsChan:
+						if err := trieIdx.insert(filepath.Clean(strings.ReplaceAll(m, ".", "/") + ".wsp")); err != nil {
+							logger.Warn("failed to update realtime trie index", zap.Error(err))
+						}
+					default:
+						break newMetricsLoop
+					}
+				}
 			}
 
 			hasSuffix := strings.HasSuffix(info.Name(), ".wsp")

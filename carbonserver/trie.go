@@ -1000,13 +1000,6 @@ func (ti *trieIndex) prune() {
 
 	for {
 		if cur.next >= len(cur.childrens) {
-			// for _, s := range states {
-			// 	if s.node != nil {
-			// 		fmt.Printf("%s", s.node.c)
-			// 	}
-			// }
-			// fmt.Println("")
-
 			cc := cur.node.getChildrens()
 			if idx > 0 && !cur.node.dir() && len(cc) == 1 && !cc[0].file() && !cc[0].dir() {
 				n := &trieNode{childrens: cc[0].childrens, gen: ti.root.gen}

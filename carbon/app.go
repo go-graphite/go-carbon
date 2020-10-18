@@ -473,6 +473,11 @@ func (app *App) Start(version string) (err error) {
 			carbonserver.SetConfigRetriever(retriever)
 		}
 
+		if conf.Carbonserver.RealtimeIndex > 0 {
+			ch := carbonserver.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
+			core.SetNewMetricsChan(ch)
+		}
+
 		if conf.Prometheus.Enabled {
 			carbonserver.InitPrometheus(app.PromRegisterer)
 		}
