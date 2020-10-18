@@ -385,7 +385,7 @@ func (ti *trieIndex) insert(path string) error {
 		path = path[:len(path)-len(ti.fileExt)]
 	}
 
-	var start, match, nlen int
+	var start, nlen int
 	var sn, newn *trieNode
 outer:
 	for i := 0; i < len(path)+1; i++ {
@@ -422,7 +422,7 @@ outer:
 	inner:
 		for ci := 0; ci < len(*cur.childrens); ci++ {
 			child := (*cur.childrens)[ci]
-			match = 0
+			match := 0
 
 			if len(child.c) == 0 || child.c[0] != path[start] {
 				continue
@@ -1004,7 +1004,9 @@ func (ti *trieIndex) prune() {
 			cc := cur.node.getChildrens()
 			if idx > 0 && !cur.node.dir() && len(cc) == 1 && !cc[0].file() && !cc[0].dir() {
 				n := &trieNode{childrens: cc[0].childrens, gen: ti.root.gen}
-				n.c = append(cur.node.c, cc[0].c...)
+				n.c = make([]byte, 0, len(cur.node.c)+len(cc[0].c))
+				n.c = append(n.c, cur.node.c...)
+				n.c = append(n.c, cc[0].c...)
 				for i, t := range *states[idx-1].node.childrens {
 					if t == cur.node {
 						states[idx-1].node.setChild(i, n)

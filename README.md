@@ -327,6 +327,14 @@ scan-frequency = "5m0s"
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
 
+# Cache file list scan data in the specified path. This option speeds
+# up index building after reboot by reading the last scan result in file
+# system instead of scanning the whole data dir, which could takes up
+# most of the indexing time if it contains a high number of metrics (10
+# - 40 millions). go-carbon only reads the cached file list once after
+# reboot and the cache result is updated after every scan.
+file-list-cache = ""
+
 # Enable concurrently building index without maintaining a new copy
 # index structure. More memory efficient.
 # Currently only trie-index is supported. (EXPERIMENTAL)
