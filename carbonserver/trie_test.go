@@ -21,7 +21,11 @@ import (
 
 func init() { log.SetFlags(log.Lshortfile) }
 
-func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
+type logf interface {
+	Logf(format string, args ...interface{})
+}
+
+func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger = zap.NewNop()
 	listener.accessLogger = zap.NewNop()
@@ -37,15 +41,15 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	for _, file := range files {
 		trieIndex.insert(file)
 	}
-	fmt.Printf("trie index took %s\n", time.Now().Sub(start)) //nolint:gosimple
+	l.Logf("trie index took %s\n", time.Since(start))
 
 	if withTrigram {
 		start = time.Now()
 		trieIndex.setTrigrams()
-		fmt.Printf("trie setTrigrams took %s size %d\n", time.Now().Sub(start), len(trieIndex.trigrams)) //nolint:gosimple
+		l.Logf("trie setTrigrams took %s size %d\n", time.Since(start), len(trieIndex.trigrams))
 	}
 
-	fmt.Printf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
+	l.Logf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
 
 	listener.UpdateFileIndex(&fileIndex{
 		trieIdx: trieIndex,
@@ -54,7 +58,7 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	return &listener
 }
 
-func newTrigramServer(files []string) *CarbonserverListener {
+func newTrigramServer(files []string, l logf) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger = zap.NewNop()
 	listener.accessLogger = zap.NewNop()
@@ -67,7 +71,7 @@ func newTrigramServer(files []string) *CarbonserverListener {
 
 	start := time.Now()
 	idx := trigram.NewIndex(files)
-	fmt.Printf("trigram index took %s\n", time.Now().Sub(start)) //nolint:gosimple
+	l.Logf("trigram index took %s\n", time.Since(start))
 
 	listener.UpdateFileIndex(&fileIndex{
 		idx:   idx,
@@ -634,7 +638,7 @@ func TestTrieIndex(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
-			trieServer := newTrieServer(c.input, false)
+			trieServer := newTrieServer(c.input, false, t)
 			resultCh := make(chan *ExpandedGlobResponse, 1)
 			trieServer.expandGlobs(context.TODO(), c.query, resultCh)
 			result := <-resultCh
@@ -719,6 +723,9 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 		}
 	}
 }
+
+// for fixing Unused code error from deepsource.io, dump is useful for debugging
+var _ = (&trieIndex{}).dump
 
 func TestTriePrune(t *testing.T) {
 	cases := []struct {
@@ -827,7 +834,7 @@ func TestTriePrune(t *testing.T) {
 			if conedc != sonedc {
 				t.Errorf("conedc = %v; sonedc %v", conedc, sonedc)
 			}
-			if ccountByChildren != scountByChildren {
+			if *ccountByChildren != *scountByChildren {
 				t.Errorf("ccountByChildren = %s; scountByChildren %s", ccountByChildren, scountByChildren)
 			}
 		})
@@ -859,11 +866,11 @@ func BenchmarkGlobIndex(b *testing.B) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		btrieServer = newTrieServer(files, true)
+		btrieServer = newTrieServer(files, true, b)
 		wg.Done()
 	}()
 	go func() {
-		btrigramServer = newTrigramServer(files)
+		btrigramServer = newTrigramServer(files, b)
 		wg.Done()
 	}()
 
@@ -952,7 +959,7 @@ func TestDumpAllMetrics(t *testing.T) {
 		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
-	trie := newTrieServer(files, true)
+	trie := newTrieServer(files, true, t)
 	metrics := trie.CurrentFileIndex().trieIdx.allMetrics('.')
 	for i := range files {
 		files[i] = files[i][:len(files[i])-4]

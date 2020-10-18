@@ -67,7 +67,7 @@ func TestTrieGlobRealData(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		trieServer = newTrieServer(files, !*pureTrie)
+		trieServer = newTrieServer(files, !*pureTrie, t)
 		trieServer.whisperData = *carbonPath
 
 		if *checkMemory {
@@ -80,7 +80,7 @@ func TestTrieGlobRealData(t *testing.T) {
 	if !*noTrigram {
 		wg.Add(1)
 		go func() {
-			trigramServer = newTrigramServer(files)
+			trigramServer = newTrigramServer(files, t)
 			trigramServer.whisperData = *carbonPath
 
 			if *checkMemory {

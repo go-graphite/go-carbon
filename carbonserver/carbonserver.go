@@ -728,8 +728,11 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}
 			} else {
 				defer func() {
-					if err := flc.close(); err != nil {
-						logger.Error("failed to close flie list cache", zap.Error(err))
+					// flc could be reset to nil during filepath walk
+					if flc != nil {
+						if err := flc.close(); err != nil {
+							logger.Error("failed to close flie list cache", zap.Error(err))
+						}
 					}
 				}()
 			}
@@ -776,7 +779,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				if flc != nil {
 					if err := flc.write(trimmedName); err != nil {
 						logger.Error("failed to write to file list cache", zap.Error(err))
-						flc.file.Close()
+						if err := flc.close(); err != nil {
+							logger.Error("failed to close flie list cache", zap.Error(err))
+						}
 						flc = nil
 					}
 				}
@@ -821,7 +826,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
 		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
 		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
-		infos = append(infos, zap.Duration("trie_count_nodes_time", time.Now().Sub(start)))
+		infos = append(infos, zap.Duration("trie_count_nodes_time", time.Since(start)))
 	}
 
 	var stat syscall.Statfs_t
@@ -865,7 +870,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		if listener.trigramIndex && !listener.concurrentIndex {
 			start := time.Now()
 			nfidx.trieIdx.setTrigrams()
-			infos = append(infos, zap.Duration("set_trigram_time", time.Now().Sub(start))) //nolint:gosimple
+			infos = append(infos, zap.Duration("set_trigram_time", time.Since(start)))
 		}
 	} else {
 		nfidx.files = files
