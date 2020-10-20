@@ -202,11 +202,6 @@ func (err errorNotFound) Error() string {
 	return "Not Found"
 }
 
-type findError struct {
-	name string
-	err  error
-}
-
 type globs struct {
 	Name  string
 	Files []string
@@ -334,7 +329,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 
 func (listener *CarbonserverListener) getExpandedGlobs(ctx context.Context, logger *zap.Logger, t0 time.Time, names []string) ([]globs, error) {
 	var expandedGlobs []globs
-	var errors []findError
+	var errors []error
 	var err error
 	expGlobResultChan := make(chan *ExpandedGlobResponse, len(names))
 
@@ -352,7 +347,7 @@ GATHER:
 			}
 			glob.Files, glob.Leafs, err = expandedResult.Files, expandedResult.Leafs, expandedResult.Err
 			if err != nil {
-				errors = append(errors, findError{name: expandedResult.Name, err: err})
+				errors = append(errors, fmt.Errorf("%s: %s", expandedResult.Name, err))
 			}
 			expandedGlobs = append(expandedGlobs, glob)
 			if responseCount == len(names) {
@@ -377,14 +372,14 @@ GATHER:
 			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "can't expand globs"),
-				zap.Any("errors", errors),
+				zap.Errors("errors", errors),
 			)
 			return nil, fmt.Errorf("find failed, can't expand globs")
 		} else {
 			logger.Warn("find partly failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "can't expand globs for some metrics"),
-				zap.Any("errors", errors),
+				zap.Errors("errors", errors),
 			)
 		}
 	}
