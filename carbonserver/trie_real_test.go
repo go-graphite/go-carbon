@@ -5,7 +5,9 @@ package carbonserver
 import (
 	"context"
 	"flag"
+	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"reflect"
 	"runtime/debug"
 	"sort"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/OneOfOne/go-utils/memory"
+	"github.com/google/go-cmp/cmp"
 )
 
 var testDataPath = flag.String("testdata", "files.txt", "path to test file")
@@ -64,7 +67,7 @@ func TestTrieGlobRealData(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		trieServer = newTrieServer(files, !*pureTrie)
+		trieServer = newTrieServer(files, !*pureTrie, t)
 		trieServer.whisperData = *carbonPath
 
 		if *checkMemory {
@@ -77,7 +80,7 @@ func TestTrieGlobRealData(t *testing.T) {
 	if !*noTrigram {
 		wg.Add(1)
 		go func() {
-			trigramServer = newTrigramServer(files)
+			trigramServer = newTrigramServer(files, t)
 			trigramServer.whisperData = *carbonPath
 
 			if *checkMemory {
@@ -228,4 +231,62 @@ func uniqFilesLeafs(files []string, leafs []bool) ([]string, []bool) {
 		leafs[index] = leafs[i]
 	}
 	return files[:index+1], leafs[:index+1]
+}
+
+func TestTrieContinuousUpdate(t *testing.T) {
+	files := readFile(*testDataPath)
+	ptrie := newTrie(".wsp")
+	for i := 0; i < 100; i++ {
+		ttrie := newTrie(".wsp")
+		ptrie.root.gen++
+		var count int
+		fmt.Println("--- run", i, count)
+		for _, f := range files {
+			if rand.Intn(10) != 7 {
+				continue
+			}
+			count++
+			ptrie.insert(f)
+			ttrie.insert(f)
+		}
+
+		count0, files0, dirs0, onec0, onefc0, onedc0, countByChildren0, nodesByMark0 := ptrie.countNodes()
+		fmt.Println("before prune:  ", count0, files0, dirs0, onec0, onefc0, onedc0, countByChildren0, nodesByMark0)
+
+		ptrie.prune()
+
+		count1, files1, dirs1, onec1, onefc1, onedc1, countByChildren1, nodesByMark1 := ptrie.countNodes()
+		fmt.Println("after prune:   ", count1, files1, dirs1, onec1, onefc1, onedc1, countByChildren1, nodesByMark1)
+
+		count2, files2, dirs2, onec2, onefc2, onedc2, countByChildren2, nodesByMark2 := ttrie.countNodes()
+		fmt.Println("non-concurrent:", count2, files2, dirs2, onec2, onefc2, onedc2, countByChildren1, nodesByMark2)
+
+		fmt.Println("reduction:", float64(count1)*100/float64(count0))
+		fmt.Println("extra:    ", float64(count2)*100/float64(count1))
+
+		if diff := cmp.Diff(ptrie.allMetrics('.'), ttrie.allMetrics('.')); diff != "" {
+			t.Fatalf("diff: %s", diff)
+		}
+		if count1 != count2 {
+			t.Errorf("count1 = %v; count2 = %v", count1, count2)
+		}
+		if files1 != files2 {
+			t.Errorf("files1 = %v; files2 = %v", files1, files2)
+		}
+		if dirs1 != dirs2 {
+			t.Errorf("dirs1 = %v; dirs2 = %v", dirs1, dirs2)
+		}
+		if onec1 != onec2 {
+			t.Errorf("onec1 = %v; onec2 = %v", onec1, onec2)
+		}
+		if onefc1 != onefc2 {
+			t.Errorf("onefc1 = %v; onefc2 = %v", onefc1, onefc2)
+		}
+		if onedc1 != onedc2 {
+			t.Errorf("onedc1 = %v; onedc2 = %v", onedc1, onedc2)
+		}
+		if countByChildren1 != countByChildren2 {
+			t.Errorf("countByChildren1 = %s; countByChildren2 = %s", countByChildren1, countByChildren2)
+		}
+	}
 }

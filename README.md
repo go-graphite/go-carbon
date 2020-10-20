@@ -327,6 +327,25 @@ scan-frequency = "5m0s"
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
 
+# Cache file list scan data in the specified path. This option speeds
+# up index building after reboot by reading the last scan result in file
+# system instead of scanning the whole data dir, which could takes up
+# most of the indexing time if it contains a high number of metrics (10
+# - 40 millions). go-carbon only reads the cached file list once after
+# reboot and the cache result is updated after every scan. (EXPERIMENTAL)
+file-list-cache = ""
+
+# Enable concurrently building index without maintaining a new copy
+# index structure. More memory efficient.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+concurrent-index = false
+
+# Set to larger than 0 to enable realtime indexing of new metrics,
+# The value controls how many new metrics could be buffered at once. Suitable to
+# adjust it higher if there are high number of new metrics being produced.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+realtime-index = 0
+
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
 # populates index with metrics with or without corresponding wsp files,
