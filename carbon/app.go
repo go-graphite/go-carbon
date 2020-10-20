@@ -87,10 +87,10 @@ func (app *App) configure() error {
 
 	// carbon-cache prefix
 	if hostname, err := os.Hostname(); err == nil {
-		hostname = strings.Replace(hostname, ".", "_", -1)
-		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", hostname, -1)
+		hostname = strings.ReplaceAll(hostname, ".", "_")
+		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", hostname)
 	} else {
-		cfg.Common.GraphPrefix = strings.Replace(cfg.Common.GraphPrefix, "{host}", "localhost", -1)
+		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", "localhost")
 	}
 
 	if cfg.Whisper.Enabled {

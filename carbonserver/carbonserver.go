@@ -109,7 +109,7 @@ type QueryItem struct {
 	QueryFinished chan struct{}
 }
 
-//type GlobResponse struct {
+// type GlobResponse struct {
 type ExpandedGlobResponse struct {
 	Name  string
 	Files []string
@@ -798,7 +798,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					metricsKnown++
 					if listener.internalStatsDir != "" {
 						i := stat.GetStat(info)
-						trimmedName = strings.Replace(trimmedName[1:len(trimmedName)-4], "/", ".", -1)
+						trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
 						details[trimmedName] = &protov3.MetricDetails{
 							Size_:    i.Size,
 							ModTime:  i.MTime,
@@ -967,7 +967,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	 * unfortunately, filepath.Glob doesn't handle the curly brace
 	 * expansion for us */
 
-	query = strings.Replace(query, ".", "/", -1)
+	query = strings.ReplaceAll(query, ".", "/")
 
 	var globs []string
 	if !strings.HasSuffix(query, "*") {
@@ -1046,7 +1046,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 			} else {
 				leafs[i] = false
 			}
-			files[i] = strings.Replace(p, "/", ".", -1)
+			files[i] = strings.ReplaceAll(p, "/", ".")
 		case os.IsNotExist(err):
 			// cache-only, so no fileinfo
 			// mark "leafs" based on wsp suffix
@@ -1057,7 +1057,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 			} else {
 				leafs[i] = false
 			}
-			files[i] = strings.Replace(p, "/", ".", -1)
+			files[i] = strings.ReplaceAll(p, "/", ".")
 		default:
 			continue
 		}

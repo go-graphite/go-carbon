@@ -964,7 +964,7 @@ func TestDumpAllMetrics(t *testing.T) {
 	for i := range files {
 		files[i] = files[i][:len(files[i])-4]
 		files[i] = files[i][1:]
-		files[i] = strings.Replace(files[i], "/", ".", -1)
+		files[i] = strings.ReplaceAll(files[i], "/", ".")
 	}
 	sort.Strings(files)
 	sort.Strings(metrics)

@@ -469,7 +469,7 @@ outer:
 
 			if nlen-match > 0 {
 				newn = &trieNode{c: make([]byte, nlen-match), childrens: &[]*trieNode{}, gen: ti.root.gen}
-				copy(newn.c, []byte(path[start:i]))
+				copy(newn.c, path[start:i])
 
 				cur.addChild(newn)
 				cur = newn
@@ -481,7 +481,7 @@ outer:
 		// case 4 & 2
 		if i-start > 0 {
 			newn = &trieNode{c: make([]byte, i-start), childrens: &[]*trieNode{}, gen: ti.root.gen}
-			copy(newn.c, []byte(path[start:i]))
+			copy(newn.c, path[start:i])
 			cur.addChild(newn)
 			cur = newn
 		}
@@ -1146,7 +1146,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
-	query = strings.Replace(query, ".", "/", -1)
+	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
 	var slashInBraces, inAlter bool

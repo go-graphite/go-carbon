@@ -28,7 +28,7 @@ func interval(time, secondsPerPoint int32) int32 {
 
 func (listener *CarbonserverListener) fetchFromCache(metric string, fromTime, untilTime int32, resp *response) ([]points.Point, error) {
 	var step, i int32
-	path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
+	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 
 	logger := listener.logger.With(
 		zap.String("path", path),

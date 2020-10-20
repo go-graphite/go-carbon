@@ -40,9 +40,9 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestReloadAndCollectorDeadlock(t *testing.T) {
-	//go func() {
+	// go func() {
 	//	http.ListenAndServe("localhost:6060", nil)
-	//}()
+	// }()
 
 	qa.Root(t, func(root string) {
 		configFile := TestConfig(root)

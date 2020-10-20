@@ -194,7 +194,7 @@ func (p *Whisper) store(metric string) {
 	if p.tagsEnabled && strings.IndexByte(metric, ';') >= 0 {
 		path = tags.FilePath(p.rootPath, metric, p.hashFilenames) + ".wsp"
 	} else {
-		path = filepath.Join(p.rootPath, strings.Replace(metric, ".", "/", -1)+".wsp")
+		path = filepath.Join(p.rootPath, strings.ReplaceAll(metric, ".", "/")+".wsp")
 	}
 
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{

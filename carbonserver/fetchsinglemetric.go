@@ -133,7 +133,7 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 
 		return resp, nil
 	case os.IsNotExist(err) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
-		//Failed to fetch from disk, try to fetch from cache
+		// Failed to fetch from disk, try to fetch from cache
 		resp := response{
 			Name:           metric,
 			PathExpression: pathExpression,

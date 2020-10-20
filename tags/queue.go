@@ -239,7 +239,7 @@ func (q *Queue) sendWorker(exit chan bool) {
 		case <-q.changed:
 			// pass
 		case <-t.C:
-			//pass
+			// pass
 		}
 		q.sendAll(exit)
 	}

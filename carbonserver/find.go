@@ -392,7 +392,7 @@ GATHER:
 	logger.Debug("expandGlobs result",
 		zap.String("action", "expandGlobs"),
 		zap.Strings("metrics", names),
-		//zap.String("format", format.String()),
+		// zap.String("format", format.String()),
 		zap.Any("result", expandedGlobs),
 	)
 	return expandedGlobs, nil
