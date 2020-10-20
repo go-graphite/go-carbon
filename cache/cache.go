@@ -55,6 +55,8 @@ type Cache struct {
 		queryCnt            uint32 // number of queries
 		tagsNormalizeErrors uint32 // tags normalize errors count
 	}
+
+	newMetricsChan chan string
 }
 
 // A "thread" safe string to anything map.
@@ -125,6 +127,8 @@ func (c *Cache) SetTagsEnabled(value bool) {
 	newSettings.tagsEnabled = value
 	c.settings.Store(&newSettings)
 }
+
+func (c *Cache) SetNewMetricsChan(ch chan string) { c.newMetricsChan = ch }
 
 func (c *Cache) Stop() {}
 
@@ -278,6 +282,14 @@ func (c *Cache) Add(p *points.Points) {
 	} else {
 		shard.items[p.Metric] = p
 		shard.adds[p.Metric] = struct{}{}
+
+		if c.newMetricsChan != nil {
+			select {
+			case c.newMetricsChan <- p.Metric:
+			default:
+				// TODO: log/metrics
+			}
+		}
 	}
 	shard.Unlock()
 

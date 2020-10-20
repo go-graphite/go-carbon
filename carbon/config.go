@@ -117,7 +117,10 @@ type carbonserverConfig struct {
 	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
 	MaxMetricsRendered int `toml:"max-metrics-rendered"`
 
-	TrieIndex bool `toml:"trie-index"`
+	TrieIndex       bool   `toml:"trie-index"`
+	ConcurrentIndex bool   `toml:"concurrent-index"`
+	RealtimeIndex   int    `toml:"realtime-index"`
+	FileListCache   string `toml:"file-list-cache"`
 }
 
 type pprofConfig struct {

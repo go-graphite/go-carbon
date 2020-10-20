@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,7 +21,11 @@ import (
 
 func init() { log.SetFlags(log.Lshortfile) }
 
-func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
+type logf interface {
+	Logf(format string, args ...interface{})
+}
+
+func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger = zap.NewNop()
 	listener.accessLogger = zap.NewNop()
@@ -36,15 +41,15 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	for _, file := range files {
 		trieIndex.insert(file)
 	}
-	fmt.Printf("trie index took %s\n", time.Now().Sub(start)) //nolint:gosimple
+	l.Logf("trie index took %s\n", time.Since(start))
 
 	if withTrigram {
 		start = time.Now()
 		trieIndex.setTrigrams()
-		fmt.Printf("trie setTrigrams took %s size %d\n", time.Now().Sub(start), len(trieIndex.trigrams)) //nolint:gosimple
+		l.Logf("trie setTrigrams took %s size %d\n", time.Since(start), len(trieIndex.trigrams))
 	}
 
-	fmt.Printf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
+	l.Logf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
 
 	listener.UpdateFileIndex(&fileIndex{
 		trieIdx: trieIndex,
@@ -53,7 +58,7 @@ func newTrieServer(files []string, withTrigram bool) *CarbonserverListener {
 	return &listener
 }
 
-func newTrigramServer(files []string) *CarbonserverListener {
+func newTrigramServer(files []string, l logf) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger = zap.NewNop()
 	listener.accessLogger = zap.NewNop()
@@ -66,7 +71,7 @@ func newTrigramServer(files []string) *CarbonserverListener {
 
 	start := time.Now()
 	idx := trigram.NewIndex(files)
-	fmt.Printf("trigram index took %s\n", time.Now().Sub(start)) //nolint:gosimple
+	l.Logf("trigram index took %s\n", time.Since(start))
 
 	listener.UpdateFileIndex(&fileIndex{
 		idx:   idx,
@@ -633,7 +638,7 @@ func TestTrieIndex(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
-			trieServer := newTrieServer(c.input, true)
+			trieServer := newTrieServer(c.input, false, t)
 			resultCh := make(chan *ExpandedGlobResponse, 1)
 			trieServer.expandGlobs(context.TODO(), c.query, resultCh)
 			result := <-resultCh
@@ -657,6 +662,180 @@ func TestTrieIndex(t *testing.T) {
 			sort.Strings(c.expect)
 			if !reflect.DeepEqual(trieFiles, c.expect) {
 				t.Errorf("incorrect files retrieved\nreturns: %s\nexpect:  %s\n", trieFiles, c.expect)
+			}
+		})
+	}
+}
+
+func TestTrieConcurrentReadWrite(t *testing.T) {
+	trieIndex := newTrie(".wsp")
+
+	rand.Seed(time.Now().Unix())
+
+	var donec = make(chan bool)
+	// var filec = make(chan string)
+	var filem sync.Map
+	var factor = 100
+	go func() {
+		for run := 0; run < 3; run++ {
+			for i := 0; i < factor; i++ {
+				for j := 0; j < factor; j++ {
+					for k := 0; k < factor; k++ {
+						filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
+						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k))
+						// if (i+j+k)%5 == 0 {
+						// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
+						// }
+					}
+				}
+			}
+
+			trieIndex.prune()
+			trieIndex.root.gen++
+		}
+
+		donec <- true
+	}()
+
+	// time.Sleep(time.Second)
+
+	var zero int
+	for {
+		select {
+		case <-donec:
+			t.Logf("total zero result: %d/%d", zero, factor*factor*factor)
+			return
+		// case <-filec:
+		default:
+			files, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
+			if err != nil {
+				panic(err)
+			}
+			if len(files) > 0 {
+				for _, f := range files {
+					if _, ok := filem.Load(f); !ok {
+						t.Errorf("trie index returned an unknown file: %s", f)
+					}
+				}
+			} else {
+				zero++
+			}
+		}
+	}
+}
+
+// for fixing Unused code error from deepsource.io, dump is useful for debugging
+var _ = (&trieIndex{}).dump
+
+func TestTriePrune(t *testing.T) {
+	cases := []struct {
+		files1 []string
+		files2 []string
+		expect []string
+	}{
+		0: {
+			files1: []string{
+				"/level-0/level-1/level-2/memory.wsp",
+				"/level-0/level-1/level-2-1/memory.wsp",
+				"/level-0/level-1/level-2-2.wsp",
+				"/level-0/level-1/level-2-2/memory1.wsp",
+				"/level-0/level-1/level-2-2/memory.wsp",
+				"/level-0/level-1/level-2-2/memory2.wsp",
+				"/level-0/level-1/cpu.wsp",
+				"/level-0/disk.wsp",
+			},
+			files2: []string{
+				"/level-0/level-1/cpu.wsp",
+				"/level-0/level-1/level-2-2/memory.wsp",
+				"/level-0/disk.wsp",
+			},
+			expect: []string{
+				"level-0.disk",
+				"level-0.level-1.cpu",
+				"level-0.level-1.level-2-2.memory",
+			},
+		},
+		1: {
+			files1: []string{
+				"/abc.wsp",
+				"/abd.wsp",
+				"/adc.wsp",
+			},
+			files2: []string{
+				"/abc.wsp",
+				"/xyz.wsp",
+			},
+			expect: []string{
+				"abc",
+				"xyz",
+			},
+		},
+		2: {
+			files1: []string{
+				"prefix-1006_xxx/rate.wsp",
+			},
+			files2: []string{
+				"prefix-1010_xxx/chkdown.wsp",
+				"prefix-1005_xxx/bin.wsp",
+				"prefix-1001_xxx/lbtot.wsp",
+				"prefix-1003_xxx/hrsp_1xx.wsp",
+				"prefix-1007_xxx/smax.wsp",
+				"prefix-1008_xxx/bout.wsp",
+			},
+			expect: []string{
+				"prefix-1001_xxx.lbtot",
+				"prefix-1003_xxx.hrsp_1xx",
+				"prefix-1005_xxx.bin",
+				"prefix-1007_xxx.smax",
+				"prefix-1008_xxx.bout",
+				"prefix-1010_xxx.chkdown",
+			},
+		},
+	}
+
+	for i, c := range cases {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
+			ctrieIndex := newTrie(".wsp")
+			strieIndex := newTrie(".wsp")
+
+			for _, f := range c.files1 {
+				ctrieIndex.insert(f)
+			}
+
+			ctrieIndex.root.gen++
+			for _, f := range c.files2 {
+				ctrieIndex.insert(f)
+				strieIndex.insert(f)
+			}
+
+			ctrieIndex.prune()
+
+			if got, want := ctrieIndex.allMetrics('.'), c.expect; !reflect.DeepEqual(got, want) {
+				t.Errorf("g = %s; want %s", got, want)
+			}
+
+			ccount, cfiles, cdirs, conec, conefc, conedc, ccountByChildren, _ := ctrieIndex.countNodes()
+			scount, sfiles, sdirs, sonec, sonefc, sonedc, scountByChildren, _ := strieIndex.countNodes()
+			if ccount != scount {
+				t.Errorf("ccount = %v; scount %v", ccount, scount)
+			}
+			if cfiles != sfiles {
+				t.Errorf("cfiles = %v; sfiles %v", cfiles, sfiles)
+			}
+			if cdirs != sdirs {
+				t.Errorf("cdirs = %v; sdirs %v", cdirs, sdirs)
+			}
+			if conec != sonec {
+				t.Errorf("conec = %v; sonec %v", conec, sonec)
+			}
+			if conefc != sonefc {
+				t.Errorf("conefc = %v; sonefc %v", conefc, sonefc)
+			}
+			if conedc != sonedc {
+				t.Errorf("conedc = %v; sonedc %v", conedc, sonedc)
+			}
+			if *ccountByChildren != *scountByChildren {
+				t.Errorf("ccountByChildren = %s; scountByChildren %s", ccountByChildren, scountByChildren)
 			}
 		})
 	}
@@ -687,11 +866,11 @@ func BenchmarkGlobIndex(b *testing.B) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		btrieServer = newTrieServer(files, true)
+		btrieServer = newTrieServer(files, true, b)
 		wg.Done()
 	}()
 	go func() {
-		btrigramServer = newTrigramServer(files)
+		btrigramServer = newTrigramServer(files, b)
 		wg.Done()
 	}()
 
@@ -780,7 +959,7 @@ func TestDumpAllMetrics(t *testing.T) {
 		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
-	trie := newTrieServer(files, true)
+	trie := newTrieServer(files, true, t)
 	metrics := trie.CurrentFileIndex().trieIdx.allMetrics('.')
 	for i := range files {
 		files[i] = files[i][:len(files[i])-4]
