@@ -1,7 +1,7 @@
 ## Changelog
 ##### master
 
-##### version 0.15.1
+##### version 0.15.2
 * carbonserver: fix findError information lost due to unexported fields #380
 * Upgrade golangci-lint #378
 * A concurrent version of trie index (#334)
