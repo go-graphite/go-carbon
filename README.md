@@ -332,13 +332,13 @@ trie-index = false
 # system instead of scanning the whole data dir, which could takes up
 # most of the indexing time if it contains a high number of metrics (10
 # - 40 millions). go-carbon only reads the cached file list once after
-# reboot and the cache result is updated after every scan.
+# reboot and the cache result is updated after every scan. (EXPERIMENTAL)
 file-list-cache = ""
 
 # Enable concurrently building index without maintaining a new copy
 # index structure. More memory efficient.
 # Currently only trie-index is supported. (EXPERIMENTAL)
-concurrent-idnex = false
+concurrent-index = false
 
 # Set to larger than 0 to enable realtime indexing of new metrics,
 # The value controls how many new metrics could be buffered at once. Suitable to
