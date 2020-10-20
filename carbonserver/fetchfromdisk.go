@@ -29,7 +29,7 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	var step int32
 
 	// We need to obtain the metadata from whisper file anyway.
-	path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
+	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
 		FLock: listener.flock,
 	})

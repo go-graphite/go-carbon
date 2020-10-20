@@ -35,7 +35,7 @@ func (listener *CarbonserverListener) getMetricsList() ([]string, error) {
 			continue
 		}
 		p = p[1 : len(p)-4]
-		metrics = append(metrics, strings.Replace(p, "/", ".", -1))
+		metrics = append(metrics, strings.ReplaceAll(p, "/", "."))
 	}
 	return metrics, nil
 }

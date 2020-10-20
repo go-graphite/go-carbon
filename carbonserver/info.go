@@ -85,7 +85,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	response := protov3.MultiMetricsInfoResponse{}
 	var retentionsV2 []protov2.Retention
 	for i, metric := range metrics {
-		path := listener.whisperData + "/" + strings.Replace(metric, ".", "/", -1) + ".wsp"
+		path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 		w, err := whisper.Open(path)
 
 		if err != nil {
@@ -113,8 +113,8 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 				SecondsPerPoint: spp,
 				NumberOfPoints:  nop,
 			})
-			//only one metric is enough - first metric
-			//TODO include support for multiple metrics
+			// only one metric is enough - first metric
+			// TODO include support for multiple metrics
 			if i == 0 && formatCode == protoV2Format {
 				retentionsV2 = append(retentionsV2, protov2.Retention{
 					SecondsPerPoint: int32(retention.SecondsPerPoint()),

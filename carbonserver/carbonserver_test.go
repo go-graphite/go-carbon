@@ -342,7 +342,7 @@ func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 	data, err := testFetchSingleMetricHelper(test, cache, carbonserver)
 	if !test.errIsNil {
 		filePath := filepath.Join(test.path, test.name+".wsp")
-		realExpectedErr := strings.Replace(test.expectedErr, "%f", filePath, -1)
+		realExpectedErr := strings.ReplaceAll(test.expectedErr, "%f", filePath)
 		if err == nil || err.Error() != realExpectedErr || (data == nil) != test.dataIsNil {
 			t.Errorf("err: '%#v', expected: '%v'", err, test.expectedErr)
 		}

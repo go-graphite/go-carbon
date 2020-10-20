@@ -35,7 +35,7 @@ func Register(protocol string,
 
 	_, ok := protocolMap[protocol]
 	if ok {
-		log.Fatalf("protocol %#v already registered", protocol)
+		log.Panicf("protocol %#v already registered", protocol)
 	}
 
 	protocolMap[protocol] = &protocolRecord{

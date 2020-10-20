@@ -88,7 +88,7 @@ func softThrottle(throttle chan bool, ratePerSec int) func(chan bool) {
 				for i := 0; i < chunk; i++ {
 					select {
 					case throttle <- true:
-					//pass
+					// pass
 					case <-exit:
 						break LOOP
 					}

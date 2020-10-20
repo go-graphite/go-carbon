@@ -33,7 +33,7 @@ func main() {
 
 	res, err := c.CacheQuery(ctx, &carbonpb.CacheRequest{Metrics: flag.Args()})
 	if err != nil {
-		log.Fatal(err)
+		log.Panic(err)
 	}
 
 	for i := 0; i < len(res.GetMetrics()); i++ {

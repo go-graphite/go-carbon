@@ -358,7 +358,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 
 	metricGlobMap := make(map[string]globs)
 	for _, expandedGlob := range expandedGlobs {
-		metricGlobMap[strings.Replace(expandedGlob.Name, "/", ".", -1)] = expandedGlob
+		metricGlobMap[strings.ReplaceAll(expandedGlob.Name, "/", ".")] = expandedGlob
 	}
 
 	var metrics []string
@@ -461,8 +461,8 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		b, err = multiv3.Marshal()
 	case pickleFormat:
 		// transform protobuf data into what pickle expects
-		//[{'start': 1396271100, 'step': 60, 'Name': 'metric',
-		//'values': [9.0, 19.0, None], 'end': 1396273140}
+		// [{'start': 1396271100, 'step': 60, 'Name': 'metric',
+		// 'values': [9.0, 19.0, None], 'end': 1396273140}
 
 		var response []map[string]interface{}
 

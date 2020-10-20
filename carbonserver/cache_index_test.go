@@ -141,20 +141,20 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 		}
 	}
 
-	//trigger filescan
+	// trigger filescan
 	go f.csListener.fileListUpdater(f.whisperDir, f.scanFrequency, f.forceChan, f.exitChan)
 	f.forceChan <- struct{}{}
 	time.Sleep(2 * time.Second)
 
-	//add metrics to cache
+	// add metrics to cache
 	for i, metricName := range addMetrics {
 		f.testCache.Add(points.OnePoint(metricName, float64(i), 10))
 	}
-	//check expandblobs for new metrics
+	// check expandblobs for new metrics
 	f.checkExpandGlobs(t, addMetrics[2], false)
 	f.checkExpandGlobs(t, addMetrics[0], false)
 
-	//pop metric from cache
+	// pop metric from cache
 	m1 := f.testCache.WriteoutQueue().Get(nil)
 	p1, _ := f.testCache.PopNotConfirmed(m1)
 	f.testCache.Confirm(p1)
@@ -176,7 +176,7 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	f.checkExpandGlobs(t, addMetrics[0], true)
 	// f.checkExpandGlobs(t, addMetrics[4], false)
 
-	//pop metric from cache
+	// pop metric from cache
 	m2 := f.testCache.WriteoutQueue().Get(nil)
 	p2, _ := f.testCache.PopNotConfirmed(m2)
 	f.testCache.Confirm(p2)
@@ -188,7 +188,7 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	}
 	f.checkExpandGlobs(t, addMetrics[0], true)
 
-	//wait for next filewalk and check the metric again
+	// wait for next filewalk and check the metric again
 	fmt.Println("wait for next filewalk and check the metric again")
 	time.Sleep(4 * time.Second)
 	// f.checkExpandGlobs(t, addMetrics[0], false)

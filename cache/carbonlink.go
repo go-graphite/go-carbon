@@ -30,7 +30,7 @@ func NewCarbonlinkRequest() *CarbonlinkRequest {
 	return &CarbonlinkRequest{}
 }
 
-func pickleMaybeMemo(b *[]byte) bool { //"consumes" memo tokens
+func pickleMaybeMemo(b *[]byte) bool { // "consumes" memo tokens
 	if len(*b) > 1 && (*b)[0] == 'q' {
 		*b = (*b)[2:]
 	} else if len(*b) > 1 && bytes.Index(*b, []byte("\x94")) == 0 { // Pickle protocol 4 or 5
@@ -54,7 +54,7 @@ func pickleGetStr(buf *[]byte) (string, bool) {
 				return string(b[2 : 2+sLen]), true
 			}
 		}
-	case b[0] == 'T' || b[0] == 'X': //long string or utf8 string
+	case b[0] == 'T' || b[0] == 'X': // long string or utf8 string
 		if len(b) >= 5 {
 			sLen := int(binary.LittleEndian.Uint32(b[1:]))
 			if len(b) >= 5+sLen {

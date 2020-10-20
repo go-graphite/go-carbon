@@ -436,7 +436,7 @@ outer:
 
 			if nlen-match > 0 {
 				newn = &trieNode{c: make([]byte, nlen-match)}
-				copy(newn.c, []byte(path[start:i]))
+				copy(newn.c, path[start:i])
 
 				cur.childrens = append(cur.childrens, newn)
 				cur = newn
@@ -448,7 +448,7 @@ outer:
 		// case 4 & 2
 		if i-start > 0 {
 			newn = &trieNode{c: make([]byte, i-start)}
-			copy(newn.c, []byte(path[start:i]))
+			copy(newn.c, path[start:i])
 			cur.childrens = append(cur.childrens, newn)
 			cur = newn
 		}
@@ -853,7 +853,7 @@ func (ti *trieIndex) setTrigrams() {
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
-	query = strings.Replace(query, ".", "/", -1)
+	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
 	var slashInBraces, inAlter bool
