@@ -1,5 +1,7 @@
 ## Changelog
 ##### master
+* carbonserver: fix findError information lost due to unexported fields #380
+* Upgrade golangci-lint #378
 * A concurrent version of trie index (#334)
 * carbonserver: fix two panics related to prometheus #374 (#376)
 * Add service.version for all the traces (#373)
