@@ -646,6 +646,30 @@ func TestTrieIndex(t *testing.T) {
 			},
 			expectLeafs: []bool{true, true},
 		},
+		{
+			input: []string{
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6/.wsp", // should not panic
+			},
+			query: "*",
+			expect: []string{
+				"ns1",
+			},
+			expectLeafs: []bool{false},
+		},
+		{
+			input: []string{
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+				"./..wsp",
+				"..wsp", // should not panic
+			},
+			query: "*",
+			expect: []string{
+				".", // should we even support . as filename?
+				"ns1",
+			},
+			expectLeafs: []bool{true, false},
+		},
 	}
 
 	for _, c := range cases {
@@ -678,6 +702,15 @@ func TestTrieIndex(t *testing.T) {
 				t.Errorf("incorrect files retrieved\nreturns: %s\nexpect:  %s\n", trieFiles, c.expect)
 			}
 		})
+	}
+}
+
+func TestTrieEdgeCases(t *testing.T) {
+	var trie = newTrie(".wsp")
+
+	_, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
+	if err == nil || err.Error() != "glob: range overflow" {
+		t.Errorf("trie should return an range overflow error")
 	}
 }
 
