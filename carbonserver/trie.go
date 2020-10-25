@@ -18,7 +18,8 @@ import (
 // dfa inspiration: https://swtch.com/~rsc/regexp/
 
 const (
-	gstateSplit = 128
+	gstateSplit   = 256
+	maxGstateCLen = 257
 )
 
 var endGstate = &gstate{}
@@ -38,14 +39,12 @@ type gmatcher struct {
 
 type gstate struct {
 	// TODO: make c compact
-	c    [131]bool
+	c    [maxGstateCLen]bool
 	next []*gstate
 }
 
 type gdstate struct {
 	gstates []*gstate
-	// next    [131]*gdstate
-	// cacheHit int
 }
 
 func (g *gmatcher) dstate() *gdstate { return g.dstates[len(g.dstates)-1] }
@@ -223,8 +222,8 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 
 			cur = &split
 		case '{':
-			alterStart := &gstate{c: [131]bool{gstateSplit: true}}
-			alterEnd := &gstate{c: [131]bool{gstateSplit: true}}
+			alterStart := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
+			alterEnd := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
 			cur.next = append(cur.next, alterStart)
 			cur = alterStart
 			alters = append(alters, [2]*gstate{alterStart, alterEnd})

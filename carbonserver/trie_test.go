@@ -632,6 +632,20 @@ func TestTrieIndex(t *testing.T) {
 			},
 			expectLeafs: []bool{true, true},
 		},
+		{
+			input: []string{
+				"/系统/核心/cpu.wsp",
+				"/系统/核心/memory.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7.wsp",
+			},
+			query: "系统.核心.*",
+			expect: []string{
+				"系统.核心.cpu",
+				"系统.核心.memory",
+			},
+			expectLeafs: []bool{true, true},
+		},
 	}
 
 	for _, c := range cases {
