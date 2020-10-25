@@ -1,6 +1,9 @@
 ## Changelog
 ##### master
 
+##### version 0.15.4
+* trie/bug fixes and finally adds some simple fuzzing logics #383
+
 ##### version 0.15.3
 * Go v1.15.3
 * carbonserver: fix findError information lost due to unexported fields #380
