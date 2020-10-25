@@ -18,7 +18,12 @@ import (
 // dfa inspiration: https://swtch.com/~rsc/regexp/
 
 const (
-	gstateSplit = 128
+	gstateSplit   = 256
+	maxGstateCLen = 257
+
+	// used in walking over the tree, a lazy way to make sure that all the nodes are
+	// covered without risking index out of range.
+	trieDepthBuffer = 7
 )
 
 var endGstate = &gstate{}
@@ -38,14 +43,12 @@ type gmatcher struct {
 
 type gstate struct {
 	// TODO: make c compact
-	c    [131]bool
+	c    [maxGstateCLen]bool
 	next []*gstate
 }
 
 type gdstate struct {
 	gstates []*gstate
-	// next    [131]*gdstate
-	// cacheHit int
 }
 
 func (g *gmatcher) dstate() *gdstate { return g.dstates[len(g.dstates)-1] }
@@ -155,6 +158,9 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			m.exact = false
 			s := &gstate{}
 			i++
+			if i >= len(expr) {
+				return nil, errors.New("glob: broken range syntax")
+			}
 			negative := expr[i] == '^'
 			if negative {
 				i++
@@ -163,6 +169,14 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 				if expr[i] == '-' {
 					if i+1 >= len(expr) {
 						return nil, errors.New("glob: missing closing range")
+					}
+					if expr[i-1] > expr[i+1] {
+						return nil, errors.New("glob: range start is bigger than range end")
+					}
+					// a simple check to make sure that range doesn't ends with 0xff,
+					// which would causes endless loop bellow
+					if expr[i-1] > 128 || expr[i+1] > 128 {
+						return nil, errors.New("glob: range overflow")
 					}
 
 					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
@@ -223,8 +237,8 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 
 			cur = &split
 		case '{':
-			alterStart := &gstate{c: [131]bool{gstateSplit: true}}
-			alterEnd := &gstate{c: [131]bool{gstateSplit: true}}
+			alterStart := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
+			alterEnd := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
 			cur.next = append(cur.next, alterStart)
 			cur = alterStart
 			alters = append(alters, [2]*gstate{alterStart, alterEnd})
@@ -267,10 +281,11 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 	}
 	m.dstates = append(m.dstates, &droot)
 
+	// TODO: consider dropping trigram integration
 	if m.lsComplex {
 		es, err := expand([]string{expr})
 		if err != nil {
-			return nil, nil
+			return &m, nil
 		}
 		for _, e := range es {
 			trigrams := extractTrigrams(e)
@@ -359,6 +374,10 @@ func newTrie(fileExt string) *trieIndex {
 func (ti *trieIndex) getDepth() uint64  { return atomic.LoadUint64(&ti.depth) }
 func (ti *trieIndex) setDepth(d uint64) { atomic.StoreUint64(&ti.depth, d) }
 
+type nilFilenameError string
+
+func (nfe nilFilenameError) Error() string { return string(nfe) }
+
 // TODO: add some defensive logics agains bad paths?
 //
 // abc.def.ghi
@@ -374,20 +393,25 @@ func (ti *trieIndex) insert(path string) error {
 		return nil
 	}
 
-	cur := ti.root
-	if uint64(len(path)) > ti.getDepth() {
-		ti.setDepth(uint64(len(path)))
-		ti.longestMetric = path
-	}
-
 	isFile := strings.HasSuffix(path, ti.fileExt)
 	if isFile {
 		path = path[:len(path)-len(ti.fileExt)]
 	}
 
+	if path == "" || path[len(path)-1] == '/' {
+		return nilFilenameError(fmt.Sprintf("metric fileename is nil: %s", path))
+	}
+
+	if uint64(len(path)) > ti.getDepth() {
+		ti.setDepth(uint64(len(path)))
+		ti.longestMetric = path
+	}
+
 	var start, nlen int
 	var sn, newn *trieNode
+	var cur = ti.root
 outer:
+	// why len(path)+1: make sure the last node is also processed in the loop
 	for i := 0; i < len(path)+1; i++ {
 		// getting a full node
 		if i < len(path) && path[i] != '/' {
@@ -556,9 +580,13 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		matchers = append(matchers, gs)
 	}
 
+	if len(matchers) == 0 {
+		return nil, nil, nil
+	}
+
 	var cur = ti.root
 	var curChildrens = cur.getChildrens()
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var trieNodes = make([]*trieNode, depth)
 	var childrensStack = make([][]*trieNode, depth)
@@ -728,7 +756,7 @@ func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode,unused
 
 func (ti *trieIndex) allMetrics(sep byte) []string {
 	var files = make([]string, 0, ti.fileCount)
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
 	var cur = ti.root
@@ -772,7 +800,7 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 }
 
 func (ti *trieIndex) dump(w io.Writer) {
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
 	var cur = ti.root
@@ -825,7 +853,7 @@ func (ti *trieIndex) dump(w io.Writer) {
 // boundary)
 func (ti *trieIndex) statNodes() map[*trieNode]int {
 	var stats = map[*trieNode]int{}
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
 	var cur = ti.root
@@ -881,7 +909,7 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 
 // TODO: support ctrie
 func (ti *trieIndex) setTrigrams() {
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
 	var cur = ti.root
@@ -997,7 +1025,7 @@ func (ti *trieIndex) prune() {
 	cur.childrens = *cur.node.childrens
 
 	var idx int
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var states = make([]state, depth)
 	for {
 		if cur.next >= len(cur.childrens) {
@@ -1088,7 +1116,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 	cur.childrens = cur.node.childrens
 
 	var idx int
-	var depth = ti.getDepth() + 1
+	var depth = ti.getDepth() + trieDepthBuffer
 	var states = make([]state, depth)
 	countByChildren = &trieCounter{}
 	nodesByGen = &trieCounter{}
