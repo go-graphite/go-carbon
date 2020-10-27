@@ -761,21 +761,6 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			if info.IsDir() || hasSuffix {
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
-				// use cacheMetricNames to check and prevent appending duplicate metrics
-				// into the index when cacheMetricNamesIndex is enabled
-				if _, present := cacheMetricNames[trimmedName]; !present {
-					if listener.trieIndex {
-						if err := trieIdx.insert(trimmedName); err != nil {
-							return fmt.Errorf("updateFileList.trie: %s", err)
-						}
-					} else {
-						files = append(files, trimmedName)
-					}
-					if hasSuffix {
-						metricsKnown++
-					}
-				}
-
 				if flc != nil {
 					if err := flc.write(trimmedName); err != nil {
 						logger.Error("failed to write to file list cache", zap.Error(err))
@@ -786,16 +771,23 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					}
 				}
 
-				if listener.trieIndex {
-					if err := trieIdx.insert(trimmedName); err != nil {
-						return fmt.Errorf("updateFileList.trie: %s", err)
+				// use cacheMetricNames to check and prevent appending duplicate metrics
+				// into the index when cacheMetricNamesIndex is enabled
+				if _, present := cacheMetricNames[trimmedName]; !present {
+					if listener.trieIndex {
+						if err := trieIdx.insert(trimmedName); err != nil {
+							return fmt.Errorf("updateFileList.trie: %s", err)
+						}
+					} else {
+						files = append(files, trimmedName)
 					}
-				} else {
-					files = append(files, trimmedName)
+
+					if hasSuffix {
+						metricsKnown++
+					}
 				}
 
 				if hasSuffix {
-					metricsKnown++
 					if listener.internalStatsDir != "" {
 						i := stat.GetStat(info)
 						trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
