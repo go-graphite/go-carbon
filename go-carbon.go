@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
-
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -27,7 +26,7 @@ import (
 )
 
 // Version of go-carbon
-const Version = "0.15.4"
+const Version = "0.15.5"
 
 var BuildVersion = "(development version)"
 
