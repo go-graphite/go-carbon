@@ -1,6 +1,9 @@
 ## Changelog
 ##### master
 
+##### version 0.15.5
+* carbonserver: fix incorrect hanlding of counting and indexing files in updateFileList #385
+
 ##### version 0.15.4
 * trie/bug fixes and finally adds some simple fuzzing logics #383
 
