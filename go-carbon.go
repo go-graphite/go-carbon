@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
