@@ -463,19 +463,25 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
+		var setConfigRetriever bool
 		if conf.Carbonserver.CacheScan {
 			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
 
-			retriever := &wspConfigRetriever{
-				getRetentionFunc: app.Persister.GetRetentionPeriod,
-				getAggrNameFunc:  app.Persister.GetAggrConf,
-			}
-			carbonserver.SetConfigRetriever(retriever)
+			setConfigRetriever = true
 		}
 
 		if conf.Carbonserver.RealtimeIndex > 0 {
 			ch := carbonserver.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
 			core.SetNewMetricsChan(ch)
+
+			setConfigRetriever = true
+		}
+		if setConfigRetriever {
+			retriever := &wspConfigRetriever{
+				getRetentionFunc: app.Persister.GetRetentionPeriod,
+				getAggrNameFunc:  app.Persister.GetAggrConf,
+			}
+			carbonserver.SetConfigRetriever(retriever)
 		}
 
 		if conf.Prometheus.Enabled {
