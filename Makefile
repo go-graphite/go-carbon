@@ -33,7 +33,6 @@ gox-build:
 	cd build && $(GO) build $(MODULE)
 	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="build/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
 	ls -la ./build/
-	./build/$(NAME)-linux-amd64 -config-print-default > ../deploy/$(NAME).conf
 
 clean:
 	rm -f go-carbon build/*
@@ -48,6 +47,7 @@ package-tree:
 	install -m 0755 -d build/root/etc/logrotate.d
 	install -m 0755 -d build/root/etc/init.d
 	install -m 0644 deploy/$(NAME).service build/root/lib/systemd/system/$(NAME).service
+	./build/$(NAME)-linux-amd64 -config-print-default > deploy/$(NAME).conf
 	install -m 0644 deploy/$(NAME).conf build/root/etc/$(NAME)/$(NAME).conf
 	install -m 0644 deploy/storage-schemas.conf build/root/etc/$(NAME)/storage-schemas.conf
 	install -m 0644 deploy/storage-aggregation.conf build/root/etc/$(NAME)/storage-aggregation.conf
