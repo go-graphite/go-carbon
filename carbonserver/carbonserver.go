@@ -625,9 +625,12 @@ uloop:
 			fidx := listener.CurrentFileIndex()
 			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
 				metric := filepath.Clean(strings.ReplaceAll(m, ".", "/") + ".wsp")
+
 				if err := fidx.trieIdx.insert(metric); err != nil {
 					listener.logger.Warn("failed to insert new metrics for realtime indexing", zap.String("metric", metric), zap.Error(err))
 				}
+
+				cacheMetrics[metric] = struct{}{}
 			}
 			continue uloop
 		}
@@ -773,7 +776,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 				// use cacheMetricNames to check and prevent appending duplicate metrics
 				// into the index when cacheMetricNamesIndex is enabled
-				if _, present := cacheMetricNames[trimmedName]; !present {
+				if _, present := cacheMetricNames[trimmedName]; present {
+					delete(cacheMetricNames, trimmedName)
+				} else {
 					if listener.trieIndex {
 						if err := trieIdx.insert(trimmedName); err != nil {
 							return fmt.Errorf("updateFileList.trie: %s", err)
