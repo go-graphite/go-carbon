@@ -29,13 +29,14 @@ test:
 
 gox-build:
 	rm -rf build
-	mkdir -p build
+	mkdir -p build/root/etc/$(NAME)/
 	cd build && $(GO) build $(MODULE)
-	gox -os="linux" -arch="amd64" -arch="386" -output="build/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
+	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="build/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
 	ls -la ./build/
+	./build/$(NAME)-linux-amd64 -config-print-default > ../deploy/$(NAME).conf
 
 clean:
-	rm -f go-carbon
+	rm -f go-carbon build/*
 
 image:
 	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
@@ -56,10 +57,12 @@ package-tree:
 fpm-deb:
 	make fpm-build-deb ARCH=amd64
 	make fpm-build-deb ARCH=386
+	make fpm-build-deb ARCH=arm64
 
 fpm-rpm:
 	make fpm-build-rpm ARCH=amd64 FILE_ARCH=x86_64
 	make fpm-build-rpm ARCH=386 FILE_ARCH=386
+	make fpm-build-rpm ARCH=arm64 FILE_ARCH=arm64
 
 fpm-build-deb:
 	make package-tree
