@@ -35,7 +35,7 @@ gox-build:
 	ls -la ./build/
 
 clean:
-	rm -f go-carbon build/*
+	rm -f go-carbon build/* *deb *rpm
 
 image:
 	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
