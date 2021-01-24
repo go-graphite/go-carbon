@@ -1,6 +1,10 @@
 ## Changelog
 ##### master
 
+##### version 0.15.6
+* trie/realtime: set wspConfigRetriever when realtime index is enabled #395 #396
+* Go v1.15.3
+
 ##### version 0.15.5
 * carbonserver: fix incorrect hanlding of counting and indexing files in updateFileList #385
 
