@@ -14,7 +14,7 @@ SOURCES=$(shell find . -name "*.go")
 all: $(NAME)
 
 $(NAME): $(SOURCES)
-	$(GO) build --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
+	$(GO) build -o ./build/$(NAME)-linux-amd64 --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
 debug: $(SOURCES)
 	$(GO) build -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
