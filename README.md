@@ -88,8 +88,7 @@ Usage of go-carbon:
 user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}"
-# Endpoint fo
-# r store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
+# Endpoint to store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
 metric-endpoint = "local"
 # Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
 metric-interval = "1m0s"
@@ -314,11 +313,13 @@ find-cache-enabled = true
 #  Another drawback is that it will recreate index every scan-frequency interval
 #  All new/deleted metrics will still be searchable until index is recreated
 trigram-index = true
-# carbonserver keeps track of all available whisper files
-# in memory. This determines how often it will check FS
-# for new or deleted metrics.
+# carbonserver keeps track of all available whisper files in memory. 
+# This determines how often it will check FS for new or deleted metrics.
+# If you only use the trie index, have 'realtime-index' > 0, and delete metrics 
+# unfrequently you can have a very low scan frequency.
+# Ex : you delete metrics only once every 24 hours, you can have a 24H scan frequency
 scan-frequency = "5m0s"
-# Control trie index (EXPERIMENTAL)
+# Control trie index
 #  This index is built as an alternative to trigram index, with shorter indexing
 #  time and less memory usage (around 2 - 5 times). For most of the queries,
 #  trie is faster than trigram. For queries with keyword wrap around by widcards
@@ -343,14 +344,14 @@ concurrent-index = false
 # Set to larger than 0 to enable realtime indexing of new metrics,
 # The value controls how many new metrics could be buffered at once. Suitable to
 # adjust it higher if there are high number of new metrics being produced.
-# Currently only trie-index is supported. (EXPERIMENTAL)
+# Currently only trie-index is supported. 
+# (EXPERIMENTAL)
 realtime-index = 0
 
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
 # populates index with metrics with or without corresponding wsp files,
 # but will lead to increased memory consumption. Disabled by default.
-# (EXPERIMENTAL)
 cache-scan = false
 
 # Maximum amount of globs in a single metric in index
