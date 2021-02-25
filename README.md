@@ -377,7 +377,8 @@ max-metrics-rendered = 1000
 graphite-web-10-strict-mode = true
 # Allows to keep track for "last time readed" between restarts, leave empty to disable
 internal-stats-dir = ""
-# Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile. To disable this feature, leave the list blank
+# Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile.
+# To disable this feature, leave the list blank
 stats-percentiles = [99, 98, 95, 75, 50]
 
 [dump]
