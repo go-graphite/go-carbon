@@ -3,7 +3,8 @@
 user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}"
-# Endpoint for store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
+# Endpoint fo
+# r store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
 metric-endpoint = "local"
 # Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
 metric-interval = "1m0s"
@@ -32,7 +33,10 @@ enabled = true
 # Use hashed filenames for tagged metrics instead of human readable
 # https://github.com/go-graphite/go-carbon/pull/225
 hash-filenames = true
-# specify to enable/disable compressed format. IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
+# specify to enable/disable compressed format (EXPERIMENTAL)
+# See details and limitations in https://github.com/go-graphite/go-whisper#compressed-format
+# IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are
+# rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
 compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
@@ -229,7 +233,7 @@ trigram-index = true
 # in memory. This determines how often it will check FS
 # for new or deleted metrics.
 scan-frequency = "5m0s"
-# Control trie index
+# Control trie index (EXPERIMENTAL)
 #  This index is built as an alternative to trigram index, with shorter indexing
 #  time and less memory usage (around 2 - 5 times). For most of the queries,
 #  trie is faster than trigram. For queries with keyword wrap around by widcards
@@ -238,10 +242,30 @@ scan-frequency = "5m0s"
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
 
+# Cache file list scan data in the specified path. This option speeds
+# up index building after reboot by reading the last scan result in file
+# system instead of scanning the whole data dir, which could takes up
+# most of the indexing time if it contains a high number of metrics (10
+# - 40 millions). go-carbon only reads the cached file list once after
+# reboot and the cache result is updated after every scan. (EXPERIMENTAL)
+file-list-cache = ""
+
+# Enable concurrently building index without maintaining a new copy
+# index structure. More memory efficient.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+concurrent-index = false
+
+# Set to larger than 0 to enable realtime indexing of new metrics,
+# The value controls how many new metrics could be buffered at once. Suitable to
+# adjust it higher if there are high number of new metrics being produced.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+realtime-index = 0
+
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
 # populates index with metrics with or without corresponding wsp files,
 # but will lead to increased memory consumption. Disabled by default.
+# (EXPERIMENTAL)
 cache-scan = false
 
 # Maximum amount of globs in a single metric in index
@@ -257,7 +281,6 @@ max-metrics-globbed  = 30000
 # Maximum metrics could be returned in render request (works both all types of
 # indexes)
 max-metrics-rendered = 1000
-
 
 # graphite-web-10-mode
 # Use Graphite-web 1.0 native structs for pickle response
@@ -308,10 +331,13 @@ encoding-time = "iso8601"
 # Log duration format: "seconds", "nanos", "string"
 encoding-duration = "seconds"
 
-[[logging]]
-logger = ""
-file = "stdout"
-level = "error"
-encoding = "mixed"
-encoding-time = "iso8601"
-encoding-duration = "seconds"
+# You can define multiply loggers:
+
+# Copy errors to stderr for systemd
+# [[logging]]
+# logger = ""
+# file = "stderr"
+# level = "error"
+# encoding = "mixed"
+# encoding-time = "iso8601"
+# encoding-duration = "seconds"
