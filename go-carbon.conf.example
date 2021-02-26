@@ -3,7 +3,7 @@
 user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
 graph-prefix = "carbon.agents.{host}"
-# Endpoint for store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
+# Endpoint to store internal carbon metrics. Valid values: "" or "local", "tcp://host:port", "udp://host:port"
 metric-endpoint = "local"
 # Interval of storing internal metrics. Like CARBON_METRIC_INTERVAL
 metric-interval = "1m0s"
@@ -32,7 +32,10 @@ enabled = true
 # Use hashed filenames for tagged metrics instead of human readable
 # https://github.com/go-graphite/go-carbon/pull/225
 hash-filenames = true
-# specify to enable/disable compressed format. IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
+# specify to enable/disable compressed format (EXPERIMENTAL)
+# See details and limitations in https://github.com/go-graphite/go-whisper#compressed-format
+# IMPORTANT: Only one process/thread could write to compressed whisper files at a time, especially when you are
+# rebalancing graphite clusters (with buckytools, for example), flock needs to be enabled both in go-carbon and your tooling.
 compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
@@ -225,9 +228,11 @@ find-cache-enabled = true
 #  Another drawback is that it will recreate index every scan-frequency interval
 #  All new/deleted metrics will still be searchable until index is recreated
 trigram-index = true
-# carbonserver keeps track of all available whisper files
-# in memory. This determines how often it will check FS
-# for new or deleted metrics.
+# carbonserver keeps track of all available whisper files in memory. 
+# This determines how often it will check FS for new or deleted metrics.
+# If you only use the trie index, have 'realtime-index' > 0, and delete metrics 
+# unfrequently you can have a very low scan frequency.
+# Ex : you delete metrics only once every 24 hours, you can have a 24H scan frequency
 scan-frequency = "5m0s"
 # Control trie index
 #  This index is built as an alternative to trigram index, with shorter indexing
@@ -237,6 +242,26 @@ scan-frequency = "5m0s"
 #  could be speeded up by enabling adding trigrams to trie, at the some costs of
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
+
+# Cache file list scan data in the specified path. This option speeds
+# up index building after reboot by reading the last scan result in file
+# system instead of scanning the whole data dir, which could takes up
+# most of the indexing time if it contains a high number of metrics (10
+# - 40 millions). go-carbon only reads the cached file list once after
+# reboot and the cache result is updated after every scan. (EXPERIMENTAL)
+file-list-cache = ""
+
+# Enable concurrently building index without maintaining a new copy
+# index structure. More memory efficient.
+# Currently only trie-index is supported. (EXPERIMENTAL)
+concurrent-index = false
+
+# Set to larger than 0 to enable realtime indexing of new metrics,
+# The value controls how many new metrics could be buffered at once. Suitable to
+# adjust it higher if there are high number of new metrics being produced.
+# Currently only trie-index is supported. 
+# (EXPERIMENTAL)
+realtime-index = 0
 
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
@@ -258,7 +283,6 @@ max-metrics-globbed  = 30000
 # indexes)
 max-metrics-rendered = 1000
 
-
 # graphite-web-10-mode
 # Use Graphite-web 1.0 native structs for pickle response
 # This mode will break compatibility with graphite-web 0.9.x
@@ -268,7 +292,8 @@ max-metrics-rendered = 1000
 graphite-web-10-strict-mode = true
 # Allows to keep track for "last time readed" between restarts, leave empty to disable
 internal-stats-dir = ""
-# Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile. To disable this feature, leave the list blank
+# Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile. 
+# To disable this feature, leave the list blank
 stats-percentiles = [99, 98, 95, 75, 50]
 
 [dump]
@@ -308,10 +333,13 @@ encoding-time = "iso8601"
 # Log duration format: "seconds", "nanos", "string"
 encoding-duration = "seconds"
 
-[[logging]]
-logger = ""
-file = "stdout"
-level = "error"
-encoding = "mixed"
-encoding-time = "iso8601"
-encoding-duration = "seconds"
+# You can define multiply loggers:
+
+# Copy errors to stderr for systemd
+# [[logging]]
+# logger = ""
+# file = "stderr"
+# level = "error"
+# encoding = "mixed"
+# encoding-time = "iso8601"
+# encoding-duration = "seconds"
