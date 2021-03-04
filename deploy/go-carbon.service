@@ -12,7 +12,7 @@ KillSignal=USR2
 Restart=on-failure
 
 TimeoutStopSec=600
-LimitNOFILE=55555
+LimitNOFILE=1048576
 LimitMEMLOCK=infinity
 
 [Install]
