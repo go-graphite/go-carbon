@@ -19,16 +19,18 @@ func main() {
 	timeout := flag.Duration("timeout", time.Second, "connect and read timeout")
 	flag.Parse()
 
-	// TODO: grpc.WithTimeout deprecated
-	conn, err := grpc.Dial(*server, grpc.WithInsecure(), grpc.WithTimeout(*timeout)) //nolint:staticcheck skipcq:SCC-SA1019
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	conn, err := grpc.DialContext(ctx, *server, grpc.WithInsecure(), grpc.WithBlock())
 	if err != nil {
 		log.Fatalf("did not connect: %v", err)
 	}
+
+	defer cancel()
 	defer conn.Close()
 
 	c := carbonpb.NewCarbonClient(conn)
 
-	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	ctx, cancel = context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	res, err := c.CacheQuery(ctx, &carbonpb.CacheRequest{Metrics: flag.Args()})
