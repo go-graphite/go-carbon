@@ -10,13 +10,13 @@ jobs:
 
   tests:
     name: Test code
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
         go:
-          - ^1.13
           - ^1.14
           - ^1.15
+          - ^1.16
           - ^1
     steps:
 
