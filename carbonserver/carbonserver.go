@@ -837,7 +837,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	var freeSpace uint64
 	// diskspace can be negative and Bavail is therefore int64
-	if stat.Bavail >= 0 { // nolint:staticcheck skipcq: SCC-SA4003
+	if stat.Bavail >= 0 { // nolint:staticcheck // skipcq: SCC-SA4003
 		freeSpace = uint64(stat.Bavail) * uint64(stat.Bsize)
 	}
 	totalSpace := stat.Blocks * uint64(stat.Bsize)
