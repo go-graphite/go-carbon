@@ -21,6 +21,7 @@ require (
 	github.com/go-graphite/protocol v0.4.3-0.20180731190405-5ae324d48067
 	github.com/gogo/protobuf v1.1.2-0.20180830160456-5669497fd644
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
+	github.com/google/go-cmp v0.5.0
 	github.com/kardianos/osext v0.0.0-20170510131534-ae77be60afb1 // indirect
 	github.com/klauspost/compress v1.4.0
 	github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5 // indirect
@@ -37,7 +38,7 @@ require (
 	github.com/prometheus/common v0.0.0-20181113130724-41aa239b4cce // indirect
 	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20180503174638-e2704e165165 // indirect
-	github.com/sevlyar/go-daemon v0.1.4
+	github.com/sevlyar/go-daemon v0.1.6-0.20210508104436-15bb82c8ea3c
 	github.com/stretchr/testify v1.6.1
 	github.com/syndtr/goleveldb v0.0.0-20180815032940-ae2bd5eed72d
 	go.opentelemetry.io/otel v0.9.0
