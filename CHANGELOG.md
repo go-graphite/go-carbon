@@ -1,5 +1,6 @@
 ## Changelog
 ##### master
+* Fixing build on riscv64 (#410) #411
 
 ##### version 0.15.6
 * trie/realtime: set wspConfigRetriever when realtime index is enabled #395 #396
