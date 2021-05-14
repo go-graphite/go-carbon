@@ -373,8 +373,7 @@ func (rcv *Kafka) consume() {
 
 	partitionConsumer, err := consumer.ConsumePartition(rcv.connectOptions.topic, rcv.connectOptions.partition, rcv.kafkaState.Offset)
 	if err != nil {
-		switch err {
-		case sarama.ErrOffsetOutOfRange:
+		if err == sarama.ErrOffsetOutOfRange {
 			rcv.logger.Error(
 				"kafka state offset out of range, restart from the oldest offset",
 				zap.Int64("kafka_state_offset", rcv.kafkaState.Offset),
