@@ -415,8 +415,8 @@ func (rcv *Kafka) consume() {
 }
 
 func (rcv *Kafka) connect() {
+	reconnectTimer := time.NewTicker(rcv.reconnectInterval)
 	for {
-		reconnectTimer := time.NewTicker(rcv.reconnectInterval)
 		select {
 		case <-rcv.closed:
 			close(rcv.workerClosed)
