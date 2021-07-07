@@ -371,6 +371,12 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 			if expandedResult, ok := metricGlobMap[metric.Name]; ok {
 				files, leafs := expandedResult.Files, expandedResult.Leafs
 				if len(files) > listener.maxMetricsRendered {
+					listener.accessLogger.Error(
+						"rendering too many metrics",
+						zap.Int("limit", listener.maxMetricsRendered),
+						zap.Int("target", len(files)),
+					)
+
 					files = files[:listener.maxMetricsRendered]
 					leafs = leafs[:listener.maxMetricsRendered]
 				}

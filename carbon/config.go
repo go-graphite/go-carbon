@@ -227,8 +227,8 @@ func NewConfig() *Config {
 			FindCacheEnabled:   true,
 			TrigramIndex:       true,
 			CacheScan:          false,
-			MaxMetricsGlobbed:  30000,
-			MaxMetricsRendered: 1000,
+			MaxMetricsGlobbed:  10_000_000,
+			MaxMetricsRendered: 1_000_000,
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
