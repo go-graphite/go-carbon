@@ -387,7 +387,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 						metricsCount++
 					}
 				}
-				listener.logger.Debug("expandGlobs result",
+				listener.accessLogger.Debug("expandGlobs result",
 					zap.String("handler", "render"),
 					zap.String("action", "expandGlobs"),
 					zap.String("metric", metric.Name),
@@ -400,7 +400,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 					res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
 					if err != nil {
 						atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-						listener.logger.Error("error while fetching the data",
+						listener.accessLogger.Error("error while fetching the data",
 							zap.Error(err),
 						)
 						continue
@@ -410,7 +410,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 					res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
 					if err != nil {
 						atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-						listener.logger.Error("error while fetching the data",
+						listener.accessLogger.Error("error while fetching the data",
 							zap.Error(err),
 						)
 						continue
@@ -421,7 +421,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 					multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
 				}
 			} else {
-				listener.logger.Debug("expand globs returned an error",
+				listener.accessLogger.Debug("expand globs returned an error",
 					zap.Error(err),
 				)
 				continue
