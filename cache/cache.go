@@ -79,7 +79,6 @@ func New() *Cache {
 		c.data[i] = &Shard{
 			items:        make(map[string]*points.Points),
 			notConfirmed: make([]*points.Points, 4),
-			adds:         make(map[string]struct{}),
 		}
 	}
 
@@ -93,6 +92,12 @@ func New() *Cache {
 
 	c.writeoutQueue = NewWriteoutQueue(c)
 	return c
+}
+
+func (c *Cache) InitCacheScanAdds() {
+	for _, shard := range c.data {
+		shard.adds = make(map[string]struct{})
+	}
 }
 
 // SetWriteStrategy ...
@@ -281,8 +286,10 @@ func (c *Cache) Add(p *points.Points) {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
-		shard.adds[p.Metric] = struct{}{}
 
+		if shard.adds != nil {
+			shard.adds[p.Metric] = struct{}{}
+		}
 		if c.newMetricsChan != nil {
 			select {
 			case c.newMetricsChan <- p.Metric:
