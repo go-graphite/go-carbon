@@ -78,6 +78,7 @@ func getTestInfo(t *testing.T) *testInfo {
 	}
 
 	c := cache.New()
+	c.InitCacheScanAdds()
 	carbonserver := NewCarbonserverListener(c.Get)
 	carbonserver.whisperData = tmpDir
 	carbonserver.logger = zap.NewNop()
