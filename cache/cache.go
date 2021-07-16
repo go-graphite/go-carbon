@@ -54,6 +54,8 @@ type Cache struct {
 		overflowCnt         uint32 // drop packages if cache full
 		queryCnt            uint32 // number of queries
 		tagsNormalizeErrors uint32 // tags normalize errors count
+
+		droppedRealtimeIndex uint32 // new metrics failed to be indexed in realtime
 	}
 
 	newMetricsChan chan string
@@ -79,7 +81,6 @@ func New() *Cache {
 		c.data[i] = &Shard{
 			items:        make(map[string]*points.Points),
 			notConfirmed: make([]*points.Points, 4),
-			adds:         make(map[string]struct{}),
 		}
 	}
 
@@ -93,6 +94,12 @@ func New() *Cache {
 
 	c.writeoutQueue = NewWriteoutQueue(c)
 	return c
+}
+
+func (c *Cache) InitCacheScanAdds() {
+	for _, shard := range c.data {
+		shard.adds = make(map[string]struct{})
+	}
 }
 
 // SetWriteStrategy ...
@@ -148,6 +155,8 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
 	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
 	helper.SendUint32("queueWriteoutTime", &c.stat.queueWriteoutTime, send)
+
+	helper.SendAndSubstractUint32("droppedRealtimeIndex", &c.stat.droppedRealtimeIndex, send)
 }
 
 // hash function
@@ -281,13 +290,15 @@ func (c *Cache) Add(p *points.Points) {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
-		shard.adds[p.Metric] = struct{}{}
 
+		if shard.adds != nil {
+			shard.adds[p.Metric] = struct{}{}
+		}
 		if c.newMetricsChan != nil {
 			select {
 			case c.newMetricsChan <- p.Metric:
 			default:
-				// TODO: log/metrics
+				atomic.AddUint32(&c.stat.droppedRealtimeIndex, 1)
 			}
 		}
 	}

@@ -612,7 +612,7 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 }
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
-	cacheMetrics := make(map[string]struct{})
+	cacheMetricNames := make(map[string]struct{})
 
 uloop:
 	for {
@@ -624,29 +624,30 @@ uloop:
 		case m := <-listener.newMetricsChan:
 			fidx := listener.CurrentFileIndex()
 			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
-				metric := filepath.Clean(strings.ReplaceAll(m, ".", "/") + ".wsp")
+				metric := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
 
 				if err := fidx.trieIdx.insert(metric); err != nil {
 					listener.logger.Warn("failed to insert new metrics for realtime indexing", zap.String("metric", metric), zap.Error(err))
 				}
-
-				cacheMetrics[metric] = struct{}{}
 			}
 			continue uloop
 		}
 
 		if listener.cacheGetRecentMetrics != nil {
-			// cacheMetrics maintains all new metric names added in cache
+			// cacheMetricNames maintains all new metric names added in cache
 			// when cache-scan is enabled in conf
 			newCacheMetricNames := listener.cacheGetRecentMetrics()
-			cacheMetrics = splitAndInsert(cacheMetrics, newCacheMetricNames)
+			cacheMetricNames = splitAndInsert(cacheMetricNames, newCacheMetricNames)
 		}
 
-		listener.updateFileList(dir, cacheMetrics)
+		if listener.updateFileList(dir, cacheMetricNames) {
+			listener.logger.Info("file list updated with cache, starting a new scan immediately")
+			listener.updateFileList(dir, cacheMetricNames)
+		}
 	}
 }
 
-func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}) {
+func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}) (readFromCache bool) {
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
 		if r := recover(); r != nil {
@@ -676,6 +677,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	// populate index for all the metric names in cache
 	// the iteration takes place only when cache-scan is enabled in conf
+	var tcache = time.Now()
+	var cacheMetricLen = len(cacheMetricNames)
 	for fileName := range cacheMetricNames {
 		if listener.trieIndex {
 			if err := trieIdx.insert(fileName); err != nil {
@@ -689,8 +692,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			metricsKnown++
 		}
 	}
+	cacheIndexRuntime := time.Since(tcache)
 
-	var readFromCache bool
+	// readFromCache hould only occur once at the start of the program
 	if fidx == nil && listener.fileListCache != "" {
 		fileListCache, err := newFileListCache(listener.fileListCache, 'r')
 		if err != nil {
@@ -707,6 +711,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				if err := trieIdx.insert(entry); err != nil {
 					logger.Error("failed to read from file list cache", zap.Error(err))
 					readFromCache = false
+
+					trieIdx = newTrie(".wsp")
 					break
 				}
 				filesLen++
@@ -746,6 +752,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				return nil
 			}
 
+			//  && len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2
 			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
 			newMetricsLoop:
 				for {
@@ -760,8 +767,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}
 			}
 
-			hasSuffix := strings.HasSuffix(info.Name(), ".wsp")
-			if info.IsDir() || hasSuffix {
+			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
+			if info.IsDir() || isFullMetric {
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
 				if flc != nil {
@@ -787,21 +794,19 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 						files = append(files, trimmedName)
 					}
 
-					if hasSuffix {
+					if isFullMetric {
 						metricsKnown++
 					}
 				}
 
-				if hasSuffix {
-					if listener.internalStatsDir != "" {
-						i := stat.GetStat(info)
-						trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
-						details[trimmedName] = &protov3.MetricDetails{
-							Size_:    i.Size,
-							ModTime:  i.MTime,
-							ATime:    i.ATime,
-							RealSize: i.RealSize,
-						}
+				if isFullMetric && listener.internalStatsDir != "" {
+					i := stat.GetStat(info)
+					trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
+					details[trimmedName] = &protov3.MetricDetails{
+						Size_:    i.Size,
+						ModTime:  i.MTime,
+						ATime:    i.ATime,
+						RealSize: i.RealSize,
 					}
 				}
 			}
@@ -817,13 +822,6 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	if listener.concurrentIndex && trieIdx != nil {
 		trieIdx.prune()
-
-		start := time.Now()
-		count, files, dirs, _, _, _, _, _ := trieIdx.countNodes()
-		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
-		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
-		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
-		infos = append(infos, zap.Duration("trie_count_nodes_time", time.Since(start)))
 	}
 
 	var stat syscall.Statfs_t
@@ -855,7 +853,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	var pruned int
 	var indexType = "trigram"
-	t0 = time.Now()
+	var tindex = time.Now()
+	var indexSize int
 	if listener.trieIndex {
 		indexType = "trie"
 		nfidx.trieIdx = trieIdx
@@ -864,18 +863,28 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			zap.Int("trie_depth", int(nfidx.trieIdx.depth)),
 			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
 		)
+
 		if listener.trigramIndex && !listener.concurrentIndex {
 			start := time.Now()
 			nfidx.trieIdx.setTrigrams()
 			infos = append(infos, zap.Duration("set_trigram_time", time.Since(start)))
 		}
+
+		start := time.Now()
+		count, files, dirs, _, _, _, _, _ := trieIdx.countNodes()
+		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
+		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
+		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
+		infos = append(infos, zap.Duration("trie_count_nodes_time", time.Since(start)))
+
+		indexSize = count
 	} else {
 		nfidx.files = files
 		nfidx.idx = trigram.NewIndex(files)
 		pruned = nfidx.idx.Prune(0.95)
+		indexSize = len(nfidx.idx)
 	}
-	indexSize := len(nfidx.idx)
-	indexingRuntime := time.Since(t0)
+	indexingRuntime := time.Since(tindex) // note: no longer meaningful for trie index
 	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
 
 	var tl = time.Now()
@@ -902,14 +911,20 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		zap.Duration("file_scan_runtime", fileScanRuntime),
 		zap.Duration("indexing_runtime", indexingRuntime),
 		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
+		zap.Duration("cache_index_runtime", cacheIndexRuntime),
 		zap.Duration("total_runtime", time.Since(t0)),
 		zap.Int("Files", filesLen),
 		zap.Int("index_size", indexSize),
 		zap.Int("pruned_trigrams", pruned),
+		zap.Int("cache_metric_len_before", cacheMetricLen),
+		zap.Int("cache_metric_len_after", len(cacheMetricNames)),
+		zap.Uint64("metrics_known", metricsKnown),
 		zap.String("index_type", indexType),
 		zap.Bool("read_from_cache", readFromCache),
 	)
 	logger.Info("file list updated", infos...)
+
+	return
 }
 
 func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {

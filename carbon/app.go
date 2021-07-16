@@ -465,6 +465,7 @@ func (app *App) Start(version string) (err error) {
 
 		var setConfigRetriever bool
 		if conf.Carbonserver.CacheScan {
+			core.InitCacheScanAdds()
 			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
 
 			setConfigRetriever = true
