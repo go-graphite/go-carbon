@@ -4,20 +4,17 @@ DESCRIPTION:="Golang implementation of Graphite/Carbon server"
 MODULE:=github.com/go-graphite/go-carbon
 
 GO ?= go
-export GOPATH := $(CURDIR)/_vendor
 TEMPDIR:=$(shell mktemp -d)
 VERSION:=$(shell sh -c 'grep "const Version" $(NAME).go  | cut -d\" -f2')
 BUILD ?= $(shell git describe --abbrev=4 --dirty --always --tags)
 
-SOURCES=$(shell find . -name "*.go")
-
 all: $(NAME)
 
-$(NAME): $(SOURCES)
-	$(GO) build --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
+$(NAME):
+	$(GO) build -mod vendor --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
-debug: $(SOURCES)
-	$(GO) build -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
+debug:
+	$(GO) build -mod vendor -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
 
 run-test:
 	$(GO) $(COMMAND) ./...
