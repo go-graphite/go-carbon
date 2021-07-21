@@ -875,6 +875,7 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 
 		trieNodes[ncindex] = cur
 		cur = cur.getChild(curChildrens, nindex[ncindex])
+		curChildrens = cur.getChildrens()
 		ncindex++
 		if ncindex >= len(nindex)-1 {
 			goto parent
