@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"crypto/md5"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"unsafe"
 
 	trigram "github.com/dgryski/go-trigram"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 // debug codes diff for reference: https://play.golang.org/p/FxuvRyosk3U
@@ -282,7 +284,7 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 	m.dstates = append(m.dstates, &droot)
 
 	// TODO: consider dropping trigram integration
-	if m.lsComplex {
+	if m.lsComplex && expand != nil {
 		es, err := expand([]string{expr})
 		if err != nil {
 			return &m, nil
@@ -316,17 +318,98 @@ type trieIndex struct {
 	depth         uint64
 	longestMetric string
 	trigrams      map[*trieNode][]uint32
+
+	// qau: Quota And Usage
+	qauMetrics   []points.Points
+	estimateSize func(metric string) (size, dataPoints int64)
 }
 
 type trieNode struct {
 	c         []byte // TODO: look for a more compact/compressed formats
 	childrens *[]*trieNode
 	gen       uint8
+
+	meta trieMeta
+}
+
+type trieMeta interface{ trieMeta() }
+
+type fileMeta struct {
+	logicalSize  int64
+	physicalSize int64
+	dataPoints   int64
+}
+
+func (fm *fileMeta) trieMeta() {}
+
+type dirMeta struct {
+	// type: *Quota
+	// note: the underlying Quota value is shared with other dir nodes.
+	//
+	// TODO: save 8 bytes by using a pointer value?
+	quota atomic.Value
+
+	usage *QuotaUsage
+}
+
+func newDirMeta() *dirMeta { return &dirMeta{usage: &QuotaUsage{}} }
+
+func (dm *dirMeta) trieMeta()           {}
+func (dm *dirMeta) update(quota *Quota) { dm.quota.Store(quota) }
+
+func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoints, throughput int64) bool {
+	quota, ok := dm.quota.Load().(*Quota)
+	if !ok {
+		return true
+	}
+
+	var (
+		qmetrics      = quota.Metrics
+		qnamespaces   = quota.Namespaces
+		qlogicalSize  = quota.LogicalSize
+		qphysicalSize = quota.PhysicalSize
+		qdataPoints   = quota.DataPoints
+		qthroughput   = quota.Throughput
+
+		umetrics      = atomic.LoadInt64(&dm.usage.Metrics)
+		unamespaces   = atomic.LoadInt64(&dm.usage.Namespaces)
+		ulogicalsize  = atomic.LoadInt64(&dm.usage.LogicalSize)
+		uphysicalsize = atomic.LoadInt64(&dm.usage.PhysicalSize)
+		udataPoints   = atomic.LoadInt64(&dm.usage.DataPoints)
+		uthroughput   = atomic.LoadInt64(&dm.usage.Throughput)
+	)
+
+	if qmetrics > 0 && umetrics+metrics > qmetrics {
+		return false
+	}
+	if qnamespaces > 0 && unamespaces+namespaces > qnamespaces {
+		return false
+	}
+	if qlogicalSize > 0 && ulogicalsize+logical > qlogicalSize {
+		return false
+	}
+	if qphysicalSize > 0 && uphysicalsize+physical > qphysicalSize {
+		return false
+	}
+	if qdataPoints > 0 && udataPoints+dataPoints > qdataPoints {
+		return false
+	}
+	if qthroughput > 0 && uthroughput+throughput > qthroughput {
+		return false
+	}
+
+	return true
 }
 
 var emptyTrieNodes = &[]*trieNode{}
 
-func newFileNode(m uint8) *trieNode { return &trieNode{childrens: emptyTrieNodes, gen: m} }
+func newFileNode(m uint8, logicalSize, physicalSize, dataPoints int64) *trieNode {
+	return &trieNode{
+		childrens: emptyTrieNodes,
+		gen:       m,
+		meta:      &fileMeta{logicalSize: logicalSize, physicalSize: physicalSize, dataPoints: dataPoints},
+	}
+}
 
 func (tn *trieNode) dir() bool  { return len(tn.c) == 1 && tn.c[0] == '/' }
 func (tn *trieNode) file() bool { return tn.c == nil }
@@ -363,11 +446,13 @@ func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
 	return false
 }
 
-func newTrie(fileExt string) *trieIndex {
+func newTrie(fileExt string, estimateSize func(metric string) (size, dataPoints int64)) *trieIndex {
+	meta := newDirMeta()
 	return &trieIndex{
-		root:     &trieNode{childrens: &[]*trieNode{}},
-		fileExt:  fileExt,
-		trigrams: map[*trieNode][]uint32{},
+		root:         &trieNode{childrens: &[]*trieNode{}, meta: meta},
+		fileExt:      fileExt,
+		trigrams:     map[*trieNode][]uint32{},
+		estimateSize: estimateSize,
 	}
 }
 
@@ -385,13 +470,16 @@ type trieInsertError struct {
 
 func (t *trieInsertError) Error() string { return t.typ }
 
-// TODO: add some defensive logics agains bad paths?
+// TODO: add some more defensive logics agains bad paths?
 //
 // abc.def.ghi
 // abc.def2.ghi
 // abc.daf2.ghi
 // efg.cjk
-func (ti *trieIndex) insert(path string) error {
+//
+// insert expects / separated file path, like ns1/ns2/ns3/metric.wsp.
+// insert considers path name ending with trieIndex.fileExt as a metric.
+func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints int64) error {
 	path = filepath.Clean(path)
 	if len(path) > 0 && path[0] == '/' {
 		path = path[1:]
@@ -533,7 +621,7 @@ outer:
 		}
 
 		if i < len(path) {
-			newn = &trieNode{c: []byte{'/'}, childrens: &[]*trieNode{}, gen: ti.root.gen}
+			newn = ti.newDir()
 			cur.addChild(newn)
 			cur = newn
 		}
@@ -555,7 +643,7 @@ outer:
 			}
 		}
 		if newDir {
-			cur.addChild(&trieNode{c: []byte{'/'}, childrens: &[]*trieNode{}, gen: ti.root.gen})
+			cur.addChild(ti.newDir())
 		}
 
 		return nil
@@ -563,24 +651,43 @@ outer:
 
 	var hasFileNode bool
 	for _, c := range *cur.childrens {
-		// if c == fileNode {
 		if c.file() {
 			hasFileNode = true
 			c.gen = ti.root.gen
+
+			if logicalSize > 0 || physicalSize > 0 || dataPoints > 0 {
+				atomic.StoreInt64(&c.meta.(*fileMeta).logicalSize, logicalSize)
+				atomic.StoreInt64(&c.meta.(*fileMeta).physicalSize, physicalSize)
+				atomic.StoreInt64(&c.meta.(*fileMeta).dataPoints, dataPoints)
+			}
 			break
 		}
 	}
 	if !hasFileNode {
-		cur.addChild(newFileNode(ti.root.gen))
+		if ti.estimateSize != nil && logicalSize == 0 && physicalSize == 0 && dataPoints == 0 {
+			logicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
+			physicalSize = logicalSize
+		}
+		cur.addChild(newFileNode(ti.root.gen, logicalSize, physicalSize, dataPoints))
 		ti.fileCount++
 	}
 
 	return nil
 }
 
+func (ti *trieIndex) newDir() *trieNode {
+	n := &trieNode{
+		c:         []byte{'/'},
+		childrens: &[]*trieNode{},
+		gen:       ti.root.gen,
+	}
+
+	return n
+}
+
 // TODO: add some defensive logics agains bad queries?
 // depth first search
-func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, err error) {
+func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "*"
@@ -593,14 +700,14 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		}
 		gs, err := newGlobState(node, expand)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		exact = exact && gs.exact
 		matchers = append(matchers, gs)
 	}
 
 	if len(matchers) == 0 {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	var cur = ti.root
@@ -614,6 +721,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	var curm = matchers[0]
 	var ndstate *gdstate
 	var isFile, isDir, hasMoreNodes bool
+	var dirNode *trieNode
 
 	for {
 		if nindex[ncindex] >= len(curChildrens) {
@@ -682,6 +790,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 				isFile = true
 			case child.dir():
 				isDir = true
+				dirNode = child
 			default:
 				hasMoreNodes = true
 			}
@@ -707,6 +816,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		if isDir {
 			files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
 			isFiles = append(isFiles, false)
+			nodes = append(nodes, dirNode)
 		}
 
 		if len(files) >= limit || exact {
@@ -741,7 +851,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		continue
 	}
 
-	return files, isFiles, nil
+	return files, isFiles, nodes, nil
 }
 
 func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
@@ -826,6 +936,10 @@ func (ti *trieIndex) dump(w io.Writer) {
 	var curChildrens = cur.getChildrens()
 	var trieNodes = make([]*trieNode, depth)
 	var ident []byte
+
+	fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, "/", len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+	ident = append(ident, ' ', ' ')
+
 	for {
 		if nindex[ncindex] >= len(curChildrens) {
 			goto parent
@@ -839,11 +953,69 @@ func (ti *trieIndex) dump(w io.Writer) {
 			goto parent
 		}
 
-		if cur.file() {
-			fmt.Fprintf(w, "%s$ (%d/%d)\n", ident, len(*cur.childrens), cur.gen)
-		} else {
-			fmt.Fprintf(w, "%s%s (%d/%d)\n", ident, cur.c, len(*cur.childrens), cur.gen)
+		switch {
+		case cur.file():
+			fmt.Fprintf(w, "%s$ (%d/%d) %p\n", ident, len(*cur.childrens), cur.gen, cur)
+		case cur.dir() && cur.meta != nil:
+			fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, cur.c, len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+		default:
+			fmt.Fprintf(w, "%s%s (%d/%d) %p\n", ident, cur.c, len(*cur.childrens), cur.gen, cur)
 		}
+		ident = append(ident, ' ', ' ')
+
+		if cur.file() {
+			goto parent
+		}
+
+		continue
+
+	parent:
+		nindex[ncindex] = 0
+		ncindex--
+		if ncindex < 0 {
+			break
+		}
+		nindex[ncindex]++
+		cur = trieNodes[ncindex]
+		curChildrens = cur.getChildrens()
+
+		ident = ident[:len(ident)-2]
+
+		continue
+	}
+}
+
+func (ti *trieIndex) getQuotaTree(w io.Writer) {
+	var depth = ti.getDepth() + trieDepthBuffer
+	var nindex = make([]int, depth)
+	var ncindex int
+	var cur = ti.root
+	var curChildrens = cur.getChildrens()
+	var trieNodes = make([]*trieNode, depth)
+	var ident []byte
+
+	fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, "/", len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+	ident = append(ident, ' ', ' ')
+
+	for {
+		if nindex[ncindex] >= len(curChildrens) {
+			goto parent
+		}
+
+		trieNodes[ncindex] = cur
+		cur = cur.getChild(curChildrens, nindex[ncindex])
+		curChildrens = cur.getChildrens()
+		ncindex++
+		if ncindex >= len(trieNodes)-1 {
+			goto parent
+		}
+
+		if cur.dir() && cur.meta != nil {
+			name := ti.root.fullPath('.', trieNodes[:ncindex])
+
+			fmt.Fprintf(w, "%s%s %s (%d/%d) (quota:%s usage:%s) %p\n", ident, cur.c, name, len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+		}
+
 		ident = append(ident, ' ', ' ')
 
 		if cur.file() {
@@ -1222,7 +1394,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var leafs []bool
 
 	for _, g := range globs {
-		f, l, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
+		f, l, _, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1231,4 +1403,522 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	}
 
 	return files, leafs, nil
+}
+
+type QuotaDroppingPolicy int8
+
+const (
+	QDPNew QuotaDroppingPolicy = iota
+	QDPNone
+)
+
+func ParseQuotaDroppingPolicy(policy string) QuotaDroppingPolicy {
+	switch policy {
+	case "none":
+		return QDPNone
+	case "new":
+		fallthrough
+	default:
+		return QDPNew
+	}
+}
+
+func (qdp QuotaDroppingPolicy) String() string {
+	switch qdp {
+	case QDPNone:
+		return "none"
+	case QDPNew:
+		fallthrough
+	default:
+		return "new"
+	}
+}
+
+type Quota struct {
+	Pattern      string
+	Namespaces   int64 // top level subdirectories
+	Metrics      int64 // files
+	LogicalSize  int64
+	PhysicalSize int64
+
+	DataPoints int64
+	Throughput int64
+
+	DroppingPolicy   QuotaDroppingPolicy
+	StatMetricPrefix string
+}
+
+func (q *Quota) String() string {
+	return fmt.Sprintf("pattern:%s,dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,policy:%s", q.Pattern, q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.DroppingPolicy)
+}
+
+type QuotaUsage struct {
+	Namespaces   int64 // top level subdirectories
+	Metrics      int64 // files
+	LogicalSize  int64
+	PhysicalSize int64
+
+	DataPoints int64 // inferred from retention policy
+	Throughput int64
+
+	Throttled int64
+}
+
+func (q *QuotaUsage) String() string {
+	return fmt.Sprintf("dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,throttled:%d", q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.Throttled)
+}
+
+// applyQuotas applies quotas on new and old dirnodes.
+// It can't be evoked with concurrent trieIndex.insert.
+//
+// TODO: * how to remove old quotas?
+func (ti *trieIndex) applyQuotas(quotas ...*Quota) error {
+	for _, quota := range quotas {
+		if quota.Pattern == "/" {
+			ti.root.meta.(*dirMeta).update(quota)
+
+			continue
+		}
+
+		_, _, nodes, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
+		if err != nil {
+			return err
+		}
+
+		for _, node := range nodes {
+			if node.meta == nil {
+				node.meta = newDirMeta()
+			}
+
+			meta, ok := node.meta.(*dirMeta)
+			if !ok {
+				// TODO: log an error?
+				continue
+			}
+
+			meta.update(quota)
+		}
+	}
+
+	return nil
+}
+
+// refreshUsage updates usage data and generate stat metrics.
+// It can't be evoked with concurrent trieIndex.insert.
+func (ti *trieIndex) refreshUsage() {
+	type state struct {
+		next      int
+		node      *trieNode
+		childrens *[]*trieNode
+
+		files        int64
+		logicalSize  int64
+		physicalSize int64
+		dataPoints   int64
+	}
+
+	var idx int
+	var depth = ti.getDepth() + trieDepthBuffer
+	var states = make([]state, depth)
+
+	var pstate *state
+	var cur = &states[idx]
+	cur.node = ti.root
+	cur.childrens = cur.node.childrens
+
+	var dirs = make([]int64, depth)
+	var dirIndex int
+
+	// Drops unflushed metrics to avoid overusing memories, as timestamp is
+	// set by app.Collector, keeping old stats helps no one.
+	ti.qauMetrics = ti.qauMetrics[:0]
+
+	for {
+		if cur.next >= len(*cur.childrens) {
+			if (cur.node.dir() || cur.node == ti.root) && dirIndex >= 0 {
+				if cur.node.meta != nil && cur.node.meta.(*dirMeta) != nil && cur.node.meta.(*dirMeta).usage != nil {
+					usage := cur.node.meta.(*dirMeta).usage
+					atomic.StoreInt64(&usage.Namespaces, dirs[dirIndex])
+					atomic.StoreInt64(&usage.Metrics, cur.files)
+					atomic.StoreInt64(&usage.LogicalSize, cur.logicalSize)
+					atomic.StoreInt64(&usage.PhysicalSize, cur.physicalSize)
+					atomic.StoreInt64(&usage.DataPoints, cur.dataPoints)
+
+					var name string
+					if cur.node == ti.root {
+						name = "root"
+					} else {
+						var nodes []*trieNode
+						for i := 0; i < idx; i++ {
+							nodes = append(nodes, states[i].node)
+						}
+						name = ti.root.fullPath('-', nodes)
+					}
+					var prefix string
+					if quota, ok := cur.node.meta.(*dirMeta).quota.Load().(*Quota); ok {
+						prefix = quota.StatMetricPrefix
+					}
+					ti.generateQuotaAndUsageMetrics(prefix, name, cur.node)
+
+					throttled := atomic.LoadInt64(&usage.Throttled)
+					if throttled > 0 {
+						atomic.AddInt64(&usage.Throttled, -throttled)
+					}
+					throughput := atomic.LoadInt64(&usage.Throughput)
+					if throughput > 0 {
+						atomic.AddInt64(&usage.Throughput, -throughput)
+					}
+				}
+
+				dirIndex--
+			}
+
+			goto parent
+		}
+
+		idx++
+		if idx >= len(states)-1 {
+			goto parent
+		}
+
+		states[idx] = state{} // reset to zero value
+
+		pstate = &states[idx-1]
+		cur = &states[idx]
+		cur.node = (*pstate.node.childrens)[pstate.next]
+		cur.childrens = cur.node.childrens
+
+		if cur.node.file() {
+			cur.files++
+			cur.logicalSize += cur.node.meta.(*fileMeta).logicalSize
+			cur.physicalSize += cur.node.meta.(*fileMeta).physicalSize
+			cur.dataPoints += cur.node.meta.(*fileMeta).dataPoints
+
+			goto parent
+		} else if cur.node.dir() {
+			dirs[dirIndex]++
+			dirIndex++
+			dirs[dirIndex] = 0
+		}
+
+		continue
+
+	parent:
+		files := cur.files
+		logicalSize := cur.logicalSize
+		physicalSize := cur.physicalSize
+		dataPoints := cur.dataPoints
+
+		states[idx] = state{}
+		idx--
+		if idx < 0 {
+			break
+		}
+
+		cur = &states[idx]
+		cur.files += files
+		cur.logicalSize += logicalSize
+		cur.physicalSize += physicalSize
+		cur.dataPoints += dataPoints
+		cur.next++
+
+		continue
+	}
+}
+
+func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode) {
+	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
+	// file extension.
+	if len(name) >= 250 {
+		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name))) //nolint:nosec
+	}
+
+	// Note: Timestamp for each points.Points are set by collector send logics
+	meta := node.meta.(*dirMeta)
+	quota := meta.quota.Load().(*Quota)
+	if quota.Namespaces > 0 {
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("quota.namespaces.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(quota.Namespaces),
+			}},
+		})
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("usage.namespaces.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(atomic.LoadInt64(&meta.usage.Namespaces)),
+			}},
+		})
+	}
+	if quota.Metrics > 0 {
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("quota.metrics.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(quota.Metrics),
+			}},
+		})
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("usage.metrics.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(atomic.LoadInt64(&meta.usage.Metrics)),
+			}},
+		})
+	}
+	if quota.DataPoints > 0 {
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("quota.data_points.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(quota.DataPoints),
+			}},
+		})
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("usage.data_points.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(atomic.LoadInt64(&meta.usage.DataPoints)),
+			}},
+		})
+	}
+	if quota.LogicalSize > 0 {
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("quota.logical_size.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(quota.LogicalSize),
+			}},
+		})
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("usage.logical_size.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(atomic.LoadInt64(&meta.usage.LogicalSize)),
+			}},
+		})
+	}
+	if quota.PhysicalSize > 0 {
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("quota.physical_size.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(quota.PhysicalSize),
+			}},
+		})
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("usage.physical_size.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(atomic.LoadInt64(&meta.usage.PhysicalSize)),
+			}},
+		})
+	}
+	if quota.Throughput > 0 {
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("quota.throughput.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(quota.Throughput),
+			}},
+		})
+		ti.qauMetrics = append(ti.qauMetrics, points.Points{
+			Metric: fmt.Sprintf("usage.throughput.%s%s", prefix, name),
+			Data: []points.Point{{
+				Value: float64(atomic.LoadInt64(&meta.usage.Throughput)),
+			}},
+		})
+	}
+
+	ti.qauMetrics = append(ti.qauMetrics, points.Points{
+		Metric: fmt.Sprintf("throttle.%s%s", prefix, name),
+		Data: []points.Point{{
+			Value: float64(atomic.LoadInt64(&meta.usage.Throttled)),
+		}},
+	})
+}
+
+//nolint:golint,unused
+func (ti *trieIndex) getNodeFullPath(node *trieNode) string {
+	//nolint:golint,unused
+	type state struct {
+		next      int
+		node      *trieNode
+		childrens *[]*trieNode
+	}
+
+	var idx int
+	var depth = ti.getDepth() + trieDepthBuffer
+	var states = make([]state, depth)
+
+	var cur = &states[idx]
+	cur.node = ti.root
+	cur.childrens = cur.node.childrens
+
+	for {
+		if cur.next >= len(*cur.childrens) {
+
+			goto parent
+		}
+
+		idx++
+		if idx >= len(states)-1 {
+			goto parent
+		}
+
+		cur = &states[idx]
+		cur.next = 0
+		cur.node = (*states[idx-1].childrens)[states[idx-1].next]
+		cur.childrens = cur.node.childrens
+
+		if cur.node == node {
+			var parents []*trieNode
+			for i := 0; i < idx; i++ {
+				parents = append(parents, states[i].node)
+			}
+
+			return cur.node.fullPath('.', parents)
+		}
+
+		if cur.node.file() {
+			goto parent
+		}
+
+		continue
+
+	parent:
+		states[idx] = state{}
+		idx--
+		if idx < 0 {
+			break
+		}
+
+		cur = &states[idx]
+		cur.next++
+
+		continue
+	}
+
+	return ""
+}
+
+func (ti *trieIndex) throttle(ps *points.Points) bool {
+	var node = ti.root
+	var dirs = []*trieNode{ti.root}
+	var mindex int
+	var isNew bool
+	var metric = ps.Metric
+
+mloop:
+	for {
+		cindex := 0
+		for ; cindex < len(node.c) && mindex < len(metric); cindex++ {
+			if node.c[cindex] != metric[mindex] {
+				isNew = true
+				break mloop
+			}
+
+			mindex++
+		}
+
+		if cindex < len(node.c) {
+			isNew = true
+			break
+		}
+
+		childrens := node.getChildrens()
+
+		if mindex < len(metric) && metric[mindex] == '.' {
+			var dir *trieNode
+			for i := 0; i < len(childrens); i++ {
+				child := node.getChild(childrens, i)
+				if !child.dir() {
+					continue
+				}
+
+				dirs = append(dirs, child)
+				dir = child
+				break
+			}
+
+			if dir == nil {
+				isNew = true
+				break
+			}
+
+			node = dir
+			childrens = dir.getChildrens()
+			mindex++
+		}
+
+		for i := 0; i < len(childrens); i++ {
+			child := node.getChild(childrens, i)
+			if mindex >= len(metric) {
+				if child.file() {
+					break mloop
+				}
+
+				continue
+			}
+
+			if len(child.c) > 0 && child.c[0] == metric[mindex] {
+				node = child
+				continue mloop
+			}
+		}
+
+		isNew = true
+		break
+	}
+
+	if !isNew {
+		// Throughput quota applies on both new and old metrics
+		for _, n := range dirs {
+			meta, ok := n.meta.(*dirMeta)
+			if !ok || meta.usage == nil {
+				continue
+			}
+			quota, ok := meta.quota.Load().(*Quota)
+			if !ok || quota.Throughput <= 0 {
+				continue
+			}
+
+			uthroughput := atomic.LoadInt64(&meta.usage.Throughput)
+			if uthroughput+int64(len(ps.Data)) > quota.Throughput {
+				return true
+			}
+
+			atomic.AddInt64(&meta.usage.Throughput, int64(len(ps.Data)))
+		}
+
+		return false
+	}
+
+	size, dataPoints := ti.estimateSize(metric)
+
+	var toThrottle bool
+	for i, n := range dirs {
+		// TODO: might need more considerations
+		var namespaces int64
+		if i == len(dirs)-1 {
+			namespaces = 1
+		}
+
+		meta, ok := n.meta.(*dirMeta)
+		if !ok || meta.withinQuota(1, namespaces, size, size, dataPoints, int64(len(ps.Data))) {
+			continue
+		}
+
+		if meta.usage != nil {
+			atomic.AddInt64(&meta.usage.Throttled, 1)
+		}
+
+		if quota, ok := meta.quota.Load().(*Quota); ok && quota != nil && quota.DroppingPolicy == QDPNone {
+			continue
+		}
+
+		toThrottle = true
+		break
+	}
+
+	if !toThrottle {
+		for _, n := range dirs {
+			if meta, ok := n.meta.(*dirMeta); ok && meta != nil && meta.usage != nil {
+				atomic.AddInt64(&meta.usage.Throughput, int64(len(ps.Data)))
+			}
+		}
+	}
+
+	return toThrottle
 }

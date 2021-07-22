@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dgryski/go-trigram"
+	"github.com/go-graphite/go-carbon/points"
 	"go.uber.org/zap"
 )
 
@@ -37,9 +38,9 @@ func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListen
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
-	trieIndex := newTrie(".wsp")
+	trieIndex := newTrie(".wsp", nil)
 	for _, file := range files {
-		trieIndex.insert(file)
+		trieIndex.insert(file, 0, 0, 0)
 	}
 	l.Logf("trie index took %s\n", time.Since(start))
 
@@ -728,9 +729,9 @@ func TestTrieIndex(t *testing.T) {
 }
 
 func TestTrieEdgeCases(t *testing.T) {
-	var trie = newTrie(".wsp")
+	var trie = newTrie(".wsp", nil)
 
-	_, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
+	_, _, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
 	if err == nil || err.Error() != "glob: range overflow" {
 		t.Errorf("trie should return an range overflow error")
 	}
@@ -741,7 +742,7 @@ func TestTrieEdgeCases(t *testing.T) {
 }
 
 func TestTrieConcurrentReadWrite(t *testing.T) {
-	trieIndex := newTrie(".wsp")
+	trieIndex := newTrie(".wsp", nil)
 
 	rand.Seed(time.Now().Unix())
 
@@ -755,7 +756,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 				for j := 0; j < factor; j++ {
 					for k := 0; k < factor; k++ {
 						filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
-						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k))
+						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k), 0, 0, 0)
 						// if (i+j+k)%5 == 0 {
 						// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
 						// }
@@ -780,7 +781,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 			return
 		// case <-filec:
 		default:
-			files, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
+			files, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
 			if err != nil {
 				panic(err)
 			}
@@ -868,17 +869,17 @@ func TestTriePrune(t *testing.T) {
 
 	for i, c := range cases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			ctrieIndex := newTrie(".wsp")
-			strieIndex := newTrie(".wsp")
+			ctrieIndex := newTrie(".wsp", nil)
+			strieIndex := newTrie(".wsp", nil)
 
 			for _, f := range c.files1 {
-				ctrieIndex.insert(f)
+				ctrieIndex.insert(f, 0, 0, 0)
 			}
 
 			ctrieIndex.root.gen++
 			for _, f := range c.files2 {
-				ctrieIndex.insert(f)
-				strieIndex.insert(f)
+				ctrieIndex.insert(f, 0, 0, 0)
+				strieIndex.insert(f, 0, 0, 0)
 			}
 
 			ctrieIndex.prune()
@@ -1043,5 +1044,271 @@ func TestDumpAllMetrics(t *testing.T) {
 	sort.Strings(metrics)
 	if !reflect.DeepEqual(files, metrics) {
 		t.Errorf("trie.allMetrics:\nwant: %s\ngot:  %s\n", files, metrics)
+	}
+}
+
+func TestTrieQuotaGeneral(t *testing.T) {
+	type metric struct {
+		name         string
+		logicalSize  int64
+		physicalSize int64
+		dataPoints   int64
+	}
+	type throttleTest struct {
+		metric   string
+		data     []points.Point
+		throttle bool
+		reason   string
+	}
+
+	var cases = []struct {
+		input1      []metric
+		input2      []metric
+		quotas      []*Quota
+		tests       []throttleTest
+		statMetrics []points.Points
+	}{
+		{
+			input1: (func() (r []metric) {
+				for i := 0; i < 5; i++ {
+					r = append(
+						r,
+						metric{fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i), 12 * 1024, 12 * 1024, 1024},
+						metric{fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i), 12 * 1024, 12 * 1024, 1024},
+						metric{fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i), 12 * 1024, 12 * 1024, 1024},
+					)
+				}
+
+				r = append(
+					r,
+					metric{fmt.Sprintf("/sys/db/server-%02d/iostat.wsp", 0), 12 * 1024, 12 * 1024, 1024},
+					metric{fmt.Sprintf("/user/foo/server-%02d/cpu.wsp", 0), 12 * 1024, 12 * 1024, 1024},
+					metric{fmt.Sprintf("/play/foo/server-%02d/cpu.wsp", 0), 12 * 1024, 12 * 1024, 1024},
+				)
+				return r
+			})(),
+
+			input2: []metric{
+				{"/sys/kv/server-00/iostat.wsp", 12 * 1024, 12 * 1024, 1024},
+				{"/sys/kv/server-01/iostat.wsp", 12 * 1024, 12 * 1024, 1024},
+			},
+
+			quotas: []*Quota{
+				{
+					Pattern:    "/",
+					Namespaces: 3,
+					Metrics:    60,
+				},
+				{
+					Pattern:    "*",
+					Namespaces: 3,
+					Metrics:    500,
+				},
+				{
+					Pattern:    "sys",
+					Namespaces: 3,
+					Metrics:    500,
+				},
+				{
+					Pattern: "sys.*",
+					Metrics: 600,
+				},
+				{
+					Pattern:    "sys.kv",
+					Namespaces: 2,
+					Metrics:    600,
+				},
+				{
+					Pattern: "sys.app.*",
+					Metrics: 3,
+				},
+				{
+					Pattern: "sys.app.server-01",
+					Metrics: 4,
+				},
+				{
+					Pattern:    "sys.app.server-02",
+					Metrics:    4,
+					DataPoints: 1024 * 3,
+				},
+			},
+			tests: []throttleTest{
+				{"sys.app.server-31.cpu", nil, false, ""},
+				{"sys.app.server-00.cpu3", nil, true, "throttled by sys.app.* metrics limit"},
+
+				{"sys.app.server-01.cpu3", nil, false, ""},
+				{"sys.app.server-02.cpu3", nil, true, "throttled by sys.app.server-01 dataPoints limit"},
+
+				{"sys.kv.server-01.cpu2", nil, false, ""},
+				{"sys.kv.server-02.iostat", nil, true, "throttled by sys.kv namespaces limit"},
+
+				{"foo2.kv.server-02.iostat", nil, true, "throttled by / namespaces limit"},
+			},
+		},
+		{
+			input1: (func() (r []metric) {
+				for i := 0; i < 5; i++ {
+					r = append(
+						r,
+						metric{fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i), 12 * 1024, 12 * 1024, 1024},
+						metric{fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i), 12 * 1024, 12 * 1024, 1024},
+						metric{fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i), 12 * 1024, 12 * 1024, 1024},
+					)
+				}
+
+				return r
+			})(),
+
+			quotas: []*Quota{
+				{
+					Pattern:      "/",
+					PhysicalSize: 1024 * 12 * 15,
+				},
+				{
+					Pattern: "*",
+					Metrics: 500,
+				},
+			},
+			tests: []throttleTest{
+				{"sys.app.server-00.cpu", nil, false, ""},
+				{"sys.app.server-00.cpu3", nil, true, "throttled by / physicalSize limit"},
+			},
+		},
+		{
+			input1: (func() (r []metric) {
+				r = append(r, metric{"/sys/app/srv1/nodes/host-01/cpu.wsp", 1, 1, 1})
+				r = append(r, metric{"/sys/app/srv1/nodes/host-01/mem.wsp", 1, 1, 1})
+				r = append(r, metric{"/sys/app/srv2/nodes/host-01/mem.wsp", 1, 1, 1})
+
+				r = append(r, metric{"/sys/app/srv1/nodes/foo-01/cpu-0.wsp", 1, 1, 1})
+				r = append(r, metric{"/sys/app/srv1/nodes/foo-01/cpu-1.wsp", 1, 1, 1})
+				r = append(r, metric{"/sys/app/srv1/nodes/foo-01/cpu-2.wsp", 1, 1, 1})
+
+				return r
+			})(),
+
+			quotas: []*Quota{
+				{
+					Pattern:      "/",
+					PhysicalSize: 1024 * 12 * 15,
+				},
+				{
+					Pattern: "sys.app.*.nodes.*",
+					Metrics: 2,
+				},
+				{
+					Pattern: "sys.app.*.nodes.foo-*",
+					Metrics: 4,
+				},
+			},
+			tests: []throttleTest{
+				{"sys.app.srv1.nodes.host-01.cpu2", nil, true, "throttled by sys.app.*.nodes.* memtrics limit"},
+				{"sys.app.srv1.nodes.foo-01.cpu-3", nil, false, ""},
+			},
+
+			statMetrics: []points.Points{
+				{Metric: "quota.metrics.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 2}}},
+				{Metric: "usage.metrics.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 2}}},
+				{Metric: "throttle.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 1}}},
+
+				{Metric: "quota.metrics.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 4}}},
+				{Metric: "usage.metrics.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 3}}},
+				{Metric: "throttle.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 0}}},
+
+				{Metric: "quota.metrics.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 2}}},
+				{Metric: "usage.metrics.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 1}}},
+				{Metric: "throttle.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 0}}},
+
+				{Metric: "quota.physical_size.root", Data: []points.Point{{Value: 184320}}},
+				{Metric: "usage.physical_size.root", Data: []points.Point{{Value: 6}}},
+				{Metric: "throttle.root", Data: []points.Point{{Value: 0}}},
+			},
+		},
+	}
+
+	for i, c := range cases {
+		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
+			tindex := newTrie(
+				".wsp",
+				func(metric string) (size, dataPoints int64) {
+					return 12 * 1024, 1024
+				},
+			)
+
+			for _, m := range c.input1 {
+				tindex.insert(m.name, m.logicalSize, m.physicalSize, m.dataPoints)
+			}
+			tindex.applyQuotas(c.quotas...)
+			tindex.qauMetrics = nil
+			tindex.refreshUsage()
+
+			for _, m := range c.input2 {
+				tindex.insert(m.name, m.logicalSize, m.physicalSize, m.dataPoints)
+			}
+
+			tindex.applyQuotas(c.quotas...)
+			tindex.qauMetrics = nil
+			tindex.refreshUsage()
+
+			// tindex.dump(os.Stdout)
+			// tindex.getQuotaTree(os.Stdout)
+
+			for _, tt := range c.tests {
+				t.Logf("Teseting throttle(%q)", tt.metric)
+				if throttle := tindex.throttle(&points.Points{Metric: tt.metric, Data: tt.data}); throttle != tt.throttle {
+					t.Errorf("throttle(%q) = %t, wants %t (explanation:%q)", tt.metric, throttle, tt.throttle, tt.reason)
+				}
+			}
+
+			tindex.qauMetrics = nil
+			tindex.refreshUsage()
+
+			if c.statMetrics != nil && !reflect.DeepEqual(tindex.qauMetrics, c.statMetrics) {
+				t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(c.statMetrics))
+			}
+		})
+	}
+}
+
+func stringifyQuotaPoints(ps []points.Points) string {
+	var str string
+	for _, p := range ps {
+		str += fmt.Sprintf("%s %v\n", p.Metric, p.Data[0].Value)
+	}
+	return str
+}
+
+func TestTrieQuotaThroughput(t *testing.T) {
+	tindex := newTrie(
+		".wsp",
+		func(metric string) (size, dataPoints int64) {
+			return 12 * 1024, 1024
+		},
+	)
+
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0)
+
+	tindex.applyQuotas(
+		&Quota{
+			Pattern:      "/",
+			PhysicalSize: 1024 * 12 * 15,
+		},
+		&Quota{
+			Pattern:    "sys.app.*",
+			Throughput: 5,
+		},
+	)
+	tindex.refreshUsage()
+
+	if tindex.throttle(&points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}, {}, {}, {}}}) {
+		t.Errorf("should not throttle old metric within throughput quota")
+	}
+	if !tindex.throttle(&points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}, {}, {}, {}}}) {
+		t.Errorf("should throttle old metric exceeding throughput quota")
+	}
+
+	if !tindex.throttle(&points.Points{Metric: "sys.app.server-002.cpu2", Data: []points.Point{{}, {}, {}, {}, {}, {}}}) {
+		t.Errorf("should throttle new metric exceeding throughput quota")
 	}
 }

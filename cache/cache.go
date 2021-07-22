@@ -59,6 +59,8 @@ type Cache struct {
 	}
 
 	newMetricsChan chan string
+
+	throttle func(*points.Points) bool
 }
 
 // A "thread" safe string to anything map.
@@ -266,6 +268,10 @@ func (c *Cache) Add(p *points.Points) {
 		return
 	}
 
+	if c.throttle != nil && c.throttle(p) {
+		return
+	}
+
 	if s.tagsEnabled {
 		var err error
 		p.Metric, err = tags.Normalize(p.Metric)
@@ -367,3 +373,5 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 	}
 	return metricNames
 }
+
+func (c *Cache) SetThrottle(throttle func(*points.Points) bool) { c.throttle = throttle }

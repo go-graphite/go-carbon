@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/go-graphite/go-carbon/receiver/udp"
@@ -56,6 +57,7 @@ type whisperConfig struct {
 	DataDir                 string `toml:"data-dir"`
 	SchemasFilename         string `toml:"schemas-file"`
 	AggregationFilename     string `toml:"aggregation-file"`
+	QuotasFilename          string `toml:"quotas-file"`
 	Workers                 int    `toml:"workers"`
 	MaxUpdatesPerSecond     int    `toml:"max-updates-per-second"`
 	MaxCreatesPerSecond     int    `toml:"max-creates-per-second"`
@@ -67,6 +69,7 @@ type whisperConfig struct {
 	HashFilenames           bool   `toml:"hash-filenames"`
 	Schemas                 persister.WhisperSchemas
 	Aggregation             *persister.WhisperAggregation
+	Quotas                  persister.WhisperQuotas
 	RemoveEmptyFile         bool `toml:"remove-empty-file"`
 }
 
@@ -121,6 +124,8 @@ type carbonserverConfig struct {
 	ConcurrentIndex bool   `toml:"concurrent-index"`
 	RealtimeIndex   int    `toml:"realtime-index"`
 	FileListCache   string `toml:"file-list-cache"`
+
+	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
 }
 
 type pprofConfig struct {
@@ -212,6 +217,9 @@ func NewConfig() *Config {
 			MetricsAsCounters: false,
 			ScanFrequency: &Duration{
 				Duration: 300 * time.Second,
+			},
+			QuotaUsageReportFrequency: &Duration{
+				Duration: 60 * time.Second,
 			},
 			ReadTimeout: &Duration{
 				Duration: 60 * time.Second,
@@ -375,4 +383,22 @@ retentions = 60:43200,3600:43800`), 0644)
 	ioutil.WriteFile(configFile, buf.Bytes(), 0644)
 
 	return configFile
+}
+
+func (c *Config) getCarbonserverQuotas() (quotas []*carbonserver.Quota) {
+	for _, q := range c.Whisper.Quotas {
+		quotas = append(quotas, &carbonserver.Quota{
+			Pattern:          q.Pattern,
+			Namespaces:       q.Namespaces,
+			Metrics:          q.Metrics,
+			DataPoints:       q.DataPoints,
+			LogicalSize:      q.LogicalSize,
+			PhysicalSize:     q.PhysicalSize,
+			Throughput:       q.Throughput,
+			DroppingPolicy:   carbonserver.ParseQuotaDroppingPolicy(q.DroppingPolicy),
+			StatMetricPrefix: q.StatMetricPrefix,
+		})
+	}
+
+	return quotas
 }

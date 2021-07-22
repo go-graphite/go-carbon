@@ -133,7 +133,6 @@ func NewCollector(app *App) *Collector {
 				}
 			})
 		})
-
 	}
 
 	sendCallback := func(moduleName string) func(metric string, value float64) {

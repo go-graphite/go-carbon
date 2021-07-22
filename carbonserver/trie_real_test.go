@@ -235,9 +235,9 @@ func uniqFilesLeafs(files []string, leafs []bool) ([]string, []bool) {
 
 func TestTrieContinuousUpdate(t *testing.T) {
 	files := readFile(*testDataPath)
-	ptrie := newTrie(".wsp")
+	ptrie := newTrie(".wsp", nil, )
 	for i := 0; i < 100; i++ {
-		ttrie := newTrie(".wsp")
+		ttrie := newTrie(".wsp", nil, )
 		ptrie.root.gen++
 		var count int
 		fmt.Println("--- run", i, count)
@@ -246,8 +246,8 @@ func TestTrieContinuousUpdate(t *testing.T) {
 				continue
 			}
 			count++
-			ptrie.insert(f)
-			ttrie.insert(f)
+			ptrie.insert(f, 0, 0, 0)
+			ttrie.insert(f, 0, 0, 0)
 		}
 
 		count0, files0, dirs0, onec0, onefc0, onedc0, countByChildren0, nodesByMark0 := ptrie.countNodes()

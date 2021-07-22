@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -97,6 +98,13 @@ func (app *App) configure() error {
 		cfg.Whisper.Schemas, err = persister.ReadWhisperSchemas(cfg.Whisper.SchemasFilename)
 		if err != nil {
 			return err
+		}
+
+		if cfg.Whisper.QuotasFilename != "" {
+			cfg.Whisper.Quotas, err = persister.ReadWhisperQuotas(cfg.Whisper.QuotasFilename)
+			if err != nil {
+				return err
+			}
 		}
 
 		if cfg.Whisper.AggregationFilename != "" {
@@ -445,6 +453,7 @@ func (app *App) Start(version string) (err error) {
 			}
 		}
 
+		// TODO: refactor: do not use var name the same as pkg name
 		carbonserver := carbonserver.NewCarbonserverListener(core.Get)
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
@@ -457,6 +466,7 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
+		carbonserver.SetQuotaUsageReportFrequency(conf.Carbonserver.QuotaUsageReportFrequency.Value())
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
 		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
@@ -470,6 +480,29 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+
+		if app.Config.Whisper.Quotas != nil {
+			if !conf.Carbonserver.ConcurrentIndex || conf.Carbonserver.RealtimeIndex <= 0 {
+				return errors.New("concurrent-index and realtime-index needs to be enabled for quota control.")
+			}
+
+			carbonserver.SetEstimateSize(func(metric string) (size, dataPoints int64) {
+				schema, ok := app.Config.Whisper.Schemas.Match(metric)
+				if !ok {
+					// Why not configurable: go-carbon users
+					// should always make sure that there is a default retention policy.
+					return 4096 + 172800*12, 172800 // 2 days of secondly data
+				}
+
+				for _, r := range schema.Retentions {
+					dataPoints += int64(r.NumberOfPoints())
+				}
+				return 4096 + dataPoints*12, dataPoints
+			})
+
+			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas())
+			core.SetThrottle(carbonserver.ShouldThrottleMetric)
+		}
 
 		var setConfigRetriever bool
 		if conf.Carbonserver.CacheScan {
