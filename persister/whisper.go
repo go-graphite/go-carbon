@@ -210,17 +210,17 @@ func (p *Whisper) store(metric string) {
 			// problem.
 			stat, err2 := os.Stat(path)
 			if err2 != nil {
-				p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(err2))
+				p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err2)))
 			}
 			if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
-				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(err))
+				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
 				if pathErr, isPathErr := err.(*os.PathError); isPathErr && pathErr.Err == syscall.ENAMETOOLONG {
 					p.popConfirm(metric)
 				}
 				return
 			}
 			if err := os.Remove(path); err != nil {
-				p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(err))
+				p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
 				p.popConfirm(metric)
 				return
 			}
@@ -257,7 +257,7 @@ func (p *Whisper) store(metric string) {
 		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
 			p.logger.Error("mkdir failed",
 				zap.String("dir", filepath.Dir(path)),
-				zap.Error(err),
+				zap.Error(p.simplifyPathError(err)),
 				zap.String("path", path),
 			)
 			return
@@ -275,7 +275,7 @@ func (p *Whisper) store(metric string) {
 		if err != nil {
 			p.logger.Error("create new whisper file failed",
 				zap.String("path", path),
-				zap.Error(err),
+				zap.Error(p.simplifyPathError(err)),
 				zap.String("retention", schema.RetentionStr),
 				zap.String("schema", schema.Name),
 				zap.String("aggregation", aggr.name),
@@ -487,4 +487,15 @@ func (p *Whisper) GetAggrConf(metric string) (string, float64, bool) {
 	}
 
 	return aggr.Name(), aggr.XFilesFactor(), true
+}
+
+// simplifyPathError retruns an error without path in the error message. This
+// simpplies the log a bit as the path is usually printed separately and the
+// new error message is easier to filter in elastic search and other tools.
+func (p *Whisper) simplifyPathError(err error) error {
+	perr, ok := err.(*os.PathError)
+	if !ok {
+		return err
+	}
+	return fmt.Errorf("%s: %s", perr.Op, perr.Err)
 }
