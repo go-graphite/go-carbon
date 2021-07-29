@@ -91,6 +91,7 @@ type metricStruct struct {
 	TrieNodes            uint64
 	TrieFiles            uint64
 	TrieDirs             uint64
+	TrieCountNodesTimeNs uint64
 	QuotaApplyTimeNs     uint64
 	UsageRefreshTimeNs   uint64
 }
@@ -547,6 +548,9 @@ func (listener *CarbonserverListener) SetEstimateSize(f func(metric string) (siz
 func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
 	listener.quotas = quotas
 }
+func (listener *CarbonserverListener) isQuotaEnabled() bool {
+	return listener.quotas != nil
+}
 func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points) bool {
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil || fidx.trieIdx == nil {
@@ -640,34 +644,39 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 	return cacheMetricNames
 }
 
-func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
 	cacheMetricNames := make(map[string]struct{})
-	qaurtFreq := listener.quotaUsageReportFrequency
-	if qaurtFreq <= 0 {
-		qaurtFreq = time.Minute
+
+	var knownMetricsStatTicker, quotaAndUsageStatTicker <-chan time.Time
+	if listener.isQuotaEnabled() {
+		ticker := time.NewTicker(listener.quotaUsageReportFrequency)
+		defer ticker.Stop()
+
+		quotaAndUsageStatTicker = ticker.C
+	} else if listener.trieIndex && listener.concurrentIndex && listener.realtimeIndex > 0 {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+
+		knownMetricsStatTicker = ticker.C
 	}
-	qaurt := time.NewTicker(qaurtFreq) // quota and usage refresh ticker
 
 uloop:
 	for {
 		select {
 		case <-exit:
-			qaurt.Stop()
 			return
-		case <-tick:
+		case <-scanFrequency:
 		case <-force:
-		case <-qaurt.C:
-			listener.refreshQuotaAndUsage()
+		case <-knownMetricsStatTicker:
+			// It's only useful when uisng realtime index as the
+			// scanFrequency should be a long interval/duration
+			// like 2 hours or more, and with concurrent and
+			// realtime index, indexed metrics would grow even without disk scanning.
+			listener.statKnonwnMetrics(knownMetricsStatTicker)
 
-			// drain remaining blocked tickers
-		quartDrainLoop:
-			for {
-				select {
-				case <-qaurt.C:
-				default:
-					break quartDrainLoop
-				}
-			}
+			continue uloop
+		case <-quotaAndUsageStatTicker:
+			listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
 
 			continue uloop
 		case m := <-listener.newMetricsChan:
@@ -695,14 +704,63 @@ uloop:
 			listener.updateFileList(dir, cacheMetricNames)
 		}
 
-		listener.refreshQuotaAndUsage()
+		listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
 	}
 }
 
-func (listener *CarbonserverListener) refreshQuotaAndUsage() {
+func (listener *CarbonserverListener) statKnonwnMetrics(knownMetricsStatTicker <-chan time.Time) {
+	defer func() {
+		// drain remaining blocked tickers
+		for {
+			select {
+			case <-knownMetricsStatTicker:
+			default:
+				return
+			}
+		}
+	}()
+
+	fidx := listener.CurrentFileIndex()
+	if fidx == nil || fidx.trieIdx == nil {
+		return
+	}
+
+	start := time.Now()
+	count, files, dirs, _, _, _, _, _ := fidx.trieIdx.countNodes()
+	atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
+	atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
+	atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
+
+	// set using the indexed files, instead of returning on-disk files.
+	//
+	// WHY: with concurrent and realtime index, disk scan should be set at
+	// am interval like 2 hours or longer. counting the files in trie index
+	// gives us more timely visibilitty on how many metrics are known now.
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, uint64(files))
+
+	atomic.StoreUint64(&listener.metrics.TrieCountNodesTimeNs, uint64(time.Since(start)))
+
+	listener.logger.Debug(
+		"trieIndex.countNodes",
+		zap.Duration("trie_count_nodes_time", time.Since(start)),
+	)
+}
+
+func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTicker <-chan time.Time) {
+	defer func() {
+		// drain remaining blocked tickers
+		for {
+			select {
+			case <-quotaAndUsageStatTicker:
+			default:
+				return
+			}
+		}
+	}()
+
 	fidx := listener.CurrentFileIndex()
 
-	if len(listener.quotas) == 0 || !listener.concurrentIndex || listener.realtimeIndex <= 0 || fidx == nil || fidx.trieIdx == nil {
+	if !listener.isQuotaEnabled() || !listener.concurrentIndex || listener.realtimeIndex <= 0 || fidx == nil || fidx.trieIdx == nil {
 		return
 	}
 
@@ -712,10 +770,18 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage() {
 	atomic.StoreUint64(&listener.metrics.QuotaApplyTimeNs, quotaTime)
 
 	usageStart := time.Now()
-	fidx.trieIdx.refreshUsage()
+	files := fidx.trieIdx.refreshUsage()
 	usageTime := uint64(time.Since(usageStart))
 	atomic.StoreUint64(&listener.metrics.UsageRefreshTimeNs, usageTime)
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, files)
 
+	// set using the indexed files, instead of returning on-disk files.
+	//
+	// WHY: quota subsystem atm can only be enabled along with concurrent
+	// and realtime idnex, and with concurrent and realtime index, disk
+	// scan should be set at an interval like 2 hours or longer. counting
+	// the files in trie index gives us more timely visibilitty into how
+	// many metrics are known now.
 	listener.quotaAndUsageMetrics.Store(fidx.trieIdx.qauMetrics)
 	fidx.trieIdx.qauMetrics = nil
 
@@ -847,8 +913,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			// have consistent quota and usage metrics produced as
 			// regularly as possible according to the
 			// quotaUsageReportFrequency specified in the config.
-			if usageRefreshTimeout.count++; usageRefreshTimeout.count > 10_000 && time.Since(usageRefreshTimeout.refreshedAt) >= listener.quotaUsageReportFrequency {
-				listener.refreshQuotaAndUsage()
+			if usageRefreshTimeout.count++; listener.isQuotaEnabled() && usageRefreshTimeout.count > 10_000 && time.Since(usageRefreshTimeout.refreshedAt) >= listener.quotaUsageReportFrequency {
+				listener.refreshQuotaAndUsage(nil)
 				usageRefreshTimeout.refreshedAt = time.Now()
 			}
 
@@ -1302,8 +1368,9 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 		senderRaw("trie_index_nodes", &listener.metrics.TrieNodes, send)
 		senderRaw("trie_index_files", &listener.metrics.TrieFiles, send)
 		senderRaw("trie_index_dirs", &listener.metrics.TrieDirs, send)
+		senderRaw("trie_count_nodes_time_ns", &listener.metrics.TrieCountNodesTimeNs, send)
 	}
-	if len(listener.quotas) > 0 {
+	if listener.isQuotaEnabled() {
 		senderRaw("quota_apply_time_ns", &listener.metrics.QuotaApplyTimeNs, send)
 		senderRaw("usage_refresh_time_ns", &listener.metrics.UsageRefreshTimeNs, send)
 	}

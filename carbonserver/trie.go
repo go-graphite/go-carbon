@@ -403,6 +403,7 @@ func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoint
 
 var emptyTrieNodes = &[]*trieNode{}
 
+// TODO: consider not initialize fileMeta if quota feature isn't enabled?
 func newFileNode(m uint8, logicalSize, physicalSize, dataPoints int64) *trieNode {
 	return &trieNode{
 		childrens: emptyTrieNodes,
@@ -1505,7 +1506,7 @@ func (ti *trieIndex) applyQuotas(quotas ...*Quota) error {
 
 // refreshUsage updates usage data and generate stat metrics.
 // It can't be evoked with concurrent trieIndex.insert.
-func (ti *trieIndex) refreshUsage() {
+func (ti *trieIndex) refreshUsage() (files uint64) {
 	type state struct {
 		next      int
 		node      *trieNode
@@ -1594,6 +1595,8 @@ func (ti *trieIndex) refreshUsage() {
 			cur.physicalSize += cur.node.meta.(*fileMeta).physicalSize
 			cur.dataPoints += cur.node.meta.(*fileMeta).dataPoints
 
+			files++
+
 			goto parent
 		} else if cur.node.dir() {
 			dirs[dirIndex]++
@@ -1624,6 +1627,8 @@ func (ti *trieIndex) refreshUsage() {
 
 		continue
 	}
+
+	return
 }
 
 func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode) {
