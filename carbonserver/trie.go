@@ -1800,10 +1800,12 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string {
 
 func (ti *trieIndex) throttle(ps *points.Points) bool {
 	var node = ti.root
-	var dirs = []*trieNode{ti.root}
+	var dirs = make([]*trieNode, 0, 32) // WHY: reduce the majority of allocations in mloop
 	var mindex int
 	var isNew bool
 	var metric = ps.Metric
+
+	dirs = append(dirs, ti.root)
 
 mloop:
 	for {
