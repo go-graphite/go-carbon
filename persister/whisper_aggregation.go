@@ -101,8 +101,8 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 		case "min":
 			item.aggregationMethod = whisper.Min
 		default:
-			return nil, fmt.Errorf("unknown aggregation method '%s'",
-				section["aggregationmethod"])
+			return nil, fmt.Errorf("unknown aggregation method '%s' in section '%s'",
+				section["aggregationmethod"], section["name"])
 		}
 
 		result.Data = append(result.Data, item)
