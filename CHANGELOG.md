@@ -1,5 +1,15 @@
 ## Changelog
 ##### master
+* Resolves #422 - Include section name when unknown aggregation method is used #423
+* ctrie: a bug fix for trigram statNodes #419
+* mod: upgrade to go 1.16 and drops SOURCES from Makefile #417
+* carbonserver: change error/debug log destination to access.log for Ca... #416
+* carbonserver: change max-metrics-globbed and max-metrics-rendered def... #416
+* trie: numerious optimization and bug fixes for concurrent and realtim... #416
+* cache-scan: only init Cache.Shard.adds when the feature is enabled #416
+* receiver/kafka: fix ci lint errors #413
+* receiver/kafka: moves time.NewTicker out of for loop #413
+* receiver/kafka: fix kafka connection leaks when failing to consume pa... #413
 * Fixing build on riscv64 (#410) #411
 
 ##### version 0.15.6
