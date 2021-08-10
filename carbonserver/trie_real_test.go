@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/OneOfOne/go-utils/memory"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -44,6 +45,60 @@ func readFile(path string) []string {
 		return lines[:len(lines)-1]
 	}
 	return lines
+}
+
+func TestTrieStatChildrens(t *testing.T) {
+	files := readFile(*testDataPath)
+	for i := range files {
+		files[i] = strings.TrimPrefix(files[i], *carbonPath)
+	}
+
+	var trieServer = newTrieServer(files, !*pureTrie, t)
+	trieServer.whisperData = *carbonPath
+
+	if *checkMemory {
+		start := time.Now()
+		t.Logf("memory.Sizeof(btrieServer)\t\t= %+v took %s\n", memory.Sizeof(trieServer), time.Now().Sub(start)) //nolint:gosimple
+	}
+
+	trieIdx := trieServer.CurrentFileIndex().trieIdx
+
+	// trieIdx.prune()
+
+	trieIdx.applyQuotas(
+		&Quota{Pattern: "*"},
+		&Quota{Pattern: "{general,security}"},
+		&Quota{Pattern: "general.*"},
+		&Quota{Pattern: "general.hadoop"},
+		&Quota{Pattern: "security.*"},
+		&Quota{Pattern: "security.authxagent"},
+		&Quota{Pattern: "/"},
+	)
+
+	{
+		start := time.Now()
+		for _, f := range files {
+			f = strings.TrimSuffix(f, ".wsp")
+			f = strings.TrimPrefix(f, "/")
+			f = strings.ReplaceAll(f, "/", ".")
+
+			trieIdx.throttle(&points.Points{Metric: f}, false)
+		}
+		t.Logf("throttle took %s\n", time.Since(start))
+	}
+	{
+		start := time.Now()
+		for _, f := range files {
+			f = strings.TrimSuffix(f, ".wsp")
+			f = strings.TrimPrefix(f, "/")
+			f = strings.ReplaceAll(f, "/", ".")
+
+			trieIdx.throttle(&points.Points{Metric: f}, true)
+		}
+		t.Logf("throttle took %s\n", time.Since(start))
+	}
+
+	t.Logf("trieIdx.throughputs = %+v\n", trieIdx.throughputs)
 }
 
 // TestTrieGlobRealData is built for benchmarking against real data, for two reasons:
@@ -235,9 +290,9 @@ func uniqFilesLeafs(files []string, leafs []bool) ([]string, []bool) {
 
 func TestTrieContinuousUpdate(t *testing.T) {
 	files := readFile(*testDataPath)
-	ptrie := newTrie(".wsp", nil, )
+	ptrie := newTrie(".wsp", nil)
 	for i := 0; i < 100; i++ {
-		ttrie := newTrie(".wsp", nil, )
+		ttrie := newTrie(".wsp", nil)
 		ptrie.root.gen++
 		var count int
 		fmt.Println("--- run", i, count)

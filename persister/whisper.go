@@ -54,6 +54,7 @@ type Whisper struct {
 	mockStore               func() (StoreFunc, func())
 	logger                  *zap.Logger
 	createLogger            *zap.Logger
+
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -321,6 +322,9 @@ func (p *Whisper) store(metric string) {
 
 	// start = time.Now()
 	p.updateMany(w, path, points)
+
+	// TODO: produce realtime size info and forward it to carbonserver.trieIndex
+	// fi := w.File().Stat()
 
 	w.Close()
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))

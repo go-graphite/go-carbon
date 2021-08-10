@@ -552,16 +552,13 @@ func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
 func (listener *CarbonserverListener) isQuotaEnabled() bool {
 	return listener.quotas != nil
 }
-func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points) bool {
+func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, inCache bool) bool {
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil || fidx.trieIdx == nil {
 		return false
 	}
 
-	var throttled = fidx.trieIdx.throttle(ps)
-	if strings.HasPrefix(ps.Metric, "vm.xhu.test.metrics") {
-		listener.logger.Info("metrics throttled\n", zap.String("metric", ps.Metric), zap.Bool("throttled", throttled))
-	}
+	var throttled = fidx.trieIdx.throttle(ps, inCache)
 
 	return throttled
 }
@@ -766,12 +763,19 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	}
 
 	quotaStart := time.Now()
-	fidx.trieIdx.applyQuotas(listener.quotas...)
+	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotas...)
+	if err != nil {
+		listener.logger.Error(
+			"refreshQuotaAndUsage",
+			zap.Error(err),
+		)
+	}
+
 	quotaTime := uint64(time.Since(quotaStart))
 	atomic.StoreUint64(&listener.metrics.QuotaApplyTimeNs, quotaTime)
 
 	usageStart := time.Now()
-	files := fidx.trieIdx.refreshUsage()
+	files := fidx.trieIdx.refreshUsage(throughputs)
 	usageTime := uint64(time.Since(usageStart))
 	atomic.StoreUint64(&listener.metrics.UsageRefreshTimeNs, usageTime)
 

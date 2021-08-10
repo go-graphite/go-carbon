@@ -60,7 +60,7 @@ type Cache struct {
 
 	newMetricsChan chan string
 
-	throttle func(*points.Points) bool
+	throttle func(ps *points.Points, inCache bool) bool
 }
 
 // A "thread" safe string to anything map.
@@ -268,10 +268,6 @@ func (c *Cache) Add(p *points.Points) {
 		return
 	}
 
-	if c.throttle != nil && c.throttle(p) {
-		return
-	}
-
 	if s.tagsEnabled {
 		var err error
 		p.Metric, err = tags.Normalize(p.Metric)
@@ -282,17 +278,23 @@ func (c *Cache) Add(p *points.Points) {
 	}
 
 	// Get map shard.
-	count := len(p.Data)
+	shard := c.GetShard(p.Metric)
+	shard.Lock()
+	defer shard.Unlock()
 
+	values, exists := shard.items[p.Metric]
+
+	if c.throttle != nil && c.throttle(p, exists) {
+		return
+	}
+
+	count := len(p.Data)
 	if s.maxSize > 0 && c.Size() > s.maxSize {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
 		return
 	}
 
-	shard := c.GetShard(p.Metric)
-
-	shard.Lock()
-	if values, exists := shard.items[p.Metric]; exists {
+	if exists {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
@@ -308,7 +310,6 @@ func (c *Cache) Add(p *points.Points) {
 			}
 		}
 	}
-	shard.Unlock()
 
 	atomic.AddInt32(&c.stat.size, int32(count))
 }
@@ -374,4 +375,6 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 	return metricNames
 }
 
-func (c *Cache) SetThrottle(throttle func(*points.Points) bool) { c.throttle = throttle }
+func (c *Cache) SetThrottle(throttle func(ps *points.Points, inCache bool) bool) {
+	c.throttle = throttle
+}

@@ -322,6 +322,8 @@ type trieIndex struct {
 	// qau: Quota And Usage
 	qauMetrics   []points.Points
 	estimateSize func(metric string) (size, dataPoints int64)
+
+	throughputs atomic.Value // *throughputUsages
 }
 
 type trieNode struct {
@@ -369,14 +371,12 @@ func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoint
 		qlogicalSize  = quota.LogicalSize
 		qphysicalSize = quota.PhysicalSize
 		qdataPoints   = quota.DataPoints
-		qthroughput   = quota.Throughput
 
 		umetrics      = atomic.LoadInt64(&dm.usage.Metrics)
 		unamespaces   = atomic.LoadInt64(&dm.usage.Namespaces)
 		ulogicalsize  = atomic.LoadInt64(&dm.usage.LogicalSize)
 		uphysicalsize = atomic.LoadInt64(&dm.usage.PhysicalSize)
 		udataPoints   = atomic.LoadInt64(&dm.usage.DataPoints)
-		uthroughput   = atomic.LoadInt64(&dm.usage.Throughput)
 	)
 
 	if qmetrics > 0 && umetrics+metrics > qmetrics {
@@ -392,9 +392,6 @@ func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoint
 		return false
 	}
 	if qdataPoints > 0 && udataPoints+dataPoints > qdataPoints {
-		return false
-	}
-	if qthroughput > 0 && uthroughput+throughput > qthroughput {
 		return false
 	}
 
@@ -1453,6 +1450,31 @@ func (q *Quota) String() string {
 	return fmt.Sprintf("pattern:%s,dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,policy:%s", q.Pattern, q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.DroppingPolicy)
 }
 
+type throughputUsagePerQuota struct {
+	quota   *Quota
+	usage   *QuotaUsage
+	counter int64
+}
+
+func (q *throughputUsagePerQuota) withinQuota(c int) bool {
+	if q.quota.Throughput > 0 && atomic.LoadInt64(&q.counter)+int64(c) >= q.quota.Throughput {
+		return false
+	}
+
+	return true
+}
+
+func (q *throughputUsagePerQuota) increase(x int) { atomic.AddInt64(&q.counter, int64(x)) }
+
+type throughputUsages struct {
+	depth   int
+	entries map[string]*throughputUsagePerQuota
+}
+
+func newQuotaThroughputCounter() *throughputUsages {
+	return &throughputUsages{entries: map[string]*throughputUsagePerQuota{}}
+}
+
 type QuotaUsage struct {
 	Namespaces   int64 // top level subdirectories
 	Metrics      int64 // files
@@ -1460,33 +1482,38 @@ type QuotaUsage struct {
 	PhysicalSize int64
 
 	DataPoints int64 // inferred from retention policy
-	Throughput int64
+
+	// NOTE: Throughput is checked separately by throughputUsages
 
 	Throttled int64
 }
 
 func (q *QuotaUsage) String() string {
-	return fmt.Sprintf("dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,throttled:%d", q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.Throttled)
+	// TODO: maybe consider retrieve throughput usage from throughputUsages?
+	return fmt.Sprintf("dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throttled:%d", q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throttled)
 }
 
 // applyQuotas applies quotas on new and old dirnodes.
 // It can't be evoked with concurrent trieIndex.insert.
 //
 // TODO: * how to remove old quotas?
-func (ti *trieIndex) applyQuotas(quotas ...*Quota) error {
+func (ti *trieIndex) applyQuotas(quotas ...*Quota) (*throughputUsages, error) {
+	throughputs := newQuotaThroughputCounter()
 	for _, quota := range quotas {
 		if quota.Pattern == "/" {
-			ti.root.meta.(*dirMeta).update(quota)
+			meta := ti.root.meta.(*dirMeta)
+			meta.update(quota)
+			throughputs.entries["/"] = &throughputUsagePerQuota{quota: quota, usage: meta.usage}
 
 			continue
 		}
 
-		_, _, nodes, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
+		paths, _, nodes, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		for _, node := range nodes {
+		for i, node := range nodes {
 			if node.meta == nil {
 				node.meta = newDirMeta()
 			}
@@ -1497,16 +1524,28 @@ func (ti *trieIndex) applyQuotas(quotas ...*Quota) error {
 				continue
 			}
 
+			throughputs.entries[paths[i]] = &throughputUsagePerQuota{quota: quota, usage: meta.usage}
+			if c := strings.Count(paths[i], "."); c > throughputs.depth {
+				throughputs.depth = c
+			}
+
 			meta.update(quota)
 		}
 	}
 
-	return nil
+	pthroughputs, _ := ti.throughputs.Load().(*throughputUsages) // WHY "_": avoid nil value panics
+	ti.throughputs.Store(throughputs)
+
+	return pthroughputs, nil
 }
 
 // refreshUsage updates usage data and generate stat metrics.
 // It can't be evoked with concurrent trieIndex.insert.
-func (ti *trieIndex) refreshUsage() (files uint64) {
+func (ti *trieIndex) refreshUsage(throughputs *throughputUsages) (files uint64) {
+	if throughputs == nil {
+		throughputs = newQuotaThroughputCounter()
+	}
+
 	type state struct {
 		next      int
 		node      *trieNode
@@ -1545,29 +1584,33 @@ func (ti *trieIndex) refreshUsage() (files uint64) {
 					atomic.StoreInt64(&usage.PhysicalSize, cur.physicalSize)
 					atomic.StoreInt64(&usage.DataPoints, cur.dataPoints)
 
-					var name string
+					var name, tname string
 					if cur.node == ti.root {
 						name = "root"
+						tname = "/"
 					} else {
 						var nodes []*trieNode
 						for i := 0; i < idx; i++ {
 							nodes = append(nodes, states[i].node)
 						}
-						name = ti.root.fullPath('-', nodes)
+						name = ti.root.fullPath('.', nodes)
+						tname = name
 					}
 					var prefix string
 					if quota, ok := cur.node.meta.(*dirMeta).quota.Load().(*Quota); ok {
 						prefix = quota.StatMetricPrefix
 					}
-					ti.generateQuotaAndUsageMetrics(prefix, name, cur.node)
+
+					var throughput int64
+					if t, ok := throughputs.entries[tname]; ok {
+						throughput = t.counter
+					}
+
+					ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput)
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
 					if throttled > 0 {
 						atomic.AddInt64(&usage.Throttled, -throttled)
-					}
-					throughput := atomic.LoadInt64(&usage.Throughput)
-					if throughput > 0 {
-						atomic.AddInt64(&usage.Throughput, -throughput)
 					}
 				}
 
@@ -1631,7 +1674,7 @@ func (ti *trieIndex) refreshUsage() (files uint64) {
 	return
 }
 
-func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode) {
+func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode, throughput int64) {
 	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
 	// file extension.
 	if len(name) >= 250 {
@@ -1721,7 +1764,7 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 		ti.qauMetrics = append(ti.qauMetrics, points.Points{
 			Metric: fmt.Sprintf("usage.throughput.%s%s", prefix, name),
 			Data: []points.Point{{
-				Value: float64(atomic.LoadInt64(&meta.usage.Throughput)),
+				Value: float64(throughput),
 			}},
 		})
 	}
@@ -1753,7 +1796,6 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string {
 
 	for {
 		if cur.next >= len(*cur.childrens) {
-
 			goto parent
 		}
 
@@ -1798,7 +1840,57 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string {
 	return ""
 }
 
-func (ti *trieIndex) throttle(ps *points.Points) bool {
+func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
+	throughput := int64(len(ps.Data))
+	if throughput == 0 {
+		// WHY: in theory, this should not happen. But in cases where
+		// go-carbon receives a metric without data points, it should
+		// still be counted as one data point, for throttling and
+		// throughput accounting.
+		throughput = 1
+	}
+
+	// WHY: hashes work much faster than the trie tree working.
+	//
+	// When checking throughput usage using trie traversal, for go-carbon
+	// instances that are seeing more than 1 millions metrics/data points
+	// per second, cpu usage growth is about 700%, which isn't ideal. By
+	// using pure hash maps, we are able to cut down cpu usage grwoth to 100%.
+	if throughputs, ok := ti.throughputs.Load().(*throughputUsages); ok {
+		// check root throughput capacity
+		// TODO: should include in throughputs.depth and simplify the code here a bit.
+		if v, ok := throughputs.entries["/"]; ok {
+			if v.quota.DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data)) {
+				atomic.AddInt64(&v.usage.Throttled, throughput)
+				return true
+			}
+
+			v.increase(len(ps.Data))
+		}
+
+		for i, d := 0, 0; d <= throughputs.depth && i < len(ps.Metric); i++ {
+			if ps.Metric[i] != '.' {
+				continue
+			}
+
+			ns := ps.Metric[:i]
+			if v, ok := throughputs.entries[ns]; ok {
+				if v.quota.DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data)) {
+					atomic.AddInt64(&v.usage.Throttled, throughput)
+					return true
+				}
+
+				v.increase(len(ps.Data))
+			}
+			d++
+		}
+	}
+
+	// quick pass if the metric is already seen in cache
+	if inCache {
+		return false
+	}
+
 	var node = ti.root
 	var dirs = make([]*trieNode, 0, 32) // WHY: reduce the majority of allocations in mloop
 	var mindex int
@@ -1870,25 +1962,6 @@ mloop:
 	}
 
 	if !isNew {
-		// Throughput quota applies on both new and old metrics
-		for _, n := range dirs {
-			meta, ok := n.meta.(*dirMeta)
-			if !ok || meta.usage == nil {
-				continue
-			}
-			quota, ok := meta.quota.Load().(*Quota)
-			if !ok || quota.Throughput <= 0 {
-				continue
-			}
-
-			uthroughput := atomic.LoadInt64(&meta.usage.Throughput)
-			if uthroughput+int64(len(ps.Data)) > quota.Throughput {
-				return true
-			}
-
-			atomic.AddInt64(&meta.usage.Throughput, int64(len(ps.Data)))
-		}
-
 		return false
 	}
 
@@ -1896,19 +1969,19 @@ mloop:
 
 	var toThrottle bool
 	for i, n := range dirs {
-		// TODO: might need more considerations
+		// TODO: might need more considerations?
 		var namespaces int64
 		if i == len(dirs)-1 {
 			namespaces = 1
 		}
 
 		meta, ok := n.meta.(*dirMeta)
-		if !ok || meta.withinQuota(1, namespaces, size, size, dataPoints, int64(len(ps.Data))) {
+		if !ok || meta.withinQuota(1, namespaces, size, size, dataPoints, throughput) {
 			continue
 		}
 
 		if meta.usage != nil {
-			atomic.AddInt64(&meta.usage.Throttled, 1)
+			atomic.AddInt64(&meta.usage.Throttled, throughput)
 		}
 
 		if quota, ok := meta.quota.Load().(*Quota); ok && quota != nil && quota.DroppingPolicy == QDPNone {
@@ -1917,14 +1990,6 @@ mloop:
 
 		toThrottle = true
 		break
-	}
-
-	if !toThrottle {
-		for _, n := range dirs {
-			if meta, ok := n.meta.(*dirMeta); ok && meta != nil && meta.usage != nil {
-				atomic.AddInt64(&meta.usage.Throughput, int64(len(ps.Data)))
-			}
-		}
 	}
 
 	return toThrottle
