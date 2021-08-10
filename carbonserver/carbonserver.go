@@ -256,7 +256,7 @@ type CarbonserverListener struct {
 
 	quotas                    []*Quota
 	estimateSize              func(metric string) (size, dataPoints int64)
-	quotaAndUsageMetrics      atomic.Value // []points.Points
+	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
 }
 
@@ -456,6 +456,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 			returnedMetric:   func() {},
 			returnedPoint:    func(int) {},
 		},
+		quotaAndUsageMetrics: make(chan []points.Points, 1),
 	}
 }
 
@@ -773,7 +774,6 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	files := fidx.trieIdx.refreshUsage()
 	usageTime := uint64(time.Since(usageStart))
 	atomic.StoreUint64(&listener.metrics.UsageRefreshTimeNs, usageTime)
-	atomic.StoreUint64(&listener.metrics.MetricsKnown, files)
 
 	// set using the indexed files, instead of returning on-disk files.
 	//
@@ -782,7 +782,13 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	// scan should be set at an interval like 2 hours or longer. counting
 	// the files in trie index gives us more timely visibilitty into how
 	// many metrics are known now.
-	listener.quotaAndUsageMetrics.Store(fidx.trieIdx.qauMetrics)
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, files)
+
+	// WHY select: avoid potential block
+	select {
+	case listener.quotaAndUsageMetrics <- fidx.trieIdx.qauMetrics:
+	default:
+	}
 	fidx.trieIdx.qauMetrics = nil
 
 	listener.logger.Debug(
@@ -1412,10 +1418,13 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 		}
 	}
 
-	// why using _: avoid panics due to casting nil atomic.Value
-	qauMetrics, _ := listener.quotaAndUsageMetrics.Load().([]points.Points)
-	for _, ps := range qauMetrics {
-		send(ps.Metric, float64(ps.Data[0].Value))
+	// WHY select: avoid potential block
+	select {
+	case qauMetrics := <-listener.quotaAndUsageMetrics:
+		for _, ps := range qauMetrics {
+			send(ps.Metric, float64(ps.Data[0].Value))
+		}
+	default:
 	}
 }
 
