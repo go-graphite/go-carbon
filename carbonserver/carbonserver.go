@@ -627,7 +627,7 @@ uloop:
 				metric := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
 
 				if err := fidx.trieIdx.insert(metric); err != nil {
-					listener.logger.Warn("failed to insert new metrics for realtime indexing", zap.String("metric", metric), zap.Error(err))
+					listener.logTrieInsertError(listener.logger, "failed to insert new metrics for realtime indexing", metric, err)
 				}
 			}
 			continue uloop
@@ -682,8 +682,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	for fileName := range cacheMetricNames {
 		if listener.trieIndex {
 			if err := trieIdx.insert(fileName); err != nil {
-				logger.Error("error populating index from cache indexMap",
-					zap.Error(err))
+				listener.logTrieInsertError(logger, "error populating index from cache indexMap", fileName, err)
 			}
 		} else {
 			files = append(files, fileName)
@@ -709,7 +708,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					continue
 				}
 				if err := trieIdx.insert(entry); err != nil {
-					logger.Error("failed to read from file list cache", zap.Error(err))
+					listener.logTrieInsertError(logger, "failed to read from file list cache", entry, err)
 					readFromCache = false
 
 					trieIdx = newTrie(".wsp")
@@ -746,6 +745,11 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}()
 			}
 		}
+		if fi, err := os.Lstat(dir); err != nil {
+			logger.Error("failed to stat whisper data directory", zap.String("path", dir), zap.Error(err))
+		} else if fi.Mode()&os.ModeSymlink == 1 {
+			logger.Error("can't index symlink data dir", zap.String("path", dir))
+		}
 		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
@@ -759,7 +763,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					select {
 					case m := <-listener.newMetricsChan:
 						if err := trieIdx.insert(filepath.Clean(strings.ReplaceAll(m, ".", "/") + ".wsp")); err != nil {
-							logger.Warn("failed to update realtime trie index", zap.Error(err))
+							listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
 						}
 					default:
 						break newMetricsLoop
@@ -788,7 +792,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				} else {
 					if listener.trieIndex {
 						if err := trieIdx.insert(trimmedName); err != nil {
-							return fmt.Errorf("updateFileList.trie: %s", err)
+							// It's better to just log an error than stop indexing
+							listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
 						}
 					} else {
 						files = append(files, trimmedName)
@@ -925,6 +930,14 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	logger.Info("file list updated", infos...)
 
 	return
+}
+
+func (listener *CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
+	zfields := []zap.Field{zap.Error(err), zap.String("metric", metric)}
+	if ierr, ok := err.(*trieInsertError); ok {
+		zfields = append(zfields, zap.String("err_info", ierr.info))
+	}
+	logger.Error(msg, zfields...)
 }
 
 func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {

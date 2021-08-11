@@ -670,6 +670,19 @@ func TestTrieIndex(t *testing.T) {
 			},
 			expectLeafs: []bool{true, false},
 		},
+		{
+			input: []string{
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_1/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_2",
+			},
+			query: "ns1.ns2.ns3.ns4.ns5.*",
+			expect: []string{
+				".", // should we even support . as filename?
+				"ns1",
+			},
+			expectLeafs: []bool{true, false},
+		},
 	}
 
 	for _, c := range cases {
@@ -711,6 +724,10 @@ func TestTrieEdgeCases(t *testing.T) {
 	_, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
 	if err == nil || err.Error() != "glob: range overflow" {
 		t.Errorf("trie should return an range overflow error")
+	}
+
+	if err := trie.insert("ns1/ns2/ns3/ns4/ns5/ns7/"); err != nil {
+		t.Errorf("should not return insert error when inserting folders")
 	}
 }
 

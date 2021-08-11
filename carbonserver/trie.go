@@ -378,6 +378,13 @@ type nilFilenameError string
 
 func (nfe nilFilenameError) Error() string { return string(nfe) }
 
+type trieInsertError struct {
+	typ  string
+	info string
+}
+
+func (t *trieInsertError) Error() string { return t.typ }
+
 // TODO: add some defensive logics agains bad paths?
 //
 // abc.def.ghi
@@ -399,7 +406,7 @@ func (ti *trieIndex) insert(path string) error {
 	}
 
 	if path == "" || path[len(path)-1] == '/' {
-		return nilFilenameError(fmt.Sprintf("metric fileename is nil: %s", path))
+		return nilFilenameError("metric filename is nil")
 	}
 
 	if uint64(len(path)) > ti.getDepth() {
@@ -474,7 +481,7 @@ outer:
 					goto dir
 				}
 
-				return fmt.Errorf("failed to index metric %s: unknwon case of match == nlen = %d", path, nlen)
+				return &trieInsertError{typ: "failed to index metric: unknwon case of match == nlen", info: fmt.Sprintf("match == nlen == %d", nlen)}
 			}
 
 			if match == len(child.c) && len(child.c) < nlen { // case 2
