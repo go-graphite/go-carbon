@@ -542,10 +542,22 @@ outer:
 	// TODO: there seems to be a problem of fetching a directory node without files
 
 	if !isFile {
-		// TODO: should double check if / already exists
 		if cur.dir() {
+			return nil
+		}
+
+		var newDir = true
+		for _, child := range *cur.childrens {
+			if child.dir() {
+				cur = child
+				newDir = false
+				break
+			}
+		}
+		if newDir {
 			cur.addChild(&trieNode{c: []byte{'/'}, childrens: &[]*trieNode{}, gen: ti.root.gen})
 		}
+
 		return nil
 	}
 

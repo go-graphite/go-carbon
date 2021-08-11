@@ -675,13 +675,20 @@ func TestTrieIndex(t *testing.T) {
 				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
 				"/ns1/ns2/ns3/ns4/ns5/ns6_1/",
 				"/ns1/ns2/ns3/ns4/ns5/ns6_2",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/metric.wsp",
 			},
 			query: "ns1.ns2.ns3.ns4.ns5.*",
 			expect: []string{
-				".", // should we even support . as filename?
-				"ns1",
+				"ns1.ns2.ns3.ns4.ns5.ns6",
+				"ns1.ns2.ns3.ns4.ns5.ns6_1",
+				"ns1.ns2.ns3.ns4.ns5.ns6_2",
+				"ns1.ns2.ns3.ns4.ns5.ns6_3",
 			},
-			expectLeafs: []bool{true, false},
+			expectLeafs: []bool{false, false, false, false},
 		},
 	}
 
@@ -708,6 +715,8 @@ func TestTrieIndex(t *testing.T) {
 					trieFiles[i] += fmt.Sprintf(" %t", result.Leafs[i])
 				}
 			}
+
+			// trieServer.CurrentFileIndex().trieIdx.dump(os.Stdout)
 
 			sort.Strings(trieFiles)
 			sort.Strings(c.expect)
