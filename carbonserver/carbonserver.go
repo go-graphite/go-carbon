@@ -562,6 +562,8 @@ func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, in
 
 	return throttled
 }
+
+// skipcq: RVV-B0011
 func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 	p := listener.fileIdx.Load()
 	if p == nil {
@@ -572,6 +574,7 @@ func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 
 func (listener *CarbonserverListener) UpdateFileIndex(fidx *fileIndex) { listener.fileIdx.Store(fidx) }
 
+// skipcq: RVV-A0005
 func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[string]int64, initial bool) {
 	idx := listener.CurrentFileIndex()
 	if idx == nil {

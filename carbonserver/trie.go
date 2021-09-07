@@ -1,7 +1,7 @@
 package carbonserver
 
 import (
-	"crypto/md5"
+	"crypto/md5" // skipcq: GSC-G501
 	"errors"
 	"fmt"
 	"io"
@@ -342,7 +342,7 @@ type fileMeta struct {
 	dataPoints   int64
 }
 
-func (fm *fileMeta) trieMeta() {}
+func (*fileMeta) trieMeta() {}
 
 type dirMeta struct {
 	// type: *Quota
@@ -356,10 +356,10 @@ type dirMeta struct {
 
 func newDirMeta() *dirMeta { return &dirMeta{usage: &QuotaUsage{}} }
 
-func (dm *dirMeta) trieMeta()           {}
+func (*dirMeta) trieMeta()              {}
 func (dm *dirMeta) update(quota *Quota) { dm.quota.Store(quota) }
 
-func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoints, throughput int64) bool {
+func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoints int64) bool {
 	quota, ok := dm.quota.Load().(*Quota)
 	if !ok {
 		return true
@@ -413,14 +413,17 @@ func (tn *trieNode) dir() bool  { return len(tn.c) == 1 && tn.c[0] == '/' }
 func (tn *trieNode) file() bool { return tn.c == nil }
 
 func (tn *trieNode) getChildrens() []*trieNode {
+	// skipcq: GSC-G103
 	return *(*[]*trieNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&tn.childrens))))
 }
 
-func (tn *trieNode) getChild(curChildrens []*trieNode, i int) *trieNode {
+func (*trieNode) getChild(curChildrens []*trieNode, i int) *trieNode {
+	// skipcq: GSC-G103
 	return (*trieNode)(atomic.LoadPointer((*unsafe.Pointer)(unsafe.Pointer(&curChildrens[i]))))
 }
 
 func (tn *trieNode) setChildrens(cs []*trieNode) {
+	// skipcq: GSC-G103
 	atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&tn.childrens)), unsafe.Pointer(&cs))
 }
 
@@ -430,8 +433,8 @@ func (tn *trieNode) addChild(n *trieNode) {
 
 func (tn *trieNode) setChild(i int, n *trieNode) {
 	atomic.StorePointer(
-		(*unsafe.Pointer)(unsafe.Pointer(&(*tn.childrens)[i])),
-		unsafe.Pointer(n),
+		(*unsafe.Pointer)(unsafe.Pointer(&(*tn.childrens)[i])), // skipcq: GSC-G103
+		unsafe.Pointer(n), // skipcq: GSC-G103
 	)
 }
 
@@ -870,6 +873,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	}
 	copy(r[i:], tn.c)
 
+	// skipcq: GSC-G103
 	return *(*string)(unsafe.Pointer(&r))
 }
 
@@ -983,6 +987,7 @@ func (ti *trieIndex) dump(w io.Writer) {
 	}
 }
 
+// skipcq: RVV-A0006
 func (ti *trieIndex) getQuotaTree(w io.Writer) {
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
@@ -1415,7 +1420,7 @@ func ParseQuotaDroppingPolicy(policy string) QuotaDroppingPolicy {
 	case "none":
 		return QDPNone
 	case "new":
-		fallthrough
+		return QDPNew
 	default:
 		return QDPNew
 	}
@@ -1426,7 +1431,7 @@ func (qdp QuotaDroppingPolicy) String() string {
 	case QDPNone:
 		return "none"
 	case QDPNew:
-		fallthrough
+		return "new"
 	default:
 		return "new"
 	}
@@ -1678,6 +1683,7 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
 	// file extension.
 	if len(name) >= 250 {
+		// skipcq: GSC-G401
 		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name))) //nolint:nosec
 	}
 
@@ -1685,88 +1691,104 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	meta := node.meta.(*dirMeta)
 	quota := meta.quota.Load().(*Quota)
 	if quota.Namespaces > 0 {
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("quota.namespaces.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(quota.Namespaces),
-			}},
-		})
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("usage.namespaces.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(atomic.LoadInt64(&meta.usage.Namespaces)),
-			}},
-		})
+		ti.qauMetrics = append(
+			ti.qauMetrics,
+			points.Points{
+				Metric: fmt.Sprintf("quota.namespaces.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(quota.Namespaces),
+				}},
+			},
+			points.Points{
+				Metric: fmt.Sprintf("usage.namespaces.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(atomic.LoadInt64(&meta.usage.Namespaces)),
+				}},
+			},
+		)
 	}
 	if quota.Metrics > 0 {
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("quota.metrics.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(quota.Metrics),
-			}},
-		})
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("usage.metrics.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(atomic.LoadInt64(&meta.usage.Metrics)),
-			}},
-		})
+		ti.qauMetrics = append(
+			ti.qauMetrics, points.Points{
+				Metric: fmt.Sprintf("quota.metrics.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(quota.Metrics),
+				}},
+			},
+			points.Points{
+				Metric: fmt.Sprintf("usage.metrics.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(atomic.LoadInt64(&meta.usage.Metrics)),
+				}},
+			},
+		)
 	}
 	if quota.DataPoints > 0 {
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("quota.data_points.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(quota.DataPoints),
-			}},
-		})
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("usage.data_points.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(atomic.LoadInt64(&meta.usage.DataPoints)),
-			}},
-		})
+		ti.qauMetrics = append(
+			ti.qauMetrics,
+			points.Points{
+				Metric: fmt.Sprintf("quota.data_points.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(quota.DataPoints),
+				}},
+			},
+			points.Points{
+				Metric: fmt.Sprintf("usage.data_points.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(atomic.LoadInt64(&meta.usage.DataPoints)),
+				}},
+			},
+		)
 	}
 	if quota.LogicalSize > 0 {
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("quota.logical_size.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(quota.LogicalSize),
-			}},
-		})
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("usage.logical_size.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(atomic.LoadInt64(&meta.usage.LogicalSize)),
-			}},
-		})
+		ti.qauMetrics = append(
+			ti.qauMetrics,
+			points.Points{
+				Metric: fmt.Sprintf("quota.logical_size.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(quota.LogicalSize),
+				}},
+			},
+			points.Points{
+				Metric: fmt.Sprintf("usage.logical_size.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(atomic.LoadInt64(&meta.usage.LogicalSize)),
+				}},
+			},
+		)
 	}
 	if quota.PhysicalSize > 0 {
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("quota.physical_size.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(quota.PhysicalSize),
-			}},
-		})
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("usage.physical_size.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(atomic.LoadInt64(&meta.usage.PhysicalSize)),
-			}},
-		})
+		ti.qauMetrics = append(
+			ti.qauMetrics,
+			points.Points{
+				Metric: fmt.Sprintf("quota.physical_size.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(quota.PhysicalSize),
+				}},
+			},
+			points.Points{
+				Metric: fmt.Sprintf("usage.physical_size.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(atomic.LoadInt64(&meta.usage.PhysicalSize)),
+				}},
+			},
+		)
 	}
 	if quota.Throughput > 0 {
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("quota.throughput.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(quota.Throughput),
-			}},
-		})
-		ti.qauMetrics = append(ti.qauMetrics, points.Points{
-			Metric: fmt.Sprintf("usage.throughput.%s%s", prefix, name),
-			Data: []points.Point{{
-				Value: float64(throughput),
-			}},
-		})
+		ti.qauMetrics = append(
+			ti.qauMetrics, points.Points{
+				Metric: fmt.Sprintf("quota.throughput.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(quota.Throughput),
+				}},
+			},
+			points.Points{
+				Metric: fmt.Sprintf("usage.throughput.%s%s", prefix, name),
+				Data: []points.Point{{
+					Value: float64(throughput),
+				}},
+			},
+		)
 	}
 
 	ti.qauMetrics = append(ti.qauMetrics, points.Points{
@@ -1778,9 +1800,9 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 }
 
 //nolint:golint,unused
-func (ti *trieIndex) getNodeFullPath(node *trieNode) string {
+func (ti *trieIndex) getNodeFullPath(node *trieNode) string { // skipcq: SCC-U1000
 	//nolint:golint,unused
-	type state struct {
+	type state struct { // skipcq: SCC-U1000
 		next      int
 		node      *trieNode
 		childrens *[]*trieNode
@@ -1840,6 +1862,7 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string {
 	return ""
 }
 
+// skipcq: RVV-A0005
 func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 	throughput := int64(len(ps.Data))
 	if throughput == 0 {
@@ -1976,7 +1999,7 @@ mloop:
 		}
 
 		meta, ok := n.meta.(*dirMeta)
-		if !ok || meta.withinQuota(1, namespaces, size, size, dataPoints, throughput) {
+		if !ok || meta.withinQuota(1, namespaces, size, size, dataPoints) {
 			continue
 		}
 

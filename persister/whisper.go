@@ -496,7 +496,7 @@ func (p *Whisper) GetAggrConf(metric string) (string, float64, bool) {
 // simplifyPathError retruns an error without path in the error message. This
 // simpplies the log a bit as the path is usually printed separately and the
 // new error message is easier to filter in elastic search and other tools.
-func (p *Whisper) simplifyPathError(err error) error {
+func (*Whisper) simplifyPathError(err error) error {
 	perr, ok := err.(*os.PathError)
 	if !ok {
 		return err

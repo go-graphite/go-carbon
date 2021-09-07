@@ -26,6 +26,7 @@ type logf interface {
 	Logf(format string, args ...interface{})
 }
 
+// skipcq: RVV-A0005
 func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger = zap.NewNop()
@@ -781,6 +782,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 			return
 		// case <-filec:
 		default:
+			// skipcq: GSC-G404
 			files, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
 			if err != nil {
 				panic(err)
@@ -1176,6 +1178,7 @@ func TestTrieQuotaGeneral(t *testing.T) {
 		},
 		{
 			input1: (func() (r []metric) {
+				// skipcq: CRT-P0001
 				r = append(r, metric{"/sys/app/srv1/nodes/host-01/cpu.wsp", 1, 1, 1})
 				r = append(r, metric{"/sys/app/srv1/nodes/host-01/mem.wsp", 1, 1, 1})
 				r = append(r, metric{"/sys/app/srv2/nodes/host-01/mem.wsp", 1, 1, 1})

@@ -139,7 +139,7 @@ func (c *Cache) SetTagsEnabled(value bool) {
 
 func (c *Cache) SetNewMetricsChan(ch chan string) { c.newMetricsChan = ch }
 
-func (c *Cache) Stop() {}
+func (*Cache) Stop() {}
 
 // Collect cache metrics
 func (c *Cache) Stat(send helper.StatCallback) {
