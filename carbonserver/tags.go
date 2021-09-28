@@ -3,6 +3,7 @@ package carbonserver
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/go-graphite/go-carbon/tags"
@@ -18,6 +19,9 @@ type tagsIndex struct {
 	metrics map[string]metricID
 
 	tags map[string]map[string][]metricID
+
+	// tvTrigrams
+	//  tag value trigrams -> value id
 }
 
 func newTagsIndex() *tagsIndex {
@@ -56,13 +60,13 @@ func (ti *tagsIndex) addMetric(taggedMetric string) error {
 	ti.idIdx++
 
 	ti.metrics[taggedMetric] = id
-	ti.metrics[id] = taggedMetric
+	ti.ids[id] = taggedMetric
 
 	strs := strings.Split(taggedMetric, ";") // TODO: make it zero-allocation?
 
 	// tagSet := map[string]string{}
 	for i, tagp := range strs {
-		var tav, val string
+		var tag, val string
 		if i == 0 {
 			tag = "name" // TODO: allow tag using value of "name"
 			val = tagp
@@ -174,18 +178,52 @@ func (ti *tagsIndex) seriesByTag(tagqs []string) ([]string, error) {
 					idSets = append(idSets, ids)
 				}
 			case tagMatcherMatch:
-				if specRegexp.Match(val) {
+				if specRegexp.MatchString(val) {
 					idSets = append(idSets, ids)
 				}
 			case tagMatcherNotMatch:
-				if !specRegexp.Match(val) {
+				if !specRegexp.MatchString(val) {
 					idSets = append(idSets, ids)
 				}
 			}
 		}
 	}
 
-	return nil, nil
+	// interset idSets
+	if len(idSets) == 0 {
+		return nil, nil
+	}
+	ids := idSets[0]
+	idSets = idSets[1:]
+	for len(idSets) > 0 {
+		ids1 := ids
+		ids2 := idSets[0]
+
+		ids = []metricID{}
+		idSets = idSets[1:]
+
+		sort.Slice(ids1, func(i, j int) bool { return ids1[i] < ids1[j] })
+		sort.Slice(ids2, func(i, j int) bool { return ids2[i] < ids2[j] })
+
+		for i, j := 0, 0; i < len(ids1) && j < len(ids2); {
+			if ids1[i] == ids2[j] {
+				ids = append(ids, ids1[i])
+				i++
+				j++
+			} else if ids1[i] > ids2[j] {
+				j++
+			} else {
+				i++
+			}
+		}
+	}
+
+	var metrics []string
+	for _, id := range ids {
+		metrics = append(metrics, ti.ids[id])
+	}
+
+	return metrics, nil
 }
 
 // curl -s "http://graphite/tags?pretty=1&filter=data"
@@ -196,7 +234,6 @@ func (ti *tagsIndex) seriesByTag(tagqs []string) ([]string, error) {
 //   }
 // ]
 func (ti *tagsIndex) getTags(filter string, limit int) error {
-
 	return nil
 }
 
