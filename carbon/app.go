@@ -537,6 +537,8 @@ func (app *App) Start(version string) (err error) {
 			return
 		}
 
+		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
+
 		app.Carbonserver = carbonserver
 	}
 	/* CARBONSERVER end */
