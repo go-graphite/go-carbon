@@ -378,3 +378,15 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 func (c *Cache) SetThrottle(throttle func(ps *points.Points, inCache bool) bool) {
 	c.throttle = throttle
 }
+
+func (c *Cache) GetInfo() map[string]interface{} {
+	s, ok := c.settings.Load().(*cacheSettings)
+	if !ok {
+		return map[string]interface{}{}
+	}
+
+	return map[string]interface{}{
+		"size":  c.stat.size,
+		"limit": s.maxSize,
+	}
+}
