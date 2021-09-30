@@ -437,6 +437,14 @@ func (app *App) Start(version string) (err error) {
 			return
 		}
 
+		if conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex {
+			if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
+				return fmt.Errorf("failed to stat whisper data directory: %s", err)
+			} else if fi.Mode()&os.ModeSymlink == 1 {
+				return fmt.Errorf("whisper data directory is a symlink")
+			}
+		}
+
 		carbonserver := carbonserver.NewCarbonserverListener(core.Get)
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)

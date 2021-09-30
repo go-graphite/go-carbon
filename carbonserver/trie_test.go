@@ -670,6 +670,26 @@ func TestTrieIndex(t *testing.T) {
 			},
 			expectLeafs: []bool{true, false},
 		},
+		{
+			input: []string{
+				"/ns1/ns2/ns3/ns4/ns5/ns6/ns7_handle.wsp",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_1/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_2",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/",
+				"/ns1/ns2/ns3/ns4/ns5/ns6_3/metric.wsp",
+			},
+			query: "ns1.ns2.ns3.ns4.ns5.*",
+			expect: []string{
+				"ns1.ns2.ns3.ns4.ns5.ns6",
+				"ns1.ns2.ns3.ns4.ns5.ns6_1",
+				"ns1.ns2.ns3.ns4.ns5.ns6_2",
+				"ns1.ns2.ns3.ns4.ns5.ns6_3",
+			},
+			expectLeafs: []bool{false, false, false, false},
+		},
 	}
 
 	for _, c := range cases {
@@ -696,6 +716,8 @@ func TestTrieIndex(t *testing.T) {
 				}
 			}
 
+			// trieServer.CurrentFileIndex().trieIdx.dump(os.Stdout)
+
 			sort.Strings(trieFiles)
 			sort.Strings(c.expect)
 			if !reflect.DeepEqual(trieFiles, c.expect) {
@@ -711,6 +733,10 @@ func TestTrieEdgeCases(t *testing.T) {
 	_, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
 	if err == nil || err.Error() != "glob: range overflow" {
 		t.Errorf("trie should return an range overflow error")
+	}
+
+	if err := trie.insert("ns1/ns2/ns3/ns4/ns5/ns7/"); err != nil {
+		t.Errorf("should not return insert error when inserting folders")
 	}
 }
 
