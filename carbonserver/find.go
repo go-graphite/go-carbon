@@ -138,7 +138,11 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
 			response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
 			if err != nil {
-				item.StoreAbort()
+				if _, ok := err.(errorNotFound); ok {
+					item.StoreAndUnlock(&findResponse{})
+				} else {
+					item.StoreAbort()
+				}
 			} else {
 				item.StoreAndUnlock(response)
 			}
@@ -147,6 +151,10 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
 			response = res.(*findResponse)
 			fromCache = true
+
+			if response.files == 0 {
+				err = errorNotFound{}
+			}
 		}
 	} else {
 		response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
@@ -198,6 +206,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 type errorNotFound struct{}
 
+// skipcq: RVV-B0013
 func (err errorNotFound) Error() string {
 	return "Not Found"
 }
