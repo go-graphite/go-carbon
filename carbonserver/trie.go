@@ -930,6 +930,7 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 	return files
 }
 
+// skipcq: SCC-U1000
 func (ti *trieIndex) dump(w io.Writer) {
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)

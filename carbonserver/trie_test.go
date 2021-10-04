@@ -737,7 +737,7 @@ func TestTrieEdgeCases(t *testing.T) {
 		t.Errorf("trie should return an range overflow error")
 	}
 
-	if err := trie.insert("ns1/ns2/ns3/ns4/ns5/ns7/"); err != nil {
+	if err := trie.insert("ns1/ns2/ns3/ns4/ns5/ns7/", 0, 0, 0); err != nil {
 		t.Errorf("should not return insert error when inserting folders")
 	}
 }
