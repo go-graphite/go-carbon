@@ -1,5 +1,7 @@
 ## Changelog
 ##### master
+* carbonserver: fix a 404 related race condition in findCache #431
+* carbonserver: log more detailed errors about symlink and continue trie index despite error #427
 * Resolves #422 - Include section name when unknown aggregation method is used #423
 * ctrie: a bug fix for trigram statNodes #419
 * mod: upgrade to go 1.16 and drops SOURCES from Makefile #417
