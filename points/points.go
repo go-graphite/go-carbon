@@ -197,3 +197,10 @@ func (p *Points) Eq(other *Points) bool {
 	}
 	return true
 }
+
+// TODO: for realtime metric size update (from persister to carbonserver)
+type MetaMetric struct {
+	Path         string
+	PhysicalSize int
+	LogicalSize  int
+}

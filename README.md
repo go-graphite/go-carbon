@@ -82,7 +82,7 @@ Usage of go-carbon:
   -version=false: Print version
 ```
 
-```toml
+```ini
 [common]
 # Run as user. Works only in daemon mode
 user = "carbon"
@@ -101,6 +101,9 @@ data-dir = "/var/lib/graphite/whisper"
 schemas-file = "/etc/go-carbon/storage-schemas.conf"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional
 aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
+# It's currently go-carbon only feature, not a standard graphite feature. Optional
+# More details in doc/quotas.md
+# quotas-file = "/etc/go-carbon/storage-quotas.conf"
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
 # Limits the number of whisper update_many() calls per second. 0 - no limit
@@ -327,6 +330,9 @@ scan-frequency = "5m0s"
 #  could be speeded up by enabling adding trigrams to trie, at the some costs of
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
+# Control how frequent it is to generate quota and usage metrics, and reset
+# throughput counters (More details in doc/quotas.md).
+# quota-usage-report-frequency = "1m"
 
 # Cache file list scan data in the specified path. This option speeds
 # up index building after reboot by reading the last scan result in file

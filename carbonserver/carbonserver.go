@@ -91,6 +91,9 @@ type metricStruct struct {
 	TrieNodes            uint64
 	TrieFiles            uint64
 	TrieDirs             uint64
+	TrieCountNodesTimeNs uint64
+	QuotaApplyTimeNs     uint64
+	UsageRefreshTimeNs   uint64
 }
 
 type requestsTimes struct {
@@ -250,6 +253,11 @@ type CarbonserverListener struct {
 	prometheus prometheus
 
 	db *leveldb.DB
+
+	quotas                    []*Quota
+	estimateSize              func(metric string) (size, dataPoints int64)
+	quotaAndUsageMetrics      chan []points.Points
+	quotaUsageReportFrequency time.Duration
 }
 
 type prometheus struct {
@@ -448,6 +456,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 			returnedMetric:   func() {},
 			returnedPoint:    func(int) {},
 		},
+		quotaAndUsageMetrics: make(chan []points.Points, 1),
 	}
 }
 
@@ -474,6 +483,9 @@ func (listener *CarbonserverListener) SetBuckets(buckets int) {
 }
 func (listener *CarbonserverListener) SetScanFrequency(scanFrequency time.Duration) {
 	listener.scanFrequency = scanFrequency
+}
+func (listener *CarbonserverListener) SetQuotaUsageReportFrequency(quotaUsageReportFrequency time.Duration) {
+	listener.quotaUsageReportFrequency = quotaUsageReportFrequency
 }
 func (listener *CarbonserverListener) SetReadTimeout(readTimeout time.Duration) {
 	listener.readTimeout = readTimeout
@@ -531,6 +543,27 @@ func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 func (listener *CarbonserverListener) SetPercentiles(percentiles []int) {
 	listener.percentiles = percentiles
 }
+func (listener *CarbonserverListener) SetEstimateSize(f func(metric string) (size, dataPoints int64)) {
+	listener.estimateSize = f
+}
+func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
+	listener.quotas = quotas
+}
+func (listener *CarbonserverListener) isQuotaEnabled() bool {
+	return listener.quotas != nil
+}
+func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, inCache bool) bool {
+	fidx := listener.CurrentFileIndex()
+	if fidx == nil || fidx.trieIdx == nil {
+		return false
+	}
+
+	var throttled = fidx.trieIdx.throttle(ps, inCache)
+
+	return throttled
+}
+
+// skipcq: RVV-B0011
 func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 	p := listener.fileIdx.Load()
 	if p == nil {
@@ -541,6 +574,7 @@ func (listener *CarbonserverListener) CurrentFileIndex() *fileIndex {
 
 func (listener *CarbonserverListener) UpdateFileIndex(fidx *fileIndex) { listener.fileIdx.Store(fidx) }
 
+// skipcq: RVV-A0005
 func (listener *CarbonserverListener) UpdateMetricsAccessTimes(metrics map[string]int64, initial bool) {
 	idx := listener.CurrentFileIndex()
 	if idx == nil {
@@ -611,25 +645,51 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 	return cacheMetricNames
 }
 
-func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
 	cacheMetricNames := make(map[string]struct{})
+
+	var knownMetricsStatTicker, quotaAndUsageStatTicker <-chan time.Time
+	if listener.isQuotaEnabled() {
+		ticker := time.NewTicker(listener.quotaUsageReportFrequency)
+		defer ticker.Stop()
+
+		quotaAndUsageStatTicker = ticker.C
+	} else if listener.trieIndex && listener.concurrentIndex && listener.realtimeIndex > 0 {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+
+		knownMetricsStatTicker = ticker.C
+	}
 
 uloop:
 	for {
 		select {
 		case <-exit:
 			return
-		case <-tick:
+		case <-scanFrequency:
 		case <-force:
+		case <-knownMetricsStatTicker:
+			// It's only useful when uisng realtime index as the
+			// scanFrequency should be a long interval/duration
+			// like 2 hours or more, and with concurrent and
+			// realtime index, indexed metrics would grow even without disk scanning.
+			listener.statKnonwnMetrics(knownMetricsStatTicker)
+
+			continue uloop
+		case <-quotaAndUsageStatTicker:
+			listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
+
+			continue uloop
 		case m := <-listener.newMetricsChan:
 			fidx := listener.CurrentFileIndex()
 			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
 				metric := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
 
-				if err := fidx.trieIdx.insert(metric); err != nil {
+				if err := fidx.trieIdx.insert(metric, 0, 0, 0); err != nil {
 					listener.logTrieInsertError(listener.logger, "failed to insert new metrics for realtime indexing", metric, err)
 				}
 			}
+
 			continue uloop
 		}
 
@@ -644,7 +704,105 @@ uloop:
 			listener.logger.Info("file list updated with cache, starting a new scan immediately")
 			listener.updateFileList(dir, cacheMetricNames)
 		}
+
+		listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
 	}
+}
+
+func (listener *CarbonserverListener) statKnonwnMetrics(knownMetricsStatTicker <-chan time.Time) {
+	defer func() {
+		// drain remaining blocked tickers
+		for {
+			select {
+			case <-knownMetricsStatTicker:
+			default:
+				return
+			}
+		}
+	}()
+
+	fidx := listener.CurrentFileIndex()
+	if fidx == nil || fidx.trieIdx == nil {
+		return
+	}
+
+	start := time.Now()
+	count, files, dirs, _, _, _, _, _ := fidx.trieIdx.countNodes()
+	atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
+	atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
+	atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
+
+	// set using the indexed files, instead of returning on-disk files.
+	//
+	// WHY: with concurrent and realtime index, disk scan should be set at
+	// am interval like 2 hours or longer. counting the files in trie index
+	// gives us more timely visibilitty on how many metrics are known now.
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, uint64(files))
+
+	atomic.StoreUint64(&listener.metrics.TrieCountNodesTimeNs, uint64(time.Since(start)))
+
+	listener.logger.Debug(
+		"trieIndex.countNodes",
+		zap.Duration("trie_count_nodes_time", time.Since(start)),
+	)
+}
+
+func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTicker <-chan time.Time) {
+	defer func() {
+		// drain remaining blocked tickers
+		for {
+			select {
+			case <-quotaAndUsageStatTicker:
+			default:
+				return
+			}
+		}
+	}()
+
+	fidx := listener.CurrentFileIndex()
+
+	if !listener.isQuotaEnabled() || !listener.concurrentIndex || listener.realtimeIndex <= 0 || fidx == nil || fidx.trieIdx == nil {
+		return
+	}
+
+	quotaStart := time.Now()
+	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotas...)
+	if err != nil {
+		listener.logger.Error(
+			"refreshQuotaAndUsage",
+			zap.Error(err),
+		)
+	}
+
+	quotaTime := uint64(time.Since(quotaStart))
+	atomic.StoreUint64(&listener.metrics.QuotaApplyTimeNs, quotaTime)
+
+	usageStart := time.Now()
+	files := fidx.trieIdx.refreshUsage(throughputs)
+	usageTime := uint64(time.Since(usageStart))
+	atomic.StoreUint64(&listener.metrics.UsageRefreshTimeNs, usageTime)
+
+	// set using the indexed files, instead of returning on-disk files.
+	//
+	// WHY: quota subsystem atm can only be enabled along with concurrent
+	// and realtime idnex, and with concurrent and realtime index, disk
+	// scan should be set at an interval like 2 hours or longer. counting
+	// the files in trie index gives us more timely visibilitty into how
+	// many metrics are known now.
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, files)
+
+	// WHY select: avoid potential block
+	select {
+	case listener.quotaAndUsageMetrics <- fidx.trieIdx.qauMetrics:
+	default:
+	}
+	fidx.trieIdx.qauMetrics = nil
+
+	listener.logger.Debug(
+		"refreshQuotaAndUsage",
+		zap.Uint64("quota_apply_time", quotaTime),
+		zap.Uint64("usage_refresh_time", usageTime),
+	)
 }
 
 func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}) (readFromCache bool) {
@@ -668,7 +826,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var infos []zap.Field
 	if listener.trieIndex {
 		if fidx == nil || !listener.concurrentIndex {
-			trieIdx = newTrie(".wsp")
+			trieIdx = newTrie(".wsp", listener.estimateSize)
 		} else {
 			trieIdx = fidx.trieIdx
 			trieIdx.root.gen++
@@ -681,7 +839,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var cacheMetricLen = len(cacheMetricNames)
 	for fileName := range cacheMetricNames {
 		if listener.trieIndex {
-			if err := trieIdx.insert(fileName); err != nil {
+			if err := trieIdx.insert(fileName, 0, 0, 0); err != nil {
 				listener.logTrieInsertError(logger, "error populating index from cache indexMap", fileName, err)
 			}
 		} else {
@@ -707,11 +865,11 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				if entry == "" {
 					continue
 				}
-				if err := trieIdx.insert(entry); err != nil {
+				if err := trieIdx.insert(entry, 0, 0, 0); err != nil {
 					listener.logTrieInsertError(logger, "failed to read from file list cache", entry, err)
 					readFromCache = false
 
-					trieIdx = newTrie(".wsp")
+					trieIdx = newTrie(".wsp", listener.estimateSize)
 					break
 				}
 				filesLen++
@@ -745,24 +903,48 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}()
 			}
 		}
+
 		if fi, err := os.Lstat(dir); err != nil {
 			logger.Error("failed to stat whisper data directory", zap.String("path", dir), zap.Error(err))
 		} else if fi.Mode()&os.ModeSymlink == 1 {
 			logger.Error("can't index symlink data dir", zap.String("path", dir))
 		}
+
+		var usageRefreshTimeout = struct {
+			refreshedAt time.Time
+			count       int
+		}{time.Now(), 0}
 		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
 				return nil
 			}
 
-			//  && len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2
+			// WHY: as filepath.walk could potentially taking a long
+			// time to complete (>= 5 minutes or more), depending
+			// on how many files are there on disk. It's nice to
+			// have consistent quota and usage metrics produced as
+			// regularly as possible according to the
+			// quotaUsageReportFrequency specified in the config.
+			if usageRefreshTimeout.count++; listener.isQuotaEnabled() && usageRefreshTimeout.count > 10_000 && time.Since(usageRefreshTimeout.refreshedAt) >= listener.quotaUsageReportFrequency {
+				listener.refreshQuotaAndUsage(nil)
+				usageRefreshTimeout.refreshedAt = time.Now()
+			}
+
+			// WHY: as filepath.walk could potentially taking a long
+			// time to complete (>= 5 minutes or more), depending
+			// on how many files are there on disk. It's nice to
+			// try to flush newMetricsChan if possible.
+			//
+			// TODO: only trigger enter the loop when it's half full?
+			// 	len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2
 			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
 			newMetricsLoop:
 				for {
 					select {
 					case m := <-listener.newMetricsChan:
-						if err := trieIdx.insert(filepath.Clean(strings.ReplaceAll(m, ".", "/") + ".wsp")); err != nil {
+						fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
+						if err := trieIdx.insert(fileName, 0, 0, 0); err != nil {
 							listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
 						}
 					default:
@@ -791,7 +973,19 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					delete(cacheMetricNames, trimmedName)
 				} else {
 					if listener.trieIndex {
-						if err := trieIdx.insert(trimmedName); err != nil {
+						var dataPoints int64
+						if isFullMetric && listener.estimateSize != nil {
+							m := strings.ReplaceAll(trimmedName, "/", ".")
+							m = m[1 : len(m)-4]
+							_, dataPoints = listener.estimateSize(m)
+						}
+
+						var physicalSize = info.Size()
+						if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+							physicalSize = stat.Blocks * 512
+						}
+
+						if err := trieIdx.insert(trimmedName, info.Size(), physicalSize, dataPoints); err != nil {
 							// It's better to just log an error than stop indexing
 							listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
 						}
@@ -1187,6 +1381,11 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 		senderRaw("trie_index_nodes", &listener.metrics.TrieNodes, send)
 		senderRaw("trie_index_files", &listener.metrics.TrieFiles, send)
 		senderRaw("trie_index_dirs", &listener.metrics.TrieDirs, send)
+		senderRaw("trie_count_nodes_time_ns", &listener.metrics.TrieCountNodesTimeNs, send)
+	}
+	if listener.isQuotaEnabled() {
+		senderRaw("quota_apply_time_ns", &listener.metrics.QuotaApplyTimeNs, send)
+		senderRaw("usage_refresh_time_ns", &listener.metrics.UsageRefreshTimeNs, send)
 	}
 
 	sender("alloc", &alloc, send)
@@ -1224,6 +1423,15 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 				send(fmt.Sprintf("request_time_%vth_percentile_ns", p), float64(list[key]))
 			}
 		}
+	}
+
+	// WHY select: avoid potential block
+	select {
+	case qauMetrics := <-listener.quotaAndUsageMetrics:
+		for _, ps := range qauMetrics {
+			send(ps.Metric, float64(ps.Data[0].Value))
+		}
+	default:
 	}
 }
 
@@ -1348,6 +1556,18 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		case <-time.After(time.Second):
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
+	})
+
+	carbonserverMux.HandleFunc("/admin/quota", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "text/plain")
+
+		fidx := listener.CurrentFileIndex()
+		if fidx == nil && fidx.trieIdx == nil {
+			fmt.Fprintf(w, "index doesn't exist.")
+			return
+		}
+
+		fidx.trieIdx.getQuotaTree(w)
 	})
 
 	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
