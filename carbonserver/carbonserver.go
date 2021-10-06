@@ -21,6 +21,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -258,6 +259,8 @@ type CarbonserverListener struct {
 	estimateSize              func(metric string) (size, dataPoints int64)
 	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
+
+	interfalInfoCallbacks map[string]func() map[string]interface{}
 }
 
 type prometheus struct {
@@ -1569,6 +1572,16 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 
 		fidx.trieIdx.getQuotaTree(w)
 	})
+	carbonserverMux.HandleFunc("/admin/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Content-Type", "application/json")
+
+		infos := map[string]map[string]interface{}{}
+		for name, f := range listener.interfalInfoCallbacks {
+			infos[name] = f()
+		}
+
+		json.NewEncoder(w).Encode(infos)
+	})
 
 	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
@@ -1772,4 +1785,11 @@ func (flc *fileListCache) close() error {
 	}
 
 	return nil
+}
+
+func (listener *CarbonserverListener) RegisterInternalInfoHandler(name string, f func() map[string]interface{}) {
+	if listener.interfalInfoCallbacks == nil {
+		listener.interfalInfoCallbacks = map[string]func() map[string]interface{}{}
+	}
+	listener.interfalInfoCallbacks[name] = f
 }
