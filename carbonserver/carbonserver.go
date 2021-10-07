@@ -957,7 +957,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			}
 
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
-			if info.IsDir() || isFullMetric {
+			if isFullMetric {
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
 				if flc != nil {
