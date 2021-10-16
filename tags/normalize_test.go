@@ -1,6 +1,8 @@
 package tags
 
 import (
+	"log"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -94,5 +96,45 @@ func BenchmarkFilePath(b *testing.B) {
 
 	if x == "" {
 		b.FailNow()
+	}
+}
+
+func TestMetricPathEncodeDecode(t *testing.T) {
+	defer func() {
+		UsingEncoding = false
+		UsingDirMode = false
+	}()
+
+	assert := assert.New(t)
+	// p := FilePath("/data/", "some.metric;tag1/=value2;tag2=value.2", false)
+	// // assert.Equal("/data/_tagged/eff/aae/some_DOT_metric;tag1=value2;tag2=value_DOT_2", p)
+
+	// UsingDirMode = true
+	// log.Println(FilePath("/data/", "some.metric;tag1/=value2;tag2=value2", false))
+	// log.Println(FilePath("/data/", "some.metric/;tag1/=value2;tag2=value2", false))
+
+	for _, c := range []string{
+		"some.metric;tag1/=value2;tag2=value.2",
+		"some.metric;tag1/=value2;tag2=value2",
+		"some.metric/;tag1/=value2;tag2=value2",
+	} {
+		UsingEncoding = true
+		UsingDirMode = false
+		{
+			p := FilePath("/data/", c, false)
+			log.Printf("p = %+v\n", p)
+			m, err := MetricPath(filepath.Base(p))
+			assert.Equal(c, m)
+			assert.Empty(err)
+		}
+
+		// UsingEncoding = true
+		// UsingDirMode = true
+		// {
+		// 	p := FilePath("/data/", c, false)
+		// 	m, err := MetricPath(strings.TrimPrefix(p, "/data/"+Directory))
+		// 	assert.Equal(c, m)
+		// 	assert.Empty(err)
+		// }
 	}
 }

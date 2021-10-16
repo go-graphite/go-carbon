@@ -67,3 +67,17 @@ message MetricDetailsResponse {
 	uint64 FreeSpace = 2;
 	uint64 TotalSpace = 3;
 }
+
+message TagsResponse {
+	string tag = 1;
+}
+
+message TagValuessResponse {
+	string tag = 1;
+	repeated TagValue values = 2;
+}
+
+message TagValue {
+	int64 count = 1;
+	string value = 2;
+}

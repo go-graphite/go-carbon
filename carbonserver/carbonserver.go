@@ -50,6 +50,7 @@ import (
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/stat"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/tags"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"github.com/lomik/zapwriter"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -62,6 +63,7 @@ type metricStruct struct {
 	RenderErrors         uint64
 	NotFound             uint64
 	FindRequests         uint64
+	TagsRequests         uint64
 	FindErrors           uint64
 	FindZero             uint64
 	InfoRequests         uint64
@@ -261,6 +263,8 @@ type CarbonserverListener struct {
 	quotaUsageReportFrequency time.Duration
 
 	interfalInfoCallbacks map[string]func() map[string]interface{}
+
+	tagsIndex *tagsIndex
 }
 
 type prometheus struct {
@@ -564,6 +568,10 @@ func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, in
 	var throttled = fidx.trieIdx.throttle(ps, inCache)
 
 	return throttled
+}
+
+func (listener *CarbonserverListener) enableTagIndex() {
+	listener.tagsIndex = newTagsIndex()
 }
 
 // skipcq: RVV-B0011
@@ -975,7 +983,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				if _, present := cacheMetricNames[trimmedName]; present {
 					delete(cacheMetricNames, trimmedName)
 				} else {
-					if listener.trieIndex {
+					if listener.tagsIndex != nil && strings.HasPrefix(p, filepath.Join(listener.whisperData, tags.Directory)) {
+						// listener.tagsIndex.addMetric(strings.TrimSuffix(info.Name(), ".wsp"))
+					} else if listener.trieIndex {
 						var dataPoints int64
 						if isFullMetric && listener.estimateSize != nil {
 							m := strings.ReplaceAll(trimmedName, "/", ".")
@@ -1551,6 +1561,9 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler, statusCodes["details"]))
 	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler, statusCodes["render"]))
 	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler, statusCodes["info"]))
+
+	carbonserverMux.HandleFunc("/tags", wrapHandler(listener.tagsHandler, statusCodes["find"]))
+	carbonserverMux.HandleFunc("/tags/", wrapHandler(listener.tagValuesHandler, statusCodes["find"]))
 
 	carbonserverMux.HandleFunc("/forcescan", func(w http.ResponseWriter, r *http.Request) {
 		select {

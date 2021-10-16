@@ -1,9 +1,9 @@
 package carbonserver
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 
 	"github.com/go-graphite/go-carbon/tags"
@@ -20,9 +20,19 @@ type tagsIndex struct {
 
 	tags map[string]map[string][]metricID
 
-	// tvTrigrams
+	// tvTrigrams?
 	//  tag value trigrams -> value id
+
+	tagsTries map[string]*trieIndex
 }
+
+type tagMeta struct {
+	ids []metricID
+}
+
+func (*tagMeta) trieMeta() {}
+
+// 10 m * 4 * 10
 
 func newTagsIndex() *tagsIndex {
 	return &tagsIndex{
@@ -202,9 +212,10 @@ func (ti *tagsIndex) seriesByTag(tagqs []string) ([]string, error) {
 		ids = []metricID{}
 		idSets = idSets[1:]
 
-		sort.Slice(ids1, func(i, j int) bool { return ids1[i] < ids1[j] })
-		sort.Slice(ids2, func(i, j int) bool { return ids2[i] < ids2[j] })
+		// sort.Slice(ids1, func(i, j int) bool { return ids1[i] < ids1[j] })
+		// sort.Slice(ids2, func(i, j int) bool { return ids2[i] < ids2[j] })
 
+		// ids are guaranteed to be sorted
 		for i, j := 0, 0; i < len(ids1) && j < len(ids2); {
 			if ids1[i] == ids2[j] {
 				ids = append(ids, ids1[i])
@@ -233,8 +244,26 @@ func (ti *tagsIndex) seriesByTag(tagqs []string) ([]string, error) {
 //     "tag": "datacenter"
 //   }
 // ]
-func (ti *tagsIndex) getTags(filter string, limit int) error {
-	return nil
+
+type TagName struct {
+	Tag string
+}
+
+func (ti *tagsIndex) getTags(filter string, limit int) ([]TagName, error) {
+	exp, err := regexp.Compile(filter)
+	if err != nil {
+		return nil, fmt.Errorf("getTags: failed to compile %q: %s", filter, err)
+	}
+
+	// TODO: optimize
+	var matches []TagName
+	for t := range ti.tags {
+		if exp.MatchString(t) {
+			matches = append(matches, TagName{Tag: t})
+		}
+	}
+
+	return matches, nil
 }
 
 // curl -s "http://graphite/tags/datacenter?pretty=1&filter=dc1"
@@ -248,6 +277,342 @@ func (ti *tagsIndex) getTags(filter string, limit int) error {
 //     }
 //   ]
 // }
-func (ti *tagsIndex) getTagValues(tag string, filter string, limit int) error {
-	return nil
+
+type TagData struct {
+	Tag    string
+	Values []TagValue
 }
+
+type TagValue struct {
+	Count int
+	Value string
+}
+
+func (ti *tagsIndex) getTagValues(tag string, filter string, limit int) (*TagData, error) {
+	exp, err := regexp.Compile(filter)
+	if err != nil {
+		return nil, fmt.Errorf("getTags: failed to compile %q: %s", filter, err)
+	}
+
+	var tdata TagData
+	for v, mids := range ti.tags[tag] {
+		if exp.MatchString(v) {
+			tdata.Values = append(tdata.Values, TagValue{Count: len(mids), Value: v})
+		}
+	}
+
+	return &tdata, nil
+}
+
+func newRegexpState(expr string) (*gmatcher, error) {
+	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
+	var cur = m.root
+	var alters [][2]*gstate
+
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		switch c {
+		case '[':
+			m.exact = false
+			s := &gstate{}
+			i++
+			if i >= len(expr) {
+				return nil, errors.New("glob: broken range syntax")
+			}
+			negative := expr[i] == '^'
+			if negative {
+				i++
+			}
+			for i < len(expr) && expr[i] != ']' {
+				if expr[i] == '-' {
+					if i+1 >= len(expr) {
+						return nil, errors.New("glob: missing closing range")
+					}
+					if expr[i-1] > expr[i+1] {
+						return nil, errors.New("glob: range start is bigger than range end")
+					}
+					// a simple check to make sure that range doesn't ends with 0xff,
+					// which would causes endless loop bellow
+					if expr[i-1] > 128 || expr[i+1] > 128 {
+						return nil, errors.New("glob: range overflow")
+					}
+
+					for j := expr[i-1] + 1; j <= expr[i+1]; j++ {
+						if j != '*' {
+							s.c[j] = true
+						}
+					}
+
+					i += 2
+					continue
+				}
+
+				s.c[expr[i]] = true
+				i++
+			}
+			if i >= len(expr) || expr[i] != ']' {
+				return nil, errors.New("glob: missing ]")
+			}
+
+			if negative {
+				// TODO: revisit
+				for i := 32; i <= 126; i++ {
+					if i != '*' {
+						s.c[i] = !s.c[i]
+					}
+				}
+			}
+
+			cur.next = append(cur.next, s)
+			cur = s
+
+			m.lsComplex = false
+		case '?':
+			m.exact = false
+			var star gstate
+			star.c['*'] = true
+			cur.next = append(cur.next, &star)
+			cur = &star
+
+			m.lsComplex = false
+		case '*':
+			m.exact = false
+			if i == 0 && len(expr) > 2 {
+				// TODO: check dup stars
+				m.lsComplex = true
+			}
+
+			// de-dup multi stars: *** -> *
+			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
+			}
+
+			var split, star gstate
+			star.c['*'] = true
+			split.c[gstateSplit] = true
+			split.next = append(split.next, &star)
+			cur.next = append(cur.next, &split)
+			star.next = append(star.next, &split)
+
+			cur = &split
+		case '{':
+			alterStart := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
+			alterEnd := &gstate{c: [maxGstateCLen]bool{gstateSplit: true}}
+			cur.next = append(cur.next, alterStart)
+			cur = alterStart
+			alters = append(alters, [2]*gstate{alterStart, alterEnd})
+
+			m.lsComplex = false
+		case '}':
+			if len(alters) == 0 {
+				return nil, errors.New("glob: missing {")
+			}
+			cur.next = append(cur.next, alters[len(alters)-1][1])
+			cur = alters[len(alters)-1][1]
+			alters = alters[:len(alters)-1]
+
+			m.lsComplex = false
+		case ',':
+			if len(alters) > 0 {
+				cur.next = append(cur.next, alters[len(alters)-1][1])
+				cur = alters[len(alters)-1][0]
+				continue
+			}
+
+			// TODO: should return error?
+			fallthrough
+		default:
+			s := &gstate{}
+			s.c[c] = true
+			cur.next = append(cur.next, s)
+			cur = s
+		}
+	}
+	cur.next = append(cur.next, endGstate)
+
+	if len(alters) > 0 {
+		return nil, errors.New("glob: missing }")
+	}
+
+	var droot gdstate
+	for _, s := range m.root.next {
+		droot.gstates = droot.add(droot.gstates, s)
+	}
+	m.dstates = append(m.dstates, &droot)
+
+	return &m, nil
+}
+
+// func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *http.Request) {
+// 	// URL: /tags?pretty=1&filter=data
+
+// 	t0 := time.Now()
+// 	ctx := req.Context()
+// 	span := trace.SpanFromContext(ctx)
+
+// 	atomic.AddUint64(&listener.metrics.TagsRequests, 1)
+
+// 	format := req.FormValue("format")
+// 	query := req.Form["query"]
+
+// 	var response *findResponse
+
+// 	logger := TraceContextToZap(ctx, listener.logger.With(
+// 		zap.String("handler", "find"),
+// 		zap.String("url", req.URL.RequestURI()),
+// 		zap.String("peer", req.RemoteAddr),
+// 	))
+
+// 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+// 		zap.String("handler", "find"),
+// 		zap.String("url", req.URL.RequestURI()),
+// 		zap.String("peer", req.RemoteAddr),
+// 	))
+
+// 	accepts := req.Header["Accept"]
+// 	for _, accept := range accepts {
+// 		if accept == httpHeaders.ContentTypeCarbonAPIv3PB {
+// 			format = "carbonapi_v3_pb"
+// 			break
+// 		}
+// 	}
+
+// 	if format == "" {
+// 		format = "json"
+// 	}
+
+// 	formatCode, ok := knownFormats[format]
+// 	if !ok {
+// 		atomic.AddUint64(&listener.metrics.FindErrors, 1)
+// 		accessLogger.Error("find failed",
+// 			zap.Duration("runtime_seconds", time.Since(t0)),
+// 			zap.String("reason", "unsupported format"),
+// 			zap.Int("http_code", http.StatusBadRequest),
+// 		)
+// 		http.Error(wr, "Bad request (unsupported format)",
+// 			http.StatusBadRequest)
+// 		return
+// 	}
+
+// 	if formatCode == protoV3Format {
+// 		body, err := ioutil.ReadAll(req.Body)
+// 		if err != nil {
+// 			accessLogger.Error("find failed",
+// 				zap.Duration("runtime_seconds", time.Since(t0)),
+// 				zap.String("reason", err.Error()),
+// 				zap.Int("http_code", http.StatusBadRequest),
+// 			)
+// 			http.Error(wr, "Bad request (unsupported format)",
+// 				http.StatusBadRequest)
+// 		}
+
+// 		var pv3Request protov3.MultiGlobRequest
+// 		pv3Request.Unmarshal(body)
+
+// 		fmt.Printf("\n\n%+v\n\n", pv3Request)
+
+// 		query = pv3Request.Metrics
+// 	}
+
+// 	logger = logger.With(
+// 		zap.Strings("query", query),
+// 		zap.String("format", format),
+// 	)
+
+// 	accessLogger = accessLogger.With(
+// 		zap.Strings("query", query),
+// 		zap.String("format", format),
+// 	)
+
+// 	span.SetAttributes(
+// 		kv.String("graphite.query", strings.Join(query, ",")),
+// 		kv.String("graphite.format", format),
+// 	)
+
+// 	if len(query) == 0 {
+// 		atomic.AddUint64(&listener.metrics.FindErrors, 1)
+// 		accessLogger.Error("find failed",
+// 			zap.Duration("runtime_seconds", time.Since(t0)),
+// 			zap.String("reason", "empty query"),
+// 			zap.Int("http_code", http.StatusBadRequest),
+// 		)
+// 		http.Error(wr, "Bad request (no query)", http.StatusBadRequest)
+// 		return
+// 	}
+
+// 	var err error
+// 	fromCache := false
+// 	if listener.findCacheEnabled {
+// 		key := strings.Join(query, ",") + "&" + format
+// 		size := uint64(100 * 1024 * 1024)
+// 		item := listener.findCache.getQueryItem(key, size, 300)
+// 		res, ok := item.FetchOrLock()
+// 		listener.prometheus.cacheRequest("find", ok)
+// 		if !ok {
+// 			logger.Debug("find cache miss")
+// 			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+// 			response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
+// 			if err != nil {
+// 				if _, ok := err.(errorNotFound); ok {
+// 					item.StoreAndUnlock(&findResponse{})
+// 				} else {
+// 					item.StoreAbort()
+// 				}
+// 			} else {
+// 				item.StoreAndUnlock(response)
+// 			}
+// 		} else if res != nil {
+// 			logger.Debug("query cache hit")
+// 			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
+// 			response = res.(*findResponse)
+// 			fromCache = true
+
+// 			if response.files == 0 {
+// 				err = errorNotFound{}
+// 			}
+// 		}
+// 	} else {
+// 		response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
+// 	}
+
+// 	if err != nil || response == nil {
+// 		var code int
+// 		var reason string
+// 		if _, ok := err.(errorNotFound); ok {
+// 			reason = "Not Found"
+// 			code = http.StatusNotFound
+// 		} else {
+// 			reason = "Internal error while processing request"
+// 			code = http.StatusInternalServerError
+// 		}
+
+// 		accessLogger.Error("find failed",
+// 			zap.Duration("runtime_seconds", time.Since(t0)),
+// 			zap.String("reason", reason),
+// 			zap.Error(err),
+// 			zap.Int("http_code", code),
+// 		)
+// 		http.Error(wr, fmt.Sprintf("%s (%v)", reason, err), code)
+
+// 		return
+// 	}
+
+// 	wr.Header().Set("Content-Type", response.contentType)
+// 	wr.Write(response.data)
+
+// 	if response.files == 0 {
+// 		// to get an idea how often we search for nothing
+// 		atomic.AddUint64(&listener.metrics.FindZero, 1)
+// 	}
+
+// 	accessLogger.Info("find success",
+// 		zap.Duration("runtime_seconds", time.Since(t0)),
+// 		zap.Int("Files", response.files),
+// 		zap.Bool("find_cache_enabled", listener.findCacheEnabled),
+// 		zap.Bool("from_cache", fromCache),
+// 		zap.Int("http_code", http.StatusOK),
+// 	)
+// 	span.SetAttributes(
+// 		kv.Int("graphite.files", response.files),
+// 		kv.Bool("graphite.from_cache", fromCache),
+// 	)
+// }
