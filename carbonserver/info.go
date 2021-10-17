@@ -72,7 +72,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		}
 
 		var pv3Request protov3.MultiGlobRequest
-		pv3Request.Unmarshal(body)
+		pv3Request.UnmarshalVT(body)
 
 		metrics = pv3Request.Metrics
 	}
@@ -83,7 +83,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	)
 
 	response := protov3.MultiMetricsInfoResponse{}
-	var retentionsV2 []protov2.Retention
+	var retentionsV2 []*protov2.Retention
 	for i, metric := range metrics {
 		path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 		w, err := whisper.Open(path)
@@ -105,25 +105,25 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		maxr := int64(w.MaxRetention())
 		xfiles := float32(w.XFilesFactor())
 
-		rets := make([]protov3.Retention, 0, 4)
+		rets := make([]*protov3.Retention, 0, 4)
 		for _, retention := range w.Retentions() {
 			spp := int64(retention.SecondsPerPoint())
 			nop := int64(retention.NumberOfPoints())
-			rets = append(rets, protov3.Retention{
+			rets = append(rets, &protov3.Retention{
 				SecondsPerPoint: spp,
 				NumberOfPoints:  nop,
 			})
 			// only one metric is enough - first metric
 			// TODO include support for multiple metrics
 			if i == 0 && formatCode == protoV2Format {
-				retentionsV2 = append(retentionsV2, protov2.Retention{
+				retentionsV2 = append(retentionsV2, &protov2.Retention{
 					SecondsPerPoint: int32(retention.SecondsPerPoint()),
 					NumberOfPoints:  int32(retention.NumberOfPoints()),
 				})
 			}
 		}
 
-		response.Metrics = append(response.Metrics, protov3.MetricsInfoResponse{
+		response.Metrics = append(response.Metrics, &protov3.MetricsInfoResponse{
 			Name:              metric,
 			ConsolidationFunc: aggr,
 			MaxRetention:      maxr,
@@ -155,7 +155,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 		var r protov3.MetricsInfoResponse
 		if len(response.Metrics) > 0 {
-			r = response.Metrics[0]
+			r = *response.Metrics[0]
 		}
 
 		response := protov2.InfoResponse{
@@ -165,10 +165,10 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			XFilesFactor:      r.XFilesFactor,
 			Retentions:        retentionsV2,
 		}
-		b, err = response.Marshal()
+		b, err = response.MarshalVT()
 	case protoV3Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv3PB
-		b, err = response.Marshal()
+		b, err = response.MarshalVT()
 	}
 
 	if err != nil {

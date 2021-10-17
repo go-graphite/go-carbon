@@ -1084,7 +1084,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					i := stat.GetStat(info)
 					trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
 					details[trimmedName] = &protov3.MetricDetails{
-						Size_:    i.Size,
+						Size:     i.Size,
 						ModTime:  i.MTime,
 						ATime:    i.ATime,
 						RealSize: i.RealSize,
