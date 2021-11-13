@@ -326,6 +326,7 @@ type trieIndex struct {
 	throughputs atomic.Value // *throughputUsages
 }
 
+// note: root and file leaf node has a nil c, mainly used in trieNode.fullPath
 type trieNode struct {
 	c         []byte // TODO: look for a more compact/compressed formats
 	childrens *[]*trieNode
@@ -722,7 +723,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	var curm = matchers[0]
 	var ndstate *gdstate
 	var isFile, isDir, hasMoreNodes bool
-	var dirNode *trieNode
+	var dirNode, fileNode *trieNode
 
 	for {
 		if nindex[ncindex] >= len(curChildrens) {
@@ -789,6 +790,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			switch {
 			case child.file():
 				isFile = true
+				fileNode = child
 			case child.dir():
 				isDir = true
 				dirNode = child
@@ -813,6 +815,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		if isFile {
 			files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
 			isFiles = append(isFiles, isFile)
+			nodes = append(nodes, fileNode)
 		}
 		if isDir {
 			files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
@@ -855,23 +858,27 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	return files, isFiles, nodes, nil
 }
 
+// note: tn might be a root or file node, which has a nil c
 func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	var size = len(tn.c)
 	for _, n := range parents {
 		size += len(n.c)
 	}
+
 	var r = make([]byte, size)
 	var i int
-	for _, n := range parents[1:] {
+	for _, n := range parents {
 		if n.dir() {
 			r[i] = sep
 			i++
-		} else {
+		} else if len(n.c) > 0 {
 			copy(r[i:], n.c)
 			i += len(n.c)
 		}
 	}
-	copy(r[i:], tn.c)
+	if len(tn.c) > 0 {
+		copy(r[i:], tn.c)
+	}
 
 	// skipcq: GSC-G103
 	return *(*string)(unsafe.Pointer(&r))
@@ -925,9 +932,73 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		continue
 	}
 
+	// TODO: remove, might be too expensive with large index
 	sort.Strings(files)
 
 	return files
+}
+
+// limit only applies when statsOnly is set to false.
+// count means the number of files/metrics under the trieNode.
+// skipcq: RVV-A0005
+func (ti *trieIndex) allMetricsNode(tn *trieNode, sep byte, prefix string, limit int, statsOnly bool) (files []string, fileNodes []*trieNode, count int, physicalSize, logicalSize int64) {
+	var depth = ti.getDepth() + trieDepthBuffer
+	var nindex = make([]int, depth)
+	var ncindex int
+	var cur = tn
+	var curChildrens = cur.getChildrens()
+	var stack = make([]*trieNode, depth)
+
+	for {
+		if nindex[ncindex] >= len(curChildrens) {
+			goto parent
+		}
+
+		stack[ncindex] = cur
+		cur = cur.getChild(curChildrens, nindex[ncindex])
+		curChildrens = cur.getChildrens()
+		ncindex++
+		if ncindex >= len(stack)-1 {
+			goto parent
+		}
+
+		if cur.file() {
+			count++
+			if meta, ok := cur.meta.(*fileMeta); ok && meta != nil {
+				physicalSize += meta.physicalSize
+				logicalSize += meta.logicalSize
+			}
+
+			if !statsOnly && ncindex > 0 {
+				files = append(files, prefix+cur.fullPath(sep, stack[:ncindex]))
+				fileNodes = append(fileNodes, cur)
+			}
+
+			if len(files) >= limit {
+				break
+			}
+
+			goto parent
+		}
+
+		continue
+
+	parent:
+		nindex[ncindex] = 0
+		ncindex--
+		if ncindex < 0 {
+			break
+		}
+		nindex[ncindex]++
+		cur = stack[ncindex]
+		curChildrens = cur.getChildrens()
+
+		continue
+	}
+
+	// sort.Strings(files)
+
+	return
 }
 
 // skipcq: SCC-U1000
@@ -1526,7 +1597,7 @@ func (ti *trieIndex) applyQuotas(quotas ...*Quota) (*throughputUsages, error) {
 
 			meta, ok := node.meta.(*dirMeta)
 			if !ok {
-				// TODO: log an error?
+				// could be a fileMeta
 				continue
 			}
 
