@@ -25,6 +25,9 @@ var (
 	CompressedArchiveInfoSize     = 92 + FreeCompressedArchiveInfoSize
 	FreeCompressedArchiveInfoSize = 36
 
+	compressedHeaderAggregationOffset = len(compressedMagicString) + VersionSize
+	compressedHeaderXFFOffset         = compressedHeaderAggregationOffset + IntSize*2
+
 	BlockRangeSize = 16
 	endOfBlockSize = 5
 
@@ -474,23 +477,41 @@ func (whisper *Whisper) archiveUpdateManyCompressed(archive *archiveInfo, points
 	bufferUnitPointsCount := archive.next.secondsPerPoint / archive.secondsPerPoint
 	for aindex := 0; aindex < len(alignedPoints); {
 		dp := alignedPoints[aindex]
-		bpBaseInterval := archive.AggregateInterval(dp.interval)
+		dpBaseInterval := archive.AggregateInterval(dp.interval)
 
 		// NOTE: current implementation expects data points to be monotonically
 		// increasing in time
-		if minInterval != 0 && bpBaseInterval < minInterval {
+		if minInterval != 0 && dpBaseInterval < minInterval { // TODO: check against cblock pn1.interval?
 			archive.stats.discard.oldInterval++
 			aindex++
 			continue
 		}
 
-		// check if buffer is full
-		if baseIntervalsPerUnit[currentUnit] == 0 || baseIntervalsPerUnit[currentUnit] == bpBaseInterval {
+		// Tolerate out of order data handling within the current buffer.
+		targetUnit := -1
+		for i, unitInterval := range baseIntervalsPerUnit {
+			if dpBaseInterval == unitInterval {
+				targetUnit = i
+				break
+			}
+		}
+		if targetUnit != -1 {
 			aindex++
-			baseIntervalsPerUnit[currentUnit] = bpBaseInterval
 
 			// TODO: not efficient if many data points are being written in one call
-			offset := currentUnit*bufferUnitPointsCount + (dp.interval-bpBaseInterval)/archive.secondsPerPoint
+			offset := targetUnit*bufferUnitPointsCount + (dp.interval-dpBaseInterval)/archive.secondsPerPoint
+			copy(archive.buffer[offset*PointSize:], dp.Bytes())
+
+			continue
+		}
+
+		// check if buffer is full
+		if baseIntervalsPerUnit[currentUnit] == 0 || baseIntervalsPerUnit[currentUnit] == dpBaseInterval {
+			aindex++
+			baseIntervalsPerUnit[currentUnit] = dpBaseInterval
+
+			// TODO: not efficient if many data points are being written in one call
+			offset := currentUnit*bufferUnitPointsCount + (dp.interval-dpBaseInterval)/archive.secondsPerPoint
 			copy(archive.buffer[offset*PointSize:], dp.Bytes())
 
 			continue
@@ -877,7 +898,7 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
 	for i, p := range ps {
 		if p.interval == 0 {
 			continue
-		} else if p.interval < a.cblock.pn1.interval {
+		} else if p.interval <= a.cblock.pn1.interval {
 			a.stats.discard.oldInterval++
 			continue
 		}
@@ -1610,46 +1631,24 @@ func (mf *memFile) Truncate(size int64) error {
 
 func (mf *memFile) dumpOnDisk(fpath string) error { return ioutil.WriteFile(fpath, mf.data, 0644) }
 
+// FillCompressed backfill cwhisper files from srcw.
+// The old and new whisper should have the same retention policies.
 func (dstw *Whisper) FillCompressed(srcw *Whisper) error {
 	defer dstw.Close()
 
-	var rets []*Retention
-	for _, arc := range dstw.archives {
-		rets = append(rets, &Retention{secondsPerPoint: arc.secondsPerPoint, numberOfPoints: arc.numberOfPoints})
+	pointsByArchives, err := dstw.retrieveAndMerge(srcw)
+	if err != nil {
+		return err
 	}
 
-	var pointsByArchives = make([][]dataPoint, len(dstw.archives))
-	for i, srcArc := range srcw.archives {
-		until := int(Now().Unix())
-		from := until - srcArc.MaxRetention()
+	var rets []*Retention
+	for i, arc := range dstw.archives {
+		ret := &Retention{secondsPerPoint: arc.secondsPerPoint, numberOfPoints: arc.numberOfPoints}
+		points := pointsByArchives[i]
 
-		srcPoints, err := srcw.FetchByAggregation(from, until, srcArc.aggregationSpec)
-		if err != nil {
-			return err
-		}
-		dstPoints, err := dstw.FetchByAggregation(from, until, srcArc.aggregationSpec)
-		if err != nil {
-			return err
-		}
+		ret.avgCompressedPointSize = estimatePointSize(points, ret, ret.calculateSuitablePointsPerBlock(dstw.pointsPerBlock))
 
-		points := make([]dataPoint, len(dstPoints.values))
-		var lenp int
-		for i, val := range dstPoints.values {
-			if !math.IsNaN(val) {
-			} else if !math.IsNaN(srcPoints.values[i]) {
-				val = srcPoints.values[i]
-			} else {
-				continue
-			}
-
-			points[lenp].interval = srcPoints.fromTime + i*srcArc.secondsPerPoint
-			points[lenp].value = val
-			lenp++
-		}
-		points = points[:lenp]
-
-		pointsByArchives[i] = points
-		rets[i].avgCompressedPointSize = estimatePointSize(points, rets[i], rets[i].calculateSuitablePointsPerBlock(dstw.pointsPerBlock))
+		rets = append(rets, ret)
 	}
 
 	var mixSpecs []MixAggregationSpec

@@ -61,6 +61,7 @@ func (whisper *Whisper) CheckIntegrity() error {
 	return nil
 }
 
+// skipcq: RVV-A0005
 func (whisper *Whisper) Dump(all, showDecompressionInfo bool) {
 	debugCompress = showDecompressionInfo
 
@@ -258,6 +259,7 @@ func GenTestArchive(buf []byte, ret Retention) *archiveInfo {
 
 func GenDataPointSlice() []dataPoint { return []dataPoint{} }
 
+// skipcq: RVV-A0005
 func Compare(
 	file1 string,
 	file2 string,
