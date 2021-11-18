@@ -145,6 +145,28 @@ compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
 
+# It's currently go-carbon only feature, not a standard graphite feature. Optional
+# More details in doc/quotas.md
+# quotas-file = "/etc/go-carbon/storage-quotas.conf"
+
+# Enable online whisper file config migration.
+#
+# online-migration-rate means metrics per second to migrate.
+#
+# To partially enable default migration for only some matched rules in
+# storage-schemas.conf or storage-aggregation.conf, we can set
+# online-migration-global-scope = "-" and enable the migration in those config
+# files.
+#
+# online-migration-global-scope can also be set any combination of the 3 rules
+# (xff,aggregationMethod,schema) as a csv string
+# like: "xff", "xff,aggregationMethod", "xff,schema",
+# or "xff,aggregationMethod,schema".
+#
+# online-migration = false
+# online-migration-rate = 5
+# online-migration-global-scope = "-"
+
 [cache]
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000

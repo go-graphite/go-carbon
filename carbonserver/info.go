@@ -101,7 +101,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 		defer w.Close()
 
-		aggr := w.AggregationMethod()
+		aggr := strings.Title(w.AggregationMethod().String())
 		maxr := int64(w.MaxRetention())
 		xfiles := float32(w.XFilesFactor())
 

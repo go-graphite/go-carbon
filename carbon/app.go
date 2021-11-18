@@ -318,8 +318,12 @@ func (app *App) startPersister() {
 			p.SetTaggedFn(app.Tags.Add)
 		}
 
-		p.Start()
+		if cfg := app.Config.Whisper; cfg.OnlineMigration {
+			scope := strings.Split(strings.TrimSpace(cfg.OnlineMigrationGlobalScope), ",")
+			p.EnableOnlineMigration(cfg.OnlineMigrationRate, scope)
+		}
 
+		p.Start()
 		app.Persister = p
 	}
 }

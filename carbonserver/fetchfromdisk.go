@@ -70,7 +70,7 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 	res := &metricFromDisk{
 		Metadata: Metadata{
-			ConsolidationFunc: w.AggregationMethod(),
+			ConsolidationFunc: strings.Title(w.AggregationMethod().String()),
 			XFilesFactor:      w.XFilesFactor(),
 		},
 	}
