@@ -19,6 +19,11 @@ type WhisperAggregationItem struct {
 	xFilesFactor         float64
 	aggregationMethodStr string
 	aggregationMethod    whisper.AggregationMethod
+
+	// If not specified, migration flag is controlled by the global
+	// migration flag set in persister.Whisper
+	xffMigration         *bool
+	aggregationMigration *bool
 }
 
 // WhisperAggregation ...
@@ -105,6 +110,15 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 				section["aggregationmethod"], section["name"])
 		}
 
+		if xffm, ok := section["xffMigration"]; ok {
+			migration := xffm == "true"
+			item.xffMigration = &migration
+		}
+		if aggrm, ok := section["aggregationMethodMigration"]; ok {
+			migration := aggrm == "true"
+			item.aggregationMigration = &migration
+		}
+
 		result.Data = append(result.Data, item)
 	}
 
@@ -119,4 +133,20 @@ func (a *WhisperAggregation) Match(metric string) *WhisperAggregationItem {
 		}
 	}
 	return a.Default
+}
+
+func (a *WhisperAggregationItem) canMigrateXff(global bool) bool {
+	if a.xffMigration != nil {
+		return *a.xffMigration
+	}
+
+	return global
+}
+
+func (a *WhisperAggregationItem) canMigrateAggregationMethod(global bool) bool {
+	if a.aggregationMigration != nil {
+		return *a.aggregationMigration
+	}
+
+	return global
 }

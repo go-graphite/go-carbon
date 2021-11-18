@@ -22,6 +22,10 @@ type Schema struct {
 	Retentions   whisper.Retentions
 	Priority     int64
 	Compressed   *bool
+
+	// If not specified, migration flag is controlled by the global
+	// migration flag set in persister.Whisper
+	Migration *bool
 }
 
 // WhisperSchemas contains schema settings
@@ -123,9 +127,22 @@ func ReadWhisperSchemas(filename string) (WhisperSchemas, error) {
 			return nil, fmt.Errorf("[persister] Failed to parse compressed %q for [%s]: %s", section["compressed"], schema.Name, "unknown value, please use true/false")
 		}
 
+		if migration, ok := section["migration"]; ok {
+			m := migration == "true"
+			schema.Migration = &m
+		}
+
 		schemas = append(schemas, schema)
 	}
 
 	sort.Sort(schemas)
 	return schemas, nil
+}
+
+func (s *Schema) canMigrate(global bool) bool {
+	if s.Migration != nil {
+		return *s.Migration
+	}
+
+	return global
 }
