@@ -68,6 +68,8 @@ type metricStruct struct {
 	InfoErrors           uint64
 	ListRequests         uint64
 	ListErrors           uint64
+	ListQueryRequests    uint64
+	ListQueryErrors      uint64
 	DetailsRequests      uint64
 	DetailsErrors        uint64
 	CacheHit             uint64
@@ -1548,6 +1550,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	carbonserverMux.HandleFunc("/_internal/capabilities/", wrapHandler(listener.capabilityHandler, statusCodes["capabilities"]))
 	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler, statusCodes["find"]))
 	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler, statusCodes["list"]))
+	carbonserverMux.HandleFunc("/metrics/list_query/", wrapHandler(listener.listQueryHandler, statusCodes["list"]))
 	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler, statusCodes["details"]))
 	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler, statusCodes["render"]))
 	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler, statusCodes["info"]))

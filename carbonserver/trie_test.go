@@ -742,6 +742,47 @@ func TestTrieEdgeCases(t *testing.T) {
 	}
 }
 
+func TestTrieQueryOpts(t *testing.T) {
+	var trieIndex = newTrie(".wsp", nil)
+
+	trieIndex.insert("/sys/app/host-01.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01/cpu/user.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01/cpu/system.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01/memory/cache.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-02/cpu/user.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-02/cpu/system.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-03/cpu/system.wsp", 0, 0, 0)
+
+	wantMetrics := []string{
+		"sys.app.host-01",
+		"sys.app.host-01.cpu.user",
+		"sys.app.host-01.cpu.system",
+		"sys.app.host-01.memory.cache",
+		"sys.app.host-02.cpu.user",
+		"sys.app.host-02.cpu.system",
+	}
+
+	files, _, nodes, err := trieIndex.query("sys/app/host-0{1,2}", 1000, nil)
+	if err != nil {
+		t.Error(err)
+	}
+
+	var metrics []string
+	for i, n := range nodes {
+		if n.file() {
+			metrics = append(metrics, files[i])
+			continue
+		}
+
+		nmetrics, _, _, _, _ := trieIndex.allMetricsNode(n, '.', files[i], 65536, false)
+		metrics = append(metrics, nmetrics...)
+	}
+
+	if got, want := metrics, wantMetrics; !reflect.DeepEqual(got, want) {
+		t.Errorf("metrics = %s; want %s", got, want)
+	}
+}
+
 func TestTrieConcurrentReadWrite(t *testing.T) {
 	trieIndex := newTrie(".wsp", nil)
 
