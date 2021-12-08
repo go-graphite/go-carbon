@@ -41,6 +41,7 @@ require (
 	github.com/sevlyar/go-daemon v0.1.6-0.20210508104436-15bb82c8ea3c
 	github.com/stretchr/testify v1.6.1
 	github.com/syndtr/goleveldb v0.0.0-20180815032940-ae2bd5eed72d
+	github.com/vmihailenco/msgpack/v5 v5.3.5
 	go.opentelemetry.io/otel v0.9.0
 	go.opentelemetry.io/otel/exporters/trace/jaeger v0.9.0
 	go.uber.org/atomic v1.3.2 // indirect
