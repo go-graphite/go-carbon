@@ -545,5 +545,5 @@ func (rcv *Kafka) worker() {
 }
 
 // InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
-func (rcv *Kafka) InitPrometheus(reg prometheus.Registerer) {
+func (*Kafka) InitPrometheus(_ prometheus.Registerer) {
 }

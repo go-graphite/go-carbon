@@ -25,7 +25,7 @@ func Msgpack(body []byte) ([]*points.Points, error) {
 		return result, err
 	}
 
-	if len(d.Name) == 0 {
+	if d.Name == "" {
 		err = errors.New("Empty metric name")
 		return result, err
 	}
