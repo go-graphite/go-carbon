@@ -84,14 +84,16 @@ func Normalize(s string) (string, error) {
 	prevKey := ""
 	for i := 1; i < len(arr); i++ {
 		p := strings.Index(arr[i], "=")
-		key := arr[i][:p]
-		if key == prevKey {
-			toDel++
-		} else {
-			prevKey = key
-		}
-		if toDel > 0 {
-			arr[i-toDel] = arr[i]
+		if p > 0 {
+			key := arr[i][:p]
+			if key == prevKey {
+				toDel++
+			} else {
+				prevKey = key
+			}
+			if toDel > 0 {
+				arr[i-toDel] = arr[i]
+			}
 		}
 	}
 

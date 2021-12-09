@@ -1756,7 +1756,7 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	// file extension.
 	if len(name) >= 250 {
 		// skipcq: GSC-G401
-		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name))) //nolint:nosec
+		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name)))
 	}
 
 	// Note: Timestamp for each points.Points are set by collector send logics
