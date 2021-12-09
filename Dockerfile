@@ -1,4 +1,4 @@
-FROM golang:1.15.7-alpine3.12 AS build
+FROM golang:1.17.4-alpine3.15 AS build
 
 ARG gocarbon_version=0.15.6
 ARG gocarbon_repo=https://github.com/go-graphite/go-carbon.git
@@ -9,7 +9,7 @@ RUN apk add --update git make \
  && make \
  && chmod +x go-carbon && cp -fv go-carbon /tmp
 
-FROM alpine:3.12
+FROM alpine:3.15
 
 RUN addgroup -S carbon && adduser -S carbon -G carbon \
     && mkdir -p /var/lib/graphite/{whisper,dump,tagging} /var/log/go-carbon /etc/go-carbon/ \
