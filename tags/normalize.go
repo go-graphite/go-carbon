@@ -100,6 +100,7 @@ func Normalize(s string) (string, error) {
 	return strings.Join(arr[:len(arr)-toDel], ";"), nil
 }
 
+// skipcq: RVV-A0005
 func FilePath(root string, s string, hashOnly bool) string {
 	sum := sha256.Sum256([]byte(s))
 	hash := fmt.Sprintf("%x", sum)
