@@ -314,12 +314,16 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 			} else {
 				item.StoreAndUnlock(response)
 			}
-		} else {
+		} else if res != nil {
 			logger.Debug("query cache hit")
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
 
 			response = res.(fetchResponse)
 			fromCache = true
+		} else {
+			// Whenever there are multiple requests approaching for the same records,
+			// and the proceeding request gets an error, waiting requests should get an error too.
+			err = fmt.Errorf("invalid cache record for the request")
 		}
 	} else {
 		response, err = listener.prepareDataProto(ctx, logger, format, targets)
