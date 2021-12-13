@@ -304,7 +304,8 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 		item := listener.queryCache.getQueryItem(key, size, 60)
 		res, ok := item.FetchOrLock()
 		listener.prometheus.cacheRequest("query", ok)
-		if !ok {
+		switch {
+		case !ok:
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 
@@ -314,13 +315,13 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 			} else {
 				item.StoreAndUnlock(response)
 			}
-		} else if res != nil {
+		case res != nil:
 			logger.Debug("query cache hit")
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
 
 			response = res.(fetchResponse)
 			fromCache = true
-		} else {
+		default:
 			// Whenever there are multiple requests approaching for the same records,
 			// and the proceeding request gets an error, waiting requests should get an error too.
 			err = fmt.Errorf("invalid cache record for the request")
