@@ -304,7 +304,8 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 		item := listener.queryCache.getQueryItem(key, size, 60)
 		res, ok := item.FetchOrLock()
 		listener.prometheus.cacheRequest("query", ok)
-		if !ok {
+		switch {
+		case !ok:
 			logger.Debug("query cache miss")
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 
@@ -314,12 +315,16 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 			} else {
 				item.StoreAndUnlock(response)
 			}
-		} else {
+		case res != nil:
 			logger.Debug("query cache hit")
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
 
 			response = res.(fetchResponse)
 			fromCache = true
+		default:
+			// Whenever there are multiple requests approaching for the same records,
+			// and the proceeding request gets an error, waiting requests should get an error too.
+			err = fmt.Errorf("invalid cache record for the request")
 		}
 	} else {
 		response, err = listener.prepareDataProto(ctx, logger, format, targets)
@@ -540,13 +545,13 @@ func (listener *CarbonserverListener) fetchDataPB3(pathExpression string, files 
 func (listener *CarbonserverListener) fetchDataPB(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*protov2.MultiFetchResponse, error) {
 	var multi protov2.MultiFetchResponse
 	var errs []error
-	for i, metric := range files {
+	for i, fileMetric := range files {
 		if !leafs[i] {
-			listener.logger.Debug("skipping directory", zap.String("metric", metric))
+			listener.logger.Debug("skipping directory", zap.String("metricName", metric), zap.String("fileMetric", fileMetric))
 			// can't fetch a directory
 			continue
 		}
-		response, err := listener.fetchSingleMetricV2(metric, fromTime, untilTime)
+		response, err := listener.fetchSingleMetricV2(fileMetric, fromTime, untilTime)
 		if err == nil {
 			multi.Metrics = append(multi.Metrics, *response)
 		} else {
