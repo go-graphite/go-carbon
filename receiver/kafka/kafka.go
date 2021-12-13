@@ -485,6 +485,8 @@ func (rcv *Kafka) worker() {
 		protocolParser = parse.Plain
 	case ProtocolPickle:
 		protocolParser = parse.Pickle
+	case ProtocolMsgPack:
+		protocolParser = parse.Msgpack
 	}
 	for {
 		select {
