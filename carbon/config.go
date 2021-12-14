@@ -126,6 +126,9 @@ type carbonserverConfig struct {
 	FileListCache   string `toml:"file-list-cache"`
 
 	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
+
+	MaxInflightRequests          uint64 `toml:"max-inflight-requests"`
+	NoServiceWhenIndexIsNotReady bool   `toml:"no-service-when-index-is-not-ready"`
 }
 
 type pprofConfig struct {

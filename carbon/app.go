@@ -481,6 +481,9 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
 
+		carbonserver.SetMaxInflightRequests(conf.Carbonserver.MaxInflightRequests)
+		carbonserver.SetNoServiceWhenIndexIsNotReady(conf.Carbonserver.NoServiceWhenIndexIsNotReady)
+
 		if app.Config.Whisper.Quotas != nil {
 			if !conf.Carbonserver.ConcurrentIndex || conf.Carbonserver.RealtimeIndex <= 0 {
 				return errors.New("concurrent-index and realtime-index needs to be enabled for quota control.")

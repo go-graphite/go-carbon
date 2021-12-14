@@ -97,6 +97,9 @@ type metricStruct struct {
 	TrieCountNodesTimeNs uint64
 	QuotaApplyTimeNs     uint64
 	UsageRefreshTimeNs   uint64
+
+	InflightRequests        uint64
+	RejectedTooManyRequests uint64
 }
 
 type requestsTimes struct {
@@ -263,6 +266,9 @@ type CarbonserverListener struct {
 	quotaUsageReportFrequency time.Duration
 
 	interfalInfoCallbacks map[string]func() map[string]interface{}
+
+	MaxInflightRequests          uint64
+	NoServiceWhenIndexIsNotReady bool
 }
 
 type prometheus struct {
@@ -566,6 +572,12 @@ func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, in
 	var throttled = fidx.trieIdx.throttle(ps, inCache)
 
 	return throttled
+}
+func (listener *CarbonserverListener) SetMaxInflightRequests(max uint64) {
+	listener.MaxInflightRequests = max
+}
+func (listener *CarbonserverListener) SetNoServiceWhenIndexIsNotReady(no bool) {
+	listener.NoServiceWhenIndexIsNotReady = no
 }
 
 // skipcq: RVV-B0011
@@ -1382,6 +1394,10 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("find_cache_hit", &listener.metrics.FindCacheHit, send)
 	sender("find_cache_miss", &listener.metrics.FindCacheMiss, send)
 
+	sender("inflight_requests_count", &listener.metrics.InflightRequests, send)
+	sender("inflight_requests_limit", &listener.MaxInflightRequests, send)
+	sender("rejected_too_many_requests", &listener.metrics.RejectedTooManyRequests, send)
+
 	if listener.concurrentIndex {
 		senderRaw("trie_index_nodes", &listener.metrics.TrieNodes, send)
 		senderRaw("trie_index_files", &listener.metrics.TrieFiles, send)
@@ -1510,6 +1526,46 @@ func (listener *CarbonserverListener) initStatsDB() error {
 	return nil
 }
 
+func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.HandlerFunc {
+	return func(wr http.ResponseWriter, req *http.Request) {
+		t0 := time.Now()
+		ctx := req.Context()
+		accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+			zap.String("handler", "rate_limit"),
+			zap.String("url", req.URL.RequestURI()),
+			zap.String("peer", req.RemoteAddr),
+		))
+
+		if listener.NoServiceWhenIndexIsNotReady && listener.CurrentFileIndex() == nil {
+			accessLogger.Error("request denied",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "index not ready"),
+				zap.Int("http_code", http.StatusServiceUnavailable),
+			)
+			http.Error(wr, "Service unavailable (index not ready)", http.StatusServiceUnavailable)
+			return
+		}
+
+		inflights := atomic.AddUint64(&listener.metrics.InflightRequests, 1)
+		defer atomic.AddUint64(&listener.metrics.InflightRequests, ^uint64(0))
+
+		// rate limit inflight requests
+		if listener.MaxInflightRequests > 0 && inflights > listener.MaxInflightRequests {
+			atomic.AddUint64(&listener.metrics.RejectedTooManyRequests, 1)
+
+			accessLogger.Error("request denied",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "too many requests"),
+				zap.Int("http_code", http.StatusTooManyRequests),
+			)
+			http.Error(wr, "Bad request (too many requests)", http.StatusTooManyRequests)
+			return
+		}
+
+		h(wr, req)
+	}
+}
+
 func (listener *CarbonserverListener) Listen(listen string) error {
 	logger := listener.logger
 
@@ -1538,7 +1594,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		return httputil.TrackConnections(
 			httputil.TimeHandler(
 				TraceHandler(
-					h,
+					listener.rateLimitRequest(h),
 					statusCodes["combined"],
 					handlerStatusCodes,
 					listener.prometheus.request,
