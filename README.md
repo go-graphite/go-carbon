@@ -354,6 +354,29 @@ concurrent-index = false
 # (EXPERIMENTAL)
 realtime-index = 0
 
+# Maximum inflight requests allowed in go-carbon. Default is 0 which means no limit.
+# If limit is reached, go-carbon/carbonserver returns 429 (Too Many Requests).
+# This option would be handy as if there are too many long running requests piling up,
+# it would slows down data ingestion in persister and slows down index building
+# (especially during restart).
+max-inflight-requests = 0
+
+# Returns 503 (Service Unavailable) when go-carbon is still building the first
+# index cache (trie/trigram) after restart. With trie or trigram index,
+# carbonserver falls back to filepath.Glob when index is not ready. And
+# filepath.Glob is expensive and not scaled enough to support some heavy
+# queries (manifested as high usage and frequent GC). Thus it is possible that
+# the read requests is so heavy that it not only slows down index building, it
+# also hinders persister from flushing down data to disk and causing cache.size
+# overflow.
+#
+# By default, it is disabled.
+#
+# It is recommend to enable this flag together with "file-list-cache" (depends on
+# the number of metrics, indexing building with "file-list-cache" is usually
+# much faster than re-scanning the whole file tree after restart).
+no-service-when-index-is-not-ready = false
+
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and
 # populates index with metrics with or without corresponding wsp files,
@@ -483,10 +506,12 @@ With settings above applied, best write-strategy to use is "noop"
 | carbonserver.disk\_requests | Amount of metrics we've tried to fetch from disk |
 | carbonserver.points\_returned | Datapoints returned by carbonserver |
 | carbonserver.metrics\_returned | Metrics returned by carbonserver |
-| persister.maxUpdatesPerSecond | |
-| persister.workers | |
-| runtime.GOMAXPROCS | |
-| runtime.NumGoroutine | |
+| carbonserver.inflight\_requests | Inflight requests in carbonserver |
+| carbonserver.rejected\_too\_many\_requests | Rejected requests due to exceeding `max-inflight-requests` in carbonserver |
+| persister.maxUpdatesPerSecond | Maximum updates per second in persister |
+| persister.workers | Number of works in persister |
+| runtime.GOMAXPROCS | Go runtime.GOMAXPROCS |
+| runtime.NumGoroutine | Go runtime.NumGoroutine |
 
 
 ## Changelog
