@@ -66,7 +66,7 @@ func (o *Offset) UnmarshalText(text []byte) error {
 	return nil
 }
 
-var supportedProtocols = []string{"plain", "protobuf", "pickle"}
+var supportedProtocols = []string{"plain", "protobuf", "pickle", "msgpack"}
 
 // Protocol is a special type to allow user to define wire protocol in Config file as a simple text.
 type Protocol int
@@ -80,6 +80,8 @@ func (p *Protocol) MarshalText() ([]byte, error) {
 		return []byte("protobuf"), nil
 	case ProtocolPickle:
 		return []byte("pickle"), nil
+	case ProtocolMsgPack:
+		return []byte("msgpack"), nil
 	}
 	return nil, fmt.Errorf("Unsupported offset type %v, supported offsets: %v", p, supportedProtocols)
 }
@@ -95,6 +97,8 @@ func (p *Protocol) UnmarshalText(text []byte) error {
 		*p = ProtocolProtobuf
 	case "pickle":
 		*p = ProtocolPickle
+	case "msgpack":
+		*p = ProtocolMsgPack
 	default:
 		return fmt.Errorf("Unsupported protocol type %v, supported: %v", protocolName, supportedProtocols)
 	}
@@ -110,6 +114,8 @@ func (p *Protocol) ToString() string {
 		return "protobuf"
 	case ProtocolPickle:
 		return "pickle"
+	case ProtocolMsgPack:
+		return "msgpack"
 	}
 	return "unsupported"
 }
@@ -126,6 +132,8 @@ const (
 	ProtocolProtobuf = 1
 	// ProtocolPickle represents pickled messages
 	ProtocolPickle = 2
+	// ProtocolMsgPack represents msgpack messages
+	ProtocolMsgPack = 3
 )
 
 // Duration wrapper time.Duration for TOML
@@ -477,6 +485,8 @@ func (rcv *Kafka) worker() {
 		protocolParser = parse.Plain
 	case ProtocolPickle:
 		protocolParser = parse.Pickle
+	case ProtocolMsgPack:
+		protocolParser = parse.Msgpack
 	}
 	for {
 		select {
@@ -537,5 +547,5 @@ func (rcv *Kafka) worker() {
 }
 
 // InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
-func (rcv *Kafka) InitPrometheus(reg prometheus.Registerer) {
+func (*Kafka) InitPrometheus(_ prometheus.Registerer) {
 }
