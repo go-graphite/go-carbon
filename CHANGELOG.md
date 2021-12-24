@@ -1,5 +1,10 @@
 ## Changelog
 ##### master
+* carbonserver: introduce new max-inflight-requests and no-service-when-index-is-not-ready configs #443
+* Fix carbonserver render error race #442
+* Add Kafka msgpack support #440 
+* carbonserver: introduce new api /metrics/list_query #435
+* carbonserver: adds /admin/info endpoint for returning internal info #433
 * carbonserver: fix a 404 related race condition in findCache #431
 * carbonserver: log more detailed errors about symlink and continue trie index despite error #427
 * Resolves #422 - Include section name when unknown aggregation method is used #423
