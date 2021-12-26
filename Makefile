@@ -30,6 +30,17 @@ gox-build:
 	cd build && $(GO) build $(MODULE)
 	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="build/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
 	ls -la ./build/
+	./build/$(NAME)-linux-amd64 -config-print-default > deploy/$(NAME).conf
+	install -m 0755 -d build/root/lib/systemd/system
+	install -m 0755 -d build/root/etc/$(NAME)
+	install -m 0755 -d build/root/etc/logrotate.d
+	install -m 0755 -d build/root/etc/init.d
+	install -m 0644 deploy/$(NAME).service build/root/lib/systemd/system/$(NAME).service
+	install -m 0644 deploy/$(NAME).conf build/root/etc/$(NAME)/$(NAME).conf
+	install -m 0644 deploy/storage-schemas.conf build/root/etc/$(NAME)/storage-schemas.conf
+	install -m 0644 deploy/storage-aggregation.conf build/root/etc/$(NAME)/storage-aggregation.conf
+	install -m 0644 deploy/$(NAME).logrotate build/root/etc/logrotate.d/$(NAME)
+	install -m 0755 deploy/$(NAME).init build/root/etc/init.d/$(NAME)
 
 clean:
 	rm -f $(NAME) build/* *deb *rpm sha256sum md5sum
@@ -37,19 +48,6 @@ clean:
 image:
 	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
 	docker build -t go-carbon .
-
-package-tree:
-	install -m 0755 -d build/root/lib/systemd/system
-	install -m 0755 -d build/root/etc/$(NAME)
-	install -m 0755 -d build/root/etc/logrotate.d
-	install -m 0755 -d build/root/etc/init.d
-	install -m 0644 deploy/$(NAME).service build/root/lib/systemd/system/$(NAME).service
-	./build/$(NAME)-linux-amd64 -config-print-default > deploy/$(NAME).conf
-	install -m 0644 deploy/$(NAME).conf build/root/etc/$(NAME)/$(NAME).conf
-	install -m 0644 deploy/storage-schemas.conf build/root/etc/$(NAME)/storage-schemas.conf
-	install -m 0644 deploy/storage-aggregation.conf build/root/etc/$(NAME)/storage-aggregation.conf
-	install -m 0644 deploy/$(NAME).logrotate build/root/etc/logrotate.d/$(NAME)
-	install -m 0755 deploy/$(NAME).init build/root/etc/init.d/$(NAME)
 
 fpm-deb:
 	make fpm-build-deb ARCH=amd64
@@ -62,7 +60,6 @@ fpm-rpm:
 	make fpm-build-rpm ARCH=arm64 FILE_ARCH=arm64
 
 fpm-build-deb:
-	make package-tree
 	chmod 0755 build/$(NAME)-linux-$(ARCH)
 	fpm -s dir -t deb -n $(NAME) -v $(VERSION) \
 		--deb-priority optional --category admin \
@@ -83,7 +80,6 @@ fpm-build-deb:
 		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
 
 fpm-build-rpm:
-	make package-tree
 	chmod 0755 build/$(NAME)-linux-$(ARCH)
 	fpm -s dir -t rpm -n $(NAME) -v $(VERSION) \
 		--package $(NAME)-$(VERSION)-1.$(FILE_ARCH).rpm \
