@@ -26,7 +26,7 @@ test:
 
 gox-build:
 	rm -rf build
-	mkdir -p build/root/etc/$(NAME)/
+	mkdir -p build/root/etc/$(NAME)/ deploy
 	cd build && $(GO) build $(MODULE)
 	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="build/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
 	ls -la ./build/
