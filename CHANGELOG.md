@@ -2,6 +2,7 @@
 ##### master
 * carbonserver: introduce new max-inflight-requests and no-service-when-index-is-not-ready configs #443
 * Fix carbonserver render error race #442
+* Pipeline improvements #441
 * Add Kafka msgpack support #440 
 * carbonserver: introduce new api /metrics/list_query #435
 * carbonserver: adds /admin/info endpoint for returning internal info #433
