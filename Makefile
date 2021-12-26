@@ -32,7 +32,7 @@ gox-build:
 	ls -la ./build/
 
 clean:
-	rm -f go-carbon build/* *deb *rpm
+	rm -f $(NAME) build/* *deb *rpm sha256sum md5sum
 
 image:
 	CGO_ENABLED=0 GOOS=linux $(MAKE) go-carbon
@@ -101,3 +101,40 @@ fpm-build-rpm:
 		--config-files /etc/ \
 		build/root/=/ \
 		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
+
+.ONESHELL:
+RPM_VERSION:=$(subst -,_,$(VERSION))
+packagecloud-push-rpm: $(wildcard $(NAME)-$(RPM_VERSION)-1.*.rpm)
+	for pkg in $^; do
+		package_cloud push $(REPO)/el/7 $${pkg} || true
+		package_cloud push $(REPO)/el/8 $${pkg} || true
+	done
+
+.ONESHELL:
+packagecloud-push-deb: $(wildcard $(NAME)_$(VERSION)_*.deb)
+	for pkg in $^; do
+		package_cloud push $(REPO)/ubuntu/xenial   $${pkg} || true
+		package_cloud push $(REPO)/ubuntu/bionic   $${pkg} || true
+		package_cloud push $(REPO)/ubuntu/focal    $${pkg} || true
+		package_cloud push $(REPO)/debian/stretch  $${pkg} || true
+		package_cloud push $(REPO)/debian/buster   $${pkg} || true
+		package_cloud push $(REPO)/debian/bullseye $${pkg} || true
+	done
+
+packagecloud-push:
+	make packagecloud-push-rpm
+	make packagecloud-push-deb
+
+packagecloud-autobuilds:
+	make packagecloud-push REPO=go-graphite/autobuilds
+
+packagecloud-stable:
+	make packagecloud-push REPO=go-graphite/stable
+
+sum-files: | sha256sum md5sum
+
+md5sum:
+	md5sum $(wildcard $(NAME)_$(VERSION)*.deb) $(wildcard $(NAME)-$(VERSION)*.rpm) > md5sum
+
+sha256sum:
+	sha256sum $(wildcard $(NAME)_$(VERSION)*.deb) $(wildcard $(NAME)-$(VERSION)*.rpm) > sha256sum
