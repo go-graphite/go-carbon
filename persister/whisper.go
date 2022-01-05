@@ -2,12 +2,15 @@ package persister
 
 import (
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	whisper "github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
@@ -713,4 +716,104 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 	}
 
 	return nw, true, err
+}
+
+// skipcq: RVV-A0005
+func (p *Whisper) CheckPolicyConsistencies(rate int, printInconsistentMetrics bool) error {
+	var summary struct {
+		total              int
+		errors             int
+		brokenAggConfig    int
+		brokenSchemaConfig int
+		inconsistencies    struct {
+			total       int
+			aggregation int
+			retention   int
+			xff         int
+		}
+	}
+
+	rateTicker := time.NewTicker(time.Second / time.Duration(rate))
+	log.SetOutput(os.Stdout)
+
+	printSummary := func() {
+		pct := func(v int) float64 { return float64(v) / float64(summary.total) * 100 }
+		log.Printf(
+			"stats: total=%d errors=%d (%.2f%%) brokenAggConfig=%d (%.2f%%) brokenSchemaConfig=%d (%.2f%%) inconsistencies.total=%d (%.2f%%) inconsistencies.aggregation=%d (%.2f%%) inconsistencies.retention=%d (%.2f%%) inconsistencies.xff=%d (%.2f%%)\n",
+			summary.total,
+			summary.errors, pct(summary.errors),
+			summary.brokenAggConfig, pct(summary.brokenAggConfig),
+			summary.brokenSchemaConfig, pct(summary.brokenSchemaConfig),
+			summary.inconsistencies.total, pct(summary.inconsistencies.total),
+			summary.inconsistencies.aggregation, pct(summary.inconsistencies.aggregation),
+			summary.inconsistencies.retention, pct(summary.inconsistencies.retention),
+			summary.inconsistencies.xff, pct(summary.inconsistencies.xff),
+		)
+	}
+
+	err := filepath.WalkDir(p.rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !strings.HasSuffix(path, ".wsp") || d.IsDir() {
+			return err
+		}
+
+		<-rateTicker.C
+
+		summary.total++
+
+		metric := strings.TrimPrefix(strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(path, ".wsp"), p.rootPath), "/", "."), ".")
+
+		schema, ok := p.schemas.Match(metric)
+		if !ok {
+			summary.brokenSchemaConfig++
+			log.Printf("no storage schema defined for metric: %s", metric)
+			return nil
+		}
+		aggr := p.aggregation.Match(metric)
+		if aggr == nil {
+			summary.brokenAggConfig++
+			log.Printf("no storage aggregation defined for metric: %s", metric)
+			return nil
+		}
+
+		file, err := whisper.OpenWithOptions(path, &whisper.Options{})
+		if err != nil {
+			summary.errors++
+			log.Printf("failed to open %s: %s\n", path, err)
+			return nil
+		}
+		defer file.Close()
+
+		retentions := whisper.NewRetentionsNoPointer(file.Retentions())
+		aggregationmethod := file.AggregationMethod()
+		xFilesFactor := file.XFilesFactor()
+		var inconsistencies []string
+		if !retentions.Equal(schema.Retentions) {
+			summary.inconsistencies.retention++
+			inconsistencies = append(inconsistencies, "retention")
+		}
+		if xFilesFactor != float32(aggr.xFilesFactor) {
+			summary.inconsistencies.xff++
+			inconsistencies = append(inconsistencies, "xff")
+		}
+		if aggregationmethod != aggr.aggregationMethod {
+			summary.inconsistencies.aggregation++
+			inconsistencies = append(inconsistencies, "aggregation")
+		}
+		if len(inconsistencies) > 0 {
+			summary.inconsistencies.total++
+			if printInconsistentMetrics {
+				log.Printf("inconsistent_metric: %s %s", strings.Join(inconsistencies, ","), metric)
+			}
+		}
+
+		if (summary.total % 5000) == 0 {
+			printSummary()
+		}
+
+		return nil
+	})
+
+	printSummary()
+
+	return err
 }
