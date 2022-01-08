@@ -69,6 +69,7 @@ type Whisper struct {
 
 		stat struct {
 			total               uint32
+			errors              uint32
 			schema              uint32
 			xff                 uint32
 			aggregationMethod   uint32
@@ -355,7 +356,18 @@ func (p *Whisper) store(metric string) {
 	// Check if schema and aggregation is still up-to-date
 	if !newFile && p.onlineMigration.enabled {
 		// errors are logged already
-		w, _, _ = p.checkAndUpdateSchemaAndAggregation(w, metric)
+		w, _, err = p.checkAndUpdateSchemaAndAggregation(w, metric)
+		if err != nil {
+			w, err = whisper.OpenWithOptions(path, &whisper.Options{
+				FLock:      p.flock,
+				Compressed: p.compressed,
+			})
+			if err != nil {
+				p.logger.Error("failed to reopen whisper file after schema migration", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
+				p.popConfirm(metric)
+			}
+			return
+		}
 	}
 
 	values, exists := p.pop(metric)
@@ -502,6 +514,10 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 		total := atomic.LoadUint32(&stat.total)
 		atomic.AddUint32(&stat.total, -total)
 		send("onlineMigration.total", float64(total))
+
+		errors := atomic.LoadUint32(&stat.errors)
+		atomic.AddUint32(&stat.errors, -errors)
+		send("onlineMigration.errors", float64(errors))
 
 		schema := atomic.LoadUint32(&stat.schema)
 		atomic.AddUint32(&stat.schema, -schema)
@@ -666,7 +682,7 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 
 	var virtualSize, physicalSize int64
 	if fiOld, err := w.File().Stat(); err != nil {
-		logger.Error("failed to retrieve file info before migration", zap.String("metric", metric))
+		logger.Error("failed to retrieve file info before migration", zap.String("metric", metric), zap.Error(err))
 	} else {
 		virtualSize = fiOld.Size()
 		physicalSize = virtualSize
@@ -677,7 +693,9 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 
 	// IMPORTANT: file has be re-opened after a call to Whisper.UpdateConfig
 	if err := w.UpdateConfig(retentions, aggregationmethod, xFilesFactor, options); err != nil {
-		logger.Error("failed to migrate/update configs (schema/aggregation/etc)", zap.String("metric", metric))
+		logger.Error("failed to migrate/update configs (schema/aggregation/xff)", zap.String("metric", metric), zap.Error(err))
+		atomic.AddUint32(&p.onlineMigration.stat.errors, 1)
+
 		return w, false, err
 	}
 
@@ -687,8 +705,8 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 		Compressed: p.compressed,
 	})
 
-	if fiNew, err := w.File().Stat(); err != nil {
-		logger.Error("failed to retrieve file info before migration", zap.String("metric", metric))
+	if fiNew, err := nw.File().Stat(); err != nil {
+		logger.Error("failed to retrieve file info after migration", zap.String("metric", metric), zap.Error(err))
 	} else {
 		virtualSizeNew := fiNew.Size()
 		physicalSizeNew := virtualSize
