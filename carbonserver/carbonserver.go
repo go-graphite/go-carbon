@@ -975,6 +975,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
 				if flc != nil {
+					// TODO: include metadata like physical/logical size, data points
 					if err := flc.write(trimmedName); err != nil {
 						logger.Error("failed to write to file list cache", zap.Error(err))
 						if err := flc.close(); err != nil {

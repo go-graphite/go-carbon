@@ -692,6 +692,19 @@ func TestTrieIndex(t *testing.T) {
 			},
 			expectLeafs: []bool{false, false, false, false},
 		},
+		{
+			input: []string{
+				"zk/kafka_xxx/by_node/node_0/status/health.wsp",
+				"zk/streaming_yyy/by_node/node_0/status/health.wsp",
+				"zk/kafka_zzz/by_node/node_0/status", // intentionally empty directory node
+			},
+			query: "zk.*.by_node.*.status.health",
+			expect: []string{
+				"zk.kafka_xxx.by_node.node_0.status.health",
+				"zk.streaming_yyy.by_node.node_0.status.health",
+			},
+			expectLeafs: []bool{true, true},
+		},
 	}
 
 	for _, c := range cases {
