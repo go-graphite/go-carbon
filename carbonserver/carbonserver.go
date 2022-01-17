@@ -975,6 +975,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
 				if flc != nil {
+					// TODO: include metadata like physical/logical size, data points
 					if err := flc.write(trimmedName); err != nil {
 						logger.Error("failed to write to file list cache", zap.Error(err))
 						if err := flc.close(); err != nil {
@@ -990,21 +991,27 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					delete(cacheMetricNames, trimmedName)
 				} else {
 					if listener.trieIndex {
-						var dataPoints int64
-						if isFullMetric && listener.estimateSize != nil {
-							m := strings.ReplaceAll(trimmedName, "/", ".")
-							m = m[1 : len(m)-4]
-							_, dataPoints = listener.estimateSize(m)
-						}
+						// WHY:
+						//   * this would only affects empty directories
+						//   * indexing empty directories causes an strange bug in trie index
+						//   * empty dir isn't useful (at least most of the time)?
+						if isFullMetric {
+							var dataPoints int64
+							if listener.estimateSize != nil {
+								m := strings.ReplaceAll(trimmedName, "/", ".")
+								m = m[1 : len(m)-4]
+								_, dataPoints = listener.estimateSize(m)
+							}
 
-						var physicalSize = info.Size()
-						if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-							physicalSize = stat.Blocks * 512
-						}
+							var physicalSize = info.Size()
+							if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+								physicalSize = stat.Blocks * 512
+							}
 
-						if err := trieIdx.insert(trimmedName, info.Size(), physicalSize, dataPoints); err != nil {
-							// It's better to just log an error than stop indexing
-							listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
+							if err := trieIdx.insert(trimmedName, info.Size(), physicalSize, dataPoints); err != nil {
+								// It's better to just log an error than stop indexing
+								listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
+							}
 						}
 					} else {
 						files = append(files, trimmedName)

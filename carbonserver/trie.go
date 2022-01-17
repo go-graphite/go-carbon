@@ -633,6 +633,7 @@ outer:
 
 	if !isFile {
 		if cur.dir() {
+			cur.gen = ti.root.gen
 			return nil
 		}
 
@@ -640,6 +641,7 @@ outer:
 		for _, child := range *cur.childrens {
 			if child.dir() {
 				cur = child
+				cur.gen = ti.root.gen
 				newDir = false
 				break
 			}
@@ -745,7 +747,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		}
 
 		if cur.dir() {
-			if mindex+1 >= len(matchers) || !curm.dstate().matched() {
+			if mindex+1 >= len(matchers) || !curm.dstate().matched() || len(curChildrens) == 0 {
 				goto parent
 			}
 
