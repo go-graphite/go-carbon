@@ -1,5 +1,6 @@
 ## Changelog
 ##### master
+* carbonserver: introduce new empty-result option to allow for empty results with carbonserver #TBD
 * carbonserver: introduce new max-inflight-requests and no-service-when-index-is-not-ready configs #443
 * Fix carbonserver render error race #442
 * Pipeline improvements #441

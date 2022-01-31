@@ -407,6 +407,10 @@ max-metrics-rendered = 1000
 # That might degrade performance of the cluster
 # But will be compatible with both graphite-web 1.0 and 0.9.x
 graphite-web-10-strict-mode = true
+
+# Return a 404 instead of empty results. Set to true if you are serving requests to graphite-web
+empty-result-ok = false
+
 # Allows to keep track for "last time readed" between restarts, leave empty to disable
 internal-stats-dir = ""
 # Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile.
