@@ -1151,7 +1151,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	return
 }
 
-func (listener *CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
+func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
 	zfields := []zap.Field{zap.Error(err), zap.String("metric", metric)}
 	if ierr, ok := err.(*trieInsertError); ok {
 		zfields = append(zfields, zap.String("err_info", ierr.info))

@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	trigram "github.com/dgryski/go-trigram"
@@ -323,7 +325,8 @@ type trieIndex struct {
 	qauMetrics   []points.Points
 	estimateSize func(metric string) (size, dataPoints int64)
 
-	throughputs atomic.Value // *throughputUsages
+	throughputs    *throughputQuotaManager
+	resetFrequency time.Duration
 }
 
 // note: root and file leaf node has a nil c, mainly used in trieNode.fullPath
@@ -455,6 +458,7 @@ func newTrie(fileExt string, estimateSize func(metric string) (size, dataPoints 
 		fileExt:      fileExt,
 		trigrams:     map[*trieNode][]uint32{},
 		estimateSize: estimateSize,
+		throughputs:  newQuotaThroughputQuotaManager(),
 	}
 }
 
@@ -483,7 +487,7 @@ func (t *trieInsertError) Error() string { return t.typ }
 // insert considers path name ending with trieIndex.fileExt as a metric.
 func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints int64) error {
 	path = filepath.Clean(path)
-	if len(path) > 0 && path[0] == '/' {
+	if len(path) > 0 && path[0] == '/' { // skipcq: GO-S1005
 		path = path[1:]
 	}
 	if path == "" || path == "." {
@@ -1529,46 +1533,109 @@ func (q *Quota) String() string {
 	return fmt.Sprintf("pattern:%s,dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,policy:%s", q.Pattern, q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.DroppingPolicy)
 }
 
-type throughputUsagePerQuota struct {
-	quota   *Quota
-	usage   *QuotaUsage
-	counter int64
+type throughputUsagePerNamespace struct {
+	quotaInfos atomic.Value // throughputUsagePerNamespaceQuotaInfo
+
+	dataPointsv int64        // number of data points
+	resetAtv    atomic.Value // time.Time
 }
 
-func (q *throughputUsagePerQuota) withinQuota(c int) bool {
-	if q.quota.Throughput > 0 && atomic.LoadInt64(&q.counter)+int64(c) >= q.quota.Throughput {
-		return false
+type throughputUsagePerNamespaceQuotaInfo struct {
+	gen   uint8
+	quota *Quota
+	usage *QuotaUsage
+}
+
+func newThroughputUsagePerNamespace(gen uint8, quota *Quota, quotaUsage *QuotaUsage) *throughputUsagePerNamespace {
+	var tp throughputUsagePerNamespace
+	tp.quotaInfos.Store(throughputUsagePerNamespaceQuotaInfo{
+		gen:   gen,
+		quota: quota,
+		usage: quotaUsage,
+	})
+	tp.resetAtv.Store(time.Now())
+
+	return &tp
+}
+
+func (q *throughputUsagePerNamespace) quota() *Quota {
+	return q.quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo).quota
+}
+func (q *throughputUsagePerNamespace) quotaUsage() *QuotaUsage {
+	return q.quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo).usage
+}
+
+func (q *throughputUsagePerNamespace) dataPoints() int64  { return atomic.LoadInt64(&q.dataPointsv) }
+func (q *throughputUsagePerNamespace) resetAt() time.Time { return q.resetAtv.Load().(time.Time) }
+func (q *throughputUsagePerNamespace) increase(x int)     { atomic.AddInt64(&q.dataPointsv, int64(x)) }
+func (q *throughputUsagePerNamespace) offset(v int64) int64 {
+	q.resetAtv.Store(time.Now())
+	return atomic.AddInt64(&q.dataPointsv, -v)
+}
+
+func (q *throughputUsagePerNamespace) withinQuota(c int, resetFrequency time.Duration) bool {
+	quota := q.quota().Throughput
+	usage := q.dataPoints()
+	if quota > 0 && usage+int64(c) > quota {
+		// slow path: ensure if it isn't due to untimely usage reset
+		useconds := int64(time.Since(q.resetAt()).Seconds())
+		rseconds := int64(resetFrequency.Seconds())
+
+		if useconds < rseconds || rseconds == 0 || usage == 0 {
+			return false
+		}
+
+		// quota per seconds * elapsed time since last usage reset
+		if usage > quota*useconds/rseconds {
+			return false
+		}
 	}
 
 	return true
 }
 
-func (q *throughputUsagePerQuota) increase(x int) { atomic.AddInt64(&q.counter, int64(x)) }
+type throughputQuotaManager struct {
+	depth int
 
-type throughputUsages struct {
-	depth   int
-	entries map[string]*throughputUsagePerQuota
+	// key:   materialized metric path of quota glob query specified in quota config
+	// value: *throughputUsagePerNamespace
+	entries sync.Map
 }
 
-func newQuotaThroughputCounter() *throughputUsages {
-	return &throughputUsages{entries: map[string]*throughputUsagePerQuota{}}
+func newQuotaThroughputQuotaManager() *throughputQuotaManager {
+	return &throughputQuotaManager{}
 }
 
+func (tu *throughputQuotaManager) load(path string) *throughputUsagePerNamespace {
+	v, ok := tu.entries.Load(path)
+	if !ok {
+		return nil
+	}
+
+	return v.(*throughputUsagePerNamespace)
+}
+
+func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerNamespace) {
+	v, loaded := tu.entries.LoadOrStore(path, tuq)
+	if !loaded {
+		return
+	}
+
+	v.(*throughputUsagePerNamespace).quotaInfos.Store(tuq.quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo))
+}
+
+// NOTE: Throughput is checked separately by throughputQuotaManager
 type QuotaUsage struct {
 	Namespaces   int64 // top level subdirectories
 	Metrics      int64 // files
 	LogicalSize  int64
 	PhysicalSize int64
-
-	DataPoints int64 // inferred from retention policy
-
-	// NOTE: Throughput is checked separately by throughputUsages
-
-	Throttled int64
+	DataPoints   int64 // inferred from retention policy
+	Throttled    int64
 }
 
 func (q *QuotaUsage) String() string {
-	// TODO: maybe consider retrieve throughput usage from throughputUsages?
+	// TODO: maybe consider retrieve throughput usage from throughputQuotaManager?
 	return fmt.Sprintf("dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throttled:%d", q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throttled)
 }
 
@@ -1576,13 +1643,14 @@ func (q *QuotaUsage) String() string {
 // It can't be evoked with concurrent trieIndex.insert.
 //
 // TODO: * how to remove old quotas?
-func (ti *trieIndex) applyQuotas(quotas ...*Quota) (*throughputUsages, error) {
-	throughputs := newQuotaThroughputCounter()
+func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
+	ti.resetFrequency = resetFrequency // expect no runtime changes, so no atomic load needed here.
+
 	for _, quota := range quotas {
 		if quota.Pattern == "/" {
 			meta := ti.root.meta.(*dirMeta)
 			meta.update(quota)
-			throughputs.entries["/"] = &throughputUsagePerQuota{quota: quota, usage: meta.usage}
+			ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
 
 			continue
 		}
@@ -1603,26 +1671,31 @@ func (ti *trieIndex) applyQuotas(quotas ...*Quota) (*throughputUsages, error) {
 				continue
 			}
 
-			throughputs.entries[paths[i]] = &throughputUsagePerQuota{quota: quota, usage: meta.usage}
-			if c := strings.Count(paths[i], "."); c > throughputs.depth {
-				throughputs.depth = c
+			ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+			if c := strings.Count(paths[i], "."); c > ti.throughputs.depth {
+				ti.throughputs.depth = c
 			}
 
 			meta.update(quota)
 		}
 	}
 
-	pthroughputs, _ := ti.throughputs.Load().(*throughputUsages) // WHY "_": avoid nil value panics
-	ti.throughputs.Store(throughputs)
+	// delete stale entries
+	ti.throughputs.entries.Range(func(k, v interface{}) bool {
+		if v.(*throughputUsagePerNamespace).quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo).gen != ti.root.gen {
+			ti.throughputs.entries.Delete(k)
+		}
+		return true
+	})
 
-	return pthroughputs, nil
+	return ti.throughputs, nil
 }
 
 // refreshUsage updates usage data and generate stat metrics.
 // It can't be evoked with concurrent trieIndex.insert.
-func (ti *trieIndex) refreshUsage(throughputs *throughputUsages) (files uint64) {
+func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files uint64) {
 	if throughputs == nil {
-		throughputs = newQuotaThroughputCounter()
+		throughputs = newQuotaThroughputQuotaManager()
 	}
 
 	type state struct {
@@ -1681,8 +1754,9 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputUsages) (files uint64) 
 					}
 
 					var throughput int64
-					if t, ok := throughputs.entries[tname]; ok {
-						throughput = t.counter
+					if te := throughputs.load(tname); te != nil {
+						throughput = te.dataPoints()
+						te.offset(throughput)
 					}
 
 					ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput)
@@ -1953,12 +2027,22 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 	// instances that are seeing more than 1 millions metrics/data points
 	// per second, cpu usage growth is about 700%, which isn't ideal. By
 	// using pure hash maps, we are able to cut down cpu usage grwoth to 100%.
-	if throughputs, ok := ti.throughputs.Load().(*throughputUsages); ok {
-		// check root throughput capacity
+	if throughputs := ti.throughputs; throughputs != nil {
+		// For simplicity of implementation, we would either ingest all
+		// data points or throttle all of them if throughput quota is
+		// exceeded. It seems not nice, but in real life, we are
+		// usually looking 1 or a few data points per metric when
+		// checking throughput. And throughput quota is usually at the
+		// order of 100k or more. It's less likely to be an issue. At
+		// the same time, partial ingestion would lead to
+		// over-consumption of quota, which itself is arguably as bad
+		// as full throttling.
+
 		// TODO: should include in throughputs.depth and simplify the code here a bit.
-		if v, ok := throughputs.entries["/"]; ok {
-			if v.quota.DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data)) {
-				atomic.AddInt64(&v.usage.Throttled, throughput)
+		// check root throughput capacity
+		if v := throughputs.load("/"); v != nil {
+			if v.quota().DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data), ti.resetFrequency) {
+				atomic.AddInt64(&v.quotaUsage().Throttled, throughput)
 				return true
 			}
 
@@ -1971,9 +2055,9 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 			}
 
 			ns := ps.Metric[:i]
-			if v, ok := throughputs.entries[ns]; ok {
-				if v.quota.DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data)) {
-					atomic.AddInt64(&v.usage.Throttled, throughput)
+			if v := throughputs.load(ns); v != nil {
+				if v.quota().DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data), ti.resetFrequency) {
+					atomic.AddInt64(&v.quotaUsage().Throttled, throughput)
 					return true
 				}
 
