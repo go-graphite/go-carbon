@@ -698,6 +698,10 @@ uloop:
 
 			continue uloop
 		case m := <-listener.newMetricsChan:
+			// listener.newMetricsChan might have high traffic, but
+			// in theory, there should be no starvation on other channels:
+			// https://groups.google.com/g/golang-nuts/c/4BR2Sdb6Zzk (2015)
+
 			fidx := listener.CurrentFileIndex()
 			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
 				metric := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
@@ -717,12 +721,10 @@ uloop:
 			cacheMetricNames = splitAndInsert(cacheMetricNames, newCacheMetricNames)
 		}
 
-		if listener.updateFileList(dir, cacheMetricNames) {
+		if listener.updateFileList(dir, cacheMetricNames, quotaAndUsageStatTicker) {
 			listener.logger.Info("file list updated with cache, starting a new scan immediately")
-			listener.updateFileList(dir, cacheMetricNames)
+			listener.updateFileList(dir, cacheMetricNames, quotaAndUsageStatTicker)
 		}
-
-		listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
 	}
 }
 
@@ -783,7 +785,7 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	}
 
 	quotaStart := time.Now()
-	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotas...)
+	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.quotas...)
 	if err != nil {
 		listener.logger.Error(
 			"refreshQuotaAndUsage",
@@ -822,7 +824,7 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	)
 }
 
-func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}) (readFromCache bool) {
+func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time) (readFromCache bool) {
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
 		if r := recover(); r != nil {
@@ -927,10 +929,6 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			logger.Error("can't index symlink data dir", zap.String("path", dir))
 		}
 
-		var usageRefreshTimeout = struct {
-			refreshedAt time.Time
-			count       int
-		}{time.Now(), 0}
 		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
@@ -943,9 +941,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			// have consistent quota and usage metrics produced as
 			// regularly as possible according to the
 			// quotaUsageReportFrequency specified in the config.
-			if usageRefreshTimeout.count++; listener.isQuotaEnabled() && usageRefreshTimeout.count > 10_000 && time.Since(usageRefreshTimeout.refreshedAt) >= listener.quotaUsageReportFrequency {
-				listener.refreshQuotaAndUsage(nil)
-				usageRefreshTimeout.refreshedAt = time.Now()
+			if listener.isQuotaEnabled() {
+				select {
+				case <-quotaAndUsageStatTicker:
+					listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
+				default:
+				}
 			}
 
 			// WHY: as filepath.walk could potentially taking a long
@@ -1150,7 +1151,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	return
 }
 
-func (listener *CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
+func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
 	zfields := []zap.Field{zap.Error(err), zap.String("metric", metric)}
 	if ierr, ok := err.(*trieInsertError); ok {
 		zfields = append(zfields, zap.String("err_info", ierr.info))
