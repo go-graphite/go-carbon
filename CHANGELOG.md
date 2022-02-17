@@ -1,5 +1,7 @@
 ## Changelog
 ##### master
+* carbonserver/quota: throughput racy counter fixes and refactoring #446 
+* trie: stop indexing empty directory nodes #445 
 * carbonserver: introduce new max-inflight-requests and no-service-when-index-is-not-ready configs #443
 * Fix carbonserver render error race #442
 * Pipeline improvements #441
