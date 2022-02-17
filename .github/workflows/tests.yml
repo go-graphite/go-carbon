@@ -57,7 +57,7 @@ jobs:
 
       - name: Install packaging dependencies
         run: |
-          gem install fpm package_cloud
+          gem install rake fpm:1.10.2 package_cloud
           GO111MODULE=off go get github.com/mitchellh/gox
 
       - name: Check packaging
