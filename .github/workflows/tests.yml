@@ -44,7 +44,7 @@ jobs:
       - name: Test
         run: make test
         env:
-          CGO_ENABLED: 0
+          CGO_ENABLED: 1
 
       - name: Check Docker images
         run: |
