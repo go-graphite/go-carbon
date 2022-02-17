@@ -5,3 +5,8 @@ _vendor/pkg
 _gopath
 .DS_Store
 .idea
+out/
+md5sum
+sha256sum
+*.rpm
+*.deb

@@ -3,9 +3,23 @@ MAINTAINER:="Roman Lomonosov <r.lomonosov@gmail.com>"
 DESCRIPTION:="Golang implementation of Graphite/Carbon server"
 MODULE:=github.com/go-graphite/go-carbon
 
+SHELL := bash
+.ONESHELL:
+.SHELLFLAGS := -eu -o pipefail -c
+
 GO ?= go
+export GOFLAGS +=  -mod=vendor
+export GO111MODULE := on
 TEMPDIR:=$(shell mktemp -d)
+
+DEVEL ?= 0
+ifeq ($(DEVEL), 0)
 VERSION:=$(shell sh -c 'grep "const Version" $(NAME).go  | cut -d\" -f2')
+else
+VERSION:=$(shell sh -c 'git describe --always --tags | sed -e "s/^v//i"')
+endif
+
+RPM_VERSION:=$(subst -,_,$(VERSION))
 BUILD ?= $(shell git describe --abbrev=4 --dirty --always --tags)
 
 all: $(NAME)
@@ -25,11 +39,14 @@ test:
 	make run-test COMMAND="test -race"
 
 gox-build:
-	rm -rf build
-	mkdir -p build/root/etc/$(NAME)/
-	cd build && $(GO) build $(MODULE)
-	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="build/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
-	ls -la ./build/
+	rm -rf out
+	mkdir -p out
+	cd out && $(GO) build $(MODULE) && cd ..
+	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="out/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
+	ls -la ./out/
+	mkdir -p out/root/etc/$(NAME)/
+	./out/$(NAME)-linux-amd64 -config-print-default >  out/root/etc/$(NAME)/$(NAME).conf
+	chown 0644 out/root/etc/$(NAME)/$(NAME).conf
 
 clean:
 	rm -f go-carbon build/* *deb *rpm
@@ -39,17 +56,15 @@ image:
 	docker build -t go-carbon .
 
 package-tree:
-	install -m 0755 -d build/root/lib/systemd/system
-	install -m 0755 -d build/root/etc/$(NAME)
-	install -m 0755 -d build/root/etc/logrotate.d
-	install -m 0755 -d build/root/etc/init.d
-	install -m 0644 deploy/$(NAME).service build/root/lib/systemd/system/$(NAME).service
-	./build/$(NAME)-linux-amd64 -config-print-default > deploy/$(NAME).conf
-	install -m 0644 deploy/$(NAME).conf build/root/etc/$(NAME)/$(NAME).conf
-	install -m 0644 deploy/storage-schemas.conf build/root/etc/$(NAME)/storage-schemas.conf
-	install -m 0644 deploy/storage-aggregation.conf build/root/etc/$(NAME)/storage-aggregation.conf
-	install -m 0644 deploy/$(NAME).logrotate build/root/etc/logrotate.d/$(NAME)
-	install -m 0755 deploy/$(NAME).init build/root/etc/init.d/$(NAME)
+	install -m 0755 -d out/root/lib/systemd/system
+	install -m 0755 -d out/root/etc/$(NAME)
+	install -m 0755 -d out/root/etc/logrotate.d
+	install -m 0755 -d out/root/etc/init.d
+	install -m 0644 deploy/$(NAME).service out/root/lib/systemd/system/$(NAME).service
+	install -m 0644 deploy/storage-schemas.conf out/root/etc/$(NAME)/storage-schemas.conf
+	install -m 0644 deploy/storage-aggregation.conf out/root/etc/$(NAME)/storage-aggregation.conf
+	install -m 0644 deploy/$(NAME).logrotate out/root/etc/logrotate.d/$(NAME)
+	install -m 0755 deploy/$(NAME).init out/root/etc/init.d/$(NAME)
 
 fpm-deb:
 	make fpm-build-deb ARCH=amd64
@@ -63,7 +78,7 @@ fpm-rpm:
 
 fpm-build-deb:
 	make package-tree
-	chmod 0755 build/$(NAME)-linux-$(ARCH)
+	chmod 0755 out/$(NAME)-linux-$(ARCH)
 	fpm -s dir -t deb -n $(NAME) -v $(VERSION) \
 		--deb-priority optional --category admin \
 		--package $(NAME)_$(VERSION)_$(ARCH).deb \
@@ -79,12 +94,12 @@ fpm-build-deb:
 		--after-install deploy/after_install.sh \
 		--after-upgrade deploy/after_install.sh \
 		--config-files /etc/ \
-		build/root/=/ \
-		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
+		out/root/=/ \
+		out/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
 
 fpm-build-rpm:
 	make package-tree
-	chmod 0755 build/$(NAME)-linux-$(ARCH)
+	chmod 0755 out/$(NAME)-linux-$(ARCH)
 	fpm -s dir -t rpm -n $(NAME) -v $(VERSION) \
 		--package $(NAME)-$(VERSION)-1.$(FILE_ARCH).rpm \
 		--force \
@@ -99,5 +114,39 @@ fpm-build-rpm:
 		--after-install deploy/after_install.sh \
 		--after-upgrade deploy/after_install.sh \
 		--config-files /etc/ \
-		build/root/=/ \
-		build/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
+		out/root/=/ \
+		out/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
+
+packagecloud-push-rpm: $(wildcard $(NAME)-$(RPM_VERSION)-1.*.rpm)
+	for pkg in $^; do
+		package_cloud push $(REPO)/el/7 $${pkg} || true
+		package_cloud push $(REPO)/el/8 $${pkg} || true
+	done
+
+packagecloud-push-deb: $(wildcard $(NAME)_$(VERSION)_*.deb)
+	for pkg in $^; do
+		package_cloud push $(REPO)/ubuntu/xenial   $${pkg} || true
+		package_cloud push $(REPO)/ubuntu/bionic   $${pkg} || true
+		package_cloud push $(REPO)/ubuntu/focal    $${pkg} || true
+		package_cloud push $(REPO)/debian/stretch  $${pkg} || true
+		package_cloud push $(REPO)/debian/buster   $${pkg} || true
+		package_cloud push $(REPO)/debian/bullseye $${pkg} || true
+	done
+
+packagecloud-push:
+	@$(MAKE) packagecloud-push-rpm
+	@$(MAKE) packagecloud-push-deb
+
+packagecloud-autobuilds:
+	$(MAKE) packagecloud-push REPO=go-graphite/autobuilds
+
+packagecloud-stable:
+	$(MAKE) packagecloud-push REPO=go-graphite/stable
+
+sum-files: | sha256sum md5sum
+
+md5sum:
+	md5sum $(wildcard $(NAME)_$(VERSION)*.deb) $(wildcard $(NAME)-$(VERSION)*.rpm) > md5sum
+
+sha256sum:
+	sha256sum $(wildcard $(NAME)_$(VERSION)*.deb) $(wildcard $(NAME)-$(VERSION)*.rpm) > sha256sum
