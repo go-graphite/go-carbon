@@ -65,11 +65,13 @@ jobs:
           make DEVEL=1 gox-build fpm-deb fpm-rpm
           make sum-files
 
-      - name: Artifact
+      - name: Upload Artifact
+        if: ${{ github.event_name == 'push' && matrix.go == '^1' }} # only when built from master with latest go
         id: artifact
         uses: actions/upload-artifact@v2
         with:
           name: packages-${{ matrix.go }}
+          retention-days: 1
           path: |
             *.deb
             *.rpm
