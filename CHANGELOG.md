@@ -1,5 +1,8 @@
 ## Changelog
 ##### master
+
+##### version 0.16.0
+* Fixing packaging #447 
 * carbonserver/quota: throughput racy counter fixes and refactoring #446 
 * trie: stop indexing empty directory nodes #445 
 * carbonserver: introduce new max-inflight-requests and no-service-when-index-is-not-ready configs #443
