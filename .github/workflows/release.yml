@@ -51,8 +51,7 @@ jobs:
       - name: Check version
         id: check_version
         run: |
-          ./out/${BINARY}-linux-amd64 -version
-          [ v$(./out/${BINARY}-linux-amd64 -version) = ${{ github.event.release.tag_name }} ]
+          ./out/${BINARY}-linux-amd64 -version | grep "${{ github.event.release.tag_name }}"
 
       - name: Artifact
         id: artifact
