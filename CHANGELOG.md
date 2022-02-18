@@ -1,6 +1,9 @@
 ## Changelog
 ##### master
 
+##### version 0.16.2
+* Another attempt to fix issues with release upload #449
+
 ##### version 0.16.1
 * Fix issues with upload #448
 
