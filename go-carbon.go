@@ -27,7 +27,7 @@ import (
 )
 
 // Version of go-carbon
-const Version = "0.15.6"
+const Version = "0.16.0"
 
 var BuildVersion = "(development version)"
 
