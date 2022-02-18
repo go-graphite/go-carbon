@@ -66,12 +66,12 @@ jobs:
           make sum-files
 
       - name: Upload Artifact
-        if: ${{ github.event_name == 'push' && matrix.go == '^1' }} # only when built from master with latest go
+        if: ${{ matrix.go == '^1' }} # only upload artifact when built with latest go
         id: artifact
         uses: actions/upload-artifact@v2
         with:
           name: packages-${{ matrix.go }}
-          retention-days: 1
+          retention-days: 3
           path: |
             *.deb
             *.rpm
