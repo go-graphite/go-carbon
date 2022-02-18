@@ -1,6 +1,9 @@
 ## Changelog
 ##### master
 
+##### version 0.16.1
+* Fix issues with upload #448
+
 ##### version 0.16.0
 * Fixing packaging #447 
 * carbonserver/quota: throughput racy counter fixes and refactoring #446 
