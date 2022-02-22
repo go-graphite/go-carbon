@@ -16,6 +16,9 @@ data-dir = "/var/lib/graphite/whisper"
 schemas-file = "/etc/go-carbon/storage-schemas.conf"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional
 aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
+# It's currently go-carbon only feature, not a standard graphite feature. Optional
+# More details in doc/quotas.md
+# quotas-file = "/etc/go-carbon/storage-quotas.conf"
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
 # Limits the number of whisper update_many() calls per second. 0 - no limit
@@ -39,6 +42,24 @@ hash-filenames = true
 compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
+
+# Enable online whisper file config migration.
+#
+# online-migration-rate means metrics per second to migrate.
+#
+# To partially enable default migration for only some matched rules in
+# storage-schemas.conf or storage-aggregation.conf, we can set
+# online-migration-global-scope = "-" and enable the migration in the config
+# files (more examples in deploy/storage-aggregation.conf and deploy/storage-schemas.conf).
+#
+# online-migration-global-scope can also be set any combination of the 3 rules
+# (xff,aggregationMethod,schema) as a csv string
+# like: "xff", "xff,aggregationMethod", "xff,schema",
+# or "xff,aggregationMethod,schema".
+#
+# online-migration = false
+# online-migration-rate = 5
+# online-migration-global-scope = "-"
 
 [cache]
 # Limit of in-memory stored points (not metrics)
@@ -242,6 +263,9 @@ scan-frequency = "5m0s"
 #  could be speeded up by enabling adding trigrams to trie, at the some costs of
 #  memory usage (by setting both trie-index and trigram-index to true).
 trie-index = false
+# Control how frequent it is to generate quota and usage metrics, and reset
+# throughput counters (More details in doc/quotas.md).
+# quota-usage-report-frequency = "1m"
 
 # Cache file list scan data in the specified path. This option speeds
 # up index building after reboot by reading the last scan result in file
@@ -262,6 +286,29 @@ concurrent-index = false
 # Currently only trie-index is supported. 
 # (EXPERIMENTAL)
 realtime-index = 0
+
+# Maximum inflight requests allowed in go-carbon. Default is 0 which means no limit.
+# If limit is reached, go-carbon/carbonserver returns 429 (Too Many Requests).
+# This option would be handy as if there are too many long running requests piling up,
+# it would slows down data ingestion in persister and slows down index building
+# (especially during restart).
+max-inflight-requests = 0
+
+# Returns 503 (Service Unavailable) when go-carbon is still building the first
+# index cache (trie/trigram) after restart. With trie or trigram index,
+# carbonserver falls back to filepath.Glob when index is not ready. And
+# filepath.Glob is expensive and not scaled enough to support some heavy
+# queries (manifested as high usage and frequent GC). Thus it is possible that
+# the read requests is so heavy that it not only slows down index building, it
+# also hinders persister from flushing down data to disk and causing cache.size
+# overflow.
+#
+# By default, it is disabled.
+#
+# It is recommend to enable this flag together with "file-list-cache" (depends on
+# the number of metrics, indexing building with "file-list-cache" is usually
+# much faster than re-scanning the whole file tree after restart).
+no-service-when-index-is-not-ready = false
 
 # This provides the ability to query for new metrics without any wsp files
 # i.e query for metrics present only in cache. Does a cache-scan and

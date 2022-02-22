@@ -145,10 +145,6 @@ compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
 
-# It's currently go-carbon only feature, not a standard graphite feature. Optional
-# More details in doc/quotas.md
-# quotas-file = "/etc/go-carbon/storage-quotas.conf"
-
 # Enable online whisper file config migration.
 #
 # online-migration-rate means metrics per second to migrate.
