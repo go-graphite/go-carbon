@@ -376,8 +376,8 @@ func (p *Whisper) store(metric string) {
 			if err != nil {
 				p.logger.Error("failed to reopen whisper file after schema migration", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
 				p.popConfirm(metric)
+				return
 			}
-			return
 		}
 	}
 
