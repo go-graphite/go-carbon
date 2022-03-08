@@ -1,6 +1,17 @@
 ## Changelog
 ##### master
 * carbonserver: introduce new empty-result option to allow for empty results with carbonserver #TBD
+
+##### version 0.16.2
+* Another attempt to fix issues with release upload #449
+
+##### version 0.16.1
+* Fix issues with upload #448
+
+##### version 0.16.0
+* Fixing packaging #447 
+* carbonserver/quota: throughput racy counter fixes and refactoring #446 
+* trie: stop indexing empty directory nodes #445 
 * carbonserver: introduce new max-inflight-requests and no-service-when-index-is-not-ready configs #443
 * Fix carbonserver render error race #442
 * Pipeline improvements #441

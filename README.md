@@ -72,6 +72,18 @@ cd go-carbon
 make
 ```
 
+We are using <a href="https://packagecloud.io/"><img alt="Private Maven, RPM, DEB, PyPi and RubyGem Repository | packagecloud" height="46" src="https://packagecloud.io/images/packagecloud-badge.png" width="158" /></a> to host our packages!
+
+At this moment we are building deb and rpm packages for i386, amd64 and arm64 architectures. Installation guides are available on packagecloud (see the links below).
+
+Stable versions: [Stable repo](https://packagecloud.io/go-graphite/stable/install)
+
+Autobuilds (master, might be unstable): [Autobuild repo](https://packagecloud.io/go-graphite/autobuilds/install)
+
+We're uploading Docker images to [Docker Hub](https://hub.docker.com/repository/docker/gographite/go-carbon/general) and [ghcr.io](https://github.com/go-graphite/go-carbon/pkgs/container/go-carbon)
+
+Also, you can download test packages from build artifacts: Go to list of [test runs](https://github.com/go-graphite/go-carbon/actions/workflows/tests.yml), click on PR name, and click on *"packages-^1"* under *"Artifact"* section.
+
 ## Configuration
 
 ```

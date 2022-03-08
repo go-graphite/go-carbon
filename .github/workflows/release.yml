@@ -1,0 +1,92 @@
+name: Upload Packages to new release
+
+on:
+  release:
+    types:
+      - published
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    env:
+      BINARY: ${{ github.event.repository.name }}
+      CGO_ENABLED: 0
+
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: ^1
+
+      - uses: actions/checkout@v2
+        name: Checkout
+
+      - name: Test
+        run: make test
+        env:
+          CGO_ENABLED: 1
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '2.7' # Version range or exact version of a Ruby version to use, using semvers version range syntax.
+      - name: Install packaging dependencies
+        run: |
+          gem install rake fpm:1.10.2 package_cloud
+          GO111MODULE=off go get github.com/mitchellh/gox
+
+      - name: Build packages
+        id: build
+        run: |
+          make gox-build fpm-deb fpm-rpm
+          make sum-files
+          ARTIFACTS=
+          # Upload all deb and rpm packages
+          for package in *deb *rpm; do ARTIFACTS=${ARTIFACTS}\"$package\",\ ; done
+          echo ::set-output name=matrix::{\"file\": [${ARTIFACTS} \"sha256sum\", \"md5sum\"]}
+
+      - name: Check version
+        id: check_version
+        run: |
+          echo v$(./out/${BINARY}-linux-amd64 -version) | grep "${{ github.event.release.tag_name }}"
+
+      - name: Artifact
+        id: artifact
+        uses: actions/upload-artifact@v2
+        with:
+          name: packages
+          retention-days: 1
+          path: |
+            *.deb
+            *.rpm
+            sha256sum
+            md5sum
+
+      - name: Push packages to the stable repo
+        run: make packagecloud-stable
+        env:
+          PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}
+
+  upload:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.build.outputs.matrix)}}
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v2
+        with:
+          name: packages
+      - name: Upload ${{ matrix.file }}
+        id: upload
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ${{ matrix.file }}
+          asset_name: ${{ matrix.file }}
+          asset_content_type: application/octet-stream

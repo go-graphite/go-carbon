@@ -2,22 +2,21 @@
 language: go
 
 go:
-- 1.15.5
+  - 1.17
 
 script:
-- make test
+  - make test
 
 before_deploy:
-- lsb_release -a
-- sudo apt-get update
-- sudo apt-get install -y ruby ruby-dev rpm
-- go get github.com/mitchellh/gox
-- go mod vendor
-- gem install rake
-- gem install fpm:1.10.2 # newer fpm is broken https://github.com/jordansissel/fpm/issues/1612
-- make gox-build
-- make fpm-deb
-- make fpm-rpm
+  - lsb_release -a
+  - sudo apt-get update
+  - sudo apt-get install -y ruby ruby-dev rpm
+  - GO111MODULE=off go get github.com/mitchellh/gox
+  - gem install rake
+  - gem install fpm:1.10.2 # newer fpm is broken https://github.com/jordansissel/fpm/issues/1612
+  - make gox-build
+  - make fpm-deb
+  - make fpm-rpm
 
 deploy:
   provider: releases
