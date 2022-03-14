@@ -221,7 +221,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	if response.metricsFetched == 0 && listener.emptyResultOk == false  {
+	if response.metricsFetched == 0 && !listener.emptyResultOk {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
