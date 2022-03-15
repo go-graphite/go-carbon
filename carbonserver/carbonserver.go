@@ -216,6 +216,7 @@ type CarbonserverListener struct {
 	whisperData       string
 	buckets           int
 	maxGlobs          int
+	emptyResultOk     bool
 	failOnMaxGlobs    bool
 	percentiles       []int
 	scanFrequency     time.Duration
@@ -476,6 +477,9 @@ func (listener *CarbonserverListener) SetWhisperData(whisperData string) {
 }
 func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 	listener.maxGlobs = maxGlobs
+}
+func (listener *CarbonserverListener) SetEmptyResultOk(emptyResultOk bool) {
+	listener.emptyResultOk = emptyResultOk
 }
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs
