@@ -1644,10 +1644,25 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		fidx.trieIdx.getQuotaTree(w)
 	})
 	carbonserverMux.HandleFunc("/admin/info", func(w http.ResponseWriter, r *http.Request) {
+		// URL: /admin/info?scopes=cache,config
 		w.Header().Add("Content-Type", "application/json")
+
+		// Parameter "scopes" is a csv string. Valid values: cache, config.
+		// By default, /admin/info returns all admin info
+		var scopes map[string]bool
+		if fs := strings.TrimSpace(r.URL.Query().Get("scopes")); fs != "" {
+			scopes = map[string]bool{}
+			for _, f := range strings.Split(fs, ",") {
+				scopes[strings.TrimSpace(f)] = true
+			}
+		}
 
 		infos := map[string]map[string]interface{}{}
 		for name, f := range listener.interfalInfoCallbacks {
+			if scopes != nil && !scopes[name] {
+				continue
+			}
+
 			infos[name] = f()
 		}
 
