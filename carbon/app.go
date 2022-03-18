@@ -3,6 +3,7 @@ package carbon
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"net/url"
 	"os"
@@ -537,11 +538,27 @@ func (app *App) Start(version string) (err error) {
 			app.FlushTraces = carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, version, conf.Tracing.SendTimeout.Value())
 		}
 
+		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
+		carbonserver.RegisterInternalInfoHandler("config", func() map[string]interface{} {
+			infos := map[string]interface{}{}
+			for name, file := range map[string]string{
+				"app":         app.ConfigFilename,
+				"schema":      app.Config.Whisper.SchemasFilename,
+				"aggregation": app.Config.Whisper.AggregationFilename,
+				"quota":       app.Config.Whisper.QuotasFilename,
+			} {
+				if data, err := ioutil.ReadFile(file); err != nil {
+					infos[name] = err.Error()
+				} else {
+					infos[name] = string(data)
+				}
+			}
+			return infos
+		})
+
 		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
 			return
 		}
-
-		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
 
 		app.Carbonserver = carbonserver
 	}

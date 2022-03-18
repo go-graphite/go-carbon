@@ -148,7 +148,7 @@ type ListQueryResult struct {
 
 // limit doesn't affect statsOnly queries
 // skipcq: RVV-A0005
-func (listener *CarbonserverListener) queryMetricsList(query string, limit int, statsOnly bool) (*ListQueryResult, error) {
+func (listener *CarbonserverListener) queryMetricsList(query string, limit int, leafOnly, statsOnly bool) (*ListQueryResult, error) {
 	fidx := listener.CurrentFileIndex()
 	var result ListQueryResult
 
@@ -186,6 +186,10 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 			continue
 		}
 
+		if leafOnly {
+			continue
+		}
+
 		pmetrics, pnodes, pcount, pphysical, plogical := fidx.trieIdx.allMetricsNode(nodes[i], '.', name, limit-len(result.Metrics), statsOnly)
 		result.Count += pcount
 		result.PhysicalSize += pphysical
@@ -204,7 +208,7 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 }
 
 func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, req *http.Request) {
-	// URL: /metrics/list_query/?format=json&target=sys.app.*&stats_only=true
+	// URL: /metrics/list_query/?format=json&target=sys.app.*&stats_only=true&leaf_only=false
 	t0 := time.Now()
 	ctx := req.Context()
 
@@ -213,6 +217,7 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 	format := req.FormValue("format")
 	target := req.FormValue("target")
 	statsOnly := req.FormValue("stats_only") == "true"
+	leafOnly := req.FormValue("leaf_only") == "true"
 
 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
 		zap.String("handler", "list_query"),
@@ -261,7 +266,7 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 		return
 	}
 
-	result, err := listener.queryMetricsList(target, limit, statsOnly)
+	result, err := listener.queryMetricsList(target, limit, leafOnly, statsOnly)
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.ListQueryErrors, 1)
 		accessLogger.Error("list_query failed",
