@@ -5,7 +5,6 @@ MODULE:=github.com/go-graphite/go-carbon
 
 SHELL := bash
 .ONESHELL:
-.SHELLFLAGS := -eu -o pipefail -c
 
 GO ?= go
 export GOFLAGS +=  -mod=vendor
