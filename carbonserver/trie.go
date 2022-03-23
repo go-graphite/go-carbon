@@ -695,7 +695,7 @@ func (ti *trieIndex) newDir() *trieNode {
 
 // TODO: add some defensive logics agains bad queries?
 // depth first search
-func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, err error) {
+func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, limited bool, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "*"
@@ -708,14 +708,14 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		}
 		gs, err := newGlobState(node, expand)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, false, err
 		}
 		exact = exact && gs.exact
 		matchers = append(matchers, gs)
 	}
 
 	if len(matchers) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, false, nil
 	}
 
 	var cur = ti.root
@@ -829,7 +829,12 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			nodes = append(nodes, dirNode)
 		}
 
-		if len(files) >= limit || exact {
+		if len(files) >= limit {
+			limited = true
+			break
+		}
+
+		if exact {
 			break
 		}
 
@@ -861,7 +866,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		continue
 	}
 
-	return files, isFiles, nodes, nil
+	return files, isFiles, nodes, limited, nil
 }
 
 // note: tn might be a root or file node, which has a nil c
@@ -1475,7 +1480,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var leafs []bool
 
 	for _, g := range globs {
-		f, l, _, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
+		f, l, _, _, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1655,7 +1660,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 			continue
 		}
 
-		paths, _, nodes, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
+		paths, _, nodes, _, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
 		if err != nil {
 			return nil, err
 		}

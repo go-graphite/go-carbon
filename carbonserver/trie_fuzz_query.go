@@ -41,7 +41,7 @@ var trie = func() *trieIndex {
 }()
 
 func Fuzz(data []byte) int {
-	_, _, err := trie.query(string(data), 1000, func([]string) ([]string, error) { return nil, nil })
+	_, _,_, _, err := trie.query(string(data), 1000, func([]string) ([]string, error) { return nil, nil })
 	if err != nil {
 		// panic(err)
 		return 0
