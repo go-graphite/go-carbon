@@ -4,14 +4,16 @@
 Table of Contents
 =================
 
-* [Features](#features)
-* [Performance](#performance)
-* [Installation](#installation)
-* [Configuration](#configuration)
-  * [OS tuning](#os-tuning)
-* [Reported stats](#reported-stats)
-* [Changelog](#changelog)
-  * [master](#master)
+- [Table of Contents](#table-of-contents)
+- [go-carbon ![Build Status](https://travis-ci.org/go-graphite/go-carbon)](#go-carbon-)
+  - [Features](#features)
+  - [Performance](#performance)
+    - [Efficient metric namespace patterns for trie index](#efficient-metric-namespace-patterns-for-trie-index)
+  - [Installation](#installation)
+  - [Configuration](#configuration)
+    - [OS tuning](#os-tuning)
+  - [Reported stats](#reported-stats)
+  - [Changelog](#changelog)
 
 
 go-carbon [![Build Status](https://travis-ci.org/go-graphite/go-carbon.svg?branch=master)](https://travis-ci.org/go-graphite/go-carbon)
@@ -80,7 +82,7 @@ Stable versions: [Stable repo](https://packagecloud.io/go-graphite/stable/instal
 
 Autobuilds (master, might be unstable): [Autobuild repo](https://packagecloud.io/go-graphite/autobuilds/install)
 
-We're uploading Docker images to [Docker Hub](https://hub.docker.com/repository/docker/gographite/go-carbon/general) and [ghcr.io](https://github.com/go-graphite/go-carbon/pkgs/container/go-carbon)
+We're uploading Docker images to [ghcr.io](https://github.com/go-graphite/go-carbon/pkgs/container/go-carbon)
 
 Also, you can download test packages from build artifacts: Go to list of [test runs](https://github.com/go-graphite/go-carbon/actions/workflows/tests.yml), click on PR name, and click on *"packages-^1"* under *"Artifact"* section.
 
