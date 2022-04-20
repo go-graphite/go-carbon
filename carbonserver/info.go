@@ -101,7 +101,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 		defer w.Close()
 
-		aggr := strings.Title(w.AggregationMethod().String())
+		aggr := titleizeAggrMethod(w.AggregationMethod().String())
 		maxr := int64(w.MaxRetention())
 		xfiles := float32(w.XFilesFactor())
 
@@ -189,4 +189,10 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 		zap.Duration("runtime_seconds", time.Since(t0)),
 		zap.Int("http_code", http.StatusOK),
 	)
+}
+
+// strings.Title is deprecated and for go-carbon, it's only for simple use case.
+// no unicode support is needed.
+func titleizeAggrMethod(aggr string) string {
+	return strings.ToUpper(aggr[:1]) + aggr[1:]
 }
