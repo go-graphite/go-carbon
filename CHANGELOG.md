@@ -1,7 +1,7 @@
 ## Changelog
 ##### master
 * carbonserver: introduce new empty-result option to allow for empty results with carbonserver #TBD
-
+* introducing `persiter.oooDiscardedPoints` metric
 ##### version 0.16.2
 * Another attempt to fix issues with release upload #449
 

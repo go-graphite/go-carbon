@@ -3,10 +3,6 @@ package cache
 import (
 	"sync"
 	"time"
-
-	"go.uber.org/zap"
-
-	"github.com/lomik/zapwriter"
 )
 
 type WriteoutQueue struct {
@@ -37,17 +33,17 @@ func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime time.Time) func(chan
 		// next rebuild
 		nextRebuildOnce.Do(func() {
 			now := time.Now()
-			logger := zapwriter.Logger("cache")
+			// logger := zapwriter.Logger("cache")
 
-			logger.Debug("WriteoutQueue.nextRebuildOnce.Do",
-				zap.String("now", now.String()),
-				zap.String("next", nextRebuildTime.String()),
-			)
+			// logger.Debug("WriteoutQueue.nextRebuildOnce.Do",
+			//	 zap.String("now", now.String()),
+			//	 zap.String("next", nextRebuildTime.String()),
+			// )
 			if now.Before(nextRebuildTime) {
 				sleepTime := nextRebuildTime.Sub(now)
-				logger.Debug("WriteoutQueue sleep before rebuild",
-					zap.String("sleepTime", sleepTime.String()),
-				)
+				// logger.Debug("WriteoutQueue sleep before rebuild",
+				// 	zap.String("sleepTime", sleepTime.String()),
+				// )
 
 				select {
 				case <-time.After(sleepTime):
@@ -102,6 +98,6 @@ QueueLoop:
 	}
 }
 
-func (q *WriteoutQueue) Get(abort chan bool) string {
+func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
 	return q.get(abort)
 }

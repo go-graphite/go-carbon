@@ -1,7 +1,9 @@
+dist: bionic
+
 language: go
 
 go:
-  - 1.2
-  - 1.3
-  - 1.4
-  - tip
+  - "1.12.x"
+  - "1.13.x"
+  - "1.14.x"
+  - master

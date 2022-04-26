@@ -12,7 +12,7 @@ require (
 	github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 	github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794
-	github.com/go-graphite/go-whisper v0.0.0-20191220103904-f154aca40cdb
+	github.com/go-graphite/go-whisper v0.0.0-20220426133541-b1ea42367ab4
 	github.com/go-graphite/protocol v0.4.3-0.20180731190405-5ae324d48067
 	github.com/gogo/protobuf v1.1.2-0.20180830160456-5669497fd644
 	github.com/google/go-cmp v0.5.0
@@ -69,7 +69,7 @@ require (
 	golang.org/x/mod v0.2.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
 	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a // indirect
-	golang.org/x/sys v0.0.0-20200615200032-f1bc736245b1 // indirect
+	golang.org/x/sys v0.0.0-20220422013727-9388b58f7150 // indirect
 	golang.org/x/text v0.3.2 // indirect
 	golang.org/x/tools v0.0.0-20200331025713-a30bf2db82d4 // indirect
 	golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 // indirect
