@@ -76,8 +76,8 @@ github.com/go-gl/glfw/v3.3/glfw v0.0.0-20191125211704-12ad95a8df72/go.mod h1:tQ2
 github.com/go-gl/glfw/v3.3/glfw v0.0.0-20200222043503-6f7a984d4dc4/go.mod h1:tQ2UAYgL5IevRw8kRxooKSPJfGvJ9fJQFa0TUsXzTg8=
 github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794 h1:9N+1I8z47huAZdcBWVIqfZZPzIzMyXqGd3uR21QN5mA=
 github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794/go.mod h1:sfZ+AkP8/bBcWSGVqhseV6t6e/+C0i/PkTpA32W5rXs=
-github.com/go-graphite/go-whisper v0.0.0-20191220103904-f154aca40cdb h1:XkDrq9Z5YFcFfWUgLNJgO5Olx6csDoyJnWpn6O5Sq3k=
-github.com/go-graphite/go-whisper v0.0.0-20191220103904-f154aca40cdb/go.mod h1:XnU8q9X8C3OhD8R7gAlRLI6VXU2KMwqgTO9Tshub2qE=
+github.com/go-graphite/go-whisper v0.0.0-20220426133541-b1ea42367ab4 h1:ztjpW09cYf5/rrqcXTAR+gJBehzvNnmrjTJlgOvOKdM=
+github.com/go-graphite/go-whisper v0.0.0-20220426133541-b1ea42367ab4/go.mod h1:XnU8q9X8C3OhD8R7gAlRLI6VXU2KMwqgTO9Tshub2qE=
 github.com/go-graphite/protocol v0.4.3-0.20180731190405-5ae324d48067 h1:3xaKhHeiu8sY1oFpgw8mou3IztFUB92FIGwDncZKJCs=
 github.com/go-graphite/protocol v0.4.3-0.20180731190405-5ae324d48067/go.mod h1:tJs3CWCesQ9Laqjz5pbMDHqJlPHDUZv502EtN7qujzQ=
 github.com/gogo/protobuf v1.1.2-0.20180830160456-5669497fd644 h1:GsuTRapGULopujrq87TLdlXsp6m3q/tOwxgx7EEwhKc=
@@ -305,8 +305,9 @@ golang.org/x/sys v0.0.0-20200223170610-d5e6a3e2c0ae/go.mod h1:h1NjWce9XRLGQEsW7w
 golang.org/x/sys v0.0.0-20200323222414-85ca7c5b95cd/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20200331124033-c3d80250170d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.0.0-20200519105757-fe76b779f299/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
-golang.org/x/sys v0.0.0-20200615200032-f1bc736245b1 h1:ogLJMz+qpzav7lGMh10LMvAkM/fAoGlaiiHYiFYdm80=
 golang.org/x/sys v0.0.0-20200615200032-f1bc736245b1/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+golang.org/x/sys v0.0.0-20220422013727-9388b58f7150 h1:xHms4gcpe1YE7A3yIllJXP16CMAGuqwO2lX1mTyyRRc=
+golang.org/x/sys v0.0.0-20220422013727-9388b58f7150/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=
 golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
 golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
 golang.org/x/text v0.3.1-0.20180807135948-17ff2d5776d2/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=

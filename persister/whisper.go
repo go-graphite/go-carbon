@@ -39,6 +39,7 @@ type Whisper struct {
 	throttledCreates        uint32 // counter
 	updateOperations        uint32 // counter
 	committedPoints         uint32 // counter
+	oooDiscardedPoints      uint32 // counter
 	extended                uint32 // counter
 	sparse                  bool
 	flock                   bool
@@ -179,6 +180,14 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	if w.Extended {
 		atomic.AddUint32(&p.extended, 1)
 		p.logger.Info("cwhisper file has extended", zap.String("path", path))
+	}
+
+	// update oooDiscardedPoints counter
+	if w.DiscardedPoints > 0 {
+		atomic.AddUint32(&p.oooDiscardedPoints, uint32(w.DiscardedPoints))
+		p.logger.Debug("cwhisper file has ooo-discarded points",
+			zap.Int("w.DiscardedPoints", int(w.DiscardedPoints)),
+			zap.String("path", path))
 	}
 }
 
@@ -426,6 +435,9 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	throttledCreates := atomic.LoadUint32(&p.throttledCreates)
 	atomic.AddUint32(&p.throttledCreates, -throttledCreates)
 
+	oooDiscardedPoints := atomic.LoadUint32(&p.oooDiscardedPoints)
+	atomic.AddUint32(&p.oooDiscardedPoints, -oooDiscardedPoints)
+
 	send("updateOperations", float64(updateOperations))
 	send("committedPoints", float64(committedPoints))
 	if updateOperations > 0 {
@@ -436,6 +448,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 	send("throttledCreates", float64(throttledCreates))
+	send("oooDiscardedPoints", float64(oooDiscardedPoints))
 	send("maxCreatesPerSecond", float64(p.maxCreatesPerSecond))
 
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
