@@ -896,6 +896,7 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 
 	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
 	var oldDiscardedPoints uint32
+	var newDiscardedPoints uint32
 
 	var currentPoints []*TimeSeriesPoint
 	for i := 0; i < len(whisper.archives); i++ {
@@ -947,21 +948,23 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 	}
 
 	if whisper.compressed {
+		// calculate new discard counter
+		for i := 0; i < len(whisper.archives); i++ {
+			a := whisper.archives[i].stats.discard.oldInterval
+			if a > 0 {
+				newDiscardedPoints += a
+			}
+		}
+		if newDiscardedPoints > oldDiscardedPoints {
+			whisper.DiscardedPoints = newDiscardedPoints - oldDiscardedPoints
+		}
+
 		if err := whisper.WriteHeaderCompressed(); err != nil {
 			return err
 		}
 
 		if err := whisper.extendIfNeeded(); err != nil {
 			return err
-		}
-
-		// update DiscardedPoints counter starting from last archive
-		// to not overflow uint32
-		for i := len(whisper.archives) - 1; i >= 0; i-- {
-			a := whisper.archives[i].stats.discard.oldInterval
-			if a > 0 {
-				whisper.DiscardedPoints += a - oldDiscardedPoints
-			}
 		}
 	}
 
