@@ -162,7 +162,7 @@ type Whisper struct {
 	// TODO: improve
 	NonFatalErrors []error
 
-	DiscardedPoints uint32
+	discardedPointsAtOpen uint32
 }
 
 /*
@@ -878,6 +878,25 @@ func (whisper *Whisper) UpdateMany(points []*TimeSeriesPoint) (err error) {
 	return whisper.UpdateManyForArchive(points, -1)
 }
 
+/*
+  Returns updated amount of out-of-order discarded points since opening whisper file
+*/
+func (whisper *Whisper) GetDiscardedPointsSinceOpen() uint32 {
+	var discardedPointsNow uint32
+	if whisper.compressed {
+		for i := 0; i < len(whisper.archives); i++ {
+			archive := whisper.archives[i]
+			if archive.stats.discard.oldInterval > 0 {
+				discardedPointsNow += archive.stats.discard.oldInterval
+			}
+		}
+	}
+	if discardedPointsNow > whisper.discardedPointsAtOpen {
+		return discardedPointsNow - whisper.discardedPointsAtOpen
+	}
+	return 0
+}
+
 // Note: for compressed format, extensions is triggered after update is
 // done, so updates of the same data set being done in one
 // UpdateManyForArchive call would have different result in file than in
@@ -895,17 +914,10 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 	sort.Stable(timeSeriesPointsNewestFirst{points})
 
 	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
-	var oldDiscardedPoints uint32
-	var newDiscardedPoints uint32
 
 	var currentPoints []*TimeSeriesPoint
 	for i := 0; i < len(whisper.archives); i++ {
 		archive := whisper.archives[i]
-
-		// keep old discard counter
-		if whisper.compressed && archive.stats.discard.oldInterval > 0 {
-			oldDiscardedPoints += archive.stats.discard.oldInterval
-		}
 
 		if targetRetention != -1 && targetRetention != archive.MaxRetention() {
 			continue
@@ -948,17 +960,6 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 	}
 
 	if whisper.compressed {
-		// calculate new discard counter
-		for i := 0; i < len(whisper.archives); i++ {
-			a := whisper.archives[i].stats.discard.oldInterval
-			if a > 0 {
-				newDiscardedPoints += a
-			}
-		}
-		if newDiscardedPoints > oldDiscardedPoints {
-			whisper.DiscardedPoints = newDiscardedPoints - oldDiscardedPoints
-		}
-
 		if err := whisper.WriteHeaderCompressed(); err != nil {
 			return err
 		}

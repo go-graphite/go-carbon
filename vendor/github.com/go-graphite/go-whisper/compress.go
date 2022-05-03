@@ -243,6 +243,7 @@ func (whisper *Whisper) readHeaderCompressed() (err error) {
 		offset += IntSize
 
 		arc.stats.discard.oldInterval = uint32(unpackInt(b[offset : offset+IntSize]))
+		whisper.discardedPointsAtOpen += arc.stats.discard.oldInterval
 		offset += IntSize
 		arc.stats.extended = uint32(unpackInt(b[offset : offset+IntSize]))
 		offset += IntSize
@@ -414,7 +415,7 @@ func (whisper *Whisper) fetchCompressed(start, end int64, archive *archiveInfo) 
 
 			cvals := []float64{}
 			cinterval := 0
-			tdps := append(dps, unpackDataPoints(arc.buffer)...)
+			tdps := append(dps, unpackDataPoints(arc.buffer)...) // skipcq: CRT-D0001
 			dps = []dataPoint{}
 			for j, p := range tdps {
 				if p.interval == 0 && j < len(tdps)-1 {
@@ -1547,9 +1548,9 @@ func newMemFile(name string) *memFile {
 
 func releaseMemFile(name string) { memFiles.Delete(name) }
 
-func (mf *memFile) Fd() uintptr  { return uintptr(unsafe.Pointer(mf)) }
+func (mf *memFile) Fd() uintptr  { return uintptr(unsafe.Pointer(mf)) } // skipcq: GSC-G103
 func (mf *memFile) Name() string { return mf.name }
-func (mf *memFile) Close() error { return nil }
+func (mf *memFile) Close() error { return nil } // skipcq: RVV-B0013
 
 func (mf *memFile) Seek(offset int64, whence int) (int64, error) {
 	switch whence {
