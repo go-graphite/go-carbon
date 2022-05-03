@@ -1,7 +1,13 @@
 ## Changelog
 ##### master
-* carbonserver: introduce new empty-result option to allow for empty results with carbonserver #TBD
-* introducing `persiter.oooDiscardedPoints` metric
+* Make empty results ok #453
+* carbonserver: /list_query?leaft_only=true and /admin/info?scopes=config #454
+* Makefile: revert .SHELLFLAGS changes #456
+* Upgrade to go-1.18 #460
+* Removing DockerHub upload #461
+* Introducing `persiter.oooDiscardedPoints` metric #463
+* Fixing OOO discard metric overflow #464
+* refactoring `persiter.oooDiscardedPoints` metric #TBD
 ##### version 0.16.2
 * Another attempt to fix issues with release upload #449
 

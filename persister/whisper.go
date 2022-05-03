@@ -183,11 +183,13 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	}
 
 	// update oooDiscardedPoints counter
-	if w.DiscardedPoints > 0 {
-		atomic.AddUint32(&p.oooDiscardedPoints, uint32(w.DiscardedPoints))
+	discardedPointsSinceOpen := w.GetDiscardedPointsSinceOpen()
+	if discardedPointsSinceOpen > 0 {
+		atomic.AddUint32(&p.oooDiscardedPoints, uint32(discardedPointsSinceOpen))
 		p.logger.Debug("cwhisper file has ooo-discarded points",
-			zap.Int("w.DiscardedPoints", int(w.DiscardedPoints)),
-			zap.String("path", path))
+			zap.Int("w.GetDiscardedPointsSinceOpen()", int(discardedPointsSinceOpen)),
+			zap.String("path", path),
+			zap.Any("points", points))
 	}
 }
 
