@@ -2,12 +2,15 @@ package persister
 
 import (
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	whisper "github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
@@ -56,6 +59,26 @@ type Whisper struct {
 	logger                  *zap.Logger
 	createLogger            *zap.Logger
 
+	onlineMigration struct {
+		enabled bool
+		rate    int
+		ticker  *ThrottleTicker
+
+		schema            bool
+		xff               bool
+		aggregationMethod bool
+
+		stat struct {
+			total               uint32
+			errors              uint32
+			schema              uint32
+			xff                 uint32
+			aggregationMethod   uint32
+			physicalSizeChanges int64
+			logicalSizeChanges  int64
+		}
+	}
+
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -100,6 +123,29 @@ func (p *Whisper) SetMaxCreatesPerSecond(maxCreatesPerSecond int) {
 // SetHardMaxCreatesPerSecond enable throttling
 func (p *Whisper) SetHardMaxCreatesPerSecond(hardMaxCreatesPerSecond bool) {
 	p.hardMaxCreatesPerSecond = hardMaxCreatesPerSecond
+}
+
+// SetOnlineMigration enable online migration
+func (p *Whisper) EnableOnlineMigration(rate int, scope []string) {
+	p.onlineMigration.enabled = true
+	p.onlineMigration.rate = rate
+
+	if len(scope) > 0 {
+		for _, s := range scope {
+			switch s {
+			case "xff":
+				p.onlineMigration.xff = true
+			case "aggregationMethod":
+				p.onlineMigration.aggregationMethod = true
+			case "schema":
+				p.onlineMigration.schema = true
+			}
+		}
+	} else {
+		p.onlineMigration.xff = true
+		p.onlineMigration.aggregationMethod = true
+		p.onlineMigration.schema = true
+	}
 }
 
 // GetMaxUpdatesPerSecond returns current throttling speed
@@ -209,6 +255,7 @@ func (p *Whisper) store(metric string) {
 		path = filepath.Join(p.rootPath, strings.ReplaceAll(metric, ".", "/")+".wsp")
 	}
 
+	var newFile bool
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
 		FLock:      p.flock,
 		Compressed: p.compressed,
@@ -313,6 +360,25 @@ func (p *Whisper) store(metric string) {
 		)
 
 		atomic.AddUint32(&p.created, 1)
+
+		newFile = true
+	}
+
+	// Check if schema and aggregation is still up-to-date
+	if !newFile && p.onlineMigration.enabled {
+		// errors are logged already
+		w, _, err = p.checkAndUpdateSchemaAndAggregation(w, metric)
+		if err != nil {
+			w, err = whisper.OpenWithOptions(path, &whisper.Options{
+				FLock:      p.flock,
+				Compressed: p.compressed,
+			})
+			if err != nil {
+				p.logger.Error("failed to reopen whisper file after schema migration", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
+				p.popConfirm(metric)
+				return
+			}
+		}
 	}
 
 	values, exists := p.pop(metric)
@@ -457,6 +523,38 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	send("workers", float64(p.workersCount))
 	send("extended", float64(extended))
 
+	if p.onlineMigration.enabled {
+		stat := &p.onlineMigration.stat
+
+		total := atomic.LoadUint32(&stat.total)
+		atomic.AddUint32(&stat.total, -total)
+		send("onlineMigration.total", float64(total))
+
+		errors := atomic.LoadUint32(&stat.errors)
+		atomic.AddUint32(&stat.errors, -errors)
+		send("onlineMigration.errors", float64(errors))
+
+		schema := atomic.LoadUint32(&stat.schema)
+		atomic.AddUint32(&stat.schema, -schema)
+		send("onlineMigration.schema", float64(schema))
+
+		xff := atomic.LoadUint32(&stat.xff)
+		atomic.AddUint32(&stat.xff, -xff)
+		send("onlineMigration.xff", float64(xff))
+
+		aggregationMethod := atomic.LoadUint32(&stat.aggregationMethod)
+		atomic.AddUint32(&stat.aggregationMethod, -aggregationMethod)
+		send("onlineMigration.aggregationMethod", float64(aggregationMethod))
+
+		physicalSizeChanges := atomic.LoadInt64(&stat.physicalSizeChanges)
+		atomic.AddInt64(&stat.physicalSizeChanges, -physicalSizeChanges)
+		send("onlineMigration.physicalSizeChanges", float64(physicalSizeChanges))
+
+		logicalSizeChanges := atomic.LoadInt64(&stat.logicalSizeChanges)
+		atomic.AddInt64(&stat.logicalSizeChanges, -logicalSizeChanges)
+		send("onlineMigration.logicalSizeChanges", float64(logicalSizeChanges))
+	}
+
 	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
 	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
 	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)
@@ -473,6 +571,10 @@ func (p *Whisper) Start() error {
 			p.maxCreatesTicker = NewThrottleTicker(p.maxCreatesPerSecond)
 		}
 
+		if p.onlineMigration.enabled {
+			p.onlineMigration.ticker = NewHardThrottleTicker(p.onlineMigration.rate)
+		}
+
 		for i := 0; i < p.workersCount; i++ {
 			p.Go(p.worker)
 		}
@@ -485,6 +587,10 @@ func (p *Whisper) Stop() {
 	p.StopFunc(func() {
 		p.throttleTicker.Stop()
 		p.maxCreatesTicker.Stop()
+
+		if p.onlineMigration.ticker != nil {
+			p.onlineMigration.ticker.Stop()
+		}
 	})
 }
 
@@ -517,4 +623,215 @@ func (*Whisper) simplifyPathError(err error) error {
 		return err
 	}
 	return fmt.Errorf("%s: %s", perr.Op, perr.Err)
+}
+
+func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric string) (*whisper.Whisper, bool, error) {
+	// TODO: skip check and update if the config files has not been updated
+	// for a long time and all the metrics have been validated? this only
+	// help if the check is expensive, most likely it's not.
+
+	logger := p.logger.Named("online_migration")
+	schema, ok := p.schemas.Match(metric)
+	if !ok {
+		logger.Error("no storage schema defined for metric", zap.String("metric", metric))
+		return w, false, nil
+	}
+	aggr := p.aggregation.Match(metric)
+	if aggr == nil {
+		logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
+		return w, false, nil
+	}
+
+	compressed := p.compressed
+	if schema.Compressed != nil {
+		compressed = *schema.Compressed
+	}
+	options := &whisper.Options{
+		Sparse:     p.sparse,
+		FLock:      p.flock,
+		Compressed: compressed,
+	}
+
+	retentions := whisper.NewRetentionsNoPointer(w.Retentions())
+	aggregationmethod := w.AggregationMethod()
+	xFilesFactor := w.XFilesFactor()
+	var updateSchema, updateXff, updateAggrMethod bool
+	if schema.canMigrate(p.onlineMigration.schema) && !retentions.Equal(schema.Retentions) {
+		retentions = schema.Retentions
+		updateSchema = true
+	}
+	if aggr.canMigrateXff(p.onlineMigration.xff) && xFilesFactor != float32(aggr.xFilesFactor) {
+		xFilesFactor = float32(aggr.xFilesFactor)
+		updateXff = true
+	}
+	if aggr.canMigrateAggregationMethod(p.onlineMigration.aggregationMethod) && aggregationmethod != aggr.aggregationMethod {
+		aggregationmethod = aggr.aggregationMethod
+		updateAggrMethod = true
+	}
+
+	// No config migration needed.
+	if !updateSchema && !updateXff && !updateAggrMethod {
+		return w, false, nil
+	}
+
+	select {
+	case hasCapacity := <-p.onlineMigration.ticker.C:
+		if !hasCapacity {
+			return w, false, nil
+		}
+	default:
+		// makes sure that it's a non-blocking process
+		return w, false, nil
+	}
+
+	if updateSchema {
+		atomic.AddUint32(&p.onlineMigration.stat.schema, 1)
+	}
+	if updateXff {
+		atomic.AddUint32(&p.onlineMigration.stat.xff, 1)
+	}
+	if updateAggrMethod {
+		atomic.AddUint32(&p.onlineMigration.stat.aggregationMethod, 1)
+	}
+	atomic.AddUint32(&p.onlineMigration.stat.total, 1)
+
+	var virtualSize, physicalSize int64
+	if fiOld, err := w.File().Stat(); err != nil {
+		logger.Error("failed to retrieve file info before migration", zap.String("metric", metric), zap.Error(err))
+	} else {
+		virtualSize = fiOld.Size()
+		physicalSize = virtualSize
+		if stat, ok := fiOld.Sys().(*syscall.Stat_t); ok {
+			physicalSize = stat.Blocks * 512
+		}
+	}
+
+	// IMPORTANT: file has be re-opened after a call to Whisper.UpdateConfig
+	if err := w.UpdateConfig(retentions, aggregationmethod, xFilesFactor, options); err != nil {
+		logger.Error("failed to migrate/update configs (schema/aggregation/xff)", zap.String("metric", metric), zap.Error(err))
+		atomic.AddUint32(&p.onlineMigration.stat.errors, 1)
+
+		return w, false, err
+	}
+
+	// reopen whisper file
+	nw, err := whisper.OpenWithOptions(w.File().Name(), &whisper.Options{
+		FLock:      p.flock,
+		Compressed: p.compressed,
+	})
+
+	if fiNew, err := nw.File().Stat(); err != nil {
+		logger.Error("failed to retrieve file info after migration", zap.String("metric", metric), zap.Error(err))
+	} else {
+		virtualSizeNew := fiNew.Size()
+		physicalSizeNew := virtualSize
+		if stat, ok := fiNew.Sys().(*syscall.Stat_t); ok {
+			physicalSizeNew = stat.Blocks * 512
+		}
+
+		atomic.AddInt64(&p.onlineMigration.stat.logicalSizeChanges, virtualSizeNew-virtualSize)
+		atomic.AddInt64(&p.onlineMigration.stat.physicalSizeChanges, physicalSizeNew-physicalSize)
+	}
+
+	return nw, true, err
+}
+
+// skipcq: RVV-A0005
+func (p *Whisper) CheckPolicyConsistencies(rate int, printInconsistentMetrics bool) error {
+	var summary struct {
+		total              int
+		errors             int
+		brokenAggConfig    int
+		brokenSchemaConfig int
+		inconsistencies    struct {
+			total       int
+			aggregation int
+			retention   int
+			xff         int
+		}
+	}
+
+	rateTicker := time.NewTicker(time.Second / time.Duration(rate))
+	log.SetOutput(os.Stdout)
+
+	printSummary := func() {
+		pct := func(v int) float64 { return float64(v) / float64(summary.total) * 100 }
+		log.Printf(
+			"stats: total=%d errors=%d (%.2f%%) brokenAggConfig=%d (%.2f%%) brokenSchemaConfig=%d (%.2f%%) inconsistencies.total=%d (%.2f%%) inconsistencies.aggregation=%d (%.2f%%) inconsistencies.retention=%d (%.2f%%) inconsistencies.xff=%d (%.2f%%)\n",
+			summary.total,
+			summary.errors, pct(summary.errors),
+			summary.brokenAggConfig, pct(summary.brokenAggConfig),
+			summary.brokenSchemaConfig, pct(summary.brokenSchemaConfig),
+			summary.inconsistencies.total, pct(summary.inconsistencies.total),
+			summary.inconsistencies.aggregation, pct(summary.inconsistencies.aggregation),
+			summary.inconsistencies.retention, pct(summary.inconsistencies.retention),
+			summary.inconsistencies.xff, pct(summary.inconsistencies.xff),
+		)
+	}
+
+	err := filepath.WalkDir(p.rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !strings.HasSuffix(path, ".wsp") || d.IsDir() {
+			return err
+		}
+
+		<-rateTicker.C
+
+		summary.total++
+
+		metric := strings.TrimPrefix(strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(path, ".wsp"), p.rootPath), "/", "."), ".")
+
+		schema, ok := p.schemas.Match(metric)
+		if !ok {
+			summary.brokenSchemaConfig++
+			log.Printf("no storage schema defined for metric: %s", metric)
+			return nil
+		}
+		aggr := p.aggregation.Match(metric)
+		if aggr == nil {
+			summary.brokenAggConfig++
+			log.Printf("no storage aggregation defined for metric: %s", metric)
+			return nil
+		}
+
+		file, err := whisper.OpenWithOptions(path, &whisper.Options{})
+		if err != nil {
+			summary.errors++
+			log.Printf("failed to open %s: %s\n", path, err)
+			return nil
+		}
+		defer file.Close()
+
+		retentions := whisper.NewRetentionsNoPointer(file.Retentions())
+		aggregationmethod := file.AggregationMethod()
+		xFilesFactor := file.XFilesFactor()
+		var inconsistencies []string
+		if !retentions.Equal(schema.Retentions) {
+			summary.inconsistencies.retention++
+			inconsistencies = append(inconsistencies, "retention")
+		}
+		if xFilesFactor != float32(aggr.xFilesFactor) {
+			summary.inconsistencies.xff++
+			inconsistencies = append(inconsistencies, "xff")
+		}
+		if aggregationmethod != aggr.aggregationMethod {
+			summary.inconsistencies.aggregation++
+			inconsistencies = append(inconsistencies, "aggregation")
+		}
+		if len(inconsistencies) > 0 {
+			summary.inconsistencies.total++
+			if printInconsistentMetrics {
+				log.Printf("inconsistent_metric: %s %s", strings.Join(inconsistencies, ","), metric)
+			}
+		}
+
+		if (summary.total % 5000) == 0 {
+			printSummary()
+		}
+
+		return nil
+	})
+
+	printSummary()
+
+	return err
 }

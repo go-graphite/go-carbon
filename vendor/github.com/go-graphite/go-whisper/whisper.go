@@ -39,6 +39,11 @@ const (
 	Years   = 86400 * 365
 )
 
+const (
+	classicHeaderAggregationOffset = 0
+	classicHeaderXFFOffset         = IntSize * 2
+)
+
 // Note: 4 bytes long in Whisper Header, 1 byte long in Archive Header
 type AggregationMethod int
 
@@ -78,7 +83,7 @@ func (am AggregationMethod) String() string {
 }
 
 func ParseAggregationMethod(am string) AggregationMethod {
-	switch am {
+	switch strings.ToLower(am) {
 	case "average", "avg":
 		return Average
 	case "sum":
@@ -266,10 +271,10 @@ func unitMultiplier(s string) (int, error) {
 	case strings.HasPrefix(s, "y"):
 		return Years, nil
 	}
-	return 0, fmt.Errorf("Invalid unit multiplier [%v]", s)
+	return 0, fmt.Errorf("invalid unit multiplier [%v]", s)
 }
 
-var retentionRegexp *regexp.Regexp = regexp.MustCompile("^(\\d+)([smhdwy]+)$")
+var retentionRegexp *regexp.Regexp = regexp.MustCompile(`^(\d+)([smhdwy]+)$`)
 
 func parseRetentionPart(retentionPart string) (int, error) {
 	part, err := strconv.ParseInt(retentionPart, 10, 32)
@@ -300,16 +305,16 @@ func parseRetentionPart(retentionPart string) (int, error) {
 func ParseRetentionDef(retentionDef string) (*Retention, error) {
 	parts := strings.Split(retentionDef, ":")
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("Not enough parts in retentionDef [%v]", retentionDef)
+		return nil, fmt.Errorf("not enough parts in retentionDef [%v]", retentionDef)
 	}
 	precision, err := parseRetentionPart(parts[0])
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse precision: %v", err)
+		return nil, fmt.Errorf("failed to parse precision: %v", err)
 	}
 
 	points, err := parseRetentionPart(parts[1])
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse points: %v", err)
+		return nil, fmt.Errorf("failed to parse points: %v", err)
 	}
 	points /= precision
 
@@ -326,6 +331,14 @@ func ParseRetentionDefs(retentionDefs string) (Retentions, error) {
 		retentions = append(retentions, retention)
 	}
 	return retentions, nil
+}
+
+func MustParseRetentionDefs(retentionDefs string) Retentions {
+	rets, err := ParseRetentionDefs(retentionDefs)
+	if err != nil {
+		panic(err)
+	}
+	return rets
 }
 
 // Wrappers for whisper.file operations
@@ -541,7 +554,7 @@ func allocateDiskSpace(file file, remaining int) error {
 
 func validateRetentions(retentions Retentions) error {
 	if len(retentions) == 0 {
-		return fmt.Errorf("No retentions")
+		return fmt.Errorf("no retentions")
 	}
 	for i, retention := range retentions {
 		if i == len(retentions)-1 {
@@ -550,19 +563,19 @@ func validateRetentions(retentions Retentions) error {
 
 		nextRetention := retentions[i+1]
 		if !(retention.secondsPerPoint < nextRetention.secondsPerPoint) {
-			return fmt.Errorf("A Whisper database may not be configured having two archives with the same precision (archive%v: %v, archive%v: %v)", i, retention, i+1, nextRetention)
+			return fmt.Errorf("a whisper database may not be configured having two archives with the same precision (archive%v: %v, archive%v: %v)", i, retention, i+1, nextRetention)
 		}
 
 		if mod(nextRetention.secondsPerPoint, retention.secondsPerPoint) != 0 {
-			return fmt.Errorf("Higher precision archives' precision must evenly divide all lower precision archives' precision (archive%v: %v, archive%v: %v)", i, retention.secondsPerPoint, i+1, nextRetention.secondsPerPoint)
+			return fmt.Errorf("higher precision archives' precision must evenly divide all lower precision archives' precision (archive%v: %v, archive%v: %v)", i, retention.secondsPerPoint, i+1, nextRetention.secondsPerPoint)
 		}
 
 		if retention.MaxRetention() >= nextRetention.MaxRetention() {
-			return fmt.Errorf("Lower precision archives must cover larger time intervals than higher precision archives (archive%v: %v seconds, archive%v: %v seconds)", i, retention.MaxRetention(), i+1, nextRetention.MaxRetention())
+			return fmt.Errorf("lower precision archives must cover larger time intervals than higher precision archives (archive%v: %v seconds, archive%v: %v seconds)", i, retention.MaxRetention(), i+1, nextRetention.MaxRetention())
 		}
 
 		if retention.numberOfPoints < (nextRetention.secondsPerPoint / retention.secondsPerPoint) {
-			return fmt.Errorf("Each archive must have at least enough points to consolidate to the next archive (archive%v consolidates %v of archive%v's points but it has only %v total points)", i+1, nextRetention.secondsPerPoint/retention.secondsPerPoint, i, retention.numberOfPoints)
+			return fmt.Errorf("each archive must have at least enough points to consolidate to the next archive (archive%v consolidates %v of archive%v's points but it has only %v total points)", i+1, nextRetention.secondsPerPoint/retention.secondsPerPoint, i, retention.numberOfPoints)
 		}
 	}
 
@@ -588,8 +601,7 @@ func OpenWithOptions(path string, options *Options) (whisper *Whisper, err error
 		if options.OpenFileFlag != nil {
 			flag = *options.OpenFileFlag
 		}
-		// skipcq: GSC-G302
-		file, err = os.OpenFile(path, flag, 0666)
+		file, err = os.OpenFile(path, flag, 0666) // skipcq: GSC-G302
 	}
 	if err != nil {
 		return
@@ -614,11 +626,11 @@ func OpenWithOptions(path string, options *Options) (whisper *Whisper, err error
 
 	b := make([]byte, len(compressedMagicString))
 	if _, err := whisper.file.Read(b); err != nil {
-		return nil, fmt.Errorf("Unable to read magic string: %s", err)
+		return nil, fmt.Errorf("unable to read magic string: %s", err)
 	} else if bytes.Equal(b, compressedMagicString) {
 		whisper.compressed = true
 	} else if _, err := whisper.file.Seek(0, 0); err != nil {
-		return nil, fmt.Errorf("Unable to reset file offset: %s", err)
+		return nil, fmt.Errorf("unable to reset file offset: %s", err)
 	}
 
 	// read the metadata
@@ -631,11 +643,11 @@ func OpenWithOptions(path string, options *Options) (whisper *Whisper, err error
 	offset := 0
 
 	if err != nil {
-		err = fmt.Errorf("Unable to read header: %s", err.Error())
+		err = fmt.Errorf("unable to read header: %s", err.Error())
 		return
 	}
 	if readed != MetadataSize {
-		err = fmt.Errorf("Unable to read header: EOF")
+		err = fmt.Errorf("unable to read header: EOF")
 		return
 	}
 
@@ -660,7 +672,7 @@ func OpenWithOptions(path string, options *Options) (whisper *Whisper, err error
 	for i := 0; i < archiveCount; i++ {
 		readed, err = file.Read(b)
 		if err != nil || readed != ArchiveInfoSize {
-			err = fmt.Errorf("Unable to read archive %d metadata: %s", i, err)
+			err = fmt.Errorf("unable to read archive %d metadata: %s", i, err)
 			return
 		}
 		whisper.archives = append(whisper.archives, unpackArchiveInfo(b))
@@ -772,25 +784,8 @@ func (whisper *Whisper) bufferSize() int {
 	return bufSize
 }
 
-/* Return aggregation method */
-func (whisper *Whisper) AggregationMethod() string {
-	aggr := "unknown"
-	switch whisper.aggregationMethod {
-	case Average:
-		aggr = "Average"
-	case Sum:
-		aggr = "Sum"
-	case First:
-		aggr = "First"
-	case Last:
-		aggr = "Last"
-	case Max:
-		aggr = "Max"
-	case Min:
-		aggr = "Min"
-	}
-	return aggr
-}
+/* Return raw aggregation method */
+func (whisper *Whisper) AggregationMethod() AggregationMethod { return whisper.aggregationMethod }
 
 /* Return max retention in seconds */
 func (whisper *Whisper) MaxRetention() int {
@@ -828,7 +823,7 @@ func (whisper *Whisper) Update(value float64, timestamp int) (err error) {
 
 	diff := int(Now().Unix()) - timestamp
 	if !(diff < whisper.maxRetention && diff >= 0) {
-		return fmt.Errorf("Timestamp not covered by any archives in this database")
+		return fmt.Errorf("timestamp not covered by any archives in this database")
 	}
 	var archive *archiveInfo
 	var lowerArchives []*archiveInfo
@@ -872,7 +867,7 @@ func reversePoints(points []*TimeSeriesPoint) {
 	}
 }
 
-var Now = func() time.Time { return time.Now() }
+var Now = time.Now
 
 func (whisper *Whisper) UpdateMany(points []*TimeSeriesPoint) (err error) {
 	return whisper.UpdateManyForArchive(points, -1)
@@ -905,7 +900,7 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 	// recover panics and return as error
 	defer func() {
 		if e := recover(); e != nil {
-			err = fmt.Errorf("%s\n%s", e, debug.Stack())
+			err = fmt.Errorf("update_many_for_archive panics: %s\n%s", e, debug.Stack())
 		}
 	}()
 
@@ -974,6 +969,11 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 
 func (whisper *Whisper) archiveUpdateMany(archive *archiveInfo, points []*TimeSeriesPoint) error {
 	alignedPoints := alignPoints(archive, points)
+	return whisper.archiveUpdateManyDataPoints(archive, alignedPoints, true)
+}
+
+// skipcq: RVV-A0005
+func (whisper *Whisper) archiveUpdateManyDataPoints(archive *archiveInfo, alignedPoints []dataPoint, propagate bool) error {
 	intervals, packedBlocks := packSequences(archive, alignedPoints)
 
 	baseInterval := whisper.getBaseInterval(archive)
@@ -1002,6 +1002,10 @@ func (whisper *Whisper) archiveUpdateMany(archive *archiveInfo, points []*TimeSe
 		}
 	}
 
+	if !propagate {
+		return nil
+	}
+
 	higher := archive
 	lowerArchives := whisper.lowerArchives(archive)
 
@@ -1023,10 +1027,11 @@ func (whisper *Whisper) archiveUpdateMany(archive *archiveInfo, points []*TimeSe
 		}
 		higher = lower
 	}
+
 	return nil
 }
 
-func extractPoints(points []*TimeSeriesPoint, now int, maxRetention int) (currentPoints []*TimeSeriesPoint, remainingPoints []*TimeSeriesPoint) {
+func extractPoints(points []*TimeSeriesPoint, now, maxRetention int) (currentPoints []*TimeSeriesPoint, remainingPoints []*TimeSeriesPoint) {
 	maxAge := now - maxRetention
 	for i, point := range points {
 		if point.Time < maxAge {
@@ -1177,13 +1182,11 @@ func (whisper *Whisper) readSeries(start, end int64, archive *archiveInfo) ([]da
 
 func (whisper *Whisper) checkSeriesEmpty(start, end int64, archive *archiveInfo, fromTime, untilTime int) (bool, error) {
 	if start < end {
-		// skipcq: RVV-B0009, CRT-A0001
-		len := end - start
-		return whisper.checkSeriesEmptyAt(start, len, fromTime, untilTime)
+		length := end - start
+		return whisper.checkSeriesEmptyAt(start, length, fromTime, untilTime)
 	}
-	// skipcq: RVV-B0009, CRT-A0001
-	len := archive.End() - start
-	empty, err := whisper.checkSeriesEmptyAt(start, len, fromTime, untilTime)
+	length := archive.End() - start
+	empty, err := whisper.checkSeriesEmptyAt(start, length, fromTime, untilTime)
 	if err != nil || !empty {
 		return empty, err
 	}
@@ -1191,8 +1194,7 @@ func (whisper *Whisper) checkSeriesEmpty(start, end int64, archive *archiveInfo,
 
 }
 
-// skipcq: CRT-A0001
-func (whisper *Whisper) checkSeriesEmptyAt(start, len int64, fromTime, untilTime int) (bool, error) {
+func (whisper *Whisper) checkSeriesEmptyAt(start, length int64, fromTime, untilTime int) (bool, error) {
 	b1 := make([]byte, 4)
 	// Read first point
 	err := whisper.fileReadAt(b1, start)
@@ -1206,7 +1208,7 @@ func (whisper *Whisper) checkSeriesEmptyAt(start, len int64, fromTime, untilTime
 
 	b2 := make([]byte, 4)
 	// Read last point
-	err = whisper.fileReadAt(b2, len-12)
+	err = whisper.fileReadAt(b2, length-12)
 	if err != nil {
 		return false, err
 	}
@@ -1235,7 +1237,7 @@ func (whisper *Whisper) Fetch(fromTime, untilTime int) (timeSeries *TimeSeries, 
 func (whisper *Whisper) FetchByAggregation(fromTime, untilTime int, spec *MixAggregationSpec) (timeSeries *TimeSeries, err error) {
 	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
 	if fromTime > untilTime {
-		return nil, fmt.Errorf("Invalid time interval: from time '%d' is after until time '%d'", fromTime, untilTime)
+		return nil, fmt.Errorf("invalid time interval: from time '%d' is after until time '%d'", fromTime, untilTime)
 	}
 	// oldestTime := whisper.StartTime()
 	oldestTime := now - whisper.maxRetention
@@ -1272,6 +1274,10 @@ func (whisper *Whisper) FetchByAggregation(fromTime, untilTime int, spec *MixAgg
 		return nil, fmt.Errorf("target aggregation %s not found", spec)
 	}
 
+	return whisper.fetchFromArchive(archive, fromTime, untilTime)
+}
+
+func (whisper *Whisper) fetchFromArchive(archive *archiveInfo, fromTime, untilTime int) (timeSeries *TimeSeries, err error) {
 	fromInterval := archive.Interval(fromTime)
 	untilInterval := archive.Interval(untilTime)
 
@@ -1346,7 +1352,7 @@ func (whisper *Whisper) FetchByAggregation(fromTime, untilTime int, spec *MixAgg
 func (whisper *Whisper) CheckEmpty(fromTime, untilTime int) (exist bool, err error) {
 	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
 	if fromTime > untilTime {
-		return true, fmt.Errorf("Invalid time interval: from time '%d' is after until time '%d'", fromTime, untilTime)
+		return true, fmt.Errorf("invalid time interval: from time '%d' is after until time '%d'", fromTime, untilTime)
 	}
 	oldestTime := whisper.StartTime()
 	// range is in the future
@@ -1426,22 +1432,23 @@ func (r *Retention) calculateSuitablePointsPerBlock(defaultSize int) int {
 	return r.numberOfPoints + 16
 }
 
-func (r Retention) String() string {
-	toStr := func(v int) string {
-		switch {
-		case v >= 365*24*60*60:
-			return fmt.Sprintf("%dy", v/(365*24*60*60))
-		case v >= 24*60*60:
-			return fmt.Sprintf("%dd", v/(24*60*60))
-		case v >= 60*60:
-			return fmt.Sprintf("%dh", v/(60*60))
-		case v >= 60:
-			return fmt.Sprintf("%dm", v/(60))
-		default:
-			return fmt.Sprintf("%ds", v)
-		}
+func durationString(v int) string {
+	switch {
+	case v >= 365*24*60*60:
+		return fmt.Sprintf("%dy", v/(365*24*60*60))
+	case v >= 24*60*60:
+		return fmt.Sprintf("%dd", v/(24*60*60))
+	case v >= 60*60:
+		return fmt.Sprintf("%dh", v/(60*60))
+	case v >= 60:
+		return fmt.Sprintf("%dm", v/(60))
+	default:
+		return fmt.Sprintf("%ds", v)
 	}
-	return fmt.Sprintf("%s:%s", toStr(r.secondsPerPoint), toStr(r.secondsPerPoint*r.numberOfPoints))
+}
+
+func (r Retention) String() string {
+	return fmt.Sprintf("%s:%s", durationString(r.secondsPerPoint), durationString(r.secondsPerPoint*r.numberOfPoints))
 }
 
 func NewRetention(secondsPerPoint, numberOfPoints int) Retention {
@@ -1451,6 +1458,7 @@ func NewRetention(secondsPerPoint, numberOfPoints int) Retention {
 	}
 }
 
+// TODO: maybe we should make it array of structs, rather than an array of struct pointers.
 type Retentions []*Retention
 
 func (r Retentions) Len() int {
@@ -1459,6 +1467,31 @@ func (r Retentions) Len() int {
 
 func (r Retentions) Swap(i, j int) {
 	r[i], r[j] = r[j], r[i]
+}
+
+func NewRetentionsNoPointer(r2 []Retention) Retentions {
+	var nr2 Retentions
+	for i := range r2 {
+		nr2 = append(nr2, &r2[i])
+	}
+
+	return nr2
+}
+
+func (r1 Retentions) Equal(r2 Retentions) bool {
+	if len(r1) != len(r2) {
+		return false
+	}
+	for i := range r1 {
+		if r1[i].secondsPerPoint != r2[i].secondsPerPoint {
+			return false
+		}
+		if r1[i].numberOfPoints != r2[i].numberOfPoints {
+			return false
+		}
+	}
+
+	return true
 }
 
 type retentionsByPrecision struct{ Retentions }
@@ -1710,4 +1743,233 @@ func (mas *MixAggregationSpec) String() string {
 		return fmt.Sprintf("p%f", mas.Percentile)
 	}
 	return mas.Method.String()
+}
+
+func (whisper *Whisper) HasMatchingConfigs(rets Retentions, aggr AggregationMethod, xff float32, options *Options) bool {
+	if !rets.Equal(NewRetentionsNoPointer(whisper.Retentions())) {
+		return false
+	}
+	if whisper.aggregationMethod != aggr {
+		return false
+	}
+	if whisper.xFilesFactor != xff {
+		return false
+	}
+
+	// TODO: support whisper -> cwhisper conversion and vice versa
+	// skipcq: SCC-SA9003
+	if whisper.compressed != options.Compressed {
+		// 	return false
+	}
+
+	return true
+}
+
+func (whisper *Whisper) UpdateConfig(rets Retentions, aggr AggregationMethod, xff float32, options *Options) (err error) {
+	newFilename := whisper.file.Name() + ".migrate"
+	os.Remove(newFilename) // in case there are broken/corrupted migrate files not being cleaned up properly
+
+	defer func() {
+		if r := recover(); r != nil {
+			// make sure that temporary file are removed properly
+			os.Remove(newFilename)
+
+			err = fmt.Errorf("update_config panics: %s\n%s", r, debug.Stack())
+		}
+	}()
+
+	updateRets := !rets.Equal(NewRetentionsNoPointer(whisper.Retentions()))
+	updateAggrXff := whisper.aggregationMethod != aggr || whisper.xFilesFactor != xff
+
+	if updateRets {
+		newWhisper, err := CreateWithOptions(newFilename, rets, aggr, xff, options)
+		if err != nil {
+			return err
+		}
+
+		if options.Compressed {
+			err = newWhisper.FillCompressed(whisper)
+		} else {
+			err = newWhisper.FillClassic(whisper)
+		}
+
+		// error ignored here, not much we can do if we fail to close files?
+		newWhisper.Close()
+		whisper.Close()
+
+		if err != nil {
+			return err
+		}
+
+		// how about aggregations: go-carbon will use the new aggr when updating retentions
+		return os.Rename(newFilename, whisper.file.Name())
+	}
+
+	if updateAggrXff {
+		// no need to create a new whisper file, just do in-place update
+		// for aggregations and xff. histories won't be changed.
+		whisper.xFilesFactor = xff
+		whisper.aggregationMethod = aggr
+
+		aggData := make([]byte, IntSize)
+		packInt(aggData, int(whisper.aggregationMethod), 0)
+		xffData := make([]byte, FloatSize)
+		packFloat32(xffData, whisper.xFilesFactor, 0)
+
+		if options.Compressed {
+			if _, err := whisper.file.WriteAt(aggData, int64(compressedHeaderAggregationOffset)); err != nil {
+				return err
+			}
+			if _, err := whisper.file.WriteAt(xffData, int64(compressedHeaderXFFOffset)); err != nil {
+				return err
+			}
+		} else {
+			if _, err := whisper.file.WriteAt(aggData, int64(classicHeaderAggregationOffset)); err != nil {
+				return err
+			}
+			if _, err := whisper.file.WriteAt(xffData, int64(classicHeaderXFFOffset)); err != nil {
+				return err
+			}
+		}
+
+		if _, err := whisper.file.(*os.File).Seek(0, 0); err != nil {
+			return err
+		}
+
+		return nil
+	}
+
+	return nil
+}
+
+func (dstw *Whisper) FillClassic(srcw *Whisper) error {
+	pointsByArchives, err := dstw.retrieveAndMerge(srcw)
+	if err != nil {
+		return err
+	}
+
+	for i, points := range pointsByArchives {
+		if len(points) == 0 {
+			continue
+		}
+
+		archive := dstw.archives[i]
+		if err := dstw.archiveUpdateManyDataPoints(archive, points, false); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// retrieveAndMerge returns data points from both dst and src whisper files. It tries to
+// figure out if src has data points of the same resolution/secondsPerPoint and performs
+// merge if the dst has no null datapoints at the same timestamp.
+func (dstw *Whisper) retrieveAndMerge(srcw *Whisper) (pointsByArchives [][]dataPoint, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("retrieve_and_merge panics: %s\n%s", r, debug.Stack())
+		}
+	}()
+
+	// notable cases:
+	//   case:
+	//     src: 1m:30d,1h:10y
+	//     dst: 1m:60d,1h:20y
+	//   case:
+	//     src: 1m:30d,1h:10y
+	//     dst: 1m:60d,1h:5y,1d:100y
+	//   case:
+	//     src: 1m:30d,1h:10y
+	//     dst: 1m:60d,30m:1y,1h:10y
+	//   case:
+	//     src: 1m:30d,1h:10y
+	//     dst: 30s:30d,30m:1y,1h:10y
+	//   case:
+	//     src: 1m:30d,1h:10y
+	//     dst: 1s:4d,1m:60d,1h:20y
+	//   case:
+	//     src: 1m:30d,1h:10y
+	//     dst: 1s:4d,1m:20d,1h:20y
+
+	pointsByArchives = make([][]dataPoint, len(dstw.archives))
+	for i, dstArc := range dstw.archives {
+		// TODO: fix needed. should limit from/until to the smaller retentions, in src or in dst.
+		until := int(Now().Unix())
+		from := until - dstArc.MaxRetention()
+
+		var srcArc *archiveInfo
+		srcPoints := &TimeSeries{}
+		for _, srcArcx := range srcw.archives {
+			if srcArcx.secondsPerPoint != dstArc.secondsPerPoint {
+				continue
+			}
+
+			srcFrom := from
+			srcUtil := until
+			if dstArc.MaxRetention() > srcArcx.MaxRetention() {
+				srcFrom = until - srcArcx.MaxRetention()
+			}
+
+			// TODO: more thoughts needed for mix aggregation backfilling?
+			if dstw.aggregationMethod == Mix &&
+				srcArcx.aggregationSpec != nil &&
+				dstArc.aggregationSpec != nil &&
+				srcArcx.aggregationSpec.Method != dstArc.aggregationSpec.Method {
+				continue
+			}
+
+			srcArc = srcArcx
+			srcPoints, err = srcw.fetchFromArchive(srcArcx, srcFrom, srcUtil)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		dstPoints, err := dstw.fetchFromArchive(dstArc, from, until)
+		if err != nil {
+			return nil, err
+		}
+
+		if srcArc != nil {
+			// in theory, this error shouldn't be happening, but we want to
+			// be sure that we fetching and merging values from archives in
+			// the same resolution, i.e. secondsPerPoint.
+			if srcPoints.step != srcArc.secondsPerPoint || dstPoints.step != dstArc.secondsPerPoint {
+				return nil, fmt.Errorf("whisper.retrieveAndMerge: failed to retrieve values from proper archive. src:%s:%s dst:%s:%s", srcArc.Retention, durationString(srcPoints.step), dstArc.Retention, durationString(dstPoints.step))
+			}
+		}
+
+		var points = make([]dataPoint, len(dstPoints.values))
+		var pidx int
+		var srcOffset = (dstPoints.fromTime - srcPoints.fromTime) / dstPoints.step
+
+		// step 2
+		//   dst:  0 - 60
+		//   src: 32 - 60
+		// step 1
+		//   dst: 32 - 60
+		//   src:  0 - 60
+		for i, val := range dstPoints.values {
+			if !math.IsNaN(val) {
+			} else if srcArc != nil &&
+				srcArc.secondsPerPoint == dstArc.secondsPerPoint &&
+				0 <= i+srcOffset &&
+				i+srcOffset < len(srcPoints.values) &&
+				!math.IsNaN(srcPoints.values[i+srcOffset]) { // Only copy histories when resolution is the same
+				val = srcPoints.values[i+srcOffset]
+			} else {
+				continue
+			}
+
+			points[pidx].interval = dstPoints.fromTime + i*dstArc.secondsPerPoint
+			points[pidx].value = val
+			pidx++
+		}
+		points = points[:pidx]
+
+		pointsByArchives[i] = points
+	}
+
+	return pointsByArchives, nil
 }

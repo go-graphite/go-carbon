@@ -7,10 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-whisper"
+	"go.uber.org/zap"
 )
 
 type Metadata struct {
@@ -70,7 +69,7 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 	res := &metricFromDisk{
 		Metadata: Metadata{
-			ConsolidationFunc: w.AggregationMethod(),
+			ConsolidationFunc: titleizeAggrMethod(w.AggregationMethod().String()),
 			XFilesFactor:      w.XFilesFactor(),
 		},
 	}

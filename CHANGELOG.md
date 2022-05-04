@@ -8,6 +8,9 @@
 * Introducing `persiter.oooDiscardedPoints` metric #463
 * Fixing OOO discard metric overflow #464
 * refactoring `persiter.oooDiscardedPoints` metric #TBD
+* __Online Schema/Aggregation Migration__ #438
+* tool/persister_configs_differ and -check-policies flag in go-carbon #438
+
 ##### version 0.16.2
 * Another attempt to fix issues with release upload #449
 

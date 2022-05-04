@@ -145,6 +145,24 @@ compressed = false
 # automatically delete empty whisper file caused by edge cases like server reboot
 remove-empty-file = false
 
+# Enable online whisper file config migration.
+#
+# online-migration-rate means metrics per second to migrate.
+#
+# To partially enable default migration for only some matched rules in
+# storage-schemas.conf or storage-aggregation.conf, we can set
+# online-migration-global-scope = "-" and enable the migration in the config
+# files (more examples in deploy/storage-aggregation.conf and deploy/storage-schemas.conf).
+#
+# online-migration-global-scope can also be set any combination of the 3 rules
+# (xff,aggregationMethod,schema) as a csv string
+# like: "xff", "xff,aggregationMethod", "xff,schema",
+# or "xff,aggregationMethod,schema".
+#
+# online-migration = false
+# online-migration-rate = 5
+# online-migration-global-scope = "-"
+
 [cache]
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000
@@ -509,6 +527,92 @@ in a background.
 
 With settings above applied, best write-strategy to use is "noop"
 
+### Online config/schema migration
+
+What is online config/schema migration?
+
+it's a process in go-carbon to make sure that metrics are using the right
+configurations, if not, it would migrate it to using the right configs.
+
+In general, metrics are always produced with the right configuration specified in
+`storage-aggregation.conf` and `storage-schemas.conf` files. However, occasionally,
+we might realized that the aggregation method is incorrect for the newly produced
+metrics, or the original retention policy is too long or too short. And if we changed
+configs now, it would only apply on the new metrics. In order to make sure that
+the old metrics are using the right config, we have a few solutions:
+
+* [whisper-resizepy](https://github.com/graphite-project/whisper#whisper-resizepy), [whisper-set-aggregation-methodpy](https://github.com/graphite-project/whisper#whisper-set-aggregation-methodpy), etc.
+* Deleting the old metrics and lose the history data.
+
+Manual approach works fine if the data set is not very large. However, automation is always better.
+
+The `online config/schema migration` feature in go-carbon is created to addresses
+this issue.
+
+Although it's a nice feature, there are some caveats and limitations. Go-Carbon
+tries keep as much history intact as possible. However, depends on the policy
+changes, it might not always be possible to do so. Please be careful with the
+migration.
+
+**Notable caveats**:
+
+* When applying schema/retention changes, history is only copied if the resolution is the same (See some examples bellow).
+* When applying aggregation method changes, histories are not changed.
+* It's important to access the file size changes before applying new configs.
+
+Expected changes:
+
+| Policy Changes  | Temporary File  | History | File Size Changes  |
+|---|---|---|---|
+| XFiles Factor  | Not Needed  | No Changes  |  No Changes |
+| Aggregation Method  | Not Needed | No Changes | No Changes |
+| Schema Changes  | Required  | Depends  | Depends  |
+
+Some illustrations of schema changes:
+
+| Original Config | New Config | History | File Size Changes  |
+|---|---|---|---|
+|`1s:2d,1m:31d,1h:2y` | `1s:2d,1m:62d,1h:2y`|Copied in All Archives|Increase|
+|`1s:2d,1m:62d,1h:2y` | `1s:2d,1m:31d,1h:2y`|Copied in All Archives, and history in the second archive (`1m:62d`) is truncated to fit the new retention |Reduce|
+|`1s:2d,1m:31d` | `1s:2d,5m:31d`|History in first archive is copied, history in the second archive is dropped because the resolution is not the same|Reduce|
+|`1s:2d,5m:31d` | `1s:2d,1m:31d` |History in first archive is copied, history in the second archive is dropped because the resolution is not the same|Increase|
+
+#### Useful Tools/Commands
+
+`tool/persister_configs_differ`: persister_configs_differ is a tool that we can use to reason the impact of the config changes using file list cache and the new and old config files.
+
+```bash
+$ go build -o persister_configs_differ tool/persister_configs_differ
+$ ./persister_configs_differ  \
+    -file-list-cache carbonserver-file-list-cache.gzip  \
+    -new-aggregation new-storage-aggregation.conf  \
+    -new-schema new-storage-schemas.conf  \
+    -old-aggregation oldstorage-aggregation.conf  \
+    -old-schema old-storage-schemas.conf
+
+# example output:
+#
+#     schema-changes
+#     1d:10y->1m:14d,5m:60d,60m:2y 790
+#     1h:10y->1m:14d,5m:60d,60m:2y 1332
+#     1d:10y->1m:14d,30m:2y 2414
+#     1d:10y->1d:2y 844
+#     1m:30d,1h:1y,1d:10y->1m:14d,5m:60d,60m:2y 183730
+#     aggregation-changes
+#     average->sum 126650
+#     average->last 9715
+```
+
+`-check-policies` flag in `go-carbon`: we can use to see how many metrics are having inconsistent schemas or aggregation policies against the config file:
+
+```bash
+$ go-carbon -config /etc/go-carbon.conf -check-policies 600 -print-inconsistent-metrics
+
+# example output:
+#
+#     2022/05/03 17:28:26 stats: total=3498534 errors=0 (0.00%) brokenAggConfig=0 (0.00%) brokenSchemaConfig=0 (0.00%) inconsistencies.total=1278439 (36.54%) inconsistencies.aggregation=4703 (0.13%) inconsistencies.retention=1132673 (32.38%) inconsistencies.xff=146531 (4.19%)
+```
+
 ## Reported stats
 
 | metric | description |
@@ -531,9 +635,25 @@ With settings above applied, best write-strategy to use is "noop"
 | carbonserver.rejected\_too\_many\_requests | Rejected requests due to exceeding `max-inflight-requests` in carbonserver |
 | persister.maxUpdatesPerSecond | Maximum updates per second in persister |
 | persister.workers | Number of works in persister |
+| persister.updateOperations | Number of files are updated (gauge) |
+| persister.committedPoints | Numer of data points are saved (gauge) |
+| persister.created | Numer of new whisper files are crated (gauge) |
+| persister.throttledCreates | Number of throttled new whisper files (gauge) |
+| persister.maxCreatesPerSecond | Maximum new whisper files allowed to be created (constant) |
+| persister.extended | Number of cwhisper files being extended (gauge) |
+| persister.onlineMigration.total | Number of whisper files being migrated to the right config (gauge) |
+| persister.onlineMigration.schema | Number of whisper files being migrated to the right schema (gauge) |
+| persister.onlineMigration.xff | Number of whisper files being migrated to the right xff (gauge) |
+| persister.onlineMigration.aggregationMethod | Number of whisper files being migrated to the right aggregation method (gauge) |
+| persister.onlineMigration.physicalSizeChanges | Physical file size changes due to online config migration (gauge) |
+| persister.onlineMigration.logicalSizeChanges | Logical file size changes due to online config migration (gauge) |
 | runtime.GOMAXPROCS | Go runtime.GOMAXPROCS |
 | runtime.NumGoroutine | Go runtime.NumGoroutine |
 
+Note: metrics listed here is incomplete, please check the actual generated metrics through Graphite queries.
+
+Note: the interval of gauge values are specfied by `common.metric-interval`.
 
 ## Changelog
+
 You can look for changes in [CHANGELOG](CHANGELOG.md)

@@ -71,6 +71,10 @@ type whisperConfig struct {
 	Aggregation             *persister.WhisperAggregation
 	Quotas                  persister.WhisperQuotas
 	RemoveEmptyFile         bool `toml:"remove-empty-file"`
+
+	OnlineMigration            bool   `toml:"online-migration"`
+	OnlineMigrationRate        int    `toml:"online-migration-rate"` // metrics per second
+	OnlineMigrationGlobalScope string `toml:"online-migration-global-scope"`
 }
 
 type cacheConfig struct {
@@ -204,6 +208,10 @@ func NewConfig() *Config {
 			Sparse:              false,
 			FLock:               false,
 			HashFilenames:       true,
+
+			OnlineMigration:            false,
+			OnlineMigrationRate:        5,
+			OnlineMigrationGlobalScope: "",
 		},
 		Cache: cacheConfig{
 			MaxSize:       1000000,
