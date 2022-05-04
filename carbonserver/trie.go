@@ -323,7 +323,7 @@ type trieIndex struct {
 
 	// qau: Quota And Usage
 	qauMetrics   []points.Points
-	estimateSize func(metric string) (size, dataPoints int64)
+	estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)
 
 	throughputs    *throughputQuotaManager
 	resetFrequency time.Duration
@@ -451,7 +451,7 @@ func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
 	return false
 }
 
-func newTrie(fileExt string, estimateSize func(metric string) (size, dataPoints int64)) *trieIndex {
+func newTrie(fileExt string, estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)) *trieIndex {
 	meta := newDirMeta()
 	return &trieIndex{
 		root:         &trieNode{childrens: &[]*trieNode{}, meta: meta},
@@ -673,8 +673,7 @@ outer:
 	}
 	if !hasFileNode {
 		if ti.estimateSize != nil && logicalSize == 0 && physicalSize == 0 && dataPoints == 0 {
-			logicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
-			physicalSize = logicalSize
+			logicalSize, physicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
 		}
 		cur.addChild(newFileNode(ti.root.gen, logicalSize, physicalSize, dataPoints))
 		ti.fileCount++
@@ -2146,7 +2145,7 @@ mloop:
 		return false
 	}
 
-	size, dataPoints := ti.estimateSize(metric)
+	logicalSize, physicalSize, dataPoints := ti.estimateSize(metric)
 
 	var toThrottle bool
 	for i, n := range dirs {
@@ -2157,7 +2156,7 @@ mloop:
 		}
 
 		meta, ok := n.meta.(*dirMeta)
-		if !ok || meta.withinQuota(1, namespaces, size, size, dataPoints) {
+		if !ok || meta.withinQuota(1, namespaces, logicalSize, physicalSize, dataPoints) {
 			continue
 		}
 
