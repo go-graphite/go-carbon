@@ -577,6 +577,42 @@ Some illustrations of schema changes:
 |`1s:2d,1m:31d` | `1s:2d,5m:31d`|History in first archive is copied, history in the second archive is dropped because the resolution is not the same|Reduce|
 |`1s:2d,5m:31d` | `1s:2d,1m:31d` |History in first archive is copied, history in the second archive is dropped because the resolution is not the same|Increase|
 
+#### Useful Tools/Commands
+
+`tool/persister_configs_differ`: persister_configs_differ is a tool that we can use to reason the impact of the config changes using file list cache and the new and old config files.
+
+```bash
+$ go build -o persister_configs_differ tool/persister_configs_differ
+$ ./persister_configs_differ  \
+    -file-list-cache carbonserver-file-list-cache.gzip  \
+    -new-aggregation new-storage-aggregation.conf  \
+    -new-schema new-storage-schemas.conf  \
+    -old-aggregation oldstorage-aggregation.conf  \
+    -old-schema old-storage-schemas.conf
+
+# example output:
+#
+#     schema-changes
+#     1d:10y->1m:14d,5m:60d,60m:2y 790
+#     1h:10y->1m:14d,5m:60d,60m:2y 1332
+#     1d:10y->1m:14d,30m:2y 2414
+#     1d:10y->1d:2y 844
+#     1m:30d,1h:1y,1d:10y->1m:14d,5m:60d,60m:2y 183730
+#     aggregation-changes
+#     average->sum 126650
+#     average->last 9715
+```
+
+`-check-policies` flag in `go-carbon`: we can use to see how many metrics are having inconsistent schemas or aggregation policies against the config file:
+
+```bash
+$ go-carbon -config /etc/go-carbon.conf -check-policies 600 -print-inconsistent-metrics
+
+# example output:
+#
+#     2022/05/03 17:28:26 stats: total=3498534 errors=0 (0.00%) brokenAggConfig=0 (0.00%) brokenSchemaConfig=0 (0.00%) inconsistencies.total=1278439 (36.54%) inconsistencies.aggregation=4703 (0.13%) inconsistencies.retention=1132673 (32.38%) inconsistencies.xff=146531 (4.19%)
+```
+
 ## Reported stats
 
 | metric | description |

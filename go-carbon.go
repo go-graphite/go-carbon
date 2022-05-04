@@ -56,7 +56,7 @@ func main() {
 	checkConfig := flag.Bool("check-config", false, "Check config and exit")
 
 	// Scan metrics to check if there are mismatches against schema and aggregation configs.
-	checkPolicies := flag.Int("check-policies", 0, "Scan all whisper files for inconsistencies of schema and aggregation policies. Triggered with a positive value. The positive value is used for specifying the check speed (unit: metrics per second).")
+	checkPolicies := flag.Int("check-policies", 0, "Scan all whisper files for inconsistencies of schema and aggregation policies. Triggered with a positive value. The positive value is used for specifying the check speed (unit: metrics per second). Example value: 120.")
 	printInconsistentMetrics := flag.Bool("print-inconsistent-metrics", false, "Prints metric path with inconsistent configs, Used with -check-policies.")
 
 	printVersion := flag.Bool("version", false, "Print version")
