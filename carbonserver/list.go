@@ -3,7 +3,6 @@ package carbonserver
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
@@ -143,6 +142,8 @@ type ListQueryResult struct {
 	PhysicalSize int64
 	LogicalSize  int64
 
+	Limited bool
+
 	Metrics []ListMetricInfo
 }
 
@@ -156,14 +157,21 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 		return nil, errMetricsListEmpty
 	}
 
-	log.Println(strings.ReplaceAll(query, ".", "/"))
-	names, isFiles, nodes, err := fidx.trieIdx.query(strings.ReplaceAll(query, ".", "/"), limit, nil)
+	// TODO: support topk queries?
+
+	names, isFiles, nodes, limited, err := fidx.trieIdx.query(strings.ReplaceAll(query, ".", "/"), limit, nil)
 	if err != nil {
 		return nil, err
 	}
+	// WHY: it's impossible for /list_query api user to be aware that a
+	// query is limited in nodes lookup.
+	// Returning a Limited signal allows api user to decide that if it should
+	// make a separate a call or show a warning.
+	result.Limited = limited
 
 	for i, name := range names {
 		if len(result.Metrics) >= limit {
+			result.Limited = true
 			break
 		}
 
