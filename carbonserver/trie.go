@@ -1704,18 +1704,51 @@ func (q *QuotaUsage) String() string {
 	return fmt.Sprintf("dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throttled:%d", q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throttled)
 }
 
-// applyQuotas applies quotas on new and old dirnodes.
-// It can't be evoked with concurrent trieIndex.insert.
+// applyQuotas applies quotas on new and old dirnodes. It can't be evoked
+// concurrently during trieIndex.insert.
 //
-// TODO: * how to remove old quotas?
+// this method is not goroutine-safe.
 func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
 	ti.resetFrequency = resetFrequency // expect no runtime changes, so no atomic load needed here.
 
-	for _, quota := range quotas {
+	// caveat (why updateChecker is needed):
+	//
+	// the current quota config file is last-match-wins, and with heavy
+	// concurrent quota enforcement, go-carbon should only update quota
+	// info per node once, otherwise it risks of having confusing and
+	// incorrect quota enforcement.
+	//
+	// for example, suppose we have the following quota configs:
+	//
+	//     [sys.*]
+	//         throughput = 1024
+	//     [sys.app]
+	//         throughput = 4096
+	//
+	// if sys.app is updated twice using top down order in the quota config
+	// file, there is a window that sys.app would have a quota with
+	// throughput of 1024, and if the namespace happen to be receiving more
+	// than 1024 data points during that window, it would trigger incorrect
+	// throttling.
+	//
+	// TODO: with updateChecker, it's also straightforward now to support
+	// first-match-wins in quota config file, but we would have to
+	// introduce a new flat to ask for it for backward compatibility.
+	//
+	// TODO: add a test for this edge case.
+	updateChecker := map[string]bool{}
+
+	for j := len(quotas) - 1; j >= 0; j-- {
+		quota := quotas[j]
+
 		if quota.Pattern == "/" {
-			meta := ti.root.meta.(*dirMeta)
-			meta.update(quota)
-			ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+			if !updateChecker["/"] {
+				meta := ti.root.meta.(*dirMeta)
+				meta.update(quota)
+				ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+
+				updateChecker["/"] = true
+			}
 
 			continue
 		}
@@ -1736,12 +1769,16 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 				continue
 			}
 
-			ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
 			if c := strings.Count(paths[i], "."); c > ti.throughputs.depth {
 				ti.throughputs.depth = c
 			}
 
-			meta.update(quota)
+			if !updateChecker[paths[i]] {
+				ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+				meta.update(quota)
+
+				updateChecker[paths[i]] = true
+			}
 		}
 	}
 
