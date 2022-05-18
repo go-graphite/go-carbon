@@ -1448,7 +1448,7 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 
 	// faking failure of throughput usage reset
 	tpe := tindex.throughputs.load("sys.app.server-001")
-	tpe.resetAtv.Store(time.Now().Add(time.Minute * -2))
+	tpe.dpRecorder().resetAt = tpe.dpRecorder().resetAt.Add(time.Minute * -2)
 
 	// failed to perform thoughput usage reset timely, should not throttle metrics in this namespace
 	if tindex.throttle(&points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}, {}, {}, {}}}, false) {
