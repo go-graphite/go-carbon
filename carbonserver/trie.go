@@ -354,7 +354,6 @@ type dirMeta struct {
 	//
 	// TODO: save 8 bytes by using a pointer value?
 	quota atomic.Value
-
 	usage *QuotaUsage
 }
 
@@ -1534,10 +1533,9 @@ func (q *Quota) String() string {
 }
 
 type throughputUsagePerNamespace struct {
-	quotaInfos atomic.Value // throughputUsagePerNamespaceQuotaInfo
-
-	dataPointsv int64        // number of data points
-	resetAtv    atomic.Value // time.Time
+	// TODO: use generics when it's in stdlib: https://github.com/golang/go/issues/50860
+	quotaInfosv atomic.Value // *throughputUsagePerNamespaceQuotaInfo
+	dpRecorderv atomic.Value // *throughputUsageDataPointsRecoder
 }
 
 type throughputUsagePerNamespaceQuotaInfo struct {
@@ -1546,47 +1544,114 @@ type throughputUsagePerNamespaceQuotaInfo struct {
 	usage *QuotaUsage
 }
 
+// check comment in *throughputUsageDataPointsRecoder.offset.
+type throughputUsageDataPointsRecoder struct {
+	dataPoints int64
+	resetAt    time.Time
+}
+
+func newThroughputUsageDataPointsRecorder() *throughputUsageDataPointsRecoder {
+	return &throughputUsageDataPointsRecoder{resetAt: time.Now()}
+}
+
 func newThroughputUsagePerNamespace(gen uint8, quota *Quota, quotaUsage *QuotaUsage) *throughputUsagePerNamespace {
 	var tp throughputUsagePerNamespace
-	tp.quotaInfos.Store(throughputUsagePerNamespaceQuotaInfo{
+	tp.quotaInfosv.Store(&throughputUsagePerNamespaceQuotaInfo{
 		gen:   gen,
 		quota: quota,
 		usage: quotaUsage,
 	})
-	tp.resetAtv.Store(time.Now())
+	tp.dpRecorderv.Store(newThroughputUsageDataPointsRecorder())
 
 	return &tp
 }
 
+func (q *throughputUsagePerNamespace) quotaInfos() *throughputUsagePerNamespaceQuotaInfo {
+	return q.quotaInfosv.Load().(*throughputUsagePerNamespaceQuotaInfo)
+}
+
 func (q *throughputUsagePerNamespace) quota() *Quota {
-	return q.quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo).quota
+	return q.quotaInfos().quota
 }
+
 func (q *throughputUsagePerNamespace) quotaUsage() *QuotaUsage {
-	return q.quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo).usage
+	return q.quotaInfos().usage
 }
 
-func (q *throughputUsagePerNamespace) dataPoints() int64  { return atomic.LoadInt64(&q.dataPointsv) }
-func (q *throughputUsagePerNamespace) resetAt() time.Time { return q.resetAtv.Load().(time.Time) }
-func (q *throughputUsagePerNamespace) increase(x int)     { atomic.AddInt64(&q.dataPointsv, int64(x)) }
-func (q *throughputUsagePerNamespace) offset(v int64) int64 {
-	q.resetAtv.Store(time.Now())
-	return atomic.AddInt64(&q.dataPointsv, -v)
+func (q *throughputUsagePerNamespace) dpRecorder() *throughputUsageDataPointsRecoder {
+	return q.dpRecorderv.Load().(*throughputUsageDataPointsRecoder)
 }
 
-func (q *throughputUsagePerNamespace) withinQuota(c int, resetFrequency time.Duration) bool {
+func (q *throughputUsagePerNamespace) increase(x int64) {
+	atomic.AddInt64(&q.dpRecorder().dataPoints, x)
+}
+
+// offset tries to avoid a potential over-enforcement due to a race condition by
+// updating resetAt and dataPoints with struct wrapper
+// (i.e. throughputUsagePerNamespace).
+//
+// if go-carbon updates resetAt and dataPoints at the same time, there is a
+// potential edge case might be triggered:
+//
+// supposed quota is 1000:
+//
+// throughputUsagePerNamespace.offset  throughputUsagePerNamespace.withinQuota
+// dataPoints -> 1024
+// resetAt    -> now-1m
+//                                     dataPoints -> 1024
+// dataPoints -> 0
+// resetAt    -> now
+//                                     resetAt    -> now
+//
+//                                     incorrect quota over enforcement as
+//                                     dataPoints is already 0 by the time
+//                                     withinQuota retrieves resetAt
+//
+// the downside of this approach is that go-carbon might still be updating on
+// the counter in the replaced recorder, causing some mis-report or
+// under-enforcement.
+//
+// under-enforcement is favored here.
+func (q *throughputUsagePerNamespace) offset() *throughputUsageDataPointsRecoder {
+	oldRecorder := q.dpRecorder()
+	q.dpRecorderv.Store(newThroughputUsageDataPointsRecorder())
+
+	return oldRecorder
+}
+
+// the current throughput enforcement is largely a fixed window based rate
+// limiting solution, with some gentle processing around the edge of reset
+// timer: when go-carbon fails to reset the counter timely (specified by
+// resetFrequency), it would calculate the average points per second and use it
+// get the full quota since the last reset timestamp
+// (avg_pps_quota * seconds_since_last_reset), and it only drops data if the
+// current usage is above that dynamically calculated result.
+func (q *throughputUsagePerNamespace) withinQuota(c int64, resetFrequency time.Duration) bool {
 	quota := q.quota().Throughput
-	usage := q.dataPoints()
-	if quota > 0 && usage+int64(c) > quota {
+	recorder := q.dpRecorder()
+	usage := recorder.dataPoints
+	if quota > 0 && usage+c > quota {
 		// slow path: ensure if it isn't due to untimely usage reset
-		useconds := int64(time.Since(q.resetAt()).Seconds())
-		rseconds := int64(resetFrequency.Seconds())
+		//
+		// why float64: to keep avg per data points more accurate, for
+		// example, 61/60 could be rounded to 1 with int64.
+		rseconds := float64(time.Since(recorder.resetAt).Seconds())
+		fseconds := float64(resetFrequency.Seconds())
 
-		if useconds < rseconds || rseconds == 0 || usage == 0 {
+		// if for some really bad reason resetFrequency is 0, go-carbon
+		// would accept the data.
+		if fseconds == 0 {
+			return true
+		}
+
+		// if the reset window is still within resetFrequency, go-carbon
+		// could safely drop the data.
+		if rseconds < fseconds {
 			return false
 		}
 
 		// quota per seconds * elapsed time since last usage reset
-		if usage > quota*useconds/rseconds {
+		if float64(usage) > float64(quota)*(rseconds/fseconds) {
 			return false
 		}
 	}
@@ -1621,7 +1686,7 @@ func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerName
 		return
 	}
 
-	v.(*throughputUsagePerNamespace).quotaInfos.Store(tuq.quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo))
+	v.(*throughputUsagePerNamespace).quotaInfosv.Store(tuq.quotaInfos())
 }
 
 // NOTE: Throughput is checked separately by throughputQuotaManager
@@ -1639,18 +1704,51 @@ func (q *QuotaUsage) String() string {
 	return fmt.Sprintf("dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throttled:%d", q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throttled)
 }
 
-// applyQuotas applies quotas on new and old dirnodes.
-// It can't be evoked with concurrent trieIndex.insert.
+// applyQuotas applies quotas on new and old dirnodes. It can't be evoked
+// concurrently during trieIndex.insert.
 //
-// TODO: * how to remove old quotas?
+// this method is not goroutine-safe.
 func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
 	ti.resetFrequency = resetFrequency // expect no runtime changes, so no atomic load needed here.
 
-	for _, quota := range quotas {
+	// caveat (why updateChecker is needed):
+	//
+	// the current quota config file is last-match-wins, and with heavy
+	// concurrent quota enforcement, go-carbon should only update quota
+	// info per node once, otherwise it risks of having confusing and
+	// incorrect quota enforcement.
+	//
+	// for example, suppose we have the following quota configs:
+	//
+	//     [sys.*]
+	//         throughput = 1024
+	//     [sys.app]
+	//         throughput = 4096
+	//
+	// if sys.app is updated twice using top down order in the quota config
+	// file, there is a window that sys.app would have a quota with
+	// throughput of 1024, and if the namespace happen to be receiving more
+	// than 1024 data points during that window, it would trigger incorrect
+	// throttling.
+	//
+	// TODO: with updateChecker, it's also straightforward now to support
+	// first-match-wins in quota config file, but we would have to
+	// introduce a new flat to ask for it for backward compatibility.
+	//
+	// TODO: add a test for this edge case.
+	updateChecker := map[string]bool{}
+
+	for j := len(quotas) - 1; j >= 0; j-- {
+		quota := quotas[j]
+
 		if quota.Pattern == "/" {
-			meta := ti.root.meta.(*dirMeta)
-			meta.update(quota)
-			ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+			if !updateChecker["/"] {
+				meta := ti.root.meta.(*dirMeta)
+				meta.update(quota)
+				ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+
+				updateChecker["/"] = true
+			}
 
 			continue
 		}
@@ -1671,18 +1769,22 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 				continue
 			}
 
-			ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
 			if c := strings.Count(paths[i], "."); c > ti.throughputs.depth {
 				ti.throughputs.depth = c
 			}
 
-			meta.update(quota)
+			if !updateChecker[paths[i]] {
+				ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
+				meta.update(quota)
+
+				updateChecker[paths[i]] = true
+			}
 		}
 	}
 
 	// delete stale entries
 	ti.throughputs.entries.Range(func(k, v interface{}) bool {
-		if v.(*throughputUsagePerNamespace).quotaInfos.Load().(throughputUsagePerNamespaceQuotaInfo).gen != ti.root.gen {
+		if v.(*throughputUsagePerNamespace).quotaInfos().gen != ti.root.gen {
 			ti.throughputs.entries.Delete(k)
 		}
 		return true
@@ -1755,13 +1857,13 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 
 					var throughput int64
 					if te := throughputs.load(tname); te != nil {
-						throughput = te.dataPoints()
-						te.offset(throughput)
+						throughput = te.offset().dataPoints
 					}
 
-					ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput)
-
 					throttled := atomic.LoadInt64(&usage.Throttled)
+
+					ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput, throttled)
+
 					if throttled > 0 {
 						atomic.AddInt64(&usage.Throttled, -throttled)
 					}
@@ -1827,11 +1929,11 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 	return
 }
 
-func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode, throughput int64) {
+func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode, throughput, throttled int64) {
 	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
 	// file extension.
 	if len(name) >= 250 {
-		// skipcq: GSC-G401
+		// skipcq: GSC-G401, GO-S1023
 		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name)))
 	}
 
@@ -1942,7 +2044,7 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	ti.qauMetrics = append(ti.qauMetrics, points.Points{
 		Metric: fmt.Sprintf("throttle.%s%s", prefix, name),
 		Data: []points.Point{{
-			Value: float64(atomic.LoadInt64(&meta.usage.Throttled)),
+			Value: float64(throttled),
 		}},
 	})
 }
@@ -2012,13 +2114,13 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string { // skipcq: SCC-U10
 
 // skipcq: RVV-A0005
 func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
-	throughput := int64(len(ps.Data))
-	if throughput == 0 {
+	dataLen := int64(len(ps.Data))
+	if dataLen == 0 {
 		// WHY: in theory, this should not happen. But in cases where
 		// go-carbon receives a metric without data points, it should
 		// still be counted as one data point, for throttling and
 		// throughput accounting.
-		throughput = 1
+		dataLen = 1
 	}
 
 	// WHY: hashes work much faster than the trie tree working.
@@ -2038,15 +2140,20 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		// over-consumption of quota, which itself is arguably as bad
 		// as full throttling.
 
+		tus := make([]*throughputUsagePerNamespace, 0, 8)
+
 		// TODO: should include in throughputs.depth and simplify the code here a bit.
 		// check root throughput capacity
 		if v := throughputs.load("/"); v != nil {
-			if v.quota().DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data), ti.resetFrequency) {
-				atomic.AddInt64(&v.quotaUsage().Throttled, throughput)
-				return true
+			if !v.withinQuota(dataLen, ti.resetFrequency) {
+				atomic.AddInt64(&v.quotaUsage().Throttled, dataLen)
+
+				if v.quota().DroppingPolicy != QDPNone {
+					return true
+				}
 			}
 
-			v.increase(len(ps.Data))
+			tus = append(tus, v)
 		}
 
 		for i, d := 0, 0; d <= throughputs.depth && i < len(ps.Metric); i++ {
@@ -2056,14 +2163,26 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 
 			ns := ps.Metric[:i]
 			if v := throughputs.load(ns); v != nil {
-				if v.quota().DroppingPolicy != QDPNone && !v.withinQuota(len(ps.Data), ti.resetFrequency) {
-					atomic.AddInt64(&v.quotaUsage().Throttled, throughput)
-					return true
+				if !v.withinQuota(dataLen, ti.resetFrequency) {
+					atomic.AddInt64(&v.quotaUsage().Throttled, dataLen)
+
+					if v.quota().DroppingPolicy != QDPNone {
+						return true
+					}
 				}
 
-				v.increase(len(ps.Data))
+				tus = append(tus, v)
 			}
 			d++
+		}
+
+		// batch increasing the counter to avoid potential
+		// over-throttling/accounting in parent nodes as the data is
+		// later on dropped due to lower child quotas.
+		//
+		// TODO: add a test
+		for _, tu := range tus {
+			tu.increase(dataLen)
 		}
 	}
 
@@ -2162,7 +2281,7 @@ mloop:
 		}
 
 		if meta.usage != nil {
-			atomic.AddInt64(&meta.usage.Throttled, throughput)
+			atomic.AddInt64(&meta.usage.Throttled, dataLen)
 		}
 
 		if quota, ok := meta.quota.Load().(*Quota); ok && quota != nil && quota.DroppingPolicy == QDPNone {

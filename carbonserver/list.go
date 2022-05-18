@@ -3,7 +3,6 @@ package carbonserver
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
@@ -156,7 +155,6 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 		return nil, errMetricsListEmpty
 	}
 
-	log.Println(strings.ReplaceAll(query, ".", "/"))
 	names, isFiles, nodes, err := fidx.trieIdx.query(strings.ReplaceAll(query, ".", "/"), limit, nil)
 	if err != nil {
 		return nil, err
