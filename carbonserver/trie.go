@@ -1933,7 +1933,7 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
 	// file extension.
 	if len(name) >= 250 {
-		// skipcq: GSC-G401
+		// skipcq: GSC-G401, GO-S1023
 		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name)))
 	}
 
