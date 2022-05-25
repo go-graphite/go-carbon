@@ -1590,8 +1590,8 @@ func (q *throughputUsagePerNamespace) increase(x int64) {
 // updating resetAt and dataPoints with struct wrapper
 // (i.e. throughputUsagePerNamespace).
 //
-// if go-carbon updates resetAt and dataPoints at the same time, there is a
-// potential edge case might be triggered:
+// if go-carbon updates resetAt and dataPoints separately, there is a potential
+// edge case might be triggered:
 //
 // supposed quota is 1000:
 //
@@ -1734,13 +1734,10 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	// TODO: with updateChecker, it's also straightforward now to support
 	// first-match-wins in quota config file, but we would have to
 	// introduce a new flat to ask for it for backward compatibility.
-	//
-	// TODO: add a test for this edge case.
 	updateChecker := map[string]bool{}
 
 	for j := len(quotas) - 1; j >= 0; j-- {
 		quota := quotas[j]
-
 		if quota.Pattern == "/" {
 			if !updateChecker["/"] {
 				meta := ti.root.meta.(*dirMeta)
@@ -2179,8 +2176,6 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		// batch increasing the counter to avoid potential
 		// over-throttling/accounting in parent nodes as the data is
 		// later on dropped due to lower child quotas.
-		//
-		// TODO: add a test
 		for _, tu := range tus {
 			tu.increase(dataLen)
 		}
