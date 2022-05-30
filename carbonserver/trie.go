@@ -329,6 +329,14 @@ type trieIndex struct {
 	resetFrequency time.Duration
 }
 
+func (ti *trieIndex) setResetFrequency(f time.Duration) {
+	atomic.StoreInt64((*int64)(&ti.resetFrequency), int64(f))
+}
+
+func (ti *trieIndex) getResetFrequency() time.Duration {
+	return time.Duration(atomic.LoadInt64((*int64)(&ti.resetFrequency)))
+}
+
 // note: root and file leaf node has a nil c, mainly used in trieNode.fullPath
 type trieNode struct {
 	c         []byte // TODO: look for a more compact/compressed formats
@@ -1660,7 +1668,7 @@ func (q *throughputUsagePerNamespace) withinQuota(c int64, resetFrequency time.D
 }
 
 type throughputQuotaManager struct {
-	depth int
+	depth int64
 
 	// key:   materialized metric path of quota glob query specified in quota config
 	// value: *throughputUsagePerNamespace
@@ -1689,6 +1697,9 @@ func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerName
 	v.(*throughputUsagePerNamespace).quotaInfosv.Store(tuq.quotaInfos())
 }
 
+func (tu *throughputQuotaManager) setDepth(depth int) { atomic.AddInt64(&tu.depth, int64(depth)) }
+func (tu *throughputQuotaManager) getDepth() int      { return int(atomic.LoadInt64(&tu.depth)) }
+
 // NOTE: Throughput is checked separately by throughputQuotaManager
 type QuotaUsage struct {
 	Namespaces   int64 // top level subdirectories
@@ -1709,7 +1720,7 @@ func (q *QuotaUsage) String() string {
 //
 // this method is not goroutine-safe.
 func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
-	ti.resetFrequency = resetFrequency // expect no runtime changes, so no atomic load needed here.
+	ti.setResetFrequency(resetFrequency)
 
 	// caveat (why updateChecker is needed):
 	//
@@ -1766,8 +1777,8 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 				continue
 			}
 
-			if c := strings.Count(paths[i], "."); c > ti.throughputs.depth {
-				ti.throughputs.depth = c
+			if c := strings.Count(paths[i], "."); c > ti.throughputs.getDepth() {
+				ti.throughputs.setDepth(c)
 			}
 
 			if !updateChecker[paths[i]] {
@@ -2138,11 +2149,12 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		// as full throttling.
 
 		tus := make([]*throughputUsagePerNamespace, 0, 8)
+		resetFreq := ti.getResetFrequency()
 
 		// TODO: should include in throughputs.depth and simplify the code here a bit.
 		// check root throughput capacity
 		if v := throughputs.load("/"); v != nil {
-			if !v.withinQuota(dataLen, ti.resetFrequency) {
+			if !v.withinQuota(dataLen, resetFreq) {
 				atomic.AddInt64(&v.quotaUsage().Throttled, dataLen)
 
 				if v.quota().DroppingPolicy != QDPNone {
@@ -2153,14 +2165,14 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 			tus = append(tus, v)
 		}
 
-		for i, d := 0, 0; d <= throughputs.depth && i < len(ps.Metric); i++ {
+		for i, d, maxd := 0, 0, throughputs.getDepth(); d <= maxd && i < len(ps.Metric); i++ {
 			if ps.Metric[i] != '.' {
 				continue
 			}
 
 			ns := ps.Metric[:i]
 			if v := throughputs.load(ns); v != nil {
-				if !v.withinQuota(dataLen, ti.resetFrequency) {
+				if !v.withinQuota(dataLen, resetFreq) {
 					atomic.AddInt64(&v.quotaUsage().Throttled, dataLen)
 
 					if v.quota().DroppingPolicy != QDPNone {
