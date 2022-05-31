@@ -383,7 +383,7 @@ GATHER:
 				zap.String("reason", "can't expand globs"),
 				zap.Errors("errors", errors),
 			)
-			return nil, fmt.Errorf("find failed, can't expand globs")
+			return nil, fmt.Errorf("find failed, can't expand globs: %v", errors)
 		} else {
 			logger.Warn("find partly failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
