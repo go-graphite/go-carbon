@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -459,6 +460,23 @@ func (app *App) Start(version string) (err error) {
 			}
 		}
 
+		apiPerPathRateLimiters := map[string]*carbonserver.ApiPerPathRatelimiter{}
+		for _, rl := range conf.Carbonserver.APIPerPathRateLimiters {
+			var timeout time.Duration
+			if rl.RequestTimeout != nil {
+				timeout = rl.RequestTimeout.Value()
+			}
+			apiPerPathRateLimiters[rl.Path] = carbonserver.NewApiPerPathRatelimiter(rl.MaxInflightRequests, timeout)
+		}
+		var globQueryRateLimiters []*carbonserver.GlobQueryRateLimiter
+		for _, rl := range conf.Carbonserver.HeavyGlobQueryRateLimiters {
+			gqrl, err := carbonserver.NewGlobQueryRateLimiter(rl.Pattern, rl.MaxInflightRequests)
+			if err != nil {
+				return fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %s", rl.Pattern, err)
+			}
+			globQueryRateLimiters = append(globQueryRateLimiters, gqrl)
+		}
+
 		// TODO: refactor: do not use var name the same as pkg name
 		carbonserver := carbonserver.NewCarbonserverListener(core.Get)
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
@@ -490,6 +508,16 @@ func (app *App) Start(version string) (err error) {
 
 		carbonserver.SetMaxInflightRequests(conf.Carbonserver.MaxInflightRequests)
 		carbonserver.SetNoServiceWhenIndexIsNotReady(conf.Carbonserver.NoServiceWhenIndexIsNotReady)
+
+		if conf.Carbonserver.RequestTimeout != nil {
+			carbonserver.SetRequestTimeout(conf.Carbonserver.RequestTimeout.Value())
+		}
+		if len(apiPerPathRateLimiters) > 0 {
+			carbonserver.SetAPIPerPathRateLimiter(apiPerPathRateLimiters)
+		}
+		if len(globQueryRateLimiters) > 0 {
+			carbonserver.SetHeavyGlobQueryRateLimiters(globQueryRateLimiters)
+		}
 
 		if app.Config.Whisper.Quotas != nil {
 			if !conf.Carbonserver.ConcurrentIndex || conf.Carbonserver.RealtimeIndex <= 0 {

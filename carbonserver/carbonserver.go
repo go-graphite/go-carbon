@@ -30,6 +30,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -213,6 +214,7 @@ type CarbonserverListener struct {
 	readTimeout       time.Duration
 	idleTimeout       time.Duration
 	writeTimeout      time.Duration
+	requestTimeout    time.Duration
 	whisperData       string
 	buckets           int
 	maxGlobs          int
@@ -268,8 +270,11 @@ type CarbonserverListener struct {
 
 	interfalInfoCallbacks map[string]func() map[string]interface{}
 
-	MaxInflightRequests          uint64
+	// resource control
+	MaxInflightRequests          uint64 // TODO: to deprecate
 	NoServiceWhenIndexIsNotReady bool
+	apiPerPathRatelimiter        map[string]*ApiPerPathRatelimiter
+	globQueryRateLimiters        []*GlobQueryRateLimiter
 }
 
 type prometheus struct {
@@ -468,7 +473,8 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 			returnedMetric:   func() {},
 			returnedPoint:    func(int) {},
 		},
-		quotaAndUsageMetrics: make(chan []points.Points, 1),
+		quotaAndUsageMetrics:  make(chan []points.Points, 1),
+		apiPerPathRatelimiter: map[string]*ApiPerPathRatelimiter{},
 	}
 }
 
@@ -510,6 +516,9 @@ func (listener *CarbonserverListener) SetIdleTimeout(idleTimeout time.Duration) 
 }
 func (listener *CarbonserverListener) SetWriteTimeout(writeTimeout time.Duration) {
 	listener.writeTimeout = writeTimeout
+}
+func (listener *CarbonserverListener) SetRequestTimeout(requestTimeout time.Duration) {
+	listener.requestTimeout = requestTimeout
 }
 func (listener *CarbonserverListener) SetCompressed(compressed bool) {
 	listener.compressed = compressed
@@ -582,6 +591,12 @@ func (listener *CarbonserverListener) SetMaxInflightRequests(max uint64) {
 }
 func (listener *CarbonserverListener) SetNoServiceWhenIndexIsNotReady(no bool) {
 	listener.NoServiceWhenIndexIsNotReady = no
+}
+func (listener *CarbonserverListener) SetHeavyGlobQueryRateLimiters(rls []*GlobQueryRateLimiter) {
+	listener.globQueryRateLimiters = rls
+}
+func (listener *CarbonserverListener) SetAPIPerPathRateLimiter(rls map[string]*ApiPerPathRatelimiter) {
+	listener.apiPerPathRatelimiter = rls
 }
 
 // skipcq: RVV-B0011
@@ -1170,6 +1185,44 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		}
 	}()
 
+	// Rate limit heavy globbing queries like: *.*.*.*keyword*.
+	//
+	// Why: it's expensive to scan the whole index while looking for
+	// keywords, especially for trie and file system glob.
+	for _, rl := range listener.globQueryRateLimiters {
+		if !rl.pattern.MatchString(query) {
+			continue
+		}
+		if cap(rl.maxInflightRequests) == 0 {
+			err := fmt.Errorf("rejected by query rate limiter: %s", rl.pattern.String())
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, err}
+			return
+		}
+
+		rl.maxInflightRequests <- struct{}{}
+		defer func() {
+			<-rl.maxInflightRequests
+		}()
+
+		// why: no need to continue execution if the request is already timeout.
+		select {
+		case <-ctx.Done():
+			switch ctx.Err() {
+			case context.DeadlineExceeded:
+				listener.prometheus.timeoutRequest()
+			case context.Canceled:
+				listener.prometheus.cancelledRequest()
+			}
+
+			err := fmt.Errorf("time out due to heavy glob query rate limiter: %s", rl.pattern.String())
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, err}
+			return
+		default:
+		}
+
+		break
+	}
+
 	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
 	defer func(start time.Time) {
@@ -1540,6 +1593,18 @@ func (listener *CarbonserverListener) initStatsDB() error {
 
 func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.HandlerFunc {
 	return func(wr http.ResponseWriter, req *http.Request) {
+		// Can't use http.TimeoutHandler here due to supporting per-path timeout
+		if ratelimiter, ok := listener.apiPerPathRatelimiter[req.URL.Path]; listener.requestTimeout > 0 || (ok && ratelimiter.timeout > 0) {
+			timeout := listener.requestTimeout
+			if ok && ratelimiter.timeout > 0 {
+				timeout = ratelimiter.timeout
+			}
+
+			ctx, cancel := context.WithTimeout(req.Context(), timeout)
+			defer cancel()
+			req = req.WithContext(ctx)
+		}
+
 		t0 := time.Now()
 		ctx := req.Context()
 		accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
@@ -1558,10 +1623,47 @@ func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.
 			return
 		}
 
+		if ratelimiter, ok := listener.apiPerPathRatelimiter[req.URL.Path]; ok {
+			if cap(ratelimiter.maxInflightRequests) == 0 {
+				http.Error(wr, "Bad request (blocked by api per path rate limiter)", http.StatusBadRequest)
+				return
+			}
+
+			ratelimiter.maxInflightRequests <- struct{}{}
+			defer func() {
+				select {
+				case <-ratelimiter.maxInflightRequests:
+				default:
+				}
+			}()
+
+			// why: if the request is already timeout, there is no
+			// need to resume execution.
+			select {
+			case <-ctx.Done():
+				switch ctx.Err() {
+				case context.DeadlineExceeded:
+					listener.prometheus.timeoutRequest()
+				case context.Canceled:
+					listener.prometheus.cancelledRequest()
+				}
+
+				accessLogger.Error("request timeout due to per url rate limiting",
+					zap.Duration("runtime_seconds", time.Since(t0)),
+					zap.String("reason", "timeout due to per url rate limiting"),
+					zap.Int("http_code", http.StatusRequestTimeout),
+				)
+				http.Error(wr, "Bad request (timeout due to maxInflightRequests)", http.StatusRequestTimeout)
+				return
+			default:
+			}
+		}
+
+		// TODO: to deprecate as it's replaced by per-path rate limiting?
+		//
+		// rate limit inflight requests
 		inflights := atomic.AddUint64(&listener.metrics.InflightRequests, 1)
 		defer atomic.AddUint64(&listener.metrics.InflightRequests, ^uint64(0))
-
-		// rate limit inflight requests
 		if listener.MaxInflightRequests > 0 && inflights > listener.MaxInflightRequests {
 			atomic.AddUint64(&listener.metrics.RejectedTooManyRequests, 1)
 
@@ -1601,7 +1703,6 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
 
 	carbonserverMux := http.NewServeMux()
-
 	wrapHandler := func(h http.HandlerFunc, handlerStatusCodes []uint64) http.HandlerFunc {
 		return httputil.TrackConnections(
 			httputil.TimeHandler(
@@ -1615,6 +1716,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 			),
 		)
 	}
+
 	carbonserverMux.HandleFunc("/_internal/capabilities/", wrapHandler(listener.capabilityHandler, statusCodes["capabilities"]))
 	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler, statusCodes["find"]))
 	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler, statusCodes["list"]))
@@ -1878,4 +1980,30 @@ func (listener *CarbonserverListener) RegisterInternalInfoHandler(name string, f
 		listener.interfalInfoCallbacks = map[string]func() map[string]interface{}{}
 	}
 	listener.interfalInfoCallbacks[name] = f
+}
+
+type GlobQueryRateLimiter struct {
+	pattern             *regexp.Regexp
+	maxInflightRequests chan struct{}
+}
+
+func NewGlobQueryRateLimiter(pattern string, max uint) (*GlobQueryRateLimiter, error) {
+	exp, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+
+	return &GlobQueryRateLimiter{pattern: exp, maxInflightRequests: make(chan struct{}, max)}, nil
+}
+
+type ApiPerPathRatelimiter struct {
+	maxInflightRequests chan struct{}
+	timeout             time.Duration
+}
+
+func NewApiPerPathRatelimiter(maxInflightRequests uint, timeout time.Duration) *ApiPerPathRatelimiter {
+	return &ApiPerPathRatelimiter{
+		maxInflightRequests: make(chan struct{}, maxInflightRequests),
+		timeout:             timeout,
+	}
 }

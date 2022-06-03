@@ -108,6 +108,7 @@ type carbonserverConfig struct {
 	ReadTimeout       *Duration `toml:"read-timeout"`
 	IdleTimeout       *Duration `toml:"idle-timeout"`
 	WriteTimeout      *Duration `toml:"write-timeout"`
+	RequestTimeout    *Duration `toml:"request-timeout"`
 	ScanFrequency     *Duration `toml:"scan-frequency"`
 	QueryCacheEnabled bool      `toml:"query-cache-enabled"`
 	QueryCacheSizeMB  int       `toml:"query-cache-size-mb"`
@@ -132,8 +133,24 @@ type carbonserverConfig struct {
 
 	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
 
-	MaxInflightRequests          uint64 `toml:"max-inflight-requests"`
-	NoServiceWhenIndexIsNotReady bool   `toml:"no-service-when-index-is-not-ready"`
+	NoServiceWhenIndexIsNotReady bool `toml:"no-service-when-index-is-not-ready"`
+
+	// TODO: depcreate, replaced by APIPerPathRateLimiters
+	MaxInflightRequests uint64 `toml:"max-inflight-requests"`
+
+	// Only applied on filtering phase where it might potentially causes
+	// high cpu and memory consumption due to matching over the whole index
+	// or file tree.
+	HeavyGlobQueryRateLimiters []struct {
+		Pattern             string `toml:"pattern"`
+		MaxInflightRequests uint   `toml:"max-inflight-requests"`
+	} `toml:"heavy-glob-query-rate-limiters"`
+
+	APIPerPathRateLimiters []struct {
+		Path                string    `toml:"path"`
+		MaxInflightRequests uint      `toml:"max-inflight-requests"`
+		RequestTimeout      *Duration `toml:"request-timeout"`
+	} `toml:"api-per-path-rate-limiters"`
 }
 
 type pprofConfig struct {

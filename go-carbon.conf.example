@@ -236,6 +236,8 @@ metrics-as-counters = false
 # Read and Write timeouts for HTTP server
 read-timeout = "60s"
 write-timeout = "60s"
+# Request timeout for each API call
+request-timeout = "60s"
 # Enable /render cache, it will cache the result for 1 minute
 query-cache-enabled = true
 # 0 for unlimited
@@ -346,6 +348,64 @@ internal-stats-dir = ""
 # Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile. 
 # To disable this feature, leave the list blank
 stats-percentiles = [99, 98, 95, 75, 50]
+
+# heavy-glob-query-rate-limiters is a narrow control against queries that might
+# causes high cpu and memory consumption due to matching over too many metrics
+# or nodes at the same time, queries like: "*.*.*.*.*.*.*.*.*keyword*". For
+# these types of queries, trigram might be able to handle it better, but for
+# trie and filesystem glob, it's too expensive.
+#
+# pattern is a Go regular expression: https://pkg.go.dev/regexp/syntax.
+#
+# When max-inflight-requests is set to 0, it means instant rejection.
+# When max-inflight-requests is set as a positive integer and when there are too
+# many concurrent requests, it would block/delay the request until the previous ones
+# are completed.
+#
+# The configs are order sensitive and are applied top down. The current
+# implementation is in an O(n) so it's advised not to apply too many rules here
+# as they are applied on all the queries.
+#
+# [[carbonserver.heavy-glob-query-rate-limiters]]
+# pattern = "^(\*\.){5,}"
+# max-inflight-requests = 1
+#
+# [[carbonserver.heavy-glob-query-rate-limiters]]
+# pattern = "^sys(\*\.){7,}"
+# max-inflight-requests = 0
+
+# api-per-path-rate-limiters are used for strict api call rate limiting. All
+# registered API paths (see carbonserver.Listen for a full list) can be
+# controlled separately here:
+#
+#     "/_internal/capabilities/"
+#     "/metrics/find/"
+#     "/metrics/list/"
+#     "/metrics/list_query/"
+#     "/metrics/details/"
+#     "/render/"
+#     "/info/"
+#     "/forcescan"
+#     "/admin/quota"
+#     "/admin/info"
+#     "/robots.txt"
+#     ...
+#
+# When max-inflight-requests is set to 0, it means instant rejection.
+# When max-inflight-requests is set as a positive integer and when there are too
+# many concurrent requests, it would block/delay the request until the previous
+# ones are completed.
+#
+# request-timeout would override the global request-timeout.
+#
+# [[carbonserver.api-per-path-rate-limiters]]
+# path = "/metrics/list/"
+# max-inflight-requests = 1
+# request-timeout = "600s"
+#
+# [[carbonserver.api-per-path-rate-limiters]]
+# path = "/metrics/list_query/"
+# max-inflight-requests = 3
 
 [dump]
 # Enable dump/restore function on USR2 signal
