@@ -1477,3 +1477,111 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 		t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(wants))
 	}
 }
+
+func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
+	tindex := newTrie(
+		".wsp",
+		func(metric string) (size, dataPoints int64) {
+			return 12 * 1024, 1024
+		},
+	)
+
+	tindex.root.gen++
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-003/cpu.wsp", 0, 0, 0)
+	tindex.prune()
+
+	endc := make(chan struct{})
+	loopCount := 10240
+
+	go func() {
+		for {
+			tindex.applyQuotas(
+				time.Minute,
+				&Quota{
+					Pattern:      "/",
+					PhysicalSize: 1024 * 12 * 15,
+				},
+				&Quota{
+					Pattern:    "sys.app.*",
+					Throughput: 1, // intentionally low quota for triggering incorrect throttling for server-0001
+				},
+				&Quota{
+					Pattern:    "sys.app.server-001",
+					Throughput: 8 * int64(loopCount),
+				},
+			)
+
+			select {
+			case <-endc:
+				return
+			default:
+			}
+		}
+	}()
+
+	for i := 0; i < loopCount; i++ {
+		if tindex.throttle(&points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}, {}, {}, {}}}, false) {
+			t.Errorf("should not throttle metric within throughput quota")
+			break
+		}
+	}
+
+	// make sure that tindex.applyQuotas ends properly.
+	endc <- struct{}{}
+}
+
+func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
+	tindex := newTrie(
+		".wsp",
+		func(metric string) (size, dataPoints int64) {
+			return 12 * 1024, 1024
+		},
+	)
+
+	tindex.root.gen++
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
+	tindex.prune()
+
+	tindex.applyQuotas(
+		time.Minute,
+		&Quota{
+			Pattern:    "/",
+			Throughput: 4,
+		},
+		&Quota{
+			Pattern:    "sys.app",
+			Throughput: 4,
+		},
+		&Quota{
+			Pattern:    "sys.app.server-001",
+			Throughput: 2,
+		},
+	)
+
+	if tindex.throttle(&points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}, {}}}, false) {
+		t.Errorf("should not throttle metric within throughput quota")
+	}
+	if !tindex.throttle(&points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}}}, false) {
+		t.Errorf("should throttle metric exceeding throughput quota")
+	}
+
+	tindex.refreshUsage(tindex.throughputs)
+
+	if wants := []points.Points{
+		{Metric: "quota.throughput.sys-app-server-001", Data: []points.Point{{Value: 2}}},
+		{Metric: "usage.throughput.sys-app-server-001", Data: []points.Point{{Value: 2}}},
+		{Metric: "throttle.sys-app-server-001", Data: []points.Point{{Value: 1}}},
+
+		{Metric: "quota.throughput.sys-app", Data: []points.Point{{Value: 4}}},
+		{Metric: "usage.throughput.sys-app", Data: []points.Point{{Value: 2}}},
+		{Metric: "throttle.sys-app", Data: []points.Point{{Value: 0}}},
+
+		{Metric: "quota.throughput.root", Data: []points.Point{{Value: 4}}},
+		{Metric: "usage.throughput.root", Data: []points.Point{{Value: 2}}},
+		{Metric: "throttle.root", Data: []points.Point{{Value: 0}}},
+	}; !reflect.DeepEqual(tindex.qauMetrics, wants) {
+		t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(wants))
+	}
+}
