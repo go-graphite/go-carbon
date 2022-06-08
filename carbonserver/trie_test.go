@@ -41,7 +41,7 @@ func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListen
 	start := time.Now()
 	trieIndex := newTrie(".wsp", nil)
 	for _, file := range files {
-		trieIndex.insert(file, 0, 0, 0)
+		trieIndex.insert(file, 0, 0, 0, 0)
 	}
 	l.Logf("trie index took %s\n", time.Since(start))
 
@@ -750,7 +750,7 @@ func TestTrieEdgeCases(t *testing.T) {
 		t.Errorf("trie should return an range overflow error")
 	}
 
-	if err := trie.insert("ns1/ns2/ns3/ns4/ns5/ns7/", 0, 0, 0); err != nil {
+	if _, err := trie.insert("ns1/ns2/ns3/ns4/ns5/ns7/", 0, 0, 0, 0); err != nil {
 		t.Errorf("should not return insert error when inserting folders")
 	}
 }
@@ -758,13 +758,13 @@ func TestTrieEdgeCases(t *testing.T) {
 func TestTrieQueryOpts(t *testing.T) {
 	var trieIndex = newTrie(".wsp", nil)
 
-	trieIndex.insert("/sys/app/host-01.wsp", 0, 0, 0)
-	trieIndex.insert("/sys/app/host-01/cpu/user.wsp", 0, 0, 0)
-	trieIndex.insert("/sys/app/host-01/cpu/system.wsp", 0, 0, 0)
-	trieIndex.insert("/sys/app/host-01/memory/cache.wsp", 0, 0, 0)
-	trieIndex.insert("/sys/app/host-02/cpu/user.wsp", 0, 0, 0)
-	trieIndex.insert("/sys/app/host-02/cpu/system.wsp", 0, 0, 0)
-	trieIndex.insert("/sys/app/host-03/cpu/system.wsp", 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01.wsp", 0, 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01/cpu/user.wsp", 0, 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01/cpu/system.wsp", 0, 0, 0, 0)
+	trieIndex.insert("/sys/app/host-01/memory/cache.wsp", 0, 0, 0, 0)
+	trieIndex.insert("/sys/app/host-02/cpu/user.wsp", 0, 0, 0, 0)
+	trieIndex.insert("/sys/app/host-02/cpu/system.wsp", 0, 0, 0, 0)
+	trieIndex.insert("/sys/app/host-03/cpu/system.wsp", 0, 0, 0, 0)
 
 	wantMetrics := []string{
 		"sys.app.host-01",
@@ -811,7 +811,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 				for j := 0; j < factor; j++ {
 					for k := 0; k < factor; k++ {
 						filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
-						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k), 0, 0, 0)
+						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k), 0, 0, 0, 0)
 						// if (i+j+k)%5 == 0 {
 						// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
 						// }
@@ -929,13 +929,13 @@ func TestTriePrune(t *testing.T) {
 			strieIndex := newTrie(".wsp", nil)
 
 			for _, f := range c.files1 {
-				ctrieIndex.insert(f, 0, 0, 0)
+				ctrieIndex.insert(f, 0, 0, 0, 0)
 			}
 
 			ctrieIndex.root.gen++
 			for _, f := range c.files2 {
-				ctrieIndex.insert(f, 0, 0, 0)
-				strieIndex.insert(f, 0, 0, 0)
+				ctrieIndex.insert(f, 0, 0, 0, 0)
+				strieIndex.insert(f, 0, 0, 0, 0)
 			}
 
 			ctrieIndex.prune()
@@ -1293,14 +1293,14 @@ func TestTrieQuotaGeneral(t *testing.T) {
 			)
 
 			for _, m := range c.input1 {
-				tindex.insert(m.name, m.logicalSize, m.physicalSize, m.dataPoints)
+				tindex.insert(m.name, m.logicalSize, m.physicalSize, m.dataPoints, 0)
 			}
 			tindex.applyQuotas(time.Minute, c.quotas...)
 			tindex.qauMetrics = nil
 			tindex.refreshUsage(nil)
 
 			for _, m := range c.input2 {
-				tindex.insert(m.name, m.logicalSize, m.physicalSize, m.dataPoints)
+				tindex.insert(m.name, m.logicalSize, m.physicalSize, m.dataPoints, 0)
 			}
 
 			tindex.applyQuotas(time.Minute, c.quotas...)
@@ -1343,8 +1343,8 @@ func TestTrieQuotaThroughput(t *testing.T) {
 		},
 	)
 
-	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
-	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0, 0)
+	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0, 0)
 
 	tindex.applyQuotas(
 		time.Minute,
@@ -1399,7 +1399,7 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 		},
 	)
 
-	tindex.insert("/sys/app/server-003/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-003/cpu.wsp", 0, 0, 0, 0)
 
 	tindex.applyQuotas(
 		time.Minute,
@@ -1414,8 +1414,8 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 	)
 
 	tindex.root.gen++
-	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
-	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0, 0)
+	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0, 0)
 	tindex.prune()
 
 	tindex.applyQuotas(
@@ -1487,9 +1487,9 @@ func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 	)
 
 	tindex.root.gen++
-	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
-	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0)
-	tindex.insert("/sys/app/server-003/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0, 0)
+	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0, 0)
+	tindex.insert("/sys/app/server-003/cpu.wsp", 0, 0, 0, 0)
 	tindex.prune()
 
 	endc := make(chan struct{})
@@ -1541,7 +1541,7 @@ func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
 	)
 
 	tindex.root.gen++
-	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0)
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0, 0)
 	tindex.prune()
 
 	tindex.applyQuotas(

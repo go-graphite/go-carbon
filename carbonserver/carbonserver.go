@@ -17,13 +17,12 @@
 package carbonserver
 
 import (
-	"bufio"
-	"compress/gzip"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net"
 	"net/http"
@@ -243,7 +242,9 @@ type CarbonserverListener struct {
 	trigramIndex      bool
 	trieIndex         bool
 	concurrentIndex   bool
-	fileListCache     string
+
+	fileListCacheVersion FLCVersion
+	fileListCache        string
 
 	realtimeIndex  int
 	newMetricsChan chan string
@@ -475,6 +476,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		},
 		quotaAndUsageMetrics:  make(chan []points.Points, 1),
 		apiPerPathRatelimiter: map[string]*ApiPerPathRatelimiter{},
+		fileListCacheVersion:  FLCVersion1,
 	}
 }
 
@@ -557,6 +559,9 @@ func (listener *CarbonserverListener) SetRealtimeIndex(num int) chan string {
 	listener.realtimeIndex = num
 	listener.newMetricsChan = make(chan string, num)
 	return listener.newMetricsChan
+}
+func (listener *CarbonserverListener) SetFileListCacheVersion(version int) {
+	listener.fileListCacheVersion = FLCVersion(version)
 }
 func (listener *CarbonserverListener) SetFileListCache(path string) {
 	listener.fileListCache = path
@@ -725,7 +730,7 @@ uloop:
 			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
 				metric := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
 
-				if err := fidx.trieIdx.insert(metric, 0, 0, 0); err != nil {
+				if _, err := fidx.trieIdx.insert(metric, 0, 0, 0, 0); err != nil {
 					listener.logTrieInsertError(listener.logger, "failed to insert new metrics for realtime indexing", metric, err)
 				}
 			}
@@ -877,7 +882,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var cacheMetricLen = len(cacheMetricNames)
 	for fileName := range cacheMetricNames {
 		if listener.trieIndex {
-			if err := trieIdx.insert(fileName, 0, 0, 0); err != nil {
+			if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
 				listener.logTrieInsertError(logger, "error populating index from cache indexMap", fileName, err)
 			}
 		} else {
@@ -889,43 +894,62 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	}
 	cacheIndexRuntime := time.Since(tcache)
 
-	// readFromCache hould only occur once at the start of the program
+	// readFromCache only run once at the start of the program.
+	// A new version is generated everytime a file list scan is completed.
 	if fidx == nil && listener.fileListCache != "" {
-		fileListCache, err := newFileListCache(listener.fileListCache, 'r')
+		// why not listener.fileListCacheVersion: this is for
+		// transparent file list cache version upgrade and reverse.
+		flc, err := NewFileListCache(listener.fileListCache, FLCVersionUnspecified, 'r')
 		if err != nil {
 			if !os.IsNotExist(err) {
 				logger.Error("failed to read file list cache", zap.Error(err))
 			}
 		} else {
-			readFromCache = true
-			for fileListCache.scanner.Scan() {
-				entry := fileListCache.scanner.Text()
-				if entry == "" {
-					continue
-				}
-				if err := trieIdx.insert(entry, 0, 0, 0); err != nil {
-					listener.logTrieInsertError(logger, "failed to read from file list cache", entry, err)
-					readFromCache = false
+			infos = append(infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
 
-					trieIdx = newTrie(".wsp", listener.estimateSize)
+			readFromCache = true
+			for {
+				entry, err := flc.Read()
+				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
+
+						readFromCache = false
+						trieIdx = newTrie(".wsp", listener.estimateSize)
+					}
+
 					break
 				}
+
+				if entry.Path == "" {
+					continue
+				}
+
+				if _, err := trieIdx.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt); err != nil {
+					listener.logTrieInsertError(logger, "failed to read from file list cache", entry.Path, err)
+
+					readFromCache = false
+					trieIdx = newTrie(".wsp", listener.estimateSize)
+
+					break
+				}
+
 				filesLen++
-				if strings.HasSuffix(entry, ".wsp") {
+				if strings.HasSuffix(entry.Path, ".wsp") {
 					metricsKnown++
 				}
 			}
-			if err := fileListCache.close(); err != nil {
+			if err := flc.Close(); err != nil {
 				logger.Error("failed to close file list cache", zap.Error(err))
 			}
 		}
 	}
 
 	if !readFromCache {
-		var flc *fileListCache
+		var flc FileListCache
 		if listener.fileListCache != "" {
 			var err error
-			flc, err = newFileListCache(listener.fileListCache, 'w')
+			flc, err = NewFileListCache(listener.fileListCache, listener.fileListCacheVersion, 'w')
 			if err != nil {
 				if !os.IsNotExist(err) {
 					logger.Error("failed to create file list cache", zap.Error(err))
@@ -934,12 +958,14 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				defer func() {
 					// flc could be reset to nil during filepath walk
 					if flc != nil {
-						if err := flc.close(); err != nil {
+						if err := flc.Close(); err != nil {
 							logger.Error("failed to close flie list cache", zap.Error(err))
 						}
 					}
 				}()
 			}
+
+			infos = append(infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
 		}
 
 		if fi, err := os.Lstat(dir); err != nil {
@@ -981,7 +1007,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					select {
 					case m := <-listener.newMetricsChan:
 						fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
-						if err := trieIdx.insert(fileName, 0, 0, 0); err != nil {
+						if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
 							listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
 						}
 					default:
@@ -991,19 +1017,25 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			}
 
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
-			if info.IsDir() || isFullMetric {
+			if info.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
-				if flc != nil {
-					// TODO: include metadata like physical/logical size, data points
-					if err := flc.write(trimmedName); err != nil {
-						logger.Error("failed to write to file list cache", zap.Error(err))
-						if err := flc.close(); err != nil {
-							logger.Error("failed to close flie list cache", zap.Error(err))
-						}
-						flc = nil
+
+				var dataPoints, logicalSize, physicalSize int64
+				if isFullMetric {
+					if listener.estimateSize != nil {
+						m := strings.ReplaceAll(trimmedName, "/", ".")
+						m = m[1 : len(m)-4]
+						_, dataPoints = listener.estimateSize(m)
+					}
+					logicalSize = info.Size()
+					physicalSize = logicalSize
+					if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+						physicalSize = stat.Blocks * 512
 					}
 				}
+
+				var metricFirstSeenAt int64
 
 				// use cacheMetricNames to check and prevent appending duplicate metrics
 				// into the index when cacheMetricNamesIndex is enabled
@@ -1013,24 +1045,13 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					if listener.trieIndex {
 						// WHY:
 						//   * this would only affects empty directories
-						//   * indexing empty directories causes an strange bug in trie index
-						//   * empty dir isn't useful (at least most of the time)?
+						//   * and empty dir isn't useful (at least most of the time)?
 						if isFullMetric {
-							var dataPoints int64
-							if listener.estimateSize != nil {
-								m := strings.ReplaceAll(trimmedName, "/", ".")
-								m = m[1 : len(m)-4]
-								_, dataPoints = listener.estimateSize(m)
-							}
-
-							var physicalSize = info.Size()
-							if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-								physicalSize = stat.Blocks * 512
-							}
-
-							if err := trieIdx.insert(trimmedName, info.Size(), physicalSize, dataPoints); err != nil {
+							if node, err := trieIdx.insert(trimmedName, logicalSize, physicalSize, dataPoints, 0); err != nil {
 								// It's better to just log an error than stop indexing
 								listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
+							} else if node.meta != nil {
+								metricFirstSeenAt = node.meta.(*fileMeta).firstSeenAt
 							}
 						}
 					} else {
@@ -1039,6 +1060,23 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 					if isFullMetric {
 						metricsKnown++
+					}
+				}
+
+				// only metric paths are cached for trie index. trigram index needs to index dir path as well.
+				if flc != nil && (!listener.trieIndex || isFullMetric) {
+					if err := flc.Write(&FLCEntry{
+						Path:         trimmedName,
+						DataPoints:   dataPoints,
+						LogicalSize:  logicalSize,
+						PhysicalSize: physicalSize,
+						FirstSeenAt:  metricFirstSeenAt,
+					}); err != nil {
+						logger.Error("failed to write to file list cache", zap.Error(err))
+						if err := flc.Close(); err != nil {
+							logger.Error("failed to close flie list cache", zap.Error(err))
+						}
+						flc = nil
 					}
 				}
 
@@ -1904,75 +1942,6 @@ func extractTrigrams(query string) []trigram.T {
 	}
 
 	return trigrams
-}
-
-type fileListCache struct {
-	path    string
-	mode    byte
-	file    *os.File
-	scanner *bufio.Scanner
-	writer  *gzip.Writer
-}
-
-func newFileListCache(p string, mode byte) (*fileListCache, error) {
-	var flc fileListCache
-	var err error
-	flc.path = p
-	flc.mode = mode
-	if mode == 'r' {
-		flc.file, err = os.Open(p)
-		if err != nil {
-			return nil, err
-		}
-		r, err := gzip.NewReader(flc.file)
-		if err != nil {
-			return nil, err
-		}
-		flc.scanner = bufio.NewScanner(r)
-	}
-	if mode == 'w' {
-		flc.file, err = os.Create(p + ".tmp")
-		if err != nil {
-			return nil, err
-		}
-		flc.writer = gzip.NewWriter(flc.file)
-	}
-	return &flc, err
-}
-
-func (flc *fileListCache) write(p string) error {
-	_, err := flc.writer.Write([]byte(p + "\n"))
-	return err
-}
-
-func (flc *fileListCache) close() error {
-	var errs []string
-	if flc.mode == 'w' {
-		if err := flc.writer.Flush(); err != nil {
-			errs = append(errs, fmt.Sprintf("gzip.flush: %s", err))
-		}
-		if err := flc.writer.Close(); err != nil {
-			errs = append(errs, fmt.Sprintf("gzip.close: %s", err))
-		}
-		if err := flc.file.Sync(); err != nil {
-			errs = append(errs, fmt.Sprintf("file.sync: %s", err))
-		}
-	}
-	if err := flc.file.Close(); err != nil {
-		errs = append(errs, fmt.Sprintf("file.sync: %s", err))
-	}
-
-	if flc.mode == 'w' && len(errs) == 0 {
-		if err := os.Rename(flc.path+".tmp", flc.path); err != nil {
-			errs = append(errs, fmt.Sprintf("file.rename: %s", err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, ";"))
-	}
-
-	return nil
 }
 
 func (listener *CarbonserverListener) RegisterInternalInfoHandler(name string, f func() map[string]interface{}) {

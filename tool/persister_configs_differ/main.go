@@ -1,13 +1,13 @@
 package main
 
 import (
-	"bufio"
-	"compress/gzip"
+	"errors"
 	"flag"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 
+	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/persister"
 )
 
@@ -49,20 +49,24 @@ func main() {
 		panic(err)
 	}
 
-	file, err := os.Open(*metricsFile)
+	flc, err := carbonserver.NewFileListCache(*metricsFile, carbonserver.FLCVersionUnspecified, 'r')
 	if err != nil {
 		panic(err)
 	}
-	r, err := gzip.NewReader(file)
-	if err != nil {
-		panic(err)
-	}
-	scanner := bufio.NewScanner(r)
+	defer flc.Close()
 
 	schemaChanges := map[string]int{}
 	aggregationChanges := map[string]int{}
-	for scanner.Scan() {
-		entry := scanner.Text()
+	for {
+		flcEntry, err := flc.Read()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			panic(err)
+		}
+
+		entry := flcEntry.Path
 		if entry == "" || !strings.HasSuffix(entry, ".wsp") {
 			continue
 		}

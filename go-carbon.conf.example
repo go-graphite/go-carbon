@@ -275,7 +275,26 @@ trie-index = false
 # most of the indexing time if it contains a high number of metrics (10
 # - 40 millions). go-carbon only reads the cached file list once after
 # reboot and the cache result is updated after every scan. (EXPERIMENTAL)
-file-list-cache = ""
+#
+# file-list-cache = "/var/lib/carbon/carbonserver-file-list-cache.bin"
+
+# Supported FLC (file list cache) version values are: 2, 1 (default value is 1
+# for backward compatibility).
+#
+# File list cache v2 is is more advanced of file list cache for go-carbon, with
+# good quota support during restarts (by keeping physical, logical sizes, metric
+# creation time in the cache). For more details, see carbonserver/flc.go.
+#
+# V2 file is no longer a plain text file compressed with gzip, but a semi-binary
+# file. For reading flc v2 cache file, use go-carbon with flag -print-file-list-cache:
+#
+#     go-carbon -print-file-list-cache /var/lib/carbon/carbonserver-file-list-cache.bin
+#
+# For upgrade or downgrade to v2 or v1, you can just update the config,
+# go-carbon would transparently detect the existing cache file on restart. No
+# manual deletion needed.
+#
+# file-list-cache-version = 2
 
 # Enable concurrently building index without maintaining a new copy
 # index structure. More memory efficient.
