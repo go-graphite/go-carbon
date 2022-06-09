@@ -39,10 +39,12 @@ type gmatcher struct {
 	dstates []*gdstate
 	dsindex int //nolint:unused,structcheck
 
+	// TODO: depcreate lsComplex and trigrams. the gains of it isn't very
+	// clear and it would make things simpler.
+	//
 	// has leading star following by complex expressions
 	lsComplex bool
-	// trigrams  roaring.Bitmap
-	trigrams []uint32
+	trigrams  []uint32
 }
 
 type gstate struct {
@@ -352,6 +354,17 @@ type fileMeta struct {
 	logicalSize  int64
 	physicalSize int64
 	dataPoints   int64
+
+	// a timestamp of the first time when go-carbon has seen this metric.
+	// stricly speacking, it is not metric creation time, but can be used
+	// as a timing reference to infer that the metric is at least created
+	// before this timestamp. some file systems doesn't maintain ctime of
+	// files (like xfs before v5:
+	// https://unix.stackexchange.com/questions/7562/what-file-systems-on-linux-store-the-creation-time#comment1184213_40093)
+	//
+	// the reliablity of this timestamp counts on file list cache v2
+	// (and above), more in carbonserver.go and flc.go.
+	firstSeenAt int64
 }
 
 func (*fileMeta) trieMeta() {}
@@ -412,11 +425,16 @@ func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoint
 var emptyTrieNodes = &[]*trieNode{}
 
 // TODO: consider not initialize fileMeta if quota feature isn't enabled?
-func newFileNode(m uint8, logicalSize, physicalSize, dataPoints int64) *trieNode {
+func newFileNode(m uint8, logicalSize, physicalSize, dataPoints, firstSeenAt int64) *trieNode {
 	return &trieNode{
 		childrens: emptyTrieNodes,
 		gen:       m,
-		meta:      &fileMeta{logicalSize: logicalSize, physicalSize: physicalSize, dataPoints: dataPoints},
+		meta: &fileMeta{
+			logicalSize:  logicalSize,
+			physicalSize: physicalSize,
+			dataPoints:   dataPoints,
+			firstSeenAt:  firstSeenAt,
+		},
 	}
 }
 
@@ -492,13 +510,15 @@ func (t *trieInsertError) Error() string { return t.typ }
 //
 // insert expects / separated file path, like ns1/ns2/ns3/metric.wsp.
 // insert considers path name ending with trieIndex.fileExt as a metric.
-func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints int64) error {
+//
+// insert returns either a file node or dir node, after inserted.
+func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
 	path = filepath.Clean(path)
 	if len(path) > 0 && path[0] == '/' { // skipcq: GO-S1005
 		path = path[1:]
 	}
 	if path == "" || path == "." {
-		return nil
+		return nil, nil
 	}
 
 	isFile := strings.HasSuffix(path, ti.fileExt)
@@ -507,7 +527,7 @@ func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints i
 	}
 
 	if path == "" || path[len(path)-1] == '/' {
-		return nilFilenameError("metric filename is nil")
+		return nil, nilFilenameError("metric filename is nil")
 	}
 
 	if uint64(len(path)) > ti.getDepth() {
@@ -582,7 +602,7 @@ outer:
 					goto dir
 				}
 
-				return &trieInsertError{typ: "failed to index metric: unknwon case of match == nlen", info: fmt.Sprintf("match == nlen == %d", nlen)}
+				return nil, &trieInsertError{typ: "failed to index metric: unknwon case of match == nlen", info: fmt.Sprintf("match == nlen == %d", nlen)}
 			}
 
 			if match == len(child.c) && len(child.c) < nlen { // case 2
@@ -645,7 +665,7 @@ outer:
 	if !isFile {
 		if cur.dir() {
 			cur.gen = ti.root.gen
-			return nil
+			return cur, nil
 		}
 
 		var newDir = true
@@ -658,10 +678,16 @@ outer:
 			}
 		}
 		if newDir {
-			cur.addChild(ti.newDir())
+			child := ti.newDir()
+			cur.addChild(child)
+			cur = child
 		}
 
-		return nil
+		return cur, nil
+	}
+
+	if firstSeenAt == 0 {
+		firstSeenAt = time.Now().Unix()
 	}
 
 	var hasFileNode bool
@@ -670,11 +696,17 @@ outer:
 			hasFileNode = true
 			c.gen = ti.root.gen
 
+			meta := c.meta.(*fileMeta)
 			if logicalSize > 0 || physicalSize > 0 || dataPoints > 0 {
-				atomic.StoreInt64(&c.meta.(*fileMeta).logicalSize, logicalSize)
-				atomic.StoreInt64(&c.meta.(*fileMeta).physicalSize, physicalSize)
-				atomic.StoreInt64(&c.meta.(*fileMeta).dataPoints, dataPoints)
+				atomic.StoreInt64(&meta.logicalSize, logicalSize)
+				atomic.StoreInt64(&meta.physicalSize, physicalSize)
+				atomic.StoreInt64(&meta.dataPoints, dataPoints)
 			}
+			if meta.firstSeenAt == 0 || meta.firstSeenAt > firstSeenAt {
+				atomic.StoreInt64(&meta.firstSeenAt, firstSeenAt)
+			}
+
+			cur = c
 			break
 		}
 	}
@@ -683,11 +715,15 @@ outer:
 			logicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
 			physicalSize = logicalSize
 		}
-		cur.addChild(newFileNode(ti.root.gen, logicalSize, physicalSize, dataPoints))
+
+		child := newFileNode(ti.root.gen, logicalSize, physicalSize, dataPoints, firstSeenAt)
+		cur.addChild(child)
+		cur = child
+
 		ti.fileCount++
 	}
 
-	return nil
+	return cur, nil
 }
 
 func (ti *trieIndex) newDir() *trieNode {

@@ -126,10 +126,12 @@ type carbonserverConfig struct {
 	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
 	MaxMetricsRendered int `toml:"max-metrics-rendered"`
 
-	TrieIndex       bool   `toml:"trie-index"`
-	ConcurrentIndex bool   `toml:"concurrent-index"`
-	RealtimeIndex   int    `toml:"realtime-index"`
-	FileListCache   string `toml:"file-list-cache"`
+	TrieIndex       bool `toml:"trie-index"`
+	ConcurrentIndex bool `toml:"concurrent-index"`
+	RealtimeIndex   int  `toml:"realtime-index"`
+
+	FileListCache        string `toml:"file-list-cache"`
+	FileListCacheVersion int    `toml:"file-list-cache-version"`
 
 	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
 
@@ -259,13 +261,14 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
-			QueryCacheEnabled:  true,
-			QueryCacheSizeMB:   0,
-			FindCacheEnabled:   true,
-			TrigramIndex:       true,
-			CacheScan:          false,
-			MaxMetricsGlobbed:  10_000_000,
-			MaxMetricsRendered: 1_000_000,
+			QueryCacheEnabled:    true,
+			QueryCacheSizeMB:     0,
+			FindCacheEnabled:     true,
+			TrigramIndex:         true,
+			CacheScan:            false,
+			MaxMetricsGlobbed:    10_000_000,
+			MaxMetricsRendered:   1_000_000,
+			FileListCacheVersion: 1, // see carbonserver/flc.go
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",

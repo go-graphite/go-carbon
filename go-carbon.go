@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/carbon"
+	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/points"
 
 	_ "net/http/pprof"
@@ -65,6 +66,7 @@ func main() {
 	pidfile := flag.String("pidfile", "", "Pidfile path (only for daemon)")
 
 	cat := flag.String("cat", "", "Print cache dump file")
+	printFLC := flag.String("print-file-list-cache", "", "Print file list cache. (format: $path_to_cache. example: /var/lib/carbon/carbonserver-file-list-cache.bin)")
 
 	flag.Parse()
 
@@ -83,6 +85,15 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		return
+	}
+
+	if *printFLC != "" {
+		path := *printFLC
+		if err := carbonserver.ReadFileListCache(path, carbonserver.FLCVersionUnspecified, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to read flc cache: %s\n", err.Error())
+		}
+
 		return
 	}
 
