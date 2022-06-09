@@ -227,7 +227,7 @@ tagdb-timeout = "1s"
 listen = "127.0.0.1:8080"
 # Carbonserver support is still experimental and may contain bugs
 # Or be incompatible with github.com/grobian/carbonserver
-enabled = false
+enabled = true
 # Buckets to track response times
 buckets = 10
 # carbonserver-specific metrics will be sent as counters
@@ -406,6 +406,10 @@ stats-percentiles = [99, 98, 95, 75, 50]
 # [[carbonserver.api-per-path-rate-limiters]]
 # path = "/metrics/list_query/"
 # max-inflight-requests = 3
+
+[carbonserver.grpc]
+enabled = true
+listen = ":7004"
 
 [dump]
 # Enable dump/restore function on USR2 signal

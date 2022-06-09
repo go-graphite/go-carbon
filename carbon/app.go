@@ -593,6 +593,12 @@ func (app *App) Start(version string) (err error) {
 			return
 		}
 
+		if conf.Carbonserver.Grpc.Enabled {
+			if err = carbonserver.ListenGRPC(conf.Carbonserver.Grpc.Listen); err != nil {
+				return
+			}
+		}
+
 		app.Carbonserver = carbonserver
 	}
 	/* CARBONSERVER end */

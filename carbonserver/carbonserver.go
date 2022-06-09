@@ -24,6 +24,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-graphite/go-carbon/helper/streamingpb"
+	"google.golang.org/grpc"
 	"math"
 	"net"
 	"net/http"
@@ -225,6 +227,7 @@ type CarbonserverListener struct {
 	forceScanChan     chan struct{}
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
+	grpcListener      *net.TCPListener
 	logger            *zap.Logger
 	accessLogger      *zap.Logger
 	internalStatsDir  string
@@ -1528,6 +1531,7 @@ func (listener *CarbonserverListener) Stop() error {
 		listener.db.Close()
 	}
 	listener.tcpListener.Close()
+	listener.grpcListener.Close()
 	return nil
 }
 
@@ -1842,6 +1846,27 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 
 	go srv.Serve(listener.tcpListener)
 
+	return nil
+}
+
+func (listener *CarbonserverListener) ListenGRPC(listen string) error {
+	var err error
+	var grpcAddr *net.TCPAddr
+	grpcAddr, err = net.ResolveTCPAddr("tcp", listen)
+	if err != nil {
+		return err
+	}
+
+	listener.grpcListener, err = net.ListenTCP("tcp", grpcAddr)
+	if err != nil {
+		return err
+	}
+
+	var opts []grpc.ServerOption
+
+	grpcServer := grpc.NewServer(opts...)
+	streamingpb.RegisterCarbonStreamServer(grpcServer, listener)
+	go grpcServer.Serve(listener.grpcListener)
 	return nil
 }
 

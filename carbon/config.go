@@ -103,25 +103,26 @@ type tagsConfig struct {
 }
 
 type carbonserverConfig struct {
-	Listen            string    `toml:"listen"`
-	Enabled           bool      `toml:"enabled"`
-	ReadTimeout       *Duration `toml:"read-timeout"`
-	IdleTimeout       *Duration `toml:"idle-timeout"`
-	WriteTimeout      *Duration `toml:"write-timeout"`
-	RequestTimeout    *Duration `toml:"request-timeout"`
-	ScanFrequency     *Duration `toml:"scan-frequency"`
-	QueryCacheEnabled bool      `toml:"query-cache-enabled"`
-	QueryCacheSizeMB  int       `toml:"query-cache-size-mb"`
-	FindCacheEnabled  bool      `toml:"find-cache-enabled"`
-	Buckets           int       `toml:"buckets"`
-	MaxGlobs          int       `toml:"max-globs"`
-	FailOnMaxGlobs    bool      `toml:"fail-on-max-globs"`
-	EmptyResultOk     bool      `toml:"empty-result-ok"`
-	MetricsAsCounters bool      `toml:"metrics-as-counters"`
-	TrigramIndex      bool      `toml:"trigram-index"`
-	InternalStatsDir  string    `toml:"internal-stats-dir"`
-	Percentiles       []int     `toml:"stats-percentiles"`
-	CacheScan         bool      `toml:"cache-scan"`
+	Listen            string     `toml:"listen"`
+	Enabled           bool       `toml:"enabled"`
+	Grpc              grpcConfig `toml:"grpc"`
+	ReadTimeout       *Duration  `toml:"read-timeout"`
+	IdleTimeout       *Duration  `toml:"idle-timeout"`
+	WriteTimeout      *Duration  `toml:"write-timeout"`
+	RequestTimeout    *Duration  `toml:"request-timeout"`
+	ScanFrequency     *Duration  `toml:"scan-frequency"`
+	QueryCacheEnabled bool       `toml:"query-cache-enabled"`
+	QueryCacheSizeMB  int        `toml:"query-cache-size-mb"`
+	FindCacheEnabled  bool       `toml:"find-cache-enabled"`
+	Buckets           int        `toml:"buckets"`
+	MaxGlobs          int        `toml:"max-globs"`
+	FailOnMaxGlobs    bool       `toml:"fail-on-max-globs"`
+	EmptyResultOk     bool       `toml:"empty-result-ok"`
+	MetricsAsCounters bool       `toml:"metrics-as-counters"`
+	TrigramIndex      bool       `toml:"trigram-index"`
+	InternalStatsDir  string     `toml:"internal-stats-dir"`
+	Percentiles       []int      `toml:"stats-percentiles"`
+	CacheScan         bool       `toml:"cache-scan"`
 
 	MaxMetricsGlobbed  int `toml:"max-metrics-globbed"`
 	MaxMetricsRendered int `toml:"max-metrics-rendered"`

@@ -90,6 +90,18 @@ func getFormat(req *http.Request) (responseFormat, error) {
 	return formatCode, nil
 }
 
+func getTargetsFromProtoV3FormatReq(pv3Request protov3.MultiFetchRequest) map[timeRange][]target {
+	targets := make(map[timeRange][]target)
+	for _, t := range pv3Request.Metrics {
+		tr := timeRange{
+			from:  int32(t.StartTime),
+			until: int32(t.StopTime),
+		}
+		targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
+	}
+	return targets
+}
+
 func getTargets(req *http.Request, format responseFormat) (map[timeRange][]target, error) {
 	targets := make(map[timeRange][]target)
 
@@ -105,14 +117,7 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 			return targets, fmt.Errorf("invalid payload: %s", err.Error())
 		}
 
-		for _, t := range pv3Request.Metrics {
-			tr := timeRange{
-				from:  int32(t.StartTime),
-				until: int32(t.StopTime),
-			}
-			targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
-		}
-
+		targets = getTargetsFromProtoV3FormatReq(pv3Request)
 	default:
 		from, err := stringToInt32(req.FormValue("from"))
 		if err != nil {
