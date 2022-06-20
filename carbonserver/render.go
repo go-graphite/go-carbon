@@ -38,6 +38,7 @@ type target struct {
 	PathExpression string
 }
 
+// TODO: year-2038 problem. need to move over to int64?
 type timeRange struct {
 	from  int32
 	until int32
@@ -63,10 +64,10 @@ func stringToInt32(t string) (int32, error) {
 	i, err := strconv.Atoi(t)
 
 	if err != nil {
-		return int32(i), err
+		return int32(i), err // skipcq: GO-E1006
 	}
 
-	return int32(i), nil
+	return int32(i), nil // skipcq: GO-E1006
 }
 
 func getFormat(req *http.Request) (responseFormat, error) {
@@ -463,6 +464,8 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	// We still keep old json format, because it's painful to deal with math.NaN that can occur in new format.
 	case jsonFormat:
 		contentType = "application/json"
+		//skipcq: VET-V0008
+		//nolint:govet
 		b, err = json.Marshal(multiv2)
 	case protoV2Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv2PB

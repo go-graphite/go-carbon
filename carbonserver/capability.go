@@ -83,6 +83,8 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		switch formatCode {
 		case jsonFormat:
 			contentType = httpHeaders.ContentTypeJSON
+			//skipcq: VET-V0008
+			//nolint:govet
 			data, _ = json.Marshal(pvResponse)
 		case protoV3Format:
 			contentType = httpHeaders.ContentTypeCarbonAPIv3PB

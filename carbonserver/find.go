@@ -93,9 +93,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 		var pv3Request protov3.MultiGlobRequest
 		pv3Request.UnmarshalVT(body)
-
-		fmt.Printf("\n\n%+v\n\n", pv3Request)
-
 		query = pv3Request.Metrics
 	}
 
@@ -246,12 +243,16 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		}
 
 		logger.Debug("will send out response",
+			//skipcq: VET-V0008
+			//nolint:govet
 			zap.Any("response", multiResponse),
 		)
 
 		switch format {
 		case jsonFormat:
 			result.contentType = httpHeaders.ContentTypeJSON
+			//skipcq: VET-V0008
+			//nolint:govet
 			result.data, err = json.Marshal(multiResponse)
 		case protoV3Format:
 			result.contentType = httpHeaders.ContentTypeCarbonAPIv3PB

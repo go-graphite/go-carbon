@@ -149,15 +149,13 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	switch formatCode {
 	case jsonFormat:
 		contentType = httpHeaders.ContentTypeJSON
+		//skipcq: VET-V0008
+		//nolint:govet
 		b, err = json.Marshal(response)
 	case protoV2Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv2PB
 
-		var r protov3.MetricsInfoResponse
-		if len(response.Metrics) > 0 {
-			r = *response.Metrics[0]
-		}
-
+		r := response.Metrics[0]
 		response := protov2.InfoResponse{
 			Name:              r.Name,
 			AggregationMethod: r.ConsolidationFunc,
