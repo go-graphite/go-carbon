@@ -18,6 +18,8 @@ type Quota struct {
 	Throughput       int64
 	DroppingPolicy   string
 	StatMetricPrefix string
+
+	TransientChildLimit int64
 }
 
 type WhisperQuotas []Quota
@@ -68,6 +70,9 @@ func ReadWhisperQuotas(filename string) (WhisperQuotas, error) {
 			return nil, err
 		}
 		if quota.Throughput, err = parseInt(section, "throughput"); err != nil {
+			return nil, err
+		}
+		if quota.TransientChildLimit, err = parseInt(section, "transient-child-limit"); err != nil {
 			return nil, err
 		}
 

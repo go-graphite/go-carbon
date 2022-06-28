@@ -380,8 +380,9 @@ type dirMeta struct {
 
 func newDirMeta() *dirMeta { return &dirMeta{usage: &QuotaUsage{}} }
 
-func (*dirMeta) trieMeta()              {}
-func (dm *dirMeta) update(quota *Quota) { dm.quota.Store(quota) }
+func (*dirMeta) trieMeta()                {}
+func (dm *dirMeta) setQuota(quota *Quota) { dm.quota.Store(quota) }
+func (dm *dirMeta) getQuota() *Quota      { return dm.quota.Load().(*Quota) }
 
 func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoints int64) bool {
 	quota, ok := dm.quota.Load().(*Quota)
@@ -538,6 +539,8 @@ func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints, 
 	var start, nlen int
 	var sn, newn *trieNode
 	var cur = ti.root
+	var dirNodes = [16]*trieNode{ti.root} // why arrray: avoiding heap allocation
+	var dirNodesIdx = 1
 outer:
 	// why len(path)+1: make sure the last node is also processed in the loop
 	for i := 0; i < len(path)+1; i++ {
@@ -649,12 +652,36 @@ outer:
 			if child.dir() {
 				cur = child
 				cur.gen = ti.root.gen
+
+				if dirNodesIdx < len(dirNodes) {
+					dirNodes[dirNodesIdx] = child
+					dirNodesIdx++
+				}
 				continue outer
 			}
 		}
 
 		if i < len(path) {
 			newn = ti.newDir()
+
+			if dirNodesIdx < len(dirNodes) {
+				if dirNodes[dirNodesIdx-1].meta != nil {
+					// Purpose of transient child?
+					//
+					//
+					pmeta := dirNodes[dirNodesIdx-1].meta
+					pquota, ok := pmeta.(*dirMeta).quota.Load().(*Quota)
+					if ok && pquota.TransientChild != nil {
+						meta := newDirMeta()
+						meta.setQuota(pquota.TransientChild)
+						newn.meta = meta
+					}
+				}
+
+				dirNodes[dirNodesIdx] = newn
+				dirNodesIdx++
+			}
+
 			cur.addChild(newn)
 			cur = newn
 		}
@@ -720,7 +747,24 @@ outer:
 		cur.addChild(child)
 		cur = child
 
+		// TODO: need to support realtime and concurrent index?
 		ti.fileCount++
+
+		for i := 0; i < dirNodesIdx; i++ {
+			if dirNodes[i] == nil {
+				continue
+			}
+
+			meta, ok := dirNodes[i].meta.(*dirMeta)
+			if !ok || meta.usage == nil {
+				continue
+			}
+
+			atomic.AddInt64(&meta.usage.Metrics, 1)
+			atomic.AddInt64(&meta.usage.LogicalSize, logicalSize)
+			atomic.AddInt64(&meta.usage.PhysicalSize, physicalSize)
+			atomic.AddInt64(&meta.usage.DataPoints, dataPoints)
+		}
 	}
 
 	return cur, nil
@@ -1570,7 +1614,13 @@ type Quota struct {
 
 	DroppingPolicy   QuotaDroppingPolicy
 	StatMetricPrefix string
+
+	// See details in trieIndex.insert
+	TransientChild *Quota
+	IsTransient    bool // for avoid emitting metrics for transient quota nodes.
 }
+
+// var transientQuota = &Quota{Metrics: 10000, Throughput: 10000, DroppingPolicy: QDPNew, StatMetricPrefix: "transient"}
 
 func (q *Quota) String() string {
 	return fmt.Sprintf("pattern:%s,dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,policy:%s", q.Pattern, q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.DroppingPolicy)
@@ -1788,7 +1838,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 		if quota.Pattern == "/" {
 			if !updateChecker["/"] {
 				meta := ti.root.meta.(*dirMeta)
-				meta.update(quota)
+				meta.setQuota(quota)
 				ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
 
 				updateChecker["/"] = true
@@ -1804,6 +1854,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 
 		for i, node := range nodes {
 			if node.meta == nil {
+				// TODO: has data race in throttle, generateQuotaAndUsageMetrics and other places?
 				node.meta = newDirMeta()
 			}
 
@@ -1819,7 +1870,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 
 			if !updateChecker[paths[i]] {
 				ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
-				meta.update(quota)
+				meta.setQuota(quota)
 
 				updateChecker[paths[i]] = true
 			}
@@ -1838,7 +1889,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 }
 
 // refreshUsage updates usage data and generate stat metrics.
-// It can't be evoked with concurrent trieIndex.insert.
+// It can't be evoked with concurrently trieIndex.insert.
 func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files uint64) {
 	if throughputs == nil {
 		throughputs = newQuotaThroughputQuotaManager()
@@ -1895,8 +1946,10 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 						tname = name
 					}
 					var prefix string
+					var isTransient bool
 					if quota, ok := cur.node.meta.(*dirMeta).quota.Load().(*Quota); ok {
 						prefix = quota.StatMetricPrefix
+						isTransient = quota.IsTransient
 					}
 
 					var throughput int64
@@ -1906,7 +1959,9 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
 
-					ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput, throttled)
+					if !isTransient {
+						ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput, throttled)
+					}
 
 					if throttled > 0 {
 						atomic.AddInt64(&usage.Throttled, -throttled)

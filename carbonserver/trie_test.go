@@ -1493,6 +1493,11 @@ func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 	tindex.prune()
 
 	endc := make(chan struct{})
+	defer func() {
+		// make sure that tindex.applyQuotas ends properly.
+		endc <- struct{}{}
+	}()
+
 	loopCount := 10240
 
 	go func() {
@@ -1527,9 +1532,99 @@ func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 			break
 		}
 	}
+}
 
-	// make sure that tindex.applyQuotas ends properly.
-	endc <- struct{}{}
+func TestTrieQuotaRealtimeEnforcement(t *testing.T) {
+	tindex := newTrie(
+		".wsp",
+		func(metric string) (size, dataPoints int64) {
+			return 12 * 1024, 1024
+		},
+	)
+
+	tindex.root.gen++
+	tindex.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0, 0)
+	tindex.insert("/sys/app/server-002/cpu.wsp", 0, 0, 0, 0)
+	tindex.insert("/sys/app/server-003/cpu.wsp", 0, 0, 0, 0)
+	tindex.prune()
+
+	refreshTriggers := struct {
+		start chan struct{}
+		done  chan struct{}
+		end   chan struct{}
+	}{
+		start: make(chan struct{}, 0),
+		done:  make(chan struct{}, 0),
+		end:   make(chan struct{}, 0),
+	}
+	defer func() {
+		// make sure that tindex.applyQuotas ends properly.
+		refreshTriggers.end <- struct{}{}
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-refreshTriggers.end:
+				return
+			case <-refreshTriggers.start:
+			}
+
+			tindex.applyQuotas(
+				time.Minute,
+				&Quota{
+					Pattern: "/",
+				},
+				&Quota{
+					Pattern: "sys.app",
+					TransientChild: &Quota{
+						Pattern:        "transient",
+						Metrics:        1_000,
+						DroppingPolicy: QDPNew,
+					},
+				},
+				&Quota{
+					Pattern:        "sys.app.*",
+					Metrics:        10_000,
+					DroppingPolicy: QDPNew,
+				},
+				&Quota{
+					Pattern: "sys.app.server-001",
+					Metrics: 500_000,
+				},
+			)
+
+			refreshTriggers.done <- struct{}{}
+		}
+	}()
+
+	refreshTriggers.start <- struct{}{}
+	<-refreshTriggers.done
+
+	t.Run("existing quota meta", func(t *testing.T) {
+		for i := 0; i < 500_000; i++ {
+			tindex.insert(fmt.Sprintf("/sys/app/server-001/cpu-%d.wsp", i), 0, 0, 0, 0)
+		}
+		if !tindex.throttle(&points.Points{Metric: "sys.app.server-001.memory", Data: []points.Point{{}, {}, {}, {}}}, false) {
+			t.Error("should throlle with existing meta nodes with realtime stat")
+		}
+	})
+
+	t.Run("transient quota meta", func(t *testing.T) {
+		for i := 0; i < 1_000; i++ {
+			tindex.insert(fmt.Sprintf("/sys/app/server-004/cpu-%d.wsp", i), 0, 0, 0, 0)
+		}
+		if !tindex.throttle(&points.Points{Metric: "sys.app.server-004.memory", Data: []points.Point{{}, {}, {}, {}}}, false) {
+			t.Error("should throlle with transient meta nodes with realtime stat")
+		}
+
+		refreshTriggers.start <- struct{}{}
+		<-refreshTriggers.done
+
+		if tindex.throttle(&points.Points{Metric: "sys.app.server-004.memory", Data: []points.Point{{}, {}, {}, {}}}, false) {
+			t.Error("should not throttle with proper quota annotation")
+		}
+	})
 }
 
 func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
