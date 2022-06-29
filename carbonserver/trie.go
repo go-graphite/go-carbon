@@ -1490,7 +1490,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 }
 
 func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
-	query = strings.ReplaceAll(query, ".", "/")
+	// query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
 	var slashInBraces, inAlter bool
@@ -1500,17 +1500,24 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 			inAlter = true
 		case c == '}':
 			inAlter = false
-		case inAlter && c == '/':
+		case inAlter && c == '.':
 			slashInBraces = true
 		}
 	}
 	// for complex queries like {a.b.c,x}.o.p.q, fall back to simple expansion
 	if slashInBraces {
 		var err error
-		globs, err = listener.expandGlobBraces(globs)
+		globs, err = listener.expandGlobBracesForTrieIndex(query)
 		if err != nil {
 			return nil, nil, err
 		}
+
+		// TODO: slow? maybe we should make listener.expandGlobBracesForTrieIndex handles / natively?
+		for i := 0; i < len(globs); i++ {
+			globs[i] = strings.ReplaceAll(globs[i], ".", "/")
+		}
+	} else {
+		globs[0] = strings.ReplaceAll(globs[0], ".", "/")
 	}
 
 	var fidx = listener.CurrentFileIndex()

@@ -1407,6 +1407,12 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 }
 
 // TODO(dgryski): add tests
+//
+// TODO(xhu): doesn't support nested braces like {a,b,c,x.{a,b,c}}, should
+// migrate to use the parser and rewriter in trie_value_list.go. however,
+// unlike trie index which supports partial/non-nested value list,
+// filepath.Glob and trigram index doesn't support brace queries at all, so full
+// expansion are needed.
 func (listener *CarbonserverListener) expandGlobBraces(globs []string) ([]string, error) {
 	for {
 		bracematch := false
