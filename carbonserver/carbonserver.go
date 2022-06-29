@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-graphite/protocol/carbonapi_v2_grpc"
+	"google.golang.org/grpc"
 	"io"
 	"math"
 	"net"
@@ -208,6 +210,7 @@ func (q *queryCache) getQueryItem(k string, size uint64, expire int32) *QueryIte
 }
 
 type CarbonserverListener struct {
+	carbonapi_v2_grpc.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
 	readTimeout       time.Duration
@@ -224,6 +227,7 @@ type CarbonserverListener struct {
 	forceScanChan     chan struct{}
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
+	grpcListener      *net.TCPListener
 	logger            *zap.Logger
 	accessLogger      *zap.Logger
 	internalStatsDir  string
@@ -1566,6 +1570,7 @@ func (listener *CarbonserverListener) Stop() error {
 		listener.db.Close()
 	}
 	listener.tcpListener.Close()
+	listener.grpcListener.Close()
 	return nil
 }
 
@@ -1975,4 +1980,25 @@ func NewApiPerPathRatelimiter(maxInflightRequests uint, timeout time.Duration) *
 		maxInflightRequests: make(chan struct{}, maxInflightRequests),
 		timeout:             timeout,
 	}
+}
+
+func (listener *CarbonserverListener) ListenGRPC(listen string) error {
+	var err error
+	var grpcAddr *net.TCPAddr
+	grpcAddr, err = net.ResolveTCPAddr("tcp", listen)
+	if err != nil {
+		return err
+	}
+
+	listener.grpcListener, err = net.ListenTCP("tcp", grpcAddr)
+	if err != nil {
+		return err
+	}
+
+	var opts []grpc.ServerOption
+
+	grpcServer := grpc.NewServer(opts...)
+	carbonapi_v2_grpc.RegisterCarbonV2Server(grpcServer, listener)
+	go grpcServer.Serve(listener.grpcListener)
+	return nil
 }
