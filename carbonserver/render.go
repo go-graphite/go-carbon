@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"io/ioutil"
 	"math"
@@ -676,31 +677,37 @@ func (listener *CarbonserverListener) fetchDataPB(metric string, files []string,
 
 func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream carbonapi_v2_grpc.CarbonV2_RenderServer) (rpcErr error) {
 	t0 := time.Now()
-	ctx := context.Background()
+	ctx := stream.Context()
+
+	var reqPeer string
+	p, ok := peer.FromContext(stream.Context())
+	if ok {
+		reqPeer = p.Addr.String()
+	}
 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
 	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
-		zap.String("handler", "renderStream"),
+		zap.String("handler", "grpc-render"),
 		zap.String("request_payload", req.String()),
+		zap.String("peer", reqPeer),
 	))
 
 	format := protoV2Format
-	accessLogger = accessLogger.With(
-		zap.String("format", format.String()),
-	)
 
 	targets := getProtoV2Targets(req)
 	tgs := getTargetNames(targets)
 	accessLogger = accessLogger.With(
+		zap.String("format", format.String()),
 		zap.Strings("targets", tgs),
 	)
 
-	logger := TraceContextToZap(ctx, listener.accessLogger.With(
-		zap.String("handler", "render"),
+	logger := TraceContextToZap(ctx, listener.logger.With(
+		zap.String("handler", "grpc-render"),
 		zap.String("request_payload", req.String()),
 		zap.Strings("targets", tgs),
 		zap.String("format", format.String()),
+		zap.String("peer", reqPeer),
 	))
 
 	// Make sure we log which metric caused a panic()
