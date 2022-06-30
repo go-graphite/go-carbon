@@ -90,6 +90,8 @@ github.com/go-graphite/go-whisper v0.0.0-20220504075317-5035f072cad3 h1:QlegEOON
 github.com/go-graphite/go-whisper v0.0.0-20220504075317-5035f072cad3/go.mod h1:XnU8q9X8C3OhD8R7gAlRLI6VXU2KMwqgTO9Tshub2qE=
 github.com/go-graphite/protocol v1.0.1-0.20220623155218-0727176fe6f6 h1:o6x5biB/GOeCgdxgr1JrDHzKkj7jVLH1Mx/P293BLb0=
 github.com/go-graphite/protocol v1.0.1-0.20220623155218-0727176fe6f6/go.mod h1:puWkW2DFZi46CaLY1rxYhkDiBDFlpaTDaMjcE/Cd9gw=
+github.com/go-graphite/protocol v1.0.1-0.20220630134049-92705234d05d h1:f9YLmzZytXwaYpFDMMqoEj6OmWQc/WOenF/gwgsHB0s=
+github.com/go-graphite/protocol v1.0.1-0.20220630134049-92705234d05d/go.mod h1:puWkW2DFZi46CaLY1rxYhkDiBDFlpaTDaMjcE/Cd9gw=
 github.com/gogo/protobuf v1.3.2 h1:Ov1cvc58UF3b5XjBnZv7+opcTcQFZebYjWzi34vdm4Q=
 github.com/gogo/protobuf v1.3.2/go.mod h1:P1XiOD3dCwIKUDQYPy72D8LYyHL2YPYrpS2s69NZV8Q=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=

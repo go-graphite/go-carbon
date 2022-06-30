@@ -70,10 +70,6 @@ message ListMetricsResponse {
 	repeated string Metrics = 1;
 }
 
-message MetricResponse {
-	string name = 1;
-}
-
 // MetricDetails and MetricDetailsResponse is not guaranteed to stay the same in future releases
 // But we'll do our best to make them stable and only to extend them if that's necessary
 message MetricDetails {

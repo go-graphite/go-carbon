@@ -31,8 +31,8 @@ const _ = grpc.SupportPackageIsVersion7
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type CarbonV2Client interface {
 	Render(ctx context.Context, in *carbonapi_v2_pb.MultiFetchRequest, opts ...grpc.CallOption) (CarbonV2_RenderClient, error)
-	Find(ctx context.Context, in *carbonapi_v2_pb.GlobRequest, opts ...grpc.CallOption) (CarbonV2_FindClient, error)
-	List(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (CarbonV2_ListClient, error)
+	Find(ctx context.Context, in *carbonapi_v2_pb.GlobRequest, opts ...grpc.CallOption) (*carbonapi_v2_pb.GlobResponse, error)
+	List(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*carbonapi_v2_pb.ListMetricsResponse, error)
 	Info(ctx context.Context, in *carbonapi_v2_pb.InfoRequest, opts ...grpc.CallOption) (*carbonapi_v2_pb.InfoResponse, error)
 	Stats(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*carbonapi_v2_pb.MetricDetailsResponse, error)
 	Version(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*carbonapi_v2_pb.ProtocolVersionResponse, error)
@@ -78,68 +78,22 @@ func (x *carbonV2RenderClient) Recv() (*carbonapi_v2_pb.FetchResponse, error) {
 	return m, nil
 }
 
-func (c *carbonV2Client) Find(ctx context.Context, in *carbonapi_v2_pb.GlobRequest, opts ...grpc.CallOption) (CarbonV2_FindClient, error) {
-	stream, err := c.cc.NewStream(ctx, &CarbonV2_ServiceDesc.Streams[1], "/carbonapi_v2_grpc.CarbonV2/Find", opts...)
+func (c *carbonV2Client) Find(ctx context.Context, in *carbonapi_v2_pb.GlobRequest, opts ...grpc.CallOption) (*carbonapi_v2_pb.GlobResponse, error) {
+	out := new(carbonapi_v2_pb.GlobResponse)
+	err := c.cc.Invoke(ctx, "/carbonapi_v2_grpc.CarbonV2/Find", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &carbonV2FindClient{stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
+	return out, nil
 }
 
-type CarbonV2_FindClient interface {
-	Recv() (*carbonapi_v2_pb.GlobResponse, error)
-	grpc.ClientStream
-}
-
-type carbonV2FindClient struct {
-	grpc.ClientStream
-}
-
-func (x *carbonV2FindClient) Recv() (*carbonapi_v2_pb.GlobResponse, error) {
-	m := new(carbonapi_v2_pb.GlobResponse)
-	if err := x.ClientStream.RecvMsg(m); err != nil {
-		return nil, err
-	}
-	return m, nil
-}
-
-func (c *carbonV2Client) List(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (CarbonV2_ListClient, error) {
-	stream, err := c.cc.NewStream(ctx, &CarbonV2_ServiceDesc.Streams[2], "/carbonapi_v2_grpc.CarbonV2/List", opts...)
+func (c *carbonV2Client) List(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*carbonapi_v2_pb.ListMetricsResponse, error) {
+	out := new(carbonapi_v2_pb.ListMetricsResponse)
+	err := c.cc.Invoke(ctx, "/carbonapi_v2_grpc.CarbonV2/List", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
-	x := &carbonV2ListClient{stream}
-	if err := x.ClientStream.SendMsg(in); err != nil {
-		return nil, err
-	}
-	if err := x.ClientStream.CloseSend(); err != nil {
-		return nil, err
-	}
-	return x, nil
-}
-
-type CarbonV2_ListClient interface {
-	Recv() (*carbonapi_v2_pb.MetricResponse, error)
-	grpc.ClientStream
-}
-
-type carbonV2ListClient struct {
-	grpc.ClientStream
-}
-
-func (x *carbonV2ListClient) Recv() (*carbonapi_v2_pb.MetricResponse, error) {
-	m := new(carbonapi_v2_pb.MetricResponse)
-	if err := x.ClientStream.RecvMsg(m); err != nil {
-		return nil, err
-	}
-	return m, nil
+	return out, nil
 }
 
 func (c *carbonV2Client) Info(ctx context.Context, in *carbonapi_v2_pb.InfoRequest, opts ...grpc.CallOption) (*carbonapi_v2_pb.InfoResponse, error) {
@@ -174,8 +128,8 @@ func (c *carbonV2Client) Version(ctx context.Context, in *emptypb.Empty, opts ..
 // for forward compatibility
 type CarbonV2Server interface {
 	Render(*carbonapi_v2_pb.MultiFetchRequest, CarbonV2_RenderServer) error
-	Find(*carbonapi_v2_pb.GlobRequest, CarbonV2_FindServer) error
-	List(*emptypb.Empty, CarbonV2_ListServer) error
+	Find(context.Context, *carbonapi_v2_pb.GlobRequest) (*carbonapi_v2_pb.GlobResponse, error)
+	List(context.Context, *emptypb.Empty) (*carbonapi_v2_pb.ListMetricsResponse, error)
 	Info(context.Context, *carbonapi_v2_pb.InfoRequest) (*carbonapi_v2_pb.InfoResponse, error)
 	Stats(context.Context, *emptypb.Empty) (*carbonapi_v2_pb.MetricDetailsResponse, error)
 	Version(context.Context, *emptypb.Empty) (*carbonapi_v2_pb.ProtocolVersionResponse, error)
@@ -189,11 +143,11 @@ type UnimplementedCarbonV2Server struct {
 func (UnimplementedCarbonV2Server) Render(*carbonapi_v2_pb.MultiFetchRequest, CarbonV2_RenderServer) error {
 	return status.Errorf(codes.Unimplemented, "method Render not implemented")
 }
-func (UnimplementedCarbonV2Server) Find(*carbonapi_v2_pb.GlobRequest, CarbonV2_FindServer) error {
-	return status.Errorf(codes.Unimplemented, "method Find not implemented")
+func (UnimplementedCarbonV2Server) Find(context.Context, *carbonapi_v2_pb.GlobRequest) (*carbonapi_v2_pb.GlobResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Find not implemented")
 }
-func (UnimplementedCarbonV2Server) List(*emptypb.Empty, CarbonV2_ListServer) error {
-	return status.Errorf(codes.Unimplemented, "method List not implemented")
+func (UnimplementedCarbonV2Server) List(context.Context, *emptypb.Empty) (*carbonapi_v2_pb.ListMetricsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method List not implemented")
 }
 func (UnimplementedCarbonV2Server) Info(context.Context, *carbonapi_v2_pb.InfoRequest) (*carbonapi_v2_pb.InfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Info not implemented")
@@ -238,46 +192,40 @@ func (x *carbonV2RenderServer) Send(m *carbonapi_v2_pb.FetchResponse) error {
 	return x.ServerStream.SendMsg(m)
 }
 
-func _CarbonV2_Find_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(carbonapi_v2_pb.GlobRequest)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
+func _CarbonV2_Find_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(carbonapi_v2_pb.GlobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
 	}
-	return srv.(CarbonV2Server).Find(m, &carbonV2FindServer{stream})
-}
-
-type CarbonV2_FindServer interface {
-	Send(*carbonapi_v2_pb.GlobResponse) error
-	grpc.ServerStream
-}
-
-type carbonV2FindServer struct {
-	grpc.ServerStream
-}
-
-func (x *carbonV2FindServer) Send(m *carbonapi_v2_pb.GlobResponse) error {
-	return x.ServerStream.SendMsg(m)
-}
-
-func _CarbonV2_List_Handler(srv interface{}, stream grpc.ServerStream) error {
-	m := new(emptypb.Empty)
-	if err := stream.RecvMsg(m); err != nil {
-		return err
+	if interceptor == nil {
+		return srv.(CarbonV2Server).Find(ctx, in)
 	}
-	return srv.(CarbonV2Server).List(m, &carbonV2ListServer{stream})
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/carbonapi_v2_grpc.CarbonV2/Find",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CarbonV2Server).Find(ctx, req.(*carbonapi_v2_pb.GlobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
-type CarbonV2_ListServer interface {
-	Send(*carbonapi_v2_pb.MetricResponse) error
-	grpc.ServerStream
-}
-
-type carbonV2ListServer struct {
-	grpc.ServerStream
-}
-
-func (x *carbonV2ListServer) Send(m *carbonapi_v2_pb.MetricResponse) error {
-	return x.ServerStream.SendMsg(m)
+func _CarbonV2_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(emptypb.Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CarbonV2Server).List(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/carbonapi_v2_grpc.CarbonV2/List",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CarbonV2Server).List(ctx, req.(*emptypb.Empty))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _CarbonV2_Info_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -342,6 +290,14 @@ var CarbonV2_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*CarbonV2Server)(nil),
 	Methods: []grpc.MethodDesc{
 		{
+			MethodName: "Find",
+			Handler:    _CarbonV2_Find_Handler,
+		},
+		{
+			MethodName: "List",
+			Handler:    _CarbonV2_List_Handler,
+		},
+		{
 			MethodName: "Info",
 			Handler:    _CarbonV2_Info_Handler,
 		},
@@ -358,16 +314,6 @@ var CarbonV2_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "Render",
 			Handler:       _CarbonV2_Render_Handler,
-			ServerStreams: true,
-		},
-		{
-			StreamName:    "Find",
-			Handler:       _CarbonV2_Find_Handler,
-			ServerStreams: true,
-		},
-		{
-			StreamName:    "List",
-			Handler:       _CarbonV2_List_Handler,
 			ServerStreams: true,
 		},
 	},
