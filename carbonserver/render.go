@@ -5,10 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/go-graphite/protocol/carbonapi_v2_grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
 	"io/ioutil"
 	"math"
 	"net/http"
@@ -19,8 +15,12 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
@@ -675,7 +675,8 @@ func (listener *CarbonserverListener) fetchDataPB(metric string, files []string,
 	return &multi, nil
 }
 
-func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream carbonapi_v2_grpc.CarbonV2_RenderServer) (rpcErr error) {
+// Render implements Render rpc of CarbonV2 gRPC service
+func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream grpcv2.CarbonV2_RenderServer) (rpcErr error) {
 	t0 := time.Now()
 	ctx := stream.Context()
 
@@ -731,7 +732,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	// TODO: implementing cache?
 	fromCache := false
 
-	// TODO: chan buffer size should be configurable
+	// TODO: should chan buffer size be configurable?
 	responseChan := make(chan *protov2.FetchResponse, 1000)
 
 	metricNames := getUniqueMetricNames(targets)

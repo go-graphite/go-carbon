@@ -22,8 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/go-graphite/protocol/carbonapi_v2_grpc"
-	"google.golang.org/grpc"
 	"io"
 	"math"
 	"net"
@@ -52,11 +50,13 @@ import (
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/stat"
 	"github.com/go-graphite/go-carbon/points"
+	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"github.com/lomik/zapwriter"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+	"google.golang.org/grpc"
 )
 
 type metricStruct struct {
@@ -210,7 +210,7 @@ func (q *queryCache) getQueryItem(k string, size uint64, expire int32) *QueryIte
 }
 
 type CarbonserverListener struct {
-	carbonapi_v2_grpc.UnimplementedCarbonV2Server
+	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
 	readTimeout       time.Duration
@@ -1998,7 +1998,7 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 	var opts []grpc.ServerOption
 
 	grpcServer := grpc.NewServer(opts...)
-	carbonapi_v2_grpc.RegisterCarbonV2Server(grpcServer, listener)
+	grpcv2.RegisterCarbonV2Server(grpcServer, listener)
 	go grpcServer.Serve(listener.grpcListener)
 	return nil
 }
