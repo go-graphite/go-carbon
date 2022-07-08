@@ -59,7 +59,7 @@ github.com/go-graphite/carbonzipper/zipper/httpHeaders
 # github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673
 ## explicit; go 1.18
 github.com/go-graphite/go-whisper
-# github.com/go-graphite/protocol v1.0.1-0.20210605224534-ac8ad6ab1f97
+# github.com/go-graphite/protocol v1.0.1-0.20220622155221-7bb0ad75c008
 ## explicit; go 1.16
 github.com/go-graphite/protocol/carbonapi_v2_pb
 github.com/go-graphite/protocol/carbonapi_v3_pb
@@ -418,8 +418,8 @@ google.golang.org/grpc/serviceconfig
 google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
-# google.golang.org/protobuf v1.26.0
-## explicit; go 1.9
+# google.golang.org/protobuf v1.28.0
+## explicit; go 1.11
 google.golang.org/protobuf/cmd/protoc-gen-go/internal_gengo
 google.golang.org/protobuf/compiler/protogen
 google.golang.org/protobuf/encoding/prototext
