@@ -12,11 +12,11 @@ require (
 	github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 	github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794
-	github.com/go-graphite/go-whisper v0.0.0-20220504075317-5035f072cad3
+	github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673
 	github.com/go-graphite/protocol v1.0.1-0.20210605224534-ac8ad6ab1f97
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
-	github.com/google/go-cmp v0.5.5
+	github.com/google/go-cmp v0.5.8
 	github.com/kardianos/osext v0.0.0-20170510131534-ae77be60afb1 // indirect
 	github.com/klauspost/compress v1.4.0
 	github.com/lomik/graphite-pickle v0.0.0-20171221213606-614e8df42119
@@ -50,7 +50,6 @@ require (
 	github.com/googleapis/gax-go/v2 v2.0.5 // indirect
 	github.com/jstemmer/go-junit-report v0.9.1 // indirect
 	github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5 // indirect
-	github.com/kr/pretty v0.2.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/onsi/gomega v1.10.1 // indirect
