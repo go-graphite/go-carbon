@@ -597,8 +597,22 @@ func (archive *archiveInfo) getBufferByUnit(unit int) []byte {
 func (archive *archiveInfo) appendToBlockAndRotate(dps []dataPoint) (rotated bool, err error) {
 	whisper := archive.whisper // TODO: optimize away?
 
-	// TODO: to improve?
-	blockBuffer := make([]byte, len(dps)*(MaxCompressedPointSize)+endOfBlockSize)
+	// Why MaxCompressedPointSize+1 and endOfBlockSize*2:
+	//
+	// MaxCompressedPointSize is set to 14, but in reality, a maximum compressed
+	// data point has a bit length of 14.125(113 bits). And there might be times
+	// when the current block is almost full, and more data needs to be set 0. So
+	// here go-whisper should prefer to have a large buffer just to be on the safe
+	// side.
+	//
+	// An edge case that can be fixed by this allocation strategy is that: the
+	// current block has less than 14 bytes plus endOfBlockSize (5) bytes
+	// available, and a data point that can't be well compressed comes in, then the
+	// buffer isn't large enough to fill the generated binary data.
+	//
+	// This allocation strategy makes sure that there is enough space in the block
+	// buffer for compression output.
+	blockBuffer := make([]byte, len(dps)*(MaxCompressedPointSize+1)+endOfBlockSize*2)
 
 	for {
 		offset := archive.cblock.lastByteOffset // lastByteOffset is updated in AppendPointsToBlock
