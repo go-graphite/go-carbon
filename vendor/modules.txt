@@ -59,7 +59,7 @@ github.com/go-graphite/carbonzipper/zipper/httpHeaders
 # github.com/go-graphite/go-whisper v0.0.0-20220504075317-5035f072cad3
 ## explicit
 github.com/go-graphite/go-whisper
-# github.com/go-graphite/protocol v1.0.1-0.20220630134049-92705234d05d
+# github.com/go-graphite/protocol v1.0.1-0.20220713140022-0180df7ab791
 ## explicit; go 1.16
 github.com/go-graphite/protocol/carbonapi_v2_grpc
 github.com/go-graphite/protocol/carbonapi_v2_pb

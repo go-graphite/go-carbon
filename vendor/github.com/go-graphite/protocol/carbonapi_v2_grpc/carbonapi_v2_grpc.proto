@@ -4,7 +4,7 @@ package carbonapi_v2_grpc;
 option go_package = "github.com/go-graphite/protocol/carbonapi_v2_grpc";
 
 import "google/protobuf/empty.proto";
-import "github.com/go-graphite/protocol/carbonapi_v2_pb/carbonapi_v2_pb.proto";
+import "carbonapi_v2_pb/carbonapi_v2_pb.proto";
 
 service CarbonV2 {
     rpc Render(carbonapi_v2_pb.MultiFetchRequest) returns (stream carbonapi_v2_pb.FetchResponse) {}
