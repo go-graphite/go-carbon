@@ -56,8 +56,8 @@ github.com/eapache/queue
 # github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794
 ## explicit
 github.com/go-graphite/carbonzipper/zipper/httpHeaders
-# github.com/go-graphite/go-whisper v0.0.0-20220504075317-5035f072cad3
-## explicit
+# github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673
+## explicit; go 1.18
 github.com/go-graphite/go-whisper
 # github.com/go-graphite/protocol v1.0.1-0.20220713140022-0180df7ab791
 ## explicit; go 1.16
@@ -87,8 +87,8 @@ github.com/golang/protobuf/ptypes/timestamp
 # github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db
 ## explicit
 github.com/golang/snappy
-# github.com/google/go-cmp v0.5.6
-## explicit; go 1.8
+# github.com/google/go-cmp v0.5.8
+## explicit; go 1.13
 github.com/google/go-cmp/cmp
 github.com/google/go-cmp/cmp/internal/diff
 github.com/google/go-cmp/cmp/internal/flags
@@ -113,8 +113,6 @@ github.com/klauspost/compress/snappy
 # github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5
 ## explicit
 github.com/klauspost/cpuid
-# github.com/kr/pretty v0.2.0
-## explicit; go 1.12
 # github.com/lomik/graphite-pickle v0.0.0-20171221213606-614e8df42119
 ## explicit
 github.com/lomik/graphite-pickle
