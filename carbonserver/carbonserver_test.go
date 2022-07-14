@@ -172,8 +172,11 @@ func generalFetchSingleMetricRemove(testData *FetchTest) {
 }
 
 func generalFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
-	data, err := carbonserver.fetchSingleMetricV2(testData.name, int32(testData.from), int32(testData.until))
-	return data, err
+	data, err := carbonserver.fetchSingleMetric(testData.name, "", int32(testData.from), int32(testData.until))
+	if err != nil {
+		return nil, err
+	}
+	return data.proto2(), nil
 }
 
 func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {

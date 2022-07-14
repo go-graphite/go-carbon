@@ -157,21 +157,3 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		return response{}, err
 	}
 }
-
-func (listener *CarbonserverListener) fetchSingleMetricV2(metric string, fromTime, untilTime int32) (*protov2.FetchResponse, error) {
-	resp, err := listener.fetchSingleMetric(metric, "", fromTime, untilTime)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.proto2(), nil
-}
-
-func (listener *CarbonserverListener) fetchSingleMetricV3(metric string, pathExpression string, fromTime, untilTime int32) (*protov3.FetchResponse, error) {
-	resp, err := listener.fetchSingleMetric(metric, pathExpression, fromTime, untilTime)
-	if err != nil {
-		return nil, err
-	}
-
-	return resp.proto3(), nil
-}
