@@ -53,7 +53,7 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		}
 
 		var pv3Request protov3.CapabilityRequest
-		err = pv3Request.Unmarshal(body)
+		err = pv3Request.UnmarshalVT(body)
 		if err != nil {
 			accessLogger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
@@ -83,10 +83,12 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		switch formatCode {
 		case jsonFormat:
 			contentType = httpHeaders.ContentTypeJSON
+			//skipcq: VET-V0008
+			//nolint:govet
 			data, _ = json.Marshal(pvResponse)
 		case protoV3Format:
 			contentType = httpHeaders.ContentTypeCarbonAPIv3PB
-			data, err = pvResponse.Marshal()
+			data, err = pvResponse.MarshalVT()
 			if err != nil {
 				accessLogger.Error("capability failed",
 					zap.Duration("runtime_seconds", time.Since(t0)),

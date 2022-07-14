@@ -92,10 +92,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		}
 
 		var pv3Request protov3.MultiGlobRequest
-		pv3Request.Unmarshal(body)
-
-		fmt.Printf("\n\n%+v\n\n", pv3Request)
-
+		pv3Request.UnmarshalVT(body)
 		query = pv3Request.Metrics
 	}
 
@@ -233,29 +230,33 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 			result.files += len(glob.Files)
 			response := protov3.GlobResponse{
 				Name:    glob.Name,
-				Matches: make([]protov3.GlobMatch, 0),
+				Matches: make([]*protov3.GlobMatch, 0),
 			}
 
 			for i, p := range glob.Files {
 				if glob.Leafs[i] {
 					metricsCount++
 				}
-				response.Matches = append(response.Matches, protov3.GlobMatch{Path: p, IsLeaf: glob.Leafs[i]})
+				response.Matches = append(response.Matches, &protov3.GlobMatch{Path: p, IsLeaf: glob.Leafs[i]})
 			}
-			multiResponse.Metrics = append(multiResponse.Metrics, response)
+			multiResponse.Metrics = append(multiResponse.Metrics, &response)
 		}
 
 		logger.Debug("will send out response",
+			//skipcq: VET-V0008
+			//nolint:govet
 			zap.Any("response", multiResponse),
 		)
 
 		switch format {
 		case jsonFormat:
 			result.contentType = httpHeaders.ContentTypeJSON
+			//skipcq: VET-V0008
+			//nolint:govet
 			result.data, err = json.Marshal(multiResponse)
 		case protoV3Format:
 			result.contentType = httpHeaders.ContentTypeCarbonAPIv3PB
-			result.data, err = multiResponse.Marshal()
+			result.data, err = multiResponse.MarshalVT()
 		}
 
 		if err != nil {
@@ -280,7 +281,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		var err error
 		response := protov2.GlobResponse{
 			Name:    names[0],
-			Matches: make([]protov2.GlobMatch, 0),
+			Matches: make([]*protov2.GlobMatch, 0),
 		}
 
 		result.files += len(expandedGlobs[0].Files)
@@ -288,9 +289,9 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 			if expandedGlobs[0].Leafs[i] {
 				metricsCount++
 			}
-			response.Matches = append(response.Matches, protov2.GlobMatch{Path: p, IsLeaf: expandedGlobs[0].Leafs[i]})
+			response.Matches = append(response.Matches, &protov2.GlobMatch{Path: p, IsLeaf: expandedGlobs[0].Leafs[i]})
 		}
-		result.data, err = response.Marshal()
+		result.data, err = response.MarshalVT()
 		result.contentType = httpHeaders.ContentTypeProtobuf
 
 		if err != nil {

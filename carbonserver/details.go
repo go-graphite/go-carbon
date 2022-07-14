@@ -99,7 +99,7 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 			FreeSpace:  fidx.freeSpace,
 			TotalSpace: fidx.totalSpace,
 		}
-		b, err = response.Marshal()
+		b, err = response.MarshalVT()
 		listener.fileIdxMutex.Unlock()
 	}
 

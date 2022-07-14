@@ -109,7 +109,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 		} else {
 			contentType = httpHeaders.ContentTypeCarbonAPIv2PB
 		}
-		b, err = response.Marshal()
+		b, err = response.MarshalVT()
 	}
 
 	if err != nil {

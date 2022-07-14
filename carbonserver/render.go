@@ -38,6 +38,7 @@ type target struct {
 	PathExpression string
 }
 
+// TODO: year-2038 problem. need to move over to int64?
 type timeRange struct {
 	from  int32
 	until int32
@@ -63,10 +64,10 @@ func stringToInt32(t string) (int32, error) {
 	i, err := strconv.Atoi(t)
 
 	if err != nil {
-		return int32(i), err
+		return int32(i), err // skipcq: GO-E1006
 	}
 
-	return int32(i), nil
+	return int32(i), nil // skipcq: GO-E1006
 }
 
 func getFormat(req *http.Request) (responseFormat, error) {
@@ -101,7 +102,7 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 		}
 
 		var pv3Request protov3.MultiFetchRequest
-		if err := pv3Request.Unmarshal(body); err != nil {
+		if err := pv3Request.UnmarshalVT(body); err != nil {
 			return targets, fmt.Errorf("invalid payload: %s", err.Error())
 		}
 
@@ -443,7 +444,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		metricsFetched = len(multiv2.Metrics)
 		for i := range multiv2.Metrics {
 			metrics = append(metrics, multiv2.Metrics[i].Name)
-			memoryUsed += multiv2.Metrics[i].Size()
+			memoryUsed += multiv2.Metrics[i].SizeVT()
 			valuesFetched += len(multiv2.Metrics[i].Values)
 		}
 	} else {
@@ -454,7 +455,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		metricsFetched = len(multiv3.Metrics)
 		for i := range multiv3.Metrics {
 			metrics = append(metrics, multiv3.Metrics[i].Name)
-			memoryUsed += multiv3.Metrics[i].Size()
+			memoryUsed += multiv3.Metrics[i].SizeVT()
 			valuesFetched += len(multiv3.Metrics[i].Values)
 		}
 	}
@@ -463,13 +464,15 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	// We still keep old json format, because it's painful to deal with math.NaN that can occur in new format.
 	case jsonFormat:
 		contentType = "application/json"
+		//skipcq: VET-V0008
+		//nolint:govet
 		b, err = json.Marshal(multiv2)
 	case protoV2Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv2PB
-		b, err = multiv2.Marshal()
+		b, err = multiv2.MarshalVT()
 	case protoV3Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv3PB
-		b, err = multiv3.Marshal()
+		b, err = multiv3.MarshalVT()
 	case pickleFormat:
 		// transform protobuf data into what pickle expects
 		// [{'start': 1396271100, 'step': 60, 'Name': 'metric',
@@ -529,7 +532,7 @@ func (listener *CarbonserverListener) fetchDataPB3(pathExpression string, files 
 		}
 		response, err := listener.fetchSingleMetricV3(fileName, pathExpression, fromTime, untilTime)
 		if err == nil {
-			multi.Metrics = append(multi.Metrics, *response)
+			multi.Metrics = append(multi.Metrics, response)
 		} else {
 			errs = append(errs, err)
 		}
@@ -553,7 +556,7 @@ func (listener *CarbonserverListener) fetchDataPB(metric string, files []string,
 		}
 		response, err := listener.fetchSingleMetricV2(fileMetric, fromTime, untilTime)
 		if err == nil {
-			multi.Metrics = append(multi.Metrics, *response)
+			multi.Metrics = append(multi.Metrics, response)
 		} else {
 			errs = append(errs, err)
 		}
