@@ -525,10 +525,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		var response []map[string]interface{}
 
 		for _, metric := range multiv3.GetMetrics() {
-
-			var m map[string]interface{} //nolint:gosimple
-
-			m = make(map[string]interface{})
+			m := make(map[string]interface{})
 			m["start"] = metric.StartTime
 			m["step"] = metric.StepTime
 			m["end"] = metric.StopTime

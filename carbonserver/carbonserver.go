@@ -1997,7 +1997,7 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 
 	var opts []grpc.ServerOption
 
-	grpcServer := grpc.NewServer(opts...)
+	grpcServer := grpc.NewServer(opts...) //skipcq: GO-S0902
 	grpcv2.RegisterCarbonV2Server(grpcServer, listener)
 	go grpcServer.Serve(listener.grpcListener)
 	return nil
