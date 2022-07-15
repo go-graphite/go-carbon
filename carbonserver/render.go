@@ -480,6 +480,20 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		}
 	}
 
+	select {
+	case <-ctx.Done():
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			listener.prometheus.timeoutRequest()
+		case context.Canceled:
+			listener.prometheus.cancelledRequest()
+		}
+
+		err := fmt.Errorf("time out while preparing data proto")
+		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+	default:
+	}
+
 	if format == protoV2Format || format == jsonFormat {
 		if len(multiv2.Metrics) == 0 && format == protoV2Format {
 			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
@@ -683,6 +697,19 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 				metricAccessBatch = metricAccessBatch[:0]
 			}
 		}
+	}
+
+	select {
+	case <-ctx.Done():
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			listener.prometheus.timeoutRequest()
+		case context.Canceled:
+			listener.prometheus.cancelledRequest()
+		}
+
+		return status.New(codes.DeadlineExceeded, "time out while preparing data proto").Err()
+	default:
 	}
 
 	if metricsFetched == 0 && !listener.emptyResultOk {
