@@ -427,6 +427,7 @@ stats-percentiles = [99, 98, 95, 75, 50]
 # max-inflight-requests = 3
 
 # carbonserver.grpc is the configuration for listening for grpc clients.
+# Note: currently, only CarbonV2 Render rpc is implemented.
 # [carbonserver.grpc]
 # enabled = true
 # listen = ":7004"

@@ -528,6 +528,12 @@ stats-percentiles = [99, 98, 95, 75, 50]
 # path = "/metrics/list_query/"
 # max-inflight-requests = 3
 
+# carbonserver.grpc is the configuration for listening for grpc clients.
+# Note: currently, only CarbonV2 Render rpc is implemented.
+# [carbonserver.grpc]
+# enabled = true
+# listen = ":7004"
+
 [dump]
 # Enable dump/restore function on USR2 signal
 enabled = false
