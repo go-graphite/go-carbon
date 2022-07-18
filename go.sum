@@ -88,8 +88,8 @@ github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794 h1:9N+1I8
 github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794/go.mod h1:sfZ+AkP8/bBcWSGVqhseV6t6e/+C0i/PkTpA32W5rXs=
 github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673 h1:KXBNR5tGEMaq2ZOtUNgRdPEJc5LfNFUQj8LGsaRyeXA=
 github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673/go.mod h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=
-github.com/go-graphite/protocol v1.0.1-0.20220713140022-0180df7ab791 h1:W2oVuFO138fYSMWIzDlHlL/4y6OSWFEPAbi55WQkOFY=
-github.com/go-graphite/protocol v1.0.1-0.20220713140022-0180df7ab791/go.mod h1:puWkW2DFZi46CaLY1rxYhkDiBDFlpaTDaMjcE/Cd9gw=
+github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee h1:Sb63UbLUOXtKFIfNfZIkWrs73vWD0ZKzrBdTjvlVOBQ=
+github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee/go.mod h1:puWkW2DFZi46CaLY1rxYhkDiBDFlpaTDaMjcE/Cd9gw=
 github.com/gogo/protobuf v1.3.2 h1:Ov1cvc58UF3b5XjBnZv7+opcTcQFZebYjWzi34vdm4Q=
 github.com/gogo/protobuf v1.3.2/go.mod h1:P1XiOD3dCwIKUDQYPy72D8LYyHL2YPYrpS2s69NZV8Q=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=

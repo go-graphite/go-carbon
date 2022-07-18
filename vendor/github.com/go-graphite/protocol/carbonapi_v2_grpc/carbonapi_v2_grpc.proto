@@ -7,6 +7,8 @@ import "google/protobuf/empty.proto";
 import "carbonapi_v2_pb/carbonapi_v2_pb.proto";
 
 service CarbonV2 {
+    // Render rpc fetches the metrics requested from the startTime until stopTime or metric end time,
+    // and sends each metric in a FetchResponse through the stream.
     rpc Render(carbonapi_v2_pb.MultiFetchRequest) returns (stream carbonapi_v2_pb.FetchResponse) {}
     rpc Find(carbonapi_v2_pb.GlobRequest) returns (carbonapi_v2_pb.GlobResponse) {}
     rpc List(google.protobuf.Empty) returns (carbonapi_v2_pb.ListMetricsResponse) {}

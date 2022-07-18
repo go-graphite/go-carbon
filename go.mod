@@ -13,7 +13,7 @@ require (
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 	github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794
 	github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673
-	github.com/go-graphite/protocol v1.0.1-0.20220713140022-0180df7ab791
+	github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
 	github.com/google/go-cmp v0.5.8
