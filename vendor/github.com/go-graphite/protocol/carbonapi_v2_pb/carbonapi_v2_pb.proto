@@ -3,27 +3,45 @@ package carbonapi_v2_pb;
 
 option go_package = "github.com/go-graphite/protocol/carbonapi_v2_pb";
 
+message FetchRequest {
+	string name = 1;
+	int32 startTime = 2;
+	int32 stopTime = 3;
+}
+
+message MultiFetchRequest {
+	repeated FetchRequest metrics = 1;
+}
+
 message FetchResponse {
-    string name = 1;
-    int32 startTime = 2;
-    int32 stopTime = 3;
-    int32 stepTime = 4;
-    repeated double values = 5;
-    repeated bool isAbsent = 6;
+	string name = 1;
+	int32 startTime = 2;
+	int32 stopTime = 3;
+	int32 stepTime = 4;
+	repeated double values = 5;
+	repeated bool isAbsent = 6;
 }
 
 message MultiFetchResponse {
-    repeated FetchResponse metrics = 1;
+	repeated FetchResponse metrics = 1;
+}
+
+message GlobRequest {
+	string query = 1;
 }
 
 message GlobMatch {
-    string path = 1;
-    bool isLeaf = 2;
+	string path = 1;
+	bool isLeaf = 2;
 }
 
 message GlobResponse {
-    string name = 1;
-    repeated GlobMatch matches = 2;
+	string name = 1;
+	repeated GlobMatch matches = 2;
+}
+
+message InfoRequest {
+	string name = 1;
 }
 
 message Retention {
@@ -65,4 +83,8 @@ message MetricDetailsResponse {
 	map<string, MetricDetails> metrics = 1;
 	uint64 FreeSpace = 2;
 	uint64 TotalSpace = 3;
+}
+
+message ProtocolVersionResponse {
+	string version = 1;
 }

@@ -15,8 +15,12 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
@@ -91,6 +95,30 @@ func getFormat(req *http.Request) (responseFormat, error) {
 	return formatCode, nil
 }
 
+func getProtoV3Targets(request *protov3.MultiFetchRequest) map[timeRange][]target {
+	targets := make(map[timeRange][]target)
+	for _, t := range request.Metrics {
+		tr := timeRange{
+			from:  int32(t.StartTime),
+			until: int32(t.StopTime),
+		}
+		targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
+	}
+	return targets
+}
+
+func getProtoV2Targets(request *protov2.MultiFetchRequest) map[timeRange][]target {
+	targets := make(map[timeRange][]target)
+	for _, t := range request.Metrics {
+		tr := timeRange{
+			from:  t.StartTime,
+			until: t.StopTime,
+		}
+		targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.Name})
+	}
+	return targets
+}
+
 func getTargets(req *http.Request, format responseFormat) (map[timeRange][]target, error) {
 	targets := make(map[timeRange][]target)
 
@@ -106,14 +134,7 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 			return targets, fmt.Errorf("invalid payload: %s", err.Error())
 		}
 
-		for _, t := range pv3Request.Metrics {
-			tr := timeRange{
-				from:  int32(t.StartTime),
-				until: int32(t.StopTime),
-			}
-			targets[tr] = append(targets[tr], target{Name: t.Name, PathExpression: t.PathExpression})
-		}
-
+		targets = getProtoV3Targets(&pv3Request)
 	default:
 		from, err := stringToInt32(req.FormValue("from"))
 		if err != nil {
@@ -333,18 +354,8 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 	return response, fromCache, err
 }
 
-func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target) (fetchResponse, error) {
-	contentType := "application/text"
-	var b []byte
-	var metricsFetched int
-	var memoryUsed int
-	var valuesFetched int
-
-	var multiv3 protov3.MultiFetchResponse
-	var multiv2 protov2.MultiFetchResponse
-
+func getUniqueMetricNames(targets map[timeRange][]target) []string {
 	metricMap := make(map[string]bool)
-
 	for _, ts := range targets {
 		for _, metric := range ts {
 			metricMap[metric.Name] = true
@@ -356,20 +367,26 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		metricNames[i] = k
 		i++
 	}
-	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+	return metricNames
+}
 
-	if expandedGlobs == nil {
-		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
-	}
-
+func getMetricGlobMapFromExpandedGlobs(expandedGlobs []globs) map[string]globs {
 	metricGlobMap := make(map[string]globs)
 	for _, expandedGlob := range expandedGlobs {
 		metricGlobMap[strings.ReplaceAll(expandedGlob.Name, "/", ".")] = expandedGlob
 	}
+	return metricGlobMap
+}
 
-	var metrics []string
+func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, responseChan chan response) {
+	defer close(responseChan)
 	for tr, ts := range targets {
 		for _, metric := range ts {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			fromTime := tr.from
 			untilTime := tr.until
 
@@ -401,39 +418,80 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 					zap.Int32("from", fromTime),
 					zap.Int32("until", untilTime),
 				)
-
+				var res []response
+				var err error
 				if format == protoV2Format || format == jsonFormat {
-					res, err := listener.fetchDataPB(metric.Name, files, leafs, fromTime, untilTime)
-					if err != nil {
-						atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-						listener.accessLogger.Error("error while fetching the data",
-							zap.Error(err),
-						)
-						continue
-					}
-					multiv2.Metrics = append(multiv2.Metrics, res.Metrics...)
+					res, err = listener.fetchData(metric.Name, "", files, leafs, fromTime, untilTime)
 				} else {
-					res, err := listener.fetchDataPB3(metric.Name, files, leafs, fromTime, untilTime)
-					if err != nil {
-						atomic.AddUint64(&listener.metrics.RenderErrors, 1)
-						listener.accessLogger.Error("error while fetching the data",
-							zap.Error(err),
-						)
-						continue
+					// FIXME: why should we pass metric name instead of path Expression and fill it in afterwards?
+					res, err = listener.fetchData(metric.Name, metric.Name, files, leafs, fromTime, untilTime)
+					for i := range res {
+						res[i].PathExpression = metric.PathExpression
 					}
-					for i := range res.Metrics {
-						res.Metrics[i].PathExpression = metric.PathExpression
-					}
-					multiv3.Metrics = append(multiv3.Metrics, res.Metrics...)
+				}
+				if err != nil {
+					atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+					listener.accessLogger.Error("error while fetching the data",
+						zap.Error(err),
+					)
+					continue
+				}
+				for i := range res {
+					responseChan <- res[i]
 				}
 			} else {
 				listener.accessLogger.Debug("expand globs returned an error",
-					zap.Error(err),
-				)
+					zap.String("metricName", metric.Name))
 				continue
 			}
-
 		}
+	}
+}
+
+func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target) (fetchResponse, error) {
+	contentType := "application/text"
+	var b []byte
+	var metricsFetched int
+	var memoryUsed int
+	var valuesFetched int
+
+	var multiv3 protov3.MultiFetchResponse
+	var multiv2 protov2.MultiFetchResponse
+
+	// TODO: should chan buffer size be configurable?
+	responseChan := make(chan response, 1000)
+	metricNames := getUniqueMetricNames(targets)
+	// TODO: pipeline?
+	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+	if expandedGlobs == nil {
+		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+	}
+	metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
+	go listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
+
+	var metrics []string
+	for renderResponse := range responseChan {
+		if format == protoV2Format || format == jsonFormat {
+			res := renderResponse.proto2()
+			multiv2.Metrics = append(multiv2.Metrics, res)
+		} else {
+			res := renderResponse.proto3()
+			multiv3.Metrics = append(multiv3.Metrics, res)
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			listener.prometheus.timeoutRequest()
+		case context.Canceled:
+			listener.prometheus.cancelledRequest()
+		}
+
+		err := fmt.Errorf("time out while preparing data proto")
+		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+	default:
 	}
 
 	if format == protoV2Format || format == jsonFormat {
@@ -481,10 +539,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		var response []map[string]interface{}
 
 		for _, metric := range multiv3.GetMetrics() {
-
-			var m map[string]interface{} //nolint:gosimple
-
-			m = make(map[string]interface{})
+			m := make(map[string]interface{})
 			m["start"] = metric.StartTime
 			m["step"] = metric.StepTime
 			m["end"] = metric.StopTime
@@ -521,18 +576,19 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics}, nil
 }
 
-func (listener *CarbonserverListener) fetchDataPB3(pathExpression string, files []string, leafs []bool, fromTime, untilTime int32) (*protov3.MultiFetchResponse, error) {
-	var multi protov3.MultiFetchResponse
+func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, fromTime, untilTime int32) ([]response, error) {
+	var multi []response
 	var errs []error
 	for i, fileName := range files {
 		if !leafs[i] {
-			listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression))
+			listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression),
+				zap.String("metricName", metric), zap.String("fileName", fileName))
 			// can't fetch a directory
 			continue
 		}
-		response, err := listener.fetchSingleMetricV3(fileName, pathExpression, fromTime, untilTime)
+		response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
 		if err == nil {
-			multi.Metrics = append(multi.Metrics, response)
+			multi = append(multi, response)
 		} else {
 			errs = append(errs, err)
 		}
@@ -542,29 +598,145 @@ func (listener *CarbonserverListener) fetchDataPB3(pathExpression string, files 
 			zap.Any("errors", errs),
 		)
 	}
-	return &multi, nil
+	return multi, nil
 }
 
-func (listener *CarbonserverListener) fetchDataPB(metric string, files []string, leafs []bool, fromTime, untilTime int32) (*protov2.MultiFetchResponse, error) {
-	var multi protov2.MultiFetchResponse
-	var errs []error
-	for i, fileMetric := range files {
-		if !leafs[i] {
-			listener.logger.Debug("skipping directory", zap.String("metricName", metric), zap.String("fileMetric", fileMetric))
-			// can't fetch a directory
-			continue
+// Render implements Render rpc of CarbonV2 gRPC service
+func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream grpcv2.CarbonV2_RenderServer) (rpcErr error) {
+	t0 := time.Now()
+	ctx := stream.Context()
+
+	var reqPeer string
+	p, ok := peer.FromContext(stream.Context())
+	if ok {
+		reqPeer = p.Addr.String()
+	}
+
+	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
+
+	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+		zap.String("handler", "grpc-render"),
+		zap.String("request_payload", req.String()),
+		zap.String("peer", reqPeer),
+	))
+
+	format := protoV2Format
+
+	targets := getProtoV2Targets(req)
+	tgs := getTargetNames(targets)
+	accessLogger = accessLogger.With(
+		zap.String("format", format.String()),
+		zap.Strings("targets", tgs),
+	)
+
+	logger := TraceContextToZap(ctx, listener.logger.With(
+		zap.String("handler", "grpc-render"),
+		zap.String("request_payload", req.String()),
+		zap.Strings("targets", tgs),
+		zap.String("format", format.String()),
+		zap.String("peer", reqPeer),
+	))
+
+	// Make sure we log which metric caused a panic()
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("panic recovered",
+				zap.Stack("stack"),
+				zap.Any("error", r),
+			)
+			accessLogger.Error("fetch failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "panic during serving the request"),
+				zap.Stack("stack"),
+				zap.Any("error", r),
+				zap.Int("http_code", http.StatusInternalServerError),
+			)
+			rpcErr = status.New(codes.Internal, "Panic occured, see logs for more information").Err()
 		}
-		response, err := listener.fetchSingleMetricV2(fileMetric, fromTime, untilTime)
-		if err == nil {
-			multi.Metrics = append(multi.Metrics, response)
-		} else {
-			errs = append(errs, err)
+	}()
+
+	// TODO: implementing cache?
+	fromCache := false
+
+	// TODO: should chan buffer size be configurable?
+	responseChan := make(chan response, 1000)
+
+	metricNames := getUniqueMetricNames(targets)
+	// TODO: pipeline?
+	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+	if expandedGlobs == nil {
+		if err != nil {
+			return status.New(codes.InvalidArgument, err.Error()).Err()
 		}
 	}
-	if len(errs) != 0 {
-		listener.logger.Warn("errors occur while fetching data",
-			zap.Any("errors", errs),
+	metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
+	go listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
+
+	metricsFetched := 0
+	valuesFetched := 0
+	// TODO: configurable?
+	metricAccessBatchSize := 100
+	metricAccessBatch := make([]string, 0, metricAccessBatchSize)
+	for renderResponse := range responseChan {
+		err := stream.Send(renderResponse.proto2())
+		if err != nil {
+			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+			accessLogger.Error("fetch failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "stream send failed"),
+				zap.Error(err),
+			)
+			return err
+		}
+		metricsFetched++
+		valuesFetched += len(renderResponse.Values)
+		if listener.internalStatsDir != "" {
+			metricAccessBatch = append(metricAccessBatch, renderResponse.Name)
+			if len(metricAccessBatch) >= metricAccessBatchSize {
+				listener.UpdateMetricsAccessTimesByRequest(metricAccessBatch)
+				metricAccessBatch = metricAccessBatch[:0]
+			}
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		switch ctx.Err() {
+		case context.DeadlineExceeded:
+			listener.prometheus.timeoutRequest()
+		case context.Canceled:
+			listener.prometheus.cancelledRequest()
+		}
+
+		return status.New(codes.DeadlineExceeded, "time out while preparing data proto").Err()
+	default:
+	}
+
+	if metricsFetched == 0 && !listener.emptyResultOk {
+		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
+		accessLogger.Error("fetch failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "no metrics found"),
+			zap.Error(err),
 		)
+		return status.New(codes.NotFound, "no metrics found").Err()
 	}
-	return &multi, nil
+
+	logger.Info("fetch served",
+		zap.Duration("runtime_seconds", time.Since(t0)),
+		zap.Bool("query_cache_enabled", listener.queryCacheEnabled),
+		zap.Bool("from_cache", fromCache),
+		zap.Int("metrics_fetched", metricsFetched),
+		zap.Int("values_fetched", valuesFetched),
+		zap.Int("http_code", http.StatusOK),
+	)
+
+	span := trace.SpanFromContext(ctx)
+	span.SetAttributes(
+		kv.Bool("graphite.from_cache", fromCache),
+		kv.Int("graphite.metrics", metricsFetched),
+		kv.Int("graphite.values", valuesFetched),
+	)
+
+	return nil
 }

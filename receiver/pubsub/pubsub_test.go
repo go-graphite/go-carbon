@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
@@ -24,7 +25,7 @@ func newTestClient() (*pstest.Server, *pubsub.Topic, *pubsub.Client, error) {
 	ctx := context.Background()
 	srv := pstest.NewServer()
 	srv.SetStreamTimeout(500 * time.Millisecond)
-	conn, err := grpc.Dial(srv.Addr, grpc.WithInsecure())
+	conn, err := grpc.Dial(srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, nil, nil, err
 	}

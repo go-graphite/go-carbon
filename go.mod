@@ -13,7 +13,7 @@ require (
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 	github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794
 	github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673
-	github.com/go-graphite/protocol v1.0.1-0.20220622155221-7bb0ad75c008
+	github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
 	github.com/google/go-cmp v0.5.8
@@ -25,7 +25,7 @@ require (
 	github.com/lomik/zapwriter v0.0.0-20180906104450-2ec2b9a61680
 	github.com/prometheus/client_golang v0.9.1
 	github.com/sevlyar/go-daemon v0.1.6-0.20210508104436-15bb82c8ea3c
-	github.com/stretchr/testify v1.6.1
+	github.com/stretchr/testify v1.7.0
 	github.com/syndtr/goleveldb v0.0.0-20180815032940-ae2bd5eed72d
 	github.com/vmihailenco/msgpack/v5 v5.3.5
 	go.opentelemetry.io/otel v0.9.0
@@ -33,7 +33,7 @@ require (
 	go.uber.org/zap v1.9.1
 	golang.org/x/net v0.0.0-20210525063256-abc453219eb5
 	google.golang.org/api v0.29.0
-	google.golang.org/grpc v1.38.0
+	google.golang.org/grpc v1.47.0
 )
 
 require (
@@ -46,7 +46,7 @@ require (
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21 // indirect
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
-	github.com/golang/protobuf v1.5.0 // indirect
+	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/googleapis/gax-go/v2 v2.0.5 // indirect
 	github.com/jstemmer/go-junit-report v0.9.1 // indirect
 	github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5 // indirect

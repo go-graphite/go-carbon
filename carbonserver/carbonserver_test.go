@@ -171,9 +171,12 @@ func generalFetchSingleMetricRemove(testData *FetchTest) {
 	os.Remove(filepath.Join(testData.path, testData.name+".wsp"))
 }
 
-func generalFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
-	data, err := carbonserver.fetchSingleMetricV2(testData.name, int32(testData.from), int32(testData.until))
-	return data, err
+func generalFetchSingleMetricHelper(testData *FetchTest, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
+	data, err := carbonserver.fetchSingleMetric(testData.name, "", int32(testData.from), int32(testData.until))
+	if err != nil {
+		return nil, err
+	}
+	return data.proto2(), nil
 }
 
 func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) (*pb.FetchResponse, error) {
@@ -182,7 +185,7 @@ func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbon
 		return nil, err
 	}
 	defer generalFetchSingleMetricRemove(testData)
-	data, err := generalFetchSingleMetricHelper(testData, cache, carbonserver)
+	data, err := generalFetchSingleMetricHelper(testData, carbonserver)
 	return data, err
 }
 
@@ -514,7 +517,7 @@ func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 
 	b.ResetTimer()
 	for runs := 0; runs < b.N; runs++ {
-		data, err := generalFetchSingleMetricHelper(test, cache, carbonserver)
+		data, err := generalFetchSingleMetricHelper(test, carbonserver)
 		if err != nil {
 			b.Errorf("Unexpected error: %v", err)
 			return
