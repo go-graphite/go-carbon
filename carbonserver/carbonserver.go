@@ -714,7 +714,7 @@ uloop:
 		case <-scanFrequency:
 		case <-force:
 		case <-knownMetricsStatTicker:
-			// It's only useful when uisng realtime index as the
+			// It's only useful when using realtime index as the
 			// scanFrequency should be a long interval/duration
 			// like 2 hours or more, and with concurrent and
 			// realtime index, indexed metrics would grow even without disk scanning.
