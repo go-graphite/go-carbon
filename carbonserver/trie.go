@@ -354,7 +354,8 @@ type fileMeta struct {
 	logicalSize  int64
 	physicalSize int64
 	dataPoints   int64
-	readHits     int64 // start only find request + render
+	readHits     int64
+	readBytes    int64
 	// a timestamp of the first time when go-carbon has seen this metric.
 	// strictly speaking, it is not metric creation time, but can be used
 	// as a timing reference to infer that the metric is at least created
@@ -470,7 +471,13 @@ func (tn *trieNode) setChild(i int, n *trieNode) {
 func (tn *trieNode) incrementFindMetric() {
 	if tn.file() {
 		meta := tn.meta.(*fileMeta)
-		atomic.StoreInt64(&meta.readHits, meta.readHits+1)
+		atomic.AddInt64(&meta.readHits, 1)
+	}
+}
+func (tn *trieNode) incrementFindBytesMetric(bytesNumber int64) {
+	if tn.file() {
+		meta := tn.meta.(*fileMeta)
+		atomic.AddInt64(&meta.readBytes, bytesNumber)
 	}
 }
 
@@ -1496,7 +1503,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 	return
 }
 
-func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
+func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, error) {
 	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
@@ -1516,7 +1523,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 		var err error
 		globs, err = listener.expandGlobBraces(globs)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
@@ -1528,7 +1535,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	for _, g := range globs {
 		f, l, n, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		files = append(files, f...)
 		leafs = append(leafs, l...)
@@ -1538,7 +1545,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	for _, node := range nodes {
 		node.incrementFindMetric()
 	}
-	return files, leafs, nil
+	return files, leafs, nodes, nil
 }
 
 type QuotaDroppingPolicy int8
@@ -1866,6 +1873,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 		physicalSize int64
 		dataPoints   int64
 		readHits     int64
+		readBytes    int64
 	}
 
 	var idx int
@@ -1914,7 +1922,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
 					metricName := ti.getMetricName(cur.node, name)
-					ti.generateTrieMetrics(metricName, cur.node, throughput, throttled, cur.readHits)
+					ti.generateTrieMetrics(metricName, cur.node, throughput, throttled, cur.readHits, cur.readBytes)
 					if throttled > 0 {
 						atomic.AddInt64(&usage.Throttled, -throttled)
 					}
@@ -1943,7 +1951,8 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 			cur.logicalSize += cur.node.meta.(*fileMeta).logicalSize
 			cur.physicalSize += cur.node.meta.(*fileMeta).physicalSize
 			cur.dataPoints += cur.node.meta.(*fileMeta).dataPoints
-			cur.readHits += cur.node.meta.(*fileMeta).readHits
+			cur.readHits += atomic.LoadInt64(&cur.node.meta.(*fileMeta).readHits)
+			cur.readBytes += atomic.LoadInt64(&cur.node.meta.(*fileMeta).readBytes)
 			files++
 
 			goto parent
@@ -1961,6 +1970,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 		physicalSize := cur.physicalSize
 		dataPoints := cur.dataPoints
 		readHits := cur.readHits
+		readBytes := cur.readBytes
 		states[idx] = state{}
 		idx--
 		if idx < 0 {
@@ -1973,6 +1983,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 		cur.physicalSize += physicalSize
 		cur.dataPoints += dataPoints
 		cur.readHits += readHits
+		cur.readBytes += readBytes
 		cur.next++
 
 		continue
@@ -1981,7 +1992,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 	return
 }
 
-func (ti *trieIndex) generateTrieMetrics(metricName string, node *trieNode, throughput, throttled, readHits int64) {
+func (ti *trieIndex) generateTrieMetrics(metricName string, node *trieNode, throughput, throttled, readHits, readBytes int64) {
 
 	// Note: Timestamp for each points.Points are set by collector send logics
 	meta := node.meta.(*dirMeta)
@@ -2097,6 +2108,12 @@ func (ti *trieIndex) generateTrieMetrics(metricName string, node *trieNode, thro
 		Metric: fmt.Sprintf("read_hits.%s", metricName),
 		Data: []points.Point{{
 			Value: float64(readHits),
+		}},
+	})
+	ti.qauMetrics = append(ti.qauMetrics, points.Points{
+		Metric: fmt.Sprintf("read_bytes.%s", metricName),
+		Data: []points.Point{{
+			Value: float64(readBytes),
 		}},
 	})
 }
@@ -2346,7 +2363,7 @@ mloop:
 	return toThrottle
 }
 
-func (ti *trieIndex) getMetricName(node *trieNode, name string) string {
+func (_ *trieIndex) getMetricName(node *trieNode, name string) string {
 	var prefix string
 	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok {
 		prefix = quota.StatMetricPrefix

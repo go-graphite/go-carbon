@@ -1268,21 +1268,25 @@ func TestTrieQuotaGeneral(t *testing.T) {
 				{Metric: "usage.metrics.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 2}}},
 				{Metric: "throttle.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 1}}},
 				{Metric: "read_hits.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 0}}},
+				{Metric: "read_bytes.sys-app-srv1-nodes-host-01", Data: []points.Point{{Value: 0}}},
 
 				{Metric: "quota.metrics.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 4}}},
 				{Metric: "usage.metrics.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 3}}},
 				{Metric: "throttle.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 0}}},
 				{Metric: "read_hits.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 0}}},
+				{Metric: "read_bytes.sys-app-srv1-nodes-foo-01", Data: []points.Point{{Value: 0}}},
 
 				{Metric: "quota.metrics.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 2}}},
 				{Metric: "usage.metrics.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 1}}},
 				{Metric: "throttle.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 0}}},
 				{Metric: "read_hits.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 0}}},
+				{Metric: "read_bytes.sys-app-srv2-nodes-host-01", Data: []points.Point{{Value: 0}}},
 
 				{Metric: "quota.physical_size.root", Data: []points.Point{{Value: 184320}}},
 				{Metric: "usage.physical_size.root", Data: []points.Point{{Value: 6}}},
 				{Metric: "throttle.root", Data: []points.Point{{Value: 0}}},
 				{Metric: "read_hits.root", Data: []points.Point{{Value: 0}}},
+				{Metric: "read_bytes.root", Data: []points.Point{{Value: 0}}},
 			},
 		},
 	}
@@ -1383,16 +1387,19 @@ func TestTrieQuotaThroughput(t *testing.T) {
 		{Metric: "usage.throughput.sys-app-server-001", Data: []points.Point{{Value: 4}}},
 		{Metric: "throttle.sys-app-server-001", Data: []points.Point{{Value: 4}}},
 		{Metric: "read_hits.sys-app-server-001", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.sys-app-server-001", Data: []points.Point{{Value: 0}}},
 
 		{Metric: "quota.throughput.sys-app-server-002", Data: []points.Point{{Value: 5}}},
 		{Metric: "usage.throughput.sys-app-server-002", Data: []points.Point{{Value: 0}}},
 		{Metric: "throttle.sys-app-server-002", Data: []points.Point{{Value: 6}}},
 		{Metric: "read_hits.sys-app-server-002", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.sys-app-server-002", Data: []points.Point{{Value: 0}}},
 
 		{Metric: "quota.physical_size.root", Data: []points.Point{{Value: 184320}}},
 		{Metric: "usage.physical_size.root", Data: []points.Point{{Value: 24576}}},
 		{Metric: "throttle.root", Data: []points.Point{{Value: 0}}},
 		{Metric: "read_hits.root", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.root", Data: []points.Point{{Value: 0}}},
 	}; !reflect.DeepEqual(tindex.qauMetrics, wants) {
 		t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(wants))
 	}
@@ -1550,16 +1557,19 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 		{Metric: "usage.throughput.sys-app-server-001", Data: []points.Point{{Value: 8}}},
 		{Metric: "throttle.sys-app-server-001", Data: []points.Point{{Value: 0}}},
 		{Metric: "read_hits.sys-app-server-001", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.sys-app-server-001", Data: []points.Point{{Value: 0}}},
 
 		{Metric: "quota.throughput.sys-app-server-002", Data: []points.Point{{Value: 4}}},
 		{Metric: "usage.throughput.sys-app-server-002", Data: []points.Point{{Value: 0}}},
 		{Metric: "throttle.sys-app-server-002", Data: []points.Point{{Value: 6}}},
 		{Metric: "read_hits.sys-app-server-002", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.sys-app-server-002", Data: []points.Point{{Value: 0}}},
 
 		{Metric: "quota.physical_size.root", Data: []points.Point{{Value: 184320}}},
 		{Metric: "usage.physical_size.root", Data: []points.Point{{Value: 24576}}},
 		{Metric: "throttle.root", Data: []points.Point{{Value: 0}}},
 		{Metric: "read_hits.root", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.root", Data: []points.Point{{Value: 0}}},
 	}; !reflect.DeepEqual(tindex.qauMetrics, wants) {
 		t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(wants))
 	}
@@ -1661,16 +1671,19 @@ func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
 		{Metric: "usage.throughput.sys-app-server-001", Data: []points.Point{{Value: 2}}},
 		{Metric: "throttle.sys-app-server-001", Data: []points.Point{{Value: 1}}},
 		{Metric: "read_hits.sys-app-server-001", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.sys-app-server-001", Data: []points.Point{{Value: 0}}},
 
 		{Metric: "quota.throughput.sys-app", Data: []points.Point{{Value: 4}}},
 		{Metric: "usage.throughput.sys-app", Data: []points.Point{{Value: 2}}},
 		{Metric: "throttle.sys-app", Data: []points.Point{{Value: 0}}},
 		{Metric: "read_hits.sys-app", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.sys-app", Data: []points.Point{{Value: 0}}},
 
 		{Metric: "quota.throughput.root", Data: []points.Point{{Value: 4}}},
 		{Metric: "usage.throughput.root", Data: []points.Point{{Value: 2}}},
 		{Metric: "throttle.root", Data: []points.Point{{Value: 0}}},
 		{Metric: "read_hits.root", Data: []points.Point{{Value: 0}}},
+		{Metric: "read_bytes.root", Data: []points.Point{{Value: 0}}},
 	}; !reflect.DeepEqual(tindex.qauMetrics, wants) {
 		t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(wants))
 	}

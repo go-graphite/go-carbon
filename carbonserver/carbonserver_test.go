@@ -189,6 +189,45 @@ func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbon
 	return data, err
 }
 
+func TestFetchDataReadBytesMetricIncrement(t *testing.T) {
+	test := getSingleMetricTest("data-file")
+	cache := cache.New()
+	carbonserver, err := getCarbonserverListener(cache)
+	carbonserver.SetTrieIndex(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	test.path = carbonserver.whisperData
+	defer os.RemoveAll(test.path)
+	err = generalFetchSingleMetricInit(test, cache, carbonserver) // insert metrics in the file
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer generalFetchSingleMetricRemove(test) // remove metrics later
+	var trieNodes []*trieNode
+	trieNodes = append(trieNodes, &trieNode{ // readBytes update will go here
+		childrens: emptyTrieNodes,
+		gen:       0,
+		meta: &fileMeta{
+			logicalSize:  0,
+			physicalSize: 0,
+			dataPoints:   0,
+			firstSeenAt:  0,
+		},
+	})
+	metrics, err := carbonserver.fetchData(test.name, "", []string{test.name}, []bool{true}, trieNodes, int32(test.from), int32(test.until))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metrics) != 1 || len(metrics[0].Values) != 5 {
+		t.Errorf("wrong number of metrics returned: should be 1 metric with 5 data points")
+	}
+	fm := trieNodes[0].meta.(*fileMeta)
+	if fm.readBytes != 5*12 { // 5 points * 12 bytes for each point
+		t.Errorf("Wrong number of read bytes, %d instead of 5*12 bytes", fm.readBytes)
+	}
+}
+
 var day = 60 * 60 * 24
 var now = (int(time.Now().Unix()) / 120) * 120
 var singleMetricTests = []FetchTest{
@@ -325,22 +364,27 @@ func getSingleMetricTest(name string) *FetchTest {
 	}
 	return nil
 }
-
-func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
-	cache := cache.New()
+func getCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error) {
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	defer os.RemoveAll(path)
-
 	carbonserver := NewCarbonserverListener(cache.Get)
 	carbonserver.whisperData = path
 	carbonserver.logger = zap.NewNop()
 	carbonserver.metrics = &metricStruct{}
-	precision := 0.000001
+	return carbonserver, nil
+}
 
-	test.path = path
+func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
+	cache := cache.New()
+	carbonserver, err := getCarbonserverListener(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	precision := 0.000001
+	test.path = carbonserver.whisperData
+	defer os.RemoveAll(test.path)
 	fmt.Println("Performing test ", test.name)
 	data, err := testFetchSingleMetricHelper(test, cache, carbonserver)
 	if !test.errIsNil {
@@ -494,18 +538,14 @@ func TestGetMetricsListWithData(t *testing.T) {
 }
 
 func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
-	path, err := ioutil.TempDir("", "")
+	cache := cache.New()
+
+	carbonserver, err := getCarbonserverListener(cache)
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer os.RemoveAll(path)
-	test.path = path
-	cache := cache.New()
-
-	carbonserver := NewCarbonserverListener(cache.Get)
-	carbonserver.whisperData = path
-	carbonserver.logger = zap.NewNop()
-	carbonserver.metrics = &metricStruct{}
+	test.path = carbonserver.whisperData
+	defer os.RemoveAll(test.path)
 	// common
 
 	// Non-existing metric
