@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"github.com/go-graphite/go-whisper"
+
 	"io/ioutil"
 	"math"
 	"net/http"

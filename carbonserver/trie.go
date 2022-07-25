@@ -1951,8 +1951,12 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 			cur.logicalSize += cur.node.meta.(*fileMeta).logicalSize
 			cur.physicalSize += cur.node.meta.(*fileMeta).physicalSize
 			cur.dataPoints += cur.node.meta.(*fileMeta).dataPoints
-			cur.readHits += atomic.LoadInt64(&cur.node.meta.(*fileMeta).readHits)
-			cur.readBytes += atomic.LoadInt64(&cur.node.meta.(*fileMeta).readBytes)
+			deltaReadHits := atomic.LoadInt64(&cur.node.meta.(*fileMeta).readHits)
+			cur.readHits += deltaReadHits
+			atomic.AddInt64(&cur.node.meta.(*fileMeta).readHits, -deltaReadHits)
+			deltaReadBytes := atomic.LoadInt64(&cur.node.meta.(*fileMeta).readBytes)
+			cur.readBytes += deltaReadBytes
+			atomic.AddInt64(&cur.node.meta.(*fileMeta).readBytes, -deltaReadBytes)
 			files++
 
 			goto parent
@@ -2363,7 +2367,7 @@ mloop:
 	return toThrottle
 }
 
-func (_ *trieIndex) getMetricName(node *trieNode, name string) string {
+func (*trieIndex) getMetricName(node *trieNode, name string) string {
 	var prefix string
 	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok {
 		prefix = quota.StatMetricPrefix
