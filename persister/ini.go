@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// TODO: migrate to toml?
 func parseIniFile(filename string) ([]map[string]string, error) {
 	body, err := ioutil.ReadFile(filename)
 	if err != nil {

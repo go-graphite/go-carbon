@@ -420,6 +420,17 @@ retentions = 60:43200,3600:43800`), 0644)
 
 func (c *Config) getCarbonserverQuotas() (quotas []*carbonserver.Quota) {
 	for _, q := range c.Whisper.Quotas {
+		var transientChild *carbonserver.Quota
+		if q.TransientChildLimit > 0 {
+			transientChild = &carbonserver.Quota{
+				Pattern:        "transient",
+				Metrics:        q.TransientChildLimit,
+				Throughput:     q.TransientChildLimit * 10,
+				IsTransient:    true,
+				DroppingPolicy: carbonserver.QDPNew,
+			}
+		}
+
 		quotas = append(quotas, &carbonserver.Quota{
 			Pattern:          q.Pattern,
 			Namespaces:       q.Namespaces,
@@ -430,6 +441,8 @@ func (c *Config) getCarbonserverQuotas() (quotas []*carbonserver.Quota) {
 			Throughput:       q.Throughput,
 			DroppingPolicy:   carbonserver.ParseQuotaDroppingPolicy(q.DroppingPolicy),
 			StatMetricPrefix: q.StatMetricPrefix,
+
+			TransientChild: transientChild,
 		})
 	}
 
