@@ -1464,9 +1464,9 @@ func TestTrieReadMetric(t *testing.T) {
 	tindex.qauMetrics = tindex.qauMetrics[:0]
 	tindex.refreshUsage(tindex.throughputs)
 	expectedMetrics = map[string]points.Points{
-		"read_hits.sys-app-server-001": {Metric: "read_hits.sys-app-server-001", Data: []points.Point{{Value: 1}}},
-		"read_hits.sys-app-server-002": {Metric: "read_hits.sys-app-server-002", Data: []points.Point{{Value: 2}}},
-		"read_hits.root":               {Metric: "read_hits.root", Data: []points.Point{{Value: 3}}},
+		"read_hits.sys-app-server-001": {Metric: "read_hits.sys-app-server-001", Data: []points.Point{{Value: 0}}},
+		"read_hits.sys-app-server-002": {Metric: "read_hits.sys-app-server-002", Data: []points.Point{{Value: 1}}},
+		"read_hits.root":               {Metric: "read_hits.root", Data: []points.Point{{Value: 1}}},
 	}
 	for _, metric := range tindex.qauMetrics {
 		if expectedMetric, ok := expectedMetrics[metric.Metric]; ok {
