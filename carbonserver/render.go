@@ -5,9 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-
-	"github.com/go-graphite/go-whisper"
-
 	"io/ioutil"
 	"math"
 	"net/http"
@@ -23,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	"github.com/go-graphite/go-whisper"
 	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -595,7 +593,7 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 			multi = append(multi, response)
 			if listener.trieIndex {
 				readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
-				trieNodes[i].incrementFindBytesMetric(readBytesNumber)
+				trieNodes[i].incrementReadBytesMetric(readBytesNumber)
 			}
 		} else {
 			errs = append(errs, err)

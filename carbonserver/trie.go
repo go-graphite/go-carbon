@@ -468,13 +468,13 @@ func (tn *trieNode) setChild(i int, n *trieNode) {
 	)
 }
 
-func (tn *trieNode) incrementFindMetric() {
+func (tn *trieNode) incrementReadHitsMetric() {
 	if tn.file() {
 		meta := tn.meta.(*fileMeta)
 		atomic.AddInt64(&meta.readHits, 1)
 	}
 }
-func (tn *trieNode) incrementFindBytesMetric(bytesNumber int64) {
+func (tn *trieNode) incrementReadBytesMetric(bytesNumber int64) {
 	if tn.file() {
 		meta := tn.meta.(*fileMeta)
 		atomic.AddInt64(&meta.readBytes, bytesNumber)
@@ -1543,7 +1543,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	}
 	// set node as viewed
 	for _, node := range nodes {
-		node.incrementFindMetric()
+		node.incrementReadHitsMetric()
 	}
 	return files, leafs, nodes, nil
 }
