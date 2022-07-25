@@ -1921,7 +1921,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 					}
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
-					metricName := ti.getMetricName(cur.node, name)
+					metricName := ti.metricName(cur.node, name)
 					ti.generateTrieMetrics(metricName, cur.node, throughput, throttled, cur.readHits, cur.readBytes)
 					if throttled > 0 {
 						atomic.AddInt64(&usage.Throttled, -throttled)
@@ -2367,7 +2367,7 @@ mloop:
 	return toThrottle
 }
 
-func (*trieIndex) getMetricName(node *trieNode, name string) string {
+func (*trieIndex) metricName(node *trieNode, name string) string {
 	var prefix string
 	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok {
 		prefix = quota.StatMetricPrefix

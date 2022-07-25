@@ -192,7 +192,7 @@ func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbon
 func TestFetchDataReadBytesMetricIncrement(t *testing.T) {
 	test := getSingleMetricTest("data-file")
 	cache := cache.New()
-	carbonserver, err := getCarbonserverListener(cache)
+	carbonserver, err := initCarbonserverListener(cache)
 	carbonserver.SetTrieIndex(true)
 	if err != nil {
 		t.Fatal(err)
@@ -364,7 +364,7 @@ func getSingleMetricTest(name string) *FetchTest {
 	}
 	return nil
 }
-func getCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error) {
+func initCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error) {
 	path, err := ioutil.TempDir("", "")
 	if err != nil {
 		return nil, err
@@ -378,7 +378,7 @@ func getCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error) 
 
 func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 	cache := cache.New()
-	carbonserver, err := getCarbonserverListener(cache)
+	carbonserver, err := initCarbonserverListener(cache)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestGetMetricsListWithData(t *testing.T) {
 func benchmarkFetchSingleMetricCommon(b *testing.B, test *FetchTest) {
 	cache := cache.New()
 
-	carbonserver, err := getCarbonserverListener(cache)
+	carbonserver, err := initCarbonserverListener(cache)
 	if err != nil {
 		b.Fatal(err)
 	}
