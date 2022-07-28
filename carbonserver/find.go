@@ -209,9 +209,10 @@ func (err errorNotFound) Error() string {
 }
 
 type globs struct {
-	Name  string
-	Files []string
-	Leafs []bool
+	Name      string
+	Files     []string
+	Leafs     []bool
+	TrieNodes []*trieNode
 }
 
 func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
@@ -355,7 +356,7 @@ GATHER:
 			glob := globs{
 				Name: expandedResult.Name,
 			}
-			glob.Files, glob.Leafs, err = expandedResult.Files, expandedResult.Leafs, expandedResult.Err
+			glob.Files, glob.Leafs, glob.TrieNodes, err = expandedResult.Files, expandedResult.Leafs, expandedResult.TrieNodes, expandedResult.Err
 			if err != nil {
 				errors = append(errors, fmt.Errorf("%s: %s", expandedResult.Name, err))
 			}

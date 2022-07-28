@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	"github.com/go-graphite/go-whisper"
 	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -392,7 +393,7 @@ func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, for
 
 			listener.logger.Debug("fetching data...")
 			if expandedResult, ok := metricGlobMap[metric.Name]; ok {
-				files, leafs := expandedResult.Files, expandedResult.Leafs
+				files, leafs, trieNodes := expandedResult.Files, expandedResult.Leafs, expandedResult.TrieNodes
 				if len(files) > listener.maxMetricsRendered {
 					listener.accessLogger.Error(
 						"rendering too many metrics",
@@ -402,6 +403,7 @@ func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, for
 
 					files = files[:listener.maxMetricsRendered]
 					leafs = leafs[:listener.maxMetricsRendered]
+					trieNodes = trieNodes[:listener.maxMetricsRendered]
 				}
 
 				metricsCount := 0
@@ -421,10 +423,10 @@ func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, for
 				var res []response
 				var err error
 				if format == protoV2Format || format == jsonFormat {
-					res, err = listener.fetchData(metric.Name, "", files, leafs, fromTime, untilTime)
+					res, err = listener.fetchData(metric.Name, "", files, leafs, trieNodes, fromTime, untilTime)
 				} else {
 					// FIXME: why should we pass metric name instead of path Expression and fill it in afterwards?
-					res, err = listener.fetchData(metric.Name, metric.Name, files, leafs, fromTime, untilTime)
+					res, err = listener.fetchData(metric.Name, metric.Name, files, leafs, trieNodes, fromTime, untilTime)
 					for i := range res {
 						res[i].PathExpression = metric.PathExpression
 					}
@@ -576,7 +578,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics}, nil
 }
 
-func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, fromTime, untilTime int32) ([]response, error) {
+func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, trieNodes []*trieNode, fromTime, untilTime int32) ([]response, error) {
 	var multi []response
 	var errs []error
 	for i, fileName := range files {
@@ -589,6 +591,10 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 		response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
 		if err == nil {
 			multi = append(multi, response)
+			if listener.trieIndex {
+				readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
+				trieNodes[i].incrementReadBytesMetric(readBytesNumber)
+			}
 		} else {
 			errs = append(errs, err)
 		}

@@ -10,3 +10,4 @@ md5sum
 sha256sum
 *.rpm
 *.deb
+/local/

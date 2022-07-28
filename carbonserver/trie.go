@@ -354,9 +354,10 @@ type fileMeta struct {
 	logicalSize  int64
 	physicalSize int64
 	dataPoints   int64
-
+	readHits     int64
+	readBytes    int64
 	// a timestamp of the first time when go-carbon has seen this metric.
-	// stricly speacking, it is not metric creation time, but can be used
+	// strictly speaking, it is not metric creation time, but can be used
 	// as a timing reference to infer that the metric is at least created
 	// before this timestamp. some file systems doesn't maintain ctime of
 	// files (like xfs before v5:
@@ -465,6 +466,19 @@ func (tn *trieNode) setChild(i int, n *trieNode) {
 		(*unsafe.Pointer)(unsafe.Pointer(&(*tn.childrens)[i])), // skipcq: GSC-G103
 		unsafe.Pointer(n), // skipcq: GSC-G103
 	)
+}
+
+func (tn *trieNode) incrementReadHitsMetric() {
+	if tn.file() {
+		meta := tn.meta.(*fileMeta)
+		atomic.AddInt64(&meta.readHits, 1)
+	}
+}
+func (tn *trieNode) incrementReadBytesMetric(bytesNumber int64) {
+	if tn.file() {
+		meta := tn.meta.(*fileMeta)
+		atomic.AddInt64(&meta.readBytes, bytesNumber)
+	}
 }
 
 func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
@@ -1489,7 +1503,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 	return
 }
 
-func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, error) {
+func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, error) {
 	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
@@ -1509,24 +1523,29 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 		var err error
 		globs, err = listener.expandGlobBraces(globs)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 
 	var fidx = listener.CurrentFileIndex()
 	var files []string
 	var leafs []bool
+	var nodes []*trieNode
 
 	for _, g := range globs {
-		f, l, _, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
+		f, l, n, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		files = append(files, f...)
 		leafs = append(leafs, l...)
+		nodes = append(nodes, n...)
 	}
-
-	return files, leafs, nil
+	// set node as viewed
+	for _, node := range nodes {
+		node.incrementReadHitsMetric()
+	}
+	return files, leafs, nodes, nil
 }
 
 type QuotaDroppingPolicy int8
@@ -1853,6 +1872,8 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 		logicalSize  int64
 		physicalSize int64
 		dataPoints   int64
+		readHits     int64
+		readBytes    int64
 	}
 
 	var idx int
@@ -1894,20 +1915,14 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 						name = ti.root.fullPath('.', nodes)
 						tname = name
 					}
-					var prefix string
-					if quota, ok := cur.node.meta.(*dirMeta).quota.Load().(*Quota); ok {
-						prefix = quota.StatMetricPrefix
-					}
-
 					var throughput int64
 					if te := throughputs.load(tname); te != nil {
 						throughput = te.offset().dataPoints
 					}
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
-
-					ti.generateQuotaAndUsageMetrics(prefix, strings.ReplaceAll(name, ".", "-"), cur.node, throughput, throttled)
-
+					metricName := ti.metricName(cur.node, name)
+					ti.generateTrieMetrics(metricName, cur.node, throughput, throttled, cur.readHits, cur.readBytes)
 					if throttled > 0 {
 						atomic.AddInt64(&usage.Throttled, -throttled)
 					}
@@ -1936,7 +1951,12 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 			cur.logicalSize += cur.node.meta.(*fileMeta).logicalSize
 			cur.physicalSize += cur.node.meta.(*fileMeta).physicalSize
 			cur.dataPoints += cur.node.meta.(*fileMeta).dataPoints
-
+			deltaReadHits := atomic.LoadInt64(&cur.node.meta.(*fileMeta).readHits)
+			cur.readHits += deltaReadHits
+			atomic.AddInt64(&cur.node.meta.(*fileMeta).readHits, -deltaReadHits)
+			deltaReadBytes := atomic.LoadInt64(&cur.node.meta.(*fileMeta).readBytes)
+			cur.readBytes += deltaReadBytes
+			atomic.AddInt64(&cur.node.meta.(*fileMeta).readBytes, -deltaReadBytes)
 			files++
 
 			goto parent
@@ -1953,7 +1973,8 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 		logicalSize := cur.logicalSize
 		physicalSize := cur.physicalSize
 		dataPoints := cur.dataPoints
-
+		readHits := cur.readHits
+		readBytes := cur.readBytes
 		states[idx] = state{}
 		idx--
 		if idx < 0 {
@@ -1965,6 +1986,8 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 		cur.logicalSize += logicalSize
 		cur.physicalSize += physicalSize
 		cur.dataPoints += dataPoints
+		cur.readHits += readHits
+		cur.readBytes += readBytes
 		cur.next++
 
 		continue
@@ -1973,13 +1996,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 	return
 }
 
-func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *trieNode, throughput, throttled int64) {
-	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
-	// file extension.
-	if len(name) >= 250 {
-		// skipcq: GSC-G401, GO-S1023
-		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name)))
-	}
+func (ti *trieIndex) generateTrieMetrics(metricName string, node *trieNode, throughput, throttled, readHits, readBytes int64) {
 
 	// Note: Timestamp for each points.Points are set by collector send logics
 	meta := node.meta.(*dirMeta)
@@ -1988,13 +2005,13 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 		ti.qauMetrics = append(
 			ti.qauMetrics,
 			points.Points{
-				Metric: fmt.Sprintf("quota.namespaces.%s%s", prefix, name),
+				Metric: fmt.Sprintf("quota.namespaces.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(quota.Namespaces),
 				}},
 			},
 			points.Points{
-				Metric: fmt.Sprintf("usage.namespaces.%s%s", prefix, name),
+				Metric: fmt.Sprintf("usage.namespaces.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(atomic.LoadInt64(&meta.usage.Namespaces)),
 				}},
@@ -2004,13 +2021,13 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	if quota.Metrics > 0 {
 		ti.qauMetrics = append(
 			ti.qauMetrics, points.Points{
-				Metric: fmt.Sprintf("quota.metrics.%s%s", prefix, name),
+				Metric: fmt.Sprintf("quota.metrics.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(quota.Metrics),
 				}},
 			},
 			points.Points{
-				Metric: fmt.Sprintf("usage.metrics.%s%s", prefix, name),
+				Metric: fmt.Sprintf("usage.metrics.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(atomic.LoadInt64(&meta.usage.Metrics)),
 				}},
@@ -2021,13 +2038,13 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 		ti.qauMetrics = append(
 			ti.qauMetrics,
 			points.Points{
-				Metric: fmt.Sprintf("quota.data_points.%s%s", prefix, name),
+				Metric: fmt.Sprintf("quota.data_points.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(quota.DataPoints),
 				}},
 			},
 			points.Points{
-				Metric: fmt.Sprintf("usage.data_points.%s%s", prefix, name),
+				Metric: fmt.Sprintf("usage.data_points.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(atomic.LoadInt64(&meta.usage.DataPoints)),
 				}},
@@ -2038,13 +2055,13 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 		ti.qauMetrics = append(
 			ti.qauMetrics,
 			points.Points{
-				Metric: fmt.Sprintf("quota.logical_size.%s%s", prefix, name),
+				Metric: fmt.Sprintf("quota.logical_size.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(quota.LogicalSize),
 				}},
 			},
 			points.Points{
-				Metric: fmt.Sprintf("usage.logical_size.%s%s", prefix, name),
+				Metric: fmt.Sprintf("usage.logical_size.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(atomic.LoadInt64(&meta.usage.LogicalSize)),
 				}},
@@ -2055,13 +2072,13 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 		ti.qauMetrics = append(
 			ti.qauMetrics,
 			points.Points{
-				Metric: fmt.Sprintf("quota.physical_size.%s%s", prefix, name),
+				Metric: fmt.Sprintf("quota.physical_size.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(quota.PhysicalSize),
 				}},
 			},
 			points.Points{
-				Metric: fmt.Sprintf("usage.physical_size.%s%s", prefix, name),
+				Metric: fmt.Sprintf("usage.physical_size.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(atomic.LoadInt64(&meta.usage.PhysicalSize)),
 				}},
@@ -2071,13 +2088,13 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	if quota.Throughput > 0 {
 		ti.qauMetrics = append(
 			ti.qauMetrics, points.Points{
-				Metric: fmt.Sprintf("quota.throughput.%s%s", prefix, name),
+				Metric: fmt.Sprintf("quota.throughput.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(quota.Throughput),
 				}},
 			},
 			points.Points{
-				Metric: fmt.Sprintf("usage.throughput.%s%s", prefix, name),
+				Metric: fmt.Sprintf("usage.throughput.%s", metricName),
 				Data: []points.Point{{
 					Value: float64(throughput),
 				}},
@@ -2086,9 +2103,21 @@ func (ti *trieIndex) generateQuotaAndUsageMetrics(prefix, name string, node *tri
 	}
 
 	ti.qauMetrics = append(ti.qauMetrics, points.Points{
-		Metric: fmt.Sprintf("throttle.%s%s", prefix, name),
+		Metric: fmt.Sprintf("throttle.%s", metricName),
 		Data: []points.Point{{
 			Value: float64(throttled),
+		}},
+	})
+	ti.qauMetrics = append(ti.qauMetrics, points.Points{
+		Metric: fmt.Sprintf("read_hits.%s", metricName),
+		Data: []points.Point{{
+			Value: float64(readHits),
+		}},
+	})
+	ti.qauMetrics = append(ti.qauMetrics, points.Points{
+		Metric: fmt.Sprintf("read_bytes.%s", metricName),
+		Data: []points.Point{{
+			Value: float64(readBytes),
 		}},
 	})
 }
@@ -2336,4 +2365,19 @@ mloop:
 	}
 
 	return toThrottle
+}
+
+func (*trieIndex) metricName(node *trieNode, name string) string {
+	var prefix string
+	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok {
+		prefix = quota.StatMetricPrefix
+	}
+	name = strings.ReplaceAll(name, ".", "-")
+	// WHY: on linux, the maximum filename length is 255, keeping 5 here for
+	// file extension.
+	if len(name) >= 250 {
+		// skipcq: GSC-G401, GO-S1023
+		name = fmt.Sprintf("%s-%x", name[:(250-md5.Size*2-1)], md5.Sum([]byte(name)))
+	}
+	return prefix + name
 }
