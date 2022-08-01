@@ -2014,7 +2014,7 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 	}
 
 	var opts []grpc.ServerOption
-	opts = append(opts, grpc.ChainUnaryInterceptor(
+	opts = append(opts, grpc.ChainStreamInterceptor(
 		grpcutil.StreamServerTimeHandler(listener.bucketRequestTimesGRPC),
 	))
 	grpcServer := grpc.NewServer(opts...) //skipcq: GO-S0902
