@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/go-graphite/go-carbon/helper/grpcutil"
 	"io"
 	"math"
 	"net"
@@ -1755,7 +1756,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 					handlerStatusCodes,
 					listener.prometheus.request,
 				),
-				listener.bucketRequestTimes,
+				listener.bucketRequestTimesHTTP,
 			),
 		)
 	}
@@ -1888,7 +1889,27 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	return nil
 }
 
-func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t time.Duration) {
+func (listener *CarbonserverListener) bucketRequestTimesHTTP(req *http.Request, t time.Duration) {
+	bucket := listener.bucketRequestTimes(t)
+	if bucket >= listener.buckets {
+		listener.logger.Info("slow request",
+			zap.String("url", req.URL.RequestURI()),
+			zap.String("peer", req.RemoteAddr),
+		)
+	}
+}
+
+func (listener *CarbonserverListener) bucketRequestTimesGRPC(payload, peer string, t time.Duration) {
+	bucket := listener.bucketRequestTimes(t)
+	if bucket >= listener.buckets {
+		listener.logger.Info("slow request",
+			zap.String("payload", payload),
+			zap.String("peer", peer),
+		)
+	}
+}
+
+func (listener *CarbonserverListener) bucketRequestTimes(t time.Duration) int {
 	listener.prometheus.duration(t)
 
 	ms := t.Nanoseconds() / int64(time.Millisecond)
@@ -1908,13 +1929,10 @@ func (listener *CarbonserverListener) bucketRequestTimes(req *http.Request, t ti
 	if bucket < listener.buckets {
 		atomic.AddUint64(&listener.timeBuckets[bucket], 1)
 	} else {
-		// Too big? Increment overflow bucket and log
+		// Too big? Increment overflow bucket
 		atomic.AddUint64(&listener.timeBuckets[listener.buckets], 1)
-		listener.logger.Info("slow request",
-			zap.String("url", req.URL.RequestURI()),
-			zap.String("peer", req.RemoteAddr),
-		)
 	}
+	return bucket
 }
 
 func extractTrigrams(query string) []trigram.T {
@@ -1996,7 +2014,9 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 	}
 
 	var opts []grpc.ServerOption
-
+	opts = append(opts, grpc.ChainUnaryInterceptor(
+		grpcutil.StreamServerTimeHandler(listener.bucketRequestTimesGRPC),
+	))
 	grpcServer := grpc.NewServer(opts...) //skipcq: GO-S0902
 	grpcv2.RegisterCarbonV2Server(grpcServer, listener)
 	go grpcServer.Serve(listener.grpcListener)
