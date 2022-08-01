@@ -3,6 +3,11 @@ package grpcutil
 import (
 	"context"
 	"github.com/golang/protobuf/proto"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"path"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
@@ -65,4 +70,45 @@ func (ws *wrappedStream) RecvMsg(m interface{}) error {
 	}
 	ws.gotFirst = true
 	return nil
+}
+
+func StreamServerStatusMetricHandler(statusCodes map[string][]uint64, promRequest func(string, int)) grpc.StreamServerInterceptor {
+	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		err := handler(srv, ss)
+		_, methodName := path.Split(info.FullMethod)
+		endpoint := strings.ToLower(methodName)
+		var major int
+		if err != nil {
+			s, _ := status.FromError(err)
+			major = getHTTPStatusCodeMajorFromGrpcStatusCode(s.Code())
+		} else {
+			major = getHTTPStatusCodeMajorFromGrpcStatusCode(codes.OK)
+		}
+		if globalStatusCodes := statusCodes["combined"]; major < len(globalStatusCodes) {
+			atomic.AddUint64(&globalStatusCodes[major], 1)
+			if handlerStatusCodes, ok := statusCodes[endpoint]; ok {
+				atomic.AddUint64(&handlerStatusCodes[major], 1)
+			}
+		}
+		promRequest(endpoint, major)
+		return err
+	}
+}
+
+func getHTTPStatusCodeMajorFromGrpcStatusCode(code codes.Code) int {
+	switch code {
+	case codes.OK:
+		return 1
+	case codes.Canceled,
+		codes.InvalidArgument,
+		codes.NotFound,
+		codes.AlreadyExists,
+		codes.PermissionDenied,
+		codes.ResourceExhausted,
+		codes.FailedPrecondition,
+		codes.Unauthenticated:
+		return 3
+	default:
+		return 4
+	}
 }
