@@ -2,16 +2,16 @@ package grpcutil
 
 import (
 	"context"
-	"github.com/golang/protobuf/proto"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"fmt"
 	"path"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 func UnaryServerTimeHandler(cb func(payload, peer string, t time.Duration)) grpc.UnaryServerInterceptor {
@@ -20,7 +20,7 @@ func UnaryServerTimeHandler(cb func(payload, peer string, t time.Duration)) grpc
 		defer func() {
 			t := time.Since(t0)
 			var payload string
-			if reqStringer, ok := req.(proto.Message); ok {
+			if reqStringer, ok := req.(fmt.Stringer); ok {
 				payload = reqStringer.String()
 			}
 			var reqPeer string
@@ -36,23 +36,32 @@ func UnaryServerTimeHandler(cb func(payload, peer string, t time.Duration)) grpc
 func StreamServerTimeHandler(cb func(payload, peer string, t time.Duration)) grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		t0 := time.Now()
-		wss := &wrappedStream{
-			ServerStream: ss,
-		}
+		wss := GetWrappedStream(ss)
 		defer func() {
 			t := time.Since(t0)
 			var reqPeer string
 			if p, ok := peer.FromContext(wss.Context()); ok {
 				reqPeer = p.Addr.String()
 			}
-			cb(wss.payload, reqPeer, t)
+			cb(wss.Payload(), reqPeer, t)
 		}()
 		return handler(srv, wss)
 	}
 }
 
+func GetWrappedStream(ss grpc.ServerStream) *wrappedStream {
+	if wss, ok := ss.(*wrappedStream); ok {
+		return wss
+	}
+	return &wrappedStream{
+		ServerStream: ss,
+		ctx:          ss.Context(),
+	}
+}
+
 type wrappedStream struct {
 	grpc.ServerStream
+	ctx      context.Context
 	payload  string
 	gotFirst bool
 }
@@ -65,11 +74,23 @@ func (ws *wrappedStream) RecvMsg(m interface{}) error {
 	if ws.gotFirst {
 		return nil
 	}
-	if p, ok := m.(proto.Message); ok {
+	if p, ok := m.(fmt.Stringer); ok {
 		ws.payload = p.String()
 	}
 	ws.gotFirst = true
 	return nil
+}
+
+func (ws *wrappedStream) Context() context.Context {
+	return ws.ctx
+}
+
+func (ws *wrappedStream) SetContext(ctx context.Context) {
+	ws.ctx = ctx
+}
+
+func (ws *wrappedStream) Payload() string {
+	return ws.payload
 }
 
 func StreamServerStatusMetricHandler(statusCodes map[string][]uint64, promRequest func(string, int)) grpc.StreamServerInterceptor {

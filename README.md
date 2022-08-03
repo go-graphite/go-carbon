@@ -527,6 +527,13 @@ stats-percentiles = [99, 98, 95, 75, 50]
 # [[carbonserver.api-per-path-rate-limiters]]
 # path = "/metrics/list_query/"
 # max-inflight-requests = 3
+# 
+# For gRPC rpcs, path should be full method name.
+#
+# [[carbonserver.api-per-path-rate-limiters]]
+# path = "/carbonapi_v2_grpc.CarbonV2/Render"
+# max-inflight-requests = 10
+# request-timeout = "40s"
 
 # carbonserver.grpc is the configuration for listening for grpc clients.
 # Note: currently, only CarbonV2 Render rpc is implemented.
