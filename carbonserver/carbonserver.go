@@ -182,7 +182,7 @@ func (q *QueryItem) FetchOrLock() (interface{}, bool) {
 		return nil, false
 	}
 
-	select { //nolint:gosimple
+	select { //nolint:gosimple //skipcq: SCC-S1000
 	// TODO: Add timeout support
 	case <-q.QueryFinished:
 		break
@@ -228,6 +228,7 @@ type CarbonserverListener struct {
 	failOnMaxGlobs    bool
 	percentiles       []int
 	scanFrequency     time.Duration
+	scanTicker        *time.Ticker
 	forceScanChan     chan struct{}
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
@@ -446,7 +447,7 @@ type jsonMetricDetailsResponse struct {
 }
 
 type fileIndex struct {
-	typ int //nolint:unused,structcheck
+	typ int //nolint:unused,structcheck //skipcq: SCC-U1000
 
 	idx   trigram.Index
 	files []string
@@ -1263,7 +1264,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
 	defer func(start time.Time) {
-		dur := time.Now().Sub(start) //nolint:gosimple
+		dur := time.Since(start)
 		if dur <= time.Second {
 			return
 		}
@@ -1560,6 +1561,9 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 func (listener *CarbonserverListener) Stop() error {
 	close(listener.forceScanChan)
+	if listener.scanTicker != nil {
+		listener.scanTicker.Stop()
+	}
 	close(listener.exitChan)
 	if listener.db != nil {
 		listener.db.Close()
@@ -1745,7 +1749,8 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	listener.exitChan = make(chan struct{})
 	if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
 		listener.forceScanChan = make(chan struct{})
-		go listener.fileListUpdater(listener.whisperData, time.Tick(listener.scanFrequency), listener.forceScanChan, listener.exitChan) //nolint:staticcheck
+		listener.scanTicker = time.NewTicker(listener.scanFrequency)
+		go listener.fileListUpdater(listener.whisperData, listener.scanTicker.C, listener.forceScanChan, listener.exitChan) //nolint:staticcheck
 		listener.forceScanChan <- struct{}{}
 	}
 

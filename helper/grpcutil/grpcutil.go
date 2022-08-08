@@ -49,24 +49,24 @@ func StreamServerTimeHandler(cb func(payload, peer string, t time.Duration)) grp
 	}
 }
 
-func GetWrappedStream(ss grpc.ServerStream) *wrappedStream {
-	if wss, ok := ss.(*wrappedStream); ok {
+func GetWrappedStream(ss grpc.ServerStream) *WrappedStream {
+	if wss, ok := ss.(*WrappedStream); ok {
 		return wss
 	}
-	return &wrappedStream{
+	return &WrappedStream{
 		ServerStream: ss,
 		ctx:          ss.Context(),
 	}
 }
 
-type wrappedStream struct {
+type WrappedStream struct {
 	grpc.ServerStream
 	ctx      context.Context
 	payload  string
 	gotFirst bool
 }
 
-func (ws *wrappedStream) RecvMsg(m interface{}) error {
+func (ws *WrappedStream) RecvMsg(m interface{}) error {
 	err := ws.ServerStream.RecvMsg(m)
 	if err != nil {
 		return err
@@ -81,15 +81,15 @@ func (ws *wrappedStream) RecvMsg(m interface{}) error {
 	return nil
 }
 
-func (ws *wrappedStream) Context() context.Context {
+func (ws *WrappedStream) Context() context.Context {
 	return ws.ctx
 }
 
-func (ws *wrappedStream) SetContext(ctx context.Context) {
+func (ws *WrappedStream) SetContext(ctx context.Context) {
 	ws.ctx = ctx
 }
 
-func (ws *wrappedStream) Payload() string {
+func (ws *WrappedStream) Payload() string {
 	return ws.payload
 }
 
