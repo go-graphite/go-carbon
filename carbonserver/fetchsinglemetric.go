@@ -42,7 +42,10 @@ func (r response) enrichFromCache(listener *CarbonserverListener, cacheData []po
 		}
 		pointsFetchedFromCache++
 		index := (ts - r.StartTime) / r.StepTime
-		r.Values[index] = item.Value
+		// TODO: log.debug such cases
+		if index >= 0 && index < int64(len(r.Values)) {
+			r.Values[index] = item.Value
+		}
 	}
 	waitTime := time.Since(cacheStartTime)
 	atomic.AddUint64(&listener.metrics.CacheWorkTimeNS, uint64(waitTime.Nanoseconds()))
