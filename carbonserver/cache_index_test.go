@@ -3,7 +3,7 @@ package carbonserver
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"os"
 	"path/filepath"
 	"testing"

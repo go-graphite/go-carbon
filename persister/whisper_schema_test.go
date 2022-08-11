@@ -1,7 +1,7 @@
 package persister
 
 import (
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"os"
 	"testing"
 

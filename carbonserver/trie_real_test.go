@@ -6,7 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io/ioutil"  //nolint:staticcheck
 	"math/rand"
 	"reflect"
 	"runtime/debug"

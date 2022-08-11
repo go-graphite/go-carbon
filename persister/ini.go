@@ -3,7 +3,7 @@ package persister
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"strings"
 )
 

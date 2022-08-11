@@ -1,7 +1,7 @@
 package atomicfiles
 
 import (
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"os"
 	"path"
 )

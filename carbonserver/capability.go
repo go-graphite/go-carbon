@@ -2,7 +2,7 @@ package carbonserver
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"net/http"
 	_ "net/http/pprof"
 	"os"

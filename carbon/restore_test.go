@@ -1,7 +1,7 @@
 package carbon
 
 import (
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"path"
 	"testing"
 
