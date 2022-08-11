@@ -116,7 +116,8 @@ func (p *Points) WriteBinaryTo(w io.Writer) (n int, err error) {
 }
 
 // ParseText parse text protocol Point
-//  host.Point.value 42 1422641531\n
+//
+//	host.Point.value 42 1422641531\n
 func ParseText(line string) (*Points, error) {
 
 	row := strings.Split(strings.Trim(line, "\n \t\r"), " ")

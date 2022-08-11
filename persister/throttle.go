@@ -8,13 +8,13 @@ import (
 
 // ThrottleTicker is a ticker that can be used for hard or soft rate-limiting.
 //
-// * A soft rate limiter will send a message on C at the actual rate that is
-//   specified.
+//   - A soft rate limiter will send a message on C at the actual rate that is
+//     specified.
 //
-// * A hard rate limiter may send arbitrarily many messages on C every second,
-//   but it will send the value 'true' with the first ratePerSec ones, and
-//   'false' with all subsequent ones, until the next second. It is up to the
-//   user to decide what to do in each case.
+//   - A hard rate limiter may send arbitrarily many messages on C every second,
+//     but it will send the value 'true' with the first ratePerSec ones, and
+//     'false' with all subsequent ones, until the next second. It is up to the
+//     user to decide what to do in each case.
 type ThrottleTicker struct {
 	helper.Stoppable
 	C chan bool

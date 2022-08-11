@@ -151,7 +151,8 @@ func (g *gdstate) matched() bool {
 }
 
 // TODO:
-//     add range value validation
+//
+//	add range value validation
 func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*gmatcher, error) {
 	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
 	var cur = m.root
@@ -1661,14 +1662,17 @@ func (q *throughputUsagePerNamespace) increase(x int64) {
 // throughputUsagePerNamespace.offset  throughputUsagePerNamespace.withinQuota
 // dataPoints -> 1024
 // resetAt    -> now-1m
-//                                     dataPoints -> 1024
+//
+//	dataPoints -> 1024
+//
 // dataPoints -> 0
 // resetAt    -> now
-//                                     resetAt    -> now
 //
-//                                     incorrect quota over enforcement as
-//                                     dataPoints is already 0 by the time
-//                                     withinQuota retrieves resetAt
+//	resetAt    -> now
+//
+//	incorrect quota over enforcement as
+//	dataPoints is already 0 by the time
+//	withinQuota retrieves resetAt
 //
 // the downside of this approach is that go-carbon might still be updating on
 // the counter in the replaced recorder, causing some mis-report or
