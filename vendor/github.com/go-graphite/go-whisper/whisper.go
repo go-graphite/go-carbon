@@ -1290,15 +1290,17 @@ func (whisper *Whisper) fetchFromArchive(archive *archiveInfo, fromTime, untilTi
 
 		irange := untilInterval - fromInterval
 		values := make([]float64, irange/archive.secondsPerPoint)
-
+		
 		for i := range values {
 			values[i] = math.NaN()
 		}
+		// fetched data can be out of order (because of buffer)
+		// so, let's sort it out
 		step := archive.secondsPerPoint
 		for _, dPoint := range series {
 			index := (dPoint.interval - fromInterval) / archive.secondsPerPoint
-			if index >= len(values) {
-				break
+			if index >= len(values) || index < 0 {
+				continue
 			}
 			values[index] = dPoint.value
 		}

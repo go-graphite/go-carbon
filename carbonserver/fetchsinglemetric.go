@@ -35,6 +35,16 @@ func (r response) enrichFromCache(listener *CarbonserverListener, cacheData []po
 	atomic.AddUint64(&listener.metrics.CacheRequestsTotal, 1)
 	cacheStartTime := time.Now()
 	pointsFetchedFromCache := 0
+	// extend values array if needed
+	max_index := (r.StopTime - r.StartTime) / r.StepTime
+	start_index := int64(len(r.Values))
+	if start_index < max_index {
+		for i := start_index; i < max_index; i++ {
+			// math.NaN is not working here
+			// values will be replaced when merging with cache
+			r.Values = append(r.Values, 0)
+		}
+	}
 	for _, item := range cacheData {
 		ts := int64(item.Timestamp) - int64(item.Timestamp)%r.StepTime
 		if ts < r.StartTime || ts >= r.StopTime {
@@ -42,7 +52,6 @@ func (r response) enrichFromCache(listener *CarbonserverListener, cacheData []po
 		}
 		pointsFetchedFromCache++
 		index := (ts - r.StartTime) / r.StepTime
-		// TODO: log.debug such cases
 		if index >= 0 && index < int64(len(r.Values)) {
 			r.Values[index] = item.Value
 		}

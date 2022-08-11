@@ -3,7 +3,7 @@ package carbon
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"os"
 	"path"
 	"sort"

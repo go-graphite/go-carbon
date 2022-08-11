@@ -56,7 +56,7 @@ github.com/eapache/queue
 # github.com/go-graphite/carbonzipper v0.0.0-20180329125635-fedce067a794
 ## explicit
 github.com/go-graphite/carbonzipper/zipper/httpHeaders
-# github.com/go-graphite/go-whisper v0.0.0-20220706140940-0fdbe10fe673
+# github.com/go-graphite/go-whisper v0.0.0-20220811123944-7ae7056cf3c0
 ## explicit; go 1.18
 github.com/go-graphite/go-whisper
 # github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee

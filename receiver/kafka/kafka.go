@@ -7,7 +7,7 @@ import (
 
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"strings"
 	"sync"
 	"time"

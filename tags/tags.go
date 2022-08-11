@@ -2,7 +2,7 @@ package tags
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"net/http"
 	"net/url"
 	"sync/atomic"

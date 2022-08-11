@@ -3,7 +3,7 @@ package carbon
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"log"
 	"net"
 	"net/url"

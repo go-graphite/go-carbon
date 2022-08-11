@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"sync"
 	"sync/atomic"
 	"time"

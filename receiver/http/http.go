@@ -2,7 +2,7 @@ package http
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io/ioutil" //nolint:staticcheck
 	"net"
 	"net/http"
 	"sync/atomic"
