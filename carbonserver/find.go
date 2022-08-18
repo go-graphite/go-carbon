@@ -26,6 +26,7 @@ type findResponse struct {
 	data        []byte
 	contentType string
 	files       int
+	lookups     uint64
 }
 
 func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *http.Request) {
@@ -193,6 +194,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		zap.Bool("find_cache_enabled", listener.findCacheEnabled),
 		zap.Bool("from_cache", fromCache),
 		zap.Int("http_code", http.StatusOK),
+		zap.Uint64("lookups", response.lookups),
 	)
 	span.SetAttributes(
 		kv.Int("graphite.files", response.files),
@@ -213,6 +215,7 @@ type globs struct {
 	Files     []string
 	Leafs     []bool
 	TrieNodes []*trieNode
+	Lookups   uint64
 }
 
 func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
@@ -229,6 +232,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		multiResponse := protov3.MultiGlobResponse{}
 		for _, glob := range expandedGlobs {
 			result.files += len(glob.Files)
+			result.lookups += glob.Lookups
 			response := protov3.GlobResponse{
 				Name:    glob.Name,
 				Matches: make([]*protov3.GlobMatch, 0),
@@ -286,6 +290,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		}
 
 		result.files += len(expandedGlobs[0].Files)
+		result.lookups += expandedGlobs[0].Lookups
 		for i, p := range expandedGlobs[0].Files {
 			if expandedGlobs[0].Leafs[i] {
 				metricsCount++
@@ -317,9 +322,11 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		var metrics []map[string]interface{}
 		var m map[string]interface{}
 		files := 0
+		var lookups uint64
 
 		glob := expandedGlobs[0]
 		files += len(glob.Files)
+		lookups += glob.Lookups
 		for i, p := range glob.Files {
 			if glob.Leafs[i] {
 				metricsCount++
@@ -333,7 +340,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		var buf bytes.Buffer
 		pEnc := pickle.NewEncoder(&buf)
 		pEnc.Encode(metrics)
-		return &findResponse{buf.Bytes(), httpHeaders.ContentTypePickle, files}, nil
+		return &findResponse{buf.Bytes(), httpHeaders.ContentTypePickle, files, lookups}, nil
 	}
 	return nil, nil
 }
@@ -356,7 +363,7 @@ GATHER:
 			glob := globs{
 				Name: expandedResult.Name,
 			}
-			glob.Files, glob.Leafs, glob.TrieNodes, err = expandedResult.Files, expandedResult.Leafs, expandedResult.TrieNodes, expandedResult.Err
+			glob.Files, glob.Leafs, glob.TrieNodes, glob.Lookups, err = expandedResult.Files, expandedResult.Leafs, expandedResult.TrieNodes, expandedResult.Lookups, expandedResult.Err
 			if err != nil {
 				errors = append(errors, fmt.Errorf("%s: %s", expandedResult.Name, err))
 			}

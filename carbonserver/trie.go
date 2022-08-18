@@ -753,37 +753,59 @@ func (ti *trieIndex) newDir() *trieNode {
 
 // TODO: add some defensive logics agains bad queries?
 // depth first search
-func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, err error) {
+// TODO: refactor to make the function more readable. Some ideas:
+// - to isolate Depth first search in separate class
+// - probably we can optimize the length of existed arrays. It uses tree depth + 7, where tree depth is the longest path in the tree in characters
+//   but we should be able to calculate max required depth based on expr, we don't have to look into deeper levels than expr's depth unless there is some unknown corner case exist
+// - get rid of 'goto', since it adds complexions
+//
+func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint64, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "*"
 	}
-	var matchers []*gmatcher
+	var matchers []*gmatcher // information about matching texts, has bytes array with used characters, one matcher per one depth level
+
+	// TODO:
+	// Supposely it indicates that we look for just one exact path, and it stops search after finding one path
+	// but it is always false in current code. 'exact' should be true by default
+	// to test if it works properly
 	var exact bool
+	// complexity of query
+	var lookups uint64
 	for _, node := range strings.Split(expr, "/") {
 		if node == "" {
 			continue
 		}
 		gs, err := newGlobState(node, expand)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, lookups, err
 		}
 		exact = exact && gs.exact
 		matchers = append(matchers, gs)
 	}
 
 	if len(matchers) == 0 {
-		return nil, nil, nil, nil
+		return nil, nil, nil, lookups, nil
 	}
 
+	// current node
 	var cur = ti.root
+	// children of current node
 	var curChildrens = cur.getChildrens()
+	// longest path in trie (length in characters) + 7 (some magic number for extra capacity)
 	var depth = ti.getDepth() + trieDepthBuffer
+	// array of child indexes we looked at last time
 	var nindex = make([]int, depth)
+	// array of nodes, contains the path to the current processed node
 	var trieNodes = make([]*trieNode, depth)
+	// each item contains an array of all children for every trieNode in current looking path
 	var childrensStack = make([][]*trieNode, depth)
+	//current searching depth
 	var ncindex int
+	// index of needed matcher
 	var mindex int
+	//// matcher for the current level depth
 	var curm = matchers[0]
 	var ndstate *gdstate
 	var isFile, isDir, hasMoreNodes bool
@@ -795,11 +817,14 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			goto parent
 		}
 
+		// starting processing children of current node and saving current node into path
+		// the root is supposed to be '/' node, not containing useful information, we skip checking it
 		trieNodes[ncindex] = cur
 		childrensStack[ncindex] = curChildrens
 		cur = cur.getChild(curChildrens, nindex[ncindex])
 		curChildrens = cur.getChildrens()
 		ncindex++
+		lookups++
 
 		// It's possible to run into a situation of newer and longer metrics
 		// are added during the query, for such situation, it's safer to just
@@ -808,7 +833,10 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			goto parent
 		}
 
+		// if node is '/'
 		if cur.dir() {
+			// amount of matchers should correlate the max searching depth,
+			// first condition: checking the depth is too deep it doesn't make sense, going to parent
 			if mindex+1 >= len(matchers) || !curm.dstate().matched() || len(curChildrens) == 0 {
 				goto parent
 			}
@@ -820,6 +848,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			continue
 		}
 
+		// matching regexp
 		if curm.lsComplex && len(curm.trigrams) > 0 {
 			if _, ok := ti.trigrams[cur]; ok {
 				for _, t := range curm.trigrams {
@@ -830,6 +859,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			}
 		}
 
+		// matching regexp
 		for i := 0; i < len(cur.c); i++ {
 			ndstate = curm.dstate().step(cur.c[i])
 			if len(ndstate.gstates) == 0 {
@@ -876,6 +906,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 			goto parent
 		}
 
+		// we found result metric here
 		if isFile {
 			files = append(files, cur.fullPath('.', trieNodes[:ncindex]))
 			isFiles = append(isFiles, isFile)
@@ -898,6 +929,8 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		curm.pop(len(cur.c))
 		goto parent
 
+		// calling this procedure means that we are done with current child and moving level up
+		// we are supposed to check next child of current parent next
 	parent:
 		// use exact for fast exit
 		nindex[ncindex] = 0
@@ -919,7 +952,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		continue
 	}
 
-	return files, isFiles, nodes, nil
+	return files, isFiles, nodes, lookups, nil
 }
 
 // note: tn might be a root or file node, which has a nil c
@@ -1504,7 +1537,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 	return
 }
 
-func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, error) {
+func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, uint64, error) {
 	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
@@ -1524,7 +1557,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 		var err error
 		globs, err = listener.expandGlobBraces(globs)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, 0, err
 		}
 	}
 
@@ -1532,21 +1565,23 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var files []string
 	var leafs []bool
 	var nodes []*trieNode
+	var lookups uint64
 
 	for _, g := range globs {
-		f, l, n, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
+		f, l, n, lk, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, lookups, err
 		}
 		files = append(files, f...)
 		leafs = append(leafs, l...)
 		nodes = append(nodes, n...)
+		lookups += lk
 	}
 	// set node as viewed
 	for _, node := range nodes {
 		node.incrementReadHitsMetric()
 	}
-	return files, leafs, nodes, nil
+	return files, leafs, nodes, lookups, nil
 }
 
 type QuotaDroppingPolicy int8
@@ -1820,7 +1855,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 			continue
 		}
 
-		paths, _, nodes, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
+		paths, _, nodes, _, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
 		if err != nil {
 			return nil, err
 		}

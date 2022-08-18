@@ -130,6 +130,7 @@ type ExpandedGlobResponse struct {
 	Files     []string
 	Leafs     []bool
 	TrieNodes []*trieNode
+	Lookups   uint64
 	Err       error
 }
 
@@ -1229,7 +1230,7 @@ func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric 
 func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query string, resultCh chan<- *ExpandedGlobResponse) {
 	defer func() {
 		if err := recover(); err != nil {
-			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, fmt.Errorf("%s\n%s", err, debug.Stack())}
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, fmt.Errorf("%s\n%s", err, debug.Stack())}
 		}
 	}()
 
@@ -1243,7 +1244,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		}
 		if cap(rl.maxInflightRequests) == 0 {
 			err := fmt.Errorf("rejected by query rate limiter: %s", rl.pattern.String())
-			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, err}
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
 			return
 		}
 
@@ -1255,7 +1256,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		// why: no need to continue execution if the request is already timeout.
 		if listener.checkRequestCtx(ctx) != nil {
 			err := fmt.Errorf("time out due to heavy glob query rate limiter: %s", rl.pattern.String())
-			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, err}
+			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
 			return
 		}
 
@@ -1282,8 +1283,8 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	}(time.Now())
 
 	if listener.trieIndex && listener.CurrentFileIndex() != nil {
-		files, leafs, nodes, err := listener.expandGlobsTrie(query)
-		resultCh <- &ExpandedGlobResponse{query, files, leafs, nodes, err}
+		files, leafs, nodes, lookups, err := listener.expandGlobsTrie(query)
+		resultCh <- &ExpandedGlobResponse{query, files, leafs, nodes, lookups, err}
 		return
 	}
 
@@ -1319,7 +1320,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	globs = append(globs, query)
 	globs, err := listener.expandGlobBraces(globs)
 	if err != nil {
-		resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, err}
+		resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
 		return
 	}
 
@@ -1404,7 +1405,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	}
 
 	matchedCount = len(files)
-	resultCh <- &ExpandedGlobResponse{query, files, leafs, nil, nil}
+	resultCh <- &ExpandedGlobResponse{query, files, leafs, nil, 0, nil}
 }
 
 // TODO(dgryski): add tests
