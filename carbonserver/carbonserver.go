@@ -126,7 +126,7 @@ type ExpandedGlobResponse struct {
 	Files     []string
 	Leafs     []bool
 	TrieNodes []*trieNode
-	Lookups   uint64
+	Lookups   uint32
 	Err       error
 }
 
