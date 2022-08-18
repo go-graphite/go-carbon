@@ -745,7 +745,7 @@ func TestTrieIndex(t *testing.T) {
 func TestTrieEdgeCases(t *testing.T) {
 	var trie = newTrie(".wsp", nil)
 
-	_, _, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
+	_, _, _, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
 	if err == nil || err.Error() != "glob: range overflow" {
 		t.Errorf("trie should return an range overflow error")
 	}
@@ -775,7 +775,7 @@ func TestTrieQueryOpts(t *testing.T) {
 		"sys.app.host-02.cpu.system",
 	}
 
-	files, _, nodes, err := trieIndex.query("sys/app/host-0{1,2}", 1000, nil)
+	files, _, nodes, _, err := trieIndex.query("sys/app/host-0{1,2}", 1000, nil)
 	if err != nil {
 		t.Error(err)
 	}
@@ -837,7 +837,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 		// case <-filec:
 		default:
 			// skipcq: GSC-G404
-			files, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
+			files, _, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
 			if err != nil {
 				panic(err)
 			}
