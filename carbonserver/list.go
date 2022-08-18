@@ -155,7 +155,7 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 		return nil, errMetricsListEmpty
 	}
 
-	names, isFiles, nodes, err := fidx.trieIdx.query(strings.ReplaceAll(query, ".", "/"), limit, nil)
+	names, isFiles, nodes, _, err := fidx.trieIdx.query(strings.ReplaceAll(query, ".", "/"), limit, nil)
 	if err != nil {
 		return nil, err
 	}
