@@ -754,11 +754,10 @@ func (ti *trieIndex) newDir() *trieNode {
 // TODO: add some defensive logics agains bad queries?
 // depth first search
 // TODO: refactor to make the function more readable. Some ideas:
-// - to isolate Depth first search in separate class
-// - probably we can optimize the length of existed arrays. It uses tree depth + 7, where tree depth is the longest path in the tree in characters
-//   but we should be able to calculate max required depth based on expr, we don't have to look into deeper levels than expr's depth unless there is some unknown corner case exist
-// - get rid of 'goto', since it adds complexions
-//
+//   - to isolate Depth first search in separate class
+//   - probably we can optimize the length of existed arrays. It uses tree depth + 7, where tree depth is the longest path in the tree in characters
+//     but we should be able to calculate max required depth based on expr, we don't have to look into deeper levels than expr's depth unless there is some unknown corner case exist
+//   - get rid of 'goto', since it adds complexions
 func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
