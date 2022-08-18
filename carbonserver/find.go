@@ -26,7 +26,7 @@ type findResponse struct {
 	data        []byte
 	contentType string
 	files       int
-	lookups     uint64
+	lookups     uint32
 }
 
 func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *http.Request) {
@@ -194,7 +194,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		zap.Bool("find_cache_enabled", listener.findCacheEnabled),
 		zap.Bool("from_cache", fromCache),
 		zap.Int("http_code", http.StatusOK),
-		zap.Uint64("lookups", response.lookups),
+		zap.Uint32("lookups", response.lookups),
 	)
 	span.SetAttributes(
 		kv.Int("graphite.files", response.files),
@@ -215,7 +215,7 @@ type globs struct {
 	Files     []string
 	Leafs     []bool
 	TrieNodes []*trieNode
-	Lookups   uint64
+	Lookups   uint32
 }
 
 func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
@@ -322,7 +322,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		var metrics []map[string]interface{}
 		var m map[string]interface{}
 		files := 0
-		var lookups uint64
+		var lookups uint32
 
 		glob := expandedGlobs[0]
 		files += len(glob.Files)

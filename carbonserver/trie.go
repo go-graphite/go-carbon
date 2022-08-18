@@ -759,7 +759,7 @@ func (ti *trieIndex) newDir() *trieNode {
 //   but we should be able to calculate max required depth based on expr, we don't have to look into deeper levels than expr's depth unless there is some unknown corner case exist
 // - get rid of 'goto', since it adds complexions
 //
-func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint64, err error) {
+func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "*"
@@ -772,7 +772,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	// to test if it works properly
 	var exact bool
 	// complexity of query
-	var lookups uint64
+	var lookups uint32
 	for _, node := range strings.Split(expr, "/") {
 		if node == "" {
 			continue
@@ -801,7 +801,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 	var trieNodes = make([]*trieNode, depth)
 	// each item contains an array of all children for every trieNode in current looking path
 	var childrensStack = make([][]*trieNode, depth)
-	//current searching depth
+	// current searching depth
 	var ncindex int
 	// index of needed matcher
 	var mindex int
@@ -1537,7 +1537,7 @@ func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, c
 	return
 }
 
-func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, uint64, error) {
+func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, []bool, []*trieNode, uint32, error) {
 	query = strings.ReplaceAll(query, ".", "/")
 	globs := []string{query}
 
@@ -1565,7 +1565,7 @@ func (listener *CarbonserverListener) expandGlobsTrie(query string) ([]string, [
 	var files []string
 	var leafs []bool
 	var nodes []*trieNode
-	var lookups uint64
+	var lookups uint32
 
 	for _, g := range globs {
 		f, l, n, lk, err := fidx.trieIdx.query(g, listener.maxMetricsGlobbed-len(files), listener.expandGlobBraces)
