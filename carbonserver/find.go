@@ -5,14 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"io/ioutil"
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"go.uber.org/zap"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
@@ -20,6 +18,10 @@ import (
 	pickle "github.com/lomik/og-rek"
 	"go.opentelemetry.io/otel/api/kv"
 	"go.opentelemetry.io/otel/api/trace"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 type findResponse struct {
@@ -128,28 +130,19 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	if listener.findCacheEnabled {
 		key := strings.Join(query, ",") + "&" + format
 		size := uint64(100 * 1024 * 1024)
-		item := listener.findCache.getQueryItem(key, size, 300)
-		res, ok := item.FetchOrLock()
-		listener.prometheus.cacheRequest("find", ok)
-		if !ok {
-			logger.Debug("find cache miss")
-			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
-			response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
-			if err != nil {
-				if _, ok := err.(errorNotFound); ok {
-					item.StoreAndUnlock(&findResponse{})
-				} else {
-					item.StoreAbort()
-				}
-			} else {
-				item.StoreAndUnlock(response)
-			}
-		} else if res != nil {
-			logger.Debug("query cache hit")
+		var result interface{}
+		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
+			func() (interface{}, error) {
+				return listener.findMetrics(ctx, logger, t0, formatCode, query)
+			})
+		listener.prometheus.cacheRequest("find", fromCache)
+		if fromCache {
 			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
-			response = res.(*findResponse)
-			fromCache = true
-
+		} else {
+			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+		}
+		if err == nil {
+			response = result.(*findResponse)
 			if response.files == 0 {
 				err = errorNotFound{}
 			}
@@ -218,6 +211,19 @@ type globs struct {
 	Lookups   uint32
 }
 
+func getProtoV2FindResponse(expandedGlob globs, query string) *protov2.GlobResponse {
+	res := &protov2.GlobResponse{
+		Name:    query,
+		Matches: make([]*protov2.GlobMatch, 0),
+	}
+
+	for i, p := range expandedGlob.Files {
+		res.Matches = append(res.Matches, &protov2.GlobMatch{Path: p, IsLeaf: expandedGlob.Leafs[i]})
+	}
+
+	return res
+}
+
 func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
 	var result findResponse
 	metricsCount := uint64(0)
@@ -284,18 +290,13 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 	case protoV2Format:
 		result.contentType = httpHeaders.ContentTypeProtobuf
 		var err error
-		response := protov2.GlobResponse{
-			Name:    names[0],
-			Matches: make([]*protov2.GlobMatch, 0),
-		}
-
+		response := getProtoV2FindResponse(expandedGlobs[0], names[0])
 		result.files += len(expandedGlobs[0].Files)
 		result.lookups += expandedGlobs[0].Lookups
-		for i, p := range expandedGlobs[0].Files {
+		for i := range expandedGlobs[0].Files {
 			if expandedGlobs[0].Leafs[i] {
 				metricsCount++
 			}
-			response.Matches = append(response.Matches, &protov2.GlobMatch{Path: p, IsLeaf: expandedGlobs[0].Leafs[i]})
 		}
 		result.data, err = response.MarshalVT()
 		result.contentType = httpHeaders.ContentTypeProtobuf
@@ -409,4 +410,148 @@ GATHER:
 		zap.Any("result", expandedGlobs),
 	)
 	return expandedGlobs, nil
+}
+
+func getWithCache(logger *zap.Logger, cache queryCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
+	item := cache.getQueryItem(key, size, expire)
+	res, ok := item.FetchOrLock()
+	switch {
+	case !ok:
+		logger.Debug("find cache miss")
+		result, err = f()
+		if err != nil {
+			item.StoreAbort()
+		} else {
+			item.StoreAndUnlock(result)
+		}
+	case res != nil:
+		logger.Debug("query cache hit")
+		result = res
+		fromCache = true
+	default:
+		// Whenever there are multiple requests approaching for the same records,
+		// and the proceeding request gets an error, waiting requests should get an error too.
+		err = fmt.Errorf("invalid cache record for the request")
+	}
+	return
+}
+
+func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.GlobRequest) (*protov2.GlobResponse, error) {
+	t0 := time.Now()
+	span := trace.SpanFromContext(ctx)
+
+	atomic.AddUint64(&listener.metrics.FindRequests, 1)
+
+	query := req.Query
+	format := protoV2Format.String()
+	var reqPeer string
+	if p, ok := peer.FromContext(ctx); ok {
+		reqPeer = p.Addr.String()
+	}
+
+	logger := TraceContextToZap(ctx, listener.logger.With(
+		zap.String("handler", "grpc-find"),
+		zap.String("request_payload", req.String()),
+		zap.String("peer", reqPeer),
+	))
+
+	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+		zap.String("handler", "grpc-find"),
+		zap.String("request_payload", req.String()),
+		zap.String("peer", reqPeer),
+	))
+
+	logger = logger.With(
+		zap.Strings("query", []string{query}),
+		zap.String("format", format),
+	)
+
+	accessLogger = accessLogger.With(
+		zap.Strings("query", []string{query}),
+		zap.String("format", format),
+	)
+
+	span.SetAttributes(
+		kv.String("graphite.query", query),
+		kv.String("graphite.format", format),
+	)
+
+	var err error
+	fromCache := false
+	var finalRes *protov2.GlobResponse
+	var lookups uint32
+	if listener.findCacheEnabled {
+		key := query + "&" + format + "grpc"
+		size := uint64(100 * 1024 * 1024)
+		var result interface{}
+		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
+			func() (interface{}, error) {
+				expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, t0, []string{query})
+				if err != nil {
+					return nil, err
+				}
+				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
+				lookups = expandedGlobs[0].Lookups
+				return finalRes, nil
+			})
+		listener.prometheus.cacheRequest("find", fromCache)
+		if fromCache {
+			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
+		} else {
+			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+		}
+		if err == nil {
+			finalRes = result.(*protov2.GlobResponse)
+			if len(finalRes.Matches) == 0 {
+				err = errorNotFound{}
+			}
+		}
+	} else {
+		var expandedGlobs []globs
+		expandedGlobs, err = listener.getExpandedGlobs(ctx, logger, t0, []string{query})
+		if err == nil {
+			finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
+			lookups = expandedGlobs[0].Lookups
+		}
+	}
+
+	if err != nil || finalRes == nil {
+		var code codes.Code
+		var reason string
+		if _, ok := err.(errorNotFound); ok {
+			reason = "Not Found"
+			code = codes.NotFound
+		} else {
+			reason = "Internal error while processing request"
+			code = codes.Internal
+		}
+
+		accessLogger.Error("find failed",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", reason),
+			zap.Error(err),
+			zap.Int("grpc_code", int(code)),
+		)
+
+		return nil, status.Error(code, reason)
+	}
+
+	if len(finalRes.Matches) == 0 {
+		// to get an idea how often we search for nothing
+		atomic.AddUint64(&listener.metrics.FindZero, 1)
+	}
+
+	accessLogger.Info("find success",
+		zap.Duration("runtime_seconds", time.Since(t0)),
+		zap.Int("Files", len(finalRes.Matches)),
+		zap.Bool("find_cache_enabled", listener.findCacheEnabled),
+		zap.Bool("from_cache", fromCache),
+		zap.Int("grpc_code", int(codes.OK)),
+		zap.Uint32("lookups", lookups),
+	)
+	span.SetAttributes(
+		kv.Int("graphite.files", len(finalRes.Matches)),
+		kv.Bool("graphite.from_cache", fromCache),
+	)
+	return finalRes, nil
 }
