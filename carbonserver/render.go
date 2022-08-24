@@ -324,30 +324,19 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 		// week to what's going on now, which is something people are generally
 		// interested in. It wouldn't be good to start adding false negative
 		// cache misses to those kinds of queries.
-		item := listener.queryCache.getQueryItem(key, size, 60)
-		res, ok := item.FetchOrLock()
-		listener.prometheus.cacheRequest("query", ok)
-		switch {
-		case !ok:
-			logger.Debug("query cache miss")
-			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
-
-			response, err = listener.prepareDataProto(ctx, logger, format, targets)
-			if err != nil {
-				item.StoreAbort()
-			} else {
-				item.StoreAndUnlock(response)
-			}
-		case res != nil:
-			logger.Debug("query cache hit")
-			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
-
+		var res interface{}
+		res, fromCache, err = getWithCache(logger, listener.queryCache, key, size, 60,
+			func() (interface{}, error) {
+				return listener.prepareDataProto(ctx, logger, format, targets)
+			})
+		if err == nil {
 			response = res.(fetchResponse)
-			fromCache = true
-		default:
-			// Whenever there are multiple requests approaching for the same records,
-			// and the proceeding request gets an error, waiting requests should get an error too.
-			err = fmt.Errorf("invalid cache record for the request")
+			listener.prometheus.cacheRequest("query", fromCache)
+			if fromCache {
+				atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
+			} else {
+				atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
+			}
 		}
 	} else {
 		response, err = listener.prepareDataProto(ctx, logger, format, targets)

@@ -2176,3 +2176,27 @@ func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Con
 	}
 	return nil
 }
+
+func getWithCache(logger *zap.Logger, cache queryCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
+	item := cache.getQueryItem(key, size, expire)
+	res, ok := item.FetchOrLock()
+	switch {
+	case !ok:
+		logger.Debug("cache miss")
+		result, err = f()
+		if err != nil {
+			item.StoreAbort()
+		} else {
+			item.StoreAndUnlock(result)
+		}
+	case res != nil:
+		logger.Debug("cache hit")
+		result = res
+		fromCache = true
+	default:
+		// Whenever there are multiple requests approaching for the same records,
+		// and the proceeding request gets an error, waiting requests should get an error too.
+		err = fmt.Errorf("invalid cache record for the request")
+	}
+	return
+}

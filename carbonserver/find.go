@@ -135,13 +135,13 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 			func() (interface{}, error) {
 				return listener.findMetrics(ctx, logger, t0, formatCode, query)
 			})
-		listener.prometheus.cacheRequest("find", fromCache)
-		if fromCache {
-			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
-		} else {
-			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
-		}
 		if err == nil {
+			listener.prometheus.cacheRequest("find", fromCache)
+			if fromCache {
+				atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
+			} else {
+				atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+			}
 			response = result.(*findResponse)
 			if response.files == 0 {
 				err = errorNotFound{}
@@ -412,30 +412,6 @@ GATHER:
 	return expandedGlobs, nil
 }
 
-func getWithCache(logger *zap.Logger, cache queryCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
-	item := cache.getQueryItem(key, size, expire)
-	res, ok := item.FetchOrLock()
-	switch {
-	case !ok:
-		logger.Debug("find cache miss")
-		result, err = f()
-		if err != nil {
-			item.StoreAbort()
-		} else {
-			item.StoreAndUnlock(result)
-		}
-	case res != nil:
-		logger.Debug("query cache hit")
-		result = res
-		fromCache = true
-	default:
-		// Whenever there are multiple requests approaching for the same records,
-		// and the proceeding request gets an error, waiting requests should get an error too.
-		err = fmt.Errorf("invalid cache record for the request")
-	}
-	return
-}
-
 func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.GlobRequest) (*protov2.GlobResponse, error) {
 	t0 := time.Now()
 	span := trace.SpanFromContext(ctx)
@@ -494,13 +470,13 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 				lookups = expandedGlobs[0].Lookups
 				return finalRes, nil
 			})
-		listener.prometheus.cacheRequest("find", fromCache)
-		if fromCache {
-			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
-		} else {
-			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
-		}
 		if err == nil {
+			listener.prometheus.cacheRequest("find", fromCache)
+			if fromCache {
+				atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
+			} else {
+				atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+			}
 			finalRes = result.(*protov2.GlobResponse)
 			if len(finalRes.Matches) == 0 {
 				err = errorNotFound{}
