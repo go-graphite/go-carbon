@@ -93,27 +93,39 @@ func (ws *WrappedStream) Payload() string {
 	return ws.payload
 }
 
+func UnaryServerStatusMetricHandler(statusCodes map[string][]uint64, promRequest func(string, int)) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		res, err := handler(ctx, req)
+		grpcServerStatusMetricHandler(info.FullMethod, err, statusCodes, promRequest)
+		return res, err
+	}
+}
+
 func StreamServerStatusMetricHandler(statusCodes map[string][]uint64, promRequest func(string, int)) grpc.StreamServerInterceptor {
 	return func(srv interface{}, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
 		err := handler(srv, ss)
-		_, methodName := path.Split(info.FullMethod)
-		endpoint := strings.ToLower(methodName)
-		var major int
-		if err != nil {
-			s, _ := status.FromError(err)
-			major = getHTTPStatusCodeMajorFromGrpcStatusCode(s.Code())
-		} else {
-			major = getHTTPStatusCodeMajorFromGrpcStatusCode(codes.OK)
-		}
-		if globalStatusCodes := statusCodes["combined"]; major < len(globalStatusCodes) {
-			atomic.AddUint64(&globalStatusCodes[major], 1)
-			if handlerStatusCodes, ok := statusCodes[endpoint]; ok {
-				atomic.AddUint64(&handlerStatusCodes[major], 1)
-			}
-		}
-		promRequest(endpoint, major)
+		grpcServerStatusMetricHandler(info.FullMethod, err, statusCodes, promRequest)
 		return err
 	}
+}
+
+func grpcServerStatusMetricHandler(fullMethodName string, handlerErr error, statusCodes map[string][]uint64, promRequest func(string, int)) {
+	_, methodName := path.Split(fullMethodName)
+	endpoint := strings.ToLower(methodName)
+	var major int
+	if handlerErr != nil {
+		s, _ := status.FromError(handlerErr)
+		major = getHTTPStatusCodeMajorFromGrpcStatusCode(s.Code())
+	} else {
+		major = getHTTPStatusCodeMajorFromGrpcStatusCode(codes.OK)
+	}
+	if globalStatusCodes := statusCodes["combined"]; major < len(globalStatusCodes) {
+		atomic.AddUint64(&globalStatusCodes[major], 1)
+		if handlerStatusCodes, ok := statusCodes[endpoint]; ok {
+			atomic.AddUint64(&handlerStatusCodes[major], 1)
+		}
+	}
+	promRequest(endpoint, major)
 }
 
 func getHTTPStatusCodeMajorFromGrpcStatusCode(code codes.Code) int {

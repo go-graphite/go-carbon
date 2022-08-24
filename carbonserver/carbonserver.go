@@ -1666,13 +1666,7 @@ func (listener *CarbonserverListener) rateLimitRequest(h http.HandlerFunc) http.
 	return func(wr http.ResponseWriter, req *http.Request) {
 		ratelimiter := listener.getPathRateLimiter(req.URL.Path)
 		// Can't use http.TimeoutHandler here due to supporting per-path timeout
-		var newTimeout time.Duration
-		if listener.requestTimeout > 0 {
-			newTimeout = listener.requestTimeout
-		}
-		if ratelimiter != nil && ratelimiter.timeout > 0 {
-			newTimeout = ratelimiter.timeout
-		}
+		newTimeout := listener.getPathRateLimiterTimeout(ratelimiter)
 		if newTimeout > 0 {
 			ctx, cancel := context.WithTimeout(req.Context(), newTimeout)
 			defer cancel()
@@ -2058,12 +2052,48 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 	opts = append(opts, grpc.ChainStreamInterceptor(
 		grpcutil.StreamServerTimeHandler(listener.bucketRequestTimesGRPC),
 		grpcutil.StreamServerStatusMetricHandler(statusCodes, listener.prometheus.request),
-		listener.StreamServerRatelimitHandler(),
-	))
+		listener.StreamServerRatelimitHandler()), grpc.ChainUnaryInterceptor(
+		grpcutil.UnaryServerTimeHandler(listener.bucketRequestTimesGRPC),
+		grpcutil.UnaryServerStatusMetricHandler(statusCodes, listener.prometheus.request),
+		listener.UnaryServerRatelimitHandler()))
 	grpcServer := grpc.NewServer(opts...) //skipcq: GO-S0902
 	grpcv2.RegisterCarbonV2Server(grpcServer, listener)
 	go grpcServer.Serve(listener.grpcListener)
 	return nil
+}
+
+func (listener *CarbonserverListener) getPathRateLimiterTimeout(ratelimiter *ApiPerPathRatelimiter) time.Duration {
+	var newTimeout time.Duration
+	if listener.requestTimeout > 0 {
+		newTimeout = listener.requestTimeout
+	}
+	if ratelimiter != nil && ratelimiter.timeout > 0 {
+		newTimeout = ratelimiter.timeout
+	}
+	return newTimeout
+}
+
+func (listener *CarbonserverListener) UnaryServerRatelimitHandler() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		t0 := time.Now()
+		var payload string
+		if reqStringer, ok := req.(fmt.Stringer); ok {
+			payload = reqStringer.String()
+		}
+		fullMethodName := info.FullMethod
+		ratelimiter := listener.getPathRateLimiter(fullMethodName) // Can't use http.TimeoutHandler here due to supporting per-path timeout
+		newTimeout := listener.getPathRateLimiterTimeout(ratelimiter)
+		if newTimeout > 0 {
+			newCtx, cancel := context.WithTimeout(ctx, newTimeout)
+			defer cancel()
+			ctx = newCtx
+		}
+
+		if err := listener.grpcServerRatelimitHandler(ctx, ratelimiter, payload, t0); err != nil {
+			return nil, err
+		}
+		return handler(ctx, req)
+	}
 }
 
 func (listener *CarbonserverListener) StreamServerRatelimitHandler() grpc.StreamServerInterceptor {
@@ -2072,13 +2102,7 @@ func (listener *CarbonserverListener) StreamServerRatelimitHandler() grpc.Stream
 		fullMethodName := info.FullMethod
 		wss := grpcutil.GetWrappedStream(ss)
 		ratelimiter := listener.getPathRateLimiter(fullMethodName) // Can't use http.TimeoutHandler here due to supporting per-path timeout
-		var newTimeout time.Duration
-		if listener.requestTimeout > 0 {
-			newTimeout = listener.requestTimeout
-		}
-		if ratelimiter != nil && ratelimiter.timeout > 0 {
-			newTimeout = ratelimiter.timeout
-		}
+		newTimeout := listener.getPathRateLimiterTimeout(ratelimiter)
 		if newTimeout > 0 {
 			ctx, cancel := context.WithTimeout(wss.Context(), newTimeout)
 			defer cancel()
@@ -2086,63 +2110,69 @@ func (listener *CarbonserverListener) StreamServerRatelimitHandler() grpc.Stream
 		}
 
 		ctx := wss.Context()
-		var reqPeer string
-		if p, ok := peer.FromContext(ctx); ok {
-			reqPeer = p.Addr.String()
+		if err := listener.grpcServerRatelimitHandler(ctx, ratelimiter, wss.Payload(), t0); err != nil {
+			return err
 		}
-		accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
-			zap.String("handler", "rate_limit"),
-			zap.String("payload", wss.Payload()),
-			zap.String("peer", reqPeer),
-		))
-
-		if listener.shouldBlockForIndex() {
-			accessLogger.Error("request denied",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", "index not ready"),
-				zap.Int("grpc_code", int(codes.Unavailable)),
-			)
-			return status.Error(codes.Unavailable, "Service unavailable (index not ready)")
-		}
-
-		if ratelimiter != nil {
-			if ratelimiter.Enter() != nil {
-				accessLogger.Error("request blocked",
-					zap.Duration("runtime_seconds", time.Since(t0)),
-					zap.String("reason", "blocked by api per path rate limiter"),
-					zap.Int("grpc_code", int(codes.InvalidArgument)),
-				)
-				return status.Error(codes.InvalidArgument, "blocked by api per path rate limiter")
-			}
-			defer ratelimiter.Exit()
-
-			// why: if the request is already timeout, there is no
-			// need to resume execution.
-			if listener.checkRequestCtx(ctx) != nil {
-				accessLogger.Error("request timeout due to per url rate limiting",
-					zap.Duration("runtime_seconds", time.Since(t0)),
-					zap.String("reason", "timeout due to per url rate limiting"),
-					zap.Int("grpc_code", int(codes.ResourceExhausted)),
-				)
-				return status.Error(codes.ResourceExhausted, "timeout due to maxInflightRequests")
-			}
-		}
-
-		// TODO: to deprecate as it's replaced by per-path rate limiting?
-		//
-		// rate limit inflight requests
-		inflights := atomic.AddUint64(&listener.metrics.InflightRequests, 1)
-		defer atomic.AddUint64(&listener.metrics.InflightRequests, ^uint64(0))
-		if listener.MaxInflightRequests > 0 && inflights > listener.MaxInflightRequests {
-			atomic.AddUint64(&listener.metrics.RejectedTooManyRequests, 1)
-			accessLogger.Error("request denied",
-				zap.Duration("runtime_seconds", time.Since(t0)),
-				zap.String("reason", "too many requests"),
-				zap.Int("grpc_code", http.StatusTooManyRequests),
-			)
-			return status.Error(codes.ResourceExhausted, "too many requests")
-		}
-
 		return handler(srv, ss)
 	}
+}
+
+func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Context, ratelimiter *ApiPerPathRatelimiter, payload string, t0 time.Time) error {
+	var reqPeer string
+	if p, ok := peer.FromContext(ctx); ok {
+		reqPeer = p.Addr.String()
+	}
+	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+		zap.String("handler", "rate_limit"),
+		zap.String("payload", payload),
+		zap.String("peer", reqPeer),
+	))
+
+	if listener.shouldBlockForIndex() {
+		accessLogger.Error("request denied",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "index not ready"),
+			zap.Int("grpc_code", int(codes.Unavailable)),
+		)
+		return status.Error(codes.Unavailable, "Service unavailable (index not ready)")
+	}
+
+	if ratelimiter != nil {
+		if ratelimiter.Enter() != nil {
+			accessLogger.Error("request blocked",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "blocked by api per path rate limiter"),
+				zap.Int("grpc_code", int(codes.InvalidArgument)),
+			)
+			return status.Error(codes.InvalidArgument, "blocked by api per path rate limiter")
+		}
+		defer ratelimiter.Exit()
+
+		// why: if the request is already timeout, there is no
+		// need to resume execution.
+		if listener.checkRequestCtx(ctx) != nil {
+			accessLogger.Error("request timeout due to per url rate limiting",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "timeout due to per url rate limiting"),
+				zap.Int("grpc_code", int(codes.ResourceExhausted)),
+			)
+			return status.Error(codes.ResourceExhausted, "timeout due to maxInflightRequests")
+		}
+	}
+
+	// TODO: to deprecate as it's replaced by per-path rate limiting?
+	//
+	// rate limit inflight requests
+	inflights := atomic.AddUint64(&listener.metrics.InflightRequests, 1)
+	defer atomic.AddUint64(&listener.metrics.InflightRequests, ^uint64(0))
+	if listener.MaxInflightRequests > 0 && inflights > listener.MaxInflightRequests {
+		atomic.AddUint64(&listener.metrics.RejectedTooManyRequests, 1)
+		accessLogger.Error("request denied",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "too many requests"),
+			zap.Int("grpc_code", http.StatusTooManyRequests),
+		)
+		return status.Error(codes.ResourceExhausted, "too many requests")
+	}
+	return nil
 }
