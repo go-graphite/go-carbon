@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"context"
 	"encoding/json"
 	"io/ioutil" //nolint:staticcheck
 	"net/http"
@@ -9,13 +10,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.uber.org/zap"
-
-	"github.com/go-graphite/go-whisper"
-
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	"github.com/go-graphite/go-whisper"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
@@ -193,4 +195,65 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 // no unicode support is needed.
 func titleizeAggrMethod(aggr string) string {
 	return strings.ToUpper(aggr[:1]) + aggr[1:]
+}
+
+func (listener *CarbonserverListener) Info(ctx context.Context, req *protov2.InfoRequest) (*protov2.InfoResponse, error) {
+	t0 := time.Now()
+	atomic.AddUint64(&listener.metrics.InfoRequests, 1)
+
+	metric := req.Name
+	var reqPeer string
+	if p, ok := peer.FromContext(ctx); ok {
+		reqPeer = p.Addr.String()
+	}
+	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+		zap.String("handler", "grpc-info"),
+		zap.String("request_payload", req.String()),
+		zap.String("peer", reqPeer),
+	))
+
+	accessLogger = accessLogger.With(
+		zap.Strings("targets", []string{metric}),
+		zap.String("format", protoV2Format.String()),
+	)
+
+	var retentionsV2 []*protov2.Retention
+	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
+	w, err := whisper.Open(path)
+	if err != nil {
+		atomic.AddUint64(&listener.metrics.NotFound, 1)
+		accessLogger.Error("info served",
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.String("reason", "metric not found"),
+			zap.Int("grpc_code", int(codes.NotFound)),
+		)
+		return nil, status.Error(codes.NotFound, "Metric not found")
+	}
+
+	defer w.Close()
+
+	aggr := titleizeAggrMethod(w.AggregationMethod().String())
+	maxr := int64(w.MaxRetention())
+	xfiles := float32(w.XFilesFactor())
+
+	for _, retention := range w.Retentions() {
+		retentionsV2 = append(retentionsV2, &protov2.Retention{
+			SecondsPerPoint: int32(retention.SecondsPerPoint()),
+			NumberOfPoints:  int32(retention.NumberOfPoints()),
+		})
+	}
+
+	res := &protov2.InfoResponse{
+		Name:              metric,
+		AggregationMethod: aggr,
+		MaxRetention:      int32(maxr),
+		XFilesFactor:      xfiles,
+		Retentions:        retentionsV2,
+	}
+
+	accessLogger.Info("info served",
+		zap.Duration("runtime_seconds", time.Since(t0)),
+		zap.Int("grpc_code", int(codes.OK)),
+	)
+	return res, nil
 }
