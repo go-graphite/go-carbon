@@ -22,12 +22,17 @@ import (
 	"go.opentelemetry.io/otel/exporters/trace/stdout"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/metadata"
 )
 
 var TraceHeaders = map[headerName]string{
 	{"X-CTX-CarbonAPI-UUID"}:    "carbonapi_uuid",
 	{"X-CTX-CarbonZipper-UUID"}: "carbonzipper_uuid",
 	{"X-Request-ID"}:            "request_id",
+}
+
+var TraceGrpcMetadata = map[string]string{
+	"carponapi_uuid": "carbonapi_uuid",
 }
 
 type headerName struct {
@@ -96,7 +101,6 @@ func (c *CarbonserverListener) InitTracing(jaegerEndpoint string, sendtoStdout b
 }
 
 func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
-
 	for header, field := range TraceHeaders {
 		v := ctx.Value(header)
 		if v == nil {
@@ -108,6 +112,16 @@ func TraceContextToZap(ctx context.Context, logger *zap.Logger) *zap.Logger {
 		}
 	}
 
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		for mdKey, field := range TraceGrpcMetadata {
+			vals := md.Get(mdKey)
+			if len(vals) == 1 {
+				logger = logger.With(zap.String(field, vals[0]))
+			} else if len(vals) > 1 {
+				logger = logger.With(zap.Strings(field, vals))
+			}
+		}
+	}
 	return logger
 }
 
