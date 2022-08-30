@@ -276,7 +276,7 @@ type CarbonserverListener struct {
 	db *leveldb.DB
 
 	quotas                    []*Quota
-	estimateSize              func(metric string) (size, dataPoints int64)
+	estimateSize              func(metric string) (logicalSize, physicalSize, dataPoints int64)
 	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
 
@@ -583,7 +583,7 @@ func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 func (listener *CarbonserverListener) SetPercentiles(percentiles []int) {
 	listener.percentiles = percentiles
 }
-func (listener *CarbonserverListener) SetEstimateSize(f func(metric string) (size, dataPoints int64)) {
+func (listener *CarbonserverListener) SetEstimateSize(f func(metric string) (logicalSize, physicalSize, dataPoints int64)) {
 	listener.estimateSize = f
 }
 func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
@@ -1037,7 +1037,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					if listener.estimateSize != nil {
 						m := strings.ReplaceAll(trimmedName, "/", ".")
 						m = m[1 : len(m)-4]
-						_, dataPoints = listener.estimateSize(m)
+						_, _, dataPoints = listener.estimateSize(m)
 					}
 					logicalSize = info.Size()
 					physicalSize = logicalSize

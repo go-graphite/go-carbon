@@ -1295,8 +1295,8 @@ func TestTrieQuotaGeneral(t *testing.T) {
 		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
 			tindex := newTrie(
 				".wsp",
-				func(metric string) (size, dataPoints int64) {
-					return 12 * 1024, 1024
+				func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+					return 12 * 1024, 12 * 1024, 1024
 				},
 			)
 
@@ -1346,8 +1346,8 @@ func stringifyQuotaPoints(ps []points.Points) string {
 func TestTrieQuotaThroughput(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
-		func(metric string) (size, dataPoints int64) {
-			return 12 * 1024, 1024
+		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			return 12 * 1024, 12 * 1024, 1024
 		},
 	)
 
@@ -1485,8 +1485,8 @@ func TestTrieReadMetric(t *testing.T) {
 func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
-		func(metric string) (size, dataPoints int64) {
-			return 12 * 1024, 1024
+		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			return 12 * 1024, 12 * 1024, 1024
 		},
 	)
 
@@ -1578,8 +1578,8 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
-		func(metric string) (size, dataPoints int64) {
-			return 12 * 1024, 1024
+		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			return 12 * 1024, 12 * 1024, 1024
 		},
 	)
 
@@ -1632,8 +1632,8 @@ func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
-		func(metric string) (size, dataPoints int64) {
-			return 12 * 1024, 1024
+		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			return 12 * 1024, 12 * 1024, 1024
 		},
 	)
 

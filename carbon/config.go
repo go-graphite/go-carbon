@@ -54,19 +54,20 @@ type commonConfig struct {
 }
 
 type whisperConfig struct {
-	DataDir                 string `toml:"data-dir"`
-	SchemasFilename         string `toml:"schemas-file"`
-	AggregationFilename     string `toml:"aggregation-file"`
-	QuotasFilename          string `toml:"quotas-file"`
-	Workers                 int    `toml:"workers"`
-	MaxUpdatesPerSecond     int    `toml:"max-updates-per-second"`
-	MaxCreatesPerSecond     int    `toml:"max-creates-per-second"`
-	HardMaxCreatesPerSecond bool   `toml:"hard-max-creates-per-second"`
-	Sparse                  bool   `toml:"sparse-create"`
-	FLock                   bool   `toml:"flock"`
-	Compressed              bool   `toml:"compressed"`
-	Enabled                 bool   `toml:"enabled"`
-	HashFilenames           bool   `toml:"hash-filenames"`
+	DataDir                 string  `toml:"data-dir"`
+	SchemasFilename         string  `toml:"schemas-file"`
+	AggregationFilename     string  `toml:"aggregation-file"`
+	QuotasFilename          string  `toml:"quotas-file"`
+	Workers                 int     `toml:"workers"`
+	MaxUpdatesPerSecond     int     `toml:"max-updates-per-second"`
+	MaxCreatesPerSecond     int     `toml:"max-creates-per-second"`
+	HardMaxCreatesPerSecond bool    `toml:"hard-max-creates-per-second"`
+	Sparse                  bool    `toml:"sparse-create"`
+	PhysicalSizeFactor      float32 `toml:"physical-size-factor"`
+	FLock                   bool    `toml:"flock"`
+	Compressed              bool    `toml:"compressed"`
+	Enabled                 bool    `toml:"enabled"`
+	HashFilenames           bool    `toml:"hash-filenames"`
 	Schemas                 persister.WhisperSchemas
 	Aggregation             *persister.WhisperAggregation
 	Quotas                  persister.WhisperQuotas
@@ -226,6 +227,7 @@ func NewConfig() *Config {
 			Enabled:             true,
 			Workers:             1,
 			Sparse:              false,
+			PhysicalSizeFactor:  0.75,
 			FLock:               false,
 			HashFilenames:       true,
 
