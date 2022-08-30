@@ -525,18 +525,26 @@ func (app *App) Start(version string) (err error) {
 				return errors.New("concurrent-index and realtime-index needs to be enabled for quota control.")
 			}
 
-			carbonserver.SetEstimateSize(func(metric string) (size, dataPoints int64) {
+			carbonserver.SetEstimateSize(func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 				schema, ok := app.Config.Whisper.Schemas.Match(metric)
+
 				if !ok {
 					// Why not configurable: go-carbon users
 					// should always make sure that there is a default retention policy.
-					return 4096 + 172800*12, 172800 // 2 days of secondly data
+					return 4096 + 172800*12, 4096 + 172800*12, 172800 // 2 days of secondly data
 				}
 
 				for _, r := range schema.Retentions {
 					dataPoints += int64(r.NumberOfPoints())
 				}
-				return 4096 + dataPoints*12, dataPoints
+				logicalSize = 4096 + dataPoints*12
+				if app.Config.Whisper.Sparse { // we assume that physical size for sparse metrics takes only a part of the logical size
+					physicalSize = int64(app.Config.Whisper.PhysicalSizeFactor * float32(logicalSize))
+				} else {
+					physicalSize = logicalSize
+				}
+
+				return logicalSize, physicalSize, dataPoints
 			})
 
 			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas())
