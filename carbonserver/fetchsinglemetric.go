@@ -74,14 +74,16 @@ func (r response) proto2() *protov2.FetchResponse {
 		StartTime: int32(r.StartTime),
 		StopTime:  int32(r.StopTime),
 		StepTime:  int32(r.StepTime),
-		Values:    r.Values,
+		Values:    make([]float64, len(r.Values)),
 		IsAbsent:  make([]bool, len(r.Values)),
 	}
 
-	for i, p := range resp.Values {
+	for i, p := range r.Values {
 		if math.IsNaN(p) {
 			resp.Values[i] = 0
 			resp.IsAbsent[i] = true
+		} else {
+			resp.Values[i] = p
 		}
 	}
 
