@@ -907,7 +907,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	// readFromCache only run once at the start of the program.
 	// A new version is generated everytime a file list scan is completed.
-	if fidx == nil && listener.fileListCache != "" {
+	if listener.trieIndex && fidx == nil && listener.fileListCache != "" {
 		// why not listener.fileListCacheVersion: this is for
 		// transparent file list cache version upgrade and reverse.
 		flc, err := NewFileListCache(listener.fileListCache, FLCVersionUnspecified, 'r')
