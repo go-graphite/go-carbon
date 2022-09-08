@@ -1,7 +1,6 @@
 package atomicfiles
 
 import (
-	"io/ioutil" //nolint:staticcheck
 	"os"
 	"path"
 )
@@ -9,7 +8,7 @@ import (
 func WriteFile(name string, body []byte) error {
 	dir, _ := path.Split(name)
 
-	tmpFile, err := ioutil.TempFile(dir, ".tmp")
+	tmpFile, err := os.CreateTemp(dir, ".tmp")
 	if err != nil {
 		return err
 	}

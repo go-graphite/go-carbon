@@ -2,7 +2,7 @@ package http
 
 import (
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"io"
 	"net"
 	"net/http"
 	"sync/atomic"
@@ -129,7 +129,7 @@ func (rcv *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		atomic.AddUint32(&rcv.errors, 1)
 		http.Error(w, fmt.Sprintf("Read request failed: %s", err.Error()), http.StatusBadRequest)

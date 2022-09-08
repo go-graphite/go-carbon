@@ -1,7 +1,7 @@
 package carbon
 
 import (
-	"io/ioutil" //nolint:staticcheck
+	"os"
 	"path"
 	"testing"
 
@@ -12,7 +12,7 @@ import (
 func TestRestore(t *testing.T) {
 	qa.Root(t, func(root string) {
 		w := func(fn, body string) {
-			err := ioutil.WriteFile(path.Join(root, fn), []byte(body), 0644)
+			err := os.WriteFile(path.Join(root, fn), []byte(body), 0644)
 			if err != nil {
 				t.Fatal(err)
 			}

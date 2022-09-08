@@ -2,7 +2,7 @@ package carbonserver
 
 import (
 	"encoding/json"
-	"io/ioutil" //nolint:staticcheck
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -40,7 +40,7 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 	}
 
 	if formatCode, ok := knownFormats[format]; ok {
-		body, err := ioutil.ReadAll(req.Body)
+		body, err := io.ReadAll(req.Body)
 		if err != nil {
 			accessLogger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),

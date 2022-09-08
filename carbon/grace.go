@@ -3,7 +3,6 @@ package carbon
 import (
 	"bufio"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
 	"os"
 	"path"
 	"sort"
@@ -180,7 +179,7 @@ func (app *App) RestoreFromDir(dumpDir string, storeFunc func(*points.Points)) {
 		)
 	}()
 
-	files, err := ioutil.ReadDir(dumpDir)
+	files, err := os.ReadDir(dumpDir)
 	if err != nil {
 		logger.Error("readdir failed", zap.Error(err))
 		return

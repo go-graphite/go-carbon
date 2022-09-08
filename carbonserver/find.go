@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
@@ -83,7 +83,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	}
 
 	if formatCode == protoV3Format {
-		body, err := ioutil.ReadAll(req.Body)
+		body, err := io.ReadAll(req.Body)
 		if err != nil {
 			accessLogger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),

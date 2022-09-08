@@ -7,7 +7,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
 	"math/rand"
 	"reflect"
 	"runtime/debug"
@@ -32,7 +31,7 @@ var localTest = flag.Bool("local-test", false, "trim prefix and replace / with .
 var excludeFilesNotInTestData = flag.Bool("exclude-non-test-files", false, "filter out files trigram matched by using filepath.Glob")
 
 func readFile(path string) []string {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
 	}

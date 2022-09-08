@@ -3,7 +3,7 @@ package carbonserver
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil" //nolint:staticcheck
+	"io"
 	"net/http"
 	_ "net/http/pprof"
 	"strings"
@@ -62,7 +62,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	}
 
 	if formatCode == protoV3Format {
-		body, err := ioutil.ReadAll(req.Body)
+		body, err := io.ReadAll(req.Body)
 		if err != nil {
 			accessLogger.Error("info failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),

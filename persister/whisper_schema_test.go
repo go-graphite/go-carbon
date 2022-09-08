@@ -1,7 +1,6 @@
 package persister
 
 import (
-	"io/ioutil" //nolint:staticcheck
 	"os"
 	"testing"
 
@@ -58,7 +57,7 @@ func TestParseRetentionDefs(t *testing.T) {
 }
 
 func parseSchemas(t *testing.T, content string) (WhisperSchemas, error) {
-	tmpFile, err := ioutil.TempFile("", "schemas-")
+	tmpFile, err := os.CreateTemp("", "schemas-")
 	if err != nil {
 		t.Fatal(err)
 		return nil, nil
@@ -182,7 +181,7 @@ func TestSchemasNotFound(t *testing.T) {
 	// create and remove file
 	assert := assert.New(t)
 
-	tmpFile, err := ioutil.TempFile("", "schemas-")
+	tmpFile, err := os.CreateTemp("", "schemas-")
 	if err != nil {
 		t.Fatal(err)
 	}

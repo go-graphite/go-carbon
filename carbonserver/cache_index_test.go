@@ -3,7 +3,6 @@ package carbonserver
 import (
 	"context"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,7 +70,7 @@ func removeFileFromDir(filePath string, tmpDir string) error {
 }
 
 func getTestInfo(t *testing.T) *testInfo {
-	tmpDir, err := ioutil.TempDir("", "")
+	tmpDir, err := os.MkdirTemp("", "")
 	if err != nil {
 		fmt.Printf("unable to create test dir tree: %v\n", err)
 		t.Fatal(err)
