@@ -295,7 +295,7 @@ func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeR
 	for tr, ts := range targets {
 		names := make([]string, 0, len(ts))
 		for _, t := range ts {
-			pathExpressionMD5 = getMD5HashString(t.PathExpression)
+			pathExpressionMD5 := getMD5HashString(t.PathExpression)
 			names = append(names, t.Name+"&"+pathExpressionMD5)
 		}
 		targetKeys = append(targetKeys, fmt.Sprintf("%s&%d&%d", strings.Join(names, "&"), tr.from, tr.until))
