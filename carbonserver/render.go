@@ -203,7 +203,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.Strings("targets", tgs),
 	)
 
-	logger := TraceContextToZap(ctx, listener.accessLogger.With(
+	logger := TraceContextToZap(ctx, listener.logger.With(
 		zap.String("handler", "render"),
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
