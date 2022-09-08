@@ -8,7 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" // skipcq: GO-S2108
 	"strconv"
 	"strings"
 	"sync/atomic"

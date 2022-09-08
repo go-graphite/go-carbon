@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" // skipcq: GO-S2108
 	"strings"
 	"sync/atomic"
 	"time"

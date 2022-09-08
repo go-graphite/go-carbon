@@ -26,7 +26,7 @@ import (
 	"math"
 	"net"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" // skipcq: GO-S2108
 	"os"
 	"path/filepath"
 	"regexp"

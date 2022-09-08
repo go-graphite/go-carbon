@@ -24,7 +24,7 @@ import (
 	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/points"
 
-	_ "net/http/pprof"
+	_ "net/http/pprof" // skipcq: GO-S2108
 )
 
 // Version of go-carbon
