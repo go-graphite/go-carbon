@@ -131,7 +131,7 @@ func (rcv *UDP) receiveWorker(exit chan bool) {
 				name, value, timestamp, err := parse.PlainLine(line)
 				if err != nil {
 					atomic.AddUint32(&rcv.errors, 1)
-					rcv.logger.Info("parse failed",
+					rcv.logger.Debug("parse failed",
 						zap.Error(err),
 						zap.String("peer", peer.String()),
 					)
