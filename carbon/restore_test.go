@@ -12,7 +12,7 @@ import (
 func TestRestore(t *testing.T) {
 	qa.Root(t, func(root string) {
 		w := func(fn, body string) {
-			err := os.WriteFile(path.Join(root, fn), []byte(body), 0644)
+			err := os.WriteFile(path.Join(root, fn), []byte(body), 0600)
 			if err != nil {
 				t.Fatal(err)
 			}

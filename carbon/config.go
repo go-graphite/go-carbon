@@ -413,9 +413,9 @@ func TestConfig(rootDir string) string {
 [default]
 priority = 1
 pattern = .*
-retentions = 60:43200,3600:43800`), 0644)
+retentions = 60:43200,3600:43800`), 0600)
 
-	os.WriteFile(configFile, buf.Bytes(), 0644)
+	os.WriteFile(configFile, buf.Bytes(), 0600)
 
 	return configFile
 }
