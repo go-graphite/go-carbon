@@ -1,6 +1,7 @@
 package persister
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -22,6 +23,8 @@ import (
 )
 
 const storeMutexCount = 32768
+const maxPathLength = 4095
+const maxFilenameLength = 255
 
 type StoreFunc func(metric string)
 
@@ -253,6 +256,25 @@ func (p *Whisper) store(metric string) {
 		path = tags.FilePath(p.rootPath, metric, p.hashFilenames) + ".wsp"
 	} else {
 		path = filepath.Join(p.rootPath, strings.ReplaceAll(metric, ".", "/")+".wsp")
+	}
+
+	if len(path) > maxPathLength {
+		p.logger.Debug("metric name exceeds limit",
+			zap.String("path", path),
+			zap.Error(errors.New("path too long")))
+		p.popConfirm(metric)
+		return
+	}
+	filenames := strings.Split(path, "/")
+	for _, filename := range filenames {
+		if len(filename) > maxFilenameLength {
+			p.logger.Debug("metric name exceeds limit",
+				zap.String("path", path),
+				zap.String("filename", filename),
+				zap.Error(errors.New("filename too long")))
+			p.popConfirm(metric)
+			return
+		}
 	}
 
 	var newFile bool

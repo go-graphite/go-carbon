@@ -229,7 +229,7 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			name, value, timestamp, err := parse.PlainLine(line)
 			if err != nil {
 				atomic.AddUint32(&rcv.errors, 1)
-				rcv.logger.Info("parse failed",
+				rcv.logger.Debug("parse failed",
 					zap.Error(err),
 					zap.String("peer", conn.RemoteAddr().String()),
 				)
