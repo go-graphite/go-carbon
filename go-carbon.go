@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	_ "net/http/pprof" // skipcq: GO-S2108
 	"os"
 	"os/signal"
 	"os/user"
@@ -23,8 +24,6 @@ import (
 	"github.com/go-graphite/go-carbon/carbon"
 	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/points"
-
-	_ "net/http/pprof"
 )
 
 // Version of go-carbon
@@ -43,7 +42,11 @@ func httpServe(addr string) (func(), error) {
 		return nil, err
 	}
 
-	go http.Serve(listener, nil)
+	server := &http.Server{
+		// TODO: set read timeout
+	}
+
+	go server.Serve(listener)
 	return func() { listener.Close() }, nil
 }
 

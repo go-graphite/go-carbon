@@ -3,12 +3,12 @@ package persister
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"os"
 	"strings"
 )
 
 func parseIniFile(filename string) ([]map[string]string, error) {
-	body, err := ioutil.ReadFile(filename)
+	body, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}

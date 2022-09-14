@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil" //nolint:staticcheck
 	"sync"
 	"sync/atomic"
 	"time"
@@ -167,7 +166,7 @@ func (rcv *PubSub) handleMessage(m *pubsub.Message) {
 		}
 		defer releaseGzipReader(gzr)
 
-		data, err = ioutil.ReadAll(gzr)
+		data, err = io.ReadAll(gzr)
 		if err != nil {
 			rcv.logger.Error(err.Error())
 			atomic.AddUint32(&rcv.errors, 1)

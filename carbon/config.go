@@ -3,8 +3,8 @@ package carbon
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -346,7 +346,7 @@ func PrintDefaultConfig() error {
 func ReadConfig(filename string) (*Config, error) {
 	cfg := NewConfig()
 	if filename != "" {
-		b, err := ioutil.ReadFile(filename)
+		b, err := os.ReadFile(filename)
 		if err != nil {
 			return nil, err
 		}
@@ -409,13 +409,13 @@ func TestConfig(rootDir string) string {
 		return configFile
 	}
 
-	ioutil.WriteFile(cfg.Whisper.SchemasFilename, []byte(`
+	os.WriteFile(cfg.Whisper.SchemasFilename, []byte(`
 [default]
 priority = 1
 pattern = .*
-retentions = 60:43200,3600:43800`), 0644)
+retentions = 60:43200,3600:43800`), 0600)
 
-	ioutil.WriteFile(configFile, buf.Bytes(), 0644)
+	os.WriteFile(configFile, buf.Bytes(), 0600)
 
 	return configFile
 }

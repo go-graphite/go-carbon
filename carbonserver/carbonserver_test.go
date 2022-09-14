@@ -2,7 +2,6 @@ package carbonserver
 
 import (
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
 	"math"
 	"os"
 	"path/filepath"
@@ -365,7 +364,7 @@ func getSingleMetricTest(name string) *FetchTest {
 	return nil
 }
 func initCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error) {
-	path, err := ioutil.TempDir("", "")
+	path, err := os.MkdirTemp("", "")
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +474,7 @@ func TestFetchSingleMetricDataCacheOnly(t *testing.T) {
 
 func TestGetMetricsListEmpty(t *testing.T) {
 	cache := cache.New()
-	path, err := ioutil.TempDir("", "")
+	path, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +497,7 @@ func TestGetMetricsListEmpty(t *testing.T) {
 
 func TestGetMetricsListWithData(t *testing.T) {
 	cache := cache.New()
-	path, err := ioutil.TempDir("", "")
+	path, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,15 +1,12 @@
 package kafka
 
 import (
-	"sync/atomic"
-
-	"go.uber.org/zap"
-
 	"encoding/json"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -21,6 +18,7 @@ import (
 	"github.com/go-graphite/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 )
 
 func init() {
@@ -241,7 +239,7 @@ func (s *state) SaveState() error {
 }
 
 func (s *state) LoadState() error {
-	data, err := ioutil.ReadFile(s.stateFile)
+	data, err := os.ReadFile(s.stateFile)
 	if err == nil {
 		err = json.Unmarshal(data, s)
 	}

@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"io"
 	"math"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" // skipcq: GO-S2108
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -125,7 +125,7 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 
 	switch format {
 	case protoV3Format:
-		body, err := ioutil.ReadAll(req.Body)
+		body, err := io.ReadAll(req.Body)
 		if err != nil {
 			return targets, fmt.Errorf("error reading body: %s", err.Error())
 		}

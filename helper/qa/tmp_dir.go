@@ -1,14 +1,13 @@
 package qa
 
 import (
-	"io/ioutil" //nolint:staticcheck
 	"os"
 	"testing"
 )
 
 // Root creates new test directory
 func Root(t *testing.T, callback func(dir string)) {
-	tmpDir, err := ioutil.TempDir("", "")
+	tmpDir, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -104,7 +104,7 @@ func (rcv *UDP) Stat(send helper.StatCallback) {
 	}
 }
 
-func (rcv *UDP) receiveWorker(exit chan bool) {
+func (rcv *UDP) receiveWorker(chan bool) {
 	defer rcv.conn.Close()
 
 	var buf [65535]byte
@@ -188,5 +188,5 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 }
 
 // InitPrometheus is a stub for the receiver prom metrics. Required to satisfy Receiver interface.
-func (rcv *UDP) InitPrometheus(reg prometheus.Registerer) {
+func (*UDP) InitPrometheus(prometheus.Registerer) {
 }

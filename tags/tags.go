@@ -2,16 +2,16 @@ package tags
 
 import (
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
+	"io"
 	"net/http"
 	"net/url"
 	"sync/atomic"
 	"time"
 
+	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
-	"github.com/lomik/zapwriter"
 )
 
 type Options struct {
@@ -62,7 +62,7 @@ func New(options *Options) *Tags {
 				return fmt.Errorf("bad status code: %d", resp.StatusCode)
 			}
 
-			ioutil.ReadAll(resp.Body)
+			io.ReadAll(resp.Body)
 			return nil
 		}
 	}

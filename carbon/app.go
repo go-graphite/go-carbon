@@ -3,7 +3,6 @@ package carbon
 import (
 	"errors"
 	"fmt"
-	"io/ioutil" //nolint:staticcheck
 	"log"
 	"net"
 	"net/url"
@@ -589,7 +588,7 @@ func (app *App) Start(version string) (err error) {
 				"aggregation": app.Config.Whisper.AggregationFilename,
 				"quota":       app.Config.Whisper.QuotasFilename,
 			} {
-				if data, err := ioutil.ReadFile(file); err != nil {
+				if data, err := os.ReadFile(file); err != nil {
 					infos[name] = err.Error()
 				} else {
 					infos[name] = string(data)
