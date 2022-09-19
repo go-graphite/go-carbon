@@ -1500,7 +1500,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("find_cache_miss", &listener.metrics.FindCacheMiss, send)
 
 	sender("inflight_requests_count", &listener.metrics.InflightRequests, send)
-	sender("inflight_requests_limit", &listener.MaxInflightRequests, send)
+	senderRaw("inflight_requests_limit", &listener.MaxInflightRequests, send)
 	sender("rejected_too_many_requests", &listener.metrics.RejectedTooManyRequests, send)
 
 	if listener.concurrentIndex {
