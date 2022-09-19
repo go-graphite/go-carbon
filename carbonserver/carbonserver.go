@@ -245,14 +245,15 @@ type CarbonserverListener struct {
 	maxMetricsGlobbed  int
 	maxMetricsRendered int
 
-	queryCacheEnabled bool
-	queryCacheSizeMB  int
-	queryCache        queryCache
-	findCacheEnabled  bool
-	findCache         queryCache
-	trigramIndex      bool
-	trieIndex         bool
-	concurrentIndex   bool
+	queryCacheEnabled          bool
+	streamingQueryCacheEnabled bool
+	queryCacheSizeMB           int
+	queryCache                 queryCache
+	findCacheEnabled           bool
+	findCache                  queryCache
+	trigramIndex               bool
+	trieIndex                  bool
+	concurrentIndex            bool
 
 	fileListCacheVersion FLCVersion
 	fileListCache        string
@@ -544,6 +545,9 @@ func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters boo
 }
 func (listener *CarbonserverListener) SetQueryCacheEnabled(enabled bool) {
 	listener.queryCacheEnabled = enabled
+}
+func (listener *CarbonserverListener) SetStreamingQueryCacheEnabled(enabled bool) {
+	listener.streamingQueryCacheEnabled = enabled
 }
 func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 	listener.queryCacheSizeMB = size

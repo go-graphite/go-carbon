@@ -689,7 +689,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		return responses, err
 	}
 
-	if listener.queryCacheEnabled {
+	if listener.streamingQueryCacheEnabled {
 		key, size := listener.getRenderCacheKeyAndSize(targets, format.String()+"grpc")
 		var res interface{}
 		res, fromCache, err = getWithCache(logger, listener.queryCache, key, size, 60,
@@ -741,7 +741,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 
 	logger.Info("fetch served",
 		zap.Duration("runtime_seconds", time.Since(t0)),
-		zap.Bool("query_cache_enabled", listener.queryCacheEnabled),
+		zap.Bool("query_cache_enabled", listener.streamingQueryCacheEnabled),
 		zap.Bool("from_cache", fromCache),
 		zap.Int("metrics_fetched", metricsFetched),
 		zap.Int("values_fetched", valuesFetched),
