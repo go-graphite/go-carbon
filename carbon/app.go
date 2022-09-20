@@ -495,6 +495,7 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 		carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
+		carbonserver.SetStreamingQueryCacheEnabled(conf.Carbonserver.StreamingQueryCacheEnabled)
 		carbonserver.SetFindCacheEnabled(conf.Carbonserver.FindCacheEnabled)
 		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
