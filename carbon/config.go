@@ -54,24 +54,21 @@ type commonConfig struct {
 }
 
 type whisperConfig struct {
-	DataDir                 string  `toml:"data-dir"`
-	SchemasFilename         string  `toml:"schemas-file"`
-	AggregationFilename     string  `toml:"aggregation-file"`
-	QuotasFilename          string  `toml:"quotas-file"`
-	Workers                 int     `toml:"workers"`
-	MaxUpdatesPerSecond     int     `toml:"max-updates-per-second"`
-	MaxCreatesPerSecond     int     `toml:"max-creates-per-second"`
-	HardMaxCreatesPerSecond bool    `toml:"hard-max-creates-per-second"`
-	Sparse                  bool    `toml:"sparse-create"`
-	PhysicalSizeFactor      float32 `toml:"physical-size-factor"`
-	FLock                   bool    `toml:"flock"`
-	Compressed              bool    `toml:"compressed"`
-	Enabled                 bool    `toml:"enabled"`
-	HashFilenames           bool    `toml:"hash-filenames"`
-	Schemas                 persister.WhisperSchemas
-	Aggregation             *persister.WhisperAggregation
-	Quotas                  persister.WhisperQuotas
-	RemoveEmptyFile         bool `toml:"remove-empty-file"`
+	DataDir             string  `toml:"data-dir"`
+	SchemasFilename     string  `toml:"schemas-file"`
+	AggregationFilename string  `toml:"aggregation-file"`
+	QuotasFilename      string  `toml:"quotas-file"`
+	Workers             int     `toml:"workers"`
+	Sparse              bool    `toml:"sparse-create"`
+	PhysicalSizeFactor  float32 `toml:"physical-size-factor"`
+	FLock               bool    `toml:"flock"`
+	Compressed          bool    `toml:"compressed"`
+	Enabled             bool    `toml:"enabled"`
+	HashFilenames       bool    `toml:"hash-filenames"`
+	Schemas             persister.WhisperSchemas
+	Aggregation         *persister.WhisperAggregation
+	Quotas              persister.WhisperQuotas
+	RemoveEmptyFile     bool `toml:"remove-empty-file"`
 
 	OnlineMigration            bool   `toml:"online-migration"`
 	OnlineMigrationRate        int    `toml:"online-migration-rate"` // metrics per second
@@ -137,6 +134,7 @@ type carbonserverConfig struct {
 	FileListCacheVersion int    `toml:"file-list-cache-version"`
 
 	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
+	MaxCreatesPerSecond       int       `toml:"max-creates-per-second"`
 
 	NoServiceWhenIndexIsNotReady bool `toml:"no-service-when-index-is-not-ready"`
 
@@ -224,7 +222,6 @@ func NewConfig() *Config {
 			DataDir:             "/var/lib/graphite/whisper/",
 			SchemasFilename:     "/etc/go-carbon/storage-schemas.conf",
 			AggregationFilename: "",
-			MaxUpdatesPerSecond: 0,
 			Enabled:             true,
 			Workers:             1,
 			Sparse:              false,

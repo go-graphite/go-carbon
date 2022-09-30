@@ -290,9 +290,9 @@ func uniqFilesLeafs(files []string, leafs []bool) ([]string, []bool) {
 
 func TestTrieContinuousUpdate(t *testing.T) {
 	files := readFile(*testDataPath)
-	ptrie := newTrie(".wsp", nil)
+	ptrie := newTrie(".wsp", 0, nil)
 	for i := 0; i < 100; i++ {
-		ttrie := newTrie(".wsp", nil)
+		ttrie := newTrie(".wsp", 0, nil)
 		ptrie.root.gen++
 		var count int
 		fmt.Println("--- run", i, count)

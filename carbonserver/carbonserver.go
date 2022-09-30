@@ -92,6 +92,8 @@ type metricStruct struct {
 	IndexBuildTimeNS     uint64
 	MetricsFetched       uint64
 	MetricsFound         uint64
+	ThrottledCreates     uint64
+	MaxCreatesPerSecond  uint64
 	FetchSize            uint64
 	QueryCacheHit        uint64
 	QueryCacheMiss       uint64
@@ -280,6 +282,7 @@ type CarbonserverListener struct {
 	estimateSize              func(metric string) (logicalSize, physicalSize, dataPoints int64)
 	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
+	maxCreatesPerSecond       int
 
 	interfalInfoCallbacks map[string]func() map[string]interface{}
 
@@ -522,6 +525,9 @@ func (listener *CarbonserverListener) SetScanFrequency(scanFrequency time.Durati
 func (listener *CarbonserverListener) SetQuotaUsageReportFrequency(quotaUsageReportFrequency time.Duration) {
 	listener.quotaUsageReportFrequency = quotaUsageReportFrequency
 }
+func (listener *CarbonserverListener) SetMaxCreatesPerSecond(maxCreatesPerSecond int) {
+	listener.maxCreatesPerSecond = maxCreatesPerSecond
+}
 func (listener *CarbonserverListener) SetReadTimeout(readTimeout time.Duration) {
 	listener.readTimeout = readTimeout
 }
@@ -703,7 +709,6 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
 	cacheMetricNames := make(map[string]struct{})
-
 	var knownMetricsStatTicker, quotaAndUsageStatTicker <-chan time.Time
 	if listener.isQuotaEnabled() {
 		ticker := time.NewTicker(listener.quotaUsageReportFrequency)
@@ -729,7 +734,7 @@ uloop:
 			// scanFrequency should be a long interval/duration
 			// like 2 hours or more, and with concurrent and
 			// realtime index, indexed metrics would grow even without disk scanning.
-			listener.statKnonwnMetrics(knownMetricsStatTicker)
+			listener.statKnownMetrics(knownMetricsStatTicker)
 
 			continue uloop
 		case <-quotaAndUsageStatTicker:
@@ -767,7 +772,7 @@ uloop:
 	}
 }
 
-func (listener *CarbonserverListener) statKnonwnMetrics(knownMetricsStatTicker <-chan time.Time) {
+func (listener *CarbonserverListener) statKnownMetrics(knownMetricsStatTicker <-chan time.Time) {
 	defer func() {
 		// drain remaining blocked tickers
 		for {
@@ -789,7 +794,10 @@ func (listener *CarbonserverListener) statKnonwnMetrics(knownMetricsStatTicker <
 	atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
 	atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
 	atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
+	atomic.StoreUint64(&listener.metrics.ThrottledCreates, fidx.trieIdx.throttledCreates)
+	atomic.AddUint64(&fidx.trieIdx.throttledCreates, -fidx.trieIdx.throttledCreates)
 
+	atomic.StoreUint64(&listener.metrics.MaxCreatesPerSecond, uint64(listener.maxCreatesPerSecond))
 	// set using the indexed files, instead of returning on-disk files.
 	//
 	// WHY: with concurrent and realtime index, disk scan should be set at
@@ -834,6 +842,10 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 
 	quotaTime := uint64(time.Since(quotaStart))
 	atomic.StoreUint64(&listener.metrics.QuotaApplyTimeNs, quotaTime)
+	atomic.StoreUint64(&listener.metrics.ThrottledCreates, fidx.trieIdx.throttledCreates)
+	atomic.AddUint64(&fidx.trieIdx.throttledCreates, -fidx.trieIdx.throttledCreates)
+
+	atomic.StoreUint64(&listener.metrics.MaxCreatesPerSecond, uint64(listener.maxCreatesPerSecond))
 
 	usageStart := time.Now()
 	files := fidx.trieIdx.refreshUsage(throughputs)
@@ -843,9 +855,9 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	// set using the indexed files, instead of returning on-disk files.
 	//
 	// WHY: quota subsystem atm can only be enabled along with concurrent
-	// and realtime idnex, and with concurrent and realtime index, disk
+	// and realtime index, and with concurrent and realtime index, disk
 	// scan should be set at an interval like 2 hours or longer. counting
-	// the files in trie index gives us more timely visibilitty into how
+	// the files in trie index gives us more timely visibility into how
 	// many metrics are known now.
 	atomic.StoreUint64(&listener.metrics.MetricsKnown, files)
 
@@ -884,7 +896,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var infos []zap.Field
 	if listener.trieIndex {
 		if fidx == nil || !listener.concurrentIndex {
-			trieIdx = newTrie(".wsp", listener.estimateSize)
+			trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
 		} else {
 			trieIdx = fidx.trieIdx
 			trieIdx.root.gen++
@@ -930,7 +942,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 						infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
 
 						readFromCache = false
-						trieIdx = newTrie(".wsp", listener.estimateSize)
+						trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
 					}
 
 					break
@@ -944,7 +956,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					listener.logTrieInsertError(logger, "failed to read from file list cache", entry.Path, err)
 
 					readFromCache = false
-					trieIdx = newTrie(".wsp", listener.estimateSize)
+					trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
 
 					break
 				}
@@ -1466,9 +1478,9 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	}
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	pauseNS := uint64(m.PauseTotalNs)
-	alloc := uint64(m.Alloc)
-	totalAlloc := uint64(m.TotalAlloc)
+	pauseNS := m.PauseTotalNs
+	alloc := m.Alloc
+	totalAlloc := m.TotalAlloc
 	numGC := uint64(m.NumGC)
 
 	sender("render_requests", &listener.metrics.RenderRequests, send)
@@ -1491,6 +1503,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("points_returned", &listener.metrics.PointsReturned, send)
 	sender("metrics_returned", &listener.metrics.MetricsReturned, send)
 	sender("metrics_found", &listener.metrics.MetricsFound, send)
+	sender("throttled_creates", &listener.metrics.ThrottledCreates, send)
+	sender("max_creates_per_second", &listener.metrics.MaxCreatesPerSecond, send)
 	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
 
 	senderRaw("metrics_known", &listener.metrics.MetricsKnown, send)

@@ -39,7 +39,7 @@ func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListen
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
-	trieIndex := newTrie(".wsp", nil)
+	trieIndex := newTrie(".wsp", 0, nil)
 	for _, file := range files {
 		trieIndex.insert(file, 0, 0, 0, 0)
 	}
@@ -743,7 +743,7 @@ func TestTrieIndex(t *testing.T) {
 }
 
 func TestTrieEdgeCases(t *testing.T) {
-	var trie = newTrie(".wsp", nil)
+	var trie = newTrie(".wsp", 0, nil)
 
 	_, _, _, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
 	if err == nil || err.Error() != "glob: range overflow" {
@@ -756,7 +756,7 @@ func TestTrieEdgeCases(t *testing.T) {
 }
 
 func TestTrieQueryOpts(t *testing.T) {
-	var trieIndex = newTrie(".wsp", nil)
+	var trieIndex = newTrie(".wsp", 0, nil)
 
 	trieIndex.insert("/sys/app/host-01.wsp", 0, 0, 0, 0)
 	trieIndex.insert("/sys/app/host-01/cpu/user.wsp", 0, 0, 0, 0)
@@ -797,7 +797,7 @@ func TestTrieQueryOpts(t *testing.T) {
 }
 
 func TestTrieConcurrentReadWrite(t *testing.T) {
-	trieIndex := newTrie(".wsp", nil)
+	trieIndex := newTrie(".wsp", 0, nil)
 
 	rand.Seed(time.Now().Unix())
 
@@ -925,8 +925,8 @@ func TestTriePrune(t *testing.T) {
 
 	for i, c := range cases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			ctrieIndex := newTrie(".wsp", nil)
-			strieIndex := newTrie(".wsp", nil)
+			ctrieIndex := newTrie(".wsp", 0, nil)
+			strieIndex := newTrie(".wsp", 0, nil)
 
 			for _, f := range c.files1 {
 				ctrieIndex.insert(f, 0, 0, 0, 0)
@@ -1102,7 +1102,94 @@ func TestDumpAllMetrics(t *testing.T) {
 		t.Errorf("trie.allMetrics:\nwant: %s\ngot:  %s\n", files, metrics)
 	}
 }
+func TestTrieCreateThrottleOff(t *testing.T) {
 
+}
+func TestTrieCreateThrottle(t *testing.T) {
+	// create index
+	tindex := newTrie(
+		".wsp",
+		15,
+		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			return 0, 0, 0
+		},
+	)
+	time.Sleep(100 * time.Millisecond) // wait till ticker is on
+	var input1 []string
+	var input2 []string
+	for i := 0; i < 5; i++ {
+		input1 = append(
+			input1,
+			fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i),
+			fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i),
+			fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i),
+		)
+		input2 = append(
+			input2,
+			fmt.Sprintf("/sys/app/server-%02d/new-cpu.wsp", i),
+			fmt.Sprintf("/sys/app/server-%02d/new-memory.wsp", i),
+			fmt.Sprintf("/sys/app/server-%02d/new-iostat.wsp", i),
+		)
+	}
+	insertAndThrottle := func(index *trieIndex, m string, shouldBeThrottled bool) {
+		throttleMetric := strings.ReplaceAll(m, "/", ".")
+		throttleMetric = throttleMetric[1 : len(throttleMetric)-4]
+		throttle := index.throttle(&points.Points{Metric: throttleMetric, Data: nil}, false)
+		if throttle != shouldBeThrottled {
+			t.Errorf("throttle(%q) = %t, wants %t", m, throttle, shouldBeThrottled)
+		}
+		if !throttle {
+			index.insert(m, 0, 0, 0, 0)
+		}
+	}
+	for _, m := range input1 {
+		insertAndThrottle(tindex, m, false)
+	}
+	//check if existing metrics don't trigger hard throttle
+	for _, m := range input1 {
+		insertAndThrottle(tindex, m, false)
+	}
+	if tindex.throttledCreates > 0 {
+		t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, 0)
+	}
+	for _, m := range input2 {
+		insertAndThrottle(tindex, m, true)
+	}
+	if tindex.throttledCreates != uint64(len(input2)) {
+		t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, len(input2))
+	}
+	time.Sleep(time.Second)
+	// should not be throttled
+	for _, m := range input2 {
+		insertAndThrottle(tindex, m, false)
+	}
+	// throttle is switched off
+	// create index
+	tindexNoThrottling := newTrie(
+		".wsp",
+		0,
+		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			return 0, 0, 0
+		},
+	)
+	var input3 []string
+
+	for i := 0; i < 1000; i++ {
+		input3 = append(
+			input3,
+			fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i),
+			fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i),
+			fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i),
+		)
+	}
+	for _, m := range input3 {
+		insertAndThrottle(tindexNoThrottling, m, false)
+	}
+	if tindexNoThrottling.throttledCreates != 0 {
+		t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, 0)
+	}
+
+}
 func TestTrieQuotaGeneral(t *testing.T) {
 	type metric struct {
 		name         string
@@ -1295,6 +1382,7 @@ func TestTrieQuotaGeneral(t *testing.T) {
 		t.Run(fmt.Sprintf("case_%d", i), func(t *testing.T) {
 			tindex := newTrie(
 				".wsp",
+				0,
 				func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 					return 12 * 1024, 12 * 1024, 1024
 				},
@@ -1346,6 +1434,7 @@ func stringifyQuotaPoints(ps []points.Points) string {
 func TestTrieQuotaThroughput(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
+		0,
 		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 			return 12 * 1024, 12 * 1024, 1024
 		},
@@ -1485,6 +1574,7 @@ func TestTrieReadMetric(t *testing.T) {
 func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
+		0,
 		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 			return 12 * 1024, 12 * 1024, 1024
 		},
@@ -1578,6 +1668,7 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
+		0,
 		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 			return 12 * 1024, 12 * 1024, 1024
 		},
@@ -1632,6 +1723,7 @@ func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
 	tindex := newTrie(
 		".wsp",
+		0,
 		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 			return 12 * 1024, 12 * 1024, 1024
 		},

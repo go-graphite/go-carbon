@@ -31,41 +31,35 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
-	recv                    func(chan bool) string
-	pop                     func(string) (*points.Points, bool)
-	confirm                 func(*points.Points)
-	popConfirm              func(string) (*points.Points, bool)
-	tagsEnabled             bool
-	taggedFn                func(string, bool)
-	schemas                 WhisperSchemas
-	aggregation             *WhisperAggregation
-	workersCount            int
-	rootPath                string
-	created                 uint32 // counter
-	throttledCreates        uint32 // counter
-	updateOperations        uint32 // counter
-	committedPoints         uint32 // counter
-	oooDiscardedPoints      uint32 // counter
-	extended                uint32 // counter
-	sparse                  bool
-	flock                   bool
-	compressed              bool
-	hashFilenames           bool
-	removeEmptyFile         bool
-	maxUpdatesPerSecond     int
-	maxCreatesPerSecond     int
-	hardMaxCreatesPerSecond bool
-	throttleTicker          *ThrottleTicker
-	maxCreatesTicker        *ThrottleTicker
-	storeMutex              [storeMutexCount]sync.Mutex
-	mockStore               func() (StoreFunc, func())
-	logger                  *zap.Logger
-	createLogger            *zap.Logger
+	recv               func(chan bool) string
+	pop                func(string) (*points.Points, bool)
+	confirm            func(*points.Points)
+	popConfirm         func(string) (*points.Points, bool)
+	tagsEnabled        bool
+	taggedFn           func(string, bool)
+	schemas            WhisperSchemas
+	aggregation        *WhisperAggregation
+	workersCount       int
+	rootPath           string
+	created            uint32 // counter
+	updateOperations   uint32 // counter
+	committedPoints    uint32 // counter
+	oooDiscardedPoints uint32 // counter
+	extended           uint32 // counter
+	sparse             bool
+	flock              bool
+	compressed         bool
+	hashFilenames      bool
+	removeEmptyFile    bool
+	storeMutex         [storeMutexCount]sync.Mutex
+	mockStore          func() (StoreFunc, func())
+	logger             *zap.Logger
+	createLogger       *zap.Logger
 
 	onlineMigration struct {
 		enabled bool
 		rate    int
-		ticker  *ThrottleTicker
+		ticker  *helper.ThrottleTicker
 
 		schema            bool
 		xff               bool
@@ -99,33 +93,17 @@ func NewWhisper(
 	popConfirm func(string) (*points.Points, bool)) *Whisper {
 
 	return &Whisper{
-		recv:                recv,
-		pop:                 pop,
-		confirm:             confirm,
-		popConfirm:          popConfirm,
-		schemas:             schemas,
-		aggregation:         aggregation,
-		workersCount:        1,
-		rootPath:            rootPath,
-		maxUpdatesPerSecond: 0,
-		logger:              zapwriter.Logger("persister"),
-		createLogger:        zapwriter.Logger("whisper:new"),
+		recv:         recv,
+		pop:          pop,
+		confirm:      confirm,
+		popConfirm:   popConfirm,
+		schemas:      schemas,
+		aggregation:  aggregation,
+		workersCount: 1,
+		rootPath:     rootPath,
+		logger:       zapwriter.Logger("persister"),
+		createLogger: zapwriter.Logger("whisper:new"),
 	}
-}
-
-// SetMaxUpdatesPerSecond enable throttling
-func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
-	p.maxUpdatesPerSecond = maxUpdatesPerSecond
-}
-
-// SetMaxCreatesPerSecond enable throttling
-func (p *Whisper) SetMaxCreatesPerSecond(maxCreatesPerSecond int) {
-	p.maxCreatesPerSecond = maxCreatesPerSecond
-}
-
-// SetHardMaxCreatesPerSecond enable throttling
-func (p *Whisper) SetHardMaxCreatesPerSecond(hardMaxCreatesPerSecond bool) {
-	p.hardMaxCreatesPerSecond = hardMaxCreatesPerSecond
 }
 
 // SetOnlineMigration enable online migration
@@ -149,11 +127,6 @@ func (p *Whisper) EnableOnlineMigration(rate int, scope []string) {
 		p.onlineMigration.aggregationMethod = true
 		p.onlineMigration.schema = true
 	}
-}
-
-// GetMaxUpdatesPerSecond returns current throttling speed
-func (p *Whisper) GetMaxUpdatesPerSecond() int {
-	return p.maxUpdatesPerSecond
 }
 
 // SetWorkers count
@@ -234,7 +207,7 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	// update oooDiscardedPoints counter
 	discardedPointsSinceOpen := w.GetDiscardedPointsSinceOpen()
 	if discardedPointsSinceOpen > 0 {
-		atomic.AddUint32(&p.oooDiscardedPoints, uint32(discardedPointsSinceOpen))
+		atomic.AddUint32(&p.oooDiscardedPoints, discardedPointsSinceOpen)
 		p.logger.Debug("cwhisper file has ooo-discarded points",
 			zap.Int("w.GetDiscardedPointsSinceOpen()", int(discardedPointsSinceOpen)),
 			zap.String("path", path),
@@ -306,21 +279,6 @@ func (p *Whisper) store(metric string) {
 				return
 			}
 			p.logger.Warn("deleted empty whisper file", zap.String("path", path))
-		}
-
-		if t := p.maxCreatesThrottling(); t != throttlingOff {
-			if t == throttlingHard {
-				p.popConfirm(metric)
-			}
-
-			atomic.AddUint32(&p.throttledCreates, 1)
-			p.logger.Error("metric creation throttled",
-				zap.String("name", metric),
-				zap.String("operation", "create"),
-				zap.Bool("dropped", t == throttlingHard),
-			)
-
-			return
 		}
 
 		schema, ok := p.schemas.Match(metric)
@@ -433,50 +391,6 @@ func (p *Whisper) store(metric string) {
 	}
 }
 
-type throttleMode int
-
-const (
-	throttlingOff  throttleMode = iota
-	throttlingSoft throttleMode = iota
-	throttlingHard throttleMode = iota
-)
-
-// For test error messages
-func (t throttleMode) String() string {
-	if t == throttlingHard {
-		return "hard"
-	}
-
-	if t == throttlingSoft {
-		return "soft"
-	}
-
-	return "off"
-}
-
-func (p *Whisper) maxCreatesThrottling() throttleMode {
-	if p.hardMaxCreatesPerSecond {
-		keep, open := <-p.maxCreatesTicker.C
-		if !open {
-			return throttlingHard
-		}
-
-		if keep {
-			return throttlingOff
-		}
-
-		return throttlingHard
-	} else {
-		select {
-		case <-p.maxCreatesTicker.C:
-			return throttlingOff
-
-		default:
-			return throttlingSoft
-		}
-	}
-}
-
 func (p *Whisper) worker(exit chan bool) {
 	storeFunc := p.store
 	var doneCb func()
@@ -486,18 +400,7 @@ func (p *Whisper) worker(exit chan bool) {
 
 LOOP:
 	for {
-		// start := time.Now()
-		select {
-		case <-p.throttleTicker.C:
-			// atomic.AddUint64(&p.blockThrottleNs, uint64(time.Since(start).Nanoseconds()))
-			// pass
-		case <-exit:
-			return
-		}
-
-		// start = time.Now()
 		metric := p.recv(exit)
-		// atomic.AddUint64(&p.blockQueueGetNs, uint64(time.Since(start).Nanoseconds()))
 		if metric == "" {
 			// exit closed
 			break LOOP
@@ -522,9 +425,6 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	extended := atomic.LoadUint32(&p.extended)
 	atomic.AddUint32(&p.extended, -extended)
 
-	throttledCreates := atomic.LoadUint32(&p.throttledCreates)
-	atomic.AddUint32(&p.throttledCreates, -throttledCreates)
-
 	oooDiscardedPoints := atomic.LoadUint32(&p.oooDiscardedPoints)
 	atomic.AddUint32(&p.oooDiscardedPoints, -oooDiscardedPoints)
 
@@ -537,11 +437,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	}
 
 	send("created", float64(created))
-	send("throttledCreates", float64(throttledCreates))
 	send("oooDiscardedPoints", float64(oooDiscardedPoints))
-	send("maxCreatesPerSecond", float64(p.maxCreatesPerSecond))
-
-	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
 	send("extended", float64(extended))
 
@@ -577,24 +473,13 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 		send("onlineMigration.logicalSizeChanges", float64(logicalSizeChanges))
 	}
 
-	// helper.SendAndSubstractUint64("blockThrottleNs", &p.blockThrottleNs, send)
-	// helper.SendAndSubstractUint64("blockQueueGetNs", &p.blockQueueGetNs, send)
-	// helper.SendAndSubstractUint64("blockAvoidConcurrentNs", &p.blockAvoidConcurrentNs, send)
-	// helper.SendAndSubstractUint64("blockUpdateManyNs", &p.blockUpdateManyNs, send)
 }
 
 // Start worker
 func (p *Whisper) Start() error {
 	return p.StartFunc(func() error {
-		p.throttleTicker = NewThrottleTicker(p.maxUpdatesPerSecond)
-		if p.hardMaxCreatesPerSecond {
-			p.maxCreatesTicker = NewHardThrottleTicker(p.maxCreatesPerSecond)
-		} else {
-			p.maxCreatesTicker = NewThrottleTicker(p.maxCreatesPerSecond)
-		}
-
 		if p.onlineMigration.enabled {
-			p.onlineMigration.ticker = NewHardThrottleTicker(p.onlineMigration.rate)
+			p.onlineMigration.ticker = helper.NewHardThrottleTicker(p.onlineMigration.rate)
 		}
 
 		for i := 0; i < p.workersCount; i++ {
@@ -607,8 +492,6 @@ func (p *Whisper) Start() error {
 
 func (p *Whisper) Stop() {
 	p.StopFunc(func() {
-		p.throttleTicker.Stop()
-		p.maxCreatesTicker.Stop()
 
 		if p.onlineMigration.ticker != nil {
 			p.onlineMigration.ticker.Stop()

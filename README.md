@@ -123,12 +123,6 @@ aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
 # quotas-file = "/etc/go-carbon/storage-quotas.conf"
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
-# Limits the number of whisper update_many() calls per second. 0 - no limit
-max-updates-per-second = 0
-# Softly limits the number of whisper files that get created each second. 0 - no limit
-max-creates-per-second = 0
-# Make max-creates-per-second a hard limit. Extra new metrics are dropped. A hard throttle of 0 drops all new metrics.
-hard-max-creates-per-second = false
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
@@ -342,6 +336,8 @@ write-timeout = "60s"
 request-timeout = "60s"
 # Enable /render cache, it will cache the result for 1 minute
 query-cache-enabled = true
+# Hard limits the number of whisper files that get created each second. 0 - no limit
+`max-creates-per-second` = 0
 # Enable carbonV2 gRPC streaming render cache, it will cache the result for 1 minute
 streaming-query-cache-enabled = false
 # 0 for unlimited
@@ -727,13 +723,10 @@ $ go-carbon -config /etc/go-carbon.conf -check-policies 600 -print-inconsistent-
 | carbonserver.metrics\_returned | Metrics returned by carbonserver |
 | carbonserver.inflight\_requests | Inflight requests in carbonserver |
 | carbonserver.rejected\_too\_many\_requests | Rejected requests due to exceeding `max-inflight-requests` in carbonserver |
-| persister.maxUpdatesPerSecond | Maximum updates per second in persister |
 | persister.workers | Number of works in persister |
 | persister.updateOperations | Number of files are updated (gauge) |
 | persister.committedPoints | Numer of data points are saved (gauge) |
 | persister.created | Numer of new whisper files are crated (gauge) |
-| persister.throttledCreates | Number of throttled new whisper files (gauge) |
-| persister.maxCreatesPerSecond | Maximum new whisper files allowed to be created (constant) |
 | persister.extended | Number of cwhisper files being extended (gauge) |
 | persister.onlineMigration.total | Number of whisper files being migrated to the right config (gauge) |
 | persister.onlineMigration.schema | Number of whisper files being migrated to the right schema (gauge) |
