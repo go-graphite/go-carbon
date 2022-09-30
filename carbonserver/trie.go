@@ -4,9 +4,6 @@ import (
 	"crypto/md5" // skipcq: GSC-G501
 	"errors"
 	"fmt"
-	"github.com/go-graphite/go-carbon/helper"
-	"github.com/lomik/zapwriter"
-	"go.uber.org/zap"
 	"io"
 	"path/filepath"
 	"sort"
@@ -15,6 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/go-graphite/go-carbon/helper"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/go-graphite/go-carbon/points"
@@ -2240,9 +2241,9 @@ func (ti *trieIndex) maxCreatesThrottle(ps *points.Points) bool {
 		break
 	}
 	atomic.AddUint64(&ti.throttledCreates, 1)
-	//ti.logger.Error("metric creation throttled",
-	//	zap.String("name", ps.Metric),
-	//)
+	ti.logger.Error("metric creation throttled",
+		zap.String("name", ps.Metric),
+	)
 	return true
 }
 func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {

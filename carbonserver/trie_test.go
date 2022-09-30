@@ -1145,7 +1145,7 @@ func TestTrieCreateThrottle(t *testing.T) {
 	for _, m := range input1 {
 		insertAndThrottle(tindex, m, false)
 	}
-	//check if existing metrics don't trigger hard throttle
+	// check if existing metrics don't trigger hard throttle
 	for _, m := range input1 {
 		insertAndThrottle(tindex, m, false)
 	}

@@ -3,13 +3,14 @@ package carbon
 import (
 	"bufio"
 	"fmt"
-	"github.com/go-graphite/go-carbon/helper"
 	"os"
 	"path"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/go-graphite/go-carbon/helper"
 
 	"go.uber.org/zap"
 
