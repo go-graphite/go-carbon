@@ -31,30 +31,32 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
-	recv               func(chan bool) string
-	pop                func(string) (*points.Points, bool)
-	confirm            func(*points.Points)
-	popConfirm         func(string) (*points.Points, bool)
-	tagsEnabled        bool
-	taggedFn           func(string, bool)
-	schemas            WhisperSchemas
-	aggregation        *WhisperAggregation
-	workersCount       int
-	rootPath           string
-	created            uint32 // counter
-	updateOperations   uint32 // counter
-	committedPoints    uint32 // counter
-	oooDiscardedPoints uint32 // counter
-	extended           uint32 // counter
-	sparse             bool
-	flock              bool
-	compressed         bool
-	hashFilenames      bool
-	removeEmptyFile    bool
-	storeMutex         [storeMutexCount]sync.Mutex
-	mockStore          func() (StoreFunc, func())
-	logger             *zap.Logger
-	createLogger       *zap.Logger
+	recv                func(chan bool) string
+	pop                 func(string) (*points.Points, bool)
+	confirm             func(*points.Points)
+	popConfirm          func(string) (*points.Points, bool)
+	tagsEnabled         bool
+	taggedFn            func(string, bool)
+	schemas             WhisperSchemas
+	aggregation         *WhisperAggregation
+	workersCount        int
+	rootPath            string
+	created             uint32 // counter
+	updateOperations    uint32 // counter
+	committedPoints     uint32 // counter
+	oooDiscardedPoints  uint32 // counter
+	extended            uint32 // counter
+	sparse              bool
+	flock               bool
+	compressed          bool
+	hashFilenames       bool
+	removeEmptyFile     bool
+	maxUpdatesPerSecond int
+	updateTicker        *helper.ThrottleTicker
+	storeMutex          [storeMutexCount]sync.Mutex
+	mockStore           func() (StoreFunc, func())
+	logger              *zap.Logger
+	createLogger        *zap.Logger
 
 	onlineMigration struct {
 		enabled bool
@@ -141,6 +143,11 @@ func (p *Whisper) SetWorkers(count int) {
 // SetSparse creation
 func (p *Whisper) SetSparse(sparse bool) {
 	p.sparse = sparse
+}
+
+// SetMaxUpdatesPerSecond
+func (p *Whisper) SetMaxUpdatesPerSecond(maxUpdatesPerSecond int) {
+	p.maxUpdatesPerSecond = maxUpdatesPerSecond
 }
 
 // SetFLock on create and open
@@ -400,6 +407,12 @@ func (p *Whisper) worker(exit chan bool) {
 
 LOOP:
 	for {
+		select {
+		case <-p.updateTicker.C:
+		case <-exit:
+			return
+		}
+
 		metric := p.recv(exit)
 		if metric == "" {
 			// exit closed
@@ -438,6 +451,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	send("created", float64(created))
 	send("oooDiscardedPoints", float64(oooDiscardedPoints))
+	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
 	send("extended", float64(extended))
 
@@ -478,6 +492,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 // Start worker
 func (p *Whisper) Start() error {
 	return p.StartFunc(func() error {
+		p.updateTicker = helper.NewThrottleTicker(p.maxUpdatesPerSecond)
 		if p.onlineMigration.enabled {
 			p.onlineMigration.ticker = helper.NewHardThrottleTicker(p.onlineMigration.rate)
 		}
@@ -492,6 +507,7 @@ func (p *Whisper) Start() error {
 
 func (p *Whisper) Stop() {
 	p.StopFunc(func() {
+		p.updateTicker.Stop()
 
 		if p.onlineMigration.ticker != nil {
 			p.onlineMigration.ticker.Stop()

@@ -59,6 +59,7 @@ type whisperConfig struct {
 	AggregationFilename string  `toml:"aggregation-file"`
 	QuotasFilename      string  `toml:"quotas-file"`
 	Workers             int     `toml:"workers"`
+	MaxUpdatesPerSecond int     `toml:"max-updates-per-second"`
 	Sparse              bool    `toml:"sparse-create"`
 	PhysicalSizeFactor  float32 `toml:"physical-size-factor"`
 	FLock               bool    `toml:"flock"`

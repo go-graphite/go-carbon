@@ -304,7 +304,7 @@ func (app *App) startPersister() {
 			app.Cache.Confirm,
 			app.Cache.Pop,
 		)
-
+		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetCompressed(app.Config.Whisper.Compressed)
