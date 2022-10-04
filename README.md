@@ -123,6 +123,8 @@ aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
 # quotas-file = "/etc/go-carbon/storage-quotas.conf"
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
+# Limits the number of whisper update_many() calls per second. 0 - no limit
+max-updates-per-second = 0
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)
@@ -723,6 +725,7 @@ $ go-carbon -config /etc/go-carbon.conf -check-policies 600 -print-inconsistent-
 | carbonserver.metrics\_returned | Metrics returned by carbonserver |
 | carbonserver.inflight\_requests | Inflight requests in carbonserver |
 | carbonserver.rejected\_too\_many\_requests | Rejected requests due to exceeding `max-inflight-requests` in carbonserver |
+| persister.maxUpdatesPerSecond | Maximum updates per second in persister |
 | persister.workers | Number of works in persister |
 | persister.updateOperations | Number of files are updated (gauge) |
 | persister.committedPoints | Numer of data points are saved (gauge) |
