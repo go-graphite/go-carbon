@@ -3,6 +3,8 @@ package carbonserver
 import (
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -47,6 +49,11 @@ type target struct {
 type timeRange struct {
 	from  int32
 	until int32
+}
+
+func getMD5HashString(text string) string {
+	hash := md5.Sum([]byte(text))
+	return hex.EncodeToString(hash[:])
 }
 
 func getTargetNames(targets map[timeRange][]target) []string {
@@ -288,7 +295,8 @@ func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeR
 	for tr, ts := range targets {
 		names := make([]string, 0, len(ts))
 		for _, t := range ts {
-			names = append(names, t.Name)
+			pathExpressionMD5 := getMD5HashString(t.PathExpression)
+			names = append(names, t.Name+"&"+pathExpressionMD5)
 		}
 		targetKeys = append(targetKeys, fmt.Sprintf("%s&%d&%d", strings.Join(names, "&"), tr.from, tr.until))
 	}
