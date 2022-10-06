@@ -305,6 +305,8 @@ func (app *App) startPersister() {
 			app.Cache.Pop,
 		)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
+		p.SetMaxCreatesPerSecond(app.Config.Whisper.MaxCreatesPerSecond)
+		p.SetHardMaxCreatesPerSecond(app.Config.Whisper.HardMaxCreatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetCompressed(app.Config.Whisper.Compressed)
@@ -489,7 +491,6 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
 		carbonserver.SetQuotaUsageReportFrequency(conf.Carbonserver.QuotaUsageReportFrequency.Value())
-		carbonserver.SetMaxCreatesPerSecond(conf.Carbonserver.MaxCreatesPerSecond)
 		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
 		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())

@@ -1,7 +1,9 @@
-package helper
+package persister
 
 import (
 	"time"
+
+	"github.com/go-graphite/go-carbon/helper"
 )
 
 // ThrottleTicker is a ticker that can be used for hard or soft rate-limiting.
@@ -14,12 +16,17 @@ import (
 //     'false' with all subsequent ones, until the next second. It is up to the
 //     user to decide what to do in each case.
 type ThrottleTicker struct {
-	Stoppable
+	helper.Stoppable
 	C chan bool
 }
 
 // NewThrottleTicker returns a new soft throttle ticker.
 func NewThrottleTicker(ratePerSec int) *ThrottleTicker {
+	return newThrottleTicker(ratePerSec, false)
+}
+
+// NewSoftThrottleTicker returns a new soft throttle ticker.
+func NewSoftThrottleTicker(ratePerSec int) *ThrottleTicker {
 	return newThrottleTicker(ratePerSec, false)
 }
 
@@ -93,27 +100,28 @@ func softThrottle(throttle chan bool, ratePerSec int) func(chan bool) {
 	}
 }
 
-func hardThrottle(notThrottle chan bool, ratePerSec int) func(chan bool) {
+func hardThrottle(throttle chan bool, ratePerSec int) func(chan bool) {
 	return func(exit chan bool) {
-		defer close(notThrottle)
+		defer close(throttle)
 
+		tick := time.Now().Add(time.Second)
 		sent := 0
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
 		for {
 			select {
-			case <-ticker.C:
-				sent = 0
+			case throttle <- sent < ratePerSec:
+				if time.Now().Before(tick) {
+					// Let's not overflow in case computers get wonderfully
+					// better, however improbable that is
+					if sent < ratePerSec {
+						sent++
+					}
+				} else {
+					sent = 0
+					tick = time.Now().Add(time.Second)
+				}
+
 			case <-exit:
 				return
-			default:
-				if sent < ratePerSec {
-					select {
-					case notThrottle <- true:
-						sent++
-					default:
-					}
-				}
 			}
 		}
 	}
