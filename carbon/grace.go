@@ -10,10 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-graphite/go-carbon/helper"
-
 	"go.uber.org/zap"
 
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
@@ -241,7 +240,7 @@ FilesLoop:
 // Restore from dump.path
 func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 	if rps > 0 {
-		ticker := helper.NewThrottleTicker(rps)
+		ticker := persister.NewThrottleTicker(rps)
 		defer ticker.Stop()
 
 		throttledStoreFunc := func(p *points.Points) {
