@@ -22,7 +22,7 @@ func SendUint32(metric string, v *uint32, send StatCallback) {
 
 func SendAndSubstractUint32(metric string, v *uint32, send StatCallback) {
 	res := atomic.LoadUint32(v)
-	atomic.AddUint32(v, ^uint32(res-1))
+	atomic.AddUint32(v, ^(res - 1))
 	send(metric, float64(res))
 }
 
