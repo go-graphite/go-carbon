@@ -52,7 +52,6 @@ type Cache struct {
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTime   uint32 // in milliseconds
 		overflowCnt         uint32 // drop packages if cache full
-		writeCacheHits      uint32 // number of metrics count which were already in cache queue
 		queryCnt            uint32 // number of queries
 		tagsNormalizeErrors uint32 // tags normalize errors count
 
@@ -154,7 +153,6 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("tagsNormalizeErrors", &c.stat.tagsNormalizeErrors, send)
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
-	helper.SendAndSubstractUint32("writeCacheHits", &c.stat.writeCacheHits, send)
 
 	helper.SendAndSubstractUint32("queueBuildCount", &c.stat.queueBuildCnt, send)
 	helper.SendAndSubstractUint32("queueBuildTimeMs", &c.stat.queueBuildTimeMs, send)
@@ -285,9 +283,6 @@ func (c *Cache) Add(p *points.Points) {
 	defer shard.Unlock()
 
 	values, exists := shard.items[p.Metric]
-	if !exists {
-		atomic.AddUint32(&c.stat.writeCacheHits, 1)
-	}
 	if c.throttle != nil && c.throttle(p, exists) {
 		return
 	}

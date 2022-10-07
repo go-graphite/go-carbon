@@ -333,6 +333,7 @@ type trieIndex struct {
 	estimateSize     func(metric string) (logicalSize, physicalSize, dataPoints int64)
 	maxCreatesTicker *helper.ThrottleTicker
 	throttledCreates uint64
+	newMetricCount   uint64
 	throughputs      *throughputQuotaManager
 	resetFrequency   time.Duration
 	logger           *zap.Logger
@@ -2231,6 +2232,7 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string { // skipcq: SCC-U10
 	return ""
 }
 func (ti *trieIndex) maxCreatesThrottle(ps *points.Points) bool {
+	atomic.AddUint64(&ti.newMetricCount, 1)
 	select {
 	case keep, open := <-ti.maxCreatesTicker.C:
 		if keep || !open {
@@ -2241,9 +2243,6 @@ func (ti *trieIndex) maxCreatesThrottle(ps *points.Points) bool {
 		break
 	}
 	atomic.AddUint64(&ti.throttledCreates, 1)
-	ti.logger.Error("metric creation throttled",
-		zap.String("name", ps.Metric),
-	)
 	return true
 }
 func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
@@ -2317,12 +2316,10 @@ func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
 func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 	dirs, isNew := ti.metricDirs(ps)
 
-	// first check max create throttle
-	// second check throughput quota
-	// third check usage quota
-	if isNew && ti.maxCreatesThrottle(ps) {
-		return true
-	}
+	// first check throughput quota
+	// second check usage quota
+	// third check max create throttle
+
 	if ti.throughputThrottle(ps) {
 		return true
 	}
@@ -2335,8 +2332,13 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 	if !isNew {
 		return false
 	}
-
-	return ti.throttleUsage(ps, dirs)
+	if ti.throttleUsage(ps, dirs) {
+		return true
+	}
+	if ti.maxCreatesThrottle(ps) {
+		return true
+	}
+	return false
 }
 
 func (ti *trieIndex) metricDataLen(ps *points.Points) int64 {

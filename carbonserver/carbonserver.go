@@ -93,6 +93,7 @@ type metricStruct struct {
 	MetricsFetched       uint64
 	MetricsFound         uint64
 	ThrottledCreates     uint64
+	NewMetricCount       uint64
 	MaxCreatesPerSecond  uint64
 	FetchSize            uint64
 	QueryCacheHit        uint64
@@ -796,7 +797,8 @@ func (listener *CarbonserverListener) statKnownMetrics(knownMetricsStatTicker <-
 	atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
 	atomic.StoreUint64(&listener.metrics.ThrottledCreates, fidx.trieIdx.throttledCreates)
 	atomic.AddUint64(&fidx.trieIdx.throttledCreates, -fidx.trieIdx.throttledCreates)
-
+	atomic.StoreUint64(&listener.metrics.NewMetricCount, fidx.trieIdx.newMetricCount)
+	atomic.AddUint64(&fidx.trieIdx.newMetricCount, -fidx.trieIdx.newMetricCount)
 	atomic.StoreUint64(&listener.metrics.MaxCreatesPerSecond, uint64(listener.maxCreatesPerSecond))
 	// set using the indexed files, instead of returning on-disk files.
 	//
@@ -844,7 +846,8 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 	atomic.StoreUint64(&listener.metrics.QuotaApplyTimeNs, quotaTime)
 	atomic.StoreUint64(&listener.metrics.ThrottledCreates, fidx.trieIdx.throttledCreates)
 	atomic.AddUint64(&fidx.trieIdx.throttledCreates, -fidx.trieIdx.throttledCreates)
-
+	atomic.StoreUint64(&listener.metrics.NewMetricCount, fidx.trieIdx.newMetricCount)
+	atomic.AddUint64(&fidx.trieIdx.newMetricCount, -fidx.trieIdx.newMetricCount)
 	atomic.StoreUint64(&listener.metrics.MaxCreatesPerSecond, uint64(listener.maxCreatesPerSecond))
 
 	usageStart := time.Now()
@@ -1504,6 +1507,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("metrics_returned", &listener.metrics.MetricsReturned, send)
 	sender("metrics_found", &listener.metrics.MetricsFound, send)
 	sender("throttled_creates", &listener.metrics.ThrottledCreates, send)
+	sender("new_metric_count", &listener.metrics.NewMetricCount, send)
 	sender("max_creates_per_second", &listener.metrics.MaxCreatesPerSecond, send)
 	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
 
