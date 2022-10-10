@@ -283,7 +283,6 @@ func (c *Cache) Add(p *points.Points) {
 	defer shard.Unlock()
 
 	values, exists := shard.items[p.Metric]
-
 	if c.throttle != nil && c.throttle(p, exists) {
 		return
 	}

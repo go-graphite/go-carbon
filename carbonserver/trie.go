@@ -13,6 +13,10 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/go-graphite/go-carbon/helper"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
+
 	trigram "github.com/dgryski/go-trigram"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -325,11 +329,14 @@ type trieIndex struct {
 	trigrams      map[*trieNode][]uint32
 
 	// qau: Quota And Usage
-	qauMetrics   []points.Points
-	estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)
-
-	throughputs    *throughputQuotaManager
-	resetFrequency time.Duration
+	qauMetrics       []points.Points
+	estimateSize     func(metric string) (logicalSize, physicalSize, dataPoints int64)
+	maxCreatesTicker *helper.ThrottleTicker
+	throttledCreates uint64
+	newMetricCount   uint64
+	throughputs      *throughputQuotaManager
+	resetFrequency   time.Duration
+	logger           *zap.Logger
 }
 
 func (ti *trieIndex) setResetFrequency(f time.Duration) {
@@ -491,14 +498,17 @@ func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
 	return false
 }
 
-func newTrie(fileExt string, estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)) *trieIndex {
+func newTrie(fileExt string, maxCreatesPerSecond int, estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)) *trieIndex {
 	meta := newDirMeta()
+	maxCreatesTicker := helper.NewHardThrottleTicker(maxCreatesPerSecond)
 	return &trieIndex{
-		root:         &trieNode{childrens: &[]*trieNode{}, meta: meta},
-		fileExt:      fileExt,
-		trigrams:     map[*trieNode][]uint32{},
-		estimateSize: estimateSize,
-		throughputs:  newQuotaThroughputQuotaManager(),
+		root:             &trieNode{childrens: &[]*trieNode{}, meta: meta},
+		fileExt:          fileExt,
+		trigrams:         map[*trieNode][]uint32{},
+		maxCreatesTicker: maxCreatesTicker,
+		estimateSize:     estimateSize,
+		throughputs:      newQuotaThroughputQuotaManager(),
+		logger:           zapwriter.Logger("trie"),
 	}
 }
 
@@ -2221,17 +2231,22 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string { // skipcq: SCC-U10
 
 	return ""
 }
-
-// skipcq: RVV-A0005
-func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
-	dataLen := int64(len(ps.Data))
-	if dataLen == 0 {
-		// WHY: in theory, this should not happen. But in cases where
-		// go-carbon receives a metric without data points, it should
-		// still be counted as one data point, for throttling and
-		// throughput accounting.
-		dataLen = 1
+func (ti *trieIndex) maxCreatesThrottle(ps *points.Points) bool {
+	atomic.AddUint64(&ti.newMetricCount, 1)
+	select {
+	case keep, open := <-ti.maxCreatesTicker.C:
+		if keep || !open {
+			return false
+		}
+		break
+	default:
+		break
 	}
+	atomic.AddUint64(&ti.throttledCreates, 1)
+	return true
+}
+func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
+	dataLen := ti.metricDataLen(ps)
 
 	// WHY: hashes work much faster than the trie tree working.
 	//
@@ -2294,12 +2309,80 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 			tu.increase(dataLen)
 		}
 	}
+	return false
+}
+
+// skipcq: RVV-A0005
+func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
+	dirs, isNew := ti.metricDirs(ps)
+
+	// first check throughput quota
+	// second check usage quota
+	// third check max create throttle
+
+	if ti.throughputThrottle(ps) {
+		return true
+	}
 
 	// quick pass if the metric is already seen in cache
 	if inCache {
 		return false
 	}
 
+	if !isNew {
+		return false
+	}
+	if ti.throttleUsage(ps, dirs) {
+		return true
+	}
+	if ti.maxCreatesThrottle(ps) {
+		return true
+	}
+	return false
+}
+
+func (ti *trieIndex) metricDataLen(ps *points.Points) int64 {
+	dataLen := int64(len(ps.Data))
+	if dataLen == 0 {
+		// WHY: in theory, this should not happen. But in cases where
+		// go-carbon receives a metric without data points, it should
+		// still be counted as one data point, for throttling and
+		// throughput accounting.
+		dataLen = 1
+	}
+	return dataLen
+}
+
+func (ti *trieIndex) throttleUsage(ps *points.Points, dirs []*trieNode) bool {
+	dataLen := ti.metricDataLen(ps)
+	logicalSize, physicalSize, dataPoints := ti.estimateSize(ps.Metric)
+
+	for i, n := range dirs {
+		// TODO: might need more considerations?
+		var namespaces int64
+		if i == len(dirs)-1 {
+			namespaces = 1
+		}
+
+		meta, ok := n.meta.(*dirMeta)
+		if !ok || meta.withinQuota(1, namespaces, logicalSize, physicalSize, dataPoints) {
+			continue
+		}
+
+		if meta.usage != nil {
+			atomic.AddInt64(&meta.usage.Throttled, dataLen)
+		}
+
+		if quota, ok := meta.quota.Load().(*Quota); ok && quota != nil && quota.DroppingPolicy == QDPNone {
+			continue
+		}
+
+		return true
+	}
+	return false
+}
+
+func (ti *trieIndex) metricDirs(ps *points.Points) ([]*trieNode, bool) {
 	var node = ti.root
 	var dirs = make([]*trieNode, 0, 32) // WHY: reduce the majority of allocations in mloop
 	var mindex int
@@ -2369,39 +2452,7 @@ mloop:
 		isNew = true
 		break
 	}
-
-	if !isNew {
-		return false
-	}
-
-	logicalSize, physicalSize, dataPoints := ti.estimateSize(metric)
-
-	var toThrottle bool
-	for i, n := range dirs {
-		// TODO: might need more considerations?
-		var namespaces int64
-		if i == len(dirs)-1 {
-			namespaces = 1
-		}
-
-		meta, ok := n.meta.(*dirMeta)
-		if !ok || meta.withinQuota(1, namespaces, logicalSize, physicalSize, dataPoints) {
-			continue
-		}
-
-		if meta.usage != nil {
-			atomic.AddInt64(&meta.usage.Throttled, dataLen)
-		}
-
-		if quota, ok := meta.quota.Load().(*Quota); ok && quota != nil && quota.DroppingPolicy == QDPNone {
-			continue
-		}
-
-		toThrottle = true
-		break
-	}
-
-	return toThrottle
+	return dirs, isNew
 }
 
 func (*trieIndex) metricName(node *trieNode, name string) string {
