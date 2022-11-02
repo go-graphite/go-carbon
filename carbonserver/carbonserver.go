@@ -1543,7 +1543,11 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	bucketStart := 0
 	bucketEnd := 10
 	for i := 0; i <= listener.buckets; i++ {
-		sender(fmt.Sprintf("requests_in_%dms_to_%dms", bucketStart, bucketEnd), &listener.timeBuckets[i], send)
+		metricName := fmt.Sprintf("requests_in_%dms_to_%dms", bucketStart, bucketEnd)
+		if i == listener.buckets {
+			metricName = fmt.Sprintf("requests_in_%dms_to_inf", bucketStart)
+		}
+		sender(metricName, &listener.timeBuckets[i], send)
 		if bucketStart == 0 {
 			bucketStart = 1
 		}
