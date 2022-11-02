@@ -1540,8 +1540,15 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 			sender(fmt.Sprintf("request_codes.%s.%vxx", name, i+1), &codes[i], send)
 		}
 	}
+	bucketStart := 0
+	bucketEnd := 10
 	for i := 0; i <= listener.buckets; i++ {
-		sender(fmt.Sprintf("requests_in_%dms_to_%dms", i*100, (i+1)*100), &listener.timeBuckets[i], send)
+		sender(fmt.Sprintf("requests_in_%dms_to_%dms", bucketStart, bucketEnd), &listener.timeBuckets[i], send)
+		if bucketStart == 0 {
+			bucketStart = 1
+		}
+		bucketStart *= 10
+		bucketEnd *= 10
 	}
 
 	// Computing response percentiles
