@@ -18,6 +18,7 @@ import (
 
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
@@ -620,6 +621,16 @@ func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_Rende
 	return
 }
 
+func getRenderStreamHeader(expandedGlobs []globs) metadata.MD {
+	var keyValues []string
+	filesCount := 0
+	for _, eg := range expandedGlobs {
+		filesCount += len(eg.Files)
+	}
+	keyValues = append(keyValues, "go-carbon-render-files-count", strconv.Itoa(filesCount))
+	return metadata.Pairs(keyValues...)
+}
+
 // Render implements Render rpc of CarbonV2 gRPC service
 func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream grpcv2.CarbonV2_RenderServer) (rpcErr error) {
 	t0 := time.Now()
@@ -689,6 +700,10 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 			if err != nil {
 				return nil, status.New(codes.InvalidArgument, err.Error()).Err()
 			}
+		}
+		err = stream.SendHeader(getRenderStreamHeader(expandedGlobs))
+		if err != nil {
+			return nil, status.New(codes.Internal, err.Error()).Err()
 		}
 		metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
 		go listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
