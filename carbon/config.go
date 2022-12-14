@@ -155,6 +155,8 @@ type carbonserverConfig struct {
 		MaxInflightRequests uint      `toml:"max-inflight-requests"`
 		RequestTimeout      *Duration `toml:"request-timeout"`
 	} `toml:"api-per-path-rate-limiters"`
+
+	RenderTraceLoggingEnabled bool `toml:"render-trace-logging-enabled"`
 }
 
 type pprofConfig struct {
