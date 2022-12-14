@@ -508,6 +508,7 @@ func (app *App) Start(version string) (err error) {
 
 		carbonserver.SetMaxInflightRequests(conf.Carbonserver.MaxInflightRequests)
 		carbonserver.SetNoServiceWhenIndexIsNotReady(conf.Carbonserver.NoServiceWhenIndexIsNotReady)
+		carbonserver.SetRenderTraceLoggingEnabled(conf.Carbonserver.RenderTraceLoggingEnabled)
 
 		if conf.Carbonserver.RequestTimeout != nil {
 			carbonserver.SetRequestTimeout(conf.Carbonserver.RequestTimeout.Value())

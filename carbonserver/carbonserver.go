@@ -291,6 +291,8 @@ type CarbonserverListener struct {
 	NoServiceWhenIndexIsNotReady bool
 	apiPerPathRatelimiter        map[string]*ApiPerPathRatelimiter
 	globQueryRateLimiters        []*GlobQueryRateLimiter
+
+	renderTraceLoggingEnabled bool
 }
 
 type prometheus struct {
@@ -623,6 +625,10 @@ func (listener *CarbonserverListener) SetHeavyGlobQueryRateLimiters(rls []*GlobQ
 }
 func (listener *CarbonserverListener) SetAPIPerPathRateLimiter(rls map[string]*ApiPerPathRatelimiter) {
 	listener.apiPerPathRatelimiter = rls
+}
+
+func (listener *CarbonserverListener) SetRenderTraceLoggingEnabled(enabled bool) {
+	listener.renderTraceLoggingEnabled = enabled
 }
 
 // skipcq: RVV-B0011
