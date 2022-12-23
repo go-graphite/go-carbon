@@ -244,6 +244,9 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	}()
 
 	response, fromCache, err := listener.fetchWithCache(ctx, logger, format, targets, tle)
+	tle.FetchSize = response.memoryUsed
+	tle.MetricsFetched = response.metricsFetched
+	tle.ValuesFetched = response.valuesFetched
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
@@ -764,6 +767,9 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	} else {
 		_, err = fetchAndStreamMetricsFunc(false)
 	}
+	tle.FetchSize = fetchSize
+	tle.MetricsFetched = metricsFetched
+	tle.ValuesFetched = valuesFetched
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
@@ -810,6 +816,9 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 
 type traceLogEntries struct {
 	FromCache             bool    `json:"from_cache"`
+	FetchSize             int     `json:"fetch_size"`
+	MetricsFetched        int     `json:"metrics_fetched"`
+	ValuesFetched         int     `json:"values_fetched"`
 	GlobExpansionDuration float64 `json:"glob_expansion_duration"`
 	CacheDuration         float64 `json:"cache_duration"`
 	PrepareDuration       float64 `json:"prepare_duration"`
