@@ -61,6 +61,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/filter"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 )
 
 type metricStruct struct {
@@ -2082,6 +2083,14 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 	}
 
 	var opts []grpc.ServerOption
+	opts = append(opts, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+		MinTime:             10 * time.Second,
+		PermitWithoutStream: true,
+	}))
+	opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{
+		Time:    60 * time.Second,
+		Timeout: 20 * time.Second,
+	}))
 	opts = append(opts, grpc.ChainStreamInterceptor(
 		grpcutil.StreamServerTimeHandler(listener.bucketRequestTimesGRPC),
 		grpcutil.StreamServerStatusMetricHandler(statusCodes, listener.prometheus.request),
