@@ -468,6 +468,9 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 				}
 				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 				lookups = expandedGlobs[0].Lookups
+				if len(finalRes.Matches) == 0 {
+					return nil, errorNotFound{}
+				}
 				return finalRes, nil
 			})
 		if err == nil {
@@ -488,6 +491,9 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 		if err == nil {
 			finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 			lookups = expandedGlobs[0].Lookups
+			if len(finalRes.Matches) == 0 {
+				finalRes, err = nil, errorNotFound{}
+			}
 		}
 	}
 
