@@ -2084,14 +2084,17 @@ func (listener *CarbonserverListener) ListenGRPC(listen string) error {
 	}
 
 	var opts []grpc.ServerOption
-	opts = append(opts, grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-		MinTime:             10 * time.Second,
-		PermitWithoutStream: true,
-	}))
-	opts = append(opts, grpc.KeepaliveParams(keepalive.ServerParameters{
-		Time:    60 * time.Second,
-		Timeout: 20 * time.Second,
-	}))
+	opts = append(opts,
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             10 * time.Second,
+			PermitWithoutStream: true,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    60 * time.Second,
+			Timeout: 20 * time.Second,
+		}))
+	// TODO: make initial window size configurable
+	opts = append(opts, grpc.InitialWindowSize(4*1024*1024), grpc.InitialConnWindowSize(4*1024*1024))
 	opts = append(opts, grpc.ChainStreamInterceptor(
 		grpcutil.StreamServerTimeHandler(listener.bucketRequestTimesGRPC),
 		grpcutil.StreamServerStatusMetricHandler(statusCodes, listener.prometheus.request),
