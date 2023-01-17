@@ -457,21 +457,12 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	var finalRes *protov2.GlobResponse
 	var lookups uint32
 	if listener.findCacheEnabled {
-		key := query + "&" + format + "grpc"
+		key := query
 		size := uint64(100 * 1024 * 1024)
 		var result interface{}
 		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
 			func() (interface{}, error) {
-				expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, t0, []string{query})
-				if err != nil {
-					return nil, err
-				}
-				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
-				lookups = expandedGlobs[0].Lookups
-				if len(finalRes.Matches) == 0 {
-					return nil, errorNotFound{}
-				}
-				return finalRes, nil
+				return listener.getExpandedGlobs(ctx, logger, t0, []string{query})
 			})
 		if err == nil {
 			listener.prometheus.cacheRequest("find", fromCache)
@@ -480,7 +471,8 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 			} else {
 				atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
 			}
-			finalRes = result.(*protov2.GlobResponse)
+			expandedGlobs := result.([]globs)
+			finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 			if len(finalRes.Matches) == 0 {
 				err = errorNotFound{}
 			}

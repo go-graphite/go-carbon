@@ -709,14 +709,29 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	fetchSize := 0
 	// TODO: should chan buffer size be configurable?
 	responseChan := make(chan response, 1000)
-	var fromCache bool
-	var err error
 
 	fetchAndStreamMetricsFunc := func(getMetrics bool) ([]response, error) {
+		var err error
+		var findFromCache bool
 		metricNames := getUniqueMetricNames(targets)
 		// TODO: pipeline?
 		expansionT0 := time.Now()
-		expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+		var expandedGlobs []globs
+		if listener.findCacheEnabled {
+			key := strings.Join(metricNames, "&")
+			size := uint64(100 * 1024 * 1024)
+			var result interface{}
+			result, findFromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
+				func() (interface{}, error) {
+					return listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+				})
+			if err == nil {
+				expandedGlobs = result.([]globs)
+				tle.FindFromCache = findFromCache
+			}
+		} else {
+			expandedGlobs, err = listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+		}
 		tle.GlobExpansionDuration = float64(time.Since(expansionT0)) / float64(time.Second)
 		if expandedGlobs == nil {
 			if err != nil {
@@ -736,6 +751,8 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		return responses, err
 	}
 
+	var fromCache bool
+	var err error
 	if listener.streamingQueryCacheEnabled {
 		key, size := listener.getRenderCacheKeyAndSize(targets, format.String()+"grpc")
 		var res interface{}
@@ -816,6 +833,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 
 type traceLogEntries struct {
 	FromCache             bool    `json:"from_cache"`
+	FindFromCache         bool    `json:"find_from_cache"`
 	FetchSize             int     `json:"fetch_size"`
 	MetricsFetched        int     `json:"metrics_fetched"`
 	ValuesFetched         int     `json:"values_fetched"`
