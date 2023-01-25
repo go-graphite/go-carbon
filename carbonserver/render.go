@@ -605,7 +605,9 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 			multi = append(multi, response)
 			if listener.trieIndex {
 				readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
-				trieNodes[i].incrementReadBytesMetric(readBytesNumber)
+				if len(trieNodes) > i {
+					trieNodes[i].incrementReadBytesMetric(readBytesNumber)
+				}
 			}
 		} else {
 			errs = append(errs, err)
