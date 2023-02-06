@@ -478,8 +478,9 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	metricNames := getUniqueMetricNames(targets)
 	// TODO: pipeline?
 	expansionT0 := time.Now()
-	expandedGlobs, err := listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
+	expandedGlobs, isExpandCacheHit, err := listener.getExpandedGlobsWithCache(ctx, logger, "render", metricNames)
 	tle.GlobExpansionDuration = float64(time.Since(expansionT0)) / float64(time.Second)
+	tle.FindFromCache = isExpandCacheHit
 	if expandedGlobs == nil {
 		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 	}
@@ -713,28 +714,12 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	responseChan := make(chan response, 1000)
 
 	fetchAndStreamMetricsFunc := func(getMetrics bool) ([]response, error) {
-		var err error
-		var findFromCache bool
 		metricNames := getUniqueMetricNames(targets)
 		// TODO: pipeline?
 		expansionT0 := time.Now()
-		var expandedGlobs []globs
-		if listener.findCacheEnabled {
-			key := strings.Join(metricNames, "&")
-			size := uint64(100 * 1024 * 1024)
-			var result interface{}
-			result, findFromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
-				func() (interface{}, error) {
-					return listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
-				})
-			if err == nil {
-				expandedGlobs = result.([]globs)
-				tle.FindFromCache = findFromCache
-			}
-		} else {
-			expandedGlobs, err = listener.getExpandedGlobs(ctx, logger, time.Now(), metricNames)
-		}
+		expandedGlobs, isExpandCacheHit, err := listener.getExpandedGlobsWithCache(ctx, logger, "render", metricNames)
 		tle.GlobExpansionDuration = float64(time.Since(expansionT0)) / float64(time.Second)
+		tle.FindFromCache = isExpandCacheHit
 		if expandedGlobs == nil {
 			if err != nil {
 				return nil, status.New(codes.InvalidArgument, err.Error()).Err()

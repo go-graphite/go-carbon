@@ -66,47 +66,51 @@ import (
 )
 
 type metricStruct struct {
-	RenderRequests       uint64
-	RenderErrors         uint64
-	NotFound             uint64
-	FindRequests         uint64
-	FindErrors           uint64
-	FindZero             uint64
-	InfoRequests         uint64
-	InfoErrors           uint64
-	ListRequests         uint64
-	ListErrors           uint64
-	ListQueryRequests    uint64
-	ListQueryErrors      uint64
-	DetailsRequests      uint64
-	DetailsErrors        uint64
-	CacheHit             uint64
-	CacheMiss            uint64
-	CacheRequestsTotal   uint64
-	CacheWorkTimeNS      uint64
-	CacheWaitTimeFetchNS uint64
-	DiskWaitTimeNS       uint64
-	DiskRequests         uint64
-	PointsReturned       uint64
-	MetricsReturned      uint64
-	MetricsKnown         uint64
-	FileScanTimeNS       uint64
-	IndexBuildTimeNS     uint64
-	MetricsFetched       uint64
-	MetricsFound         uint64
-	ThrottledCreates     uint64
-	MaxCreatesPerSecond  uint64
-	FetchSize            uint64
-	QueryCacheHit        uint64
-	QueryCacheMiss       uint64
-	FindCacheHit         uint64
-	FindCacheMiss        uint64
-	TrieNodes            uint64
-	TrieFiles            uint64
-	TrieDirs             uint64
-	TrieCountNodesTimeNs uint64
-	QuotaApplyTimeNs     uint64
-	UsageRefreshTimeNs   uint64
+	RenderRequests               uint64
+	RenderErrors                 uint64
+	NotFound                     uint64
+	FindRequests                 uint64
+	FindErrors                   uint64
+	FindZero                     uint64
+	InfoRequests                 uint64
+	InfoErrors                   uint64
+	ListRequests                 uint64
+	ListErrors                   uint64
+	ListQueryRequests            uint64
+	ListQueryErrors              uint64
+	DetailsRequests              uint64
+	DetailsErrors                uint64
+	CacheHit                     uint64
+	CacheMiss                    uint64
+	CacheRequestsTotal           uint64
+	CacheWorkTimeNS              uint64
+	CacheWaitTimeFetchNS         uint64
+	DiskWaitTimeNS               uint64
+	DiskRequests                 uint64
+	PointsReturned               uint64
+	MetricsReturned              uint64
+	MetricsKnown                 uint64
+	FileScanTimeNS               uint64
+	IndexBuildTimeNS             uint64
+	MetricsFetched               uint64
+	MetricsFound                 uint64
+	ThrottledCreates             uint64
+	MaxCreatesPerSecond          uint64
+	FetchSize                    uint64
+	QueryCacheHit                uint64
+	QueryCacheMiss               uint64
+	FindCacheHit                 uint64
+	FindCacheMiss                uint64
+	findExpandedGlobsCachedHit   uint64
+	findExpandedGlobsCacheMiss   uint64
+	renderExpandedGlobsCacheHit  uint64
+	renderExpandedGlobsCacheMiss uint64
+	TrieNodes                    uint64
+	TrieFiles                    uint64
+	TrieDirs                     uint64
+	TrieCountNodesTimeNs         uint64
+	QuotaApplyTimeNs             uint64
+	UsageRefreshTimeNs           uint64
 
 	InflightRequests        uint64
 	RejectedTooManyRequests uint64
@@ -255,6 +259,7 @@ type CarbonserverListener struct {
 	queryCache                 queryCache
 	findCacheEnabled           bool
 	findCache                  queryCache
+	expandedGlobsCache         queryCache // TODO: rename queryCache type to be more generic
 	trigramIndex               bool
 	trieIndex                  bool
 	concurrentIndex            bool
@@ -473,14 +478,15 @@ type fileIndex struct {
 func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *CarbonserverListener {
 	return &CarbonserverListener{
 		// Config variables
-		metrics:           &metricStruct{},
-		metricsAsCounters: false,
-		cacheGet:          cacheGetFunc,
-		logger:            zapwriter.Logger("carbonserver"),
-		accessLogger:      zapwriter.Logger("access"),
-		findCache:         queryCache{ec: expirecache.New(0)},
-		trigramIndex:      true,
-		percentiles:       []int{100, 99, 98, 95, 75, 50},
+		metrics:            &metricStruct{},
+		metricsAsCounters:  false,
+		cacheGet:           cacheGetFunc,
+		logger:             zapwriter.Logger("carbonserver"),
+		accessLogger:       zapwriter.Logger("access"),
+		findCache:          queryCache{ec: expirecache.New(0)},
+		expandedGlobsCache: queryCache{ec: expirecache.New(0)},
+		trigramIndex:       true,
+		percentiles:        []int{100, 99, 98, 95, 75, 50},
 		prometheus: prometheus{
 			request:          func(string, int) {},
 			duration:         func(time.Duration) {},
@@ -1522,6 +1528,12 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 	sender("find_cache_hit", &listener.metrics.FindCacheHit, send)
 	sender("find_cache_miss", &listener.metrics.FindCacheMiss, send)
+
+	sender("find_expanded_globs_cache_hit", &listener.metrics.findExpandedGlobsCachedHit, send)
+	sender("find_expanded_globs_cache_miss", &listener.metrics.findExpandedGlobsCacheMiss, send)
+
+	sender("render_expanded_globs_cache_hit", &listener.metrics.renderExpandedGlobsCacheHit, send)
+	sender("render_expanded_globs_cache_miss", &listener.metrics.renderExpandedGlobsCacheMiss, send)
 
 	sender("inflight_requests_count", &listener.metrics.InflightRequests, send)
 	senderRaw("inflight_requests_limit", &listener.MaxInflightRequests, send)
