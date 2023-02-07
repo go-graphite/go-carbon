@@ -20,7 +20,7 @@ jobs:
           # working-directory: somedir
 
           # Optional: golangci-lint command line arguments.
-          args: --enable gofmt,goimports,gocritic --disable errcheck
+          # args: --enable gofmt,goimports,gocritic --disable errcheck
 
           # Optional: show only new issues if it's a pull request. The default value is `false`.
           # only-new-issues: true
