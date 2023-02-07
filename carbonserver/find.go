@@ -226,12 +226,11 @@ func getProtoV2FindResponse(expandedGlob globs, query string) *protov2.GlobRespo
 
 func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, names []string) (*findResponse, error) {
 	var result findResponse
-	metricsCount := uint64(0)
 	expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", names)
 	if expandedGlobs == nil {
 		return nil, err
 	}
-	atomic.AddUint64(&listener.metrics.MetricsFound, metricsCount)
+
 	switch format {
 	case protoV3Format, jsonFormat:
 		var err error
@@ -245,13 +244,11 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 			}
 
 			for i, p := range glob.Files {
-				if glob.Leafs[i] {
-					metricsCount++
-				}
 				response.Matches = append(response.Matches, &protov3.GlobMatch{Path: p, IsLeaf: glob.Leafs[i]})
 			}
 			multiResponse.Metrics = append(multiResponse.Metrics, &response)
 		}
+		listener.populateMetricsFoundStat(expandedGlobs)
 
 		logger.Debug("will send out response",
 			//skipcq: VET-V0008
@@ -293,13 +290,9 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		response := getProtoV2FindResponse(expandedGlobs[0], names[0])
 		result.files += len(expandedGlobs[0].Files)
 		result.lookups += expandedGlobs[0].Lookups
-		for i := range expandedGlobs[0].Files {
-			if expandedGlobs[0].Leafs[i] {
-				metricsCount++
-			}
-		}
 		result.data, err = response.MarshalVT()
 		result.contentType = httpHeaders.ContentTypeProtobuf
+		listener.populateMetricsFoundStat(expandedGlobs)
 
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.FindErrors, 1)
@@ -329,15 +322,13 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		files += len(glob.Files)
 		lookups += glob.Lookups
 		for i, p := range glob.Files {
-			if glob.Leafs[i] {
-				metricsCount++
-			}
 			m = make(map[string]interface{})
 			m["metric_path"] = p
 			m["isLeaf"] = glob.Leafs[i]
 
 			metrics = append(metrics, m)
 		}
+		listener.populateMetricsFoundStat(expandedGlobs)
 		var buf bytes.Buffer
 		pEnc := pickle.NewEncoder(&buf)
 		pEnc.Encode(metrics)
@@ -551,6 +542,8 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 		atomic.AddUint64(&listener.metrics.FindZero, 1)
 	}
 
+	listener.populateMetricsFoundStat(expandedGlobs)
+
 	accessLogger.Info("find success",
 		zap.Duration("runtime_seconds", time.Since(t0)),
 		zap.Int("Files", len(finalRes.Matches)),
@@ -564,4 +557,14 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 		kv.Bool("graphite.from_cache", fromCache),
 	)
 	return finalRes, nil
+}
+
+func (listener *CarbonserverListener) populateMetricsFoundStat(expandedGlobs []globs) {
+	c := uint64(0)
+	for i := range expandedGlobs[0].Files {
+		if expandedGlobs[0].Leafs[i] {
+			c++
+		}
+	}
+	atomic.AddUint64(&listener.metrics.MetricsFound, c)
 }
