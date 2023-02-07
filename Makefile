@@ -26,6 +26,9 @@ all: $(NAME)
 $(NAME):
 	$(GO) build -mod vendor --ldflags '-X main.BuildVersion=$(BUILD)' $(MODULE)
 
+build-linux: ## Build the binary for linux and amd64
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -o $(NAME)
+
 debug:
 	$(GO) build -mod vendor -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
 

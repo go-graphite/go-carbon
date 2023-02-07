@@ -1,0 +1,31 @@
+linters:
+  disable-all: true
+  enable:
+    - gofmt
+    - goimports
+    - gocritic
+    - ineffassign
+
+    # enabled in carbonapi
+    # - asciicheck
+    # - bodyclose
+    # - gochecknoinits
+    # - gosec
+    # - misspell
+    # - unparam
+
+    # The linters we need to enable ASAP.
+    # Enabling would require significant changes.
+    # - gochecknoglobals
+    # - unconvert
+    # - wrapcheck
+
+    # The linters that would be nice to have in order of decreasing priority.
+    # They are disabled now because they cause a lot of warnings that would require multiple changes.
+    # - revive
+    # - errorlint
+    # - promlinter
+    # - cyclop or gocyclo
+    # - whitespace
+    # - gomnd
+    # - lll
