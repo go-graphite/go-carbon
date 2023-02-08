@@ -388,7 +388,7 @@ func getMetricGlobMapFromExpandedGlobs(expandedGlobs []globs) map[string]globs {
 	return metricGlobMap
 }
 
-func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, responseChan chan response) {
+func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, responseChan chan<- response) {
 	defer close(responseChan)
 	for tr, ts := range targets {
 		for _, metric := range ts {
@@ -617,7 +617,7 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 	return multi, nil
 }
 
-func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_RenderServer, responseChan chan response, storeAndGetMetrics bool) (responses []response, metricsFetched, valuesFetched, fetchSize int, err error) {
+func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_RenderServer, responseChan <-chan response) (metricsFetched, valuesFetched, fetchSize int, err error) {
 	var metricAccessBatch []string
 	for renderResponse := range responseChan {
 		protoRes := renderResponse.proto2()
@@ -625,9 +625,6 @@ func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_Rende
 		err = stream.Send(protoRes)
 		if err != nil {
 			return
-		}
-		if storeAndGetMetrics {
-			responses = append(responses, renderResponse)
 		}
 		metricsFetched++
 		valuesFetched += len(renderResponse.Values)
@@ -705,10 +702,8 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	metricsFetched := 0
 	valuesFetched := 0
 	fetchSize := 0
-	// TODO: should chan buffer size be configurable?
-	responseChan := make(chan response, 1000)
 
-	fetchAndStreamMetricsFunc := func(getMetrics bool) ([]response, error) {
+	fetchMetricsFunc := func(responseChan chan<- response) error {
 		metricNames := getUniqueMetricNames(targets)
 		// TODO: pipeline?
 		expansionT0 := time.Now()
@@ -717,7 +712,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		tle.FindFromCache = isExpandCacheHit
 		if expandedGlobs == nil {
 			if err != nil {
-				return nil, status.New(codes.InvalidArgument, err.Error()).Err()
+				return status.New(codes.InvalidArgument, err.Error()).Err()
 			}
 		}
 		metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
@@ -726,46 +721,67 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 			listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
 			tle.PrepareDuration = float64(time.Since(prepareT0)) / float64(time.Second)
 		}()
-		var responses []response
-		streamT0 := time.Now()
-		responses, metricsFetched, valuesFetched, fetchSize, err = listener.streamMetrics(stream, responseChan, getMetrics)
-		tle.StreamDuration = float64(time.Since(streamT0)) / float64(time.Second)
-		return responses, err
+		return nil
 	}
 
+	// TODO: should chan buffer size be configurable?
+	responseChanToStream := make(chan response, 1000)
 	var fromCache bool
 	var err error
 	if listener.streamingQueryCacheEnabled {
 		key, size := listener.getRenderCacheKeyAndSize(targets, format.String()+"grpc")
 		var res interface{}
 		cacheT0 := time.Now()
-		res, fromCache, err = getWithCache(logger, listener.queryCache, key, size, 60,
-			func() (interface{}, error) {
-				return fetchAndStreamMetricsFunc(true)
-			})
-		tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
-		if err == nil {
-			listener.prometheus.cacheRequest("query", fromCache)
-			if fromCache {
-				atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
-				cacheResponse := res.([]response)
-				go func() {
-					for _, r := range cacheResponse {
-						responseChan <- r
-					}
-					close(responseChan)
-				}()
-				streamT0 := time.Now()
-				_, metricsFetched, valuesFetched, fetchSize, err = listener.streamMetrics(stream, responseChan, false)
-				tle.StreamDuration = float64(time.Since(streamT0)) / float64(time.Second)
+
+		item := listener.queryCache.getQueryItem(key, size, 60)
+		res, found := item.FetchOrLock()
+		switch {
+		case !found:
+			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
+			// TODO: should chan buffer size be configurable?
+			responseChan := make(chan response, 1000)
+			err = fetchMetricsFunc(responseChan)
+			if err != nil {
+				item.StoreAbort()
+				tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 			} else {
-				atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
+				go func() {
+					var responses []response
+					for r := range responseChan {
+						responses = append(responses, r)
+						responseChanToStream <- r
+					}
+					close(responseChanToStream)
+					item.StoreAndUnlock(responses)
+					tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
+				}()
 			}
-			tle.FromCache = fromCache
+		case res != nil:
+			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
+			go func() {
+				for _, r := range res.([]response) {
+					responseChanToStream <- r
+				}
+				close(responseChanToStream)
+				tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
+			}()
+			fromCache = true
+		default:
+			err = fmt.Errorf("invalid cache record for the request")
+			tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 		}
+		listener.prometheus.cacheRequest("query", fromCache)
+		tle.FromCache = fromCache
 	} else {
-		_, err = fetchAndStreamMetricsFunc(false)
+		err = fetchMetricsFunc(responseChanToStream)
 	}
+
+	if err == nil {
+		streamT0 := time.Now()
+		metricsFetched, valuesFetched, fetchSize, err = listener.streamMetrics(stream, responseChanToStream)
+		tle.StreamDuration = float64(time.Since(streamT0)) / float64(time.Second)
+	}
+
 	tle.FetchSize = fetchSize
 	tle.MetricsFetched = metricsFetched
 	tle.ValuesFetched = valuesFetched
