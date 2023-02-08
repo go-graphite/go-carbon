@@ -392,7 +392,7 @@ func getMetricGlobMapFromExpandedGlobs(expandedGlobs []globs) map[string]globs {
 	return metricGlobMap
 }
 
-func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, responseChan chan response) {
+func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, responseChan chan<- response) {
 	defer close(responseChan)
 	for tr, ts := range targets {
 		for _, metric := range ts {
@@ -622,7 +622,7 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 	return multi, nil
 }
 
-func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_RenderServer, responseChan chan response) (metricsFetched, valuesFetched, fetchSize int, err error) {
+func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_RenderServer, responseChan <-chan response) (metricsFetched, valuesFetched, fetchSize int, err error) {
 	var metricAccessBatch []string
 	for renderResponse := range responseChan {
 		protoRes := renderResponse.proto2()
@@ -707,10 +707,8 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	metricsFetched := 0
 	valuesFetched := 0
 	fetchSize := 0
-	// TODO: should chan buffer size be configurable?
-	streamChan := make(chan response, 1000)
 
-	fetchMetricsFunc := func(responseChan chan response) error {
+	fetchMetricsFunc := func(responseChan chan<- response) error {
 		metricNames := getUniqueMetricNames(targets)
 		// TODO: pipeline?
 		expansionT0 := time.Now()
@@ -731,6 +729,8 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		return nil
 	}
 
+	// TODO: should chan buffer size be configurable?
+	responseChanToStream := make(chan response, 1000)
 	var fromCache bool
 	var err error
 	if listener.streamingQueryCacheEnabled {
@@ -739,9 +739,9 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		cacheT0 := time.Now()
 
 		item := listener.queryCache.getQueryItem(key, size, 60)
-		res, cacheOk := item.FetchOrLock()
+		res, found := item.FetchOrLock()
 		switch {
-		case !cacheOk:
+		case !found:
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 			// TODO: should chan buffer size be configurable?
 			responseChan := make(chan response, 1000)
@@ -751,13 +751,13 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 				tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 			} else {
 				go func() {
-					var fullResponse []response
+					var responses []response
 					for r := range responseChan {
-						fullResponse = append(fullResponse, r)
-						streamChan <- r
+						responses = append(responses, r)
+						responseChanToStream <- r
 					}
-					close(streamChan)
-					item.StoreAndUnlock(fullResponse)
+					close(responseChanToStream)
+					item.StoreAndUnlock(responses)
 					tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 				}()
 			}
@@ -765,12 +765,12 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
 			go func() {
 				for _, r := range res.([]response) {
-					streamChan <- r
+					responseChanToStream <- r
 				}
-				close(streamChan)
+				close(responseChanToStream)
+				tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 			}()
 			fromCache = true
-			tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 		default:
 			err = fmt.Errorf("invalid cache record for the request")
 			tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
@@ -778,12 +778,12 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		listener.prometheus.cacheRequest("query", fromCache)
 		tle.FromCache = fromCache
 	} else {
-		err = fetchMetricsFunc(streamChan)
+		err = fetchMetricsFunc(responseChanToStream)
 	}
 
 	if err == nil {
 		streamT0 := time.Now()
-		metricsFetched, valuesFetched, fetchSize, err = listener.streamMetrics(stream, streamChan)
+		metricsFetched, valuesFetched, fetchSize, err = listener.streamMetrics(stream, responseChanToStream)
 		tle.StreamDuration = float64(time.Since(streamT0)) / float64(time.Second)
 	}
 
