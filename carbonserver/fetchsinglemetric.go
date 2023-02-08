@@ -116,7 +116,6 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 	case err == nil:
 		// Should never happen, because we have a check for proper archive now
 		if m.Timeseries == nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			logger.Warn("metric time range not found")
 			return response{}, errors.New("time range not found")
 		}
@@ -154,7 +153,6 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		}
 		cacheData, cerr := listener.fetchFromCache(metric, fromTime, untilTime, &resp)
 		if cerr != nil {
-			atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 			logger.Warn("metric not found even in Cache", zap.Error(err))
 			// Metric has no Whisper file and/or has no datapoints in Cache
 			return response{}, cerr
@@ -166,7 +164,6 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 
 		return resp, nil
 	default:
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		logger.Warn("failed to fetch points", zap.Error(err))
 		return response{}, err
 	}

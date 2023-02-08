@@ -44,7 +44,6 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 
 	formatCode, ok := knownFormats[format]
 	if !ok || formatCode == pickleFormat {
-		atomic.AddUint64(&listener.metrics.DetailsErrors, 1)
 		accessLogger.Error("details failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
@@ -58,7 +57,6 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil {
-		atomic.AddUint64(&listener.metrics.DetailsErrors, 1)
 		accessLogger.Error("details failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "can't fetch metrics list"),
@@ -104,7 +102,6 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 	}
 
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.ListErrors, 1)
 		accessLogger.Error("details failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "response encode failed"),

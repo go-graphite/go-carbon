@@ -71,7 +71,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	formatCode, ok := knownFormats[format]
 	if !ok {
-		atomic.AddUint64(&listener.metrics.FindErrors, 1)
 		accessLogger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
@@ -115,7 +114,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	)
 
 	if len(query) == 0 {
-		atomic.AddUint64(&listener.metrics.FindErrors, 1)
 		accessLogger.Error("find failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "empty query"),
@@ -268,8 +266,6 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		}
 
 		if err != nil {
-			atomic.AddUint64(&listener.metrics.FindErrors, 1)
-
 			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "response encode failed"),
@@ -295,8 +291,6 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		listener.populateMetricsFoundStat(expandedGlobs)
 
 		if err != nil {
-			atomic.AddUint64(&listener.metrics.FindErrors, 1)
-
 			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "response encode failed"),
@@ -376,8 +370,6 @@ GATHER:
 	}
 
 	if len(errors) > 0 {
-		atomic.AddUint64(&listener.metrics.FindErrors, uint64(len(errors)))
-
 		if len(errors) == len(names) {
 			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),

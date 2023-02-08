@@ -72,7 +72,6 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	formatCode, ok := knownFormats[format]
 	if !ok || formatCode == pickleFormat {
-		atomic.AddUint64(&listener.metrics.ListErrors, 1)
 		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
@@ -86,7 +85,6 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 
 	metrics, err := listener.getMetricsList()
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.ListErrors, 1)
 		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "can't fetch metrics list"),
@@ -113,7 +111,6 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	}
 
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.ListErrors, 1)
 		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "response encode failed"),
@@ -229,7 +226,6 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 		var err error
 		limit, err = strconv.Atoi(req.FormValue("limit"))
 		if err != nil {
-			atomic.AddUint64(&listener.metrics.ListQueryErrors, 1)
 			accessLogger.Error("list failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
 				zap.String("reason", "faield to parse limit"),
@@ -254,7 +250,6 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 
 	formatCode, ok := knownFormats[format]
 	if !ok || formatCode != jsonFormat {
-		atomic.AddUint64(&listener.metrics.ListQueryErrors, 1)
 		accessLogger.Error("list_query failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
@@ -266,7 +261,6 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 
 	result, err := listener.queryMetricsList(target, limit, leafOnly, statsOnly)
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.ListQueryErrors, 1)
 		accessLogger.Error("list_query failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "can't fetch metrics list"),
@@ -287,7 +281,6 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 	}
 
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.ListQueryErrors, 1)
 		accessLogger.Error("list_query failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "response encode failed"),

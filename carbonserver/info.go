@@ -50,7 +50,6 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 
 	formatCode, ok := knownFormats[format]
 	if !ok || formatCode == pickleFormat {
-		atomic.AddUint64(&listener.metrics.InfoErrors, 1)
 		accessLogger.Error("info failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "unsupported format"),
@@ -135,7 +134,6 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	}
 
 	if len(response.Metrics) == 0 {
-		atomic.AddUint64(&listener.metrics.InfoErrors, 1)
 		accessLogger.Error("info failed",
 			zap.String("reason", "Not Found"),
 			zap.Int("http_code", http.StatusNotFound),
@@ -172,7 +170,6 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	}
 
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.InfoErrors, 1)
 		accessLogger.Error("info failed",
 			zap.String("reason", "response encode failed"),
 			zap.Int("http_code", http.StatusInternalServerError),
