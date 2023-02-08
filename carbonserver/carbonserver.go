@@ -67,19 +67,13 @@ import (
 
 type metricStruct struct {
 	RenderRequests               uint64
-	RenderErrors                 uint64
 	NotFound                     uint64
 	FindRequests                 uint64
-	FindErrors                   uint64
 	FindZero                     uint64
 	InfoRequests                 uint64
-	InfoErrors                   uint64
 	ListRequests                 uint64
-	ListErrors                   uint64
 	ListQueryRequests            uint64
-	ListQueryErrors              uint64
 	DetailsRequests              uint64
-	DetailsErrors                uint64
 	CacheHit                     uint64
 	CacheMiss                    uint64
 	CacheRequestsTotal           uint64
@@ -1496,15 +1490,11 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	numGC := uint64(m.NumGC)
 
 	sender("render_requests", &listener.metrics.RenderRequests, send)
-	sender("render_errors", &listener.metrics.RenderErrors, send)
 	sender("notfound", &listener.metrics.NotFound, send)
 	sender("find_requests", &listener.metrics.FindRequests, send)
-	sender("find_errors", &listener.metrics.FindErrors, send)
 	sender("find_zero", &listener.metrics.FindZero, send)
 	sender("list_requests", &listener.metrics.ListRequests, send)
-	sender("list_errors", &listener.metrics.ListErrors, send)
 	sender("details_requests", &listener.metrics.DetailsRequests, send)
-	sender("details_errors", &listener.metrics.DetailsErrors, send)
 	sender("cache_hit", &listener.metrics.CacheHit, send)
 	sender("cache_miss", &listener.metrics.CacheMiss, send)
 	sender("cache_work_time_ns", &listener.metrics.CacheWorkTimeNS, send)

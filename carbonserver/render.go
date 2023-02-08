@@ -179,7 +179,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	format, err := getFormat(req)
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", err.Error()),
@@ -195,7 +194,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	targets, err := getTargets(req, format)
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", err.Error()),
@@ -250,7 +248,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	wr.Header().Set("Content-Type", response.contentType)
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "failed to read data"),
@@ -262,7 +259,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	}
 
 	if response.metricsFetched == 0 && !listener.emptyResultOk {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "no metrics found"),
@@ -445,7 +441,6 @@ func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, for
 					}
 				}
 				if err != nil {
-					atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 					listener.accessLogger.Error("error while fetching the data",
 						zap.Error(err),
 					)
@@ -775,7 +770,6 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	tle.MetricsFetched = metricsFetched
 	tle.ValuesFetched = valuesFetched
 	if err != nil {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "stream send failed"),
@@ -789,7 +783,6 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	}
 
 	if metricsFetched == 0 && !listener.emptyResultOk {
-		atomic.AddUint64(&listener.metrics.RenderErrors, 1)
 		accessLogger.Error("fetch failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
 			zap.String("reason", "no metrics found"),
