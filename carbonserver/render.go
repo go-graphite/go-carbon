@@ -716,6 +716,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 			}
 		}
 		metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
+		tle.MetricGlobMapLength = len(metricGlobMap)
 		go func() {
 			prepareT0 := time.Now()
 			listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
@@ -725,7 +726,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	}
 
 	// TODO: should chan buffer size be configurable?
-	responseChanToStream := make(chan response, 1000)
+	responseChanToStream := make(chan response, 100)
 	var fromCache bool
 	var err error
 	if listener.streamingQueryCacheEnabled {
@@ -739,7 +740,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		case !found:
 			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
 			// TODO: should chan buffer size be configurable?
-			responseChan := make(chan response, 1000)
+			responseChan := make(chan response, 100)
 			err = fetchMetricsFunc(responseChan)
 			if err != nil {
 				item.StoreAbort()
@@ -839,4 +840,5 @@ type traceLogEntries struct {
 	StreamDuration        float64 `json:"stream_duration"`
 	MarshalDuration       float64 `json:"marshal_duration"`
 	TotalDuration         float64 `json:"total_duration"`
+	MetricGlobMapLength   int     `json:"metric_glob_map_length"`
 }
