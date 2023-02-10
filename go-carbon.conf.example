@@ -223,7 +223,7 @@ tagdb-timeout = "1s"
 listen = "127.0.0.1:8080"
 # Carbonserver support is still experimental and may contain bugs
 # Or be incompatible with github.com/grobian/carbonserver
-enabled = false
+enabled = true
 # Buckets to track response times
 buckets = 10
 # Hard limits the number of whisper files that get created each second. 0 - no limit
