@@ -1,0 +1,19 @@
+FROM golang:1.18
+
+RUN apt-get update && apt-get install -y \
+    apt-utils telnet netcat-openbsd net-tools jq lsof less
+
+RUN go install github.com/go-delve/delve/cmd/dlv@latest
+RUN go install github.com/google/pprof@latest
+
+COPY . go-carbon
+WORKDIR /go/go-carbon
+
+RUN go build
+
+RUN addgroup --system carbon && adduser --system carbon && adduser carbon carbon \
+    && mkdir -p /var/lib/graphite/whisper /var/lib/graphite/dump /var/lib/graphite/tagging /var/log/go-carbon /etc/go-carbon/ \
+    && chown -R carbon:carbon /var/lib/graphite/ /var/log/go-carbon
+
+ADD go-carbon.conf.example /etc/go-carbon/go-carbon.conf
+ADD deploy/storage*.conf /etc/go-carbon/
