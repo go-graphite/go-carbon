@@ -551,12 +551,19 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	return finalRes, nil
 }
 
-func (listener *CarbonserverListener) populateMetricsFoundStat(expandedGlobs []globs) {
-	c := uint64(0)
-	for i := range expandedGlobs[0].Files {
-		if expandedGlobs[0].Leafs[i] {
-			c++
+func countFilesInExpandedGlobs(expandedGlobs []globs) int {
+	var c int
+	for _, eg := range expandedGlobs {
+		for i := range eg.Files {
+			if eg.Leafs[i] {
+				c++
+			}
 		}
 	}
-	atomic.AddUint64(&listener.metrics.MetricsFound, c)
+	return c
+}
+
+func (listener *CarbonserverListener) populateMetricsFoundStat(expandedGlobs []globs) {
+	c := countFilesInExpandedGlobs(expandedGlobs)
+	atomic.AddUint64(&listener.metrics.MetricsFound, uint64(c))
 }
