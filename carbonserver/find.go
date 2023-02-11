@@ -274,12 +274,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 			return nil, err
 		}
 
-		if len(multiResponse.Metrics) == 0 {
-			return nil, errorNotFound{}
-		}
-
 		return &result, err
-
 	case protoV2Format:
 		result.contentType = httpHeaders.ContentTypeProtobuf
 		var err error
@@ -299,12 +294,7 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 			return nil, err
 		}
 
-		if len(response.Matches) == 0 {
-			return nil, errorNotFound{}
-		}
-
 		return &result, err
-
 	case pickleFormat:
 		// [{'metric_path': 'metric', 'intervals': [(x,y)], 'isLeaf': True},]
 		var metrics []map[string]interface{}
@@ -483,9 +473,6 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 			func() (interface{}, error) {
 				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 				lookups = expandedGlobs[0].Lookups
-				if len(finalRes.Matches) == 0 {
-					return nil, errorNotFound{}
-				}
 				return finalRes, nil
 			})
 		if err == nil {
@@ -496,16 +483,14 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 				atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
 			}
 			finalRes = result.(*protov2.GlobResponse)
-			if len(finalRes.Matches) == 0 {
-				err = errorNotFound{}
-			}
 		}
 	} else if err == nil {
 		finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 		lookups = expandedGlobs[0].Lookups
-		if len(finalRes.Matches) == 0 {
-			finalRes, err = nil, errorNotFound{}
-		}
+	}
+
+	if len(finalRes.Matches) == 0 {
+		finalRes, err = nil, errorNotFound{}
 	}
 
 	if err != nil || finalRes == nil {
