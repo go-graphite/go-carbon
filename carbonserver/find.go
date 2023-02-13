@@ -147,6 +147,9 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		}
 	} else {
 		response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
+		if err == nil && response.files == 0 {
+			err = errorNotFound{}
+		}
 	}
 
 	if err != nil || response == nil {
@@ -476,16 +479,18 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 				return finalRes, nil
 			})
-		if err == nil {
-			listener.prometheus.cacheRequest("find", fromCache)
-			if fromCache {
-				atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
-			} else {
-				atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
-			}
-			finalRes = result.(*protov2.GlobResponse)
+		if err != nil {
+			return nil, err
 		}
-	} else if err == nil {
+
+		listener.prometheus.cacheRequest("find", fromCache)
+		if fromCache {
+			atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
+		} else {
+			atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+		}
+		finalRes = result.(*protov2.GlobResponse)
+	} else {
 		expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", []string{query})
 		if err != nil {
 			return nil, err
