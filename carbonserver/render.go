@@ -767,8 +767,10 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 			}
 		case res != nil:
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
+			cachedResponses := res.([]response)
+			responseChanToStream = make(chan response, getStreamingChannelSize(len(cachedResponses)))
 			go func() {
-				for _, r := range res.([]response) {
+				for _, r := range cachedResponses {
 					responseChanToStream <- r
 				}
 				close(responseChanToStream)
