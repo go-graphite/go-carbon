@@ -460,10 +460,6 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	fromCache := false
 	var finalRes *protov2.GlobResponse
 	var lookups uint32
-	expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", []string{query})
-	if err != nil {
-		return nil, err
-	}
 
 	if listener.findCacheEnabled {
 		key := query + "&" + format + "grpc"
@@ -471,8 +467,13 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 		var result interface{}
 		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
 			func() (interface{}, error) {
-				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
+				expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", []string{query})
+				if err != nil {
+					return nil, err
+				}
+				listener.populateMetricsFoundStat(expandedGlobs)
 				lookups = expandedGlobs[0].Lookups
+				finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 				return finalRes, nil
 			})
 		if err == nil {
@@ -485,8 +486,13 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 			finalRes = result.(*protov2.GlobResponse)
 		}
 	} else if err == nil {
-		finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
+		expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", []string{query})
+		if err != nil {
+			return nil, err
+		}
+		listener.populateMetricsFoundStat(expandedGlobs)
 		lookups = expandedGlobs[0].Lookups
+		finalRes = getProtoV2FindResponse(expandedGlobs[0], query)
 	}
 
 	if len(finalRes.Matches) == 0 {
@@ -518,8 +524,6 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 		// to get an idea how often we search for nothing
 		atomic.AddUint64(&listener.metrics.FindZero, 1)
 	}
-
-	listener.populateMetricsFoundStat(expandedGlobs)
 
 	accessLogger.Info("find success",
 		zap.Duration("runtime_seconds", time.Since(t0)),
