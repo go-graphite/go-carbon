@@ -66,45 +66,45 @@ import (
 )
 
 type metricStruct struct {
-	RenderRequests               uint64
-	NotFound                     uint64
-	FindRequests                 uint64
-	FindZero                     uint64
-	InfoRequests                 uint64
-	ListRequests                 uint64
-	ListQueryRequests            uint64
-	DetailsRequests              uint64
-	CacheHit                     uint64
-	CacheMiss                    uint64
-	CacheRequestsTotal           uint64
-	CacheWorkTimeNS              uint64
-	CacheWaitTimeFetchNS         uint64
-	DiskWaitTimeNS               uint64
-	DiskRequests                 uint64
-	PointsReturned               uint64
-	MetricsReturned              uint64
-	MetricsKnown                 uint64
-	FileScanTimeNS               uint64
-	IndexBuildTimeNS             uint64
-	MetricsFetched               uint64
-	MetricsFound                 uint64
-	ThrottledCreates             uint64
-	MaxCreatesPerSecond          uint64
-	FetchSize                    uint64
-	QueryCacheHit                uint64
-	QueryCacheMiss               uint64
-	FindCacheHit                 uint64
-	FindCacheMiss                uint64
-	findExpandedGlobsCachedHit   uint64
-	findExpandedGlobsCacheMiss   uint64
-	renderExpandedGlobsCacheHit  uint64
-	renderExpandedGlobsCacheMiss uint64
-	TrieNodes                    uint64
-	TrieFiles                    uint64
-	TrieDirs                     uint64
-	TrieCountNodesTimeNs         uint64
-	QuotaApplyTimeNs             uint64
-	UsageRefreshTimeNs           uint64
+	RenderRequests                   uint64
+	NotFound                         uint64
+	FindRequests                     uint64
+	FindZero                         uint64
+	InfoRequests                     uint64
+	ListRequests                     uint64
+	ListQueryRequests                uint64
+	DetailsRequests                  uint64
+	CacheHit                         uint64
+	CacheMiss                        uint64
+	CacheRequestsTotal               uint64
+	CacheWorkTimeNS                  uint64
+	CacheWaitTimeFetchNS             uint64
+	DiskWaitTimeNS                   uint64
+	DiskRequests                     uint64
+	PointsReturned                   uint64
+	MetricsReturned                  uint64
+	MetricsKnown                     uint64
+	FileScanTimeNS                   uint64
+	IndexBuildTimeNS                 uint64
+	MetricsFetched                   uint64
+	MetricsFoundWithoutResponseCache uint64
+	ThrottledCreates                 uint64
+	MaxCreatesPerSecond              uint64
+	FetchSize                        uint64
+	QueryCacheHit                    uint64
+	QueryCacheMiss                   uint64
+	FindCacheHit                     uint64
+	FindCacheMiss                    uint64
+	findExpandedGlobsCachedHit       uint64
+	findExpandedGlobsCacheMiss       uint64
+	renderExpandedGlobsCacheHit      uint64
+	renderExpandedGlobsCacheMiss     uint64
+	TrieNodes                        uint64
+	TrieFiles                        uint64
+	TrieDirs                         uint64
+	TrieCountNodesTimeNs             uint64
+	QuotaApplyTimeNs                 uint64
+	UsageRefreshTimeNs               uint64
 
 	InflightRequests        uint64
 	RejectedTooManyRequests uint64
@@ -1504,7 +1504,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("disk_requests", &listener.metrics.DiskRequests, send)
 	sender("points_returned", &listener.metrics.PointsReturned, send)
 	sender("metrics_returned", &listener.metrics.MetricsReturned, send)
-	sender("metrics_found", &listener.metrics.MetricsFound, send)
+	sender("metrics_found_without_response_cache", &listener.metrics.MetricsFoundWithoutResponseCache, send)
 	sender("throttled_creates", &listener.metrics.ThrottledCreates, send)
 	sender("max_creates_per_second", &listener.metrics.MaxCreatesPerSecond, send)
 	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
