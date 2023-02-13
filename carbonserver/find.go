@@ -554,5 +554,5 @@ func countFilesInExpandedGlobs(expandedGlobs []globs) int {
 
 func (listener *CarbonserverListener) populateMetricsFoundStat(expandedGlobs []globs) {
 	c := countFilesInExpandedGlobs(expandedGlobs)
-	atomic.AddUint64(&listener.metrics.MetricsFoundWithoutResponseCache, uint64(c))
+	atomic.AddUint64(&listener.metrics.findMetricsFoundWithoutResponseCache, uint64(c))
 }
