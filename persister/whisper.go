@@ -3,6 +3,7 @@ package persister
 import (
 	"errors"
 	"fmt"
+	prom "github.com/prometheus/client_golang/prometheus"
 	"io/fs"
 	"log"
 	"os"
@@ -77,7 +78,7 @@ type Whisper struct {
 			logicalSizeChanges  int64
 		}
 	}
-
+	prometheus prometheus
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -85,6 +86,12 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
+type prometheus struct {
+	enabled              bool
+	outOfOrderWritesLags prom.Histogram
+	outOfOrderWritesLag  func(time.Duration)
+}
+
 func NewWhisper(
 	rootPath string,
 	schemas WhisperSchemas,
@@ -106,6 +113,23 @@ func NewWhisper(
 		logger:       zapwriter.Logger("persister"),
 		createLogger: zapwriter.Logger("whisper:new"),
 	}
+}
+
+func (p *Whisper) InitPrometheus(reg prom.Registerer) {
+	p.prometheus = prometheus{
+		enabled: true,
+		outOfOrderWritesLags: prom.NewHistogram(
+			prom.HistogramOpts{
+				Name:    "out_of_order_writes_lag_exp",
+				Help:    "Lag for incoming datapoints (exponential buckets)",
+				Buckets: prom.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 20),
+			},
+		),
+	}
+	p.prometheus.outOfOrderWritesLag = func(t time.Duration) {
+		p.prometheus.outOfOrderWritesLags.Observe(t.Seconds())
+	}
+	reg.MustRegister(p.prometheus.outOfOrderWritesLags)
 }
 
 // SetOnlineMigration enable online migration
@@ -188,7 +212,16 @@ func fnv32(key string) uint32 {
 	}
 	return hash
 }
-
+func (p *Whisper) registerOutOfOrderLag(points []*whisper.TimeSeriesPoint) {
+	if !p.prometheus.enabled {
+		return
+	}
+	now := time.Now()
+	for _, point := range points {
+		lag := now.Sub(time.Unix(int64(point.Time), 0))
+		p.prometheus.outOfOrderWritesLag(lag)
+	}
+}
 func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.TimeSeriesPoint) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -200,6 +233,7 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	}()
 
 	// start = time.Now()
+	p.registerOutOfOrderLag(points)
 	if err := w.UpdateMany(points); err != nil {
 		p.logger.Error("fail to update metric",
 			zap.String("path", path),

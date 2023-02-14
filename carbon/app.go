@@ -311,7 +311,9 @@ func (app *App) startPersister() {
 		p.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
 		p.SetWorkers(app.Config.Whisper.Workers)
 		p.SetHashFilenames(app.Config.Whisper.HashFilenames)
-
+		if app.Config.Prometheus.Enabled {
+			p.InitPrometheus(app.PromRegisterer)
+		}
 		if app.Tags != nil {
 			p.SetTagsEnabled(true)
 			p.SetTaggedFn(app.Tags.Add)
