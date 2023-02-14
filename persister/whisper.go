@@ -213,7 +213,7 @@ func fnv32(key string) uint32 {
 	}
 	return hash
 }
-func (p *Whisper) registerOutOfOrderLags(points []*whisper.TimeSeriesPoint) {
+func (p *Whisper) registerOutOfOrderWriteLags(points []*whisper.TimeSeriesPoint) {
 	if !p.prometheus.enabled {
 		return
 	}
@@ -234,7 +234,7 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	}()
 
 	// start = time.Now()
-	p.registerOutOfOrderLags(points)
+	p.registerOutOfOrderWriteLags(points)
 	if err := w.UpdateMany(points); err != nil {
 		p.logger.Error("fail to update metric",
 			zap.String("path", path),
