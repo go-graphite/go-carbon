@@ -88,9 +88,9 @@ type Whisper struct {
 
 // NewWhisper create instance of Whisper
 type whisperPrometheus struct {
-	enabled              bool
-	outOfOrderWritesLags prometheus.Histogram
-	outOfOrderWritesLag  func(time.Duration)
+	enabled             bool
+	outOfOrderWriteLags prometheus.Histogram
+	outOfOrderWriteLag  func(time.Duration)
 }
 
 func NewWhisper(
@@ -119,18 +119,18 @@ func NewWhisper(
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
 	p.prometheus = whisperPrometheus{
 		enabled: true,
-		outOfOrderWritesLags: prometheus.NewHistogram(
+		outOfOrderWriteLags: prometheus.NewHistogram(
 			prometheus.HistogramOpts{
-				Name:    "out_of_order_writes_lag_exp",
+				Name:    "out_of_order_write_lag_exp",
 				Help:    "Lag for incoming datapoints (exponential buckets)",
 				Buckets: prometheus.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 30),
 			},
 		),
 	}
-	p.prometheus.outOfOrderWritesLag = func(t time.Duration) {
-		p.prometheus.outOfOrderWritesLags.Observe(t.Seconds())
+	p.prometheus.outOfOrderWriteLag = func(t time.Duration) {
+		p.prometheus.outOfOrderWriteLags.Observe(t.Seconds())
 	}
-	reg.MustRegister(p.prometheus.outOfOrderWritesLags)
+	reg.MustRegister(p.prometheus.outOfOrderWriteLags)
 }
 
 // SetOnlineMigration enable online migration
@@ -220,7 +220,7 @@ func (p *Whisper) registerOutOfOrderLags(points []*whisper.TimeSeriesPoint) {
 	now := time.Now()
 	for _, point := range points {
 		lag := now.Sub(time.Unix(int64(point.Time), 0))
-		p.prometheus.outOfOrderWritesLag(lag)
+		p.prometheus.outOfOrderWriteLag(lag)
 	}
 }
 func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.TimeSeriesPoint) {
