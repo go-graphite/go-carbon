@@ -3,7 +3,6 @@ package persister
 import (
 	"errors"
 	"fmt"
-	prom "github.com/prometheus/client_golang/prometheus"
 	"io/fs"
 	"log"
 	"os"
@@ -13,6 +12,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 
 	whisper "github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
@@ -78,7 +79,7 @@ type Whisper struct {
 			logicalSizeChanges  int64
 		}
 	}
-	prometheus prometheus
+	prometheus whisperPrometheus
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -86,9 +87,9 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
-type prometheus struct {
+type whisperPrometheus struct {
 	enabled              bool
-	outOfOrderWritesLags prom.Histogram
+	outOfOrderWritesLags prometheus.Histogram
 	outOfOrderWritesLag  func(time.Duration)
 }
 
@@ -115,14 +116,14 @@ func NewWhisper(
 	}
 }
 
-func (p *Whisper) InitPrometheus(reg prom.Registerer) {
-	p.prometheus = prometheus{
+func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
+	p.prometheus = whisperPrometheus{
 		enabled: true,
-		outOfOrderWritesLags: prom.NewHistogram(
-			prom.HistogramOpts{
+		outOfOrderWritesLags: prometheus.NewHistogram(
+			prometheus.HistogramOpts{
 				Name:    "out_of_order_writes_lag_exp",
 				Help:    "Lag for incoming datapoints (exponential buckets)",
-				Buckets: prom.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 20),
+				Buckets: prometheus.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 30),
 			},
 		),
 	}
@@ -212,7 +213,7 @@ func fnv32(key string) uint32 {
 	}
 	return hash
 }
-func (p *Whisper) registerOutOfOrderLag(points []*whisper.TimeSeriesPoint) {
+func (p *Whisper) registerOutOfOrderLags(points []*whisper.TimeSeriesPoint) {
 	if !p.prometheus.enabled {
 		return
 	}
@@ -233,7 +234,7 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	}()
 
 	// start = time.Now()
-	p.registerOutOfOrderLag(points)
+	p.registerOutOfOrderLags(points)
 	if err := w.UpdateMany(points); err != nil {
 		p.logger.Error("fail to update metric",
 			zap.String("path", path),
