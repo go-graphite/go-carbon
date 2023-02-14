@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	whisper "github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
 
@@ -77,7 +79,7 @@ type Whisper struct {
 			logicalSizeChanges  int64
 		}
 	}
-
+	prometheus whisperPrometheus
 	// blockThrottleNs        uint64 // sum ns counter
 	// blockQueueGetNs        uint64 // sum ns counter
 	// blockAvoidConcurrentNs uint64 // sum ns counter
@@ -85,6 +87,12 @@ type Whisper struct {
 }
 
 // NewWhisper create instance of Whisper
+type whisperPrometheus struct {
+	enabled             bool
+	outOfOrderWriteLags prometheus.Histogram
+	outOfOrderWriteLag  func(time.Duration)
+}
+
 func NewWhisper(
 	rootPath string,
 	schemas WhisperSchemas,
@@ -106,6 +114,23 @@ func NewWhisper(
 		logger:       zapwriter.Logger("persister"),
 		createLogger: zapwriter.Logger("whisper:new"),
 	}
+}
+
+func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
+	p.prometheus = whisperPrometheus{
+		enabled: true,
+		outOfOrderWriteLags: prometheus.NewHistogram(
+			prometheus.HistogramOpts{
+				Name:    "out_of_order_write_lag_exp",
+				Help:    "Lag for incoming datapoints (exponential buckets)",
+				Buckets: prometheus.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 30),
+			},
+		),
+	}
+	p.prometheus.outOfOrderWriteLag = func(t time.Duration) {
+		p.prometheus.outOfOrderWriteLags.Observe(t.Seconds())
+	}
+	reg.MustRegister(p.prometheus.outOfOrderWriteLags)
 }
 
 // SetOnlineMigration enable online migration
@@ -188,7 +213,16 @@ func fnv32(key string) uint32 {
 	}
 	return hash
 }
-
+func (p *Whisper) registerOutOfOrderWriteLags(points []*whisper.TimeSeriesPoint) {
+	if !p.prometheus.enabled {
+		return
+	}
+	now := time.Now()
+	for _, point := range points {
+		lag := now.Sub(time.Unix(int64(point.Time), 0))
+		p.prometheus.outOfOrderWriteLag(lag)
+	}
+}
 func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.TimeSeriesPoint) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -200,6 +234,7 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 	}()
 
 	// start = time.Now()
+	p.registerOutOfOrderWriteLags(points)
 	if err := w.UpdateMany(points); err != nil {
 		p.logger.Error("fail to update metric",
 			zap.String("path", path),
