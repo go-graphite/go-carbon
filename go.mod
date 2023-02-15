@@ -23,7 +23,7 @@ require (
 	github.com/lomik/og-rek v0.0.0-20170411191824-628eefeb8d80
 	github.com/lomik/stop v0.0.0-20161127103810-188e98d969bd
 	github.com/lomik/zapwriter v0.0.0-20180906104450-2ec2b9a61680
-	github.com/prometheus/client_golang v0.9.1
+	github.com/prometheus/client_golang v1.11.1
 	github.com/sevlyar/go-daemon v0.1.6-0.20210508104436-15bb82c8ea3c
 	github.com/stretchr/testify v1.7.0
 	github.com/syndtr/goleveldb v0.0.0-20180815032940-ae2bd5eed72d
@@ -40,7 +40,8 @@ require (
 	cloud.google.com/go v0.56.0 // indirect
 	github.com/Shopify/toxiproxy v2.1.4+incompatible // indirect
 	github.com/apache/thrift v0.13.0 // indirect
-	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973 // indirect
+	github.com/beorn7/perks v1.0.1 // indirect
+	github.com/cespare/xxhash/v2 v2.1.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/eapache/go-resiliency v1.1.0 // indirect
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21 // indirect
@@ -54,11 +55,10 @@ require (
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/onsi/gomega v1.10.1 // indirect
 	github.com/pierrec/lz4 v2.0.5+incompatible // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4 // indirect
-	github.com/prometheus/common v0.0.0-20181113130724-41aa239b4cce // indirect
-	github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d // indirect
+	github.com/prometheus/client_model v0.2.0 // indirect
+	github.com/prometheus/common v0.26.0 // indirect
+	github.com/prometheus/procfs v0.6.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20180503174638-e2704e165165 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.opencensus.io v0.22.3 // indirect
@@ -67,7 +67,7 @@ require (
 	golang.org/x/lint v0.0.0-20200302205851-738671d3881b // indirect
 	golang.org/x/mod v0.3.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
-	golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9 // indirect
+	golang.org/x/sync v0.0.0-20201207232520-09787c993a3a // indirect
 	golang.org/x/sys v0.0.0-20220422013727-9388b58f7150 // indirect
 	golang.org/x/text v0.3.6 // indirect
 	golang.org/x/tools v0.0.0-20210106214847-113979e3529a // indirect
