@@ -1,6 +1,9 @@
 ## Changelog
 ##### master
 
+##### version 0.17.1
+* Version bump by @deniszh
+
 ##### version 0.17.0
 * Make empty results ok #453
 * carbonserver: /list_query?leaft_only=true and /admin/info?scopes=config #454
