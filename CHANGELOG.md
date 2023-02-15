@@ -1,5 +1,7 @@
 ## Changelog
 ##### master
+
+##### version 0.17.0
 * Make empty results ok #453
 * carbonserver: /list_query?leaft_only=true and /admin/info?scopes=config #454
 * Makefile: revert .SHELLFLAGS changes #456
@@ -10,6 +12,68 @@
 * refactoring `persiter.oooDiscardedPoints` metric #TBD
 * __Online Schema/Aggregation Migration__ #438
 * tool/persister_configs_differ and -check-policies flag in go-carbon #438
+* Make empty results ok by @jdblack in https://github.com/go-graphite/go-carbon/pull/
+* carbonserver: /list_query?leaft_only=true  and /admin/info?scopes=config by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/454
+* Makefile: revert .SHELLFLAGS changes by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/456
+* Upgrade to go-1.18 by @emadolsky in https://github.com/go-graphite/go-carbon/pull/460
+* Removing DockerHub upload by @deniszh in https://github.com/go-graphite/go-carbon/pull/461
+* Introducing `persiter.oooDiscardedPoints` metric by @deniszh in https://github.com/go-graphite/go-carbon/pull/463
+* Fixing OOO discard metric overflow by @deniszh in https://github.com/go-graphite/go-carbon/pull/464
+* Refactoring persiter.oooDiscardedPoints metric by @deniszh in https://github.com/go-graphite/go-carbon/pull/465
+* persister: online schema migration by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/438
+* quota: throughput racy enforcement bug fixes by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/467
+* carbonserver: introducing request-timeout, heavy-glob-query-rate-limiters and api-per-path-rate-limiters for read traffic regulation by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/469
+* quota: add two unit tests for proper enforcement by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/468
+* carbonserver: introduce file list cache v2 by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/470
+* persister: update go-whisper for cwhisper appendToBlockAndRotate bug fix by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/478
+* protocol: upgrade to the latest version by @bom-d-van in https://github.com/go-graphite/go-carbon/pull/472
+* CarbonV2 gRPC streaming render by @emadolsky in https://github.com/go-graphite/go-carbon/pull/476
+* Docker build from local copy, expands /var/lib/graphite/ paths in Doc… by @flucrezia in https://github.com/go-graphite/go-carbon/pull/481
+* Add stats for find and render requests by @auguzun in https://github.com/go-graphite/go-carbon/pull/482
+* Fixing panic in carbonserver by @deniszh in https://github.com/go-graphite/go-carbon/pull/485
+* gRPC interceptors by @emadolsky in https://github.com/go-graphite/go-carbon/pull/483
+* Proper enrichFromCache  panic fix and go-whisper upgrade by @deniszh in https://github.com/go-graphite/go-carbon/pull/486
+* add into access log "complexity" of find request by @enuret in https://github.com/go-graphite/go-carbon/pull/487
+* Find grpc by @emadolsky in https://github.com/go-graphite/go-carbon/pull/488
+* Info grpc by @emadolsky in https://github.com/go-graphite/go-carbon/pull/489
+* Add gRPC metadata for getting carbonapi_uuid by @emadolsky in https://github.com/go-graphite/go-carbon/pull/490
+* Factor for physical size for sparse mode. For sparse mode I added config variable which applies to logical size… by @auguzun in https://github.com/go-graphite/go-carbon/pull/491
+* Add simple cache for grpc render by @emadolsky in https://github.com/go-graphite/go-carbon/pull/492
+* Fixed a bug with trie index recreation from the cache by @auguzun in https://github.com/go-graphite/go-carbon/pull/493
+* Reduce useless logs by @emadolsky in https://github.com/go-graphite/go-carbon/pull/495
+* Fix deepsource issues by @emadolsky in https://github.com/go-graphite/go-carbon/pull/496
+* Fix carbonserver Stat() from resetting the value of max-inflight-requests to zero by @jmeichle in https://github.com/go-graphite/go-carbon/pull/497
+* Add 'streaming-query-cache-enabled' config param by @emadolsky in https://github.com/go-graphite/go-carbon/pull/498
+* Solved problem with different number of metrics in trie index and on disk by @auguzun in https://github.com/go-graphite/go-carbon/pull/499
+* carbonserver: fix a cache hit bug by @cxfcxf in https://github.com/go-graphite/go-carbon/pull/494
+* Revert "Solved problem with different number of metrics in trie index and on disk" by @auguzun in https://github.com/go-graphite/go-carbon/pull/500
+* Fixed the problem with different number of metrics in trie index and on disk by @auguzun in https://github.com/go-graphite/go-carbon/pull/501
+* Removed metric newMetricCount by @auguzun in https://github.com/go-graphite/go-carbon/pull/502
+* Fix request duration bucket metrics naming by @emadolsky in https://github.com/go-graphite/go-carbon/pull/503
+* Calculate and add fetch size in gRPC render by @emadolsky in https://github.com/go-graphite/go-carbon/pull/508
+* Add carbonserver render tracing by @emadolsky in https://github.com/go-graphite/go-carbon/pull/509
+* Add stats to render trace logs by @emadolsky in https://github.com/go-graphite/go-carbon/pull/510
+* Add keepalive server parameters & enforcements by @emadolsky in https://github.com/go-graphite/go-carbon/pull/511
+* Don't use find cache for not founds in grpc by @emadolsky in https://github.com/go-graphite/go-carbon/pull/512
+* Add gRPC gzip compression to carbonserver by @emadolsky in https://github.com/go-graphite/go-carbon/pull/513
+* Add gRPC initial win size of 4MB for less latency by @emadolsky in https://github.com/go-graphite/go-carbon/pull/514
+* Use find cache for glob expansion in grpc render by @emadolsky in https://github.com/go-graphite/go-carbon/pull/516
+* Fixed index panic during metric fetch on corrupt file by @auguzun in https://github.com/go-graphite/go-carbon/pull/519
+* optimisation(carbonserver): separate grpc expandedGlobsCache from findCache into a separate one, and restore response caching in findCache; and use expandedGlobsCache in http find/render by @timtofan in https://github.com/go-graphite/go-carbon/pull/520
+* fix(carbonserver): find http/grpc - fix metrics_found metric by @timtofan in https://github.com/go-graphite/go-carbon/pull/521
+* cleanup: remove <requestType>Errors metrics in favour of status_codes.* ones as more reliable by @timtofan in https://github.com/go-graphite/go-carbon/pull/523
+* Use intermediate chan to expedite gRPC render cache by @emadolsky in https://github.com/go-graphite/go-carbon/pull/522
+* Decrease gRPC streaming channel size by @emadolsky in https://github.com/go-graphite/go-carbon/pull/524
+* Limit streaming channel size dynamically for gRPC render by @emadolsky in https://github.com/go-graphite/go-carbon/pull/526
+* added dockerfile.debug and enabled carbonserver in test config by @timtofan in https://github.com/go-graphite/go-carbon/pull/527
+* fix(carbonserver): find - cache http404 responses, as render handler does by @timtofan in https://github.com/go-graphite/go-carbon/pull/528
+* fix(carbonserver): grpc find - avoid unnecessary glob expansions upon responseCache hit by @timtofan in https://github.com/go-graphite/go-carbon/pull/529
+* find - rename stat metrics_found to metrics_found_without_response_cache to clarify its meaning by @timtofan in https://github.com/go-graphite/go-carbon/pull/530
+* find - rename stat metrics_found_without_response_cache to find_metrics_found_without_response_cache to denote that it's only for find handler by @timtofan in https://github.com/go-graphite/go-carbon/pull/531
+* Fix uninitialized render stream chan on cached res by @emadolsky in https://github.com/go-graphite/go-carbon/pull/532
+* fix(find): in http set ErrNotFound in codepath when findCache is disabled; in grpc exit early if expandGlobs failed by @timtofan in https://github.com/go-graphite/go-carbon/pull/533
+* added metric for ooo lag for each datapoint by @auguzun in https://github.com/go-graphite/go-carbon/pull/534
+* Bump github.com/prometheus/client_golang from 0.9.1 to 1.11.1 by @dependabot in https://github.com/go-graphite/go-carbon/pull/536
 
 ##### version 0.16.2
 * Another attempt to fix issues with release upload #449
