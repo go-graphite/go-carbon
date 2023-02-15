@@ -29,9 +29,12 @@ github.com/Shopify/sarama
 # github.com/apache/thrift v0.13.0
 ## explicit
 github.com/apache/thrift/lib/go/thrift
-# github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973
-## explicit
+# github.com/beorn7/perks v1.0.1
+## explicit; go 1.11
 github.com/beorn7/perks/quantile
+# github.com/cespare/xxhash/v2 v2.1.1
+## explicit; go 1.11
+github.com/cespare/xxhash/v2
 # github.com/davecgh/go-spew v1.1.1
 ## explicit
 github.com/davecgh/go-spew/spew
@@ -137,30 +140,27 @@ github.com/matttproud/golang_protobuf_extensions/pbutil
 ## explicit
 github.com/pierrec/lz4
 github.com/pierrec/lz4/internal/xxh32
-# github.com/pkg/errors v0.9.1
-## explicit
 # github.com/pmezard/go-difflib v1.0.0
 ## explicit
 github.com/pmezard/go-difflib/difflib
-# github.com/prometheus/client_golang v0.9.1
-## explicit
+# github.com/prometheus/client_golang v1.11.1
+## explicit; go 1.13
 github.com/prometheus/client_golang/prometheus
 github.com/prometheus/client_golang/prometheus/internal
 github.com/prometheus/client_golang/prometheus/promhttp
-# github.com/prometheus/client_model v0.0.0-20190812154241-14fe0d1b01d4
+# github.com/prometheus/client_model v0.2.0
 ## explicit; go 1.9
 github.com/prometheus/client_model/go
-# github.com/prometheus/common v0.0.0-20181113130724-41aa239b4cce
-## explicit
+# github.com/prometheus/common v0.26.0
+## explicit; go 1.11
 github.com/prometheus/common/expfmt
 github.com/prometheus/common/internal/bitbucket.org/ww/goautoneg
 github.com/prometheus/common/model
-# github.com/prometheus/procfs v0.0.0-20181005140218-185b4288413d
-## explicit
+# github.com/prometheus/procfs v0.6.0
+## explicit; go 1.13
 github.com/prometheus/procfs
+github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-github.com/prometheus/procfs/nfs
-github.com/prometheus/procfs/xfs
 # github.com/rcrowley/go-metrics v0.0.0-20180503174638-e2704e165165
 ## explicit
 github.com/rcrowley/go-metrics
@@ -280,7 +280,7 @@ golang.org/x/oauth2/google
 golang.org/x/oauth2/internal
 golang.org/x/oauth2/jws
 golang.org/x/oauth2/jwt
-# golang.org/x/sync v0.0.0-20201020160332-67f06af15bc9
+# golang.org/x/sync v0.0.0-20201207232520-09787c993a3a
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
@@ -288,6 +288,7 @@ golang.org/x/sync/semaphore
 ## explicit; go 1.17
 golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
+golang.org/x/sys/windows
 # golang.org/x/text v0.3.6
 ## explicit; go 1.11
 golang.org/x/text/secure/bidirule
