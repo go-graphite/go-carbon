@@ -2,7 +2,6 @@ package carbonserver
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	_ "net/http/pprof" // skipcq: GO-S2108
@@ -18,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
@@ -149,12 +149,9 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	switch formatCode {
 	case jsonFormat:
 		contentType = httpHeaders.ContentTypeJSON
-		//skipcq: VET-V0008
-		//nolint:govet
-		b, err = json.Marshal(response)
+		b, err = protojson.Marshal(response.ProtoReflect().Interface())
 	case protoV2Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv2PB
-
 		r := response.Metrics[0]
 		response := protov2.InfoResponse{
 			Name:              r.Name,
