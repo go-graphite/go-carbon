@@ -917,13 +917,7 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 		if targetRetention != -1 && targetRetention != archive.MaxRetention() {
 			continue
 		}
-
-		if whisper.opts.IgnoreNowOnWrite {
-			currentPoints = points
-			points = []*TimeSeriesPoint{}
-		} else {
-			currentPoints, points = extractPoints(points, now, archive.MaxRetention())
-		}
+		currentPoints, points = extractPoints(points, now, archive.MaxRetention())
 
 		if len(currentPoints) == 0 {
 			continue
@@ -949,7 +943,7 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 		if err != nil {
 			return
 		}
-		if len(points) == 0 { // nothing left to do
+		if len(points) == 0 || whisper.opts.IgnoreNowOnWrite { // nothing left to do or writing to lower archives is forbidden
 			break
 		}
 	}
@@ -1290,7 +1284,7 @@ func (whisper *Whisper) fetchFromArchive(archive *archiveInfo, fromTime, untilTi
 
 		irange := untilInterval - fromInterval
 		values := make([]float64, irange/archive.secondsPerPoint)
-		
+
 		for i := range values {
 			values[i] = math.NaN()
 		}
