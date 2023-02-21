@@ -72,7 +72,7 @@ jobs:
           make sum-files
 
       - name: Upload Artifact
-        if: ${{ matrix.go == '^1' }} # only upload artifact when built with latest go
+        if: ${{ matrix.go == 'tip' }} # only upload artifact when built with latest go
         id: artifact
         uses: actions/upload-artifact@v3
         with:
@@ -85,7 +85,7 @@ jobs:
             md5sum
 
       - name: Push packages to the autobuilds repo
-        if: ${{ github.event_name == 'push' && matrix.go == '^1' }} # only when built from master with latest go
+        if: ${{ github.event_name == 'push' && matrix.go == 'tip' }} # only when built from master with latest go
         run: make DEVEL=1 packagecloud-autobuilds
         env:
           PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}
