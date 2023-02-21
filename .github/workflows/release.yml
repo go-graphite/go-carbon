@@ -17,11 +17,11 @@ jobs:
       matrix: ${{ steps.build.outputs.matrix }}
     steps:
       - name: Set up Go
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v3
         with:
           go-version: ^1
 
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         name: Checkout
 
       - name: Test
@@ -55,7 +55,7 @@ jobs:
 
       - name: Artifact
         id: artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: packages
           retention-days: 1
@@ -77,7 +77,7 @@ jobs:
       matrix: ${{fromJson(needs.build.outputs.matrix)}}
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v3
         with:
           name: packages
       - name: Upload ${{ matrix.file }}
