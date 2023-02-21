@@ -1,0 +1,4 @@
+*.test
+cpu.out
+tags
+.idea
