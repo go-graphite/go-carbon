@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -20,6 +19,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	"github.com/go-graphite/go-whisper"
@@ -539,9 +539,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	// We still keep old json format, because it's painful to deal with math.NaN that can occur in new format.
 	case jsonFormat:
 		contentType = "application/json"
-		//skipcq: VET-V0008
-		//nolint:govet
-		b, err = json.Marshal(multiv2)
+		b, err = protojson.Marshal(multiv2.ProtoReflect().Interface())
 	case protoV2Format:
 		contentType = httpHeaders.ContentTypeCarbonAPIv2PB
 		b, err = multiv2.MarshalVT()

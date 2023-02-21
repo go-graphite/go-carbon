@@ -1,7 +1,6 @@
 package carbonserver
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	_ "net/http/pprof" // skipcq: GO-S2108
@@ -10,6 +9,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -83,24 +83,22 @@ func (listener *CarbonserverListener) capabilityHandler(wr http.ResponseWriter, 
 		switch formatCode {
 		case jsonFormat:
 			contentType = httpHeaders.ContentTypeJSON
-			//skipcq: VET-V0008
-			//nolint:govet
-			data, _ = json.Marshal(pvResponse)
+			data, err = protojson.Marshal(pvResponse.ProtoReflect().Interface())
 		case protoV3Format:
 			contentType = httpHeaders.ContentTypeCarbonAPIv3PB
 			data, err = pvResponse.MarshalVT()
-			if err != nil {
-				accessLogger.Error("capability failed",
-					zap.Duration("runtime_seconds", time.Since(t0)),
-					zap.String("reason", err.Error()),
-					zap.Int("http_code", http.StatusBadRequest),
-				)
-				http.Error(wr, "Bad request (unsupported format)",
-					http.StatusBadRequest,
-				)
-			}
 		}
 
+		if err != nil {
+			accessLogger.Error("capability failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", err.Error()),
+				zap.Int("http_code", http.StatusBadRequest),
+			)
+			http.Error(wr, "Bad request (unsupported format)",
+				http.StatusBadRequest,
+			)
+		}
 		wr.Header().Set("Content-Type", contentType)
 		wr.Write(data)
 	} else {

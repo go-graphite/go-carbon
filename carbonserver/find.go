@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 )
 
 type findResponse struct {
@@ -251,23 +252,17 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 		}
 		listener.populateMetricsFoundStat(expandedGlobs)
 
-		logger.Debug("will send out response",
-			//skipcq: VET-V0008
-			//nolint:govet
-			zap.Any("response", multiResponse),
-		)
-
 		switch format {
 		case jsonFormat:
 			result.contentType = httpHeaders.ContentTypeJSON
-			//skipcq: VET-V0008
-			//nolint:govet
-			result.data, err = json.Marshal(multiResponse)
+			result.data, err = protojson.Marshal(multiResponse.ProtoReflect().Interface())
 		case protoV3Format:
 			result.contentType = httpHeaders.ContentTypeCarbonAPIv3PB
 			result.data, err = multiResponse.MarshalVT()
 		}
-
+		logger.Debug("will send out response",
+			zap.Any("response", json.RawMessage(result.data)),
+		)
 		if err != nil {
 			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),
