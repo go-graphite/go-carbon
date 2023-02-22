@@ -1,6 +1,6 @@
 module github.com/go-graphite/go-carbon
 
-go 1.18
+go 1.20
 
 require (
 	cloud.google.com/go/pubsub v1.2.0
@@ -35,6 +35,8 @@ require (
 	google.golang.org/api v0.29.0
 	google.golang.org/grpc v1.47.0
 )
+
+require google.golang.org/protobuf v1.28.0
 
 require (
 	cloud.google.com/go v0.56.0 // indirect
@@ -74,7 +76,6 @@ require (
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/appengine v1.6.5 // indirect
 	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
-	google.golang.org/protobuf v1.28.0 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c // indirect
 	honnef.co/go/tools v0.0.1-2020.1.3 // indirect
 )
