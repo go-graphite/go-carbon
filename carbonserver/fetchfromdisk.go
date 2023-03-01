@@ -49,12 +49,19 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	retentions := w.Retentions()
 	now := int32(time.Now().Unix())
 	diff := now - fromTime
-	bestStep := int32(retentions[0].SecondsPerPoint())
+	var bestStep int32 = -1
 	for _, retention := range retentions {
+		if bestStep == -1 {
+			bestStep = int32(retention.SecondsPerPoint())
+		}
 		if int32(retention.MaxRetention()) >= diff {
 			step = int32(retention.SecondsPerPoint())
 			break
 		}
+	}
+	if bestStep == -1 {
+		logger.Error("metric file %s doesn't have archives info", zap.String("metric", metric))
+		return nil, errors.New("corrupt metric file")
 	}
 
 	if step == 0 {
