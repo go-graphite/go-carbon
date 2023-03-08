@@ -31,7 +31,6 @@ require (
 	go.opentelemetry.io/otel v0.9.0
 	go.opentelemetry.io/otel/exporters/trace/jaeger v0.9.0
 	go.uber.org/zap v1.9.1
-	golang.org/x/net v0.7.0
 	google.golang.org/api v0.29.0
 	google.golang.org/grpc v1.47.0
 )
@@ -68,6 +67,7 @@ require (
 	go.uber.org/multierr v1.1.0 // indirect
 	golang.org/x/lint v0.0.0-20200302205851-738671d3881b // indirect
 	golang.org/x/mod v0.6.0-dev.0.20220419223038-86c51ed26bb4 // indirect
+	golang.org/x/net v0.7.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
 	golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4 // indirect
 	golang.org/x/sys v0.5.0 // indirect
