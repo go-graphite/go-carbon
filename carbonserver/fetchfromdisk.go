@@ -5,6 +5,7 @@ import (
 	_ "net/http/pprof" // skipcq: GO-S2108
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
@@ -30,11 +31,11 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	// We need to obtain the metadata from whisper file anyway.
 	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
-		FLock: listener.flock,
+		FLock: listener.flock, FlockType: syscall.LOCK_SH,
 	})
 	if err != nil {
 		// the FE/carbonzipper often requests metrics we don't have
-		// We shouldn't really see this any more -- expandGlobs() should filter them out
+		// We shouldn't really see this anymore -- expandGlobs() should filter them out
 		atomic.AddUint64(&listener.metrics.NotFound, 1)
 		listener.logger.Error("open error", zap.String("path", path), zap.Error(err))
 		return nil, err
