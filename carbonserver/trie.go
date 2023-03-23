@@ -17,7 +17,6 @@ import (
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
 
-	trigram "github.com/dgryski/go-trigram"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -43,12 +42,6 @@ type gmatcher struct {
 	dstates []*gdstate
 	dsindex int //nolint:unused,structcheck
 
-	// TODO: depcreate lsComplex and trigrams. the gains of it isn't very
-	// clear and it would make things simpler.
-	//
-	// has leading star following by complex expressions
-	lsComplex bool
-	trigrams  []uint32
 }
 
 type gstate struct {
@@ -219,7 +212,6 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			cur.next = append(cur.next, s)
 			cur = s
 
-			m.lsComplex = false
 		case '?':
 			m.exact = false
 			var star gstate
@@ -227,16 +219,12 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			cur.next = append(cur.next, &star)
 			cur = &star
 
-			m.lsComplex = false
 		case '*':
 			m.exact = false
-			if i == 0 && len(expr) > 2 {
-				// TODO: check dup stars
-				m.lsComplex = true
-			}
 
 			// de-dup multi stars: *** -> *
 			for ; i+1 < len(expr) && expr[i+1] == '*'; i++ {
+
 			}
 
 			var split, star gstate
@@ -254,7 +242,6 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			cur = alterStart
 			alters = append(alters, [2]*gstate{alterStart, alterEnd})
 
-			m.lsComplex = false
 		case '}':
 			if len(alters) == 0 {
 				return nil, errors.New("glob: missing {")
@@ -263,7 +250,6 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 			cur = alters[len(alters)-1][1]
 			alters = alters[:len(alters)-1]
 
-			m.lsComplex = false
 		case ',':
 			if len(alters) > 0 {
 				cur.next = append(cur.next, alters[len(alters)-1][1])
@@ -292,27 +278,6 @@ func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*
 	}
 	m.dstates = append(m.dstates, &droot)
 
-	// TODO: consider dropping trigram integration
-	if m.lsComplex && expand != nil {
-		es, err := expand([]string{expr})
-		if err != nil {
-			return &m, nil
-		}
-		for _, e := range es {
-			trigrams := extractTrigrams(e)
-
-		appendt:
-			for i := 0; i < len(trigrams); i++ {
-				for _, t := range m.trigrams {
-					if t == uint32(trigrams[i]) {
-						continue appendt
-					}
-				}
-				m.trigrams = append(m.trigrams, uint32(trigrams[i]))
-			}
-		}
-	}
-
 	return &m, nil
 }
 
@@ -326,7 +291,6 @@ type trieIndex struct {
 	fileCount     int
 	depth         uint64
 	longestMetric string
-	trigrams      map[*trieNode][]uint32
 
 	// qau: Quota And Usage
 	qauMetrics       []points.Points
@@ -488,22 +452,12 @@ func (tn *trieNode) incrementReadBytesMetric(bytesNumber int64) {
 	}
 }
 
-func (ti *trieIndex) trigramsContains(tn *trieNode, t uint32) bool {
-	for _, i := range ti.trigrams[tn] {
-		if i == t {
-			return true
-		}
-	}
-	return false
-}
-
 func newTrie(fileExt string, maxCreatesPerSecond int, estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)) *trieIndex {
 	meta := newDirMeta()
 	maxCreatesTicker := helper.NewHardThrottleTicker(maxCreatesPerSecond)
 	return &trieIndex{
 		root:             &trieNode{childrens: &[]*trieNode{}, meta: meta},
 		fileExt:          fileExt,
-		trigrams:         map[*trieNode][]uint32{},
 		maxCreatesTicker: maxCreatesTicker,
 		estimateSize:     estimateSize,
 		throughputs:      newQuotaThroughputQuotaManager(),
@@ -856,17 +810,6 @@ func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) (
 		}
 
 		// matching regexp
-		if curm.lsComplex && len(curm.trigrams) > 0 {
-			if _, ok := ti.trigrams[cur]; ok {
-				for _, t := range curm.trigrams {
-					if !ti.trigramsContains(cur, t) {
-						goto parent
-					}
-				}
-			}
-		}
-
-		// matching regexp
 		for i := 0; i < len(cur.c); i++ {
 			ndstate = curm.dstate().step(cur.c[i])
 			if len(ndstate.gstates) == 0 {
@@ -986,14 +929,6 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 
 	// skipcq: GSC-G103
 	return *(*string)(unsafe.Pointer(&r))
-}
-
-func dumpTrigrams(data []uint32) []trigram.T { //nolint:deadcode,unused
-	var ts []trigram.T
-	for _, t := range data {
-		ts = append(ts, trigram.T(t))
-	}
-	return ts
 }
 
 func (ti *trieIndex) allMetrics(sep byte) []string {
@@ -1276,110 +1211,6 @@ func (ti *trieIndex) statNodes() map[*trieNode]int {
 	}
 
 	return stats
-}
-
-// TODO: support ctrie
-func (ti *trieIndex) setTrigrams() {
-	var depth = ti.getDepth() + trieDepthBuffer
-	var nindex = make([]int, depth)
-	var ncindex int
-	var cur = ti.root
-	var trieNodes = make([]*trieNode, depth)
-	var trigrams = make([][]uint32, depth)
-	var stats = ti.statNodes()
-
-	// chosen semi-randomly. maybe we could turn this into a configurations
-	// if we have enough evidence to prove it's valuable.
-	const factor = 10
-
-	gent := func(b1, b2, b3 byte) uint32 { return uint32(uint32(b1)<<16 | uint32(b2)<<8 | uint32(b3)) }
-
-	for {
-		if nindex[ncindex] >= len(*cur.childrens) {
-			goto parent
-		}
-
-		trieNodes[ncindex] = cur
-		cur = (*cur.childrens)[nindex[ncindex]]
-		ncindex++
-		if ncindex >= len(nindex)-1 {
-			goto parent
-		}
-
-		// abc.xyz.cjk
-		trigrams[ncindex] = []uint32{}
-		if ncindex > 1 && len(cur.c) > 0 && !cur.dir() {
-			cur1 := trieNodes[ncindex-1]
-			if !cur1.dir() {
-				if len(cur1.c) > 1 {
-					t := gent(cur1.c[len(cur1.c)-2], cur1.c[len(cur1.c)-1], cur.c[0])
-					trigrams[ncindex] = append(trigrams[ncindex], t)
-				} else if ncindex-2 >= 0 {
-					cur2 := trieNodes[ncindex-2]
-					if !cur2.dir() && len(cur2.c) > 0 && len(cur1.c) > 0 {
-						t := gent(cur2.c[len(cur2.c)-1], cur1.c[len(cur1.c)-1], cur.c[0])
-						trigrams[ncindex] = append(trigrams[ncindex], t)
-					}
-				}
-
-				if len(cur.c) > 1 {
-					t := gent(cur1.c[len(cur1.c)-1], cur.c[0], cur.c[1])
-					trigrams[ncindex] = append(trigrams[ncindex], t)
-				}
-			}
-		}
-		if !cur.dir() && len(cur.c) > 2 {
-			for i := 0; i < len(cur.c)-2; i++ {
-				t := gent(cur.c[i], cur.c[i+1], cur.c[i+2])
-				trigrams[ncindex] = append(trigrams[ncindex], t)
-			}
-		}
-
-		for i := ncindex - 1; i >= 0 && len(trigrams[ncindex]) > 0; i-- {
-			if trieNodes[i] == nil || !trieNodes[i].dir() {
-				continue
-			}
-
-			// TODO: index not just the first node, but also the 5th, 9th, etc.
-			if stats[trieNodes[i]] > factor {
-				// the current trigrams strategy only works for dir nodes contains many direct children
-				// but should be able to change to handle deep-nested children
-				for _, pos := range []int{1} {
-					if i+pos >= len(trieNodes) || trieNodes[i+pos] == nil {
-						break
-					}
-				appendt:
-					for _, t := range trigrams[ncindex] {
-						for _, tit := range ti.trigrams[trieNodes[i+pos]] {
-							if t == tit {
-								continue appendt
-							}
-						}
-						ti.trigrams[trieNodes[i+pos]] = append(ti.trigrams[trieNodes[i+pos]], t)
-					}
-
-				}
-			}
-			break
-		}
-
-		if cur.file() {
-			goto parent
-		}
-
-		continue
-
-	parent:
-		nindex[ncindex] = 0
-		trieNodes[ncindex] = nil
-		ncindex--
-		if ncindex < 0 {
-			break
-		}
-		nindex[ncindex]++
-		cur = trieNodes[ncindex]
-		continue
-	}
 }
 
 // prune prunes trie nodes gened with a different values against root.
