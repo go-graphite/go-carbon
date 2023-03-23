@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"math/rand"
+	"os"
 	"reflect"
 	"runtime/debug"
 	"sort"
@@ -53,7 +54,7 @@ func TestTrieStatChildrens(t *testing.T) {
 		files[i] = strings.TrimPrefix(files[i], *carbonPath)
 	}
 
-	var trieServer = newTrieServer(files, !*pureTrie, t)
+	var trieServer = newTrieServer(files, t)
 	trieServer.whisperData = *carbonPath
 
 	if *checkMemory {
@@ -102,8 +103,7 @@ func TestTrieStatChildrens(t *testing.T) {
 }
 
 // TestTrieGlobRealData is built for benchmarking against real data, for two reasons:
-// 		* trigram index solution invokes stat syscall
-// 		* can't share production data in open source project
+//   - can't share production data in open source project
 func TestTrieGlobRealData(t *testing.T) {
 	files := readFile(*testDataPath)
 	filesm := make(map[string]bool)
@@ -122,7 +122,7 @@ func TestTrieGlobRealData(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
-		trieServer = newTrieServer(files, !*pureTrie, t)
+		trieServer = newTrieServer(files, t)
 		trieServer.whisperData = *carbonPath
 
 		if *checkMemory {

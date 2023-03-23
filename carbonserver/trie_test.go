@@ -27,7 +27,7 @@ type logf interface {
 }
 
 // skipcq: RVV-A0005
-func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListener {
+func newTrieServer(files []string, l logf) *CarbonserverListener {
 	var listener CarbonserverListener
 	listener.logger = zap.NewNop()
 	listener.accessLogger = zap.NewNop()
@@ -44,12 +44,6 @@ func newTrieServer(files []string, withTrigram bool, l logf) *CarbonserverListen
 		trieIndex.insert(file, 0, 0, 0, 0)
 	}
 	l.Logf("trie index took %s\n", time.Since(start))
-
-	if withTrigram {
-		start = time.Now()
-		trieIndex.setTrigrams()
-		l.Logf("trie setTrigrams took %s size %d\n", time.Since(start), len(trieIndex.trigrams))
-	}
 
 	l.Logf("longest metric(%d): %s\n", trieIndex.depth, trieIndex.longestMetric)
 
@@ -711,7 +705,7 @@ func TestTrieIndex(t *testing.T) {
 		t.Run(c.query, func(t *testing.T) {
 			t.Logf("case: TestTrieIndex/'^%s$'", regexp.QuoteMeta(c.query))
 
-			trieServer := newTrieServer(c.input, false, t)
+			trieServer := newTrieServer(c.input, t)
 			resultCh := make(chan *ExpandedGlobResponse, 1)
 			trieServer.expandGlobs(context.TODO(), c.query, resultCh)
 			result := <-resultCh
@@ -996,7 +990,7 @@ func BenchmarkGlobIndex(b *testing.B) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		btrieServer = newTrieServer(files, true, b)
+		btrieServer = newTrieServer(files, b)
 		wg.Done()
 	}()
 	go func() {
@@ -1089,7 +1083,7 @@ func TestDumpAllMetrics(t *testing.T) {
 		"/service-01/server-170/metric-namespace-007-008-xdp/cpu.wsp",
 		"/service-01/server-170/metric-namespace-006-xdp/cpu.wsp",
 	}
-	trie := newTrieServer(files, true, t)
+	trie := newTrieServer(files, t)
 	metrics := trie.CurrentFileIndex().trieIdx.allMetrics('.')
 	for i := range files {
 		files[i] = files[i][:len(files[i])-4]
@@ -1499,7 +1493,7 @@ func TestTrieReadMetric(t *testing.T) {
 		"/sys/app/server-001/cpu.wsp",
 		"/sys/app/server-002/cpu.wsp",
 	}
-	trieServer := newTrieServer(input, false, t)
+	trieServer := newTrieServer(input, t)
 	var tindex = trieServer.CurrentFileIndex().trieIdx
 	tindex.applyQuotas(
 		time.Minute,

@@ -1178,12 +1178,6 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
 		)
 
-		if listener.trigramIndex && !listener.concurrentIndex {
-			start := time.Now()
-			nfidx.trieIdx.setTrigrams()
-			infos = append(infos, zap.Duration("set_trigram_time", time.Since(start)))
-		}
-
 		start := time.Now()
 		count, files, dirs, _, _, _, _, _ := trieIdx.countNodes()
 		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
