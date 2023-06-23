@@ -3,20 +3,24 @@ package sarama
 import (
 	"encoding/binary"
 	"math"
+
+	"github.com/rcrowley/go-metrics"
 )
 
-var errInvalidArrayLength = PacketDecodingError{"invalid array length"}
-var errInvalidByteSliceLength = PacketDecodingError{"invalid byteslice length"}
-var errInvalidByteSliceLengthType = PacketDecodingError{"invalid byteslice length type"}
-var errInvalidStringLength = PacketDecodingError{"invalid string length"}
-var errInvalidSubsetSize = PacketDecodingError{"invalid subset size"}
-var errVarintOverflow = PacketDecodingError{"varint overflow"}
-var errInvalidBool = PacketDecodingError{"invalid bool"}
+var (
+	errInvalidArrayLength     = PacketDecodingError{"invalid array length"}
+	errInvalidByteSliceLength = PacketDecodingError{"invalid byteslice length"}
+	errInvalidStringLength    = PacketDecodingError{"invalid string length"}
+	errVarintOverflow         = PacketDecodingError{"varint overflow"}
+	errUVarintOverflow        = PacketDecodingError{"uvarint overflow"}
+	errInvalidBool            = PacketDecodingError{"invalid bool"}
+)
 
 type realDecoder struct {
-	raw   []byte
-	off   int
-	stack []pushDecoder
+	raw      []byte
+	off      int
+	stack    []pushDecoder
+	registry metrics.Registry
 }
 
 // primitives
@@ -75,6 +79,32 @@ func (rd *realDecoder) getVarint() (int64, error) {
 	return tmp, nil
 }
 
+func (rd *realDecoder) getUVarint() (uint64, error) {
+	tmp, n := binary.Uvarint(rd.raw[rd.off:])
+	if n == 0 {
+		rd.off = len(rd.raw)
+		return 0, ErrInsufficientData
+	}
+
+	if n < 0 {
+		rd.off -= n
+		return 0, errUVarintOverflow
+	}
+
+	rd.off += n
+	return tmp, nil
+}
+
+func (rd *realDecoder) getFloat64() (float64, error) {
+	if rd.remaining() < 8 {
+		rd.off = len(rd.raw)
+		return -1, ErrInsufficientData
+	}
+	tmp := math.Float64frombits(binary.BigEndian.Uint64(rd.raw[rd.off:]))
+	rd.off += 8
+	return tmp, nil
+}
+
 func (rd *realDecoder) getArrayLength() (int, error) {
 	if rd.remaining() < 4 {
 		rd.off = len(rd.raw)
@@ -91,6 +121,19 @@ func (rd *realDecoder) getArrayLength() (int, error) {
 	return tmp, nil
 }
 
+func (rd *realDecoder) getCompactArrayLength() (int, error) {
+	n, err := rd.getUVarint()
+	if err != nil {
+		return 0, err
+	}
+
+	if n == 0 {
+		return 0, nil
+	}
+
+	return int(n) - 1, nil
+}
+
 func (rd *realDecoder) getBool() (bool, error) {
 	b, err := rd.getInt8()
 	if err != nil || b == 0 {
@@ -100,6 +143,32 @@ func (rd *realDecoder) getBool() (bool, error) {
 		return false, errInvalidBool
 	}
 	return true, nil
+}
+
+func (rd *realDecoder) getEmptyTaggedFieldArray() (int, error) {
+	tagCount, err := rd.getUVarint()
+	if err != nil {
+		return 0, err
+	}
+
+	// skip over any tagged fields without deserializing them
+	// as we don't currently support doing anything with them
+	for i := uint64(0); i < tagCount; i++ {
+		// fetch and ignore tag identifier
+		_, err := rd.getUVarint()
+		if err != nil {
+			return 0, err
+		}
+		length, err := rd.getUVarint()
+		if err != nil {
+			return 0, err
+		}
+		if _, err := rd.getRawBytes(int(length)); err != nil {
+			return 0, err
+		}
+	}
+
+	return 0, nil
 }
 
 // collections
@@ -126,6 +195,16 @@ func (rd *realDecoder) getVarintBytes() ([]byte, error) {
 	}
 
 	return rd.getRawBytes(int(tmp))
+}
+
+func (rd *realDecoder) getCompactBytes() ([]byte, error) {
+	n, err := rd.getUVarint()
+	if err != nil {
+		return nil, err
+	}
+
+	length := int(n - 1)
+	return rd.getRawBytes(length)
 }
 
 func (rd *realDecoder) getStringLength() (int, error) {
@@ -167,6 +246,59 @@ func (rd *realDecoder) getNullableString() (*string, error) {
 	tmpStr := string(rd.raw[rd.off : rd.off+n])
 	rd.off += n
 	return &tmpStr, err
+}
+
+func (rd *realDecoder) getCompactString() (string, error) {
+	n, err := rd.getUVarint()
+	if err != nil {
+		return "", err
+	}
+
+	length := int(n - 1)
+	if length < 0 {
+		return "", errInvalidByteSliceLength
+	}
+	tmpStr := string(rd.raw[rd.off : rd.off+length])
+	rd.off += length
+	return tmpStr, nil
+}
+
+func (rd *realDecoder) getCompactNullableString() (*string, error) {
+	n, err := rd.getUVarint()
+	if err != nil {
+		return nil, err
+	}
+
+	length := int(n - 1)
+
+	if length < 0 {
+		return nil, err
+	}
+
+	tmpStr := string(rd.raw[rd.off : rd.off+length])
+	rd.off += length
+	return &tmpStr, err
+}
+
+func (rd *realDecoder) getCompactInt32Array() ([]int32, error) {
+	n, err := rd.getUVarint()
+	if err != nil {
+		return nil, err
+	}
+
+	if n == 0 {
+		return nil, nil
+	}
+
+	arrayLength := int(n) - 1
+
+	ret := make([]int32, arrayLength)
+
+	for i := range ret {
+		ret[i] = int32(binary.BigEndian.Uint32(rd.raw[rd.off:]))
+		rd.off += 4
+	}
+	return ret, nil
 }
 
 func (rd *realDecoder) getInt32Array() ([]int32, error) {
@@ -290,6 +422,14 @@ func (rd *realDecoder) peek(offset, length int) (packetDecoder, error) {
 	return &realDecoder{raw: rd.raw[off : off+length]}, nil
 }
 
+func (rd *realDecoder) peekInt8(offset int) (int8, error) {
+	const byteLen = 1
+	if rd.remaining() < offset+byteLen {
+		return -1, ErrInsufficientData
+	}
+	return int8(rd.raw[rd.off+offset]), nil
+}
+
 // stacks
 
 func (rd *realDecoder) push(in pushDecoder) error {
@@ -321,4 +461,8 @@ func (rd *realDecoder) pop() error {
 	rd.stack = rd.stack[:len(rd.stack)-1]
 
 	return in.check(rd.off, rd.raw)
+}
+
+func (rd *realDecoder) metricRegistry() metrics.Registry {
+	return rd.registry
 }

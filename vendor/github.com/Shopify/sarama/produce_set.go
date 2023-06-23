@@ -2,6 +2,7 @@ package sarama
 
 import (
 	"encoding/binary"
+	"errors"
 	"time"
 )
 
@@ -12,17 +13,22 @@ type partitionSet struct {
 }
 
 type produceSet struct {
-	parent *asyncProducer
-	msgs   map[string]map[int32]*partitionSet
+	parent        *asyncProducer
+	msgs          map[string]map[int32]*partitionSet
+	producerID    int64
+	producerEpoch int16
 
 	bufferBytes int
 	bufferCount int
 }
 
 func newProduceSet(parent *asyncProducer) *produceSet {
+	pid, epoch := parent.txnmgr.getProducerID()
 	return &produceSet{
-		msgs:   make(map[string]map[int32]*partitionSet),
-		parent: parent,
+		msgs:          make(map[string]map[int32]*partitionSet),
+		parent:        parent,
+		producerID:    pid,
+		producerEpoch: epoch,
 	}
 }
 
@@ -43,9 +49,10 @@ func (ps *produceSet) add(msg *ProducerMessage) error {
 	}
 
 	timestamp := msg.Timestamp
-	if msg.Timestamp.IsZero() {
+	if timestamp.IsZero() {
 		timestamp = time.Now()
 	}
+	timestamp = timestamp.Truncate(time.Millisecond)
 
 	partitions := ps.msgs[msg.Topic]
 	if partitions == nil {
@@ -61,9 +68,13 @@ func (ps *produceSet) add(msg *ProducerMessage) error {
 			batch := &RecordBatch{
 				FirstTimestamp:   timestamp,
 				Version:          2,
-				ProducerID:       -1, /* No producer id */
 				Codec:            ps.parent.conf.Producer.Compression,
 				CompressionLevel: ps.parent.conf.Producer.CompressionLevel,
+				ProducerID:       ps.producerID,
+				ProducerEpoch:    ps.producerEpoch,
+			}
+			if ps.parent.conf.Producer.Idempotent {
+				batch.FirstSequence = msg.sequenceNumber
 			}
 			set = &partitionSet{recordsToSend: newDefaultRecords(batch)}
 			size = recordBatchOverhead
@@ -73,7 +84,15 @@ func (ps *produceSet) add(msg *ProducerMessage) error {
 		partitions[msg.Partition] = set
 	}
 
+	if ps.parent.conf.Version.IsAtLeast(V0_11_0_0) {
+		if ps.parent.conf.Producer.Idempotent && msg.sequenceNumber < set.recordsToSend.RecordBatch.FirstSequence {
+			return errors.New("assertion failed: message out of sequence added to a batch")
+		}
+	}
+
+	// Past this point we can't return an error, because we've already added the message to the set.
 	set.msgs = append(set.msgs, msg)
+
 	if ps.parent.conf.Version.IsAtLeast(V0_11_0_0) {
 		// We are being conservative here to avoid having to prep encode the record
 		size += maximumRecordOverhead
@@ -118,10 +137,17 @@ func (ps *produceSet) buildRequest() *ProduceRequest {
 	}
 	if ps.parent.conf.Version.IsAtLeast(V0_11_0_0) {
 		req.Version = 3
+		if ps.parent.IsTransactional() {
+			req.TransactionalID = &ps.parent.conf.Producer.Transaction.ID
+		}
 	}
 
-	for topic, partitionSet := range ps.msgs {
-		for partition, set := range partitionSet {
+	if ps.parent.conf.Producer.Compression == CompressionZSTD && ps.parent.conf.Version.IsAtLeast(V2_1_0_0) {
+		req.Version = 7
+	}
+
+	for topic, partitionSets := range ps.msgs {
+		for partition, set := range partitionSets {
 			if req.Version >= 3 {
 				// If the API version we're hitting is 3 or greater, we need to calculate
 				// offsets for each record in the batch relative to FirstOffset.
@@ -137,6 +163,9 @@ func (ps *produceSet) buildRequest() *ProduceRequest {
 						record.OffsetDelta = int64(i)
 					}
 				}
+
+				// Set the batch as transactional when a transactionalID is set
+				rb.IsTransactional = ps.parent.IsTransactional()
 
 				req.AddBatch(topic, partition, rb)
 				continue
@@ -159,7 +188,7 @@ func (ps *produceSet) buildRequest() *ProduceRequest {
 						msg.Offset = int64(i)
 					}
 				}
-				payload, err := encode(set.recordsToSend.MsgSet, ps.parent.conf.MetricRegistry)
+				payload, err := encode(set.recordsToSend.MsgSet, ps.parent.metricsRegistry)
 				if err != nil {
 					Logger.Println(err) // if this happens, it's basically our fault.
 					panic(err)
@@ -183,10 +212,10 @@ func (ps *produceSet) buildRequest() *ProduceRequest {
 	return req
 }
 
-func (ps *produceSet) eachPartition(cb func(topic string, partition int32, msgs []*ProducerMessage)) {
+func (ps *produceSet) eachPartition(cb func(topic string, partition int32, pSet *partitionSet)) {
 	for topic, partitionSet := range ps.msgs {
 		for partition, set := range partitionSet {
-			cb(topic, partition, set.msgs)
+			cb(topic, partition, set)
 		}
 	}
 }
@@ -213,12 +242,11 @@ func (ps *produceSet) wouldOverflow(msg *ProducerMessage) bool {
 
 	switch {
 	// Would we overflow our maximum possible size-on-the-wire? 10KiB is arbitrary overhead for safety.
-	case ps.bufferBytes+msg.byteSize(version) >= int(MaxRequestSize-(10*1024)):
+	case ps.bufferBytes+msg.ByteSize(version) >= int(MaxRequestSize-(10*1024)):
 		return true
-	// Would we overflow the size-limit of a compressed message-batch for this partition?
-	case ps.parent.conf.Producer.Compression != CompressionNone &&
-		ps.msgs[msg.Topic] != nil && ps.msgs[msg.Topic][msg.Partition] != nil &&
-		ps.msgs[msg.Topic][msg.Partition].bufferBytes+msg.byteSize(version) >= ps.parent.conf.Producer.MaxMessageBytes:
+	// Would we overflow the size-limit of a message-batch for this partition?
+	case ps.msgs[msg.Topic] != nil && ps.msgs[msg.Topic][msg.Partition] != nil &&
+		ps.msgs[msg.Topic][msg.Partition].bufferBytes+msg.ByteSize(version) >= ps.parent.conf.Producer.MaxMessageBytes:
 		return true
 	// Would we overflow simply in number of messages?
 	case ps.parent.conf.Producer.Flush.MaxMessages > 0 && ps.bufferCount >= ps.parent.conf.Producer.Flush.MaxMessages:

@@ -25,11 +25,31 @@ type SyncProducer interface {
 	// SendMessages will return an error.
 	SendMessages(msgs []*ProducerMessage) error
 
-	// Close shuts down the producer and waits for any buffered messages to be
-	// flushed. You must call this function before a producer object passes out of
-	// scope, as it may otherwise leak memory. You must call this before calling
-	// Close on the underlying client.
+	// Close shuts down the producer; you must call this function before a producer
+	// object passes out of scope, as it may otherwise leak memory.
+	// You must call this before calling Close on the underlying client.
 	Close() error
+
+	// TxnStatus return current producer transaction status.
+	TxnStatus() ProducerTxnStatusFlag
+
+	// IsTransactional return true when current producer is is transactional.
+	IsTransactional() bool
+
+	// BeginTxn mark current transaction as ready.
+	BeginTxn() error
+
+	// CommitTxn commit current transaction.
+	CommitTxn() error
+
+	// AbortTxn abort current transaction.
+	AbortTxn() error
+
+	// AddOffsetsToTxn add associated offsets to current transaction.
+	AddOffsetsToTxn(offsets map[string][]*PartitionOffsetMetadata, groupId string) error
+
+	// AddMessageToTxn add message offsets to current transaction.
+	AddMessageToTxn(msg *ConsumerMessage, groupId string, metadata *string) error
 }
 
 type syncProducer struct {
@@ -90,38 +110,23 @@ func verifyProducerConfig(config *Config) error {
 }
 
 func (sp *syncProducer) SendMessage(msg *ProducerMessage) (partition int32, offset int64, err error) {
-	oldMetadata := msg.Metadata
-	defer func() {
-		msg.Metadata = oldMetadata
-	}()
-
 	expectation := make(chan *ProducerError, 1)
-	msg.Metadata = expectation
+	msg.expectation = expectation
 	sp.producer.Input() <- msg
 
-	if err := <-expectation; err != nil {
-		return -1, -1, err.Err
+	if pErr := <-expectation; pErr != nil {
+		return -1, -1, pErr.Err
 	}
 
 	return msg.Partition, msg.Offset, nil
 }
 
 func (sp *syncProducer) SendMessages(msgs []*ProducerMessage) error {
-	savedMetadata := make([]interface{}, len(msgs))
-	for i := range msgs {
-		savedMetadata[i] = msgs[i].Metadata
-	}
-	defer func() {
-		for i := range msgs {
-			msgs[i].Metadata = savedMetadata[i]
-		}
-	}()
-
 	expectations := make(chan chan *ProducerError, len(msgs))
 	go func() {
 		for _, msg := range msgs {
 			expectation := make(chan *ProducerError, 1)
-			msg.Metadata = expectation
+			msg.expectation = expectation
 			sp.producer.Input() <- msg
 			expectations <- expectation
 		}
@@ -130,8 +135,8 @@ func (sp *syncProducer) SendMessages(msgs []*ProducerMessage) error {
 
 	var errors ProducerErrors
 	for expectation := range expectations {
-		if err := <-expectation; err != nil {
-			errors = append(errors, err)
+		if pErr := <-expectation; pErr != nil {
+			errors = append(errors, pErr)
 		}
 	}
 
@@ -144,7 +149,7 @@ func (sp *syncProducer) SendMessages(msgs []*ProducerMessage) error {
 func (sp *syncProducer) handleSuccesses() {
 	defer sp.wg.Done()
 	for msg := range sp.producer.Successes() {
-		expectation := msg.Metadata.(chan *ProducerError)
+		expectation := msg.expectation
 		expectation <- nil
 	}
 }
@@ -152,7 +157,7 @@ func (sp *syncProducer) handleSuccesses() {
 func (sp *syncProducer) handleErrors() {
 	defer sp.wg.Done()
 	for err := range sp.producer.Errors() {
-		expectation := err.Msg.Metadata.(chan *ProducerError)
+		expectation := err.Msg.expectation
 		expectation <- err
 	}
 }
@@ -161,4 +166,32 @@ func (sp *syncProducer) Close() error {
 	sp.producer.AsyncClose()
 	sp.wg.Wait()
 	return nil
+}
+
+func (sp *syncProducer) IsTransactional() bool {
+	return sp.producer.IsTransactional()
+}
+
+func (sp *syncProducer) BeginTxn() error {
+	return sp.producer.BeginTxn()
+}
+
+func (sp *syncProducer) CommitTxn() error {
+	return sp.producer.CommitTxn()
+}
+
+func (sp *syncProducer) AbortTxn() error {
+	return sp.producer.AbortTxn()
+}
+
+func (sp *syncProducer) AddOffsetsToTxn(offsets map[string][]*PartitionOffsetMetadata, groupId string) error {
+	return sp.producer.AddOffsetsToTxn(offsets, groupId)
+}
+
+func (sp *syncProducer) AddMessageToTxn(msg *ConsumerMessage, groupId string, metadata *string) error {
+	return sp.producer.AddMessageToTxn(msg, groupId, metadata)
+}
+
+func (p *syncProducer) TxnStatus() ProducerTxnStatusFlag {
+	return p.producer.TxnStatus()
 }

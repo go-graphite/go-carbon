@@ -182,7 +182,7 @@ func Open(stor storage.Storage, o *opt.Options) (db *DB, err error) {
 
 	err = s.recover()
 	if err != nil {
-		if !os.IsNotExist(err) || s.o.GetErrorIfMissing() {
+		if !os.IsNotExist(err) || s.o.GetErrorIfMissing() || s.o.GetReadOnly() {
 			return
 		}
 		err = s.create()
@@ -871,6 +871,10 @@ func (db *DB) Has(key []byte, ro *opt.ReadOptions) (ret bool, err error) {
 // range. A nil Range.Start is treated as a key before all keys in the
 // DB. And a nil Range.Limit is treated as a key after all keys in
 // the DB.
+//
+// WARNING: Any slice returned by interator (e.g. slice returned by calling
+// Iterator.Key() or Iterator.Key() methods), its content should not be modified
+// unless noted otherwise.
 //
 // The iterator must be released after use, by calling Release method.
 //

@@ -1,11 +1,22 @@
 package sarama
 
 import (
+	"errors"
+	"sort"
 	"time"
+
+	"github.com/rcrowley/go-metrics"
+)
+
+const (
+	invalidLeaderEpoch        = -1
+	invalidPreferredReplicaID = -1
 )
 
 type AbortedTransaction struct {
-	ProducerID  int64
+	// ProducerID contains the producer id associated with the aborted transaction.
+	ProducerID int64
+	// FirstOffset contains the first offset in the aborted transaction.
 	FirstOffset int64
 }
 
@@ -29,16 +40,37 @@ func (t *AbortedTransaction) encode(pe packetEncoder) (err error) {
 }
 
 type FetchResponseBlock struct {
-	Err                 KError
+	// Err contains the error code, or 0 if there was no fetch error.
+	Err KError
+	// HighWatermarkOffset contains the current high water mark.
 	HighWaterMarkOffset int64
-	LastStableOffset    int64
+	// LastStableOffset contains the last stable offset (or LSO) of the
+	// partition. This is the last offset such that the state of all
+	// transactional records prior to this offset have been decided (ABORTED or
+	// COMMITTED)
+	LastStableOffset       int64
+	LastRecordsBatchOffset *int64
+	// LogStartOffset contains the current log start offset.
+	LogStartOffset int64
+	// AbortedTransactions contains the aborted transactions.
 	AbortedTransactions []*AbortedTransaction
-	Records             *Records // deprecated: use FetchResponseBlock.Records
-	RecordsSet          []*Records
-	Partial             bool
+	// PreferredReadReplica contains the preferred read replica for the
+	// consumer to use on its next fetch request
+	PreferredReadReplica int32
+	// RecordsSet contains the record data.
+	RecordsSet []*Records
+
+	Partial bool
+	Records *Records // deprecated: use FetchResponseBlock.RecordsSet
 }
 
 func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error) {
+	metricRegistry := pd.metricRegistry()
+	var sizeMetric metrics.Histogram
+	if metricRegistry != nil {
+		sizeMetric = getOrRegisterHistogram("consumer-fetch-response-size", metricRegistry)
+	}
+
 	tmp, err := pd.getInt16()
 	if err != nil {
 		return err
@@ -54,6 +86,13 @@ func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error)
 		b.LastStableOffset, err = pd.getInt64()
 		if err != nil {
 			return err
+		}
+
+		if version >= 5 {
+			b.LogStartOffset, err = pd.getInt64()
+			if err != nil {
+				return err
+			}
 		}
 
 		numTransact, err := pd.getArrayLength()
@@ -74,9 +113,21 @@ func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error)
 		}
 	}
 
+	if version >= 11 {
+		b.PreferredReadReplica, err = pd.getInt32()
+		if err != nil {
+			return err
+		}
+	} else {
+		b.PreferredReadReplica = -1
+	}
+
 	recordsSize, err := pd.getInt32()
 	if err != nil {
 		return err
+	}
+	if sizeMetric != nil {
+		sizeMetric.Update(int64(recordsSize))
 	}
 
 	recordsDecoder, err := pd.getSubset(int(recordsSize))
@@ -90,7 +141,7 @@ func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error)
 		records := &Records{}
 		if err := records.decode(recordsDecoder); err != nil {
 			// If we have at least one decoded records, this is not an error
-			if err == ErrInsufficientData {
+			if errors.Is(err, ErrInsufficientData) {
 				if len(b.RecordsSet) == 0 {
 					b.Partial = true
 				}
@@ -99,20 +150,36 @@ func (b *FetchResponseBlock) decode(pd packetDecoder, version int16) (err error)
 			return err
 		}
 
+		b.LastRecordsBatchOffset, err = records.recordsOffset()
+		if err != nil {
+			return err
+		}
+
 		partial, err := records.isPartial()
 		if err != nil {
 			return err
 		}
 
-		// If we have at least one full records, we skip incomplete ones
-		if partial && len(b.RecordsSet) > 0 {
-			break
+		n, err := records.numRecords()
+		if err != nil {
+			return err
 		}
 
-		b.RecordsSet = append(b.RecordsSet, records)
+		if n > 0 || (partial && len(b.RecordsSet) == 0) {
+			b.RecordsSet = append(b.RecordsSet, records)
 
-		if b.Records == nil {
-			b.Records = records
+			if b.Records == nil {
+				b.Records = records
+			}
+		}
+
+		overflow, err := records.isOverflow()
+		if err != nil {
+			return err
+		}
+
+		if partial || overflow {
+			break
 		}
 	}
 
@@ -154,6 +221,10 @@ func (b *FetchResponseBlock) encode(pe packetEncoder, version int16) (err error)
 	if version >= 4 {
 		pe.putInt64(b.LastStableOffset)
 
+		if version >= 5 {
+			pe.putInt64(b.LogStartOffset)
+		}
+
 		if err = pe.putArrayLength(len(b.AbortedTransactions)); err != nil {
 			return err
 		}
@@ -162,6 +233,10 @@ func (b *FetchResponseBlock) encode(pe packetEncoder, version int16) (err error)
 				return err
 			}
 		}
+	}
+
+	if version >= 11 {
+		pe.putInt32(b.PreferredReadReplica)
 	}
 
 	pe.push(&lengthField{})
@@ -174,10 +249,33 @@ func (b *FetchResponseBlock) encode(pe packetEncoder, version int16) (err error)
 	return pe.pop()
 }
 
+func (b *FetchResponseBlock) getAbortedTransactions() []*AbortedTransaction {
+	// I can't find any doc that guarantee the field `fetchResponse.AbortedTransactions` is ordered
+	// plus Java implementation use a PriorityQueue based on `FirstOffset`. I guess we have to order it ourself
+	at := b.AbortedTransactions
+	sort.Slice(
+		at,
+		func(i, j int) bool { return at[i].FirstOffset < at[j].FirstOffset },
+	)
+	return at
+}
+
 type FetchResponse struct {
-	Blocks       map[string]map[int32]*FetchResponseBlock
+	// Version defines the protocol version to use for encode and decode
+	Version int16
+	// ThrottleTime contains the duration in milliseconds for which the request
+	// was throttled due to a quota violation, or zero if the request did not
+	// violate any quota.
 	ThrottleTime time.Duration
-	Version      int16 // v1 requires 0.9+, v2 requires 0.10+
+	// ErrorCode contains the top level response error code.
+	ErrorCode int16
+	// SessionID contains the fetch session ID, or 0 if this is not part of a fetch session.
+	SessionID int32
+	// Blocks contains the response topics.
+	Blocks map[string]map[int32]*FetchResponseBlock
+
+	LogAppendTime bool
+	Timestamp     time.Time
 }
 
 func (r *FetchResponse) decode(pd packetDecoder, version int16) (err error) {
@@ -189,6 +287,17 @@ func (r *FetchResponse) decode(pd packetDecoder, version int16) (err error) {
 			return err
 		}
 		r.ThrottleTime = time.Duration(throttle) * time.Millisecond
+	}
+
+	if r.Version >= 7 {
+		r.ErrorCode, err = pd.getInt16()
+		if err != nil {
+			return err
+		}
+		r.SessionID, err = pd.getInt32()
+		if err != nil {
+			return err
+		}
 	}
 
 	numTopics, err := pd.getArrayLength()
@@ -233,6 +342,11 @@ func (r *FetchResponse) encode(pe packetEncoder) (err error) {
 		pe.putInt32(int32(r.ThrottleTime / time.Millisecond))
 	}
 
+	if r.Version >= 7 {
+		pe.putInt16(r.ErrorCode)
+		pe.putInt32(r.SessionID)
+	}
+
 	err = pe.putArrayLength(len(r.Blocks))
 	if err != nil {
 		return err
@@ -256,7 +370,6 @@ func (r *FetchResponse) encode(pe packetEncoder) (err error) {
 				return err
 			}
 		}
-
 	}
 	return nil
 }
@@ -269,18 +382,34 @@ func (r *FetchResponse) version() int16 {
 	return r.Version
 }
 
+func (r *FetchResponse) headerVersion() int16 {
+	return 0
+}
+
 func (r *FetchResponse) requiredVersion() KafkaVersion {
 	switch r.Version {
+	case 0:
+		return MinVersion
 	case 1:
 		return V0_9_0_0
 	case 2:
 		return V0_10_0_0
 	case 3:
 		return V0_10_1_0
-	case 4:
+	case 4, 5:
 		return V0_11_0_0
+	case 6:
+		return V1_0_0_0
+	case 7:
+		return V1_1_0_0
+	case 8:
+		return V2_0_0_0
+	case 9, 10:
+		return V2_1_0_0
+	case 11:
+		return V2_3_0_0
 	default:
-		return MinVersion
+		return MaxVersion
 	}
 }
 
@@ -344,10 +473,13 @@ func encodeKV(key, value Encoder) ([]byte, []byte) {
 	return kb, vb
 }
 
-func (r *FetchResponse) AddMessage(topic string, partition int32, key, value Encoder, offset int64) {
+func (r *FetchResponse) AddMessageWithTimestamp(topic string, partition int32, key, value Encoder, offset int64, timestamp time.Time, version int8) {
 	frb := r.getOrCreateBlock(topic, partition)
 	kb, vb := encodeKV(key, value)
-	msg := &Message{Key: kb, Value: vb}
+	if r.LogAppendTime {
+		timestamp = r.Timestamp
+	}
+	msg := &Message{Key: kb, Value: vb, LogAppendTime: r.LogAppendTime, Timestamp: timestamp, Version: version}
 	msgBlock := &MessageBlock{Msg: msg, Offset: offset}
 	if len(frb.RecordsSet) == 0 {
 		records := newLegacyRecords(&MessageSet{})
@@ -357,16 +489,92 @@ func (r *FetchResponse) AddMessage(topic string, partition int32, key, value Enc
 	set.Messages = append(set.Messages, msgBlock)
 }
 
-func (r *FetchResponse) AddRecord(topic string, partition int32, key, value Encoder, offset int64) {
+func (r *FetchResponse) AddRecordWithTimestamp(topic string, partition int32, key, value Encoder, offset int64, timestamp time.Time) {
 	frb := r.getOrCreateBlock(topic, partition)
 	kb, vb := encodeKV(key, value)
-	rec := &Record{Key: kb, Value: vb, OffsetDelta: offset}
 	if len(frb.RecordsSet) == 0 {
-		records := newDefaultRecords(&RecordBatch{Version: 2})
+		records := newDefaultRecords(&RecordBatch{Version: 2, LogAppendTime: r.LogAppendTime, FirstTimestamp: timestamp, MaxTimestamp: r.Timestamp})
 		frb.RecordsSet = []*Records{&records}
 	}
 	batch := frb.RecordsSet[0].RecordBatch
+	rec := &Record{Key: kb, Value: vb, OffsetDelta: offset, TimestampDelta: timestamp.Sub(batch.FirstTimestamp)}
 	batch.addRecord(rec)
+}
+
+// AddRecordBatchWithTimestamp is similar to AddRecordWithTimestamp
+// But instead of appending 1 record to a batch, it append a new batch containing 1 record to the fetchResponse
+// Since transaction are handled on batch level (the whole batch is either committed or aborted), use this to test transactions
+func (r *FetchResponse) AddRecordBatchWithTimestamp(topic string, partition int32, key, value Encoder, offset int64, producerID int64, isTransactional bool, timestamp time.Time) {
+	frb := r.getOrCreateBlock(topic, partition)
+	kb, vb := encodeKV(key, value)
+
+	records := newDefaultRecords(&RecordBatch{Version: 2, LogAppendTime: r.LogAppendTime, FirstTimestamp: timestamp, MaxTimestamp: r.Timestamp})
+	batch := &RecordBatch{
+		Version:         2,
+		LogAppendTime:   r.LogAppendTime,
+		FirstTimestamp:  timestamp,
+		MaxTimestamp:    r.Timestamp,
+		FirstOffset:     offset,
+		LastOffsetDelta: 0,
+		ProducerID:      producerID,
+		IsTransactional: isTransactional,
+	}
+	rec := &Record{Key: kb, Value: vb, OffsetDelta: 0, TimestampDelta: timestamp.Sub(batch.FirstTimestamp)}
+	batch.addRecord(rec)
+	records.RecordBatch = batch
+
+	frb.RecordsSet = append(frb.RecordsSet, &records)
+}
+
+func (r *FetchResponse) AddControlRecordWithTimestamp(topic string, partition int32, offset int64, producerID int64, recordType ControlRecordType, timestamp time.Time) {
+	frb := r.getOrCreateBlock(topic, partition)
+
+	// batch
+	batch := &RecordBatch{
+		Version:         2,
+		LogAppendTime:   r.LogAppendTime,
+		FirstTimestamp:  timestamp,
+		MaxTimestamp:    r.Timestamp,
+		FirstOffset:     offset,
+		LastOffsetDelta: 0,
+		ProducerID:      producerID,
+		IsTransactional: true,
+		Control:         true,
+	}
+
+	// records
+	records := newDefaultRecords(nil)
+	records.RecordBatch = batch
+
+	// record
+	crAbort := ControlRecord{
+		Version: 0,
+		Type:    recordType,
+	}
+	crKey := &realEncoder{raw: make([]byte, 4)}
+	crValue := &realEncoder{raw: make([]byte, 6)}
+	crAbort.encode(crKey, crValue)
+	rec := &Record{Key: ByteEncoder(crKey.raw), Value: ByteEncoder(crValue.raw), OffsetDelta: 0, TimestampDelta: timestamp.Sub(batch.FirstTimestamp)}
+	batch.addRecord(rec)
+
+	frb.RecordsSet = append(frb.RecordsSet, &records)
+}
+
+func (r *FetchResponse) AddMessage(topic string, partition int32, key, value Encoder, offset int64) {
+	r.AddMessageWithTimestamp(topic, partition, key, value, offset, time.Time{}, 0)
+}
+
+func (r *FetchResponse) AddRecord(topic string, partition int32, key, value Encoder, offset int64) {
+	r.AddRecordWithTimestamp(topic, partition, key, value, offset, time.Time{})
+}
+
+func (r *FetchResponse) AddRecordBatch(topic string, partition int32, key, value Encoder, offset int64, producerID int64, isTransactional bool) {
+	r.AddRecordBatchWithTimestamp(topic, partition, key, value, offset, producerID, isTransactional, time.Time{})
+}
+
+func (r *FetchResponse) AddControlRecord(topic string, partition int32, offset int64, producerID int64, recordType ControlRecordType) {
+	// define controlRecord key and value
+	r.AddControlRecordWithTimestamp(topic, partition, offset, producerID, recordType, time.Time{})
 }
 
 func (r *FetchResponse) SetLastOffsetDelta(topic string, partition int32, offset int32) {
