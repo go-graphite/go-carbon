@@ -111,10 +111,11 @@ type Options struct {
 	Compressed bool
 	// It's a hint, used if the retention is big enough, more in
 	// Retention.calculateSuitablePointsPerBlock
-	PointsPerBlock int
-	PointSize      float32
-	InMemory       bool
-	OpenFileFlag   *int
+	PointsPerBlock  int
+	PointSize       float32
+	InMemory        bool
+	InMemoryContent []byte
+	OpenFileFlag    *int
 
 	MixAggregationSpecs        []MixAggregationSpec
 	MixAvgCompressedPointSizes map[int][]float32
@@ -596,7 +597,15 @@ func Open(path string) (whisper *Whisper, err error) {
 func OpenWithOptions(path string, options *Options) (whisper *Whisper, err error) {
 	var file file
 	if options.InMemory {
-		file = newMemFile(path)
+		if mc := options.InMemoryContent; mc != nil {
+			file = &memFile{
+				name:   path,
+				data:   mc,
+				offset: 0,
+			}
+		} else {
+			file = newMemFile(path)
+		}
 	} else {
 		flag := os.O_RDWR
 		if options.OpenFileFlag != nil {
