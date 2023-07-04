@@ -100,6 +100,8 @@ github.com/go-graphite/go-whisper v0.0.0-20230221134257-6774e38a461b h1:vyKMs7TO
 github.com/go-graphite/go-whisper v0.0.0-20230221134257-6774e38a461b/go.mod h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=
 github.com/go-graphite/go-whisper v0.0.0-20230316154527-2337c74b5007 h1:jfpukwFZGuZhWTKbGL+qNJB32CDBcERIQ+03hnPsdIs=
 github.com/go-graphite/go-whisper v0.0.0-20230316154527-2337c74b5007/go.mod h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=
+github.com/go-graphite/go-whisper v0.0.0-20230526115116-e3110f57c01c h1:Edc/U64p3BAlAm/V8WLjEwK4WxC2eq1FOyLw3yO99zg=
+github.com/go-graphite/go-whisper v0.0.0-20230526115116-e3110f57c01c/go.mod h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=
 github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee h1:Sb63UbLUOXtKFIfNfZIkWrs73vWD0ZKzrBdTjvlVOBQ=
 github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee/go.mod h1:puWkW2DFZi46CaLY1rxYhkDiBDFlpaTDaMjcE/Cd9gw=
 github.com/go-kit/kit v0.8.0/go.mod h1:xBxKIO96dXMWWy0MnWVtmwkA9/13aqxPnvrjFYMA2as=
