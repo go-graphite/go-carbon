@@ -259,12 +259,14 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	}
 
 	if response.metricsFetched == 0 && !listener.emptyResultOk {
-		accessLogger.Error("fetch failed",
-			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "no metrics found"),
-			zap.Int("http_code", http.StatusNotFound),
-			zap.Error(err),
-		)
+		if !listener.doNotLog404s {
+			accessLogger.Error("fetch failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "no metrics found"),
+				zap.Int("http_code", http.StatusNotFound),
+				zap.Error(err),
+			)
+		}
 		http.Error(wr, "Bad request (Not Found)", http.StatusNotFound)
 		return
 	}
@@ -808,11 +810,13 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	}
 
 	if metricsFetched == 0 && !listener.emptyResultOk {
-		accessLogger.Error("fetch failed",
-			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", "no metrics found"),
-			zap.Error(err),
-		)
+		if !listener.doNotLog404s {
+			accessLogger.Error("fetch failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", "no metrics found"),
+				zap.Error(err),
+			)
+		}
 		return status.New(codes.NotFound, "no metrics found").Err()
 	}
 

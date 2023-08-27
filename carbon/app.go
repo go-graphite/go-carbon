@@ -481,6 +481,7 @@ func (app *App) Start(version string) (err error) {
 		carbonserver.SetWhisperData(conf.Whisper.DataDir)
 		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 		carbonserver.SetEmptyResultOk(conf.Carbonserver.EmptyResultOk)
+		carbonserver.SetDoNotLog404s(conf.Carbonserver.DoNotLog404s)
 		carbonserver.SetFLock(app.Config.Whisper.FLock)
 		carbonserver.SetCompressed(app.Config.Whisper.Compressed)
 		carbonserver.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
