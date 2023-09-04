@@ -362,6 +362,9 @@ graphite-web-10-strict-mode = true
 # Return a 404 instead of empty results. Set to true if you are serving requests to graphite-web
 empty-result-ok = false
 
+# Do not log 404 (metric not found) errors
+do-not-log-404s = false
+
 # Allows to keep track for "last time readed" between restarts, leave empty to disable
 internal-stats-dir = ""
 # Calculate /render request time percentiles for the bucket, '95' means calculate 95th Percentile. 

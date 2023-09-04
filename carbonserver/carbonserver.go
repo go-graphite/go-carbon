@@ -229,6 +229,7 @@ type CarbonserverListener struct {
 	buckets           int
 	maxGlobs          int
 	emptyResultOk     bool
+	doNotLog404s      bool
 	failOnMaxGlobs    bool
 	percentiles       []int
 	scanFrequency     time.Duration
@@ -507,6 +508,9 @@ func (listener *CarbonserverListener) SetMaxGlobs(maxGlobs int) {
 }
 func (listener *CarbonserverListener) SetEmptyResultOk(emptyResultOk bool) {
 	listener.emptyResultOk = emptyResultOk
+}
+func (listener *CarbonserverListener) SetDoNotLog404s(doNotLog404s bool) {
+	listener.doNotLog404s = doNotLog404s
 }
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs

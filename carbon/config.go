@@ -118,6 +118,7 @@ type carbonserverConfig struct {
 	MaxGlobs                   int        `toml:"max-globs"`
 	FailOnMaxGlobs             bool       `toml:"fail-on-max-globs"`
 	EmptyResultOk              bool       `toml:"empty-result-ok"`
+	DoNotLog404s               bool       `toml:"do-not-log-404s"`
 	MetricsAsCounters          bool       `toml:"metrics-as-counters"`
 	TrigramIndex               bool       `toml:"trigram-index"`
 	InternalStatsDir           string     `toml:"internal-stats-dir"`

@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: [ 1.17.x, 1.18.x, 1.19.x, 1.20.x, tip ]
+        go: [ 1.18.x, 1.19.x, 1.20.x, 1.21.x, tip ]
 
     steps:
       - name: Set up Go stable
@@ -64,7 +64,7 @@ jobs:
       - name: Install packaging dependencies
         run: |
           gem install rake fpm:1.10.2 package_cloud
-          GO111MODULE=off go get github.com/mitchellh/gox
+          go install github.com/mitchellh/gox@latest
 
       - name: Check packaging
         run: |
