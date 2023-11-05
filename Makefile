@@ -132,6 +132,7 @@ packagecloud-push-deb: $(wildcard $(NAME)_$(VERSION)_*.deb)
 		package_cloud push $(REPO)/debian/stretch  $${pkg} || true
 		package_cloud push $(REPO)/debian/buster   $${pkg} || true
 		package_cloud push $(REPO)/debian/bullseye $${pkg} || true
+		package_cloud push $(REPO)/debian/bookworm $${pkg} || true
 	done
 
 packagecloud-push:
