@@ -1,6 +1,26 @@
 ## Changelog
 ##### master
 
+##### version 0.17.3
+* Bump golang.org/x/net from 0.7.0 to 0.17.0 by @dependabot in #568
+* Version bump by @deniszh
+
+##### version 0.17.2
+* Refresh actions and go versions by @deniszh in #539
+* Use protojson.Marshal for produce json from the proto messages by @deniszh in #540
+* update go-whisper lib by @auguzun in #542
+* Fixing typo with go tip, update Docker base images by @deniszh in #543
+* updated golang in go.mod from 1.18 to 1.20 by @auguzun in #545
+* added logic to handle corrupt whisper file without archive info by @auguzun in #548
+* Dependabots security PRs by @deniszh in #551
+* Bump golang.org/x/net from 0.0.0-20210525063256-abc453219eb5 to 0.7.0 by @dependabot in #549
+* add shared lock for read request by @auguzun in #553
+* removed trigram field in trie index because it is not used by @auguzun in #554
+* Update go-whisper by @deniszh in #560
+* Optionally disable 404 error logging (fix #563) by @deniszh in #564
+* Bump gopkg.in/yaml.v3 from 3.0.0-20200313102051-9f266ea9e77c to 3.0.0 by @dependabot in #565
+* Build packages for Debian Bookworm by @anayrat in #571
+
 ##### version 0.17.1
 * Version bump by @deniszh
 
