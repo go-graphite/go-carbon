@@ -3,7 +3,7 @@ module github.com/go-graphite/go-carbon
 go 1.20
 
 require (
-	cloud.google.com/go/pubsub v1.2.0
+	cloud.google.com/go/pubsub v1.30.0
 	github.com/BurntSushi/toml v0.3.1
 	github.com/NYTimes/gziphandler v1.0.1
 	github.com/OneOfOne/go-utils v0.0.0-20180319162427-6019ff89a94e
@@ -16,7 +16,7 @@ require (
 	github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db // indirect
-	github.com/google/go-cmp v0.5.8
+	github.com/google/go-cmp v0.5.9
 	github.com/kardianos/osext v0.0.0-20170510131534-ae77be60afb1 // indirect
 	github.com/klauspost/compress v1.4.0
 	github.com/lomik/graphite-pickle v0.0.0-20171221213606-614e8df42119
@@ -25,35 +25,38 @@ require (
 	github.com/lomik/zapwriter v0.0.0-20180906104450-2ec2b9a61680
 	github.com/prometheus/client_golang v1.11.1
 	github.com/sevlyar/go-daemon v0.1.6-0.20210508104436-15bb82c8ea3c
-	github.com/stretchr/testify v1.7.0
+	github.com/stretchr/testify v1.8.1
 	github.com/syndtr/goleveldb v0.0.0-20180815032940-ae2bd5eed72d
 	github.com/vmihailenco/msgpack/v5 v5.3.5
 	go.opentelemetry.io/otel v0.9.0
 	go.opentelemetry.io/otel/exporters/trace/jaeger v0.9.0
 	go.uber.org/zap v1.9.1
-	google.golang.org/api v0.29.0
-	google.golang.org/grpc v1.47.0
+	google.golang.org/api v0.114.0
+	google.golang.org/grpc v1.56.3
 )
 
 require (
 	golang.org/x/net v0.17.0
-	google.golang.org/protobuf v1.28.0
+	google.golang.org/protobuf v1.30.0
 )
 
 require (
-	cloud.google.com/go v0.56.0 // indirect
+	cloud.google.com/go v0.110.0 // indirect
+	cloud.google.com/go/compute v1.19.1 // indirect
+	cloud.google.com/go/compute/metadata v0.2.3 // indirect
+	cloud.google.com/go/iam v0.13.0 // indirect
 	github.com/Shopify/toxiproxy v2.1.4+incompatible // indirect
 	github.com/apache/thrift v0.13.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.1.1 // indirect
+	github.com/cespare/xxhash/v2 v2.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/eapache/go-resiliency v1.1.0 // indirect
 	github.com/eapache/go-xerial-snappy v0.0.0-20180814174437-776d5712da21 // indirect
 	github.com/eapache/queue v1.1.0 // indirect
 	github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/googleapis/gax-go/v2 v2.0.5 // indirect
-	github.com/jstemmer/go-junit-report v0.9.1 // indirect
+	github.com/golang/protobuf v1.5.3 // indirect
+	github.com/googleapis/enterprise-certificate-proxy v0.2.3 // indirect
+	github.com/googleapis/gax-go/v2 v2.7.1 // indirect
 	github.com/klauspost/cpuid v0.0.0-20170728055534-ae7887de9fa5 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
 	github.com/onsi/ginkgo v1.14.0 // indirect
@@ -65,18 +68,14 @@ require (
 	github.com/prometheus/procfs v0.6.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20180503174638-e2704e165165 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
-	go.opencensus.io v0.22.3 // indirect
+	go.opencensus.io v0.24.0 // indirect
 	go.uber.org/atomic v1.3.2 // indirect
 	go.uber.org/multierr v1.1.0 // indirect
-	golang.org/x/lint v0.0.0-20200302205851-738671d3881b // indirect
-	golang.org/x/mod v0.8.0 // indirect
-	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
+	golang.org/x/oauth2 v0.7.0 // indirect
 	golang.org/x/sync v0.1.0 // indirect
 	golang.org/x/sys v0.13.0 // indirect
 	golang.org/x/text v0.13.0 // indirect
-	golang.org/x/tools v0.6.0 // indirect
-	google.golang.org/appengine v1.6.5 // indirect
-	google.golang.org/genproto v0.0.0-20200526211855-cb27e3aa2013 // indirect
-	gopkg.in/yaml.v3 v3.0.0 // indirect
-	honnef.co/go/tools v0.0.1-2020.1.3 // indirect
+	google.golang.org/appengine v1.6.7 // indirect
+	google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
