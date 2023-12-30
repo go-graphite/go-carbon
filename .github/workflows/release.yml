@@ -32,7 +32,7 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '2.7' # Version range or exact version of a Ruby version to use, using semvers version range syntax.
+          ruby-version: "2.7" # Version range or exact version of a Ruby version to use, using semvers version range syntax.
       - name: Install packaging dependencies
         run: |
           gem install dotenv -v 2.8.1
@@ -47,7 +47,7 @@ jobs:
           ARTIFACTS=
           # Upload all deb and rpm packages
           for package in *deb *rpm; do ARTIFACTS=${ARTIFACTS}\"$package\",\ ; done
-          echo ::set-output name=matrix::{\"file\": [${ARTIFACTS} \"sha256sum\", \"md5sum\"]}
+          echo "matrix={\"file\": [${ARTIFACTS} \"sha256sum\", \"md5sum\"]}" >> $GITHUB_OUTPUT
 
       - name: Check version
         id: check_version
