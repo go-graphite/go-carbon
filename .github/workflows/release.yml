@@ -46,7 +46,7 @@ jobs:
           ARTIFACTS=
           # Upload all deb and rpm packages
           for package in *deb *rpm; do ARTIFACTS=${ARTIFACTS}\"$package\",\ ; done
-          echo "matrix={\"file\": [${ARTIFACTS} \"sha256sum\", \"md5sum\"]}" >> $GITHUB_OUTPUT
+          echo "matrix={\"file\": [${ARTIFACTS} \"sha256sum\", \"md5sum\"]}" >> "$GITHUB_OUTPUT"
 
       - name: Check version
         id: check_version
