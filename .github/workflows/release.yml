@@ -35,6 +35,7 @@ jobs:
           ruby-version: '2.7' # Version range or exact version of a Ruby version to use, using semvers version range syntax.
       - name: Install packaging dependencies
         run: |
+          gem install dotenv -v 2.8.1
           gem install rake fpm:1.10.2 package_cloud
           GO111MODULE=off go get github.com/mitchellh/gox
 
