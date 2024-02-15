@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: [ 1.18.x, 1.19.x, 1.20.x, 1.21.x, tip ]
+        go: [ 1.19.x, 1.20.x, 1.21.x, 1.22.x, tip ]
 
     steps:
       - name: Set up Go stable
         if: matrix.go != 'tip'
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
       - name: Set up Go tip
@@ -32,7 +32,7 @@ jobs:
           echo "PATH=$HOME/go/bin:$HOME/sdk/gotip/bin/:$PATH" >> $GITHUB_ENV
 
       - name: Check out code into the Go module directory
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Checkout to the latest tag
         run: |
@@ -63,6 +63,7 @@ jobs:
 
       - name: Install packaging dependencies
         run: |
+          gem install dotenv -v 2.8.1
           gem install rake fpm:1.10.2 package_cloud
           go install github.com/mitchellh/gox@latest
 
@@ -74,7 +75,7 @@ jobs:
       - name: Upload Artifact
         if: ${{ matrix.go == 'tip' }} # only upload artifact when built with latest go
         id: artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.go }}
           retention-days: 3
