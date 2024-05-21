@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"bytes"
+	"encoding"
 	"fmt"
 	"log"
 	"os"
@@ -24,7 +25,7 @@ type Duration struct {
 	time.Duration
 }
 
-var _ toml.TextMarshaler = &Duration{}
+var _ encoding.TextMarshaler = &Duration{}
 
 // UnmarshalText from TOML
 func (d *Duration) UnmarshalText(text []byte) error {

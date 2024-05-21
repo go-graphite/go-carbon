@@ -1,6 +1,7 @@
 package kafka
 
 import (
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/BurntSushi/toml"
 	"github.com/IBM/sarama"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/atomicfiles"
@@ -140,7 +140,7 @@ type Duration struct {
 	time.Duration
 }
 
-var _ toml.TextMarshaler = &Duration{}
+var _ encoding.TextMarshaler = &Duration{}
 
 // UnmarshalText from TOML
 func (d *Duration) UnmarshalText(text []byte) error {
