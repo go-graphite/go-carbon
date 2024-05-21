@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/atomicfiles"
 	"github.com/go-graphite/go-carbon/points"
@@ -18,6 +18,7 @@ import (
 	"github.com/go-graphite/go-carbon/receiver/parse"
 	"github.com/lomik/zapwriter"
 	"github.com/prometheus/client_golang/prometheus"
+
 	"go.uber.org/zap"
 )
 

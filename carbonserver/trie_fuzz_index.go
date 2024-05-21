@@ -1,3 +1,4 @@
+//go:build fuzz_trie_index
 // +build fuzz_trie_index
 
 package carbonserver

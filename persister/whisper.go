@@ -16,6 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	whisper "github.com/go-graphite/go-whisper"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"

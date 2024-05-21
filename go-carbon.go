@@ -19,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	daemon "github.com/sevlyar/go-daemon"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/carbon"

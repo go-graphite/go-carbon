@@ -17,6 +17,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-whisper"
 	pb "github.com/go-graphite/protocol/carbonapi_v2_pb"
+
 	"go.uber.org/zap"
 )
 

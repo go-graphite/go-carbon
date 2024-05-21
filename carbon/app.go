@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/api"
@@ -578,9 +579,6 @@ func (app *App) Start(version string) (err error) {
 
 		if conf.Prometheus.Enabled {
 			carbonserver.InitPrometheus(app.PromRegisterer)
-		}
-		if conf.Tracing.Enabled {
-			app.FlushTraces = carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, version, conf.Tracing.SendTimeout.Value())
 		}
 
 		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)

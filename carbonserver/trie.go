@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/lomik/zapwriter"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/points"

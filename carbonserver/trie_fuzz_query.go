@@ -1,3 +1,4 @@
+//go:build fuzz_trie_query
 // +build fuzz_trie_query
 
 package carbonserver
