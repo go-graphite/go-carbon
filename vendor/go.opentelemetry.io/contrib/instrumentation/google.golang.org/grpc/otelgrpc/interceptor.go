@@ -1,5 +1,16 @@
 // Copyright The OpenTelemetry Authors
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package otelgrpc // import "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
@@ -48,7 +59,7 @@ var (
 )
 
 // UnaryClientInterceptor returns a grpc.UnaryClientInterceptor suitable
-// for use in a grpc.NewClient call.
+// for use in a grpc.Dial call.
 //
 // Deprecated: Use [NewClientHandler] instead.
 func UnaryClientInterceptor(opts ...Option) grpc.UnaryClientInterceptor {
@@ -185,7 +196,7 @@ func (w *clientStream) CloseSend() error {
 	return err
 }
 
-func wrapClientStream(s grpc.ClientStream, desc *grpc.StreamDesc, span trace.Span, cfg *config) *clientStream {
+func wrapClientStream(ctx context.Context, s grpc.ClientStream, desc *grpc.StreamDesc, span trace.Span, cfg *config) *clientStream {
 	return &clientStream{
 		ClientStream:  s,
 		span:          span,
@@ -208,7 +219,7 @@ func (w *clientStream) endSpan(err error) {
 }
 
 // StreamClientInterceptor returns a grpc.StreamClientInterceptor suitable
-// for use in a grpc.NewClient call.
+// for use in a grpc.Dial call.
 //
 // Deprecated: Use [NewClientHandler] instead.
 func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
@@ -259,7 +270,7 @@ func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
 			span.End()
 			return s, err
 		}
-		stream := wrapClientStream(s, desc, span, cfg)
+		stream := wrapClientStream(ctx, s, desc, span, cfg)
 		return stream, nil
 	}
 }
