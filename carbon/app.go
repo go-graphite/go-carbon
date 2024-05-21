@@ -331,7 +331,7 @@ func (app *App) startPersister() {
 }
 
 // Start starts
-func (app *App) Start(version string) (err error) {
+func (app *App) Start() (err error) {
 	app.Lock()
 	defer app.Unlock()
 
@@ -579,6 +579,9 @@ func (app *App) Start(version string) (err error) {
 
 		if conf.Prometheus.Enabled {
 			carbonserver.InitPrometheus(app.PromRegisterer)
+		}
+		if conf.Tracing.Enabled {
+			log.Printf("Otel tracing is removed in current verion, ignoring tracing.enabled=true")
 		}
 
 		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
