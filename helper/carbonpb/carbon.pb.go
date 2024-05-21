@@ -3,30 +3,36 @@
 // DO NOT EDIT!
 
 /*
-	Package carbonpb is a generated protocol buffer package.
+Package carbonpb is a generated protocol buffer package.
 
-	It is generated from these files:
-		carbon.proto
+It is generated from these files:
 
-	It has these top-level messages:
-		Point
-		Metric
-		Payload
-		CacheRequest
+	carbon.proto
+
+It has these top-level messages:
+
+	Point
+	Metric
+	Payload
+	CacheRequest
 */
 package carbonpb
 
-import proto "github.com/gogo/protobuf/proto"
-import fmt "fmt"
-import math "math"
-import _ "github.com/gogo/protobuf/gogoproto"
-
 import (
-	context "golang.org/x/net/context"
-	grpc "google.golang.org/grpc"
-)
+	fmt "fmt"
 
-import io "io"
+	proto "github.com/gogo/protobuf/proto"
+
+	math "math"
+
+	_ "github.com/gogo/protobuf/gogoproto"
+
+	context "golang.org/x/net/context"
+
+	grpc "google.golang.org/grpc"
+
+	io "io"
+)
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal

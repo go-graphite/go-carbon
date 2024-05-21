@@ -14,16 +14,7 @@
 
 package internal // import "go.opentelemetry.io/otel/sdk/internal"
 
-import (
-	"fmt"
-	"time"
-
-	opentelemetry "go.opentelemetry.io/otel/sdk"
-)
-
-// UserAgent is the user agent to be added to the outgoing
-// requests from the exporters.
-var UserAgent = fmt.Sprintf("opentelemetry-go/%s", opentelemetry.Version())
+import "time"
 
 // MonotonicEndTime returns the end time at present
 // but offset from start, monotonically.

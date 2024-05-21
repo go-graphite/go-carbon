@@ -8,8 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"go.uber.org/zap"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"

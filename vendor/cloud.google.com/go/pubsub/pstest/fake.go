@@ -36,6 +36,7 @@ import (
 
 	"cloud.google.com/go/internal/testutil"
 	pb "cloud.google.com/go/pubsub/apiv1/pubsubpb"
+	"go.einride.tech/aip/filtering"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	durpb "google.golang.org/protobuf/types/known/durationpb"
@@ -288,6 +289,9 @@ func (s *Server) ClearMessages() {
 	s.GServer.mu.Lock()
 	s.GServer.msgs = nil
 	s.GServer.msgsByID = make(map[string]*Message)
+	for _, sub := range s.GServer.subs {
+		sub.msgs = map[string]*message{}
+	}
 	s.GServer.mu.Unlock()
 }
 
@@ -313,8 +317,12 @@ func (s *GServer) CreateTopic(_ context.Context, t *pb.Topic) (*pb.Topic, error)
 	if s.topics[t.Name] != nil {
 		return nil, status.Errorf(codes.AlreadyExists, "topic %q", t.Name)
 	}
-	if err := checkMRD(t.MessageRetentionDuration); err != nil {
+	if err := checkTopicMessageRetention(t.MessageRetentionDuration); err != nil {
 		return nil, err
+	}
+	// Take any ingestion setting to mean the topic is active.
+	if t.IngestionDataSourceSettings != nil {
+		t.State = pb.Topic_ACTIVE
 	}
 	top := newTopic(t)
 	s.topics[t.Name] = top
@@ -354,13 +362,12 @@ func (s *GServer) UpdateTopic(_ context.Context, req *pb.UpdateTopicRequest) (*p
 		case "message_storage_policy":
 			t.proto.MessageStoragePolicy = req.Topic.MessageStoragePolicy
 		case "message_retention_duration":
-			if err := checkMRD(req.Topic.MessageRetentionDuration); err != nil {
+			if err := checkTopicMessageRetention(req.Topic.MessageRetentionDuration); err != nil {
 				return nil, err
 			}
 			t.proto.MessageRetentionDuration = req.Topic.MessageRetentionDuration
 		case "schema_settings":
-			// Clear this field.
-			t.proto.SchemaSettings = &pb.SchemaSettings{}
+			t.proto.SchemaSettings = req.Topic.SchemaSettings
 		case "schema_settings.schema":
 			if t.proto.SchemaSettings == nil {
 				t.proto.SchemaSettings = &pb.SchemaSettings{}
@@ -381,6 +388,15 @@ func (s *GServer) UpdateTopic(_ context.Context, req *pb.UpdateTopicRequest) (*p
 				t.proto.SchemaSettings = &pb.SchemaSettings{}
 			}
 			t.proto.SchemaSettings.LastRevisionId = req.Topic.SchemaSettings.LastRevisionId
+		case "ingestion_data_source_settings":
+			if t.proto.IngestionDataSourceSettings == nil {
+				t.proto.IngestionDataSourceSettings = &pb.IngestionDataSourceSettings{}
+			}
+			t.proto.IngestionDataSourceSettings = req.Topic.IngestionDataSourceSettings
+			// Take any ingestion setting to mean the topic is active.
+			if t.proto.IngestionDataSourceSettings != nil {
+				t.proto.State = pb.Topic_ACTIVE
+			}
 		default:
 			return nil, status.Errorf(codes.InvalidArgument, "unknown field name %q", path)
 		}
@@ -491,16 +507,25 @@ func (s *GServer) CreateSubscription(_ context.Context, ps *pb.Subscription) (*p
 	if ps.MessageRetentionDuration == nil {
 		ps.MessageRetentionDuration = defaultMessageRetentionDuration
 	}
-	if err := checkMRD(ps.MessageRetentionDuration); err != nil {
+	if err := checkSubMessageRetention(ps.MessageRetentionDuration); err != nil {
 		return nil, err
 	}
 	if ps.PushConfig == nil {
 		ps.PushConfig = &pb.PushConfig{}
+	} else if ps.PushConfig.Wrapper == nil {
+		// Wrapper should default to PubsubWrapper.
+		ps.PushConfig.Wrapper = &pb.PushConfig_PubsubWrapper_{
+			PubsubWrapper: &pb.PushConfig_PubsubWrapper{},
+		}
 	}
-	if ps.BigqueryConfig == nil {
-		ps.BigqueryConfig = &pb.BigQueryConfig{}
-	} else if ps.BigqueryConfig.Table != "" {
+	// Consider any table set to mean the config is active.
+	// We don't convert nil config to empty like with PushConfig above
+	// as this mimics the live service behavior.
+	if ps.GetBigqueryConfig() != nil && ps.GetBigqueryConfig().GetTable() != "" {
 		ps.BigqueryConfig.State = pb.BigQueryConfig_ACTIVE
+	}
+	if ps.CloudStorageConfig != nil && ps.CloudStorageConfig.Bucket != "" {
+		ps.CloudStorageConfig.State = pb.CloudStorageConfig_ACTIVE
 	}
 	ps.TopicMessageRetentionDuration = top.proto.MessageRetentionDuration
 	var deadLetterTopic *topic
@@ -550,18 +575,33 @@ func checkAckDeadline(ads int32) error {
 }
 
 const (
-	minMessageRetentionDuration = 10 * time.Minute
-	maxMessageRetentionDuration = 168 * time.Hour
+	minTopicMessageRetentionDuration = 10 * time.Minute
+	// 31 days is the maximum topic supported duration (https://cloud.google.com/pubsub/docs/replay-overview#configuring_message_retention)
+	maxTopicMessageRetentionDuration = 31 * 24 * time.Hour
+	minSubMessageRetentionDuration   = 10 * time.Minute
+	// 7 days is the maximum subscription supported duration (https://cloud.google.com/pubsub/docs/replay-overview#configuring_message_retention)
+	maxSubMessageRetentionDuration = 7 * 24 * time.Hour
 )
 
-var defaultMessageRetentionDuration = durpb.New(maxMessageRetentionDuration)
+var defaultMessageRetentionDuration = durpb.New(168 * time.Hour) // default is 7 days
 
-func checkMRD(pmrd *durpb.Duration) error {
+func checkTopicMessageRetention(pmrd *durpb.Duration) error {
 	if pmrd == nil {
 		return nil
 	}
 	mrd := pmrd.AsDuration()
-	if mrd < minMessageRetentionDuration || mrd > maxMessageRetentionDuration {
+	if mrd < minTopicMessageRetentionDuration || mrd > maxTopicMessageRetentionDuration {
+		return status.Errorf(codes.InvalidArgument, "bad message_retention_duration %+v", pmrd)
+	}
+	return nil
+}
+
+func checkSubMessageRetention(pmrd *durpb.Duration) error {
+	if pmrd == nil {
+		return nil
+	}
+	mrd := pmrd.AsDuration()
+	if mrd < minSubMessageRetentionDuration || mrd > maxSubMessageRetentionDuration {
 		return status.Errorf(codes.InvalidArgument, "bad message_retention_duration %+v", pmrd)
 	}
 	return nil
@@ -603,9 +643,23 @@ func (s *GServer) UpdateSubscription(_ context.Context, req *pb.UpdateSubscripti
 			sub.proto.PushConfig = req.Subscription.PushConfig
 
 		case "bigquery_config":
+			// If bq config is nil here, it will be cleared.
+			// Otherwise, we'll consider the subscription active if any table is set.
 			sub.proto.BigqueryConfig = req.GetSubscription().GetBigqueryConfig()
-			if sub.proto.GetBigqueryConfig().GetTable() != "" {
-				sub.proto.GetBigqueryConfig().State = pb.BigQueryConfig_ACTIVE
+			if sub.proto.GetBigqueryConfig() != nil {
+				if sub.proto.GetBigqueryConfig().GetTable() != "" {
+					sub.proto.BigqueryConfig.State = pb.BigQueryConfig_ACTIVE
+				} else {
+					return nil, status.Errorf(codes.InvalidArgument, "table must be provided")
+				}
+			}
+
+		case "cloud_storage_config":
+			sub.proto.CloudStorageConfig = req.GetSubscription().GetCloudStorageConfig()
+			// As long as the storage config is not nil, we assume it's valid
+			// without additional checks.
+			if sub.proto.GetCloudStorageConfig() != nil {
+				sub.proto.CloudStorageConfig.State = pb.CloudStorageConfig_ACTIVE
 			}
 
 		case "ack_deadline_seconds":
@@ -619,7 +673,7 @@ func (s *GServer) UpdateSubscription(_ context.Context, req *pb.UpdateSubscripti
 			sub.proto.RetainAckedMessages = req.Subscription.RetainAckedMessages
 
 		case "message_retention_duration":
-			if err := checkMRD(req.Subscription.MessageRetentionDuration); err != nil {
+			if err := checkSubMessageRetention(req.Subscription.MessageRetentionDuration); err != nil {
 				return nil, err
 			}
 			sub.proto.MessageRetentionDuration = req.Subscription.MessageRetentionDuration
@@ -644,6 +698,11 @@ func (s *GServer) UpdateSubscription(_ context.Context, req *pb.UpdateSubscripti
 			sub.proto.RetryPolicy = req.Subscription.RetryPolicy
 
 		case "filter":
+			filter, err := parseFilter(req.Subscription.Filter)
+			if err != nil {
+				return nil, status.Errorf(codes.InvalidArgument, "bad filter: %v", err)
+			}
+			sub.filter = &filter
 			sub.proto.Filter = req.Subscription.Filter
 
 		case "enable_exactly_once_delivery":
@@ -813,6 +872,7 @@ type subscription struct {
 	streams         []*stream
 	done            chan struct{}
 	timeNowFunc     func() time.Time
+	filter          *filtering.Filter
 }
 
 func newSubscription(t *topic, mu *sync.Mutex, timeNowFunc func() time.Time, deadLetterTopic *topic, ps *pb.Subscription) *subscription {
@@ -821,7 +881,7 @@ func newSubscription(t *topic, mu *sync.Mutex, timeNowFunc func() time.Time, dea
 		at = 10 * time.Second
 	}
 	ps.State = pb.Subscription_ACTIVE
-	return &subscription{
+	sub := &subscription{
 		topic:           t,
 		deadLetterTopic: deadLetterTopic,
 		mu:              mu,
@@ -831,6 +891,14 @@ func newSubscription(t *topic, mu *sync.Mutex, timeNowFunc func() time.Time, dea
 		done:            make(chan struct{}),
 		timeNowFunc:     timeNowFunc,
 	}
+	if ps.Filter != "" {
+		filter, err := parseFilter(ps.Filter)
+		if err != nil {
+			panic(fmt.Sprintf("pstest: bad filter: %v", err))
+		}
+		sub.filter = &filter
+	}
+	return sub
 }
 
 func (s *subscription) start(wg *sync.WaitGroup) {
@@ -1028,7 +1096,8 @@ func (s *subscription) pull(max int) []*pb.ReceivedMessage {
 	now := s.timeNowFunc()
 	s.maintainMessages(now)
 	var msgs []*pb.ReceivedMessage
-	for id, m := range filterMsgs(s.msgs, s.proto.EnableMessageOrdering) {
+	filterMsgs(s.msgs, s.filter)
+	for id, m := range orderMsgs(s.msgs, s.proto.EnableMessageOrdering) {
 		if m.outstanding() {
 			continue
 		}
@@ -1037,10 +1106,10 @@ func (s *subscription) pull(max int) []*pb.ReceivedMessage {
 			s.publishToDeadLetter(m)
 			continue
 		}
+		(*m.deliveries)++
 		if s.proto.DeadLetterPolicy != nil {
 			m.proto.DeliveryAttempt = int32(*m.deliveries)
 		}
-		(*m.deliveries)++
 		m.ackDeadline = now.Add(s.ackTimeout)
 		msgs = append(msgs, m.proto)
 		if len(msgs) >= max {
@@ -1050,7 +1119,7 @@ func (s *subscription) pull(max int) []*pb.ReceivedMessage {
 	return msgs
 }
 
-func filterMsgs(msgs map[string]*message, enableMessageOrdering bool) map[string]*message {
+func orderMsgs(msgs map[string]*message, enableMessageOrdering bool) map[string]*message {
 	if !enableMessageOrdering {
 		return msgs
 	}
@@ -1076,6 +1145,16 @@ func filterMsgs(msgs map[string]*message, enableMessageOrdering bool) map[string
 	return result
 }
 
+func filterMsgs(msgs map[string]*message, filter *filtering.Filter) {
+	if filter == nil {
+		return
+	}
+
+	filterByAttrs(msgs, filter, func(m *message) messageAttrs {
+		return m.proto.Message.Attributes
+	})
+}
+
 func (s *subscription) deliver() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1084,7 +1163,8 @@ func (s *subscription) deliver() {
 	s.maintainMessages(now)
 	// Try to deliver each remaining message.
 	curIndex := 0
-	for id, m := range filterMsgs(s.msgs, s.proto.EnableMessageOrdering) {
+	filterMsgs(s.msgs, s.filter)
+	for id, m := range orderMsgs(s.msgs, s.proto.EnableMessageOrdering) {
 		if m.outstanding() {
 			continue
 		}
@@ -1122,6 +1202,13 @@ func (s *subscription) deliver() {
 //
 // Must be called with the lock held.
 func (s *subscription) tryDeliverMessage(m *message, start int, now time.Time) (int, bool) {
+	// Optimistically increment DeliveryAttempt assuming we'll be able to deliver the message.  This is
+	// safe since the lock is held for the duration of this function, and the channel receiver does not
+	// modify the message.
+	if s.proto.DeadLetterPolicy != nil {
+		m.proto.DeliveryAttempt = int32(*m.deliveries) + 1
+	}
+
 	for i := 0; i < len(s.streams); i++ {
 		idx := (i + start) % len(s.streams)
 
@@ -1138,6 +1225,10 @@ func (s *subscription) tryDeliverMessage(m *message, start int, now time.Time) (
 
 		default:
 		}
+	}
+	// Restore the correct value of DeliveryAttempt if we were not able to deliver the message.
+	if s.proto.DeadLetterPolicy != nil {
+		m.proto.DeliveryAttempt = int32(*m.deliveries)
 	}
 	return 0, false
 }

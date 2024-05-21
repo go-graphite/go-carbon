@@ -22,7 +22,10 @@
 // the Detect function to generate a Resource from the merged information.
 //
 // To load a user defined Resource from the environment variable
-// OTEL_RESOURCE_LABELS the FromEnv Detector can be used. It will interpret
+// OTEL_RESOURCE_ATTRIBUTES the FromEnv Detector can be used. It will interpret
 // the value as a list of comma delimited key/value pairs
 // (e.g. `<key1>=<value1>,<key2>=<value2>,...`).
-package resource
+//
+// While this package provides a stable API,
+// the attributes added by resource detectors may change.
+package resource // import "go.opentelemetry.io/otel/sdk/resource"

@@ -3,31 +3,37 @@
 // DO NOT EDIT!
 
 /*
-	Package carbonzipperpb is a generated protocol buffer package.
+Package carbonzipperpb is a generated protocol buffer package.
 
-	It is generated from these files:
-		carbonzipper.proto
+It is generated from these files:
 
-	It has these top-level messages:
-		FetchResponse
-		MultiFetchResponse
-		GlobMatch
-		GlobResponse
-		Retention
-		InfoResponse
-		ServerInfoResponse
-		ZipperInfoResponse
-		ListMetricsResponse
-		MetricDetails
-		MetricDetailsResponse
+	carbonzipper.proto
+
+It has these top-level messages:
+
+	FetchResponse
+	MultiFetchResponse
+	GlobMatch
+	GlobResponse
+	Retention
+	InfoResponse
+	ServerInfoResponse
+	ZipperInfoResponse
+	ListMetricsResponse
+	MetricDetails
+	MetricDetailsResponse
 */
 package carbonzipperpb
 
-import proto "github.com/gogo/protobuf/proto"
-import fmt "fmt"
-import math "math"
+import (
+	fmt "fmt"
 
-import io "io"
+	proto "github.com/gogo/protobuf/proto"
+
+	math "math"
+
+	io "io"
+)
 
 // Reference imports to suppress errors if they are not otherwise used.
 var _ = proto.Marshal

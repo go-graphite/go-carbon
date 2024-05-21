@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,6 +18,8 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// user provides an auth flow for domain-wide delegation, setting
+// CredentialsConfig.Subject to be the impersonated user.
 func user(ctx context.Context, c CredentialsConfig, client *http.Client, lifetime time.Duration, isStaticToken bool) (oauth2.TokenSource, error) {
 	u := userTokenSource{
 		client:          client,
@@ -123,7 +124,7 @@ func (u userTokenSource) signJWT() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("impersonate: unable to sign JWT: %v", err)
 	}
-	body, err := ioutil.ReadAll(io.LimitReader(rawResp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(rawResp.Body, 1<<20))
 	if err != nil {
 		return "", fmt.Errorf("impersonate: unable to read body: %v", err)
 	}
@@ -148,7 +149,7 @@ func (u userTokenSource) exchangeToken(signedJWT string) (*oauth2.Token, error) 
 	if err != nil {
 		return nil, fmt.Errorf("impersonate: unable to exchange token: %v", err)
 	}
-	body, err := ioutil.ReadAll(io.LimitReader(rawResp.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(rawResp.Body, 1<<20))
 	if err != nil {
 		return nil, fmt.Errorf("impersonate: unable to read body: %v", err)
 	}

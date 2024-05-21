@@ -11,14 +11,16 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"regexp"
 	"runtime"
 	"strconv"
 	"syscall"
 
 	"github.com/lomik/zapwriter"
-	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	daemon "github.com/sevlyar/go-daemon"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/carbon"
@@ -200,11 +202,15 @@ func main() {
 	}
 
 	if cfg.Prometheus.Enabled {
-		app.PromRegisterer.MustRegister(prometheus.NewGoCollector())
-		app.PromRegisterer.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+		app.PromRegisterer.MustRegister(
+			collectors.NewBuildInfoCollector(),
+			collectors.NewGoCollector(
+				collectors.WithGoCollectorRuntimeMetrics(collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile("/.*")}),
+			),
+			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 		http.Handle(cfg.Prometheus.Endpoint, promhttp.HandlerFor(app.PromRegistry, promhttp.HandlerOpts{}))
 	}
-	if err = app.Start(BuildVersion); err != nil {
+	if err = app.Start(); err != nil {
 		mainLogger.Fatal(err.Error())
 	} else {
 		mainLogger.Info("started")

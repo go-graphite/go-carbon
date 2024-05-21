@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/points"
+
 	"go.uber.org/zap"
 )
 

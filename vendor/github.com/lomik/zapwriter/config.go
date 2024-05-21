@@ -15,15 +15,15 @@ import (
 // If SampleTick is defined, the Sample* parameters are passed to
 // zapcore.NewSampler. See their documentation for details.
 type Config struct {
-	Logger           string `toml:"logger" json:"logger"`                       // handler name, default empty
-	File             string `toml:"file" json:"file"`                           // filename, "stderr", "stdout", "empty" (=="stderr"), "none"
-	Level            string `toml:"level" json:"level"`                         // "debug", "info", "warn", "error", "dpanic", "panic", and "fatal"
-	Encoding         string `toml:"encoding" json:"encoding"`                   // "json", "console"
-	EncodingTime     string `toml:"encoding-time" json:"encoding-time"`         // "millis", "nanos", "epoch", "iso8601"
-	EncodingDuration string `toml:"encoding-duration" json:"encoding-duration"` // "seconds", "nanos", "string"
-	SampleTick       string `toml:"sample-tick" json:"sample-tick"`             // passed to time.ParseDuration
-	SampleInitial    int    `toml:"sample-initial" json:"sample-initial"`       // first n messages logged per tick
-	SampleThereafter int    `toml:"sample-thereafter" json:"sample-thereafter"` // every m-th message logged thereafter per tick
+	Logger           string `toml:"logger" json:"logger" comment:"handler name, default empty"`
+	File             string `toml:"file" json:"file" comment:"'/path/to/filename', 'stderr', 'stdout', 'empty' (=='stderr'), 'none'"`
+	Level            string `toml:"level" json:"level" comment:"'debug', 'info', 'warn', 'error', 'dpanic', 'panic', and 'fatal'"`
+	Encoding         string `toml:"encoding" json:"encoding" comment:"'json' or 'console'"`
+	EncodingTime     string `toml:"encoding-time" json:"encoding-time" comment:"'millis', 'nanos', 'epoch', 'iso8601'"`
+	EncodingDuration string `toml:"encoding-duration" json:"encoding-duration" comment:"'seconds', 'nanos', 'string'"`
+	SampleTick       string `toml:"sample-tick" json:"sample-tick" comment:"passed to time.ParseDuration"`
+	SampleInitial    int    `toml:"sample-initial" json:"sample-initial" comment:"first n messages logged per tick"`
+	SampleThereafter int    `toml:"sample-thereafter" json:"sample-thereafter" comment:"every m-th message logged thereafter per tick"`
 }
 
 func NewConfig() Config {

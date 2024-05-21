@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/api"
@@ -330,7 +331,7 @@ func (app *App) startPersister() {
 }
 
 // Start starts
-func (app *App) Start(version string) (err error) {
+func (app *App) Start() (err error) {
 	app.Lock()
 	defer app.Unlock()
 
@@ -580,7 +581,7 @@ func (app *App) Start(version string) (err error) {
 			carbonserver.InitPrometheus(app.PromRegisterer)
 		}
 		if conf.Tracing.Enabled {
-			app.FlushTraces = carbonserver.InitTracing(conf.Tracing.JaegerEndpoint, conf.Tracing.Stdout, version, conf.Tracing.SendTimeout.Value())
+			log.Printf("Otel tracing is removed in current verion, ignoring tracing.enabled=true")
 		}
 
 		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)

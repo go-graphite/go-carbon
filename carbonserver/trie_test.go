@@ -17,6 +17,7 @@ import (
 
 	"github.com/dgryski/go-trigram"
 	"github.com/go-graphite/go-carbon/points"
+
 	"go.uber.org/zap"
 )
 

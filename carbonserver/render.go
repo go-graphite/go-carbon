@@ -15,11 +15,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"go.uber.org/zap"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	"github.com/go-graphite/go-whisper"
@@ -27,8 +28,6 @@ import (
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
-	"go.opentelemetry.io/otel/api/kv"
-	"go.opentelemetry.io/otel/api/trace"
 )
 
 type fetchResponse struct {
@@ -287,15 +286,6 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		zap.Int("memory_used_bytes", response.memoryUsed),
 		zap.Int("http_code", http.StatusOK),
 	)
-
-	span := trace.SpanFromContext(ctx)
-	span.SetAttributes(
-		kv.Bool("graphite.from_cache", fromCache),
-		kv.Int("graphite.metrics", response.metricsFetched),
-		kv.Int("graphite.values", response.valuesFetched),
-		kv.Int("graphite.memory_used", response.memoryUsed),
-	)
-
 }
 
 func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeRange][]target, format string) (string, uint64) {
@@ -828,13 +818,6 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		zap.Int("metrics_fetched", metricsFetched),
 		zap.Int("values_fetched", valuesFetched),
 		zap.Int("http_code", http.StatusOK),
-	)
-
-	span := trace.SpanFromContext(ctx)
-	span.SetAttributes(
-		kv.Bool("graphite.from_cache", fromCache),
-		kv.Int("graphite.metrics", metricsFetched),
-		kv.Int("graphite.values", valuesFetched),
 	)
 
 	return nil

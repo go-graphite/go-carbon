@@ -13,11 +13,12 @@ import (
 	"github.com/go-graphite/go-whisper"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
-	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
+
+	"go.uber.org/zap"
 )
 
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {

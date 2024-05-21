@@ -11,6 +11,7 @@ import (
 
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
