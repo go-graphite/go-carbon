@@ -1,3 +1,4 @@
+//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || plan9 || solaris
 // +build darwin dragonfly freebsd linux netbsd openbsd plan9 solaris
 
 package daemon
@@ -68,6 +69,13 @@ func (d *Context) search() (daemon *os.Process, err error) {
 			return
 		}
 		daemon, err = os.FindProcess(pid)
+		if err == nil && daemon != nil {
+			// Send a test signal to test if this daemon is actually alive or dead
+			// An error means it is dead
+			if daemon.Signal(syscall.Signal(0)) != nil {
+				daemon = nil
+			}
+		}
 	}
 	return
 }
@@ -141,7 +149,11 @@ func (d *Context) openFiles() (err error) {
 	}
 
 	if len(d.LogFileName) > 0 {
-		if d.logFile, err = os.OpenFile(d.LogFileName,
+		if d.LogFileName == "/dev/stdout" {
+			d.logFile = os.Stdout
+		} else if d.LogFileName == "/dev/stderr" {
+			d.logFile = os.Stderr
+		} else if d.logFile, err = os.OpenFile(d.LogFileName,
 			os.O_WRONLY|os.O_CREATE|os.O_APPEND, d.LogFilePerm); err != nil {
 			return
 		}
@@ -249,12 +261,10 @@ func (d *Context) child() (err error) {
 	return
 }
 
-func (d *Context) release() (err error) {
-	if !initialized {
-		return
+func (d *Context) release() error {
+	if !initialized || d.pidFile == nil {
+		return nil
 	}
-	if d.pidFile != nil {
-		err = d.pidFile.Remove()
-	}
-	return
+
+	return d.pidFile.Remove()
 }

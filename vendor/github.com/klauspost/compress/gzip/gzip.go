@@ -22,6 +22,13 @@ const (
 	DefaultCompression  = flate.DefaultCompression
 	ConstantCompression = flate.ConstantCompression
 	HuffmanOnly         = flate.HuffmanOnly
+
+	// StatelessCompression will do compression but without maintaining any state
+	// between Write calls.
+	// There will be no memory kept between Write calls,
+	// but compression and speed will be suboptimal.
+	// Because of this, the size of actual Write calls will affect output size.
+	StatelessCompression = -3
 )
 
 // A Writer is an io.WriteCloser.
@@ -30,13 +37,13 @@ type Writer struct {
 	Header      // written at first call to Write, Flush, or Close
 	w           io.Writer
 	level       int
-	wroteHeader bool
+	err         error
 	compressor  *flate.Writer
 	digest      uint32 // CRC-32, IEEE polynomial (section 8)
 	size        uint32 // Uncompressed size (section 2.3.1)
+	wroteHeader bool
 	closed      bool
 	buf         [10]byte
-	err         error
 }
 
 // NewWriter returns a new Writer.
@@ -59,7 +66,7 @@ func NewWriter(w io.Writer) *Writer {
 // integer value between BestSpeed and BestCompression inclusive. The error
 // returned will be nil if the level is valid.
 func NewWriterLevel(w io.Writer, level int) (*Writer, error) {
-	if level < HuffmanOnly || level > BestCompression {
+	if level < StatelessCompression || level > BestCompression {
 		return nil, fmt.Errorf("gzip: invalid compression level: %d", level)
 	}
 	z := new(Writer)
@@ -67,11 +74,35 @@ func NewWriterLevel(w io.Writer, level int) (*Writer, error) {
 	return z, nil
 }
 
+// MinCustomWindowSize is the minimum window size that can be sent to NewWriterWindow.
+const MinCustomWindowSize = flate.MinCustomWindowSize
+
+// MaxCustomWindowSize is the maximum custom window that can be sent to NewWriterWindow.
+const MaxCustomWindowSize = flate.MaxCustomWindowSize
+
+// NewWriterWindow returns a new Writer compressing data with a custom window size.
+// windowSize must be from MinCustomWindowSize to MaxCustomWindowSize.
+func NewWriterWindow(w io.Writer, windowSize int) (*Writer, error) {
+	if windowSize < MinCustomWindowSize {
+		return nil, errors.New("gzip: requested window size less than MinWindowSize")
+	}
+	if windowSize > MaxCustomWindowSize {
+		return nil, errors.New("gzip: requested window size bigger than MaxCustomWindowSize")
+	}
+
+	z := new(Writer)
+	z.init(w, -windowSize)
+	return z, nil
+}
+
 func (z *Writer) init(w io.Writer, level int) {
 	compressor := z.compressor
-	if compressor != nil {
-		compressor.Reset(w)
+	if level != StatelessCompression {
+		if compressor != nil {
+			compressor.Reset(w)
+		}
 	}
+
 	*z = Writer{
 		Header: Header{
 			OS: 255, // unknown
@@ -189,12 +220,16 @@ func (z *Writer) Write(p []byte) (int, error) {
 				return n, z.err
 			}
 		}
-		if z.compressor == nil {
+
+		if z.compressor == nil && z.level != StatelessCompression {
 			z.compressor, _ = flate.NewWriter(z.w, z.level)
 		}
 	}
 	z.size += uint32(len(p))
 	z.digest = crc32.Update(z.digest, crc32.IEEETable, p)
+	if z.level == StatelessCompression {
+		return len(p), flate.StatelessDeflate(z.w, p, false, nil)
+	}
 	n, z.err = z.compressor.Write(p)
 	return n, z.err
 }
@@ -211,7 +246,7 @@ func (z *Writer) Flush() error {
 	if z.err != nil {
 		return z.err
 	}
-	if z.closed {
+	if z.closed || z.level == StatelessCompression {
 		return nil
 	}
 	if !z.wroteHeader {
@@ -240,7 +275,11 @@ func (z *Writer) Close() error {
 			return z.err
 		}
 	}
-	z.err = z.compressor.Close()
+	if z.level == StatelessCompression {
+		z.err = flate.StatelessDeflate(z.w, nil, true, nil)
+	} else {
+		z.err = z.compressor.Close()
+	}
 	if z.err != nil {
 		return z.err
 	}
