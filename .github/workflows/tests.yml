@@ -58,10 +58,12 @@ jobs:
 
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
 
       - name: Install packaging dependencies
         run: |
-          gem install rake fpm:1.10.2 package_cloud
+          gem install rake fpm package_cloud
           go install github.com/mitchellh/gox@latest
 
       - name: Check packaging
