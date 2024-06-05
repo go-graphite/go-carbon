@@ -117,6 +117,11 @@ func (rcv *HTTP) Stat(send helper.StatCallback) {
 }
 
 func (rcv *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		http.Error(w, "OK", http.StatusOK)
+		return
+	}
+
 	if r.Method != "POST" {
 		atomic.AddUint32(&rcv.errors, 1)
 		http.Error(w, fmt.Sprintf("Method %#v is not supported", r.Method), http.StatusBadRequest)
