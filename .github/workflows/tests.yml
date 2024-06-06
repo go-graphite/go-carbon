@@ -24,11 +24,11 @@ jobs:
       - name: Set up Go tip
         if: matrix.go == 'tip'
         run: |
-          curl -sL https://storage.googleapis.com/go-build-snap/go/linux-amd64/$(git ls-remote https://github.com/golang/go.git HEAD | awk '{print $1;}').tar.gz -o gotip.tar.gz
-          ls -lah gotip.tar.gz
-          mkdir -p ~/sdk/gotip
-          tar -C ~/sdk/gotip -xzf gotip.tar.gz
-          ~/sdk/gotip/bin/go version
+          curl -o go.tar.gz -L \
+          https://github.com/AlekSi/golang-tip/releases/download/tip/master.linux-amd64.tar.gz
+          sudo tar -C /usr/local -xzf go.tar.gz
+          sudo ln -s /usr/local/go/bin/* /usr/local/bin/
+          /usr/local/bin/go version
           echo "PATH=$HOME/go/bin:$HOME/sdk/gotip/bin/:$PATH" >> $GITHUB_ENV
 
       - name: Check out code into the Go module directory
@@ -59,12 +59,11 @@ jobs:
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '2.7' # Version range or exact version of a Ruby version to use, using semvers version range syntax.
+          ruby-version: '3.3'
 
       - name: Install packaging dependencies
         run: |
-          gem install dotenv -v 2.8.1
-          gem install rake fpm:1.10.2 package_cloud
+          gem install rake fpm package_cloud
           go install github.com/mitchellh/gox@latest
 
       - name: Check packaging
