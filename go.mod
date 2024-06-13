@@ -34,6 +34,7 @@ require (
 )
 
 require (
+	github.com/charlievieth/fastwalk v1.0.3
 	golang.org/x/net v0.25.0
 	google.golang.org/protobuf v1.34.1
 )
