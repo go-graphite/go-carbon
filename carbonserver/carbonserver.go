@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net"
 	"net/http"
@@ -49,6 +50,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/NYTimes/gziphandler"
+	"github.com/charlievieth/fastwalk"
 	"github.com/dgryski/go-expirecache"
 	"github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
@@ -1012,12 +1014,23 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			logger.Error("can't index symlink data dir", zap.String("path", dir))
 		}
 
-		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		fastwalkConf := fastwalk.Config{
+			Follow: false, // do not follow symlinks
+			// numWorkers default in sane here (>=4, but <=32)
+		}
+		// please note that fastwalk.Walk function is not thread safe
+		err := fastwalk.Walk(&fastwalkConf, dir, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
 				return nil
 			}
 
+			// getting file info from direntry
+			info, ierr := d.Info()
+			if ierr != nil {
+				logger.Info("error processing", zap.String("path", p), zap.Error(err))
+				return nil
+			}
 			// WHY: as filepath.walk could potentially taking a long
 			// time to complete (>= 5 minutes or more), depending
 			// on how many files are there on disk. It's nice to
@@ -1055,7 +1068,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			}
 
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
-			if info.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
+			if d.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen++
 
