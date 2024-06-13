@@ -303,7 +303,7 @@ func (flc *fileListCacheV2) Write(entry *FLCEntry) error {
 	offset += flcv2StatFieldSize
 
 	buf[offset] = '\n'
-	
+
 	flc.mutex.Lock()
 	defer flc.mutex.Unlock()
 	_, err := flc.writer.Write(buf)
