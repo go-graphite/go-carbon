@@ -1017,11 +1017,11 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 		fastwalkConf := fastwalk.Config{
 			Follow: false, // do not follow symlinks
-			// numWorkers default in sane here (>=4, but <=32)
+			// numWorkers default is sane here (>=4, but <=32)
 		}
-		// please note that fastwalk.Walk function is not thread safe
+		// please note that fastwalk.Walk function should be concurrently safe
 		// TODO: refactor this
-		// we can construct filesList in goroutines and update index from fileList cache singlethreaded
+		// e.g. we can construct filesList concurrently and update index from fileList cache single threaded later
 		err := fastwalk.Walk(&fastwalkConf, dir, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
@@ -1055,7 +1055,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			//
 			// TODO: only trigger enter the loop when it's half full?
 			// 	len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2
-			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
+			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil && len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2 {
+				logger.Info("trying to flush incoming metrics into index")
 			newMetricsLoop:
 				for {
 					select {
@@ -1070,8 +1071,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}
 			}
 
+			logger.Info("flush of incoming metrics done, proceeding with file list populating")
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
-			if d.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
+			if info.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
 				filesLen.Add(1)
 
@@ -1157,6 +1159,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			)
 		}
 	}
+	logger.Info("filewalk is done, proceeding with index update")
 
 	if listener.concurrentIndex && trieIdx != nil {
 		trieIdx.prune()
