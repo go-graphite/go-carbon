@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 // file list cache
@@ -82,6 +83,7 @@ type fileListCacheCommon struct {
 	path    string
 	mode    byte
 	file    *os.File
+	mutex   sync.Mutex
 	reader  *gzip.Reader
 	writer  *gzip.Writer
 }
@@ -237,6 +239,8 @@ func newFileListCacheV1ReadOnly(flcc *fileListCacheCommon) *fileListCacheV1 {
 }
 
 func (flc *fileListCacheV1) Write(entry *FLCEntry) error {
+	flc.mutex.Lock()
+	defer flc.mutex.Unlock()
 	_, err := flc.writer.Write([]byte(entry.Path + "\n"))
 	return err
 }
@@ -299,7 +303,9 @@ func (flc *fileListCacheV2) Write(entry *FLCEntry) error {
 	offset += flcv2StatFieldSize
 
 	buf[offset] = '\n'
-
+	
+	flc.mutex.Lock()
+	defer flc.mutex.Unlock()
 	_, err := flc.writer.Write(buf)
 
 	return err
