@@ -504,6 +504,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
 		carbonserver.SetTrieIndex(conf.Carbonserver.TrieIndex)
 		carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
+		carbonserver.SetSkipMetricChanFlush(conf.Carbonserver.SkipMetricChanFlush)
 		carbonserver.SetFileListCache(conf.Carbonserver.FileListCache)
 		carbonserver.SetFileListCacheVersion(conf.Carbonserver.FileListCacheVersion)
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)

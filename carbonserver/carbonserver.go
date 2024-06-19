@@ -263,8 +263,9 @@ type CarbonserverListener struct {
 	fileListCacheVersion FLCVersion
 	fileListCache        string
 
-	realtimeIndex  int
-	newMetricsChan chan string
+	realtimeIndex        int
+	newMetricsChan       chan string
+	skipMetricsChanFlush bool
 
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
@@ -589,6 +590,9 @@ func (listener *CarbonserverListener) SetRealtimeIndex(num int) chan string {
 	listener.realtimeIndex = num
 	listener.newMetricsChan = make(chan string, num)
 	return listener.newMetricsChan
+}
+func (listener *CarbonserverListener) SetSkipMetricChanFlush(enabled bool) {
+	listener.skipMetricsChanFlush = enabled
 }
 func (listener *CarbonserverListener) SetFileListCacheVersion(version int) {
 	listener.fileListCacheVersion = FLCVersion(version)
@@ -1027,7 +1031,16 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			if listener.isQuotaEnabled() {
 				select {
 				case <-quotaAndUsageStatTicker:
+					timeQuota := time.Now()
+					listener.logger.Info(
+						"updateFileList.refreshQuotaAndUsage",
+						zap.Time("started", timeQuota),
+					)
 					listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
+					listener.logger.Info(
+						"updateFileList.refreshQuotaAndUsage",
+						zap.Duration("finished", time.Since(timeQuota)),
+					)
 				default:
 				}
 			}
@@ -1036,21 +1049,29 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			// time to complete (>= 5 minutes or more), depending
 			// on how many files are there on disk. It's nice to
 			// try to flush newMetricsChan if possible.
-			//
-			// TODO: only trigger enter the loop when it's half full?
-			// 	len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2
-			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
-			newMetricsLoop:
-				for {
-					select {
-					case m := <-listener.newMetricsChan:
-						fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
-						if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
-							listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
+			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil && !listener.skipMetricsChanFlush {
+				if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2 {
+					metricsChanFlushStart := time.Now()
+					listener.logger.Info(
+						"updateFileList.newMetricsChan",
+						zap.Time("started", metricsChanFlushStart),
+					)
+				newMetricsLoop:
+					for {
+						select {
+						case m := <-listener.newMetricsChan:
+							fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
+							if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
+								listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
+							}
+						default:
+							break newMetricsLoop
 						}
-					default:
-						break newMetricsLoop
 					}
+					listener.logger.Info(
+						"updateFileList.newMetricsChan",
+						zap.Duration("finished", time.Since(metricsChanFlushStart)),
+					)
 				}
 			}
 
