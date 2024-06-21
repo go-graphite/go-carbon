@@ -176,11 +176,9 @@ func (app *App) ReloadConfig() error {
 	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
 
 	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
-	if app.Config.Cache.BloomSize > 0 {
-		app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
-	}
 	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
 	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
+	app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
 
 	if app.Persister != nil {
 		app.Persister.Stop()
@@ -350,11 +348,9 @@ func (app *App) Start() (err error) {
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
-	if app.Config.Cache.BloomSize > 0 {
-		app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
-	}
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
+	core.SetBloomSize(conf.Cache.BloomSize)
 
 	app.Cache = core
 

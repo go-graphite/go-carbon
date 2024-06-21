@@ -1029,12 +1029,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				select {
 				case <-quotaAndUsageStatTicker:
 					timeQuota := time.Now()
-					listener.logger.Debug(
+					listener.logger.Info(
 						"updateFileList.refreshQuotaAndUsage",
 						zap.Time("started", timeQuota),
 					)
 					listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
-					listener.logger.Debug(
+					listener.logger.Info(
 						"updateFileList.refreshQuotaAndUsage",
 						zap.Duration("finished", time.Since(timeQuota)),
 					)
@@ -1050,7 +1050,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				// flush newMetricsChan if 25% full or more
 				if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/4 {
 					metricsChanFlushStart := time.Now()
-					listener.logger.Debug(
+					listener.logger.Info(
 						"updateFileList.newMetricsChan",
 						zap.Int("started at", len(listener.newMetricsChan)),
 					)
@@ -1066,7 +1066,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 							break newMetricsLoop
 						}
 					}
-					listener.logger.Debug(
+					listener.logger.Info(
 						"updateFileList.newMetricsChan",
 						zap.Duration("finished", time.Since(metricsChanFlushStart)),
 					)

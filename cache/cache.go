@@ -134,8 +134,10 @@ func (c *Cache) SetMaxSize(maxSize uint32) {
 }
 
 // SetMaxSize of bloom filter
-func (c *Cache) SetBloomSize(maxSize uint32) {
-	c.newMetricCf = cuckoo.NewFilter(uint(maxSize))
+func (c *Cache) SetBloomSize(bloomSize uint) {
+	if bloomSize > 0 {
+		c.newMetricCf = cuckoo.NewFilter(bloomSize)
+	}
 }
 
 func (c *Cache) SetTagsEnabled(value bool) {
@@ -318,21 +320,24 @@ func (c *Cache) Add(p *points.Points) {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
-
 		if shard.adds != nil {
 			shard.adds[p.Metric] = struct{}{}
 		}
-		// if we have new metric channel and bloom filter
-		if c.newMetricsChan != nil && c.newMetricCf != nil {
-			// add metric to new metric channel if missed in bloom
-			if !c.newMetricCf.Lookup([]byte(p.Metric)) {
-				sendMetricToNewMetricChan(c, p.Metric)
-				c.newMetricCf.Insert([]byte(p.Metric))
-			}
-		} else {
-			// add metric to new channel
+		// if no bloom filter - just add metric to new channel
+		// if missed in cache
+		if c.newMetricsChan != nil && c.newMetricCf == nil {
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
+	}
+
+	// if we have both new metric channel and bloom filter
+	if c.newMetricsChan != nil && c.newMetricCf != nil {
+		// add metric to new metric channel if missed in bloom
+		// despite that we have it in cache
+		if !c.newMetricCf.Lookup([]byte(p.Metric)) {
+			sendMetricToNewMetricChan(c, p.Metric)
+		}
+		c.newMetricCf.Insert([]byte(p.Metric))
 	}
 	atomic.AddInt32(&c.stat.size, int32(count))
 }
