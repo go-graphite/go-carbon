@@ -263,9 +263,8 @@ type CarbonserverListener struct {
 	fileListCacheVersion FLCVersion
 	fileListCache        string
 
-	realtimeIndex        int
-	newMetricsChan       chan string
-	skipMetricsChanFlush bool
+	realtimeIndex  int
+	newMetricsChan chan string
 
 	fileIdx      atomic.Value
 	fileIdxMutex sync.Mutex
@@ -590,9 +589,6 @@ func (listener *CarbonserverListener) SetRealtimeIndex(num int) chan string {
 	listener.realtimeIndex = num
 	listener.newMetricsChan = make(chan string, num)
 	return listener.newMetricsChan
-}
-func (listener *CarbonserverListener) SetSkipMetricChanFlush(enabled bool) {
-	listener.skipMetricsChanFlush = enabled
 }
 func (listener *CarbonserverListener) SetFileListCacheVersion(version int) {
 	listener.fileListCacheVersion = FLCVersion(version)
@@ -1032,12 +1028,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				select {
 				case <-quotaAndUsageStatTicker:
 					timeQuota := time.Now()
-					listener.logger.Info(
+					listener.logger.Debug(
 						"updateFileList.refreshQuotaAndUsage",
 						zap.Time("started", timeQuota),
 					)
 					listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
-					listener.logger.Info(
+					listener.logger.Debug(
 						"updateFileList.refreshQuotaAndUsage",
 						zap.Duration("finished", time.Since(timeQuota)),
 					)
@@ -1049,12 +1045,13 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			// time to complete (>= 5 minutes or more), depending
 			// on how many files are there on disk. It's nice to
 			// try to flush newMetricsChan if possible.
-			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil && !listener.skipMetricsChanFlush {
-				if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2 {
+			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
+				// flush newMetricsChan if 25% full or more
+				if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/4 {
 					metricsChanFlushStart := time.Now()
-					listener.logger.Info(
+					listener.logger.Debug(
 						"updateFileList.newMetricsChan",
-						zap.Time("started", metricsChanFlushStart),
+						zap.Int("started at", len(listener.newMetricsChan)),
 					)
 				newMetricsLoop:
 					for {
@@ -1068,7 +1065,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 							break newMetricsLoop
 						}
 					}
-					listener.logger.Info(
+					listener.logger.Debug(
 						"updateFileList.newMetricsChan",
 						zap.Duration("finished", time.Since(metricsChanFlushStart)),
 					)
