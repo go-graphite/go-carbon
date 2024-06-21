@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net"
 	"net/http"
@@ -1012,7 +1013,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			logger.Error("can't index symlink data dir", zap.String("path", dir))
 		}
 
-		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
 				return nil
@@ -1072,6 +1073,11 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}
 			}
 
+			info, ierr := d.Info()
+			if ierr != nil {
+				logger.Info("error processing", zap.String("path", p), zap.Error(ierr))
+				return nil
+			}
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
 			if info.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
