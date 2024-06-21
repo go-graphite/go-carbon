@@ -176,6 +176,9 @@ func (app *App) ReloadConfig() error {
 	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
 
 	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
+	if app.Config.Cache.BloomSize > 0 {
+		app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
+	}
 	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
 	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
 
@@ -347,6 +350,9 @@ func (app *App) Start() (err error) {
 
 	core := cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
+	if app.Config.Cache.BloomSize > 0 {
+		app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
+	}
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
 
@@ -504,7 +510,6 @@ func (app *App) Start() (err error) {
 		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
 		carbonserver.SetTrieIndex(conf.Carbonserver.TrieIndex)
 		carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
-		carbonserver.SetSkipMetricChanFlush(conf.Carbonserver.SkipMetricChanFlush)
 		carbonserver.SetFileListCache(conf.Carbonserver.FileListCache)
 		carbonserver.SetFileListCacheVersion(conf.Carbonserver.FileListCacheVersion)
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
