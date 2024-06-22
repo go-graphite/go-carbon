@@ -292,6 +292,7 @@ type trieIndex struct {
 	fileCount     int
 	depth         uint64
 	longestMetric string
+	writeMutex    sync.Mutex
 
 	// qau: Quota And Usage
 	qauMetrics       []points.Points
@@ -492,6 +493,8 @@ func (t *trieInsertError) Error() string { return t.typ }
 //
 // insert returns either a file node or dir node, after inserted.
 func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
+	ti.writeMutex.Lock()
+	defer ti.writeMutex.Unlock()
 	path = filepath.Clean(path)
 	if len(path) > 0 && path[0] == '/' { // skipcq: GO-S1005
 		path = path[1:]

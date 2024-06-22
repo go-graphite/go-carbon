@@ -50,6 +50,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/NYTimes/gziphandler"
+	"github.com/charlievieth/fastwalk"
 	"github.com/dgryski/go-expirecache"
 	"github.com/dgryski/go-trigram"
 	"github.com/dgryski/httputil"
@@ -263,6 +264,7 @@ type CarbonserverListener struct {
 
 	fileListCacheVersion FLCVersion
 	fileListCache        string
+	fileWalkerFunc       func(string) []string
 
 	realtimeIndex  int
 	newMetricsChan chan string
@@ -901,10 +903,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var t0 = time.Now()
 	var fidx = listener.CurrentFileIndex()
 	var files []string
-	var filesLen int
+	var filesMutex sync.Mutex
+	var quotaUpdateMutex sync.Mutex
+	var filesLen atomic.Int64
 	var details = make(map[string]*protov3.MetricDetails)
 	var trieIdx *trieIndex
-	var metricsKnown uint64
+	var metricsKnown atomic.Uint64
 	var infos []zap.Field
 	if listener.trieIndex {
 		if fidx == nil || !listener.concurrentIndex {
@@ -920,15 +924,18 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	var tcache = time.Now()
 	var cacheMetricLen = len(cacheMetricNames)
 	for fileName := range cacheMetricNames {
-		if listener.trieIndex {
+		if listener.trieIndex && trieIdx != nil {
 			if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
 				listener.logTrieInsertError(logger, "error populating index from cache indexMap", fileName, err)
 			}
 		} else {
+			// we're in goroutine
+			filesMutex.Lock()
 			files = append(files, fileName)
+			filesMutex.Unlock()
 		}
 		if strings.HasSuffix(fileName, ".wsp") {
-			metricsKnown++
+			metricsKnown.Add(1)
 		}
 	}
 	cacheIndexRuntime := time.Since(tcache)
@@ -973,9 +980,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					break
 				}
 
-				filesLen++
+				filesLen.Add(1)
 				if strings.HasSuffix(entry.Path, ".wsp") {
-					metricsKnown++
+					metricsKnown.Add(1)
 				}
 			}
 			if err := flc.Close(); err != nil {
@@ -1013,7 +1020,21 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			logger.Error("can't index symlink data dir", zap.String("path", dir))
 		}
 
-		err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		// numWorkers default in sane here (>=4, but <=32)
+		numWorkers := helper.FastwalkDefaultNumWorkers()
+		fastwalkConf := fastwalk.Config{
+			Follow:     false, // do not follow symlinks
+			NumWorkers: numWorkers,
+		}
+		// run one QuotaAndUsageStat() per walker
+		probQuotaUpdate := 1.0 / float64(numWorkers)
+		// run newMetricChan consumption in 4 threads
+		probNewChanConsume := probQuotaUpdate * 4
+		listener.logger.Info("filewalk threads", zap.Int("numWorkers", numWorkers))
+		listener.logger.Info("quotaUpd probability", zap.Float64("p", probQuotaUpdate))
+		listener.logger.Info("newChan probability", zap.Float64("p", probNewChanConsume))
+
+		fileWalkFunc := func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
 				return nil
@@ -1026,19 +1047,25 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			// regularly as possible according to the
 			// quotaUsageReportFrequency specified in the config.
 			if listener.isQuotaEnabled() {
-				select {
-				case <-quotaAndUsageStatTicker:
-					timeQuota := time.Now()
-					listener.logger.Info(
-						"updateFileList.refreshQuotaAndUsage",
-						zap.Time("started", timeQuota),
-					)
-					listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
-					listener.logger.Info(
-						"updateFileList.refreshQuotaAndUsage",
-						zap.Duration("finished", time.Since(timeQuota)),
-					)
-				default:
+				// probability concurrency limiter
+				if helper.CoinToss(probQuotaUpdate) {
+					select {
+					case <-quotaAndUsageStatTicker:
+						timeQuota := time.Now()
+						listener.logger.Info(
+							"updateFileList.refreshQuotaAndUsage",
+							zap.Time("started", timeQuota),
+						)
+						// run only one refreshQuotaAndUsage() because it's not thread-safe
+						quotaUpdateMutex.Lock()
+						listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
+						quotaUpdateMutex.Unlock()
+						listener.logger.Info(
+							"updateFileList.refreshQuotaAndUsage",
+							zap.Duration("finished", time.Since(timeQuota)),
+						)
+					default:
+					}
 				}
 			}
 
@@ -1047,29 +1074,32 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			// on how many files are there on disk. It's nice to
 			// try to flush newMetricsChan if possible.
 			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
-				// flush newMetricsChan if 25% full or more
-				if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/4 {
-					metricsChanFlushStart := time.Now()
-					listener.logger.Info(
-						"updateFileList.newMetricsChan",
-						zap.Int("started at", len(listener.newMetricsChan)),
-					)
-				newMetricsLoop:
-					for {
-						select {
-						case m := <-listener.newMetricsChan:
-							fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
-							if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
-								listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
+				// probability concurrency limiter
+				if helper.CoinToss(probNewChanConsume) {
+					// flush newMetricsChan if 25% full or more
+					if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/4 {
+						metricsChanFlushStart := time.Now()
+						listener.logger.Info(
+							"updateFileList.newMetricsChan",
+							zap.Int("started at", len(listener.newMetricsChan)),
+						)
+					newMetricsLoop:
+						for {
+							select {
+							case m := <-listener.newMetricsChan:
+								fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
+								if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
+									listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
+								}
+							default:
+								break newMetricsLoop
 							}
-						default:
-							break newMetricsLoop
 						}
+						listener.logger.Info(
+							"updateFileList.newMetricsChan",
+							zap.Duration("finished", time.Since(metricsChanFlushStart)),
+						)
 					}
-					listener.logger.Info(
-						"updateFileList.newMetricsChan",
-						zap.Duration("finished", time.Since(metricsChanFlushStart)),
-					)
 				}
 			}
 
@@ -1081,7 +1111,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
 			if info.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
 				trimmedName := strings.TrimPrefix(p, listener.whisperData)
-				filesLen++
+				filesLen.Add(1)
 
 				var dataPoints, logicalSize, physicalSize int64
 				if isFullMetric {
@@ -1097,12 +1127,14 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					}
 				}
 
-				var metricFirstSeenAt int64
+				var metricFirstSeenAt atomic.Int64
 
 				// use cacheMetricNames to check and prevent appending duplicate metrics
 				// into the index when cacheMetricNamesIndex is enabled
 				if _, present := cacheMetricNames[trimmedName]; present {
+					filesMutex.Lock()
 					delete(cacheMetricNames, trimmedName)
+					filesMutex.Unlock()
 				} else {
 					if listener.trieIndex {
 						// WHY:
@@ -1113,15 +1145,17 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 								// It's better to just log an error than stop indexing
 								listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
 							} else if node.meta != nil {
-								metricFirstSeenAt = node.meta.(*fileMeta).firstSeenAt
+								metricFirstSeenAt.Store(node.meta.(*fileMeta).firstSeenAt)
 							}
 						}
 					} else {
+						filesMutex.Lock()
 						files = append(files, trimmedName)
+						filesMutex.Unlock()
 					}
 
 					if isFullMetric {
-						metricsKnown++
+						metricsKnown.Add(1)
 					}
 				}
 
@@ -1132,7 +1166,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 						DataPoints:   dataPoints,
 						LogicalSize:  logicalSize,
 						PhysicalSize: physicalSize,
-						FirstSeenAt:  metricFirstSeenAt,
+						FirstSeenAt:  metricFirstSeenAt.Load(),
 					}); err != nil {
 						logger.Error("failed to write to file list cache", zap.Error(err))
 						if err := flc.Close(); err != nil {
@@ -1145,17 +1179,21 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				if isFullMetric && listener.internalStatsDir != "" {
 					i := stat.GetStat(info)
 					trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
+					filesMutex.Lock()
 					details[trimmedName] = &protov3.MetricDetails{
 						Size:     i.Size,
 						ModTime:  i.MTime,
 						ATime:    i.ATime,
 						RealSize: i.RealSize,
 					}
+					filesMutex.Unlock()
 				}
 			}
-
 			return nil
-		})
+		}
+
+		//err := filepath.WalkDir(dir, fileWalkFunc)
+		err := fastwalk.Walk(&fastwalkConf, dir, fileWalkFunc)
 		if err != nil {
 			logger.Error("error getting file list",
 				zap.Error(err),
@@ -1184,7 +1222,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	totalSpace := stat.Blocks * uint64(stat.Bsize)
 
 	fileScanRuntime := time.Since(t0)
-	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
+	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown.Load())
 	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 
 	nfidx := &fileIndex{
@@ -1250,12 +1288,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
 		zap.Duration("cache_index_runtime", cacheIndexRuntime),
 		zap.Duration("total_runtime", time.Since(t0)),
-		zap.Int("Files", filesLen),
+		zap.Int64("Files", filesLen.Load()),
 		zap.Int("index_size", indexSize),
 		zap.Int("pruned_trigrams", pruned),
 		zap.Int("cache_metric_len_before", cacheMetricLen),
 		zap.Int("cache_metric_len_after", len(cacheMetricNames)),
-		zap.Uint64("metrics_known", metricsKnown),
+		zap.Uint64("metrics_known", metricsKnown.Load()),
 		zap.String("index_type", indexType),
 		zap.Bool("read_from_cache", readFromCache),
 	)
