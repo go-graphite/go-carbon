@@ -352,13 +352,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	p, exists = shard.items[key]
 	delete(shard.items, key)
 	shard.Unlock()
-
-	// we probably can skip that, but I'm a bit worry
-	// of effectiveness of bloom filter over time
-	if c.newMetricsChan != nil && c.newMetricCf != nil {
-		c.newMetricCf.Delete([]byte(p.Metric))
-	}
-
+	
 	if exists {
 		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
 	}
