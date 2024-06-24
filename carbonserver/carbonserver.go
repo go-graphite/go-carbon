@@ -1085,30 +1085,27 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
 				// probability concurrency limiter
 				if helper.CoinToss(probNewChanConsume) {
-					// flush newMetricsChan if 25% full or more
-					if len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/4 {
-						metricsChanFlushStart := time.Now()
-						listener.logger.Info(
-							"updateFileList.newMetricsChan",
-							zap.Int("started at", len(listener.newMetricsChan)),
-						)
-					newMetricsLoop:
-						for {
-							select {
-							case m := <-listener.newMetricsChan:
-								fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
-								if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
-									listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
-								}
-							default:
-								break newMetricsLoop
+					metricsChanFlushStart := time.Now()
+					listener.logger.Info(
+						"updateFileList.newMetricsChan",
+						zap.Int("started at", len(listener.newMetricsChan)),
+					)
+				newMetricsLoop:
+					for {
+						select {
+						case m := <-listener.newMetricsChan:
+							fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
+							if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
+								listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
 							}
+						default:
+							break newMetricsLoop
 						}
-						listener.logger.Info(
-							"updateFileList.newMetricsChan",
-							zap.Duration("finished", time.Since(metricsChanFlushStart)),
-						)
 					}
+					listener.logger.Info(
+						"updateFileList.newMetricsChan",
+						zap.Duration("finished", time.Since(metricsChanFlushStart)),
+					)
 				}
 			}
 
