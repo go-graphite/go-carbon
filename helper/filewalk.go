@@ -13,7 +13,7 @@ func CoinToss(p float64) bool {
 	if p >= 1.0 {
 		return true
 	}
-	return p > 0 && float64(rand.Int())/float64(math.MaxInt32) < p
+	return float64(rand.Intn(math.MaxInt32))/float64(math.MaxInt32) < p
 }
 
 func FastwalkDefaultNumWorkers() int {
