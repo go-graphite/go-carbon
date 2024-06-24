@@ -134,8 +134,9 @@ type carbonserverConfig struct {
 	ConcurrentIndex bool `toml:"concurrent-index"`
 	RealtimeIndex   int  `toml:"realtime-index"`
 
-	FileListCache        string `toml:"file-list-cache"`
-	FileListCacheVersion int    `toml:"file-list-cache-version"`
+	FileListCache          string `toml:"file-list-cache"`
+	FileListCacheVersion   int    `toml:"file-list-cache-version"`
+	MultiThreadWalkEnabled bool   `toml:"multi-thread-walk-enabled"`
 
 	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
 	MaxCreatesPerSecond       int       `toml:"max-creates-per-second"`

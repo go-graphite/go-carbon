@@ -264,7 +264,7 @@ type CarbonserverListener struct {
 
 	fileListCacheVersion FLCVersion
 	fileListCache        string
-	fileWalkerFunc       func(string) []string
+	multiThreadWalk      bool
 
 	realtimeIndex  int
 	newMetricsChan chan string
@@ -598,6 +598,9 @@ func (listener *CarbonserverListener) SetFileListCacheVersion(version int) {
 }
 func (listener *CarbonserverListener) SetFileListCache(path string) {
 	listener.fileListCache = path
+}
+func (listener *CarbonserverListener) SetMultiThreadWalkEnabled(enabled bool) {
+	listener.multiThreadWalk = enabled
 }
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
@@ -1020,16 +1023,22 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			logger.Error("can't index symlink data dir", zap.String("path", dir))
 		}
 
-		// numWorkers default in sane here (>=4, but <=32)
-		numWorkers := helper.FastwalkDefaultNumWorkers()
-		fastwalkConf := fastwalk.Config{
-			Follow:     false, // do not follow symlinks
-			NumWorkers: numWorkers,
+		var numWorkers int
+		var probQuotaUpdate float64
+		var probNewChanConsume float64
+		if listener.multiThreadWalk {
+			// numWorkers default in sane here (>=4, but <=32)
+			numWorkers = helper.FastwalkDefaultNumWorkers()
+			// run one QuotaAndUsageStat() per walker
+			probQuotaUpdate = 1.0 / float64(numWorkers)
+			// run newMetricChan consumption in 4 threads
+			probNewChanConsume = probQuotaUpdate * 4
+		} else {
+			numWorkers = 1
+			probQuotaUpdate = 1.0
+			probNewChanConsume = 1.0
 		}
-		// run one QuotaAndUsageStat() per walker
-		probQuotaUpdate := 1.0 / float64(numWorkers)
-		// run newMetricChan consumption in 4 threads
-		probNewChanConsume := probQuotaUpdate * 4
+
 		listener.logger.Info("filewalk threads", zap.Int("numWorkers", numWorkers))
 		listener.logger.Info("quotaUpd probability", zap.Float64("p", probQuotaUpdate))
 		listener.logger.Info("newChan probability", zap.Float64("p", probNewChanConsume))
@@ -1192,8 +1201,16 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			return nil
 		}
 
-		//err := filepath.WalkDir(dir, fileWalkFunc)
-		err := fastwalk.Walk(&fastwalkConf, dir, fileWalkFunc)
+		var err error
+		if listener.multiThreadWalk {
+			fastwalkConf := fastwalk.Config{
+				Follow:     false, // do not follow symlinks
+				NumWorkers: numWorkers,
+			}
+			err = fastwalk.Walk(&fastwalkConf, dir, fileWalkFunc)
+		} else {
+			err = filepath.WalkDir(dir, fileWalkFunc)
+		}
 		if err != nil {
 			logger.Error("error getting file list",
 				zap.Error(err),

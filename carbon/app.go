@@ -508,6 +508,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
 		carbonserver.SetFileListCache(conf.Carbonserver.FileListCache)
 		carbonserver.SetFileListCacheVersion(conf.Carbonserver.FileListCacheVersion)
+		carbonserver.SetMultiThreadWalkEnabled(conf.Carbonserver.MultiThreadWalkEnabled)
 		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
