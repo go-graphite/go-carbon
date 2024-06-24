@@ -169,6 +169,8 @@ max-size = 1000000
 #   "noop" - pick metrics to write in unspecified order,
 #            requires least CPU and improves cache responsiveness
 write-strategy = "max"
+# If > 0 use bloom filter to detect new metrics instead of cache
+bloom-size = 0
 
 [udp]
 listen = ":2003"

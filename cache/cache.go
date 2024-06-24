@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	cuckoo "github.com/seiflotfy/cuckoofilter"
+
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
@@ -59,6 +61,7 @@ type Cache struct {
 	}
 
 	newMetricsChan chan string
+	newMetricCf    *cuckoo.Filter
 
 	throttle func(ps *points.Points, inCache bool) bool
 }
@@ -95,6 +98,7 @@ func New() *Cache {
 	c.settings.Store(&settings)
 
 	c.writeoutQueue = NewWriteoutQueue(c)
+	c.newMetricCf = nil
 	return c
 }
 
@@ -130,6 +134,13 @@ func (c *Cache) SetMaxSize(maxSize uint32) {
 	c.settings.Store(&newSettings)
 }
 
+// SetBloomSize of bloom filter
+func (c *Cache) SetBloomSize(bloomSize uint) {
+	if bloomSize > 0 {
+		c.newMetricCf = cuckoo.NewFilter(bloomSize)
+	}
+}
+
 func (c *Cache) SetTagsEnabled(value bool) {
 	s := c.settings.Load().(*cacheSettings)
 	newSettings := *s
@@ -149,6 +160,10 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("metrics", float64(c.Len()))
 	send("maxSize", float64(s.maxSize))
 	send("notConfirmed", float64(c.NotConfirmedLength()))
+	// report elements in bloom filter
+	if c.newMetricCf != nil {
+		send("cfCount", float64(c.newMetricCf.Count()))
+	}
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("tagsNormalizeErrors", &c.stat.tagsNormalizeErrors, send)
@@ -259,6 +274,15 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 	c.settings.Store(&newSettings)
 }
 
+// send metric to the new metrics channel
+func sendMetricToNewMetricChan(c *Cache, metric string) {
+	select {
+	case c.newMetricsChan <- metric:
+	default:
+		atomic.AddUint32(&c.stat.droppedRealtimeIndex, 1)
+	}
+}
+
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
 	s := c.settings.Load().(*cacheSettings)
@@ -301,15 +325,22 @@ func (c *Cache) Add(p *points.Points) {
 		if shard.adds != nil {
 			shard.adds[p.Metric] = struct{}{}
 		}
-		if c.newMetricsChan != nil {
-			select {
-			case c.newMetricsChan <- p.Metric:
-			default:
-				atomic.AddUint32(&c.stat.droppedRealtimeIndex, 1)
-			}
+		// if no bloom filter - just add metric to new channel
+		// if missed in cache, as it was before
+		if c.newMetricsChan != nil && c.newMetricCf == nil {
+			sendMetricToNewMetricChan(c, p.Metric)
 		}
 	}
 
+	// if we have both new metric channel and bloom filter
+	if c.newMetricsChan != nil && c.newMetricCf != nil {
+		// add metric to new metric channel if missed in bloom
+		// despite what we have it in cache (new behaviour)
+		if !c.newMetricCf.Lookup([]byte(p.Metric)) {
+			sendMetricToNewMetricChan(c, p.Metric)
+		}
+		c.newMetricCf.Insert([]byte(p.Metric))
+	}
 	atomic.AddInt32(&c.stat.size, int32(count))
 }
 
@@ -321,6 +352,12 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	p, exists = shard.items[key]
 	delete(shard.items, key)
 	shard.Unlock()
+
+	// we probably can skip that, but I'm a bit worry
+	// of effectiveness of bloom filter over time
+	if c.newMetricsChan != nil && c.newMetricCf != nil {
+		c.newMetricCf.Delete([]byte(p.Metric))
+	}
 
 	if exists {
 		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
@@ -345,6 +382,12 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 		shard.notConfirmedUsed++
 	}
 	shard.Unlock()
+
+	// we probably can skip that, but I'm a bit worry
+	// of effectiveness of bloom filter over time
+	if c.newMetricsChan != nil && c.newMetricCf != nil {
+		c.newMetricCf.Delete([]byte(p.Metric))
+	}
 
 	if exists {
 		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
