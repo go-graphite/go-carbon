@@ -134,8 +134,6 @@ type carbonserverConfig struct {
 	ConcurrentIndex bool `toml:"concurrent-index"`
 	RealtimeIndex   int  `toml:"realtime-index"`
 
-	SkipMetricChanFlush bool `toml:"skip-metric-chan-flush"`
-
 	FileListCache        string `toml:"file-list-cache"`
 	FileListCacheVersion int    `toml:"file-list-cache-version"`
 

@@ -6,11 +6,12 @@ Based on https://github.com/orcaman/concurrent-map
 
 import (
 	"fmt"
-	cuckoo "github.com/seiflotfy/cuckoofilter"
 	"io"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	cuckoo "github.com/seiflotfy/cuckoofilter"
 
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
