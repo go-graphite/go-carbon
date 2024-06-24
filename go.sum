@@ -47,8 +47,9 @@ github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb h1:X9MwMz6mVZEWcbhsri5TwaCm/Q4USFdAAmy1T7RCGjw=
 github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb/go.mod h1:pD/+9DfmmQ+xvOI1fxUltHV69BxC1aeTILPQg9Kw1hE=
-github.com/dgryski/go-metro v0.0.0-20200812162917-85c65e2d0165 h1:BS21ZUJ/B5X2UVUbczfmdWH7GapPWAhxcMsDnjJTU1E=
 github.com/dgryski/go-metro v0.0.0-20200812162917-85c65e2d0165/go.mod h1:c9O8+fpSOX1DM8cPNSkX/qsBWdkD4yd2dpciOWQjpBw=
+github.com/dgryski/go-metro v0.0.0-20211217172704-adc40b04c140 h1:y7y0Oa6UawqTFPCDw9JG6pdKt4F9pAhHv0B7FMGaGD0=
+github.com/dgryski/go-metro v0.0.0-20211217172704-adc40b04c140/go.mod h1:c9O8+fpSOX1DM8cPNSkX/qsBWdkD4yd2dpciOWQjpBw=
 github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0 h1:b+7JSiBM+hnLQjP/lXztks5hnLt1PS46hktG9VOJgzo=
 github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0/go.mod h1:qzKC/DpcxK67zaSHdCmIv3L9WJViHVinYXN2S7l3RM8=
 github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08 h1:BGzXzhmOgLHlylvQ27Tcgz235JvonPEgdMtpaZaeZt0=

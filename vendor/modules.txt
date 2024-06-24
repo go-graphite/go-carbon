@@ -68,7 +68,7 @@ github.com/davecgh/go-spew/spew
 # github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb
 ## explicit
 github.com/dgryski/go-expirecache
-# github.com/dgryski/go-metro v0.0.0-20200812162917-85c65e2d0165
+# github.com/dgryski/go-metro v0.0.0-20211217172704-adc40b04c140
 ## explicit
 github.com/dgryski/go-metro
 # github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0

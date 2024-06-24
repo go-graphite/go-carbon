@@ -134,7 +134,7 @@ func (c *Cache) SetMaxSize(maxSize uint32) {
 	c.settings.Store(&newSettings)
 }
 
-// SetMaxSize of bloom filter
+// SetBloomSize of bloom filter
 func (c *Cache) SetBloomSize(bloomSize uint) {
 	if bloomSize > 0 {
 		c.newMetricCf = cuckoo.NewFilter(bloomSize)
@@ -161,7 +161,7 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("maxSize", float64(s.maxSize))
 	send("notConfirmed", float64(c.NotConfirmedLength()))
 	// report elements in bloom filter
-	if c.newMetricsChan != nil && c.newMetricCf != nil {
+	if c.newMetricCf != nil {
 		send("cfCount", float64(c.newMetricCf.Count()))
 	}
 
@@ -321,11 +321,12 @@ func (c *Cache) Add(p *points.Points) {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
+
 		if shard.adds != nil {
 			shard.adds[p.Metric] = struct{}{}
 		}
 		// if no bloom filter - just add metric to new channel
-		// if missed in cache
+		// if missed in cache, as it was before
 		if c.newMetricsChan != nil && c.newMetricCf == nil {
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
@@ -334,7 +335,7 @@ func (c *Cache) Add(p *points.Points) {
 	// if we have both new metric channel and bloom filter
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
-		// despite that we have it in cache
+		// despite what we have it in cache (new behaviour)
 		if !c.newMetricCf.Lookup([]byte(p.Metric)) {
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
@@ -351,6 +352,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	p, exists = shard.items[key]
 	delete(shard.items, key)
 	shard.Unlock()
+
 	// we probably can skip that, but I'm a bit worry
 	// of effectiveness of bloom filter over time
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
@@ -380,6 +382,7 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 		shard.notConfirmedUsed++
 	}
 	shard.Unlock()
+
 	// we probably can skip that, but I'm a bit worry
 	// of effectiveness of bloom filter over time
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
