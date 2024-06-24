@@ -383,12 +383,6 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 	}
 	shard.Unlock()
 
-	// we probably can skip that, but I'm a bit worry
-	// of effectiveness of bloom filter over time
-	if c.newMetricsChan != nil && c.newMetricCf != nil {
-		c.newMetricCf.Delete([]byte(p.Metric))
-	}
-
 	if exists {
 		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
 	}
