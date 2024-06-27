@@ -61,7 +61,11 @@ type Cache struct {
 	}
 
 	newMetricsChan chan string
-	newMetricCf    *cuckoo.Filter
+	newMetricCfA   *cuckoo.Filter
+	newMetricCfB   *cuckoo.Filter
+	newMetricCfTTL time.Duration
+	timeToResetCfA time.Time
+	timeToResetCfB time.Time
 
 	throttle func(ps *points.Points, inCache bool) bool
 }
@@ -98,7 +102,11 @@ func New() *Cache {
 	c.settings.Store(&settings)
 
 	c.writeoutQueue = NewWriteoutQueue(c)
-	c.newMetricCf = nil
+	c.newMetricCfA = nil
+	c.newMetricCfB = nil
+	c.newMetricCfTTL = time.Duration(0)
+	c.timeToResetCfA = time.Now()
+	c.timeToResetCfB = time.Now()
 	return c
 }
 
@@ -135,9 +143,17 @@ func (c *Cache) SetMaxSize(maxSize uint32) {
 }
 
 // SetBloomSize of bloom filter
-func (c *Cache) SetBloomSize(bloomSize uint) {
+// if ttl > 0 will initialize secondary bloom filter
+// and set initial TTL for both filters
+func (c *Cache) SetBloomFilters(bloomSize uint, ttl time.Duration) {
 	if bloomSize > 0 {
-		c.newMetricCf = cuckoo.NewFilter(bloomSize)
+		c.newMetricCfA = cuckoo.NewFilter(bloomSize)
+	}
+	if ttl > 0 {
+		c.newMetricCfTTL = ttl
+		c.newMetricCfB = cuckoo.NewFilter(bloomSize)
+		c.timeToResetCfA = time.Now().Add(ttl / 2)
+		c.timeToResetCfB = time.Now().Add(ttl)
 	}
 }
 
@@ -161,10 +177,12 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("maxSize", float64(s.maxSize))
 	send("notConfirmed", float64(c.NotConfirmedLength()))
 	// report elements in bloom filter
-	if c.newMetricCf != nil {
-		send("cfCount", float64(c.newMetricCf.Count()))
+	if c.newMetricCfA != nil {
+		send("cfCountA", float64(c.newMetricCfA.Count()))
 	}
-
+	if c.newMetricCfB != nil {
+		send("cfCountB", float64(c.newMetricCfB.Count()))
+	}
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
 	helper.SendAndSubstractUint32("tagsNormalizeErrors", &c.stat.tagsNormalizeErrors, send)
 	helper.SendAndSubstractUint32("overflow", &c.stat.overflowCnt, send)
@@ -275,12 +293,39 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 }
 
 // send metric to the new metrics channel
-func sendMetricToNewMetricChan(c *Cache, metric string) {
+func (c *Cache) sendMetricToNewMetricChan(metric string) {
 	select {
 	case c.newMetricsChan <- metric:
 	default:
 		atomic.AddUint32(&c.stat.droppedRealtimeIndex, 1)
 	}
+}
+
+// check if metric present in one or another bloom filter
+// also doing housekeeping of filters
+func (c *Cache) checkAndAddMetricToBloomFilters(metric string) bool {
+	if metric != "" {
+		mb := []byte(metric)
+		if c.newMetricCfA != nil {
+			if time.Now().After(c.timeToResetCfA) {
+				c.timeToResetCfA = time.Now().Add(c.newMetricCfTTL)
+				c.newMetricCfA.Reset()
+			} else if c.newMetricCfA.Lookup(mb) {
+				return true
+			}
+			c.newMetricCfA.Insert(mb)
+		}
+		if c.newMetricCfB != nil {
+			if time.Now().After(c.timeToResetCfB) {
+				c.newMetricCfB.Reset()
+				c.timeToResetCfB = time.Now().Add(c.newMetricCfTTL)
+			} else if c.newMetricCfB.Lookup(mb) {
+				return true
+			}
+			c.newMetricCfB.Insert(mb)
+		}
+	}
+	return false
 }
 
 // Sets the given value under the specified key.
@@ -327,19 +372,18 @@ func (c *Cache) Add(p *points.Points) {
 		}
 		// if no bloom filter - just add metric to new channel
 		// if missed in cache, as it was before
-		if c.newMetricsChan != nil && c.newMetricCf == nil {
-			sendMetricToNewMetricChan(c, p.Metric)
+		if c.newMetricsChan != nil && c.newMetricCfA == nil {
+			c.sendMetricToNewMetricChan(p.Metric)
 		}
 	}
 
 	// if we have both new metric channel and bloom filter
-	if c.newMetricsChan != nil && c.newMetricCf != nil {
+	if c.newMetricsChan != nil && c.newMetricCfA != nil {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
-		if !c.newMetricCf.Lookup([]byte(p.Metric)) {
-			sendMetricToNewMetricChan(c, p.Metric)
+		if !c.checkAndAddMetricToBloomFilters(p.Metric) {
+			c.sendMetricToNewMetricChan(p.Metric)
 		}
-		c.newMetricCf.Insert([]byte(p.Metric))
 	}
 	atomic.AddInt32(&c.stat.size, int32(count))
 }

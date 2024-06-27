@@ -178,7 +178,7 @@ func (app *App) ReloadConfig() error {
 	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
 	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
 	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
-	app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
+	app.Cache.SetBloomFilters(app.Config.Cache.BloomSize, app.Config.Cache.BloomTTL.Value())
 
 	if app.Persister != nil {
 		app.Persister.Stop()
@@ -350,7 +350,7 @@ func (app *App) Start() (err error) {
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
-	core.SetBloomSize(conf.Cache.BloomSize)
+	core.SetBloomFilters(conf.Cache.BloomSize, conf.Cache.BloomTTL.Value())
 
 	app.Cache = core
 
