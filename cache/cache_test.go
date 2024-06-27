@@ -16,7 +16,7 @@ func TestCache(t *testing.T) {
 	ch := make(chan string, 3)
 	c.SetNewMetricsChan(ch)
 	// set bloom size
-	c.SetBloomSize(3)
+	c.SetBloomFilters(3, 0)
 
 	c.Add(points.OnePoint("hello.world", 42, 10))
 
@@ -25,7 +25,7 @@ func TestCache(t *testing.T) {
 	}
 
 	// check if new metric added to bloom filter
-	if c.newMetricCf.Count() != 1 {
+	if c.newMetricCfA.Count() != 1 {
 		t.FailNow()
 	}
 

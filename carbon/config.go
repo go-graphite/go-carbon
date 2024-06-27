@@ -78,9 +78,10 @@ type whisperConfig struct {
 }
 
 type cacheConfig struct {
-	MaxSize       uint32 `toml:"max-size"`
-	WriteStrategy string `toml:"write-strategy"`
-	BloomSize     uint   `toml:"bloom-size"`
+	MaxSize       uint32    `toml:"max-size"`
+	WriteStrategy string    `toml:"write-strategy"`
+	BloomSize     uint      `toml:"bloom-size"`
+	BloomTTL      *Duration `toml:"bloom-ttl"`
 }
 
 type carbonlinkConfig struct {
@@ -242,6 +243,10 @@ func NewConfig() *Config {
 		Cache: cacheConfig{
 			MaxSize:       1000000,
 			WriteStrategy: "max",
+			BloomSize:     0,
+			BloomTTL: &Duration{
+				0 * time.Second,
+			},
 		},
 		Udp:    udp.NewOptions(),
 		Tcp:    tcp.NewOptions(),
