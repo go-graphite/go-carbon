@@ -12,9 +12,25 @@ func TestCache(t *testing.T) {
 
 	c := New()
 
+	// init new metric channel
+	ch := make(chan string, 3)
+	c.SetNewMetricsChan(ch)
+	// set bloom size
+	c.SetBloomSize(3)
+
 	c.Add(points.OnePoint("hello.world", 42, 10))
 
 	if c.Size() != 1 {
+		t.FailNow()
+	}
+
+	// check if new metric added to bloom filter
+	if c.newMetricCf.Count() != 1 {
+		t.FailNow()
+	}
+
+	// check if new metric added to new metric channel
+	if len(c.newMetricsChan) != 1 {
 		t.FailNow()
 	}
 
