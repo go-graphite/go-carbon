@@ -209,11 +209,11 @@ func (q *QueryItem) StoreAndUnlock(data interface{}) {
 	close(q.QueryFinished)
 }
 
-type queryCache struct {
+type expireCache struct {
 	ec *expirecache.Cache
 }
 
-func (q *queryCache) getQueryItem(k string, size uint64, expire int32) *QueryItem {
+func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryItem {
 	emptyQueryItem := &QueryItem{QueryFinished: make(chan struct{})}
 	return q.ec.GetOrSet(k, emptyQueryItem, size, expire).(*QueryItem)
 }
@@ -252,10 +252,10 @@ type CarbonserverListener struct {
 	queryCacheEnabled          bool
 	streamingQueryCacheEnabled bool
 	queryCacheSizeMB           int
-	queryCache                 queryCache
+	queryCache                 expireCache
 	findCacheEnabled           bool
-	findCache                  queryCache
-	expandedGlobsCache         queryCache // TODO: rename queryCache type to be more generic
+	findCache                  expireCache
+	expandedGlobsCache         expireCache
 	trigramIndex               bool
 	trieIndex                  bool
 	concurrentIndex            bool
@@ -479,8 +479,8 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		cacheGet:           cacheGetFunc,
 		logger:             zapwriter.Logger("carbonserver"),
 		accessLogger:       zapwriter.Logger("access"),
-		findCache:          queryCache{ec: expirecache.New(0)},
-		expandedGlobsCache: queryCache{ec: expirecache.New(0)},
+		findCache:          expireCache{ec: expirecache.New(0)},
+		expandedGlobsCache: expireCache{ec: expirecache.New(0)},
 		trigramIndex:       true,
 		percentiles:        []int{100, 99, 98, 95, 75, 50},
 		prometheus: prometheus{
