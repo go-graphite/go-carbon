@@ -407,12 +407,19 @@ func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, for
 					listener.accessLogger.Error(
 						"rendering too many metrics",
 						zap.Int("limit", listener.maxMetricsRendered),
-						zap.Int("target", len(files)),
+						zap.Int("files", len(files)),
+						zap.Int("leafs", len(leafs)),
+						zap.Int("trieNodes", len(trieNodes)),
 					)
-
-					files = files[:listener.maxMetricsRendered]
-					leafs = leafs[:listener.maxMetricsRendered]
-					trieNodes = trieNodes[:listener.maxMetricsRendered]
+					if len(files) > listener.maxMetricsRendered {
+						files = files[:listener.maxMetricsRendered]
+					}
+					if len(leafs) > listener.maxMetricsRendered {
+						leafs = leafs[:listener.maxMetricsRendered]
+					}
+					if len(trieNodes) > listener.maxMetricsRendered {
+						trieNodes = trieNodes[:listener.maxMetricsRendered]
+					}
 				}
 
 				metricsCount := 0
