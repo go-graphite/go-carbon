@@ -1786,7 +1786,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		listener.forceScanChan <- struct{}{}
 	}
 
-	listener.queryCache = queryCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
+	listener.queryCache = expireCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
 
 	// +1 to track every over the number of buckets we track
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
@@ -2224,7 +2224,7 @@ func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Con
 	return nil
 }
 
-func getWithCache(logger *zap.Logger, cache queryCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
+func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
 	item := cache.getQueryItem(key, size, expire)
 	res, ok := item.FetchOrLock()
 	switch {
