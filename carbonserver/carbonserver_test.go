@@ -373,6 +373,7 @@ func initCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error)
 	carbonserver.whisperData = path
 	carbonserver.logger = zap.NewNop()
 	carbonserver.metrics = &metricStruct{}
+	carbonserver.SetMaxFetchDataGoroutines(2)
 	return carbonserver, nil
 }
 

@@ -491,6 +491,7 @@ func (app *App) Start() (err error) {
 		carbonserver.SetFailOnMaxGlobs(conf.Carbonserver.FailOnMaxGlobs)
 		carbonserver.SetMaxMetricsGlobbed(conf.Carbonserver.MaxMetricsGlobbed)
 		carbonserver.SetMaxMetricsRendered(conf.Carbonserver.MaxMetricsRendered)
+		carbonserver.SetMaxFetchDataGoroutines(conf.Carbonserver.MaxFetchDataGoroutines)
 		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
 		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
 		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())

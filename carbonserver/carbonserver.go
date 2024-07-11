@@ -246,8 +246,9 @@ type CarbonserverListener struct {
 	compressed        bool
 	removeEmptyFile   bool
 
-	maxMetricsGlobbed  int
-	maxMetricsRendered int
+	maxMetricsGlobbed      int
+	maxMetricsRendered     int
+	maxFetchDataGoroutines int
 
 	queryCacheEnabled          bool
 	streamingQueryCacheEnabled bool
@@ -521,6 +522,13 @@ func (listener *CarbonserverListener) SetMaxMetricsGlobbed(max int) {
 }
 func (listener *CarbonserverListener) SetMaxMetricsRendered(max int) {
 	listener.maxMetricsRendered = max
+}
+func (listener *CarbonserverListener) SetMaxFetchDataGoroutines(max int) {
+	if max > 0 {
+		listener.maxFetchDataGoroutines = max
+	} else {
+		listener.maxFetchDataGoroutines = 2 * runtime.GOMAXPROCS(0)
+	}
 }
 func (listener *CarbonserverListener) SetFLock(flock bool) {
 	listener.flock = flock
