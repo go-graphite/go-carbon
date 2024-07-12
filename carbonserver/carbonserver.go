@@ -209,11 +209,11 @@ func (q *QueryItem) StoreAndUnlock(data interface{}) {
 	close(q.QueryFinished)
 }
 
-type queryCache struct {
+type expireCache struct {
 	ec *expirecache.Cache
 }
 
-func (q *queryCache) getQueryItem(k string, size uint64, expire int32) *QueryItem {
+func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryItem {
 	emptyQueryItem := &QueryItem{QueryFinished: make(chan struct{})}
 	return q.ec.GetOrSet(k, emptyQueryItem, size, expire).(*QueryItem)
 }
@@ -246,16 +246,17 @@ type CarbonserverListener struct {
 	compressed        bool
 	removeEmptyFile   bool
 
-	maxMetricsGlobbed  int
-	maxMetricsRendered int
+	maxMetricsGlobbed      int
+	maxMetricsRendered     int
+	maxFetchDataGoroutines int
 
 	queryCacheEnabled          bool
 	streamingQueryCacheEnabled bool
 	queryCacheSizeMB           int
-	queryCache                 queryCache
+	queryCache                 expireCache
 	findCacheEnabled           bool
-	findCache                  queryCache
-	expandedGlobsCache         queryCache // TODO: rename queryCache type to be more generic
+	findCache                  expireCache
+	expandedGlobsCache         expireCache
 	trigramIndex               bool
 	trieIndex                  bool
 	concurrentIndex            bool
@@ -479,8 +480,8 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		cacheGet:           cacheGetFunc,
 		logger:             zapwriter.Logger("carbonserver"),
 		accessLogger:       zapwriter.Logger("access"),
-		findCache:          queryCache{ec: expirecache.New(0)},
-		expandedGlobsCache: queryCache{ec: expirecache.New(0)},
+		findCache:          expireCache{ec: expirecache.New(0)},
+		expandedGlobsCache: expireCache{ec: expirecache.New(0)},
 		trigramIndex:       true,
 		percentiles:        []int{100, 99, 98, 95, 75, 50},
 		prometheus: prometheus{
@@ -521,6 +522,9 @@ func (listener *CarbonserverListener) SetMaxMetricsGlobbed(max int) {
 }
 func (listener *CarbonserverListener) SetMaxMetricsRendered(max int) {
 	listener.maxMetricsRendered = max
+}
+func (listener *CarbonserverListener) SetMaxFetchDataGoroutines(max int) {
+	listener.maxFetchDataGoroutines = max
 }
 func (listener *CarbonserverListener) SetFLock(flock bool) {
 	listener.flock = flock
@@ -1786,7 +1790,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		listener.forceScanChan <- struct{}{}
 	}
 
-	listener.queryCache = queryCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
+	listener.queryCache = expireCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
 
 	// +1 to track every over the number of buckets we track
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
@@ -2224,7 +2228,7 @@ func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Con
 	return nil
 }
 
-func getWithCache(logger *zap.Logger, cache queryCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
+func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
 	item := cache.getQueryItem(key, size, expire)
 	res, ok := item.FetchOrLock()
 	switch {

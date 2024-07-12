@@ -85,6 +85,7 @@ func getTestInfo(t *testing.T) *testInfo {
 	carbonserver.cacheGetRecentMetrics = c.GetRecentNewMetrics
 	carbonserver.metrics = &metricStruct{}
 	carbonserver.exitChan = make(chan struct{})
+	carbonserver.SetMaxFetchDataGoroutines(2)
 
 	return &testInfo{
 		forceChan:     make(chan struct{}),

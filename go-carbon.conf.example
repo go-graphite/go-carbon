@@ -350,6 +350,9 @@ max-metrics-globbed  = 30000
 # Maximum metrics could be returned in render request (works both all types of
 # indexes) (Default: 1,000,000)
 max-metrics-rendered = 1000
+# Maximum number of goroutines (i.e. threads) to fetch data from disk/cache
+# (Default: 2 x max-cpu)
+max-fetch-data-goroutines = 0
 
 # graphite-web-10-mode
 # Use Graphite-web 1.0 native structs for pickle response

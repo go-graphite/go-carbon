@@ -10,8 +10,10 @@ import (
 	"math"
 	"net/http"
 	_ "net/http/pprof" // skipcq: GO-S2108
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -594,26 +596,46 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, trieNodes []*trieNode, fromTime, untilTime int32) ([]response, error) {
 	var multi []response
 	var errs []error
-	for i, fileName := range files {
-		if !leafs[i] {
-			listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression),
-				zap.String("metricName", metric), zap.String("fileName", fileName))
-			// can't fetch a directory
-			continue
-		}
-		response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
-		if err == nil {
-			multi = append(multi, response)
-			if listener.trieIndex {
-				readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
-				if len(trieNodes) > i {
-					trieNodes[i].incrementReadBytesMetric(readBytesNumber)
-				}
-			}
-		} else {
-			errs = append(errs, err)
-		}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var maxFetchDataGoroutines int
+	// listener.maxFetchDataGoroutines is the maximum number of goroutines you want to allow
+	// but < 0 is always wrong
+	if listener.maxFetchDataGoroutines > 0 {
+		maxFetchDataGoroutines = listener.maxFetchDataGoroutines
+	} else {
+		maxFetchDataGoroutines = 2 * runtime.GOMAXPROCS(0)
 	}
+	sem := make(chan struct{}, maxFetchDataGoroutines)
+	for i, fileName := range files {
+		wg.Add(1)
+		sem <- struct{}{} // acquire a slot
+		go func(i int, fileName string) {
+			defer wg.Done()
+			defer func() { <-sem }() // release the slot
+			if !leafs[i] {
+				listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression),
+					zap.String("metricName", metric), zap.String("fileName", fileName))
+				// can't fetch a directory
+				return
+			}
+			response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				multi = append(multi, response)
+				if listener.trieIndex {
+					readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
+					if len(trieNodes) > i {
+						trieNodes[i].incrementReadBytesMetric(readBytesNumber)
+					}
+				}
+			} else {
+				errs = append(errs, err)
+			}
+		}(i, fileName)
+	}
+	wg.Wait()
 	if len(errs) != 0 {
 		listener.logger.Warn("errors occur while fetching data",
 			zap.Any("errors", errs),
