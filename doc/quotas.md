@@ -17,7 +17,7 @@ Limitations/Caveats:
 * logical-size: how many logical disk space are allowed for the matched prefix/namespaces
 * physical-size: how many physical disk space are allowed for the matched prefix/namespaces
 * data-points: how many data points (inferred using storage-schemas.conf) are allowed for the matched prefix/namespaces
-* throughput: how many data points are allowed within the interval specified by `carbonserver.quota-usage-report-frequency` for the matched prefix/namespaces
+* throughput: how many data points are allowed within a minute interval for the matched prefix/namespaces
 * dropping-policy: available values includes `none` and `new`. `none` means doesn't not drop any values. `new` means dropping new metrics. `none` can be used to produce only the quota, usage, and throttle metrics without actually dropping the data.
 
 ### Why `logical-size` and `physical-size`
@@ -32,13 +32,13 @@ Usually, `data_points` corresponds to `logical-size` as they are both determined
 
 ### `throughput`
 
-Throughput controls how many data points are allowed within the interval specified by `carbonserver.quota-usage-report-frequency`.
+Throughput controls how many data points are allowed within a minute interval.
 
-This is useful for us to monitor how many datapoints are sent to a specific patthen/namespace. It's useful for cases like some of those namespaces are generating too many datapoints and causing other namespaces to be overflown in the memory cache.
+This is useful for us to monitor how many datapoints are sent to a specific pattern/namespace. It's useful for cases like some of those namespaces are generating too many datapoints and causing other namespaces to be overflown in the memory cache.
 
 The value is reset every interval specified by `carbonserver.quota-usage-report-frequency`.
 
-If `carbonserver.quota-usage-report-frequency` is 1 minute, then `throughput = 600,000`, then it means only 600k data points per minute are allowed to be pushed to the matched namespace/pattern.
+If `carbonserver.quota-usage-report-frequency` is 5 minute, then `throughput = 600,000`, then it means only 3M data points per every 5 minute are allowed to be pushed to the matched namespace/pattern.
 
 For `throughput` control, both new and old metrics might be dropped, depending their arriving order.
 

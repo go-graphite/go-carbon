@@ -11,11 +11,12 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"github.com/lomik/zapwriter"
+
 	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/go-graphite/go-carbon/receiver/udp"
-	"github.com/lomik/zapwriter"
 )
 
 const MetricEndpointLocal = "local"
@@ -425,7 +426,8 @@ retentions = 60:43200,3600:43800`), 0600)
 	return configFile
 }
 
-func (c *Config) getCarbonserverQuotas() (quotas []*carbonserver.Quota) {
+func (c *Config) getCarbonserverQuotas(reportFrequency time.Duration) (quotas []*carbonserver.Quota) {
+	minutes := int64(reportFrequency / time.Minute)
 	for _, q := range c.Whisper.Quotas {
 		quotas = append(quotas, &carbonserver.Quota{
 			Pattern:          q.Pattern,
@@ -434,7 +436,7 @@ func (c *Config) getCarbonserverQuotas() (quotas []*carbonserver.Quota) {
 			DataPoints:       q.DataPoints,
 			LogicalSize:      q.LogicalSize,
 			PhysicalSize:     q.PhysicalSize,
-			Throughput:       q.Throughput,
+			Throughput:       q.Throughput * minutes,
 			DroppingPolicy:   carbonserver.ParseQuotaDroppingPolicy(q.DroppingPolicy),
 			StatMetricPrefix: q.StatMetricPrefix,
 		})

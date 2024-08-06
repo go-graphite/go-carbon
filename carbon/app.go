@@ -554,7 +554,7 @@ func (app *App) Start() (err error) {
 				return logicalSize, physicalSize, dataPoints
 			})
 
-			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas())
+			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas(conf.Carbonserver.QuotaUsageReportFrequency.Value()))
 			core.SetThrottle(carbonserver.ShouldThrottleMetric)
 		}
 
