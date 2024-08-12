@@ -3,7 +3,7 @@ module github.com/go-graphite/go-carbon
 go 1.20
 
 require (
-	cloud.google.com/go/pubsub v1.40.0
+	cloud.google.com/go/pubsub v1.41.0
 	github.com/BurntSushi/toml v1.4.0
 	github.com/IBM/sarama v1.43.2
 	github.com/NYTimes/gziphandler v1.1.1
