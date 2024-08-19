@@ -43,7 +43,7 @@ cloud.google.com/go/pubsub/pstest
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/IBM/sarama v1.43.2
+# github.com/IBM/sarama v1.43.3
 ## explicit; go 1.19
 github.com/IBM/sarama
 # github.com/NYTimes/gziphandler v1.1.1
@@ -73,7 +73,7 @@ github.com/dgryski/go-trigram
 # github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 ## explicit
 github.com/dgryski/httputil
-# github.com/eapache/go-resiliency v1.6.0
+# github.com/eapache/go-resiliency v1.7.0
 ## explicit; go 1.13
 github.com/eapache/go-resiliency/breaker
 # github.com/eapache/go-xerial-snappy v0.0.0-20230731223053-c322873962e3
