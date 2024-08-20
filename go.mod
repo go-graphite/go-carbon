@@ -2,8 +2,6 @@ module github.com/go-graphite/go-carbon
 
 go 1.21
 
-toolchain go1.23.0
-
 require (
 	cloud.google.com/go/pubsub v1.41.0
 	github.com/BurntSushi/toml v1.4.0
