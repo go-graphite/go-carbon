@@ -6,16 +6,16 @@ Based on https://github.com/orcaman/concurrent-map
 
 import (
 	"fmt"
+	"github.com/cespare/xxhash/v2"
 	"io"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	cuckoo "github.com/seiflotfy/cuckoofilter"
-
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
+	"github.com/greatroar/blobloom"
 )
 
 type WriteStrategy int
@@ -60,8 +60,9 @@ type Cache struct {
 		droppedRealtimeIndex uint32 // new metrics failed to be indexed in realtime
 	}
 
-	newMetricsChan chan string
-	newMetricCf    *cuckoo.Filter
+	newMetricsChan      chan string
+	newMetricCf         *blobloom.Filter
+	newMetricCfCapacity uint64
 
 	throttle func(ps *points.Points, inCache bool) bool
 }
@@ -135,9 +136,13 @@ func (c *Cache) SetMaxSize(maxSize uint32) {
 }
 
 // SetBloomSize of bloom filter
-func (c *Cache) SetBloomSize(bloomSize uint) {
+func (c *Cache) SetBloomSize(bloomSize uint64) {
 	if bloomSize > 0 {
-		c.newMetricCf = cuckoo.NewFilter(bloomSize)
+		c.newMetricCf = blobloom.NewOptimized(blobloom.Config{
+			Capacity: bloomSize, // Expected number of keys.
+			FPRate:   1e-4,      // Accept one false positive per 10,000 lookups.
+		})
+		c.newMetricCfCapacity = bloomSize
 	}
 }
 
@@ -162,7 +167,12 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("notConfirmed", float64(c.NotConfirmedLength()))
 	// report elements in bloom filter
 	if c.newMetricCf != nil {
-		send("cfCount", float64(c.newMetricCf.Count()))
+		cfCount := c.newMetricCf.Cardinality()
+		if uint64(cfCount) > c.newMetricCfCapacity {
+			// full filter report +Inf cardinality
+			cfCount = float64(c.newMetricCfCapacity)
+		}
+		send("cfCount", cfCount)
 	}
 
 	helper.SendAndSubstractUint32("queries", &c.stat.queryCnt, send)
@@ -336,10 +346,10 @@ func (c *Cache) Add(p *points.Points) {
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
-		if !c.newMetricCf.Lookup([]byte(p.Metric)) {
+		if !c.newMetricCf.Has(xxhash.Sum64([]byte(p.Metric))) {
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
-		c.newMetricCf.Insert([]byte(p.Metric))
+		c.newMetricCf.Add(xxhash.Sum64([]byte(p.Metric)))
 	}
 	atomic.AddInt32(&c.stat.size, int32(count))
 }
