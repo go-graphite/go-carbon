@@ -6,11 +6,12 @@ Based on https://github.com/orcaman/concurrent-map
 
 import (
 	"fmt"
-	"github.com/cespare/xxhash/v2"
 	"io"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cespare/xxhash/v2"
 
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
