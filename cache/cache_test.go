@@ -25,7 +25,7 @@ func TestCache(t *testing.T) {
 	}
 
 	// check if new metric added to bloom filter
-	if c.newMetricCf.Count() != 1 {
+	if c.newMetricCf.Empty() {
 		t.FailNow()
 	}
 

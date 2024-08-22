@@ -1,6 +1,6 @@
 module github.com/go-graphite/go-carbon
 
-go 1.20
+go 1.21
 
 require (
 	cloud.google.com/go/pubsub v1.41.0
@@ -34,7 +34,8 @@ require (
 )
 
 require (
-	github.com/seiflotfy/cuckoofilter v0.0.0-20220411075957-e3b120b3f5fb
+	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/greatroar/blobloom v0.8.0
 	golang.org/x/net v0.28.0
 	google.golang.org/protobuf v1.34.2
 )
@@ -46,9 +47,7 @@ require (
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
 	cloud.google.com/go/iam v1.1.12 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/dgryski/go-metro v0.0.0-20211217172704-adc40b04c140 // indirect
 	github.com/eapache/go-resiliency v1.7.0 // indirect
 	github.com/eapache/go-xerial-snappy v0.0.0-20230731223053-c322873962e3 // indirect
 	github.com/eapache/queue v1.1.0 // indirect
