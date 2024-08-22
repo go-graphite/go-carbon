@@ -349,8 +349,10 @@ func (c *Cache) Add(p *points.Points) {
 		// despite what we have it in cache (new behaviour)
 		if !c.newMetricCf.Has(xxhash.Sum64([]byte(p.Metric))) {
 			sendMetricToNewMetricChan(c, p.Metric)
+		} else {
+			c.newMetricCf.Add(xxhash.Sum64([]byte(p.Metric)))
 		}
-		c.newMetricCf.Add(xxhash.Sum64([]byte(p.Metric)))
+
 	}
 	atomic.AddInt32(&c.stat.size, int32(count))
 }
