@@ -555,6 +555,8 @@ func (app *App) Start() (err error) {
 			})
 
 			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas(conf.Carbonserver.QuotaUsageReportFrequency.Value()))
+			// TODO: make it configurable
+			carbonserver.SetThrottleBloomCache(10*1000*1000, time.Duration(150*time.Second))
 			core.SetThrottle(carbonserver.ShouldThrottleMetric)
 		}
 

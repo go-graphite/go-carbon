@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cespare/xxhash/v2"
 	"io"
 	"math"
 	"net"
@@ -58,6 +59,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
+	"github.com/greatroar/blobloom"
 	"github.com/lomik/zapwriter"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/filter"
@@ -104,6 +106,8 @@ type metricStruct struct {
 	TrieFiles                            uint64
 	TrieDirs                             uint64
 	TrieCountNodesTimeNs                 uint64
+	throttleBloomACardinality            uint64
+	throttleBloomBCardinality            uint64
 	QuotaApplyTimeNs                     uint64
 	UsageRefreshTimeNs                   uint64
 
@@ -287,6 +291,12 @@ type CarbonserverListener struct {
 	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
 	maxCreatesPerSecond       int
+	throttleBloomA            *blobloom.Filter
+	throttleBloomB            *blobloom.Filter
+	throttleBloomSize         uint64
+	throttleBloomTTL          time.Duration
+	timeToResetBloomA         time.Time
+	timeToResetBloomB         time.Time
 
 	interfalInfoCallbacks map[string]func() map[string]interface{}
 
@@ -499,6 +509,12 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		quotaAndUsageMetrics:  make(chan []points.Points, 1),
 		apiPerPathRatelimiter: map[string]*ApiPerPathRatelimiter{},
 		fileListCacheVersion:  FLCVersion1,
+		throttleBloomA:        nil,
+		throttleBloomB:        nil,
+		throttleBloomSize:     0,
+		throttleBloomTTL:      time.Duration(0),
+		timeToResetBloomA:     time.Now(),
+		timeToResetBloomB:     time.Now(),
 	}
 }
 
@@ -615,13 +631,75 @@ func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
 func (listener *CarbonserverListener) isQuotaEnabled() bool {
 	return listener.quotas != nil
 }
+
+func (listener *CarbonserverListener) SetThrottleBloomCache(bloomSize uint64, ttl time.Duration) {
+	if bloomSize > 0 && ttl > 0 {
+		c := blobloom.Config{
+			Capacity: bloomSize, // Expected number of keys.
+			FPRate:   1e-4,      // Accept one false positive per 10,000 lookups.
+		}
+		listener.throttleBloomSize = bloomSize
+		listener.throttleBloomA = blobloom.NewOptimized(c)
+		listener.throttleBloomB = blobloom.NewOptimized(c)
+		listener.throttleBloomTTL = ttl
+		listener.timeToResetBloomA = time.Now().Add(ttl / 2)
+		listener.timeToResetBloomB = time.Now().Add(ttl)
+	}
+}
+
+func (listener *CarbonserverListener) checkMetricNotThrottledCache(hash uint64) bool {
+	if listener.throttleBloomA != nil && listener.throttleBloomB != nil {
+		if listener.throttleBloomA.Has(hash) || listener.throttleBloomB.Has(hash) {
+			return true
+		}
+	}
+	return false
+}
+
+func (listener *CarbonserverListener) setMetricNotThrottledCache(hash uint64) {
+	if listener.throttleBloomA != nil {
+		if time.Now().After(listener.timeToResetBloomA) {
+			// record cardinality before resetting bloom
+			c := uint64(listener.throttleBloomA.Cardinality())
+			if c > listener.throttleBloomSize {
+				c = listener.throttleBloomSize
+			}
+			atomic.StoreUint64(&listener.metrics.throttleBloomACardinality, c)
+			listener.timeToResetBloomA = time.Now().Add(listener.throttleBloomTTL)
+			listener.throttleBloomA.Clear()
+		}
+		listener.throttleBloomA.Add(hash)
+	}
+	if listener.throttleBloomB != nil {
+		if time.Now().After(listener.timeToResetBloomB) {
+			// record cardinality before resetting bloom
+			c := uint64(listener.throttleBloomB.Cardinality())
+			if c > listener.throttleBloomSize {
+				c = listener.throttleBloomSize
+			}
+			atomic.StoreUint64(&listener.metrics.throttleBloomBCardinality, c)
+			listener.throttleBloomB.Clear()
+			listener.timeToResetBloomB = time.Now().Add(listener.throttleBloomTTL)
+		}
+		listener.throttleBloomB.Add(hash)
+	}
+}
+
 func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, inCache bool) bool {
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil || fidx.trieIdx == nil {
 		return false
 	}
 
+	hash := xxhash.Sum64([]byte(ps.Metric))
+	if listener.checkMetricNotThrottledCache(hash) {
+		return false
+	}
+
 	var throttled = fidx.trieIdx.throttle(ps, inCache)
+	if !throttled {
+		listener.setMetricNotThrottledCache(hash)
+	}
 
 	return throttled
 }
@@ -1541,6 +1619,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	if listener.isQuotaEnabled() {
 		senderRaw("quota_apply_time_ns", &listener.metrics.QuotaApplyTimeNs, send)
 		senderRaw("usage_refresh_time_ns", &listener.metrics.UsageRefreshTimeNs, send)
+		senderRaw("throttle_bloom_a_cardinality", &listener.metrics.throttleBloomACardinality, send)
+		senderRaw("throttle_bloom_b_cardinality", &listener.metrics.throttleBloomBCardinality, send)
 	}
 
 	sender("alloc", &alloc, send)
