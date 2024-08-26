@@ -1,4 +1,4 @@
-FROM golang:1.20-alpine3.17 AS build
+FROM golang:1.23-alpine AS build
 
 COPY . /usr/local/src/go-carbon
 RUN apk add --update git make bash \
@@ -6,7 +6,7 @@ RUN apk add --update git make bash \
  && make go-carbon \
  && chmod +x go-carbon && cp -fv go-carbon /tmp
 
-FROM alpine:3.17
+FROM alpine:3
 
 RUN addgroup -S carbon && adduser -S carbon -G carbon \
     && mkdir -p /var/lib/graphite/whisper /var/lib/graphite/dump /var/lib/graphite/tagging /var/log/go-carbon /etc/go-carbon/ \
