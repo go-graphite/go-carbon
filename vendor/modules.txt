@@ -30,7 +30,7 @@ cloud.google.com/go/compute/metadata
 ## explicit; go 1.21
 cloud.google.com/go/iam
 cloud.google.com/go/iam/apiv1/iampb
-# cloud.google.com/go/pubsub v1.42.0
+# cloud.google.com/go/pubsub v1.43.0
 ## explicit; go 1.21
 cloud.google.com/go/pubsub
 cloud.google.com/go/pubsub/apiv1
@@ -155,6 +155,7 @@ github.com/googleapis/gax-go/v2/apierror
 github.com/googleapis/gax-go/v2/apierror/internal/proto
 github.com/googleapis/gax-go/v2/callctx
 github.com/googleapis/gax-go/v2/internal
+github.com/googleapis/gax-go/v2/iterator
 # github.com/greatroar/blobloom v0.8.0
 ## explicit; go 1.14
 github.com/greatroar/blobloom
@@ -312,8 +313,8 @@ github.com/vmihailenco/msgpack/v5/msgpcode
 github.com/vmihailenco/tagparser/v2
 github.com/vmihailenco/tagparser/v2/internal
 github.com/vmihailenco/tagparser/v2/internal/parser
-# go.einride.tech/aip v0.67.1
-## explicit; go 1.19
+# go.einride.tech/aip v0.68.0
+## explicit; go 1.21
 go.einride.tech/aip/filtering
 go.einride.tech/aip/filtering/exprs
 # go.opencensus.io v0.24.0
@@ -364,7 +365,7 @@ go.opentelemetry.io/otel/semconv/v1.26.0
 go.opentelemetry.io/otel/metric
 go.opentelemetry.io/otel/metric/embedded
 go.opentelemetry.io/otel/metric/noop
-# go.opentelemetry.io/otel/sdk v1.28.0
+# go.opentelemetry.io/otel/sdk v1.29.0
 ## explicit; go 1.21
 go.opentelemetry.io/otel/sdk
 go.opentelemetry.io/otel/sdk/instrumentation
@@ -414,7 +415,7 @@ golang.org/x/net/internal/socks
 golang.org/x/net/internal/timeseries
 golang.org/x/net/proxy
 golang.org/x/net/trace
-# golang.org/x/oauth2 v0.22.0
+# golang.org/x/oauth2 v0.23.0
 ## explicit; go 1.18
 golang.org/x/oauth2
 golang.org/x/oauth2/authhandler
@@ -465,7 +466,7 @@ google.golang.org/api/transport/http/internal/propagation
 # google.golang.org/genproto v0.0.0-20240903143218-8af14fe29dc1
 ## explicit; go 1.21
 google.golang.org/genproto/googleapis/type/expr
-# google.golang.org/genproto/googleapis/api v0.0.0-20240827150818-7e3bb234dfed
+# google.golang.org/genproto/googleapis/api v0.0.0-20240903143218-8af14fe29dc1
 ## explicit; go 1.21
 google.golang.org/genproto/googleapis/api
 google.golang.org/genproto/googleapis/api/annotations
