@@ -247,6 +247,12 @@ streaming-query-cache-enabled = false
 query-cache-size-mb = 0
 # Enable /metrics/find cache, it will cache the result for 5 minutes
 find-cache-enabled = true
+# 0 for unlimited
+find-cache-size-mb = 0
+# Enable expanded globs cache, it will cache the glob expansion result for 5 minutes
+glob-cache-enabled = true
+# 0 for unlimited
+glob-cache-size-mb = 0
 # Control trigram index
 #  This index is used to speed-up /find requests
 #  However, it will lead to increased memory consumption
