@@ -1,5 +1,4 @@
 NAME:=go-carbon
-MAINTAINER:="Roman Lomonosov <r.lomonosov@gmail.com>"
 DESCRIPTION:="Golang implementation of Graphite/Carbon server"
 MODULE:=github.com/go-graphite/go-carbon
 
@@ -21,6 +20,8 @@ endif
 RPM_VERSION:=$(subst -,_,$(VERSION))
 BUILD ?= $(shell git describe --abbrev=4 --dirty --always --tags)
 
+SRCS:=$(shell find . -name '*.go')
+
 all: $(NAME)
 
 $(NAME):
@@ -40,12 +41,14 @@ test:
 	make run-test COMMAND="vet"
 	make run-test COMMAND="test -race"
 
-gox-build:
-	rm -rf out
+gox-build: out/$(NAME)-linux-386 out/$(NAME)-linux-amd64 out/$(NAME)-linux-arm64
+
+ARCH = 386 amd64 arm64
+out/$(NAME)-linux-%: out $(SRCS)
+	GOOS=linux GOARCH=$* $(GO) build -ldflags '-X main.BuildVersion=$(VERSION)' -o $@ $(MODULE)
+
+out:
 	mkdir -p out
-	cd out && $(GO) build $(MODULE) && cd ..
-	gox -os="linux" -arch="amd64" -arch="386" -arch="arm64" -output="out/$(NAME)-{{.OS}}-{{.Arch}}" $(MODULE)
-	ls -la ./out/
 
 clean:
 	rm -f go-carbon build/* *deb *rpm
@@ -67,68 +70,32 @@ package-tree:
 	install -m 0644 deploy/$(NAME).logrotate out/root/etc/logrotate.d/$(NAME)
 	install -m 0755 deploy/$(NAME).init out/root/etc/init.d/$(NAME)
 
-fpm-deb:
-	make fpm-build-deb ARCH=amd64
-	make fpm-build-deb ARCH=386
-	make fpm-build-deb ARCH=arm64
+nfpm-deb: gox-build package-tree
+	$(MAKE) nfpm-build-deb ARCH=386
+	$(MAKE) nfpm-build-deb ARCH=amd64
+	$(MAKE) nfpm-build-deb ARCH=arm64
 
-fpm-rpm:
-	make fpm-build-rpm ARCH=amd64 FILE_ARCH=x86_64
-	make fpm-build-rpm ARCH=386 FILE_ARCH=386
-	make fpm-build-rpm ARCH=arm64 FILE_ARCH=arm64
+nfpm-rpm: gox-build package-tree
+	$(MAKE) nfpm-build-rpm ARCH=386
+	$(MAKE) nfpm-build-rpm ARCH=amd64
+	$(MAKE) nfpm-build-rpm ARCH=arm64
 
-fpm-build-deb:
-	make package-tree
-	chmod 0755 out/$(NAME)-linux-$(ARCH)
-	fpm -s dir -t deb -n $(NAME) -v $(VERSION) \
-		--deb-priority optional --category admin \
-		--package $(NAME)_$(VERSION)_$(ARCH).deb \
-		--force \
-		--deb-compression bzip2 \
-		--url https://github.com/go-graphite/$(NAME) \
-		--description $(DESCRIPTION) \
-		-m $(MAINTAINER) \
-		--license "MIT" \
-		-a $(ARCH) \
-		--before-install deploy/before_install.sh \
-		--before-upgrade deploy/before_install.sh \
-		--after-install deploy/after_install.sh \
-		--after-upgrade deploy/after_install.sh \
-		--config-files /etc/ \
-		out/root/=/ \
-		out/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
-
-fpm-build-rpm:
-	make package-tree
-	chmod 0755 out/$(NAME)-linux-$(ARCH)
-	fpm -s dir -t rpm -n $(NAME) -v $(VERSION) \
-		--package $(NAME)-$(VERSION)-1.$(FILE_ARCH).rpm \
-		--force \
-		--rpm-compression bzip2 --rpm-os linux \
-		--url https://github.com/go-graphite/$(NAME) \
-		--description $(DESCRIPTION) \
-		-m $(MAINTAINER) \
-		--license "MIT" \
-		-a $(ARCH) \
-		--before-install deploy/before_install.sh \
-		--before-upgrade deploy/before_install.sh \
-		--after-install deploy/after_install.sh \
-		--after-upgrade deploy/after_install.sh \
-		--config-files /etc/ \
-		out/root/=/ \
-		out/$(NAME)-linux-$(ARCH)=/usr/bin/$(NAME)
+nfpm-build-%: nfpm.yaml
+	NAME=$(NAME) DESCRIPTION=$(DESCRIPTION) ARCH=$(ARCH) VERSION_STRING=$(VERSION) nfpm package --packager $*
 
 packagecloud-push-rpm: $(wildcard $(NAME)-$(RPM_VERSION)-1.*.rpm)
 	for pkg in $^; do
 		package_cloud push $(REPO)/el/7 $${pkg} || true
 		package_cloud push $(REPO)/el/8 $${pkg} || true
+		package_cloud push $(REPO)/el/9 $${pkg} || true
 	done
 
 packagecloud-push-deb: $(wildcard $(NAME)_$(VERSION)_*.deb)
 	for pkg in $^; do
-		package_cloud push $(REPO)/ubuntu/xenial   $${pkg} || true
 		package_cloud push $(REPO)/ubuntu/bionic   $${pkg} || true
 		package_cloud push $(REPO)/ubuntu/focal    $${pkg} || true
+		package_cloud push $(REPO)/ubuntu/jammy    $${pkg} || true
+		package_cloud push $(REPO)/ubuntu/noble    $${pkg} || true
 		package_cloud push $(REPO)/debian/stretch  $${pkg} || true
 		package_cloud push $(REPO)/debian/buster   $${pkg} || true
 		package_cloud push $(REPO)/debian/bullseye $${pkg} || true

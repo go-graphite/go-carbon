@@ -1,0 +1,47 @@
+---
+name: ${NAME}
+description: ${DESCRIPTION}
+
+# Common packages config
+arch: "${ARCH}"  # 386, amd64, arm64
+platform: "linux"
+version: "${VERSION_STRING}"
+maintainer: &m "Roman Lomonosov <r.lomonosov@gmail.com>"
+vendor: *m
+homepage: "https://github.com/go-graphite/${NAME}"
+license: "MIT"
+section: "admin"
+priority: "optional"
+
+scripts:
+  preinstall: deploy/before_install.sh
+  postinstall: deploy/after_install.sh
+
+contents:
+  - src: out/root/etc/init.d/${NAME}
+    dst: /etc/init.d/${NAME}
+    type: config|noreplace
+    expand: true
+  - src: out/root/lib/systemd/system/${NAME}.service
+    dst: /lib/systemd/system/${NAME}.service
+    type: config|noreplace
+    expand: true
+  - src: out/root/etc/logrotate.d/${NAME}
+    dst: /etc/logrotate.d/${NAME}
+    type: config|noreplace
+    expand: true
+  - src: out/root/etc/${NAME}/storage-schemas.conf
+    dst: /etc/${NAME}/storage-schemas.conf
+    type: config|noreplace
+    expand: true
+  - src: out/root/etc/${NAME}/storage-aggregation.conf
+    dst: /etc/${NAME}/storage-aggregation.conf
+    type: config|noreplace
+    expand: true
+  - src: out/root/etc/${NAME}/${NAME}.conf
+    dst: /etc/${NAME}/${NAME}.conf
+    type: config|noreplace
+    expand: true
+  - src: "out/${NAME}-linux-${ARCH}"
+    dst: /usr/bin/${NAME}
+    expand: true
