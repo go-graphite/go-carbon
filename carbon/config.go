@@ -117,6 +117,9 @@ type carbonserverConfig struct {
 	StreamingQueryCacheEnabled bool       `toml:"streaming-query-cache-enabled"`
 	QueryCacheSizeMB           int        `toml:"query-cache-size-mb"`
 	FindCacheEnabled           bool       `toml:"find-cache-enabled"`
+	FindCacheSizeMB            int        `toml:"find-cache-size-mb"`
+	GlobCacheEnabled           bool       `toml:"glob-cache-enabled"`
+	GlobCacheSizeMB            int        `toml:"glob-cache-size-mb"`
 	Buckets                    int        `toml:"buckets"`
 	MaxGlobs                   int        `toml:"max-globs"`
 	FailOnMaxGlobs             bool       `toml:"fail-on-max-globs"`
@@ -273,6 +276,9 @@ func NewConfig() *Config {
 			QueryCacheEnabled:    true,
 			QueryCacheSizeMB:     0,
 			FindCacheEnabled:     true,
+			FindCacheSizeMB:      0,
+			GlobCacheEnabled:     true,
+			GlobCacheSizeMB:      0,
 			TrigramIndex:         true,
 			CacheScan:            false,
 			MaxMetricsGlobbed:    10_000_000,

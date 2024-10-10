@@ -255,8 +255,11 @@ type CarbonserverListener struct {
 	queryCacheSizeMB           int
 	queryCache                 expireCache
 	findCacheEnabled           bool
+	findCacheSizeMB            int
 	findCache                  expireCache
-	expandedGlobsCache         expireCache
+	globCacheEnabled           bool
+	globCacheSizeMB            int
+	globCache                  expireCache
 	trigramIndex               bool
 	trieIndex                  bool
 	concurrentIndex            bool
@@ -475,15 +478,15 @@ type fileIndex struct {
 func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *CarbonserverListener {
 	return &CarbonserverListener{
 		// Config variables
-		metrics:            &metricStruct{},
-		metricsAsCounters:  false,
-		cacheGet:           cacheGetFunc,
-		logger:             zapwriter.Logger("carbonserver"),
-		accessLogger:       zapwriter.Logger("access"),
-		findCache:          expireCache{ec: expirecache.New(0)},
-		expandedGlobsCache: expireCache{ec: expirecache.New(0)},
-		trigramIndex:       true,
-		percentiles:        []int{100, 99, 98, 95, 75, 50},
+		metrics:           &metricStruct{},
+		metricsAsCounters: false,
+		cacheGet:          cacheGetFunc,
+		logger:            zapwriter.Logger("carbonserver"),
+		accessLogger:      zapwriter.Logger("access"),
+		findCache:         expireCache{ec: expirecache.New(0)},
+		globCache:         expireCache{ec: expirecache.New(0)},
+		trigramIndex:      true,
+		percentiles:       []int{100, 99, 98, 95, 75, 50},
 		prometheus: prometheus{
 			request:          func(string, int) {},
 			duration:         func(time.Duration) {},
@@ -565,14 +568,23 @@ func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters boo
 func (listener *CarbonserverListener) SetQueryCacheEnabled(enabled bool) {
 	listener.queryCacheEnabled = enabled
 }
-func (listener *CarbonserverListener) SetStreamingQueryCacheEnabled(enabled bool) {
-	listener.streamingQueryCacheEnabled = enabled
-}
 func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 	listener.queryCacheSizeMB = size
 }
+func (listener *CarbonserverListener) SetStreamingQueryCacheEnabled(enabled bool) {
+	listener.streamingQueryCacheEnabled = enabled
+}
 func (listener *CarbonserverListener) SetFindCacheEnabled(enabled bool) {
 	listener.findCacheEnabled = enabled
+}
+func (listener *CarbonserverListener) SetFindCacheSizeMB(size int) {
+	listener.findCacheSizeMB = size
+}
+func (listener *CarbonserverListener) SetGlobCacheEnabled(enabled bool) {
+	listener.globCacheEnabled = enabled
+}
+func (listener *CarbonserverListener) SetGlobCacheSizeMB(size int) {
+	listener.globCacheSizeMB = size
 }
 func (listener *CarbonserverListener) SetTrigramIndex(enabled bool) {
 	listener.trigramIndex = enabled
@@ -1791,6 +1803,12 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	}
 
 	listener.queryCache = expireCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
+	if listener.findCacheEnabled {
+		listener.findCache = expireCache{ec: expirecache.New(uint64(listener.findCacheSizeMB))}
+	}
+	if listener.globCacheEnabled {
+		listener.globCache = expireCache{ec: expirecache.New(uint64(listener.globCacheSizeMB))}
+	}
 
 	// +1 to track every over the number of buckets we track
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
@@ -1924,7 +1942,14 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		}
 	}
 
+	// cache cleaners
 	go listener.queryCache.ec.StoppableApproximateCleaner(10*time.Second, listener.exitChan)
+	if listener.findCacheEnabled {
+		go listener.findCache.ec.StoppableApproximateCleaner(60*time.Second, listener.exitChan)
+	}
+	if listener.globCacheEnabled {
+		go listener.globCache.ec.StoppableApproximateCleaner(60*time.Second, listener.exitChan)
+	}
 
 	srv := &http.Server{
 		Handler:      gziphandler.GzipHandler(carbonserverMux),
