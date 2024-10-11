@@ -375,10 +375,17 @@ GATHER:
 func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Context, logger *zap.Logger, handler string, queries []string) ([]globs, bool, error) {
 	key := strings.Join(queries, "&")
 	size := uint64(100 * 1024 * 1024)
-	expandedGlobs, isCacheHit, err := getWithCache(logger, listener.expandedGlobsCache, key, size, 300,
-		func() (interface{}, error) {
-			return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
-		})
+	var expandedGlobs interface{}
+	var err error
+	isCacheHit := false
+	if listener.globCacheEnabled {
+		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, size, 300,
+			func() (interface{}, error) {
+				return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
+			})
+	} else {
+		expandedGlobs, err = listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
+	}
 
 	var expandedGlobsCasted []globs
 	if err == nil {
