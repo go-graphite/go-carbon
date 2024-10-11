@@ -3,25 +3,18 @@
 cd `dirname $0`
 ROOT=$PWD
 
-docker run -ti --rm -v $ROOT:/root/go/src/github.com/go-graphite/go-carbon ubuntu:20.04 bash -c '
+docker run -i -e "DEVEL=${DEVEL:-0}" --rm -v "$ROOT:/root/go/src/github.com/go-graphite/go-carbon" golang bash -e << 'EOF'
     cd /root/
-    export GO_VERSION=1.17
-    DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get update
-    DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC apt-get install -y rpm ruby ruby-dev wget build-essential
+    export TZ=Europe/Amsterdam
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-    wget https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz
-    tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-    ln -s /usr/local/go/bin/go /usr/local/bin/go
-
-    # newer fpm is broken https://github.com/jordansissel/fpm/issues/1612
-    gem install rake fpm:1.10.2 package_cloud
-
-    go install github.com/mitchellh/gox@latest
-    ln -s /root/go/bin/gox /usr/bin/gox
+    go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.40.0
 
     cd /root/go/src/github.com/go-graphite/go-carbon
 
-    make gox-build
-    make fpm-deb
-    make fpm-rpm
-'
+    # go reads the VCS state
+    git config --global --add safe.directory "$PWD"
+
+    make nfpm-deb nfpm-rpm
+    chmod -R a+w *.deb *.rpm out/
+EOF

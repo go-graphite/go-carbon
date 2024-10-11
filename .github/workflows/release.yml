@@ -29,20 +29,11 @@ jobs:
         env:
           CGO_ENABLED: 1
 
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "2.7" # Version range or exact version of a Ruby version to use, using semvers version range syntax.
-      - name: Install packaging dependencies
-        run: |
-          gem install dotenv -v 2.8.1
-          gem install rake fpm:1.10.2 package_cloud
-          GO111MODULE=off go get github.com/mitchellh/gox
-
       - name: Build packages
         id: build
         run: |
-          make gox-build fpm-deb fpm-rpm
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.40.0
+          make nfpm-deb nfpm-rpm
           make sum-files
           ARTIFACTS=
           # Upload all deb and rpm packages
