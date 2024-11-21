@@ -1,6 +1,7 @@
 module github.com/go-graphite/go-carbon
 
 go 1.21
+toolchain go1.22.9
 
 require (
 	cloud.google.com/go/pubsub v1.44.0
@@ -30,7 +31,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.uber.org/zap v1.27.0
 	google.golang.org/api v0.199.0
-	google.golang.org/grpc v1.67.1
+	google.golang.org/grpc v1.68.0
 )
 
 require (
