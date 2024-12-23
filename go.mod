@@ -38,7 +38,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/greatroar/blobloom v0.8.0
 	golang.org/x/net v0.31.0
-	google.golang.org/protobuf v1.35.1
+	google.golang.org/protobuf v1.36.0
 )
 
 require (
