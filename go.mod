@@ -26,7 +26,7 @@ require (
 	github.com/lomik/zapwriter v0.0.0-20210624082824-c1161d1eb463
 	github.com/prometheus/client_golang v1.20.5
 	github.com/sevlyar/go-daemon v0.1.6
-	github.com/stretchr/testify v1.9.0
+	github.com/stretchr/testify v1.10.0
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	go.uber.org/zap v1.27.0
