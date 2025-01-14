@@ -84,6 +84,10 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 	var err error
 
 	metrics, err := listener.getMetricsList()
+	accessLogger.Info("list acquired",
+		zap.Duration("runtime_seconds", time.Since(t0)),
+		zap.Int("length", len(metrics)),
+	)
 	if err != nil {
 		accessLogger.Error("list failed",
 			zap.Duration("runtime_seconds", time.Since(t0)),
@@ -109,6 +113,10 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 		}
 		b, err = response.MarshalVT()
 	}
+	accessLogger.Info("list formatted",
+		zap.Duration("runtime_seconds", time.Since(t0)),
+		zap.Int("length", len(b)),
+	)
 
 	if err != nil {
 		accessLogger.Error("list failed",
@@ -120,10 +128,11 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 		return
 	}
 	wr.Header().Set("Content-Type", contentType)
-	wr.Write(b)
-
+	writtenBytes, err := wr.Write(b)
 	accessLogger.Info("list served",
 		zap.Duration("runtime_seconds", time.Since(t0)),
+		zap.Int("write", writtenBytes),
+		zap.Error(err),
 	)
 }
 
