@@ -54,6 +54,7 @@ jobs:
           CGO_ENABLED: 1
 
       - name: Govulncheck
+        if: matrix.go != 'tip'
         id: govulncheck
         uses: golang/govulncheck-action@v1
         with:
