@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: [ 1.21.x, 1.22.x, 1.23.x, tip ]
+        go: [ 1.22.x, 1.23.x, tip ]
 
     steps:
       - name: Set up Go stable
