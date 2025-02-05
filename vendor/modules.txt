@@ -443,7 +443,7 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.9.0
 ## explicit; go 1.18
 golang.org/x/time/rate
-# google.golang.org/api v0.218.0
+# google.golang.org/api v0.219.0
 ## explicit; go 1.22
 google.golang.org/api/googleapi
 google.golang.org/api/googleapi/transport
