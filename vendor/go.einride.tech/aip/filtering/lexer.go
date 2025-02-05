@@ -133,7 +133,7 @@ func (l *Lexer) nextRune() (rune, error) {
 	} else {
 		l.tokenEnd.Column++
 	}
-	l.tokenEnd.Offset += int32(n)
+	l.tokenEnd.Offset += int32(n) // #nosec G115
 	return r, nil
 }
 

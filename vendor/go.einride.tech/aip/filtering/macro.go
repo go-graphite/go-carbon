@@ -77,12 +77,12 @@ func (c *Cursor) Replace(newExpr *expr.Expr) {
 }
 
 func maxID(exp *expr.Expr) int64 {
-	var max int64
+	var maxFound int64
 	Walk(func(_, _ *expr.Expr) bool {
-		if exp.GetId() > max {
-			max = exp.GetId()
+		if exp.GetId() > maxFound {
+			maxFound = exp.GetId()
 		}
 		return true
 	}, exp)
-	return max
+	return maxFound
 }
