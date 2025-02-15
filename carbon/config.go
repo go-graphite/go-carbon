@@ -212,9 +212,14 @@ type Config struct {
 }
 
 func NewLoggingConfig() zapwriter.Config {
-	cfg := zapwriter.NewConfig()
-	cfg.File = "/var/log/go-carbon/go-carbon.log"
-	return cfg
+	return zapwriter.Config{
+		Logger:           "",
+		File:             "stdout",
+		Level:            "info",
+		Encoding:         "console",
+		EncodingTime:     "iso8601",
+		EncodingDuration: "seconds",
+	}
 }
 
 // NewConfig ...
