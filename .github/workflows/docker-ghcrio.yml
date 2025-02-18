@@ -1,52 +1,81 @@
+#
+# Based on:
+#
+# Docker docs: Distribute build across multiple runners
+# https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
+#
+
 name: Upload Docker images to GitHub Container Registry (ghcr.io)
 
 on:
+  release:
+    types:
+      - released
+
   push:
-    branches: [ master, main ]
-    tags: [ 'v*' ]
+    branches:
+      - master
+      - main
+
   pull_request:
-    branches: [ master, main ]
+    branches:
+      - master
+      - main
+
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git tag to push the image
+        required: true
+        type: string
 
 jobs:
-  docker:
-    name: Build images
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
+    outputs:
+      github_repository: ${{ steps.vars.outputs.github_repository }}
+      publish_image: ${{ steps.vars.outputs.publish_image }}
+      semver_value: ${{ steps.vars.outputs.semver_value }}
+    steps:
+      - id: vars
+        name: Prepare outputs
+        run: |
+          function prepend() { while read line; do echo "${1}${line}"; done; }
+          readonly NOTICE_VAR='::notice title=Setting variable::'
+
+          github_repository=${{ github.repository }}
+          echo "github_repository=${github_repository,,}" | tee -a $GITHUB_OUTPUT | prepend "$NOTICE_VAR"
+
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "publish_image=true" | tee -a $GITHUB_OUTPUT | prepend "$NOTICE_VAR"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "publish_image=true" | tee -a $GITHUB_OUTPUT | prepend "$NOTICE_VAR"
+            echo "semver_value=,value=${{ inputs.ref }}" | tee -a $GITHUB_OUTPUT | prepend "$NOTICE_VAR"
+          fi
+
+  build:
+    name: Build image
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
     steps:
       - name: Check out code
         uses: actions/checkout@v4
-      - name: Set up QEMU
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@v3
         with:
-          platforms: arm,arm64
-          cache-image: false
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+          fetch-tags: true
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          # create latest tag for branch events
-          flavor: |
-            latest=${{ github.event_name == 'push' && github.ref_type == 'branch' }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}.{{minor}}.{{patch}}
-        env:
-          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
-      - name: Login to GitHub Container Registry
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
       - name: Build
-        if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -55,15 +84,151 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-      - name: Build and push
-        if: github.event_name != 'pull_request'
+
+  mbuild:
+    name: Build image
+    needs:
+      - prepare
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - platform: linux/amd64
+          - platform: linux/arm64
+            qemu: arm64
+          - platform: linux/arm/v7
+            qemu: arm
+          - platform: linux/arm/v6
+            qemu: arm
+    steps:
+      - name: Prepare
+        id: prepare
+        run: |
+          platform=${{ matrix.platform.platform }}
+          echo "platform_pair=${platform//\//-}" | tee -a $GITHUB_OUTPUT
+
+      - name: Check out code
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-tags: true
+
+      - name: Check out code
+        if: github.event_name != 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          fetch-tags: true
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        if: ${{ matrix.platform.qemu }}
+        with:
+          platforms: ${{ matrix.platform.qemu }}
+          cache-image: false
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Login to GitHub Container Registry
+        if: needs.prepare.outputs.publish_image
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        if: ${{ ! needs.prepare.outputs.publish_image }}
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64
-          push: true
+          platforms: ${{ matrix.platform.platform }}
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+
+      - name: Build and push
+        if: needs.prepare.outputs.publish_image
+        uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          platforms: ${{ matrix.platform.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          outputs: type=image,"name=ghcr.io/${{ needs.prepare.outputs.github_repository }}",push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        if: needs.prepare.outputs.publish_image
+        run: |
+          mkdir -p ${{ runner.temp }}/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: needs.prepare.outputs.publish_image
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.prepare.outputs.platform_pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  merge:
+    name: Merge images
+    runs-on: ubuntu-latest
+    needs:
+      - prepare
+      - mbuild
+    if: needs.prepare.outputs.publish_image
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=${{ github.event_name == 'workflow_dispatch' && 'false' || 'auto' }}
+          tags: |
+            type=semver,pattern={{version}}${{ needs.prepare.outputs.semver_value }}
+            type=semver,pattern={{major}}.{{minor}}${{ needs.prepare.outputs.semver_value }}
+            type=semver,pattern={{major}}.{{minor}}.{{patch}}${{ needs.prepare.outputs.semver_value }}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ needs.prepare.outputs.github_repository }}@sha256:%s ' *)
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect ghcr.io/${{ needs.prepare.outputs.github_repository }}:${{ steps.meta.outputs.version }}
+
+
