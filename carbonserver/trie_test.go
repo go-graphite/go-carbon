@@ -34,9 +34,9 @@ func newTrieServer(files []string, l logf) *CarbonserverListener {
 	listener.accessLogger = zap.NewNop()
 	listener.trieIndex = true
 	listener.whisperData = "./testdata"
-	listener.maxGlobs = math.MaxInt64
-	listener.maxMetricsGlobbed = math.MaxInt64
-	listener.maxMetricsRendered = math.MaxInt64
+	listener.maxGlobs = math.MaxInt
+	listener.maxMetricsGlobbed = math.MaxInt
+	listener.maxMetricsRendered = math.MaxInt
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
@@ -61,9 +61,9 @@ func newTrigramServer(files []string, l logf) *CarbonserverListener {
 	listener.accessLogger = zap.NewNop()
 	listener.trigramIndex = true
 	listener.whisperData = "./testdata"
-	listener.maxGlobs = math.MaxInt64
-	listener.maxMetricsGlobbed = math.MaxInt64
-	listener.maxMetricsRendered = math.MaxInt64
+	listener.maxGlobs = math.MaxInt
+	listener.maxMetricsGlobbed = math.MaxInt
+	listener.maxMetricsRendered = math.MaxInt
 	listener.failOnMaxGlobs = true
 
 	start := time.Now()
@@ -832,7 +832,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 		// case <-filec:
 		default:
 			// skipcq: GSC-G404
-			files, _, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), int(math.MaxInt64), nil)
+			files, _, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), math.MaxInt, nil)
 			if err != nil {
 				panic(err)
 			}
