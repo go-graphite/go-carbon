@@ -1,5 +1,6 @@
 FROM golang:alpine AS build
 ARG TARGETARCH
+ARG GOCACHE=/tmp
 
 RUN apk add --update git make bash gcc musl-dev
 
@@ -7,8 +8,8 @@ USER nobody:nogroup
 WORKDIR /usr/local/src/go-carbon
 COPY --chown=nobody:nogroup . .
 RUN --network=none make clean
-RUN --mount=type=cache,id=go-cache,target=/.cache,sharing=locked,uid=65534,gid=65534 make go-carbon
-RUN --mount=type=cache,id=go-cache,target=/.cache,sharing=locked,uid=65534,gid=65534 <<EOT
+RUN make go-carbon
+RUN <<EOT
 if [ "${TARGETARCH:-unknown}" = "amd64" ]; then
   make run-test COMMAND="test -race" 
 else
