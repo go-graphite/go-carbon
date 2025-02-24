@@ -218,14 +218,15 @@ github.com/jcmturner/rpc/v2/ndr
 # github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0
 ## explicit
 github.com/kardianos/osext
-# github.com/klauspost/compress v1.17.11
-## explicit; go 1.21
+# github.com/klauspost/compress v1.18.0
+## explicit; go 1.22
 github.com/klauspost/compress
 github.com/klauspost/compress/flate
 github.com/klauspost/compress/fse
 github.com/klauspost/compress/gzip
 github.com/klauspost/compress/huff0
 github.com/klauspost/compress/internal/cpuinfo
+github.com/klauspost/compress/internal/le
 github.com/klauspost/compress/internal/race
 github.com/klauspost/compress/internal/snapref
 github.com/klauspost/compress/s2
