@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: [ 1.21.x, 1.22.x, 1.23.x, tip ]
+        go: [ 1.22.x, 1.23.x, 1.24.x, tip ]
 
     steps:
       - name: Set up Go stable
@@ -52,6 +52,15 @@ jobs:
         env:
           CGO_ENABLED: 1
 
+      - name: Govulncheck
+        if: matrix.go != 'tip'
+        id: govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ matrix.go }}
+          check-latest: true
+          go-package: ./...
+
       - name: Check Docker images
         run: |
           make image
@@ -63,7 +72,7 @@ jobs:
           make sum-files
 
       - name: Upload Artifact
-        if: ${{ matrix.go == 'tip' }} # only upload artifact when built with latest go
+        if: ${{ matrix.go == '1.24.x' }} # only upload artifact when built with latest stable go
         id: artifact
         uses: actions/upload-artifact@v4
         with:
@@ -76,7 +85,7 @@ jobs:
             md5sum
 
       - name: Push packages to the autobuilds repo
-        if: ${{ github.event_name == 'push' && matrix.go == 'tip' }} # only when built from master with latest go
+        if: ${{ github.event_name == 'push' && matrix.go == '1.24.x' }} # only when built from master with latest stable go
         run: make DEVEL=1 packagecloud-autobuilds
         env:
           PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}
