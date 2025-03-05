@@ -1,7 +1,7 @@
 module github.com/go-graphite/go-carbon
 
-go 1.21
-toolchain go1.22.9
+go 1.22
+toolchain go1.22.12
 
 require (
 	cloud.google.com/go/pubsub v1.47.0
