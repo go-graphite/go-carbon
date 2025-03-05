@@ -44,7 +44,7 @@ cloud.google.com/go/pubsub/pstest
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/IBM/sarama v1.45.0
+# github.com/IBM/sarama v1.45.1
 ## explicit; go 1.21
 github.com/IBM/sarama
 # github.com/NYTimes/gziphandler v1.1.1

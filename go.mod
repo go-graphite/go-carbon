@@ -6,7 +6,7 @@ toolchain go1.22.9
 require (
 	cloud.google.com/go/pubsub v1.47.0
 	github.com/BurntSushi/toml v1.4.0
-	github.com/IBM/sarama v1.45.0
+	github.com/IBM/sarama v1.45.1
 	github.com/NYTimes/gziphandler v1.1.1
 	github.com/OneOfOne/go-utils v0.0.0-20180319162427-6019ff89a94e
 	github.com/dgryski/go-expirecache v0.0.0-20170314133854-743ef98b2adb
