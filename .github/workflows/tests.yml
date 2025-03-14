@@ -54,14 +54,14 @@ jobs:
         env:
           CGO_ENABLED: 1
 
-      #- name: Govulncheck
-      #  if: matrix.go != 'tip'
-      #  id: govulncheck
-      #  uses: golang/govulncheck-action@v1
-      #  with:
-      #    go-version-input: ${{ matrix.go }}
-      #    check-latest: true
-      #    go-package: ./...
+      - name: Govulncheck
+        if: ${{ matrix.go == '1.24.x' }} # only do govulncheck when built with latest stable go
+        id: govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-version-input: ${{ matrix.go }}
+          check-latest: true
+          go-package: ./...
 
       - name: Check Docker images
         run: |
