@@ -5,7 +5,7 @@ toolchain go1.24.1
 
 require (
 	cloud.google.com/go/pubsub v1.48.0
-	github.com/BurntSushi/toml v1.4.0
+	github.com/BurntSushi/toml v1.5.0
 	github.com/IBM/sarama v1.45.1
 	github.com/NYTimes/gziphandler v1.1.1
 	github.com/OneOfOne/go-utils v0.0.0-20180319162427-6019ff89a94e
