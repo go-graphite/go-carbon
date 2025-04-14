@@ -4,7 +4,7 @@ go 1.22
 toolchain go1.24.1
 
 require (
-	cloud.google.com/go/pubsub v1.48.1
+	cloud.google.com/go/pubsub v1.49.0
 	github.com/BurntSushi/toml v1.5.0
 	github.com/IBM/sarama v1.45.1
 	github.com/NYTimes/gziphandler v1.1.1
