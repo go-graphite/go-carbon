@@ -1,4 +1,4 @@
-// Copyright 2020-2022 the Blobloom authors
+// Copyright 2020-2024 the Blobloom authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@
 // is double that of standard Bloom filter.
 //
 // For more details, see the 2010 paper by Putze, Sanders and Singler,
-// https://algo2.iti.kit.edu/documents/cacheefficientbloomfilters-jea.pdf.
+// https://www.cs.amherst.edu/~ccmcgeoch/cs34/papers/cacheefficientbloomfilters-jea.pdf.
 package blobloom
 
 import "math"
@@ -124,12 +124,6 @@ func (f *Filter) Cardinality() float64 {
 func cardinality(nhashes int, b []block, onescount func(*block) int) float64 {
 	k := float64(nhashes - 1)
 
-	// The probability of some bit not being set in a single insertion is
-	// p0 = (1-1/BlockBits)^k.
-	//
-	// logProb0Inv = 1 / log(p0) = 1 / (k*log(1-1/BlockBits)).
-	logProb0Inv := 1 / (k * log1minus1divBlockbits)
-
 	var n float64
 	for i := range b {
 		ones := onescount(&b[i])
@@ -138,7 +132,11 @@ func cardinality(nhashes int, b []block, onescount func(*block) int) float64 {
 		}
 		n += math.Log1p(-float64(ones) / BlockBits)
 	}
-	return n * logProb0Inv
+
+	// The probability of some bit not being set in a single insertion is
+	// p0 = (1-1/BlockBits)^k. Divide by the log of that.
+	logP0 := k * log1minus1divBlockbits
+	return n / logP0
 }
 
 // Clear resets f to its empty state.
