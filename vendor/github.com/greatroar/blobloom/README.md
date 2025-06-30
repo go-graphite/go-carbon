@@ -4,7 +4,7 @@ Blobloom
 A Bloom filter package for Go (golang) with no compile-time dependencies.
 
 This package implements a version of Bloom filters called [blocked Bloom filters](
-https://algo2.iti.kit.edu/documents/cacheefficientbloomfilters-jea.pdf),
+https://www.cs.amherst.edu/~ccmcgeoch/cs34/papers/cacheefficientbloomfilters-jea.pdf),
 which get a speed boost from using the CPU cache more efficiently
 than regular Bloom filters.
 
@@ -71,7 +71,7 @@ So does passing integer keys in without running them through a mixing function.
 License
 -------
 
-Copyright © 2020-2023 the Blobloom authors
+Copyright © 2020-2024 the Blobloom authors
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

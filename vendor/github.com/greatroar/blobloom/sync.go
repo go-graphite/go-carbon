@@ -127,19 +127,3 @@ func getbitAtomic(b *block, i uint32) bool {
 	x := atomic.LoadUint32(&(*b)[(i/wordSize)%blockWords])
 	return x&bit != 0
 }
-
-// setbit sets bit (i modulo BlockBits) of b, atomically.
-func setbitAtomic(b *block, i uint32) {
-	bit := uint32(1) << (i % wordSize)
-	p := &(*b)[(i/wordSize)%blockWords]
-
-	for {
-		old := atomic.LoadUint32(p)
-		if old&bit != 0 {
-			// Checking here instead of checking the return value from
-			// the CAS is between 50% and 80% faster on the benchmark.
-			return
-		}
-		atomic.CompareAndSwapUint32(p, old, old|bit)
-	}
-}

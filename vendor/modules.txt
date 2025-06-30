@@ -157,7 +157,7 @@ github.com/googleapis/gax-go/v2/internallog
 github.com/googleapis/gax-go/v2/internallog/grpclog
 github.com/googleapis/gax-go/v2/internallog/internal
 github.com/googleapis/gax-go/v2/iterator
-# github.com/greatroar/blobloom v0.8.0
+# github.com/greatroar/blobloom v0.8.1
 ## explicit; go 1.14
 github.com/greatroar/blobloom
 # github.com/hashicorp/errwrap v1.1.0
