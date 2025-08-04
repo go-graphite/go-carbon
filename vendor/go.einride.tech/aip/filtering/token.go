@@ -10,12 +10,9 @@ type Token struct {
 	Value string
 }
 
-func (t Token) Unquote() string {
+func (t Token) Unquote() (string, error) {
 	if t.Type == TokenTypeString {
-		if len(t.Value) <= 2 {
-			return ""
-		}
-		return t.Value[1 : len(t.Value)-1]
+		return unescape(t.Value)
 	}
-	return t.Value
+	return t.Value, nil
 }
