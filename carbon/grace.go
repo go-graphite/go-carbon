@@ -94,7 +94,7 @@ func (app *App) DumpStop() error {
 	}
 
 	logger.Info("cache dump finished",
-		zap.Int("records", int(cacheSize)),
+		zap.Int64("records", int64(cacheSize)),
 		zap.Duration("runtime", time.Since(dumpStart)),
 	)
 

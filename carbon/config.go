@@ -79,7 +79,7 @@ type whisperConfig struct {
 }
 
 type cacheConfig struct {
-	MaxSize       uint32 `toml:"max-size"`
+	MaxSize       uint64 `toml:"max-size"`
 	WriteStrategy string `toml:"write-strategy"`
 	BloomSize     uint64 `toml:"bloom-size"`
 }

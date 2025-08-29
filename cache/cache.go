@@ -30,7 +30,7 @@ const (
 const shardCount = 1024
 
 type cacheSettings struct {
-	maxSize     int32
+	maxSize     int64
 	xlog        io.Writer
 	tagsEnabled bool
 }
@@ -50,7 +50,7 @@ type Cache struct {
 	settings atomic.Value // cacheSettings
 
 	stat struct {
-		size                int32  // changing via atomic
+		size                int64  // changing via atomic
 		queueBuildCnt       uint32 // number of times writeout queue was built
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTime   uint32 // in milliseconds
@@ -129,10 +129,10 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 }
 
 // SetMaxSize of cache
-func (c *Cache) SetMaxSize(maxSize uint32) {
+func (c *Cache) SetMaxSize(maxSize uint64) {
 	s := c.settings.Load().(*cacheSettings)
 	newSettings := *s
-	newSettings.maxSize = int32(maxSize)
+	newSettings.maxSize = int64(maxSize)
 	c.settings.Store(&newSettings)
 }
 
@@ -274,8 +274,8 @@ func (c *Cache) NotConfirmedLength() int32 {
 	return int32(l)
 }
 
-func (c *Cache) Size() int32 {
-	return atomic.LoadInt32(&c.stat.size)
+func (c *Cache) Size() int64 {
+	return atomic.LoadInt64(&c.stat.size)
 }
 
 func (c *Cache) DivertToXlog(w io.Writer) {
@@ -353,7 +353,7 @@ func (c *Cache) Add(p *points.Points) {
 		}
 
 	}
-	atomic.AddInt32(&c.stat.size, int32(count))
+	atomic.AddInt64(&c.stat.size, int64(count))
 }
 
 // Pop removes an element from the map and returns it
@@ -366,7 +366,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	shard.Unlock()
 
 	if exists {
-		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
+		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
 	}
 
 	return p, exists
@@ -390,7 +390,7 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 	shard.Unlock()
 
 	if exists {
-		atomic.AddInt32(&c.stat.size, -int32(len(p.Data)))
+		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
 	}
 
 	return p, exists

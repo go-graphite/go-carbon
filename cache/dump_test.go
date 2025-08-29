@@ -21,7 +21,7 @@ func fillCacheForDump() *Cache {
 	pointsCount := 5
 
 	c := New()
-	c.SetMaxSize(uint32(pointsCount*metrics + 1))
+	c.SetMaxSize(uint64(pointsCount*metrics + 1))
 
 	baseTimestamp := time.Now().Unix()
 
