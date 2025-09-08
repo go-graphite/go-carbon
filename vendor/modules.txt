@@ -1,4 +1,4 @@
-# cloud.google.com/go v0.121.4
+# cloud.google.com/go v0.121.6
 ## explicit; go 1.23.0
 cloud.google.com/go/internal/detect
 cloud.google.com/go/internal/optional
@@ -31,8 +31,8 @@ cloud.google.com/go/compute/metadata
 ## explicit; go 1.23.0
 cloud.google.com/go/iam
 cloud.google.com/go/iam/apiv1/iampb
-# cloud.google.com/go/pubsub v1.50.0
-## explicit; go 1.23.0
+# cloud.google.com/go/pubsub v1.50.1
+## explicit; go 1.24.0
 cloud.google.com/go/pubsub
 cloud.google.com/go/pubsub/apiv1
 cloud.google.com/go/pubsub/apiv1/pubsubpb
@@ -463,7 +463,7 @@ google.golang.org/api/transport/http
 # google.golang.org/genproto v0.0.0-20250603155806-513f23925822
 ## explicit; go 1.23.0
 google.golang.org/genproto/googleapis/type/expr
-# google.golang.org/genproto/googleapis/api v0.0.0-20250721164621-a45f3dfb1074
+# google.golang.org/genproto/googleapis/api v0.0.0-20250818200422-3122310a409c
 ## explicit; go 1.23.0
 google.golang.org/genproto/googleapis/api
 google.golang.org/genproto/googleapis/api/annotations
