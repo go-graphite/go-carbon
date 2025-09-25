@@ -17,6 +17,7 @@ import (
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
 	"github.com/klauspost/compress/gzip"
+	"github.com/klauspost/compress/s2"
 	"github.com/klauspost/compress/snappy"
 	"github.com/lomik/graphite-pickle/framing"
 	"github.com/lomik/zapwriter"
@@ -395,6 +396,10 @@ type decompressor func(net.Conn) (io.Reader, error)
 
 func newDecompressor(typ string) decompressor {
 	switch typ {
+	case "s2":
+		return func(c net.Conn) (io.Reader, error) {
+			return s2.NewReader(c), nil
+		}
 	case "snappy":
 		return func(c net.Conn) (io.Reader, error) {
 			return snappy.NewReader(c), nil
