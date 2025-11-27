@@ -1,4 +1,4 @@
-// Copyright 2021 Google LLC
+// Copyright 2025 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package metadata
+package retry
 
 import (
 	"context"
@@ -47,8 +47,8 @@ func (b *defaultBackoff) Pause() time.Duration {
 	return d
 }
 
-// sleep is the equivalent of gax.Sleep without the need for the dependency.
-func sleep(ctx context.Context, d time.Duration) error {
+// Sleep is the equivalent of gax.Sleep without the need for the dependency.
+func Sleep(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
 	select {
 	case <-ctx.Done():
@@ -59,8 +59,9 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-func newRetryer() *metadataRetryer {
-	return &metadataRetryer{bo: &defaultBackoff{
+// New returns a new Retryer with the default backoff strategy.
+func New() *Retryer {
+	return &Retryer{bo: &defaultBackoff{
 		cur: 100 * time.Millisecond,
 		max: 30 * time.Second,
 		mul: 2,
@@ -71,12 +72,14 @@ type backoff interface {
 	Pause() time.Duration
 }
 
-type metadataRetryer struct {
+// Retryer is a retryer for HTTP requests.
+type Retryer struct {
 	bo       backoff
 	attempts int
 }
 
-func (r *metadataRetryer) Retry(status int, err error) (time.Duration, bool) {
+// Retry determines if a request should be retried.
+func (r *Retryer) Retry(status int, err error) (time.Duration, bool) {
 	if status == http.StatusOK {
 		return 0, false
 	}
@@ -93,9 +96,6 @@ func (r *metadataRetryer) Retry(status int, err error) (time.Duration, bool) {
 
 func shouldRetry(status int, err error) bool {
 	if 500 <= status && status <= 599 {
-		return true
-	}
-	if status == http.StatusTooManyRequests {
 		return true
 	}
 	if err == io.ErrUnexpectedEOF {
