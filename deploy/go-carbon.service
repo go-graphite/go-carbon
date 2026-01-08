@@ -6,7 +6,7 @@ Wants=network-online.target local-fs.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf -pidfile /var/run/go-carbon.pid
+ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=USR2
 Restart=on-failure
