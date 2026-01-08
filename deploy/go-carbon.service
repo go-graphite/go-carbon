@@ -1,12 +1,12 @@
 [Unit]
-Description=Golang implementation of Graphite/Carbon server.
+Description=Golang implementation of Graphite/Carbon server
 Documentation=https://github.com/go-graphite/go-carbon
 After=network-online.target local-fs.target
 Wants=network-online.target local-fs.target
 
 [Service]
-Type=forking
-ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf -pidfile /var/run/go-carbon.pid -daemon
+Type=simple
+ExecStart=/usr/bin/go-carbon -config /etc/go-carbon/go-carbon.conf -pidfile /var/run/go-carbon.pid
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=USR2
 Restart=on-failure
