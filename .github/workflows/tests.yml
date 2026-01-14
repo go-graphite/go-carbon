@@ -76,7 +76,7 @@ jobs:
       - name: Upload Artifact
         if: ${{ matrix.go == '1.24.x' }} # only upload artifact when built with latest stable go
         id: artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: packages-${{ matrix.go }}
           retention-days: 3
