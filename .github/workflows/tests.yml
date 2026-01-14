@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Set up Go stable
         if: matrix.go != 'tip'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
       - name: Set up Go tip
