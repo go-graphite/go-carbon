@@ -19,7 +19,7 @@ func ReadPlain(r io.Reader, callback func(*Points)) error {
 	for {
 		line, err := reader.ReadBytes('\n')
 
-		if err != nil && err != io.EOF {
+		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
 
@@ -61,13 +61,10 @@ func ReadBinary(r io.Reader, callback func(*Points)) error {
 		l, err := binary.ReadVarint(reader)
 		if l > MB {
 			return fmt.Errorf("metric name too long: %d", l)
-		}
-
-		if err == io.EOF {
-			break
-		}
-
-		if err != nil {
+		} else if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
 			return err
 		}
 

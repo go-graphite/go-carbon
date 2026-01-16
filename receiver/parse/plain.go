@@ -85,7 +85,7 @@ func oldPlain(body []byte) ([]*points.Points, error) {
 	for {
 		line, err := reader.ReadBytes('\n')
 
-		if err != nil && err != io.EOF {
+		if err != nil && !errors.Is(err, io.EOF) {
 			return result, err
 		}
 

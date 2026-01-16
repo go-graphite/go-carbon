@@ -107,7 +107,7 @@ func (listener *CarbonserverListener) detailsHandler(wr http.ResponseWriter, req
 			zap.String("reason", "response encode failed"),
 			zap.Error(err),
 		)
-		http.Error(wr, fmt.Sprintf("An internal error has occured: %s", err), http.StatusInternalServerError)
+		http.Error(wr, fmt.Sprintf("An internal error has occurred: %s", err), http.StatusInternalServerError)
 		return
 	}
 	wr.Header().Set("Content-Type", contentType)

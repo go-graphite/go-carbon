@@ -147,7 +147,7 @@ var statusCodes = map[string][]uint64{
 	"capabilities": make([]uint64, 5),
 }
 
-// interface to retrive retention and aggregation
+// interface to retrieve retention and aggregation
 // schema from persister.
 type configRetriever interface {
 	MetricRetentionPeriod(string) (int, bool)
@@ -964,13 +964,14 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			readFromCache = true
 			for {
 				entry, err := flc.Read()
+				if errors.Is(err, io.EOF) {
+					break
+				}
 				if err != nil {
-					if !errors.Is(err, io.EOF) {
-						infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
+					infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
 
-						readFromCache = false
-						trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
-					}
+					readFromCache = false
+					trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
 
 					break
 				}
@@ -1258,7 +1259,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
 	zfields := []zap.Field{zap.Error(err), zap.String("metric", metric)}
-	if ierr, ok := err.(*trieInsertError); ok {
+	var ierr *trieInsertError
+	if errors.As(err, &ierr) {
 		zfields = append(zfields, zap.String("err_info", ierr.info))
 	}
 	logger.Error(msg, zfields...)

@@ -456,7 +456,7 @@ func (app *App) Start() (err error) {
 
 		if conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex {
 			if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
-				return fmt.Errorf("failed to stat whisper data directory: %s", err)
+				return fmt.Errorf("failed to stat whisper data directory: %w", err)
 			} else if fi.Mode()&os.ModeSymlink == 1 {
 				return fmt.Errorf("whisper data directory is a symlink")
 			}
@@ -474,7 +474,7 @@ func (app *App) Start() (err error) {
 		for _, rl := range conf.Carbonserver.HeavyGlobQueryRateLimiters {
 			gqrl, err := carbonserver.NewGlobQueryRateLimiter(rl.Pattern, rl.MaxInflightRequests)
 			if err != nil {
-				return fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %s", rl.Pattern, err)
+				return fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %w", rl.Pattern, err)
 			}
 			globQueryRateLimiters = append(globQueryRateLimiters, gqrl)
 		}

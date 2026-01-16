@@ -302,7 +302,7 @@ func (p *Whisper) store(metric string) {
 			}
 			if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
 				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
-				if pathErr, isPathErr := err.(*os.PathError); isPathErr && pathErr.Err == syscall.ENAMETOOLONG {
+				if errors.Is(err, syscall.ENAMETOOLONG) {
 					p.popConfirm(metric)
 				}
 				return
@@ -566,11 +566,11 @@ func (p *Whisper) GetAggrConf(metric string) (string, float64, bool) {
 // simpplies the log a bit as the path is usually printed separately and the
 // new error message is easier to filter in elastic search and other tools.
 func (*Whisper) simplifyPathError(err error) error {
-	perr, ok := err.(*os.PathError)
-	if !ok {
+	var perr *os.PathError
+	if !errors.As(err, &perr) {
 		return err
 	}
-	return fmt.Errorf("%s: %s", perr.Op, perr.Err)
+	return fmt.Errorf("%s: %w", perr.Op, perr.Err)
 }
 
 func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric string) (*whisper.Whisper, bool, error) {

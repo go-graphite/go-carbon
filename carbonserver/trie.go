@@ -480,7 +480,7 @@ type trieInsertError struct {
 
 func (t *trieInsertError) Error() string { return t.typ }
 
-// TODO: add some more defensive logics agains bad paths?
+// TODO: add some more defensive logics against bad paths?
 //
 // abc.def.ghi
 // abc.def2.ghi
@@ -581,7 +581,7 @@ outer:
 					goto dir
 				}
 
-				return nil, &trieInsertError{typ: "failed to index metric: unknwon case of match == nlen", info: fmt.Sprintf("match == nlen == %d", nlen)}
+				return nil, &trieInsertError{typ: "failed to index metric: unknown case of match == nlen", info: fmt.Sprintf("match == nlen == %d", nlen)}
 			}
 
 			if match == len(child.c) && len(child.c) < nlen { // case 2
@@ -714,7 +714,7 @@ func (ti *trieIndex) newDir() *trieNode {
 	return n
 }
 
-// TODO: add some defensive logics agains bad queries?
+// TODO: add some defensive logics against bad queries?
 // depth first search
 // TODO: refactor to make the function more readable. Some ideas:
 //   - to isolate Depth first search in separate class

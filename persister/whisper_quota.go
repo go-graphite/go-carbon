@@ -43,7 +43,7 @@ func ReadWhisperQuotas(filename string) (WhisperQuotas, error) {
 
 		v, err := strconv.ParseInt(strings.ReplaceAll(str, ",", ""), 10, 64)
 		if err != nil {
-			err = fmt.Errorf("[persister] Failed to parse %s for [%s]: %s", name, section["name"], err)
+			err = fmt.Errorf("[persister] Failed to parse %s for [%s]: %w", name, section["name"], err)
 		}
 		return v, err
 	}

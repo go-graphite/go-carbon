@@ -238,7 +238,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 				zap.Any("error", r),
 				zap.Int("http_code", http.StatusInternalServerError),
 			)
-			http.Error(wr, "Panic occured, see logs for more information", http.StatusInternalServerError)
+			http.Error(wr, "Panic occurred, see logs for more information", http.StatusInternalServerError)
 		}
 	}()
 
@@ -722,7 +722,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 				zap.Any("error", r),
 				zap.Int("http_code", http.StatusInternalServerError),
 			)
-			rpcErr = status.New(codes.Internal, "Panic occured, see logs for more information").Err()
+			rpcErr = status.New(codes.Internal, "Panic occurred, see logs for more information").Err()
 		}
 	}()
 
