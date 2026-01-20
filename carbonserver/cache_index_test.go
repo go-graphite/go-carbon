@@ -137,6 +137,9 @@ func (f *testInfo) checkExpandGlobs(t *testing.T, query string, shdExist bool) {
 func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	defer os.RemoveAll(f.whisperDir)
 
+	// force "sorted" strategy to ensure determinism in tests
+	f.testCache.SetWriteStrategy("sorted")
+
 	for _, filePath := range addFiles {
 		if err := addFileToSys(filePath, f.whisperDir); err != nil {
 			t.Fatal(err)
@@ -148,9 +151,11 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	f.forceChan <- struct{}{}
 	time.Sleep(2 * time.Second)
 
-	// add metrics to cache
+	// add metrics to cache with distinct timestamps
+	timestamps := []int64{20, 30, 40, 50, 10}
+
 	for i, metricName := range addMetrics {
-		f.testCache.Add(points.OnePoint(metricName, float64(i), 10))
+		f.testCache.Add(points.OnePoint(metricName, float64(i), timestamps[i]))
 	}
 	// check expandblobs for new metrics
 	f.checkExpandGlobs(t, addMetrics[2], false)
@@ -161,7 +166,8 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	p1, _ := f.testCache.PopNotConfirmed(m1)
 	f.testCache.Confirm(p1)
 
-	if !p1.Eq(points.OnePoint(addMetrics[4], 4, 10)) {
+	// assert [4] comes first, it has the smallest timestamp
+	if !p1.Eq(points.OnePoint(addMetrics[4], 4, timestamps[4])) {
 		fmt.Printf("error - recived wrong point - %v\n", p1)
 		t.FailNow()
 	}
@@ -183,8 +189,8 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	p2, _ := f.testCache.PopNotConfirmed(m2)
 	f.testCache.Confirm(p2)
 
-	// queue within cache is sorted by length of metric name
-	if !p2.Eq(points.OnePoint(addMetrics[0], 0, 10)) {
+	// assert [0] comes second, it has the second smallest timestamp
+	if !p2.Eq(points.OnePoint(addMetrics[0], 0, timestamps[0])) {
 		fmt.Printf("error - recived wrong point - %v\n", p2)
 		t.FailNow()
 	}

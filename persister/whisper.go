@@ -25,7 +25,7 @@ import (
 	"github.com/lomik/zapwriter"
 )
 
-const storeMutexCount = 32768
+const storeMutexCount = 1 << 15 // 32768
 const maxPathLength = 4095
 const maxFilenameLength = 255
 
@@ -205,15 +205,6 @@ func (p *Whisper) SetTaggedFn(fn func(string, bool)) {
 	p.taggedFn = fn
 }
 
-func fnv32(key string) uint32 {
-	hash := uint32(2166136261)
-	const prime32 = uint32(16777619)
-	for i := 0; i < len(key); i++ {
-		hash *= prime32
-		hash ^= uint32(key[i])
-	}
-	return hash
-}
 func (p *Whisper) registerOutOfOrderWriteLags(points []*whisper.TimeSeriesPoint) {
 	if !p.prometheus.enabled {
 		return
@@ -262,7 +253,7 @@ func (p *Whisper) store(metric string) {
 	// avoid concurrent store same metric
 	// @TODO: may be flock?
 	// start := time.Now()
-	mutexIndex := fnv32(metric) % storeMutexCount
+	mutexIndex := helper.HashString(metric) & (storeMutexCount - 1)
 	p.storeMutex[mutexIndex].Lock()
 	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
 	defer p.storeMutex[mutexIndex].Unlock()
