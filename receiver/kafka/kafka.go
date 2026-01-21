@@ -310,8 +310,8 @@ func newKafka(name string, options *Options, store func(*points.Points)) (*Kafka
 		version: ver,
 	}
 
+	rcv.waitGroup.Add(1)
 	go func() {
-		rcv.waitGroup.Add(1) //nolint:staticcheck
 		rcv.connect()
 		rcv.waitGroup.Done()
 	}()
@@ -412,8 +412,8 @@ func (rcv *Kafka) consume() {
 
 	rcv.logger.Info("connected to kafka")
 
+	rcv.waitGroup.Add(1)
 	go func() {
-		rcv.waitGroup.Add(1) //nolint:staticcheck
 		rcv.worker()
 		rcv.waitGroup.Done()
 	}()

@@ -8,6 +8,7 @@ linters:
     - misspell
     - promlinter
     - errorlint
+    - govet
 
     # enabled in carbonapi
     # - bodyclose
