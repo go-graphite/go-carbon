@@ -24,7 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func init() {
+func Register() {
 	receiver.Register(
 		"tcp",
 		func() interface{} { return NewOptions() },

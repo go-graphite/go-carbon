@@ -16,6 +16,10 @@ type tcpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
+func TestMain(m *testing.M) {
+	Register()
+}
+
 func newTCPTestCase(t *testing.T, protocol string) *tcpTestCase {
 	test := &tcpTestCase{
 		T: t,

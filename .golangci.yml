@@ -11,9 +11,9 @@ linters:
     - govet
     - unparam
     - bodyclose
+    - gochecknoinits
 
     # enabled in carbonapi
-    # - gochecknoinits
     # - gosec
 
     # The linters we need to enable ASAP.

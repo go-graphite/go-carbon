@@ -23,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func init() {
+func Register() {
 	receiver.Register(
 		"kafka",
 		func() interface{} { return NewOptions() },

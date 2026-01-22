@@ -16,7 +16,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func init() {
+func Register() {
 	receiver.Register(
 		"udp",
 		func() interface{} { return NewOptions() },

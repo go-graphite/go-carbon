@@ -24,12 +24,12 @@ import (
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/lomik/zapwriter"
 
-	// register receivers
-	_ "github.com/go-graphite/go-carbon/receiver/http"
-	_ "github.com/go-graphite/go-carbon/receiver/kafka"
-	_ "github.com/go-graphite/go-carbon/receiver/pubsub"
-	_ "github.com/go-graphite/go-carbon/receiver/tcp"
-	_ "github.com/go-graphite/go-carbon/receiver/udp"
+	// receivers
+	http_receiver "github.com/go-graphite/go-carbon/receiver/http"
+	kafka_receiver "github.com/go-graphite/go-carbon/receiver/kafka"
+	pubsub_receiver "github.com/go-graphite/go-carbon/receiver/pubsub"
+	tcp_receiver "github.com/go-graphite/go-carbon/receiver/tcp"
+	udp_receiver "github.com/go-graphite/go-carbon/receiver/udp"
 )
 
 type NamedReceiver struct {
@@ -68,6 +68,8 @@ type App struct {
 	FlushTraces    func()
 }
 
+var registerPluginsOnce sync.Once
+
 // New App instance
 func New(configFilename string) *App {
 	app := &App{
@@ -76,6 +78,15 @@ func New(configFilename string) *App {
 		PromRegistry:   prometheus.NewPedanticRegistry(),
 		exit:           make(chan bool),
 	}
+
+	// Register all receivers explicitly
+	registerPluginsOnce.Do(func() {
+		http_receiver.Register()
+		kafka_receiver.Register()
+		pubsub_receiver.Register()
+		tcp_receiver.Register()
+		udp_receiver.Register()
+	})
 
 	return app
 }

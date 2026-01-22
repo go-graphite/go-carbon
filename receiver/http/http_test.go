@@ -12,6 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMain(m *testing.M) {
+	Register()
+}
+
 func TestHttp(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
