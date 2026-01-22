@@ -10,9 +10,9 @@ linters:
     - errorlint
     - govet
     - unparam
+    - bodyclose
 
     # enabled in carbonapi
-    # - bodyclose
     # - gochecknoinits
     # - gosec
 

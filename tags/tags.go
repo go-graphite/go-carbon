@@ -58,6 +58,7 @@ func New(options *Options) *Tags {
 				t.logger.Error("failed to post tags", zap.Error(err))
 				return err
 			}
+			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				t.logger.Error("failed to post tags", zap.Int("status-code", resp.StatusCode))
 				return fmt.Errorf("bad status code: %d", resp.StatusCode)

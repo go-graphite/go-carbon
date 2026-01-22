@@ -82,6 +82,7 @@ func TestHttp(t *testing.T) {
 		resp, err := http.Post(url, tc.ContentType, bytes.NewReader([]byte(tc.Body)))
 		if !tc.Error {
 			assert.Nil(t, err, fmt.Sprintf("test #%d", index))
+			defer resp.Body.Close()
 			assert.Equal(t, 200, resp.StatusCode, fmt.Sprintf("test #%d", index))
 			assert.Equal(t, tc.Expected, received, fmt.Sprintf("test #%d", index))
 		} else {
