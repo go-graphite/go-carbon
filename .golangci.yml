@@ -9,12 +9,12 @@ linters:
     - promlinter
     - errorlint
     - govet
+    - unparam
 
     # enabled in carbonapi
     # - bodyclose
     # - gochecknoinits
     # - gosec
-    # - unparam
 
     # The linters we need to enable ASAP.
     # Enabling would require significant changes.

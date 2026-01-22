@@ -593,6 +593,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics}, nil
 }
 
+// nolint:unparam // FIXME - this always returns a nil error
 func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, trieNodes []*trieNode, fromTime, untilTime int32) ([]response, error) {
 	var multi []response
 	var errs []error

@@ -149,8 +149,8 @@ func (g *gdstate) matched() bool {
 }
 
 // TODO:
-//
-//	add range value validation
+// add range value validation
+// nolint:unparam // FIXME - nothing calls or uses the expand callback
 func newGlobState(expr string, expand func(globs []string) ([]string, error)) (*gmatcher, error) {
 	var m = gmatcher{root: &gstate{}, exact: true, expr: expr}
 	var cur = m.root
@@ -453,6 +453,7 @@ func (tn *trieNode) incrementReadBytesMetric(bytesNumber int64) {
 	}
 }
 
+// nolint:unparam // fileExt always receives ".wsp"
 func newTrie(fileExt string, maxCreatesPerSecond int, estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)) *trieIndex {
 	meta := newDirMeta()
 	maxCreatesTicker := helper.NewHardThrottleTicker(maxCreatesPerSecond)
@@ -1307,6 +1308,7 @@ func (tc *trieCounter) String() string {
 	return fmt.Sprintf("{%s}", str)
 }
 
+//nolint:unparam // TODO - add test coverage for nodesByGen return value
 func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, countByChildren, nodesByGen *trieCounter) {
 	type state struct {
 		next      int
@@ -2062,7 +2064,7 @@ func (ti *trieIndex) getNodeFullPath(node *trieNode) string { // skipcq: SCC-U10
 
 	return ""
 }
-func (ti *trieIndex) maxCreatesThrottle(ps *points.Points) bool {
+func (ti *trieIndex) maxCreatesThrottle() bool {
 	select {
 	case keep, open := <-ti.maxCreatesTicker.C:
 		if keep || !open {
@@ -2165,7 +2167,7 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 	if ti.throttleUsage(ps, dirs) {
 		return true
 	}
-	if ti.maxCreatesThrottle(ps) {
+	if ti.maxCreatesThrottle() {
 		return true
 	}
 	return false
