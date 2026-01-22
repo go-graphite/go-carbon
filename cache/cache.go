@@ -27,7 +27,7 @@ const (
 	Noop
 )
 
-const shardCount = 1024
+const shardCount = 1 << 10 // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
 	maxSize     int64
@@ -187,22 +187,9 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	helper.SendAndSubstractUint32("droppedRealtimeIndex", &c.stat.droppedRealtimeIndex, send)
 }
 
-// hash function
-// @TODO: try crc32 or something else?
-func fnv32(key string) uint32 {
-	hash := uint32(2166136261)
-	const prime32 = uint32(16777619)
-	for i := 0; i < len(key); i++ {
-		hash *= prime32
-		hash ^= uint32(key[i])
-	}
-	return hash
-}
-
 // GetShard returns shard under given key
 func (c *Cache) GetShard(key string) *Shard {
-	// @TODO: remove type casts?
-	return c.data[uint(fnv32(key))%uint(shardCount)]
+	return c.data[helper.HashString(key)&(shardCount-1)]
 }
 
 func (c *Cache) Get(key string) []points.Point {
