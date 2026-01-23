@@ -26,7 +26,7 @@ import (
 // the allocation overhead of repeatedly calling gzip.NewReader
 var gzipPool sync.Pool
 
-func init() {
+func Register() {
 	receiver.Register(
 		"pubsub",
 		func() interface{} { return NewOptions() },

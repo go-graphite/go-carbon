@@ -112,10 +112,10 @@ func ReadFileListCache(p string, version FLCVersion, writer io.Writer) error {
 
 	for {
 		entry, err := flc.Read()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
 			return err
 		}
 
@@ -160,7 +160,7 @@ func NewFileListCache(p string, version FLCVersion, mode byte) (FileListCache, e
 		case FLCVersionUnspecified, FLCVersion2:
 			flcc.version = FLCVersion2                  // for supporting FLCVersionUnspecified
 			flc, err = newFileListCacheV2ReadOnly(flcc) // flcc is already closed if there is error.
-			if err != nil && errors.Is(err, errFLCFallbackToV1) {
+			if errors.Is(err, errFLCFallbackToV1) {
 				// transparently detect which cache version is it.
 				return NewFileListCache(p, FLCVersion1, mode)
 			}

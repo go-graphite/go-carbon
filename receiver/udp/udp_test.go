@@ -16,6 +16,10 @@ type udpTestCase struct {
 	rcvChan  chan *points.Points
 }
 
+func TestMain(m *testing.M) {
+	Register()
+}
+
 func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 	test := &udpTestCase{
 		T: t,

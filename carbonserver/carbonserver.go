@@ -147,7 +147,7 @@ var statusCodes = map[string][]uint64{
 	"capabilities": make([]uint64, 5),
 }
 
-// interface to retrive retention and aggregation
+// interface to retrieve retention and aggregation
 // schema from persister.
 type configRetriever interface {
 	MetricRetentionPeriod(string) (int, bool)
@@ -520,14 +520,14 @@ func (listener *CarbonserverListener) SetDoNotLog404s(doNotLog404s bool) {
 func (listener *CarbonserverListener) SetFailOnMaxGlobs(failOnMaxGlobs bool) {
 	listener.failOnMaxGlobs = failOnMaxGlobs
 }
-func (listener *CarbonserverListener) SetMaxMetricsGlobbed(max int) {
-	listener.maxMetricsGlobbed = max
+func (listener *CarbonserverListener) SetMaxMetricsGlobbed(m int) {
+	listener.maxMetricsGlobbed = m
 }
-func (listener *CarbonserverListener) SetMaxMetricsRendered(max int) {
-	listener.maxMetricsRendered = max
+func (listener *CarbonserverListener) SetMaxMetricsRendered(m int) {
+	listener.maxMetricsRendered = m
 }
-func (listener *CarbonserverListener) SetMaxFetchDataGoroutines(max int) {
-	listener.maxFetchDataGoroutines = max
+func (listener *CarbonserverListener) SetMaxFetchDataGoroutines(m int) {
+	listener.maxFetchDataGoroutines = m
 }
 func (listener *CarbonserverListener) SetFLock(flock bool) {
 	listener.flock = flock
@@ -637,8 +637,8 @@ func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, in
 
 	return throttled
 }
-func (listener *CarbonserverListener) SetMaxInflightRequests(max uint64) {
-	listener.MaxInflightRequests = max
+func (listener *CarbonserverListener) SetMaxInflightRequests(m uint64) {
+	listener.MaxInflightRequests = m
 }
 func (listener *CarbonserverListener) SetNoServiceWhenIndexIsNotReady(no bool) {
 	listener.NoServiceWhenIndexIsNotReady = no
@@ -964,13 +964,14 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			readFromCache = true
 			for {
 				entry, err := flc.Read()
+				if errors.Is(err, io.EOF) {
+					break
+				}
 				if err != nil {
-					if !errors.Is(err, io.EOF) {
-						infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
+					infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
 
-						readFromCache = false
-						trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
-					}
+					readFromCache = false
+					trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
 
 					break
 				}
@@ -1258,7 +1259,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
 	zfields := []zap.Field{zap.Error(err), zap.String("metric", metric)}
-	if ierr, ok := err.(*trieInsertError); ok {
+	var ierr *trieInsertError
+	if errors.As(err, &ierr) {
 		zfields = append(zfields, zap.String("err_info", ierr.info))
 	}
 	logger.Error(msg, zfields...)
@@ -2053,13 +2055,13 @@ type GlobQueryRateLimiter struct {
 	maxInflightRequests chan struct{}
 }
 
-func NewGlobQueryRateLimiter(pattern string, max uint) (*GlobQueryRateLimiter, error) {
+func NewGlobQueryRateLimiter(pattern string, m uint) (*GlobQueryRateLimiter, error) {
 	exp, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, err
 	}
 
-	return &GlobQueryRateLimiter{pattern: exp, maxInflightRequests: make(chan struct{}, max)}, nil
+	return &GlobQueryRateLimiter{pattern: exp, maxInflightRequests: make(chan struct{}, m)}, nil
 }
 
 type ApiPerPathRatelimiter struct {

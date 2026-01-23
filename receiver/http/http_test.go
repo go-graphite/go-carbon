@@ -12,6 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestMain(m *testing.M) {
+	Register()
+}
+
 func TestHttp(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
 	if err != nil {
@@ -82,6 +86,7 @@ func TestHttp(t *testing.T) {
 		resp, err := http.Post(url, tc.ContentType, bytes.NewReader([]byte(tc.Body)))
 		if !tc.Error {
 			assert.Nil(t, err, fmt.Sprintf("test #%d", index))
+			defer resp.Body.Close()
 			assert.Equal(t, 200, resp.StatusCode, fmt.Sprintf("test #%d", index))
 			assert.Equal(t, tc.Expected, received, fmt.Sprintf("test #%d", index))
 		} else {

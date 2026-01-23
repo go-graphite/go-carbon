@@ -18,7 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func init() {
+func Register() {
 	receiver.Register(
 		"http",
 		func() interface{} { return NewOptions() },

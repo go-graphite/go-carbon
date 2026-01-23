@@ -124,7 +124,7 @@ func (listener *CarbonserverListener) listHandler(wr http.ResponseWriter, req *h
 			zap.String("reason", "response encode failed"),
 			zap.Error(err),
 		)
-		http.Error(wr, fmt.Sprintf("An internal error has occured: %s", err), http.StatusInternalServerError)
+		http.Error(wr, fmt.Sprintf("An internal error has occurred: %s", err), http.StatusInternalServerError)
 		return
 	}
 	wr.Header().Set("Content-Type", contentType)
@@ -295,7 +295,7 @@ func (listener *CarbonserverListener) listQueryHandler(wr http.ResponseWriter, r
 			zap.String("reason", "response encode failed"),
 			zap.Error(err),
 		)
-		http.Error(wr, fmt.Sprintf("An internal error has occured: %s", err), http.StatusInternalServerError)
+		http.Error(wr, fmt.Sprintf("An internal error has occurred: %s", err), http.StatusInternalServerError)
 		return
 	}
 	wr.Header().Set("Content-Type", contentType)

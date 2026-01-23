@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -149,7 +150,8 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 	if err != nil || response == nil {
 		var code int
 		var reason string
-		if _, ok := err.(errorNotFound); ok {
+		var nf errorNotFound
+		if errors.Is(err, &nf) {
 			reason = "Not Found"
 			code = http.StatusNotFound
 		} else {
@@ -328,7 +330,7 @@ GATHER:
 			}
 			glob.Files, glob.Leafs, glob.TrieNodes, glob.Lookups, err = expandedResult.Files, expandedResult.Leafs, expandedResult.TrieNodes, expandedResult.Lookups, expandedResult.Err
 			if err != nil {
-				errors = append(errors, fmt.Errorf("%s: %s", expandedResult.Name, err))
+				errors = append(errors, fmt.Errorf("%s: %w", expandedResult.Name, err))
 			}
 			expandedGlobs = append(expandedGlobs, glob)
 			if responseCount == len(names) {
@@ -492,7 +494,8 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	if err != nil || finalRes == nil {
 		var code codes.Code
 		var reason string
-		if _, ok := err.(errorNotFound); ok {
+		var nf errorNotFound
+		if errors.As(err, &nf) {
 			reason = "Not Found"
 			code = codes.NotFound
 		} else {

@@ -95,22 +95,22 @@ func ReadWhisperSchemas(filename string) (WhisperSchemas, error) {
 		}
 		schema.Pattern, err = regexp.Compile(section["pattern"])
 		if err != nil {
-			return nil, fmt.Errorf("[persister] Failed to parse pattern %q for [%s]: %s",
-				section["pattern"], schema.Name, err.Error())
+			return nil, fmt.Errorf("[persister] Failed to parse pattern %q for [%s]: %w",
+				section["pattern"], schema.Name, err)
 		}
 		schema.RetentionStr = section["retentions"]
 		schema.Retentions, err = ParseRetentionDefs(schema.RetentionStr)
 
 		if err != nil {
-			return nil, fmt.Errorf("[persister] Failed to parse retentions %q for [%s]: %s",
-				schema.RetentionStr, schema.Name, err.Error())
+			return nil, fmt.Errorf("[persister] Failed to parse retentions %q for [%s]: %w",
+				schema.RetentionStr, schema.Name, err)
 		}
 
 		p := int64(0)
 		if section["priority"] != "" {
 			p, err = strconv.ParseInt(section["priority"], 10, 0)
 			if err != nil {
-				return nil, fmt.Errorf("[persister] Failed to parse priority %q for [%s]: %s", section["priority"], schema.Name, err)
+				return nil, fmt.Errorf("[persister] Failed to parse priority %q for [%s]: %w", section["priority"], schema.Name, err)
 			}
 		}
 		schema.Priority = int64(p)<<32 - int64(i) // to sort records with same priority by position in file

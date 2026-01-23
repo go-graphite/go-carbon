@@ -24,12 +24,12 @@ import (
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/lomik/zapwriter"
 
-	// register receivers
-	_ "github.com/go-graphite/go-carbon/receiver/http"
-	_ "github.com/go-graphite/go-carbon/receiver/kafka"
-	_ "github.com/go-graphite/go-carbon/receiver/pubsub"
-	_ "github.com/go-graphite/go-carbon/receiver/tcp"
-	_ "github.com/go-graphite/go-carbon/receiver/udp"
+	// receivers
+	http_receiver "github.com/go-graphite/go-carbon/receiver/http"
+	kafka_receiver "github.com/go-graphite/go-carbon/receiver/kafka"
+	pubsub_receiver "github.com/go-graphite/go-carbon/receiver/pubsub"
+	tcp_receiver "github.com/go-graphite/go-carbon/receiver/tcp"
+	udp_receiver "github.com/go-graphite/go-carbon/receiver/udp"
 )
 
 type NamedReceiver struct {
@@ -68,6 +68,8 @@ type App struct {
 	FlushTraces    func()
 }
 
+var registerPluginsOnce sync.Once
+
 // New App instance
 func New(configFilename string) *App {
 	app := &App{
@@ -76,6 +78,15 @@ func New(configFilename string) *App {
 		PromRegistry:   prometheus.NewPedanticRegistry(),
 		exit:           make(chan bool),
 	}
+
+	// Register all receivers explicitly
+	registerPluginsOnce.Do(func() {
+		http_receiver.Register()
+		kafka_receiver.Register()
+		pubsub_receiver.Register()
+		tcp_receiver.Register()
+		udp_receiver.Register()
+	})
 
 	return app
 }
@@ -456,7 +467,7 @@ func (app *App) Start() (err error) {
 
 		if conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex {
 			if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
-				return fmt.Errorf("failed to stat whisper data directory: %s", err)
+				return fmt.Errorf("failed to stat whisper data directory: %w", err)
 			} else if fi.Mode()&os.ModeSymlink == 1 {
 				return fmt.Errorf("whisper data directory is a symlink")
 			}
@@ -474,7 +485,7 @@ func (app *App) Start() (err error) {
 		for _, rl := range conf.Carbonserver.HeavyGlobQueryRateLimiters {
 			gqrl, err := carbonserver.NewGlobQueryRateLimiter(rl.Pattern, rl.MaxInflightRequests)
 			if err != nil {
-				return fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %s", rl.Pattern, err)
+				return fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %w", rl.Pattern, err)
 			}
 			globQueryRateLimiters = append(globQueryRateLimiters, gqrl)
 		}

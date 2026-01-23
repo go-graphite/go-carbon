@@ -3,6 +3,7 @@ package kafka
 import (
 	"encoding"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -22,7 +23,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func init() {
+func Register() {
 	receiver.Register(
 		"kafka",
 		func() interface{} { return NewOptions() },
@@ -309,8 +310,8 @@ func newKafka(name string, options *Options, store func(*points.Points)) (*Kafka
 		version: ver,
 	}
 
+	rcv.waitGroup.Add(1)
 	go func() {
-		rcv.waitGroup.Add(1) //nolint:staticcheck
 		rcv.connect()
 		rcv.waitGroup.Done()
 	}()
@@ -379,24 +380,22 @@ func (rcv *Kafka) consume() {
 	}()
 
 	partitionConsumer, err := consumer.ConsumePartition(rcv.connectOptions.topic, rcv.connectOptions.partition, rcv.kafkaState.Offset)
-	if err != nil {
-		if err == sarama.ErrOffsetOutOfRange {
-			rcv.logger.Error(
-				"kafka state offset out of range, restart from the oldest offset",
-				zap.Int64("kafka_state_offset", rcv.kafkaState.Offset),
-			)
-			partitionConsumer, err = consumer.ConsumePartition(rcv.connectOptions.topic, rcv.connectOptions.partition, sarama.OffsetOldest)
-		}
+	if errors.Is(err, sarama.ErrOffsetOutOfRange) {
+		rcv.logger.Error(
+			"kafka state offset out of range, restart from the oldest offset",
+			zap.Int64("kafka_state_offset", rcv.kafkaState.Offset),
+		)
+		partitionConsumer, err = consumer.ConsumePartition(rcv.connectOptions.topic, rcv.connectOptions.partition, sarama.OffsetOldest)
+	}
 
-		if err != nil {
-			rcv.logger.Error("failed to consume from partition",
-				zap.String("topic", rcv.connectOptions.topic),
-				zap.Int32("partition", rcv.connectOptions.partition),
-				zap.Int64("offset", rcv.kafkaState.Offset),
-				zap.Error(err),
-			)
-			return
-		}
+	if err != nil {
+		rcv.logger.Error("failed to consume from partition",
+			zap.String("topic", rcv.connectOptions.topic),
+			zap.Int32("partition", rcv.connectOptions.partition),
+			zap.Int64("offset", rcv.kafkaState.Offset),
+			zap.Error(err),
+		)
+		return
 	}
 	defer func() {
 		if err := partitionConsumer.Close(); err != nil {
@@ -413,8 +412,8 @@ func (rcv *Kafka) consume() {
 
 	rcv.logger.Info("connected to kafka")
 
+	rcv.waitGroup.Add(1)
 	go func() {
-		rcv.waitGroup.Add(1) //nolint:staticcheck
 		rcv.worker()
 		rcv.waitGroup.Done()
 	}()

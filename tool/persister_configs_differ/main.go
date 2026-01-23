@@ -59,10 +59,10 @@ func main() {
 	aggregationChanges := map[string]int{}
 	for {
 		flcEntry, err := flc.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
 			panic(err)
 		}
 

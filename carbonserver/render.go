@@ -238,7 +238,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 				zap.Any("error", r),
 				zap.Int("http_code", http.StatusInternalServerError),
 			)
-			http.Error(wr, "Panic occured, see logs for more information", http.StatusInternalServerError)
+			http.Error(wr, "Panic occurred, see logs for more information", http.StatusInternalServerError)
 		}
 	}()
 
@@ -593,6 +593,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics}, nil
 }
 
+// nolint:unparam // FIXME - this always returns a nil error
 func (listener *CarbonserverListener) fetchData(metric, pathExpression string, files []string, leafs []bool, trieNodes []*trieNode, fromTime, untilTime int32) ([]response, error) {
 	var multi []response
 	var errs []error
@@ -722,7 +723,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 				zap.Any("error", r),
 				zap.Int("http_code", http.StatusInternalServerError),
 			)
-			rpcErr = status.New(codes.Internal, "Panic occured, see logs for more information").Err()
+			rpcErr = status.New(codes.Internal, "Panic occurred, see logs for more information").Err()
 		}
 	}()
 

@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -489,7 +490,7 @@ func TestGetMetricsListEmpty(t *testing.T) {
 	}
 
 	metrics, err := carbonserver.getMetricsList()
-	if err != errMetricsListEmpty {
+	if !errors.Is(err, errMetricsListEmpty) {
 		t.Errorf("err: '%v', expected: '%v'", err, errMetricsListEmpty)
 	}
 	if metrics != nil {

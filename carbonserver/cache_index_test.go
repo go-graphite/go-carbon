@@ -168,7 +168,7 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 
 	// assert [4] comes first, it has the smallest timestamp
 	if !p1.Eq(points.OnePoint(addMetrics[4], 4, timestamps[4])) {
-		fmt.Printf("error - recived wrong point - %v\n", p1)
+		fmt.Printf("error - received wrong point - %v\n", p1)
 		t.FailNow()
 	}
 
@@ -191,7 +191,7 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 
 	// assert [0] comes second, it has the second smallest timestamp
 	if !p2.Eq(points.OnePoint(addMetrics[0], 0, timestamps[0])) {
-		fmt.Printf("error - recived wrong point - %v\n", p2)
+		fmt.Printf("error - received wrong point - %v\n", p2)
 		t.FailNow()
 	}
 	f.checkExpandGlobs(t, addMetrics[0], true)

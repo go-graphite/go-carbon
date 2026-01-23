@@ -21,6 +21,10 @@ var (
 	testSub     = "test-sub"
 )
 
+func TestMain(m *testing.M) {
+	Register()
+}
+
 func newTestClient() (*pstest.Server, *pubsub.Topic, *pubsub.Client, error) {
 	ctx := context.Background()
 	srv := pstest.NewServer()

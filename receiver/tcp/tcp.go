@@ -3,6 +3,7 @@ package tcp
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,7 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func init() {
+func Register() {
 	receiver.Register(
 		"tcp",
 		func() interface{} { return NewOptions() },
@@ -273,9 +274,9 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 		conn.SetReadDeadline(time.Now().Add(2 * time.Minute))
 		data, err := framedConn.ReadFrame()
 		switch {
-		case err == io.EOF:
+		case errors.Is(err, io.EOF):
 			return
-		case err == framing.ErrPrefixLength:
+		case errors.Is(err, framing.ErrPrefixLength):
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("bad message size")
 			return
