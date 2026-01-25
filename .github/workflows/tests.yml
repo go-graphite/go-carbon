@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
   tests:
@@ -12,23 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: [ 1.22.x, 1.23.x, 1.24.x, tip ]
+        go: [oldstable, stable]
 
     steps:
       - name: Set up Go stable
-        if: matrix.go != 'tip'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ matrix.go }}
-      - name: Set up Go tip
-        if: matrix.go == 'tip'
-        run: |
-          curl -o go.tar.gz -L \
-          https://github.com/AlekSi/golang-tip/releases/download/tip/master.linux-amd64.tar.gz
-          sudo tar -C /usr/local -xzf go.tar.gz
-          sudo ln -s /usr/local/go/bin/* /usr/local/bin/
-          /usr/local/bin/go version
-          echo "PATH=$HOME/go/bin:$HOME/sdk/gotip/bin/:$PATH" >> $GITHUB_ENV
+          check-latest: true
 
       - name: Check out code into the Go module directory
         uses: actions/checkout@v5
@@ -55,7 +46,7 @@ jobs:
           CGO_ENABLED: 1
 
       - name: Govulncheck
-        if: ${{ matrix.go == '1.24.x' }} # only do govulncheck when built with latest stable go
+        if: ${{ matrix.go == 'stable' }} # only do govulncheck when built with latest stable go
         id: govulncheck
         uses: golang/govulncheck-action@v1
         with:
@@ -74,7 +65,7 @@ jobs:
           make sum-files
 
       - name: Upload Artifact
-        if: ${{ matrix.go == '1.24.x' }} # only upload artifact when built with latest stable go
+        if: ${{ matrix.go == 'stable' }} # only upload artifact when built with latest stable go
         id: artifact
         uses: actions/upload-artifact@v6
         with:
@@ -87,7 +78,7 @@ jobs:
             md5sum
 
       - name: Push packages to the autobuilds repo
-        if: ${{ github.event_name == 'push' && matrix.go == '1.24.x' }} # only when built from master with latest stable go
+        if: ${{ github.event_name == 'push' && matrix.go == 'stable' }} # only when built from master with latest stable go
         run: make DEVEL=1 packagecloud-autobuilds
         env:
           PACKAGECLOUD_TOKEN: ${{ secrets.PACKAGECLOUD_TOKEN }}
