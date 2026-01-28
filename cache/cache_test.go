@@ -96,5 +96,5 @@ func benchmarkStrategy(b *testing.B, strategy string) {
 }
 
 func BenchmarkUpdateQueueMax(b *testing.B)  { benchmarkStrategy(b, "max") }
-func BenchmarkUpdateQueueSort(b *testing.B) { benchmarkStrategy(b, "sort") }
+func BenchmarkUpdateQueueSort(b *testing.B) { benchmarkStrategy(b, "sorted") }
 func BenchmarkUpdateQueueNoop(b *testing.B) { benchmarkStrategy(b, "noop") }
