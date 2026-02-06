@@ -70,7 +70,7 @@ type Cache struct {
 
 // A "thread" safe string to anything map.
 type Shard struct {
-	mu               sync.RWMutex        // Read Write mutex, guards access to internal map.
+	mu               sync.RWMutex // Read Write mutex, guards access to internal map.
 	items            map[string]*points.Points
 	notConfirmed     []*points.Points    // linear search for value/slot
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
