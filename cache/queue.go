@@ -43,7 +43,7 @@ func (c *Cache) makeQueue() chan string {
 		c.mu.Unlock()
 	}()
 
-	orderKey := func(p *points.Points) int64 {
+	orderKey := func(_ *points.Points) int64 {
 		return 0
 	}
 
