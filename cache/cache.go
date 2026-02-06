@@ -254,9 +254,9 @@ func (c *Cache) NotConfirmedLength() int32 {
 	l := 0
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
-		shard.mu.Lock()
+		shard.mu.RLock()
 		l += len(shard.notConfirmed)
-		shard.mu.Unlock()
+		shard.mu.RUnlock()
 	}
 	return int32(l)
 }
