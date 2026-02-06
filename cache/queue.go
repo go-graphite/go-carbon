@@ -64,7 +64,7 @@ func (c *Cache) makeQueue() chan string {
 
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
-		shard.Lock()
+		shard.mu.Lock()
 
 		for _, p := range shard.items {
 			if index < size {
@@ -76,7 +76,7 @@ func (c *Cache) makeQueue() chan string {
 			index++
 		}
 
-		shard.Unlock()
+		shard.mu.Unlock()
 	}
 
 	q = q[:index]

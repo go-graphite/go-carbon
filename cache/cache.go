@@ -70,7 +70,7 @@ type Cache struct {
 
 // A "thread" safe string to anything map.
 type Shard struct {
-	sync.RWMutex     // Read Write mutex, guards access to internal map.
+	mu               sync.RWMutex        // Read Write mutex, guards access to internal map.
 	items            map[string]*points.Points
 	notConfirmed     []*points.Points    // linear search for value/slot
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
@@ -198,7 +198,7 @@ func (c *Cache) Get(key string) []points.Point {
 	shard := c.GetShard(key)
 
 	var data []points.Point
-	shard.Lock()
+	shard.mu.Lock()
 	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 		if p != nil && p.Metric == key {
 			if data == nil {
@@ -216,7 +216,7 @@ func (c *Cache) Get(key string) []points.Point {
 			data = append(data, p.Data...)
 		}
 	}
-	shard.Unlock()
+	shard.mu.Unlock()
 	return data
 }
 
@@ -224,7 +224,7 @@ func (c *Cache) Confirm(p *points.Points) {
 	var i, j int
 	shard := c.GetShard(p.Metric)
 
-	shard.Lock()
+	shard.mu.Lock()
 	for i = 0; i < shard.notConfirmedUsed; i++ {
 		if shard.notConfirmed[i] == p {
 			shard.notConfirmed[i] = nil
@@ -236,16 +236,16 @@ func (c *Cache) Confirm(p *points.Points) {
 			shard.notConfirmedUsed--
 		}
 	}
-	shard.Unlock()
+	shard.mu.Unlock()
 }
 
 func (c *Cache) Len() int32 {
 	l := 0
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
-		shard.Lock()
+		shard.mu.Lock()
 		l += len(shard.items)
-		shard.Unlock()
+		shard.mu.Unlock()
 	}
 	return int32(l)
 }
@@ -254,9 +254,9 @@ func (c *Cache) NotConfirmedLength() int32 {
 	l := 0
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
-		shard.Lock()
+		shard.mu.Lock()
 		l += len(shard.notConfirmed)
-		shard.Unlock()
+		shard.mu.Unlock()
 	}
 	return int32(l)
 }
@@ -301,8 +301,8 @@ func (c *Cache) Add(p *points.Points) {
 
 	// Get map shard.
 	shard := c.GetShard(p.Metric)
-	shard.Lock()
-	defer shard.Unlock()
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
 
 	values, exists := shard.items[p.Metric]
 	if c.throttle != nil && c.throttle(p, exists) {
@@ -347,10 +347,10 @@ func (c *Cache) Add(p *points.Points) {
 func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
 	shard := c.GetShard(key)
-	shard.Lock()
+	shard.mu.Lock()
 	p, exists = shard.items[key]
 	delete(shard.items, key)
-	shard.Unlock()
+	shard.mu.Unlock()
 
 	if exists {
 		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
@@ -362,7 +362,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
 	shard := c.GetShard(key)
-	shard.Lock()
+	shard.mu.Lock()
 	p, exists = shard.items[key]
 	delete(shard.items, key)
 
@@ -374,7 +374,7 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 		}
 		shard.notConfirmedUsed++
 	}
-	shard.Unlock()
+	shard.mu.Unlock()
 
 	if exists {
 		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
@@ -395,10 +395,10 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 	metricNames := make([]map[string]struct{}, shardCount)
 	for i := 0; i < shardCount; i++ {
 		shard, newAdds := c.data[i], make(map[string]struct{})
-		shard.Lock()
+		shard.mu.Lock()
 		currNames := shard.adds
 		shard.adds = newAdds
-		shard.Unlock()
+		shard.mu.Unlock()
 		metricNames[i] = currNames
 	}
 	return metricNames
