@@ -2,7 +2,7 @@ package cache
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/points"
@@ -71,10 +71,10 @@ func createCacheAndPopulate(metricsCount int, maxPointsPerMetric int) *Cache {
 	cache = New()
 
 	for i := 0; i < metricsCount; i++ {
-		m := fmt.Sprintf("%d.metric.name.for.bench.test.%d", rand.Intn(metricsCount), i)
+		m := fmt.Sprintf("%d.metric.name.for.bench.test.%d", rand.IntN(metricsCount), i)
 
 		p := points.OnePoint(m, 0, int64(i))
-		for j := 0; j < rand.Intn(maxPointsPerMetric)+1; j++ {
+		for j := 0; j < rand.IntN(maxPointsPerMetric)+1; j++ {
 			p.Add(0, int64(i+j))
 		}
 		cache.Add(p)
