@@ -334,9 +334,10 @@ func (c *Cache) Add(p *points.Points) {
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
-		if !c.newMetricCf.Has(xxhash.Sum64([]byte(p.Metric))) {
+		hash := xxhash.Sum64([]byte(p.Metric))
+		if !c.newMetricCf.Has(hash) {
 			sendMetricToNewMetricChan(c, p.Metric)
-			c.newMetricCf.Add(xxhash.Sum64([]byte(p.Metric)))
+			c.newMetricCf.Add(hash)
 		}
 
 	}
