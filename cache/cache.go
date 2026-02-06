@@ -11,8 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
-
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
@@ -334,8 +332,7 @@ func (c *Cache) Add(p *points.Points) {
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
-		hash := xxhash.Sum64([]byte(p.Metric))
-		if !c.newMetricCf.Has(hash) {
+		if hash := helper.HashString(p.Metric); !c.newMetricCf.Has(hash) {
 			sendMetricToNewMetricChan(c, p.Metric)
 			c.newMetricCf.Add(hash)
 		}
