@@ -22,10 +22,10 @@ func (v byOrderKey) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 
 func (c *Cache) makeQueue() chan string {
-	c.Lock()
+	c.mu.Lock()
 	writeStrategy := c.writeStrategy
 	prevBuild := c.queueLastBuild
-	c.Unlock()
+	c.mu.Unlock()
 
 	if !prevBuild.IsZero() {
 		// @TODO: may be max (with atomic cas)
@@ -38,9 +38,9 @@ func (c *Cache) makeQueue() chan string {
 		atomic.AddUint32(&c.stat.queueBuildTimeMs, uint32(time.Since(start)/time.Millisecond))
 		atomic.AddUint32(&c.stat.queueBuildCnt, 1)
 
-		c.Lock()
+		c.mu.Lock()
 		c.queueLastBuild = time.Now()
-		c.Unlock()
+		c.mu.Unlock()
 	}()
 
 	orderKey := func(p *points.Points) int64 {

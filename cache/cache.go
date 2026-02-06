@@ -38,7 +38,7 @@ type cacheSettings struct {
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
-	sync.Mutex
+	mu sync.Mutex
 
 	queueLastBuild time.Time
 
@@ -112,8 +112,8 @@ func (c *Cache) InitCacheScanAdds() {
 
 // SetWriteStrategy ...
 func (c *Cache) SetWriteStrategy(s string) (err error) {
-	c.Lock()
-	defer c.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	switch s {
 	case "max":
