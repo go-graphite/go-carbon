@@ -1,6 +1,121 @@
 ## Changelog
 ##### master
 
+##### version 0.19.0
+
+* Adding info output for /metric/list handler by @deniszh in https://github.com/go-graphite/go-carbon/pull/681
+* Docker: build mulitarchitecture images by @RoEdAl in https://github.com/go-graphite/go-carbon/pull/692
+* Use math.MaxInt as maximum value of int type by @RoEdAl in https://github.com/go-graphite/go-carbon/pull/695
+* Docker: distribute build across multiple runners by @RoEdAl in https://github.com/go-graphite/go-carbon/pull/696
+* Adding latest go and govulncheck by @deniszh in https://github.com/go-graphite/go-carbon/pull/704
+* Fixing strange govulncheck error by @deniszh in https://github.com/go-graphite/go-carbon/pull/705
+* Commenting out govulncheck by @deniszh in https://github.com/go-graphite/go-carbon/pull/706
+* Enabling govulncheck by @deniszh in https://github.com/go-graphite/go-carbon/pull/712
+* Upgrade golangci-lint by @deniszh in https://github.com/go-graphite/go-carbon/pull/715
+* Make cache size 64 bit by @deniszh in https://github.com/go-graphite/go-carbon/pull/764
+* Switch systemd unit example to non-forking by @drawks in https://github.com/go-graphite/go-carbon/pull/808
+* Replace fnv32 with xxh3 for shard hashing by @drawks in https://github.com/go-graphite/go-carbon/pull/814
+* Updates for automated linting config and various code fixes to match by @drawks in https://github.com/go-graphite/go-carbon/pull/815
+* Replace MD5 hashing in favor of xxh3 by @drawks in https://github.com/go-graphite/go-carbon/pull/816
+* switching pipeline to stable/oldstable by @deniszh in https://github.com/go-graphite/go-carbon/pull/817
+* Add User/Group specification to systemd unit example by @drawks in https://github.com/go-graphite/go-carbon/pull/820
+* Update Cache.Add to use helper.HashString by @drawks in https://github.com/go-graphite/go-carbon/pull/822
+* Deepsource fixes by @deniszh in https://github.com/go-graphite/go-carbon/pull/824
+
+###### Dependabot updates
+
+* Bump google.golang.org/protobuf from 1.34.2 to 1.35.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/645
+* Bump github.com/klauspost/compress from 1.17.10 to 1.17.11 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/647
+* Bump cloud.google.com/go/pubsub from 1.43.0 to 1.44.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/648
+* Bump github.com/prometheus/client_golang from 1.20.4 to 1.20.5 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/649
+* Bump golang.org/x/net from 0.29.0 to 0.31.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/654
+* Bump google.golang.org/grpc from 1.67.1 to 1.68.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/655
+* Bump github.com/stretchr/testify from 1.9.0 to 1.10.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/660
+* Bump cloud.google.com/go/pubsub from 1.44.0 to 1.45.3 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/665
+* Bump google.golang.org/grpc from 1.68.0 to 1.69.2 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/669
+* Bump golang.org/x/net from 0.31.0 to 0.33.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/671
+* Bump google.golang.org/api from 0.199.0 to 0.214.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/670
+* Bump google.golang.org/protobuf from 1.35.2 to 1.36.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/673
+* Bump github.com/IBM/sarama from 1.43.3 to 1.44.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/674
+* Bump google.golang.org/protobuf from 1.36.1 to 1.36.2 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/676
+* Bump google.golang.org/grpc from 1.69.2 to 1.69.4 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/677
+* Bump google.golang.org/api from 0.214.0 to 0.216.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/678
+* Bump golang.org/x/net from 0.33.0 to 0.34.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/679
+* Bump github.com/IBM/sarama from 1.44.0 to 1.45.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/680
+* Bump google.golang.org/api from 0.216.0 to 0.217.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/682
+* Bump google.golang.org/protobuf from 1.36.2 to 1.36.3 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/683
+* Bump google.golang.org/grpc from 1.69.4 to 1.70.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/684
+* Bump google.golang.org/protobuf from 1.36.3 to 1.36.4 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/685
+* Bump google.golang.org/api from 0.217.0 to 0.218.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/686
+* Bump cloud.google.com/go/pubsub from 1.45.3 to 1.47.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/689
+* Bump google.golang.org/api from 0.218.0 to 0.219.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/688
+* Bump google.golang.org/api from 0.219.0 to 0.220.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/690
+* Bump google.golang.org/protobuf from 1.36.4 to 1.36.5 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/691
+* Bump golang.org/x/net from 0.34.0 to 0.35.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/693
+* Bump github.com/google/go-cmp from 0.6.0 to 0.7.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/697
+* Bump github.com/klauspost/compress from 1.17.11 to 1.18.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/698
+* Bump github.com/prometheus/client_golang from 1.20.5 to 1.21.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/700
+* Bump github.com/IBM/sarama from 1.45.0 to 1.45.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/703
+* Bump google.golang.org/api from 0.220.0 to 0.223.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/702
+* Bump google.golang.org/grpc from 1.70.0 to 1.71.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/708
+* Bump github.com/prometheus/client_golang from 1.21.0 to 1.21.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/709
+* Bump golang.org/x/net from 0.35.0 to 0.37.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/710
+* Bump cloud.google.com/go/pubsub from 1.47.0 to 1.48.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/713
+* Bump google.golang.org/api from 0.223.0 to 0.226.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/714
+* Bump github.com/BurntSushi/toml from 1.4.0 to 1.5.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/716
+* Bump google.golang.org/protobuf from 1.36.5 to 1.36.6 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/717
+* Bump google.golang.org/api from 0.226.0 to 0.228.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/720
+* Bump golang.org/x/net from 0.37.0 to 0.38.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/719
+* Bump google.golang.org/grpc from 1.71.0 to 1.71.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/722
+* Bump cloud.google.com/go/pubsub from 1.48.0 to 1.48.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/723
+* Bump github.com/prometheus/client_golang from 1.21.1 to 1.22.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/724
+* Bump cloud.google.com/go/pubsub from 1.48.1 to 1.49.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/725
+* Bump golang.org/x/net from 0.38.0 to 0.39.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/726
+* Bump google.golang.org/grpc from 1.71.1 to 1.72.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/728
+* Bump google.golang.org/api from 0.228.0 to 0.231.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/730
+* Bump github.com/IBM/sarama from 1.45.1 to 1.45.2 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/737
+* Bump google.golang.org/grpc from 1.72.0 to 1.73.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/741
+* Bump golang.org/x/net from 0.39.0 to 0.41.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/739
+* Bump google.golang.org/api from 0.232.0 to 0.237.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/742
+* Bump github.com/greatroar/blobloom from 0.8.0 to 0.8.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/745
+* Bump google.golang.org/api from 0.237.0 to 0.239.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/744
+* Bump github.com/prometheus/client_golang from 1.22.0 to 1.23.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/752
+* Bump cloud.google.com/go/pubsub from 1.49.0 to 1.50.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/753
+* Bump github.com/stretchr/testify from 1.10.0 to 1.11.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/761
+* Bump golang.org/x/net from 0.41.0 to 0.43.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/755
+* Bump github.com/IBM/sarama from 1.45.2 to 1.46.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/759
+* Bump google.golang.org/grpc from 1.73.0 to 1.75.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/760
+* Bump google.golang.org/api from 0.239.0 to 0.248.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/762
+* Bump google.golang.org/protobuf from 1.36.6 to 1.36.8 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/763
+* Bump actions/checkout from 4 to 5 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/766
+* Bump actions/download-artifact from 4 to 5 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/765
+* Bump cloud.google.com/go/pubsub from 1.50.0 to 1.50.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/767
+* Bump github.com/stretchr/testify from 1.11.0 to 1.11.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/768
+* Bump github.com/prometheus/client_golang from 1.23.0 to 1.23.2 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/769
+* Bump actions/download-artifact from 5 to 6 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/788
+* Bump github/codeql-action from 3 to 4 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/787
+* Bump actions/upload-artifact from 4 to 5 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/786
+* Bump github.com/klauspost/compress from 1.18.0 to 1.18.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/785
+* Bump google.golang.org/protobuf from 1.36.8 to 1.36.10 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/778
+* Bump go.uber.org/zap from 1.27.0 to 1.27.1 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/794
+* Bump actions/upload-artifact from 5 to 6 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/806
+* Bump actions/download-artifact from 6 to 7 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/805
+* Bump github.com/BurntSushi/toml from 1.5.0 to 1.6.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/803
+* Bump google.golang.org/protobuf from 1.36.10 to 1.36.11 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/801
+* Bump github.com/klauspost/compress from 1.18.1 to 1.18.2 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/796
+* Bump github.com/klauspost/compress from 1.18.2 to 1.18.3 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/812
+* Bump golang.org/x/net from 0.43.0 to 0.49.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/811
+* Bump google.golang.org/grpc from 1.75.0 to 1.78.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/804
+* Bump github.com/IBM/sarama from 1.46.0 to 1.46.3 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/783
+* Bump google.golang.org/api from 0.248.0 to 0.260.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/813
+* Bump github.com/zeebo/xxh3 from 1.0.2 to 1.1.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/818
+* Bump google.golang.org/api from 0.262.0 to 0.264.0 by @dependabot[bot] in https://github.com/go-graphite/go-carbon/pull/823
+
+## New Contributors
+* @RoEdAl made their first contribution in https://github.com/go-graphite/go-carbon/pull/692
+
+**Full Changelog**: https://github.com/go-graphite/go-carbon/compare/v0.18.0...v0.19.0
+
 ##### version 0.18.0
 * bump google.golang.org/grpc to fix vulnerability GHSA-m425-mq94-257g by @KacperLegowski in https://github.com/go-graphite/go-carbon/pull/574
 * Actions bump and fpm fix by @deniszh in https://github.com/go-graphite/go-carbon/pull/580
