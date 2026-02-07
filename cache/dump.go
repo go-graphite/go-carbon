@@ -5,26 +5,26 @@ import "io"
 func (c *Cache) Dump(w io.Writer) error {
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
-		shard.Lock()
+		shard.mu.RLock()
 
 		for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 			if p == nil {
 				continue
 			}
 			if _, err := p.WriteTo(w); err != nil {
-				shard.Unlock()
+				shard.mu.RUnlock()
 				return err
 			}
 		}
 
 		for _, p := range shard.items {
 			if _, err := p.WriteTo(w); err != nil {
-				shard.Unlock()
+				shard.mu.RUnlock()
 				return err
 			}
 		}
 
-		shard.Unlock()
+		shard.mu.RUnlock()
 	}
 
 	return nil
@@ -33,26 +33,26 @@ func (c *Cache) Dump(w io.Writer) error {
 func (c *Cache) DumpBinary(w io.Writer) error {
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
-		shard.Lock()
+		shard.mu.RLock()
 
 		for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 			if p == nil {
 				continue
 			}
 			if _, err := p.WriteBinaryTo(w); err != nil {
-				shard.Unlock()
+				shard.mu.RUnlock()
 				return err
 			}
 		}
 
 		for _, p := range shard.items {
 			if _, err := p.WriteBinaryTo(w); err != nil {
-				shard.Unlock()
+				shard.mu.RUnlock()
 				return err
 			}
 		}
 
-		shard.Unlock()
+		shard.mu.RUnlock()
 	}
 
 	return nil
