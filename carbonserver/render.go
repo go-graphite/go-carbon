@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
@@ -659,6 +660,13 @@ func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_Rende
 	return
 }
 
+const gRPCRenderMetricsCountHeaderKey = "metrics-count"
+
+func sendRenderMetadataHeader(stream grpcv2.CarbonV2_RenderServer, filesCount int) error {
+	header := metadata.Pairs(gRPCRenderMetricsCountHeaderKey, strconv.Itoa(filesCount))
+	return stream.SendHeader(header)
+}
+
 // Render implements Render rpc of CarbonV2 gRPC service
 func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream grpcv2.CarbonV2_RenderServer) (rpcErr error) {
 	t0 := time.Now()
@@ -739,6 +747,10 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
 		tle.MetricGlobMapLength = len(metricGlobMap)
 		filesCount := countFilesInExpandedGlobs(expandedGlobs)
+		err = sendRenderMetadataHeader(stream, filesCount)
+		if err != nil {
+			return nil, err
+		}
 		prepareChan := make(chan response, getStreamingChannelSize(filesCount))
 		go func() {
 			prepareT0 := time.Now()
@@ -781,6 +793,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		case res != nil:
 			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
 			cachedResponses := res.([]response)
+			err = sendRenderMetadataHeader(stream, len(cachedResponses))
 			responseChanToStream = make(chan response, getStreamingChannelSize(len(cachedResponses)))
 			go func() {
 				for _, r := range cachedResponses {
