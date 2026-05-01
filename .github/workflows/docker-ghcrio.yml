@@ -76,7 +76,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -148,7 +148,7 @@ jobs:
 
       - name: Build
         if: ${{ ! needs.prepare.outputs.publish_image }}
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform.platform }}
@@ -159,7 +159,7 @@ jobs:
 
       - name: Build and push
         if: needs.prepare.outputs.publish_image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         id: build
         with:
           context: .
