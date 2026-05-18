@@ -164,11 +164,12 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 		partition:            partition,
 		messages:             make(chan *ConsumerMessage, c.conf.ChannelBufferSize),
 		errors:               make(chan *ConsumerError, c.conf.ChannelBufferSize),
-		feeder:               make(chan *FetchResponse, 1),
+		feeder:               make(chan *partitionConsumerResponse, 1),
 		leaderEpoch:          invalidLeaderEpoch,
 		preferredReadReplica: invalidPreferredReplicaID,
 		trigger:              make(chan none, 1),
 		dying:                make(chan none),
+		dispatcherStop:       make(chan none),
 		fetchSize:            c.conf.Consumer.Fetch.Default,
 	}
 
@@ -189,8 +190,16 @@ func (c *consumer) ConsumePartition(topic string, partition int32, offset int64)
 	go withRecover(child.responseFeeder)
 
 	child.leaderEpoch = epoch
-	child.broker = c.refBrokerConsumer(leader)
-	child.broker.input <- child
+	for {
+		child.broker = c.refBrokerConsumer(leader)
+		child.brokerSubscription = newBrokerSubscription(child)
+		if child.broker.queueSubscription(child.brokerSubscription) {
+			break
+		}
+
+		child.brokerSubscription.release()
+		c.unrefBrokerConsumer(child.broker)
+	}
 
 	return child, nil
 }
@@ -391,27 +400,55 @@ type PartitionConsumer interface {
 	IsPaused() bool
 }
 
+type partitionConsumerResponse struct {
+	broker       *brokerConsumer
+	subscription *brokerSubscription
+	response     *FetchResponse
+}
+
+type brokerSubscription struct {
+	child       *partitionConsumer
+	released    chan none
+	releaseOnce sync.Once
+}
+
+func newBrokerSubscription(child *partitionConsumer) *brokerSubscription {
+	return &brokerSubscription{
+		child:    child,
+		released: make(chan none),
+	}
+}
+
+func (s *brokerSubscription) release() {
+	s.releaseOnce.Do(func() {
+		close(s.released)
+	})
+}
+
 type partitionConsumer struct {
 	highWaterMarkOffset atomic.Int64 // must be at the top of the struct because https://golang.org/pkg/sync/atomic/#pkg-note-BUG
 
-	consumer *consumer
-	conf     *Config
-	broker   *brokerConsumer
-	messages chan *ConsumerMessage
-	errors   chan *ConsumerError
-	feeder   chan *FetchResponse
+	consumer           *consumer
+	conf               *Config
+	broker             *brokerConsumer
+	brokerSubscription *brokerSubscription
+	messages           chan *ConsumerMessage
+	errors             chan *ConsumerError
+	feeder             chan *partitionConsumerResponse
 
 	leaderEpoch          int32
 	preferredReadReplica int32
 
-	trigger, dying chan none
-	closeOnce      sync.Once
-	topic          string
-	partition      int32
-	responseResult error
-	fetchSize      int32
-	offset         int64
-	retries        atomic.Int32
+	trigger, dying     chan none
+	dispatcherStop     chan none
+	closeOnce          sync.Once
+	dispatcherStopOnce sync.Once
+	topic              string
+	partition          int32
+	responseResult     error
+	fetchSize          int32
+	offset             int64
+	retries            atomic.Int32
 
 	paused atomic.Bool // accessed atomically, 0 = not paused, 1 = paused
 }
@@ -432,6 +469,54 @@ func (child *partitionConsumer) sendError(err error) {
 	}
 }
 
+// notifyError delivers an abort error and queues a redispatch unless shutdown
+// is already in progress
+func (child *partitionConsumer) notifyError(err error) {
+	cErr := &ConsumerError{
+		Topic:     child.topic,
+		Partition: child.partition,
+		Err:       err,
+	}
+
+	select {
+	case <-child.dying:
+		// shutdown is already in progress; skip error delivery
+		return
+	default:
+	}
+
+	if child.conf.Consumer.Return.Errors {
+		child.errors <- cErr
+	} else {
+		Logger.Println(cErr)
+	}
+
+	child.triggerRedispatch()
+}
+
+// triggerRedispatch queues a redispatch signal unless one is already pending.
+// If the child is shutting down, the signal is ignored.
+func (child *partitionConsumer) triggerRedispatch() {
+	select {
+	case <-child.dispatcherStop:
+		return
+	case <-child.dying:
+		return
+	default:
+	}
+
+	select {
+	case child.trigger <- none{}:
+	default:
+	}
+}
+
+func (child *partitionConsumer) stopDispatcher() {
+	child.dispatcherStopOnce.Do(func() {
+		close(child.dispatcherStop)
+	})
+}
+
 func (child *partitionConsumer) computeBackoff() time.Duration {
 	if child.conf.Consumer.Retry.BackoffFunc != nil {
 		retries := child.retries.Add(1)
@@ -441,28 +526,60 @@ func (child *partitionConsumer) computeBackoff() time.Duration {
 }
 
 func (child *partitionConsumer) dispatcher() {
-	for range child.trigger {
+	defer func() {
+		if child.broker != nil {
+			child.consumer.unrefBrokerConsumer(child.broker)
+		}
+		child.consumer.removeChild(child)
+		close(child.feeder)
+	}()
+
+	var backoff <-chan time.Time
+	for {
 		select {
+		case <-child.dispatcherStop:
+			return
 		case <-child.dying:
-			close(child.trigger)
-		case <-time.After(child.computeBackoff()):
+			child.waitForBrokerHandover()
+			return
+		case <-child.trigger:
+			// only set the timer when none is pending, so retries increments
+			// once per dispatch attempt rather than once per trigger
+			if backoff == nil {
+				backoff = time.After(child.computeBackoff())
+			}
+		case <-backoff:
+			backoff = nil
 			if child.broker != nil {
 				child.consumer.unrefBrokerConsumer(child.broker)
 				child.broker = nil
 			}
-
 			if err := child.dispatch(); err != nil {
-				child.sendError(err)
-				child.trigger <- none{}
+				select {
+				case <-child.dispatcherStop:
+					return
+				case <-child.dying:
+					return
+				default:
+					child.sendError(err)
+					child.triggerRedispatch()
+				}
 			}
 		}
 	}
+}
 
-	if child.broker != nil {
-		child.consumer.unrefBrokerConsumer(child.broker)
+// waitForBrokerHandover blocks until the brokerConsumer releases the current
+// subscription, so the deferred close(feeder) cannot race an in-flight
+// write to the feeder from subscriptionConsumer.
+func (child *partitionConsumer) waitForBrokerHandover() {
+	if child.broker == nil {
+		return
 	}
-	child.consumer.removeChild(child)
-	close(child.feeder)
+	select {
+	case <-child.dispatcherStop:
+	case <-child.brokerSubscription.released:
+	}
 }
 
 func (child *partitionConsumer) preferredBroker() (*Broker, int32, error) {
@@ -494,12 +611,17 @@ func (child *partitionConsumer) dispatch() error {
 	if err != nil {
 		return err
 	}
-
 	child.leaderEpoch = epoch
-	child.broker = child.consumer.refBrokerConsumer(broker)
-	child.broker.input <- child
+	for {
+		child.broker = child.consumer.refBrokerConsumer(broker)
+		child.brokerSubscription = newBrokerSubscription(child)
+		if child.broker.queueSubscription(child.brokerSubscription) {
+			return nil
+		}
 
-	return nil
+		child.brokerSubscription.release()
+		child.consumer.unrefBrokerConsumer(child.broker)
+	}
 }
 
 func (child *partitionConsumer) chooseStartingOffset(offset int64) error {
@@ -538,10 +660,8 @@ func (child *partitionConsumer) Errors() <-chan *ConsumerError {
 }
 
 func (child *partitionConsumer) AsyncClose() {
-	// this triggers whatever broker owns this child to abandon it and close its trigger channel, which causes
-	// the dispatcher to exit its loop, which removes it from the consumer then closes its 'messages' and
-	// 'errors' channel (alternatively, if the child is already at the dispatcher for some reason, that will
-	// also just close itself)
+	// this tells the current broker to abandon this child and lets the
+	// dispatcher shut itself down, which eventually closes messages and errors
 	child.closeOnce.Do(func() {
 		close(child.dying)
 	})
@@ -571,8 +691,11 @@ func (child *partitionConsumer) responseFeeder() {
 	firstAttempt := true
 
 feederLoop:
-	for response := range child.feeder {
-		msgs, child.responseResult = child.parseResponse(response)
+	for feederResponse := range child.feeder {
+		broker := feederResponse.broker
+		subscription := feederResponse.subscription
+
+		msgs, child.responseResult = child.parseResponse(feederResponse.response)
 
 		if child.responseResult == nil {
 			child.retries.Store(0)
@@ -583,14 +706,14 @@ feederLoop:
 		messageSelect:
 			select {
 			case <-child.dying:
-				child.broker.acks.Done()
+				broker.acks.Done()
 				continue feederLoop
 			case child.messages <- msg:
 				firstAttempt = true
 			case <-expiryTicker.C:
 				if !firstAttempt {
 					child.responseResult = errTimedOut
-					child.broker.acks.Done()
+					broker.acks.Done()
 				remainingLoop:
 					for _, msg = range msgs[i:] {
 						child.interceptors(msg)
@@ -600,7 +723,12 @@ feederLoop:
 							break remainingLoop
 						}
 					}
-					child.broker.input <- child
+					if !broker.queueSubscription(subscription) {
+						// the broker is shutting down; release so any waiter on
+						// the dispatcher side can make progress
+						subscription.release()
+						child.triggerRedispatch()
+					}
 					continue feederLoop
 				} else {
 					// current message has not been sent, return to select
@@ -611,7 +739,7 @@ feederLoop:
 			}
 		}
 
-		child.broker.acks.Done()
+		broker.acks.Done()
 	}
 
 	expiryTicker.Stop()
@@ -853,21 +981,24 @@ func (child *partitionConsumer) IsPaused() bool {
 type brokerConsumer struct {
 	consumer         *consumer
 	broker           *Broker
-	input            chan *partitionConsumer
-	newSubscriptions chan []*partitionConsumer
-	subscriptions    map[*partitionConsumer]none
+	input            chan *brokerSubscription
+	newSubscriptions chan []*brokerSubscription
+	subscriptions    map[*partitionConsumer]*brokerSubscription
 	acks             sync.WaitGroup
 	refs             int
+	stop             chan none
+	stopOnce         sync.Once
 }
 
 func (c *consumer) newBrokerConsumer(broker *Broker) *brokerConsumer {
 	bc := &brokerConsumer{
 		consumer:         c,
 		broker:           broker,
-		input:            make(chan *partitionConsumer),
-		newSubscriptions: make(chan []*partitionConsumer),
-		subscriptions:    make(map[*partitionConsumer]none),
+		input:            make(chan *brokerSubscription),
+		newSubscriptions: make(chan []*brokerSubscription),
+		subscriptions:    make(map[*partitionConsumer]*brokerSubscription),
 		refs:             0,
+		stop:             make(chan none),
 	}
 
 	go withRecover(bc.subscriptionManager)
@@ -884,27 +1015,39 @@ func (bc *brokerConsumer) subscriptionManager() {
 	defer close(bc.newSubscriptions)
 
 	for {
-		var partitionConsumers []*partitionConsumer
+		var subscriptions []*brokerSubscription
+		stopping := false
 
 		// Check for any partition consumer asking to subscribe if there aren't
 		// any, trigger the network request (to fetch Kafka messages) by sending "nil" to the
 		// newSubscriptions channel
 		select {
-		case pc, ok := <-bc.input:
+		case <-bc.stop:
+			return
+		case subscription, ok := <-bc.input:
 			if !ok {
 				return
 			}
-			partitionConsumers = append(partitionConsumers, pc)
+			subscriptions = append(subscriptions, subscription)
 		case bc.newSubscriptions <- nil:
 			continue
 		}
 
 		// drain input of any further incoming subscriptions
 		timer := time.NewTimer(partitionConsumersBatchTimeout)
+		inputClosed := false
 		for batchComplete := false; !batchComplete; {
 			select {
-			case pc := <-bc.input:
-				partitionConsumers = append(partitionConsumers, pc)
+			case <-bc.stop:
+				stopping = true
+				batchComplete = true
+			case subscription, ok := <-bc.input:
+				if !ok {
+					inputClosed = true
+					batchComplete = true
+					continue
+				}
+				subscriptions = append(subscriptions, subscription)
 			case <-timer.C:
 				batchComplete = true
 			}
@@ -913,9 +1056,12 @@ func (bc *brokerConsumer) subscriptionManager() {
 
 		Logger.Printf(
 			"consumer/broker/%d accumulated %d new subscriptions\n",
-			bc.broker.ID(), len(partitionConsumers))
+			bc.broker.ID(), len(subscriptions))
 
-		bc.newSubscriptions <- partitionConsumers
+		bc.newSubscriptions <- subscriptions
+		if inputClosed || stopping {
+			return
+		}
 	}
 }
 
@@ -947,7 +1093,17 @@ func (bc *brokerConsumer) subscriptionConsumer() {
 		}
 
 		bc.acks.Add(len(bc.subscriptions))
-		for child := range bc.subscriptions {
+		for child, subscription := range bc.subscriptions {
+			select {
+			case <-child.dying:
+				Logger.Printf("consumer/broker/%d closed dead subscription to %s/%d\n", bc.broker.ID(), child.topic, child.partition)
+				bc.releaseSubscription(child)
+				child.stopDispatcher()
+				bc.acks.Done()
+				continue
+			default:
+			}
+
 			if _, ok := response.Blocks[child.topic]; !ok {
 				bc.acks.Done()
 				continue
@@ -958,16 +1114,21 @@ func (bc *brokerConsumer) subscriptionConsumer() {
 				continue
 			}
 
-			child.feeder <- response
+			child.feeder <- &partitionConsumerResponse{
+				broker:       bc,
+				subscription: subscription,
+				response:     response,
+			}
 		}
 		bc.acks.Wait()
 		bc.handleResponses()
 	}
 }
 
-func (bc *brokerConsumer) updateSubscriptions(newSubscriptions []*partitionConsumer) {
-	for _, child := range newSubscriptions {
-		bc.subscriptions[child] = none{}
+func (bc *brokerConsumer) updateSubscriptions(newSubscriptions []*brokerSubscription) {
+	for _, subscription := range newSubscriptions {
+		child := subscription.child
+		bc.subscriptions[child] = subscription
 		Logger.Printf("consumer/broker/%d added subscription to %s/%d\n", bc.broker.ID(), child.topic, child.partition)
 	}
 
@@ -975,8 +1136,8 @@ func (bc *brokerConsumer) updateSubscriptions(newSubscriptions []*partitionConsu
 		select {
 		case <-child.dying:
 			Logger.Printf("consumer/broker/%d closed dead subscription to %s/%d\n", bc.broker.ID(), child.topic, child.partition)
-			close(child.trigger)
-			delete(bc.subscriptions, child)
+			bc.releaseSubscription(child)
+			child.stopDispatcher()
 		default:
 			// no-op
 		}
@@ -986,6 +1147,14 @@ func (bc *brokerConsumer) updateSubscriptions(newSubscriptions []*partitionConsu
 // handleResponses handles the response codes left for us by our subscriptions, and abandons ones that have been closed
 func (bc *brokerConsumer) handleResponses() {
 	for child := range bc.subscriptions {
+		select {
+		case <-child.dying:
+			bc.releaseSubscription(child)
+			child.stopDispatcher()
+			continue
+		default:
+		}
+
 		result := child.responseResult
 		child.responseResult = nil
 
@@ -996,8 +1165,8 @@ func (bc *brokerConsumer) handleResponses() {
 					Logger.Printf(
 						"consumer/broker/%d abandoned in favor of preferred replica broker/%d\n",
 						bc.broker.ID(), preferredBroker.ID())
-					child.trigger <- none{}
-					delete(bc.subscriptions, child)
+					child.triggerRedispatch()
+					bc.releaseSubscription(child)
 				}
 			}
 			continue
@@ -1009,14 +1178,18 @@ func (bc *brokerConsumer) handleResponses() {
 		if errors.Is(result, errTimedOut) {
 			Logger.Printf("consumer/broker/%d abandoned subscription to %s/%d because consuming was taking too long\n",
 				bc.broker.ID(), child.topic, child.partition)
+			// responseFeeder already requeued this subscription onto bc.input
+			// so it will loop back through subscriptionManager so no need to
+			// release it here
 			delete(bc.subscriptions, child)
 		} else if errors.Is(result, ErrOffsetOutOfRange) {
 			// there's no point in retrying this it will just fail the same way again
 			// shut it down and force the user to choose what to do
 			child.sendError(result)
 			Logger.Printf("consumer/%s/%d shutting down because %s\n", child.topic, child.partition, result)
-			close(child.trigger)
-			delete(bc.subscriptions, child)
+			child.stopDispatcher()
+			child.AsyncClose()
+			bc.releaseSubscription(child)
 		} else if errors.Is(result, ErrUnknownTopicOrPartition) ||
 			errors.Is(result, ErrNotLeaderForPartition) ||
 			errors.Is(result, ErrLeaderNotAvailable) ||
@@ -1026,37 +1199,44 @@ func (bc *brokerConsumer) handleResponses() {
 			// not an error, but does need redispatching
 			Logger.Printf("consumer/broker/%d abandoned subscription to %s/%d because %s\n",
 				bc.broker.ID(), child.topic, child.partition, result)
-			child.trigger <- none{}
-			delete(bc.subscriptions, child)
+			child.triggerRedispatch()
+			bc.releaseSubscription(child)
 		} else {
 			// dunno, tell the user and try redispatching
 			child.sendError(result)
 			Logger.Printf("consumer/broker/%d abandoned subscription to %s/%d because %s\n",
 				bc.broker.ID(), child.topic, child.partition, result)
-			child.trigger <- none{}
-			delete(bc.subscriptions, child)
+			child.triggerRedispatch()
+			bc.releaseSubscription(child)
 		}
 	}
 }
 
 func (bc *brokerConsumer) abort(err error) {
 	bc.consumer.abandonBrokerConsumer(bc)
+	bc.stopConsuming()
 	_ = bc.broker.Close() // we don't care about the error this might return, we already have one
 
 	for child := range bc.subscriptions {
-		child.sendError(err)
-		child.trigger <- none{}
+		bc.releaseSubscription(child)
+		select {
+		case <-child.dying:
+			child.stopDispatcher()
+		default:
+			child.notifyError(err)
+		}
 	}
 
 	for newSubscriptions := range bc.newSubscriptions {
-		if len(newSubscriptions) == 0 {
-			// Take a small nap to avoid burning the CPU.
-			time.Sleep(partitionConsumersBatchTimeout)
-			continue
-		}
-		for _, child := range newSubscriptions {
-			child.sendError(err)
-			child.trigger <- none{}
+		for _, subscription := range newSubscriptions {
+			child := subscription.child
+			subscription.release()
+			select {
+			case <-child.dying:
+				child.stopDispatcher()
+			default:
+				child.notifyError(err)
+			}
 		}
 	}
 }
@@ -1122,6 +1302,14 @@ func (bc *brokerConsumer) fetchNewMessages() (*FetchResponse, error) {
 	}
 
 	for child := range bc.subscriptions {
+		select {
+		case <-child.dying:
+			bc.releaseSubscription(child)
+			child.stopDispatcher()
+			continue
+		default:
+		}
+
 		if !child.IsPaused() {
 			request.AddBlock(child.topic, child.partition, child.offset, child.fetchSize, child.leaderEpoch)
 		}
@@ -1133,4 +1321,26 @@ func (bc *brokerConsumer) fetchNewMessages() (*FetchResponse, error) {
 	}
 
 	return bc.broker.Fetch(request)
+}
+
+func (bc *brokerConsumer) stopConsuming() {
+	bc.stopOnce.Do(func() {
+		close(bc.stop)
+	})
+}
+
+func (bc *brokerConsumer) releaseSubscription(child *partitionConsumer) {
+	if subscription, ok := bc.subscriptions[child]; ok {
+		delete(bc.subscriptions, child)
+		subscription.release()
+	}
+}
+
+func (bc *brokerConsumer) queueSubscription(subscription *brokerSubscription) bool {
+	select {
+	case <-bc.stop:
+		return false
+	case bc.input <- subscription:
+		return true
+	}
 }

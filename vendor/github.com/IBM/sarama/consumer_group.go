@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -477,24 +478,46 @@ func (c *consumerGroup) joinGroupRequest(coordinator *Broker, topics []string) (
 		}
 	}
 
-	meta := &ConsumerGroupMemberMetadata{
-		Topics:   topics,
-		UserData: c.userData,
-	}
-	var strategy BalanceStrategy
-	if strategy = c.config.Consumer.Group.Rebalance.Strategy; strategy != nil {
-		if err := req.AddGroupProtocolMetadata(strategy.Name(), meta); err != nil {
+	if strategy := c.config.Consumer.Group.Rebalance.Strategy; strategy != nil {
+		if err := req.AddGroupProtocolMetadata(strategy.Name(), c.subscriptionMetadata(strategy, topics)); err != nil {
 			return nil, err
 		}
 	} else {
-		for _, strategy = range c.config.Consumer.Group.Rebalance.GroupStrategies {
-			if err := req.AddGroupProtocolMetadata(strategy.Name(), meta); err != nil {
+		for _, strategy := range c.config.Consumer.Group.Rebalance.GroupStrategies {
+			if err := req.AddGroupProtocolMetadata(strategy.Name(), c.subscriptionMetadata(strategy, topics)); err != nil {
 				return nil, err
 			}
 		}
 	}
 
 	return coordinator.JoinGroup(req)
+}
+
+// subscriptionMetadata builds the ConsumerGroupMemberMetadata for a single
+// strategy in a JoinGroup request. If the strategy implements
+// SubscriptionUserDataBalanceStrategy, its SubscriptionUserData hook is invoked
+// to obtain per-cycle UserData; on error the statically configured
+// Consumer.Group.Member.UserData is used and the error is logged.
+func (c *consumerGroup) subscriptionMetadata(strategy BalanceStrategy, topics []string) *ConsumerGroupMemberMetadata {
+	if p, ok := strategy.(SubscriptionUserDataBalanceStrategy); ok {
+		// Hand the provider a throwaway copy so it cannot mutate the slice
+		// we later attach to the JoinGroup request.
+		userData, err := p.SubscriptionUserData(slices.Clone(topics))
+		if err == nil {
+			return &ConsumerGroupMemberMetadata{
+				Topics:   topics,
+				UserData: userData,
+			}
+		}
+		Logger.Printf(
+			"consumergroup/%s: falling back to static user data for strategy %q due to %v\n",
+			c.groupID, strategy.Name(), err,
+		)
+	}
+	return &ConsumerGroupMemberMetadata{
+		Topics:   topics,
+		UserData: c.userData,
+	}
 }
 
 // findStrategy returns the BalanceStrategy with the specified protocolName
@@ -933,6 +956,50 @@ func (s *consumerGroupSession) Context() context.Context {
 	return s.ctx
 }
 
+// newClaimWithRetry calls newConsumerGroupClaim, retrying transient errors so
+// that brief leader/metadata desync around a rebalance doesn't leave a
+// partition permanently unclaimed for the lifetime of this session
+func (s *consumerGroupSession) newClaimWithRetry(topic string, partition int32, offset int64) (*consumerGroupClaim, error) {
+	retries := s.parent.config.Metadata.Retry.Max
+	for {
+		claim, err := newConsumerGroupClaim(s, topic, partition, offset)
+		if err == nil {
+			return claim, nil
+		}
+		if retries <= 0 || !isRetriableClaimError(err) {
+			return nil, err
+		}
+		retries--
+
+		backoff := computeMetadataBackoff(s.parent.config, retries)
+		Logger.Printf(
+			"consumer-group/claim %s/%d retrying after %dms... (%d attempts remaining): %v\n",
+			topic, partition, backoff/time.Millisecond, retries, err)
+
+		select {
+		case <-s.ctx.Done():
+			return nil, err
+		case <-s.parent.closed:
+			return nil, err
+		case <-time.After(backoff):
+		}
+
+		// refresh leader/broker info before retrying
+		_ = s.parent.client.RefreshMetadata(topic)
+	}
+}
+
+// isRetriableClaimError reports whether err from newConsumerGroupClaim is
+// a transient condition worth retrying after a metadata refresh
+func isRetriableClaimError(err error) bool {
+	return errors.Is(err, ErrNotConnected) ||
+		errors.Is(err, ErrLeaderNotAvailable) ||
+		errors.Is(err, ErrNotLeaderForPartition) ||
+		errors.Is(err, ErrFencedLeaderEpoch) ||
+		errors.Is(err, ErrUnknownLeaderEpoch) ||
+		errors.Is(err, ErrReplicaNotAvailable)
+}
+
 func (s *consumerGroupSession) consume(topic string, partition int32) {
 	// quick exit if rebalance is due
 	select {
@@ -950,18 +1017,11 @@ func (s *consumerGroupSession) consume(topic string, partition int32) {
 	}
 
 	// create new claim
-	claim, err := newConsumerGroupClaim(s, topic, partition, offset)
+	claim, err := s.newClaimWithRetry(topic, partition, offset)
 	if err != nil {
 		s.parent.handleError(err, topic, partition)
 		return
 	}
-
-	// handle errors
-	go func() {
-		for err := range claim.Errors() {
-			s.parent.handleError(err, topic, partition)
-		}
-	}()
 
 	// trigger close when session is done
 	go func() {
