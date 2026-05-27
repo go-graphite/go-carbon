@@ -50,7 +50,7 @@ cloud.google.com/go/pubsub/v2/apiv1/pubsubpb
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/IBM/sarama v1.47.0
+# github.com/IBM/sarama v1.49.0
 ## explicit; go 1.25.0
 github.com/IBM/sarama
 # github.com/NYTimes/gziphandler v1.1.1
@@ -254,7 +254,7 @@ github.com/munnerz/goautoneg
 ## explicit; go 1.13
 # github.com/onsi/gomega v1.10.1
 ## explicit
-# github.com/pierrec/lz4/v4 v4.1.25
+# github.com/pierrec/lz4/v4 v4.1.26
 ## explicit; go 1.17
 github.com/pierrec/lz4/v4
 github.com/pierrec/lz4/v4/internal/lz4block
