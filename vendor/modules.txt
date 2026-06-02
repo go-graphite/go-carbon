@@ -50,9 +50,10 @@ cloud.google.com/go/pubsub/v2/apiv1/pubsubpb
 ## explicit; go 1.18
 github.com/BurntSushi/toml
 github.com/BurntSushi/toml/internal
-# github.com/IBM/sarama v1.47.0
+# github.com/IBM/sarama v1.50.1
 ## explicit; go 1.25.0
 github.com/IBM/sarama
+github.com/IBM/sarama/internal/queue
 # github.com/NYTimes/gziphandler v1.1.1
 ## explicit; go 1.11
 github.com/NYTimes/gziphandler
@@ -80,9 +81,6 @@ github.com/dgryski/httputil
 # github.com/eapache/go-resiliency v1.7.0
 ## explicit; go 1.13
 github.com/eapache/go-resiliency/breaker
-# github.com/eapache/queue v1.1.0
-## explicit
-github.com/eapache/queue
 # github.com/felixge/httpsnoop v1.0.4
 ## explicit; go 1.13
 github.com/felixge/httpsnoop
@@ -254,7 +252,7 @@ github.com/munnerz/goautoneg
 ## explicit; go 1.13
 # github.com/onsi/gomega v1.10.1
 ## explicit
-# github.com/pierrec/lz4/v4 v4.1.25
+# github.com/pierrec/lz4/v4 v4.1.26
 ## explicit; go 1.17
 github.com/pierrec/lz4/v4
 github.com/pierrec/lz4/v4/internal/lz4block
@@ -404,7 +402,7 @@ go.uber.org/zap/zapcore
 # go.yaml.in/yaml/v2 v2.4.2
 ## explicit; go 1.15
 go.yaml.in/yaml/v2
-# golang.org/x/crypto v0.51.0
+# golang.org/x/crypto v0.52.0
 ## explicit; go 1.25.0
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305
