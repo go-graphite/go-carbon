@@ -644,9 +644,23 @@ func (mr *MockOffsetFetchResponse) SetError(kerror KError) *MockOffsetFetchRespo
 
 func (mr *MockOffsetFetchResponse) For(reqBody versionedDecoder) encoderWithHeader {
 	req := reqBody.(*OffsetFetchRequest)
-	group := req.ConsumerGroup
 	res := &OffsetFetchResponse{Version: req.Version}
 
+	if res.Version >= 8 {
+		res.Groups = make([]OffsetFetchResponseGroup, len(req.Groups))
+		for i, g := range req.Groups {
+			respGroup := OffsetFetchResponseGroup{GroupId: g.GroupId, Err: mr.error}
+			for topic, partitions := range mr.offsets[g.GroupId] {
+				for partition, block := range partitions {
+					respGroup.AddBlock(topic, partition, block)
+				}
+			}
+			res.Groups[i] = respGroup
+		}
+		return res
+	}
+
+	group := req.ConsumerGroup
 	for topic, partitions := range mr.offsets[group] {
 		for partition, block := range partitions {
 			res.AddBlock(topic, partition, block)
@@ -854,6 +868,7 @@ func (mr *MockDescribeConfigsResponse) For(reqBody versionedDecoder) encoderWith
 			)
 			res.Resources = append(res.Resources, &ResourceResponse{
 				Name:    r.Name,
+				Type:    r.Type,
 				Configs: configEntries,
 			})
 		case BrokerLoggerResource:
@@ -867,6 +882,7 @@ func (mr *MockDescribeConfigsResponse) For(reqBody versionedDecoder) encoderWith
 			)
 			res.Resources = append(res.Resources, &ResourceResponse{
 				Name:    r.Name,
+				Type:    r.Type,
 				Configs: configEntries,
 			})
 		case TopicResource:
@@ -914,6 +930,7 @@ func (mr *MockDescribeConfigsResponse) For(reqBody versionedDecoder) encoderWith
 				configEntries, maxMessageBytes, retentionMs, password)
 			res.Resources = append(res.Resources, &ResourceResponse{
 				Name:    r.Name,
+				Type:    r.Type,
 				Configs: configEntries,
 			})
 		}
@@ -1400,6 +1417,7 @@ func (m *MockHeartbeatResponse) For(reqBody versionedDecoder) encoderWithHeader 
 	req := reqBody.(*HeartbeatRequest)
 	resp := &HeartbeatResponse{
 		Version: req.version(),
+		Err:     m.Err,
 	}
 	return resp
 }
