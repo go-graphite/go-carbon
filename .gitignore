@@ -12,3 +12,5 @@ sha256sum
 *.deb
 /local/
 .omc
+# Added by code-review-graph
+.code-review-graph/
