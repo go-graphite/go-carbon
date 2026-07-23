@@ -2,12 +2,14 @@ package tcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -54,7 +56,13 @@ type Options struct {
 	Listen      string `toml:"listen"`
 	Enabled     bool   `toml:"enabled"`
 	BufferSize  int    `toml:"buffer-size"`
+	Workers     int    `toml:"workers"`
 	Compression string `toml:"compression"`
+}
+
+type tcpBatch struct {
+	data []byte
+	peer string
 }
 
 func NewOptions() *Options {
@@ -62,6 +70,7 @@ func NewOptions() *Options {
 		Listen:     ":2003",
 		Enabled:    true,
 		BufferSize: 0,
+		Workers:    1,
 	}
 }
 
@@ -95,6 +104,12 @@ type TCP struct {
 	isFraming           bool
 	frameParser         func(body []byte) ([]*points.Points, error)
 	buffer              chan *points.Points
+	batchBuffer         chan tcpBatch
+	workers             int
+	producers           sync.WaitGroup
+	connectionsExit     chan struct{}
+	acceptDone          chan struct{}
+	stopOnce            sync.Once
 	logger              *zap.Logger
 	decompressor        decompressor
 }
@@ -118,12 +133,15 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	}
 
 	r := &TCP{
-		out:    store,
-		name:   name,
-		logger: zapwriter.Logger(name),
+		out:     store,
+		name:    name,
+		logger:  zapwriter.Logger(name),
+		workers: max(options.Workers, 1),
 	}
 
-	if options.BufferSize > 0 {
+	if r.workers > 1 {
+		r.batchBuffer = make(chan tcpBatch, max(options.BufferSize, 0))
+	} else if options.BufferSize > 0 {
 		r.buffer = make(chan *points.Points, options.BufferSize)
 	}
 
@@ -182,25 +200,26 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 
 	defer conn.Close()
 
-	bconn, err := rcv.decompressor(conn)
-	if err != nil {
-		rcv.logger.Error("failed init decompressor", zap.Error(err))
-		return
-	}
-	reader := bufio.NewReader(bconn)
-
 	finished := make(chan bool)
 	defer close(finished)
 
 	rcv.Go(func(exit chan bool) {
 		select {
 		case <-finished:
-			return
 		case <-exit:
 			conn.Close()
-			return
+		case <-rcv.connectionsExit:
+			conn.Close()
 		}
 	})
+
+	bconn, err := rcv.decompressor(conn)
+	if err != nil {
+		rcv.logger.Error("failed init decompressor", zap.Error(err))
+		return
+	}
+	reader := bufio.NewReader(bconn)
+	peer := conn.RemoteAddr().String()
 
 	lastDeadline := time.Now()
 	readTimeout := 2 * time.Minute
@@ -226,20 +245,61 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			}
 			break
 		}
-		if len(line) > 0 { // skip empty lines
-			name, value, timestamp, err := parse.PlainLine(line)
-			if err != nil {
-				atomic.AddUint32(&rcv.errors, 1)
-				rcv.logger.Debug("parse failed",
-					zap.Error(err),
-					zap.String("peer", conn.RemoteAddr().String()),
-				)
-			} else {
-				atomic.AddUint32(&rcv.metricsReceived, 1)
-				rcv.out(points.OnePoint(string(name), value, timestamp))
+		if rcv.batchBuffer != nil {
+			// Amortize channel overhead across every complete line already buffered.
+			if buffered := reader.Buffered(); buffered > 0 {
+				data, _ := reader.Peek(buffered)
+				if end := bytes.LastIndexByte(data, '\n'); end >= 0 {
+					line = append(line, data[:end+1]...)
+					_, _ = reader.Discard(end + 1)
+				}
 			}
+
+			rcv.batchBuffer <- tcpBatch{data: line, peer: peer}
+			continue
+		}
+
+		if len(line) > 0 { // skip empty lines
+			rcv.processLine(line, peer)
 		}
 	}
+}
+
+func (rcv *TCP) processBatch(batch tcpBatch) {
+	for len(batch.data) > 0 {
+		end := bytes.IndexByte(batch.data, '\n')
+		if end < 0 {
+			return
+		}
+		rcv.processLine(batch.data[:end+1], batch.peer)
+		batch.data = batch.data[end+1:]
+	}
+}
+
+func (rcv *TCP) processLine(line []byte, peer string) {
+	name, value, timestamp, err := parse.PlainLine(line)
+	if err != nil {
+		atomic.AddUint32(&rcv.errors, 1)
+		rcv.logger.Debug("parse failed", zap.Error(err), zap.String("peer", peer))
+		return
+	}
+
+	atomic.AddUint32(&rcv.metricsReceived, 1)
+	rcv.out(points.OnePoint(string(name), value, timestamp))
+}
+
+// Stop drains accepted plaintext batches when parallel workers are enabled.
+func (rcv *TCP) Stop() {
+	rcv.stopOnce.Do(func() {
+		if rcv.batchBuffer != nil {
+			_ = rcv.listener.Close()
+			<-rcv.acceptDone // No more producers can be added after Accept stops.
+			close(rcv.connectionsExit)
+			rcv.producers.Wait()
+			close(rcv.batchBuffer)
+		}
+		rcv.Stoppable.Stop()
+	})
 }
 
 func (rcv *TCP) handleFraming(conn net.Conn) {
@@ -322,6 +382,9 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	if rcv.buffer != nil {
 		send("bufferLen", float64(len(rcv.buffer)))
 		send("bufferCap", float64(cap(rcv.buffer)))
+	} else if rcv.batchBuffer != nil {
+		send("bufferLen", float64(len(rcv.batchBuffer)))
+		send("bufferCap", float64(cap(rcv.batchBuffer)))
 	}
 }
 
@@ -363,14 +426,27 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 			}
 		}
 
+		if rcv.batchBuffer != nil {
+			rcv.connectionsExit = make(chan struct{})
+			for i := 0; i < rcv.workers; i++ {
+				rcv.Go(func(exit chan bool) {
+					for batch := range rcv.batchBuffer {
+						rcv.processBatch(batch)
+					}
+				})
+			}
+		}
+
+		rcv.acceptDone = make(chan struct{})
 		rcv.Go(func(exit chan bool) {
 			defer tcpListener.Close()
+			defer close(rcv.acceptDone)
 
 			for {
 
 				conn, err := tcpListener.Accept()
 				if err != nil {
-					if strings.Contains(err.Error(), "use of closed network connection") {
+					if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "use of closed network connection") {
 						break
 					}
 					rcv.logger.Warn("failed to accept connection",
@@ -379,9 +455,17 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 					continue
 				}
 
-				rcv.Go(func(exit chan bool) {
-					handler(conn)
-				})
+				if rcv.batchBuffer != nil {
+					rcv.producers.Add(1)
+					rcv.Go(func(exit chan bool) {
+						defer rcv.producers.Done()
+						handler(conn)
+					})
+				} else {
+					rcv.Go(func(exit chan bool) {
+						handler(conn)
+					})
+				}
 			}
 
 		})

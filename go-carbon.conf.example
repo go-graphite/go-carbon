@@ -81,7 +81,11 @@ buffer-size = 0
 listen = ":2003"
 enabled = true
 # Optional internal queue between receiver and cache
+# With workers > 1, it buffers read batches containing complete lines
 buffer-size = 0
+# Shared plaintext parse/store workers. Values above 1 can reorder metrics.
+# Set common.max-cpu above 1 to use multiple CPUs. Count is per receiver.
+workers = 1
 
 [pickle]
 listen = ":2004"

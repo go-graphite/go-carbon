@@ -1,10 +1,15 @@
 package tcp
 
 import (
+	"fmt"
 	"net"
+	"os"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 )
@@ -18,6 +23,7 @@ type tcpTestCase struct {
 
 func TestMain(m *testing.M) {
 	Register()
+	os.Exit(m.Run())
 }
 
 func newTCPTestCase(t *testing.T, protocol string) *tcpTestCase {
@@ -137,5 +143,111 @@ func TestTCPIssue176(t *testing.T) {
 		test.Eq(msg, points.OnePoint("metric.name", 1096378.0, 1422698155))
 	default:
 		t.Fatalf("Message #1 not received")
+	}
+}
+
+func TestTCPWorkersProcessLinesConcurrently(t *testing.T) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	r, err := receiver.New("tcp", map[string]interface{}{
+		"protocol": "tcp",
+		"listen":   addr.String(),
+		"workers":  2,
+	}, func(*points.Points) {
+		started <- struct{}{}
+		<-release
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	defer close(release)
+
+	conn, err := net.Dial("tcp", r.(*TCP).Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	send := func(line string) {
+		t.Helper()
+		if _, err := conn.Write([]byte(line)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("workers did not process two lines concurrently")
+		}
+	}
+	send("one 1 1\n")
+	send("two 2 2\n")
+}
+
+func BenchmarkTCPSingleConnection(b *testing.B) {
+	const pointsPerWrite = 256
+
+	var payload strings.Builder
+	for i := 0; i < pointsPerWrite; i++ {
+		fmt.Fprintf(&payload, "benchmark.metric.%d 1 1\n", i)
+	}
+	data := []byte(payload.String())
+
+	for _, workers := range []int{1, 4} {
+		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
+			addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			core := cache.New()
+			expected := int64(b.N * pointsPerWrite)
+			var received int64
+			done := make(chan struct{})
+
+			r, err := receiver.New("tcp", map[string]interface{}{
+				"protocol":    "tcp",
+				"listen":      addr.String(),
+				"buffer-size": 1024,
+				"workers":     workers,
+			}, func(p *points.Points) {
+				core.Add(p)
+				if atomic.AddInt64(&received, int64(len(p.Data))) == expected {
+					close(done)
+				}
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+
+			conn, err := net.Dial("tcp", r.(*TCP).Addr().String())
+			if err != nil {
+				r.Stop()
+				b.Fatal(err)
+			}
+
+			b.SetBytes(int64(len(data)))
+			b.ResetTimer()
+			for range b.N {
+				n, err := conn.Write(data)
+				if err != nil {
+					b.Fatal(err)
+				}
+				if n != len(data) {
+					b.Fatalf("short write: %d of %d bytes", n, len(data))
+				}
+			}
+			<-done
+			b.StopTimer()
+
+			conn.Close()
+			r.Stop()
+			b.ReportMetric(float64(expected)/b.Elapsed().Seconds(), "points/s")
+		})
 	}
 }
