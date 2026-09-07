@@ -233,7 +233,7 @@ func BenchmarkTCPSingleConnection(b *testing.B) {
 
 			b.SetBytes(int64(len(data)))
 			b.ResetTimer()
-			for range b.N {
+for i := 0; i < b.N; i++ {
 				n, err := conn.Write(data)
 				if err != nil {
 					b.Fatal(err)
