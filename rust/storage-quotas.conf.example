@@ -1,0 +1,13 @@
+[/]
+metrics = 1000000
+namespaces = 10000
+data-points = maximum
+logical-size = maximum
+physical-size = maximum
+throughput = maximum
+dropping-policy = new
+
+[example.*]
+metrics = 100000
+throughput = 600000
+dropping-policy = new

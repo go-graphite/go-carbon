@@ -1,0 +1,20 @@
+name: Rust rewrite
+on:
+  push:
+    paths: ['rust/**', 'vendor/github.com/go-graphite/go-whisper/**', '.github/workflows/rust.yml']
+  pull_request:
+    paths: ['rust/**', 'vendor/github.com/go-graphite/go-whisper/**', '.github/workflows/rust.yml']
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+      - name: Cross-language, socket, and unit tests
+        run: make -C rust check

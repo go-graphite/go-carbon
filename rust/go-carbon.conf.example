@@ -1,0 +1,63 @@
+# Run from the repository root. Start against a COPY of your Whisper tree.
+[common]
+max-cpu = 4
+
+[cache]
+write-strategy = "noop"
+max-size = 1000000
+max-bytes = 134217728
+
+[whisper]
+data-dir = "rust/data/whisper"
+schemas-file = "rust/storage-schemas.conf.example"
+aggregation-file = "rust/storage-aggregation.conf.example"
+quotas-file = "rust/storage-quotas.conf.example"
+workers = 4
+sparse-create = true
+flock = true
+compressed = false
+out-of-order = true
+out-of-order-compact-rate = 5
+
+[tcp]
+enabled = true
+listen = "127.0.0.1:2003"
+max-line-bytes = 65536
+max-connections = 4096
+read-timeout = "2m"
+shutdown-timeout = "30s"
+
+[udp]
+enabled = true
+listen = "127.0.0.1:2003"
+max-line-bytes = 65536
+
+[carbonserver]
+enabled = true
+listen = "127.0.0.1:8080"
+trie-index = true
+trigram-index = false
+realtime-index = 65536
+scan-frequency = "5m"
+file-list-cache = "rust/data/file-list-cache"
+file-list-cache-version = 2
+quota-usage-report-frequency = "1m"
+concurrent-requests = 64
+request-timeout = "60s"
+query-cache-enabled = true
+find-cache-enabled = true
+query-cache-size-mb = 32
+max-globs = 100
+max-metrics-globbed = 100000
+max-metrics-rendered = 10000
+
+[dump]
+enabled = true
+path = "rust/data/dump"
+
+[pickle]
+enabled = false
+[carbonlink]
+enabled = false
+[grpc]
+enabled = false

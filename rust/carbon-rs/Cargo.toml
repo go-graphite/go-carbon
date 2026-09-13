@@ -1,0 +1,22 @@
+[package]
+name = "carbon-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+whisper-rs = { path = "../whisper-rs" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum.workspace = true
+toml.workspace = true
+regex.workspace = true
+prost.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

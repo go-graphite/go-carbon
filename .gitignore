@@ -11,4 +11,6 @@ sha256sum
 *.rpm
 *.deb
 /local/
+/rust/target/
+/rust/data/
 .omc

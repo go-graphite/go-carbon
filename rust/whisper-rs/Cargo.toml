@@ -1,0 +1,14 @@
+[package]
+name = "whisper-rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "BSD-3-Clause"
+
+[dependencies]
+serde.workspace = true
+crc32fast.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json.workspace = true
