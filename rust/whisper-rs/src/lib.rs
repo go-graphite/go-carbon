@@ -598,7 +598,7 @@ impl Whisper {
             ];
             read_exact_at(&file, &mut ranges, at)?;
             at += ranges.len() as u64;
-            for b in ranges.chunks_exact(16) {
+            for b in ranges.as_chunks::<16>().0 {
                 compressed[i].ranges.push(BlockRange {
                     start: i64::from(be_u32(&b[0..4])),
                     end: i64::from(be_u32(&b[4..8])),

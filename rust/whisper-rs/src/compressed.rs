@@ -7,7 +7,9 @@ type Table = BTreeMap<i64, f64>;
 
 fn unpack_buffer(bytes: &[u8]) -> Vec<Point> {
     bytes
-        .chunks_exact(12)
+        .as_chunks::<12>()
+        .0
+        .iter()
         .map(|b| Point {
             timestamp: be_u32(&b[..4]) as i64,
             value: be_f64(&b[4..]),
