@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type tcpTestCase struct {
 
 func TestMain(m *testing.M) {
 	Register()
+	os.Exit(m.Run())
 }
 
 func newTCPTestCase(t *testing.T, protocol string) *tcpTestCase {

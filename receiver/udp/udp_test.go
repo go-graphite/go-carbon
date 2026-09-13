@@ -2,6 +2,7 @@ package udp
 
 import (
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type udpTestCase struct {
 
 func TestMain(m *testing.M) {
 	Register()
+	os.Exit(m.Run())
 }
 
 func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
