@@ -16,7 +16,10 @@ regex.workspace = true
 prost.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
+prometheus.workspace = true
+
+[target.'cfg(all(any(target_os = "linux", target_os = "macos"), target_pointer_width = "64"))'.dependencies]
+pprof.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-

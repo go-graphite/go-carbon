@@ -10,5 +10,6 @@ test: reference
 	cargo test --locked --workspace
 
 check: test
+	cargo test --locked --release -p carbon-rs --lib profiling::tests
 	cargo fmt --all --check
 	cargo clippy --locked --workspace --all-targets -- -D warnings

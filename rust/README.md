@@ -4,7 +4,7 @@ Native Rust implementation alongside the unchanged Go daemon. This is a compatib
 
 ## Build and check
 
-Requires Rust 1.89+ on Unix and the Go version from the repository's `go.mod` for the test oracle. The daemon itself does not invoke Go, use FFI, or depend on Go libraries.
+Requires Rust 1.89+ on Unix, a C toolchain for the profiler's native dependencies, and the Go version from the repository's `go.mod` for the test oracle. The daemon itself does not invoke or link Go; CPU profiling uses native stack unwinding.
 
 ```sh
 make -C rust build
@@ -20,9 +20,35 @@ Example paths are relative to the repository root. Use absolute paths in deploym
 - `whisper-rs`: classic and compressed v1 `.wsp` create/open/update/fetch, all six standard aggregation methods, retention propagation and XFF, block coding/rotation/growth, live buffers, `.ooo` reads/writes and compaction. Path locks survive atomic replacement; compaction synchronizes the replacement before removing its sidecar. Go file-integrity checks and cross-language reads, writes, appends, and compaction run in tests.
 - `carbon-rs`: bounded sharded cache with noop scheduling, pending/in-flight query visibility, exact batch confirmation, failed-write retry, Go-compatible cache dump/restore; bounded TCP framing and UDP datagram parsing.
 - Namespace quotas: hierarchical last-matching glob rules, new-metric reservations, namespaces/metrics/archive-capacity/logical and physical storage/throughput limits, observe-only `dropping-policy=none`. Sidecar storage belongs to its main metric.
-- HTTP carbonserver: JSON and carbonapi v2/v3 protobuf find/render/info/list/details, list-query, capabilities, force-scan, quota/admin inspection, and `/metrics`. Protobuf transport is HTTP only. Trie and trigram discovery, realtime cache-only metrics, disk reconciliation, gzip FLC v1/v2, bounded query/find caches, concurrency and request limits.
+- HTTP carbonserver: JSON and carbonapi v2/v3 protobuf find/render/info/list/details, list-query, capabilities, force-scan, and quota/admin inspection. Protobuf transport is HTTP only. Trie and trigram discovery, realtime cache-only metrics, disk reconciliation, gzip FLC v1/v2, bounded query/find caches, concurrency and request limits.
+- Optional Prometheus exposition using the `prometheus` crate, with Go's application metric names, types, labels, HELP text, and histogram buckets.
 
 Storage schema and aggregation files retain their Graphite INI syntax; the main configuration is TOML. Select the trie with `trie-index=true`, or the trigram backend with `trie-index=false`. The catalog is updated synchronously on admission, so there is no lossy realtime notification queue.
+
+## Prometheus
+
+Set `prometheus.enabled=true`. As in Go, `prometheus.endpoint` defaults to `/metrics` on **`pprof.listen`** (default `127.0.0.1:7007`), independently of carbonserver and `pprof.enabled`. The former unconditional carbonserver `/metrics` endpoint and `carbon_rs_*` pipeline counters are replaced. `[prometheus.labels]` adds constant labels to every exported sample; invalid names or collisions with collector labels fail configuration validation.
+
+TCP counts successfully parsed points, including subsequent admission drops; updates are immediate rather than delayed until Go's periodic stats collection. UDP and the ingestion cache have no Prometheus collectors in Go. Whisper write lag observes every point reaching `UpdateMany`, including retries and negative lag for future timestamps. Carbonserver records bounded handler/status labels, cache hits/misses, cache wait/work time, disk fetches, returned series and point slots. Query-cache hits do not increment disk/returned counters. Find hits mean every requested expression was cached; Rust's caches are expression-based and generation-invalidated, so hit rates need not match Go's response caches.
+
+Two intentional fixes to Go instrumentation: `cache_requests_total` actually increments, and `cache_duration_seconds_exp` is registered. Cancellation counts dropped handler futures; timeouts count separately. This does not guarantee observing every disconnected client or stopping already-running blocking disk work.
+
+Linux exports Go's nine `process_*` families plus the crate's `process_threads`. CPU time and process start time use the crate's whole-second precision. The network counters use Go's network-namespace `/proc/self/net/netstat` totals, not per-socket attribution. Process collectors are unavailable on other platforms. `carbon_rs_build_info{version=...}` identifies the actual Rust build; Go runtime/GC/goroutine metrics and Go build metadata are not fabricated.
+
+## CPU profiling
+
+Set `pprof.enabled=true` (default false) on 64-bit Linux. It shares `pprof.listen` with Prometheus but works with Prometheus and carbonserver disabled. `/debug/pprof/` lists the supported CPU endpoint. Keep this unauthenticated diagnostics listener on localhost or a trusted management network: profiles expose stack symbols/source paths, and collection adds overhead.
+
+```sh
+curl --fail --max-time 45 -o cpu.pprof 'http://127.0.0.1:7007/debug/pprof/profile?seconds=30'
+go tool pprof -top cpu.pprof
+```
+
+Profiles are gzip-compressed pprof protobufs with CPU samples at 100 Hz. Release builds retain line-table debug information for symbolization. `seconds` defaults to 30; invalid values or values outside 1–300 return `400`. Only one recording may run per process; overlapping requests return `409`. Collection/reporting runs off the async HTTP workers; dropped handler futures and daemon shutdown cancel collection. An already-running report build must finish. Prometheus endpoints under `/debug/pprof` are rejected when profiling is enabled.
+
+This uses the `pprof` crate's signal-based sampler and recommended system-library exclusions, not Go runtime profiling. Do not run another SIGPROF/ITIMER_PROF profiler in the same process. Validate overhead and unwinding on the deployment platform before production use. Heap/allocations, goroutines, mutex/block profiles, and Go runtime traces are not implemented and return `404`.
+
+macOS CPU profiling is rejected: the native unwinder lost sampled leaf functions in optimized-build qualification, even with frame pointers retained. Debug-build profiles were readable by Go's pprof tool, but this is not sufficient production evidence. The Linux-only recording/cancellation test must pass on Linux before deployment; live Linux sampling has not been validated in the macOS development environment.
 
 ## Recovery and rollout
 

@@ -13,9 +13,12 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/parse"
+	"github.com/go-graphite/go-carbon/receiver/tcp"
 	whisper "github.com/go-graphite/go-whisper"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type retention struct {
@@ -46,6 +49,45 @@ type request struct {
 	Metric      string                  `json:"metric"`
 	Version     int                     `json:"version"`
 	Entries     []carbonserver.FLCEntry `json:"entries"`
+	Labels      map[string]string       `json:"labels"`
+}
+
+// Instantiate vector children so Gather includes their schemas before traffic.
+type schemaRegisterer struct{ prometheus.Registerer }
+
+func (s schemaRegisterer) MustRegister(collectors ...prometheus.Collector) {
+	for _, collector := range collectors {
+		if vector, ok := collector.(*prometheus.CounterVec); ok {
+			vector.WithLabelValues("test", "test")
+		}
+	}
+	s.Registerer.MustRegister(collectors...)
+}
+
+func prometheusSchema(labels map[string]string) (any, error) {
+	registry := prometheus.NewPedanticRegistry()
+	registerer := schemaRegisterer{prometheus.WrapRegistererWith(labels, registry)}
+	new(tcp.TCP).InitPrometheus(registerer)
+	new(persister.Whisper).InitPrometheus(registerer)
+	carbonserver.NewCarbonserverListener(func(string) []points.Point { return nil }).InitPrometheus(registerer)
+	families, err := registry.Gather()
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{}
+	for _, family := range families {
+		metric := family.GetMetric()[0]
+		labelNames := []string{}
+		for _, label := range metric.GetLabel() {
+			labelNames = append(labelNames, label.GetName())
+		}
+		buckets := []float64{}
+		for _, bucket := range metric.GetHistogram().GetBucket() {
+			buckets = append(buckets, bucket.GetUpperBound())
+		}
+		result[family.GetName()] = map[string]any{"help": family.GetHelp(), "type": family.GetType().String(), "labels": labelNames, "buckets": buckets}
+	}
+	return result, nil
 }
 
 func execute(r request) (result any, err error) {
@@ -55,6 +97,9 @@ func execute(r request) (result any, err error) {
 		}
 	}()
 	whisper.Now = func() time.Time { return time.Unix(r.Now, 0) }
+	if r.Op == "prometheus_schema" {
+		return prometheusSchema(r.Labels)
+	}
 	if r.Op == "dump_write" {
 		file, err := os.Create(r.Path)
 		if err != nil {

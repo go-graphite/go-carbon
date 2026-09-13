@@ -19,8 +19,10 @@ prost = "0.14"
 crc32fast = "1"
 flate2 = "1"
 tempfile = "3"
+prometheus = { version = "0.14", features = ["process"] }
+pprof = { version = "0.15", default-features = false, features = ["protobuf-codec"] }
 
 [profile.release]
+debug = 1
 lto = "thin"
 codegen-units = 1
-

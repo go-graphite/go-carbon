@@ -51,6 +51,18 @@ max-globs = 100
 max-metrics-globbed = 100000
 max-metrics-rendered = 10000
 
+# Shared diagnostics listener; keep on localhost or a trusted management network.
+[pprof]
+enabled = false
+listen = "127.0.0.1:7007"
+
+[prometheus]
+enabled = false
+endpoint = "/metrics"
+
+[prometheus.labels]
+# cluster = "example"
+
 [dump]
 enabled = true
 path = "rust/data/dump"

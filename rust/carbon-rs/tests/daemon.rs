@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -14,6 +14,143 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+#[test]
+fn diagnostics_start_without_carbonserver_and_honor_enable_flags() {
+    for (pprof_enabled, prometheus_enabled) in [(false, true), (true, false), (true, true)] {
+        if pprof_enabled && !carbon_rs::profiling::SUPPORTED {
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let port = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let schemas = dir.path().join("schemas");
+        fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:60\n").unwrap();
+        let config = dir.path().join("config.toml");
+        fs::write(
+            &config,
+            format!(
+                r#"
+[whisper]
+data-dir = "{}/wsp"
+schemas-file = "{}"
+[dump]
+path = "{}/dump"
+[pprof]
+enabled = {pprof_enabled}
+listen = "127.0.0.1:{port}"
+[prometheus]
+enabled = {prometheus_enabled}
+endpoint = "/custom"
+[prometheus.labels]
+region = "ams"
+"#,
+                dir.path().display(),
+                schemas.display(),
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let bin = env!("CARGO_BIN_EXE_carbon-rs");
+        let mut child = ChildGuard(
+            Command::new(bin)
+                .arg("--config")
+                .arg(&config)
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(stream) => break stream,
+                Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(10)),
+                Err(error) => panic!("Prometheus listener did not start: {error}"),
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        stream
+            .write_all(b"GET /custom HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        if prometheus_enabled {
+            assert!(response.starts_with("HTTP/1.1 200"));
+            assert!(response.contains("out_of_order_write_lag_exp_count{region=\"ams\"} 0"));
+        } else {
+            assert!(response.starts_with("HTTP/1.1 404"));
+        }
+        assert!(!response.contains("metrics_received_tcp_total"));
+        assert!(!response.contains("http_requests_total"));
+        let expected = if pprof_enabled { "200" } else { "404" };
+        assert!(http_get(port, "/debug/pprof/").starts_with(&format!("HTTP/1.1 {expected}")));
+        let expected = if pprof_enabled { "400" } else { "404" };
+        for seconds in ["0", "301", "-1", "0.5", "bad", "18446744073709551616"] {
+            assert!(
+                http_get(port, &format!("/debug/pprof/profile?seconds={seconds}"))
+                    .starts_with(&format!("HTTP/1.1 {expected}"))
+            );
+        }
+        assert!(http_get(port, "/debug/pprof/heap").starts_with("HTTP/1.1 404"));
+        if pprof_enabled && prometheus_enabled {
+            let recording =
+                std::thread::spawn(move || http_get_bytes(port, "/debug/pprof/profile?seconds=1"));
+            assert!(http_get(port, "/custom").starts_with("HTTP/1.1 200"));
+            let response = recording.join().unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 200"));
+            let body = &response[response.windows(4).position(|s| s == b"\r\n\r\n").unwrap() + 4..];
+            let mut decoded = Vec::new();
+            flate2::read::GzDecoder::new(body)
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert!(!decoded.is_empty());
+        }
+        assert!(
+            Command::new("kill")
+                .arg("-TERM")
+                .arg(child.0.id().to_string())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "diagnostics daemon did not stop after SIGTERM"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+fn http_get(port: u16, path: &str) -> String {
+    String::from_utf8(http_get_bytes(port, path)).unwrap()
+}
+
+fn http_get_bytes(port: u16, path: &str) -> Vec<u8> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    response
 }
 
 fn wait_for(path: &Path) {

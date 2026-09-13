@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::Cache;
 use crate::config::{Config, Rules};
@@ -18,6 +18,7 @@ pub struct App {
     pub cache: Cache,
     pub index: Index,
     pub quotas: Option<Engine>,
+    pub prometheus: Option<Arc<crate::metrics::Metrics>>,
     pub wake: Notify,
     pub received: AtomicU64,
     pub rejected: AtomicU64,
@@ -41,6 +42,14 @@ pub fn invalid(message: impl Into<String>) -> io::Error {
 
 impl App {
     pub fn new(config: Config) -> io::Result<Arc<Self>> {
+        // Config::load already ran validate_diagnostics; Metrics::new re-checks its own part.
+        let prometheus = if config.prometheus.enabled {
+            Some(Arc::new(
+                crate::metrics::Metrics::new(&config).map_err(io::Error::other)?,
+            ))
+        } else {
+            None
+        };
         fs::create_dir_all(&config.whisper.data_dir)?;
         let rules = Rules::load(
             &config.whisper.schemas_file,
@@ -69,6 +78,7 @@ impl App {
             config,
             rules: RwLock::new(rules),
             quotas,
+            prometheus,
             mutation: Mutex::new(()),
             files: (0..1024).map(|_| Mutex::new(())).collect(),
             wake: Notify::new(),
@@ -192,10 +202,52 @@ impl App {
     ) -> io::Result<Option<TimeSeries>> {
         let path = self.path(metric)?;
         let _lock = self.file_lock(metric).lock().unwrap();
+        let metrics = self
+            .prometheus
+            .as_ref()
+            .and_then(|m| m.carbonserver.as_ref());
+        let wait = metrics.map(|_| Instant::now());
         let cached = self.cache.get(metric);
+        let wait = wait.map(|wait| wait.elapsed().as_secs_f64());
+        // Instrumentation mirrors Go's fetchfromdisk.go: cache "wait" is observed only when the
+        // finest archive serves the query; disk_requests counts attempts, while disk_wait covers
+        // successful fetches only and includes the file close.
         let (metadata, mut series) = match Whisper::open(path, self.options()) {
-            Ok(mut w) => (w.metadata().clone(), w.fetch(from, until, at)?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound && !cached.is_empty() => {
+            Ok(mut w) => {
+                let metadata = w.metadata().clone();
+                if at.saturating_sub(from)
+                    <= i64::from(metadata.retentions[0].seconds_per_point)
+                        * i64::from(metadata.retentions[0].points)
+                    && let (Some(metrics), Some(wait)) = (metrics, wait)
+                {
+                    metrics
+                        .cache_durations
+                        .with_label_values(&["wait"])
+                        .observe(wait);
+                }
+                let start = metrics.map(|m| {
+                    m.disk_requests.inc();
+                    Instant::now()
+                });
+                let series = w.fetch(from, until, at)?;
+                drop(w);
+                if series.is_some()
+                    && let (Some(metrics), Some(start)) = (metrics, start)
+                {
+                    metrics.disk_wait.observe(start.elapsed().as_secs_f64());
+                }
+                (metadata, series)
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if let (Some(metrics), Some(wait)) = (metrics, wait) {
+                    metrics
+                        .cache_durations
+                        .with_label_values(&["wait"])
+                        .observe(wait);
+                }
+                if cached.is_empty() {
+                    return Err(e);
+                }
                 let meta = self.rules.read().unwrap().metadata(metric).ok_or(e)?;
                 let archive = &meta.retentions[0];
                 let step = archive.seconds_per_point as i64;
@@ -218,14 +270,29 @@ impl App {
         };
         if let Some(series) = &mut series
             && series.step == metadata.retentions[0].seconds_per_point
+            && !cached.is_empty()
         {
+            let start = metrics.map(|_| Instant::now());
+            let mut hit = false;
             for point in cached {
                 let timestamp = point.timestamp.div_euclid(series.step as i64) * series.step as i64;
                 if timestamp >= series.from && timestamp < series.until {
                     series.values[((timestamp - series.from) / series.step as i64) as usize] =
                         Some(point.value);
+                    hit = true;
                 }
             }
+            if let (Some(metrics), Some(start)) = (metrics, start) {
+                metrics.cache_request("metric", hit);
+                metrics
+                    .cache_durations
+                    .with_label_values(&["work"])
+                    .observe(start.elapsed().as_secs_f64());
+            }
+        }
+        if let (Some(metrics), Some(series)) = (metrics, &series) {
+            metrics.returned_metrics.inc();
+            metrics.returned_points.inc_by(series.values.len() as u64);
         }
         Ok(series)
     }
@@ -254,6 +321,16 @@ impl App {
                 }
                 Err(e) => return Err(e),
             };
+            if let Some(metrics) = &self.prometheus {
+                // Go observes all points reaching UpdateMany, including failed attempts.
+                let at = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64();
+                for point in batch.points.iter() {
+                    metrics.write_lag.observe(at - point.timestamp as f64);
+                }
+            }
             w.update_many(&batch.points, now())?;
             w.sync()?;
             let meta = disk_meta(

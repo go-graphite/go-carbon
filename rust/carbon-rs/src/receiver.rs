@@ -8,13 +8,21 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
-fn line(app: &App, bytes: &[u8], limit: usize) {
+fn line(app: &App, bytes: &[u8], limit: usize, tcp: bool) {
     if bytes.len() > limit {
         app.invalid.fetch_add(1, Ordering::Relaxed);
         return;
     }
     match crate::plaintext::parse_line(bytes) {
         Ok((name, point)) => {
+            if tcp
+                && let Some(counter) = app
+                    .prometheus
+                    .as_ref()
+                    .and_then(|m| m.tcp_received.as_ref())
+            {
+                counter.inc();
+            }
             if let Err(e) = app.ingest(name, point)
                 && e.kind() == io::ErrorKind::InvalidInput
             {
@@ -77,7 +85,7 @@ async fn connection(
         for &byte in &buffer[..n] {
             if byte == b'\n' {
                 if !oversized {
-                    line(&app, &pending, config.max_line_bytes);
+                    line(&app, &pending, config.max_line_bytes, true);
                 }
                 pending.clear();
                 oversized = false;
@@ -105,7 +113,7 @@ pub async fn udp(
         let n = tokio::select! { biased; _ = stop.changed() => return Ok(()), result = socket.recv(&mut buffer) => result? };
         for bytes in buffer[..n].split(|b| *b == b'\n') {
             if !bytes.is_empty() {
-                line(&app, bytes, config.max_line_bytes);
+                line(&app, bytes, config.max_line_bytes, false);
             }
         }
     }

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
-use axum::extract::{Query, Request, State};
+use axum::extract::{MatchedPath, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -75,7 +75,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/forcescan", post(force_scan))
         .route("/admin/info", get(admin_info))
         .route("/admin/quota", get(admin_quota))
-        .route("/metrics", get(metrics))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -89,15 +88,51 @@ async fn request_timeout(
     request: Request,
     next: middleware::Next,
 ) -> Response {
-    match tokio::time::timeout(
+    let metrics = state
+        .app
+        .prometheus
+        .as_ref()
+        .and_then(|m| m.carbonserver.as_ref());
+    // Only Go's instrumented routes; never use arbitrary client paths as labels.
+    let guard = metrics.and_then(|metrics| {
+        let path = request
+            .extensions()
+            .get::<MatchedPath>()?
+            .as_str()
+            .trim_end_matches('/');
+        [
+            "/metrics/find",
+            "/metrics/list",
+            "/metrics/list_query",
+            "/metrics/details",
+            "/render",
+            "/info",
+            "/_internal/capabilities",
+        ]
+        .into_iter()
+        .find(|handler| *handler == path)
+        .map(|handler| metrics.request(handler))
+    });
+    let response = match tokio::time::timeout(
         state.app.config.carbonserver.request_timeout,
         next.run(request),
     )
     .await
     {
         Ok(response) => response,
-        Err(_) => (StatusCode::GATEWAY_TIMEOUT, "request timed out").into_response(),
+        Err(_) => {
+            if guard.is_some()
+                && let Some(metrics) = metrics
+            {
+                metrics.timeout_requests.inc();
+            }
+            (StatusCode::GATEWAY_TIMEOUT, "request timed out").into_response()
+        }
+    };
+    if let Some(guard) = guard {
+        guard.finish(response.status());
     }
+    response
 }
 
 type ResultResponse = Result<Response, (StatusCode, String)>;
@@ -184,7 +219,7 @@ async fn cached_find(
     state: &HttpState,
     query: &str,
     limit: usize,
-) -> Result<Vec<Match>, (StatusCode, String)> {
+) -> Result<(Vec<Match>, bool), (StatusCode, String)> {
     let job = state
         .jobs
         .clone()
@@ -205,9 +240,13 @@ fn compute_find(
     state: &HttpState,
     query: &str,
     limit: usize,
-) -> Result<Vec<Match>, crate::index::GlobError> {
+) -> Result<(Vec<Match>, bool), crate::index::GlobError> {
     if !state.app.config.carbonserver.find_cache_enabled || state.cache_bytes == 0 {
-        return state.app.index.find(query, limit);
+        return state
+            .app
+            .index
+            .find(query, limit)
+            .map(|matches| (matches, false));
     }
     let generation = state.app.index.generation();
     let key = format!("{limit}\0{query}");
@@ -219,7 +258,7 @@ fn compute_find(
         cache.3.clear();
     }
     if let Some((_, matches)) = cache.2.get(&key) {
-        return Ok(matches.iter().take(limit).cloned().collect());
+        return Ok((matches.iter().take(limit).cloned().collect(), true));
     }
     let matches = state.app.index.find(query, limit)?;
     let bytes = key.len() + matches.iter().map(|m| m.path.len() + 16).sum::<usize>();
@@ -236,7 +275,7 @@ fn compute_find(
         cache.3.push_back(key.clone());
         cache.2.insert(key, (bytes, matches.clone()));
     }
-    Ok(matches)
+    Ok((matches, false))
 }
 fn cached_render(
     state: &HttpState,
@@ -348,11 +387,13 @@ async fn find(
     let limit = state.app.config.carbonserver.max_metrics_globbed;
     let mut result = Vec::new();
     let mut v3_result = Vec::new();
+    let mut from_cache = true;
     for name in queries {
         if name.len() > MAX_QUERY {
             return Err((StatusCode::BAD_REQUEST, "query too long".into()));
         }
-        let matches = cached_find(&state, &name, limit).await?;
+        let (matches, hit) = cached_find(&state, &name, limit).await?;
+        from_cache &= hit;
         result.push(json!({"name":name,"matches":matched_json(&matches)}));
         v3_result.push(v3::GlobResponse {
             name,
@@ -384,12 +425,23 @@ async fn find(
     } else {
         None
     };
-    encoded(
+    let response = encoded(
         wire,
         json!({"metrics":result}),
         v2_response,
         Some(v3_response.encode_to_vec()),
-    )
+    )?;
+    if state.app.config.carbonserver.find_cache_enabled
+        && state.cache_bytes > 0
+        && let Some(metrics) = state
+            .app
+            .prometheus
+            .as_ref()
+            .and_then(|m| m.carbonserver.as_ref())
+    {
+        metrics.cache_request("find", from_cache);
+    }
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -430,7 +482,7 @@ async fn list_query(
 ) -> ResultResponse {
     let _permit = permit(&state).await?;
     let limit = checked_limit(query.limit, 65_536)?;
-    let matches = cached_find(&state, &query.target, limit).await?;
+    let (matches, _) = cached_find(&state, &query.target, limit).await?;
     let leaf_only = query.leaf_only.unwrap_or(false);
     let all = if leaf_only {
         Vec::new()
@@ -546,7 +598,16 @@ async fn render(
     let fetched_at = now();
     let cache_key = format!("{fetched_at}:{targets:?}");
     if let Some((v3_metrics, v2_metrics)) = cached_render(&state, &cache_key) {
-        return encode_render(wire, v3_metrics, v2_metrics);
+        let response = encode_render(wire, v3_metrics, v2_metrics)?;
+        if let Some(metrics) = state
+            .app
+            .prometheus
+            .as_ref()
+            .and_then(|m| m.carbonserver.as_ref())
+        {
+            metrics.cache_request("query", true);
+        }
+        return Ok(response);
     }
     let render_generation = state
         .app
@@ -558,7 +619,7 @@ async fn render(
         if target.len() > MAX_QUERY || from >= until {
             return Err((StatusCode::BAD_REQUEST, "invalid target or range".into()));
         }
-        let found = cached_find(
+        let (found, _) = cached_find(
             &state,
             &target,
             state
@@ -645,7 +706,18 @@ async fn render(
         cache_key,
         (v3_metrics.clone(), v2_metrics.clone()),
     );
-    encode_render(wire, v3_metrics, v2_metrics)
+    let response = encode_render(wire, v3_metrics, v2_metrics)?;
+    if state.app.config.carbonserver.query_cache_enabled
+        && state.cache_bytes > 0
+        && let Some(metrics) = state
+            .app
+            .prometheus
+            .as_ref()
+            .and_then(|m| m.carbonserver.as_ref())
+    {
+        metrics.cache_request("query", false);
+    }
+    Ok(response)
 }
 
 async fn info(
@@ -828,29 +900,6 @@ async fn admin_quota(State(state): State<HttpState>) -> ResultResponse {
     let _permit = permit(&state).await?;
     Ok(Json(json!({"enabled":state.app.quotas.is_some(), "namespaces":state.app.quotas.as_ref().map(|quota| quota.report()).unwrap_or_default()})).into_response())
 }
-async fn metrics(State(state): State<HttpState>) -> ResultResponse {
-    let _permit = permit(&state).await?;
-    use std::sync::atomic::Ordering;
-    let cache = state.app.cache.stats();
-    let mut body = format!(
-        "# TYPE carbon_rs_received_total counter\ncarbon_rs_received_total {}\n# TYPE carbon_rs_rejected_total counter\ncarbon_rs_rejected_total {}\n# TYPE carbon_rs_invalid_total counter\ncarbon_rs_invalid_total {}\n# TYPE carbon_rs_write_errors_total counter\ncarbon_rs_write_errors_total {}\n# TYPE carbon_rs_cache_pending_points gauge\ncarbon_rs_cache_pending_points {}\n# TYPE carbon_rs_cache_in_flight_points gauge\ncarbon_rs_cache_in_flight_points {}\n# TYPE carbon_rs_cache_bytes gauge\ncarbon_rs_cache_bytes {}\n# TYPE carbon_rs_cache_dropped_points_total counter\ncarbon_rs_cache_dropped_points_total {}\n",
-        state.app.received.load(Ordering::Relaxed),
-        state.app.rejected.load(Ordering::Relaxed),
-        state.app.invalid.load(Ordering::Relaxed),
-        state.app.write_errors.load(Ordering::Relaxed),
-        cache.pending_points,
-        cache.in_flight_points,
-        cache.bytes,
-        cache.dropped_points,
-    );
-    if let Some(quota) = &state.app.quotas {
-        for row in quota.report() {
-            let namespace = row.namespace.replace('\\', "\\\\").replace('"', "\\\"");
-            body.push_str(&format!("carbon_rs_quota_metrics{{namespace=\"{namespace}\"}} {}\ncarbon_rs_quota_throttled_total{{namespace=\"{namespace}\"}} {}\n", row.usage.metrics, row.usage.throttled));
-        }
-    }
-    Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response())
-}
 fn bad(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
@@ -876,6 +925,68 @@ mod tests {
         let mut response = Vec::new();
         stream.read_to_end(&mut response).await.unwrap();
         response
+    }
+
+    #[tokio::test]
+    async fn request_metrics_cover_overload_timeout_and_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = dir.path().join("schemas");
+        std::fs::write(&schema, "[all]\npattern = .*\nretentions = 1s:60\n").unwrap();
+        let mut config = Config::default();
+        config.whisper.data_dir = dir.path().join("wsp").display().to_string();
+        config.whisper.schemas_file = schema.display().to_string();
+        config.prometheus.enabled = true;
+        config.carbonserver.enabled = true;
+        config.carbonserver.request_timeout = std::time::Duration::from_millis(5);
+        let app = App::new(config).unwrap();
+        let state = HttpState {
+            app: app.clone(),
+            requests: Arc::new(Semaphore::new(0)),
+            jobs: Arc::new(Semaphore::new(1)),
+            find_cache: Arc::new(Mutex::new((0, 0, HashMap::new(), VecDeque::new()))),
+            render_cache: Arc::new(Mutex::new((0, 0, HashMap::new(), VecDeque::new()))),
+            cache_bytes: 0,
+        };
+        let router = Router::new()
+            .route("/render/", get(render))
+            .route("/info/", get(std::future::pending::<StatusCode>))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                request_timeout,
+            ))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let metrics = app
+            .prometheus
+            .as_ref()
+            .unwrap()
+            .carbonserver
+            .as_ref()
+            .unwrap();
+        for (path, status) in [("/render/", "429"), ("/info/", "504")] {
+            let response = request(
+                addr,
+                format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").into_bytes(),
+            )
+            .await;
+            assert!(response.starts_with(format!("HTTP/1.1 {status}").as_bytes()));
+            assert_eq!(
+                metrics
+                    .requests
+                    .with_label_values(&[status, path.trim_end_matches('/')])
+                    .get(),
+                1
+            );
+        }
+        assert_eq!(metrics.timeout_requests.get(), 1);
+        assert_eq!(metrics.cancelled_requests.get(), 0);
+        assert_eq!(metrics.durations.get_sample_count(), 2);
+        drop(metrics.request("/render")); // A dropped handler future must count as cancellation.
+        assert_eq!(metrics.cancelled_requests.get(), 1);
+        assert_eq!(metrics.durations.get_sample_count(), 3);
+        task.abort();
     }
     #[tokio::test]
     async fn repeated_find_params_and_v3_wire_work() {

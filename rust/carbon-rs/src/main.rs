@@ -114,6 +114,17 @@ async fn run(config: Config) -> io::Result<()> {
     } else {
         None
     };
+    let diagnostics = if app.config.prometheus.enabled || app.config.pprof.enabled {
+        // Prometheus and pprof share this listener, so name the key on failure.
+        let listen = &app.config.pprof.listen;
+        Some(
+            TcpListener::bind(listen)
+                .await
+                .map_err(|e| io::Error::new(e.kind(), format!("pprof.listen {listen}: {e}")))?,
+        )
+    } else {
+        None
+    };
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut listeners = JoinSet::new();
     if let Some(listener) = tcp {
@@ -146,9 +157,24 @@ async fn run(config: Config) -> io::Result<()> {
                 .await
         });
     }
+    if let Some(listener) = diagnostics {
+        eprintln!("Diagnostics listening on {}", listener.local_addr()?);
+        let mut router = carbon_rs::metrics::router(app.clone());
+        if app.config.pprof.enabled {
+            router = router.merge(carbon_rs::profiling::router(stop_rx.clone()));
+        }
+        let mut stopped = stop_rx.clone();
+        listeners.spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = stopped.changed().await;
+                })
+                .await
+        });
+    }
     if listeners.is_empty() {
         return Err(carbon_rs::app::invalid(
-            "no receivers or carbonserver enabled",
+            "no receivers, carbonserver, prometheus or pprof enabled",
         ));
     }
     let mut workers = JoinSet::new();

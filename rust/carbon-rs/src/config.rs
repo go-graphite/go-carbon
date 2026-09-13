@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use whisper_rs::{Aggregation, Metadata, Retention};
@@ -15,6 +16,8 @@ pub struct Config {
     pub udp: Receiver,
     pub carbonserver: Carbonserver,
     pub dump: Dump,
+    pub prometheus: Prometheus,
+    pub pprof: Pprof,
     pub pickle: Disabled,
     pub carbonlink: Disabled,
     pub grpc: Disabled,
@@ -97,6 +100,70 @@ pub struct Dump {
 #[serde(default)]
 pub struct Disabled {
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Prometheus {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub labels: HashMap<String, String>,
+}
+impl Default for Prometheus {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "/metrics".into(),
+            labels: HashMap::new(),
+        }
+    }
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Pprof {
+    pub enabled: bool,
+    pub listen: String,
+}
+impl Default for Pprof {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:7007".into(),
+        }
+    }
+}
+
+impl Prometheus {
+    pub fn validate(&self, carbonserver: bool) -> Result<(), String> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if !self.endpoint.starts_with('/')
+            || self.endpoint.split('/').any(|part| part.starts_with(':'))
+            || self.endpoint.parse::<axum::http::Uri>().is_err()
+            || self.endpoint.bytes().any(|b| {
+                b.is_ascii_control()
+                    || b.is_ascii_whitespace()
+                    || matches!(b, b'{' | b'}' | b'*' | b'?' | b'#')
+            })
+        {
+            return Err("prometheus.endpoint must be a literal absolute HTTP path".into());
+        }
+        for name in self.labels.keys() {
+            let valid = !name.is_empty()
+                && !name.starts_with("__")
+                && name.bytes().enumerate().all(|(i, b)| {
+                    b == b'_' || b.is_ascii_alphabetic() || (i > 0 && b.is_ascii_digit())
+                });
+            if !valid
+                || matches!(name.as_str(), "le" | "version")
+                || (carbonserver && matches!(name.as_str(), "code" | "handler" | "type" | "hit"))
+            {
+                return Err(format!("invalid or conflicting prometheus label: {name}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for Common {
@@ -213,7 +280,23 @@ impl Config {
                 return Err(format!("{name} is not supported"));
             }
         }
+        config.validate_diagnostics()?;
         Ok(config)
+    }
+
+    pub fn validate_diagnostics(&self) -> Result<(), String> {
+        self.prometheus.validate(self.carbonserver.enabled)?;
+        if self.pprof.enabled && !crate::profiling::SUPPORTED {
+            return Err("CPU profiling requires 64-bit Linux".into());
+        }
+        if self.pprof.enabled
+            && self.prometheus.enabled
+            && (self.prometheus.endpoint == "/debug/pprof"
+                || self.prometheus.endpoint.starts_with("/debug/pprof/"))
+        {
+            return Err("prometheus.endpoint conflicts with the enabled pprof routes".into());
+        }
+        Ok(())
     }
 }
 fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::time::Duration, D::Error> {
@@ -435,6 +518,29 @@ fn required<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pprof_defaults_and_conflicting_diagnostics_paths() {
+        let mut config = Config::default();
+        assert!(!config.pprof.enabled);
+        assert_eq!(config.pprof.listen, "127.0.0.1:7007");
+        config.prometheus.enabled = true;
+        for endpoint in ["/debug/pprof", "/debug/pprof/", "/debug/pprof/profile"] {
+            config.prometheus.endpoint = endpoint.into();
+            config.pprof.enabled = false;
+            assert!(config.validate_diagnostics().is_ok());
+            config.pprof.enabled = true;
+            assert!(config.validate_diagnostics().is_err());
+        }
+        let config: Config =
+            toml::from_str("[pprof]\nenabled=true\nlisten='127.0.0.1:7100'\n").unwrap();
+        assert!(config.pprof.enabled);
+        assert_eq!(config.pprof.listen, "127.0.0.1:7100");
+        assert_eq!(
+            config.validate_diagnostics().is_ok(),
+            crate::profiling::SUPPORTED
+        );
+    }
     #[test]
     fn rejects_invalid_storage_settings_before_admission() {
         let dir = tempfile::tempdir().unwrap();
