@@ -63,6 +63,23 @@ endpoint = "/metrics"
 [prometheus.labels]
 # cluster = "example"
 
+[[logging]]
+logger = ""
+file = "stdout" # Local filename, stderr, stdout, none, or empty (stderr).
+level = "info"
+encoding = "console" # json, console, mixed
+encoding-time = "iso8601" # iso8601, epoch, millis, nanos
+encoding-duration = "seconds" # seconds, nanos, string
+# sample-tick = "1s"
+# sample-initial = 100
+# sample-thereafter = 100
+
+# Route access logs separately, or use file = "none" to disable them.
+# [[logging]]
+# logger = "access"
+# file = "/var/log/go-carbon/access.log"
+# encoding = "json"
+
 [dump]
 enabled = true
 path = "rust/data/dump"

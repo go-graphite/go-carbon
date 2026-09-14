@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{MatchedPath, Query, Request, State};
@@ -16,7 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::app::App;
+use crate::app::{App, now};
 use crate::index::Match;
 use crate::protocol::{v2, v3};
 
@@ -88,6 +88,7 @@ async fn request_timeout(
     request: Request,
     next: middleware::Next,
 ) -> Response {
+    let access = AccessLog::new(&request);
     let metrics = state
         .app
         .prometheus
@@ -132,7 +133,76 @@ async fn request_timeout(
     if let Some(guard) = guard {
         guard.finish(response.status());
     }
+    if let Some(mut access) = access {
+        access.status = Some(response.status());
+    }
     response
+}
+
+struct AccessLog {
+    start: Instant,
+    handler: String,
+    url: String,
+    method: String,
+    peer: String,
+    status: Option<StatusCode>,
+}
+
+impl AccessLog {
+    fn new(request: &Request) -> Option<Self> {
+        if !tracing::enabled!(target: "access", tracing::Level::INFO)
+            && !tracing::enabled!(target: "access", tracing::Level::ERROR)
+        {
+            return None;
+        }
+        let path = request
+            .extensions()
+            .get::<MatchedPath>()
+            .map_or("", MatchedPath::as_str);
+        let handler = match path {
+            "/metrics/find/" => "find",
+            "/render/" => "render",
+            "/info/" => "info",
+            "/metrics/list/" => "list",
+            "/metrics/list_query/" => "list_query",
+            "/metrics/details/" => "details",
+            "/_internal/capabilities/" => "capabilities",
+            "/forcescan" => "forcescan",
+            "/admin/info" => "admin_info",
+            "/admin/quota" => "admin_quota",
+            _ => "unknown",
+        };
+        Some(Self {
+            start: Instant::now(),
+            handler: handler.into(),
+            url: request.uri().to_string().chars().take(MAX_QUERY).collect(),
+            method: request.method().to_string(),
+            peer: request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|peer| peer.0.to_string())
+                .unwrap_or_default(),
+            status: None,
+        })
+    }
+}
+
+impl Drop for AccessLog {
+    fn drop(&mut self) {
+        let runtime = self.start.elapsed().as_nanos() as u64;
+        match self.status {
+            Some(status) if status.as_u16() < 400 => {
+                tracing::info!(target: "access", handler = %self.handler, url = %self.url, method = %self.method,
+                    peer = %self.peer, http_code = status.as_u16(), "runtime_seconds.duration_ns" = runtime, "request served");
+            }
+            status => {
+                tracing::error!(target: "access", handler = %self.handler, url = %self.url, method = %self.method,
+                    peer = %self.peer, http_code = status.map_or(499, |s| s.as_u16()),
+                    reason = status.map_or("request cancelled", |s| s.canonical_reason().unwrap_or("request failed")),
+                    "runtime_seconds.duration_ns" = runtime, "request failed");
+            }
+        }
+    }
 }
 
 type ResultResponse = Result<Response, (StatusCode, String)>;
@@ -190,12 +260,6 @@ fn encoded(
         _ => unreachable!(),
     }
 }
-fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
 fn checked_limit(value: Option<usize>, max: usize) -> Result<usize, (StatusCode, String)> {
     let n = value.unwrap_or(max).min(max);
     if n == 0 {
@@ -215,11 +279,12 @@ fn matched_json(matches: &[Match]) -> Vec<Value> {
         })
         .collect()
 }
-async fn cached_find(
+type FindTask = tokio::task::JoinHandle<Result<(Vec<Match>, bool), crate::index::GlobError>>;
+async fn spawn_find(
     state: &HttpState,
     query: &str,
     limit: usize,
-) -> Result<(Vec<Match>, bool), (StatusCode, String)> {
+) -> Result<FindTask, (StatusCode, String)> {
     let job = state
         .jobs
         .clone()
@@ -228,13 +293,22 @@ async fn cached_find(
         .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "server stopping".into()))?;
     let state = state.clone();
     let query = query.to_owned();
-    tokio::task::spawn_blocking(move || {
+    Ok(tokio::task::spawn_blocking(move || {
         let _job = job;
         compute_find(&state, &query, limit)
-    })
-    .await
-    .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "find task failed".into()))?
-    .map_err(bad)
+    }))
+}
+async fn join_find(task: FindTask) -> Result<(Vec<Match>, bool), (StatusCode, String)> {
+    task.await
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "find task failed".into()))?
+        .map_err(bad)
+}
+async fn cached_find(
+    state: &HttpState,
+    query: &str,
+    limit: usize,
+) -> Result<(Vec<Match>, bool), (StatusCode, String)> {
+    join_find(spawn_find(state, query, limit).await?).await
 }
 fn compute_find(
     state: &HttpState,
@@ -250,7 +324,10 @@ fn compute_find(
     }
     let generation = state.app.index.generation();
     let key = format!("{limit}\0{query}");
-    let mut cache = state.find_cache.lock().expect("find cache lock poisoned");
+    let mut cache = state
+        .find_cache
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
     if cache.0 != generation {
         cache.0 = generation;
         cache.1 = 0;
@@ -258,7 +335,7 @@ fn compute_find(
         cache.3.clear();
     }
     if let Some((_, matches)) = cache.2.get(&key) {
-        return Ok((matches.iter().take(limit).cloned().collect(), true));
+        return Ok((matches.clone(), true));
     }
     let matches = state.app.index.find(query, limit)?;
     let bytes = key.len() + matches.iter().map(|m| m.path.len() + 16).sum::<usize>();
@@ -291,7 +368,7 @@ fn cached_render(
     let mut cache = state
         .render_cache
         .lock()
-        .expect("render cache lock poisoned");
+        .unwrap_or_else(PoisonError::into_inner);
     if cache.0 != generation {
         cache.0 = generation;
         cache.1 = 0;
@@ -319,7 +396,7 @@ fn store_render(
     let mut cache = state
         .render_cache
         .lock()
-        .expect("render cache lock poisoned");
+        .unwrap_or_else(PoisonError::into_inner);
     if cache.0 != generation {
         cache.0 = generation;
         cache.1 = 0;
@@ -484,27 +561,21 @@ async fn list_query(
     let limit = checked_limit(query.limit, 65_536)?;
     let (matches, _) = cached_find(&state, &query.target, limit).await?;
     let leaf_only = query.leaf_only.unwrap_or(false);
-    let all = if leaf_only {
-        Vec::new()
-    } else {
-        state.app.index.list()
-    };
-    let mut leaves = std::collections::BTreeSet::new();
+    let mut leaves = std::collections::BTreeMap::new();
     for matched in matches {
         if matched.is_leaf {
-            leaves.insert(matched.path.clone());
+            let meta = state.app.index.get(&matched.path).unwrap_or_default();
+            leaves.insert(matched.path.clone(), meta);
         }
         if !leaf_only {
-            let prefix = matched.path + ".";
-            leaves.extend(all.iter().filter(|m| m.starts_with(&prefix)).cloned());
+            leaves.extend(state.app.index.under(&matched.path));
         }
     }
     let count = leaves.len();
     let mut physical_size = 0u64;
     let mut logical_size = 0u64;
     let mut metrics = Vec::new();
-    for name in leaves {
-        let meta = state.app.index.get(&name).unwrap_or_default();
+    for (name, meta) in leaves {
         physical_size = physical_size.saturating_add(meta.physical_size);
         logical_size = logical_size.saturating_add(meta.logical_size);
         if !query.stats_only.unwrap_or(false) && metrics.len() < limit {
@@ -594,9 +665,10 @@ async fn render(
     if targets.is_empty() || targets.len() > state.app.config.carbonserver.max_globs {
         return Err((StatusCode::BAD_REQUEST, "invalid targets".into()));
     }
-    // Fetch clamps ranges to now and selects retention by age, even without writes.
+    // Fetch clamps ranges to now and selects retention by age, even without writes, so the
+    // key carries a minute bucket: Go's query cache accepts the same 60 s of staleness.
     let fetched_at = now();
-    let cache_key = format!("{fetched_at}:{targets:?}");
+    let cache_key = format!("{}:{targets:?}", fetched_at / 60);
     if let Some((v3_metrics, v2_metrics)) = cached_render(&state, &cache_key) {
         let response = encode_render(wire, v3_metrics, v2_metrics)?;
         if let Some(metrics) = state
@@ -613,23 +685,28 @@ async fn render(
         .app
         .read_generation
         .load(std::sync::atomic::Ordering::Relaxed);
-    // Fetches run in parallel, bounded by the jobs semaphore; results keep find order.
-    let mut fetches = Vec::new();
+    // Finds and fetches run in parallel, bounded by the jobs semaphore; results keep find order.
+    let limit = state
+        .app
+        .config
+        .carbonserver
+        .max_metrics_rendered
+        .saturating_add(1);
+    let mut finds = Vec::new();
     for (target, from, until, expression) in targets {
         if target.len() > MAX_QUERY || from >= until {
             return Err((StatusCode::BAD_REQUEST, "invalid target or range".into()));
         }
-        let (found, _) = cached_find(
-            &state,
-            &target,
-            state
-                .app
-                .config
-                .carbonserver
-                .max_metrics_rendered
-                .saturating_add(1),
-        )
-        .await?;
+        finds.push((
+            spawn_find(&state, &target, limit).await?,
+            from,
+            until,
+            expression,
+        ));
+    }
+    let mut fetches = Vec::new();
+    for (find, from, until, expression) in finds {
+        let (found, _) = join_find(find).await?;
         for found in found.into_iter().filter(|m| m.is_leaf) {
             if fetches.len() >= state.app.config.carbonserver.max_metrics_rendered {
                 return Err((StatusCode::BAD_REQUEST, "too many rendered metrics".into()));
@@ -644,9 +721,7 @@ async fn render(
                 .map_err(|_| (StatusCode::SERVICE_UNAVAILABLE, "server stopping".into()))?;
             let task = tokio::task::spawn_blocking(move || {
                 let _job = job;
-                let series = app.fetch(&name, from, until, fetched_at)?;
-                let metadata = app.metadata(&name)?;
-                Ok::<_, std::io::Error>((series, metadata))
+                app.fetch_with_metadata(&name, from, until, fetched_at)
             });
             fetches.push((found.path, expression.clone(), from, until, task));
         }
@@ -654,7 +729,7 @@ async fn render(
     let mut v3_metrics = Vec::new();
     let mut v2_metrics = Vec::new();
     for (name, expression, from, until, task) in fetches {
-        let series = task
+        let (meta, series) = task
             .await
             .map_err(|_| {
                 (
@@ -663,7 +738,7 @@ async fn render(
                 )
             })?
             .map_err(internal)?;
-        let (Some(series), meta) = series else {
+        let Some(series) = series else {
             continue;
         };
         let values: Vec<f64> = series
@@ -672,7 +747,7 @@ async fn render(
             .map(|v| v.unwrap_or(f64::NAN))
             .collect();
         let absent: Vec<bool> = series.values.iter().map(Option::is_none).collect();
-        let method = format!("{:?}", meta.aggregation);
+        let method = meta.aggregation.to_string();
         v3_metrics.push(v3::FetchResponse {
             name: name.clone(),
             path_expression: expression,
@@ -749,7 +824,7 @@ async fn info(
             .collect();
         metrics.push(v3::MetricsInfoResponse {
             name: name.clone(),
-            consolidation_func: format!("{:?}", meta.aggregation),
+            consolidation_func: meta.aggregation.to_string(),
             max_retention: meta
                 .retentions
                 .last()
@@ -760,7 +835,10 @@ async fn info(
         });
     }
     let v3_response = v3::MultiMetricsInfoResponse { metrics };
-    let first = v3_response.metrics.first().unwrap();
+    let first = v3_response
+        .metrics
+        .first()
+        .ok_or((StatusCode::NOT_FOUND, "no metrics".into()))?;
     let v2_response = v2::InfoResponse {
         name: first.name.clone(),
         aggregation_method: first.consolidation_func.clone(),

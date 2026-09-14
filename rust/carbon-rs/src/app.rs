@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::Cache;
@@ -25,6 +25,7 @@ pub struct App {
     pub invalid: AtomicU64,
     pub write_errors: AtomicU64,
     pub read_generation: AtomicU64,
+    rejection_logged: AtomicI64,
     rules: RwLock<Rules>,
     mutation: Mutex<()>,
     files: Vec<Mutex<()>>,
@@ -87,21 +88,35 @@ impl App {
             invalid: AtomicU64::new(0),
             write_errors: AtomicU64::new(0),
             read_generation: AtomicU64::new(0),
+            rejection_logged: AtomicI64::new(0),
         }))
     }
 
+    /// Name checks plus the on-disk location. No I/O: this runs once per ingested point.
     pub fn path(&self, metric: &str) -> io::Result<PathBuf> {
+        // PATH_MAX (4096, NUL included) bounds data_dir + '/' + metric-as-path + ".wsp".
         if metric.is_empty()
-            || metric.len() > 4096
+            || self.config.whisper.data_dir.len() + metric.len() + 5 > 4095
             || metric.bytes().any(|b| matches!(b, b'/' | b'\\' | 0))
         {
             return Err(invalid("invalid metric path"));
         }
+        if metric
+            .split('.')
+            .any(|component| component.is_empty() || component.len() > 251)
+        {
+            return Err(invalid("empty or oversized metric component"));
+        }
+        let mut path = PathBuf::from(&self.config.whisper.data_dir);
+        path.extend(metric.split('.'));
+        path.set_extension("wsp");
+        Ok(path)
+    }
+
+    /// Refuses to create a file through a symlink planted inside data_dir.
+    fn check_symlinks(&self, metric: &str) -> io::Result<()> {
         let mut path = PathBuf::from(&self.config.whisper.data_dir);
         for component in metric.split('.') {
-            if component.is_empty() || component.len() > 251 {
-                return Err(invalid("empty or oversized metric component"));
-            }
             path.push(component);
             if path
                 .symlink_metadata()
@@ -117,7 +132,7 @@ impl App {
         {
             return Err(invalid("metric file is a symlink"));
         }
-        Ok(path)
+        Ok(())
     }
 
     fn options(&self) -> Options {
@@ -130,6 +145,23 @@ impl App {
     }
     fn file_lock(&self, metric: &str) -> &Mutex<()> {
         &self.files[crc32fast::hash(metric.as_bytes()) as usize % self.files.len()]
+    }
+    /// Counts a dropped point. Per-point logs would flood under sustained overflow, so the
+    /// operator-visible warning fires at most once a minute.
+    fn reject(&self, metric: &str, reason: &str) -> io::Error {
+        let rejected = self.rejected.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::debug!(target: "cache", metric, reason, "point rejected");
+        let at = now();
+        let last = self.rejection_logged.load(Ordering::Relaxed);
+        if at - last >= 60
+            && self
+                .rejection_logged
+                .compare_exchange(last, at, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            tracing::warn!(target: "cache", metric, reason, rejected, "points rejected");
+        }
+        io::Error::new(io::ErrorKind::WouldBlock, reason.to_owned())
     }
 
     /// Admission reserves quota and publishes a cache-only metric before returning success.
@@ -148,7 +180,7 @@ impl App {
             .metadata(&metric)
             .ok_or_else(|| invalid("no matching storage schema"))?;
         // ponytail: serialize catalog admission; partition by root only after measuring contention.
-        let _mutation = self.mutation.lock().unwrap();
+        let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let existing = self.index.get(&metric);
         let meta = existing
             .clone()
@@ -158,16 +190,12 @@ impl App {
             .as_ref()
             .map(|q| q.admit(&metric, 1, costs(&meta)))
             .transpose()
-            .map_err(|e| {
-                self.rejected.fetch_add(1, Ordering::Relaxed);
-                io::Error::new(io::ErrorKind::WouldBlock, format!("quota exceeded: {e:?}"))
-            })?;
+            .map_err(|e| self.reject(&metric, &format!("quota exceeded: {e:?}")))?;
         if self.cache.add(metric.clone(), point).is_err() {
             if let (Some(q), Some(r)) = (&self.quotas, reservation) {
                 q.release(r);
             }
-            self.rejected.fetch_add(1, Ordering::Relaxed);
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "cache full"));
+            return Err(self.reject(&metric, "cache full"));
         }
         if let (Some(q), Some(r)) = (&self.quotas, reservation) {
             q.commit(r);
@@ -183,11 +211,18 @@ impl App {
 
     pub fn metadata(&self, metric: &str) -> io::Result<Metadata> {
         let path = self.path(metric)?;
-        let _lock = self.file_lock(metric).lock().unwrap();
+        let _lock = self
+            .file_lock(metric)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         match Whisper::open(path, self.options()) {
             Ok(w) => Ok(w.metadata().clone()),
             Err(e) if e.kind() == io::ErrorKind::NotFound && !self.cache.get(metric).is_empty() => {
-                self.rules.read().unwrap().metadata(metric).ok_or(e)
+                self.rules
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .metadata(metric)
+                    .ok_or(e)
             }
             Err(e) => Err(e),
         }
@@ -200,8 +235,23 @@ impl App {
         until: i64,
         at: i64,
     ) -> io::Result<Option<TimeSeries>> {
+        self.fetch_with_metadata(metric, from, until, at)
+            .map(|(_, series)| series)
+    }
+
+    /// The series and the metadata it was read with, under one file lock.
+    pub fn fetch_with_metadata(
+        &self,
+        metric: &str,
+        from: i64,
+        until: i64,
+        at: i64,
+    ) -> io::Result<(Metadata, Option<TimeSeries>)> {
         let path = self.path(metric)?;
-        let _lock = self.file_lock(metric).lock().unwrap();
+        let _lock = self
+            .file_lock(metric)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let metrics = self
             .prometheus
             .as_ref()
@@ -248,7 +298,12 @@ impl App {
                 if cached.is_empty() {
                     return Err(e);
                 }
-                let meta = self.rules.read().unwrap().metadata(metric).ok_or(e)?;
+                let meta = self
+                    .rules
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .metadata(metric)
+                    .ok_or(e)?;
                 let archive = &meta.retentions[0];
                 let step = archive.seconds_per_point as i64;
                 let start =
@@ -294,7 +349,7 @@ impl App {
             metrics.returned_metrics.inc();
             metrics.returned_points.inc_by(series.values.len() as u64);
         }
-        Ok(series)
+        Ok((metadata, series))
     }
 
     /// One metric has at most one in-flight batch; its lock spans write and confirmation.
@@ -302,12 +357,16 @@ impl App {
         let Some(batch) = self.cache.take() else {
             return Ok(false);
         };
-        let _lock = self.file_lock(&batch.metric).lock().unwrap();
+        let _lock = self
+            .file_lock(&batch.metric)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let result = (|| {
             let path = self.path(&batch.metric)?;
             let mut w = match Whisper::open(&path, self.options()) {
                 Ok(w) => w,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    self.check_symlinks(&batch.metric)?;
                     fs::create_dir_all(path.parent().unwrap())?;
                     let metadata = self
                         .rules
@@ -317,7 +376,9 @@ impl App {
                         .ok_or_else(|| invalid("no storage schema"))?;
                     let mut options = self.options();
                     options.compressed = metadata.compressed;
-                    Whisper::create(&path, metadata, options)?
+                    let file = Whisper::create(&path, metadata, options)?;
+                    tracing::info!(target: "whisper:new", metric = %batch.metric, path = %path.display(), "new whisper file");
+                    file
                 }
                 Err(e) => return Err(e),
             };
@@ -341,7 +402,7 @@ impl App {
                     .map(|m| m.first_seen_at)
                     .unwrap_or_else(now),
             )?;
-            let _mutation = self.mutation.lock().unwrap();
+            let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(q) = &self.quotas {
                 q.sync_metric(&batch.metric, costs(&meta));
             }
@@ -353,12 +414,14 @@ impl App {
         if let Err(e) = result {
             self.cache.retry(batch.id);
             self.write_errors.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(target: "persister", metric = %batch.metric, error = %e, "fail to update metric; batch requeued");
             return Err(e);
         }
         Ok(true)
     }
 
     pub fn scan(&self) -> io::Result<()> {
+        let started = Instant::now();
         let before: BTreeMap<_, _> = self
             .index
             .snapshot()
@@ -384,7 +447,10 @@ impl App {
                 .collect::<io::Result<Vec<_>>>()?
                 .join(".");
             self.path(&metric)?;
-            let _lock = self.file_lock(&metric).lock().unwrap();
+            let _lock = self
+                .file_lock(&metric)
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             // Files removed since walk() are skipped rather than failing the whole scan.
             let Some(w) = skip_missing(Whisper::open(&path, self.options()))? else {
                 continue;
@@ -398,7 +464,7 @@ impl App {
             };
             entries.insert(metric, meta);
         }
-        let _mutation = self.mutation.lock().unwrap();
+        let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         // A filesystem walk is not a snapshot. Keep arrivals and writes made during it.
         for (name, meta, revision) in self.index.snapshot() {
             if before.get(&name).map(|(_, rev)| *rev) != Some(revision)
@@ -411,12 +477,16 @@ impl App {
             q.reconcile(entries.iter().map(|(n, m)| (n.clone(), costs(m))).collect());
         }
         let generation = self.index.generation();
+        let metrics = entries.len();
         self.index.reconcile_if_generation(generation, entries);
         self.read_generation.fetch_add(1, Ordering::Relaxed);
+        drop(_mutation);
+        tracing::info!(target: "carbonserver", metrics, "runtime_seconds.duration_ns" = started.elapsed().as_nanos() as u64, "file list updated");
         Ok(())
     }
 
     pub fn dump(&self) -> io::Result<PathBuf> {
+        tracing::info!(target: "dump", dir = %self.config.dump.path, "dump started");
         fs::create_dir_all(&self.config.dump.path)?;
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -433,6 +503,7 @@ impl App {
         fs::rename(&tmp, &path)?;
         // Directory fsync is best effort: NFS and tmpfs reject it, and the file is already durable.
         let _ = File::open(&self.config.dump.path).and_then(|dir| dir.sync_all());
+        tracing::info!(target: "dump", filename = %path.display(), "dump finished");
         Ok(path)
     }
 
@@ -463,6 +534,7 @@ impl App {
             (timestamp, kind.to_owned())
         });
         for path in &files {
+            tracing::info!(target: "restore", filename = %path.display(), "restore started");
             let mut reader = BufReader::new(File::open(path)?);
             if path.extension().is_some_and(|e| e == "bin") {
                 while let Some((metric, points)) = read_dump(&mut reader)? {
@@ -483,6 +555,7 @@ impl App {
                     line.clear();
                 }
             }
+            tracing::info!(target: "restore", filename = %path.display(), "dump loaded into cache");
         }
         // Keep originals until all restored points have reached durable storage.
         Ok(files)
@@ -515,7 +588,7 @@ impl App {
             &self.config.whisper,
         )
         .map_err(invalid)?;
-        *self.rules.write().unwrap() = rules;
+        *self.rules.write().unwrap_or_else(PoisonError::into_inner) = rules;
         self.read_generation.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -523,13 +596,17 @@ impl App {
     pub fn compact_one(&self, metric: &str) -> io::Result<bool> {
         let path = self.path(metric)?;
         let sidecar = whisper_rs::out_of_order_sidecar_path(&path);
+        let _lock = self
+            .file_lock(metric)
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Checked under the lock: flush_one removes the sidecar once it is merged.
         if !sidecar.try_exists()? {
             return Ok(false);
         }
-        let _lock = self.file_lock(metric).lock().unwrap();
         let mut w = Whisper::open(&path, self.options())?;
         w.compact_out_of_order(now())?;
-        let _mutation = self.mutation.lock().unwrap();
+        let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let first_seen = self
             .index
             .get(metric)
@@ -541,11 +618,13 @@ impl App {
         }
         self.index.upsert(metric, meta);
         self.read_generation.fetch_add(1, Ordering::Relaxed);
+        drop(_mutation);
+        tracing::debug!(target: "persister", metric, path = %path.display(), "merged out-of-order sidecar into cwhisper file");
         Ok(true)
     }
 
     pub fn load_file_list(&self, entries: Vec<crate::file_list::Entry>) -> io::Result<()> {
-        let _mutation = self.mutation.lock().unwrap();
+        let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let mut catalog = Vec::with_capacity(entries.len());
         for entry in entries {
             let name = entry

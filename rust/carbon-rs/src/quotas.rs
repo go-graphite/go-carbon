@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::index::Glob;
@@ -160,7 +160,7 @@ impl Engine {
     /// Checks throughput for every metric; resource limits only for a new metric.
     /// An accepted new metric remains reserved until `commit` or `release`.
     pub fn admit(&self, metric: &str, points: i64, costs: Costs) -> Result<Reservation, Rejection> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.reset_if_due(&mut state);
         let handles = self.handles(metric);
         for handle in &handles {
@@ -236,7 +236,7 @@ impl Engine {
             };
             add_usage(state.usage.entry(handle.clone()).or_default(), add);
         }
-        let mut next = self.next.lock().unwrap();
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
         let id = *next;
         *next += 1;
         state.pending.insert(
@@ -257,7 +257,7 @@ impl Engine {
         if reservation.id == 0 {
             return true;
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(p) = state.pending.remove(&reservation.id) else {
             return false;
         };
@@ -280,7 +280,7 @@ impl Engine {
         if reservation.id == 0 {
             return true;
         }
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(p) = state.pending.remove(&reservation.id) else {
             return false;
         };
@@ -313,7 +313,7 @@ impl Engine {
     }
     /// Reconciles a known file after create, compaction, or a filesystem scan; `.ooo` bytes belong in `costs`.
     pub fn sync_metric(&self, metric: &str, costs: Costs) -> bool {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let Some((old, handles)) = state.metrics.get_mut(metric).map(|current| {
             let old = current.costs;
             current.costs = costs;
@@ -337,7 +337,7 @@ impl Engine {
             .unwrap_or_default()
     }
     pub fn report(&self) -> Vec<NamespaceReport> {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut report = BTreeMap::new();
         for (namespace, usage) in &state.usage {
             report.insert(
@@ -356,7 +356,7 @@ impl Engine {
     }
     /// Inserts files discovered at startup without charging throughput or enforcing limits.
     pub fn register_existing(&self, metric: &str, costs: Costs) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.register_locked(&mut state, metric, costs);
     }
     fn register_locked(&self, state: &mut State, metric: &str, costs: Costs) {
@@ -391,7 +391,7 @@ impl Engine {
     }
     /// Rebuilds catalog resource usage from a completed filesystem scan, preserving throughput counters.
     pub fn reconcile(&self, metrics: Vec<(String, Costs)>) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         // The daemon serializes scans with admissions. Standalone callers may
         // defer reconciliation until outstanding reservations have resolved.
         if !state.pending.is_empty() {
@@ -412,7 +412,7 @@ impl Engine {
     }
     pub fn remove_metric(&self, metric: &str) -> bool {
         let metrics = {
-            let mut state = self.state.lock().unwrap();
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
             if state.metrics.remove(metric).is_none() {
                 return false;
             }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use whisper_rs::Point;
 
@@ -81,7 +81,10 @@ impl Cache {
     }
 
     pub fn add(&self, metric: String, point: Point) -> Result<(), AddError> {
-        let _admission = self.admission.lock().unwrap();
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let entry_bytes = POINT_BYTES
             + if self.entry_exists(&metric) {
                 0
@@ -105,7 +108,10 @@ impl Cache {
 
     /// Restore and retry bypass fresh-admission limits: those points were accepted already.
     pub fn restore(&self, metric: String, points: impl IntoIterator<Item = Point>) {
-        let _admission = self.admission.lock().unwrap();
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for point in points {
             self.insert(
                 metric.clone(),
@@ -122,8 +128,14 @@ impl Cache {
 
     pub fn take(&self) -> Option<Batch> {
         loop {
-            let metric = self.ready.lock().unwrap().pop_front()?;
-            let mut shard = self.shards[self.shard(&metric)].lock().unwrap();
+            let metric = self
+                .ready
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop_front()?;
+            let mut shard = self.shards[self.shard(&metric)]
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             let Some(entry) = shard.entries.get_mut(&metric) else {
                 continue;
             };
@@ -144,7 +156,10 @@ impl Cache {
             self.pending.fetch_sub(count, Ordering::Relaxed);
             self.in_flight.fetch_add(count, Ordering::Relaxed);
             drop(shard);
-            self.active.lock().unwrap().insert(batch.id, metric);
+            self.active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(batch.id, metric);
             return Some(batch);
         }
     }
@@ -158,7 +173,9 @@ impl Cache {
     }
 
     pub fn get(&self, metric: &str) -> Vec<Point> {
-        let shard = self.shards[self.shard(metric)].lock().unwrap();
+        let shard = self.shards[self.shard(metric)]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let Some(entry) = shard.entries.get(metric) else {
             return Vec::new();
         };
@@ -174,7 +191,7 @@ impl Cache {
         self.shards
             .iter()
             .flat_map(|shard| {
-                let shard = shard.lock().unwrap();
+                let shard = shard.lock().unwrap_or_else(PoisonError::into_inner);
                 shard
                     .entries
                     .iter()
@@ -206,12 +223,23 @@ impl Cache {
     }
 
     fn finish(&self, id: u64, retry: bool) -> bool {
-        let _admission = self.admission.lock().unwrap();
-        let Some(name) = self.active.lock().unwrap().get(&id).cloned() else {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(name) = self
+            .active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned()
+        else {
             return false;
         };
         let mut enqueue = false;
-        let mut shard = self.shards[self.shard(&name)].lock().unwrap();
+        let mut shard = self.shards[self.shard(&name)]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let Some(entry) = shard.entries.get_mut(&name) else {
             return false;
         };
@@ -246,16 +274,24 @@ impl Cache {
             shard.entries.remove(&name);
         }
         drop(shard);
-        self.active.lock().unwrap().remove(&id);
+        self.active
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
         if enqueue {
-            self.ready.lock().unwrap().push_back(name);
+            self.ready
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_back(name);
         }
         true
     }
 
     fn insert(&self, metric: String, point: Point, bytes: u64) {
         let mut enqueue = false;
-        let mut shard = self.shards[self.shard(&metric)].lock().unwrap();
+        let mut shard = self.shards[self.shard(&metric)]
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let entry = shard
             .entries
             .entry(metric.clone())
@@ -276,7 +312,10 @@ impl Cache {
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
         drop(shard);
         if enqueue {
-            self.ready.lock().unwrap().push_back(metric);
+            self.ready
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push_back(metric);
         }
     }
 

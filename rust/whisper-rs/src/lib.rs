@@ -52,6 +52,20 @@ impl Aggregation {
     }
 }
 
+/// Go's titleized names, the wire format of carbonserver's consolidationFunc.
+impl std::fmt::Display for Aggregation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Average => "Average",
+            Self::Sum => "Sum",
+            Self::Last => "Last",
+            Self::Max => "Max",
+            Self::Min => "Min",
+            Self::First => "First",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Metadata {
     pub aggregation: Aggregation,

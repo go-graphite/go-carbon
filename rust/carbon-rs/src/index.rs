@@ -2,7 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::sync::RwLock;
+use std::ops::Bound;
+use std::sync::{PoisonError, RwLock};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndexMode {
@@ -367,10 +368,13 @@ impl Index {
         self.mode
     }
     pub fn generation(&self) -> u64 {
-        self.state.read().expect("index lock poisoned").generation
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .generation
     }
     pub fn snapshot(&self) -> Vec<(String, MetricMeta, u64)> {
-        let state = self.state.read().expect("index lock poisoned");
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         state
             .metrics
             .iter()
@@ -401,11 +405,24 @@ impl Index {
             .collect()
     }
 
+    /// Leaf metrics below `prefix`, sorted: one range scan over the ordered catalog.
+    pub fn under(&self, prefix: &str) -> Vec<(String, MetricMeta)> {
+        let prefix = format!("{prefix}.");
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .metrics
+            .range::<str, _>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+            .take_while(|(name, _)| name.starts_with(&prefix))
+            .map(|(name, meta)| (name.clone(), meta.clone()))
+            .collect()
+    }
+
     pub fn upsert(&self, metric: &str, meta: MetricMeta) {
         if metric.is_empty() {
             return;
         }
-        let mut state = self.state.write().expect("index lock poisoned");
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         if !state.metrics.contains_key(metric) {
             state.trie.insert(metric);
             for path in prefixes(metric)
@@ -428,7 +445,7 @@ impl Index {
     }
 
     pub fn remove(&self, metric: &str) -> bool {
-        let mut state = self.state.write().expect("index lock poisoned");
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         if state.metrics.remove(metric).is_none() {
             return false;
         }
@@ -444,7 +461,7 @@ impl Index {
 
     pub fn find(&self, query: &str, limit: usize) -> Result<Vec<Match>, GlobError> {
         let glob = Glob::new(query)?;
-        let state = self.state.read().expect("index lock poisoned");
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
         if limit == 0 {
             return Ok(vec![]);
         }
@@ -491,7 +508,7 @@ impl Index {
     where
         I: IntoIterator<Item = (String, MetricMeta)>,
     {
-        let mut state = self.state.write().expect("index lock poisoned");
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         if state.generation != expected {
             return false;
         }
@@ -559,7 +576,14 @@ mod tests {
                 }]
             );
             if mode == IndexMode::Trie {
-                assert!(index.state.read().unwrap().trigrams.is_empty());
+                assert!(
+                    index
+                        .state
+                        .read()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .trigrams
+                        .is_empty()
+                );
             }
             let first = index.snapshot().last().unwrap().2;
             index.upsert("z.metric.yes", MetricMeta::default());

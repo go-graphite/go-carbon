@@ -7,6 +7,7 @@ pub mod index;
 pub mod lifecycle;
 #[cfg(any(target_os = "linux", test))]
 mod linux_process;
+pub mod logging;
 pub mod metrics;
 pub mod plaintext;
 pub mod profiling;

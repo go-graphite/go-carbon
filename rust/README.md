@@ -25,6 +25,18 @@ Example paths are relative to the repository root. Use absolute paths in deploym
 
 Storage schema and aggregation files retain their Graphite INI syntax; the main configuration is TOML. Select the trie with `trie-index=true`, or the trigram backend with `trie-index=false`. The catalog is updated synchronously on admission, so there is no lossy realtime notification queue.
 
+## Logging
+
+`[[logging]]` uses Go's `logger`, `file`, `level`, `encoding`, `encoding-time`, `encoding-duration`, and `sample-*` settings, implemented with `tracing` / `tracing-subscriber`. With no entries, logs go to stdout at info level in console format, as in Go. An explicit entry defaults to stderr/mixed/info. Legacy `[logging]` and `common.logfile` / `common.log-level` are accepted; the common options override the logging entries as in Go.
+
+Outputs are local files, `stdout`, `stderr`, or `none`. A named logger replaces the default route (no prefix inheritance); repeated entries for the same logger write to each destination. Component names include `main`, `tcp`, `udp`, `cache`, `persister`, `whisper:new`, `carbonserver`, `access`, `dump`, `restore`, and `pprof`. Levels are `debug`, `info`, `warn`, `error`, `dpanic`, `panic`, and `fatal`; terminal daemon errors emit FATAL and exit unsuccessfully. Rust panics retain Rust's runtime handling rather than emulating Go panic/DPanic behavior.
+
+JSON has top-level `timestamp`, `level`, `logger`, `message`, and typed event fields. Console uses tab-separated metadata plus JSON fields; mixed uses `[timestamp] LEVEL [logger] message {fields}`. Timestamps support local-time `iso8601`, Unix `epoch` seconds, `millis`, and `nanos`; durations support `seconds`, `nanos`, and Go-style `string`. These are compatible conventions, not byte-identical logs or complete copies of every Go message. HTTP access events include handler, method, URL, peer, status, and `runtime_seconds`; URL/debug-line payloads are bounded, and headers/bodies are not logged. Handler cancellation is recorded as 499 when its future is dropped, not as a guarantee of detecting every client disconnect.
+
+Sampling is opt-in: set positive `sample-tick` (e.g. `1s`), `sample-initial`, and positive `sample-thereafter`. Each output emits the first N occurrences of a level/message pair per interval, then every Mth, with Go's bounded 4096 FNV buckets per level. Files append and reopen after external rename/deletion, checked on writes at most once per second; no idle reopen thread or size-based rotation is added. Writes are synchronous, with file synchronization at shutdown; sink errors fall back to stderr without recursively logging. Use stdout with a log collector, or sampling, when filesystem logging latency matters.
+
+Local `file:/absolute/path` / `file:///absolute/path` and the four level/encoding query overrides are supported. Other URL schemes/query options and unknown logging keys fail validation. `--check-config` validates without creating logs. Logging configuration changes require restart; SIGHUP still reloads storage rules only, and file rotation needs no signal.
+
 ## Prometheus
 
 Set `prometheus.enabled=true`. As in Go, `prometheus.endpoint` defaults to `/metrics` on **`pprof.listen`** (default `127.0.0.1:7007`), independently of carbonserver and `pprof.enabled`. The former unconditional carbonserver `/metrics` endpoint and `carbon_rs_*` pipeline counters are replaced. `[prometheus.labels]` adds constant labels to every exported sample; invalid names or collisions with collector labels fail configuration validation.

@@ -164,6 +164,266 @@ fn wait_for(path: &Path) {
     panic!("timed out waiting for {}", path.display());
 }
 
+fn wait_log(path: &Path, logger: &str, message: &str) -> serde_json::Value {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        if let Some(row) = text
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["logger"] == logger && row["message"] == message)
+        {
+            return row;
+        }
+        assert!(
+            Instant::now() < until,
+            "missing {logger}: {message} in {text}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn signal(child: &ChildGuard, name: &str) {
+    assert!(
+        Command::new("kill")
+            .arg(name)
+            .arg(child.0.id().to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn structured_logging_covers_receivers_access_reload_rotation_and_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let schemas = dir.path().join("schemas");
+    let schema = "[all]\npattern = .*\nretentions = 1:60\n";
+    fs::write(&schemas, schema).unwrap();
+    let log = dir.path().join("logs/carbon.log");
+    let config = dir.path().join("config");
+    fs::write(
+        &config,
+        format!(
+            r#"
+[whisper]
+data-dir = "{}/wsp"
+schemas-file = "{}"
+[tcp]
+enabled = true
+listen = "127.0.0.1:0"
+[udp]
+enabled = true
+listen = "127.0.0.1:0"
+[carbonserver]
+enabled = true
+listen = "127.0.0.1:0"
+[dump]
+path = "{}/dump"
+[[logging]]
+file = "{}"
+encoding = "json"
+[[logging]]
+logger = "tcp"
+file = "{}"
+encoding = "json"
+level = "debug"
+[[logging]]
+logger = "udp"
+file = "{}"
+encoding = "json"
+level = "debug"
+[[logging]]
+logger = "access"
+file = "{}"
+encoding = "json"
+encoding-duration = "nanos"
+"#,
+            dir.path().display(),
+            schemas.display(),
+            dir.path().display(),
+            log.display(),
+            log.display(),
+            log.display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    let bin = env!("CARGO_BIN_EXE_carbon-rs");
+    let checked = Command::new(bin)
+        .args(["--config", config.to_str().unwrap(), "--check-config"])
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{:?}", checked);
+    assert!(!log.parent().unwrap().exists());
+    let mut child = ChildGuard(
+        Command::new(bin)
+            .arg("--config")
+            .arg(&config)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    wait_log(&log, "main", "started");
+    let tcp = wait_log(&log, "tcp", "listening");
+    let udp = wait_log(&log, "udp", "listening");
+    let http = wait_log(&log, "carbonserver", "starting carbonserver");
+    let mut stream = TcpStream::connect(tcp["address"].as_str().unwrap()).unwrap();
+    stream
+        .write_all(format!("invalid\nlive.metric 1 {}\n", carbon_rs::app::now()).as_bytes())
+        .unwrap();
+    drop(stream);
+    let udp_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    udp_socket
+        .send_to(b"invalid\n", udp["address"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(wait_log(&log, "tcp", "parse failed")["level"], "DEBUG");
+    assert_eq!(wait_log(&log, "udp", "parse failed")["level"], "DEBUG");
+    wait_log(&log, "whisper:new", "new whisper file");
+    let http: std::net::SocketAddr = http["address"].as_str().unwrap().parse().unwrap();
+    assert!(http_get(http.port(), "/metrics/find/?query=live.*").starts_with("HTTP/1.1 200"));
+    let access = wait_log(&log, "access", "request served");
+    assert_eq!(access["handler"], "find");
+    assert_eq!(access["http_code"], 200);
+    assert_eq!(access["method"], "GET");
+    assert!(access["peer"].as_str().unwrap().starts_with("127.0.0.1:"));
+    assert!(access["runtime_seconds"].is_u64());
+    assert!(http_get(http.port(), "/info/?target=missing").starts_with("HTTP/1.1 404"));
+    assert_eq!(wait_log(&log, "access", "request failed")["http_code"], 404);
+
+    fs::write(&schemas, "broken").unwrap();
+    signal(&child, "-HUP");
+    assert_eq!(
+        wait_log(&log, "main", "config reload failed")["level"],
+        "ERROR"
+    );
+    fs::write(&schemas, schema).unwrap();
+    signal(&child, "-HUP");
+    wait_log(&log, "main", "config successfully reloaded");
+
+    let rotated = dir.path().join("carbon.log.1");
+    fs::rename(&log, &rotated).unwrap();
+    let previous = fs::read(&rotated).unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    signal(&child, "-HUP");
+    wait_log(&log, "main", "config successfully reloaded");
+    assert_eq!(fs::read(&rotated).unwrap(), previous);
+    signal(&child, "-TERM");
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < until, "daemon failed to stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    wait_log(&log, "main", "stopped");
+    for path in [&log, &rotated] {
+        for line in fs::read_to_string(path).unwrap().lines() {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(row["timestamp"].is_string());
+            assert!(row.get("go_level").is_none());
+        }
+    }
+}
+
+#[test]
+fn logging_routes_fatal_startup_errors_and_check_config_never_creates_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let schemas = dir.path().join("schemas");
+    fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:60\n").unwrap();
+    let config = dir.path().join("config");
+    let bin = env!("CARGO_BIN_EXE_carbon-rs");
+    for (destination, encoding, level) in [
+        ("stdout", "json", "info"),
+        ("stderr", "mixed", "info"),
+        ("none", "json", "info"),
+        ("stdout", "json", "fatal"),
+    ] {
+        fs::write(
+            &config,
+            format!(
+                r#"
+[whisper]
+data-dir = "{}/wsp"
+schemas-file = "{}"
+[dump]
+path = "{}/dump"
+[[logging]]
+file = "{destination}"
+encoding = "{encoding}"
+level = "{level}"
+"#,
+                dir.path().display(),
+                schemas.display(),
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        // No listener enabled: a startup failure after logging initialization.
+        let output = Command::new(bin)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        match destination {
+            "stdout" => {
+                assert!(output.stderr.is_empty(), "{:?}", output.stderr);
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                let rows: Vec<serde_json::Value> = stdout
+                    .lines()
+                    .map(|s| serde_json::from_str(s).unwrap())
+                    .collect();
+                if level == "fatal" {
+                    assert_eq!(rows.len(), 1);
+                }
+                let row = rows.last().unwrap();
+                assert_eq!(row["level"], "FATAL");
+                assert_eq!(row["message"], "daemon failed");
+                assert!(row["error"].as_str().unwrap().contains("no receivers"));
+            }
+            "stderr" => {
+                assert!(output.stdout.is_empty());
+                assert!(
+                    String::from_utf8(output.stderr)
+                        .unwrap()
+                        .contains(" FATAL [main] daemon failed ")
+                );
+            }
+            "none" => {
+                assert!(output.stdout.is_empty());
+                assert!(output.stderr.is_empty());
+            }
+            _ => unreachable!(),
+        }
+    }
+    let log = dir.path().join("must-not-exist");
+    fs::write(
+        &config,
+        format!(
+            "[[logging]]\nfile='{}'\nencoding='invalid'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    let output = Command::new(bin)
+        .arg("--config")
+        .arg(&config)
+        .arg("--check-config")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("logging.encoding")
+    );
+    assert!(!log.exists());
+}
+
 #[test]
 fn daemon_restores_dump_ingests_tcp_and_shuts_down() {
     let dir = tempfile::tempdir().unwrap();

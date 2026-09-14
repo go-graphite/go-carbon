@@ -21,6 +21,8 @@ flate2 = "1"
 tempfile = "3"
 prometheus = { version = "0.14", features = ["process"] }
 pprof = { version = "0.15", default-features = false, features = ["protobuf-codec"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "chrono"] }
 
 [profile.release]
 debug = 1

@@ -18,6 +18,8 @@ pub struct Config {
     pub dump: Dump,
     pub prometheus: Prometheus,
     pub pprof: Pprof,
+    #[serde(deserialize_with = "crate::logging::deserialize")]
+    pub logging: Vec<crate::logging::Config>,
     pub pickle: Disabled,
     pub carbonlink: Disabled,
     pub grpc: Disabled,
@@ -27,6 +29,8 @@ pub struct Config {
 pub struct Common {
     pub graph_prefix: String,
     pub max_cpu: usize,
+    pub log_level: Option<String>,
+    pub logfile: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
@@ -171,6 +175,8 @@ impl Default for Common {
         Self {
             graph_prefix: "carbon.agents.{host}".into(),
             max_cpu: 1,
+            log_level: None,
+            logfile: None,
         }
     }
 }
@@ -281,6 +287,22 @@ impl Config {
             }
         }
         config.validate_diagnostics()?;
+        if config.common.log_level.is_some() || config.common.logfile.is_some() {
+            let mut logging = crate::logging::Config::application_default();
+            if let Some(level) = &config.common.log_level {
+                logging.level = level.clone();
+            }
+            if let Some(file) = &config.common.logfile {
+                logging.file = file.clone();
+            }
+            config.logging = vec![logging];
+        }
+        if config.logging.is_empty() {
+            config
+                .logging
+                .push(crate::logging::Config::application_default());
+        }
+        crate::logging::validate(&config.logging)?;
         Ok(config)
     }
 

@@ -25,13 +25,15 @@ pub async fn compact(app: Arc<App>, mut stop: tokio::sync::watch::Receiver<bool>
                 continue;
             }
             let app = app.clone();
-            let metric = metric.clone();
-            match tokio::task::spawn_blocking(move || app.compact_one(&metric)).await {
+            let name = metric.clone();
+            match tokio::task::spawn_blocking(move || app.compact_one(&name)).await {
                 Ok(Ok(true)) => {
                     tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(delay) => {} }
                 }
                 Ok(Ok(false)) => {}
-                result => eprintln!("out-of-order compaction failed: {result:?}"),
+                result => {
+                    tracing::error!(target: "persister", metric = %metric, error = ?result, "out-of-order compaction failed")
+                }
             }
         }
         tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }

@@ -1,13 +1,28 @@
 use carbon_rs::{app::App, config::Config, receiver};
 use std::io;
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-fn main() -> io::Result<()> {
+fn main() -> ExitCode {
+    match start() {
+        Ok(code) => code,
+        Err(error) => {
+            // Configuration/output initialization errors happen before tracing is available.
+            let _ = std::io::Write::write_fmt(
+                &mut io::stderr().lock(),
+                format_args!("carbon-rs: {error}\n"),
+            );
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn start() -> io::Result<ExitCode> {
     let mut args = std::env::args().skip(1);
     let mut config = PathBuf::from("/etc/go-carbon/go-carbon.conf");
     let mut check = false;
@@ -22,13 +37,13 @@ fn main() -> io::Result<()> {
             "--check-config" => check = true,
             "-version" | "--version" => {
                 println!("carbon-rs {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
+                return Ok(ExitCode::SUCCESS);
             }
             "-h" | "--help" => {
                 println!(
                     "carbon-rs --config FILE [--check-config]\nTCP/UDP plaintext and HTTP carbonserver; noop cache scheduling."
                 );
-                return Ok(());
+                return Ok(ExitCode::SUCCESS);
             }
             _ => return Err(carbon_rs::app::invalid(format!("unknown argument {arg}"))),
         }
@@ -49,13 +64,27 @@ fn main() -> io::Result<()> {
             .map_err(carbon_rs::app::invalid)?;
         }
         println!("configuration valid");
-        return Ok(());
+        return Ok(ExitCode::SUCCESS);
     }
-    tokio::runtime::Builder::new_multi_thread()
+    let _logging = carbon_rs::logging::init(&config.logging)?;
+    if config.common.log_level.is_some() || config.common.logfile.is_some() {
+        tracing::warn!(target: "main", "common.log-level and common.logfile are deprecated; use [[logging]]");
+    }
+    let result = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.common.max_cpu.max(1))
         .enable_all()
-        .build()?
-        .block_on(run(config))
+        .build()
+        .and_then(|runtime| runtime.block_on(run(config)));
+    match result {
+        Ok(()) => {
+            tracing::info!(target: "main", "stopped");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(error) => {
+            tracing::error!(target: "main", go_level = "FATAL", error = %error, "daemon failed");
+            Ok(ExitCode::FAILURE)
+        }
+    }
 }
 
 async fn run(config: Config) -> io::Result<()> {
@@ -65,7 +94,7 @@ async fn run(config: Config) -> io::Result<()> {
         && let Err(error) = carbon_rs::file_list::read(&app.config.carbonserver.file_list_cache)
             .and_then(|(_, entries)| app.load_file_list(entries))
     {
-        eprintln!("file-list cache ignored: {error}");
+        tracing::warn!(target: "carbonserver", error = %error, "file-list cache ignored");
     }
     // FLC v1 has no size metadata and any version can be stale. Reconcile disk
     // before quota-constrained admission; the loaded cache only shortens index readiness.
@@ -73,6 +102,7 @@ async fn run(config: Config) -> io::Result<()> {
     save_file_list(&app)?;
     if app.config.dump.enabled {
         let restored = app.restore()?;
+        let restored_files = restored.len();
         while !app.cache.is_empty() {
             if !app.flush_one()? {
                 return Err(io::Error::other("recovery cache has no writable batch"));
@@ -89,6 +119,9 @@ async fn run(config: Config) -> io::Result<()> {
                 )));
             }
             std::fs::rename(path, restored)?;
+        }
+        if restored_files > 0 {
+            tracing::info!(target: "restore", files = restored_files, "restored points persisted");
         }
         app.scan()?;
         save_file_list(&app)?;
@@ -128,7 +161,7 @@ async fn run(config: Config) -> io::Result<()> {
     let (stop_tx, stop_rx) = watch::channel(false);
     let mut listeners = JoinSet::new();
     if let Some(listener) = tcp {
-        eprintln!("TCP listening on {}", listener.local_addr()?);
+        tracing::info!(target: "tcp", address = %listener.local_addr()?, "listening");
         listeners.spawn(receiver::tcp(
             listener,
             app.clone(),
@@ -137,7 +170,7 @@ async fn run(config: Config) -> io::Result<()> {
         ));
     }
     if let Some(socket) = udp {
-        eprintln!("UDP listening on {}", socket.local_addr()?);
+        tracing::info!(target: "udp", address = %socket.local_addr()?, "listening");
         listeners.spawn(receiver::udp(
             socket,
             app.clone(),
@@ -146,19 +179,22 @@ async fn run(config: Config) -> io::Result<()> {
         ));
     }
     if let Some(listener) = http {
-        eprintln!("HTTP listening on {}", listener.local_addr()?);
+        tracing::info!(target: "carbonserver", address = %listener.local_addr()?, "starting carbonserver");
         let router = carbon_rs::http::router(app.clone());
         let mut stopped = stop_rx.clone();
         listeners.spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = stopped.changed().await;
-                })
-                .await
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = stopped.changed().await;
+            })
+            .await
         });
     }
     if let Some(listener) = diagnostics {
-        eprintln!("Diagnostics listening on {}", listener.local_addr()?);
+        tracing::info!(target: "pprof", address = %listener.local_addr()?, "diagnostics listening");
         let mut router = carbon_rs::metrics::router(app.clone());
         if app.config.pprof.enabled {
             router = router.merge(carbon_rs::profiling::router(stop_rx.clone()));
@@ -194,10 +230,12 @@ async fn run(config: Config) -> io::Result<()> {
             match tokio::task::spawn_blocking(move || app.scan()).await {
                 Ok(Ok(())) => {
                     if let Err(error) = save_file_list(&scanner_app) {
-                        eprintln!("file-list cache write failed: {error}")
+                        tracing::error!(target: "carbonserver", error = %error, "file-list cache write failed");
                     }
                 }
-                result => eprintln!("filesystem scan failed: {result:?}"),
+                result => {
+                    tracing::error!(target: "carbonserver", error = ?result, "filesystem scan failed")
+                }
             }
         }
     });
@@ -207,14 +245,26 @@ async fn run(config: Config) -> io::Result<()> {
     let mut dump_stop =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())?;
     let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tracing::info!(target: "main", version = env!("CARGO_PKG_VERSION"), "started");
     let dump_immediately = loop {
         let stop = tokio::select! {
-            _ = terminate.recv() => false,
-            _ = interrupt.recv() => false,
-        _ = dump_stop.recv() => { if app.config.dump.enabled { true } else { eprintln!("SIGUSR2 ignored: dump is disabled"); continue } },
-            _ = reload.recv() => { if let Err(error) = app.reload_rules() { eprintln!("configuration reload failed: {error}"); } continue },
-            failure = listeners.join_next() => { eprintln!("listener terminated: {failure:?}"); false },
-            failure = workers.join_next() => { eprintln!("persister terminated: {failure:?}"); false },
+            _ = terminate.recv() => { tracing::info!(target: "main", signal = "SIGTERM", "stopping"); false },
+            _ = interrupt.recv() => { tracing::info!(target: "main", signal = "SIGINT", "stopping"); false },
+            _ = dump_stop.recv() => {
+                if app.config.dump.enabled {
+                    tracing::info!(target: "main", signal = "SIGUSR2", "dump and stop"); true
+                } else { tracing::warn!(target: "main", "SIGUSR2 ignored: dump is disabled"); continue }
+            },
+            _ = reload.recv() => {
+                tracing::info!(target: "main", "HUP received. Reload config");
+                match app.reload_rules() {
+                    Ok(()) => tracing::info!(target: "main", "config successfully reloaded"),
+                    Err(error) => tracing::error!(target: "main", error = %error, "config reload failed"),
+                }
+                continue
+            },
+            failure = listeners.join_next() => { tracing::error!(target: "main", error = ?failure, "listener terminated"); false },
+            failure = workers.join_next() => { tracing::error!(target: "main", error = ?failure, "persister terminated"); false },
         };
         break stop;
     };
@@ -230,6 +280,7 @@ async fn run(config: Config) -> io::Result<()> {
     .await
     .is_err()
     {
+        tracing::warn!(target: "main", "listener shutdown timed out");
         listeners.abort_all();
     }
     while let Some(result) = workers.join_next().await {
@@ -244,7 +295,7 @@ async fn run(config: Config) -> io::Result<()> {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(e) => {
-                    eprintln!("shutdown write failed: {e}");
+                    tracing::error!(target: "main", error = %e, "shutdown write failed");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
@@ -253,10 +304,7 @@ async fn run(config: Config) -> io::Result<()> {
     if !app.cache.is_empty() {
         // Accepted data must not disappear because shutdown hit a disk error or its deadline.
         let path = app.dump()?;
-        eprintln!(
-            "saved unpersisted points to {}; enable dump restoration before restart",
-            path.display()
-        );
+        tracing::warn!(target: "dump", filename = %path.display(), "saved unpersisted points; enable dump restoration before restart");
     }
     Ok(())
 }
@@ -307,7 +355,10 @@ async fn worker(app: Arc<App>, mut stop: watch::Receiver<bool>) {
                 tokio::select! { _ = stop.changed() => break, _ = app.wake.notified() => {}, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
             }
             result => {
-                eprintln!("Whisper write failed; batch requeued: {result:?}");
+                // flush_one logs storage errors with the metric before requeueing the batch.
+                if let Err(error) = result {
+                    tracing::error!(target: "persister", error = %error, "Whisper worker failed");
+                }
                 tokio::select! { _ = stop.changed() => break, _ = tokio::time::sleep(Duration::from_secs(1)) => {} }
             }
         }
