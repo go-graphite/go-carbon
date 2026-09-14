@@ -15,6 +15,8 @@ rust/target/release/carbon-rs --config rust/go-carbon.conf.example
 
 Example paths are relative to the repository root. Use absolute paths in deployment. The example binds plaintext TCP/UDP on localhost:2003 and HTTP on localhost:8080.
 
+Go-style port-only `listen` values such as `":2003"` bind to `0.0.0.0:2003` for TCP, UDP, carbonserver, and pprof/Prometheus. Explicit IPs (including bracketed IPv6) and hostnames remain unchanged. Port-only listeners expose all IPv4 interfaces; use localhost or a trusted management IP for diagnostics.
+
 ## Implemented
 
 - `whisper-rs`: classic and compressed v1 `.wsp` create/open/update/fetch, all six standard aggregation methods, retention propagation and XFF, block coding/rotation/growth, live buffers, `.ooo` reads/writes and compaction. Path locks survive atomic replacement; compaction synchronizes the replacement before removing its sidecar. Go file-integrity checks and cross-language reads, writes, appends, and compaction run in tests.

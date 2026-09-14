@@ -305,6 +305,80 @@ fn signal(child: &ChildGuard, name: &str) {
 }
 
 #[test]
+fn go_style_listeners_bind_all_ipv4_interfaces() {
+    let dir = tempfile::tempdir().unwrap();
+    let schemas = dir.path().join("schemas");
+    fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:60\n").unwrap();
+    let log = dir.path().join("carbon.log");
+    let config = dir.path().join("config");
+    fs::write(
+        &config,
+        format!(
+            r#"
+[whisper]
+data-dir = "{}/wsp"
+schemas-file = "{}"
+[dump]
+path = "{}/dump"
+[tcp]
+enabled = true
+listen = ":0"
+[udp]
+enabled = true
+listen = ":0"
+[carbonserver]
+enabled = true
+listen = ":0"
+[prometheus]
+enabled = true
+[pprof]
+listen = ":0"
+[[logging]]
+file = "{}"
+encoding = "json"
+"#,
+            dir.path().display(),
+            schemas.display(),
+            dir.path().display(),
+            log.display()
+        ),
+    )
+    .unwrap();
+    let mut child = ChildGuard(
+        Command::new(env!("CARGO_BIN_EXE_carbon-rs"))
+            .arg("--config")
+            .arg(&config)
+            .spawn()
+            .unwrap(),
+    );
+    wait_log(&log, "main", "started");
+    for (logger, message) in [
+        ("tcp", "listening"),
+        ("udp", "listening"),
+        ("carbonserver", "starting carbonserver"),
+        ("pprof", "diagnostics listening"),
+    ] {
+        let row = wait_log(&log, logger, message);
+        let address: std::net::SocketAddr = row["address"].as_str().unwrap().parse().unwrap();
+        assert_eq!(address.ip(), std::net::Ipv4Addr::UNSPECIFIED, "{logger}");
+        assert_ne!(address.port(), 0, "{logger}");
+        if logger == "pprof" {
+            assert!(http_get(address.port(), "/metrics").starts_with("HTTP/1.1 200"));
+        }
+    }
+    signal(&child, "-TERM");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success());
+            break;
+        }
+        assert!(Instant::now() < deadline, "daemon failed to stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
 fn structured_logging_covers_receivers_access_reload_rotation_and_shutdown() {
     let dir = tempfile::tempdir().unwrap();
     let schemas = dir.path().join("schemas");

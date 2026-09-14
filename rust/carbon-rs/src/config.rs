@@ -62,6 +62,7 @@ pub struct Cache {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Receiver {
     pub enabled: bool,
+    #[serde(deserialize_with = "listen_address")]
     pub listen: String,
     pub max_line_bytes: usize,
     pub max_connections: usize,
@@ -74,6 +75,7 @@ pub struct Receiver {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Carbonserver {
     pub enabled: bool,
+    #[serde(deserialize_with = "listen_address")]
     pub listen: String,
     pub trie_index: bool,
     pub trigram_index: bool,
@@ -129,6 +131,7 @@ impl Default for Prometheus {
 #[serde(default)]
 pub struct Pprof {
     pub enabled: bool,
+    #[serde(deserialize_with = "listen_address")]
     pub listen: String,
 }
 impl Default for Pprof {
@@ -339,6 +342,18 @@ impl Config {
         Ok(())
     }
 }
+fn listen_address<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let mut address = String::deserialize(d)?;
+    // Treat Go's :port shorthand as an IPv4 wildcard, not an empty DNS hostname.
+    if address
+        .strip_prefix(':')
+        .is_some_and(|port| !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        address.insert_str(0, "0.0.0.0");
+    }
+    Ok(address)
+}
+
 fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<std::time::Duration, D::Error> {
     let v = String::deserialize(d)?;
     parse_duration(&v).ok_or_else(|| serde::de::Error::custom("invalid duration"))
@@ -577,6 +592,41 @@ fn required<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_style_listeners_normalize_only_port_only_addresses() {
+        for (input, expected) in [
+            (":2003", "0.0.0.0:2003"),
+            (":8080", "0.0.0.0:8080"),
+            (":7007", "0.0.0.0:7007"),
+            (":0", "0.0.0.0:0"),
+            (":65535", "0.0.0.0:65535"),
+            ("127.0.0.1:2003", "127.0.0.1:2003"),
+            ("0.0.0.0:2003", "0.0.0.0:2003"),
+            ("localhost:2003", "localhost:2003"),
+            ("[::]:2003", "[::]:2003"),
+            ("[::1]:2003", "[::1]:2003"),
+            ("::1", "::1"),
+            (":", ":"),
+            (":bad", ":bad"),
+            ("", ""),
+        ] {
+            let mut text = "[common]\nmetric-endpoint='tcp://localhost:3002'\n".to_owned();
+            for section in ["tcp", "udp", "carbonserver", "pprof"] {
+                text.push_str(&format!("[{section}]\nlisten='{input}'\n"));
+            }
+            let config: Config = toml::from_str(&text).unwrap();
+            for listen in [
+                &config.tcp.listen,
+                &config.udp.listen,
+                &config.carbonserver.listen,
+                &config.pprof.listen,
+            ] {
+                assert_eq!(listen, expected, "input: {input}");
+            }
+            assert_eq!(config.common.metric_endpoint, "tcp://localhost:3002");
+        }
+    }
 
     #[test]
     fn pprof_defaults_and_conflicting_diagnostics_paths() {
