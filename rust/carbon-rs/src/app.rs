@@ -19,6 +19,8 @@ pub struct App {
     pub index: Index,
     pub quotas: Option<Engine>,
     pub prometheus: Option<Arc<crate::metrics::Metrics>>,
+    pub(crate) metrics: Arc<crate::metrics::Metrics>,
+    pub(crate) graphite: crate::graphite::Stats,
     pub wake: Notify,
     pub received: AtomicU64,
     pub rejected: AtomicU64,
@@ -43,14 +45,10 @@ pub fn invalid(message: impl Into<String>) -> io::Error {
 
 impl App {
     pub fn new(config: Config) -> io::Result<Arc<Self>> {
-        // Config::load already ran validate_diagnostics; Metrics::new re-checks its own part.
-        let prometheus = if config.prometheus.enabled {
-            Some(Arc::new(
-                crate::metrics::Metrics::new(&config).map_err(io::Error::other)?,
-            ))
-        } else {
-            None
-        };
+        crate::graphite::validate(&config.common).map_err(invalid)?;
+        // Instrumentation is shared; Prometheus only controls HTTP exposition.
+        let metrics = Arc::new(crate::metrics::Metrics::new(&config).map_err(io::Error::other)?);
+        let prometheus = config.prometheus.enabled.then(|| metrics.clone());
         fs::create_dir_all(&config.whisper.data_dir)?;
         let rules = Rules::load(
             &config.whisper.schemas_file,
@@ -80,6 +78,8 @@ impl App {
             rules: RwLock::new(rules),
             quotas,
             prometheus,
+            metrics,
+            graphite: crate::graphite::Stats::default(),
             mutation: Mutex::new(()),
             files: (0..1024).map(|_| Mutex::new(())).collect(),
             wake: Notify::new(),
@@ -176,7 +176,7 @@ impl App {
         let metadata = self
             .rules
             .read()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .metadata(&metric)
             .ok_or_else(|| invalid("no matching storage schema"))?;
         // ponytail: serialize catalog admission; partition by root only after measuring contention.
@@ -252,10 +252,7 @@ impl App {
             .file_lock(metric)
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let metrics = self
-            .prometheus
-            .as_ref()
-            .and_then(|m| m.carbonserver.as_ref());
+        let metrics = self.metrics.carbonserver.as_ref();
         let wait = metrics.map(|_| Instant::now());
         let cached = self.cache.get(metric);
         let wait = wait.map(|wait| wait.elapsed().as_secs_f64());
@@ -371,28 +368,31 @@ impl App {
                     let metadata = self
                         .rules
                         .read()
-                        .unwrap()
+                        .unwrap_or_else(PoisonError::into_inner)
                         .metadata(&batch.metric)
                         .ok_or_else(|| invalid("no storage schema"))?;
                     let mut options = self.options();
                     options.compressed = metadata.compressed;
                     let file = Whisper::create(&path, metadata, options)?;
+                    self.graphite.created.fetch_add(1, Ordering::Relaxed);
                     tracing::info!(target: "whisper:new", metric = %batch.metric, path = %path.display(), "new whisper file");
                     file
                 }
                 Err(e) => return Err(e),
             };
-            if let Some(metrics) = &self.prometheus {
-                // Go observes all points reaching UpdateMany, including failed attempts.
-                let at = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                for point in batch.points.iter() {
-                    metrics.write_lag.observe(at - point.timestamp as f64);
-                }
+            // Go observes all points reaching UpdateMany, including failed attempts.
+            let at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            for point in batch.points.iter() {
+                self.metrics.write_lag.observe(at - point.timestamp as f64);
             }
             w.update_many(&batch.points, now())?;
+            self.graphite.updates.fetch_add(1, Ordering::Relaxed);
+            self.graphite
+                .committed
+                .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
             w.sync()?;
             let meta = disk_meta(
                 &path,
@@ -407,7 +407,9 @@ impl App {
                 q.sync_metric(&batch.metric, costs(&meta));
             }
             self.index.upsert(&batch.metric, meta);
-            self.cache.confirm(batch.id);
+            if !self.cache.confirm(batch.id) {
+                tracing::error!(target: "persister", metric = %batch.metric, batch = batch.id, "written batch was not active; cache accounting may be stale");
+            }
             self.read_generation.fetch_add(1, Ordering::Relaxed);
             Ok(())
         })();
@@ -481,6 +483,9 @@ impl App {
         self.index.reconcile_if_generation(generation, entries);
         self.read_generation.fetch_add(1, Ordering::Relaxed);
         drop(_mutation);
+        self.graphite
+            .scan_ns
+            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
         tracing::info!(target: "carbonserver", metrics, "runtime_seconds.duration_ns" = started.elapsed().as_nanos() as u64, "file list updated");
         Ok(())
     }

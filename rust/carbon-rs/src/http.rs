@@ -89,11 +89,7 @@ async fn request_timeout(
     next: middleware::Next,
 ) -> Response {
     let access = AccessLog::new(&request);
-    let metrics = state
-        .app
-        .prometheus
-        .as_ref()
-        .and_then(|m| m.carbonserver.as_ref());
+    let metrics = state.app.metrics.carbonserver.as_ref();
     // Only Go's instrumented routes; never use arbitrary client paths as labels.
     let guard = metrics.and_then(|metrics| {
         let path = request
@@ -510,11 +506,7 @@ async fn find(
     )?;
     if state.app.config.carbonserver.find_cache_enabled
         && state.cache_bytes > 0
-        && let Some(metrics) = state
-            .app
-            .prometheus
-            .as_ref()
-            .and_then(|m| m.carbonserver.as_ref())
+        && let Some(metrics) = state.app.metrics.carbonserver.as_ref()
     {
         metrics.cache_request("find", from_cache);
     }
@@ -671,12 +663,7 @@ async fn render(
     let cache_key = format!("{}:{targets:?}", fetched_at / 60);
     if let Some((v3_metrics, v2_metrics)) = cached_render(&state, &cache_key) {
         let response = encode_render(wire, v3_metrics, v2_metrics)?;
-        if let Some(metrics) = state
-            .app
-            .prometheus
-            .as_ref()
-            .and_then(|m| m.carbonserver.as_ref())
-        {
+        if let Some(metrics) = state.app.metrics.carbonserver.as_ref() {
             metrics.cache_request("query", true);
         }
         return Ok(response);
@@ -784,11 +771,7 @@ async fn render(
     let response = encode_render(wire, v3_metrics, v2_metrics)?;
     if state.app.config.carbonserver.query_cache_enabled
         && state.cache_bytes > 0
-        && let Some(metrics) = state
-            .app
-            .prometheus
-            .as_ref()
-            .and_then(|m| m.carbonserver.as_ref())
+        && let Some(metrics) = state.app.metrics.carbonserver.as_ref()
     {
         metrics.cache_request("query", false);
     }

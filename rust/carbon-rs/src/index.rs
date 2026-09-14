@@ -367,6 +367,13 @@ impl Index {
     pub fn mode(&self) -> IndexMode {
         self.mode
     }
+    pub(crate) fn metric_count(&self) -> usize {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .metrics
+            .len()
+    }
     pub fn generation(&self) -> u64 {
         self.state
             .read()

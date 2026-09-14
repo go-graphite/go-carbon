@@ -17,6 +17,116 @@ impl Drop for ChildGuard {
 }
 
 #[test]
+fn graphite_common_settings_drive_local_tcp_and_udp_delivery_without_prometheus() {
+    for transport in ["local", "tcp", "udp"] {
+        let dir = tempfile::tempdir().unwrap();
+        let tcp = TcpListener::bind("127.0.0.1:0").unwrap();
+        tcp.set_nonblocking(true).unwrap();
+        let udp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let endpoint = match transport {
+            "tcp" => format!("tcp://{}", tcp.local_addr().unwrap()),
+            "udp" => format!("udp://{}", udp.local_addr().unwrap()),
+            _ => "local".into(),
+        };
+        let schemas = dir.path().join("schemas");
+        fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:600\n").unwrap();
+        let config = dir.path().join("config");
+        fs::write(
+            &config,
+            format!(
+                r#"
+[common]
+graph-prefix = "self.agent"
+metric-endpoint = "{endpoint}"
+metric-interval = "0.1s"
+[whisper]
+data-dir = "{}/wsp"
+schemas-file = "{}"
+[dump]
+path = "{}/dump"
+[tcp]
+enabled = true
+listen = "127.0.0.1:0"
+[[logging]]
+file = "none"
+"#,
+                dir.path().display(),
+                schemas.display(),
+                dir.path().display()
+            ),
+        )
+        .unwrap();
+        let mut child = ChildGuard(
+            Command::new(env!("CARGO_BIN_EXE_carbon-rs"))
+                .arg("--config")
+                .arg(&config)
+                .spawn()
+                .unwrap(),
+        );
+        let metric_path = dir.path().join("wsp/self/agent/cache/maxSize.wsp");
+        let mut wire = String::new();
+        match transport {
+            "local" => wait_for(&metric_path),
+            "tcp" => {
+                let until = Instant::now() + Duration::from_secs(5);
+                let mut socket = loop {
+                    match tcp.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < until =>
+                        {
+                            std::thread::sleep(Duration::from_millis(10))
+                        }
+                        Err(error) => panic!("self-metrics not delivered: {error}"),
+                    }
+                };
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                socket.read_to_string(&mut wire).unwrap();
+            }
+            _ => {
+                let mut packet = [0; 4096];
+                let n = udp.recv(&mut packet).unwrap();
+                assert!(n <= 1000);
+                wire = String::from_utf8(packet[..n].to_vec()).unwrap();
+            }
+        }
+        signal(&child, "-TERM");
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.0.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < until,
+                "Graphite reporter prevented shutdown"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if transport == "local" {
+            let at = carbon_rs::app::now();
+            let mut whisper =
+                whisper_rs::Whisper::open(metric_path, whisper_rs::Options::default()).unwrap();
+            let series = whisper.fetch(at - 10, at, at).unwrap().unwrap();
+            assert!(series.values.contains(&Some(1_000_000.0)));
+        } else {
+            assert!(wire.contains("self.agent.cache.maxSize 1000000 "), "{wire}");
+            assert!(wire.ends_with('\n'));
+            for line in wire.lines() {
+                let (name, point) = carbon_rs::plaintext::parse_line(line.as_bytes()).unwrap();
+                assert!(name.starts_with("self.agent."));
+                assert!(point.timestamp > 0);
+            }
+            assert_eq!(fs::read_dir(dir.path().join("wsp")).unwrap().count(), 0);
+        }
+    }
+}
+
+#[test]
 fn diagnostics_start_without_carbonserver_and_honor_enable_flags() {
     for (pprof_enabled, prometheus_enabled) in [(false, true), (true, false), (true, true)] {
         if pprof_enabled && !carbon_rs::profiling::SUPPORTED {

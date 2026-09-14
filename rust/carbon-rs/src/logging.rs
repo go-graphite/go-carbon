@@ -205,35 +205,7 @@ fn decode_path(path: &str) -> Result<String, String> {
 }
 
 fn sample_tick(value: &str) -> Option<Duration> {
-    static PARTS: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)").unwrap()
-    });
-    let value = value.strip_prefix('+').unwrap_or(value);
-    let mut end = 0;
-    let mut seconds = 0.0;
-    for cap in PARTS.captures_iter(value) {
-        let part = cap.get(0)?;
-        if part.start() != end {
-            return None;
-        }
-        end = part.end();
-        seconds += cap[1].parse::<f64>().ok()?
-            * match &cap[2] {
-                "ns" => 1e-9,
-                "us" | "µs" | "μs" => 1e-6,
-                "ms" => 1e-3,
-                "s" => 1.0,
-                "m" => 60.0,
-                "h" => 3600.0,
-                _ => return None,
-            };
-    }
-    if end != value.len() || seconds <= 0.0 || seconds > i64::MAX as f64 / 1e9 {
-        return None;
-    }
-    Duration::try_from_secs_f64(seconds)
-        .ok()
-        .filter(|d| !d.is_zero())
+    crate::config::parse_duration(value).filter(|d| !d.is_zero())
 }
 
 struct Sampler {

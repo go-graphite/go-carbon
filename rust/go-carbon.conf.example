@@ -1,6 +1,9 @@
 # Run from the repository root. Start against a COPY of your Whisper tree.
 [common]
 max-cpu = 4
+graph-prefix = "carbon.agents.{host}"
+metric-endpoint = "local" # Or tcp://host:2003 / udp://host:2003 (IPv6: [::1]:2003).
+metric-interval = "1m0s"
 
 [cache]
 write-strategy = "noop"

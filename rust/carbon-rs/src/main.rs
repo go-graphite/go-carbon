@@ -240,6 +240,13 @@ async fn run(config: Config) -> io::Result<()> {
         }
     });
     let compactor = tokio::spawn(carbon_rs::lifecycle::compact(app.clone(), stop_rx.clone()));
+    let collector_app = app.clone();
+    let collector_stop = stop_rx.clone();
+    let collector = tokio::spawn(async move {
+        if let Err(error) = carbon_rs::graphite::run(collector_app, collector_stop).await {
+            tracing::error!(target: "stat", error = %error, "self-metrics collector stopped");
+        }
+    });
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut dump_stop =
@@ -283,15 +290,39 @@ async fn run(config: Config) -> io::Result<()> {
         tracing::warn!(target: "main", "listener shutdown timed out");
         listeners.abort_all();
     }
-    while let Some(result) = workers.join_next().await {
-        result.map_err(io::Error::other)?;
-    }
-    scanner.await.map_err(io::Error::other)?;
-    compactor.await.map_err(io::Error::other)?;
+    // One budget for background teardown plus drain; failures and hangs must not skip the dump.
     let deadline = Instant::now() + timeout;
+    let background = async {
+        while let Some(result) = workers.join_next().await {
+            if let Err(error) = result {
+                tracing::error!(target: "persister", error = %error, "Whisper worker failed");
+            }
+        }
+        for (name, task) in [
+            ("scanner", scanner),
+            ("compactor", compactor),
+            ("collector", collector),
+        ] {
+            if let Err(error) = task.await {
+                tracing::error!(target: "main", task = name, error = %error, "background task failed");
+            }
+        }
+    };
+    if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), background)
+        .await
+        .is_err()
+    {
+        tracing::warn!(target: "main", "background shutdown timed out");
+        workers.abort_all();
+    }
     if !dump_immediately {
         while !app.cache.is_empty() && Instant::now() < deadline {
-            match app.flush_one() {
+            let writer = app.clone();
+            let flushed = tokio::task::spawn_blocking(move || writer.flush_one())
+                .await
+                .map_err(io::Error::other)
+                .and_then(|result| result);
+            match flushed {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(e) => {

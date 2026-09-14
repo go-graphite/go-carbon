@@ -2,6 +2,7 @@ pub mod app;
 pub mod cache;
 pub mod config;
 pub mod file_list;
+pub mod graphite;
 pub mod http;
 pub mod index;
 pub mod lifecycle;

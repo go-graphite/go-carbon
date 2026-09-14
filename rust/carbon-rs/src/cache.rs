@@ -53,6 +53,8 @@ pub struct Cache {
     dropped: AtomicU64,
     high_water: AtomicU64,
     next_batch: AtomicU64,
+    pending_metrics: AtomicU64,
+    queries: AtomicU64,
 }
 
 impl Cache {
@@ -77,6 +79,8 @@ impl Cache {
             dropped: AtomicU64::new(0),
             high_water: AtomicU64::new(0),
             next_batch: AtomicU64::new(1),
+            pending_metrics: AtomicU64::new(0),
+            queries: AtomicU64::new(0),
         }
     }
 
@@ -160,6 +164,8 @@ impl Cache {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .insert(batch.id, metric);
+            // Registered as in-flight before leaving pending: counts overlap rather than gap.
+            self.pending_metrics.fetch_sub(1, Ordering::Relaxed);
             return Some(batch);
         }
     }
@@ -173,6 +179,7 @@ impl Cache {
     }
 
     pub fn get(&self, metric: &str) -> Vec<Point> {
+        self.queries.fetch_add(1, Ordering::Relaxed);
         let shard = self.shards[self.shard(metric)]
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
@@ -222,6 +229,17 @@ impl Cache {
         }
     }
 
+    pub(crate) fn graphite_counts(&self) -> (u64, usize, u64) {
+        (
+            self.pending_metrics.load(Ordering::Relaxed),
+            self.active
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len(),
+            self.queries.load(Ordering::Relaxed),
+        )
+    }
+
     fn finish(&self, id: u64, retry: bool) -> bool {
         let _admission = self
             .admission
@@ -255,6 +273,9 @@ impl Cache {
         let count = batch.points.len() as u64;
         self.in_flight.fetch_sub(count, Ordering::Relaxed);
         if retry {
+            if entry.pending.is_empty() {
+                self.pending_metrics.fetch_add(1, Ordering::Relaxed);
+            }
             let mut recovered = (*batch.points).clone();
             recovered.append(&mut entry.pending);
             entry.pending = recovered;
@@ -300,6 +321,9 @@ impl Cache {
                 in_flight: None,
                 scheduled: false,
             });
+        if entry.pending.is_empty() {
+            self.pending_metrics.fetch_add(1, Ordering::Relaxed);
+        }
         entry.pending.push(point);
         if !entry.scheduled {
             entry.scheduled = true;
@@ -322,7 +346,7 @@ impl Cache {
     fn entry_exists(&self, metric: &str) -> bool {
         self.shards[self.shard(metric)]
             .lock()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .entries
             .contains_key(metric)
     }

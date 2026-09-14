@@ -22,6 +22,7 @@ pub struct Metrics {
 }
 
 pub struct ServerMetrics {
+    pub(crate) inflight: std::sync::atomic::AtomicU64,
     pub requests: IntCounterVec,
     pub cache_requests: IntCounterVec,
     pub durations: Histogram,
@@ -40,7 +41,13 @@ impl Metrics {
             .prometheus
             .validate(config.carbonserver.enabled)
             .map_err(prometheus::Error::Msg)?;
-        let registry = Registry::new_custom(None, Some(config.prometheus.labels.clone()))?;
+        let registry = Registry::new_custom(
+            None,
+            config
+                .prometheus
+                .enabled
+                .then(|| config.prometheus.labels.clone()),
+        )?;
         let tcp_received = if config.tcp.enabled {
             let counter = IntCounter::new(
                 "metrics_received_tcp_total",
@@ -71,7 +78,7 @@ impl Metrics {
         build.set(1);
         registry.register(Box::new(build))?;
         #[cfg(target_os = "linux")]
-        {
+        if config.prometheus.enabled {
             registry.register(Box::new(
                 prometheus::process_collector::ProcessCollector::for_self(),
             ))?;
@@ -127,6 +134,7 @@ impl ServerMetrics {
         registry.register(Box::new(cache_durations.clone()))?;
         Ok(Self {
             requests,
+            inflight: std::sync::atomic::AtomicU64::new(0),
             cache_requests,
             cache_durations,
             durations: histogram(
@@ -159,6 +167,7 @@ impl ServerMetrics {
 
     pub(crate) fn request<'a>(&'a self, handler: &'a str) -> RequestMetrics<'a> {
         RequestMetrics {
+            _active: crate::graphite::Active::new(&self.inflight),
             metrics: self,
             handler,
             start: Instant::now(),
@@ -168,6 +177,7 @@ impl ServerMetrics {
 }
 
 pub(crate) struct RequestMetrics<'a> {
+    _active: crate::graphite::Active<'a>,
     metrics: &'a ServerMetrics,
     handler: &'a str,
     start: Instant,

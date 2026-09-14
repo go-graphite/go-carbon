@@ -9,19 +9,21 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
 fn line(app: &App, bytes: &[u8], limit: usize, tcp: bool) {
+    let stats = if tcp {
+        &app.graphite.tcp
+    } else {
+        &app.graphite.udp
+    };
     if bytes.len() > limit {
+        stats.errors.fetch_add(1, Ordering::Relaxed);
         app.invalid.fetch_add(1, Ordering::Relaxed);
         parse_failed(tcp, bytes, &"line exceeds max-line-bytes");
         return;
     }
     match crate::plaintext::parse_line(bytes) {
         Ok((name, point)) => {
-            if tcp
-                && let Some(counter) = app
-                    .prometheus
-                    .as_ref()
-                    .and_then(|m| m.tcp_received.as_ref())
-            {
+            stats.received.fetch_add(1, Ordering::Relaxed);
+            if tcp && let Some(counter) = app.metrics.tcp_received.as_ref() {
                 counter.inc();
             }
             if let Err(e) = app.ingest(name, point)
@@ -32,6 +34,7 @@ fn line(app: &App, bytes: &[u8], limit: usize, tcp: bool) {
             }
         }
         Err(error) => {
+            stats.errors.fetch_add(1, Ordering::Relaxed);
             app.invalid.fetch_add(1, Ordering::Relaxed);
             parse_failed(tcp, bytes, &error);
         }
@@ -70,7 +73,9 @@ pub async fn tcp(
                         let app = app.clone(); let config = config.clone(); let stop = stop.clone();
                         connections.spawn(async move {
                             let _permit = permit;
-                            if let Err(error) = connection(stream, app, config, stop).await {
+                            let _active = crate::graphite::Active::new(&app.graphite.tcp.active);
+                            if let Err(error) = connection(stream, app.clone(), config, stop).await {
+                                app.graphite.tcp.errors.fetch_add(1, Ordering::Relaxed);
                                 tracing::error!(target: "tcp", peer = %peer, error = %error, "read error");
                             }
                         });
@@ -117,6 +122,7 @@ async fn connection(
                     pending.clear();
                     oversized = true;
                     app.invalid.fetch_add(1, Ordering::Relaxed);
+                    app.graphite.tcp.errors.fetch_add(1, Ordering::Relaxed);
                     tracing::warn!(target: "tcp", max_line_bytes = config.max_line_bytes, "line exceeds max-line-bytes");
                 } else {
                     pending.push(byte);

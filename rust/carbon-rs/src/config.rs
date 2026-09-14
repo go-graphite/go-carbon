@@ -28,6 +28,9 @@ pub struct Config {
 #[serde(default, rename_all = "kebab-case")]
 pub struct Common {
     pub graph_prefix: String,
+    pub metric_endpoint: String,
+    #[serde(default = "sixty_seconds", deserialize_with = "duration")]
+    pub metric_interval: std::time::Duration,
     pub max_cpu: usize,
     pub log_level: Option<String>,
     pub logfile: Option<String>,
@@ -174,6 +177,8 @@ impl Default for Common {
     fn default() -> Self {
         Self {
             graph_prefix: "carbon.agents.{host}".into(),
+            metric_endpoint: "local".into(),
+            metric_interval: sixty_seconds(),
             max_cpu: 1,
             log_level: None,
             logfile: None,
@@ -287,6 +292,19 @@ impl Config {
             }
         }
         config.validate_diagnostics()?;
+        crate::graphite::validate(&config.common)?;
+        // A zero tokio timeout fires before the first poll: every read/request would fail.
+        for (name, value) in [
+            ("tcp.read-timeout", config.tcp.read_timeout),
+            (
+                "carbonserver.request-timeout",
+                config.carbonserver.request_timeout,
+            ),
+        ] {
+            if value.is_zero() {
+                return Err(format!("{name} must be positive"));
+            }
+        }
         if config.common.log_level.is_some() || config.common.logfile.is_some() {
             let mut logging = crate::logging::Config::application_default();
             if let Some(level) = &config.common.log_level {
@@ -340,18 +358,37 @@ fn five_minutes() -> std::time::Duration {
 fn thirty_seconds() -> std::time::Duration {
     std::time::Duration::from_secs(30)
 }
-fn parse_duration(v: &str) -> Option<std::time::Duration> {
-    let (n, u) = v
-        .trim()
-        .split_at(v.trim().find(|c: char| !c.is_ascii_digit())?);
-    let n = n.parse::<u64>().ok()?;
-    Some(std::time::Duration::from_secs(n.checked_mul(match u {
-        "ms" => return Some(std::time::Duration::from_millis(n)),
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        _ => return None,
-    })?))
+pub(crate) fn parse_duration(value: &str) -> Option<std::time::Duration> {
+    use std::{sync::LazyLock, time::Duration};
+    static PARTS: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(\d+(?:\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h)").unwrap());
+    let value = value.strip_prefix('+').unwrap_or(value);
+    if value == "0" {
+        return Some(Duration::ZERO);
+    }
+    let mut end = 0;
+    let mut seconds = 0.0;
+    for cap in PARTS.captures_iter(value) {
+        let part = cap.get(0)?;
+        if part.start() != end {
+            return None;
+        }
+        end = part.end();
+        seconds += cap[1].parse::<f64>().ok()?
+            * match &cap[2] {
+                "ns" => 1e-9,
+                "us" | "µs" | "μs" => 1e-6,
+                "ms" => 1e-3,
+                "s" => 1.0,
+                "m" => 60.0,
+                "h" => 3600.0,
+                _ => return None,
+            };
+    }
+    if value.is_empty() || end != value.len() || seconds > i64::MAX as f64 / 1e9 {
+        return None;
+    }
+    Duration::try_from_secs_f64(seconds).ok()
 }
 
 pub struct Rules {
@@ -607,6 +644,27 @@ mod tests {
         let conf = dir.path().join("c");
         fs::write(&conf, "[cache]\nwrite-strategy='max'\n").unwrap();
         assert!(Config::load(conf).is_err());
+    }
+    #[test]
+    fn rejects_zero_timeouts() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("c");
+        for toml in [
+            "[tcp]\nread-timeout = \"0s\"\n",
+            "[carbonserver]\nrequest-timeout = \"0\"\n",
+        ] {
+            fs::write(&conf, toml).unwrap();
+            let error = Config::load(&conf).unwrap_err();
+            assert!(error.ends_with("must be positive"), "{toml}: {error}");
+        }
+        fs::write(&conf, "[carbonserver]\nscan-frequency = \"0\"\n").unwrap();
+        assert!(
+            Config::load(&conf)
+                .unwrap()
+                .carbonserver
+                .scan_frequency
+                .is_zero()
+        );
     }
     #[test]
     fn converts_existing_query_cache_megabytes() {
