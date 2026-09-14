@@ -2145,8 +2145,6 @@ func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
 
 // skipcq: RVV-A0005
 func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
-	dirs, isNew := ti.metricDirs(ps)
-
 	// first check throughput quota
 	// second check usage quota
 	// third check max create throttle
@@ -2160,6 +2158,7 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		return false
 	}
 
+	dirs, isNew := ti.metricDirs(ps)
 	if !isNew {
 		return false
 	}
