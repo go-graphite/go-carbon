@@ -103,6 +103,8 @@ pub struct Engine {
     window: Duration,
     state: Mutex<State>,
     next: Mutex<u64>,
+    /// Namespace -> index into `rules`; grows with the same namespaces `State::usage` tracks.
+    rule_cache: Mutex<HashMap<String, Option<usize>>>,
 }
 pub type QuotaEngine = Engine;
 
@@ -154,6 +156,7 @@ impl Engine {
                 window_at: Instant::now(),
             }),
             next: Mutex::new(1),
+            rule_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -454,21 +457,28 @@ impl Engine {
         }
         out
     }
+    /// Last matching rule. Rules are fixed for the engine's lifetime, so each namespace is
+    /// glob-matched once instead of on every admitted point.
     fn rule_for(&self, namespace: &str) -> Option<&Rule> {
-        self.rules
-            .iter()
-            .rev()
-            .find(|compiled| {
-                if compiled.rule.pattern == "/" {
-                    namespace == "/"
-                } else {
-                    compiled
-                        .glob
-                        .as_ref()
-                        .is_some_and(|glob| glob.matches(namespace))
-                }
-            })
-            .map(|x| &x.rule)
+        let mut cache = self
+            .rule_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(index) = cache.get(namespace) {
+            return index.map(|i| &self.rules[i].rule);
+        }
+        let index = self.rules.iter().rposition(|compiled| {
+            if compiled.rule.pattern == "/" {
+                namespace == "/"
+            } else {
+                compiled
+                    .glob
+                    .as_ref()
+                    .is_some_and(|glob| glob.matches(namespace))
+            }
+        });
+        cache.insert(namespace.to_owned(), index);
+        index.map(|i| &self.rules[i].rule)
     }
     fn exceeded(
         &self,
@@ -652,6 +662,33 @@ mod tests {
         assert!(q.release(first));
         assert!(q.commit(second));
         assert_eq!(q.usage("/").namespaces, 1);
+    }
+    /// Rules never change for a loaded engine, so each namespace resolves its rule once.
+    #[test]
+    fn rule_lookups_are_memoized_per_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("q");
+        fs::write(
+            &file,
+            "[/]\nmetrics=10\n[sys.*]\nmetrics=5\n[sys.*.db]\nmetrics=5\n",
+        )
+        .unwrap();
+        let q = Engine::load(file, Duration::from_secs(60)).unwrap();
+        let cached = || q.rule_cache.lock().unwrap().len();
+        assert!(q.admit("sys.app.db.one", 1, Costs::metric(1, 1, 1)).is_ok());
+        assert_eq!(cached(), 4, "/, sys, sys.app, sys.app.db");
+        assert!(q.admit("sys.app.db.two", 1, Costs::metric(1, 1, 1)).is_ok());
+        assert_eq!(cached(), 4);
+        assert!(q.admit("web.x", 1, Costs::metric(1, 1, 1)).is_ok());
+        assert_eq!(cached(), 5);
+        for _ in 0..2 {
+            let pattern = |ns: &str| q.rule_for(ns).map(|r| r.pattern.as_str());
+            assert_eq!(pattern("/"), Some("/"));
+            assert_eq!(pattern("sys"), None);
+            assert_eq!(pattern("sys.app"), Some("sys.*"));
+            assert_eq!(pattern("sys.app.db"), Some("sys.*.db"));
+            assert_eq!(pattern("web"), None);
+        }
     }
     #[test]
     fn throughput_scales_to_report_window() {
