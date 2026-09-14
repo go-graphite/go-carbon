@@ -623,18 +623,24 @@ fn daemon_restores_dump_ingests_tcp_and_shuts_down() {
     fs::write(&schemas, "[default]\npattern = .*\nretentions = 1:60\n").unwrap();
     let config = dir.path().join("carbon.toml");
     fs::write(&config, format!("[whisper]\ndata-dir = \"{}\"\nschemas-file = \"{}\"\nworkers = 1\n\n[tcp]\nenabled = true\nlisten = \"127.0.0.1:{port}\"\n\n[udp]\nenabled = false\n\n[carbonserver]\nenabled = false\n\n[dump]\nenabled = true\npath = \"{}\"\n", data.display(), schemas.display(), dump.display())).unwrap();
+    let timestamp = carbon_rs::app::now() - 1;
     let pending = dump.join("cache.bin");
     let mut file = fs::File::create(&pending).unwrap();
     write_dump(
         &mut file,
         "restored.metric",
         &[Point {
-            timestamp: 100,
+            timestamp,
             value: 1.0,
         }],
     )
     .unwrap();
     drop(file);
+    let original = fs::read(&pending).unwrap();
+    let input = dump.join("input.1.2");
+    let line = format!("restored.input 3 {timestamp}\n");
+    let previous = dump.join("cache.old.bin.restored");
+    fs::write(&previous, b"previous backup").unwrap();
     let bin = env!("CARGO_BIN_EXE_carbon-rs");
     assert!(
         Command::new(bin)
@@ -645,6 +651,27 @@ fn daemon_restores_dump_ingests_tcp_and_shuts_down() {
             .unwrap()
             .success()
     );
+    // Both a truncated input and a failed write must keep every pending dump intact.
+    for truncated in [true, false] {
+        let contents = if truncated {
+            line.trim_end()
+        } else {
+            fs::create_dir_all(&data).unwrap();
+            fs::write(data.join("restored"), b"blocks metric creation").unwrap();
+            &line
+        };
+        fs::write(&input, contents).unwrap();
+        let output = Command::new(bin)
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(fs::read(&pending).unwrap(), original);
+        assert_eq!(fs::read_to_string(&input).unwrap(), contents);
+        assert_eq!(fs::read_dir(&dump).unwrap().count(), 3);
+    }
+    fs::remove_file(data.join("restored")).unwrap();
     let mut child = ChildGuard(
         Command::new(bin)
             .arg("--config")
@@ -653,8 +680,6 @@ fn daemon_restores_dump_ingests_tcp_and_shuts_down() {
             .spawn()
             .unwrap(),
     );
-    wait_for(&pending.with_extension("bin.restored"));
-    wait_for(&data.join("restored/metric.wsp"));
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         match TcpStream::connect(("127.0.0.1", port)) {
@@ -665,6 +690,27 @@ fn daemon_restores_dump_ingests_tcp_and_shuts_down() {
             Err(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => panic!("TCP listener did not start: {e}"),
         }
+    }
+    // The listener starts only after successful persistence and dump cleanup.
+    assert_eq!(
+        fs::read_dir(&dump)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>(),
+        vec![previous.clone()]
+    );
+    assert_eq!(fs::read(previous).unwrap(), b"previous backup");
+    for (metric, value) in [("metric", 1.0), ("input", 3.0)] {
+        let mut whisper = whisper_rs::Whisper::open(
+            data.join(format!("restored/{metric}.wsp")),
+            whisper_rs::Options::default(),
+        )
+        .unwrap();
+        let series = whisper
+            .fetch(timestamp - 1, timestamp + 1, timestamp + 1)
+            .unwrap()
+            .unwrap();
+        assert!(series.values.contains(&Some(value)));
     }
     wait_for(&data.join("live/metric.wsp"));
     assert!(

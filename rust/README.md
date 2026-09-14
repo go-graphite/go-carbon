@@ -82,7 +82,7 @@ macOS CPU profiling is rejected: the native unwinder lost sampled leaf functions
 
 ## Recovery and rollout
 
-SIGTERM/SIGINT stop admission, finish active writes, and drain the cache. Unpersisted data is saved as a Go-compatible binary dump if draining fails. SIGUSR2 dumps and stops when dumping is enabled. Recovery runs before receivers start; originals are renamed with `.restored` only after successful writes. A pending dump with restoration disabled prevents startup. SIGHUP reloads schema/aggregation rules atomically; other configuration changes require restart.
+SIGTERM/SIGINT stop admission, finish active writes, and drain the cache. Unpersisted data is saved as a Go-compatible binary dump if draining fails. SIGUSR2 dumps and stops when dumping is enabled. Recovery runs before receivers start; originals are deleted only after all restored points have been flushed and synced. Failed restoration leaves pending dumps intact for retry. Existing `.restored` backups from older versions are ignored and left untouched; they can be removed manually when no longer needed. A pending dump with restoration disabled prevents startup. SIGHUP reloads schema/aggregation rules atomically; other configuration changes require restart.
 
 Validate on a **copy** of the Whisper tree first. Do not run Go and Rust writers against the same tree. Compare query results, quota reports, file-integrity checks, RSS, latency, and sustained ingestion under the intended workload before a canary. To roll back, stop Rust, retain both `.wsp` and `.ooo` files and pending dumps, then start the pinned Go daemon with dump restoration enabled.
 

@@ -109,16 +109,7 @@ async fn run(config: Config) -> io::Result<()> {
             }
         }
         for path in restored {
-            let mut name = path.as_os_str().to_owned();
-            name.push(".restored");
-            let restored = PathBuf::from(name);
-            if restored.exists() {
-                return Err(carbon_rs::app::invalid(format!(
-                    "refusing to overwrite restored dump {}",
-                    restored.display()
-                )));
-            }
-            std::fs::rename(path, restored)?;
+            std::fs::remove_file(path)?;
         }
         if restored_files > 0 {
             tracing::info!(target: "restore", files = restored_files, "restored points persisted");
