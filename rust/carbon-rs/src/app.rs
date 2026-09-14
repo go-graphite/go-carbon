@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -29,14 +29,20 @@ pub struct App {
     pub read_generation: AtomicU64,
     rejection_logged: AtomicI64,
     rules: RwLock<Rules>,
-    mutation: Mutex<CreationRate>,
+    mutation: Mutex<AdmissionState>,
     files: Vec<Mutex<()>>,
     /// Last sidecar merge; caps compactions at `out-of-order-compact-rate` per second.
     compaction_grant: Mutex<Option<Instant>>,
 }
 
-// The catalog mutation lock also protects this budget, so concurrent first arrivals
-// for the same metric consume one permit. Go refills a full burst each second.
+struct AdmissionState {
+    creation_rate: CreationRate,
+    // Keep the chosen file format until the first successful flush, even across reloads.
+    pending_metadata: HashMap<String, Metadata>,
+}
+
+// Protected by the catalog mutation lock, so concurrent first arrivals for the same
+// metric consume one permit. Go refills a full burst each second.
 struct CreationRate {
     window_at: Instant,
     used: u64,
@@ -106,9 +112,12 @@ impl App {
             prometheus,
             metrics,
             graphite: crate::graphite::Stats::default(),
-            mutation: Mutex::new(CreationRate {
-                window_at: Instant::now(),
-                used: 0,
+            mutation: Mutex::new(AdmissionState {
+                creation_rate: CreationRate {
+                    window_at: Instant::now(),
+                    used: 0,
+                },
+                pending_metadata: HashMap::new(),
             }),
             files: (0..1024).map(|_| Mutex::new(())).collect(),
             wake: Notify::new(),
@@ -206,19 +215,22 @@ impl App {
         // ponytail: serialize catalog admission; partition by root only after measuring contention.
         let mut mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let existing = self.index.get(&metric);
+        let mut creation_metadata = None;
         let meta = match existing.clone() {
             Some(meta) => meta,
             // Schemas only shape a file that does not exist yet, as in Go. Matching them for
             // every point of a known metric was a measurable share of receiver CPU.
-            None => estimated_meta(
-                &self
+            None => {
+                let metadata = self
                     .rules
                     .read()
                     .unwrap_or_else(PoisonError::into_inner)
                     .metadata(&metric)
-                    .ok_or_else(|| invalid("no matching storage schema"))?,
-                self.config.whisper.sparse_create,
-            ),
+                    .ok_or_else(|| invalid("no matching storage schema"))?;
+                let meta = estimated_meta(&metadata, self.config.whisper.sparse_create);
+                creation_metadata = Some(metadata);
+                meta
+            }
         };
         let reservation = self
             .quotas
@@ -230,7 +242,7 @@ impl App {
         if existing.is_none()
             && self.config.carbonserver.enabled
             && self.config.carbonserver.max_creates_per_second > 0
-            && !mutation.allow(
+            && !mutation.creation_rate.allow(
                 self.config.carbonserver.max_creates_per_second,
                 Instant::now(),
             )
@@ -252,6 +264,9 @@ impl App {
         if existing.is_none() {
             self.index.upsert(&metric, meta);
         }
+        if let Some(metadata) = creation_metadata {
+            mutation.pending_metadata.insert(metric, metadata);
+        }
         self.received.fetch_add(1, Ordering::Relaxed);
         self.read_generation.fetch_add(1, Ordering::Relaxed);
         self.wake.notify_one();
@@ -267,14 +282,26 @@ impl App {
         match Whisper::open(path, self.options()) {
             Ok(w) => Ok(w.metadata().clone()),
             Err(e) if e.kind() == io::ErrorKind::NotFound && !self.cache.get(metric).is_empty() => {
-                self.rules
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .metadata(metric)
-                    .ok_or(e)
+                self.creation_metadata(metric).ok_or(e)
             }
             Err(e) => Err(e),
         }
+    }
+
+    fn creation_metadata(&self, metric: &str) -> Option<Metadata> {
+        let pending = self
+            .mutation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pending_metadata
+            .get(metric)
+            .cloned();
+        pending.or_else(|| {
+            self.rules
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .metadata(metric)
+        })
     }
 
     pub fn fetch(
@@ -344,12 +371,7 @@ impl App {
                 if cached.is_empty() {
                     return Err(e);
                 }
-                let meta = self
-                    .rules
-                    .read()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .metadata(metric)
-                    .ok_or(e)?;
+                let meta = self.creation_metadata(metric).ok_or(e)?;
                 let archive = &meta.retentions[0];
                 let step = archive.seconds_per_point as i64;
                 let start =
@@ -415,10 +437,7 @@ impl App {
                     self.check_symlinks(&batch.metric)?;
                     fs::create_dir_all(path.parent().unwrap())?;
                     let metadata = self
-                        .rules
-                        .read()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .metadata(&batch.metric)
+                        .creation_metadata(&batch.metric)
                         .ok_or_else(|| invalid("no storage schema"))?;
                     let mut options = self.options();
                     options.compressed = metadata.compressed;
@@ -472,11 +491,12 @@ impl App {
                     .map(|m| m.first_seen_at)
                     .unwrap_or_else(now),
             )?;
-            let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some(q) = &self.quotas {
                 q.sync_metric(&batch.metric, costs(&meta));
             }
             self.index.upsert(&batch.metric, meta);
+            mutation.pending_metadata.remove(&batch.metric);
             if !self.cache.confirm(batch.id) {
                 tracing::error!(target: "persister", metric = %batch.metric, batch = batch.id, "written batch was not active; cache accounting may be stale");
             }
@@ -638,20 +658,30 @@ impl App {
 
     fn restore_points(&self, metric: String, points: Vec<Point>) -> io::Result<()> {
         self.path(&metric)?;
-        let meta = self
-            .rules
-            .read()
-            .unwrap()
-            .metadata(&metric)
+        if points.is_empty() {
+            return Ok(());
+        }
+        let mut mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
+        let metadata = mutation
+            .pending_metadata
+            .get(&metric)
+            .cloned()
+            .or_else(|| {
+                self.rules
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .metadata(&metric)
+            })
             .ok_or_else(|| invalid("no storage schema for restored metric"))?;
         self.cache.restore(metric.clone(), points);
         self.read_generation.fetch_add(1, Ordering::Relaxed);
         if self.index.get(&metric).is_none() {
-            let meta = estimated_meta(&meta, self.config.whisper.sparse_create);
+            let meta = estimated_meta(&metadata, self.config.whisper.sparse_create);
             if let Some(q) = &self.quotas {
                 q.register_existing(&metric, costs(&meta));
             }
             self.index.upsert(&metric, meta);
+            mutation.pending_metadata.insert(metric, metadata);
         }
         Ok(())
     }
@@ -982,7 +1012,8 @@ mod tests {
                     app.ingest("restored.metric".into(), point).unwrap();
                     if enabled && limit > 0 {
                         assert!(app.ingest("still.limited".into(), point).is_err());
-                        app.mutation.lock().unwrap().window_at -= Duration::from_secs(1);
+                        app.mutation.lock().unwrap().creation_rate.window_at -=
+                            Duration::from_secs(1);
                         app.ingest("next.window".into(), point).unwrap();
                     }
                 }
@@ -1014,7 +1045,7 @@ mod tests {
                 .to_string()
                 .starts_with("quota exceeded")
         );
-        assert_eq!(app.mutation.lock().unwrap().used, 0);
+        assert_eq!(app.mutation.lock().unwrap().creation_rate.used, 0);
         app.ingest("allowed.one".into(), point).unwrap();
         assert_eq!(
             app.ingest("allowed.two".into(), point)
@@ -1033,7 +1064,8 @@ mod tests {
         assert_eq!(app.quotas.as_ref().unwrap().usage("allowed").metrics, 1);
         assert!(app.index.get("allowed.two").is_none());
         assert!(app.index.get("allowed.three").is_none());
-        app.mutation.lock().unwrap().window_at -= Duration::from_secs(1);
+        assert!(app.mutation.lock().unwrap().pending_metadata.is_empty());
+        app.mutation.lock().unwrap().creation_rate.window_at -= Duration::from_secs(1);
         app.ingest("allowed.three".into(), point).unwrap();
         assert_eq!(app.quotas.as_ref().unwrap().usage("allowed").metrics, 2);
     }
@@ -1065,39 +1097,107 @@ mod tests {
                 scope.spawn(move || app.ingest(known.clone(), point).unwrap());
             }
         });
-        assert_eq!(app.mutation.lock().unwrap().used, 4);
+        assert_eq!(app.mutation.lock().unwrap().creation_rate.used, 4);
     }
 
-    /// Schemas decide how a new file is created; a metric already in the catalog keeps
-    /// accepting points even when no schema matches it any more, as in Go.
+    /// Removing a schema must not strand an admitted metric before its first file exists.
     #[test]
-    fn ingest_consults_schemas_only_for_unknown_metrics() {
-        let dir = tempfile::tempdir().unwrap();
-        let schemas = dir.path().join("schemas");
+    fn pending_metric_survives_schema_removal_and_frees_cache_after_flush() {
+        for (compressed, restored) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut config = Config::default();
+            config.whisper.compressed = compressed;
+            config.cache.max_size = 3;
+            let (_dir, app) = creation_app(config);
+            let point = Point {
+                timestamp: now() - 2,
+                value: 1.0,
+            };
+            if restored {
+                app.restore_points("known.a".into(), vec![point]).unwrap();
+            } else {
+                app.ingest("known.a".into(), point).unwrap();
+            }
+            let selected = app.metadata("known.a").unwrap();
+            assert!(!app.path("known.a").unwrap().exists());
+            fs::write(
+                &app.config.whisper.schemas_file,
+                "[other]\npattern = ^other\\.\nretentions = 10:600\n",
+            )
+            .unwrap();
+            app.reload_rules().unwrap();
+            app.ingest("known.a".into(), point).unwrap();
+            app.ingest("known.a".into(), point).unwrap();
+            assert!(app.ingest("known.b".into(), point).is_err());
+            app.scan().unwrap();
+            let (meta, series) = app
+                .fetch_with_metadata("known.a", point.timestamp - 1, now(), now())
+                .unwrap();
+            assert_eq!(meta, selected);
+            assert!(series.unwrap().values.contains(&Some(point.value)));
+            app.flush_one().unwrap();
+            assert!(app.cache.is_empty());
+            assert!(app.mutation.lock().unwrap().pending_metadata.is_empty());
+            assert_eq!(app.metadata("known.a").unwrap(), selected);
+            // A healthy new metric is no longer blocked by an unflushable cache entry.
+            app.ingest("other.healthy".into(), point).unwrap();
+            app.ingest("known.a".into(), point).unwrap(); // persisted fast path
+            assert_eq!(
+                app.metadata("other.healthy").unwrap().retentions[0].seconds_per_point,
+                10
+            );
+            while app.flush_one().unwrap() {}
+            assert!(app.mutation.lock().unwrap().pending_metadata.is_empty());
+        }
+    }
+
+    #[test]
+    fn pending_metadata_survives_failed_creation_and_changed_storage_rules() {
+        let (dir, mut app) = creation_app(Config::default());
+        let aggregation = dir.path().join("aggregation");
         fs::write(
-            &schemas,
-            "[known]\npattern = ^known\\.\nretentions = 1:600\n",
+            &aggregation,
+            "[all]\npattern = .*\nxFilesFactor = 0.5\naggregationMethod = average\n",
         )
         .unwrap();
-        let mut config = Config::default();
-        config.whisper.schemas_file = schemas.display().to_string();
-        config.whisper.data_dir = dir.path().join("wsp").display().to_string();
-        let app = App::new(config).unwrap();
+        Arc::get_mut(&mut app)
+            .unwrap()
+            .config
+            .whisper
+            .aggregation_file = aggregation.display().to_string();
         let point = Point {
-            timestamp: now(),
+            timestamp: now() - 2,
             value: 1.0,
         };
-        app.ingest("known.a".into(), point).unwrap();
-        assert!(app.ingest("other.a".into(), point).is_err());
+        app.ingest("known.retry".into(), point).unwrap();
+        let selected = app.metadata("known.retry").unwrap();
+        let path = app.path("known.retry").unwrap();
+        fs::create_dir_all(&path).unwrap();
+        assert!(app.flush_one().is_err());
         fs::write(
-            &schemas,
-            "[none]\npattern = ^nothing\\.\nretentions = 1:600\n",
+            &app.config.whisper.schemas_file,
+            "[all]\npattern = .*\nretentions = 10:60\ncompressed = true\n",
+        )
+        .unwrap();
+        fs::write(
+            &aggregation,
+            "[all]\npattern = .*\nxFilesFactor = 0.9\naggregationMethod = sum\n",
         )
         .unwrap();
         app.reload_rules().unwrap();
-        app.ingest("known.a".into(), point).unwrap();
-        assert!(app.ingest("known.b".into(), point).is_err());
-        assert_eq!(app.cache.get("known.a").len(), 2);
+        fs::remove_dir(&path).unwrap();
+        assert_eq!(app.metadata("known.retry").unwrap(), selected);
+        app.ingest("known.retry".into(), point).unwrap();
+        app.flush_one().unwrap();
+        assert_eq!(app.metadata("known.retry").unwrap(), selected);
+        app.ingest("new.metric".into(), point).unwrap();
+        let updated = app.metadata("new.metric").unwrap();
+        assert_eq!(updated.retentions[0].seconds_per_point, 10);
+        assert_eq!(updated.aggregation, whisper_rs::Aggregation::Sum);
+        assert_eq!(updated.x_files_factor, 0.9);
+        assert!(updated.compressed);
+        app.flush_one().unwrap();
+        assert_eq!(app.metadata("new.metric").unwrap(), updated);
+        assert!(app.mutation.lock().unwrap().pending_metadata.is_empty());
     }
 
     #[test]

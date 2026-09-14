@@ -27,6 +27,8 @@ Go-style port-only `listen` values such as `":2003"` bind to `0.0.0.0:2003` for 
 
 Storage schema and aggregation files retain their Graphite INI syntax; the main configuration is TOML. Select the trie with `trie-index=true`, or the trigram backend with `trie-index=false`. The catalog is updated synchronously on admission, so there is no lossy realtime notification queue.
 
+New cache-only metrics retain their selected retention, aggregation, XFF, and compression settings until the first successful flush. A storage-rule reload cannot strand their accepted points or change their cache-only read metadata; newly admitted metrics use the new rules. These pending settings are memory-only: Go-compatible dumps still require matching storage rules on restoration after restart.
+
 With carbonserver enabled, `carbonserver.max-creates-per-second` limits admission of new metric names: an initial burst of N permits, refilled to N each second without accumulating unused permits. `0` (default) is unlimited; negative values are rejected. Excess arrivals are dropped, not queued. Existing indexed, cached, and in-flight metrics bypass this limit; dump restoration also bypasses it to preserve accepted data. Like Go, quota checks precede this budget and cache capacity checks follow it, so cache overflow can consume a permit. This limits admission, not the timing of later disk writes. Unlike Go's quota/trie-dependent wiring, Rust enforces it with either index and without a quotas file. Changing the limit requires a restart.
 
 ## Logging
