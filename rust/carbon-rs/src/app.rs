@@ -176,18 +176,23 @@ impl App {
         {
             return Err(invalid("invalid Whisper point"));
         }
-        let metadata = self
-            .rules
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .metadata(&metric)
-            .ok_or_else(|| invalid("no matching storage schema"))?;
         // ponytail: serialize catalog admission; partition by root only after measuring contention.
         let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let existing = self.index.get(&metric);
-        let meta = existing
-            .clone()
-            .unwrap_or_else(|| estimated_meta(&metadata, self.config.whisper.sparse_create));
+        let meta = match existing.clone() {
+            Some(meta) => meta,
+            // Schemas only shape a file that does not exist yet, as in Go. Matching them for
+            // every point of a known metric was a measurable share of receiver CPU.
+            None => estimated_meta(
+                &self
+                    .rules
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .metadata(&metric)
+                    .ok_or_else(|| invalid("no matching storage schema"))?,
+                self.config.whisper.sparse_create,
+            ),
+        };
         let reservation = self
             .quotas
             .as_ref()
@@ -869,6 +874,39 @@ fn read_varint(input: &mut impl Read) -> io::Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Schemas decide how a new file is created; a metric already in the catalog keeps
+    /// accepting points even when no schema matches it any more, as in Go.
+    #[test]
+    fn ingest_consults_schemas_only_for_unknown_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let schemas = dir.path().join("schemas");
+        fs::write(
+            &schemas,
+            "[known]\npattern = ^known\\.\nretentions = 1:600\n",
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.whisper.schemas_file = schemas.display().to_string();
+        config.whisper.data_dir = dir.path().join("wsp").display().to_string();
+        let app = App::new(config).unwrap();
+        let point = Point {
+            timestamp: now(),
+            value: 1.0,
+        };
+        app.ingest("known.a".into(), point).unwrap();
+        assert!(app.ingest("other.a".into(), point).is_err());
+        fs::write(
+            &schemas,
+            "[none]\npattern = ^nothing\\.\nretentions = 1:600\n",
+        )
+        .unwrap();
+        app.reload_rules().unwrap();
+        app.ingest("known.a".into(), point).unwrap();
+        assert!(app.ingest("known.b".into(), point).is_err());
+        assert_eq!(app.cache.get("known.a").len(), 2);
+    }
+
     #[test]
     fn dump_roundtrip_and_truncation() {
         let points = vec![
