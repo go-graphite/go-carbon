@@ -297,6 +297,68 @@ fn rust_compressed_write_go_read_then_go_append_rust_read() {
     assert_eq!(fetch_json(&mut rust, 290, 302, 302), expected);
 }
 
+/// Rust appends resume Go's stored block tail; Go verifies the chained block CRCs.
+#[test]
+fn go_write_rust_incremental_append_passes_go_integrity_then_go_append() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("go-then-rust.wsp");
+    let rets = json!([{"seconds_per_point":1,"points":200},{"seconds_per_point":10,"points":200}]);
+    oracle(
+        json!({"op":"create","path":path.display().to_string(),"now":300,"retentions":rets,"aggregation":"average","xff":0.5,"compressed":true}),
+    );
+    let go_points: Vec<Point> = (100..=200)
+        .map(|timestamp| Point {
+            timestamp,
+            value: (timestamp % 7) as f64,
+        })
+        .collect();
+    oracle(
+        json!({"op":"update","path":path.display().to_string(),"now":300,"points":json_points(&go_points)}),
+    );
+    let options = Options {
+        compressed: true,
+        ..Options::default()
+    };
+    // One handle per batch, like the persister.
+    for batch in (201..=300)
+        .map(|timestamp| Point {
+            timestamp,
+            value: (timestamp % 5) as f64 * 0.5,
+        })
+        .collect::<Vec<_>>()
+        .chunks(7)
+    {
+        Whisper::open(&path, options)
+            .unwrap()
+            .update_many(batch, 300)
+            .unwrap();
+    }
+    integrity(&path, 300);
+    let expected = comparable_fetch(oracle(
+        json!({"op":"fetch","path":path.display().to_string(),"now":300,"from":100,"until":300}),
+    ));
+    let mut rust = Whisper::open(&path, options).unwrap();
+    assert_eq!(fetch_json(&mut rust, 100, 300, 300), expected);
+    assert_eq!(
+        expected["values"].as_array().unwrap()[199],
+        json!((300 % 5) as f64 * 0.5)
+    );
+    drop(rust);
+    let append = [Point {
+        timestamp: 301,
+        value: 301.0,
+    }];
+    oracle(
+        json!({"op":"update","path":path.display().to_string(),"now":301,"points":json_points(&append)}),
+    );
+    integrity(&path, 301);
+    let expected = comparable_fetch(oracle(
+        json!({"op":"fetch","path":path.display().to_string(),"now":301,"from":250,"until":301}),
+    ));
+    let mut rust = Whisper::open(&path, options).unwrap();
+    assert_eq!(fetch_json(&mut rust, 250, 301, 301), expected);
+}
+
 #[test]
 fn compressed_sidecar_main_wins_and_cross_compaction() {
     let dir = tempfile::tempdir().unwrap();

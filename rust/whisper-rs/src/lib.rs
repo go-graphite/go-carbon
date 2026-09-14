@@ -980,6 +980,19 @@ struct EncodedBlock {
     last_offset: usize,
     bit: i8,
     crc: u32,
+    /// Bytes holding data plus the end-of-block marker; the rest is padding.
+    used: usize,
+}
+/// Resume state of an archive's current block, as Go stores it in the header.
+struct BlockTail {
+    p1: Point,
+    p2: Point,
+    last_byte: u8,
+    /// Absolute file offset of the partially written last byte.
+    offset: u64,
+    bit: i8,
+    count: u32,
+    crc: u32,
 }
 #[cfg(test)]
 fn encode_block(points: &[Point], step: u32, capacity: usize) -> io::Result<Vec<u8>> {
@@ -993,6 +1006,7 @@ fn encode_block_state(points: &[Point], step: u32, capacity: usize) -> io::Resul
             last_offset: 0,
             bit: 7,
             crc: 0,
+            used: 0,
         });
     }
     if capacity < 17 {
@@ -1006,9 +1020,56 @@ fn encode_block_state(points: &[Point], step: u32, capacity: usize) -> io::Resul
     );
     out.bytes[4..12].copy_from_slice(&points[0].value.to_bits().to_be_bytes());
     out.index = 12;
-    let mut p2 = points[0];
-    let mut p1 = points[0];
-    for &p in &points[1..] {
+    encode_points(&mut out, points[0], points[0], &points[1..], step)?;
+    finish_block(out, 0)
+}
+/// Continues a block from its stored tail, encoding only `points` (all newer than `tail.p1`)
+/// into a buffer that starts at the tail byte and covers the `remaining` bytes of the block.
+/// `WriteZero` means the block is full and the caller must rotate.
+fn append_block_state(
+    tail: &BlockTail,
+    points: &[Point],
+    step: u32,
+    remaining: usize,
+) -> io::Result<EncodedBlock> {
+    if remaining == 0 || points.is_empty() {
+        return Err(Error::new(ErrorKind::WriteZero, "compressed block full"));
+    }
+    let mut out = BitWriter::new(remaining);
+    // Bits at and below the resume position hold the old end-of-block marker.
+    out.bytes[0] = tail.last_byte & !(((1u16 << (tail.bit + 1)) - 1) as u8);
+    out.bit = tail.bit;
+    encode_points(&mut out, tail.p2, tail.p1, points, step)?;
+    finish_block(out, tail.crc)
+}
+fn finish_block(mut out: BitWriter, crc_seed: u32) -> io::Result<EncodedBlock> {
+    let last_offset = out.index;
+    let bit = out.bit;
+    let last_byte = out.bytes[last_offset];
+    let mut hasher = crc32fast::Hasher::new_with_initial(crc_seed);
+    hasher.update(&out.bytes[..last_offset]);
+    let crc = hasher.finalize();
+    out.write(4, 15)?;
+    out.write(32, 0)?;
+    let used = (out.index + 1).min(out.bytes.len());
+    Ok(EncodedBlock {
+        bytes: out.bytes,
+        last_byte,
+        last_offset,
+        bit,
+        crc,
+        used,
+    })
+}
+fn encode_points(
+    out: &mut BitWriter,
+    mut p2: Point,
+    mut p1: Point,
+    points: &[Point],
+    step: u32,
+) -> io::Result<()> {
+    let capacity = out.bytes.len();
+    for &p in points {
         if p.timestamp <= p1.timestamp {
             return Err(invalid("compressed points must be ascending"));
         }
@@ -1060,19 +1121,7 @@ fn encode_block_state(points: &[Point], step: u32, capacity: usize) -> io::Resul
         p2 = p1;
         p1 = p;
     }
-    let last_offset = out.index;
-    let bit = out.bit;
-    let last_byte = out.bytes[last_offset];
-    let crc = crc32fast::hash(&out.bytes[..last_offset]);
-    out.write(4, 15)?;
-    out.write(32, 0)?;
-    Ok(EncodedBlock {
-        bytes: out.bytes,
-        last_byte,
-        last_offset,
-        bit,
-        crc,
-    })
+    Ok(())
 }
 impl<'a> Bits<'a> {
     fn read(&mut self, n: usize) -> io::Result<u64> {
@@ -1500,6 +1549,102 @@ mod tests {
         assert_eq!(
             decode_block(&encode_block(&points, 1, 256).unwrap(), 1).unwrap(),
             points
+        );
+    }
+
+    /// Appends resume from the header's block tail state instead of decoding the block.
+    #[test]
+    fn compressed_append_leaves_existing_block_body_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("append.wsp");
+        let mut meta = metadata();
+        meta.compressed = true;
+        meta.retentions.truncate(1);
+        meta.retentions[0].points = 200;
+        let options = Options {
+            compressed: true,
+            ..Options::default()
+        };
+        let mut w = Whisper::create(&path, meta, options).unwrap();
+        let points: Vec<Point> = (0..150)
+            .map(|i| Point {
+                timestamp: 1000 + i,
+                value: (i / 25) as f64,
+            })
+            .collect();
+        w.update_many(&points, 1160).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let mut header = vec![0; 63 + 128];
+        file.read_exact_at(&mut header, 0).unwrap();
+        let body_start = u64::from(be_u32(&header[63..67])) + 12;
+        let tail = u64::from(be_u32(&header[63 + 68..63 + 72]));
+        let mut body = vec![0; (tail - body_start) as usize];
+        assert!(body.len() > 16);
+        file.read_exact_at(&mut body, body_start).unwrap();
+        let scrambled: Vec<u8> = body.iter().map(|b| !b).collect();
+        file.write_all_at(&scrambled, body_start).unwrap();
+        w.update_many(
+            &[Point {
+                timestamp: 1150,
+                value: 42.0,
+            }],
+            1160,
+        )
+        .unwrap();
+        file.write_all_at(&body, body_start).unwrap();
+        drop(w);
+        let mut w = Whisper::open(&path, options).unwrap();
+        let values: Vec<f64> = w
+            .fetch(999, 1150, 1160)
+            .unwrap()
+            .unwrap()
+            .values
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut expected: Vec<f64> = points.iter().map(|p| p.value).collect();
+        expected.push(42.0);
+        assert_eq!(values, expected);
+    }
+
+    /// Incremental appends produce the same bytes as one write of all points.
+    #[test]
+    fn compressed_incremental_appends_match_single_batch_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut meta = metadata();
+        meta.compressed = true;
+        let options = Options {
+            compressed: true,
+            ..Options::default()
+        };
+        let points: Vec<Point> = (0..55)
+            .map(|i| Point {
+                timestamp: 1000 + i,
+                value: (i % 3) as f64,
+            })
+            .collect();
+        let single = dir.path().join("single.wsp");
+        Whisper::create(&single, meta.clone(), options)
+            .unwrap()
+            .update_many(&points, 1055)
+            .unwrap();
+        let batched = dir.path().join("batched.wsp");
+        let mut w = Whisper::create(&batched, meta, options).unwrap();
+        let mut rest = &points[..];
+        for n in [1, 2, 3, 5, 8, 13, 23] {
+            let (head, tail) = rest.split_at(n);
+            w.update_many(head, 1055).unwrap();
+            rest = tail;
+        }
+        assert!(rest.is_empty());
+        drop(w);
+        assert_eq!(
+            std::fs::read(&single).unwrap(),
+            std::fs::read(&batched).unwrap()
         );
     }
 }

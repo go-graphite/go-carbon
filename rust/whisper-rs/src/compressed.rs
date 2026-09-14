@@ -21,12 +21,22 @@ fn pack_point(bytes: &mut [u8], point: Point) {
     bytes[4..12].copy_from_slice(&point.value.to_bits().to_be_bytes());
 }
 
+/// Newest timestamp an archive holds: pending points first, then the block tail.
+fn newest(pending: &Table, tail: &Option<BlockTail>) -> Option<i64> {
+    pending
+        .keys()
+        .next_back()
+        .copied()
+        .or(tail.as_ref().map(|t| t.p1.timestamp))
+}
+
 impl Whisper {
-    fn current_compressed_table(&self, index: usize) -> io::Result<Table> {
+    /// Decodes the current block; only needed when it must be re-encoded for rotation.
+    fn current_block_points(&self, index: usize) -> io::Result<Vec<Point>> {
         let archive = &self.archives[index];
         let compressed = &self.compressed_archives.as_ref().unwrap()[index];
         if compressed.ranges[compressed.current].start == 0 {
-            return Ok(Table::new());
+            return Ok(Vec::new());
         }
         let mut block = vec![0; compressed.block_size];
         read_exact_at(
@@ -34,10 +44,83 @@ impl Whisper {
             &mut block,
             archive.offset + compressed.current as u64 * compressed.block_size as u64,
         )?;
-        Ok(decode_block(&block, archive.retention.seconds_per_point)?
-            .into_iter()
-            .map(|p| (p.timestamp, p.value))
-            .collect())
+        decode_block(&block, archive.retention.seconds_per_point)
+    }
+    /// Resume state of the current block from the header; `None` while it is empty or unusable.
+    fn block_tail(&self, header: &[u8], index: usize) -> Option<BlockTail> {
+        let compressed = &self.compressed_archives.as_ref().unwrap()[index];
+        if compressed.ranges[compressed.current].start == 0 {
+            return None;
+        }
+        let p = 63 + 128 * index;
+        let point = |at: usize| Point {
+            timestamp: i64::from(be_u32(&header[at..at + 4])),
+            value: be_f64(&header[at + 4..at + 12]),
+        };
+        let p1 = point(p + 40);
+        let bit = be_u32(&header[p + 72..p + 76]);
+        (p1.timestamp != 0 && bit <= 7).then(|| BlockTail {
+            p1,
+            p2: point(p + 52),
+            last_byte: be_u32(&header[p + 64..p + 68]) as u8,
+            offset: u64::from(be_u32(&header[p + 68..p + 72])),
+            bit: bit as i8,
+            count: be_u32(&header[p + 76..p + 80]),
+            crc: be_u32(&header[p + 80..p + 84]),
+        })
+    }
+    /// Appends `points` by resuming the current block's tail; `None` when the block is full or
+    /// its header geometry is unusable, so the caller re-encodes and rotates instead.
+    fn append_current_block(
+        &self,
+        index: usize,
+        tail: &BlockTail,
+        points: &[Point],
+        header: &mut [u8],
+        range_offset: usize,
+    ) -> io::Result<Option<(u64, Vec<u8>)>> {
+        let archive = &self.archives[index];
+        let c = &self.compressed_archives.as_ref().unwrap()[index];
+        let base = archive.offset + (c.current * c.block_size) as u64;
+        let Some(used) = tail
+            .offset
+            .checked_sub(base)
+            .filter(|n| (12..c.block_size as u64).contains(n))
+        else {
+            return Ok(None);
+        };
+        let block = match append_block_state(
+            tail,
+            points,
+            archive.retention.seconds_per_point,
+            c.block_size - used as usize,
+        ) {
+            Ok(block) => block,
+            Err(e) if e.kind() == ErrorKind::WriteZero => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let n = points.len();
+        let count = tail.count.saturating_add(n as u32);
+        let p = 63 + 128 * index;
+        let r = range_offset + c.current * 16;
+        put(header, r + 4, points[n - 1].timestamp as u32);
+        put(header, r + 8, count);
+        put(header, r + 12, block.crc);
+        pack_point(&mut header[p + 40..p + 52], points[n - 1]);
+        pack_point(
+            &mut header[p + 52..p + 64],
+            if n >= 2 { points[n - 2] } else { tail.p1 },
+        );
+        put(header, p + 64, block.last_byte as u32);
+        put(
+            header,
+            p + 68,
+            (tail.offset + block.last_offset as u64) as u32,
+        );
+        put(header, p + 72, block.bit as u32);
+        put(header, p + 76, count);
+        put(header, p + 80, block.crc);
+        Ok(Some((tail.offset, block.bytes[..block.used].to_vec())))
     }
     fn compressed_table(&self, index: usize) -> io::Result<Table> {
         let archive = &self.archives[index];
@@ -96,10 +179,17 @@ impl Whisper {
     }
 
     pub(super) fn update_compressed(&mut self, points: &[Point], now: i64) -> io::Result<()> {
-        let mut tables = (0..self.archives.len())
-            .map(|i| self.current_compressed_table(i))
-            .collect::<io::Result<Vec<_>>>()?;
-        let original = tables.clone();
+        let header_len = self.archives[0].offset as usize;
+        if header_len > 64 * 1024 * 1024 {
+            return Err(invalid("compressed header exceeds safety limit"));
+        }
+        let mut header = vec![0; header_len];
+        read_exact_at(&self.file, &mut header, 0)?;
+        let tails = (0..self.archives.len())
+            .map(|i| self.block_tail(&header, i))
+            .collect::<Vec<_>>();
+        // Only points not yet in a block; existing block bytes are never decoded to append.
+        let mut tables = vec![Table::new(); self.archives.len()];
         let mut buffers = self
             .compressed_archives
             .as_ref()
@@ -128,7 +218,7 @@ impl Whisper {
                 .into_iter()
                 .map(|(timestamp, value)| Point { timestamp, value })
                 .collect::<Vec<_>>();
-            self.apply_compressed(i, &points, &mut tables, &mut buffers, &mut dropped)?;
+            self.apply_compressed(i, &points, &tails, &mut tables, &mut buffers, &mut dropped)?;
         }
         let discarded = dropped.len() as u64;
         self.out_of_order_stats.discarded += discarded;
@@ -158,22 +248,17 @@ impl Whisper {
             sidecar.file.sync_data()?;
             self.out_of_order_stats.diverted += discarded;
         }
-        self.write_compressed_changes(original, tables, buffers, now)
+        self.write_compressed_changes(header, &tails, tables, buffers, now)
     }
 
     fn write_compressed_changes(
         &mut self,
-        original: Vec<Table>,
+        mut header: Vec<u8>,
+        tails: &[Option<BlockTail>],
         tables: Vec<Table>,
         buffers: Vec<Vec<Point>>,
         now: i64,
     ) -> io::Result<()> {
-        let header_len = self.archives[0].offset as usize;
-        if header_len > 64 * 1024 * 1024 {
-            return Err(invalid("compressed header exceeds safety limit"));
-        }
-        let mut header = vec![0; header_len];
-        read_exact_at(&self.file, &mut header, 0)?;
         let compressed = self.compressed_archives.as_ref().unwrap();
         let mut range_offset = 63 + 128 * self.archives.len();
         let mut writes = Vec::new();
@@ -182,11 +267,22 @@ impl Whisper {
             let c = &compressed[i];
             let archive = &self.archives[i];
             let p = 63 + 128 * i;
-            if table != &original[i] {
-                let points = table
-                    .iter()
-                    .map(|(&timestamp, &value)| Point { timestamp, value })
-                    .collect::<Vec<_>>();
+            let pending = table
+                .iter()
+                .map(|(&timestamp, &value)| Point { timestamp, value })
+                .collect::<Vec<_>>();
+            let appended = match &tails[i] {
+                Some(tail) if !pending.is_empty() => {
+                    self.append_current_block(i, tail, &pending, &mut header, range_offset)?
+                }
+                _ => None,
+            };
+            if let Some(write) = appended {
+                writes.push(write);
+            } else if !pending.is_empty() {
+                // Block full or empty: re-encode it with the new points and rotate as needed.
+                let mut points = self.current_block_points(i)?;
+                points.extend(pending);
                 let mut offset = 0;
                 let mut block_index = c.current;
                 while offset < points.len() {
@@ -295,16 +391,14 @@ impl Whisper {
         &self,
         index: usize,
         points: &[Point],
+        tails: &[Option<BlockTail>],
         tables: &mut [Table],
         buffers: &mut [Vec<Point>],
         dropped: &mut Vec<(usize, Point)>,
     ) -> io::Result<()> {
         if buffers[index].is_empty() {
             for &point in points {
-                if tables[index]
-                    .last_key_value()
-                    .is_some_and(|(t, _)| *t >= point.timestamp)
-                {
+                if newest(&tables[index], &tails[index]).is_some_and(|t| t >= point.timestamp) {
                     dropped.push((index, point));
                 } else {
                     tables[index].insert(point.timestamp, point.value);
@@ -361,10 +455,7 @@ impl Whisper {
                 flushed.sort_by_key(|p| p.timestamp);
                 let mut accepted = Vec::new();
                 for p in flushed {
-                    if tables[index]
-                        .last_key_value()
-                        .is_some_and(|(t, _)| *t >= p.timestamp)
-                    {
+                    if newest(&tables[index], &tails[index]).is_some_and(|t| t >= p.timestamp) {
                         dropped.push((index, p));
                     } else {
                         tables[index].insert(p.timestamp, p.value);
@@ -381,6 +472,7 @@ impl Whisper {
                             timestamp: floor(accepted[0].timestamp, lower_step),
                             value: aggregate(self.metadata.aggregation, &values),
                         }],
+                        tails,
                         tables,
                         buffers,
                         dropped,
