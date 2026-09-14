@@ -89,6 +89,7 @@ pub struct Carbonserver {
     pub file_list_cache: String,
     pub file_list_cache_version: u8,
     pub concurrent_requests: usize,
+    pub max_creates_per_second: u64,
     pub query_cache_size: usize,
     pub query_cache_size_mb: usize,
     pub query_cache_enabled: bool,
@@ -240,6 +241,7 @@ impl Default for Carbonserver {
             file_list_cache: String::new(),
             file_list_cache_version: 1,
             concurrent_requests: 0,
+            max_creates_per_second: 0,
             query_cache_size: 0,
             query_cache_size_mb: 0,
             query_cache_enabled: true,
@@ -592,6 +594,36 @@ fn required<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_rate_config_defaults_to_unlimited_and_rejects_invalid_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        fs::write(&path, "").unwrap();
+        assert_eq!(
+            Config::load(&path)
+                .unwrap()
+                .carbonserver
+                .max_creates_per_second,
+            0
+        );
+        for value in ["0", "500", "-1", "1.5", "'500'"] {
+            fs::write(
+                &path,
+                format!("[carbonserver]\nmax-creates-per-second = {value}\n"),
+            )
+            .unwrap();
+            let result = Config::load(&path);
+            if let Ok(expected) = value.parse::<u64>() {
+                assert_eq!(
+                    result.unwrap().carbonserver.max_creates_per_second,
+                    expected
+                );
+            } else {
+                assert!(result.is_err(), "{value}");
+            }
+        }
+    }
 
     #[test]
     fn go_style_listeners_normalize_only_port_only_addresses() {

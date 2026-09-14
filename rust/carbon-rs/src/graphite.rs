@@ -211,6 +211,10 @@ impl Collector {
             return;
         };
         send(
+            "carbonserver.max_creates_per_second",
+            app.config.carbonserver.max_creates_per_second as f64,
+        );
+        send(
             "carbonserver.metrics_known",
             app.index.metric_count() as f64,
         );
@@ -519,6 +523,28 @@ mod tests {
             values.insert(name.into(), value);
         });
         values
+    }
+
+    #[test]
+    fn creation_limit_metric_is_a_gauge_independent_of_prometheus() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = app(dir.path(), false);
+        for enabled in [false, true] {
+            for limit in [0, 500] {
+                let mut config = base.config.clone();
+                config.carbonserver.enabled = enabled;
+                config.carbonserver.max_creates_per_second = limit;
+                let app = App::new(config).unwrap();
+                let mut collector = Collector::default();
+                for _ in 0..2 {
+                    let values = snapshot(&mut collector, &app);
+                    assert_eq!(
+                        values.get("carbonserver.max_creates_per_second").copied(),
+                        enabled.then_some(limit as f64),
+                    );
+                }
+            }
+        }
     }
 
     /// Like Go, compaction rides on the write path: a flush merges the sidecar once it reaches

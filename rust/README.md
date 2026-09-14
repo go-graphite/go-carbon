@@ -27,6 +27,8 @@ Go-style port-only `listen` values such as `":2003"` bind to `0.0.0.0:2003` for 
 
 Storage schema and aggregation files retain their Graphite INI syntax; the main configuration is TOML. Select the trie with `trie-index=true`, or the trigram backend with `trie-index=false`. The catalog is updated synchronously on admission, so there is no lossy realtime notification queue.
 
+With carbonserver enabled, `carbonserver.max-creates-per-second` limits admission of new metric names: an initial burst of N permits, refilled to N each second without accumulating unused permits. `0` (default) is unlimited; negative values are rejected. Excess arrivals are dropped, not queued. Existing indexed, cached, and in-flight metrics bypass this limit; dump restoration also bypasses it to preserve accepted data. Like Go, quota checks precede this budget and cache capacity checks follow it, so cache overflow can consume a permit. This limits admission, not the timing of later disk writes. Unlike Go's quota/trie-dependent wiring, Rust enforces it with either index and without a quotas file. Changing the limit requires a restart.
+
 ## Logging
 
 `[[logging]]` uses Go's `logger`, `file`, `level`, `encoding`, `encoding-time`, `encoding-duration`, and `sample-*` settings, implemented with `tracing` / `tracing-subscriber`. With no entries, logs go to stdout at info level in console format, as in Go. An explicit entry defaults to stderr/mixed/info. Legacy `[logging]` and `common.logfile` / `common.log-level` are accepted; the common options override the logging entries as in Go.
@@ -58,6 +60,8 @@ Collection starts after the first interval and works with Prometheus disabled. L
 Go-style names cover cache `size` (pending points), `metrics` (pending metric names), `notConfirmed` (in-flight batches), `maxSize`, `queries`, and `overflow`; TCP/UDP `metricsReceived` and `errors`, TCP `active`; persister `created`, `updateOperations`, `committedPoints`, `pointsPerUpdate`, `workers`, and the Rust extension `errors`. Carbonserver exports request/status counts, cache hits/misses and wait/work times, disk requests/wait, returned metrics/point slots, known metrics, scan time, and in-flight requests/limit. Counters are interval deltas; sizes/limits/concurrency are gauges. Shared Prometheus counters remain cumulative and constant Prometheus labels do not alter Graphite paths. These measure Rust's existing operations, not every Go-only collector: Go runtime/GC, queue rebuilds, response-time percentiles, and per-namespace quota self-metrics are not fabricated or exported.
 
 Persister also exports `oooDiscardedPoints`: compressed-encoder rejections, including points saved to `.ooo` (not necessarily data loss). With `whisper.out-of-order = true`, it additionally exports `oooDiverted` (points successfully written to the sidecar), `oooCompactions`, and `oooCompactErrors` (successful/failed merge attempts, excluding skipped files). All four use interval deltas, including zero values; failed updates still contribute rejected points, and retries count as new attempts.
+
+`carbonserver.max_creates_per_second` reports the configured creation limit as a gauge on every collection when carbonserver is enabled, including `0` for unlimited. It is not the observed creation rate and does not require Prometheus.
 
 ## CPU profiling
 

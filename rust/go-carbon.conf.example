@@ -46,6 +46,8 @@ file-list-cache = "rust/data/file-list-cache"
 file-list-cache-version = 2
 quota-usage-report-frequency = "1m"
 concurrent-requests = 64
+# Burst budget for new metric admission, refilled each second; 0 is unlimited.
+max-creates-per-second = 0
 request-timeout = "60s"
 query-cache-enabled = true
 find-cache-enabled = true

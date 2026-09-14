@@ -29,10 +29,34 @@ pub struct App {
     pub read_generation: AtomicU64,
     rejection_logged: AtomicI64,
     rules: RwLock<Rules>,
-    mutation: Mutex<()>,
+    mutation: Mutex<CreationRate>,
     files: Vec<Mutex<()>>,
     /// Last sidecar merge; caps compactions at `out-of-order-compact-rate` per second.
     compaction_grant: Mutex<Option<Instant>>,
+}
+
+// The catalog mutation lock also protects this budget, so concurrent first arrivals
+// for the same metric consume one permit. Go refills a full burst each second.
+struct CreationRate {
+    window_at: Instant,
+    used: u64,
+}
+impl CreationRate {
+    fn allow(&mut self, limit: u64, at: Instant) -> bool {
+        if limit == 0 {
+            return true;
+        }
+        let seconds = at.duration_since(self.window_at).as_secs();
+        if seconds > 0 {
+            self.window_at += Duration::from_secs(seconds);
+            self.used = 0;
+        }
+        if self.used >= limit {
+            return false;
+        }
+        self.used += 1;
+        true
+    }
 }
 
 pub fn now() -> i64 {
@@ -82,7 +106,10 @@ impl App {
             prometheus,
             metrics,
             graphite: crate::graphite::Stats::default(),
-            mutation: Mutex::new(()),
+            mutation: Mutex::new(CreationRate {
+                window_at: Instant::now(),
+                used: 0,
+            }),
             files: (0..1024).map(|_| Mutex::new(())).collect(),
             wake: Notify::new(),
             received: AtomicU64::new(0),
@@ -177,7 +204,7 @@ impl App {
             return Err(invalid("invalid Whisper point"));
         }
         // ponytail: serialize catalog admission; partition by root only after measuring contention.
-        let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let existing = self.index.get(&metric);
         let meta = match existing.clone() {
             Some(meta) => meta,
@@ -199,6 +226,20 @@ impl App {
             .map(|q| q.admit(&metric, 1, costs(&meta)))
             .transpose()
             .map_err(|e| self.reject(&metric, &format!("quota exceeded: {e:?}")))?;
+        // Match Go's order: quotas, then creation budget, then cache capacity.
+        if existing.is_none()
+            && self.config.carbonserver.enabled
+            && self.config.carbonserver.max_creates_per_second > 0
+            && !mutation.allow(
+                self.config.carbonserver.max_creates_per_second,
+                Instant::now(),
+            )
+        {
+            if let (Some(q), Some(r)) = (&self.quotas, reservation) {
+                q.release(r);
+            }
+            return Err(self.reject(&metric, "creation rate limit exceeded"));
+        }
         if self.cache.add(metric.clone(), point).is_err() {
             if let (Some(q), Some(r)) = (&self.quotas, reservation) {
                 q.release(r);
@@ -874,6 +915,158 @@ fn read_varint(input: &mut impl Read) -> io::Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_rate_refills_fixed_one_second_bursts_without_accumulating() {
+        let start = Instant::now();
+        let mut rate = CreationRate {
+            window_at: start,
+            used: 0,
+        };
+        assert!(rate.allow(2, start));
+        assert!(rate.allow(2, start));
+        assert!(!rate.allow(2, start + Duration::from_millis(999)));
+        assert!(rate.allow(2, start + Duration::from_millis(1900)));
+        assert!(rate.allow(2, start + Duration::from_millis(1900)));
+        assert!(!rate.allow(2, start + Duration::from_millis(1999)));
+        // Refills stay anchored to startup, not to the most recent arrival.
+        assert!(rate.allow(2, start + Duration::from_secs(2)));
+        assert!(rate.allow(2, start + Duration::from_secs(20)));
+        assert!(rate.allow(2, start + Duration::from_secs(20)));
+        assert!(!rate.allow(2, start + Duration::from_secs(20)));
+        assert!(rate.allow(0, start + Duration::from_secs(20)));
+    }
+
+    fn creation_app(mut config: Config) -> (tempfile::TempDir, Arc<App>) {
+        let dir = tempfile::tempdir().unwrap();
+        let schemas = dir.path().join("schemas");
+        fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:600\n").unwrap();
+        config.whisper.schemas_file = schemas.display().to_string();
+        config.whisper.data_dir = dir.path().join("wsp").display().to_string();
+        (dir, App::new(config).unwrap())
+    }
+
+    #[test]
+    fn creation_limit_only_charges_unknown_metrics_and_never_drops_restores() {
+        for trie in [false, true] {
+            for enabled in [false, true] {
+                for limit in [0, 2] {
+                    let mut config = Config::default();
+                    config.carbonserver.enabled = enabled;
+                    config.carbonserver.trie_index = trie;
+                    config.carbonserver.max_creates_per_second = limit;
+                    let (_dir, app) = creation_app(config);
+                    let point = Point {
+                        timestamp: now(),
+                        value: 1.0,
+                    };
+                    for n in 0..4 {
+                        let result = app.ingest(format!("new.metric{n}"), point);
+                        let accepted = !enabled || limit == 0 || n < limit;
+                        assert_eq!(result.is_ok(), accepted);
+                        assert_eq!(app.index.get(&format!("new.metric{n}")).is_some(), accepted);
+                        if !accepted {
+                            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                            assert!(app.cache.get(&format!("new.metric{n}")).is_empty());
+                        }
+                    }
+                    app.ingest("new.metric0".into(), point).unwrap();
+                    let batch = app.cache.take().unwrap();
+                    app.ingest(batch.metric.clone(), point).unwrap(); // in flight
+                    app.cache.retry(batch.id);
+                    while app.flush_one().unwrap() {}
+                    app.scan().unwrap();
+                    app.ingest("new.metric0".into(), point).unwrap(); // on disk
+                    app.restore_points("restored.metric".into(), vec![point])
+                        .unwrap();
+                    app.ingest("restored.metric".into(), point).unwrap();
+                    if enabled && limit > 0 {
+                        assert!(app.ingest("still.limited".into(), point).is_err());
+                        app.mutation.lock().unwrap().window_at -= Duration::from_secs(1);
+                        app.ingest("next.window".into(), point).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn creation_limit_preserves_quota_and_cache_admission_order() {
+        let mut config = Config::default();
+        config.carbonserver.enabled = true;
+        config.carbonserver.max_creates_per_second = 2;
+        config.cache.max_size = 1;
+        let (dir, mut app) = creation_app(config);
+        let quotas = dir.path().join("quotas");
+        fs::write(&quotas, "[blocked]\nmetrics = 1\n").unwrap();
+        Arc::get_mut(&mut app).unwrap().quotas =
+            Some(Engine::load(&quotas, Duration::from_secs(60)).unwrap());
+        let point = Point {
+            timestamp: now(),
+            value: 1.0,
+        };
+        app.restore_points("blocked.seed".into(), vec![point])
+            .unwrap();
+        app.flush_one().unwrap();
+        assert!(
+            app.ingest("blocked.new".into(), point)
+                .unwrap_err()
+                .to_string()
+                .starts_with("quota exceeded")
+        );
+        assert_eq!(app.mutation.lock().unwrap().used, 0);
+        app.ingest("allowed.one".into(), point).unwrap();
+        assert_eq!(
+            app.ingest("allowed.two".into(), point)
+                .unwrap_err()
+                .to_string(),
+            "cache full"
+        );
+        app.flush_one().unwrap();
+        assert_eq!(
+            app.ingest("allowed.three".into(), point)
+                .unwrap_err()
+                .to_string(),
+            "creation rate limit exceeded"
+        );
+        // Both rejected paths release their new-metric quota reservations.
+        assert_eq!(app.quotas.as_ref().unwrap().usage("allowed").metrics, 1);
+        assert!(app.index.get("allowed.two").is_none());
+        assert!(app.index.get("allowed.three").is_none());
+        app.mutation.lock().unwrap().window_at -= Duration::from_secs(1);
+        app.ingest("allowed.three".into(), point).unwrap();
+        assert_eq!(app.quotas.as_ref().unwrap().usage("allowed").metrics, 2);
+    }
+
+    #[test]
+    fn creation_limit_is_shared_by_concurrent_admissions() {
+        let mut config = Config::default();
+        config.carbonserver.enabled = true;
+        config.carbonserver.max_creates_per_second = 4;
+        let (_dir, app) = creation_app(config);
+        let point = Point {
+            timestamp: now(),
+            value: 1.0,
+        };
+        std::thread::scope(|scope| {
+            for n in 0..16 {
+                let app = &app;
+                scope.spawn(move || app.ingest(format!("concurrent.metric{n}"), point));
+            }
+        });
+        assert_eq!(app.index.metric_count(), 4);
+        assert_eq!(app.received.load(Ordering::Relaxed), 4);
+        assert_eq!(app.rejected.load(Ordering::Relaxed), 12);
+        let known = app.index.list().into_iter().next().unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let app = &app;
+                let known = &known;
+                scope.spawn(move || app.ingest(known.clone(), point).unwrap());
+            }
+        });
+        assert_eq!(app.mutation.lock().unwrap().used, 4);
+    }
 
     /// Schemas decide how a new file is created; a metric already in the catalog keeps
     /// accepting points even when no schema matches it any more, as in Go.
