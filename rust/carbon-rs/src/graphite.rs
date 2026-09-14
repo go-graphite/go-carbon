@@ -31,6 +31,10 @@ pub(crate) struct Stats {
     pub created: AtomicU64,
     pub updates: AtomicU64,
     pub committed: AtomicU64,
+    pub ooo_discarded: AtomicU64,
+    pub ooo_diverted: AtomicU64,
+    pub ooo_compactions: AtomicU64,
+    pub ooo_compact_errors: AtomicU64,
     pub scan_ns: AtomicU64,
 }
 
@@ -153,8 +157,24 @@ impl Collector {
             ("cache.overflow", cache.dropped_points),
             ("persister.created", app.graphite.created.load(Relaxed)),
             ("persister.errors", app.write_errors.load(Relaxed)),
+            (
+                "persister.oooDiscardedPoints",
+                app.graphite.ooo_discarded.load(Relaxed),
+            ),
         ] {
             send(name, self.delta(name, total));
+        }
+        if app.config.whisper.out_of_order {
+            for (name, counter) in [
+                ("persister.oooDiverted", &app.graphite.ooo_diverted),
+                ("persister.oooCompactions", &app.graphite.ooo_compactions),
+                (
+                    "persister.oooCompactErrors",
+                    &app.graphite.ooo_compact_errors,
+                ),
+            ] {
+                send(name, self.delta(name, counter.load(Relaxed)));
+            }
         }
         let updates = self.delta(
             "persister.updateOperations",
@@ -499,6 +519,93 @@ mod tests {
             values.insert(name.into(), value);
         });
         values
+    }
+
+    #[test]
+    fn ooo_metrics_report_real_writes_compactions_errors_and_interval_deltas() {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let schemas = dir.path().join("schemas");
+            std::fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:600\n").unwrap();
+            let mut config = Config::default();
+            config.whisper.schemas_file = schemas.display().to_string();
+            config.whisper.data_dir = dir.path().join("wsp").display().to_string();
+            config.whisper.compressed = true;
+            config.whisper.out_of_order = enabled;
+            // These counters must work without carbonserver or Prometheus enabled.
+            config.carbonserver.enabled = false;
+            config.prometheus.enabled = false;
+            let app = App::new(config).unwrap();
+            let mut collector = Collector::default();
+            let names = [
+                "persister.oooDiverted",
+                "persister.oooCompactions",
+                "persister.oooCompactErrors",
+            ];
+            let zero = snapshot(&mut collector, &app);
+            assert_eq!(zero["persister.oooDiscardedPoints"], 0.0);
+            for name in names {
+                assert_eq!(zero.get(name).copied(), enabled.then_some(0.0));
+            }
+            let at = now();
+            app.ingest(
+                "ooo.test".into(),
+                Point {
+                    timestamp: at - 2,
+                    value: 2.0,
+                },
+            )
+            .unwrap();
+            app.flush_one().unwrap();
+            let sidecar = whisper_rs::out_of_order_sidecar_path(app.path("ooo.test").unwrap());
+            assert!(!app.compact_one("ooo.test").unwrap());
+            if enabled {
+                std::fs::create_dir(&sidecar).unwrap();
+            }
+            app.ingest(
+                "ooo.test".into(),
+                Point {
+                    timestamp: at - 3,
+                    value: 1.0,
+                },
+            )
+            .unwrap();
+            if enabled {
+                assert!(app.flush_one().is_err());
+                let failed = snapshot(&mut collector, &app);
+                assert_eq!(failed["persister.oooDiscardedPoints"], 1.0);
+                assert_eq!(failed["persister.oooDiverted"], 0.0);
+                assert_eq!(failed["persister.oooCompactErrors"], 0.0);
+                std::fs::remove_dir(&sidecar).unwrap();
+            }
+            app.flush_one().unwrap();
+            let written = snapshot(&mut collector, &app);
+            assert_eq!(written["persister.oooDiscardedPoints"], 1.0);
+            if enabled {
+                assert_eq!(written["persister.oooDiverted"], 1.0);
+                assert_eq!(written["persister.oooCompactions"], 0.0);
+                let original = std::fs::read(&sidecar).unwrap();
+                std::fs::write(&sidecar, b"broken").unwrap();
+                assert!(app.compact_one("ooo.test").is_err());
+                let failed = snapshot(&mut collector, &app);
+                assert_eq!(failed["persister.oooCompactErrors"], 1.0);
+                assert_eq!(failed["persister.oooCompactions"], 0.0);
+                std::fs::write(&sidecar, original).unwrap();
+                assert!(app.compact_one("ooo.test").unwrap());
+                assert!(!app.compact_one("ooo.test").unwrap());
+                let compacted = snapshot(&mut collector, &app);
+                assert_eq!(compacted["persister.oooCompactions"], 1.0);
+                assert_eq!(compacted["persister.oooCompactErrors"], 0.0);
+                assert_eq!(compacted["persister.oooDiverted"], 0.0);
+            } else {
+                assert!(!sidecar.exists());
+            }
+            let idle = snapshot(&mut collector, &app);
+            assert_eq!(idle["persister.oooDiscardedPoints"], 0.0);
+            for name in names {
+                assert_eq!(idle.get(name).copied(), enabled.then_some(0.0));
+            }
+        }
     }
 
     #[test]

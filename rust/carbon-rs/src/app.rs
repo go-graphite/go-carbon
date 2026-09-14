@@ -388,7 +388,16 @@ impl App {
             for point in batch.points.iter() {
                 self.metrics.write_lag.observe(at - point.timestamp as f64);
             }
-            w.update_many(&batch.points, now())?;
+            let update = w.update_many(&batch.points, now());
+            // Each batch opens a fresh handle. Go counts OOO rejections even on errors.
+            let ooo = w.out_of_order_stats();
+            self.graphite
+                .ooo_discarded
+                .fetch_add(ooo.discarded, Ordering::Relaxed);
+            self.graphite
+                .ooo_diverted
+                .fetch_add(ooo.diverted, Ordering::Relaxed);
+            update?;
             self.graphite.updates.fetch_add(1, Ordering::Relaxed);
             self.graphite
                 .committed
@@ -605,12 +614,23 @@ impl App {
             .file_lock(metric)
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        // Checked under the lock: flush_one removes the sidecar once it is merged.
+        // Checked under the lock: another compactor may already have merged it.
         if !sidecar.try_exists()? {
             return Ok(false);
         }
         let mut w = Whisper::open(&path, self.options())?;
-        w.compact_out_of_order(now())?;
+        if !w.metadata().compressed {
+            return Ok(false);
+        }
+        if let Err(error) = w.compact_out_of_order(now()) {
+            self.graphite
+                .ooo_compact_errors
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
+        self.graphite
+            .ooo_compactions
+            .fetch_add(1, Ordering::Relaxed);
         let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let first_seen = self
             .index

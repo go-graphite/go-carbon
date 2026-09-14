@@ -130,6 +130,8 @@ impl Whisper {
                 .collect::<Vec<_>>();
             self.apply_compressed(i, &points, &mut tables, &mut buffers, &mut dropped)?;
         }
+        let discarded = dropped.len() as u64;
+        self.out_of_order_stats.discarded += discarded;
         if self.options.out_of_order && !dropped.is_empty() {
             let path = out_of_order_sidecar_path(&self.path);
             let options = Options {
@@ -154,6 +156,7 @@ impl Whisper {
                 sidecar.propagate_from(i, point.timestamp)?;
             }
             sidecar.file.sync_data()?;
+            self.out_of_order_stats.diverted += discarded;
         }
         self.write_compressed_changes(original, tables, buffers, now)
     }
@@ -277,12 +280,13 @@ impl Whisper {
         let checksum = crc32fast::hash(&header);
         put(&mut header, 43, checksum);
         write_all_at(&self.file, &header, 0)?;
-        let next = Self::open_compressed(
+        let mut next = Self::open_compressed(
             self.path.clone(),
             self.file.try_clone()?,
             self.lock_file.take(),
             self.options,
         )?;
+        next.out_of_order_stats = self.out_of_order_stats;
         *self = next;
         Ok(())
     }
@@ -608,6 +612,7 @@ impl Whisper {
             let mut next = Self::open_compressed(self.path.clone(), file, None, self.options)?;
             fs::rename(&temp, &self.path)?;
             next.lock_file = self.lock_file.take();
+            next.out_of_order_stats = self.out_of_order_stats;
             *self = next;
             File::open(self.path.parent().unwrap_or(Path::new(".")))?.sync_all()
         })();

@@ -118,6 +118,15 @@ struct CompressedArchive {
     current: usize,
 }
 
+/// OOO point counts since this handle was opened, including failed update attempts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OutOfOrderStats {
+    /// Rejected by the compressed encoder, including points subsequently diverted.
+    pub discarded: u64,
+    /// Successfully written to the sidecar; compaction does not reset this total.
+    pub diverted: u64,
+}
+
 pub struct Whisper {
     path: PathBuf,
     file: File,
@@ -128,6 +137,7 @@ pub struct Whisper {
     archives: Vec<Archive>,
     compressed_archives: Option<Vec<CompressedArchive>>,
     options: Options,
+    out_of_order_stats: OutOfOrderStats,
 }
 
 fn invalid(msg: &'static str) -> Error {
@@ -218,6 +228,7 @@ impl Whisper {
             archives,
             compressed_archives: None,
             options,
+            out_of_order_stats: OutOfOrderStats::default(),
         })
     }
 
@@ -301,11 +312,17 @@ impl Whisper {
             archives,
             compressed_archives: None,
             options,
+            out_of_order_stats: OutOfOrderStats::default(),
         })
     }
 
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// Snapshot without resetting counters; ordinary and expired points do not count.
+    pub fn out_of_order_stats(&self) -> OutOfOrderStats {
+        self.out_of_order_stats
     }
 
     pub fn sync(&self) -> io::Result<()> {
@@ -677,6 +694,7 @@ impl Whisper {
             archives,
             compressed_archives: Some(compressed),
             options,
+            out_of_order_stats: OutOfOrderStats::default(),
         })
     }
 
@@ -1356,6 +1374,109 @@ mod tests {
         drop(w);
         std::fs::remove_file(path).unwrap();
     }
+
+    #[test]
+    fn out_of_order_stats_count_rejections_and_survive_internal_reopens() {
+        for compressed in [false, true] {
+            for out_of_order in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("stats.wsp");
+                let mut meta = metadata();
+                meta.retentions.truncate(1);
+                let options = Options {
+                    compressed,
+                    out_of_order,
+                    ..Options::default()
+                };
+                let mut w = Whisper::create(&path, meta, options).unwrap();
+                let point = |timestamp| Point {
+                    timestamp,
+                    value: 1.0,
+                };
+                w.update_many(&[point(100), point(101)], 110).unwrap();
+                assert_eq!(w.out_of_order_stats(), OutOfOrderStats::default());
+                w.update_many(&[point(1)], 110).unwrap();
+                assert_eq!(w.out_of_order_stats(), OutOfOrderStats::default());
+                // Same-batch duplicates are coalesced before compressed-encoder rejection.
+                w.update_many(&[point(99), point(100), point(100)], 110)
+                    .unwrap();
+                let expected = OutOfOrderStats {
+                    discarded: if compressed { 2 } else { 0 },
+                    diverted: if compressed && out_of_order { 2 } else { 0 },
+                };
+                assert_eq!(w.out_of_order_stats(), expected);
+                w.update_many(&[point(102)], 110).unwrap();
+                assert_eq!(w.out_of_order_stats(), expected);
+                if compressed && out_of_order {
+                    assert!(out_of_order_sidecar_path(&path).exists());
+                    // Compaction uses the same internal replacement path as block growth.
+                    w.compact_out_of_order(110).unwrap();
+                    assert!(!out_of_order_sidecar_path(&path).exists());
+                    assert_eq!(w.out_of_order_stats(), expected);
+                }
+                drop(w);
+                let w = Whisper::open(&path, options).unwrap();
+                assert_eq!(w.out_of_order_stats(), OutOfOrderStats::default());
+            }
+        }
+    }
+
+    #[test]
+    fn out_of_order_stats_keep_rejections_when_diversion_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stats.wsp");
+        let mut w = Whisper::create(
+            &path,
+            metadata(),
+            Options {
+                compressed: true,
+                out_of_order: true,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let points: Vec<_> = (80..=110)
+            .map(|timestamp| Point {
+                timestamp,
+                value: 1.0,
+            })
+            .collect();
+        w.update_many(&points, 110).unwrap();
+        // Still-live buffer slots accept out-of-order updates without diversion.
+        w.update_many(
+            &[Point {
+                timestamp: 108,
+                value: 2.0,
+            }],
+            110,
+        )
+        .unwrap();
+        assert_eq!(w.out_of_order_stats(), OutOfOrderStats::default());
+        let sidecar = out_of_order_sidecar_path(&path);
+        std::fs::create_dir(&sidecar).unwrap();
+        let late = [Point {
+            timestamp: 85,
+            value: 3.0,
+        }];
+        assert!(w.update_many(&late, 110).is_err());
+        assert_eq!(
+            w.out_of_order_stats(),
+            OutOfOrderStats {
+                discarded: 1,
+                diverted: 0
+            }
+        );
+        std::fs::remove_dir(&sidecar).unwrap();
+        w.update_many(&late, 110).unwrap();
+        assert_eq!(
+            w.out_of_order_stats(),
+            OutOfOrderStats {
+                discarded: 2,
+                diverted: 1
+            }
+        );
+    }
+
     #[test]
     fn compressed_block_encode_roundtrip() {
         let points = vec![
