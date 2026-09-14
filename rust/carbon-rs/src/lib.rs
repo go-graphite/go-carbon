@@ -5,7 +5,6 @@ pub mod file_list;
 pub mod graphite;
 pub mod http;
 pub mod index;
-pub mod lifecycle;
 #[cfg(any(target_os = "linux", test))]
 mod linux_process;
 pub mod logging;

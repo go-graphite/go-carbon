@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::cache::Cache;
 use crate::config::{Config, Rules};
@@ -31,6 +31,8 @@ pub struct App {
     rules: RwLock<Rules>,
     mutation: Mutex<()>,
     files: Vec<Mutex<()>>,
+    /// Last sidecar merge; caps compactions at `out-of-order-compact-rate` per second.
+    compaction_grant: Mutex<Option<Instant>>,
 }
 
 pub fn now() -> i64 {
@@ -89,6 +91,7 @@ impl App {
             write_errors: AtomicU64::new(0),
             read_generation: AtomicU64::new(0),
             rejection_logged: AtomicI64::new(0),
+            compaction_grant: Mutex::new(None),
         }))
     }
 
@@ -403,6 +406,18 @@ impl App {
                 .committed
                 .fetch_add(batch.points.len() as u64, Ordering::Relaxed);
             w.sync()?;
+            // Go compacts on the write path too: size threshold, then a non-blocking rate
+            // budget. A failed merge is counted and left in place; the points are durable.
+            if self.config.whisper.out_of_order && w.metadata().compressed {
+                let (_, physical) = sidecar_sizes(&path)?;
+                if physical > 0
+                    && physical >= self.config.whisper.out_of_order_compact_threshold
+                    && self.claim_compaction()
+                    && let Err(error) = self.merge_sidecar(&mut w, &batch.metric, &path)
+                {
+                    tracing::error!(target: "persister", metric = %batch.metric, error = %error, "failed to merge out-of-order sidecar");
+                }
+            }
             let meta = disk_meta(
                 &path,
                 w.metadata(),
@@ -622,15 +637,7 @@ impl App {
         if !w.metadata().compressed {
             return Ok(false);
         }
-        if let Err(error) = w.compact_out_of_order(now()) {
-            self.graphite
-                .ooo_compact_errors
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(error);
-        }
-        self.graphite
-            .ooo_compactions
-            .fetch_add(1, Ordering::Relaxed);
+        self.merge_sidecar(&mut w, metric, &path)?;
         let _mutation = self.mutation.lock().unwrap_or_else(PoisonError::into_inner);
         let first_seen = self
             .index
@@ -644,8 +651,40 @@ impl App {
         self.index.upsert(metric, meta);
         self.read_generation.fetch_add(1, Ordering::Relaxed);
         drop(_mutation);
-        tracing::debug!(target: "persister", metric, path = %path.display(), "merged out-of-order sidecar into cwhisper file");
         Ok(true)
+    }
+
+    /// Folds the sidecar into `w` (caller holds the file lock) and counts the outcome.
+    fn merge_sidecar(&self, w: &mut Whisper, metric: &str, path: &Path) -> io::Result<()> {
+        if let Err(error) = w.compact_out_of_order(now()) {
+            self.graphite
+                .ooo_compact_errors
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(error);
+        }
+        self.graphite
+            .ooo_compactions
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(target: "persister", metric, path = %path.display(), "merged out-of-order sidecar into cwhisper file");
+        Ok(())
+    }
+
+    /// One merge per `1/rate` seconds, never waiting; a zero rate disables merging.
+    fn claim_compaction(&self) -> bool {
+        let rate = self.config.whisper.out_of_order_compact_rate;
+        if rate == 0 {
+            return false;
+        }
+        let interval = Duration::from_secs_f64(1.0 / rate as f64);
+        let mut last = self
+            .compaction_grant
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < interval) {
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
     }
 
     pub fn load_file_list(&self, entries: Vec<crate::file_list::Entry>) -> io::Result<()> {
@@ -722,15 +761,20 @@ fn skip_missing<T>(result: io::Result<T>) -> io::Result<Option<T>> {
         Err(e) => Err(e),
     }
 }
+/// (logical, physical) bytes of a metric's `.ooo` sidecar, zero when absent. Physical is what
+/// matters: sidecars are sparse, so logical size is the whole retention however few points.
+fn sidecar_sizes(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    match fs::metadata(whisper_rs::out_of_order_sidecar_path(path)) {
+        Ok(m) => Ok((m.len(), m.blocks() * 512)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok((0, 0)),
+        Err(e) => Err(e),
+    }
+}
 fn disk_meta(path: &Path, metadata: &Metadata, first_seen_at: i64) -> io::Result<MetricMeta> {
     use std::os::unix::fs::MetadataExt;
     let file = fs::metadata(path)?;
-    let sidecar = fs::metadata(format!("{}.ooo", path.display()));
-    let (side_logical, side_physical) = match sidecar {
-        Ok(m) => (m.len(), m.blocks() * 512),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => (0, 0),
-        Err(e) => return Err(e),
-    };
+    let (side_logical, side_physical) = sidecar_sizes(path)?;
     Ok(MetricMeta {
         data_points: metadata.retentions.iter().map(|r| r.points as u64).sum(),
         logical_size: file.len() + side_logical,

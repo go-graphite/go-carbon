@@ -521,6 +521,51 @@ mod tests {
         values
     }
 
+    /// Like Go, compaction rides on the write path: a flush merges the sidecar once it reaches
+    /// the size threshold, at most `out-of-order-compact-rate` merges per second.
+    #[test]
+    fn flush_compacts_sidecar_at_threshold_within_rate_budget() {
+        for (threshold, compacted) in [(1u64, true), (1 << 40, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let schemas = dir.path().join("schemas");
+            std::fs::write(&schemas, "[all]\npattern = .*\nretentions = 1:600\n").unwrap();
+            let mut config = Config::default();
+            config.whisper.schemas_file = schemas.display().to_string();
+            config.whisper.data_dir = dir.path().join("wsp").display().to_string();
+            config.whisper.compressed = true;
+            config.whisper.out_of_order = true;
+            config.whisper.out_of_order_compact_rate = 1;
+            config.whisper.out_of_order_compact_threshold = threshold;
+            config.carbonserver.enabled = false;
+            config.prometheus.enabled = false;
+            let app = App::new(config).unwrap();
+            let mut collector = Collector::default();
+            let at = now();
+            let sidecar = whisper_rs::out_of_order_sidecar_path(app.path("ooo.test").unwrap());
+            let write = |timestamp: i64, value: f64| {
+                app.ingest("ooo.test".into(), Point { timestamp, value })
+                    .unwrap();
+                app.flush_one().unwrap();
+            };
+            write(at - 2, 2.0);
+            write(at - 3, 1.0);
+            assert_eq!(sidecar.exists(), !compacted, "threshold {threshold}");
+            let after = snapshot(&mut collector, &app);
+            assert_eq!(after["persister.oooDiverted"], 1.0);
+            assert_eq!(after["persister.oooCompactions"], f64::from(compacted));
+            assert_eq!(after["persister.oooCompactErrors"], 0.0);
+            if compacted {
+                let merged = app.fetch("ooo.test", at - 4, at - 2, at).unwrap().unwrap();
+                assert_eq!(merged.values, vec![Some(1.0), Some(2.0)]);
+                // The one merge per second is spent; the next sidecar waits for a later flush.
+                write(at - 4, 0.5);
+                assert!(sidecar.exists());
+                let budget = snapshot(&mut collector, &app);
+                assert_eq!(budget["persister.oooCompactions"], 0.0);
+            }
+        }
+    }
+
     #[test]
     fn ooo_metrics_report_real_writes_compactions_errors_and_interval_deltas() {
         for enabled in [false, true] {

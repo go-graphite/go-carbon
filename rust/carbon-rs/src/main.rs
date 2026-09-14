@@ -239,7 +239,6 @@ async fn run(config: Config) -> io::Result<()> {
             }
         }
     });
-    let compactor = tokio::spawn(carbon_rs::lifecycle::compact(app.clone(), stop_rx.clone()));
     let collector_app = app.clone();
     let collector_stop = stop_rx.clone();
     let collector = tokio::spawn(async move {
@@ -298,11 +297,7 @@ async fn run(config: Config) -> io::Result<()> {
                 tracing::error!(target: "persister", error = %error, "Whisper worker failed");
             }
         }
-        for (name, task) in [
-            ("scanner", scanner),
-            ("compactor", compactor),
-            ("collector", collector),
-        ] {
+        for (name, task) in [("scanner", scanner), ("collector", collector)] {
             if let Err(error) = task.await {
                 tracing::error!(target: "main", task = name, error = %error, "background task failed");
             }
