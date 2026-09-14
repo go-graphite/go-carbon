@@ -88,10 +88,15 @@ struct Pending {
     handles: Vec<String>,
     namespaces: Vec<(String, String)>, // (namespace, parent) charged by this reservation
 }
+/// A namespace's counters plus its rule, resolved by glob once when the slot is created.
+struct Slot {
+    usage: Usage,
+    rule: Option<usize>,
+}
 struct State {
     metrics: HashMap<String, Metric>,
     namespaces: HashSet<String>,
-    usage: HashMap<String, Usage>,
+    usage: HashMap<String, Slot>,
     pending: HashMap<u64, Pending>,
     window_at: Instant,
 }
@@ -103,8 +108,6 @@ pub struct Engine {
     window: Duration,
     state: Mutex<State>,
     next: Mutex<u64>,
-    /// Namespace -> index into `rules`; grows with the same namespaces `State::usage` tracks.
-    rule_cache: Mutex<HashMap<String, Option<usize>>>,
 }
 pub type QuotaEngine = Engine;
 
@@ -156,7 +159,6 @@ impl Engine {
                 window_at: Instant::now(),
             }),
             next: Mutex::new(1),
-            rule_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -165,22 +167,28 @@ impl Engine {
     pub fn admit(&self, metric: &str, points: i64, costs: Costs) -> Result<Reservation, Rejection> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.reset_if_due(&mut state);
-        let handles = self.handles(metric);
-        for handle in &handles {
-            if let Some(rule) = self.rule_for(handle) {
-                let usage = state.usage.entry(handle.clone()).or_default();
-                if rule.throughput > 0 && usage.throughput.saturating_add(points) > rule.throughput
-                {
-                    usage.throttled = usage.throttled.saturating_add(points);
-                    if rule.dropping_policy == DroppingPolicy::New {
-                        return Err(Rejection::Throughput);
+        let handles = handles(metric);
+        // One pass over the slots: charge throughput as we go and undo it on a rejection.
+        for (n, handle) in handles.iter().enumerate() {
+            // Known namespaces (the steady state) cost one hash lookup here.
+            let slot = match state.usage.get_mut(*handle) {
+                Some(slot) => slot,
+                None => self.slot(&mut state.usage, handle),
+            };
+            if let Some(rule) = slot.rule.map(|i| &self.rules[i].rule)
+                && rule.throughput > 0
+                && slot.usage.throughput.saturating_add(points) > rule.throughput
+            {
+                slot.usage.throttled = slot.usage.throttled.saturating_add(points);
+                if rule.dropping_policy == DroppingPolicy::New {
+                    for handle in &handles[..n] {
+                        let usage = &mut self.slot(&mut state.usage, handle).usage;
+                        usage.throughput = usage.throughput.saturating_sub(points);
                     }
+                    return Err(Rejection::Throughput);
                 }
             }
-        }
-        for handle in &handles {
-            let usage = state.usage.entry(handle.clone()).or_default();
-            usage.throughput = usage.throughput.saturating_add(points);
+            slot.usage.throughput = slot.usage.throughput.saturating_add(points);
         }
         if state.metrics.contains_key(metric)
             || state
@@ -220,10 +228,9 @@ impl Engine {
                     .count() as i64,
                 ..costs
             };
-            let usage = *state.usage.entry(handle.clone()).or_default();
-            if let Some((which, policy)) = self.exceeded(handle, usage, add) {
-                state.usage.get_mut(handle).unwrap().throttled =
-                    state.usage[handle].throttled.saturating_add(points);
+            let slot = self.slot(&mut state.usage, handle);
+            if let Some((which, policy)) = self.exceeded(slot.rule, slot.usage, add) {
+                slot.usage.throttled = slot.usage.throttled.saturating_add(points);
                 if policy == DroppingPolicy::New {
                     return Err(which);
                 }
@@ -237,7 +244,7 @@ impl Engine {
                     .count() as i64,
                 ..costs
             };
-            add_usage(state.usage.entry(handle.clone()).or_default(), add);
+            add_usage(&mut self.slot(&mut state.usage, handle).usage, add);
         }
         let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
         let id = *next;
@@ -247,7 +254,7 @@ impl Engine {
             Pending {
                 metric: metric.to_owned(),
                 costs,
-                handles,
+                handles: handles.iter().map(|h| (*h).to_owned()).collect(),
                 namespaces: namespace_adds,
             },
         );
@@ -299,13 +306,10 @@ impl Engine {
                 None => refund.push((ns, parent)),
             }
         }
-        for handle in p.handles {
-            let namespaces = refund
-                .iter()
-                .filter(|(_, parent)| parent == &handle)
-                .count() as i64;
+        for handle in &p.handles {
+            let namespaces = refund.iter().filter(|(_, parent)| parent == handle).count() as i64;
             subtract_usage(
-                state.usage.entry(handle).or_default(),
+                &mut self.slot(&mut state.usage, handle).usage,
                 Costs {
                     namespaces,
                     ..p.costs
@@ -317,16 +321,16 @@ impl Engine {
     /// Reconciles a known file after create, compaction, or a filesystem scan; `.ooo` bytes belong in `costs`.
     pub fn sync_metric(&self, metric: &str, costs: Costs) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let Some((old, handles)) = state.metrics.get_mut(metric).map(|current| {
-            let old = current.costs;
-            current.costs = costs;
-            (old, current.handles.clone())
-        }) else {
+        let state = &mut *state;
+        let Some(current) = state.metrics.get_mut(metric) else {
             return false;
         };
-        for handle in handles {
-            let u = state.usage.entry(handle).or_default();
-            add_usage(u, difference(costs, old));
+        let old = std::mem::replace(&mut current.costs, costs);
+        for handle in &current.handles {
+            add_usage(
+                &mut self.slot(&mut state.usage, handle).usage,
+                difference(costs, old),
+            );
         }
         true
     }
@@ -336,19 +340,19 @@ impl Engine {
             .unwrap()
             .usage
             .get(namespace)
-            .copied()
+            .map(|slot| slot.usage)
             .unwrap_or_default()
     }
     pub fn report(&self) -> Vec<NamespaceReport> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut report = BTreeMap::new();
-        for (namespace, usage) in &state.usage {
+        for (namespace, slot) in &state.usage {
             report.insert(
                 namespace.clone(),
                 NamespaceReport {
                     namespace: namespace.clone(),
-                    rule: self.rule_for(namespace).cloned(),
-                    usage: *usage,
+                    rule: slot.rule.map(|i| self.rules[i].rule.clone()),
+                    usage: slot.usage,
                 },
             );
         }
@@ -367,13 +371,13 @@ impl Engine {
             let delta = difference(costs, current.costs);
             current.costs = costs;
             for handle in &current.handles {
-                add_usage(state.usage.entry(handle.clone()).or_default(), delta);
+                add_usage(&mut self.slot(&mut state.usage, handle).usage, delta);
             }
             return;
         }
-        let handles = self.handles(metric);
+        let handles = handles(metric);
         for handle in &handles {
-            add_usage(state.usage.entry(handle.clone()).or_default(), costs);
+            add_usage(&mut self.slot(&mut state.usage, handle).usage, costs);
         }
         let parent = metric.rsplit_once('.').map(|x| x.0).unwrap_or("");
         let parts: Vec<_> = parent.split('.').filter(|x| !x.is_empty()).collect();
@@ -385,12 +389,16 @@ impl Engine {
                 } else {
                     parts[..i - 1].join(".")
                 };
-                state.usage.entry(parent).or_default().namespaces += 1;
+                self.slot(&mut state.usage, &parent).usage.namespaces += 1;
             }
         }
-        state
-            .metrics
-            .insert(metric.to_owned(), Metric { costs, handles });
+        state.metrics.insert(
+            metric.to_owned(),
+            Metric {
+                costs,
+                handles: handles.iter().map(|h| (*h).to_owned()).collect(),
+            },
+        );
     }
     /// Rebuilds catalog resource usage from a completed filesystem scan, preserving throughput counters.
     pub fn reconcile(&self, metrics: Vec<(String, Costs)>) {
@@ -402,12 +410,12 @@ impl Engine {
         }
         state.metrics.clear();
         state.namespaces.clear();
-        for usage in state.usage.values_mut() {
-            usage.namespaces = 0;
-            usage.metrics = 0;
-            usage.data_points = 0;
-            usage.logical_size = 0;
-            usage.physical_size = 0;
+        for slot in state.usage.values_mut() {
+            slot.usage.namespaces = 0;
+            slot.usage.metrics = 0;
+            slot.usage.data_points = 0;
+            slot.usage.logical_size = 0;
+            slot.usage.physical_size = 0;
         }
         for (metric, costs) in metrics {
             self.register_locked(&mut state, &metric, costs);
@@ -433,41 +441,35 @@ impl Engine {
             return;
         }
         let elapsed = state.window_at.elapsed().as_secs_f64() / self.window.as_secs_f64();
-        for (name, usage) in &mut state.usage {
-            if let Some(rule) = self.rule_for(name)
+        for slot in state.usage.values_mut() {
+            if let Some(rule) = slot.rule.map(|i| &self.rules[i].rule)
                 && rule.throughput > 0
-                && (usage.throughput as f64) > rule.throughput as f64 * elapsed
+                && (slot.usage.throughput as f64) > rule.throughput as f64 * elapsed
             {
                 continue;
             }
-            usage.throughput = 0;
+            slot.usage.throughput = 0;
         }
         state.window_at = Instant::now();
     }
-    fn handles(&self, metric: &str) -> Vec<String> {
-        let mut out = vec!["/".to_owned()];
-        let parent = metric.rsplit_once('.').map(|x| x.0).unwrap_or("");
-        for (i, b) in parent.bytes().enumerate() {
-            if b == b'.' {
-                out.push(parent[..i].to_owned());
-            }
+    /// The namespace slot for `handle`, created with its rule on first sight.
+    /// ponytail: two SipHash lookups per hit; hashbrown's entry_ref makes it one if it shows.
+    fn slot<'a>(&self, usage: &'a mut HashMap<String, Slot>, handle: &str) -> &'a mut Slot {
+        if !usage.contains_key(handle) {
+            usage.insert(
+                handle.to_owned(),
+                Slot {
+                    usage: Usage::default(),
+                    rule: self.resolve_rule(handle),
+                },
+            );
         }
-        if !parent.is_empty() {
-            out.push(parent.to_owned());
-        }
-        out
+        usage.get_mut(handle).expect("slot inserted above")
     }
-    /// Last matching rule. Rules are fixed for the engine's lifetime, so each namespace is
-    /// glob-matched once instead of on every admitted point.
-    fn rule_for(&self, namespace: &str) -> Option<&Rule> {
-        let mut cache = self
-            .rule_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(index) = cache.get(namespace) {
-            return index.map(|i| &self.rules[i].rule);
-        }
-        let index = self.rules.iter().rposition(|compiled| {
+    /// Last matching rule by glob; rules are fixed for the engine's lifetime, so this runs
+    /// once per namespace when its slot is created.
+    fn resolve_rule(&self, namespace: &str) -> Option<usize> {
+        self.rules.iter().rposition(|compiled| {
             if compiled.rule.pattern == "/" {
                 namespace == "/"
             } else {
@@ -476,17 +478,15 @@ impl Engine {
                     .as_ref()
                     .is_some_and(|glob| glob.matches(namespace))
             }
-        });
-        cache.insert(namespace.to_owned(), index);
-        index.map(|i| &self.rules[i].rule)
+        })
     }
     fn exceeded(
         &self,
-        namespace: &str,
+        rule: Option<usize>,
         usage: Usage,
         add: Costs,
     ) -> Option<(Rejection, DroppingPolicy)> {
-        let rule = self.rule_for(namespace)?;
+        let rule = &self.rules[rule?].rule;
         for (limit, value, reason) in [
             (
                 rule.namespaces,
@@ -567,6 +567,20 @@ fn throughput(per_minute: i64, window: Duration) -> i64 {
     (per_minute as f64 * window.as_secs_f64() / 60.0) as i64
 }
 
+/// "/" plus every namespace prefix of the metric's parent path, borrowed from the name.
+fn handles(metric: &str) -> Vec<&str> {
+    let mut out = vec!["/"];
+    let parent = metric.rsplit_once('.').map(|x| x.0).unwrap_or("");
+    for (i, b) in parent.bytes().enumerate() {
+        if b == b'.' {
+            out.push(&parent[..i]);
+        }
+    }
+    if !parent.is_empty() {
+        out.push(parent);
+    }
+    out
+}
 fn in_namespace(metric: &str, namespace: &str) -> bool {
     let parent = metric.rsplit_once('.').map(|x| x.0).unwrap_or("");
     parent == namespace || parent.starts_with(&(namespace.to_owned() + "."))
@@ -663,9 +677,9 @@ mod tests {
         assert!(q.commit(second));
         assert_eq!(q.usage("/").namespaces, 1);
     }
-    /// Rules never change for a loaded engine, so each namespace resolves its rule once.
+    /// A namespace slot is created once and carries the rule resolved by glob at that time.
     #[test]
-    fn rule_lookups_are_memoized_per_namespace() {
+    fn namespace_slots_resolve_their_rule_once() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("q");
         fs::write(
@@ -674,21 +688,46 @@ mod tests {
         )
         .unwrap();
         let q = Engine::load(file, Duration::from_secs(60)).unwrap();
-        let cached = || q.rule_cache.lock().unwrap().len();
+        let slots = || {
+            let state = q.state.lock().unwrap();
+            state
+                .usage
+                .iter()
+                .map(|(ns, slot)| {
+                    let pattern = slot.rule.map(|i| q.rules[i].rule.pattern.clone());
+                    (ns.clone(), pattern)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
         assert!(q.admit("sys.app.db.one", 1, Costs::metric(1, 1, 1)).is_ok());
-        assert_eq!(cached(), 4, "/, sys, sys.app, sys.app.db");
+        let expected = BTreeMap::from([
+            ("/".to_owned(), Some("/".to_owned())),
+            ("sys".to_owned(), None),
+            ("sys.app".to_owned(), Some("sys.*".to_owned())),
+            ("sys.app.db".to_owned(), Some("sys.*.db".to_owned())),
+        ]);
+        assert_eq!(slots(), expected);
         assert!(q.admit("sys.app.db.two", 1, Costs::metric(1, 1, 1)).is_ok());
-        assert_eq!(cached(), 4);
+        assert_eq!(slots(), expected);
         assert!(q.admit("web.x", 1, Costs::metric(1, 1, 1)).is_ok());
-        assert_eq!(cached(), 5);
-        for _ in 0..2 {
-            let pattern = |ns: &str| q.rule_for(ns).map(|r| r.pattern.as_str());
-            assert_eq!(pattern("/"), Some("/"));
-            assert_eq!(pattern("sys"), None);
-            assert_eq!(pattern("sys.app"), Some("sys.*"));
-            assert_eq!(pattern("sys.app.db"), Some("sys.*.db"));
-            assert_eq!(pattern("web"), None);
-        }
+        assert_eq!(slots().len(), 5);
+        assert_eq!(slots()["web"], None);
+    }
+    /// A throughput rejection leaves no partial charge on the handles checked before it.
+    #[test]
+    fn throughput_rejection_charges_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("q");
+        fs::write(&file, "[/]\nmetrics=10\n[a]\nthroughput=1\n").unwrap();
+        let q = Engine::load(file, Duration::from_secs(60)).unwrap();
+        assert!(q.admit("a.x", 1, Costs::metric(1, 1, 1)).is_ok());
+        assert_eq!(
+            q.admit("a.y", 1, Costs::metric(1, 1, 1)),
+            Err(Rejection::Throughput)
+        );
+        assert_eq!(q.usage("/").throughput, 1);
+        assert_eq!(q.usage("a").throughput, 1);
+        assert_eq!(q.usage("a").throttled, 1);
     }
     #[test]
     fn throughput_scales_to_report_window() {
