@@ -63,7 +63,11 @@ impl Glob {
         self.matches_checked(path, 100_000).unwrap_or(false)
     }
     pub fn matches_checked(&self, path: &str, work_limit: usize) -> Result<bool, GlobError> {
-        matches_at(self.pattern.as_bytes(), path.as_bytes(), work_limit)
+        matches_at(self.pattern.as_bytes(), path.as_bytes(), work_limit, false)
+    }
+    /// Whether `path` or some extension of it could match; false prunes a whole subtree.
+    pub fn matches_prefix(&self, path: &str, work_limit: usize) -> Result<bool, GlobError> {
+        matches_at(self.pattern.as_bytes(), path.as_bytes(), work_limit, true)
     }
     pub fn pattern(&self) -> &str {
         &self.pattern
@@ -176,12 +180,22 @@ fn validate(pattern: &str) -> Result<(), GlobError> {
     Ok(())
 }
 
-fn matches_at(pattern: &[u8], path: &[u8], mut work: usize) -> Result<bool, GlobError> {
-    fn inner(p: &[u8], s: &[u8], work: &mut usize) -> Result<bool, GlobError> {
+/// With `prefix`, an exhausted path answers true: whatever pattern remains can be satisfied
+/// by some extension, so the caller learns whether descending below `path` can pay off.
+fn matches_at(
+    pattern: &[u8],
+    path: &[u8],
+    mut work: usize,
+    prefix: bool,
+) -> Result<bool, GlobError> {
+    fn inner(p: &[u8], s: &[u8], work: &mut usize, prefix: bool) -> Result<bool, GlobError> {
         if *work == 0 {
             return Err(GlobError("glob: work limit exceeded".into()));
         }
         *work -= 1;
+        if prefix && s.is_empty() {
+            return Ok(true);
+        }
         if p.is_empty() {
             return Ok(s.is_empty());
         }
@@ -189,20 +203,20 @@ fn matches_at(pattern: &[u8], path: &[u8], mut work: usize) -> Result<bool, Glob
             b'*' => {
                 let mut n = 0;
                 while n <= s.len() && (n == 0 || s[n - 1] != b'.') {
-                    if inner(&p[1..], &s[n..], work)? {
+                    if inner(&p[1..], &s[n..], work, prefix)? {
                         return Ok(true);
                     }
                     n += 1;
                 }
                 Ok(false)
             }
-            b'?' => Ok(!s.is_empty() && s[0] != b'.' && inner(&p[1..], &s[1..], work)?),
+            b'?' => Ok(!s.is_empty() && s[0] != b'.' && inner(&p[1..], &s[1..], work, prefix)?),
             b'[' => {
                 let end = p.iter().position(|&b| b == b']').expect("validated glob");
                 Ok(!s.is_empty()
                     && s[0] != b'.'
                     && class_matches(&p[1..end], s[0])
-                    && inner(&p[end + 1..], &s[1..], work)?)
+                    && inner(&p[end + 1..], &s[1..], work, prefix)?)
             }
             b'{' => {
                 let end = matching_brace(p).expect("validated glob");
@@ -210,16 +224,16 @@ fn matches_at(pattern: &[u8], path: &[u8], mut work: usize) -> Result<bool, Glob
                 for alt in split_alternatives(&p[1..end]) {
                     let mut combined = alt;
                     combined.extend_from_slice(tail);
-                    if inner(&combined, s, work)? {
+                    if inner(&combined, s, work, prefix)? {
                         return Ok(true);
                     }
                 }
                 Ok(false)
             }
-            c => Ok(!s.is_empty() && c == s[0] && inner(&p[1..], &s[1..], work)?),
+            c => Ok(!s.is_empty() && c == s[0] && inner(&p[1..], &s[1..], work, prefix)?),
         }
     }
-    inner(pattern, path, &mut work)
+    inner(pattern, path, &mut work, prefix)
 }
 
 fn class_matches(class: &[u8], byte: u8) -> bool {
@@ -308,6 +322,18 @@ impl TrieNode {
         limit: usize,
         visited: &mut usize,
     ) -> Result<(), GlobError> {
+        self.walk(&mut prefix.to_owned(), glob, out, limit, visited)
+    }
+    /// Emits this node when it matches, then enters only children whose path could still be
+    /// extended into a match, so the pattern bounds the walk rather than the trie.
+    fn walk(
+        &self,
+        path: &mut String,
+        glob: &Glob,
+        out: &mut Vec<Match>,
+        limit: usize,
+        visited: &mut usize,
+    ) -> Result<(), GlobError> {
         if out.len() >= limit {
             return Ok(());
         }
@@ -315,22 +341,25 @@ impl TrieNode {
         if *visited > 10_000_000 {
             return Err(GlobError("index query exceeds traversal budget".into()));
         }
-        if !prefix.is_empty() && glob.matches_checked(prefix, 100_000)? {
+        if !path.is_empty() && glob.matches_checked(path, 100_000)? {
             out.push(Match {
-                path: prefix.to_owned(),
+                path: path.clone(),
                 is_leaf: self.leaf,
             });
         }
+        let len = path.len();
         for (name, child) in &self.children {
             if out.len() >= limit {
                 break;
             }
-            let path = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}.{name}")
-            };
-            child.find_matches(&path, glob, out, limit, visited)?;
+            if len > 0 {
+                path.push('.');
+            }
+            path.push_str(name);
+            if glob.matches_prefix(path, 100_000)? {
+                child.walk(path, glob, out, limit, visited)?;
+            }
+            path.truncate(len);
         }
         Ok(())
     }
@@ -664,6 +693,44 @@ mod tests {
             i.find("service.{bar,baz}.tail", 10).unwrap(),
             vec![Match {
                 path: "service.bar.tail".into(),
+                is_leaf: true
+            }]
+        );
+    }
+    /// The walk descends only where some completion of the path can still match, so the
+    /// pattern bounds the work rather than the size of the trie.
+    #[test]
+    fn trie_find_prunes_subtrees_that_cannot_match() {
+        let i = Index::new(IndexMode::Trie);
+        for c in 0..100 {
+            for d in 0..10 {
+                i.upsert(&format!("a.b.c{c:02}.d{d}"), MetricMeta::default());
+            }
+        }
+        i.upsert(
+            "service.frontend.random.404.xoxo.http",
+            MetricMeta::default(),
+        );
+        let state = i.state.read().unwrap();
+        let glob = Glob::new("a.b.*").unwrap();
+        let (mut out, mut visited) = (Vec::new(), 0);
+        state
+            .trie
+            .find_matches("", &glob, &mut out, 1000, &mut visited)
+            .unwrap();
+        assert_eq!(out.len(), 100);
+        assert!(out.iter().all(|m| !m.is_leaf));
+        assert_eq!(visited, 103, "root, a, a.b and the 100 candidates");
+        drop(state);
+        // Brace alternatives may span segments, so the pattern does not fix the depth.
+        assert_eq!(
+            i.find(
+                "service.frontend.{random-404_xoxo,random.404.xoxo}.http*",
+                10
+            )
+            .unwrap(),
+            vec![Match {
+                path: "service.frontend.random.404.xoxo.http".into(),
                 is_leaf: true
             }]
         );
