@@ -1427,6 +1427,62 @@ func stringifyQuotaPoints(ps []points.Points) string {
 	return str
 }
 
+func TestTrieQuotaCacheHitStillChecksThroughput(t *testing.T) {
+	index := newTrie(".wsp", 0, nil)
+	if _, err := index.applyQuotas(time.Minute, &Quota{
+		Pattern: "/", Throughput: 1, DroppingPolicy: QDPNew,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A cache entry may not have reached the realtime index yet.
+	ps := &points.Points{Metric: "sys.app.pending.cpu", Data: []points.Point{{}}}
+	if index.throttle(ps, true) {
+		t.Fatal("cached metric within throughput quota was rejected")
+	}
+	if !index.throttle(ps, true) {
+		t.Fatal("cached metric exceeding throughput quota was accepted")
+	}
+	usage := index.throughputs.load("/")
+	if got := usage.dpRecorder().dataPoints; got != 1 {
+		t.Fatalf("accepted throughput = %d, want 1", got)
+	}
+	if got := usage.quotaUsage().Throttled; got != 1 {
+		t.Fatalf("throttled points = %d, want 1", got)
+	}
+}
+
+func BenchmarkTrieQuotaEarlyReturn(b *testing.B) {
+	for _, tt := range []struct {
+		name      string
+		limit     int64
+		throttled bool
+	}{
+		{name: "cached", limit: math.MaxInt64},
+		{name: "throughput_rejected", limit: 1, throttled: true},
+	} {
+		b.Run(tt.name, func(b *testing.B) {
+			index := newTrie(".wsp", 0, nil)
+			if _, err := index.insert("/sys/app/server-001/cpu.wsp", 0, 0, 0, 0); err != nil {
+				b.Fatal(err)
+			}
+			if _, err := index.applyQuotas(time.Hour, &Quota{
+				Pattern: "/", Throughput: tt.limit, DroppingPolicy: QDPNew,
+			}); err != nil {
+				b.Fatal(err)
+			}
+			ps := &points.Points{Metric: "sys.app.server-001.cpu", Data: []points.Point{{}}}
+			index.throttle(ps, true)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if got := index.throttle(ps, true); got != tt.throttled {
+					b.Fatalf("throttled = %t, want %t", got, tt.throttled)
+				}
+			}
+		})
+	}
+}
+
 func TestTrieQuotaThroughput(t *testing.T) {
 	tindex := newTrie(
 		".wsp",

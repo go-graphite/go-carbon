@@ -648,6 +648,12 @@ func (archive *archiveInfo) getBufferByUnit(unit int) []byte {
 }
 
 func (archive *archiveInfo) appendToBlockAndRotate(dps []dataPoint) (rotated bool, err error) {
+	rotated, _, err = archive.appendToBlockAndRotateWithBuffer(dps, nil)
+	return rotated, err
+}
+
+func (archive *archiveInfo) appendToBlockAndRotateWithBuffer(dps []dataPoint, blockBuffer []byte) (bool, []byte, error) {
+	var rotated bool
 	whisper := archive.whisper // TODO: optimize away?
 
 	// Why MaxCompressedPointSize+1 and endOfBlockSize*2:
@@ -665,7 +671,15 @@ func (archive *archiveInfo) appendToBlockAndRotate(dps []dataPoint) (rotated boo
 	//
 	// This allocation strategy makes sure that there is enough space in the block
 	// buffer for compression output.
-	blockBuffer := make([]byte, len(dps)*(MaxCompressedPointSize+1)+endOfBlockSize*2)
+	bufferSize := len(dps)*(MaxCompressedPointSize+1) + endOfBlockSize*2
+	if cap(blockBuffer) < bufferSize {
+		blockBuffer = make([]byte, bufferSize)
+	} else {
+		blockBuffer = blockBuffer[:bufferSize]
+		for i := range blockBuffer {
+			blockBuffer[i] = 0
+		}
+	}
 
 	for {
 		offset := archive.cblock.lastByteOffset // lastByteOffset is updated in AppendPointsToBlock
@@ -677,7 +691,7 @@ func (archive *archiveInfo) appendToBlockAndRotate(dps []dataPoint) (rotated boo
 			size = len(blockBuffer)
 		}
 		if err := whisper.fileWriteAt(blockBuffer[:size], int64(offset)); err != nil {
-			return rotated, err
+			return rotated, blockBuffer, err
 		}
 
 		if len(left) == 0 {
@@ -705,7 +719,7 @@ func (archive *archiveInfo) appendToBlockAndRotate(dps []dataPoint) (rotated boo
 		rotated = true
 	}
 
-	return rotated, nil
+	return rotated, blockBuffer, nil
 }
 
 func (whisper *Whisper) extendIfNeeded() error {
@@ -841,12 +855,14 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		// Blocks come back ascending by start and each block's points are
 		// ascending, so the whole stream is ascending and pending can be drained
 		// against it in order. appendToBlockAndRotate requires that.
+		buf := make([]byte, archive.blockSize)
+		var dst []dataPoint
+		var blockBuffer []byte
 		for _, block := range archive.getSortedBlockRanges() {
-			buf := make([]byte, archive.blockSize)
 			if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].file.read: %s", i, block.index, err)
 			}
-			dst, _, err := archive.ReadFromBlock(buf, []dataPoint{}, 0, maxInt)
+			dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
 			if err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
 			}
@@ -854,19 +870,19 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 			var before []extraPoint
 			before, pending = splitBefore(pending, block.start)
 			if len(before) > 0 {
-				if _, err := nwhisper.archives[i].appendToBlockAndRotate(dataPointsOf(before)); err != nil {
+				if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dataPointsOf(before), blockBuffer); err != nil {
 					return fmt.Errorf("archives[%d].extra.write: %s", i, err)
 				}
 			}
 			dst, pending = mergeExtra(dst, pending, block.end)
 
-			if _, err := nwhisper.archives[i].appendToBlockAndRotate(dst); err != nil {
+			if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dst, blockBuffer); err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].write: %s", i, block.index, err)
 			}
 		}
 
 		if len(pending) > 0 {
-			if _, err := nwhisper.archives[i].appendToBlockAndRotate(dataPointsOf(pending)); err != nil {
+			if _, _, err := nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dataPointsOf(pending), blockBuffer); err != nil {
 				return fmt.Errorf("archives[%d].extra.write: %s", i, err)
 			}
 		}
@@ -1405,7 +1421,7 @@ func (a *archiveInfo) ReadFromBlock(buf []byte, dst []dataPoint, start, end int)
 		dst = append(dst, p)
 	}
 
-	var pn1, pn2 *dataPoint = &p, &p
+	pn1, pn2 := p, p
 	var exitByEOB bool
 
 readloop:
@@ -1542,7 +1558,7 @@ readloop:
 		}
 
 		pn2 = pn1
-		pn1 = &p
+		pn1 = p
 
 		if start <= p.interval && p.interval <= end {
 			dst = append(dst, p)

@@ -713,24 +713,35 @@ func spanOf(lists ...[]dataPoint) (from, until int, ok bool) {
 func readArchivePoints(w *Whisper, index int) ([]dataPoint, error) {
 	archive := w.archives[index]
 
-	// the whole archive at once: ~12 bytes per slot, so tens of MB for a long
-	// retention. Acceptable for an explicit, rate-limited maintenance op that
-	// is about to decompress the entire main file anyway.
-	buf := make([]byte, archive.Size())
-	if err := w.fileReadAt(buf, archive.Offset()); err != nil {
-		return nil, fmt.Errorf("read archive %d: %w", index, err)
+	// Sparse sidecars can have long retentions but few live points. Keep
+	// scratch space bounded and only allocate decoded points that survive.
+	bufferSize := 4096 * PointSize
+	if archive.Size() < bufferSize {
+		bufferSize = archive.Size()
 	}
+	buf := make([]byte, bufferSize)
 
 	// a classic archive is a ring buffer: unwritten slots are zero, and slots
 	// not yet overwritten since the last wrap hold points older than retention
 	oldest := int(Now().Unix()) - archive.MaxRetention()
 
 	var points []dataPoint
-	for _, p := range unpackDataPoints(buf) {
-		if p.interval <= 0 || p.interval <= oldest {
-			continue
+	for offset := 0; offset < archive.Size(); {
+		chunk := buf
+		if remaining := archive.Size() - offset; len(chunk) > remaining {
+			chunk = chunk[:remaining]
 		}
-		points = append(points, p)
+		if err := w.fileReadAt(chunk, archive.Offset()+int64(offset)); err != nil {
+			return nil, fmt.Errorf("read archive %d: %w", index, err)
+		}
+		for i := 0; i < len(chunk); i += PointSize {
+			p := unpackDataPoint(chunk[i : i+PointSize])
+			if p.interval <= 0 || p.interval <= oldest {
+				continue
+			}
+			points = append(points, p)
+		}
+		offset += len(chunk)
 	}
 
 	sort.Slice(points, func(i, j int) bool { return points[i].interval < points[j].interval })
