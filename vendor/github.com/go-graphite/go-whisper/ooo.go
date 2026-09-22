@@ -9,10 +9,11 @@ package whisper
 // backfill into an existing file impossible.
 //
 // With Options.OutOfOrder set, those points are diverted into a sidecar: a plain
-// *classic* whisper file named "<path>.ooo", with identical retentions,
-// aggregation method and xFilesFactor, created sparse. Classic whisper is
-// already a random-order, point-addressable store with retention enforcement
-// and per-slot dedup, so no new file format is involved.
+// *classic* whisper file normally named "<path>.ooo", with identical retentions,
+// aggregation method and xFilesFactor, created sparse. Near the filesystem's
+// filename limit, the sidecar uses a stable hashed name in the same directory.
+// Classic whisper is already a random-order, point-addressable store with
+// retention enforcement and per-slot dedup, so no new file format is involved.
 //
 // The compressed file itself stays byte-compatible, so unmodified readers keep
 // working; they simply do not see the diverted points. Fetch merges the sidecar
@@ -31,7 +32,7 @@ import (
 	"sort"
 )
 
-// oooSuffix is appended to the compressed file's path to name its sidecar.
+// oooSuffix is appended to the compressed file's path when the result fits.
 // It deliberately does not end in ".wsp": go-carbon's carbonserver indexes
 // metrics by that suffix, and sidecars must stay invisible to find/glob.
 const oooSuffix = ".ooo"
@@ -89,7 +90,7 @@ func (whisper *Whisper) oooEnabled() bool {
 		!whisper.opts.InMemory
 }
 
-func (whisper *Whisper) oooSidecarPath() string { return whisper.file.Name() + oooSuffix }
+func (whisper *Whisper) oooSidecarPath() string { return OutOfOrderSidecarPath(whisper.file.Name()) }
 
 // detectOOO records whether a sidecar is present, so the read path can skip the
 // open entirely for the overwhelmingly common case of a file that has never
@@ -754,8 +755,9 @@ func readArchivePoints(w *Whisper, index int) ([]dataPoint, error) {
 func (whisper *Whisper) OutOfOrderPath() string { return whisper.oooPath }
 
 // OutOfOrderSidecarPath returns the sidecar path belonging to the whisper file
-// at path. The file need not exist.
-func OutOfOrderSidecarPath(path string) string { return path + oooSuffix }
+// at path. The file need not exist. Paths near the filename limit use a stable
+// hashed filename in the same directory.
+func OutOfOrderSidecarPath(path string) string { return auxiliaryPath(path, oooSuffix) }
 
 // RemoveOutOfOrderSidecar deletes the sidecar belonging to the whisper file at
 // path, and reports whether there was one. A missing sidecar is not an error.

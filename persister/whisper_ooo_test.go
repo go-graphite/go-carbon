@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -302,6 +303,43 @@ func TestStoreAlwaysCreatesSparseOutOfOrderSidecar(t *testing.T) {
 	}
 	if physical := stat.Blocks * 512; physical >= info.Size() {
 		t.Errorf("sidecar is not sparse: logical=%d physical=%d", info.Size(), physical)
+	}
+}
+
+func TestStoreLongFilenameDivertsOutOfOrderWithFLock(t *testing.T) {
+	dir := t.TempDir()
+	cache := &fakeCache{}
+	p := newOOOTestPersister(t, dir, cache)
+	p.SetFLock(true)
+
+	filenameLength := maxFilenameLength - len(".lock")
+	node := strings.Repeat("m", filenameLength-len(".wsp"))
+	metric := "test." + node
+	path := filepath.Join(dir, "test", node+".wsp")
+	if got := len(filepath.Base(path)); got != filenameLength {
+		t.Fatalf("filename length = %d; want %d", got, filenameLength)
+	}
+
+	base := int64(time.Now().Unix()) - 3600
+	cache.add(metric, base, 1)
+	cache.add(metric, base+2, 2)
+	cache.add(metric, base+4, 3)
+	p.store(metric)
+
+	cache.add(metric, base+1, 7)
+	p.store(metric)
+
+	if got := p.oooDiverted; got != 1 {
+		t.Errorf("oooDiverted = %d; want 1", got)
+	}
+	if got := cache.confirmedPoints(); got != 4 {
+		t.Errorf("confirmed points = %d; want 4", got)
+	}
+	if _, err := os.Stat(whisper.OutOfOrderSidecarPath(path)); err != nil {
+		t.Fatalf("stat sidecar: %s", err)
+	}
+	if got := fetchValue(t, path, int(base+1)); got != 7 {
+		t.Errorf("sidecar value = %v; want 7", got)
 	}
 }
 
