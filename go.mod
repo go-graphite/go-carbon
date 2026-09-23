@@ -12,7 +12,7 @@ require (
 	github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 	github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed
-	github.com/go-graphite/go-whisper v0.0.0-20260922182909-b62532075611
+	github.com/go-graphite/go-whisper v0.0.0-20260923110109-c8ec2ce9ec20
 	github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v0.0.4 // indirect
