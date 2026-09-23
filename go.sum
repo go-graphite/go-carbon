@@ -83,8 +83,8 @@ github.com/fsnotify/fsnotify v1.4.9/go.mod h1:znqG4EE+3YCdAaPaxE2ZRY/06pZUdp0tY4
 github.com/ghodss/yaml v1.0.0/go.mod h1:4dBDuWmgqj2HViK6kFavaiC9ZROes6MMH2rRYeMEF04=
 github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed h1:f5BBBdpKP3ODvyLFjzc3b2dgm6SsXtnAKYvLvUGQozc=
 github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed/go.mod h1:sfZ+AkP8/bBcWSGVqhseV6t6e/+C0i/PkTpA32W5rXs=
-github.com/go-graphite/go-whisper v0.0.0-20260914194205-23d1891703f1 h1:OyWa+kgADXopZv8TD/hB0MLGMwbECoOEvNvywWRczks=
-github.com/go-graphite/go-whisper v0.0.0-20260914194205-23d1891703f1/go.mod h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=
+github.com/go-graphite/go-whisper v0.0.0-20260922182909-b62532075611 h1:s8YHxxI1YMfH6o6XiPWHXYkk43bLeua+Y7I8zqd98YU=
+github.com/go-graphite/go-whisper v0.0.0-20260922182909-b62532075611/go.mod h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=
 github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee h1:Sb63UbLUOXtKFIfNfZIkWrs73vWD0ZKzrBdTjvlVOBQ=
 github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee/go.mod h1:puWkW2DFZi46CaLY1rxYhkDiBDFlpaTDaMjcE/Cd9gw=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=

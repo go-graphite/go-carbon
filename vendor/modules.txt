@@ -89,7 +89,7 @@ github.com/felixge/httpsnoop
 # github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed
 ## explicit
 github.com/go-graphite/carbonzipper/zipper/httpHeaders
-# github.com/go-graphite/go-whisper v0.0.0-20260914194205-23d1891703f1
+# github.com/go-graphite/go-whisper v0.0.0-20260922182909-b62532075611
 ## explicit; go 1.18
 github.com/go-graphite/go-whisper
 # github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee
