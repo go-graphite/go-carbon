@@ -799,7 +799,7 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 	var nferrs []error
 
 	filename := whisper.file.Name()
-	tmpname := filename + "." + op
+	tmpname := auxiliaryPath(filename, "."+op)
 	if err := os.Remove(tmpname); err != nil && !os.IsNotExist(err) {
 		nferrs = append(nferrs, err)
 	}
