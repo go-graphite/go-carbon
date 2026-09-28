@@ -1021,6 +1021,17 @@ func (b *Broker) UpdateFeatures(req *UpdateFeaturesRequest) (*UpdateFeaturesResp
 	return res, nil
 }
 
+// ConsumerGroupDescribe describes KIP-848 consumer groups coordinated by this broker.
+func (b *Broker) ConsumerGroupDescribe(req *ConsumerGroupDescribeRequest) (*ConsumerGroupDescribeResponse, error) {
+	res := new(ConsumerGroupDescribeResponse)
+
+	if err := b.sendAndReceive(req, res); err != nil {
+		return nil, err
+	}
+
+	return res, nil
+}
+
 // DescribeProducers sends a request to list the active producer state for
 // topic partitions led by this broker
 func (b *Broker) DescribeProducers(req *DescribeProducersRequest) (*DescribeProducersResponse, error) {
@@ -1237,13 +1248,15 @@ func (b *Broker) sendAndReceive(req protocolBody, res protocolBody) error {
 // negotiateApiVersion clamps pb's version to the broker's advertised maximum
 // for pb's API (treating pb's current version as the client max). When the
 // broker has not advertised ApiVersions info, pb's version is left untouched
-// (optimistic). Returns (0, false) if the resulting version is below
-// minVersion.
+// (optimistic). Returns (0, false) if the broker advertised ApiVersions info
+// that omits pb's API, or if the resulting version is below minVersion.
 func (b *Broker) negotiateApiVersion(pb protocolBody, minVersion int16) (int16, bool) {
 	b.lock.Lock()
 	defer b.lock.Unlock()
 
-	_ = restrictApiVersion(pb, b.brokerAPIVersions)
+	if err := restrictApiVersion(pb, b.brokerAPIVersions); err != nil {
+		return 0, false
+	}
 	if pb.version() < minVersion {
 		return 0, false
 	}
