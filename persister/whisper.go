@@ -65,6 +65,9 @@ type Whisper struct {
 	logger              *zap.Logger
 	createLogger        *zap.Logger
 
+	oooCompactionChecks   uint32 // counter
+	oooCompactionDeferred uint32 // counter
+
 	// outOfOrder diverts points the compressed format rejects into a sidecar
 	// file and folds them back in periodically. See go-whisper's ooo.go.
 	outOfOrder struct {
@@ -72,6 +75,7 @@ type Whisper struct {
 		rate      int
 		threshold int64
 		ticker    *helper.ThrottleTicker
+		policy    whisper.OutOfOrderMergeOptions
 	}
 
 	onlineMigration struct {
@@ -212,6 +216,15 @@ func (p *Whisper) EnableOutOfOrder(rate int, thresholdBytes int64) {
 	p.outOfOrder.threshold = thresholdBytes
 }
 
+// SetOutOfOrderCompactionPolicy enables live-record/age checks instead of the
+// physical-size trigger when minPoints is positive. The same rate budget limits
+// scans as well as merges. Eligibility is checked on writes, not in background.
+func (p *Whisper) SetOutOfOrderCompactionPolicy(minPoints int, maxPointAge, retentionMargin time.Duration) {
+	p.outOfOrder.policy = whisper.OutOfOrderMergeOptions{
+		MinPoints: minPoints, MaxPointAge: maxPointAge, RetentionMargin: retentionMargin,
+	}
+}
+
 func (p *Whisper) SetRemoveEmptyFile(remove bool) {
 	p.removeEmptyFile = remove
 }
@@ -299,10 +312,10 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 // compressed file, once the sidecar has grown enough to be worth a full file
 // rewrite.
 //
-// Like online migration this is rate limited and never blocks the writer: with
-// no budget left the sidecar simply stays where it is, and reads keep merging
-// it. It returns the handle to carry on with, or nil when a failed merge cannot
-// be followed by a reopen.
+// Like online migration, budget acquisition never waits: with no budget left
+// the sidecar stays where it is, and reads keep merging it. Eligible merges are
+// synchronous. It returns the handle to carry on with, or nil when a failed
+// merge cannot be followed by a reopen.
 func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *whisper.Whisper {
 	sidecar := w.OutOfOrderPath()
 	if sidecar == "" {
@@ -324,7 +337,7 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 	if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
 		size = stat.Blocks * 512
 	}
-	if size < p.outOfOrder.threshold {
+	if p.outOfOrder.policy.MinPoints <= 0 && size < p.outOfOrder.threshold {
 		return w
 	}
 
@@ -338,8 +351,18 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 		return w
 	}
 
-	err = w.MergeOutOfOrder()
+	merged := true
+	if p.outOfOrder.policy.MinPoints > 0 {
+		atomic.AddUint32(&p.oooCompactionChecks, 1)
+		merged, err = w.MergeOutOfOrderWithOptions(p.outOfOrder.policy)
+	} else {
+		err = w.MergeOutOfOrder()
+	}
 	if err == nil {
+		if !merged {
+			atomic.AddUint32(&p.oooCompactionDeferred, 1)
+			return w
+		}
 		atomic.AddUint32(&p.oooCompactions, 1)
 		p.logger.Debug("merged out-of-order sidecar into cwhisper file",
 			zap.String("path", path), zap.Int64("sidecarBytes", size))
@@ -622,6 +645,8 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	oooCompactErrors := atomic.LoadUint32(&p.oooCompactErrors)
 	atomic.AddUint32(&p.oooCompactErrors, -oooCompactErrors)
+	oooCompactionChecks := atomic.SwapUint32(&p.oooCompactionChecks, 0)
+	oooCompactionDeferred := atomic.SwapUint32(&p.oooCompactionDeferred, 0)
 
 	send("updateOperations", float64(updateOperations))
 	send("committedPoints", float64(committedPoints))
@@ -639,6 +664,10 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 		send("oooDiverted", float64(oooDiverted))
 		send("oooCompactions", float64(oooCompactions))
 		send("oooCompactErrors", float64(oooCompactErrors))
+		if p.outOfOrder.policy.MinPoints > 0 {
+			send("oooCompactionChecks", float64(oooCompactionChecks))
+			send("oooCompactionDeferred", float64(oooCompactionDeferred))
+		}
 	}
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
