@@ -81,6 +81,25 @@ remove-empty-file = false
 # out-of-order = false
 # out-of-order-compact-rate = 5
 # out-of-order-compact-threshold = 65536
+#
+# Optional point-based batching (0 keeps the physical-size policy above).
+# When positive, min-points replaces the physical-size trigger. A sidecar is
+# eligible when ANY limit is reached: live records >= min-points, oldest sample
+# >= max-point-age, or a live record expires within retention-margin.
+# Counts include all archives, including propagated aggregates; duplicate
+# timestamps occupy one record per archive. Ages use sample timestamps, NOT
+# arrival time or sidecar mtime. Already-old backfill can therefore merge early.
+# The rate above limits sidecar scans as well as successful compactions. Scans
+# read the classic sidecar; only eligible files are rewritten. Monitor
+# oooCompactionChecks, oooCompactionDeferred, oooCompactions and oooCompactErrors.
+# Checks happen on writes only. Idle files are not swept, and rate limiting can
+# delay eligible merges: neither age nor retention-margin is a hard deadline.
+# Coarse aggregates can remain stale until compaction. Choose the margin above
+# the observed writeout cycle; monitor read correctness and sidecar I/O.
+# max-point-age and retention-margin must be positive when min-points is enabled.
+# out-of-order-compact-min-points = 0
+# out-of-order-compact-max-point-age = "5m"
+# out-of-order-compact-retention-margin = "1m"
 
 [cache]
 # Limit of in-memory stored points (not metrics)

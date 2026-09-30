@@ -84,10 +84,15 @@ type whisperConfig struct {
 	// and merged back in on read.
 	OutOfOrder bool `toml:"out-of-order"`
 	// How many metrics per second may fold their sidecar back into the
-	// compressed file. Compaction is a full file rewrite.
+	// compressed file. With the point policy, this limits scans too.
 	OutOfOrderCompactRate int `toml:"out-of-order-compact-rate"`
 	// Physical size a sidecar must reach before it is compacted, in bytes.
 	OutOfOrderCompactThreshold int64 `toml:"out-of-order-compact-threshold"`
+	// Positive MinPoints replaces the physical-size trigger. Age is measured
+	// from sample timestamps, not sidecar mtime or arrival time.
+	OutOfOrderCompactMinPoints       int      `toml:"out-of-order-compact-min-points"`
+	OutOfOrderCompactMaxPointAge     Duration `toml:"out-of-order-compact-max-point-age"`
+	OutOfOrderCompactRetentionMargin Duration `toml:"out-of-order-compact-retention-margin"`
 }
 
 type cacheConfig struct {
@@ -261,9 +266,11 @@ func NewConfig() *Config {
 			OnlineMigrationRate:        5,
 			OnlineMigrationGlobalScope: "",
 
-			OutOfOrder:                 false,
-			OutOfOrderCompactRate:      5,
-			OutOfOrderCompactThreshold: 65536,
+			OutOfOrder:                       false,
+			OutOfOrderCompactRate:            5,
+			OutOfOrderCompactThreshold:       65536,
+			OutOfOrderCompactMaxPointAge:     Duration{5 * time.Minute},
+			OutOfOrderCompactRetentionMargin: Duration{time.Minute},
 		},
 		Cache: cacheConfig{
 			MaxSize:       1000000,

@@ -138,7 +138,14 @@ func (app *App) configure() error {
 			if cfg.Whisper.OutOfOrderCompactRate <= 0 {
 				return fmt.Errorf("whisper.out-of-order-compact-rate must be positive, got %d", cfg.Whisper.OutOfOrderCompactRate)
 			}
-			if cfg.Whisper.OutOfOrderCompactThreshold <= 0 {
+			if cfg.Whisper.OutOfOrderCompactMinPoints < 0 {
+				return fmt.Errorf("whisper.out-of-order-compact-min-points must not be negative")
+			}
+			if cfg.Whisper.OutOfOrderCompactMinPoints > 0 &&
+				(cfg.Whisper.OutOfOrderCompactMaxPointAge.Value() <= 0 || cfg.Whisper.OutOfOrderCompactRetentionMargin.Value() <= 0) {
+				return fmt.Errorf("point-based out-of-order compaction requires positive max-point-age and retention-margin")
+			}
+			if cfg.Whisper.OutOfOrderCompactMinPoints == 0 && cfg.Whisper.OutOfOrderCompactThreshold <= 0 {
 				return fmt.Errorf("whisper.out-of-order-compact-threshold must be positive, got %d", cfg.Whisper.OutOfOrderCompactThreshold)
 			}
 		}
@@ -353,6 +360,8 @@ func (app *App) startPersister() {
 
 		if cfg := app.Config.Whisper; cfg.OutOfOrder {
 			p.EnableOutOfOrder(cfg.OutOfOrderCompactRate, cfg.OutOfOrderCompactThreshold)
+			p.SetOutOfOrderCompactionPolicy(cfg.OutOfOrderCompactMinPoints,
+				cfg.OutOfOrderCompactMaxPointAge.Value(), cfg.OutOfOrderCompactRetentionMargin.Value())
 		}
 
 		p.Start()
