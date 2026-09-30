@@ -368,11 +368,17 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 	return nw
 }
 
+func storeMutexIndex(metric string) uint64 {
+	// The noop writeout queue groups metrics by cache shard, selected using low
+	// hash bits. Use high bits so each group can use the full store lock array.
+	return (helper.HashString(metric) >> 32) & (storeMutexCount - 1)
+}
+
 func (p *Whisper) store(metric string) {
 	// avoid concurrent store same metric
 	// @TODO: may be flock?
 	// start := time.Now()
-	mutexIndex := helper.HashString(metric) & (storeMutexCount - 1)
+	mutexIndex := storeMutexIndex(metric)
 	p.storeMutex[mutexIndex].Lock()
 	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
 	defer p.storeMutex[mutexIndex].Unlock()
