@@ -784,8 +784,9 @@ func (whisper *Whisper) computeExtendedRetentions() (rets []*Retention, extend b
 }
 
 // rewrite rebuilds the whole compressed file under the given retentions by
-// decompressing every block and re-encoding it into a sibling temp file, which
-// is then renamed into place. op names the operation and its temp suffix
+// streaming populated blocks into a sibling temp file, which is then renamed
+// into place. Compaction can copy unchanged leading blocks without decoding.
+// op names the operation and its temp suffix
 // ("extend", "compact").
 //
 // extra optionally supplies additional points to merge into archive i as it is
@@ -808,12 +809,17 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		rets, mixSpecs, mixSizes = extractMixSpecs(rets, whisper.archives)
 	}
 
+	pointsPerBlock := DefaultPointsPerBlock
+	if extra != nil {
+		// Preserve compaction's block geometry when no extension is needed.
+		pointsPerBlock = whisper.pointsPerBlock
+	}
 	nwhisper, err := CreateWithOptions(
 		tmpname, rets,
 		whisper.aggregationMethod, whisper.xFilesFactor,
 		&Options{
 			Compressed:                 true,
-			PointsPerBlock:             DefaultPointsPerBlock,
+			PointsPerBlock:             pointsPerBlock,
 			InMemory:                   whisper.opts.InMemory,
 			MixAggregationSpecs:        mixSpecs,
 			MixAvgCompressedPointSizes: mixSizes,
@@ -858,10 +864,28 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		buf := make([]byte, archive.blockSize)
 		var dst []dataPoint
 		var blockBuffer []byte
+		target := nwhisper.archives[i]
+		copyPrefix := op == "compact" && whisper.compVersion == nwhisper.compVersion &&
+			archive.blockSize == target.blockSize && archive.blockCount <= target.blockCount
 		for _, block := range archive.getSortedBlockRanges() {
+			// Empty blocks have no points, even if their unused bytes contain
+			// old data. Decoding zero-filled capacity also builds a large stream
+			// of zero timestamps that the encoder would only discard again.
+			if block.start == 0 {
+				continue
+			}
 			if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].file.read: %s", i, block.index, err)
 			}
+			if copyPrefix && (len(pending) == 0 || pending[0].interval > block.end) {
+				if err := target.copyCompressedBlock(archive, block, buf); err != nil {
+					return fmt.Errorf("archives[%d].blocks[%d].copy: %w", i, block.index, err)
+				}
+				continue
+			}
+			// Extra points can shift all later block boundaries. Only copy the
+			// unchanged prefix; stream the remainder through the usual encoder.
+			copyPrefix = false
 			dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
 			if err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
@@ -935,6 +959,29 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 	whisper.NonFatalErrors = append(whisper.NonFatalErrors, nferrs...)
 
 	return err
+}
+
+// copyCompressedBlock relocates an unchanged leading block into the next output
+// slot. Sealed blocks need no decoder state. The active tail needs its encoder
+// state relocated too, so appending after compaction resumes at the right bit.
+// The caller checks the format version, block size and destination capacity.
+func (target *archiveInfo) copyCompressedBlock(source *archiveInfo, block blockRange, data []byte) error {
+	index := target.cblock.index
+	if err := target.whisper.fileWriteAt(data, int64(target.blockOffset(index))); err != nil {
+		return err
+	}
+	sourceIndex := block.index
+	block.index = index
+	target.blockRanges[index] = block
+	if sourceIndex == source.cblock.index {
+		target.cblock = source.cblock
+		target.cblock.index = index
+		target.cblock.lastByteOffset += target.blockOffset(index) - source.blockOffset(sourceIndex)
+	} else {
+		next := (index + 1) % len(target.blockRanges)
+		target.cblock = blockInfo{index: next, lastByteBitPos: 7, lastByteOffset: target.blockOffset(next)}
+	}
+	return nil
 }
 
 // splitBefore peels off the leading run of points strictly older than interval.
