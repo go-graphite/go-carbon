@@ -414,105 +414,9 @@ func (app *App) Start() (err error) {
 	app.startPersister()
 	/* WHISPER and TAGS end */
 
-	// Restore cwhisper data before receivers can advance block watermarks past
-	// replayed points. Keep the persister running so it can drain the cache.
 	restoreBeforeReceivers := conf.Dump.Enabled && conf.Whisper.Enabled &&
 		(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed())
-	if restoreBeforeReceivers {
-		logger := zapwriter.Logger("app")
-		logger.Info("restoring dump before starting receivers",
-			zap.String("path", conf.Dump.Path),
-			zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
-		)
-		restoreStart := time.Now()
-		app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
-		restoreLoaded := time.Now()
-		for !core.IsEmpty() {
-			time.Sleep(10 * time.Millisecond)
-		}
-		// The collector has not started yet. Separate the accumulated restore
-		// counters from live interval statistics instead of reporting minutes of
-		// creates/updates as the first single collection interval.
-		restoreStats := make(map[string]float64)
-		app.Persister.Stat(func(name string, value float64) { restoreStats[name] = value })
-		logger.Info("dump restored, starting receivers",
-			zap.Duration("load_seconds", restoreLoaded.Sub(restoreStart)),
-			zap.Duration("drain_seconds", time.Since(restoreLoaded)),
-			zap.Any("persister_stats", restoreStats),
-		)
-	}
-
-	app.Receivers = make([]*NamedReceiver, 0)
-	var rcv receiver.Receiver
-	var rcvOptions map[string]interface{}
-
-	/* UDP start */
-	if conf.Udp.Enabled {
-		if rcvOptions, err = receiver.WithProtocol(conf.Udp, "udp"); err != nil {
-			return
-		}
-
-		if rcv, err = receiver.New("udp", rcvOptions, core.Add); err != nil {
-			return
-		}
-
-		app.Receivers = append(app.Receivers, &NamedReceiver{
-			Receiver: rcv,
-			Name:     "udp",
-		})
-	}
-	/* UDP end */
-
-	/* TCP start */
-	if conf.Tcp.Enabled {
-		if rcvOptions, err = receiver.WithProtocol(conf.Tcp, "tcp"); err != nil {
-			return
-		}
-
-		if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
-			return
-		}
-
-		if conf.Prometheus.Enabled {
-			rcv.InitPrometheus(app.PromRegisterer)
-		}
-
-		app.Receivers = append(app.Receivers, &NamedReceiver{
-			Receiver: rcv,
-			Name:     "tcp",
-		})
-	}
-	/* TCP end */
-
-	/* PICKLE start */
-	if conf.Pickle.Enabled {
-		if rcvOptions, err = receiver.WithProtocol(conf.Pickle, "pickle"); err != nil {
-			return
-		}
-
-		if rcv, err = receiver.New("pickle", rcvOptions, core.Add); err != nil {
-			return
-		}
-
-		app.Receivers = append(app.Receivers, &NamedReceiver{
-			Receiver: rcv,
-			Name:     "pickle",
-		})
-	}
-	/* PICKLE end */
-
-	/* CUSTOM RECEIVERS start */
-	for receiverName, receiverOptions := range conf.Receiver {
-		if rcv, err = receiver.New(receiverName, receiverOptions, core.Add); err != nil {
-			return
-		}
-
-		app.Receivers = append(app.Receivers, &NamedReceiver{
-			Receiver: rcv,
-			Name:     receiverName,
-		})
-	}
-	/* CUSTOM RECEIVERS end */
+	var newMetricsChan chan string
 
 	/* CARBONSERVER start */
 	if conf.Carbonserver.Enabled {
@@ -624,20 +528,17 @@ func (app *App) Start() (err error) {
 			})
 
 			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas(conf.Carbonserver.QuotaUsageReportFrequency.Value()))
-			core.SetThrottle(carbonserver.ShouldThrottleMetric)
 		}
 
 		var setConfigRetriever bool
 		if conf.Carbonserver.CacheScan {
-			core.InitCacheScanAdds()
 			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
 
 			setConfigRetriever = true
 		}
 
 		if conf.Carbonserver.RealtimeIndex > 0 {
-			ch := carbonserver.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
-			core.SetNewMetricsChan(ch)
+			newMetricsChan = carbonserver.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
 
 			setConfigRetriever = true
 		}
@@ -674,19 +575,134 @@ func (app *App) Start() (err error) {
 			return infos
 		})
 
-		if err = carbonserver.Listen(conf.Carbonserver.Listen); err != nil {
-			return
-		}
-
-		if conf.Carbonserver.Grpc.Enabled {
-			if err = carbonserver.ListenGRPC(conf.Carbonserver.Grpc.Listen); err != nil {
-				return
-			}
-		}
-
 		app.Carbonserver = carbonserver
 	}
 	/* CARBONSERVER end */
+
+	// Restore cwhisper data before receivers can advance block watermarks past
+	// replayed points. Keep the persister running so it can drain the cache.
+	if restoreBeforeReceivers {
+		logger := zapwriter.Logger("app")
+		logger.Info("restoring dump before starting receivers",
+			zap.String("path", conf.Dump.Path),
+			zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
+		)
+		restoreStart := time.Now()
+		app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		restoreLoaded := time.Now()
+		// Overlap saved-index loading with disk drain, after dump parsing has
+		// finished allocating the restored cache. Keep ingestion closed until
+		// those historical points have been persisted.
+		if app.Carbonserver != nil {
+			app.Carbonserver.WarmupIndex()
+		}
+		for !core.IsEmpty() {
+			time.Sleep(10 * time.Millisecond)
+		}
+		// The collector has not started yet. Separate the accumulated restore
+		// counters from live interval statistics instead of reporting minutes of
+		// creates/updates as the first single collection interval.
+		restoreStats := make(map[string]float64)
+		app.Persister.Stat(func(name string, value float64) { restoreStats[name] = value })
+		logger.Info("dump restored, starting receivers",
+			zap.Duration("load_seconds", restoreLoaded.Sub(restoreStart)),
+			zap.Duration("drain_seconds", time.Since(restoreLoaded)),
+			zap.Any("persister_stats", restoreStats),
+		)
+	}
+
+	if cs := app.Carbonserver; cs != nil {
+		// Restore bypasses live quotas and notifications, just as before warmup.
+		// Start the filesystem scan only after restored files have been written.
+		if app.Config.Whisper.Quotas != nil {
+			core.SetThrottle(cs.ShouldThrottleMetric)
+		}
+		if conf.Carbonserver.CacheScan {
+			core.InitCacheScanAdds()
+		}
+		core.SetNewMetricsChan(newMetricsChan)
+		core.SetMetricExists(cs.MetricExists)
+		if err = cs.Listen(conf.Carbonserver.Listen); err != nil {
+			return
+		}
+		if conf.Carbonserver.Grpc.Enabled {
+			if err = cs.ListenGRPC(conf.Carbonserver.Grpc.Listen); err != nil {
+				return
+			}
+		}
+	}
+
+	app.Receivers = make([]*NamedReceiver, 0)
+	var rcv receiver.Receiver
+	var rcvOptions map[string]interface{}
+
+	/* UDP start */
+	if conf.Udp.Enabled {
+		if rcvOptions, err = receiver.WithProtocol(conf.Udp, "udp"); err != nil {
+			return
+		}
+
+		if rcv, err = receiver.New("udp", rcvOptions, core.Add); err != nil {
+			return
+		}
+
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     "udp",
+		})
+	}
+	/* UDP end */
+
+	/* TCP start */
+	if conf.Tcp.Enabled {
+		if rcvOptions, err = receiver.WithProtocol(conf.Tcp, "tcp"); err != nil {
+			return
+		}
+
+		if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
+			return
+		}
+
+		if conf.Prometheus.Enabled {
+			rcv.InitPrometheus(app.PromRegisterer)
+		}
+
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     "tcp",
+		})
+	}
+	/* TCP end */
+
+	/* PICKLE start */
+	if conf.Pickle.Enabled {
+		if rcvOptions, err = receiver.WithProtocol(conf.Pickle, "pickle"); err != nil {
+			return
+		}
+
+		if rcv, err = receiver.New("pickle", rcvOptions, core.Add); err != nil {
+			return
+		}
+
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     "pickle",
+		})
+	}
+	/* PICKLE end */
+
+	/* CUSTOM RECEIVERS start */
+	for receiverName, receiverOptions := range conf.Receiver {
+		if rcv, err = receiver.New(receiverName, receiverOptions, core.Add); err != nil {
+			return
+		}
+
+		app.Receivers = append(app.Receivers, &NamedReceiver{
+			Receiver: rcv,
+			Name:     receiverName,
+		})
+	}
+	/* CUSTOM RECEIVERS end */
 
 	/* CARBONLINK start */
 	if conf.Carbonlink.Enabled {

@@ -237,6 +237,10 @@ type CarbonserverListener struct {
 	scanFrequency     time.Duration
 	scanTicker        *time.Ticker
 	forceScanChan     chan struct{}
+	indexWarmupDone   chan struct{}
+	indexWarmupOnce   sync.Once
+	indexWorkers      sync.WaitGroup
+	stopOnce          sync.Once
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
 	grpcListener      *net.TCPListener
@@ -480,6 +484,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 	return &CarbonserverListener{
 		// Config variables
 		metrics:           &metricStruct{},
+		exitChan:          make(chan struct{}),
 		metricsAsCounters: false,
 		cacheGet:          cacheGetFunc,
 		logger:            zapwriter.Logger("carbonserver"),
@@ -638,6 +643,41 @@ func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, in
 
 	return throttled
 }
+
+// MetricExists checks the published concurrent trie without glob expansion.
+// An unavailable or non-concurrent index must not suppress notifications.
+func (listener *CarbonserverListener) MetricExists(metric string) bool {
+	if !listener.trieIndex || !listener.concurrentIndex {
+		return false
+	}
+	fidx := listener.CurrentFileIndex()
+	if fidx == nil || fidx.trieIdx == nil {
+		return false
+	}
+	_, isNew := fidx.trieIdx.metricPath(metric, nil)
+	return !isNew
+}
+
+// WarmupIndex loads the saved trie before the HTTP listener starts. It does not
+// scan the filesystem: restore may still be creating files, and its disk writes
+// should not compete with a full directory walk. Listen starts that walk after
+// warmup finishes, including when the saved index is absent or corrupt.
+// Configure the listener fully before calling this method.
+func (listener *CarbonserverListener) WarmupIndex() {
+	if !listener.trieIndex || listener.scanFrequency == 0 || listener.fileListCache == "" {
+		return
+	}
+	listener.indexWarmupOnce.Do(func() {
+		listener.indexWarmupDone = make(chan struct{})
+		listener.indexWorkers.Add(1)
+		go func() {
+			defer listener.indexWorkers.Done()
+			defer close(listener.indexWarmupDone)
+			listener.updateFileListWithCache(listener.whisperData, nil, nil, true)
+		}()
+	})
+}
+
 func (listener *CarbonserverListener) SetMaxInflightRequests(m uint64) {
 	listener.MaxInflightRequests = m
 }
@@ -738,6 +778,13 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 }
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+	if listener.indexWarmupDone != nil {
+		select {
+		case <-listener.indexWarmupDone:
+		case <-exit:
+			return
+		}
+	}
 	cacheMetricNames := make(map[string]struct{})
 	var knownMetricsStatTicker, quotaAndUsageStatTicker <-chan time.Time
 	if listener.isQuotaEnabled() {
@@ -941,7 +988,11 @@ func metricFileSizes(path string, info os.FileInfo) (logical, physical int64, er
 	return logical, physical, nil
 }
 
-func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time) (readFromCache bool) {
+func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time) bool {
+	return listener.updateFileListWithCache(dir, cacheMetricNames, quotaAndUsageStatTicker, false)
+}
+
+func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool) (readFromCache bool) {
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
 		if r := recover(); r != nil {
@@ -1001,7 +1052,17 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 			infos = append(infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
 
 			readFromCache = true
+			defer func() {
+				if err := flc.Close(); err != nil {
+					logger.Error("failed to close file list cache", zap.Error(err))
+				}
+			}()
 			for {
+				select {
+				case <-listener.exitChan:
+					return false
+				default:
+				}
 				entry, err := flc.Read()
 				if errors.Is(err, io.EOF) {
 					break
@@ -1033,14 +1094,16 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 					metricsKnown++
 				}
 			}
-			if err := flc.Close(); err != nil {
-				logger.Error("failed to close file list cache", zap.Error(err))
-			}
 		}
+	}
+
+	if cacheOnly && !readFromCache {
+		return false
 	}
 
 	if !readFromCache {
 		var flc FileListCache
+		var scanCancelled bool
 		if listener.fileListCache != "" {
 			var err error
 			flc, err = NewFileListCache(listener.fileListCache, listener.fileListCacheVersion, 'w')
@@ -1052,6 +1115,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				defer func() {
 					// flc could be reset to nil during filepath walk
 					if flc != nil {
+						if scanCancelled {
+							if err := flc.Abort(); err != nil {
+								logger.Error("failed to abort file list cache", zap.Error(err))
+							}
+							return
+						}
 						if err := flc.Close(); err != nil {
 							logger.Error("failed to close flie list cache", zap.Error(err))
 						}
@@ -1069,6 +1138,12 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 		}
 
 		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+			select {
+			case <-listener.exitChan:
+				scanCancelled = true
+				return filepath.SkipAll
+			default:
+			}
 			if err != nil {
 				logger.Info("error processing", zap.String("path", p), zap.Error(err))
 				return nil
@@ -1173,6 +1248,9 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 			return nil
 		})
+		if scanCancelled {
+			return false
+		}
 		if err != nil {
 			logger.Error("error getting file list",
 				zap.Error(err),
@@ -1264,6 +1342,11 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	if fidx == nil {
 		// The first published index must already enforce its configured quotas.
 		listener.refreshIndexQuotaAndUsage(nfidx, quotaAndUsageStatTicker)
+	}
+	select {
+	case <-listener.exitChan:
+		return false
+	default:
 	}
 	listener.UpdateFileIndex(nfidx)
 
@@ -1646,16 +1729,22 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 }
 
 func (listener *CarbonserverListener) Stop() error {
-	close(listener.forceScanChan)
-	if listener.scanTicker != nil {
-		listener.scanTicker.Stop()
-	}
-	close(listener.exitChan)
-	if listener.db != nil {
-		listener.db.Close()
-	}
-	listener.tcpListener.Close()
-	listener.grpcListener.Close()
+	listener.stopOnce.Do(func() {
+		close(listener.exitChan)
+		if listener.scanTicker != nil {
+			listener.scanTicker.Stop()
+		}
+		if listener.tcpListener != nil {
+			listener.tcpListener.Close()
+		}
+		if listener.grpcListener != nil {
+			listener.grpcListener.Close()
+		}
+		listener.indexWorkers.Wait()
+		if listener.db != nil {
+			listener.db.Close()
+		}
+	})
 	return nil
 }
 
@@ -1826,11 +1915,14 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		zap.String("scanFrequency", listener.scanFrequency.String()),
 	)
 
-	listener.exitChan = make(chan struct{})
 	if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
-		listener.forceScanChan = make(chan struct{})
+		listener.forceScanChan = make(chan struct{}, 1)
 		listener.scanTicker = time.NewTicker(listener.scanFrequency)
-		go listener.fileListUpdater(listener.whisperData, listener.scanTicker.C, listener.forceScanChan, listener.exitChan) //nolint:staticcheck
+		listener.indexWorkers.Add(1)
+		go func() {
+			defer listener.indexWorkers.Done()
+			listener.fileListUpdater(listener.whisperData, listener.scanTicker.C, listener.forceScanChan, listener.exitChan)
+		}()
 		listener.forceScanChan <- struct{}{}
 	}
 
