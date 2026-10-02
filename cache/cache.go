@@ -28,9 +28,11 @@ const (
 const shardCount = 1 << 10 // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
-	maxSize     int64
-	xlog        io.Writer
-	tagsEnabled bool
+	maxSize           int64
+	xlog              io.Writer
+	tagsEnabled       bool
+	writeoutMinPoints int
+	writeoutMaxDelay  time.Duration
 }
 
 // A "thread" safe map of type string:Anything.
@@ -73,6 +75,8 @@ type Shard struct {
 	notConfirmed     []*points.Points    // linear search for value/slot
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
 	adds             map[string]struct{} // map to maintain all the new metric names
+	// Keyed by batch so in-flight writes retain their arrival time on retry.
+	firstArrival map[*points.Points]time.Time
 }
 
 // Creates a new cache instance
@@ -132,6 +136,7 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 	newSettings := *s
 	newSettings.maxSize = int64(maxSize)
 	c.settings.Store(&newSettings)
+	c.writeoutQueue.notifyAt(time.Now())
 }
 
 // SetBloomSize of bloom filter
@@ -223,6 +228,7 @@ func (c *Cache) Confirm(p *points.Points) {
 
 	shard.mu.Lock()
 	removeNotConfirmed(shard, p)
+	delete(shard.firstArrival, p)
 	shard.mu.Unlock()
 }
 
@@ -253,9 +259,18 @@ func (c *Cache) Requeue(p *points.Points) {
 	count := len(p.Data)
 	if current, exists := shard.items[p.Metric]; exists {
 		p.Data = append(p.Data, current.Data...)
+		// A missing arrival marks restored or previously unbatched data ready.
+		first, other := shard.firstArrival[p], shard.firstArrival[current]
+		if other.IsZero() || (!first.IsZero() && other.Before(first)) {
+			if shard.firstArrival != nil {
+				shard.firstArrival[p] = other
+			}
+		}
+		delete(shard.firstArrival, current)
 	}
 	shard.items[p.Metric] = p
 	atomic.AddInt64(&c.stat.size, int64(count))
+	c.writeoutQueue.notifyAt(time.Now())
 }
 
 func (c *Cache) Len() int32 {
@@ -315,6 +330,15 @@ func sendMetricToNewMetricChan(c *Cache, metric string) {
 
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
+	c.add(p, false)
+}
+
+// AddRestored adds dump data without starting a new buffering deadline.
+func (c *Cache) AddRestored(p *points.Points) {
+	c.add(p, true)
+}
+
+func (c *Cache) add(p *points.Points, restored bool) {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
@@ -351,6 +375,13 @@ func (c *Cache) Add(p *points.Points) {
 		values.Data = append(values.Data, p.Data...)
 	} else {
 		shard.items[p.Metric] = p
+		values = p
+		if s.batching() && !restored {
+			if shard.firstArrival == nil {
+				shard.firstArrival = make(map[*points.Points]time.Time)
+			}
+			shard.firstArrival[p] = time.Now()
+		}
 
 		if shard.adds != nil {
 			shard.adds[p.Metric] = struct{}{}
@@ -372,7 +403,18 @@ func (c *Cache) Add(p *points.Points) {
 		}
 
 	}
-	atomic.AddInt64(&c.stat.size, int64(count))
+	size := atomic.AddInt64(&c.stat.size, int64(count))
+	if restored {
+		delete(shard.firstArrival, values)
+	}
+	if s.batching() {
+		crossedThreshold := len(values.Data) >= s.writeoutMinPoints && len(values.Data)-count < s.writeoutMinPoints
+		if restored || crossedThreshold || (s.underPressure(size) && !s.underPressure(size-int64(count))) {
+			c.writeoutQueue.notifyAt(time.Now())
+		} else if !exists {
+			c.writeoutQueue.notifyAt(shard.firstArrival[values].Add(s.writeoutMaxDelay))
+		}
+	}
 }
 
 // Pop removes an element from the map and returns it
@@ -382,6 +424,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	shard.mu.Lock()
 	p, exists = shard.items[key]
 	delete(shard.items, key)
+	delete(shard.firstArrival, p)
 	shard.mu.Unlock()
 
 	if exists {

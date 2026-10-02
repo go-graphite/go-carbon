@@ -111,6 +111,15 @@ max-size = 1000000
 #   "noop" - pick metrics to write in unspecified order,
 #            requires least CPU and improves cache responsiveness
 write-strategy = "max"
+
+# Opt-in batching before opening Whisper files. Both zero disables batching.
+# Example canary: 8 points or "2s" since the oldest pending arrival, whichever
+# comes first. Samples remain readable in cache; this adds crash-loss exposure
+# and memory use. Existing writer-queue latency is additional to this delay.
+# Bypassed above 75% of max-size, for restored data, and during shutdown.
+# Reloadable; enabling batching leaves already cached data immediately eligible.
+writeout-min-points = 0
+writeout-max-delay = "0s"
 # If > 0 use bloom filter to detect new metrics instead of cache (EXPERIMENTAL)
 # works better for multi-million metrics installations
 bloom-size = 0

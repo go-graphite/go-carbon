@@ -156,6 +156,11 @@ func (app *App) configure() error {
 		return fmt.Errorf("go-carbon support only \"max\", \"sorted\"  or \"noop\" write-strategy")
 	}
 
+	if cfg.Cache.WriteoutMinPoints < 0 || cfg.Cache.WriteoutMaxDelay.Value() < 0 ||
+		(cfg.Cache.WriteoutMinPoints == 0) != (cfg.Cache.WriteoutMaxDelay.Value() == 0) {
+		return fmt.Errorf("cache.writeout-min-points and cache.writeout-max-delay must both be positive or both zero")
+	}
+
 	if cfg.Common.MetricEndpoint == "" {
 		cfg.Common.MetricEndpoint = MetricEndpointLocal
 	}
@@ -210,6 +215,9 @@ func (app *App) ReloadConfig() error {
 	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
 	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
 	app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
+	if err := app.Cache.SetWriteoutBatching(app.Config.Cache.WriteoutMinPoints, app.Config.Cache.WriteoutMaxDelay.Value()); err != nil {
+		return err
+	}
 
 	if app.Persister != nil {
 		app.Persister.Stop()
@@ -274,6 +282,9 @@ func (app *App) stopListeners() {
 }
 
 func (app *App) stopAll() {
+	if app.Cache != nil {
+		_ = app.Cache.SetWriteoutBatching(0, 0)
+	}
 	app.stopListeners()
 
 	logger := zapwriter.Logger("app")
@@ -338,6 +349,7 @@ func (app *App) startPersister() {
 			app.Cache.Pop,
 		)
 		p.SetRequeue(app.Cache.Requeue)
+		p.SetWriteoutReady(app.Cache.WriteoutReady)
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
@@ -389,6 +401,9 @@ func (app *App) Start() (err error) {
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
 	core.SetBloomSize(conf.Cache.BloomSize)
+	if err = core.SetWriteoutBatching(conf.Cache.WriteoutMinPoints, conf.Cache.WriteoutMaxDelay.Value()); err != nil {
+		return err
+	}
 
 	app.Cache = core
 
@@ -424,7 +439,7 @@ func (app *App) Start() (err error) {
 			zap.String("path", conf.Dump.Path),
 			zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
 		)
-		app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
 		for !core.IsEmpty() {
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -699,7 +714,7 @@ func (app *App) Start() (err error) {
 
 	/* RESTORE start */
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
-		go app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		go app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
 	/* RESTORE end */
 
