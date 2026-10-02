@@ -64,7 +64,7 @@ func TestFindNotFoundLogging(t *testing.T) {
 						} else {
 							_, err := listener.Find(context.Background(), &protov2.GlobRequest{Query: "missing.metric"})
 							if status.Code(err) != codes.NotFound {
-								done <- fmt.Errorf("gRPC error = %v; want NotFound", err)
+								done <- fmt.Errorf("gRPC error = %w; want NotFound", err)
 								return
 							}
 						}
