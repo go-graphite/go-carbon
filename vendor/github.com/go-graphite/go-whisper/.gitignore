@@ -2,3 +2,8 @@
 cpu.out
 tags
 .idea
+
+*.wsp
+*.cwsp
+tmp/
+*.lock
