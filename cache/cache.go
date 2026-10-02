@@ -60,7 +60,7 @@ type Cache struct {
 	}
 
 	newMetricsChan      chan string
-	newMetricCf         *blobloom.Filter
+	newMetricCf         *blobloom.SyncFilter
 	newMetricCfCapacity uint64
 
 	throttle func(ps *points.Points, inCache bool) bool
@@ -137,7 +137,7 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 // SetBloomSize of bloom filter
 func (c *Cache) SetBloomSize(bloomSize uint64) {
 	if bloomSize > 0 {
-		c.newMetricCf = blobloom.NewOptimized(blobloom.Config{
+		c.newMetricCf = blobloom.NewSyncOptimized(blobloom.Config{
 			Capacity: bloomSize, // Expected number of keys.
 			FPRate:   1e-4,      // Accept one false positive per 10,000 lookups.
 		})
@@ -305,11 +305,13 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 }
 
 // send metric to the new metrics channel
-func sendMetricToNewMetricChan(c *Cache, metric string) {
+func sendMetricToNewMetricChan(c *Cache, metric string) bool {
 	select {
 	case c.newMetricsChan <- metric:
+		return true
 	default:
 		atomic.AddUint32(&c.stat.droppedRealtimeIndex, 1)
+		return false
 	}
 }
 
@@ -367,8 +369,11 @@ func (c *Cache) Add(p *points.Points) {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
 		if hash := helper.HashString(p.Metric); !c.newMetricCf.Has(hash) {
-			sendMetricToNewMetricChan(c, p.Metric)
-			c.newMetricCf.Add(hash)
+			// Only suppress future notifications after a successful enqueue.
+			// A full queue must allow the next sample to retry.
+			if sendMetricToNewMetricChan(c, p.Metric) {
+				c.newMetricCf.Add(hash)
+			}
 		}
 
 	}

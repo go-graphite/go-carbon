@@ -424,11 +424,22 @@ func (app *App) Start() (err error) {
 			zap.String("path", conf.Dump.Path),
 			zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
 		)
+		restoreStart := time.Now()
 		app.Restore(core.Add, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		restoreLoaded := time.Now()
 		for !core.IsEmpty() {
 			time.Sleep(10 * time.Millisecond)
 		}
-		logger.Info("dump restored, starting receivers")
+		// The collector has not started yet. Separate the accumulated restore
+		// counters from live interval statistics instead of reporting minutes of
+		// creates/updates as the first single collection interval.
+		restoreStats := make(map[string]float64)
+		app.Persister.Stat(func(name string, value float64) { restoreStats[name] = value })
+		logger.Info("dump restored, starting receivers",
+			zap.Duration("load_seconds", restoreLoaded.Sub(restoreStart)),
+			zap.Duration("drain_seconds", time.Since(restoreLoaded)),
+			zap.Any("persister_stats", restoreStats),
+		)
 	}
 
 	app.Receivers = make([]*NamedReceiver, 0)

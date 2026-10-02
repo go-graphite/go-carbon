@@ -754,6 +754,11 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency 
 
 uloop:
 	for {
+		fidx := listener.CurrentFileIndex()
+		var newMetricsChan <-chan string
+		if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
+			newMetricsChan = listener.newMetricsChan
+		}
 		select {
 		case <-exit:
 			return
@@ -771,19 +776,12 @@ uloop:
 			listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
 
 			continue uloop
-		case m := <-listener.newMetricsChan:
+		case m := <-newMetricsChan:
 			// listener.newMetricsChan might have high traffic, but
 			// in theory, there should be no starvation on other channels:
 			// https://groups.google.com/g/golang-nuts/c/4BR2Sdb6Zzk (2015)
 
-			fidx := listener.CurrentFileIndex()
-			if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
-				metric := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
-
-				if _, err := fidx.trieIdx.insert(metric, 0, 0, 0, 0); err != nil {
-					listener.logTrieInsertError(listener.logger, "failed to insert new metrics for realtime indexing", metric, err)
-				}
-			}
+			listener.insertRealtimeMetric(fidx.trieIdx, m)
 
 			continue uloop
 		}
@@ -799,6 +797,20 @@ uloop:
 			listener.logger.Info("file list updated with cache, starting a new scan immediately")
 			listener.updateFileList(dir, cacheMetricNames, quotaAndUsageStatTicker)
 		}
+	}
+}
+
+// Consume only the current backlog so a busy producer cannot starve the scan.
+func (listener *CarbonserverListener) drainRealtimeMetrics(trie *trieIndex) {
+	for remaining := len(listener.newMetricsChan); remaining > 0; remaining-- {
+		listener.insertRealtimeMetric(trie, <-listener.newMetricsChan)
+	}
+}
+
+func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metric string) {
+	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
+	if _, err := trie.insert(path, 0, 0, 0, 0); err != nil {
+		listener.logTrieInsertError(listener.logger, "failed to insert realtime metric", metric, err)
 	}
 }
 
@@ -843,8 +855,13 @@ func (listener *CarbonserverListener) statKnownMetrics(knownMetricsStatTicker <-
 }
 
 func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTicker <-chan time.Time) {
+	listener.refreshIndexQuotaAndUsage(listener.CurrentFileIndex(), quotaAndUsageStatTicker)
+}
+
+func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex, quotaAndUsageStatTicker <-chan time.Time) {
 	defer func() {
-		// drain remaining blocked tickers
+		// Loading the initial index may take longer than the quota interval.
+		// This refresh also satisfies ticks queued while initialization ran.
 		for {
 			select {
 			case <-quotaAndUsageStatTicker:
@@ -853,8 +870,6 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 			}
 		}
 	}()
-
-	fidx := listener.CurrentFileIndex()
 
 	if !listener.isQuotaEnabled() || !listener.concurrentIndex || listener.realtimeIndex <= 0 || fidx == nil || fidx.trieIdx == nil {
 		return
@@ -1073,26 +1088,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 				}
 			}
 
-			// WHY: as filepath.walk could potentially taking a long
-			// time to complete (>= 5 minutes or more), depending
-			// on how many files are there on disk. It's nice to
-			// try to flush newMetricsChan if possible.
-			//
-			// TODO: only trigger enter the loop when it's half full?
-			// 	len(listener.newMetricsChan) >= cap(listener.newMetricsChan)/2
-			if listener.trieIndex && listener.concurrentIndex && listener.newMetricsChan != nil {
-			newMetricsLoop:
-				for {
-					select {
-					case m := <-listener.newMetricsChan:
-						fileName := "/" + filepath.Clean(strings.ReplaceAll(m, ".", "/")+".wsp")
-						if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
-							listener.logTrieInsertError(logger, "failed to update realtime trie index", m, err)
-						}
-					default:
-						break newMetricsLoop
-					}
-				}
+			if listener.trieIndex && listener.concurrentIndex {
+				listener.drainRealtimeMetrics(trieIdx)
 			}
 
 			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
@@ -1184,6 +1181,8 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	}
 
 	if listener.concurrentIndex && trieIdx != nil {
+		// Include notifications queued while loading the file-list cache.
+		listener.drainRealtimeMetrics(trieIdx)
 		trieIdx.prune()
 	}
 
@@ -1262,6 +1261,10 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 	}
 	var rdTimeUpdateRuntime = time.Since(tl)
 
+	if fidx == nil {
+		// The first published index must already enforce its configured quotas.
+		listener.refreshIndexQuotaAndUsage(nfidx, quotaAndUsageStatTicker)
+	}
 	listener.UpdateFileIndex(nfidx)
 
 	infos = append(infos,
