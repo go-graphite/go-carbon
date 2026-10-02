@@ -855,8 +855,13 @@ func (listener *CarbonserverListener) statKnownMetrics(knownMetricsStatTicker <-
 }
 
 func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTicker <-chan time.Time) {
+	listener.refreshIndexQuotaAndUsage(listener.CurrentFileIndex(), quotaAndUsageStatTicker)
+}
+
+func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex, quotaAndUsageStatTicker <-chan time.Time) {
 	defer func() {
-		// drain remaining blocked tickers
+		// Loading the initial index may take longer than the quota interval.
+		// This refresh also satisfies ticks queued while initialization ran.
 		for {
 			select {
 			case <-quotaAndUsageStatTicker:
@@ -866,10 +871,6 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 		}
 	}()
 
-	listener.refreshIndexQuotaAndUsage(listener.CurrentFileIndex())
-}
-
-func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex) {
 	if !listener.isQuotaEnabled() || !listener.concurrentIndex || listener.realtimeIndex <= 0 || fidx == nil || fidx.trieIdx == nil {
 		return
 	}
@@ -1262,7 +1263,7 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 
 	if fidx == nil {
 		// The first published index must already enforce its configured quotas.
-		listener.refreshIndexQuotaAndUsage(nfidx)
+		listener.refreshIndexQuotaAndUsage(nfidx, quotaAndUsageStatTicker)
 	}
 	listener.UpdateFileIndex(nfidx)
 

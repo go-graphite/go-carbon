@@ -32,8 +32,13 @@ func TestInitialFileListCachePublishesNotificationsAndQuotas(t *testing.T) {
 	listener.SetQuotas([]*Quota{{Pattern: "/", Metrics: 2}})
 	ch := listener.SetRealtimeIndex(10)
 	ch <- "namespace.pending"
-	if !listener.updateFileList(dir, nil, nil) {
+	ticks := make(chan time.Time, 1)
+	ticks <- time.Now()
+	if !listener.updateFileList(dir, nil, ticks) {
 		t.Fatal("expected initial index from cache")
+	}
+	if len(ticks) != 0 {
+		t.Fatal("startup quota refresh left a stale tick that would immediately repeat the full traversal")
 	}
 	result, err := listener.queryMetricsList("namespace.pending", 1, true, false)
 	if err != nil || len(result.Metrics) != 1 {
