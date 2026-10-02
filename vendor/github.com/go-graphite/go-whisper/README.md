@@ -68,6 +68,20 @@ BenchmarkReadCompressed-8          	   10000	    260862 ns/op
 * cwhisper is faster and smaller, but unlike standard format, you can't easily backfill/update/rewrite old data points because it's not data-point addressable.
 * file size could grow if data points are irregular.
 
+### Historical corrections
+
+With `Options.OutOfOrder` enabled, late samples within the finest archive's
+retention are written to a sidecar. The latest value at an existing timestamp
+replaces the encoded value on read and survives `MergeOutOfOrder`, including
+repeated corrections after compaction.
+
+Coarser archives can contain partial aggregates in the sidecar, so those do not
+replace existing aggregate values directly. Compaction recomputes the complete
+aggregates using the corrected samples. Callers must compact before the finest
+samples expire if corrected rollups are required; reads do not trigger compaction.
+Direct overwrites of existing samples older than the finest retention remain
+outside this guarantee. Previously discarded corrections must be replayed.
+
 ### Suitable Application
 
 * cwhisper is most suitable for metrics that are mostly regular and less likely needed to backfill/rewrite old data, like system metrics. cwhisper also works nicely for sparse metrics.

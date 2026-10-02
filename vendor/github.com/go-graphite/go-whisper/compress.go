@@ -150,6 +150,10 @@ func (whisper *Whisper) WriteHeaderCompressed() (err error) {
 	return nil
 }
 
+// Only scratch bytes are pooled: archive metadata and propagation buffers must
+// remain owned by the handle, including across Close during a rewrite.
+var compressedHeaderScratch = sync.Pool{New: func() interface{} { return new([]byte) }}
+
 func (whisper *Whisper) readHeaderCompressed() (err error) {
 	if _, err := whisper.file.Seek(int64(len(compressedMagicString)), 0); err != nil {
 		return err
@@ -157,7 +161,20 @@ func (whisper *Whisper) readHeaderCompressed() (err error) {
 
 	offset := 0
 	hlen := whisper.MetadataSize() - len(compressedMagicString)
-	b := make([]byte, hlen)
+	scratch := compressedHeaderScratch.Get().(*[]byte)
+	b := *scratch
+	defer func() {
+		// An unusually large header must not inflate the pool indefinitely.
+		if cap(b) > 64*1024 {
+			b = nil
+		}
+		*scratch = b[:0]
+		compressedHeaderScratch.Put(scratch)
+	}()
+	if cap(b) < hlen {
+		b = make([]byte, hlen)
+	}
+	b = b[:hlen]
 	readed, err := whisper.file.Read(b)
 	if err != nil {
 		err = fmt.Errorf("unable to read header: %s", err)
@@ -189,7 +206,10 @@ func (whisper *Whisper) readHeaderCompressed() (err error) {
 
 	whisper.archives = make([]*archiveInfo, archiveCount)
 	for i := 0; i < archiveCount; i++ {
-		b := make([]byte, CompressedArchiveInfoSize)
+		if cap(b) < CompressedArchiveInfoSize {
+			b = make([]byte, CompressedArchiveInfoSize)
+		}
+		b = b[:CompressedArchiveInfoSize]
 		readed, err = whisper.file.Read(b)
 		if err != nil || readed != CompressedArchiveInfoSize {
 			err = fmt.Errorf("unable to read compressed archive %d metadata: %s", i, err)
@@ -256,7 +276,11 @@ func (whisper *Whisper) readHeaderCompressed() (err error) {
 	whisper.initMetaInfo()
 
 	for i, arc := range whisper.archives {
-		b := make([]byte, BlockRangeSize*arc.blockCount)
+		size := BlockRangeSize * arc.blockCount
+		if cap(b) < size {
+			b = make([]byte, size)
+		}
+		b = b[:size]
 		readed, err = whisper.file.Read(b)
 		if err != nil || readed != BlockRangeSize*arc.blockCount {
 			err = fmt.Errorf("unable to read archive %d block ranges: %s", i, err)
@@ -318,6 +342,34 @@ func (archive *archiveInfo) getSortedBlockRanges() []blockRange {
 		return istart < jstart
 	})
 	return brs
+}
+
+// Match the prefix of getSortedBlockRanges before the current block without
+// allocating or sorting. Empty starts sort last; ties preserve slice order.
+func (archive *archiveInfo) blockStatsBeforeCurrent() (points, blocks int) {
+	current, currentStart := len(archive.blockRanges), maxInt
+	for i, b := range archive.blockRanges {
+		if b.index == archive.cblock.index {
+			start := b.start
+			if start == 0 {
+				start = maxInt
+			}
+			if current == len(archive.blockRanges) || start < currentStart {
+				current, currentStart = i, start
+			}
+		}
+	}
+	for i, b := range archive.blockRanges {
+		start := b.start
+		if start == 0 {
+			start = maxInt
+		}
+		if current == len(archive.blockRanges) || start < currentStart || (start == currentStart && i < current) {
+			points += b.count
+			blocks++
+		}
+	}
+	return points, blocks
 }
 
 func (archive *archiveInfo) getRange() (from, until int) {
@@ -752,16 +804,7 @@ func (whisper *Whisper) computeExtendedRetentions() (rets []*Retention, extend b
 			blockCount:             arc.blockCount,
 		}
 
-		var totalPoints int
-		var totalBlocks int
-		for _, b := range arc.getSortedBlockRanges() {
-			if b.index == arc.cblock.index {
-				break
-			}
-
-			totalBlocks++
-			totalPoints += b.count
-		}
+		totalPoints, totalBlocks := arc.blockStatsBeforeCurrent()
 		if totalPoints > 0 {
 			avgPointSize := float32(totalBlocks*arc.blockSize) / float32(totalPoints)
 			if avgPointSize > arc.avgCompressedPointSize {
@@ -863,6 +906,7 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		// against it in order. appendToBlockAndRotate requires that.
 		buf := make([]byte, archive.blockSize)
 		var dst []dataPoint
+		var mergeBuffer []dataPoint
 		var blockBuffer []byte
 		target := nwhisper.archives[i]
 		copyPrefix := op == "compact" && whisper.compVersion == nwhisper.compVersion &&
@@ -886,6 +930,11 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 			// Extra points can shift all later block boundaries. Only copy the
 			// unchanged prefix; stream the remainder through the usual encoder.
 			copyPrefix = false
+			// count is the last point's index, not its length. Treat disk
+			// metadata as a hint bounded by the two-bit minimum encoding.
+			if block.count >= 0 && block.count < maxInt && block.count/4 < len(buf) && cap(dst) < block.count+1 {
+				dst = make([]dataPoint, 0, block.count+1)
+			}
 			dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
 			if err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
@@ -898,9 +947,10 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 					return fmt.Errorf("archives[%d].extra.write: %s", i, err)
 				}
 			}
-			dst, pending = mergeExtra(dst, pending, block.end)
+			var merged []dataPoint
+			merged, pending = mergeExtraWithBuffer(dst, pending, block.end, &mergeBuffer)
 
-			if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dst, blockBuffer); err != nil {
+			if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(merged, blockBuffer); err != nil {
 				return fmt.Errorf("archives[%d].blocks[%d].write: %s", i, block.index, err)
 			}
 		}
@@ -1014,6 +1064,13 @@ func dataPointsOf(ps []extraPoint) []dataPoint {
 // wins - the compressed file stays authoritative - unless the extra point is
 // marked replace, which recomputed aggregates are (see recomputeAggregates).
 func mergeExtra(block []dataPoint, extra []extraPoint, end int) (merged []dataPoint, rest []extraPoint) {
+	var buffer []dataPoint
+	return mergeExtraWithBuffer(block, extra, end, &buffer)
+}
+
+// buffer must not alias block; the decoder and merger retain separate scratch
+// space so a merge does not replace or overwrite the next decode's buffer.
+func mergeExtraWithBuffer(block []dataPoint, extra []extraPoint, end int, buffer *[]dataPoint) (merged []dataPoint, rest []extraPoint) {
 	if end <= 0 {
 		return block, extra
 	}
@@ -1027,7 +1084,10 @@ func mergeExtra(block []dataPoint, extra []extraPoint, end int) (merged []dataPo
 		return block, rest
 	}
 
-	merged = make([]dataPoint, 0, len(block)+len(head))
+	if cap(*buffer) < len(block)+len(head) {
+		*buffer = make([]dataPoint, 0, len(block)+len(head))
+	}
+	merged = (*buffer)[:0]
 	i, j := 0, 0
 	for i < len(block) && j < len(head) {
 		switch {
@@ -1048,7 +1108,10 @@ func mergeExtra(block []dataPoint, extra []extraPoint, end int) (merged []dataPo
 		}
 	}
 	merged = append(merged, block[i:]...)
-	merged = append(merged, dataPointsOf(head[j:])...)
+	for _, point := range head[j:] {
+		merged = append(merged, point.dataPoint)
+	}
+	*buffer = merged
 
 	return merged, rest
 }

@@ -181,6 +181,8 @@ func TestStoreDivertsAndCompactsOutOfOrderPoints(t *testing.T) {
 
 	// high threshold so the first pass diverts without compacting
 	p := newOOOTestPersister(t, dir, cache)
+	p.outOfOrder.ticker.Stop()
+	p.outOfOrder.ticker = &helper.ThrottleTicker{C: make(chan bool, 1)}
 
 	const metric = "test.ooo"
 	path := filepath.Join(dir, "test", "ooo.wsp")
@@ -216,6 +218,7 @@ func TestStoreDivertsAndCompactsOutOfOrderPoints(t *testing.T) {
 
 	// drop the threshold so the next store folds the sidecar back in
 	p.outOfOrder.threshold = 1
+	p.outOfOrder.ticker.C <- true
 	cache.add(metric, int64(base+6), 4)
 	p.store(metric)
 
@@ -239,6 +242,58 @@ func TestStoreDivertsAndCompactsOutOfOrderPoints(t *testing.T) {
 	}{{base + 0, 1}, {base + 2, 2}, {base + 4, 3}, {base + 6, 4}} {
 		if got := fetchValue(t, path, tc.ts); got != tc.want {
 			t.Errorf("value at %d = %v; want %v", tc.ts, got, tc.want)
+		}
+	}
+}
+
+// Corrections to existing raw samples must survive both sidecar reads and
+// compaction, including a later correction back to the original value.
+func TestStorePreservesHistoricalCorrections(t *testing.T) {
+	dir := t.TempDir()
+	cache := &fakeCache{}
+	p := newOOOTestPersister(t, dir, cache)
+	p.outOfOrder.ticker.Stop()
+	p.outOfOrder.ticker = &helper.ThrottleTicker{C: make(chan bool, 1)}
+
+	const metric = "test.corrections"
+	path := filepath.Join(dir, "test", "corrections.wsp")
+	base := int(time.Now().Unix()) - 3600
+	cache.add(metric, int64(base), 0)
+	cache.add(metric, int64(base+2), 2)
+	cache.add(metric, int64(base+4), 3)
+	p.store(metric)
+
+	for i, value := range []float64{1, 0} {
+		p.outOfOrder.threshold = 1 << 30
+		cache.add(metric, int64(base), value)
+		p.store(metric)
+
+		if got := fetchValue(t, path, base); got != value {
+			t.Errorf("correction %d before compaction = %v; want %v", i, got, value)
+		}
+		if got := p.oooCompactions; got != uint32(i) {
+			t.Fatalf("compactions before trigger = %d; want %d", got, i)
+		}
+
+		p.outOfOrder.threshold = 1
+		p.outOfOrder.ticker.C <- true
+		cache.add(metric, int64(base+6+i), 4)
+		p.store(metric)
+
+		if got := p.oooCompactions; got != uint32(i+1) {
+			t.Fatalf("compactions after trigger = %d; want %d", got, i+1)
+		}
+		if got := p.oooCompactErrors; got != 0 {
+			t.Fatalf("compaction errors = %d; want 0", got)
+		}
+		if _, err := os.Stat(whisper.OutOfOrderSidecarPath(path)); !os.IsNotExist(err) {
+			t.Fatalf("sidecar still present after compaction: %v", err)
+		}
+		if got := fetchValue(t, path, base); got != value {
+			t.Errorf("correction %d after compaction = %v; want %v", i, got, value)
+		}
+		if got := fetchValue(t, path, base+2); got != 2 {
+			t.Errorf("neighbor after correction %d = %v; want 2", i, got)
 		}
 	}
 }
