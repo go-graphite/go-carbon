@@ -62,8 +62,9 @@ type Cache struct {
 	}
 
 	newMetricsChan      chan string
-	newMetricCf         *blobloom.Filter
+	newMetricCf         *blobloom.SyncFilter
 	newMetricCfCapacity uint64
+	metricExists        func(string) bool
 
 	throttle func(ps *points.Points, inCache bool) bool
 }
@@ -142,7 +143,7 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 // SetBloomSize of bloom filter
 func (c *Cache) SetBloomSize(bloomSize uint64) {
 	if bloomSize > 0 {
-		c.newMetricCf = blobloom.NewOptimized(blobloom.Config{
+		c.newMetricCf = blobloom.NewSyncOptimized(blobloom.Config{
 			Capacity: bloomSize, // Expected number of keys.
 			FPRate:   1e-4,      // Accept one false positive per 10,000 lookups.
 		})
@@ -158,6 +159,10 @@ func (c *Cache) SetTagsEnabled(value bool) {
 }
 
 func (c *Cache) SetNewMetricsChan(ch chan string) { c.newMetricsChan = ch }
+
+// SetMetricExists avoids notifying the realtime index about metrics it already
+// contains. Configure this callback before starting ingestion.
+func (c *Cache) SetMetricExists(exists func(string) bool) { c.metricExists = exists }
 
 func (*Cache) Stop() {}
 
@@ -320,11 +325,13 @@ func (c *Cache) DivertToXlog(w io.Writer) {
 }
 
 // send metric to the new metrics channel
-func sendMetricToNewMetricChan(c *Cache, metric string) {
+func sendMetricToNewMetricChan(c *Cache, metric string) bool {
 	select {
 	case c.newMetricsChan <- metric:
+		return true
 	default:
 		atomic.AddUint32(&c.stat.droppedRealtimeIndex, 1)
+		return false
 	}
 }
 
@@ -398,8 +405,11 @@ func (c *Cache) add(p *points.Points, restored bool) {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
 		if hash := helper.HashString(p.Metric); !c.newMetricCf.Has(hash) {
-			sendMetricToNewMetricChan(c, p.Metric)
-			c.newMetricCf.Add(hash)
+			// Suppress notifications only for an indexed metric or a successful
+			// enqueue. A full queue must allow unknown metrics to retry.
+			if (c.metricExists != nil && c.metricExists(p.Metric)) || sendMetricToNewMetricChan(c, p.Metric) {
+				c.newMetricCf.Add(hash)
+			}
 		}
 
 	}

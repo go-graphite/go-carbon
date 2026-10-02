@@ -2213,13 +2213,18 @@ func (ti *trieIndex) throttleUsage(ps *points.Points, dirs []*trieNode) bool {
 }
 
 func (ti *trieIndex) metricDirs(ps *points.Points) ([]*trieNode, bool) {
+	return ti.metricPath(ps.Metric, make([]*trieNode, 0, 32))
+}
+
+// A nil dirs slice requests an allocation-free existence check.
+func (ti *trieIndex) metricPath(metric string, dirs []*trieNode) ([]*trieNode, bool) {
 	var node = ti.root
-	var dirs = make([]*trieNode, 0, 32) // WHY: reduce the majority of allocations in mloop
 	var mindex int
 	var isNew bool
-	var metric = ps.Metric
 
-	dirs = append(dirs, ti.root)
+	if dirs != nil {
+		dirs = append(dirs, ti.root)
+	}
 
 mloop:
 	for {
@@ -2248,7 +2253,9 @@ mloop:
 					continue
 				}
 
-				dirs = append(dirs, child)
+				if dirs != nil {
+					dirs = append(dirs, child)
+				}
 				dir = child
 				break
 			}

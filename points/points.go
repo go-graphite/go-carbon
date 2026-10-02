@@ -65,17 +65,13 @@ func (p *Points) WriteTo(w io.Writer) (n int64, err error) {
 	return
 }
 
-func encodeVarint(value int64) []byte {
-	var buf [10]byte
-	l := binary.PutVarint(buf[:], value)
-	return buf[:l]
-}
-
 func (p *Points) WriteBinaryTo(w io.Writer) (n int, err error) {
 	var c int
+	var buf [binary.MaxVarintLen64]byte
 
 	writeVarint := func(value int64) bool {
-		c, err = w.Write(encodeVarint(value))
+		l := binary.PutVarint(buf[:], value)
+		c, err = w.Write(buf[:l])
 		n += c
 		return err == nil
 	}

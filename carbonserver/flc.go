@@ -63,6 +63,7 @@ type FileListCache interface {
 	Write(*FLCEntry) error
 	Read() (*FLCEntry, error)
 	Close() error
+	Abort() error
 }
 
 // FLCEntry is an entry in the file list cache.
@@ -197,6 +198,17 @@ func NewFileListCache(p string, version FLCVersion, mode byte) (FileListCache, e
 
 // GetVersion returns the version of the file list cache file.
 func (flc *fileListCacheCommon) GetVersion() FLCVersion { return flc.version }
+
+// Abort closes an unfinished cache without replacing the previous snapshot.
+func (flc *fileListCacheCommon) Abort() error {
+	err := flc.file.Close()
+	if flc.mode == 'w' {
+		if removeErr := os.Remove(flc.path + ".tmp"); err == nil {
+			err = removeErr
+		}
+	}
+	return err
+}
 
 // Closes close the cache file and related writers and readers.
 // For 'w' mode, it also performs a `mv tmp_cache_file cache_file`.
