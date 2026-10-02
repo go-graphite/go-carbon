@@ -79,8 +79,15 @@ Coarser archives can contain partial aggregates in the sidecar, so those do not
 replace existing aggregate values directly. Compaction recomputes the complete
 aggregates using the corrected samples. Callers must compact before the finest
 samples expire if corrected rollups are required; reads do not trigger compaction.
-Direct overwrites of existing samples older than the finest retention remain
-outside this guarantee. Previously discarded corrections must be replayed.
+
+Explicit historical writes to a coarser archive are authoritative corrections,
+not partial aggregates. When the compressed encoder rejects one, `UpdateMany`
+folds it together with existing sidecar data into one synchronous rewrite and
+recomputes lower archives. This preserves corrections across different batch
+sizes without changing the file format. These writes can be more expensive and
+are not delayed by a caller's background compaction rate limit.
+
+Previously discarded corrections must be replayed.
 
 ### Suitable Application
 

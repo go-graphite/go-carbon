@@ -48,6 +48,7 @@ func (app *App) DumpStop() error {
 	if !app.Config.Dump.Enabled {
 		return nil
 	}
+	_ = app.Cache.SetWriteoutBatching(0, 0)
 
 	if app.Persister != nil {
 		app.Persister.Stop()

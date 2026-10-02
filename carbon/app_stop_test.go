@@ -67,6 +67,8 @@ func TestRestoreStartupOrdering(t *testing.T) {
 				app.Config.Dump.Path = root
 				app.Config.Dump.RestorePerSecond = 0
 				app.Config.Whisper.MaxUpdatesPerSecond = 10
+				app.Config.Cache.WriteoutMinPoints = 8
+				app.Config.Cache.WriteoutMaxDelay = Duration{time.Hour}
 				app.Config.Udp.Enabled = false
 				app.Config.Tcp.Enabled = false
 				app.Config.Pickle.Enabled = false

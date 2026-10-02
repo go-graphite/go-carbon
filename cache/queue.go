@@ -22,6 +22,12 @@ func (v byOrderKey) Swap(i, j int)      { v[i], v[j] = v[j], v[i] }
 func (v byOrderKey) Less(i, j int) bool { return v[i].orderKey < v[j].orderKey }
 
 func (c *Cache) makeQueue() chan string {
+	q, _ := c.makeQueueAt(time.Now())
+	return q
+}
+
+// The next deadline lets an empty queue sleep without rescanning deferred data.
+func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 	c.mu.Lock()
 	writeStrategy := c.writeStrategy
 	prevBuild := c.queueLastBuild
@@ -61,12 +67,24 @@ func (c *Cache) makeQueue() chan string {
 	size := c.Len() * 2
 	q := make(queue, size)
 	index := int32(0)
+	s := c.settings.Load().(*cacheSettings)
+	batch := c.batchWrites(s)
+	var next time.Time
 
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
 		shard.mu.Lock()
 
 		for _, p := range shard.items {
+			if batch {
+				deadline := writeoutDeadline(shard, p, s)
+				if now.Before(deadline) {
+					if next.IsZero() || deadline.Before(next) {
+						next = deadline
+					}
+					continue
+				}
+			}
 			if index < size {
 				q[index].metric = p.Metric
 				q[index].orderKey = orderKey(p)
@@ -90,7 +108,7 @@ func (c *Cache) makeQueue() chan string {
 
 	l := len(q)
 	if l == 0 {
-		return nil
+		return nil, next
 	}
 
 	ch := make(chan string, l)
@@ -98,5 +116,5 @@ func (c *Cache) makeQueue() chan string {
 		ch <- i.metric
 	}
 
-	return ch
+	return ch, next
 }
