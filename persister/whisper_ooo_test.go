@@ -181,6 +181,8 @@ func TestStoreDivertsAndCompactsOutOfOrderPoints(t *testing.T) {
 
 	// high threshold so the first pass diverts without compacting
 	p := newOOOTestPersister(t, dir, cache)
+	p.outOfOrder.ticker.Stop()
+	p.outOfOrder.ticker = &helper.ThrottleTicker{C: make(chan bool, 1)}
 
 	const metric = "test.ooo"
 	path := filepath.Join(dir, "test", "ooo.wsp")
@@ -216,6 +218,7 @@ func TestStoreDivertsAndCompactsOutOfOrderPoints(t *testing.T) {
 
 	// drop the threshold so the next store folds the sidecar back in
 	p.outOfOrder.threshold = 1
+	p.outOfOrder.ticker.C <- true
 	cache.add(metric, int64(base+6), 4)
 	p.store(metric)
 
