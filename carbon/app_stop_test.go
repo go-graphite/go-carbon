@@ -86,6 +86,10 @@ func TestRestoreStartupOrdering(t *testing.T) {
 					assert.True(t, app.Cache.IsEmpty(), "restored cwhisper data must be persisted before receivers start")
 					_, err = os.Stat(filepath.Join(root, "restore", "two.wsp"))
 					assert.NoError(t, err)
+					stats := make(map[string]float64)
+					app.Persister.Stat(func(name string, value float64) { stats[name] = value })
+					assert.Zero(t, stats["created"], "restore creations must not be reported as live interval activity")
+					assert.Zero(t, stats["committedPoints"], "restore commits must not be reported as live interval activity")
 					return
 				}
 				assert.NoError(t, err)
