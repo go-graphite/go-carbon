@@ -159,12 +159,14 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 			code = http.StatusInternalServerError
 		}
 
-		accessLogger.Error("find failed",
-			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", reason),
-			zap.Error(err),
-			zap.Int("http_code", code),
-		)
+		if code != http.StatusNotFound || !listener.doNotLog404s {
+			accessLogger.Error("find failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", reason),
+				zap.Error(err),
+				zap.Int("http_code", code),
+			)
+		}
 		http.Error(wr, fmt.Sprintf("%s (%v)", reason, err), code)
 
 		return
@@ -503,12 +505,14 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 			code = codes.Internal
 		}
 
-		accessLogger.Error("find failed",
-			zap.Duration("runtime_seconds", time.Since(t0)),
-			zap.String("reason", reason),
-			zap.Error(err),
-			zap.Int("grpc_code", int(code)),
-		)
+		if code != codes.NotFound || !listener.doNotLog404s {
+			accessLogger.Error("find failed",
+				zap.Duration("runtime_seconds", time.Since(t0)),
+				zap.String("reason", reason),
+				zap.Error(err),
+				zap.Int("grpc_code", int(code)),
+			)
+		}
 
 		return nil, status.Error(code, reason)
 	}

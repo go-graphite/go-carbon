@@ -418,7 +418,8 @@ graphite-web-10-strict-mode = true
 # Return a 404 instead of empty results. Set to true if you are serving requests to graphite-web
 empty-result-ok = false
 
-# Do not log 404 (metric not found) errors
+# Do not log metric-not-found errors for render and find (HTTP 404 / gRPC NotFound).
+# Useful for sharded stores, where a missing metric is an expected result.
 do-not-log-404s = false
 
 # Allows to keep track for "last time readed" between restarts, leave empty to disable
