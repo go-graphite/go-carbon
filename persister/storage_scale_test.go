@@ -31,7 +31,7 @@ func TestStorageScale(t *testing.T) {
 	storageMust(t, oracle.create(config))
 	storageMust(t, oracle.update(config.Name, seed))
 	elapsed, before, after, memBefore, memAfter, batchLatencies, readLatencies := runStorageScale(t, s, oracle, names, config, rounds, workers, late, now)
-	logStorageScale(t, kind, count, rounds, elapsed, before, after, memBefore, memAfter, batchLatencies, readLatencies)
+	logStorageScale(t, kind, count, rounds, elapsed, before, after, &memBefore, &memAfter, batchLatencies, readLatencies)
 	verifyStorageScale(t, s, oracle, names, config.Name, workers, now)
 }
 
@@ -113,7 +113,7 @@ func storageScaleProfile(t *testing.T) *os.File {
 	return profile
 }
 
-func logStorageScale(t *testing.T, kind string, count, rounds int, elapsed time.Duration, before, after syscall.Rusage, memBefore, memAfter runtime.MemStats, batchLatencies, readLatencies []int64) {
+func logStorageScale(t *testing.T, kind string, count, rounds int, elapsed time.Duration, before, after syscall.Rusage, memBefore, memAfter *runtime.MemStats, batchLatencies, readLatencies []int64) {
 	cpu := func(r syscall.Rusage) float64 {
 		return float64(r.Utime.Sec+r.Stime.Sec) + float64(r.Utime.Usec+r.Stime.Usec)/1e6
 	}
