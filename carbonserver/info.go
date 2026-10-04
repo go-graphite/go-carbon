@@ -21,6 +21,54 @@ import (
 	"go.uber.org/zap"
 )
 
+type metricInfo struct {
+	aggregationMethod string
+	maxRetention      int64
+	xFilesFactor      float32
+	retentions        []retentionInfo
+}
+
+type retentionInfo struct {
+	secondsPerPoint int
+	numberOfPoints  int
+}
+
+func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, error) {
+	if metricStore := listener.getMetricStore(); metricStore != nil {
+		metadata, err := metricStore.Metadata(context.Background(), metric)
+		if err != nil {
+			return metricInfo{}, err
+		}
+		info := metricInfo{
+			aggregationMethod: titleizeAggrMethod(metadata.AggregationMethod.String()),
+			xFilesFactor:      metadata.XFilesFactor,
+		}
+		for _, retention := range metadata.Retentions {
+			info.retentions = append(info.retentions, retentionInfo{retention.SecondsPerPoint(), retention.NumberOfPoints()})
+			if retention.MaxRetention() > int(info.maxRetention) {
+				info.maxRetention = int64(retention.MaxRetention())
+			}
+		}
+		return info, nil
+	}
+
+	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
+	w, err := whisper.Open(path)
+	if err != nil {
+		return metricInfo{}, err
+	}
+	defer w.Close()
+	info := metricInfo{
+		aggregationMethod: titleizeAggrMethod(w.AggregationMethod().String()),
+		maxRetention:      int64(w.MaxRetention()),
+		xFilesFactor:      w.XFilesFactor(),
+	}
+	for _, retention := range w.Retentions() {
+		info.retentions = append(info.retentions, retentionInfo{retention.SecondsPerPoint(), retention.NumberOfPoints()})
+	}
+	return info, nil
+}
+
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
 	// URL: /info/?target=the.metric.Name&format=json
 	t0 := time.Now()
@@ -87,9 +135,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 	response := protov3.MultiMetricsInfoResponse{}
 	var retentionsV2 []*protov2.Retention
 	for i, metric := range metrics {
-		path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
-		w, err := whisper.Open(path)
-
+		info, err := listener.getMetricInfo(metric)
 		if err != nil {
 			atomic.AddUint64(&listener.metrics.NotFound, 1)
 			accessLogger.Error("info served",
@@ -101,16 +147,10 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			return
 		}
 
-		defer w.Close()
-
-		aggr := titleizeAggrMethod(w.AggregationMethod().String())
-		maxr := int64(w.MaxRetention())
-		xfiles := float32(w.XFilesFactor())
-
 		rets := make([]*protov3.Retention, 0, 4)
-		for _, retention := range w.Retentions() {
-			spp := int64(retention.SecondsPerPoint())
-			nop := int64(retention.NumberOfPoints())
+		for _, retention := range info.retentions {
+			spp := int64(retention.secondsPerPoint)
+			nop := int64(retention.numberOfPoints)
 			rets = append(rets, &protov3.Retention{
 				SecondsPerPoint: spp,
 				NumberOfPoints:  nop,
@@ -119,17 +159,17 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			// TODO include support for multiple metrics
 			if i == 0 && formatCode == protoV2Format {
 				retentionsV2 = append(retentionsV2, &protov2.Retention{
-					SecondsPerPoint: int32(retention.SecondsPerPoint()),
-					NumberOfPoints:  int32(retention.NumberOfPoints()),
+					SecondsPerPoint: int32(retention.secondsPerPoint),
+					NumberOfPoints:  int32(retention.numberOfPoints),
 				})
 			}
 		}
 
 		response.Metrics = append(response.Metrics, &protov3.MetricsInfoResponse{
 			Name:              metric,
-			ConsolidationFunc: aggr,
-			MaxRetention:      maxr,
-			XFilesFactor:      xfiles,
+			ConsolidationFunc: info.aggregationMethod,
+			MaxRetention:      info.maxRetention,
+			XFilesFactor:      info.xFilesFactor,
 			Retentions:        rets,
 		})
 	}
@@ -212,9 +252,7 @@ func (listener *CarbonserverListener) Info(ctx context.Context, req *protov2.Inf
 		zap.String("format", protoV2Format.String()),
 	)
 
-	var retentionsV2 []*protov2.Retention
-	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
-	w, err := whisper.Open(path)
+	info, err := listener.getMetricInfo(metric)
 	if err != nil {
 		atomic.AddUint64(&listener.metrics.NotFound, 1)
 		accessLogger.Error("info served",
@@ -225,24 +263,19 @@ func (listener *CarbonserverListener) Info(ctx context.Context, req *protov2.Inf
 		return nil, status.Error(codes.NotFound, "Metric not found")
 	}
 
-	defer w.Close()
-
-	aggr := titleizeAggrMethod(w.AggregationMethod().String())
-	maxr := int64(w.MaxRetention())
-	xfiles := float32(w.XFilesFactor())
-
-	for _, retention := range w.Retentions() {
+	var retentionsV2 []*protov2.Retention
+	for _, retention := range info.retentions {
 		retentionsV2 = append(retentionsV2, &protov2.Retention{
-			SecondsPerPoint: int32(retention.SecondsPerPoint()),
-			NumberOfPoints:  int32(retention.NumberOfPoints()),
+			SecondsPerPoint: int32(retention.secondsPerPoint),
+			NumberOfPoints:  int32(retention.numberOfPoints),
 		})
 	}
 
 	res := &protov2.InfoResponse{
 		Name:              metric,
-		AggregationMethod: aggr,
-		MaxRetention:      int32(maxr),
-		XFilesFactor:      xfiles,
+		AggregationMethod: info.aggregationMethod,
+		MaxRetention:      int32(info.maxRetention),
+		XFilesFactor:      info.xFilesFactor,
 		Retentions:        retentionsV2,
 	}
 

@@ -1,13 +1,17 @@
 package carbonserver
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	_ "net/http/pprof" // skipcq: GO-S2108
+	"os"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-whisper"
 
@@ -22,11 +26,32 @@ type Metadata struct {
 type metricFromDisk struct {
 	DiskStartTime time.Time
 	CacheData     []points.Point
-	Timeseries    *whisper.TimeSeries
+	Timeseries    timeseries
 	Metadata      Metadata
 }
 
+// timeseries is the narrow response shape shared by classic Whisper and the
+// embedded shared store. It prevents the storage engine leaking into render.
+type timeseries interface {
+	Values() []float64
+	FromTime() int
+	UntilTime() int
+	Step() int
+}
+
+type metricStoreSeries struct{ *store.Series }
+
+func (s metricStoreSeries) FromTime() int  { return s.Series.FromTime }
+func (s metricStoreSeries) UntilTime() int { return s.Series.UntilTime }
+func (s metricStoreSeries) Step() int      { return s.Series.Step }
+func (s metricStoreSeries) Values() []float64 {
+	return s.Series.Values
+}
+
 func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
+	if metricStore := listener.getMetricStore(); metricStore != nil {
+		return listener.fetchFromMetricStore(metricStore, metric, fromTime, untilTime)
+	}
 	var step int32
 
 	// We need to obtain the metadata from whisper file anyway.
@@ -127,5 +152,47 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 	res.Timeseries = points
 
+	return res, nil
+}
+
+func (listener *CarbonserverListener) fetchFromMetricStore(metricStore *store.Store, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
+	started := time.Now()
+	series, err := metricStore.Fetch(context.Background(), metric, int(fromTime), int(untilTime))
+	if errors.Is(err, store.ErrNotFound) {
+		atomic.AddUint64(&listener.metrics.NotFound, 1)
+		return nil, fmt.Errorf("open shared metric %q: %w", metric, os.ErrNotExist)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if series == nil {
+		return nil, errors.New("time range not found")
+	}
+	metadata := series.Metadata
+
+	res := &metricFromDisk{
+		DiskStartTime: started,
+		Timeseries:    metricStoreSeries{series},
+		Metadata: Metadata{
+			ConsolidationFunc: titleizeAggrMethod(metadata.AggregationMethod.String()),
+			XFilesFactor:      metadata.XFilesFactor,
+		},
+	}
+	if len(metadata.Retentions) > 0 && series.Step == metadata.Retentions[0].SecondsPerPoint() {
+		cacheStarted := time.Now()
+		res.CacheData = listener.cacheGet(metric)
+		wait := time.Since(cacheStarted)
+		atomic.AddUint64(&listener.metrics.CacheWaitTimeFetchNS, uint64(wait.Nanoseconds()))
+		listener.prometheus.cacheDuration("wait", wait)
+	}
+	atomic.AddUint64(&listener.metrics.DiskRequests, 1)
+	listener.prometheus.diskRequest()
+	wait := time.Since(started)
+	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
+	listener.prometheus.returnedMetric()
+	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, uint64(wait.Nanoseconds()))
+	listener.prometheus.diskWaitDuration(wait)
+	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(series.Values)))
+	listener.prometheus.returnedPoint(len(series.Values))
 	return res, nil
 }

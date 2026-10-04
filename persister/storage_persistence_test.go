@@ -54,7 +54,7 @@ func TestStorageFetchEdges(t *testing.T) {
 
 func TestStorageRandomizedParity(t *testing.T) {
 	now := storageTestClock(t)
-	for _, kind := range []string{"cwhisper-ooo"} {
+	for _, kind := range []string{"cwhisper-ooo", "pebble-chunk"} {
 		for _, seed := range []int64{1, 4271, 82597} {
 			for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Last, whisper.Max, whisper.Min, whisper.First} {
 				t.Run(fmt.Sprintf("%s/seed=%d/%s", kind, seed, method), func(t *testing.T) {
@@ -140,7 +140,9 @@ func storageRecoveryBatches(kind string) [][]whisper.TimeSeriesPoint {
 	return result
 }
 
-// This helper exits after acknowledged writes without running any defer or cleanup.
+// This helper exits after acknowledged writes without running any defer or
+// cleanup. In particular Pebble never receives Close; recovery must replay WAL.
+// It models process loss, not a power failure or a torn device write.
 func TestStorageCrashWriter(t *testing.T) {
 	dir := os.Getenv("GO_CARBON_STORAGE_CRASH_DIR")
 	if dir == "" {
@@ -156,6 +158,13 @@ func TestStorageCrashWriter(t *testing.T) {
 			storageMust(t, s.update(name, batch))
 		}
 	}
+	if os.Getenv("GO_CARBON_STORAGE_CRASH_FLUSH") == "1" {
+		if s.db != nil {
+			storageMust(t, s.db.Flush())
+		}
+		// Leave a mixture of SST data and newer WAL data to recover.
+		storageMust(t, s.update("metric-0", storagePoints(storageEpoch-30, 8, 1)))
+	}
 	// Bypass test cleanup and deferred closes to simulate process termination.
 	// skipcq: RVV-A0003
 	os.Exit(23)
@@ -165,6 +174,9 @@ func TestStorageCrashRecovery(t *testing.T) {
 	now := storageTestClock(t)
 	for _, kind := range storageBackends {
 		modes := []string{"unclosed"}
+		if kind == "pebble-chunk" {
+			modes = append(modes, "sst-and-wal")
+		}
 		for _, mode := range modes {
 			t.Run(kind+"/"+mode, func(t *testing.T) {
 				dir := t.TempDir()
@@ -172,6 +184,9 @@ func TestStorageCrashRecovery(t *testing.T) {
 				defer cancel()
 				cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStorageCrashWriter$")
 				cmd.Env = append(os.Environ(), "GO_CARBON_STORAGE_CRASH_DIR="+dir, "GO_CARBON_STORAGE_CRASH_BACKEND="+kind)
+				if mode == "sst-and-wal" {
+					cmd.Env = append(cmd.Env, "GO_CARBON_STORAGE_CRASH_FLUSH=1")
+				}
 				output, err := cmd.CombinedOutput()
 				var exitErr *exec.ExitError
 				if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
@@ -186,6 +201,9 @@ func TestStorageCrashRecovery(t *testing.T) {
 					storageMust(t, oracle.create(c))
 					for _, batch := range storageRecoveryBatches(kind) {
 						storageMust(t, oracle.update(c.Name, batch))
+					}
+					if mode == "sst-and-wal" && i == 0 {
+						storageMust(t, oracle.update(c.Name, storagePoints(storageEpoch-30, 8, 1)))
 					}
 					storageCompare(t, oracle, candidate, c, "crash-recovery")
 					for _, s := range []*storageBackend{oracle, candidate} {
@@ -256,6 +274,9 @@ func TestStoragePersisterRoundTrip(t *testing.T) {
 			p.SetRequeue(cache.requeue)
 			p.SetFLock(true)
 			p.SetCompressed(kind == "cwhisper" || kind == "cwhisper-ooo")
+			if candidate.db != nil {
+				p.SetMetricStore(candidate.db)
+			}
 			if kind == "cwhisper-ooo" {
 				p.EnableOutOfOrder(1, 1<<30)
 				p.outOfOrder.ticker = helper.NewHardThrottleTicker(1)
@@ -279,6 +300,41 @@ func TestStoragePersisterRoundTrip(t *testing.T) {
 			storageMust(t, err)
 			if v == nil || len(v.values) != 1 || math.IsNaN(v.values[0]) {
 				t.Fatal("persisted query is empty")
+			}
+		})
+	}
+}
+
+func TestStorageEpochCrossingFetchParity(t *testing.T) {
+	now := storageTestClock(t)
+	now.Store(1000)
+	c := storageConfig("metric", "10s:30m", whisper.Average, 0)
+	tests := []struct {
+		name   string
+		points []whisper.TimeSeriesPoint
+	}{
+		{name: "empty"},
+		{name: "missing-slot-zero", points: []whisper.TimeSeriesPoint{{Time: 10, Value: 1}, {Time: 20, Value: 2}, {Time: 990, Value: 3}}},
+		// 1800 aliases physical slot zero, but has a different timestamp and is
+		// not part of these reads. Its presence must suppress Whisper's zero sentinel.
+		{name: "occupied-slot-zero", points: []whisper.TimeSeriesPoint{{Time: 10, Value: 1}, {Time: 20, Value: 2}, {Time: 990, Value: 3}, {Time: 1800, Value: 4}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oracle := newStorageBackend(t, "classic", now)
+			candidate := newStorageBackend(t, "pebble-chunk", now)
+			for _, s := range []*storageBackend{oracle, candidate} {
+				storageMust(t, s.create(c))
+				storageMust(t, s.update(c.Name, tt.points))
+			}
+			for _, from := range []int{-600, -60, 0} {
+				want, err := oracle.fetch(c.Name, from, 1000)
+				storageMust(t, err)
+				got, err := candidate.fetch(c.Name, from, 1000)
+				storageMust(t, err)
+				if diff := storageSeriesDiff(want, got); diff != "" {
+					t.Fatalf("query=[%d,1000): %s", from, diff)
+				}
 			}
 		})
 	}

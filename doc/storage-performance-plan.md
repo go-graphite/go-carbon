@@ -220,8 +220,7 @@ Source: [collision checks and replay](../vendor/github.com/go-graphite/go-whispe
    bound. Do not change the on-disk format based on this small fixture alone.
 
 Historical source: [synchronous commits, Fetch, hasArchivePoint and rollup](https://github.com/go-graphite/go-whisper/blob/16b07882e95e65a1eb2c3c8df22712e795622bde/store/store.go).
-The Pebble replacement is delivered in a separate engine change; these results
-record the earlier per-point prototype.
+The replacement is documented in [chunk storage qualification](shared-storage.md#qualification-results).
 
 ## Proposed order and acceptance gates
 

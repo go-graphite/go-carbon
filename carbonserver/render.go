@@ -326,7 +326,7 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 	var err error
 
 	var response fetchResponse
-	if listener.queryCacheEnabled {
+	if listener.queryCacheEnabled && listener.getMetricStore() == nil {
 		key, size := listener.getRenderCacheKeyAndSize(targets, format.String())
 		var res interface{}
 		cacheT0 := time.Now()
@@ -751,7 +751,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	var responseChanToStream chan response
 	var fromCache bool
 	var err error
-	if listener.streamingQueryCacheEnabled {
+	if listener.streamingQueryCacheEnabled && listener.getMetricStore() == nil {
 		key, size := listener.getRenderCacheKeyAndSize(targets, format.String()+"grpc")
 		var res interface{}
 		cacheT0 := time.Now()

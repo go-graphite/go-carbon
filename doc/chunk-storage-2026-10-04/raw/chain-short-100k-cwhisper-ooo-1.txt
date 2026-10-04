@@ -1,0 +1,6 @@
+=== RUN   TestStorageScale
+    storage_scale_test.go:89: engine=cwhisper-ooo metrics=100000 workers=32 cache-memtable-MiB=64 rounds=80 late=false setup=6.472557748s
+    storage_scale_test.go:145: engine=cwhisper-ooo points=64000000 reads=800000 wall=5m0.653942738s cpu-us/point=6.105 allocated-B/point=751.2 batch-p95-us=275.304 batch-p99-us=32189.670 read-p99-us=169.460 maxrss-KiB=173048
+    storage_scale_test.go:197: engine=cwhisper-ooo verified-metrics=100000 maintenance-sample=253 maintenance=446.670015ms files=200253 logical-bytes=727100000 allocated-bytes=819200000
+--- PASS: TestStorageScale (312.67s)
+PASS

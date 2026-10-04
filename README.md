@@ -34,6 +34,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 - Carbonlink-like GRPC api
 - Logging with rotation support (reopen log if it moves)
 - Many persister workers (using many cpu cores)
+- Experimental [shared compressed storage and embedded buckyd](doc/shared-storage.md)
 - Run as daemon
 - Optional dump/restore restart on `USR2` signal (config `dump` section): stop persister, start write new data to file, dump cache to file, stop all (and restore from files after next start)
 - Reload some config options without restart (HUP signal):

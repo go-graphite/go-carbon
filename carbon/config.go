@@ -13,6 +13,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/lomik/zapwriter"
 
+	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
@@ -56,6 +57,10 @@ type commonConfig struct {
 }
 
 type whisperConfig struct {
+	StorageBackend      string  `toml:"storage-backend"`
+	StoreDir            string  `toml:"store-dir"`
+	StoreCacheSize      int64   `toml:"store-cache-size"`
+	StoreMemTableSize   uint64  `toml:"store-memtable-size"`
 	DataDir             string  `toml:"data-dir"`
 	SchemasFilename     string  `toml:"schemas-file"`
 	AggregationFilename string  `toml:"aggregation-file"`
@@ -212,6 +217,7 @@ type tracingConfig struct {
 
 // Config ...
 type Config struct {
+	Buckyd       buckyd.Config                       `toml:"buckyd"`
 	Common       commonConfig                        `toml:"common"`
 	Whisper      whisperConfig                       `toml:"whisper"`
 	Cache        cacheConfig                         `toml:"cache"`
@@ -244,6 +250,11 @@ func NewLoggingConfig() zapwriter.Config {
 // NewConfig ...
 func NewConfig() *Config {
 	cfg := &Config{
+		Buckyd: buckyd.Config{
+			Bind: "0.0.0.0:4242", Hash: "carbon", Replicas: 1,
+			TmpDir: os.TempDir(), Timeout: 3600,
+			MaxBodyBytes: 160 << 20, MaxTransfers: 4,
+		},
 		Common: commonConfig{
 			GraphPrefix: "carbon.agents.{host}",
 			MetricInterval: &Duration{
@@ -254,6 +265,9 @@ func NewConfig() *Config {
 			User:           "carbon",
 		},
 		Whisper: whisperConfig{
+			StorageBackend:      "files",
+			StoreCacheSize:      256 << 20,
+			StoreMemTableSize:   64 << 20,
 			DataDir:             "/var/lib/graphite/whisper/",
 			SchemasFilename:     "/etc/go-carbon/storage-schemas.conf",
 			AggregationFilename: "",
