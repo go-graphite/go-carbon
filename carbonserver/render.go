@@ -824,7 +824,7 @@ func (listener *CarbonserverListener) renderCachedResponseChannel(item *QueryIte
 			return nil, false, err
 		}
 		stream := make(chan response, cap(responseChan))
-		go listener.storeAndStreamRenderResponses(item, responseChan, stream, tle, cacheT0)
+		go storeAndStreamRenderResponses(item, responseChan, stream, tle, cacheT0)
 		return stream, false, nil
 	}
 	if res == nil {
@@ -837,7 +837,7 @@ func (listener *CarbonserverListener) renderCachedResponseChannel(item *QueryIte
 	return stream, true, nil
 }
 
-func (listener *CarbonserverListener) storeAndStreamRenderResponses(item *QueryItem, responseChan <-chan response, stream chan<- response, tle *traceLogEntries, cacheT0 time.Time) {
+func storeAndStreamRenderResponses(item *QueryItem, responseChan <-chan response, stream chan<- response, tle *traceLogEntries, cacheT0 time.Time) {
 	var responses []response
 	for r := range responseChan {
 		responses = append(responses, r)

@@ -2,6 +2,8 @@ package carbonserver
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +11,28 @@ import (
 
 	"github.com/go-graphite/go-carbon/points"
 )
+
+func TestQuotaHandlerWithoutTrieIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		index *fileIndex
+	}{
+		{name: "before initial scan"},
+		{name: "trigram index", index: &fileIndex{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := NewCarbonserverListener(nil)
+			if tc.index != nil {
+				listener.UpdateFileIndex(tc.index)
+			}
+			response := httptest.NewRecorder()
+			listener.quotaHandler(response, httptest.NewRequest(http.MethodGet, "/admin/quota", http.NoBody))
+			if response.Code != http.StatusOK || response.Body.String() != "index doesn't exist." {
+				t.Fatalf("unexpected quota response: status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+}
 
 func TestInitialFileListCachePublishesNotificationsAndQuotas(t *testing.T) {
 	dir := t.TempDir()

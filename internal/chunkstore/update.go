@@ -46,7 +46,7 @@ func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRet
 			return err
 		}
 	} else {
-		if err := s.updateAutomatic(w, m, input, now); err != nil {
+		if err := updateAutomatic(w, m, input, now); err != nil {
 			return err
 		}
 	}
@@ -70,14 +70,14 @@ func updateArchive(w *chunkWriter, m Metadata, input []Point, targetRetention in
 	return nil
 }
 
-func (s *Store) updateAutomatic(w *chunkWriter, m Metadata, input []Point, now int) error {
+func updateAutomatic(w *chunkWriter, m Metadata, input []Point, now int) error {
 	// This preserves classic UpdateMany's newest-first routing and exact
 	// retention-boundary behaviour.
 	remaining := newestFirst(input)
 	for archive := range m.Retentions {
 		current, next := extractPoints(remaining, now, m.Retentions[archive].MaxRetention())
 		remaining = next
-		if err := s.updateRetention(w, m, archive, current); err != nil {
+		if err := updateRetention(w, m, archive, current); err != nil {
 			return err
 		}
 		if len(remaining) == 0 {
@@ -96,7 +96,7 @@ func newestFirst(input []Point) []Point {
 	return result
 }
 
-func (s *Store) updateRetention(w *chunkWriter, m Metadata, archive int, current []Point) error {
+func updateRetention(w *chunkWriter, m Metadata, archive int, current []Point) error {
 	for i := 0; i < len(current)/2; i++ {
 		current[i], current[len(current)-i-1] = current[len(current)-i-1], current[i]
 	}
@@ -112,7 +112,7 @@ func (s *Store) updateRetention(w *chunkWriter, m Metadata, archive int, current
 		}
 		changed[interval] = struct{}{}
 	}
-	return s.propagate(w, m, archive, changed)
+	return propagate(w, m, archive, changed)
 }
 
 func (s *Store) commitUpdate(b *pebble.Batch, w *chunkWriter, m Metadata) error {
@@ -143,7 +143,7 @@ func extractPoints(input []Point, now, retention int) ([]Point, []Point) {
 	return input, nil
 }
 
-func (s *Store) propagate(reader *chunkWriter, m Metadata, start int, changed map[int]struct{}) error {
+func propagate(reader *chunkWriter, m Metadata, start int, changed map[int]struct{}) error {
 	// Keep every original interval eligible at each lower archive. A finer
 	// rollup can fail XFF while its lower-resolution bucket is already complete.
 	original := make([]int, 0, len(changed))

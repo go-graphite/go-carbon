@@ -31,12 +31,12 @@ func TestMetricStoreCatalogAndReadPaths(t *testing.T) {
 	}
 	defer metricStore.Close()
 
-	populateMetricStoreCatalog(t, ctx, metricStore, now)
-	t.Run("trigram", func(t *testing.T) { testMetricStoreCatalogPath(t, ctx, metricStore, now, false) })
-	t.Run("trie", func(t *testing.T) { testMetricStoreCatalogPath(t, ctx, metricStore, now, true) })
+	populateMetricStoreCatalog(ctx, t, metricStore, now)
+	t.Run("trigram", func(t *testing.T) { testMetricStoreCatalogPath(ctx, t, metricStore, now, false) })
+	t.Run("trie", func(t *testing.T) { testMetricStoreCatalogPath(ctx, t, metricStore, now, true) })
 }
 
-func populateMetricStoreCatalog(t *testing.T, ctx context.Context, metricStore *store.Store, now int64) {
+func populateMetricStoreCatalog(ctx context.Context, t *testing.T, metricStore *store.Store, now int64) {
 	t.Helper()
 	for _, metric := range []string{"servers.api.cpu.user", "servers.api.cpu.system"} {
 		config := store.MetricConfig{Name: metric, Retentions: []store.Retention{{Step: 1, Count: 120}, {Step: 60, Count: 120}}, AggregationMethod: store.Average}
@@ -49,7 +49,7 @@ func populateMetricStoreCatalog(t *testing.T, ctx context.Context, metricStore *
 	}
 }
 
-func testMetricStoreCatalogPath(t *testing.T, ctx context.Context, metricStore *store.Store, now int32, trie bool) {
+func testMetricStoreCatalogPath(ctx context.Context, t *testing.T, metricStore *store.Store, now int32, trie bool) {
 	t.Helper()
 	metricCache := cache.New()
 	listener := newMetricStoreTestListener(t, metricCache, metricStore, trie)
@@ -58,9 +58,9 @@ func testMetricStoreCatalogPath(t *testing.T, ctx context.Context, metricStore *
 	assertStoreGlob(t, listener, "servers.api.cpu.*", true)
 	assertMetricStoreReadPaths(t, listener, metricCache, now)
 	assertMetricStoreHTTPMetadata(t, listener)
-	assertMetricStoreGRPCMetadata(t, ctx, listener)
+	assertMetricStoreGRPCMetadata(ctx, t, listener)
 	if !trie {
-		assertMetricStoreDeletion(t, ctx, metricStore, listener)
+		assertMetricStoreDeletion(ctx, t, metricStore, listener)
 	}
 	assertMetricStoreRestart(t, metricCache, metricStore, trie)
 }
@@ -121,7 +121,7 @@ func assertFineMetricStoreResponse(t *testing.T, fine response) {
 	t.Fatalf("fine fetch did not overlay cache: step=%d values=%v", fine.StepTime, fine.Values)
 }
 
-func assertMetricStoreGRPCMetadata(t *testing.T, ctx context.Context, listener *CarbonserverListener) {
+func assertMetricStoreGRPCMetadata(ctx context.Context, t *testing.T, listener *CarbonserverListener) {
 	t.Helper()
 	grpcInfo, err := listener.Info(ctx, &protov2.InfoRequest{Name: "servers.api.cpu.user"})
 	if err != nil {
@@ -132,7 +132,7 @@ func assertMetricStoreGRPCMetadata(t *testing.T, ctx context.Context, listener *
 	}
 }
 
-func assertMetricStoreDeletion(t *testing.T, ctx context.Context, metricStore *store.Store, listener *CarbonserverListener) {
+func assertMetricStoreDeletion(ctx context.Context, t *testing.T, metricStore *store.Store, listener *CarbonserverListener) {
 	t.Helper()
 	if err := metricStore.Delete(ctx, "servers.api.cpu.system"); err != nil {
 		t.Fatal(err)
