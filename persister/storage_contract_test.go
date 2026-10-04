@@ -247,6 +247,8 @@ func storageTraces() []storageTrace {
 		ordered.writes = append(ordered.writes, storageWrite{points: dense[i : i+30]})
 	}
 	shuffled := slices.Clone(dense)
+	// Keep shuffled writes reproducible when diagnosing oracle mismatches.
+	// skipcq: GSC-G404
 	rand.New(rand.NewSource(4271)).Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
 	late := ordered
 	late.name, late.late, late.writes, late.retentions = "late-holes", true, nil, "1s:5m"

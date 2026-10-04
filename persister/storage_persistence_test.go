@@ -59,6 +59,8 @@ func TestStorageRandomizedParity(t *testing.T) {
 			for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Last, whisper.Max, whisper.Min, whisper.First} {
 				t.Run(fmt.Sprintf("%s/seed=%d/%s", kind, seed, method), func(t *testing.T) {
 					now.Store(storageEpoch)
+					// A fixed seed lets failures replay the same write order and timestamps.
+					// skipcq: GSC-G404
 					rng := rand.New(rand.NewSource(seed))
 					oracle := newStorageBackend(t, "classic", now)
 					candidate := newStorageBackend(t, kind, now)
@@ -154,6 +156,8 @@ func TestStorageCrashWriter(t *testing.T) {
 			storageMust(t, s.update(name, batch))
 		}
 	}
+	// Bypass test cleanup and deferred closes to simulate process termination.
+	// skipcq: RVV-A0003
 	os.Exit(23)
 }
 

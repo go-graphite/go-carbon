@@ -46,7 +46,7 @@ func storageReportFootprint(b *testing.B, s *storageBackend, metrics int) {
 	// walking the directory; otherwise the sampled files may vanish mid-walk.
 	storageMust(b, s.close())
 	var size, files int64
-	storageMust(b, filepath.WalkDir(s.dir, func(path string, entry fs.DirEntry, err error) error {
+	storageMust(b, filepath.WalkDir(s.dir, func(_ string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
