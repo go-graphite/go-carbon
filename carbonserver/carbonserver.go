@@ -1584,7 +1584,7 @@ func (listener *CarbonserverListener) matchGlobIndex(fidx *fileIndex, globs []st
 	}
 	docs := make(map[trigram.DocID]struct{})
 	for _, glob := range globs {
-		listener.matchGlobDocuments(fidx, glob, docs)
+		matchGlobDocuments(fidx, glob, docs)
 	}
 	files := make([]string, 0, len(docs))
 	for id := range docs {
@@ -1594,7 +1594,7 @@ func (listener *CarbonserverListener) matchGlobIndex(fidx *fileIndex, globs []st
 	return files
 }
 
-func (listener *CarbonserverListener) matchGlobDocuments(fidx *fileIndex, glob string, docs map[trigram.DocID]struct{}) {
+func matchGlobDocuments(fidx *fileIndex, glob string, docs map[trigram.DocID]struct{}) {
 	for _, id := range fidx.idx.QueryTrigrams(extractTrigrams(glob)) {
 		docID := trigram.DocID(id)
 		if _, seen := docs[docID]; seen {
@@ -2206,7 +2206,7 @@ func (listener *CarbonserverListener) forceScanHandler(w http.ResponseWriter, _ 
 func (listener *CarbonserverListener) quotaHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Add("Content-Type", "text/plain")
 	fidx := listener.CurrentFileIndex()
-	if fidx == nil && fidx.trieIdx == nil {
+	if fidx == nil || fidx.trieIdx == nil {
 		fmt.Fprintf(w, "index doesn't exist.")
 		return
 	}

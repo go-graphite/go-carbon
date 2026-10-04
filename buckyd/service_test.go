@@ -330,7 +330,7 @@ func TestLifecycleBindsSynchronouslyAndMutationCallbackRuns(t *testing.T) {
 func TestOffloadRejectsOversizedDecodedBody(t *testing.T) {
 	s, db := testService(t)
 	s.config.MaxBodyBytes = 32
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		metadata, _ := json.Marshal(MetricData{Size: 33})
 		w.Header().Set("X-Metric-Stat", string(metadata))
 		_, _ = w.Write(bytes.Repeat([]byte{'x'}, 33))
@@ -392,7 +392,7 @@ func TestOffloadDoesNotFollowRedirect(t *testing.T) {
 	s, db := testService(t)
 	s.secret = []byte("shared-secret")
 	var calls int32
-	redirected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	redirected := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&calls, 1)
 		w.WriteHeader(http.StatusOK)
 	}))

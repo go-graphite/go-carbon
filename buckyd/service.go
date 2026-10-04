@@ -689,7 +689,7 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request, name string, r
 		return
 	}
 	defer cleanup()
-	s.commitImport(w, r.Context(), name, path, replace)
+	s.commitImport(r.Context(), w, name, path, replace)
 }
 
 func (s *Service) acquireTransfer() bool {
@@ -742,7 +742,7 @@ func (s *Service) receiveFile(w http.ResponseWriter, r *http.Request) (string, f
 	return path, cleanup, true
 }
 
-func (s *Service) commitImport(w http.ResponseWriter, ctx context.Context, name, path string, replace bool) {
+func (s *Service) commitImport(ctx context.Context, w http.ResponseWriter, name, path string, replace bool) {
 	m, err := s.importFile(ctx, name, path, replace)
 	if err != nil {
 		writeImportError(w, err)
@@ -784,7 +784,7 @@ func (s *Service) offload(w http.ResponseWriter, r *http.Request, name string, r
 		return
 	}
 	defer cleanup()
-	s.commitImport(w, r.Context(), name, path, replace)
+	s.commitImport(r.Context(), w, name, path, replace)
 }
 
 func (s *Service) fetchOffload(w http.ResponseWriter, r *http.Request, name string) (*http.Response, MetricData, bool) {
