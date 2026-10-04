@@ -1,0 +1,9 @@
+.idea/
+.vscode/
+.tools/
+
+main
+timing
+
+go.work
+go.work.sum

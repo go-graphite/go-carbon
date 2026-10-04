@@ -1,0 +1,1 @@
+PASS: legacy Pebble -> chunks direct + Snappy offload, chunks -> legacy offload, all 3 archives and float bits, stale and valid conditional delete

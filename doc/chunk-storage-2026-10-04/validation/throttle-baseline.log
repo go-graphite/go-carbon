@@ -1,0 +1,18 @@
+NONCE=op-14725-8240-1791117934
+--- FAIL: TestThrottleChan (5.00s)
+    throttle_test.go:42: 
+        	Error Trace:	/tmp/go-carbon-chunks-baseline-check/helper/throttle_test.go:42
+        	Error:      	Should be true
+        	Test:       	TestThrottleChan
+        	Messages:   	perSecond: 1000, bw: 893
+--- FAIL: TestThrottleChan (5.00s)
+    throttle_test.go:42: 
+        	Error Trace:	/tmp/go-carbon-chunks-baseline-check/helper/throttle_test.go:42
+        	Error:      	Should be true
+        	Test:       	TestThrottleChan
+        	Messages:   	perSecond: 1000, bw: 886
+FAIL
+FAIL	github.com/go-graphite/go-carbon/helper	15.142s
+FAIL
+
+REMOTE_RC_op-14725-8240-1791117934=1

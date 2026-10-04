@@ -1,8 +1,9 @@
 # Storage performance implementation (2026-10-03)
 
 These are historical measurements, including the retired per-point Pebble
-prototype. The current tests branch runs only the Whisper file backends and pins
-root go-whisper `a1d8f4cdfbff`, which retains the file-library fixes below.
+prototype. The Whisper test-suite base pins root go-whisper `a1d8f4cdfbff`, which
+retains the file-library fixes below. Current `pebble-chunk` measurements are in
+[chunk storage qualification](shared-storage.md#qualification-results).
 
 Published go-whisper master: `16b07882e95e65a1eb2c3c8df22712e795622bde`.
 At measurement time, go-carbon pinned both the root and nested store modules to

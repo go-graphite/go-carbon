@@ -120,7 +120,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	var err error
 	fromCache := false
-	if listener.findCacheEnabled {
+	if listener.findCacheEnabled && listener.getMetricStore() == nil {
 		key := strings.Join(query, ",") + "&" + format
 		size := uint64(100 * 1024 * 1024)
 		var result interface{}
@@ -382,7 +382,7 @@ func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Cont
 	var expandedGlobs interface{}
 	var err error
 	isCacheHit := false
-	if listener.globCacheEnabled {
+	if listener.globCacheEnabled && listener.getMetricStore() == nil {
 		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, size, 300,
 			func() (interface{}, error) {
 				return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
@@ -453,7 +453,7 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	var finalRes *protov2.GlobResponse
 	var lookups uint32
 
-	if listener.findCacheEnabled {
+	if listener.findCacheEnabled && listener.getMetricStore() == nil {
 		key := query + "&" + format + "grpc"
 		size := uint64(100 * 1024 * 1024)
 		var result interface{}
