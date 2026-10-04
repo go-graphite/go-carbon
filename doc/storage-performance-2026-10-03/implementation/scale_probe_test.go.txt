@@ -1,0 +1,49 @@
+package persister
+import("fmt";"os";"runtime";"sort";"sync";"syscall";"testing";"time";"path/filepath";whisper "github.com/go-graphite/go-whisper")
+func TestStorageScaleProbe(t *testing.T){
+ kind:=os.Getenv("STORAGE_SCALE_ENGINE");if kind==""{t.Skip("measurement-only scale probe")}
+ const count=100000
+ now:=storageTestClock(t);s:=newStorageBackend(t,kind,now)
+ names:=storageBenchmarkNames(count)
+ c:=storageConfig("metric","1s:10m,10s:1h,60s:6h",whisper.Average,0.5)
+ seed:=storagePoints(storageEpoch-120,120,1)
+ parallel:=func(fn func(int)error){
+  var wg sync.WaitGroup;errs:=make(chan error,32)
+  for worker:=0;worker<32;worker++ {wg.Add(1);go func(worker int){defer wg.Done();for i:=worker;i<count;i+=32 {if err:=fn(i);err!=nil{errs<-err;return}}}(worker)}
+  wg.Wait();close(errs);for err:=range errs {t.Fatal(err)}
+ }
+ setup:=time.Now()
+ parallel(func(i int)error{cfg:=c;cfg.Name=names[i];if err:=s.create(cfg);err!=nil{return err};return s.update(names[i],seed)})
+ t.Logf("engine=%s metrics=%d workers=32 setup=%s",kind,count,time.Since(setup))
+ oracle:=newStorageBackend(t,"classic",now);storageMust(t,oracle.create(c));storageMust(t,oracle.update(c.Name,seed))
+ var before,after syscall.Rusage
+ latencies:=make([]int64,count*3)
+ runtime.GC();var memBefore,memAfter runtime.MemStats;runtime.ReadMemStats(&memBefore)
+ storageMust(t,syscall.Getrusage(syscall.RUSAGE_SELF,&before));started:=time.Now()
+ for round:=0;round<3;round++ {
+  batch:=make([]whisper.TimeSeriesPoint,8);now.Store(int64(storageWriteBatch(batch,round,false)))
+  parallel(func(i int)error{
+   start:=time.Now();if err:=s.update(names[i],batch);err!=nil{return err}
+   if i%10==0 {if _,err:=s.fetch(names[i],int(now.Load())-120,int(now.Load()));err!=nil{return err}}
+   latencies[round*count+i]=time.Since(start).Nanoseconds();return nil
+  })
+  storageMust(t,oracle.update(c.Name,batch))
+ }
+ elapsed:=time.Since(started);storageMust(t,syscall.Getrusage(syscall.RUSAGE_SELF,&after));runtime.ReadMemStats(&memAfter)
+ cpu:=func(r syscall.Rusage)float64{return float64(r.Utime.Sec+r.Stime.Sec)+float64(r.Utime.Usec+r.Stime.Usec)/1e6}
+ sort.Slice(latencies,func(i,j int)bool{return latencies[i]<latencies[j]})
+ t.Logf("engine=%s points=%d reads=%d wall=%s cpu-us/point=%.3f allocated-B/point=%.1f batch-mixed-p95-us=%.3f batch-mixed-p99-us=%.3f maxrss-KiB=%d",kind,count*3*8,count*3/10,elapsed,(cpu(after)-cpu(before))*1e6/(count*3*8),float64(memAfter.TotalAlloc-memBefore.TotalAlloc)/(count*3*8),float64(latencies[len(latencies)*95/100])/1000,float64(latencies[len(latencies)*99/100])/1000,after.Maxrss)
+ // Read every metric after reopen; each has the identical deterministic trace.
+ storageMust(t,s.reopen())
+ want,err:=oracle.fetch(c.Name,int(now.Load())-600,int(now.Load()));storageMust(t,err)
+ parallel(func(i int)error{got,err:=s.fetch(names[i],int(now.Load())-600,int(now.Load()));if err!=nil{return err};if diff:=storageSeriesDiff(want,got);diff!=""{return fmt.Errorf("%s: %s",names[i],diff)};return nil})
+ // Sample every retained resolution and then verify the same sample after maintenance.
+ sample:=make([]string,0,256)
+ for i:=0;i<count;i+=397 {sample=append(sample,names[i]);cfg:=c;cfg.Name=names[i];for _,age:=range []int{3600,21600}{want,err:=oracle.fetch(c.Name,int(now.Load())-age,int(now.Load()));storageMust(t,err);got,err:=s.fetch(cfg.Name,int(now.Load())-age,int(now.Load()));storageMust(t,err);if diff:=storageSeriesDiff(want,got);diff!=""{t.Fatal(diff)}}}
+ maintenance:=time.Now();storageMust(t,s.compact(sample));storageMust(t,s.reopen())
+ for _,name:=range sample{got,err:=s.fetch(name,int(now.Load())-600,int(now.Load()));storageMust(t,err);if diff:=storageSeriesDiff(want,got);diff!=""{t.Fatal(diff)}}
+ var allocated,logical int64;files:=0
+ storageMust(t,filepath.Walk(s.dir,func(path string,info os.FileInfo,err error)error{if err!=nil{return err};if !info.IsDir(){files++;logical+=info.Size();if st,ok:=info.Sys().(*syscall.Stat_t);ok{allocated+=st.Blocks*512}};return nil}))
+ runtime.GC();runtime.ReadMemStats(&memAfter)
+ t.Logf("engine=%s verified-metrics=%d maintenance-sample=%d maintenance=%s files=%d logical-bytes=%d allocated-bytes=%d live-heap-bytes=%d",kind,count,len(sample),time.Since(maintenance),files,logical,allocated,memAfter.HeapAlloc)
+}

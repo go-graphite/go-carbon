@@ -1,0 +1,139 @@
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+                                             │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                             │                          sec/op                          │             sec/op              vs base                │
+StorageRead/recent/classic-2                                                                9.440µ ± 2%                      9.268µ ± 3%        ~ (p=0.190 n=10)
+StorageRead/recent/cwhisper-2                                                               15.65µ ± 4%                      15.73µ ± 8%        ~ (p=0.393 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                           15.70µ ± 3%                      15.47µ ± 2%        ~ (p=0.631 n=10)
+StorageRead/recent/pebble-2                                                                 8.293µ ± 3%                      7.277µ ± 4%  -12.25% (p=0.000 n=10)
+StorageRead/fine-full/classic-2                                                             24.38µ ± 5%                      14.96µ ± 2%  -38.65% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                            82.18µ ± 1%                      82.33µ ± 3%        ~ (p=0.912 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                        82.66µ ± 2%                      82.12µ ± 5%        ~ (p=0.853 n=10)
+StorageRead/fine-full/pebble-2                                                              45.64µ ± 2%                      44.55µ ± 1%   -2.39% (p=0.001 n=10)
+StorageRead/coarse/classic-2                                                               11.402µ ± 2%                      9.927µ ± 3%  -12.93% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                               32.47µ ± 3%                      32.60µ ± 2%        ~ (p=0.579 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                           32.27µ ± 2%                      32.68µ ± 2%        ~ (p=0.143 n=10)
+StorageRead/coarse/pebble-2                                                                 5.184µ ± 5%                      4.102µ ± 2%  -20.87% (p=0.000 n=10)
+StorageProbe/coarse-clean/classic-2                                                         12.49µ ± 3%                      10.21µ ± 4%  -18.28% (p=0.000 n=10)
+StorageProbe/coarse-clean/cwhisper-2                                                        33.10µ ± 4%                      32.59µ ± 1%   -1.56% (p=0.007 n=10)
+StorageProbe/coarse-clean/cwhisper-ooo-2                                                    32.65µ ± 3%                      32.59µ ± 1%        ~ (p=0.912 n=10)
+StorageProbe/coarse-clean/pebble-2                                                          5.205µ ± 4%                      4.105µ ± 1%  -21.15% (p=0.000 n=10)
+StorageProbe/coarse-corrected/classic-2                                                    11.571µ ± 4%                      9.933µ ± 1%  -14.15% (p=0.000 n=10)
+StorageProbe/coarse-corrected/cwhisper-ooo-2                                                81.62µ ± 1%                      80.22µ ± 3%   -1.72% (p=0.029 n=10)
+StorageProbe/coarse-corrected/pebble-2                                                      5.240µ ± 2%                      4.063µ ± 6%  -22.46% (p=0.000 n=10)
+geomean                                                                                     19.46µ                           17.60µ        -9.58%
+
+                                     │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                     │                          files                           │             files              vs base                 │
+StorageRead/recent/classic-2                                                         2.000 ± 0%                      2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-2                                                        2.000 ± 0%                      2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                    3.000 ± 0%                      3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                          8.000 ± 0%                      8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/classic-2                                                      2.000 ± 0%                      2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-2                                                     2.000 ± 0%                      2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                                 3.000 ± 0%                      3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                       8.000 ± 0%                      8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/classic-2                                                         2.000 ± 0%                      2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-2                                                        2.000 ± 0%                      2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                    3.000 ± 0%                      3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                          8.000 ± 0%                      8.000 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                              3.130                           3.130       +0.00%
+¹ all samples are equal
+
+                                     │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                     │                     logical-B/metric                     │       logical-B/metric         vs base                 │
+StorageRead/recent/classic-2                                                       38.01Ki ± 0%                    38.01Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-2                                                      11.68Ki ± 0%                    11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                  11.68Ki ± 0%                    11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                        68.73Ki ± 0%                    68.73Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/classic-2                                                    38.01Ki ± 0%                    38.01Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-2                                                   11.68Ki ± 0%                    11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                               11.68Ki ± 0%                    11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                     68.73Ki ± 0%                    68.73Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/classic-2                                                       38.01Ki ± 0%                    38.01Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-2                                                      11.68Ki ± 0%                    11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                  11.68Ki ± 0%                    11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                        68.73Ki ± 0%                    68.73Ki ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                            24.44Ki                         24.44Ki       +0.00%
+¹ all samples are equal
+
+                                     │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                     │                        sec/value                         │           sec/value             vs base                │
+StorageRead/recent/classic-2                                                        78.66n ± 2%                      77.23n ± 3%        ~ (p=0.197 n=10)
+StorageRead/recent/cwhisper-2                                                       130.4n ± 4%                      131.1n ± 8%        ~ (p=0.393 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                   130.9n ± 3%                      128.9n ± 2%        ~ (p=0.617 n=10)
+StorageRead/recent/pebble-2                                                         69.11n ± 3%                      60.64n ± 4%  -12.25% (p=0.000 n=10)
+StorageRead/fine-full/classic-2                                                    13.540n ± 5%                      8.309n ± 2%  -38.63% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                    45.66n ± 1%                      45.74n ± 3%        ~ (p=0.898 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                45.92n ± 2%                      45.62n ± 5%        ~ (p=0.853 n=10)
+StorageRead/fine-full/pebble-2                                                      25.36n ± 2%                      24.75n ± 1%   -2.41% (p=0.001 n=10)
+StorageRead/coarse/classic-2                                                        31.85n ± 2%                      27.73n ± 3%  -12.92% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                       90.69n ± 3%                      91.05n ± 2%        ~ (p=0.579 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                   90.15n ± 2%                      91.29n ± 2%        ~ (p=0.143 n=10)
+StorageRead/coarse/pebble-2                                                         14.48n ± 5%                      11.46n ± 2%  -20.89% (p=0.000 n=10)
+geomean                                                                             50.13n                           46.00n        -8.24%
+
+                                     │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                     │                        values/op                         │           values/op            vs base                 │
+StorageRead/recent/classic-2                                                         120.0 ± 0%                      120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-2                                                        120.0 ± 0%                      120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                    120.0 ± 0%                      120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                          120.0 ± 0%                      120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/classic-2                                                     1.800k ± 0%                     1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-2                                                    1.800k ± 0%                     1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                                1.800k ± 0%                     1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                      1.800k ± 0%                     1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/classic-2                                                         358.0 ± 0%                      358.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-2                                                        358.0 ± 0%                      358.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                    358.0 ± 0%                      358.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                          358.0 ± 0%                      358.0 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                              426.0                           426.0       +0.00%
+¹ all samples are equal
+
+                                             │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                             │                           B/op                           │              B/op               vs base                │
+StorageRead/recent/classic-2                                                               6.094Ki ± 0%                     4.094Ki ± 0%  -32.82% (p=0.000 n=10)
+StorageRead/recent/cwhisper-2                                                              21.22Ki ± 0%                     21.22Ki ± 0%        ~ (p=1.000 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                          21.25Ki ± 0%                     21.25Ki ± 0%        ~ (p=1.000 n=10)
+StorageRead/recent/pebble-2                                                                1.973Ki ± 0%                     1.730Ki ± 0%  -12.28% (p=0.000 n=10)
+StorageRead/fine-full/classic-2                                                            94.86Ki ± 0%                     38.86Ki ± 0%  -59.03% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                           112.8Ki ± 0%                     112.8Ki ± 0%        ~ (p=0.285 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                       112.8Ki ± 0%                     112.8Ki ± 0%        ~ (p=0.237 n=10)
+StorageRead/fine-full/pebble-2                                                             17.26Ki ± 0%                     17.02Ki ± 0%   -1.39% (p=0.000 n=10)
+StorageRead/coarse/classic-2                                                              20.078Ki ± 0%                     9.344Ki ± 0%  -53.46% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                              44.08Ki ± 0%                     44.08Ki ± 0%        ~ (p=0.656 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                          44.11Ki ± 0%                     44.12Ki ± 0%        ~ (p=0.132 n=10)
+StorageRead/coarse/pebble-2                                                                4.001Ki ± 0%                     3.759Ki ± 0%   -6.05% (p=0.000 n=10)
+StorageProbe/coarse-clean/classic-2                                                       20.109Ki ± 0%                     9.375Ki ± 0%  -53.38% (p=0.000 n=10)
+StorageProbe/coarse-clean/cwhisper-2                                                       44.12Ki ± 0%                     44.12Ki ± 0%        ~ (p=1.000 n=10)
+StorageProbe/coarse-clean/cwhisper-ooo-2                                                   44.12Ki ± 0%                     44.12Ki ± 0%        ~ (p=0.628 n=10)
+StorageProbe/coarse-clean/pebble-2                                                         4.002Ki ± 0%                     3.758Ki ± 0%   -6.10% (p=0.000 n=10)
+StorageProbe/coarse-corrected/classic-2                                                   20.109Ki ± 0%                     9.375Ki ± 0%  -53.38% (p=0.000 n=10)
+StorageProbe/coarse-corrected/cwhisper-ooo-2                                               147.3Ki ± 0%                     135.9Ki ± 0%   -7.77% (p=0.000 n=10)
+StorageProbe/coarse-corrected/pebble-2                                                     3.953Ki ± 0%                     3.704Ki ± 0%   -6.31% (p=0.000 n=10)
+geomean                                                                                    22.01Ki                          17.83Ki       -18.98%
+
+                                             │ baseline-reads-all.txt │ reads1-reads-all.txt │
+                                             │                        allocs/op                         │          allocs/op            vs base                  │
+StorageRead/recent/classic-2                                                                 24.00 ± 0%                     23.00 ± 0%   -4.17% (p=0.000 n=10)
+StorageRead/recent/cwhisper-2                                                                52.00 ± 0%                     52.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                            52.00 ± 0%                     52.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                                  19.00 ± 0%                     15.00 ± 0%  -21.05% (p=0.000 n=10)
+StorageRead/fine-full/classic-2                                                              26.00 ± 0%                     23.00 ± 0%  -11.54% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                             58.00 ± 0%                     58.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                                         58.00 ± 0%                     58.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                               24.00 ± 0%                     20.00 ± 0%  -16.67% (p=0.000 n=10)
+StorageRead/coarse/classic-2                                                                 26.00 ± 0%                     23.00 ± 0%  -11.54% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                                105.0 ± 0%                     105.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                            105.0 ± 0%                     105.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                                  20.00 ± 0%                     16.00 ± 0%  -20.00% (p=0.000 n=10)
+StorageProbe/coarse-clean/classic-2                                                          26.00 ± 0%                     23.00 ± 0%  -11.54% (p=0.000 n=10)
+StorageProbe/coarse-clean/cwhisper-2                                                         105.0 ± 0%                     105.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageProbe/coarse-clean/cwhisper-ooo-2                                                     105.0 ± 0%                     105.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageProbe/coarse-clean/pebble-2                                                           20.00 ± 0%                     16.00 ± 0%  -20.00% (p=0.000 n=10)
+StorageProbe/coarse-corrected/classic-2                                                      26.00 ± 0%                     23.00 ± 0%  -11.54% (p=0.000 n=10)
+StorageProbe/coarse-corrected/cwhisper-ooo-2                                                 203.0 ± 0%                     200.0 ± 0%   -1.48% (p=0.000 n=10)
+StorageProbe/coarse-corrected/pebble-2                                                       19.00 ± 0%                     15.00 ± 0%  -21.05% (p=0.000 n=10)
+geomean                                                                                      42.46                          38.93        -8.31%
+¹ all samples are equal

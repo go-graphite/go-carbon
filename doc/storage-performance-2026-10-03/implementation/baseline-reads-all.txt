@@ -1,0 +1,270 @@
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9866 ns/op	         2.000 files	     38920 logical-B/metric	        82.22 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     16220 ns/op	         2.000 files	     11964 logical-B/metric	       135.2 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     16517 ns/op	         3.000 files	     11964 logical-B/metric	       137.6 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      9053 ns/op	         8.000 files	     70381 logical-B/metric	        75.44 ns/value	       120.0 values/op	    2022 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     24692 ns/op	         2.000 files	     38920 logical-B/metric	        13.72 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     85884 ns/op	         2.000 files	     11964 logical-B/metric	        47.71 ns/value	      1800 values/op	  115495 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     85338 ns/op	         3.000 files	     11964 logical-B/metric	        47.41 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     48209 ns/op	         8.000 files	     70381 logical-B/metric	        26.78 ns/value	      1800 values/op	   17666 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     12036 ns/op	         2.000 files	     38920 logical-B/metric	        33.62 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     34472 ns/op	         2.000 files	     11964 logical-B/metric	        96.29 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     34554 ns/op	         3.000 files	     11964 logical-B/metric	        96.52 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5431 ns/op	         8.000 files	     70381 logical-B/metric	        15.17 ns/value	       358.0 values/op	    4093 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12577 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     33759 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     33477 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5481 ns/op	    4097 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11694 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     85029 ns/op	  150830 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5549 ns/op	    4046 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9241 ns/op	         2.000 files	     38920 logical-B/metric	        77.01 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15501 ns/op	         2.000 files	     11964 logical-B/metric	       129.2 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15587 ns/op	         3.000 files	     11964 logical-B/metric	       129.9 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8545 ns/op	         8.000 files	     70381 logical-B/metric	        71.21 ns/value	       120.0 values/op	    2019 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     25515 ns/op	         2.000 files	     38920 logical-B/metric	        14.18 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     82200 ns/op	         2.000 files	     11964 logical-B/metric	        45.67 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     83749 ns/op	         3.000 files	     11964 logical-B/metric	        46.53 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45756 ns/op	         8.000 files	     70381 logical-B/metric	        25.42 ns/value	      1800 values/op	   17668 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11494 ns/op	         2.000 files	     38920 logical-B/metric	        32.11 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     33387 ns/op	         2.000 files	     11964 logical-B/metric	        93.26 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32830 ns/op	         3.000 files	     11964 logical-B/metric	        91.70 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5281 ns/op	         8.000 files	     70381 logical-B/metric	        14.75 ns/value	       358.0 values/op	    4097 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12620 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     33207 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32759 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5247 ns/op	    4096 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11485 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     81939 ns/op	  150835 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5179 ns/op	    4047 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9392 ns/op	         2.000 files	     38920 logical-B/metric	        78.27 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     16262 ns/op	         2.000 files	     11964 logical-B/metric	       135.5 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15895 ns/op	         3.000 files	     11964 logical-B/metric	       132.5 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8268 ns/op	         8.000 files	     70381 logical-B/metric	        68.90 ns/value	       120.0 values/op	    2019 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     24902 ns/op	         2.000 files	     38920 logical-B/metric	        13.83 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     82843 ns/op	         2.000 files	     11964 logical-B/metric	        46.02 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     83072 ns/op	         3.000 files	     11964 logical-B/metric	        46.15 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45646 ns/op	         8.000 files	     70381 logical-B/metric	        25.36 ns/value	      1800 values/op	   17658 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11474 ns/op	         2.000 files	     38920 logical-B/metric	        32.05 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     32519 ns/op	         2.000 files	     11964 logical-B/metric	        90.84 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32798 ns/op	         3.000 files	     11964 logical-B/metric	        91.62 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5263 ns/op	         8.000 files	     70381 logical-B/metric	        14.70 ns/value	       358.0 values/op	    4095 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12789 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     33155 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32348 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5208 ns/op	    4098 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11656 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     81722 ns/op	  150835 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5128 ns/op	    4050 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9314 ns/op	         2.000 files	     38920 logical-B/metric	        77.62 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15599 ns/op	         2.000 files	     11964 logical-B/metric	       130.0 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15283 ns/op	         3.000 files	     11964 logical-B/metric	       127.4 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8203 ns/op	         8.000 files	     70381 logical-B/metric	        68.36 ns/value	       120.0 values/op	    2022 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     24468 ns/op	         2.000 files	     38920 logical-B/metric	        13.59 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     82604 ns/op	         2.000 files	     11964 logical-B/metric	        45.89 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     82410 ns/op	         3.000 files	     11964 logical-B/metric	        45.78 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45598 ns/op	         8.000 files	     70381 logical-B/metric	        25.33 ns/value	      1800 values/op	   17668 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11354 ns/op	         2.000 files	     38920 logical-B/metric	        31.71 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     32113 ns/op	         2.000 files	     11964 logical-B/metric	        89.70 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     31945 ns/op	         3.000 files	     11964 logical-B/metric	        89.23 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5168 ns/op	         8.000 files	     70381 logical-B/metric	        14.44 ns/value	       358.0 values/op	    4095 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12239 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     32564 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32899 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5403 ns/op	    4096 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11390 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     81523 ns/op	  150835 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5281 ns/op	    4047 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9533 ns/op	         2.000 files	     38920 logical-B/metric	        79.44 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15692 ns/op	         2.000 files	     11964 logical-B/metric	       130.8 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15497 ns/op	         3.000 files	     11964 logical-B/metric	       129.1 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8288 ns/op	         8.000 files	     70381 logical-B/metric	        69.07 ns/value	       120.0 values/op	    2022 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     23708 ns/op	         2.000 files	     38920 logical-B/metric	        13.17 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     82203 ns/op	         2.000 files	     11964 logical-B/metric	        45.67 ns/value	      1800 values/op	  115495 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     81270 ns/op	         3.000 files	     11964 logical-B/metric	        45.15 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     46391 ns/op	         8.000 files	     70381 logical-B/metric	        25.77 ns/value	      1800 values/op	   17684 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11449 ns/op	         2.000 files	     38920 logical-B/metric	        31.98 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     32307 ns/op	         2.000 files	     11964 logical-B/metric	        90.24 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32220 ns/op	         3.000 files	     11964 logical-B/metric	        90.00 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5165 ns/op	         8.000 files	     70381 logical-B/metric	        14.43 ns/value	       358.0 values/op	    4098 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12146 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     34463 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32975 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5173 ns/op	    4098 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11474 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     81369 ns/op	  150803 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5262 ns/op	    4049 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9556 ns/op	         2.000 files	     38920 logical-B/metric	        79.63 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15487 ns/op	         2.000 files	     11964 logical-B/metric	       129.1 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     14960 ns/op	         3.000 files	     11964 logical-B/metric	       124.7 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8297 ns/op	         8.000 files	     70381 logical-B/metric	        69.14 ns/value	       120.0 values/op	    2019 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     22212 ns/op	         2.000 files	     38920 logical-B/metric	        12.34 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     81699 ns/op	         2.000 files	     11964 logical-B/metric	        45.39 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     80936 ns/op	         3.000 files	     11964 logical-B/metric	        44.96 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45270 ns/op	         8.000 files	     70381 logical-B/metric	        25.15 ns/value	      1800 values/op	   17679 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11087 ns/op	         2.000 files	     38920 logical-B/metric	        30.97 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     31432 ns/op	         2.000 files	     11964 logical-B/metric	        87.80 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     31601 ns/op	         3.000 files	     11964 logical-B/metric	        88.27 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5115 ns/op	         8.000 files	     70381 logical-B/metric	        14.29 ns/value	       358.0 values/op	    4094 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     13328 ns/op	   20593 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     33047 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32550 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5143 ns/op	    4098 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11068 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     81087 ns/op	  150834 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5158 ns/op	    4048 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9659 ns/op	         2.000 files	     38920 logical-B/metric	        80.49 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15928 ns/op	         2.000 files	     11964 logical-B/metric	       132.7 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15995 ns/op	         3.000 files	     11964 logical-B/metric	       133.3 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8150 ns/op	         8.000 files	     70381 logical-B/metric	        67.92 ns/value	       120.0 values/op	    2020 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     23923 ns/op	         2.000 files	     38920 logical-B/metric	        13.29 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     82093 ns/op	         2.000 files	     11964 logical-B/metric	        45.61 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     83579 ns/op	         3.000 files	     11964 logical-B/metric	        46.43 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45639 ns/op	         8.000 files	     70381 logical-B/metric	        25.36 ns/value	      1800 values/op	   17674 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11120 ns/op	         2.000 files	     38920 logical-B/metric	        31.06 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     32419 ns/op	         2.000 files	     11964 logical-B/metric	        90.55 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32326 ns/op	         3.000 files	     11964 logical-B/metric	        90.30 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5594 ns/op	         8.000 files	     70381 logical-B/metric	        15.62 ns/value	       358.0 values/op	    4097 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12288 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     35399 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     36637 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5419 ns/op	    4100 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11751 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     82633 ns/op	  150836 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5160 ns/op	    4048 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9249 ns/op	         2.000 files	     38920 logical-B/metric	        77.07 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15446 ns/op	         2.000 files	     11964 logical-B/metric	       128.7 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15817 ns/op	         3.000 files	     11964 logical-B/metric	       131.8 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8301 ns/op	         8.000 files	     70381 logical-B/metric	        69.17 ns/value	       120.0 values/op	    2021 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     23087 ns/op	         2.000 files	     38920 logical-B/metric	        12.83 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     82151 ns/op	         2.000 files	     11964 logical-B/metric	        45.64 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     82904 ns/op	         3.000 files	     11964 logical-B/metric	        46.06 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45294 ns/op	         8.000 files	     70381 logical-B/metric	        25.16 ns/value	      1800 values/op	   17676 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11174 ns/op	         2.000 files	     38920 logical-B/metric	        31.21 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     33326 ns/op	         2.000 files	     11964 logical-B/metric	        93.09 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32420 ns/op	         3.000 files	     11964 logical-B/metric	        90.56 ns/value	       358.0 values/op	   45157 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5199 ns/op	         8.000 files	     70381 logical-B/metric	        14.52 ns/value	       358.0 values/op	    4100 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12402 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     32977 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32109 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5181 ns/op	    4099 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11690 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     82001 ns/op	  150835 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5217 ns/op	    4049 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9487 ns/op	         2.000 files	     38920 logical-B/metric	        79.06 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     16401 ns/op	         2.000 files	     11964 logical-B/metric	       136.7 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15944 ns/op	         3.000 files	     11964 logical-B/metric	       132.9 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8283 ns/op	         8.000 files	     70381 logical-B/metric	        69.02 ns/value	       120.0 values/op	    2020 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     24287 ns/op	         2.000 files	     38920 logical-B/metric	        13.49 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     81220 ns/op	         2.000 files	     11964 logical-B/metric	        45.12 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     81951 ns/op	         3.000 files	     11964 logical-B/metric	        45.53 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45314 ns/op	         8.000 files	     70381 logical-B/metric	        25.17 ns/value	      1800 values/op	   17682 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11651 ns/op	         2.000 files	     38920 logical-B/metric	        32.54 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     32654 ns/op	         2.000 files	     11964 logical-B/metric	        91.21 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32069 ns/op	         3.000 files	     11964 logical-B/metric	        89.58 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5165 ns/op	         8.000 files	     70381 logical-B/metric	        14.43 ns/value	       358.0 values/op	    4097 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     12861 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     32505 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     32123 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5188 ns/op	    4100 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11145 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     80182 ns/op	  150835 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5272 ns/op	    4043 B/op	      19 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageRead/recent/classic-2         	    8192	      9082 ns/op	         2.000 files	     38920 logical-B/metric	        75.69 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2        	    8192	     15386 ns/op	         2.000 files	     11964 logical-B/metric	       128.2 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2    	    8192	     15266 ns/op	         3.000 files	     11964 logical-B/metric	       127.2 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2          	    8192	      8320 ns/op	         8.000 files	     70381 logical-B/metric	        69.33 ns/value	       120.0 values/op	    2020 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2      	    8192	     25126 ns/op	         2.000 files	     38920 logical-B/metric	        13.96 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2     	    8192	     81506 ns/op	         2.000 files	     11964 logical-B/metric	        45.28 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2 	    8192	     80998 ns/op	         3.000 files	     11964 logical-B/metric	        45.00 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2       	    8192	     45724 ns/op	         8.000 files	     70381 logical-B/metric	        25.40 ns/value	      1800 values/op	   17681 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2         	    8192	     11168 ns/op	         2.000 files	     38920 logical-B/metric	        31.19 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2        	    8192	     32026 ns/op	         2.000 files	     11964 logical-B/metric	        89.46 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2    	    8192	     32036 ns/op	         3.000 files	     11964 logical-B/metric	        89.49 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2          	    8192	      5162 ns/op	         8.000 files	     70381 logical-B/metric	        14.42 ns/value	       358.0 values/op	    4097 B/op	      20 allocs/op
+PASS
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    8192	     11895 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    8192	     32948 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    8192	     31999 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    8192	      5203 ns/op	    4095 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    8192	     11712 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    8192	     80778 ns/op	  150835 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    8192	      5285 ns/op	    4050 B/op	      19 allocs/op
+PASS

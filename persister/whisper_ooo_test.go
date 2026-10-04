@@ -335,6 +335,30 @@ func TestStoreDiscardsOutOfOrderPointsWhenDisabled(t *testing.T) {
 
 func TestStoreAlwaysCreatesSparseOutOfOrderSidecar(t *testing.T) {
 	dir := t.TempDir()
+	// Check sparse allocation after close, just like the sidecar below. Some
+	// filesystems materialize holes on close even for an explicit Truncate.
+	probe, err := os.Create(filepath.Join(dir, "sparse-control"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := probe.Truncate(8 << 20); err != nil {
+		_ = probe.Close()
+		t.Fatal(err)
+	}
+	if _, err := probe.WriteAt([]byte{1}, 0); err != nil {
+		_ = probe.Close()
+		t.Fatal(err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	control, err := os.Stat(probe.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat, ok := control.Sys().(*syscall.Stat_t); ok && stat.Blocks*512 >= control.Size() {
+		t.Skip("filesystem does not preserve sparse allocation after close")
+	}
 	cache := &fakeCache{}
 	p := newOOOTestPersister(t, dir, cache)
 	p.SetSparse(false)

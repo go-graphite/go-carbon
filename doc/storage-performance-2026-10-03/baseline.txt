@@ -1,0 +1,900 @@
+
+# Repeat 1, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8454 ns/op	         2.000 files	      7228 logical-B/metric	      8454 ns/point	         1.000 points/op	    118283 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	      9702 ns/op	         2.000 files	      4921 logical-B/metric	      9702 ns/point	         1.000 points/op	    103075 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	      9596 ns/op	         3.000 files	      4921 logical-B/metric	      9596 ns/point	         1.000 points/op	    104209 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    325478 ns/op	         7.000 files	      9770 logical-B/metric	    325478 ns/point	         1.000 points/op	      3072 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      8823 ns/op	       256.0 files	      7228 logical-B/metric	      8823 ns/point	         1.000 points/op	    113346 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     10687 ns/op	       256.0 files	      4921 logical-B/metric	     10687 ns/point	         1.000 points/op	     93569 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     10715 ns/op	       384.0 files	      4921 logical-B/metric	     10715 ns/point	         1.000 points/op	     93330 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    271199 ns/op	         7.000 files	      6416 logical-B/metric	    271199 ns/point	         1.000 points/op	      3687 points/s	     599 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8179 ns/op	         2.000 files	      7228 logical-B/metric	      1022 ns/point	         8.000 points/op	    978121 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10136 ns/op	         2.000 files	      4921 logical-B/metric	      1267 ns/point	         8.000 points/op	    789239 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10089 ns/op	         3.000 files	      4921 logical-B/metric	      1261 ns/point	         8.000 points/op	    792981 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    280110 ns/op	         7.000 files	      9767 logical-B/metric	     35014 ns/point	         8.000 points/op	     28560 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9111 ns/op	       256.0 files	      7228 logical-B/metric	      1139 ns/point	         8.000 points/op	    878065 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     10939 ns/op	       256.0 files	      4921 logical-B/metric	      1367 ns/point	         8.000 points/op	    731295 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11111 ns/op	       384.0 files	      4921 logical-B/metric	      1389 ns/point	         8.000 points/op	    720020 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    298270 ns/op	         7.000 files	      6758 logical-B/metric	     37284 ns/point	         8.000 points/op	     26821 points/s	     949 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     11975 ns/op	         2.000 files	      7228 logical-B/metric	       187.1 ns/point	        64.00 points/op	   5344601 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     15993 ns/op	         2.000 files	      4921 logical-B/metric	       249.9 ns/point	        64.00 points/op	   4001807 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     16813 ns/op	         3.000 files	      4921 logical-B/metric	       262.7 ns/point	        64.00 points/op	   3806683 points/s	   15833 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    295907 ns/op	         7.000 files	     10382 logical-B/metric	      4624 ns/point	        64.00 points/op	    216284 points/s	    7955 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     12846 ns/op	       256.0 files	      7228 logical-B/metric	       200.7 ns/point	        64.00 points/op	   4982228 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     16929 ns/op	       256.0 files	      4921 logical-B/metric	       264.5 ns/point	        64.00 points/op	   3780590 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     18097 ns/op	       384.0 files	      4921 logical-B/metric	       282.8 ns/point	        64.00 points/op	   3536446 points/s	   15881 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    221928 ns/op	         7.000 files	      7203 logical-B/metric	      3468 ns/point	        64.00 points/op	    288382 points/s	    8073 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8189 ns/op	         2.000 files	      7228 logical-B/metric	      8189 ns/point	         1.000 points/op	    122115 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     19276 ns/op	         3.000 files	      4921 logical-B/metric	     19276 ns/point	         1.000 points/op	     51878 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    282007 ns/op	         7.000 files	      9770 logical-B/metric	    282007 ns/point	         1.000 points/op	      3546 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9774 ns/op	       256.0 files	      7228 logical-B/metric	      9774 ns/point	         1.000 points/op	    102310 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     20989 ns/op	       384.0 files	      4921 logical-B/metric	     20989 ns/point	         1.000 points/op	     47644 points/s	    4148 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    247836 ns/op	         7.000 files	      6416 logical-B/metric	    247836 ns/point	         1.000 points/op	      4035 points/s	     598 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8668 ns/op	         2.000 files	      7228 logical-B/metric	      1083 ns/point	         8.000 points/op	    922954 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     26675 ns/op	         3.000 files	      4921 logical-B/metric	      3334 ns/point	         8.000 points/op	    299901 points/s	   11178 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    200271 ns/op	         7.000 files	      9767 logical-B/metric	     25034 ns/point	         8.000 points/op	     39946 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9277 ns/op	       256.0 files	      7228 logical-B/metric	      1160 ns/point	         8.000 points/op	    862372 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     22611 ns/op	       384.0 files	      4921 logical-B/metric	      2826 ns/point	         8.000 points/op	    353809 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    194377 ns/op	         7.000 files	      6758 logical-B/metric	     24297 ns/point	         8.000 points/op	     41157 points/s	     952 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     13549 ns/op	         2.000 files	      7228 logical-B/metric	       211.7 ns/point	        64.00 points/op	   4723611 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     90582 ns/op	         3.000 files	      4921 logical-B/metric	      1415 ns/point	        64.00 points/op	    706545 points/s	   79312 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    228804 ns/op	         7.000 files	     10382 logical-B/metric	      3575 ns/point	        64.00 points/op	    279715 points/s	    7952 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     13273 ns/op	       256.0 files	      7228 logical-B/metric	       207.4 ns/point	        64.00 points/op	   4821851 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     80692 ns/op	       384.0 files	      4921 logical-B/metric	      1261 ns/point	        64.00 points/op	    793143 points/s	   65463 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    173438 ns/op	         7.000 files	      7203 logical-B/metric	      2710 ns/point	        64.00 points/op	    369008 points/s	    8076 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      8980 ns/op	         2.000 files	     38920 logical-B/metric	        74.83 ns/value	       120.0 values/op	    6224 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     14970 ns/op	         2.000 files	     11964 logical-B/metric	       124.8 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15034 ns/op	         3.000 files	     11964 logical-B/metric	       125.3 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8245 ns/op	         8.000 files	     70381 logical-B/metric	        68.71 ns/value	       120.0 values/op	    2022 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     21537 ns/op	         2.000 files	     38920 logical-B/metric	        11.97 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     77274 ns/op	         2.000 files	     11964 logical-B/metric	        42.93 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     77781 ns/op	         3.000 files	     11964 logical-B/metric	        43.21 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45255 ns/op	         8.000 files	     70381 logical-B/metric	        25.14 ns/value	      1800 values/op	   17666 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     10711 ns/op	         2.000 files	     38920 logical-B/metric	        29.92 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     30845 ns/op	         2.000 files	     11964 logical-B/metric	        86.16 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     30579 ns/op	         3.000 files	     11964 logical-B/metric	        85.42 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5178 ns/op	         8.000 files	     70381 logical-B/metric	        14.46 ns/value	       358.0 values/op	    4095 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12121 ns/op	         2.000 files	      7228 logical-B/metric	      1515 ns/point	         8.000 points/op	    660015 points/s	    1880 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     15849 ns/op	         2.000 files	      4921 logical-B/metric	      1981 ns/point	         8.000 points/op	    504768 points/s	    3104 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16268 ns/op	         3.000 files	      4921 logical-B/metric	      2034 ns/point	         8.000 points/op	    491752 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    199581 ns/op	         7.000 files	      9767 logical-B/metric	     24948 ns/point	         8.000 points/op	     40084 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     58853 ns/op	        16.00 files	      7228 logical-B/metric	       919.6 ns/point	        64.00 points/op	   1087448 points/s	   15040 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     73900 ns/op	        16.00 files	      4921 logical-B/metric	      1155 ns/point	        64.00 points/op	    866031 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     74894 ns/op	        24.00 files	      4921 logical-B/metric	      1170 ns/point	        64.00 points/op	    854543 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    300824 ns/op	         7.000 files	      7577 logical-B/metric	      4700 ns/point	        64.00 points/op	    212749 points/s	    7839 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    205157 ns/op	        64.00 files	      7228 logical-B/metric	       801.4 ns/point	       256.0 points/op	   1247826 points/s	   60159 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    248873 ns/op	        64.00 files	      4921 logical-B/metric	       972.2 ns/point	       256.0 points/op	   1028635 points/s	   99850 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    242942 ns/op	        96.00 files	      4921 logical-B/metric	       949.0 ns/point	       256.0 points/op	   1053751 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    374272 ns/op	         7.000 files	      7329 logical-B/metric	      1462 ns/point	       256.0 points/op	    683995 points/s	   32093 B/op	     578 allocs/op
+PASS
+
+# Repeat 1, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    178784 ns/op	         3.000 files	     12831 logical-B/metric	  162775 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1842612 ns/op	         7.000 files	    136851 logical-B/metric	  148297 B/op	     535 allocs/op
+PASS
+
+# Repeat 1, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	      9886 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     16468 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     16970 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1629675 ns/op	  370982 B/op	     660 allocs/op
+PASS
+
+# Repeat 2, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8231 ns/op	         2.000 files	      7228 logical-B/metric	      8231 ns/point	         1.000 points/op	    121488 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10112 ns/op	         2.000 files	      4921 logical-B/metric	     10112 ns/point	         1.000 points/op	     98894 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10074 ns/op	         3.000 files	      4921 logical-B/metric	     10074 ns/point	         1.000 points/op	     99263 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    206544 ns/op	         7.000 files	      9770 logical-B/metric	    206544 ns/point	         1.000 points/op	      4842 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9487 ns/op	       256.0 files	      7228 logical-B/metric	      9487 ns/point	         1.000 points/op	    105404 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11206 ns/op	       256.0 files	      4921 logical-B/metric	     11206 ns/point	         1.000 points/op	     89242 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11197 ns/op	       384.0 files	      4921 logical-B/metric	     11197 ns/point	         1.000 points/op	     89307 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    184217 ns/op	         7.000 files	      6416 logical-B/metric	    184217 ns/point	         1.000 points/op	      5428 points/s	     598 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8584 ns/op	         2.000 files	      7228 logical-B/metric	      1073 ns/point	         8.000 points/op	    931983 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10535 ns/op	         2.000 files	      4921 logical-B/metric	      1317 ns/point	         8.000 points/op	    759379 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10737 ns/op	         3.000 files	      4921 logical-B/metric	      1342 ns/point	         8.000 points/op	    745075 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    197630 ns/op	         7.000 files	      9767 logical-B/metric	     24704 ns/point	         8.000 points/op	     40480 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9277 ns/op	       256.0 files	      7228 logical-B/metric	      1160 ns/point	         8.000 points/op	    862316 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     11736 ns/op	       256.0 files	      4921 logical-B/metric	      1467 ns/point	         8.000 points/op	    681641 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11606 ns/op	       384.0 files	      4921 logical-B/metric	      1451 ns/point	         8.000 points/op	    689270 points/s	    3136 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    194098 ns/op	         7.000 files	      6758 logical-B/metric	     24262 ns/point	         8.000 points/op	     41216 points/s	     949 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     12719 ns/op	         2.000 files	      7228 logical-B/metric	       198.7 ns/point	        64.00 points/op	   5031855 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     16644 ns/op	         2.000 files	      4921 logical-B/metric	       260.1 ns/point	        64.00 points/op	   3845247 points/s	   13490 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     17481 ns/op	         3.000 files	      4921 logical-B/metric	       273.1 ns/point	        64.00 points/op	   3661192 points/s	   15834 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    258225 ns/op	         7.000 files	     10382 logical-B/metric	      4035 ns/point	        64.00 points/op	    247846 points/s	    7950 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     13291 ns/op	       256.0 files	      7228 logical-B/metric	       207.7 ns/point	        64.00 points/op	   4815304 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     17899 ns/op	       256.0 files	      4921 logical-B/metric	       279.7 ns/point	        64.00 points/op	   3575670 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     18848 ns/op	       384.0 files	      4921 logical-B/metric	       294.5 ns/point	        64.00 points/op	   3395576 points/s	   15834 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    168413 ns/op	         7.000 files	      7203 logical-B/metric	      2631 ns/point	        64.00 points/op	    380018 points/s	    8063 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8246 ns/op	         2.000 files	      7228 logical-B/metric	      8246 ns/point	         1.000 points/op	    121276 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     19855 ns/op	         3.000 files	      4921 logical-B/metric	     19855 ns/point	         1.000 points/op	     50365 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    192083 ns/op	         7.000 files	      9770 logical-B/metric	    192083 ns/point	         1.000 points/op	      5206 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9246 ns/op	       256.0 files	      7228 logical-B/metric	      9246 ns/point	         1.000 points/op	    108159 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21298 ns/op	       384.0 files	      4921 logical-B/metric	     21298 ns/point	         1.000 points/op	     46954 points/s	    4116 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    217862 ns/op	         7.000 files	      6416 logical-B/metric	    217862 ns/point	         1.000 points/op	      4590 points/s	     600 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8451 ns/op	         2.000 files	      7228 logical-B/metric	      1056 ns/point	         8.000 points/op	    946688 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     27657 ns/op	         3.000 files	      4921 logical-B/metric	      3457 ns/point	         8.000 points/op	    289263 points/s	   11178 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    199050 ns/op	         7.000 files	      9767 logical-B/metric	     24881 ns/point	         8.000 points/op	     40191 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9562 ns/op	       256.0 files	      7228 logical-B/metric	      1195 ns/point	         8.000 points/op	    836621 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     23478 ns/op	       384.0 files	      4921 logical-B/metric	      2935 ns/point	         8.000 points/op	    340745 points/s	    5060 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    195024 ns/op	         7.000 files	      6758 logical-B/metric	     24378 ns/point	         8.000 points/op	     41021 points/s	     949 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12581 ns/op	         2.000 files	      7228 logical-B/metric	       196.6 ns/point	        64.00 points/op	   5086894 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     91902 ns/op	         3.000 files	      4921 logical-B/metric	      1436 ns/point	        64.00 points/op	    696396 points/s	   79313 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    213834 ns/op	         7.000 files	     10382 logical-B/metric	      3341 ns/point	        64.00 points/op	    299298 points/s	    7954 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     13611 ns/op	       256.0 files	      7228 logical-B/metric	       212.7 ns/point	        64.00 points/op	   4702247 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     83684 ns/op	       384.0 files	      4921 logical-B/metric	      1308 ns/point	        64.00 points/op	    764779 points/s	   65463 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    206253 ns/op	         7.000 files	      7203 logical-B/metric	      3223 ns/point	        64.00 points/op	    310299 points/s	    8082 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      8848 ns/op	         2.000 files	     38920 logical-B/metric	        73.74 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     14953 ns/op	         2.000 files	     11964 logical-B/metric	       124.6 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15035 ns/op	         3.000 files	     11964 logical-B/metric	       125.3 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8205 ns/op	         8.000 files	     70381 logical-B/metric	        68.37 ns/value	       120.0 values/op	    2021 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     21293 ns/op	         2.000 files	     38920 logical-B/metric	        11.83 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     78981 ns/op	         2.000 files	     11964 logical-B/metric	        43.88 ns/value	      1800 values/op	  115495 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     79144 ns/op	         3.000 files	     11964 logical-B/metric	        43.97 ns/value	      1800 values/op	  115509 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     44991 ns/op	         8.000 files	     70381 logical-B/metric	        24.99 ns/value	      1800 values/op	   17675 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     10718 ns/op	         2.000 files	     38920 logical-B/metric	        29.94 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     31301 ns/op	         2.000 files	     11964 logical-B/metric	        87.43 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     32954 ns/op	         3.000 files	     11964 logical-B/metric	        92.05 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5130 ns/op	         8.000 files	     70381 logical-B/metric	        14.33 ns/value	       358.0 values/op	    4097 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12228 ns/op	         2.000 files	      7228 logical-B/metric	      1528 ns/point	         8.000 points/op	    654251 points/s	    1880 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     16082 ns/op	         2.000 files	      4921 logical-B/metric	      2010 ns/point	         8.000 points/op	    497456 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     15956 ns/op	         3.000 files	      4921 logical-B/metric	      1994 ns/point	         8.000 points/op	    501381 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    197671 ns/op	         7.000 files	      9767 logical-B/metric	     24709 ns/point	         8.000 points/op	     40471 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     62063 ns/op	        16.00 files	      7228 logical-B/metric	       969.7 ns/point	        64.00 points/op	   1031218 points/s	   15040 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     76976 ns/op	        16.00 files	      4921 logical-B/metric	      1203 ns/point	        64.00 points/op	    831431 points/s	   24834 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     78212 ns/op	        24.00 files	      4921 logical-B/metric	      1222 ns/point	        64.00 points/op	    818294 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    332942 ns/op	         7.000 files	      7577 logical-B/metric	      5202 ns/point	        64.00 points/op	    192226 points/s	    7834 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    203113 ns/op	        64.00 files	      7228 logical-B/metric	       793.4 ns/point	       256.0 points/op	   1260381 points/s	   60672 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    250263 ns/op	        64.00 files	      4921 logical-B/metric	       977.6 ns/point	       256.0 points/op	   1022922 points/s	   99852 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    249563 ns/op	        96.00 files	      4921 logical-B/metric	       974.9 ns/point	       256.0 points/op	   1025793 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    404689 ns/op	         7.000 files	      7329 logical-B/metric	      1581 ns/point	       256.0 points/op	    632584 points/s	   32129 B/op	     578 allocs/op
+PASS
+
+# Repeat 2, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    178669 ns/op	         3.000 files	     12831 logical-B/metric	  162851 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1830303 ns/op	         7.000 files	    136851 logical-B/metric	  149078 B/op	     536 allocs/op
+PASS
+
+# Repeat 2, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	      9588 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     18088 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     17036 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1616401 ns/op	  371575 B/op	     660 allocs/op
+PASS
+
+# Repeat 3, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8501 ns/op	         2.000 files	      7228 logical-B/metric	      8501 ns/point	         1.000 points/op	    117638 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10044 ns/op	         2.000 files	      4921 logical-B/metric	     10044 ns/point	         1.000 points/op	     99560 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10987 ns/op	         3.000 files	      4921 logical-B/metric	     10987 ns/point	         1.000 points/op	     91018 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    191467 ns/op	         7.000 files	      9770 logical-B/metric	    191467 ns/point	         1.000 points/op	      5223 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9414 ns/op	       256.0 files	      7228 logical-B/metric	      9414 ns/point	         1.000 points/op	    106228 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11288 ns/op	       256.0 files	      4921 logical-B/metric	     11288 ns/point	         1.000 points/op	     88592 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11284 ns/op	       384.0 files	      4921 logical-B/metric	     11284 ns/point	         1.000 points/op	     88623 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    217320 ns/op	         7.000 files	      6416 logical-B/metric	    217320 ns/point	         1.000 points/op	      4602 points/s	     597 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8802 ns/op	         2.000 files	      7228 logical-B/metric	      1100 ns/point	         8.000 points/op	    908912 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10585 ns/op	         2.000 files	      4921 logical-B/metric	      1323 ns/point	         8.000 points/op	    755803 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10844 ns/op	         3.000 files	      4921 logical-B/metric	      1355 ns/point	         8.000 points/op	    737751 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    197541 ns/op	         7.000 files	      9767 logical-B/metric	     24693 ns/point	         8.000 points/op	     40498 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	     10441 ns/op	       256.0 files	      7228 logical-B/metric	      1305 ns/point	         8.000 points/op	    766215 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     11922 ns/op	       256.0 files	      4921 logical-B/metric	      1490 ns/point	         8.000 points/op	    671047 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11853 ns/op	       384.0 files	      4921 logical-B/metric	      1482 ns/point	         8.000 points/op	    674963 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    193631 ns/op	         7.000 files	      6758 logical-B/metric	     24204 ns/point	         8.000 points/op	     41316 points/s	     950 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     12787 ns/op	         2.000 files	      7228 logical-B/metric	       199.8 ns/point	        64.00 points/op	   5005204 points/s	   11023 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     16691 ns/op	         2.000 files	      4921 logical-B/metric	       260.8 ns/point	        64.00 points/op	   3834340 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     17897 ns/op	         3.000 files	      4921 logical-B/metric	       279.6 ns/point	        64.00 points/op	   3576024 points/s	   15833 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    213077 ns/op	         7.000 files	     10382 logical-B/metric	      3329 ns/point	        64.00 points/op	    300360 points/s	    7955 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     13766 ns/op	       256.0 files	      7228 logical-B/metric	       215.1 ns/point	        64.00 points/op	   4649079 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     18186 ns/op	       256.0 files	      4921 logical-B/metric	       284.2 ns/point	        64.00 points/op	   3519171 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19107 ns/op	       384.0 files	      4921 logical-B/metric	       298.5 ns/point	        64.00 points/op	   3349563 points/s	   15881 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    198644 ns/op	         7.000 files	      7203 logical-B/metric	      3104 ns/point	        64.00 points/op	    322184 points/s	    8065 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8589 ns/op	         2.000 files	      7228 logical-B/metric	      8589 ns/point	         1.000 points/op	    116432 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20136 ns/op	         3.000 files	      4921 logical-B/metric	     20136 ns/point	         1.000 points/op	     49663 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    190682 ns/op	         7.000 files	      9770 logical-B/metric	    190682 ns/point	         1.000 points/op	      5244 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9295 ns/op	       256.0 files	      7228 logical-B/metric	      9295 ns/point	         1.000 points/op	    107590 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21307 ns/op	       384.0 files	      4921 logical-B/metric	     21307 ns/point	         1.000 points/op	     46932 points/s	    4116 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    187102 ns/op	         7.000 files	      6416 logical-B/metric	    187102 ns/point	         1.000 points/op	      5345 points/s	     598 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8773 ns/op	         2.000 files	      7228 logical-B/metric	      1097 ns/point	         8.000 points/op	    911869 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     27853 ns/op	         3.000 files	      4921 logical-B/metric	      3482 ns/point	         8.000 points/op	    287220 points/s	   11227 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    199415 ns/op	         7.000 files	      9767 logical-B/metric	     24927 ns/point	         8.000 points/op	     40117 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9740 ns/op	       256.0 files	      7228 logical-B/metric	      1218 ns/point	         8.000 points/op	    821349 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     24051 ns/op	       384.0 files	      4921 logical-B/metric	      3006 ns/point	         8.000 points/op	    332625 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    195988 ns/op	         7.000 files	      6758 logical-B/metric	     24499 ns/point	         8.000 points/op	     40819 points/s	     950 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12728 ns/op	         2.000 files	      7228 logical-B/metric	       198.9 ns/point	        64.00 points/op	   5028384 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     92691 ns/op	         3.000 files	      4921 logical-B/metric	      1448 ns/point	        64.00 points/op	    690469 points/s	   79314 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    215109 ns/op	         7.000 files	     10382 logical-B/metric	      3361 ns/point	        64.00 points/op	    297523 points/s	    7949 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     13636 ns/op	       256.0 files	      7228 logical-B/metric	       213.1 ns/point	        64.00 points/op	   4693413 points/s	   11023 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     84635 ns/op	       384.0 files	      4921 logical-B/metric	      1322 ns/point	        64.00 points/op	    756187 points/s	   65462 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    167440 ns/op	         7.000 files	      7203 logical-B/metric	      2616 ns/point	        64.00 points/op	    382227 points/s	    8048 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9034 ns/op	         2.000 files	     38920 logical-B/metric	        75.28 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15290 ns/op	         2.000 files	     11964 logical-B/metric	       127.4 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15551 ns/op	         3.000 files	     11964 logical-B/metric	       129.6 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8194 ns/op	         8.000 files	     70381 logical-B/metric	        68.28 ns/value	       120.0 values/op	    2023 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     22831 ns/op	         2.000 files	     38920 logical-B/metric	        12.68 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     84189 ns/op	         2.000 files	     11964 logical-B/metric	        46.77 ns/value	      1800 values/op	  115495 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     83344 ns/op	         3.000 files	     11964 logical-B/metric	        46.30 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45812 ns/op	         8.000 files	     70381 logical-B/metric	        25.45 ns/value	      1800 values/op	   17659 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11183 ns/op	         2.000 files	     38920 logical-B/metric	        31.24 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     31834 ns/op	         2.000 files	     11964 logical-B/metric	        88.92 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     31445 ns/op	         3.000 files	     11964 logical-B/metric	        87.84 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5174 ns/op	         8.000 files	     70381 logical-B/metric	        14.45 ns/value	       358.0 values/op	    4098 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12657 ns/op	         2.000 files	      7228 logical-B/metric	      1582 ns/point	         8.000 points/op	    632062 points/s	    1864 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     17020 ns/op	         2.000 files	      4921 logical-B/metric	      2127 ns/point	         8.000 points/op	    470046 points/s	    3104 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16554 ns/op	         3.000 files	      4921 logical-B/metric	      2069 ns/point	         8.000 points/op	    483264 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    197924 ns/op	         7.000 files	      9767 logical-B/metric	     24741 ns/point	         8.000 points/op	     40420 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     66068 ns/op	        16.00 files	      7228 logical-B/metric	      1032 ns/point	        64.00 points/op	    968701 points/s	   15040 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     78875 ns/op	        16.00 files	      4921 logical-B/metric	      1232 ns/point	        64.00 points/op	    811406 points/s	   24835 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     79797 ns/op	        24.00 files	      4921 logical-B/metric	      1247 ns/point	        64.00 points/op	    802039 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    300600 ns/op	         7.000 files	      7577 logical-B/metric	      4697 ns/point	        64.00 points/op	    212907 points/s	    7837 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    208772 ns/op	        64.00 files	      7228 logical-B/metric	       815.5 ns/point	       256.0 points/op	   1226217 points/s	   60672 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    256093 ns/op	        64.00 files	      4921 logical-B/metric	      1000 ns/point	       256.0 points/op	    999636 points/s	   99852 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    257906 ns/op	        96.00 files	      4921 logical-B/metric	      1007 ns/point	       256.0 points/op	    992611 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    386547 ns/op	         7.000 files	      7329 logical-B/metric	      1510 ns/point	       256.0 points/op	    662274 points/s	   32065 B/op	     578 allocs/op
+PASS
+
+# Repeat 3, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    190504 ns/op	         3.000 files	     12831 logical-B/metric	  162769 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1840321 ns/op	         7.000 files	    136851 logical-B/metric	  149145 B/op	     538 allocs/op
+PASS
+
+# Repeat 3, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	      9755 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     17389 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     16736 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1664740 ns/op	  371199 B/op	     660 allocs/op
+PASS
+
+# Repeat 4, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8677 ns/op	         2.000 files	      7228 logical-B/metric	      8677 ns/point	         1.000 points/op	    115246 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10520 ns/op	         2.000 files	      4921 logical-B/metric	     10520 ns/point	         1.000 points/op	     95053 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10270 ns/op	         3.000 files	      4921 logical-B/metric	     10270 ns/point	         1.000 points/op	     97372 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    190932 ns/op	         7.000 files	      9770 logical-B/metric	    190932 ns/point	         1.000 points/op	      5237 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9478 ns/op	       256.0 files	      7228 logical-B/metric	      9478 ns/point	         1.000 points/op	    105504 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11273 ns/op	       256.0 files	      4921 logical-B/metric	     11273 ns/point	         1.000 points/op	     88705 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11286 ns/op	       384.0 files	      4921 logical-B/metric	     11286 ns/point	         1.000 points/op	     88609 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    208570 ns/op	         7.000 files	      6416 logical-B/metric	    208570 ns/point	         1.000 points/op	      4795 points/s	     599 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8622 ns/op	         2.000 files	      7228 logical-B/metric	      1078 ns/point	         8.000 points/op	    927882 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10637 ns/op	         2.000 files	      4921 logical-B/metric	      1330 ns/point	         8.000 points/op	    752097 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10822 ns/op	         3.000 files	      4921 logical-B/metric	      1353 ns/point	         8.000 points/op	    739249 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    200892 ns/op	         7.000 files	      9767 logical-B/metric	     25112 ns/point	         8.000 points/op	     39822 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9538 ns/op	       256.0 files	      7228 logical-B/metric	      1192 ns/point	         8.000 points/op	    838740 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     11656 ns/op	       256.0 files	      4921 logical-B/metric	      1457 ns/point	         8.000 points/op	    686322 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11828 ns/op	       384.0 files	      4921 logical-B/metric	      1478 ns/point	         8.000 points/op	    676383 points/s	    3136 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    193750 ns/op	         7.000 files	      6758 logical-B/metric	     24219 ns/point	         8.000 points/op	     41290 points/s	     949 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     13508 ns/op	         2.000 files	      7228 logical-B/metric	       211.1 ns/point	        64.00 points/op	   4737770 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     16631 ns/op	         2.000 files	      4921 logical-B/metric	       259.9 ns/point	        64.00 points/op	   3848169 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     17757 ns/op	         3.000 files	      4921 logical-B/metric	       277.4 ns/point	        64.00 points/op	   3604296 points/s	   15834 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    212773 ns/op	         7.000 files	     10382 logical-B/metric	      3325 ns/point	        64.00 points/op	    300789 points/s	    7962 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     14164 ns/op	       256.0 files	      7228 logical-B/metric	       221.3 ns/point	        64.00 points/op	   4518390 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     17866 ns/op	       256.0 files	      4921 logical-B/metric	       279.2 ns/point	        64.00 points/op	   3582296 points/s	   13490 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19615 ns/op	       384.0 files	      4921 logical-B/metric	       306.5 ns/point	        64.00 points/op	   3262820 points/s	   15882 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    187735 ns/op	         7.000 files	      7203 logical-B/metric	      2933 ns/point	        64.00 points/op	    340905 points/s	    8065 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8385 ns/op	         2.000 files	      7228 logical-B/metric	      8385 ns/point	         1.000 points/op	    119258 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20529 ns/op	         3.000 files	      4921 logical-B/metric	     20529 ns/point	         1.000 points/op	     48711 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    191715 ns/op	         7.000 files	      9770 logical-B/metric	    191715 ns/point	         1.000 points/op	      5216 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9577 ns/op	       256.0 files	      7228 logical-B/metric	      9577 ns/point	         1.000 points/op	    104422 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21521 ns/op	       384.0 files	      4921 logical-B/metric	     21521 ns/point	         1.000 points/op	     46467 points/s	    4148 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    187974 ns/op	         7.000 files	      6416 logical-B/metric	    187974 ns/point	         1.000 points/op	      5320 points/s	     599 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8764 ns/op	         2.000 files	      7228 logical-B/metric	      1095 ns/point	         8.000 points/op	    912871 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     27741 ns/op	         3.000 files	      4921 logical-B/metric	      3468 ns/point	         8.000 points/op	    288384 points/s	   11177 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    198498 ns/op	         7.000 files	      9767 logical-B/metric	     24812 ns/point	         8.000 points/op	     40303 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9585 ns/op	       256.0 files	      7228 logical-B/metric	      1198 ns/point	         8.000 points/op	    834625 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     25332 ns/op	       384.0 files	      4921 logical-B/metric	      3166 ns/point	         8.000 points/op	    315812 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    195365 ns/op	         7.000 files	      6758 logical-B/metric	     24421 ns/point	         8.000 points/op	     40949 points/s	     952 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12540 ns/op	         2.000 files	      7228 logical-B/metric	       195.9 ns/point	        64.00 points/op	   5103856 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     91737 ns/op	         3.000 files	      4921 logical-B/metric	      1433 ns/point	        64.00 points/op	    697643 points/s	   79312 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    215416 ns/op	         7.000 files	     10382 logical-B/metric	      3366 ns/point	        64.00 points/op	    297100 points/s	    7950 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     13635 ns/op	       256.0 files	      7228 logical-B/metric	       213.0 ns/point	        64.00 points/op	   4693900 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     82910 ns/op	       384.0 files	      4921 logical-B/metric	      1295 ns/point	        64.00 points/op	    771922 points/s	   65429 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    166198 ns/op	         7.000 files	      7203 logical-B/metric	      2597 ns/point	        64.00 points/op	    385083 points/s	    8063 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9056 ns/op	         2.000 files	     38920 logical-B/metric	        75.47 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15260 ns/op	         2.000 files	     11964 logical-B/metric	       127.2 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15121 ns/op	         3.000 files	     11964 logical-B/metric	       126.0 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8184 ns/op	         8.000 files	     70381 logical-B/metric	        68.20 ns/value	       120.0 values/op	    2021 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     19743 ns/op	         2.000 files	     38920 logical-B/metric	        10.97 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     83004 ns/op	         2.000 files	     11964 logical-B/metric	        46.11 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     80638 ns/op	         3.000 files	     11964 logical-B/metric	        44.80 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45772 ns/op	         8.000 files	     70381 logical-B/metric	        25.43 ns/value	      1800 values/op	   17673 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11209 ns/op	         2.000 files	     38920 logical-B/metric	        31.31 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     31352 ns/op	         2.000 files	     11964 logical-B/metric	        87.57 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     31981 ns/op	         3.000 files	     11964 logical-B/metric	        89.33 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5268 ns/op	         8.000 files	     70381 logical-B/metric	        14.72 ns/value	       358.0 values/op	    4100 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12971 ns/op	         2.000 files	      7228 logical-B/metric	      1621 ns/point	         8.000 points/op	    616751 points/s	    1880 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     17179 ns/op	         2.000 files	      4921 logical-B/metric	      2147 ns/point	         8.000 points/op	    465682 points/s	    3104 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16763 ns/op	         3.000 files	      4921 logical-B/metric	      2095 ns/point	         8.000 points/op	    477248 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    199619 ns/op	         7.000 files	      9767 logical-B/metric	     24952 ns/point	         8.000 points/op	     40076 points/s	    1023 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     62121 ns/op	        16.00 files	      7228 logical-B/metric	       970.6 ns/point	        64.00 points/op	   1030246 points/s	   15039 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     76616 ns/op	        16.00 files	      4921 logical-B/metric	      1197 ns/point	        64.00 points/op	    835337 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     76076 ns/op	        24.00 files	      4921 logical-B/metric	      1189 ns/point	        64.00 points/op	    841268 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    299766 ns/op	         7.000 files	      7577 logical-B/metric	      4684 ns/point	        64.00 points/op	    213500 points/s	    7837 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    202404 ns/op	        64.00 files	      7228 logical-B/metric	       790.6 ns/point	       256.0 points/op	   1264796 points/s	   60672 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    246162 ns/op	        64.00 files	      4921 logical-B/metric	       961.6 ns/point	       256.0 points/op	   1039965 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    248939 ns/op	        96.00 files	      4921 logical-B/metric	       972.4 ns/point	       256.0 points/op	   1028366 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    381536 ns/op	         7.000 files	      7329 logical-B/metric	      1490 ns/point	       256.0 points/op	    670973 points/s	   32065 B/op	     578 allocs/op
+PASS
+
+# Repeat 4, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    179815 ns/op	         3.000 files	     12831 logical-B/metric	  162769 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1810313 ns/op	         7.000 files	    136851 logical-B/metric	  149067 B/op	     538 allocs/op
+PASS
+
+# Repeat 4, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	      9100 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     16731 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     15998 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1617274 ns/op	  371188 B/op	     660 allocs/op
+PASS
+
+# Repeat 5, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8590 ns/op	         2.000 files	      7228 logical-B/metric	      8590 ns/point	         1.000 points/op	    116419 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10130 ns/op	         2.000 files	      4921 logical-B/metric	     10130 ns/point	         1.000 points/op	     98714 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10333 ns/op	         3.000 files	      4921 logical-B/metric	     10333 ns/point	         1.000 points/op	     96773 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    191172 ns/op	         7.000 files	      9770 logical-B/metric	    191172 ns/point	         1.000 points/op	      5231 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9756 ns/op	       256.0 files	      7228 logical-B/metric	      9756 ns/point	         1.000 points/op	    102506 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11319 ns/op	       256.0 files	      4921 logical-B/metric	     11319 ns/point	         1.000 points/op	     88348 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11445 ns/op	       384.0 files	      4921 logical-B/metric	     11445 ns/point	         1.000 points/op	     87375 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    188955 ns/op	         7.000 files	      6416 logical-B/metric	    188955 ns/point	         1.000 points/op	      5292 points/s	     598 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8751 ns/op	         2.000 files	      7228 logical-B/metric	      1094 ns/point	         8.000 points/op	    914228 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10770 ns/op	         2.000 files	      4921 logical-B/metric	      1346 ns/point	         8.000 points/op	    742832 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10840 ns/op	         3.000 files	      4921 logical-B/metric	      1355 ns/point	         8.000 points/op	    737989 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    224948 ns/op	         7.000 files	      9767 logical-B/metric	     28118 ns/point	         8.000 points/op	     35564 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9668 ns/op	       256.0 files	      7228 logical-B/metric	      1208 ns/point	         8.000 points/op	    827491 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     11777 ns/op	       256.0 files	      4921 logical-B/metric	      1472 ns/point	         8.000 points/op	    679311 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11956 ns/op	       384.0 files	      4921 logical-B/metric	      1495 ns/point	         8.000 points/op	    669109 points/s	    3136 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    195479 ns/op	         7.000 files	      6758 logical-B/metric	     24435 ns/point	         8.000 points/op	     40925 points/s	     952 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     13635 ns/op	         2.000 files	      7228 logical-B/metric	       213.0 ns/point	        64.00 points/op	   4693942 points/s	   11023 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     17319 ns/op	         2.000 files	      4921 logical-B/metric	       270.6 ns/point	        64.00 points/op	   3695298 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     18048 ns/op	         3.000 files	      4921 logical-B/metric	       282.0 ns/point	        64.00 points/op	   3546014 points/s	   15833 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    214986 ns/op	         7.000 files	     10382 logical-B/metric	      3359 ns/point	        64.00 points/op	    297694 points/s	    7958 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     13876 ns/op	       256.0 files	      7228 logical-B/metric	       216.8 ns/point	        64.00 points/op	   4612364 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     18397 ns/op	       256.0 files	      4921 logical-B/metric	       287.5 ns/point	        64.00 points/op	   3478825 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     20221 ns/op	       384.0 files	      4921 logical-B/metric	       316.0 ns/point	        64.00 points/op	   3164993 points/s	   15882 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    165491 ns/op	         7.000 files	      7203 logical-B/metric	      2586 ns/point	        64.00 points/op	    386727 points/s	    8076 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8548 ns/op	         2.000 files	      7228 logical-B/metric	      8548 ns/point	         1.000 points/op	    116984 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20391 ns/op	         3.000 files	      4921 logical-B/metric	     20391 ns/point	         1.000 points/op	     49042 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    230010 ns/op	         7.000 files	      9770 logical-B/metric	    230010 ns/point	         1.000 points/op	      4348 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9565 ns/op	       256.0 files	      7228 logical-B/metric	      9565 ns/point	         1.000 points/op	    104548 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21757 ns/op	       384.0 files	      4921 logical-B/metric	     21757 ns/point	         1.000 points/op	     45962 points/s	    4148 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    185501 ns/op	         7.000 files	      6416 logical-B/metric	    185501 ns/point	         1.000 points/op	      5391 points/s	     597 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      9116 ns/op	         2.000 files	      7228 logical-B/metric	      1139 ns/point	         8.000 points/op	    877597 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     28952 ns/op	         3.000 files	      4921 logical-B/metric	      3619 ns/point	         8.000 points/op	    276318 points/s	   11177 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    198211 ns/op	         7.000 files	      9767 logical-B/metric	     24776 ns/point	         8.000 points/op	     40361 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9624 ns/op	       256.0 files	      7228 logical-B/metric	      1203 ns/point	         8.000 points/op	    831276 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     24032 ns/op	       384.0 files	      4921 logical-B/metric	      3004 ns/point	         8.000 points/op	    332888 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    193387 ns/op	         7.000 files	      6758 logical-B/metric	     24173 ns/point	         8.000 points/op	     41368 points/s	     950 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12912 ns/op	         2.000 files	      7228 logical-B/metric	       201.7 ns/point	        64.00 points/op	   4956712 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     95120 ns/op	         3.000 files	      4921 logical-B/metric	      1486 ns/point	        64.00 points/op	    672837 points/s	   79313 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    215184 ns/op	         7.000 files	     10382 logical-B/metric	      3362 ns/point	        64.00 points/op	    297419 points/s	    7949 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     14233 ns/op	       256.0 files	      7228 logical-B/metric	       222.4 ns/point	        64.00 points/op	   4496484 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     85207 ns/op	       384.0 files	      4921 logical-B/metric	      1331 ns/point	        64.00 points/op	    751116 points/s	   65463 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    169268 ns/op	         7.000 files	      7203 logical-B/metric	      2645 ns/point	        64.00 points/op	    378100 points/s	    8080 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9089 ns/op	         2.000 files	     38920 logical-B/metric	        75.74 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15705 ns/op	         2.000 files	     11964 logical-B/metric	       130.9 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15383 ns/op	         3.000 files	     11964 logical-B/metric	       128.2 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8297 ns/op	         8.000 files	     70381 logical-B/metric	        69.15 ns/value	       120.0 values/op	    2018 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     24063 ns/op	         2.000 files	     38920 logical-B/metric	        13.37 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     82900 ns/op	         2.000 files	     11964 logical-B/metric	        46.06 ns/value	      1800 values/op	  115509 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     83705 ns/op	         3.000 files	     11964 logical-B/metric	        46.50 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45466 ns/op	         8.000 files	     70381 logical-B/metric	        25.26 ns/value	      1800 values/op	   17672 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11660 ns/op	         2.000 files	     38920 logical-B/metric	        32.57 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     32735 ns/op	         2.000 files	     11964 logical-B/metric	        91.44 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     33149 ns/op	         3.000 files	     11964 logical-B/metric	        92.59 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5281 ns/op	         8.000 files	     70381 logical-B/metric	        14.75 ns/value	       358.0 values/op	    4095 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12882 ns/op	         2.000 files	      7228 logical-B/metric	      1610 ns/point	         8.000 points/op	    621028 points/s	    1880 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     17117 ns/op	         2.000 files	      4921 logical-B/metric	      2140 ns/point	         8.000 points/op	    467379 points/s	    3104 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16634 ns/op	         3.000 files	      4921 logical-B/metric	      2079 ns/point	         8.000 points/op	    480933 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    205297 ns/op	         7.000 files	      9767 logical-B/metric	     25662 ns/point	         8.000 points/op	     38968 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     62651 ns/op	        16.00 files	      7228 logical-B/metric	       978.9 ns/point	        64.00 points/op	   1021525 points/s	   15039 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     75764 ns/op	        16.00 files	      4921 logical-B/metric	      1184 ns/point	        64.00 points/op	    844728 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     76366 ns/op	        24.00 files	      4921 logical-B/metric	      1193 ns/point	        64.00 points/op	    838071 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    302419 ns/op	         7.000 files	      7577 logical-B/metric	      4725 ns/point	        64.00 points/op	    211627 points/s	    7846 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    209745 ns/op	        64.00 files	      7228 logical-B/metric	       819.3 ns/point	       256.0 points/op	   1220532 points/s	   60671 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    247937 ns/op	        64.00 files	      4921 logical-B/metric	       968.5 ns/point	       256.0 points/op	   1032521 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    260125 ns/op	        96.00 files	      4921 logical-B/metric	      1016 ns/point	       256.0 points/op	    984142 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    373218 ns/op	         7.000 files	      7329 logical-B/metric	      1458 ns/point	       256.0 points/op	    685927 points/s	   32076 B/op	     578 allocs/op
+PASS
+
+# Repeat 5, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    182031 ns/op	         3.000 files	     12831 logical-B/metric	  162778 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1849216 ns/op	         7.000 files	    136851 logical-B/metric	  149199 B/op	     536 allocs/op
+PASS
+
+# Repeat 5, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	     10246 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     18860 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     17342 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1658891 ns/op	  371363 B/op	     660 allocs/op
+PASS
+
+# Repeat 6, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8226 ns/op	         2.000 files	      7228 logical-B/metric	      8226 ns/point	         1.000 points/op	    121571 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	      9843 ns/op	         2.000 files	      4921 logical-B/metric	      9843 ns/point	         1.000 points/op	    101599 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	      9917 ns/op	         3.000 files	      4921 logical-B/metric	      9917 ns/point	         1.000 points/op	    100833 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    188727 ns/op	         7.000 files	      9770 logical-B/metric	    188727 ns/point	         1.000 points/op	      5299 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      8848 ns/op	       256.0 files	      7228 logical-B/metric	      8848 ns/point	         1.000 points/op	    113023 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     10757 ns/op	       256.0 files	      4921 logical-B/metric	     10757 ns/point	         1.000 points/op	     92966 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11075 ns/op	       384.0 files	      4921 logical-B/metric	     11075 ns/point	         1.000 points/op	     90296 points/s	    2688 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    211757 ns/op	         7.000 files	      6416 logical-B/metric	    211757 ns/point	         1.000 points/op	      4722 points/s	     597 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8462 ns/op	         2.000 files	      7228 logical-B/metric	      1058 ns/point	         8.000 points/op	    945442 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10692 ns/op	         2.000 files	      4921 logical-B/metric	      1336 ns/point	         8.000 points/op	    748233 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10774 ns/op	         3.000 files	      4921 logical-B/metric	      1347 ns/point	         8.000 points/op	    742557 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    198114 ns/op	         7.000 files	      9767 logical-B/metric	     24764 ns/point	         8.000 points/op	     40381 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9368 ns/op	       256.0 files	      7228 logical-B/metric	      1171 ns/point	         8.000 points/op	    854011 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     11849 ns/op	       256.0 files	      4921 logical-B/metric	      1481 ns/point	         8.000 points/op	    675190 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11441 ns/op	       384.0 files	      4921 logical-B/metric	      1430 ns/point	         8.000 points/op	    699219 points/s	    3136 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    199117 ns/op	         7.000 files	      6758 logical-B/metric	     24890 ns/point	         8.000 points/op	     40177 points/s	     949 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     12785 ns/op	         2.000 files	      7228 logical-B/metric	       199.8 ns/point	        64.00 points/op	   5005857 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     16419 ns/op	         2.000 files	      4921 logical-B/metric	       256.5 ns/point	        64.00 points/op	   3897933 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     17178 ns/op	         3.000 files	      4921 logical-B/metric	       268.4 ns/point	        64.00 points/op	   3725674 points/s	   15833 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    216934 ns/op	         7.000 files	     10382 logical-B/metric	      3390 ns/point	        64.00 points/op	    295021 points/s	    7954 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     13321 ns/op	       256.0 files	      7228 logical-B/metric	       208.1 ns/point	        64.00 points/op	   4804616 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     18093 ns/op	       256.0 files	      4921 logical-B/metric	       282.7 ns/point	        64.00 points/op	   3537227 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19072 ns/op	       384.0 files	      4921 logical-B/metric	       298.0 ns/point	        64.00 points/op	   3355762 points/s	   15882 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    197771 ns/op	         7.000 files	      7203 logical-B/metric	      3090 ns/point	        64.00 points/op	    323607 points/s	    8073 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8581 ns/op	         2.000 files	      7228 logical-B/metric	      8581 ns/point	         1.000 points/op	    116533 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     19821 ns/op	         3.000 files	      4921 logical-B/metric	     19821 ns/point	         1.000 points/op	     50451 points/s	    4786 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    204184 ns/op	         7.000 files	      9770 logical-B/metric	    204184 ns/point	         1.000 points/op	      4898 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9233 ns/op	       256.0 files	      7228 logical-B/metric	      9233 ns/point	         1.000 points/op	    108304 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21671 ns/op	       384.0 files	      4921 logical-B/metric	     21671 ns/point	         1.000 points/op	     46144 points/s	    4147 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    190253 ns/op	         7.000 files	      6416 logical-B/metric	    190253 ns/point	         1.000 points/op	      5256 points/s	     597 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      9071 ns/op	         2.000 files	      7228 logical-B/metric	      1134 ns/point	         8.000 points/op	    881961 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     27496 ns/op	         3.000 files	      4921 logical-B/metric	      3437 ns/point	         8.000 points/op	    290951 points/s	   11178 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    231447 ns/op	         7.000 files	      9767 logical-B/metric	     28931 ns/point	         8.000 points/op	     34565 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9471 ns/op	       256.0 files	      7228 logical-B/metric	      1184 ns/point	         8.000 points/op	    844651 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     26022 ns/op	       384.0 files	      4921 logical-B/metric	      3253 ns/point	         8.000 points/op	    307428 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    196979 ns/op	         7.000 files	      6758 logical-B/metric	     24622 ns/point	         8.000 points/op	     40613 points/s	     954 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12618 ns/op	         2.000 files	      7228 logical-B/metric	       197.2 ns/point	        64.00 points/op	   5071945 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     93198 ns/op	         3.000 files	      4921 logical-B/metric	      1456 ns/point	        64.00 points/op	    686713 points/s	   79278 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    214916 ns/op	         7.000 files	     10382 logical-B/metric	      3358 ns/point	        64.00 points/op	    297791 points/s	    7953 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     14253 ns/op	       256.0 files	      7228 logical-B/metric	       222.7 ns/point	        64.00 points/op	   4490428 points/s	   11023 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     83513 ns/op	       384.0 files	      4921 logical-B/metric	      1305 ns/point	        64.00 points/op	    766348 points/s	   65463 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    167564 ns/op	         7.000 files	      7203 logical-B/metric	      2618 ns/point	        64.00 points/op	    381945 points/s	    8071 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      8860 ns/op	         2.000 files	     38920 logical-B/metric	        73.84 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15106 ns/op	         2.000 files	     11964 logical-B/metric	       125.9 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15254 ns/op	         3.000 files	     11964 logical-B/metric	       127.1 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8168 ns/op	         8.000 files	     70381 logical-B/metric	        68.06 ns/value	       120.0 values/op	    2022 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     21699 ns/op	         2.000 files	     38920 logical-B/metric	        12.05 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     80927 ns/op	         2.000 files	     11964 logical-B/metric	        44.96 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     79679 ns/op	         3.000 files	     11964 logical-B/metric	        44.27 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45739 ns/op	         8.000 files	     70381 logical-B/metric	        25.41 ns/value	      1800 values/op	   17679 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     10819 ns/op	         2.000 files	     38920 logical-B/metric	        30.22 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     31442 ns/op	         2.000 files	     11964 logical-B/metric	        87.83 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     31187 ns/op	         3.000 files	     11964 logical-B/metric	        87.11 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5188 ns/op	         8.000 files	     70381 logical-B/metric	        14.49 ns/value	       358.0 values/op	    4099 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12040 ns/op	         2.000 files	      7228 logical-B/metric	      1505 ns/point	         8.000 points/op	    664454 points/s	    1864 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     16188 ns/op	         2.000 files	      4921 logical-B/metric	      2023 ns/point	         8.000 points/op	    494198 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16511 ns/op	         3.000 files	      4921 logical-B/metric	      2064 ns/point	         8.000 points/op	    484524 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    199538 ns/op	         7.000 files	      9767 logical-B/metric	     24942 ns/point	         8.000 points/op	     40093 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     63807 ns/op	        16.00 files	      7228 logical-B/metric	       997.0 ns/point	        64.00 points/op	   1003030 points/s	   15039 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     77879 ns/op	        16.00 files	      4921 logical-B/metric	      1217 ns/point	        64.00 points/op	    821784 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     76440 ns/op	        24.00 files	      4921 logical-B/metric	      1194 ns/point	        64.00 points/op	    837255 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    302200 ns/op	         7.000 files	      7577 logical-B/metric	      4722 ns/point	        64.00 points/op	    211780 points/s	    7837 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    208381 ns/op	        64.00 files	      7228 logical-B/metric	       814.0 ns/point	       256.0 points/op	   1228520 points/s	   60672 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    250612 ns/op	        64.00 files	      4921 logical-B/metric	       979.0 ns/point	       256.0 points/op	   1021499 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    250860 ns/op	        96.00 files	      4921 logical-B/metric	       979.9 ns/point	       256.0 points/op	   1020488 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    371332 ns/op	         7.000 files	      7329 logical-B/metric	      1451 ns/point	       256.0 points/op	    689410 points/s	   32077 B/op	     578 allocs/op
+PASS
+
+# Repeat 6, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    175067 ns/op	         3.000 files	     12831 logical-B/metric	  162774 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1808076 ns/op	         7.000 files	    136851 logical-B/metric	  148573 B/op	     537 allocs/op
+PASS
+
+# Repeat 6, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	      9546 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     16963 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     17442 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1664767 ns/op	  371662 B/op	     661 allocs/op
+PASS
+
+# Repeat 7, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8635 ns/op	         2.000 files	      7228 logical-B/metric	      8635 ns/point	         1.000 points/op	    115814 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10451 ns/op	         2.000 files	      4921 logical-B/metric	     10451 ns/point	         1.000 points/op	     95681 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10247 ns/op	         3.000 files	      4921 logical-B/metric	     10247 ns/point	         1.000 points/op	     97592 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    192084 ns/op	         7.000 files	      9770 logical-B/metric	    192084 ns/point	         1.000 points/op	      5206 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9607 ns/op	       256.0 files	      7228 logical-B/metric	      9607 ns/point	         1.000 points/op	    104092 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11296 ns/op	       256.0 files	      4921 logical-B/metric	     11296 ns/point	         1.000 points/op	     88525 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11183 ns/op	       384.0 files	      4921 logical-B/metric	     11183 ns/point	         1.000 points/op	     89423 points/s	    2688 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    185120 ns/op	         7.000 files	      6416 logical-B/metric	    185120 ns/point	         1.000 points/op	      5402 points/s	     599 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8723 ns/op	         2.000 files	      7228 logical-B/metric	      1090 ns/point	         8.000 points/op	    917064 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10659 ns/op	         2.000 files	      4921 logical-B/metric	      1332 ns/point	         8.000 points/op	    750564 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10808 ns/op	         3.000 files	      4921 logical-B/metric	      1351 ns/point	         8.000 points/op	    740215 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    217028 ns/op	         7.000 files	      9767 logical-B/metric	     27128 ns/point	         8.000 points/op	     36862 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9670 ns/op	       256.0 files	      7228 logical-B/metric	      1209 ns/point	         8.000 points/op	    827268 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     11752 ns/op	       256.0 files	      4921 logical-B/metric	      1469 ns/point	         8.000 points/op	    680764 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     11968 ns/op	       384.0 files	      4921 logical-B/metric	      1496 ns/point	         8.000 points/op	    668470 points/s	    3136 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    195863 ns/op	         7.000 files	      6758 logical-B/metric	     24483 ns/point	         8.000 points/op	     40845 points/s	     949 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     12712 ns/op	         2.000 files	      7228 logical-B/metric	       198.6 ns/point	        64.00 points/op	   5034613 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     17336 ns/op	         2.000 files	      4921 logical-B/metric	       270.9 ns/point	        64.00 points/op	   3691714 points/s	   13490 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     18143 ns/op	         3.000 files	      4921 logical-B/metric	       283.5 ns/point	        64.00 points/op	   3527554 points/s	   15834 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    213695 ns/op	         7.000 files	     10382 logical-B/metric	      3339 ns/point	        64.00 points/op	    299492 points/s	    7954 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     14448 ns/op	       256.0 files	      7228 logical-B/metric	       225.8 ns/point	        64.00 points/op	   4429538 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     17979 ns/op	       256.0 files	      4921 logical-B/metric	       280.9 ns/point	        64.00 points/op	   3559729 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19136 ns/op	       384.0 files	      4921 logical-B/metric	       299.0 ns/point	        64.00 points/op	   3344492 points/s	   15881 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    166255 ns/op	         7.000 files	      7203 logical-B/metric	      2598 ns/point	        64.00 points/op	    384950 points/s	    8088 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8589 ns/op	         2.000 files	      7228 logical-B/metric	      8589 ns/point	         1.000 points/op	    116432 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20354 ns/op	         3.000 files	      4921 logical-B/metric	     20354 ns/point	         1.000 points/op	     49131 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    231357 ns/op	         7.000 files	      9770 logical-B/metric	    231357 ns/point	         1.000 points/op	      4322 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9529 ns/op	       256.0 files	      7228 logical-B/metric	      9529 ns/point	         1.000 points/op	    104940 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21294 ns/op	       384.0 files	      4921 logical-B/metric	     21294 ns/point	         1.000 points/op	     46962 points/s	    4116 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    188378 ns/op	         7.000 files	      6416 logical-B/metric	    188378 ns/point	         1.000 points/op	      5308 points/s	     598 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8718 ns/op	         2.000 files	      7228 logical-B/metric	      1090 ns/point	         8.000 points/op	    917655 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     28445 ns/op	         3.000 files	      4921 logical-B/metric	      3556 ns/point	         8.000 points/op	    281247 points/s	   11227 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    199164 ns/op	         7.000 files	      9767 logical-B/metric	     24895 ns/point	         8.000 points/op	     40168 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9499 ns/op	       256.0 files	      7228 logical-B/metric	      1187 ns/point	         8.000 points/op	    842196 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     24859 ns/op	       384.0 files	      4921 logical-B/metric	      3107 ns/point	         8.000 points/op	    321820 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    201064 ns/op	         7.000 files	      6758 logical-B/metric	     25133 ns/point	         8.000 points/op	     39788 points/s	     955 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12746 ns/op	         2.000 files	      7228 logical-B/metric	       199.2 ns/point	        64.00 points/op	   5021091 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     94493 ns/op	         3.000 files	      4921 logical-B/metric	      1476 ns/point	        64.00 points/op	    677300 points/s	   79277 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    215968 ns/op	         7.000 files	     10382 logical-B/metric	      3375 ns/point	        64.00 points/op	    296340 points/s	    7972 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     14123 ns/op	       256.0 files	      7228 logical-B/metric	       220.7 ns/point	        64.00 points/op	   4531507 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     83831 ns/op	       384.0 files	      4921 logical-B/metric	      1310 ns/point	        64.00 points/op	    763437 points/s	   65462 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    167507 ns/op	         7.000 files	      7203 logical-B/metric	      2617 ns/point	        64.00 points/op	    382073 points/s	    8061 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9075 ns/op	         2.000 files	     38920 logical-B/metric	        75.63 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15380 ns/op	         2.000 files	     11964 logical-B/metric	       128.2 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15442 ns/op	         3.000 files	     11964 logical-B/metric	       128.7 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8222 ns/op	         8.000 files	     70381 logical-B/metric	        68.51 ns/value	       120.0 values/op	    2019 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     24530 ns/op	         2.000 files	     38920 logical-B/metric	        13.63 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     82178 ns/op	         2.000 files	     11964 logical-B/metric	        45.65 ns/value	      1800 values/op	  115495 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     80975 ns/op	         3.000 files	     11964 logical-B/metric	        44.99 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45621 ns/op	         8.000 files	     70381 logical-B/metric	        25.34 ns/value	      1800 values/op	   17673 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11145 ns/op	         2.000 files	     38920 logical-B/metric	        31.13 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     32261 ns/op	         2.000 files	     11964 logical-B/metric	        90.11 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     32493 ns/op	         3.000 files	     11964 logical-B/metric	        90.76 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5243 ns/op	         8.000 files	     70381 logical-B/metric	        14.65 ns/value	       358.0 values/op	    4100 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12639 ns/op	         2.000 files	      7228 logical-B/metric	      1580 ns/point	         8.000 points/op	    632982 points/s	    1864 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     16300 ns/op	         2.000 files	      4921 logical-B/metric	      2038 ns/point	         8.000 points/op	    490793 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16875 ns/op	         3.000 files	      4921 logical-B/metric	      2109 ns/point	         8.000 points/op	    474067 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    223137 ns/op	         7.000 files	      9767 logical-B/metric	     27892 ns/point	         8.000 points/op	     35852 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     64640 ns/op	        16.00 files	      7228 logical-B/metric	      1010 ns/point	        64.00 points/op	    990100 points/s	   15039 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     76966 ns/op	        16.00 files	      4921 logical-B/metric	      1203 ns/point	        64.00 points/op	    831541 points/s	   24706 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     79029 ns/op	        24.00 files	      4921 logical-B/metric	      1235 ns/point	        64.00 points/op	    809825 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    299101 ns/op	         7.000 files	      7577 logical-B/metric	      4673 ns/point	        64.00 points/op	    213975 points/s	    7850 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    208560 ns/op	        64.00 files	      7228 logical-B/metric	       814.7 ns/point	       256.0 points/op	   1227465 points/s	   60673 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    246969 ns/op	        64.00 files	      4921 logical-B/metric	       964.7 ns/point	       256.0 points/op	   1036566 points/s	   99852 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    254457 ns/op	        96.00 files	      4921 logical-B/metric	       994.0 ns/point	       256.0 points/op	   1006063 points/s	   99850 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    377561 ns/op	         7.000 files	      7329 logical-B/metric	      1475 ns/point	       256.0 points/op	    678036 points/s	   32049 B/op	     578 allocs/op
+PASS
+
+# Repeat 7, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    197227 ns/op	         3.000 files	     12831 logical-B/metric	  162775 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1845822 ns/op	         7.000 files	    136851 logical-B/metric	  148798 B/op	     536 allocs/op
+PASS
+
+# Repeat 7, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	     10269 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     18590 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     17355 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1637832 ns/op	  371358 B/op	     661 allocs/op
+PASS
+
+# Repeat 8, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8412 ns/op	         2.000 files	      7228 logical-B/metric	      8412 ns/point	         1.000 points/op	    118874 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10306 ns/op	         2.000 files	      4921 logical-B/metric	     10306 ns/point	         1.000 points/op	     97032 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10172 ns/op	         3.000 files	      4921 logical-B/metric	     10172 ns/point	         1.000 points/op	     98311 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    312441 ns/op	         7.000 files	      9770 logical-B/metric	    312441 ns/point	         1.000 points/op	      3201 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	     10483 ns/op	       256.0 files	      7228 logical-B/metric	     10483 ns/point	         1.000 points/op	     95391 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     12138 ns/op	       256.0 files	      4921 logical-B/metric	     12138 ns/point	         1.000 points/op	     82389 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11481 ns/op	       384.0 files	      4921 logical-B/metric	     11481 ns/point	         1.000 points/op	     87102 points/s	    2688 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    309384 ns/op	         7.000 files	      6416 logical-B/metric	    309384 ns/point	         1.000 points/op	      3232 points/s	     598 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      9632 ns/op	         2.000 files	      7228 logical-B/metric	      1204 ns/point	         8.000 points/op	    830546 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     12436 ns/op	         2.000 files	      4921 logical-B/metric	      1555 ns/point	         8.000 points/op	    643290 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     12186 ns/op	         3.000 files	      4921 logical-B/metric	      1523 ns/point	         8.000 points/op	    656507 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    328039 ns/op	         7.000 files	      9767 logical-B/metric	     41005 ns/point	         8.000 points/op	     24387 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	     11257 ns/op	       256.0 files	      7228 logical-B/metric	      1407 ns/point	         8.000 points/op	    710690 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     12416 ns/op	       256.0 files	      4921 logical-B/metric	      1552 ns/point	         8.000 points/op	    644355 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     13882 ns/op	       384.0 files	      4921 logical-B/metric	      1735 ns/point	         8.000 points/op	    576294 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    234968 ns/op	         7.000 files	      6758 logical-B/metric	     29371 ns/point	         8.000 points/op	     34047 points/s	     951 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     13005 ns/op	         2.000 files	      7228 logical-B/metric	       203.2 ns/point	        64.00 points/op	   4921086 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     17084 ns/op	         2.000 files	      4921 logical-B/metric	       266.9 ns/point	        64.00 points/op	   3746134 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     18232 ns/op	         3.000 files	      4921 logical-B/metric	       284.9 ns/point	        64.00 points/op	   3510350 points/s	   15834 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    218106 ns/op	         7.000 files	     10382 logical-B/metric	      3408 ns/point	        64.00 points/op	    293436 points/s	    7960 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     14514 ns/op	       256.0 files	      7228 logical-B/metric	       226.8 ns/point	        64.00 points/op	   4409546 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     19165 ns/op	       256.0 files	      4921 logical-B/metric	       299.4 ns/point	        64.00 points/op	   3339476 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19461 ns/op	       384.0 files	      4921 logical-B/metric	       304.1 ns/point	        64.00 points/op	   3288637 points/s	   15850 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    170001 ns/op	         7.000 files	      7203 logical-B/metric	      2656 ns/point	        64.00 points/op	    376468 points/s	    8088 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8655 ns/op	         2.000 files	      7228 logical-B/metric	      8655 ns/point	         1.000 points/op	    115546 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20870 ns/op	         3.000 files	      4921 logical-B/metric	     20870 ns/point	         1.000 points/op	     47916 points/s	    4850 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    187271 ns/op	         7.000 files	      9770 logical-B/metric	    187271 ns/point	         1.000 points/op	      5340 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9625 ns/op	       256.0 files	      7228 logical-B/metric	      9625 ns/point	         1.000 points/op	    103899 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21982 ns/op	       384.0 files	      4921 logical-B/metric	     21982 ns/point	         1.000 points/op	     45491 points/s	    4148 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    182432 ns/op	         7.000 files	      6416 logical-B/metric	    182432 ns/point	         1.000 points/op	      5482 points/s	     603 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8819 ns/op	         2.000 files	      7228 logical-B/metric	      1102 ns/point	         8.000 points/op	    907104 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     28831 ns/op	         3.000 files	      4921 logical-B/metric	      3604 ns/point	         8.000 points/op	    277477 points/s	   11226 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    197824 ns/op	         7.000 files	      9767 logical-B/metric	     24728 ns/point	         8.000 points/op	     40440 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9909 ns/op	       256.0 files	      7228 logical-B/metric	      1239 ns/point	         8.000 points/op	    807325 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     24117 ns/op	       384.0 files	      4921 logical-B/metric	      3015 ns/point	         8.000 points/op	    331710 points/s	    5108 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    194901 ns/op	         7.000 files	      6758 logical-B/metric	     24363 ns/point	         8.000 points/op	     41046 points/s	     950 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     12877 ns/op	         2.000 files	      7228 logical-B/metric	       201.2 ns/point	        64.00 points/op	   4970007 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     94614 ns/op	         3.000 files	      4921 logical-B/metric	      1478 ns/point	        64.00 points/op	    676432 points/s	   79277 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    242266 ns/op	         7.000 files	     10382 logical-B/metric	      3785 ns/point	        64.00 points/op	    264173 points/s	    7969 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     14290 ns/op	       256.0 files	      7228 logical-B/metric	       223.3 ns/point	        64.00 points/op	   4478603 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     84933 ns/op	       384.0 files	      4921 logical-B/metric	      1327 ns/point	        64.00 points/op	    753532 points/s	   65463 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    169272 ns/op	         7.000 files	      7203 logical-B/metric	      2645 ns/point	        64.00 points/op	    378090 points/s	    8063 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9103 ns/op	         2.000 files	     38920 logical-B/metric	        75.86 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15673 ns/op	         2.000 files	     11964 logical-B/metric	       130.6 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15674 ns/op	         3.000 files	     11964 logical-B/metric	       130.6 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8266 ns/op	         8.000 files	     70381 logical-B/metric	        68.89 ns/value	       120.0 values/op	    2019 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     23285 ns/op	         2.000 files	     38920 logical-B/metric	        12.94 ns/value	      1800 values/op	   97120 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     82955 ns/op	         2.000 files	     11964 logical-B/metric	        46.09 ns/value	      1800 values/op	  115495 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     82935 ns/op	         3.000 files	     11964 logical-B/metric	        46.08 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45547 ns/op	         8.000 files	     70381 logical-B/metric	        25.30 ns/value	      1800 values/op	   17656 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11415 ns/op	         2.000 files	     38920 logical-B/metric	        31.89 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     33004 ns/op	         2.000 files	     11964 logical-B/metric	        92.19 ns/value	       358.0 values/op	   45141 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     31949 ns/op	         3.000 files	     11964 logical-B/metric	        89.24 ns/value	       358.0 values/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5202 ns/op	         8.000 files	     70381 logical-B/metric	        14.53 ns/value	       358.0 values/op	    4098 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12582 ns/op	         2.000 files	      7228 logical-B/metric	      1573 ns/point	         8.000 points/op	    635840 points/s	    1880 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     16985 ns/op	         2.000 files	      4921 logical-B/metric	      2123 ns/point	         8.000 points/op	    471009 points/s	    3104 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     17247 ns/op	         3.000 files	      4921 logical-B/metric	      2156 ns/point	         8.000 points/op	    463841 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    196078 ns/op	         7.000 files	      9767 logical-B/metric	     24510 ns/point	         8.000 points/op	     40800 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     62864 ns/op	        16.00 files	      7228 logical-B/metric	       982.2 ns/point	        64.00 points/op	   1018074 points/s	   15039 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     75664 ns/op	        16.00 files	      4921 logical-B/metric	      1182 ns/point	        64.00 points/op	    845844 points/s	   24835 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     77486 ns/op	        24.00 files	      4921 logical-B/metric	      1211 ns/point	        64.00 points/op	    825956 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    300914 ns/op	         7.000 files	      7577 logical-B/metric	      4702 ns/point	        64.00 points/op	    212685 points/s	    7833 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    205980 ns/op	        64.00 files	      7228 logical-B/metric	       804.6 ns/point	       256.0 points/op	   1242840 points/s	   60160 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    249401 ns/op	        64.00 files	      4921 logical-B/metric	       974.2 ns/point	       256.0 points/op	   1026459 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    252823 ns/op	        96.00 files	      4921 logical-B/metric	       987.6 ns/point	       256.0 points/op	   1012567 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    371118 ns/op	         7.000 files	      7329 logical-B/metric	      1450 ns/point	       256.0 points/op	    689808 points/s	   32114 B/op	     578 allocs/op
+PASS
+
+# Repeat 8, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    195295 ns/op	         3.000 files	     12831 logical-B/metric	  162769 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1868586 ns/op	         7.000 files	    136851 logical-B/metric	  149202 B/op	     536 allocs/op
+PASS
+
+# Repeat 8, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	      9982 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     16993 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     16288 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1611201 ns/op	  371747 B/op	     661 allocs/op
+PASS
+
+# Repeat 9, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8849 ns/op	         2.000 files	      7228 logical-B/metric	      8849 ns/point	         1.000 points/op	    113008 points/s	    1447 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10148 ns/op	         2.000 files	      4921 logical-B/metric	     10148 ns/point	         1.000 points/op	     98538 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10993 ns/op	         3.000 files	      4921 logical-B/metric	     10993 ns/point	         1.000 points/op	     90964 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    189753 ns/op	         7.000 files	      9770 logical-B/metric	    189753 ns/point	         1.000 points/op	      5270 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9533 ns/op	       256.0 files	      7228 logical-B/metric	      9533 ns/point	         1.000 points/op	    104902 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11584 ns/op	       256.0 files	      4921 logical-B/metric	     11584 ns/point	         1.000 points/op	     86326 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11688 ns/op	       384.0 files	      4921 logical-B/metric	     11688 ns/point	         1.000 points/op	     85560 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    185492 ns/op	         7.000 files	      6416 logical-B/metric	    185492 ns/point	         1.000 points/op	      5391 points/s	     600 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8976 ns/op	         2.000 files	      7228 logical-B/metric	      1122 ns/point	         8.000 points/op	    891248 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10873 ns/op	         2.000 files	      4921 logical-B/metric	      1359 ns/point	         8.000 points/op	    735757 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10967 ns/op	         3.000 files	      4921 logical-B/metric	      1371 ns/point	         8.000 points/op	    729466 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    199176 ns/op	         7.000 files	      9767 logical-B/metric	     24897 ns/point	         8.000 points/op	     40165 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9804 ns/op	       256.0 files	      7228 logical-B/metric	      1226 ns/point	         8.000 points/op	    815971 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     12120 ns/op	       256.0 files	      4921 logical-B/metric	      1515 ns/point	         8.000 points/op	    660084 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     12450 ns/op	       384.0 files	      4921 logical-B/metric	      1556 ns/point	         8.000 points/op	    642595 points/s	    3136 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    196379 ns/op	         7.000 files	      6758 logical-B/metric	     24547 ns/point	         8.000 points/op	     40738 points/s	     950 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     13015 ns/op	         2.000 files	      7228 logical-B/metric	       203.4 ns/point	        64.00 points/op	   4917278 points/s	   11023 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     17118 ns/op	         2.000 files	      4921 logical-B/metric	       267.5 ns/point	        64.00 points/op	   3738718 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     18199 ns/op	         3.000 files	      4921 logical-B/metric	       284.4 ns/point	        64.00 points/op	   3516657 points/s	   15833 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    248923 ns/op	         7.000 files	     10382 logical-B/metric	      3889 ns/point	        64.00 points/op	    257108 points/s	    7966 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     14020 ns/op	       256.0 files	      7228 logical-B/metric	       219.1 ns/point	        64.00 points/op	   4564770 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     18479 ns/op	       256.0 files	      4921 logical-B/metric	       288.7 ns/point	        64.00 points/op	   3463447 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19264 ns/op	       384.0 files	      4921 logical-B/metric	       301.0 ns/point	        64.00 points/op	   3322237 points/s	   15850 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    169696 ns/op	         7.000 files	      7203 logical-B/metric	      2652 ns/point	        64.00 points/op	    377144 points/s	    8088 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      8441 ns/op	         2.000 files	      7228 logical-B/metric	      8441 ns/point	         1.000 points/op	    118468 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20477 ns/op	         3.000 files	      4921 logical-B/metric	     20477 ns/point	         1.000 points/op	     48834 points/s	    4802 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    192416 ns/op	         7.000 files	      9770 logical-B/metric	    192416 ns/point	         1.000 points/op	      5197 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9416 ns/op	       256.0 files	      7228 logical-B/metric	      9416 ns/point	         1.000 points/op	    106204 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     21624 ns/op	       384.0 files	      4921 logical-B/metric	     21624 ns/point	         1.000 points/op	     46245 points/s	    4148 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    201525 ns/op	         7.000 files	      6416 logical-B/metric	    201525 ns/point	         1.000 points/op	      4962 points/s	     597 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      9033 ns/op	         2.000 files	      7228 logical-B/metric	      1129 ns/point	         8.000 points/op	    885645 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     28238 ns/op	         3.000 files	      4921 logical-B/metric	      3530 ns/point	         8.000 points/op	    283307 points/s	   11178 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    201797 ns/op	         7.000 files	      9767 logical-B/metric	     25225 ns/point	         8.000 points/op	     39644 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9709 ns/op	       256.0 files	      7228 logical-B/metric	      1214 ns/point	         8.000 points/op	    823962 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     24102 ns/op	       384.0 files	      4921 logical-B/metric	      3013 ns/point	         8.000 points/op	    331922 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    197037 ns/op	         7.000 files	      6758 logical-B/metric	     24630 ns/point	         8.000 points/op	     40601 points/s	     952 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     13210 ns/op	         2.000 files	      7228 logical-B/metric	       206.4 ns/point	        64.00 points/op	   4844875 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     94624 ns/op	         3.000 files	      4921 logical-B/metric	      1479 ns/point	        64.00 points/op	    676360 points/s	   79277 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    217945 ns/op	         7.000 files	     10382 logical-B/metric	      3405 ns/point	        64.00 points/op	    293652 points/s	    7960 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     14305 ns/op	       256.0 files	      7228 logical-B/metric	       223.5 ns/point	        64.00 points/op	   4473816 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     86395 ns/op	       384.0 files	      4921 logical-B/metric	      1350 ns/point	        64.00 points/op	    740784 points/s	   65464 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    202739 ns/op	         7.000 files	      7203 logical-B/metric	      3168 ns/point	        64.00 points/op	    315677 points/s	    8066 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9130 ns/op	         2.000 files	     38920 logical-B/metric	        76.09 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15589 ns/op	         2.000 files	     11964 logical-B/metric	       129.9 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15366 ns/op	         3.000 files	     11964 logical-B/metric	       128.1 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8271 ns/op	         8.000 files	     70381 logical-B/metric	        68.93 ns/value	       120.0 values/op	    2024 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     23002 ns/op	         2.000 files	     38920 logical-B/metric	        12.78 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     85821 ns/op	         2.000 files	     11964 logical-B/metric	        47.68 ns/value	      1800 values/op	  115510 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     84628 ns/op	         3.000 files	     11964 logical-B/metric	        47.02 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45920 ns/op	         8.000 files	     70381 logical-B/metric	        25.51 ns/value	      1800 values/op	   17664 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11650 ns/op	         2.000 files	     38920 logical-B/metric	        32.54 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     33203 ns/op	         2.000 files	     11964 logical-B/metric	        92.75 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     32949 ns/op	         3.000 files	     11964 logical-B/metric	        92.04 ns/value	       358.0 values/op	   45157 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5263 ns/op	         8.000 files	     70381 logical-B/metric	        14.70 ns/value	       358.0 values/op	    4099 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12740 ns/op	         2.000 files	      7228 logical-B/metric	      1592 ns/point	         8.000 points/op	    627968 points/s	    1880 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     16470 ns/op	         2.000 files	      4921 logical-B/metric	      2059 ns/point	         8.000 points/op	    485729 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     17513 ns/op	         3.000 files	      4921 logical-B/metric	      2189 ns/point	         8.000 points/op	    456809 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    201230 ns/op	         7.000 files	      9767 logical-B/metric	     25154 ns/point	         8.000 points/op	     39755 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     63026 ns/op	        16.00 files	      7228 logical-B/metric	       984.8 ns/point	        64.00 points/op	   1015462 points/s	   15039 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     76066 ns/op	        16.00 files	      4921 logical-B/metric	      1189 ns/point	        64.00 points/op	    841371 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     76974 ns/op	        24.00 files	      4921 logical-B/metric	      1203 ns/point	        64.00 points/op	    831449 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    368926 ns/op	         7.000 files	      7577 logical-B/metric	      5764 ns/point	        64.00 points/op	    173477 points/s	    7839 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    208012 ns/op	        64.00 files	      7228 logical-B/metric	       812.5 ns/point	       256.0 points/op	   1230695 points/s	   60672 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    248294 ns/op	        64.00 files	      4921 logical-B/metric	       969.9 ns/point	       256.0 points/op	   1031036 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    250996 ns/op	        96.00 files	      4921 logical-B/metric	       980.5 ns/point	       256.0 points/op	   1019938 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    373390 ns/op	         7.000 files	      7329 logical-B/metric	      1459 ns/point	       256.0 points/op	    685610 points/s	   32071 B/op	     578 allocs/op
+PASS
+
+# Repeat 9, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    197060 ns/op	         3.000 files	     12831 logical-B/metric	  162784 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1815852 ns/op	         7.000 files	    136851 logical-B/metric	  149218 B/op	     537 allocs/op
+PASS
+
+# Repeat 9, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	     10105 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     17738 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     16758 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   1634003 ns/op	  371846 B/op	     661 allocs/op
+PASS
+
+# Repeat 10, core
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/classic-2         	    4096	      8756 ns/op	         2.000 files	      7228 logical-B/metric	      8756 ns/point	         1.000 points/op	    114212 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-2        	    4096	     10638 ns/op	         2.000 files	      4921 logical-B/metric	     10638 ns/point	         1.000 points/op	     94001 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2    	    4096	     10480 ns/op	         3.000 files	      4921 logical-B/metric	     10480 ns/point	         1.000 points/op	     95417 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=1/pebble-2          	    4096	    191272 ns/op	         7.000 files	      9770 logical-B/metric	    191272 ns/point	         1.000 points/op	      5228 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/classic-2       	    4096	      9643 ns/op	       256.0 files	      7228 logical-B/metric	      9643 ns/point	         1.000 points/op	    103706 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-2      	    4096	     11647 ns/op	       256.0 files	      4921 logical-B/metric	     11647 ns/point	         1.000 points/op	     85858 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2  	    4096	     11571 ns/op	       384.0 files	      4921 logical-B/metric	     11571 ns/point	         1.000 points/op	     86421 points/s	    2672 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=1/metrics=128/pebble-2        	    4096	    186225 ns/op	         7.000 files	      6416 logical-B/metric	    186225 ns/point	         1.000 points/op	      5370 points/s	     599 B/op	      15 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/classic-2         	    4096	      8854 ns/op	         2.000 files	      7228 logical-B/metric	      1107 ns/point	         8.000 points/op	    903574 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-2        	    4096	     10702 ns/op	         2.000 files	      4921 logical-B/metric	      1338 ns/point	         8.000 points/op	    747522 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2    	    4096	     10843 ns/op	         3.000 files	      4921 logical-B/metric	      1355 ns/point	         8.000 points/op	    737823 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=1/pebble-2          	    4096	    199679 ns/op	         7.000 files	      9767 logical-B/metric	     24960 ns/point	         8.000 points/op	     40064 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/classic-2       	    4096	      9621 ns/op	       256.0 files	      7228 logical-B/metric	      1203 ns/point	         8.000 points/op	    831477 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-2      	    4096	     12119 ns/op	       256.0 files	      4921 logical-B/metric	      1515 ns/point	         8.000 points/op	    660133 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2  	    4096	     12212 ns/op	       384.0 files	      4921 logical-B/metric	      1526 ns/point	         8.000 points/op	    655110 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageWrite/ordered/batch=8/metrics=128/pebble-2        	    4096	    195943 ns/op	         7.000 files	      6758 logical-B/metric	     24493 ns/point	         8.000 points/op	     40828 points/s	     952 B/op	      18 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/classic-2        	    4096	     13114 ns/op	         2.000 files	      7228 logical-B/metric	       204.9 ns/point	        64.00 points/op	   4880344 points/s	   11023 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-2       	    4096	     17239 ns/op	         2.000 files	      4921 logical-B/metric	       269.4 ns/point	        64.00 points/op	   3712408 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2   	    4096	     18269 ns/op	         3.000 files	      4921 logical-B/metric	       285.4 ns/point	        64.00 points/op	   3503246 points/s	   15834 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=1/pebble-2         	    4096	    228114 ns/op	         7.000 files	     10382 logical-B/metric	      3564 ns/point	        64.00 points/op	    280562 points/s	    7950 B/op	      26 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/classic-2      	    4096	     14082 ns/op	       256.0 files	      7228 logical-B/metric	       220.0 ns/point	        64.00 points/op	   4544926 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-2     	    4096	     18269 ns/op	       256.0 files	      4921 logical-B/metric	       285.5 ns/point	        64.00 points/op	   3503123 points/s	   13489 B/op	      40 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2 	    4096	     19250 ns/op	       384.0 files	      4921 logical-B/metric	       300.8 ns/point	        64.00 points/op	   3324690 points/s	   15882 B/op	      43 allocs/op
+BenchmarkStorageWrite/ordered/batch=64/metrics=128/pebble-2       	    4096	    168524 ns/op	         7.000 files	      7203 logical-B/metric	      2633 ns/point	        64.00 points/op	    379768 points/s	    8083 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/classic-2      	    4096	      9381 ns/op	         2.000 files	      7228 logical-B/metric	      9381 ns/point	         1.000 points/op	    106599 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2 	    4096	     20653 ns/op	         3.000 files	      4921 logical-B/metric	     20653 ns/point	         1.000 points/op	     48419 points/s	    4802 B/op	      49 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=1/pebble-2       	    4096	    190822 ns/op	         7.000 files	      9770 logical-B/metric	    190822 ns/point	         1.000 points/op	      5240 points/s	     639 B/op	      14 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/classic-2    	    4096	      9515 ns/op	       256.0 files	      7228 logical-B/metric	      9515 ns/point	         1.000 points/op	    105099 points/s	    1448 B/op	      24 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2         	    4096	     22650 ns/op	       384.0 files	      4921 logical-B/metric	     22650 ns/point	         1.000 points/op	     44151 points/s	    4147 B/op	      48 allocs/op
+BenchmarkStorageWrite/late-holes/batch=1/metrics=128/pebble-2               	    4096	    185069 ns/op	         7.000 files	      6416 logical-B/metric	    185069 ns/point	         1.000 points/op	      5403 points/s	     597 B/op	      15 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/classic-2                	    4096	      8825 ns/op	         2.000 files	      7228 logical-B/metric	      1103 ns/point	         8.000 points/op	    906495 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2           	    4096	     29624 ns/op	         3.000 files	      4921 logical-B/metric	      3703 ns/point	         8.000 points/op	    270053 points/s	   11178 B/op	      61 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=1/pebble-2                 	    4096	    197336 ns/op	         7.000 files	      9767 logical-B/metric	     24667 ns/point	         8.000 points/op	     40540 points/s	    1020 B/op	      17 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/classic-2              	    4096	      9643 ns/op	       256.0 files	      7228 logical-B/metric	      1205 ns/point	         8.000 points/op	    829641 points/s	    1896 B/op	      27 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2         	    4096	     24406 ns/op	       384.0 files	      4921 logical-B/metric	      3051 ns/point	         8.000 points/op	    327788 points/s	    5140 B/op	      57 allocs/op
+BenchmarkStorageWrite/late-holes/batch=8/metrics=128/pebble-2               	    4096	    194068 ns/op	         7.000 files	      6758 logical-B/metric	     24259 ns/point	         8.000 points/op	     41223 points/s	     950 B/op	      18 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/classic-2               	    4096	     13289 ns/op	         2.000 files	      7228 logical-B/metric	       207.6 ns/point	        64.00 points/op	   4815934 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2          	    4096	     95722 ns/op	         3.000 files	      4921 logical-B/metric	      1496 ns/point	        64.00 points/op	    668600 points/s	   79313 B/op	     146 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=1/pebble-2                	    4096	    215363 ns/op	         7.000 files	     10382 logical-B/metric	      3365 ns/point	        64.00 points/op	    297173 points/s	    7953 B/op	      26 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/classic-2             	    4096	     14675 ns/op	       256.0 files	      7228 logical-B/metric	       229.3 ns/point	        64.00 points/op	   4361270 points/s	   11024 B/op	      40 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2        	    4096	     86217 ns/op	       384.0 files	      4921 logical-B/metric	      1347 ns/point	        64.00 points/op	    742317 points/s	   65429 B/op	     137 allocs/op
+BenchmarkStorageWrite/late-holes/batch=64/metrics=128/pebble-2              	    4096	    189115 ns/op	         7.000 files	      7203 logical-B/metric	      2955 ns/point	        64.00 points/op	    338419 points/s	    8078 B/op	      27 allocs/op
+BenchmarkStorageRead/recent/classic-2                                       	    4096	      9231 ns/op	         2.000 files	     38920 logical-B/metric	        76.93 ns/value	       120.0 values/op	    6240 B/op	      24 allocs/op
+BenchmarkStorageRead/recent/cwhisper-2                                      	    4096	     15790 ns/op	         2.000 files	     11964 logical-B/metric	       131.6 ns/value	       120.0 values/op	   21730 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/cwhisper-ooo-2                                  	    4096	     15848 ns/op	         3.000 files	     11964 logical-B/metric	       132.1 ns/value	       120.0 values/op	   21762 B/op	      52 allocs/op
+BenchmarkStorageRead/recent/pebble-2                                        	    4096	      8421 ns/op	         8.000 files	     70381 logical-B/metric	        70.18 ns/value	       120.0 values/op	    2021 B/op	      19 allocs/op
+BenchmarkStorageRead/fine-full/classic-2                                    	    4096	     25500 ns/op	         2.000 files	     38920 logical-B/metric	        14.17 ns/value	      1800 values/op	   97136 B/op	      26 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-2                                   	    4096	     84160 ns/op	         2.000 files	     11964 logical-B/metric	        46.76 ns/value	      1800 values/op	  115511 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/cwhisper-ooo-2                               	    4096	     83488 ns/op	         3.000 files	     11964 logical-B/metric	        46.38 ns/value	      1800 values/op	  115512 B/op	      58 allocs/op
+BenchmarkStorageRead/fine-full/pebble-2                                     	    4096	     45376 ns/op	         8.000 files	     70381 logical-B/metric	        25.21 ns/value	      1800 values/op	   17661 B/op	      24 allocs/op
+BenchmarkStorageRead/coarse/classic-2                                       	    4096	     11475 ns/op	         2.000 files	     38920 logical-B/metric	        32.05 ns/value	       358.0 values/op	   20560 B/op	      26 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-2                                      	    4096	     32748 ns/op	         2.000 files	     11964 logical-B/metric	        91.47 ns/value	       358.0 values/op	   45142 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/cwhisper-ooo-2                                  	    4096	     32570 ns/op	         3.000 files	     11964 logical-B/metric	        90.98 ns/value	       358.0 values/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageRead/coarse/pebble-2                                        	    4096	      5214 ns/op	         8.000 files	     70381 logical-B/metric	        14.56 ns/value	       358.0 values/op	    4101 B/op	      20 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/classic-2                         	    4096	     12676 ns/op	         2.000 files	      7228 logical-B/metric	      1585 ns/point	         8.000 points/op	    631090 points/s	    1864 B/op	      27 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-2                        	    4096	     17118 ns/op	         2.000 files	      4921 logical-B/metric	      2140 ns/point	         8.000 points/op	    467334 points/s	    3104 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/cwhisper-ooo-2                    	    4096	     16636 ns/op	         3.000 files	      4921 logical-B/metric	      2079 ns/point	         8.000 points/op	    480895 points/s	    3120 B/op	      28 allocs/op
+BenchmarkStorageConcurrentWrite/workers=1/pebble-2                          	    4096	    199938 ns/op	         7.000 files	      9767 logical-B/metric	     24992 ns/point	         8.000 points/op	     40012 points/s	    1022 B/op	      17 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/classic-2                         	    4096	     62935 ns/op	        16.00 files	      7228 logical-B/metric	       983.4 ns/point	        64.00 points/op	   1016920 points/s	   15040 B/op	     216 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-2                        	    4096	     76815 ns/op	        16.00 files	      4921 logical-B/metric	      1200 ns/point	        64.00 points/op	    833167 points/s	   24963 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/cwhisper-ooo-2                    	    4096	     76297 ns/op	        24.00 files	      4921 logical-B/metric	      1192 ns/point	        64.00 points/op	    838826 points/s	   24962 B/op	     224 allocs/op
+BenchmarkStorageConcurrentWrite/workers=8/pebble-2                          	    4096	    305392 ns/op	         7.000 files	      7577 logical-B/metric	      4772 ns/point	        64.00 points/op	    209567 points/s	    7839 B/op	     143 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/classic-2                        	    4096	    215426 ns/op	        64.00 files	      7228 logical-B/metric	       841.5 ns/point	       256.0 points/op	   1188343 points/s	   60673 B/op	     864 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-2                       	    4096	    254770 ns/op	        64.00 files	      4921 logical-B/metric	       995.2 ns/point	       256.0 points/op	   1004829 points/s	   99851 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/cwhisper-ooo-2                   	    4096	    249685 ns/op	        96.00 files	      4921 logical-B/metric	       975.3 ns/point	       256.0 points/op	   1025292 points/s	   99850 B/op	     896 allocs/op
+BenchmarkStorageConcurrentWrite/workers=32/pebble-2                         	    4096	    384949 ns/op	         7.000 files	      7329 logical-B/metric	      1504 ns/point	       256.0 points/op	    665023 points/s	   32055 B/op	     578 allocs/op
+PASS
+
+# Repeat 10, maintenance
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageMaintenance/cwhisper-ooo-2         	      64	    187069 ns/op	         3.000 files	     12831 logical-B/metric	  162852 B/op	     100 allocs/op
+BenchmarkStorageMaintenance/pebble-2               	      64	   1828777 ns/op	         7.000 files	    136851 logical-B/metric	  149274 B/op	     538 allocs/op
+PASS
+
+# Repeat 10, reopen
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageReopen/classic-2         	     256	     10529 ns/op	    5264 B/op	      22 allocs/op
+BenchmarkStorageReopen/cwhisper-2        	     256	     18237 ns/op	   10888 B/op	      47 allocs/op
+BenchmarkStorageReopen/cwhisper-ooo-2    	     256	     19822 ns/op	   10984 B/op	      47 allocs/op
+BenchmarkStorageReopen/pebble-2          	     256	   2024179 ns/op	  371077 B/op	     660 allocs/op
+PASS

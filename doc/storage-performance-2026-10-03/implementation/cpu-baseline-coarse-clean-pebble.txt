@@ -1,0 +1,5 @@
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/pebble-2         	  588955	      5514 ns/op	    4096 B/op	      20 allocs/op
+PASS

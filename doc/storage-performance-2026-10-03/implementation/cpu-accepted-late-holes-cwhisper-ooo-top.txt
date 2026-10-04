@@ -1,0 +1,21 @@
+File: accepted.test
+Build ID: c8a2a5d1895d0dce35354145cb6d1755ee023f29
+Type: cpu
+Time: 2026-10-03 21:50:30 CEST
+Duration: 3.42s, Total samples = 3.49s (102.10%)
+Showing nodes accounting for 2.99s, 85.67% of 3.49s total
+Dropped 76 nodes (cum <= 0.02s)
+Showing top 12 nodes out of 139
+      flat  flat%   sum%        cum   cum%
+     2.76s 79.08% 79.08%      2.76s 79.08%  internal/runtime/syscall/linux.Syscall6
+     0.04s  1.15% 80.23%      0.04s  1.15%  runtime.reentersyscall
+     0.03s  0.86% 81.09%      0.03s  0.86%  github.com/go-graphite/go-whisper.(*bitsWriter).Write
+     0.03s  0.86% 81.95%      0.04s  1.15%  runtime.mallocgcSmallScanNoHeaderSC1
+     0.02s  0.57% 82.52%      2.37s 67.91%  github.com/go-graphite/go-whisper.openWithOptions
+     0.02s  0.57% 83.09%      0.02s  0.57%  runtime.(*mspan).specialFindSplicePoint
+     0.02s  0.57% 83.67%      0.02s  0.57%  runtime.memequal
+     0.02s  0.57% 84.24%      0.03s  0.86%  runtime.scanblock
+     0.02s  0.57% 84.81%      0.02s  0.57%  runtime.unlock2
+     0.01s  0.29% 85.10%      1.72s 49.28%  github.com/go-graphite/go-whisper.(*Whisper).UpdateManyForArchive
+     0.01s  0.29% 85.39%      0.07s  2.01%  github.com/go-graphite/go-whisper.(*Whisper).archiveUpdateManyDataPoints
+     0.01s  0.29% 85.67%      1.34s 38.40%  github.com/go-graphite/go-whisper.(*Whisper).compressedBatchOverlaps

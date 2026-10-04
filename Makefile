@@ -6,9 +6,9 @@ SHELL := bash
 .ONESHELL:
 
 GO ?= go
+TEST_TIMEOUT ?= 30m
 export GOFLAGS +=  -mod=vendor
 export GO111MODULE := on
-TEMPDIR:=$(shell mktemp -d)
 
 DEVEL ?= 0
 ifeq ($(DEVEL), 0)
@@ -37,9 +37,33 @@ run-test:
 	$(GO) $(COMMAND) ./...
 
 test:
-	make run-test COMMAND="test"
+	make run-test COMMAND="test -timeout $(TEST_TIMEOUT)"
 	make run-test COMMAND="vet"
-	make run-test COMMAND="test -race"
+	make run-test COMMAND="test -race -timeout $(TEST_TIMEOUT)"
+
+.PHONY: test-storage bench-storage test-storage-clean bench-storage-clean
+STORAGE_TMP_ROOT = $(if $(TMPDIR),$(TMPDIR),/tmp)/go-carbon-storage
+
+# Keep each wrapper in one shell even on macOS make without .ONESHELL support.
+test-storage:
+	mkdir -p "$(STORAGE_TMP_ROOT)/test-storage" || exit $$?; \
+	storage_run_tmp=$$(mktemp -d "$(STORAGE_TMP_ROOT)/test-storage/run.XXXXXX") || exit $$?; \
+	trap 'rm -rf -- "$$storage_run_tmp"' EXIT; \
+	TMPDIR="$$storage_run_tmp" $(GO) test -timeout $(TEST_TIMEOUT) -count=1 -race -run '^TestStorage' ./persister
+
+# Override for fixed-work comparisons, e.g. STORAGE_BENCH_FLAGS='-benchtime=4096x -count=5'.
+STORAGE_BENCH_FLAGS ?= -benchtime=1s -count=3
+bench-storage:
+	mkdir -p "$(STORAGE_TMP_ROOT)/bench-storage" || exit $$?; \
+	storage_run_tmp=$$(mktemp -d "$(STORAGE_TMP_ROOT)/bench-storage/run.XXXXXX") || exit $$?; \
+	trap 'rm -rf -- "$$storage_run_tmp"' EXIT; \
+	TMPDIR="$$storage_run_tmp" $(GO) test -run '^$$' -bench '^BenchmarkStorage' -benchmem $(STORAGE_BENCH_FLAGS) ./persister
+
+test-storage-clean:
+	rm -rf -- "$(STORAGE_TMP_ROOT)/test-storage"
+
+bench-storage-clean:
+	rm -rf -- "$(STORAGE_TMP_ROOT)/bench-storage"
 
 gox-build: out/$(NAME)-linux-386 out/$(NAME)-linux-amd64 out/$(NAME)-linux-arm64
 

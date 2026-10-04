@@ -1,0 +1,21 @@
+File: baseline.test
+Build ID: 9a15edda62d01f69cc94b527b3763df4bbd8f037
+Type: cpu
+Time: 2026-10-03 21:50:11 CEST
+Duration: 3.27s, Total samples = 3880ms (118.76%)
+Showing nodes accounting for 2200ms, 56.70% of 3880ms total
+Dropped 86 nodes (cum <= 19.40ms)
+Showing top 12 nodes out of 214
+      flat  flat%   sum%        cum   cum%
+     950ms 24.48% 24.48%      950ms 24.48%  internal/runtime/syscall/linux.Syscall6
+     310ms  7.99% 32.47%      320ms  8.25%  github.com/go-graphite/go-whisper.(*bitsReader).Read
+     130ms  3.35% 35.82%      200ms  5.15%  runtime.tryDeferToSpanScan
+     130ms  3.35% 39.18%      160ms  4.12%  sort.partition_func
+     110ms  2.84% 42.01%      110ms  2.84%  github.com/go-graphite/go-whisper.(*bitsReader).Peek
+     110ms  2.84% 44.85%      250ms  6.44%  github.com/go-graphite/go-whisper.readArchivePointsAt
+     110ms  2.84% 47.68%      380ms  9.79%  runtime.mapassign_fast64
+      90ms  2.32% 50.00%      160ms  4.12%  runtime.mapaccess2_fast64
+      80ms  2.06% 52.06%      560ms 14.43%  github.com/go-graphite/go-whisper.(*archiveInfo).ReadFromBlock
+      60ms  1.55% 53.61%       60ms  1.55%  runtime.heapArenaOf (inline)
+      60ms  1.55% 55.15%       60ms  1.55%  runtime.memclrNoHeapPointers
+      60ms  1.55% 56.70%      130ms  3.35%  runtime.scanblock

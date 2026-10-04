@@ -1,0 +1,586 @@
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                          sec/op                           │              sec/op                vs base                │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                           8.936µ ±  2%                        8.811µ ±  2%        ~ (p=0.063 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                          10.72µ ±  3%                        10.59µ ±  1%   -1.17% (p=0.043 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                      10.80µ ±  2%                        10.69µ ±  1%        ~ (p=0.075 n=10)
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                            194.0µ ±  8%                        205.4µ ±  6%        ~ (p=0.190 n=10)
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                         9.851µ ±  5%                        9.753µ ±  2%        ~ (p=0.315 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                        11.80µ ±  2%                        11.80µ ±  2%        ~ (p=0.896 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                    11.80µ ±  1%                        11.72µ ±  9%        ~ (p=0.853 n=10)
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                          197.1µ ±  6%                        191.9µ ±  9%        ~ (p=0.529 n=10)
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                           9.146µ ±  2%                        9.180µ ±  3%        ~ (p=0.796 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                          11.10µ ±  3%                        11.14µ ±  2%        ~ (p=0.631 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                      11.26µ ±  1%                        11.39µ ±  3%        ~ (p=0.143 n=10)
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                            203.4µ ± 11%                        201.5µ ±  1%        ~ (p=0.165 n=10)
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                         10.04µ ± 11%                        10.02µ ±  3%        ~ (p=0.853 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                        12.35µ ±  5%                        12.37µ ±  2%        ~ (p=0.971 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                    12.44µ ±  4%                        12.39µ ±  3%        ~ (p=0.342 n=10)
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                          199.4µ ±  6%                        200.0µ ±  2%        ~ (p=0.912 n=10)
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                          13.41µ ±  2%                        13.41µ ±  2%        ~ (p=0.971 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                         17.78µ ±  2%                        17.74µ ±  2%        ~ (p=0.987 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                     18.95µ ±  2%                        18.66µ ±  2%        ~ (p=0.089 n=10)
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                           222.0µ ± 17%                        233.3µ ±  8%        ~ (p=0.684 n=10)
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                        14.64µ ±  5%                        14.56µ ±  2%        ~ (p=0.393 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                       19.49µ ±  5%                        18.96µ ±  4%        ~ (p=0.052 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                   20.27µ ±  2%                        20.30µ ±  5%        ~ (p=0.739 n=10)
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                         174.0µ ±  3%                        176.2µ ±  3%        ~ (p=0.796 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                        8.775µ ±  2%                        8.763µ ±  1%        ~ (p=0.971 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                   21.35µ ±  4%                        20.45µ ±  1%   -4.22% (p=0.001 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                         193.5µ ±  6%                        193.8µ ± 14%        ~ (p=0.579 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                      9.845µ ±  4%                        9.771µ ±  2%        ~ (p=0.315 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                 22.51µ ±  2%                        22.57µ ±  2%        ~ (p=1.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                       201.0µ ±  5%                        193.7µ ±  5%        ~ (p=0.393 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                        9.099µ ±  1%                        9.194µ ±  2%        ~ (p=0.118 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                   29.24µ ±  1%                        23.33µ ±  1%  -20.21% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                         202.0µ ±  1%                        202.2µ ±  1%        ~ (p=0.853 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                      10.02µ ±  2%                        10.04µ ±  2%        ~ (p=0.617 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                 25.10µ ±  1%                        25.11µ ±  2%        ~ (p=0.739 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                       201.3µ ±  7%                        200.6µ ±  7%        ~ (p=0.739 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                       13.51µ ±  2%                        13.50µ ±  3%        ~ (p=0.853 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                  98.58µ ±  2%                        49.33µ ±  3%  -49.96% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                        221.6µ ±  5%                        220.0µ ±  2%        ~ (p=0.393 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                     14.95µ ±  2%                        14.62µ ±  2%   -2.25% (p=0.035 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                89.07µ ±  4%                        51.14µ ±  2%  -42.59% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                      174.7µ ± 10%                        177.3µ ±  3%        ~ (p=0.739 n=10)
+StorageRead/recent/classic-2                                                                               9.431µ ±  3%                        9.233µ ±  3%        ~ (p=0.093 n=10)
+StorageRead/recent/cwhisper-2                                                                              16.28µ ±  7%                        11.97µ ±  3%  -26.44% (p=0.000 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                                          16.37µ ±  2%                        12.04µ ±  5%  -26.46% (p=0.000 n=10)
+StorageRead/recent/pebble-2                                                                                8.510µ ±  1%                        7.587µ ±  2%  -10.85% (p=0.001 n=10)
+StorageRead/fine-full/classic-2                                                                            24.19µ ±  4%                        15.46µ ±  6%  -36.09% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                                           84.85µ ±  1%                        50.61µ ±  2%  -40.36% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                                       84.94µ ±  1%                        50.27µ ±  2%  -40.82% (p=0.000 n=10)
+StorageRead/fine-full/pebble-2                                                                             46.80µ ±  1%                        45.95µ ±  1%   -1.80% (p=0.001 n=10)
+StorageRead/coarse/classic-2                                                                               11.71µ ±  3%                        10.46µ ±  4%  -10.73% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                                              33.68µ ±  1%                        24.22µ ±  3%  -28.09% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                                          33.74µ ±  2%                        23.99µ ±  2%  -28.90% (p=0.000 n=10)
+StorageRead/coarse/pebble-2                                                                                5.386µ ±  2%                        4.289µ ±  2%  -20.38% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/classic-2                                                                 12.86µ ±  2%                        12.81µ ±  8%        ~ (p=0.684 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                17.44µ ±  3%                        17.37µ ±  2%        ~ (p=0.684 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                            17.45µ ±  6%                        17.29µ ±  7%        ~ (p=0.481 n=10)
+StorageConcurrentWrite/workers=1/pebble-2                                                                  203.1µ ±  2%                        202.7µ ±  4%        ~ (p=0.796 n=10)
+StorageConcurrentWrite/workers=8/classic-2                                                                 65.58µ ±  5%                        64.73µ ±  2%        ~ (p=0.529 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                78.32µ ±  5%                        78.34µ ±  2%        ~ (p=0.739 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                            79.62µ ±  4%                        78.60µ ±  3%        ~ (p=0.190 n=10)
+StorageConcurrentWrite/workers=8/pebble-2                                                                  311.4µ ±  9%                        310.1µ ± 13%        ~ (p=0.579 n=10)
+StorageConcurrentWrite/workers=32/classic-2                                                                215.3µ ±  3%                        215.0µ ±  2%        ~ (p=0.631 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-2                                                               259.7µ ±  4%                        255.2µ ±  3%        ~ (p=0.052 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                           259.5µ ±  2%                        256.4µ ±  2%        ~ (p=0.089 n=10)
+StorageConcurrentWrite/workers=32/pebble-2                                                                 390.9µ ±  6%                        389.4µ ±  3%        ~ (p=0.529 n=10)
+StorageMaintenance/cwhisper-ooo-2                                                                          191.4µ ±  7%                        182.6µ ±  4%   -4.61% (p=0.023 n=10)
+StorageMaintenance/pebble-2                                                                                1.904m ±  6%                        1.892m ±  1%        ~ (p=0.165 n=10)
+StorageReopen/classic-2                                                                                   10.398µ ±  4%                        9.958µ ±  3%   -4.23% (p=0.001 n=10)
+StorageReopen/cwhisper-2                                                                                   18.11µ ±  5%                        14.17µ ±  4%  -21.75% (p=0.000 n=10)
+StorageReopen/cwhisper-ooo-2                                                                               17.67µ ±  5%                        13.81µ ±  6%  -21.84% (p=0.000 n=10)
+StorageReopen/pebble-2                                                                                     1.681m ±  2%                        1.662m ±  3%        ~ (p=0.315 n=10)
+geomean                                                                                                    39.86µ                              36.92µ         -7.38%
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                           files                           │              files                vs base                 │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                             2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                            2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                        3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                              7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                           256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                          256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                      384.0 ± 0%                         384.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                            7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                             2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                            2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                        3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                              7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                           256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                          256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                      384.0 ± 0%                         384.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                            7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                            2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                           2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                       3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                             7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                          256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                         256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                     384.0 ± 0%                         384.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                           7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                          2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                     3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                           7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                        256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                   384.0 ± 0%                         384.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                         7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                          2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                     3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                           7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                        256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                   384.0 ± 0%                         384.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                         7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                         2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                    3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                          7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                       256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                  384.0 ± 0%                         384.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                        7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/classic-2                                                                                 2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-2                                                                                2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                                            3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                                                  8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/classic-2                                                                              2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-2                                                                             2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                                                         3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                                               8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/classic-2                                                                                 2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-2                                                                                2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                                            3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                                                  8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/classic-2                                                                   2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                  2.000 ± 0%                         2.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                              3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/pebble-2                                                                    7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/classic-2                                                                   16.00 ± 0%                         16.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                  16.00 ± 0%                         16.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                              24.00 ± 0%                         24.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/pebble-2                                                                    7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/classic-2                                                                  64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-2                                                                 64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                             96.00 ± 0%                         96.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/pebble-2                                                                   7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageMaintenance/cwhisper-ooo-2                                                                            3.000 ± 0%                         3.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageMaintenance/pebble-2                                                                                  7.000 ± 0%                         7.000 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                                                      11.91                              11.91       +0.00%
+¹ all samples are equal
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                     logical-B/metric                      │         logical-B/metric          vs base                 │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                           7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                          4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                      4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                            9.541Ki ± 0%                       9.541Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                         7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                        4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                    4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                          6.266Ki ± 0%                       6.266Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                           7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                          4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                      4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                            9.538Ki ± 0%                       9.538Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                         7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                        4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                    4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                          6.600Ki ± 0%                       6.600Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                          7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                         4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                     4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                           10.14Ki ± 0%                       10.14Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                        7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                       4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                   4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                         7.034Ki ± 0%                       7.034Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                        7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                   4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                         9.541Ki ± 0%                       9.541Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                      7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                 4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                       6.266Ki ± 0%                       6.266Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                        7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                   4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                         9.538Ki ± 0%                       9.538Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                      7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                 4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                       6.600Ki ± 0%                       6.600Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                       7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                  4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                        10.14Ki ± 0%                       10.14Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                     7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                      7.034Ki ± 0%                       7.034Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/classic-2                                                                               38.01Ki ± 0%                       38.01Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-2                                                                              11.68Ki ± 0%                       11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                                          11.68Ki ± 0%                       11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                                                68.73Ki ± 0%                       68.73Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/classic-2                                                                            38.01Ki ± 0%                       38.01Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-2                                                                           11.68Ki ± 0%                       11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                                                       11.68Ki ± 0%                       11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                                             68.73Ki ± 0%                       68.73Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/classic-2                                                                               38.01Ki ± 0%                       38.01Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-2                                                                              11.68Ki ± 0%                       11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                                          11.68Ki ± 0%                       11.68Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                                                68.73Ki ± 0%                       68.73Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/classic-2                                                                 7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                            4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/pebble-2                                                                  9.538Ki ± 0%                       9.538Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/classic-2                                                                 7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                            4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/pebble-2                                                                  7.399Ki ± 0%                       7.399Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/classic-2                                                                7.059Ki ± 0%                       7.059Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-2                                                               4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                           4.806Ki ± 0%                       4.806Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/pebble-2                                                                 7.157Ki ± 0%                       7.157Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageMaintenance/cwhisper-ooo-2                                                                          12.53Ki ± 0%                       12.53Ki ± 0%       ~ (p=1.000 n=10) ¹
+StorageMaintenance/pebble-2                                                                                133.6Ki ± 0%                       133.6Ki ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                                                    8.310Ki                            8.310Ki       +0.00%
+¹ all samples are equal
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                         sec/point                         │             sec/point              vs base                │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                           8.936µ ±  2%                        8.811µ ±  2%        ~ (p=0.063 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                          10.72µ ±  3%                        10.59µ ±  1%   -1.17% (p=0.043 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                      10.80µ ±  2%                        10.69µ ±  1%        ~ (p=0.075 n=10)
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                            194.0µ ±  8%                        205.4µ ±  6%        ~ (p=0.190 n=10)
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                         9.851µ ±  5%                        9.753µ ±  2%        ~ (p=0.315 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                        11.80µ ±  2%                        11.80µ ±  2%        ~ (p=0.896 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                    11.80µ ±  1%                        11.72µ ±  9%        ~ (p=0.853 n=10)
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                          197.1µ ±  6%                        191.9µ ±  9%        ~ (p=0.529 n=10)
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                           1.143µ ±  2%                        1.148µ ±  3%        ~ (p=0.724 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                          1.388µ ±  3%                        1.393µ ±  2%        ~ (p=0.631 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                      1.408µ ±  1%                        1.425µ ±  3%        ~ (p=0.148 n=10)
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                            25.42µ ± 11%                        25.18µ ±  1%        ~ (p=0.165 n=10)
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                         1.256µ ± 11%                        1.252µ ±  3%        ~ (p=0.796 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                        1.544µ ±  5%                        1.547µ ±  2%        ~ (p=0.926 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                    1.555µ ±  4%                        1.549µ ±  3%        ~ (p=0.343 n=10)
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                          24.92µ ±  6%                        25.00µ ±  2%        ~ (p=0.912 n=10)
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                          209.6n ±  2%                        209.5n ±  2%        ~ (p=0.971 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                         277.8n ±  2%                        277.2n ±  2%        ~ (p=0.987 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                     296.1n ±  2%                        291.5n ±  2%        ~ (p=0.089 n=10)
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                           3.468µ ± 17%                        3.645µ ±  8%        ~ (p=0.669 n=10)
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                        228.7n ±  5%                        227.4n ±  2%        ~ (p=0.393 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                       304.6n ±  5%                        296.2n ±  4%        ~ (p=0.052 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                   316.8n ±  2%                        317.1n ±  5%        ~ (p=0.699 n=10)
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                         2.720µ ±  3%                        2.754µ ±  3%        ~ (p=0.811 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                        8.775µ ±  2%                        8.763µ ±  1%        ~ (p=0.971 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                   21.35µ ±  4%                        20.45µ ±  1%   -4.22% (p=0.001 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                         193.5µ ±  6%                        193.8µ ± 14%        ~ (p=0.579 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                      9.845µ ±  4%                        9.771µ ±  2%        ~ (p=0.315 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                 22.51µ ±  2%                        22.57µ ±  2%        ~ (p=1.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                       201.0µ ±  5%                        193.7µ ±  5%        ~ (p=0.393 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                        1.137µ ±  1%                        1.149µ ±  2%        ~ (p=0.118 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                   3.655µ ±  1%                        2.916µ ±  1%  -20.22% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                         25.25µ ±  1%                        25.27µ ±  1%        ~ (p=0.853 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                      1.253µ ±  2%                        1.256µ ±  2%        ~ (p=0.617 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                 3.137µ ±  1%                        3.139µ ±  2%        ~ (p=0.725 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                       25.16µ ±  7%                        25.07µ ±  7%        ~ (p=0.739 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                       211.2n ±  2%                        211.0n ±  3%        ~ (p=0.869 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                 1540.5n ±  2%                        770.7n ±  3%  -49.97% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                        3.463µ ±  5%                        3.439µ ±  2%        ~ (p=0.393 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                     233.7n ±  2%                        228.3n ±  2%   -2.27% (p=0.030 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                               1391.5n ±  4%                        799.0n ±  2%  -42.58% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                      2.731µ ± 10%                        2.770µ ±  3%        ~ (p=0.739 n=10)
+StorageConcurrentWrite/workers=1/classic-2                                                                 1.608µ ±  2%                        1.602µ ±  8%        ~ (p=0.725 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                2.181µ ±  3%                        2.172µ ±  2%        ~ (p=0.684 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                            2.181µ ±  6%                        2.160µ ±  7%        ~ (p=0.481 n=10)
+StorageConcurrentWrite/workers=1/pebble-2                                                                  25.39µ ±  2%                        25.33µ ±  4%        ~ (p=0.796 n=10)
+StorageConcurrentWrite/workers=8/classic-2                                                                 1.025µ ±  5%                        1.012µ ±  2%        ~ (p=0.515 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                1.224µ ±  4%                        1.224µ ±  2%        ~ (p=0.698 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                            1.244µ ±  4%                        1.228µ ±  3%        ~ (p=0.190 n=10)
+StorageConcurrentWrite/workers=8/pebble-2                                                                  4.866µ ±  9%                        4.846µ ± 13%        ~ (p=0.579 n=10)
+StorageConcurrentWrite/workers=32/classic-2                                                                841.0n ±  3%                        839.8n ±  2%        ~ (p=0.631 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-2                                                              1014.0n ±  4%                        997.1n ±  3%   -1.66% (p=0.050 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                           1.014µ ±  2%                        1.002µ ±  2%        ~ (p=0.085 n=10)
+StorageConcurrentWrite/workers=32/pebble-2                                                                 1.528µ ±  6%                        1.521µ ±  3%        ~ (p=0.494 n=10)
+geomean                                                                                                    3.361µ                              3.260µ         -3.01%
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                         points/op                         │            points/op              vs base                 │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                             1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                            1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                        1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                              1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                           1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                          1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                      1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                            1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                             8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                            8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                        8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                              8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                           8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                          8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                      8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                            8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                            64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                           64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                       64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                             64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                          64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                         64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                     64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                           64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                          1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                     1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                           1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                        1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                   1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                         1.000 ± 0%                         1.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                          8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                     8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                           8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                        8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                   8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                         8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                         64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                    64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                          64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                       64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                  64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                        64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/classic-2                                                                   8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                  8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                              8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/pebble-2                                                                    8.000 ± 0%                         8.000 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/classic-2                                                                   64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                  64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                              64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/pebble-2                                                                    64.00 ± 0%                         64.00 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/classic-2                                                                  256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-2                                                                 256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                             256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/pebble-2                                                                   256.0 ± 0%                         256.0 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                                                      12.06                              12.06       +0.00%
+¹ all samples are equal
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                         points/s                          │             points/s               vs base                │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                           111.9k ±  2%                        113.5k ±  2%        ~ (p=0.063 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                          93.29k ±  3%                        94.39k ±  1%   +1.18% (p=0.043 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                      92.62k ±  2%                        93.57k ±  1%        ~ (p=0.075 n=10)
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                            5.154k ±  7%                        4.872k ±  6%        ~ (p=0.190 n=10)
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                         101.5k ±  4%                        102.5k ±  2%        ~ (p=0.315 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                        84.78k ±  2%                        84.74k ±  2%        ~ (p=0.912 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                    84.72k ±  1%                        85.29k ±  9%        ~ (p=0.853 n=10)
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                          5.077k ±  6%                        5.210k ±  9%        ~ (p=0.529 n=10)
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                           874.7k ±  2%                        871.5k ±  3%        ~ (p=0.796 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                          720.6k ±  3%                        718.3k ±  2%        ~ (p=0.631 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                      710.2k ±  1%                        702.2k ±  3%        ~ (p=0.143 n=10)
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                            39.34k ± 10%                        39.71k ±  1%        ~ (p=0.165 n=10)
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                         796.5k ± 10%                        798.5k ±  3%        ~ (p=0.853 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                        647.9k ±  5%                        646.8k ±  2%        ~ (p=0.971 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                    643.3k ±  4%                        645.9k ±  3%        ~ (p=0.353 n=10)
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                          40.12k ±  6%                        40.00k ±  2%        ~ (p=0.912 n=10)
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                          4.772M ±  2%                        4.773M ±  2%        ~ (p=0.971 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                         3.600M ±  2%                        3.608M ±  2%        ~ (p=0.971 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                     3.377M ±  2%                        3.430M ±  2%        ~ (p=0.089 n=10)
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                           288.3k ± 14%                        274.9k ±  8%        ~ (p=0.684 n=10)
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                        4.373M ±  5%                        4.396M ±  2%        ~ (p=0.393 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                       3.284M ±  5%                        3.376M ±  4%        ~ (p=0.052 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                   3.157M ±  2%                        3.153M ±  5%        ~ (p=0.739 n=10)
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                         367.8k ±  3%                        363.2k ±  3%        ~ (p=0.796 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                        114.0k ±  2%                        114.1k ±  1%        ~ (p=0.971 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                   46.84k ±  4%                        48.90k ±  1%   +4.40% (p=0.001 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                         5.169k ±  6%                        5.160k ± 12%        ~ (p=0.579 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                      101.6k ±  4%                        102.3k ±  2%        ~ (p=0.315 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                 44.42k ±  2%                        44.32k ±  2%        ~ (p=1.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                       4.976k ±  6%                        5.162k ±  5%        ~ (p=0.382 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                        879.2k ±  1%                        870.2k ±  2%        ~ (p=0.123 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                   273.6k ±  1%                        343.0k ±  1%  +25.33% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                         39.61k ±  1%                        39.57k ±  1%        ~ (p=0.853 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                      798.3k ±  2%                        796.5k ±  2%        ~ (p=0.684 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                 318.8k ±  1%                        318.7k ±  2%        ~ (p=0.739 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                       39.74k ±  6%                        39.88k ±  7%        ~ (p=0.739 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                       4.736M ±  2%                        4.740M ±  3%        ~ (p=0.853 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                  649.2k ±  2%                       1297.4k ±  3%  +99.85% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                        288.8k ±  5%                        290.9k ±  2%        ~ (p=0.393 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                     4.280M ±  2%                        4.379M ±  2%   +2.30% (p=0.035 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                718.5k ±  4%                       1251.6k ±  2%  +74.18% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                      366.3k ±  9%                        361.0k ±  3%        ~ (p=0.739 n=10)
+StorageConcurrentWrite/workers=1/classic-2                                                                 622.0k ±  2%                        624.3k ±  8%        ~ (p=0.684 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                458.6k ±  3%                        460.5k ±  2%        ~ (p=0.684 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                            458.6k ±  7%                        462.8k ±  8%        ~ (p=0.481 n=10)
+StorageConcurrentWrite/workers=1/pebble-2                                                                  39.38k ±  2%                        39.47k ±  4%        ~ (p=0.796 n=10)
+StorageConcurrentWrite/workers=8/classic-2                                                                 975.9k ±  5%                        988.8k ±  2%        ~ (p=0.529 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                817.2k ±  4%                        816.9k ±  2%        ~ (p=0.739 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                            803.8k ±  5%                        814.2k ±  3%        ~ (p=0.190 n=10)
+StorageConcurrentWrite/workers=8/pebble-2                                                                  205.5k ±  8%                        206.4k ± 12%        ~ (p=0.579 n=10)
+StorageConcurrentWrite/workers=32/classic-2                                                                1.189M ±  4%                        1.191M ±  3%        ~ (p=0.631 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-2                                                               985.9k ±  4%                       1003.0k ±  3%        ~ (p=0.052 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                           986.6k ±  2%                        998.3k ±  2%        ~ (p=0.089 n=10)
+StorageConcurrentWrite/workers=32/pebble-2                                                                 654.9k ±  5%                        657.5k ±  3%        ~ (p=0.529 n=10)
+geomean                                                                                                    297.5k                              306.7k         +3.10%
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                           B/op                            │              B/op                vs base                  │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                           1.414Ki ± 0%                      1.414Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                          2.609Ki ± 0%                      2.266Ki ± 0%  -13.17% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                      2.609Ki ± 0%                      2.266Ki ± 0%  -13.17% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                              639.0 ± 0%                        639.0 ± 0%        ~ (p=0.334 n=10)
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                         1.414Ki ± 0%                      1.414Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                        2.609Ki ± 0%                      2.266Ki ± 0%  -13.17% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                    2.625Ki ± 1%                      2.281Ki ± 1%  -13.10% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                            597.0 ± 1%                        597.5 ± 0%        ~ (p=0.900 n=10)
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                           1.852Ki ± 0%                      1.852Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                          3.047Ki ± 0%                      2.703Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                      3.047Ki ± 0%                      2.703Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                             1021.0 ± 0%                       1020.0 ± 0%        ~ (p=0.350 n=10)
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                         1.852Ki ± 0%                      1.852Ki ± 0%        ~ (p=1.000 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                        3.047Ki ± 0%                      2.703Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                    3.062Ki ± 1%                      2.719Ki ± 0%  -11.22% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                            950.5 ± 0%                        950.5 ± 0%        ~ (p=0.744 n=10)
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                          10.77Ki ± 0%                      10.77Ki ± 0%        ~ (p=0.350 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                         13.17Ki ± 0%                      12.83Ki ± 0%   -2.61% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                     15.46Ki ± 0%                      15.12Ki ± 0%   -2.23% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                           7.768Ki ± 0%                      7.770Ki ± 0%        ~ (p=0.470 n=10)
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                        10.77Ki ± 0%                      10.77Ki ± 0%        ~ (p=0.582 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                       13.17Ki ± 0%                      12.83Ki ± 0%   -2.61% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                   15.51Ki ± 0%                      15.17Ki ± 0%   -2.22% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                         7.885Ki ± 0%                      7.880Ki ± 0%        ~ (p=0.591 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                        1.414Ki ± 0%                      1.414Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                   4.736Ki ± 0%                      3.684Ki ± 1%  -22.23% (p=0.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                           639.0 ± 0%                        639.0 ± 0%        ~ (p=1.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                      1.414Ki ± 0%                      1.414Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                 4.050Ki ± 0%                      3.706Ki ± 1%   -8.49% (p=0.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                         597.0 ± 0%                        597.5 ± 0%        ~ (p=0.513 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                        1.852Ki ± 0%                      1.852Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                  10.964Ki ± 0%                      4.652Ki ± 1%  -57.57% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                          1020.5 ± 0%                       1020.0 ± 0%        ~ (p=0.350 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                      1.852Ki ± 0%                      1.852Ki ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                 5.020Ki ± 0%                      4.676Ki ± 1%   -6.85% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                         950.0 ± 0%                        952.0 ± 0%   +0.21% (p=0.003 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                       10.77Ki ± 0%                      10.77Ki ± 0%        ~ (p=1.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                  77.45Ki ± 0%                      24.19Ki ± 0%  -68.77% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                        7.768Ki ± 0%                      7.766Ki ± 0%        ~ (p=0.319 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                     10.77Ki ± 0%                      10.77Ki ± 0%        ~ (p=1.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                63.93Ki ± 0%                      24.18Ki ± 0%  -62.17% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                      7.885Ki ± 0%                      7.896Ki ± 0%        ~ (p=0.147 n=10)
+StorageRead/recent/classic-2                                                                               6.094Ki ± 0%                      4.094Ki ± 0%  -32.82% (p=0.000 n=10)
+StorageRead/recent/cwhisper-2                                                                             21.221Ki ± 0%                      9.610Ki ± 0%  -54.71% (p=0.000 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                                         21.252Ki ± 0%                      9.642Ki ± 0%  -54.63% (p=0.000 n=10)
+StorageRead/recent/pebble-2                                                                                1.974Ki ± 0%                      1.731Ki ± 0%  -12.30% (p=0.000 n=10)
+StorageRead/fine-full/classic-2                                                                            94.86Ki ± 0%                      38.86Ki ± 0%  -59.03% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                                          112.80Ki ± 0%                      66.54Ki ± 0%  -41.01% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                                      112.80Ki ± 0%                      66.54Ki ± 0%  -41.01% (p=0.000 n=10)
+StorageRead/fine-full/pebble-2                                                                             17.26Ki ± 0%                      17.01Ki ± 0%   -1.43% (p=0.000 n=10)
+StorageRead/coarse/classic-2                                                                              20.078Ki ± 0%                      9.344Ki ± 0%  -53.46% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                                              44.08Ki ± 0%                      22.87Ki ± 0%  -48.12% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                                          44.11Ki ± 0%                      22.90Ki ± 0%  -48.09% (p=0.000 n=10)
+StorageRead/coarse/pebble-2                                                                                4.001Ki ± 0%                      3.760Ki ± 0%   -6.04% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/classic-2                                                                 1.836Ki ± 1%                      1.836Ki ± 0%        ~ (p=0.474 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                3.047Ki ± 1%                      2.703Ki ± 1%  -11.28% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                            3.047Ki ± 0%                      2.703Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/pebble-2                                                                   1022.0 ± 0%                       1022.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/classic-2                                                                 14.69Ki ± 1%                      14.69Ki ± 0%        ~ (p=0.391 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                24.38Ki ± 1%                      21.63Ki ± 1%  -11.28% (p=0.000 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                            24.38Ki ± 0%                      21.63Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageConcurrentWrite/workers=8/pebble-2                                                                  7.657Ki ± 0%                      7.654Ki ± 0%        ~ (p=0.382 n=10)
+StorageConcurrentWrite/workers=32/classic-2                                                                59.25Ki ± 1%                      59.00Ki ± 1%        ~ (p=0.722 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-2                                                               97.51Ki ± 0%                      86.51Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                           97.51Ki ± 0%                      86.51Ki ± 0%  -11.28% (p=0.000 n=10)
+StorageConcurrentWrite/workers=32/pebble-2                                                                 31.33Ki ± 0%                      31.33Ki ± 0%        ~ (p=0.405 n=10)
+StorageMaintenance/cwhisper-ooo-2                                                                          159.0Ki ± 0%                      158.4Ki ± 0%   -0.40% (p=0.000 n=10)
+StorageMaintenance/pebble-2                                                                                145.4Ki ± 0%                      145.4Ki ± 1%        ~ (p=0.853 n=10)
+StorageReopen/classic-2                                                                                    5.141Ki ± 0%                      3.391Ki ± 0%  -34.04% (p=0.000 n=10)
+StorageReopen/cwhisper-2                                                                                  10.633Ki ± 0%                      5.477Ki ± 0%  -48.49% (p=0.000 n=10)
+StorageReopen/cwhisper-ooo-2                                                                              10.727Ki ± 0%                      5.570Ki ± 0%  -48.07% (p=0.000 n=10)
+StorageReopen/pebble-2                                                                                     362.9Ki ± 0%                      362.5Ki ± 0%        ~ (p=0.089 n=10)
+geomean                                                                                                    7.407Ki                           6.165Ki       -16.77%
+¹ all samples are equal
+
+                                                            │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                                            │                         allocs/op                         │            allocs/op             vs base                  │
+StorageWrite/ordered/batch=1/metrics=1/classic-2                                                             24.00 ± 0%                        24.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-2                                                            28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=1/cwhisper-ooo-2                                                        28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=1/pebble-2                                                              14.00 ± 0%                        14.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/classic-2                                                           24.00 ± 0%                        24.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-2                                                          28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=128/cwhisper-ooo-2                                                      28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=1/metrics=128/pebble-2                                                            15.00 ± 0%                        15.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/classic-2                                                             27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-2                                                            28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=1/cwhisper-ooo-2                                                        28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=1/pebble-2                                                              17.00 ± 0%                        17.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/classic-2                                                           27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-2                                                          28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=128/cwhisper-ooo-2                                                      28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageWrite/ordered/batch=8/metrics=128/pebble-2                                                            18.00 ± 0%                        18.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/classic-2                                                            40.00 ± 0%                        40.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-2                                                           40.00 ± 0%                        39.00 ± 0%   -2.50% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=1/cwhisper-ooo-2                                                       43.00 ± 0%                        42.00 ± 0%   -2.33% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=1/pebble-2                                                             26.00 ± 0%                        26.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/classic-2                                                          40.00 ± 0%                        40.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-2                                                         40.00 ± 0%                        39.00 ± 0%   -2.50% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=128/cwhisper-ooo-2                                                     43.00 ± 0%                        42.00 ± 0%   -2.33% (p=0.000 n=10)
+StorageWrite/ordered/batch=64/metrics=128/pebble-2                                                           27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/classic-2                                                          24.00 ± 0%                        24.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=1/cwhisper-ooo-2                                                     49.00 ± 0%                        48.00 ± 0%   -2.04% (p=0.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=1/pebble-2                                                           14.00 ± 0%                        14.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/classic-2                                                        24.00 ± 0%                        24.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=1/metrics=128/cwhisper-ooo-2                                                   48.00 ± 0%                        47.00 ± 0%   -2.08% (p=0.000 n=10)
+StorageWrite/late-holes/batch=1/metrics=128/pebble-2                                                         15.00 ± 0%                        15.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/classic-2                                                          27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=1/cwhisper-ooo-2                                                     61.00 ± 0%                        57.00 ± 0%   -6.56% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=1/pebble-2                                                           17.00 ± 0%                        17.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/classic-2                                                        27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=8/metrics=128/cwhisper-ooo-2                                                   57.00 ± 0%                        56.00 ± 0%   -1.75% (p=0.000 n=10)
+StorageWrite/late-holes/batch=8/metrics=128/pebble-2                                                         18.00 ± 0%                        18.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/classic-2                                                         40.00 ± 0%                        40.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=1/cwhisper-ooo-2                                                    146.0 ± 0%                        111.0 ± 0%  -23.97% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=1/pebble-2                                                          26.00 ± 0%                        26.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/classic-2                                                       40.00 ± 0%                        40.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageWrite/late-holes/batch=64/metrics=128/cwhisper-ooo-2                                                  137.0 ± 0%                        110.0 ± 0%  -19.71% (p=0.000 n=10)
+StorageWrite/late-holes/batch=64/metrics=128/pebble-2                                                        27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageRead/recent/classic-2                                                                                 24.00 ± 0%                        23.00 ± 0%   -4.17% (p=0.000 n=10)
+StorageRead/recent/cwhisper-2                                                                                52.00 ± 0%                        41.00 ± 0%  -21.15% (p=0.000 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                                            52.00 ± 0%                        41.00 ± 0%  -21.15% (p=0.000 n=10)
+StorageRead/recent/pebble-2                                                                                  19.00 ± 0%                        15.00 ± 0%  -21.05% (p=0.000 n=10)
+StorageRead/fine-full/classic-2                                                                              26.00 ± 0%                        23.00 ± 0%  -11.54% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                                             58.00 ± 0%                        36.00 ± 0%  -37.93% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                                         58.00 ± 0%                        36.00 ± 0%  -37.93% (p=0.000 n=10)
+StorageRead/fine-full/pebble-2                                                                               24.00 ± 0%                        20.00 ± 0%  -16.67% (p=0.000 n=10)
+StorageRead/coarse/classic-2                                                                                 26.00 ± 0%                        23.00 ± 0%  -11.54% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                                               105.00 ± 0%                        57.00 ± 0%  -45.71% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                                           105.00 ± 0%                        57.00 ± 0%  -45.71% (p=0.000 n=10)
+StorageRead/coarse/pebble-2                                                                                  20.00 ± 0%                        16.00 ± 0%  -20.00% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/classic-2                                                                   27.00 ± 0%                        27.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=1/cwhisper-2                                                                  28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/cwhisper-ooo-2                                                              28.00 ± 0%                        27.00 ± 0%   -3.57% (p=0.000 n=10)
+StorageConcurrentWrite/workers=1/pebble-2                                                                    17.00 ± 0%                        17.00 ± 0%        ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/classic-2                                                                   216.0 ± 0%                        216.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=8/cwhisper-2                                                                  224.0 ± 0%                        216.0 ± 0%   -3.57% (p=0.000 n=10)
+StorageConcurrentWrite/workers=8/cwhisper-ooo-2                                                              224.0 ± 0%                        216.0 ± 0%   -3.57% (p=0.000 n=10)
+StorageConcurrentWrite/workers=8/pebble-2                                                                    143.0 ± 0%                        143.0 ± 0%        ~ (p=1.000 n=10)
+StorageConcurrentWrite/workers=32/classic-2                                                                  864.0 ± 0%                        864.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageConcurrentWrite/workers=32/cwhisper-2                                                                 896.0 ± 0%                        864.0 ± 0%   -3.57% (p=0.000 n=10)
+StorageConcurrentWrite/workers=32/cwhisper-ooo-2                                                             896.0 ± 0%                        864.0 ± 0%   -3.57% (p=0.000 n=10)
+StorageConcurrentWrite/workers=32/pebble-2                                                                   578.0 ± 0%                        578.0 ± 0%        ~ (p=1.000 n=10) ¹
+StorageMaintenance/cwhisper-ooo-2                                                                           100.00 ± 0%                        98.00 ± 0%   -2.00% (p=0.000 n=10)
+StorageMaintenance/pebble-2                                                                                  537.0 ± 0%                        536.0 ± 0%        ~ (p=0.598 n=10)
+StorageReopen/classic-2                                                                                      22.00 ± 0%                        21.00 ± 0%   -4.55% (p=0.000 n=10)
+StorageReopen/cwhisper-2                                                                                     47.00 ± 0%                        32.00 ± 0%  -31.91% (p=0.000 n=10)
+StorageReopen/cwhisper-ooo-2                                                                                 47.00 ± 0%                        32.00 ± 0%  -31.91% (p=0.000 n=10)
+StorageReopen/pebble-2                                                                                       661.0 ± 0%                        656.0 ± 0%   -0.76% (p=0.000 n=10)
+geomean                                                                                                      46.39                             42.89        -7.55%
+¹ all samples are equal
+
+                                     │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                     │                         sec/value                         │             sec/value              vs base                │
+StorageRead/recent/classic-2                                                         78.59n ± 3%                         76.95n ± 3%        ~ (p=0.093 n=10)
+StorageRead/recent/cwhisper-2                                                       135.65n ± 7%                         99.78n ± 3%  -26.44% (p=0.000 n=10)
+StorageRead/recent/cwhisper-ooo-2                                                    136.4n ± 2%                         100.3n ± 5%  -26.46% (p=0.000 n=10)
+StorageRead/recent/pebble-2                                                          70.91n ± 1%                         63.23n ± 2%  -10.84% (p=0.001 n=10)
+StorageRead/fine-full/classic-2                                                     13.435n ± 4%                         8.588n ± 6%  -36.08% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-2                                                     47.14n ± 1%                         28.11n ± 2%  -40.36% (p=0.000 n=10)
+StorageRead/fine-full/cwhisper-ooo-2                                                 47.19n ± 1%                         27.92n ± 2%  -40.82% (p=0.000 n=10)
+StorageRead/fine-full/pebble-2                                                       26.00n ± 1%                         25.53n ± 1%   -1.81% (p=0.001 n=10)
+StorageRead/coarse/classic-2                                                         32.71n ± 3%                         29.21n ± 4%  -10.71% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-2                                                        94.09n ± 1%                         67.66n ± 3%  -28.09% (p=0.000 n=10)
+StorageRead/coarse/cwhisper-ooo-2                                                    94.23n ± 2%                         66.99n ± 2%  -28.91% (p=0.000 n=10)
+StorageRead/coarse/pebble-2                                                          15.04n ± 2%                         11.99n ± 2%  -20.34% (p=0.000 n=10)
+geomean                                                                              51.52n                              39.23n       -23.85%
+
+                                     │ baseline-matrix-all.txt │ accepted-matrix-all.txt │
+                                     │                         values/op                         │            values/op              vs base                 │
+StorageRead/recent/classic-2                                                          120.0 ± 0%                         120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-2                                                         120.0 ± 0%                         120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/cwhisper-ooo-2                                                     120.0 ± 0%                         120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/recent/pebble-2                                                           120.0 ± 0%                         120.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/classic-2                                                      1.800k ± 0%                        1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-2                                                     1.800k ± 0%                        1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/cwhisper-ooo-2                                                 1.800k ± 0%                        1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/fine-full/pebble-2                                                       1.800k ± 0%                        1.800k ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/classic-2                                                          358.0 ± 0%                         358.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-2                                                         358.0 ± 0%                         358.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/cwhisper-ooo-2                                                     358.0 ± 0%                         358.0 ± 0%       ~ (p=1.000 n=10) ¹
+StorageRead/coarse/pebble-2                                                           358.0 ± 0%                         358.0 ± 0%       ~ (p=1.000 n=10) ¹
+geomean                                                                               426.0                              426.0       +0.00%
+¹ all samples are equal

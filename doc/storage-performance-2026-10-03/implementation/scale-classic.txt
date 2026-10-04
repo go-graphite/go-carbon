@@ -1,0 +1,6 @@
+=== RUN   TestStorageScaleProbe
+    scale_probe_test.go:17: engine=classic metrics=100000 workers=32 setup=25.218352659s
+    scale_probe_test.go:35: engine=classic points=2400000 reads=30000 wall=11.81099249s cpu-us/point=6.962 allocated-B/point=968.4 batch-mixed-p95-us=234.229 batch-mixed-p99-us=27482.572 maxrss-KiB=42008
+    scale_probe_test.go:48: engine=classic verified-metrics=100000 maintenance-sample=252 maintenance=448.621473ms files=200000 logical-bytes=1589200000 allocated-bytes=1638400000 live-heap-bytes=556384
+--- PASS: TestStorageScaleProbe (41.12s)
+PASS

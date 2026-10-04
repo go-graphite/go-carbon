@@ -1,0 +1,21 @@
+File: accepted.test
+Build ID: c8a2a5d1895d0dce35354145cb6d1755ee023f29
+Type: cpu
+Time: 2026-10-03 21:50:15 CEST
+Duration: 3.54s, Total samples = 3980ms (112.43%)
+Showing nodes accounting for 2510ms, 63.07% of 3980ms total
+Dropped 93 nodes (cum <= 19.90ms)
+Showing top 12 nodes out of 200
+      flat  flat%   sum%        cum   cum%
+    1100ms 27.64% 27.64%     1100ms 27.64%  internal/runtime/syscall/linux.Syscall6
+     350ms  8.79% 36.43%      350ms  8.79%  github.com/go-graphite/go-whisper.(*bitsReader).Read
+     220ms  5.53% 41.96%      630ms 15.83%  github.com/go-graphite/go-whisper.(*archiveInfo).ReadFromBlock
+     160ms  4.02% 45.98%      160ms  4.02%  runtime.memmove
+     130ms  3.27% 49.25%      160ms  4.02%  runtime.mapassign_fast64
+     110ms  2.76% 52.01%      260ms  6.53%  sort.partition_func
+     100ms  2.51% 54.52%      150ms  3.77%  runtime.mapaccess2_fast64
+      70ms  1.76% 56.28%     1050ms 26.38%  github.com/go-graphite/go-whisper.(*Whisper).recomputeArchiveAggregates
+      70ms  1.76% 58.04%      280ms  7.04%  internal/reflectlite.typedmemmove
+      70ms  1.76% 59.80%       70ms  1.76%  runtime.futex
+      70ms  1.76% 61.56%       70ms  1.76%  runtime.memclrNoHeapPointers
+      60ms  1.51% 63.07%       60ms  1.51%  encoding/binary.bigEndian.Uint32

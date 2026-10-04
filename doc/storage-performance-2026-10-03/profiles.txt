@@ -1,0 +1,472 @@
+
+# ordered-classic.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:16 CEST
+Duration: 2.13s, Total samples = 2160ms (101.38%)
+Showing nodes accounting for 1780ms, 82.41% of 2160ms total
+Dropped 72 nodes (cum <= 10.80ms)
+Showing top 18 nodes out of 92
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%     2110ms 97.69%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%     2110ms 97.69%  testing.(*B).launch
+         0     0%     0%     2110ms 97.69%  testing.(*B).runN
+         0     0%     0%     2080ms 96.30%  github.com/go-graphite/go-carbon/persister.(*storageBackend).update
+    1780ms 82.41% 82.41%     1780ms 82.41%  internal/runtime/syscall/linux.Syscall6
+         0     0% 82.41%     1690ms 78.24%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+         0     0% 82.41%     1690ms 78.24%  github.com/go-graphite/go-whisper.openWithOptions
+         0     0% 82.41%     1680ms 77.78%  syscall.RawSyscall6
+         0     0% 82.41%     1100ms 50.93%  syscall.Syscall
+         0     0% 82.41%     1040ms 48.15%  os.OpenFile
+         0     0% 82.41%     1040ms 48.15%  os.openFileNolog
+         0     0% 82.41%      720ms 33.33%  github.com/go-graphite/go-whisper.acquirePathLock
+         0     0% 82.41%      660ms 30.56%  syscall.Syscall6
+         0     0% 82.41%      550ms 25.46%  os.ignoringEINTR (inline)
+         0     0% 82.41%      550ms 25.46%  os.open
+         0     0% 82.41%      550ms 25.46%  os.openFileNolog.func1 (inline)
+         0     0% 82.41%      550ms 25.46%  syscall.Open (inline)
+         0     0% 82.41%      550ms 25.46%  syscall.openat
+
+# ordered-classic.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:18 CEST
+Showing nodes accounting for 16705.65kB, 100% of 16705.65kB total
+Showing top 18 nodes out of 49
+      flat  flat%   sum%        cum   cum%
+ 2048.56kB 12.26% 12.26%  2048.56kB 12.26%  github.com/go-graphite/go-whisper.unpackArchiveInfo (inline)
+ 2048.25kB 12.26% 24.52%  2048.25kB 12.26%  github.com/go-graphite/go-whisper.alignPoints
+ 2048.19kB 12.26% 36.78%  2048.19kB 12.26%  github.com/go-graphite/go-whisper.auxiliaryPath
+ 2048.19kB 12.26% 49.04%  2048.19kB 12.26%  os.newFile
+ 1536.11kB  9.20% 58.24%  1536.11kB  9.20%  github.com/go-graphite/go-whisper.packSequences
+ 1024.12kB  6.13% 64.37%  1024.12kB  6.13%  slices.Clone[go.shape.[]github.com/go-graphite/go-whisper.TimeSeriesPoint,go.shape.struct { Time int; Value float64 }]
+ 1024.11kB  6.13% 70.50%  1024.11kB  6.13%  github.com/go-graphite/go-carbon/persister.(*storageBackend).options
+ 1024.10kB  6.13% 76.63%  8193.12kB 49.04%  github.com/go-graphite/go-whisper.openWithOptions
+ 1024.09kB  6.13% 82.76%  1024.09kB  6.13%  syscall.ByteSliceFromString
+ 1024.08kB  6.13% 88.89%  1024.08kB  6.13%  internal/bytealg.MakeNoZero
+  688.56kB  4.12% 93.01%   688.56kB  4.12%  compress/flate.(*fastGen).addBlock
+  655.29kB  3.92% 96.94%   655.29kB  3.92%  compress/flate.NewWriter
+  512.01kB  3.06%   100%  1536.09kB  9.20%  github.com/go-graphite/go-carbon/persister.(*storageBackend).path
+         0     0%   100%   688.56kB  4.12%  compress/flate.(*Writer).Close (inline)
+         0     0%   100%   688.56kB  4.12%  compress/flate.(*compressor).close
+         0     0%   100%   688.56kB  4.12%  compress/flate.(*compressor).deflateFast
+         0     0%   100%   688.56kB  4.12%  compress/flate.(*fastEncL1).encode
+         0     0%   100%   688.56kB  4.12%  compress/gzip.(*Writer).Close
+
+# ordered-cwhisper.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:18 CEST
+Duration: 2.63s, Total samples = 2.71s (102.90%)
+Showing nodes accounting for 2.22s, 81.92% of 2.71s total
+Dropped 61 nodes (cum <= 0.01s)
+Showing top 18 nodes out of 111
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      2.68s 98.89%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%      2.68s 98.89%  testing.(*B).launch
+         0     0%     0%      2.68s 98.89%  testing.(*B).runN
+         0     0%     0%      2.65s 97.79%  github.com/go-graphite/go-carbon/persister.(*storageBackend).update
+     2.20s 81.18% 81.18%      2.20s 81.18%  internal/runtime/syscall/linux.Syscall6
+         0     0% 81.18%      2.10s 77.49%  syscall.RawSyscall6
+         0     0% 81.18%      1.83s 67.53%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+     0.02s  0.74% 81.92%      1.83s 67.53%  github.com/go-graphite/go-whisper.openWithOptions
+         0     0% 81.92%      1.37s 50.55%  syscall.Syscall
+         0     0% 81.92%      0.93s 34.32%  os.OpenFile
+         0     0% 81.92%      0.93s 34.32%  os.openFileNolog
+         0     0% 81.92%      0.76s 28.04%  syscall.Syscall6
+         0     0% 81.92%      0.63s 23.25%  github.com/go-graphite/go-whisper.acquirePathLock
+         0     0% 81.92%      0.52s 19.19%  github.com/go-graphite/go-whisper.(*Whisper).UpdateMany (inline)
+         0     0% 81.92%      0.52s 19.19%  github.com/go-graphite/go-whisper.(*Whisper).UpdateManyForArchive
+         0     0% 81.92%      0.51s 18.82%  os.ignoringEINTR (inline)
+         0     0% 81.92%      0.50s 18.45%  os.newFile
+         0     0% 81.92%      0.43s 15.87%  os.open
+
+# ordered-cwhisper.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:21 CEST
+Showing nodes accounting for 24613.50kB, 100% of 24613.50kB total
+Showing top 18 nodes out of 50
+      flat  flat%   sum%        cum   cum%
+ 5634.05kB 22.89% 22.89%  5634.05kB 22.89%  github.com/go-graphite/go-whisper.(*Whisper).readHeaderCompressed
+ 3584.59kB 14.56% 37.45%  3584.59kB 14.56%  os.statNolog
+ 3073.03kB 12.49% 49.94%  3073.03kB 12.49%  github.com/go-graphite/go-whisper.(*Whisper).WriteHeaderCompressed
+ 2048.19kB  8.32% 58.26%  2048.19kB  8.32%  github.com/go-graphite/go-whisper.auxiliaryPath
+ 2048.14kB  8.32% 66.58%  2048.14kB  8.32%  os.newFile
+ 1536.19kB  6.24% 72.82%  1536.19kB  6.24%  slices.Clone[go.shape.[]github.com/go-graphite/go-whisper.TimeSeriesPoint,go.shape.struct { Time int; Value float64 }] (inline)
+ 1024.19kB  4.16% 76.98% 15363.25kB 62.42%  github.com/go-graphite/go-whisper.openWithOptions
+ 1024.14kB  4.16% 81.14%  1024.14kB  4.16%  github.com/go-graphite/go-whisper.(*archiveInfo).appendToBlockAndRotateWithBuffer
+ 1024.11kB  4.16% 85.31%  1024.11kB  4.16%  github.com/go-graphite/go-carbon/persister.(*storageBackend).options (inline)
+ 1024.09kB  4.16% 89.47%  1024.09kB  4.16%  syscall.ByteSliceFromString
+ 1024.08kB  4.16% 93.63%  1024.08kB  4.16%  internal/bytealg.MakeNoZero
+  544.67kB  2.21% 95.84%   544.67kB  2.21%  compress/flate.(*compressor).init
+  512.03kB  2.08% 97.92%   512.03kB  2.08%  github.com/go-graphite/go-whisper.(*Whisper).compressedBatchOverlaps
+  512.01kB  2.08%   100%  5121.21kB 20.81%  github.com/go-graphite/go-whisper.(*Whisper).UpdateManyForArchive
+         0     0%   100%   544.67kB  2.21%  compress/flate.NewWriter (inline)
+         0     0%   100%   544.67kB  2.21%  compress/gzip.(*Writer).Write
+         0     0%   100%  1024.08kB  4.16%  github.com/go-graphite/go-carbon/persister.(*storageBackend).path (inline)
+         0     0%   100% 24068.84kB 97.79%  github.com/go-graphite/go-carbon/persister.(*storageBackend).update
+
+# late-holes-cwhisper-ooo.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:21 CEST
+Duration: 3.54s, Total samples = 3.72s (105.09%)
+Showing nodes accounting for 2.59s, 69.62% of 3.72s total
+Dropped 113 nodes (cum <= 0.02s)
+Showing top 18 nodes out of 202
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      3.55s 95.43%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%      3.55s 95.43%  testing.(*B).launch
+         0     0%     0%      3.55s 95.43%  testing.(*B).runN
+     0.01s  0.27%  0.27%      3.53s 94.89%  github.com/go-graphite/go-carbon/persister.(*storageBackend).update
+     2.49s 66.94% 67.20%      2.49s 66.94%  internal/runtime/syscall/linux.Syscall6
+         0     0% 67.20%      2.36s 63.44%  syscall.RawSyscall6
+         0     0% 67.20%      2.09s 56.18%  github.com/go-graphite/go-whisper.(*Whisper).UpdateMany (inline)
+     0.01s  0.27% 67.47%      2.09s 56.18%  github.com/go-graphite/go-whisper.(*Whisper).UpdateManyForArchive
+     0.02s  0.54% 68.01%      1.93s 51.88%  github.com/go-graphite/go-whisper.openWithOptions
+         0     0% 68.01%      1.90s 51.08%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+     0.01s  0.27% 68.28%      1.29s 34.68%  syscall.Syscall6
+     0.02s  0.54% 68.82%      1.21s 32.53%  github.com/go-graphite/go-whisper.(*Whisper).compressedBatchOverlaps
+     0.03s  0.81% 69.62%      1.21s 32.53%  os.OpenFile
+         0     0% 69.62%      1.18s 31.72%  os.openFileNolog
+         0     0% 69.62%      1.18s 31.72%  syscall.Syscall
+         0     0% 69.62%      0.89s 23.92%  github.com/go-graphite/go-whisper.(*Whisper).oooSidecar
+         0     0% 69.62%      0.89s 23.92%  github.com/go-graphite/go-whisper.(*Whisper).openOOO
+         0     0% 69.62%      0.82s 22.04%  os.ignoringEINTR (inline)
+
+# late-holes-cwhisper-ooo.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:25 CEST
+Showing nodes accounting for 72.97MB, 85.64% of 85.21MB total
+Showing top 18 nodes out of 89
+      flat  flat%   sum%        cum   cum%
+    7.57MB  8.88%  8.88%     7.57MB  8.88%  github.com/go-graphite/go-whisper.alignPoints
+    7.50MB  8.81% 17.69%     7.50MB  8.81%  github.com/go-graphite/go-whisper.(*Whisper).readHeaderCompressed
+    7.11MB  8.34% 26.03%     9.62MB 11.29%  github.com/go-graphite/go-whisper.allocateDiskSpace
+    6.58MB  7.73% 33.76%     6.58MB  7.73%  github.com/go-graphite/go-whisper.(*archiveInfo).ReadFromBlock
+    4.58MB  5.37% 39.14%     6.60MB  7.74%  github.com/go-graphite/go-whisper.(*Whisper).filterCompressedSlots
+    4.56MB  5.35% 44.49%    45.49MB 53.39%  github.com/go-graphite/go-whisper.(*Whisper).updateCompressedOverlappingBatch
+    3.51MB  4.12% 48.61%     3.51MB  4.12%  github.com/go-graphite/go-whisper.readArchivePointsAt
+    3.51MB  4.12% 52.73%     3.51MB  4.12%  github.com/go-graphite/go-whisper.packSequences
+    3.50MB  4.11% 56.84%     3.50MB  4.11%  github.com/go-graphite/go-whisper.(*Whisper).WriteHeaderCompressed
+    3.50MB  4.11% 60.95%       23MB 27.00%  github.com/go-graphite/go-whisper.openWithOptions
+    3.50MB  4.11% 65.06%     3.50MB  4.11%  os.newFile
+       3MB  3.52% 68.58%        3MB  3.52%  os.statNolog
+       3MB  3.52% 72.10%        3MB  3.52%  syscall.ByteSliceFromString
+    2.52MB  2.96% 75.06%     2.52MB  2.96%  github.com/go-graphite/go-whisper.(*Whisper).ArchivePoints
+    2.51MB  2.94% 78.01%     2.51MB  2.94%  github.com/go-graphite/go-whisper.(*memFile).WriteAt (inline)
+    2.50MB  2.93% 80.94%     2.50MB  2.93%  github.com/go-graphite/go-carbon/persister.(*storageBackend).options
+    2.01MB  2.36% 83.29%     2.01MB  2.36%  github.com/go-graphite/go-whisper.(*archiveInfo).appendToBlockAndRotateWithBuffer
+       2MB  2.35% 85.64%        2MB  2.35%  github.com/go-graphite/go-whisper.unpackArchiveInfo (inline)
+
+# ordered-pebble.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:25 CEST
+Duration: 9.36s, Total samples = 2.51s (26.82%)
+Showing nodes accounting for 0.85s, 33.86% of 2.51s total
+Dropped 111 nodes (cum <= 0.01s)
+Showing top 18 nodes out of 141
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      1.20s 47.81%  runtime/pprof.Do
+         0     0%     0%      1.18s 47.01%  github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop
+         0     0%     0%      1.18s 47.01%  github.com/cockroachdb/pebble/record.NewLogWriter.func2
+         0     0%     0%      1.14s 45.42%  github.com/cockroachdb/pebble/record.(*LogWriter).flushPending
+     0.01s   0.4%   0.4%      0.86s 34.26%  github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).timeDiskOp
+     0.83s 33.07% 33.47%      0.83s 33.07%  internal/runtime/syscall/linux.Syscall6
+         0     0% 33.47%      0.83s 33.07%  syscall.RawSyscall6
+         0     0% 33.47%      0.83s 33.07%  syscall.Syscall
+         0     0% 33.47%      0.78s 31.08%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0% 33.47%      0.78s 31.08%  testing.(*B).launch
+         0     0% 33.47%      0.78s 31.08%  testing.(*B).runN
+     0.01s   0.4% 33.86%      0.75s 29.88%  github.com/go-graphite/go-carbon/persister.(*storageBackend).update
+         0     0% 33.86%      0.74s 29.48%  github.com/go-graphite/go-whisper/store.(*Store).UpdateMany (inline)
+         0     0% 33.86%      0.74s 29.48%  github.com/go-graphite/go-whisper/store.(*Store).updateByName
+         0     0% 33.86%      0.68s 27.09%  github.com/cockroachdb/pebble/record.(*LogWriter).syncWithLatency
+         0     0% 33.86%      0.68s 27.09%  github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).SyncData
+         0     0% 33.86%      0.68s 27.09%  github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).SyncData.func1
+         0     0% 33.86%      0.68s 27.09%  github.com/cockroachdb/pebble/vfs.(*linuxFile).SyncData
+
+# ordered-pebble.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:35 CEST
+Showing nodes accounting for 7382.04kB, 100% of 7382.04kB total
+Showing top 18 nodes out of 41
+      flat  flat%   sum%        cum   cum%
+ 2048.31kB 27.75% 27.75%  2048.31kB 27.75%  bytes.Clone (inline)
+ 1536.12kB 20.81% 48.56%  1536.12kB 20.81%  reflect.unsafe_New
+ 1024.12kB 13.87% 62.43%  5669.41kB 76.80%  github.com/go-graphite/go-whisper/store.(*Store).update
+  688.56kB  9.33% 71.76%   688.56kB  9.33%  compress/flate.(*fastGen).addBlock
+  548.84kB  7.43% 79.19%   548.84kB  7.43%  github.com/cockroachdb/pebble/record.NewLogWriter
+  512.06kB  6.94% 86.13%   512.06kB  6.94%  slices.Clone[go.shape.[]github.com/go-graphite/go-whisper.TimeSeriesPoint,go.shape.struct { Time int; Value float64 }]
+  512.02kB  6.94% 93.06%   512.02kB  6.94%  github.com/go-graphite/go-whisper/store.unmarshalMetadata
+  512.01kB  6.94%   100%  4096.44kB 55.49%  github.com/go-graphite/go-whisper/store.marshalMetadata
+         0     0%   100%   688.56kB  9.33%  compress/flate.(*Writer).Close (inline)
+         0     0%   100%   688.56kB  9.33%  compress/flate.(*compressor).close
+         0     0%   100%   688.56kB  9.33%  compress/flate.(*compressor).deflateFast
+         0     0%   100%   688.56kB  9.33%  compress/flate.(*fastEncL1).encode
+         0     0%   100%   688.56kB  9.33%  compress/gzip.(*Writer).Close
+         0     0%   100%  3584.43kB 48.56%  encoding/json.Marshal (inline)
+         0     0%   100%  3584.43kB 48.56%  encoding/json/v2.Marshal
+         0     0%   100%  1536.12kB 20.81%  encoding/json/v2.marshalEncode
+         0     0%   100%   548.84kB  7.43%  github.com/cockroachdb/pebble.(*Batch).Commit (inline)
+         0     0%   100%   548.84kB  7.43%  github.com/cockroachdb/pebble.(*DB).Apply (inline)
+
+# coarse-clean-classic.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:36 CEST
+Duration: 3.26s, Total samples = 3.68s (112.81%)
+Showing nodes accounting for 1.96s, 53.26% of 3.68s total
+Dropped 84 nodes (cum <= 0.02s)
+Showing top 18 nodes out of 191
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      3.09s 83.97%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%      3.09s 83.97%  testing.(*B).launch
+         0     0%     0%      3.09s 83.97%  testing.(*B).runN
+         0     0%     0%      3.06s 83.15%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+     1.81s 49.18% 49.18%      1.81s 49.18%  internal/runtime/syscall/linux.Syscall6
+         0     0% 49.18%      1.68s 45.65%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+         0     0% 49.18%      1.68s 45.65%  github.com/go-graphite/go-whisper.openWithOptions
+         0     0% 49.18%      1.67s 45.38%  syscall.RawSyscall6
+         0     0% 49.18%      1.10s 29.89%  syscall.Syscall
+         0     0% 49.18%      0.99s 26.90%  os.OpenFile
+         0     0% 49.18%      0.99s 26.90%  os.openFileNolog
+         0     0% 49.18%      0.96s 26.09%  github.com/go-graphite/go-whisper.(*Whisper).Fetch (inline)
+         0     0% 49.18%      0.96s 26.09%  github.com/go-graphite/go-whisper.(*Whisper).FetchByAggregation
+     0.11s  2.99% 52.17%      0.96s 26.09%  github.com/go-graphite/go-whisper.(*Whisper).fetchFromArchive
+         0     0% 52.17%      0.72s 19.57%  github.com/go-graphite/go-whisper.acquirePathLock
+     0.01s  0.27% 52.45%      0.71s 19.29%  syscall.Syscall6
+     0.02s  0.54% 52.99%      0.63s 17.12%  github.com/go-graphite/go-whisper.(*Whisper).readSeries
+     0.01s  0.27% 53.26%      0.63s 17.12%  runtime.systemstack
+
+# coarse-clean-classic.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:40 CEST
+Showing nodes accounting for 151.16MB, 98.89% of 152.86MB total
+Dropped 10 nodes (cum <= 0.76MB)
+Showing top 18 nodes out of 30
+      flat  flat%   sum%        cum   cum%
+   73.33MB 47.97% 47.97%   119.60MB 78.24%  github.com/go-graphite/go-whisper.(*Whisper).readSeries
+   46.27MB 30.27% 78.24%    46.27MB 30.27%  github.com/go-graphite/go-whisper.unpackDataPoints (inline)
+   19.06MB 12.47% 90.71%   138.65MB 90.71%  github.com/go-graphite/go-whisper.(*Whisper).fetchFromArchive
+       5MB  3.27% 93.98%        5MB  3.27%  github.com/go-graphite/go-whisper.unpackArchiveInfo (inline)
+       3MB  1.96% 95.94%        3MB  1.96%  os.newFile
+       2MB  1.31% 97.25%       12MB  7.85%  github.com/go-graphite/go-whisper.openWithOptions
+    1.50MB  0.98% 98.23%     1.50MB  0.98%  syscall.ByteSliceFromString
+       1MB  0.65% 98.89%   151.66MB 99.21%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0% 98.89%   152.86MB   100%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0% 98.89%     1.20MB  0.79%  github.com/go-graphite/go-carbon/persister.perfProbeStart
+         0     0% 98.89%     1.20MB  0.79%  github.com/go-graphite/go-carbon/persister.perfProbeStart.func2 (inline)
+         0     0% 98.89%   138.65MB 90.71%  github.com/go-graphite/go-whisper.(*Whisper).Fetch (inline)
+         0     0% 98.89%   138.65MB 90.71%  github.com/go-graphite/go-whisper.(*Whisper).FetchByAggregation
+         0     0% 98.89%       12MB  7.85%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+         0     0% 98.89%     3.50MB  2.29%  github.com/go-graphite/go-whisper.acquirePathLock
+         0     0% 98.89%     4.50MB  2.94%  os.OpenFile
+         0     0% 98.89%     1.50MB  0.98%  os.ignoringEINTR (inline)
+         0     0% 98.89%     1.50MB  0.98%  os.open
+
+# coarse-clean-cwhisper.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:40 CEST
+Duration: 4.31s, Total samples = 4960ms (114.95%)
+Showing nodes accounting for 1480ms, 29.84% of 4960ms total
+Dropped 131 nodes (cum <= 24.80ms)
+Showing top 18 nodes out of 209
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%     4170ms 84.07%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%     4170ms 84.07%  testing.(*B).launch
+         0     0%     0%     4170ms 84.07%  testing.(*B).runN
+         0     0%     0%     4160ms 83.87%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0%     0%     2850ms 57.46%  github.com/go-graphite/go-whisper.(*Whisper).Fetch (inline)
+         0     0%     0%     2850ms 57.46%  github.com/go-graphite/go-whisper.(*Whisper).FetchByAggregation
+         0     0%     0%     2850ms 57.46%  github.com/go-graphite/go-whisper.(*Whisper).fetchFromArchive
+      80ms  1.61%  1.61%     2710ms 54.64%  github.com/go-graphite/go-whisper.(*Whisper).fetchCompressed
+    1210ms 24.40% 26.01%     1210ms 24.40%  internal/runtime/syscall/linux.Syscall6
+         0     0% 26.01%     1170ms 23.59%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+         0     0% 26.01%     1170ms 23.59%  github.com/go-graphite/go-whisper.openWithOptions
+         0     0% 26.01%     1150ms 23.19%  syscall.RawSyscall6
+         0     0% 26.01%      970ms 19.56%  runtime.systemstack
+         0     0% 26.01%      880ms 17.74%  sort.Slice
+         0     0% 26.01%      870ms 17.54%  sort.pdqsort_func
+     190ms  3.83% 29.84%      680ms 13.71%  runtime.mapassign_fast64
+         0     0% 29.84%      680ms 13.71%  syscall.Syscall
+         0     0% 29.84%      590ms 11.90%  runtime.gcBgMarkWorker
+
+# coarse-clean-cwhisper.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:44 CEST
+Showing nodes accounting for 361.27MB, 98.90% of 365.27MB total
+Dropped 18 nodes (cum <= 1.83MB)
+Showing top 18 nodes out of 31
+      flat  flat%   sum%        cum   cum%
+  131.81MB 36.09% 36.09%   303.18MB 83.00%  github.com/go-graphite/go-whisper.(*Whisper).fetchCompressed
+   61.08MB 16.72% 52.81%    97.64MB 26.73%  github.com/go-graphite/go-whisper.(*Whisper).storedPoints
+   46.69MB 12.78% 65.59%    84.24MB 23.06%  github.com/go-graphite/go-whisper.(*Whisper).filterCompressedSlots
+   32.06MB  8.78% 74.37%    32.06MB  8.78%  github.com/go-graphite/go-whisper.unpackDataPoints (inline)
+   24.07MB  6.59% 80.96%   332.25MB 90.96%  github.com/go-graphite/go-whisper.(*Whisper).fetchFromArchive
+   22.02MB  6.03% 86.99%    22.02MB  6.03%  github.com/go-graphite/go-whisper.(*Whisper).readHeaderCompressed
+   17.03MB  4.66% 91.65%    17.03MB  4.66%  github.com/go-graphite/go-whisper.unpackDataPointsStrict (inline)
+       9MB  2.46% 94.11%        9MB  2.46%  github.com/go-graphite/go-whisper.(*archiveInfo).ReadFromBlock
+    4.50MB  1.23% 95.35%     5.50MB  1.51%  github.com/go-graphite/go-whisper.(*archiveInfo).getSortedBlockRanges
+       4MB  1.10% 96.44%     6.50MB  1.78%  os.statNolog
+       4MB  1.10% 97.54%        4MB  1.10%  syscall.ByteSliceFromString
+    2.50MB  0.68% 98.22%    31.02MB  8.49%  github.com/go-graphite/go-whisper.openWithOptions
+    2.50MB  0.68% 98.90%     2.50MB  0.68%  github.com/go-graphite/go-whisper.auxiliaryPath
+         0     0% 98.90%   365.27MB   100%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0% 98.90%   365.27MB   100%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0% 98.90%   332.25MB 90.96%  github.com/go-graphite/go-whisper.(*Whisper).Fetch (inline)
+         0     0% 98.90%   332.25MB 90.96%  github.com/go-graphite/go-whisper.(*Whisper).FetchByAggregation
+         0     0% 98.90%        8MB  2.19%  github.com/go-graphite/go-whisper.(*Whisper).detectOOO
+
+# coarse-corrected-cwhisper-ooo.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:45 CEST
+Duration: 1.39s, Total samples = 1.65s (118.82%)
+Showing nodes accounting for 0.41s, 24.85% of 1.65s total
+Showing top 18 nodes out of 232
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      1.39s 84.24%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0%     0%      1.39s 84.24%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%      1.39s 84.24%  testing.(*B).launch
+         0     0%     0%      1.39s 84.24%  testing.(*B).runN
+         0     0%     0%      1.15s 69.70%  github.com/go-graphite/go-whisper.(*Whisper).Fetch (inline)
+         0     0%     0%      1.15s 69.70%  github.com/go-graphite/go-whisper.(*Whisper).FetchByAggregation
+     0.01s  0.61%  0.61%      1.15s 69.70%  github.com/go-graphite/go-whisper.(*Whisper).fetchFromArchive
+         0     0%  0.61%      0.76s 46.06%  github.com/go-graphite/go-whisper.(*Whisper).mergeOutOfOrderValues
+     0.02s  1.21%  1.82%      0.64s 38.79%  github.com/go-graphite/go-whisper.(*Whisper).fetchCompressed
+         0     0%  1.82%      0.44s 26.67%  github.com/go-graphite/go-whisper.(*Whisper).recomputeAggregates (inline)
+         0     0%  1.82%      0.44s 26.67%  github.com/go-graphite/go-whisper.(*Whisper).recomputeArchiveAggregates
+         0     0%  1.82%      0.37s 22.42%  github.com/go-graphite/go-whisper.OpenWithOptions (inline)
+         0     0%  1.82%      0.37s 22.42%  github.com/go-graphite/go-whisper.openWithOptions
+     0.37s 22.42% 24.24%      0.37s 22.42%  internal/runtime/syscall/linux.Syscall6
+         0     0% 24.24%      0.37s 22.42%  syscall.RawSyscall6
+         0     0% 24.24%      0.32s 19.39%  github.com/go-graphite/go-whisper.(*Whisper).mergedArchiveValues
+     0.01s  0.61% 24.85%      0.30s 18.18%  runtime.systemstack
+         0     0% 24.85%      0.22s 13.33%  syscall.Syscall
+
+# coarse-corrected-cwhisper-ooo.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:46 CEST
+Showing nodes accounting for 1154.74MB, 97.90% of 1179.55MB total
+Dropped 49 nodes (cum <= 5.90MB)
+Showing top 18 nodes out of 29
+      flat  flat%   sum%        cum   cum%
+  346.50MB 29.38% 29.38%   348.51MB 29.55%  github.com/go-graphite/go-whisper.readArchivePointsAt
+  144.82MB 12.28% 41.65%   452.55MB 38.37%  github.com/go-graphite/go-whisper.(*Whisper).fetchCompressed
+  116.93MB  9.91% 51.57%   116.93MB  9.91%  github.com/go-graphite/go-whisper.unpackDataPoints (inline)
+   82.39MB  6.99% 58.55%   133.19MB 11.29%  github.com/go-graphite/go-whisper.(*Whisper).readSeries
+   73.15MB  6.20% 64.75%   228.05MB 19.33%  github.com/go-graphite/go-whisper.(*Whisper).mergedArchiveValues
+   72.82MB  6.17% 70.93%   141.93MB 12.03%  github.com/go-graphite/go-whisper.(*Whisper).filterCompressedSlots
+   67.08MB  5.69% 76.61%   129.19MB 10.95%  github.com/go-graphite/go-whisper.(*Whisper).storedPoints
+   66.15MB  5.61% 82.22%    66.15MB  5.61%  github.com/go-graphite/go-whisper.(*archiveInfo).ReadFromBlock
+   47.55MB  4.03% 86.25%   308.75MB 26.17%  github.com/go-graphite/go-whisper.(*Whisper).recomputeArchiveAggregates
+   45.63MB  3.87% 90.12%  1149.72MB 97.47%  github.com/go-graphite/go-whisper.(*Whisper).fetchFromArchive
+   32.65MB  2.77% 92.89%    32.65MB  2.77%  github.com/go-graphite/go-whisper.windowsOf
+   21.04MB  1.78% 94.67%    21.04MB  1.78%  github.com/go-graphite/go-whisper.unpackDataPointsStrict (inline)
+   20.52MB  1.74% 96.41%    21.02MB  1.78%  github.com/go-graphite/go-whisper.(*Whisper).readHeaderCompressed
+      12MB  1.02% 97.43%       14MB  1.19%  github.com/go-graphite/go-whisper.(*archiveInfo).getSortedBlockRanges
+       5MB  0.42% 97.85%    41.03MB  3.48%  github.com/go-graphite/go-whisper.openWithOptions
+    0.50MB 0.042% 97.90%   826.50MB 70.07%  github.com/go-graphite/go-whisper.(*Whisper).mergeOutOfOrderValues
+         0     0% 97.90%  1178.24MB 99.89%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0% 97.90%  1179.55MB   100%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+
+# coarse-corrected-pebble.cpu.cum.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: cpu
+Time: 2026-10-03 20:32:47 CEST
+Duration: 1.43s, Total samples = 1.60s (112.04%)
+Showing nodes accounting for 0.30s, 18.75% of 1.60s total
+Showing top 18 nodes out of 236
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%      1.42s 88.75%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%      1.42s 88.75%  testing.(*B).launch
+         0     0%     0%      1.42s 88.75%  testing.(*B).runN
+         0     0%     0%      1.38s 86.25%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0%     0%      1.38s 86.25%  github.com/go-graphite/go-whisper/store.(*Store).Fetch
+     0.07s  4.38%  4.38%      0.65s 40.62%  github.com/go-graphite/go-whisper/store.getRange
+         0     0%  4.38%      0.36s 22.50%  github.com/go-graphite/go-whisper/store.hasArchivePoint
+         0     0%  4.38%      0.36s 22.50%  github.com/go-graphite/go-whisper/store.metadataFrom
+     0.19s 11.88% 16.25%      0.32s 20.00%  github.com/cockroachdb/pebble.(*Iterator).Close
+     0.03s  1.88% 18.12%      0.29s 18.12%  github.com/cockroachdb/pebble.(*Iterator).First
+     0.01s  0.62% 18.75%      0.29s 18.12%  github.com/go-graphite/go-whisper/store.unmarshalMetadata
+         0     0% 18.75%      0.28s 17.50%  encoding/json.Unmarshal (inline)
+         0     0% 18.75%      0.28s 17.50%  encoding/json/v2.Unmarshal
+         0     0% 18.75%      0.26s 16.25%  runtime.systemstack
+         0     0% 18.75%      0.25s 15.62%  encoding/json/v2.unmarshalDecode
+         0     0% 18.75%      0.24s 15.00%  github.com/cockroachdb/pebble.(*Iterator).iterFirstWithinBounds
+         0     0% 18.75%      0.24s 15.00%  github.com/cockroachdb/pebble.(*mergingIter).SeekGE
+         0     0% 18.75%      0.24s 15.00%  github.com/cockroachdb/pebble.(*mergingIter).seekGE
+
+# coarse-corrected-pebble.allocs.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: alloc_space
+Time: 2026-10-03 20:32:48 CEST
+Showing nodes accounting for 29758.81kB, 100% of 29758.81kB total
+      flat  flat%   sum%        cum   cum%
+24638.22kB 82.79% 82.79% 25150.23kB 84.51%  github.com/go-graphite/go-whisper/store.getRange
+ 2048.38kB  6.88% 89.68%  2048.38kB  6.88%  github.com/go-graphite/go-whisper/store.hasArchivePoint
+ 1024.12kB  3.44% 93.12% 29758.81kB   100%  github.com/go-graphite/go-whisper/store.(*Store).Fetch
+ 1024.05kB  3.44% 96.56%  1024.05kB  3.44%  github.com/cockroachdb/pebble.(*DB).NewSnapshot
+  512.03kB  1.72% 98.28%   512.03kB  1.72%  github.com/go-graphite/go-whisper/store.unmarshalMetadata
+  512.01kB  1.72%   100%   512.01kB  1.72%  github.com/go-graphite/go-whisper/store.pointKey (inline)
+         0     0%   100% 29758.81kB   100%  github.com/go-graphite/go-carbon/persister.(*storageBackend).fetch
+         0     0%   100% 29758.81kB   100%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%   100%   512.03kB  1.72%  github.com/go-graphite/go-whisper/store.metadataFrom
+         0     0%   100% 29758.81kB   100%  testing.(*B).launch
+         0     0%   100% 29758.81kB   100%  testing.(*B).runN
+
+# ordered-pebble.block.top.txt
+File: probe.test
+Build ID: 736067791a3f72f620a9ea508b72f3a50cab06c6
+Type: delay
+Time: 2026-10-03 20:32:51 CEST
+Showing nodes accounting for 3137.06ms, 100% of 3137.17ms total
+Dropped 17 nodes (cum <= 15.69ms)
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%  1925.12ms 61.36%  github.com/cockroachdb/pebble.(*Batch).Commit (inline)
+         0     0%     0%  1925.12ms 61.36%  github.com/cockroachdb/pebble.(*DB).Apply (inline)
+         0     0%     0%  1925.12ms 61.36%  github.com/cockroachdb/pebble.(*DB).applyInternal
+         0     0%     0%  1925.12ms 61.36%  github.com/cockroachdb/pebble.(*commitPipeline).Commit
+         0     0%     0%  1925.12ms 61.36%  github.com/go-graphite/go-carbon/persister.(*storageBackend).update
+         0     0%     0%  1925.12ms 61.36%  github.com/go-graphite/go-carbon/persister.BenchmarkStorageProbe.func1
+         0     0%     0%  1925.12ms 61.36%  github.com/go-graphite/go-whisper/store.(*Store).UpdateMany (inline)
+         0     0%     0%  1925.12ms 61.36%  github.com/go-graphite/go-whisper/store.(*Store).update
+         0     0%     0%  1925.12ms 61.36%  github.com/go-graphite/go-whisper/store.(*Store).updateByName
+         0     0%     0%  1925.12ms 61.36%  testing.(*B).runN
+    1925ms 61.36% 61.36%     1925ms 61.36%  sync.(*WaitGroup).Wait
+         0     0% 61.36%     1925ms 61.36%  github.com/cockroachdb/pebble.(*commitPipeline).publish
+         0     0% 61.36%  1924.90ms 61.36%  testing.(*B).doBench.gowrap1
+         0     0% 61.36%  1924.90ms 61.36%  testing.(*B).launch
+         0     0% 61.36%  1149.35ms 36.64%  github.com/cockroachdb/pebble/vfs.(*diskHealthCheckingFile).startTicker.func1
+ 1149.35ms 36.64% 98.00%  1149.35ms 36.64%  runtime.selectgo
+         0     0% 98.00%    62.70ms  2.00%  runtime/pprof.Do
+         0     0% 98.00%    62.70ms  2.00%  github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop
+         0     0% 98.00%    62.70ms  2.00%  github.com/cockroachdb/pebble/record.(*LogWriter).flushLoop-fm
+         0     0% 98.00%    62.70ms  2.00%  github.com/cockroachdb/pebble/record.(*flusherCond).Wait (inline)
+         0     0% 98.00%    62.70ms  2.00%  github.com/cockroachdb/pebble/record.NewLogWriter.func2
+   62.70ms  2.00%   100%    62.70ms  2.00%  sync.(*Cond).Wait

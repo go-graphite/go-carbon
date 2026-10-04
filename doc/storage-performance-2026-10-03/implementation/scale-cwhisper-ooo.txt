@@ -1,0 +1,6 @@
+=== RUN   TestStorageScaleProbe
+    scale_probe_test.go:17: engine=cwhisper-ooo metrics=100000 workers=32 setup=6.348296751s
+    scale_probe_test.go:35: engine=cwhisper-ooo points=2400000 reads=30000 wall=10.66479292s cpu-us/point=7.246 allocated-B/point=1864.6 batch-mixed-p95-us=165.973 batch-mixed-p99-us=24963.310 maxrss-KiB=37808
+    scale_probe_test.go:48: engine=cwhisper-ooo verified-metrics=100000 maintenance-sample=252 maintenance=487.528253ms files=200252 logical-bytes=528100000 allocated-bytes=819200000 live-heap-bytes=579296
+--- PASS: TestStorageScaleProbe (21.26s)
+PASS

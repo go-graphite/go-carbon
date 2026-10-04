@@ -1,0 +1,58 @@
+[
+  {
+    "profile": "cpu-accepted-coarse-clean-cwhisper",
+    "iterations": 141087,
+    "sample_cpu_s": 3.7,
+    "unit": "query",
+    "cpu_us_per_unit": 26.22495339754903
+  },
+  {
+    "profile": "cpu-accepted-coarse-clean-pebble",
+    "iterations": 701304,
+    "sample_cpu_s": 3.6,
+    "unit": "query",
+    "cpu_us_per_unit": 5.13329454844119
+  },
+  {
+    "profile": "cpu-accepted-coarse-corrected-cwhisper-ooo",
+    "iterations": 59698,
+    "sample_cpu_s": 3.98,
+    "unit": "query",
+    "cpu_us_per_unit": 66.66890013065765
+  },
+  {
+    "profile": "cpu-accepted-late-holes-cwhisper-ooo",
+    "iterations": 155335,
+    "sample_cpu_s": 3.49,
+    "unit": "point",
+    "cpu_us_per_unit": 2.808446261306209
+  },
+  {
+    "profile": "cpu-baseline-coarse-clean-cwhisper",
+    "iterations": 98292,
+    "sample_cpu_s": 3.88,
+    "unit": "query",
+    "cpu_us_per_unit": 39.47421967199772
+  },
+  {
+    "profile": "cpu-baseline-coarse-clean-pebble",
+    "iterations": 588955,
+    "sample_cpu_s": 3.6,
+    "unit": "query",
+    "cpu_us_per_unit": 6.112521330152559
+  },
+  {
+    "profile": "cpu-baseline-coarse-corrected-cwhisper-ooo",
+    "iterations": 37731,
+    "sample_cpu_s": 3.88,
+    "unit": "query",
+    "cpu_us_per_unit": 102.83321406800773
+  },
+  {
+    "profile": "cpu-baseline-late-holes-cwhisper-ooo",
+    "iterations": 118653,
+    "sample_cpu_s": 3.55,
+    "unit": "point",
+    "cpu_us_per_unit": 3.7398970106107727
+  }
+]

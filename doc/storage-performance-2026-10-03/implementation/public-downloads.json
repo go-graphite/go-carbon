@@ -1,0 +1,25 @@
+[
+  {
+    "Path": "github.com/go-graphite/go-whisper",
+    "Version": "v0.0.0-20261003193447-16b07882e95e",
+    "Sum": "h1:rJ6IM+vVk4FyFT3G8V/pSEU8TFVocBk0zUh4yNFkveE=",
+    "GoModSum": "h1:1edRhfqJoiHSjN72nYptHK0YR4yYt8aPC4NRHWhT0XE=",
+    "Origin": {
+      "VCS": "git",
+      "URL": "https://github.com/go-graphite/go-whisper",
+      "Hash": "16b07882e95e65a1eb2c3c8df22712e795622bde"
+    }
+  },
+  {
+    "Path": "github.com/go-graphite/go-whisper/store",
+    "Version": "v0.0.0-20261003193447-16b07882e95e",
+    "Sum": "h1:T3dkd2bjRhjdsmNzOUx1BZfp7mDHDWu/cslT7Bm5CO4=",
+    "GoModSum": "h1:9h4Ac5lZj7lS/WAbEH8VpmcCm5E1iVFQViaOhKMZjIQ=",
+    "Origin": {
+      "VCS": "git",
+      "URL": "https://github.com/go-graphite/go-whisper",
+      "Subdir": "store",
+      "Hash": "16b07882e95e65a1eb2c3c8df22712e795622bde"
+    }
+  }
+]

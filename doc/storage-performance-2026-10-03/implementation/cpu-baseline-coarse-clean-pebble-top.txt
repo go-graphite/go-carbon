@@ -1,0 +1,21 @@
+File: baseline.test
+Build ID: 9a15edda62d01f69cc94b527b3763df4bbd8f037
+Type: cpu
+Time: 2026-10-03 21:50:19 CEST
+Duration: 3.25s, Total samples = 3600ms (110.85%)
+Showing nodes accounting for 1490ms, 41.39% of 3600ms total
+Dropped 112 nodes (cum <= 18ms)
+Showing top 12 nodes out of 188
+      flat  flat%   sum%        cum   cum%
+     510ms 14.17% 14.17%      600ms 16.67%  github.com/cockroachdb/pebble.(*Iterator).Close
+     130ms  3.61% 17.78%      130ms  3.61%  cmpbody
+     110ms  3.06% 20.83%      220ms  6.11%  github.com/cockroachdb/pebble.(*DB).newIter
+     110ms  3.06% 23.89%      140ms  3.89%  github.com/cockroachdb/pebble/sstable.(*blockIter).readEntry
+     100ms  2.78% 26.67%      220ms  6.11%  github.com/cockroachdb/pebble/sstable.(*blockIter).Next
+     100ms  2.78% 29.44%      100ms  2.78%  runtime.typePointers.next
+      80ms  2.22% 31.67%       80ms  2.22%  encoding/json/internal/jsonwire.ConsumeSimpleString
+      80ms  2.22% 33.89%     1330ms 36.94%  github.com/go-graphite/go-whisper/store.getRange
+      70ms  1.94% 35.83%      310ms  8.61%  github.com/cockroachdb/pebble/sstable.(*blockIter).SeekGE
+      70ms  1.94% 37.78%       80ms  2.22%  runtime.scanblock
+      70ms  1.94% 39.72%       90ms  2.50%  runtime.tryDeferToSpanScan
+      60ms  1.67% 41.39%      230ms  6.39%  github.com/cockroachdb/pebble.(*getIter).Next
