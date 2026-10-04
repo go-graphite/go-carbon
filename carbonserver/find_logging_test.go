@@ -28,7 +28,7 @@ func (w *blockedAccessWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (w *blockedAccessWriter) Sync() error { return nil }
+func (*blockedAccessWriter) Sync() error { return nil }
 
 func TestFindNotFoundLogging(t *testing.T) {
 	for _, protocol := range []string{"http", "grpc"} {
@@ -44,7 +44,7 @@ func TestFindNotFoundLogging(t *testing.T) {
 					if cached {
 						listener.accessLogger = zap.NewNop()
 						if protocol == "http" {
-							listener.findHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics/find/?query=missing.metric&format=protobuf", nil))
+							listener.findHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics/find/?query=missing.metric&format=protobuf", http.NoBody))
 						} else {
 							_, _ = listener.Find(context.Background(), &protov2.GlobRequest{Query: "missing.metric"})
 						}
@@ -56,7 +56,7 @@ func TestFindNotFoundLogging(t *testing.T) {
 					go func() {
 						if protocol == "http" {
 							rec := httptest.NewRecorder()
-							listener.findHandler(rec, httptest.NewRequest(http.MethodGet, "/metrics/find/?query=missing.metric&format=protobuf", nil))
+							listener.findHandler(rec, httptest.NewRequest(http.MethodGet, "/metrics/find/?query=missing.metric&format=protobuf", http.NoBody))
 							if rec.Code != http.StatusNotFound {
 								done <- fmt.Errorf("HTTP status = %d; want 404", rec.Code)
 								return
@@ -103,7 +103,7 @@ func TestFindBadRequestStillLogged(t *testing.T) {
 	var logs bytes.Buffer
 	listener.accessLogger = zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(&logs), zap.ErrorLevel))
 	rec := httptest.NewRecorder()
-	listener.findHandler(rec, httptest.NewRequest(http.MethodGet, "/metrics/find/?query=missing.metric&format=invalid", nil))
+	listener.findHandler(rec, httptest.NewRequest(http.MethodGet, "/metrics/find/?query=missing.metric&format=invalid", http.NoBody))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("HTTP status = %d; want 400", rec.Code)
 	}

@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -234,7 +235,7 @@ func TestAbortedCachePreservesPreviousSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(after) != string(before) {
+	if !bytes.Equal(after, before) {
 		t.Fatal("cancellation replaced the saved index")
 	}
 	f, err := NewFileListCache(l.fileListCache, FLCVersion2, 'w')
@@ -248,7 +249,7 @@ func TestAbortedCachePreservesPreviousSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	after, err = os.ReadFile(l.fileListCache)
-	if err != nil || string(after) != string(before) {
+	if err != nil || !bytes.Equal(after, before) {
 		t.Fatal("aborted writer replaced previous snapshot", err)
 	}
 	if _, err := os.Stat(l.fileListCache + ".tmp"); !os.IsNotExist(err) {
