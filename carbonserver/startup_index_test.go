@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -71,6 +72,27 @@ func TestInitialIndexQuotaBeforeFirstTick(t *testing.T) {
 	}
 	if listener.ShouldThrottleMetric(points.OnePoint("namespace.existing", 1, 1), false) {
 		t.Fatal("existing series rejected by creation quota")
+	}
+}
+
+func TestFileScanCountsFreshDiskMetrics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "namespace", "fresh.wsp")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	listener := NewCarbonserverListener(nil)
+	listener.SetWhisperData(dir)
+	listener.SetTrieIndex(true)
+	listener.SetConcurrentIndex(true)
+	if listener.updateFileList(dir, nil, nil) {
+		t.Fatal("disk scan must not report a cache load")
+	}
+	if listener.metrics.MetricsKnown != 1 {
+		t.Fatalf("metrics known = %d, want 1", listener.metrics.MetricsKnown)
 	}
 }
 

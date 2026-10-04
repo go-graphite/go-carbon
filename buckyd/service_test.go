@@ -89,7 +89,7 @@ func TestMetricTransferSnappyStatAndConditionalDelete(t *testing.T) {
 	if err := json.Unmarshal(result.Body.Bytes(), &heal); err != nil {
 		t.Fatalf("POST heal stats: %v", err)
 	}
-	head := httptest.NewRequest(http.MethodHead, "/metrics/team.cpu", nil)
+	head := httptest.NewRequest(http.MethodHead, "/metrics/team.cpu", http.NoBody)
 	headResult := httptest.NewRecorder()
 	h.ServeHTTP(headResult, head)
 	if headResult.Code != 200 {
@@ -102,7 +102,7 @@ func TestMetricTransferSnappyStatAndConditionalDelete(t *testing.T) {
 	if stat.StorageVersion == "" {
 		t.Fatal("missing storage version")
 	}
-	get := httptest.NewRequest(http.MethodGet, "/metrics/team.cpu", nil)
+	get := httptest.NewRequest(http.MethodGet, "/metrics/team.cpu", http.NoBody)
 	get.Header.Set("Accept-Encoding", "snappy")
 	getResult := httptest.NewRecorder()
 	h.ServeHTTP(getResult, get)
@@ -120,13 +120,13 @@ func TestMetricTransferSnappyStatAndConditionalDelete(t *testing.T) {
 	if err != nil || len(decoded) == 0 {
 		t.Fatalf("snappy response: %v", err)
 	}
-	wrong := httptest.NewRequest(http.MethodDelete, "/metrics/team.cpu?version=wrong", nil)
+	wrong := httptest.NewRequest(http.MethodDelete, "/metrics/team.cpu?version=wrong", http.NoBody)
 	wrongResult := httptest.NewRecorder()
 	h.ServeHTTP(wrongResult, wrong)
 	if wrongResult.Code != http.StatusConflict {
 		t.Fatalf("wrong delete=%d", wrongResult.Code)
 	}
-	del := httptest.NewRequest(http.MethodDelete, "/metrics/team.cpu?version="+stat.StorageVersion, nil)
+	del := httptest.NewRequest(http.MethodDelete, "/metrics/team.cpu?version="+stat.StorageVersion, http.NoBody)
 	delResult := httptest.NewRecorder()
 	h.ServeHTTP(delResult, del)
 	if delResult.Code != http.StatusOK {
@@ -150,13 +150,13 @@ func TestFailedReplacePreservesMetricAndListFilters(t *testing.T) {
 	if badResult.Code == 200 {
 		t.Fatal("bad replace succeeded")
 	}
-	head := httptest.NewRequest(http.MethodHead, "/metrics/team.cpu", nil)
+	head := httptest.NewRequest(http.MethodHead, "/metrics/team.cpu", http.NoBody)
 	headResult := httptest.NewRecorder()
 	h.ServeHTTP(headResult, head)
 	if headResult.Code != 200 {
 		t.Fatal("failed replace deleted metric")
 	}
-	list := httptest.NewRequest(http.MethodGet, "/metrics?regex=^team\\.", nil)
+	list := httptest.NewRequest(http.MethodGet, "/metrics?regex=^team\\.", http.NoBody)
 	listResult := httptest.NewRecorder()
 	h.ServeHTTP(listResult, list)
 	if listResult.Code != 200 || !bytes.Contains(listResult.Body.Bytes(), []byte("team.cpu")) {
@@ -180,7 +180,7 @@ func TestOffloadUsesReadInterNodeTokenWithoutHashring(t *testing.T) {
 	destination, _ := testService(t)
 	destination.secret = secret
 	host := remote.URL[len("http://"):]
-	request := httptest.NewRequest(http.MethodPost, "/metrics/destination?fetch_offload=true&server="+host+"&metric=source", nil)
+	request := httptest.NewRequest(http.MethodPost, "/metrics/destination?fetch_offload=true&server="+host+"&metric=source", http.NoBody)
 	request.Header.Set(authHeader, token(t, secret, []string{"destination"}, []string{"update"}))
 	result := httptest.NewRecorder()
 	destination.Handler().ServeHTTP(result, request)
@@ -191,7 +191,7 @@ func TestOffloadUsesReadInterNodeTokenWithoutHashring(t *testing.T) {
 	if err := json.Unmarshal(result.Body.Bytes(), &heal); err != nil {
 		t.Fatalf("offload heal stats: %v", err)
 	}
-	head := httptest.NewRequest(http.MethodHead, "/metrics/destination", nil)
+	head := httptest.NewRequest(http.MethodHead, "/metrics/destination", http.NoBody)
 	head.Header.Set(authHeader, token(t, secret, []string{"*"}, []string{"read"}))
 	headResult := httptest.NewRecorder()
 	destination.Handler().ServeHTTP(headResult, head)
@@ -233,10 +233,10 @@ func TestOffloadClassicWhisperIndependentOfHashring(t *testing.T) {
 			s.config.Node = "10.214.27.71"
 			s.config.Hash = "jump_fnv1a"
 			ringBefore := httptest.NewRecorder()
-			ringRequest := httptest.NewRequest(http.MethodGet, "/hashring", nil)
+			ringRequest := httptest.NewRequest(http.MethodGet, "/hashring", http.NoBody)
 			ringRequest.Header.Set(authHeader, token(t, secret, []string{"*"}, []string{"read"}))
 			s.Handler().ServeHTTP(ringBefore, ringRequest)
-			request := httptest.NewRequest(http.MethodPost, "/metrics/destination?fetch_offload=true&server="+remote.Listener.Addr().String()+"&metric=source", nil)
+			request := httptest.NewRequest(http.MethodPost, "/metrics/destination?fetch_offload=true&server="+remote.Listener.Addr().String()+"&metric=source", http.NoBody)
 			request.Header.Set(authHeader, token(t, secret, []string{"destination"}, []string{"update"}))
 			response := httptest.NewRecorder()
 			s.Handler().ServeHTTP(response, request)
@@ -263,11 +263,11 @@ func TestOffloadRejectsUnauthorizedCallerBeforeFetching(t *testing.T) {
 	s, _ := testService(t)
 	s.secret = []byte("shared-secret")
 	var calls int32
-	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	remote := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&calls, 1)
 	}))
 	defer remote.Close()
-	request := httptest.NewRequest(http.MethodPost, "/metrics/destination?fetch_offload=true&server="+remote.Listener.Addr().String(), nil)
+	request := httptest.NewRequest(http.MethodPost, "/metrics/destination?fetch_offload=true&server="+remote.Listener.Addr().String(), http.NoBody)
 	request.Header.Set(authHeader, token(t, s.secret, []string{"destination"}, []string{"read"}))
 	response := httptest.NewRecorder()
 	s.Handler().ServeHTTP(response, request)
@@ -280,7 +280,7 @@ func TestOffloadPreservesSourceNotFound(t *testing.T) {
 	s, db := testService(t)
 	remote := httptest.NewServer(http.NotFoundHandler())
 	defer remote.Close()
-	request := httptest.NewRequest(http.MethodPost, "/metrics/missing?fetch_offload=true&server="+remote.Listener.Addr().String(), nil)
+	request := httptest.NewRequest(http.MethodPost, "/metrics/missing?fetch_offload=true&server="+remote.Listener.Addr().String(), http.NoBody)
 	response := httptest.NewRecorder()
 	s.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusNotFound {
@@ -321,7 +321,7 @@ func TestLifecycleBindsSynchronouslyAndMutationCallbackRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	late := httptest.NewRecorder()
-	s.Handler().ServeHTTP(late, httptest.NewRequest(http.MethodGet, "/metrics/callback", nil))
+	s.Handler().ServeHTTP(late, httptest.NewRequest(http.MethodGet, "/metrics/callback", http.NoBody))
 	if late.Code != http.StatusServiceUnavailable {
 		t.Fatalf("stopped service accepted late request: %d", late.Code)
 	}
@@ -336,7 +336,7 @@ func TestOffloadRejectsOversizedDecodedBody(t *testing.T) {
 		_, _ = w.Write(bytes.Repeat([]byte{'x'}, 33))
 	}))
 	defer remote.Close()
-	request := httptest.NewRequest(http.MethodPost, "/metrics/oversized?fetch_offload=true&server="+remote.Listener.Addr().String(), nil)
+	request := httptest.NewRequest(http.MethodPost, "/metrics/oversized?fetch_offload=true&server="+remote.Listener.Addr().String(), http.NoBody)
 	response := httptest.NewRecorder()
 	s.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest {
@@ -353,6 +353,9 @@ func TestPprofUsesSeparateListenerAndClosesOnStop(t *testing.T) {
 	s.config.Pprof = "127.0.0.1:0"
 	if err := s.Start(); err != nil {
 		t.Fatal(err)
+	}
+	if s.server.ReadHeaderTimeout != readHeaderTimeout || s.pprofServer.ReadHeaderTimeout != readHeaderTimeout {
+		t.Fatal("servers must bound header reads")
 	}
 	pprofAddress := s.pprofListener.Addr().String()
 	response, err := http.Get("http://" + pprofAddress + "/debug/pprof/goroutine")
@@ -398,7 +401,7 @@ func TestOffloadDoesNotFollowRedirect(t *testing.T) {
 		http.Redirect(w, r, redirected.URL, http.StatusFound)
 	}))
 	defer remote.Close()
-	request := httptest.NewRequest(http.MethodPost, "/metrics/leak?fetch_offload=true&server="+remote.Listener.Addr().String(), nil)
+	request := httptest.NewRequest(http.MethodPost, "/metrics/leak?fetch_offload=true&server="+remote.Listener.Addr().String(), http.NoBody)
 	request.Header.Set(authHeader, token(t, s.secret, []string{"leak"}, []string{"update"}))
 	response := httptest.NewRecorder()
 	s.Handler().ServeHTTP(response, request)

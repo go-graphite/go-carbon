@@ -31,103 +31,122 @@ func TestMetricStoreCatalogAndReadPaths(t *testing.T) {
 	}
 	defer metricStore.Close()
 
-	config := func(name string) store.MetricConfig {
-		return store.MetricConfig{
-			Name:              name,
-			Retentions:        []store.Retention{{Step: 1, Count: 120}, {Step: 60, Count: 120}},
-			AggregationMethod: store.Average,
-			XFilesFactor:      0,
-		}
-	}
+	populateMetricStoreCatalog(t, ctx, metricStore, now)
+	t.Run("trigram", func(t *testing.T) { testMetricStoreCatalogPath(t, ctx, metricStore, now, false) })
+	t.Run("trie", func(t *testing.T) { testMetricStoreCatalogPath(t, ctx, metricStore, now, true) })
+}
+
+func populateMetricStoreCatalog(t *testing.T, ctx context.Context, metricStore *store.Store, now int64) {
+	t.Helper()
 	for _, metric := range []string{"servers.api.cpu.user", "servers.api.cpu.system"} {
-		if _, err := metricStore.Create(ctx, config(metric)); err != nil {
+		config := store.MetricConfig{Name: metric, Retentions: []store.Retention{{Step: 1, Count: 120}, {Step: 60, Count: 120}}, AggregationMethod: store.Average}
+		if _, err := metricStore.Create(ctx, config); err != nil {
 			t.Fatal(err)
 		}
-		if err := metricStore.UpdateMany(ctx, metric, []store.Point{
-			{Timestamp: now - 180, Value: 1}, {Timestamp: now - 2, Value: 2},
-		}); err != nil {
+		if err := metricStore.UpdateMany(ctx, metric, []store.Point{{Timestamp: now - 180, Value: 1}, {Timestamp: now - 2, Value: 2}}); err != nil {
 			t.Fatal(err)
 		}
 	}
+}
 
-	for _, test := range []struct {
-		name string
-		trie bool
-	}{{name: "trigram"}, {name: "trie", trie: true}} {
-		t.Run(test.name, func(t *testing.T) {
-			cache := cache.New()
-			listener := NewCarbonserverListener(cache.Get)
-			listener.logger = zap.NewNop()
-			listener.accessLogger = zap.NewNop()
-			listener.SetWhisperData(t.TempDir())
-			listener.SetMaxGlobs(100)
-			listener.SetTrieIndex(test.trie)
-			listener.SetTrigramIndex(!test.trie)
-			listener.SetMetricStore(metricStore)
-			if err := listener.RefreshMetricStoreIndex(); err != nil {
-				t.Fatal(err)
-			}
-
-			entries, err := os.ReadDir(listener.whisperData)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(entries) != 0 {
-				t.Fatalf("shared-store catalog created metric files: %v", entries)
-			}
-			assertStoreGlob(t, listener, "servers.api.cpu", true)
-			assertStoreGlob(t, listener, "servers.api.cpu.*", true)
-
-			cache.Add(points.OnePoint("servers.api.cpu.user", 99, now-2))
-			fine, err := listener.fetchSingleMetric("servers.api.cpu.user", "", now-10, now)
-			if err != nil {
-				t.Fatal(err)
-			}
-			hasCacheValue := false
-			for _, value := range fine.Values {
-				hasCacheValue = hasCacheValue || value == 99
-			}
-			if fine.StepTime != 1 || !hasCacheValue {
-				t.Fatalf("fine fetch did not overlay cache: step=%d values=%v", fine.StepTime, fine.Values)
-			}
-			coarse, err := listener.fetchSingleMetric("servers.api.cpu.user", "", now-240, now-121)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if coarse.StepTime != 60 {
-				t.Fatalf("coarse fetch step=%d, want 60", coarse.StepTime)
-			}
-
-			assertMetricStoreHTTPMetadata(t, listener)
-			grpcInfo, err := listener.Info(ctx, &protov2.InfoRequest{Name: "servers.api.cpu.user"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(grpcInfo.Retentions) != 2 || grpcInfo.MaxRetention != 7200 {
-				t.Fatalf("unexpected gRPC info: %#v", grpcInfo)
-			}
-
-			if !test.trie {
-				if err := metricStore.Delete(ctx, "servers.api.cpu.system"); err != nil {
-					t.Fatal(err)
-				}
-				if err := listener.RefreshMetricStoreIndex(); err != nil {
-					t.Fatal(err)
-				}
-				assertStoreGlob(t, listener, "servers.api.cpu.system", false)
-			}
-
-			restarted := NewCarbonserverListener(cache.Get)
-			restarted.logger = zap.NewNop()
-			restarted.SetTrieIndex(test.trie)
-			restarted.SetTrigramIndex(!test.trie)
-			restarted.SetMetricStore(metricStore)
-			if err := restarted.RefreshMetricStoreIndex(); err != nil {
-				t.Fatal(err)
-			}
-			assertStoreGlob(t, restarted, "servers.api.cpu.user", true)
-		})
+func testMetricStoreCatalogPath(t *testing.T, ctx context.Context, metricStore *store.Store, now int32, trie bool) {
+	t.Helper()
+	metricCache := cache.New()
+	listener := newMetricStoreTestListener(t, metricCache, metricStore, trie)
+	assertMetricStoreCatalogDoesNotCreateFiles(t, listener)
+	assertStoreGlob(t, listener, "servers.api.cpu", true)
+	assertStoreGlob(t, listener, "servers.api.cpu.*", true)
+	assertMetricStoreReadPaths(t, listener, metricCache, now)
+	assertMetricStoreHTTPMetadata(t, listener)
+	assertMetricStoreGRPCMetadata(t, ctx, listener)
+	if !trie {
+		assertMetricStoreDeletion(t, ctx, metricStore, listener)
 	}
+	assertMetricStoreRestart(t, metricCache, metricStore, trie)
+}
+
+func newMetricStoreTestListener(t *testing.T, metricCache *cache.Cache, metricStore *store.Store, trie bool) *CarbonserverListener {
+	t.Helper()
+	listener := NewCarbonserverListener(metricCache.Get)
+	listener.logger, listener.accessLogger = zap.NewNop(), zap.NewNop()
+	listener.SetWhisperData(t.TempDir())
+	listener.SetMaxGlobs(100)
+	listener.SetTrieIndex(trie)
+	listener.SetTrigramIndex(!trie)
+	listener.SetMetricStore(metricStore)
+	if err := listener.RefreshMetricStoreIndex(); err != nil {
+		t.Fatal(err)
+	}
+	return listener
+}
+
+func assertMetricStoreCatalogDoesNotCreateFiles(t *testing.T, listener *CarbonserverListener) {
+	t.Helper()
+	entries, err := os.ReadDir(listener.whisperData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("shared-store catalog created metric files: %v", entries)
+	}
+}
+
+func assertMetricStoreReadPaths(t *testing.T, listener *CarbonserverListener, metricCache *cache.Cache, now int32) {
+	t.Helper()
+	metricCache.Add(points.OnePoint("servers.api.cpu.user", 99, int64(now-2)))
+	fine, err := listener.fetchSingleMetric("servers.api.cpu.user", "", now-10, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFineMetricStoreResponse(t, fine)
+	coarse, err := listener.fetchSingleMetric("servers.api.cpu.user", "", now-240, now-121)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if coarse.StepTime != 60 {
+		t.Fatalf("coarse fetch step=%d, want 60", coarse.StepTime)
+	}
+}
+
+func assertFineMetricStoreResponse(t *testing.T, fine response) {
+	t.Helper()
+	for _, value := range fine.Values {
+		if value == 99 {
+			if fine.StepTime == 1 {
+				return
+			}
+			break
+		}
+	}
+	t.Fatalf("fine fetch did not overlay cache: step=%d values=%v", fine.StepTime, fine.Values)
+}
+
+func assertMetricStoreGRPCMetadata(t *testing.T, ctx context.Context, listener *CarbonserverListener) {
+	t.Helper()
+	grpcInfo, err := listener.Info(ctx, &protov2.InfoRequest{Name: "servers.api.cpu.user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grpcInfo.Retentions) != 2 || grpcInfo.MaxRetention != 7200 {
+		t.Fatalf("unexpected gRPC info: %#v", grpcInfo)
+	}
+}
+
+func assertMetricStoreDeletion(t *testing.T, ctx context.Context, metricStore *store.Store, listener *CarbonserverListener) {
+	t.Helper()
+	if err := metricStore.Delete(ctx, "servers.api.cpu.system"); err != nil {
+		t.Fatal(err)
+	}
+	if err := listener.RefreshMetricStoreIndex(); err != nil {
+		t.Fatal(err)
+	}
+	assertStoreGlob(t, listener, "servers.api.cpu.system", false)
+}
+
+func assertMetricStoreRestart(t *testing.T, metricCache *cache.Cache, metricStore *store.Store, trie bool) {
+	t.Helper()
+	restarted := newMetricStoreTestListener(t, metricCache, metricStore, trie)
+	assertStoreGlob(t, restarted, "servers.api.cpu.user", true)
 }
 
 func TestMetricStoreListenerStopsCatalogScanner(t *testing.T) {
@@ -268,7 +287,7 @@ func TestMetricStoreRejectsLateRequests(t *testing.T) {
 	listener.sharedRequestMu.Unlock()
 
 	httpCalled := false
-	httpRequest := httptest.NewRequest(http.MethodGet, "/render/", nil)
+	httpRequest := httptest.NewRequest(http.MethodGet, "/render/", http.NoBody)
 	httpResponse := httptest.NewRecorder()
 	listener.rateLimitRequest(func(http.ResponseWriter, *http.Request) { httpCalled = true })(httpResponse, httpRequest)
 	if httpResponse.Code != http.StatusServiceUnavailable || httpCalled {
@@ -299,21 +318,21 @@ func assertStoreGlob(t *testing.T, listener *CarbonserverListener, query string,
 
 func assertMetricStoreHTTPMetadata(t *testing.T, listener *CarbonserverListener) {
 	t.Helper()
-	infoRequest := httptest.NewRequest(http.MethodGet, "/info/?target=servers.api.cpu.user&format=json", nil)
+	infoRequest := httptest.NewRequest(http.MethodGet, "/info/?target=servers.api.cpu.user&format=json", http.NoBody)
 	infoResponse := httptest.NewRecorder()
 	listener.infoHandler(infoResponse, infoRequest)
 	if infoResponse.Code != http.StatusOK || !strings.Contains(infoResponse.Body.String(), "servers.api.cpu.user") {
 		t.Fatalf("HTTP info response: status=%d body=%s", infoResponse.Code, infoResponse.Body.String())
 	}
 
-	findRequest := httptest.NewRequest(http.MethodGet, "/metrics/find/?query=servers.api.cpu.*&format=json", nil)
+	findRequest := httptest.NewRequest(http.MethodGet, "/metrics/find/?query=servers.api.cpu.*&format=json", http.NoBody)
 	findResponse := httptest.NewRecorder()
 	listener.findHandler(findResponse, findRequest)
 	if findResponse.Code != http.StatusOK || !strings.Contains(findResponse.Body.String(), "servers.api.cpu.user") {
 		t.Fatalf("HTTP find response: status=%d body=%s", findResponse.Code, findResponse.Body.String())
 	}
 
-	detailsRequest := httptest.NewRequest(http.MethodGet, "/metrics/details/?format=json", nil)
+	detailsRequest := httptest.NewRequest(http.MethodGet, "/metrics/details/?format=json", http.NoBody)
 	detailsResponse := httptest.NewRecorder()
 	listener.detailsHandler(detailsResponse, detailsRequest)
 	if detailsResponse.Code != http.StatusOK || !strings.Contains(detailsResponse.Body.String(), "servers.api.cpu.user") {

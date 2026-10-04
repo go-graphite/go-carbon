@@ -119,6 +119,7 @@ func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *h
 			)
 			http.Error(wr, "Bad request (unsupported format)",
 				http.StatusBadRequest)
+			return
 		}
 
 		var pv3Request protov3.MultiGlobRequest

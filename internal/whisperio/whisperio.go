@@ -25,7 +25,7 @@ func (a *Adapter) ExportWSP(ctx context.Context, name, path string) error {
 	return a.ExportSnapshot(ctx, snapshot, path)
 }
 
-func (a *Adapter) ExportSnapshot(ctx context.Context, snapshot chunkstore.Snapshot, path string) error {
+func (*Adapter) ExportSnapshot(ctx context.Context, snapshot chunkstore.Snapshot, path string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -36,7 +36,7 @@ func (a *Adapter) ExportSnapshot(ctx context.Context, snapshot chunkstore.Snapsh
 	for i, r := range snapshot.Metadata.Retentions {
 		retentions[i] = whisper.NewRetention(r.Step, r.Count)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
 		return fmt.Errorf("create export directory: %w", err)
 	}
 	w, err := whisper.Create(path, whisper.NewRetentionsNoPointer(retentions), whisper.AggregationMethod(snapshot.Metadata.AggregationMethod), snapshot.Metadata.XFilesFactor)

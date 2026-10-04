@@ -72,17 +72,7 @@ func TestSharedAppPersistsReloadsAndReopens(t *testing.T) {
 	}
 	now := time.Now().Unix()
 	app.Cache.Add(points.OnePoint("shared.cpu", 42, now-2))
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		snap, err := app.MetricStore.Snapshot(context.Background(), "shared.cpu")
-		if err == nil && len(snap.Archives[0].Points) == 1 && snap.Archives[0].Points[0].Value == 42 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("metric not persisted: %+v %v", snap, err)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForSharedPoint(t, app.MetricStore)
 	if err := app.ReloadConfig(); err != nil {
 		t.Fatal(err)
 	}
@@ -209,5 +199,20 @@ func TestStorageSettingsChangedIgnoresDataDirForFileBackend(t *testing.T) {
 	next.Buckyd.Enabled = !old.Buckyd.Enabled
 	if !storageSettingsChanged(old, next) {
 		t.Fatal("buckyd change must require restart")
+	}
+}
+
+func waitForSharedPoint(t *testing.T, db *store.Store) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snap, err := db.Snapshot(context.Background(), "shared.cpu")
+		if err == nil && len(snap.Archives[0].Points) == 1 && snap.Archives[0].Points[0].Value == 42 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("metric not persisted: %+v %v", snap, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

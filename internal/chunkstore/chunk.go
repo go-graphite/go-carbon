@@ -92,40 +92,63 @@ func encodeChunk(c *chunk) []byte {
 
 // decodeChunk validates the whole input before publishing it into dst.
 func decodeChunk(data []byte, dst *chunk) error {
+	payload, err := chunkPayload(data)
+	if err != nil {
+		return err
+	}
+	parsed, offset, err := decodeChunkHeader(payload)
+	if err != nil {
+		return err
+	}
+	if err := decodeChunkPoints(payload, offset, &parsed); err != nil {
+		return err
+	}
+	*dst = parsed
+	return nil
+}
+
+func chunkPayload(data []byte) ([]byte, error) {
 	if len(data) < 2 || data[0] != chunkVersion || data[1]&^byte(chunkCompressed) != 0 {
-		return errInvalidChunk
+		return nil, errInvalidChunk
 	}
 	payload := data
 	if data[1]&chunkCompressed != 0 {
 		decodedLen, err := snappy.DecodedLen(data[2:])
 		if err != nil || decodedLen < chunkHeaderSize-1 || decodedLen > maxChunkSize-2 {
-			return errInvalidChunk
+			return nil, errInvalidChunk
 		}
 		payload = make([]byte, 2+decodedLen)
 		payload[0] = chunkVersion
 		payload[1] = 0
 		if _, err := snappy.Decode(payload[2:], data[2:]); err != nil {
-			return errInvalidChunk
+			return nil, errInvalidChunk
 		}
 	} else if len(payload) > maxChunkSize {
-		return errInvalidChunk
+		return nil, errInvalidChunk
 	}
+	return payload, nil
+}
 
+func decodeChunkHeader(payload []byte) (chunk, int, error) {
 	var parsed chunk
 	offset := 2
 	deltas, n := binary.Uvarint(payload[offset:])
 	if n <= 0 || deltas >= materializeAt {
-		return errInvalidChunk
+		return chunk{}, 0, errInvalidChunk
 	}
 	offset += n
 	if len(payload)-offset < 16 {
-		return errInvalidChunk
+		return chunk{}, 0, errInvalidChunk
 	}
 	parsed.Deltas = uint32(deltas)
 	for i := range parsed.Present {
 		parsed.Present[i] = binary.LittleEndian.Uint64(payload[offset : offset+8])
 		offset += 8
 	}
+	return parsed, offset, nil
+}
+
+func decodeChunkPoints(payload []byte, offset int, parsed *chunk) error {
 	var previousTimestamp int64
 	for slot := 0; slot < chunkSlots; slot++ {
 		if !parsed.has(slot) {
@@ -149,7 +172,6 @@ func decodeChunk(data []byte, dst *chunk) error {
 	if offset != len(payload) {
 		return errInvalidChunk
 	}
-	*dst = parsed
 	return nil
 }
 

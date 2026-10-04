@@ -31,6 +31,8 @@ import (
 
 const authHeader = "X-Buckyd-Authorization"
 
+const readHeaderTimeout = 10 * time.Second
+
 type Config struct {
 	Enabled       bool     `toml:"enabled"`
 	Bind          string   `toml:"bind"`
@@ -108,26 +110,49 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if metricStore == nil {
 		return nil, errors.New("metric store is required")
 	}
+	if err := validateConfig(config); err != nil {
+		return nil, err
+	}
+	normalizeConfig(&config)
+	nodes, err := parseNodes(config.Nodes)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(config.TmpDir, 0750); err != nil {
+		return nil, fmt.Errorf("create buckyd temporary directory: %w", err)
+	}
+	secret, err := readSecret(config.JWTSecretFile)
+	if err != nil {
+		return nil, err
+	}
+	return &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}, nil
+}
+
+func validateConfig(config Config) error {
 	if config.Backend != "" && config.Backend != "shared" {
-		return nil, fmt.Errorf("unsupported buckyd backend %q", config.Backend)
+		return fmt.Errorf("unsupported buckyd backend %q", config.Backend)
 	}
 	if config.Sparse || config.Compressed || config.ReadMTime {
-		return nil, errors.New("sparse, compressed, and mtime options are not supported with shared buckyd storage")
+		return errors.New("sparse, compressed, and mtime options are not supported with shared buckyd storage")
 	}
 	if config.CachePath != "" || config.Prefix != "" {
-		return nil, errors.New("cache_path and prefix are filesystem buckyd options unsupported by shared storage")
+		return errors.New("cache_path and prefix are filesystem buckyd options unsupported by shared storage")
 	}
+	if config.Hash != "" && config.Hash != "carbon" && config.Hash != "fnv1a" && config.Hash != "jump_fnv1a" {
+		return fmt.Errorf("unsupported hash %q", config.Hash)
+	}
+	if config.Replicas < 0 {
+		return errors.New("replicas must be positive")
+	}
+	return nil
+}
+
+func normalizeConfig(config *Config) {
 	if config.Hash == "" {
 		config.Hash = "carbon"
 	}
-	if config.Hash != "carbon" && config.Hash != "fnv1a" && config.Hash != "jump_fnv1a" {
-		return nil, fmt.Errorf("unsupported hash %q", config.Hash)
-	}
 	if config.Replicas == 0 {
 		config.Replicas = 1
-	}
-	if config.Replicas < 1 {
-		return nil, errors.New("replicas must be positive")
 	}
 	if config.Node == "" {
 		config.Node, _ = os.Hostname()
@@ -135,19 +160,8 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if config.Timeout == 0 {
 		config.Timeout = 3600
 	}
-	nodes := make([]Node, 0, len(config.Nodes))
-	for _, raw := range config.Nodes {
-		node, err := parseNode(raw)
-		if err != nil {
-			return nil, err
-		}
-		nodes = append(nodes, node)
-	}
 	if config.TmpDir == "" {
 		config.TmpDir = os.TempDir()
-	}
-	if err := os.MkdirAll(config.TmpDir, 0755); err != nil {
-		return nil, fmt.Errorf("create buckyd temporary directory: %w", err)
 	}
 	if config.MaxBodyBytes <= 0 {
 		config.MaxBodyBytes = 160 << 20
@@ -155,18 +169,33 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if config.MaxTransfers <= 0 {
 		config.MaxTransfers = 4
 	}
-	if config.JWTSecretFile != "" {
-		b, err := os.ReadFile(config.JWTSecretFile)
+}
+
+func parseNodes(rawNodes []string) ([]Node, error) {
+	nodes := make([]Node, 0, len(rawNodes))
+	for _, raw := range rawNodes {
+		node, err := parseNode(raw)
 		if err != nil {
-			return nil, fmt.Errorf("read buckyd JWT secret: %w", err)
+			return nil, err
 		}
-		configSecret := strings.TrimSpace(string(b))
-		if configSecret == "" {
-			return nil, errors.New("buckyd JWT secret is empty")
-		}
-		return &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: []byte(configSecret), transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}, nil
+		nodes = append(nodes, node)
 	}
-	return &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}, nil
+	return nodes, nil
+}
+
+func readSecret(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read buckyd JWT secret: %w", err)
+	}
+	secret := strings.TrimSpace(string(b))
+	if secret == "" {
+		return nil, errors.New("buckyd JWT secret is empty")
+	}
+	return []byte(secret), nil
 }
 
 func parseNode(raw string) (Node, error) {
@@ -217,7 +246,7 @@ func (s *Service) Start() error {
 	}
 	s.listener = listener
 	s.stopped = false
-	s.server = &http.Server{Addr: bind, Handler: s.Handler()}
+	s.server = newHTTPServer(bind, s.Handler())
 	if s.config.Pprof != "" {
 		pprofListener, err := net.Listen("tcp", s.config.Pprof)
 		if err != nil {
@@ -233,7 +262,7 @@ func (s *Service) Start() error {
 		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 		s.pprofListener = pprofListener
-		s.pprofServer = &http.Server{Handler: mux}
+		s.pprofServer = newHTTPServer("", mux)
 		s.pprofErr = make(chan error, 1)
 		go func(server *http.Server, listener net.Listener, errs chan error) {
 			err := server.Serve(listener)
@@ -274,6 +303,10 @@ func (s *Service) Start() error {
 	return nil
 }
 
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: readHeaderTimeout}
+}
+
 // SetOnChange installs an immutable callback invoked after a successful
 // mutation has committed. It is intended to refresh carbonserver's catalog.
 func (s *Service) SetOnChange(callback func()) {
@@ -290,15 +323,48 @@ func (s *Service) changed() {
 	}
 }
 func (s *Service) Stop() error {
+	resources := s.takeResources()
+	if resources.server == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err := shutdownServer(ctx, resources.server, &s.handlers)
+	if resources.listener != nil {
+		_ = resources.listener.Close()
+	}
+	err = firstError(err, receiveServeError(resources.serveErr))
+	if resources.profiler != nil {
+		_ = resources.profiler.Stop()
+	}
+	if resources.pprofServer != nil {
+		_ = resources.pprofServer.Close()
+	}
+	if resources.pprofListener != nil {
+		_ = resources.pprofListener.Close()
+	}
+	return firstError(err, receiveServeError(resources.pprofErr))
+}
+
+type serviceResources struct {
+	server        *http.Server
+	listener      net.Listener
+	serveErr      chan error
+	profiler      *pyroscope.Profiler
+	pprofServer   *http.Server
+	pprofListener net.Listener
+	pprofErr      chan error
+}
+
+func (s *Service) takeResources() serviceResources {
 	s.mu.Lock()
-	server := s.server
+	defer s.mu.Unlock()
+	resources := serviceResources{
+		server: s.server, listener: s.listener, serveErr: s.serveErr,
+		profiler: s.pyroscope, pprofServer: s.pprofServer,
+		pprofListener: s.pprofListener, pprofErr: s.pprofErr,
+	}
 	s.stopped = true
-	listener := s.listener
-	serveErr := s.serveErr
-	profiler := s.pyroscope
-	pprofServer := s.pprofServer
-	pprofListener := s.pprofListener
-	pprofErr := s.pprofErr
 	s.server = nil
 	s.listener = nil
 	s.serveErr = nil
@@ -306,18 +372,16 @@ func (s *Service) Stop() error {
 	s.pprofServer = nil
 	s.pprofListener = nil
 	s.pprofErr = nil
-	s.mu.Unlock()
-	if server == nil {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	return resources
+}
+
+func shutdownServer(ctx context.Context, server *http.Server, handlers *sync.WaitGroup) error {
 	err := server.Shutdown(ctx)
 	if err != nil {
 		_ = server.Close()
 	}
 	done := make(chan struct{})
-	go func() { s.handlers.Wait(); close(done) }()
+	go func() { handlers.Wait(); close(done) }()
 	select {
 	case <-done:
 	case <-ctx.Done():
@@ -327,29 +391,24 @@ func (s *Service) Stop() error {
 		_ = server.Close()
 		<-done
 	}
-	if listener != nil {
-		_ = listener.Close()
-	}
-	if serveErr != nil {
-		if serveError, ok := <-serveErr; ok && serveError != nil && err == nil {
-			err = serveError
-		}
-	}
-	if profiler != nil {
-		_ = profiler.Stop()
-	}
-	if pprofServer != nil {
-		_ = pprofServer.Close()
-	}
-	if pprofListener != nil {
-		_ = pprofListener.Close()
-	}
-	if pprofErr != nil {
-		if pprofError, ok := <-pprofErr; ok && pprofError != nil && err == nil {
-			err = pprofError
-		}
-	}
 	return err
+}
+
+func receiveServeError(errs chan error) error {
+	if errs == nil {
+		return nil
+	}
+	if err, ok := <-errs; ok {
+		return err
+	}
+	return nil
+}
+
+func firstError(current, candidate error) error {
+	if current == nil {
+		return candidate
+	}
+	return current
 }
 func (s *Service) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -429,53 +488,75 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, 403)
 		return
 	}
-	prefix := r.FormValue("prefix")
-	names := make([]string, 0)
-	rx := r.FormValue("regex")
-	var re *regexp.Regexp
-	if rx != "" {
-		compiled, err := regexp.Compile(rx)
-		if err != nil {
-			writeError(w, err, 400)
-			return
-		}
-		re = compiled
+	filter, err := listFilter(r)
+	if err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
 	}
-	var filter map[string]struct{}
-	if raw := r.FormValue("list"); raw != "" {
-		var values []string
-		if err := json.Unmarshal([]byte(raw), &values); err != nil {
-			writeError(w, err, 400)
-			return
-		}
-		filter = make(map[string]struct{}, len(values))
-		for _, value := range values {
-			filter[value] = struct{}{}
-		}
-	}
-	after := r.FormValue("after")
-	for {
-		page, err := s.store.ListPage(r.Context(), prefix, after, 10000)
-		if err != nil {
-			writeError(w, err, 500)
-			return
-		}
-		for _, m := range page {
-			if re == nil || re.MatchString(m.Name) {
-				if filter == nil {
-					names = append(names, m.Name)
-				} else if _, ok := filter[m.Name]; ok {
-					names = append(names, m.Name)
-				}
-			}
-		}
-		if len(page) < 10000 {
-			break
-		}
-		after = page[len(page)-1].Name
+	names, err := s.listNames(r.Context(), r.FormValue("prefix"), r.FormValue("after"), filter)
+	if err != nil {
+		writeError(w, err, http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(names)
+}
+
+type metricFilter struct {
+	pattern *regexp.Regexp
+	names   map[string]struct{}
+}
+
+func listFilter(r *http.Request) (metricFilter, error) {
+	filter := metricFilter{}
+	if pattern := r.FormValue("regex"); pattern != "" {
+		compiled, err := regexp.Compile(pattern)
+		if err != nil {
+			return metricFilter{}, err
+		}
+		filter.pattern = compiled
+	}
+	if raw := r.FormValue("list"); raw != "" {
+		var names []string
+		if err := json.Unmarshal([]byte(raw), &names); err != nil {
+			return metricFilter{}, err
+		}
+		filter.names = make(map[string]struct{}, len(names))
+		for _, name := range names {
+			filter.names[name] = struct{}{}
+		}
+	}
+	return filter, nil
+}
+
+func (s *Service) listNames(ctx context.Context, prefix, after string, filter metricFilter) ([]string, error) {
+	names := make([]string, 0)
+	for {
+		page, err := s.store.ListPage(ctx, prefix, after, 10000)
+		if err != nil {
+			return nil, err
+		}
+		for _, metadata := range page {
+			if filter.matches(metadata.Name) {
+				names = append(names, metadata.Name)
+			}
+		}
+		if len(page) < 10000 {
+			return names, nil
+		}
+		after = page[len(page)-1].Name
+	}
+}
+
+func (f metricFilter) matches(name string) bool {
+	if f.pattern != nil && !f.pattern.MatchString(name) {
+		return false
+	}
+	if f.names == nil {
+		return true
+	}
+	_, ok := f.names[name]
+	return ok
 }
 
 func (s *Service) metric(w http.ResponseWriter, r *http.Request) {
@@ -594,63 +675,77 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request, name string) {
 	http.ServeContent(w, r, name, time.Time{}, serve)
 }
 func (s *Service) receive(w http.ResponseWriter, r *http.Request, name string, replace bool) {
-	select {
-	case s.transfers <- struct{}{}:
-		defer func() { <-s.transfers }()
-	default:
+	if !s.acquireTransfer() {
 		writeError(w, errors.New("too many concurrent transfers"), http.StatusTooManyRequests)
 		return
 	}
+	defer s.releaseTransfer()
 	if r.URL.Query().Get("fetch_offload") == "true" {
 		s.offload(w, r, name, replace)
 		return
 	}
+	path, cleanup, ok := s.receiveFile(w, r)
+	if !ok {
+		return
+	}
+	defer cleanup()
+	s.commitImport(w, r.Context(), name, path, replace)
+}
+
+func (s *Service) acquireTransfer() bool {
+	select {
+	case s.transfers <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Service) releaseTransfer() { <-s.transfers }
+
+func (s *Service) receiveFile(w http.ResponseWriter, r *http.Request) (string, func(), bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxBodyBytes)
 	file, err := os.CreateTemp(s.config.TmpDir, "buckyd-import-*.wsp")
 	if err != nil {
 		writeError(w, err, 500)
-		return
+		return "", nil, false
 	}
 	path := file.Name()
-	defer os.Remove(path)
-	defer file.Close()
+	cleanup := func() { _ = file.Close(); _ = os.Remove(path) }
 	reader := io.Reader(r.Body)
 	if encoding := r.Header.Get("Content-Encoding"); encoding == "snappy" {
 		reader = snappy.NewReader(reader)
 	} else if encoding != "" && encoding != "identity" {
 		writeError(w, errors.New("unsupported content encoding"), 400)
-		return
+		cleanup()
+		return "", nil, false
 	}
 	n, copyErr := io.Copy(file, io.LimitReader(reader, s.config.MaxBodyBytes+1))
 	if copyErr != nil || n > s.config.MaxBodyBytes {
-		_ = file.Close()
 		writeError(w, errors.New("request body exceeds limit or is invalid"), 400)
-		return
+		cleanup()
+		return "", nil, false
 	}
 	if header := r.Header.Get("X-Metric-Stat"); header != "" {
 		var remote MetricData
 		if err := json.Unmarshal([]byte(header), &remote); err != nil || remote.Size != n {
-			_ = file.Close()
 			writeError(w, errors.New("metric stat does not match request body"), 400)
-			return
+			cleanup()
+			return "", nil, false
 		}
 	}
 	if err := file.Close(); err != nil {
 		writeError(w, err, 500)
-		return
+		cleanup()
+		return "", nil, false
 	}
-	var m chunkstore.Metadata
-	if replace {
-		m, err = s.whisperIO.ImportWSP(r.Context(), name, path, true)
-	} else {
-		m, err = s.whisperIO.FillWSP(r.Context(), name, path)
-	}
+	return path, cleanup, true
+}
+
+func (s *Service) commitImport(w http.ResponseWriter, ctx context.Context, name, path string, replace bool) {
+	m, err := s.importFile(ctx, name, path, replace)
 	if err != nil {
-		if errors.Is(err, chunkstore.ErrConflict) {
-			writeError(w, err, 409)
-		} else {
-			writeError(w, err, 500)
-		}
+		writeImportError(w, err)
 		return
 	}
 	w.Header().Set("X-Storage-Version", version(m))
@@ -658,98 +753,137 @@ func (s *Service) receive(w http.ResponseWriter, r *http.Request, name string, r
 	writeHealStats(w)
 }
 
+func (s *Service) importFile(ctx context.Context, name, path string, replace bool) (chunkstore.Metadata, error) {
+	if replace {
+		return s.whisperIO.ImportWSP(ctx, name, path, true)
+	}
+	return s.whisperIO.FillWSP(ctx, name, path)
+}
+
+func writeImportError(w http.ResponseWriter, err error) {
+	if err != nil {
+		if errors.Is(err, chunkstore.ErrConflict) {
+			writeError(w, err, 409)
+		} else {
+			writeError(w, err, 500)
+		}
+	}
+}
+
 // offload copies one authorized metric through the same GET/POST wire format.
 // Compatibility with buckytools uses a locally minted read token for the
 // inter-buckyd GET; the caller is authorized only for the destination update.
 func (s *Service) offload(w http.ResponseWriter, r *http.Request, name string, replace bool) {
+	response, remote, ok := s.fetchOffload(w, r, name)
+	if !ok {
+		return
+	}
+	defer response.Body.Close()
+	path, cleanup, ok := s.offloadFile(w, response, remote)
+	if !ok {
+		return
+	}
+	defer cleanup()
+	s.commitImport(w, r.Context(), name, path, replace)
+}
+
+func (s *Service) fetchOffload(w http.ResponseWriter, r *http.Request, name string) (*http.Response, MetricData, bool) {
+	request, err := s.newOffloadRequest(r, name)
+	if err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return nil, MetricData{}, false
+	}
+	response, err := offloadClient.Do(request)
+	if err != nil {
+		writeError(w, fmt.Errorf("offload request: %w", err), http.StatusBadGateway)
+		return nil, MetricData{}, false
+	}
+	remote, status, err := s.validateOffloadResponse(response)
+	if err != nil {
+		response.Body.Close()
+		writeError(w, err, status)
+		return nil, MetricData{}, false
+	}
+	return response, remote, true
+}
+
+func (s *Service) newOffloadRequest(r *http.Request, name string) (*http.Request, error) {
 	server, source := r.FormValue("server"), r.FormValue("metric")
 	if source == "" {
 		source = name
 	}
 	if server == "" {
-		writeError(w, errors.New("offload server missing"), 400)
-		return
+		return nil, errors.New("offload server missing")
 	}
 	u := url.URL{Scheme: "http", Host: server, Path: "/metrics/" + source}
-	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+	request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
-		writeError(w, err, 400)
-		return
+		return nil, err
 	}
 	if len(s.secret) > 0 {
 		signed, err := s.offloadToken(source)
 		if err != nil {
-			writeError(w, err, 500)
-			return
+			return nil, err
 		}
 		request.Header.Set(authHeader, signed)
 	}
 	request.Header.Set("Accept-Encoding", "snappy")
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		// The source is supplied by the caller; keep its token on that request.
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	response, err := client.Do(request)
-	if err != nil {
-		writeError(w, fmt.Errorf("offload request: %w", err), 502)
-		return
-	}
-	defer response.Body.Close()
+	return request, nil
+}
+
+var offloadClient = &http.Client{
+	Timeout: 30 * time.Second,
+	// The source is supplied by the caller; keep its token on that request.
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+func (s *Service) validateOffloadResponse(response *http.Response) (MetricData, int, error) {
 	if response.StatusCode == http.StatusNotFound {
-		writeError(w, errors.New("offload source metric not found"), http.StatusNotFound)
-		return
+		return MetricData{}, http.StatusNotFound, errors.New("offload source metric not found")
 	}
-	if response.StatusCode != 200 {
-		writeError(w, fmt.Errorf("offload source returned %s", response.Status), 502)
-		return
+	if response.StatusCode != http.StatusOK {
+		return MetricData{}, http.StatusBadGateway, fmt.Errorf("offload source returned %s", response.Status)
 	}
 	var remote MetricData
 	if err := json.Unmarshal([]byte(response.Header.Get("X-Metric-Stat")), &remote); err != nil {
-		writeError(w, errors.New("offload source missing metric stat"), 502)
-		return
+		return MetricData{}, http.StatusBadGateway, errors.New("offload source missing metric stat")
 	}
 	if remote.Size < 0 || remote.Size > s.config.MaxBodyBytes {
-		writeError(w, errors.New("offload source exceeds body limit"), http.StatusBadRequest)
-		return
+		return MetricData{}, http.StatusBadRequest, errors.New("offload source exceeds body limit")
 	}
-	reader := io.Reader(response.Body)
-	if encoding := response.Header.Get("Content-Encoding"); encoding == "snappy" {
-		reader = snappy.NewReader(reader)
-	} else if encoding != "" && encoding != "identity" {
-		writeError(w, errors.New("unsupported offload content encoding"), http.StatusBadRequest)
-		return
+	return remote, http.StatusOK, nil
+}
+
+func (s *Service) offloadFile(w http.ResponseWriter, response *http.Response, remote MetricData) (string, func(), bool) {
+	reader, ok := offloadReader(w, response)
+	if !ok {
+		return "", nil, false
 	}
 	file, err := os.CreateTemp(s.config.TmpDir, "buckyd-offload-*.wsp")
 	if err != nil {
-		writeError(w, err, 500)
-		return
+		writeError(w, err, http.StatusInternalServerError)
+		return "", nil, false
 	}
 	path := file.Name()
-	defer os.Remove(path)
+	cleanup := func() { _ = file.Close(); _ = os.Remove(path) }
 	n, err := io.Copy(file, io.LimitReader(reader, s.config.MaxBodyBytes+1))
 	closeErr := file.Close()
 	if err != nil || closeErr != nil || n != remote.Size || n > s.config.MaxBodyBytes {
-		writeError(w, errors.New("offload body does not match metric stat"), 400)
-		return
+		cleanup()
+		writeError(w, errors.New("offload body does not match metric stat"), http.StatusBadRequest)
+		return "", nil, false
 	}
-	var metadata chunkstore.Metadata
-	if replace {
-		metadata, err = s.whisperIO.ImportWSP(r.Context(), name, path, true)
-	} else {
-		metadata, err = s.whisperIO.FillWSP(r.Context(), name, path)
+	return path, cleanup, true
+}
+
+func offloadReader(w http.ResponseWriter, response *http.Response) (io.Reader, bool) {
+	if encoding := response.Header.Get("Content-Encoding"); encoding == "snappy" {
+		return snappy.NewReader(response.Body), true
+	} else if encoding != "" && encoding != "identity" {
+		writeError(w, errors.New("unsupported offload content encoding"), http.StatusBadRequest)
+		return nil, false
 	}
-	if err != nil {
-		if errors.Is(err, chunkstore.ErrConflict) {
-			writeError(w, err, http.StatusConflict)
-		} else {
-			writeError(w, err, http.StatusInternalServerError)
-		}
-		return
-	}
-	w.Header().Set("X-Storage-Version", version(metadata))
-	s.changed()
-	writeHealStats(w)
+	return response.Body, true
 }
 
 func writeHealStats(w http.ResponseWriter) {

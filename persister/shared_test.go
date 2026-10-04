@@ -20,10 +20,10 @@ type failedSharedStore struct {
 	err   error
 }
 
-func (f failedSharedStore) Metadata(context.Context, string) (store.Metadata, error) {
+func (failedSharedStore) Metadata(context.Context, string) (store.Metadata, error) {
 	return store.Metadata{}, nil
 }
-func (f failedSharedStore) Create(context.Context, store.MetricConfig) (store.Metadata, error) {
+func (failedSharedStore) Create(context.Context, store.MetricConfig) (store.Metadata, error) {
 	return store.Metadata{}, nil
 }
 func (f failedSharedStore) UpdateMany(context.Context, string, []points.Point) error {

@@ -201,14 +201,7 @@ func TestWriteMaterializationAtFourSurvivesCompactionAndReopen(t *testing.T) {
 	// bound without changing the independently validated 32-operand format.
 	const chains = 3
 	updates := 1 + deltasBeforeSet*chains
-	for i := 0; i < updates; i++ {
-		if err := s.UpdateManyForArchive(context.Background(), "materialize", []Point{{Timestamp: int64(now - 60), Value: float64(i)}}, 60*256); err != nil {
-			t.Fatalf("update %d: %v", i, err)
-		}
-		if deltas := storedChunkDeltas(t, s, m, now-60); deltas >= deltasBeforeSet {
-			t.Fatalf("update %d left %d merge operands, bound is %d", i, deltas, deltasBeforeSet)
-		}
-	}
+	writeMaterializedChains(t, s, m, "materialize", now, updates)
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +237,18 @@ func TestWriteMaterializationAtFourSurvivesCompactionAndReopen(t *testing.T) {
 	}
 	if len(series.Values) != 2 || series.Values[0] != float64(updates-1) || !math.IsNaN(series.Values[1]) {
 		t.Fatalf("reopened values = %v", series.Values)
+	}
+}
+
+func writeMaterializedChains(t *testing.T, s *Store, m Metadata, name string, now, updates int) {
+	t.Helper()
+	for i := 0; i < updates; i++ {
+		if err := s.UpdateManyForArchive(context.Background(), name, []Point{{Timestamp: int64(now - 60), Value: float64(i)}}, 60*256); err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+		if deltas := storedChunkDeltas(t, s, m, now-60); deltas >= deltasBeforeSet {
+			t.Fatalf("update %d left %d merge operands, bound is %d", i, deltas, deltasBeforeSet)
+		}
 	}
 }
 
@@ -311,14 +316,7 @@ func TestStrictMemCrashPreservesSyncedMaterialization(t *testing.T) {
 	m := createTestMetric(t, s, "strict-recovery")
 	const strictChains = 3
 	strictUpdates := 1 + deltasBeforeSet*strictChains
-	for i := 0; i < strictUpdates; i++ {
-		if err := s.UpdateManyForArchive(context.Background(), "strict-recovery", []Point{{Timestamp: int64(now - 60), Value: float64(i)}}, 60*256); err != nil {
-			t.Fatal(err)
-		}
-		if deltas := storedChunkDeltas(t, s, m, now-60); deltas >= deltasBeforeSet {
-			t.Fatalf("update %d left %d merge operands, bound is %d", i, deltas, deltasBeforeSet)
-		}
-	}
+	writeMaterializedChains(t, s, m, "strict-recovery", now, strictUpdates)
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}

@@ -38,6 +38,10 @@ func validateStorageConfig(cfg *Config) error {
 	if cfg.Whisper.OnlineMigration {
 		return errors.New("online-migration is not supported by shared storage")
 	}
+	return validateSharedStoragePolicies(cfg)
+}
+
+func validateSharedStoragePolicies(cfg *Config) error {
 	for _, schema := range cfg.Whisper.Schemas {
 		if schema.Migration != nil && *schema.Migration {
 			return errors.New("schema migration is not supported by shared storage")
