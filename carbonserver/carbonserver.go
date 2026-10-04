@@ -1079,6 +1079,60 @@ func metricFileSizes(path string, info os.FileInfo) (logical, physical int64, er
 	return logical, physical, nil
 }
 
+type fileListUpdate struct {
+	listener            *CarbonserverListener
+	logger              *zap.Logger
+	started             time.Time
+	fileIndex           *fileIndex
+	files               []string
+	filesLen            int
+	details             map[string]*protov3.MetricDetails
+	trieIdx             *trieIndex
+	metricsKnown        uint64
+	infos               []zap.Field
+	cacheMetricNames    map[string]struct{}
+	cacheMetricLen      int
+	cacheIndexRuntime   time.Duration
+	readFromCache       bool
+	fileListCacheReader FileListCache
+	fileListCache       FileListCache
+	scanCancelled       bool
+}
+
+func newFileListUpdate(listener *CarbonserverListener, cacheMetricNames map[string]struct{}) *fileListUpdate {
+	u := &fileListUpdate{
+		listener: listener, logger: listener.logger.With(zap.String("handler", "fileListUpdated")), started: time.Now(),
+		fileIndex: listener.CurrentFileIndex(), details: make(map[string]*protov3.MetricDetails), cacheMetricNames: cacheMetricNames, cacheMetricLen: len(cacheMetricNames),
+	}
+	if listener.trieIndex {
+		if u.fileIndex == nil || !listener.concurrentIndex {
+			u.trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
+		} else {
+			u.trieIdx = u.fileIndex.trieIdx
+			u.trieIdx.root.gen++
+		}
+	}
+	u.populateCacheMetrics(cacheMetricNames)
+	return u
+}
+
+func (u *fileListUpdate) populateCacheMetrics(cacheMetricNames map[string]struct{}) {
+	started := time.Now()
+	for fileName := range cacheMetricNames {
+		if u.listener.trieIndex {
+			if _, err := u.trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
+				u.listener.logTrieInsertError(u.logger, "error populating index from cache indexMap", fileName, err)
+			}
+		} else {
+			u.files = append(u.files, fileName)
+		}
+		if strings.HasSuffix(fileName, ".wsp") {
+			u.metricsKnown++
+		}
+	}
+	u.cacheIndexRuntime = time.Since(started)
+}
+
 func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time) bool {
 	return listener.updateFileListWithCache(dir, cacheMetricNames, quotaAndUsageStatTicker, false)
 }
@@ -1090,7 +1144,6 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 		}
 		return false
 	}
-
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
 		if r := recover(); r != nil {
@@ -1100,372 +1153,349 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 			)
 		}
 	}()
-
-	var t0 = time.Now()
-	var fidx = listener.CurrentFileIndex()
-	var files []string
-	var filesLen int
-	var details = make(map[string]*protov3.MetricDetails)
-	var trieIdx *trieIndex
-	var metricsKnown uint64
-	var infos []zap.Field
-	if listener.trieIndex {
-		if fidx == nil || !listener.concurrentIndex {
-			trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
-		} else {
-			trieIdx = fidx.trieIdx
-			trieIdx.root.gen++
-		}
-	}
-
-	// populate index for all the metric names in cache
-	// the iteration takes place only when cache-scan is enabled in conf
-	var tcache = time.Now()
-	var cacheMetricLen = len(cacheMetricNames)
-	for fileName := range cacheMetricNames {
-		if listener.trieIndex {
-			if _, err := trieIdx.insert(fileName, 0, 0, 0, 0); err != nil {
-				listener.logTrieInsertError(logger, "error populating index from cache indexMap", fileName, err)
-			}
-		} else {
-			files = append(files, fileName)
-		}
-		if strings.HasSuffix(fileName, ".wsp") {
-			metricsKnown++
-		}
-	}
-	cacheIndexRuntime := time.Since(tcache)
-
-	// readFromCache only run once at the start of the program.
-	// A new version is generated everytime a file list scan is completed.
-	if listener.trieIndex && fidx == nil && listener.fileListCache != "" {
-		// why not listener.fileListCacheVersion: this is for
-		// transparent file list cache version upgrade and reverse.
-		flc, err := NewFileListCache(listener.fileListCache, FLCVersionUnspecified, 'r')
-		if err != nil {
-			if !os.IsNotExist(err) {
-				logger.Error("failed to read file list cache", zap.Error(err))
-			}
-		} else {
-			infos = append(infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
-
-			readFromCache = true
-			defer func() {
-				if err := flc.Close(); err != nil {
-					logger.Error("failed to close file list cache", zap.Error(err))
-				}
-			}()
-			for {
-				select {
-				case <-listener.exitChan:
-					return false
-				default:
-				}
-				entry, err := flc.Read()
-				if errors.Is(err, io.EOF) {
-					break
-				}
-				if err != nil {
-					infos = append(infos, zap.NamedError("file_list_cache_read_error", err))
-
-					readFromCache = false
-					trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
-
-					break
-				}
-
-				if entry.Path == "" {
-					continue
-				}
-
-				if _, err := trieIdx.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt); err != nil {
-					listener.logTrieInsertError(logger, "failed to read from file list cache", entry.Path, err)
-
-					readFromCache = false
-					trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
-
-					break
-				}
-
-				filesLen++
-				if strings.HasSuffix(entry.Path, ".wsp") {
-					metricsKnown++
-				}
-			}
-		}
-	}
-
-	if cacheOnly && !readFromCache {
+	u := newFileListUpdate(listener, cacheMetricNames)
+	defer func() { readFromCache = u.readFromCache }()
+	defer u.closeFileListCaches()
+	if !u.loadFileListCache(cacheOnly) {
 		return false
 	}
+	if !u.readFromCache && !u.scanFiles(dir, quotaAndUsageStatTicker) {
+		return false
+	}
+	u.pruneRealtimeMetrics()
+	return u.publish(dir, quotaAndUsageStatTicker)
+}
 
-	if !readFromCache {
-		var flc FileListCache
-		var scanCancelled bool
-		if listener.fileListCache != "" {
-			var err error
-			flc, err = NewFileListCache(listener.fileListCache, listener.fileListCacheVersion, 'w')
-			if err != nil {
-				if !os.IsNotExist(err) {
-					logger.Error("failed to create file list cache", zap.Error(err))
-				}
-			} else {
-				defer func() {
-					// flc could be reset to nil during filepath walk
-					if flc != nil {
-						if scanCancelled {
-							if err := flc.Abort(); err != nil {
-								logger.Error("failed to abort file list cache", zap.Error(err))
-							}
-							return
-						}
-						if err := flc.Close(); err != nil {
-							logger.Error("failed to close flie list cache", zap.Error(err))
-						}
-					}
-				}()
-			}
-
-			infos = append(infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
+func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
+	if !u.listener.trieIndex || u.fileIndex != nil || u.listener.fileListCache == "" {
+		return !cacheOnly
+	}
+	flc, err := NewFileListCache(u.listener.fileListCache, FLCVersionUnspecified, 'r')
+	if err != nil {
+		if !os.IsNotExist(err) {
+			u.logger.Error("failed to read file list cache", zap.Error(err))
 		}
+		return !cacheOnly
+	}
+	u.fileListCacheReader = flc
+	u.infos = append(u.infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
+	u.readFromCache = true
+	for u.readNextCacheEntry(flc) {
+	}
+	if u.stopped() {
+		return false
+	}
+	return u.readFromCache || !cacheOnly
+}
 
-		if fi, err := os.Lstat(dir); err != nil {
-			logger.Error("failed to stat whisper data directory", zap.String("path", dir), zap.Error(err))
-		} else if fi.Mode()&os.ModeSymlink == 1 {
-			logger.Error("can't index symlink data dir", zap.String("path", dir))
+func (u *fileListUpdate) readNextCacheEntry(flc FileListCache) bool {
+	select {
+	case <-u.listener.exitChan:
+		u.readFromCache = false
+		return false
+	default:
+	}
+	entry, err := flc.Read()
+	if errors.Is(err, io.EOF) {
+		return false
+	}
+	if err != nil {
+		u.infos = append(u.infos, zap.NamedError("file_list_cache_read_error", err))
+		u.resetTrie()
+		return false
+	}
+	if entry.Path == "" {
+		return true
+	}
+	if _, err := u.trieIdx.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt); err != nil {
+		u.listener.logTrieInsertError(u.logger, "failed to read from file list cache", entry.Path, err)
+		u.resetTrie()
+		return false
+	}
+	u.filesLen++
+	if strings.HasSuffix(entry.Path, ".wsp") {
+		u.metricsKnown++
+	}
+	return true
+}
+
+func (u *fileListUpdate) resetTrie() {
+	u.readFromCache = false
+	u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+}
+
+func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
+	u.fileListCache = u.newFileListCacheWriter()
+	u.logWhisperDataDir(dir)
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		return u.walkFile(path, info, err, quotaAndUsageStatTicker)
+	})
+	if u.scanCancelled {
+		return false
+	}
+	if err != nil {
+		u.logger.Error("error getting file list", zap.Error(err))
+	}
+	return true
+}
+
+func (u *fileListUpdate) newFileListCacheWriter() FileListCache {
+	if u.listener.fileListCache == "" {
+		return nil
+	}
+	flc, err := NewFileListCache(u.listener.fileListCache, u.listener.fileListCacheVersion, 'w')
+	if err != nil {
+		if !os.IsNotExist(err) {
+			u.logger.Error("failed to create file list cache", zap.Error(err))
 		}
+		return nil
+	}
+	u.infos = append(u.infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
+	return flc
+}
 
-		err := filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-			select {
-			case <-listener.exitChan:
-				scanCancelled = true
-				return filepath.SkipAll
-			default:
-			}
-			if err != nil {
-				logger.Info("error processing", zap.String("path", p), zap.Error(err))
-				return nil
-			}
-
-			// WHY: as filepath.walk could potentially taking a long
-			// time to complete (>= 5 minutes or more), depending
-			// on how many files are there on disk. It's nice to
-			// have consistent quota and usage metrics produced as
-			// regularly as possible according to the
-			// quotaUsageReportFrequency specified in the config.
-			if listener.isQuotaEnabled() {
-				select {
-				case <-quotaAndUsageStatTicker:
-					listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
-				default:
-				}
-			}
-
-			if listener.trieIndex && listener.concurrentIndex {
-				listener.drainRealtimeMetrics(trieIdx)
-			}
-
-			isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
-			if info.IsDir() || isFullMetric { // both dir and metric file is needed for supporting trigram index.
-				trimmedName := strings.TrimPrefix(p, listener.whisperData)
-				filesLen++
-
-				var dataPoints, logicalSize, physicalSize int64
-				if isFullMetric {
-					if listener.estimateSize != nil {
-						m := strings.ReplaceAll(trimmedName, "/", ".")
-						m = m[1 : len(m)-4]
-						_, _, dataPoints = listener.estimateSize(m)
-					}
-					var sizeErr error
-					logicalSize, physicalSize, sizeErr = metricFileSizes(p, info)
-					if sizeErr != nil {
-						logger.Info("failed to stat out-of-order sidecar",
-							zap.String("path", whisper.OutOfOrderSidecarPath(p)), zap.Error(sizeErr))
-					}
-				}
-
-				var metricFirstSeenAt int64
-
-				// use cacheMetricNames to check and prevent appending duplicate metrics
-				// into the index when cacheMetricNamesIndex is enabled
-				if _, present := cacheMetricNames[trimmedName]; present {
-					delete(cacheMetricNames, trimmedName)
-				} else {
-					if listener.trieIndex {
-						// WHY:
-						//   * this would only affects empty directories
-						//   * and empty dir isn't useful (at least most of the time)?
-						if isFullMetric {
-							if node, err := trieIdx.insert(trimmedName, logicalSize, physicalSize, dataPoints, 0); err != nil {
-								// It's better to just log an error than stop indexing
-								listener.logTrieInsertError(logger, "updateFileList.trie: failed to index path", trimmedName, err)
-							} else if node.meta != nil {
-								metricFirstSeenAt = node.meta.(*fileMeta).firstSeenAt
-							}
-						}
-					} else {
-						files = append(files, trimmedName)
-					}
-
-					if isFullMetric {
-						metricsKnown++
-					}
-				}
-
-				// only metric paths are cached for trie index. trigram index needs to index dir path as well.
-				if flc != nil && (!listener.trieIndex || isFullMetric) {
-					if err := flc.Write(&FLCEntry{
-						Path:         trimmedName,
-						DataPoints:   dataPoints,
-						LogicalSize:  logicalSize,
-						PhysicalSize: physicalSize,
-						FirstSeenAt:  metricFirstSeenAt,
-					}); err != nil {
-						logger.Error("failed to write to file list cache", zap.Error(err))
-						if err := flc.Close(); err != nil {
-							logger.Error("failed to close flie list cache", zap.Error(err))
-						}
-						flc = nil
-					}
-				}
-
-				if isFullMetric && listener.internalStatsDir != "" {
-					i := stat.GetStat(info)
-					i.Size = logicalSize
-					i.RealSize = physicalSize
-					trimmedName = strings.ReplaceAll(trimmedName[1:len(trimmedName)-4], "/", ".")
-					details[trimmedName] = &protov3.MetricDetails{
-						Size:     i.Size,
-						ModTime:  i.MTime,
-						ATime:    i.ATime,
-						RealSize: i.RealSize,
-					}
-				}
-			}
-
-			return nil
-		})
-		if scanCancelled {
-			return false
+func (u *fileListUpdate) closeFileListCaches() {
+	if u.fileListCache == nil {
+	} else if u.scanCancelled {
+		if err := u.fileListCache.Abort(); err != nil {
+			u.logger.Error("failed to abort file list cache", zap.Error(err))
 		}
+	} else if err := u.fileListCache.Close(); err != nil {
+		u.logger.Error("failed to close flie list cache", zap.Error(err))
+	}
+	if u.fileListCacheReader != nil {
+		if err := u.fileListCacheReader.Close(); err != nil {
+			u.logger.Error("failed to close file list cache", zap.Error(err))
+		}
+	}
+}
+
+func (u *fileListUpdate) logWhisperDataDir(dir string) {
+	if fi, err := os.Lstat(dir); err != nil {
+		u.logger.Error("failed to stat whisper data directory", zap.String("path", dir), zap.Error(err))
+	} else if fi.Mode()&os.ModeSymlink == 1 {
+		u.logger.Error("can't index symlink data dir", zap.String("path", dir))
+	}
+}
+
+func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, quotaAndUsageStatTicker <-chan time.Time) error {
+	if u.cancelled() {
+		return filepath.SkipAll
+	}
+	if walkErr != nil {
+		u.logger.Info("error processing", zap.String("path", path), zap.Error(walkErr))
+		return nil
+	}
+	u.refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker)
+	if info.IsDir() || strings.HasSuffix(info.Name(), ".wsp") {
+		u.addFile(path, info)
+	}
+	return nil
+}
+
+func (u *fileListUpdate) cancelled() bool {
+	if u.stopped() {
+		u.scanCancelled = true
+		return true
+	}
+	return false
+}
+
+func (u *fileListUpdate) stopped() bool {
+	select {
+	case <-u.listener.exitChan:
+		return true
+	default:
+		return false
+	}
+}
+
+func (u *fileListUpdate) refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker <-chan time.Time) {
+	if u.listener.isQuotaEnabled() {
+		select {
+		case <-quotaAndUsageStatTicker:
+			u.listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
+		default:
+		}
+	}
+	if u.listener.trieIndex && u.listener.concurrentIndex {
+		u.listener.drainRealtimeMetrics(u.trieIdx)
+	}
+}
+
+func (u *fileListUpdate) addFile(path string, info os.FileInfo) {
+	trimmedName := strings.TrimPrefix(path, u.listener.whisperData)
+	isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
+	u.filesLen++
+	dataPoints, logicalSize, physicalSize := u.metricSizes(path, info, trimmedName, isFullMetric)
+	firstSeenAt := u.indexFile(trimmedName, isFullMetric, logicalSize, physicalSize, dataPoints)
+	u.cacheFile(trimmedName, isFullMetric, dataPoints, logicalSize, physicalSize, firstSeenAt)
+	u.addMetricDetails(info, trimmedName, isFullMetric, logicalSize, physicalSize)
+}
+
+func (u *fileListUpdate) metricSizes(path string, info os.FileInfo, trimmedName string, isFullMetric bool) (dataPoints, logicalSize, physicalSize int64) {
+	if !isFullMetric {
+		return 0, 0, 0
+	}
+	if u.listener.estimateSize != nil {
+		metric := strings.ReplaceAll(trimmedName, "/", ".")
+		_, _, dataPoints = u.listener.estimateSize(metric[1 : len(metric)-4])
+	}
+	logicalSize, physicalSize, err := metricFileSizes(path, info)
+	if err != nil {
+		u.logger.Info("failed to stat out-of-order sidecar", zap.String("path", whisper.OutOfOrderSidecarPath(path)), zap.Error(err))
+	}
+	return dataPoints, logicalSize, physicalSize
+}
+
+func (u *fileListUpdate) indexFile(name string, isFullMetric bool, logicalSize, physicalSize, dataPoints int64) int64 {
+	if _, present := u.cacheMetricNames[name]; present {
+		delete(u.cacheMetricNames, name)
+		return 0
+	}
+	var firstSeenAt int64
+	if !u.listener.trieIndex {
+		u.files = append(u.files, name)
+	} else if isFullMetric {
+		node, err := u.trieIdx.insert(name, logicalSize, physicalSize, dataPoints, 0)
 		if err != nil {
-			logger.Error("error getting file list",
-				zap.Error(err),
-			)
+			u.listener.logTrieInsertError(u.logger, "updateFileList.trie: failed to index path", name, err)
+		} else if node.meta != nil {
+			firstSeenAt = node.meta.(*fileMeta).firstSeenAt
 		}
 	}
-
-	if listener.concurrentIndex && trieIdx != nil {
-		// Include notifications queued while loading the file-list cache.
-		listener.drainRealtimeMetrics(trieIdx)
-		trieIdx.prune()
+	if isFullMetric {
+		u.metricsKnown++
 	}
+	return firstSeenAt
+}
 
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(dir, &stat); err != nil {
-		logger.Info("error getting FS Stats",
-			zap.String("dir", dir),
-			zap.Error(err),
-		)
+func (u *fileListUpdate) cacheFile(name string, isFullMetric bool, dataPoints, logicalSize, physicalSize, firstSeenAt int64) {
+	if u.fileListCache == nil || (u.listener.trieIndex && !isFullMetric) {
 		return
 	}
+	if err := u.fileListCache.Write(&FLCEntry{Path: name, DataPoints: dataPoints, LogicalSize: logicalSize, PhysicalSize: physicalSize, FirstSeenAt: firstSeenAt}); err != nil {
+		u.logger.Error("failed to write to file list cache", zap.Error(err))
+		if err := u.fileListCache.Close(); err != nil {
+			u.logger.Error("failed to close flie list cache", zap.Error(err))
+		}
+		u.fileListCache = nil
+	}
+}
 
+func (u *fileListUpdate) addMetricDetails(info os.FileInfo, name string, isFullMetric bool, logicalSize, physicalSize int64) {
+	if !isFullMetric || u.listener.internalStatsDir == "" {
+		return
+	}
+	details := stat.GetStat(info)
+	details.Size = logicalSize
+	details.RealSize = physicalSize
+	metric := strings.ReplaceAll(name[1:len(name)-4], "/", ".")
+	u.details[metric] = &protov3.MetricDetails{Size: details.Size, ModTime: details.MTime, ATime: details.ATime, RealSize: details.RealSize}
+}
+
+func (u *fileListUpdate) pruneRealtimeMetrics() {
+	if u.listener.concurrentIndex && u.trieIdx != nil {
+		// Include notifications queued while loading the file-list cache.
+		u.listener.drainRealtimeMetrics(u.trieIdx)
+		u.trieIdx.prune()
+	}
+}
+
+func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
+	freeSpace, totalSpace, ok := u.fileSystemSpace(dir)
+	if !ok {
+		return u.readFromCache
+	}
+	fileScanRuntime := time.Since(u.started)
+	atomic.StoreUint64(&u.listener.metrics.MetricsKnown, u.metricsKnown)
+	atomic.AddUint64(&u.listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
+	index, indexType, indexSize, pruned, indexingRuntime := u.buildIndex(freeSpace, totalSpace)
+	rdTimeUpdateRuntime := u.copyAccessTimes(index)
+	if u.fileIndex == nil {
+		// The first published index must already enforce its configured quotas.
+		u.listener.refreshIndexQuotaAndUsage(index, quotaAndUsageStatTicker)
+	}
+	if u.stopped() {
+		return false
+	}
+	u.listener.UpdateFileIndex(index)
+	u.logResult(fileScanRuntime, indexingRuntime, rdTimeUpdateRuntime, indexType, indexSize, pruned)
+	return u.readFromCache
+}
+
+func (u *fileListUpdate) fileSystemSpace(dir string) (uint64, uint64, bool) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(dir, &stat); err != nil {
+		u.logger.Info("error getting FS Stats", zap.String("dir", dir), zap.Error(err))
+		return 0, 0, false
+	}
 	var freeSpace uint64
 	// diskspace can be negative and Bavail is therefore int64
 	if stat.Bavail >= 0 { // nolint:staticcheck // skipcq: SCC-SA4003
 		freeSpace = uint64(stat.Bavail) * uint64(stat.Bsize)
 	}
-	totalSpace := stat.Blocks * uint64(stat.Bsize)
+	return freeSpace, stat.Blocks * uint64(stat.Bsize), true
+}
 
-	fileScanRuntime := time.Since(t0)
-	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
-	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
-
-	nfidx := &fileIndex{
-		details:     details,
-		freeSpace:   freeSpace,
-		totalSpace:  totalSpace,
-		accessTimes: make(map[string]int64),
-	}
-
-	var pruned int
-	var indexType = "trigram"
-	var tindex = time.Now()
-	var indexSize int
-	if listener.trieIndex {
-		indexType = "trie"
-		nfidx.trieIdx = trieIdx
-		infos = append(
-			infos,
-			zap.Int("trie_depth", int(nfidx.trieIdx.depth)),
-			zap.String("longest_metric", nfidx.trieIdx.longestMetric),
-		)
-
-		start := time.Now()
-		count, files, dirs, _, _, _, _, _ := trieIdx.countNodes()
-		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
-		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
-		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
-		infos = append(infos, zap.Duration("trie_count_nodes_time", time.Since(start)))
-
-		indexSize = count
+func (u *fileListUpdate) buildIndex(freeSpace, totalSpace uint64) (*fileIndex, string, int, int, time.Duration) {
+	index := &fileIndex{details: u.details, freeSpace: freeSpace, totalSpace: totalSpace, accessTimes: make(map[string]int64)}
+	indexType, indexSize, pruned := "trigram", 0, 0
+	started := time.Now()
+	if u.listener.trieIndex {
+		indexType, index.trieIdx = "trie", u.trieIdx
+		indexSize = u.addTrieStats(index)
 	} else {
-		nfidx.files = files
-		nfidx.idx = trigram.NewIndex(files)
-		pruned = nfidx.idx.Prune(0.95)
-		indexSize = len(nfidx.idx)
+		index.files = u.files
+		index.idx = trigram.NewIndex(u.files)
+		pruned = index.idx.Prune(0.95)
+		indexSize = len(index.idx)
 	}
-	indexingRuntime := time.Since(tindex) // note: no longer meaningful for trie index
-	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(indexingRuntime.Nanoseconds()))
+	runtime := time.Since(started)
+	atomic.AddUint64(&u.listener.metrics.IndexBuildTimeNS, uint64(runtime.Nanoseconds()))
+	return index, indexType, indexSize, pruned, runtime
+}
 
-	var tl = time.Now()
-	if fidx != nil && listener.internalStatsDir != "" {
-		listener.fileIdxMutex.Lock()
-		for m := range fidx.accessTimes {
-			if d, ok := details[m]; ok {
-				d.RdTime = fidx.accessTimes[m]
-			} else {
-				delete(fidx.accessTimes, m)
-				if listener.db != nil {
-					listener.db.Delete([]byte(m), nil)
-				}
+func (u *fileListUpdate) addTrieStats(index *fileIndex) int {
+	u.infos = append(u.infos, zap.Int("trie_depth", int(index.trieIdx.depth)), zap.String("longest_metric", index.trieIdx.longestMetric))
+	started := time.Now()
+	count, files, dirs, _, _, _, _, _ := index.trieIdx.countNodes()
+	atomic.StoreUint64(&u.listener.metrics.TrieNodes, uint64(count))
+	atomic.StoreUint64(&u.listener.metrics.TrieFiles, uint64(files))
+	atomic.StoreUint64(&u.listener.metrics.TrieDirs, uint64(dirs))
+	u.infos = append(u.infos, zap.Duration("trie_count_nodes_time", time.Since(started)))
+	return count
+}
+
+func (u *fileListUpdate) copyAccessTimes(index *fileIndex) time.Duration {
+	started := time.Now()
+	if u.fileIndex == nil || u.listener.internalStatsDir == "" {
+		return time.Since(started)
+	}
+	u.listener.fileIdxMutex.Lock()
+	defer u.listener.fileIdxMutex.Unlock()
+	for metric := range u.fileIndex.accessTimes {
+		if details, ok := u.details[metric]; ok {
+			details.RdTime = u.fileIndex.accessTimes[metric]
+		} else {
+			delete(u.fileIndex.accessTimes, metric)
+			if u.listener.db != nil {
+				u.listener.db.Delete([]byte(metric), nil)
 			}
 		}
-		nfidx.accessTimes = fidx.accessTimes
-		listener.fileIdxMutex.Unlock()
 	}
-	var rdTimeUpdateRuntime = time.Since(tl)
+	index.accessTimes = u.fileIndex.accessTimes
+	return time.Since(started)
+}
 
-	if fidx == nil {
-		// The first published index must already enforce its configured quotas.
-		listener.refreshIndexQuotaAndUsage(nfidx, quotaAndUsageStatTicker)
-	}
-	select {
-	case <-listener.exitChan:
-		return false
-	default:
-	}
-	listener.UpdateFileIndex(nfidx)
-
-	infos = append(infos,
-		zap.Duration("file_scan_runtime", fileScanRuntime),
-		zap.Duration("indexing_runtime", indexingRuntime),
-		zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
-		zap.Duration("cache_index_runtime", cacheIndexRuntime),
-		zap.Duration("total_runtime", time.Since(t0)),
-		zap.Int("Files", filesLen),
-		zap.Int("index_size", indexSize),
-		zap.Int("pruned_trigrams", pruned),
-		zap.Int("cache_metric_len_before", cacheMetricLen),
-		zap.Int("cache_metric_len_after", len(cacheMetricNames)),
-		zap.Uint64("metrics_known", metricsKnown),
-		zap.String("index_type", indexType),
-		zap.Bool("read_from_cache", readFromCache),
+func (u *fileListUpdate) logResult(fileScanRuntime, indexingRuntime, rdTimeUpdateRuntime time.Duration, indexType string, indexSize, pruned int) {
+	u.infos = append(u.infos,
+		zap.Duration("file_scan_runtime", fileScanRuntime), zap.Duration("indexing_runtime", indexingRuntime), zap.Duration("rdtime_update_runtime", rdTimeUpdateRuntime),
+		zap.Duration("cache_index_runtime", u.cacheIndexRuntime), zap.Duration("total_runtime", time.Since(u.started)), zap.Int("Files", u.filesLen),
+		zap.Int("index_size", indexSize), zap.Int("pruned_trigrams", pruned), zap.Int("cache_metric_len_before", u.cacheMetricLen),
+		zap.Int("cache_metric_len_after", len(u.cacheMetricNames)), zap.Uint64("metrics_known", u.metricsKnown), zap.String("index_type", indexType), zap.Bool("read_from_cache", u.readFromCache),
 	)
-	logger.Info("file list updated", infos...)
-
-	return
+	u.logger.Info("file list updated", u.infos...)
 }
 
 func (*CarbonserverListener) logTrieInsertError(logger *zap.Logger, msg, metric string, err error) {
@@ -1484,53 +1514,19 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		}
 	}()
 
-	// Rate limit heavy globbing queries like: *.*.*.*keyword*.
-	//
-	// Why: it's expensive to scan the whole index while looking for
-	// keywords, especially for trie and file system glob.
-	for _, rl := range listener.globQueryRateLimiters {
-		if !rl.pattern.MatchString(query) {
-			continue
-		}
-		if cap(rl.maxInflightRequests) == 0 {
-			err := fmt.Errorf("rejected by query rate limiter: %s", rl.pattern.String())
-			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
-			return
-		}
-
-		rl.maxInflightRequests <- struct{}{}
-		defer func() {
-			<-rl.maxInflightRequests
-		}()
-
-		// why: no need to continue execution if the request is already timeout.
-		if listener.checkRequestCtx(ctx) != nil {
-			err := fmt.Errorf("time out due to heavy glob query rate limiter: %s", rl.pattern.String())
-			resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
-			return
-		}
-
-		break
+	release, err := listener.acquireGlobQuerySlot(ctx, query)
+	if err != nil {
+		resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
+		return
+	}
+	if release != nil {
+		defer release()
 	}
 
 	logger := TraceContextToZap(ctx, listener.logger)
 	matchedCount := 0
-	defer func(start time.Time) {
-		dur := time.Since(start)
-		if dur <= time.Second {
-			return
-		}
-		var itype string
-		if listener.trieIndex {
-			itype = "trie"
-			if listener.trigramIndex {
-				itype = "trie-trigram"
-			}
-		} else if listener.trigramIndex {
-			itype = "trigram"
-		}
-		logger.Info("slow_expand_globs", zap.Duration("time", dur), zap.String("query", query), zap.Int("matched_count", matchedCount), zap.String("index_type", itype))
-	}(time.Now())
+	started := time.Now()
+	defer listener.logSlowGlobExpansion(logger, query, started, &matchedCount)
 
 	if listener.trieIndex && listener.CurrentFileIndex() != nil {
 		files, leafs, nodes, lookups, err := listener.expandGlobsTrie(query)
@@ -1538,15 +1534,7 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 		return
 	}
 
-	var useGlob bool
-
-	// TODO: Find out why we have set 'useGlob' if 'star == -1'
-	if star := strings.IndexByte(query, '*'); listener.getMetricStore() == nil && listener.cacheGetRecentMetrics == nil &&
-		strings.IndexByte(query, '[') == -1 &&
-		strings.IndexByte(query, '?') == -1 &&
-		(star == -1 || star == len(query)-1) {
-		useGlob = true
-	}
+	useGlob := listener.shouldUseFilesystemGlob(query)
 	logger = logger.With(zap.Bool("use_glob", useGlob))
 
 	/* things to glob:
@@ -1558,104 +1546,137 @@ func (listener *CarbonserverListener) expandGlobs(ctx context.Context, query str
 	 * unfortunately, filepath.Glob doesn't handle the curly brace
 	 * expansion for us */
 
-	query = strings.ReplaceAll(query, ".", "/")
-
-	var globs []string
-	if !strings.HasSuffix(query, "*") {
-		globs = append(globs, query+".wsp")
-		logger.Debug("appending file to globs struct",
-			zap.Strings("globs", globs),
-		)
-	}
-	globs = append(globs, query)
-	globs, err := listener.expandGlobBraces(globs)
+	globs, err := listener.globPatterns(query, logger)
 	if err != nil {
 		resultCh <- &ExpandedGlobResponse{query, nil, nil, nil, 0, err}
 		return
 	}
-
-	fidx := listener.CurrentFileIndex()
-	var files []string
-	fallbackToFS := false
-	if !listener.trigramIndex || fidx == nil || len(fidx.files) == 0 {
-		fallbackToFS = true
-	}
-
-	if fidx != nil && !useGlob {
-		// use the index
-		docs := make(map[trigram.DocID]struct{})
-
-		for _, g := range globs {
-			gpath := "/" + g
-			ts := extractTrigrams(g)
-
-			// TODO(dgryski): If we have 'not enough trigrams' we
-			// should bail and use the file-system glob instead
-
-			ids := fidx.idx.QueryTrigrams(ts)
-			for _, id := range ids {
-				docid := trigram.DocID(id)
-				if _, ok := docs[docid]; !ok {
-					matched, err := filepath.Match(gpath, fidx.files[id])
-					if err == nil && matched {
-						docs[docid] = struct{}{}
-					}
-				}
-			}
-		}
-
-		for id := range docs {
-			files = append(files, listener.whisperData+fidx.files[id])
-		}
-
-		sort.Strings(files)
-	}
-
-	// Not an 'else' clause because the trigram-searching code might want
-	// to fall back to the file-system glob
-
-	if useGlob || fallbackToFS {
-		// no index or we were asked to hit the filesystem
-		for _, g := range globs {
-			nfiles, err := filepath.Glob(listener.whisperData + "/" + g)
-			if err == nil {
-				files = append(files, nfiles...)
-			}
-		}
-	}
-
-	leafs := make([]bool, len(files))
-	for i, p := range files {
-		s, err := os.Stat(p)
-		switch {
-		case err == nil:
-			// exists on disk
-			p = p[len(listener.whisperData+"/"):]
-			if !s.IsDir() && strings.HasSuffix(p, ".wsp") {
-				p = p[:len(p)-4]
-				leafs[i] = true
-			} else {
-				leafs[i] = false
-			}
-			files[i] = strings.ReplaceAll(p, "/", ".")
-		case os.IsNotExist(err):
-			// cache-only, so no fileinfo
-			// mark "leafs" based on wsp suffix
-			p = p[len(listener.whisperData+"/"):]
-			if strings.HasSuffix(p, ".wsp") {
-				p = p[:len(p)-4]
-				leafs[i] = true
-			} else {
-				leafs[i] = false
-			}
-			files[i] = strings.ReplaceAll(p, "/", ".")
-		default:
-			continue
-		}
-	}
+	files := listener.expandGlobFiles(globs, useGlob)
+	files, leafs := listener.normalizeGlobFiles(files)
 
 	matchedCount = len(files)
 	resultCh <- &ExpandedGlobResponse{query, files, leafs, nil, 0, nil}
+}
+
+func (listener *CarbonserverListener) globPatterns(query string, logger *zap.Logger) ([]string, error) {
+	query = strings.ReplaceAll(query, ".", "/")
+	globs := []string{query}
+	if !strings.HasSuffix(query, "*") {
+		globs = append([]string{query + ".wsp"}, globs...)
+		logger.Debug("appending file to globs struct", zap.Strings("globs", globs))
+	}
+	return listener.expandGlobBraces(globs)
+}
+
+func (listener *CarbonserverListener) expandGlobFiles(globs []string, useGlob bool) []string {
+	fidx := listener.CurrentFileIndex()
+	fallbackToFS := !listener.trigramIndex || fidx == nil || len(fidx.files) == 0
+	files := listener.matchGlobIndex(fidx, globs, useGlob)
+	if useGlob || fallbackToFS {
+		files = append(files, listener.matchGlobFilesystem(globs)...)
+	}
+	return files
+}
+
+func (listener *CarbonserverListener) matchGlobIndex(fidx *fileIndex, globs []string, useGlob bool) []string {
+	if fidx == nil || useGlob {
+		return nil
+	}
+	docs := make(map[trigram.DocID]struct{})
+	for _, glob := range globs {
+		listener.matchGlobDocuments(fidx, glob, docs)
+	}
+	files := make([]string, 0, len(docs))
+	for id := range docs {
+		files = append(files, listener.whisperData+fidx.files[id])
+	}
+	sort.Strings(files)
+	return files
+}
+
+func (listener *CarbonserverListener) matchGlobDocuments(fidx *fileIndex, glob string, docs map[trigram.DocID]struct{}) {
+	for _, id := range fidx.idx.QueryTrigrams(extractTrigrams(glob)) {
+		docID := trigram.DocID(id)
+		if _, seen := docs[docID]; seen {
+			continue
+		}
+		matched, err := filepath.Match("/"+glob, fidx.files[id])
+		if err == nil && matched {
+			docs[docID] = struct{}{}
+		}
+	}
+}
+
+func (listener *CarbonserverListener) matchGlobFilesystem(globs []string) []string {
+	var files []string
+	for _, glob := range globs {
+		if matched, err := filepath.Glob(listener.whisperData + "/" + glob); err == nil {
+			files = append(files, matched...)
+		}
+	}
+	return files
+}
+
+func (listener *CarbonserverListener) normalizeGlobFiles(files []string) ([]string, []bool) {
+	leafs := make([]bool, len(files))
+	for i, path := range files {
+		info, err := os.Stat(path)
+		if err != nil && !os.IsNotExist(err) {
+			continue
+		}
+		path, leafs[i] = listener.normalizeGlobFile(path, info)
+		files[i] = path
+	}
+	return files, leafs
+}
+
+func (listener *CarbonserverListener) normalizeGlobFile(path string, info os.FileInfo) (string, bool) {
+	path = path[len(listener.whisperData+"/"):]
+	leaf := strings.HasSuffix(path, ".wsp") && (info == nil || !info.IsDir())
+	if leaf {
+		path = path[:len(path)-4]
+	}
+	return strings.ReplaceAll(path, "/", "."), leaf
+}
+
+func (listener *CarbonserverListener) acquireGlobQuerySlot(ctx context.Context, query string) (func(), error) {
+	for _, rl := range listener.globQueryRateLimiters {
+		if !rl.pattern.MatchString(query) {
+			continue
+		}
+		if cap(rl.maxInflightRequests) == 0 {
+			return nil, fmt.Errorf("rejected by query rate limiter: %s", rl.pattern.String())
+		}
+		rl.maxInflightRequests <- struct{}{}
+		if listener.checkRequestCtx(ctx) != nil {
+			<-rl.maxInflightRequests
+			return nil, fmt.Errorf("time out due to heavy glob query rate limiter: %s", rl.pattern.String())
+		}
+		return func() { <-rl.maxInflightRequests }, nil
+	}
+	return nil, nil
+}
+
+func (listener *CarbonserverListener) logSlowGlobExpansion(logger *zap.Logger, query string, started time.Time, matchedCount *int) {
+	duration := time.Since(started)
+	if duration <= time.Second {
+		return
+	}
+	indexType := ""
+	if listener.trieIndex {
+		indexType = "trie"
+		if listener.trigramIndex {
+			indexType = "trie-trigram"
+		}
+	} else if listener.trigramIndex {
+		indexType = "trigram"
+	}
+	logger.Info("slow_expand_globs", zap.Duration("time", duration), zap.String("query", query), zap.Int("matched_count", *matchedCount), zap.String("index_type", indexType))
+}
+
+func (listener *CarbonserverListener) shouldUseFilesystemGlob(query string) bool {
+	star := strings.IndexByte(query, '*')
+	return listener.getMetricStore() == nil && listener.cacheGetRecentMetrics == nil && strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1)
 }
 
 // TODO(dgryski): add tests
@@ -2048,105 +2069,10 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		zap.String("scanFrequency", listener.scanFrequency.String()),
 	)
 
-	if listener.getMetricStore() != nil && (listener.trigramIndex || listener.trieIndex) {
-		listener.forceScanChan = make(chan struct{}, 1)
-		var scanFrequency <-chan time.Time
-		if listener.scanFrequency != 0 {
-			listener.scanTicker = time.NewTicker(listener.scanFrequency)
-			scanFrequency = listener.scanTicker.C
-		}
-		listener.startFileListUpdater(listener.whisperData, scanFrequency, listener.forceScanChan, listener.exitChan)
-		listener.forceScanChan <- struct{}{}
-	} else if (listener.trigramIndex || listener.trieIndex) && listener.scanFrequency != 0 {
-		listener.forceScanChan = make(chan struct{}, 1)
-		listener.scanTicker = time.NewTicker(listener.scanFrequency)
-		listener.startFileListUpdater(listener.whisperData, listener.scanTicker.C, listener.forceScanChan, listener.exitChan)
-		listener.forceScanChan <- struct{}{}
-	}
+	listener.startIndexUpdater()
+	listener.initializeCaches()
 
-	listener.queryCache = expireCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
-	if listener.findCacheEnabled {
-		listener.findCache = expireCache{ec: expirecache.New(uint64(listener.findCacheSizeMB))}
-	}
-	if listener.globCacheEnabled {
-		listener.globCache = expireCache{ec: expirecache.New(uint64(listener.globCacheSizeMB))}
-	}
-
-	// +1 to track every over the number of buckets we track
-	listener.timeBuckets = make([]uint64, listener.buckets+1)
-
-	carbonserverMux := http.NewServeMux()
-	wrapHandler := func(h http.HandlerFunc, handlerStatusCodes []uint64) http.HandlerFunc {
-		return httputil.TrackConnections(
-			httputil.TimeHandler(
-				TraceHandler(
-					listener.rateLimitRequest(h),
-					statusCodes["combined"],
-					handlerStatusCodes,
-					listener.prometheus.request,
-				),
-				listener.bucketRequestTimesHTTP,
-			),
-		)
-	}
-
-	carbonserverMux.HandleFunc("/_internal/capabilities/", wrapHandler(listener.capabilityHandler, statusCodes["capabilities"]))
-	carbonserverMux.HandleFunc("/metrics/find/", wrapHandler(listener.findHandler, statusCodes["find"]))
-	carbonserverMux.HandleFunc("/metrics/list/", wrapHandler(listener.listHandler, statusCodes["list"]))
-	carbonserverMux.HandleFunc("/metrics/list_query/", wrapHandler(listener.listQueryHandler, statusCodes["list"]))
-	carbonserverMux.HandleFunc("/metrics/details/", wrapHandler(listener.detailsHandler, statusCodes["details"]))
-	carbonserverMux.HandleFunc("/render/", wrapHandler(listener.renderHandler, statusCodes["render"]))
-	carbonserverMux.HandleFunc("/info/", wrapHandler(listener.infoHandler, statusCodes["info"]))
-
-	carbonserverMux.HandleFunc("/forcescan", func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case listener.forceScanChan <- struct{}{}:
-			w.WriteHeader(http.StatusAccepted)
-		case <-time.After(time.Second):
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	})
-
-	carbonserverMux.HandleFunc("/admin/quota", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("Content-Type", "text/plain")
-
-		fidx := listener.CurrentFileIndex()
-		if fidx == nil && fidx.trieIdx == nil {
-			fmt.Fprintf(w, "index doesn't exist.")
-			return
-		}
-
-		fidx.trieIdx.getQuotaTree(w)
-	})
-	carbonserverMux.HandleFunc("/admin/info", func(w http.ResponseWriter, r *http.Request) {
-		// URL: /admin/info?scopes=cache,config
-		w.Header().Add("Content-Type", "application/json")
-
-		// Parameter "scopes" is a csv string. Valid values: cache, config.
-		// By default, /admin/info returns all admin info
-		var scopes map[string]bool
-		if fs := strings.TrimSpace(r.URL.Query().Get("scopes")); fs != "" {
-			scopes = map[string]bool{}
-			for _, f := range strings.Split(fs, ",") {
-				scopes[strings.TrimSpace(f)] = true
-			}
-		}
-
-		infos := map[string]map[string]interface{}{}
-		for name, f := range listener.interfalInfoCallbacks {
-			if scopes != nil && !scopes[name] {
-				continue
-			}
-
-			infos[name] = f()
-		}
-
-		json.NewEncoder(w).Encode(infos)
-	})
-
-	carbonserverMux.HandleFunc("/robots.txt", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, "User-agent: *\nDisallow: /")
-	})
+	carbonserverMux := listener.newHTTPMux()
 
 	tcpAddr, err := net.ResolveTCPAddr("tcp", listen)
 	if err != nil {
@@ -2230,6 +2156,95 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	}()
 
 	return nil
+}
+
+func (listener *CarbonserverListener) startIndexUpdater() {
+	if !listener.trigramIndex && !listener.trieIndex {
+		return
+	}
+	if listener.getMetricStore() == nil && listener.scanFrequency == 0 {
+		return
+	}
+	listener.forceScanChan = make(chan struct{}, 1)
+	var scanFrequency <-chan time.Time
+	if listener.scanFrequency != 0 {
+		listener.scanTicker = time.NewTicker(listener.scanFrequency)
+		scanFrequency = listener.scanTicker.C
+	}
+	listener.startFileListUpdater(listener.whisperData, scanFrequency, listener.forceScanChan, listener.exitChan)
+	listener.forceScanChan <- struct{}{}
+}
+
+func (listener *CarbonserverListener) newHTTPMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	wrap := func(handler http.HandlerFunc, codes []uint64) http.HandlerFunc {
+		return httputil.TrackConnections(httputil.TimeHandler(TraceHandler(listener.rateLimitRequest(handler), statusCodes["combined"], codes, listener.prometheus.request), listener.bucketRequestTimesHTTP))
+	}
+	mux.HandleFunc("/_internal/capabilities/", wrap(listener.capabilityHandler, statusCodes["capabilities"]))
+	mux.HandleFunc("/metrics/find/", wrap(listener.findHandler, statusCodes["find"]))
+	mux.HandleFunc("/metrics/list/", wrap(listener.listHandler, statusCodes["list"]))
+	mux.HandleFunc("/metrics/list_query/", wrap(listener.listQueryHandler, statusCodes["list"]))
+	mux.HandleFunc("/metrics/details/", wrap(listener.detailsHandler, statusCodes["details"]))
+	mux.HandleFunc("/render/", wrap(listener.renderHandler, statusCodes["render"]))
+	mux.HandleFunc("/info/", wrap(listener.infoHandler, statusCodes["info"]))
+	mux.HandleFunc("/forcescan", listener.forceScanHandler)
+	mux.HandleFunc("/admin/quota", listener.quotaHandler)
+	mux.HandleFunc("/admin/info", listener.adminInfoHandler)
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "User-agent: *\nDisallow: /") })
+	return mux
+}
+
+func (listener *CarbonserverListener) forceScanHandler(w http.ResponseWriter, _ *http.Request) {
+	select {
+	case listener.forceScanChan <- struct{}{}:
+		w.WriteHeader(http.StatusAccepted)
+	case <-time.After(time.Second):
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+}
+
+func (listener *CarbonserverListener) quotaHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Add("Content-Type", "text/plain")
+	fidx := listener.CurrentFileIndex()
+	if fidx == nil && fidx.trieIdx == nil {
+		fmt.Fprintf(w, "index doesn't exist.")
+		return
+	}
+	fidx.trieIdx.getQuotaTree(w)
+}
+
+func (listener *CarbonserverListener) adminInfoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Add("Content-Type", "application/json")
+	scopes := parseAdminInfoScopes(r.URL.Query().Get("scopes"))
+	infos := make(map[string]map[string]interface{})
+	for name, callback := range listener.interfalInfoCallbacks {
+		if scopes == nil || scopes[name] {
+			infos[name] = callback()
+		}
+	}
+	json.NewEncoder(w).Encode(infos)
+}
+
+func parseAdminInfoScopes(value string) map[string]bool {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	scopes := make(map[string]bool)
+	for _, scope := range strings.Split(value, ",") {
+		scopes[strings.TrimSpace(scope)] = true
+	}
+	return scopes
+}
+
+func (listener *CarbonserverListener) initializeCaches() {
+	listener.queryCache = expireCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
+	if listener.findCacheEnabled {
+		listener.findCache = expireCache{ec: expirecache.New(uint64(listener.findCacheSizeMB))}
+	}
+	if listener.globCacheEnabled {
+		listener.globCache = expireCache{ec: expirecache.New(uint64(listener.globCacheSizeMB))}
+	}
+	listener.timeBuckets = make([]uint64, listener.buckets+1)
 }
 
 func (listener *CarbonserverListener) bucketRequestTimesHTTP(req *http.Request, t time.Duration) {

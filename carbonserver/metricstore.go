@@ -24,46 +24,9 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 	defer listener.metricStoreIndexMu.Unlock()
 
 	started := time.Now()
-	ctx := context.Background()
-	var (
-		files        []string
-		metricsKnown uint64
-		details      = make(map[string]*protov3.MetricDetails)
-		trieIdx      *trieIndex
-		catalogAfter string
-		seenPaths    = make(map[string]struct{})
-	)
-	if listener.trieIndex {
-		trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
-	}
-
-	for {
-		page, err := metricStore.ListPage(ctx, "", catalogAfter, metricStoreCatalogPageSize)
-		if err != nil {
-			return fmt.Errorf("list shared metric-store catalog: %w", err)
-		}
-		for _, metadata := range page {
-			path := metricStoreVirtualPath(metadata.Name)
-			logical, dataPoints := metricStoreLogicalSize(metadata)
-			details[metadata.Name] = &protov3.MetricDetails{Size: logical, RealSize: 0}
-			if listener.trieIndex {
-				if _, err := trieIdx.insert(path, logical, 0, dataPoints, 0); err != nil {
-					return fmt.Errorf("index shared metric %q: %w", metadata.Name, err)
-				}
-			} else {
-				for _, virtualPath := range metricStoreTrigramPaths(path) {
-					if _, ok := seenPaths[virtualPath]; !ok {
-						seenPaths[virtualPath] = struct{}{}
-						files = append(files, virtualPath)
-					}
-				}
-			}
-			metricsKnown++
-		}
-		if len(page) < metricStoreCatalogPageSize {
-			break
-		}
-		catalogAfter = page[len(page)-1].Name
+	files, details, trieIdx, metricsKnown, err := listener.loadMetricStoreCatalog(metricStore)
+	if err != nil {
+		return err
 	}
 
 	var freeSpace, totalSpace uint64
@@ -120,6 +83,61 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		zap.Duration("runtime", time.Since(started)),
 	)
 	return nil
+}
+
+func (listener *CarbonserverListener) loadMetricStoreCatalog(metricStore *store.Store) ([]string, map[string]*protov3.MetricDetails, *trieIndex, uint64, error) {
+	var files []string
+	details := make(map[string]*protov3.MetricDetails)
+	seenPaths := make(map[string]struct{})
+	var trieIdx *trieIndex
+	if listener.trieIndex {
+		trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
+	}
+	return listener.loadMetricStoreCatalogPages(metricStore, files, details, trieIdx, seenPaths)
+}
+
+func (listener *CarbonserverListener) loadMetricStoreCatalogPages(metricStore *store.Store, files []string, details map[string]*protov3.MetricDetails, trieIdx *trieIndex, seenPaths map[string]struct{}) ([]string, map[string]*protov3.MetricDetails, *trieIndex, uint64, error) {
+	ctx := context.Background()
+	var metricsKnown uint64
+	var catalogAfter string
+	for {
+		page, err := metricStore.ListPage(ctx, "", catalogAfter, metricStoreCatalogPageSize)
+		if err != nil {
+			return nil, nil, nil, 0, fmt.Errorf("list shared metric-store catalog: %w", err)
+		}
+		for _, metadata := range page {
+			var indexErr error
+			files, indexErr = listener.addMetricStoreCatalogEntry(metadata, files, details, trieIdx, seenPaths)
+			if indexErr != nil {
+				return nil, nil, nil, 0, indexErr
+			}
+			metricsKnown++
+		}
+		if len(page) < metricStoreCatalogPageSize {
+			return files, details, trieIdx, metricsKnown, nil
+		}
+		catalogAfter = page[len(page)-1].Name
+	}
+}
+
+func (listener *CarbonserverListener) addMetricStoreCatalogEntry(metadata store.Metadata, files []string, details map[string]*protov3.MetricDetails, trieIdx *trieIndex, seenPaths map[string]struct{}) ([]string, error) {
+	path := metricStoreVirtualPath(metadata.Name)
+	logical, dataPoints := metricStoreLogicalSize(metadata)
+	details[metadata.Name] = &protov3.MetricDetails{Size: logical}
+	if listener.trieIndex {
+		if _, err := trieIdx.insert(path, logical, 0, dataPoints, 0); err != nil {
+			return nil, fmt.Errorf("index shared metric %q: %w", metadata.Name, err)
+		}
+		return files, nil
+	}
+	for _, virtualPath := range metricStoreTrigramPaths(path) {
+		if _, ok := seenPaths[virtualPath]; ok {
+			continue
+		}
+		seenPaths[virtualPath] = struct{}{}
+		files = append(files, virtualPath)
+	}
+	return files, nil
 }
 
 func metricStoreVirtualPath(name string) string {

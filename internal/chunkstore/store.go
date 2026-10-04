@@ -87,20 +87,28 @@ func checkFormat(fs vfs.FS, dir string) error {
 		return fmt.Errorf("list store directory: %w", err)
 	}
 	if len(names) > 0 {
-		f, err := fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
-		if err != nil {
-			return fmt.Errorf("%w: missing marker; migrate legacy data through buckyd", ErrFormat)
-		}
-		data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarker)+1)))
-		closeErr := f.Close()
-		if err := errors.Join(readErr, closeErr); err != nil {
-			return fmt.Errorf("read store marker: %w", err)
-		}
-		if string(data) != formatMarker {
-			return ErrFormat
-		}
-		return nil
+		return checkFormatMarker(fs, dir)
 	}
+	return createFormatMarker(fs, dir)
+}
+
+func checkFormatMarker(fs vfs.FS, dir string) error {
+	f, err := fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		return fmt.Errorf("%w: missing marker; migrate legacy data through buckyd", ErrFormat)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarker)+1)))
+	closeErr := f.Close()
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return fmt.Errorf("read store marker: %w", err)
+	}
+	if string(data) != formatMarker {
+		return ErrFormat
+	}
+	return nil
+}
+
+func createFormatMarker(fs vfs.FS, dir string) error {
 	// Sync newly created directory entries too: syncing the WAL and store
 	// directory alone cannot make a missing ancestor survive a crash.
 	var parents []string

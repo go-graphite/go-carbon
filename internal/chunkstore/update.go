@@ -42,53 +42,80 @@ func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRet
 		return fmt.Errorf("clock timestamp: %w", err)
 	}
 	if targetRetention >= 0 {
-		archive := targetArchive(m.Retentions, 0, targetRetention)
-		if archive < 0 {
-			return fmt.Errorf("target retention %d not found", targetRetention)
-		}
-		for _, p := range input {
-			timestamp, err := storageTimestamp(p.Timestamp)
-			if err != nil {
-				return err
-			}
-			if err := w.setPoint(archive, align(timestamp, m.Retentions[archive].SecondsPerPoint()), p.Value); err != nil {
-				return err
-			}
+		if err := updateArchive(w, m, input, targetRetention); err != nil {
+			return err
 		}
 	} else {
-		// This preserves classic UpdateMany's newest-first routing and exact
-		// retention-boundary behaviour.
-		remaining := append([]Point(nil), input...)
-		for i := 0; i < len(remaining)/2; i++ {
-			remaining[i], remaining[len(remaining)-i-1] = remaining[len(remaining)-i-1], remaining[i]
-		}
-		sort.SliceStable(remaining, func(i, j int) bool { return remaining[i].Timestamp > remaining[j].Timestamp })
-		for archive := range m.Retentions {
-			current, next := extractPoints(remaining, now, m.Retentions[archive].MaxRetention())
-			remaining = next
-			for i := 0; i < len(current)/2; i++ {
-				current[i], current[len(current)-i-1] = current[len(current)-i-1], current[i]
-			}
-			changed := make(map[int]struct{})
-			for _, p := range current {
-				timestamp, err := storageTimestamp(p.Timestamp)
-				if err != nil {
-					return err
-				}
-				interval := align(timestamp, m.Retentions[archive].SecondsPerPoint())
-				if err := w.setPoint(archive, interval, p.Value); err != nil {
-					return err
-				}
-				changed[interval] = struct{}{}
-			}
-			if err := s.propagate(w, m, archive, changed); err != nil {
-				return err
-			}
-			if len(remaining) == 0 {
-				break
-			}
+		if err := s.updateAutomatic(w, m, input, now); err != nil {
+			return err
 		}
 	}
+	return s.commitUpdate(b, w, m)
+}
+
+func updateArchive(w *chunkWriter, m Metadata, input []Point, targetRetention int) error {
+	archive := targetArchive(m.Retentions, 0, targetRetention)
+	if archive < 0 {
+		return fmt.Errorf("target retention %d not found", targetRetention)
+	}
+	for _, p := range input {
+		timestamp, err := storageTimestamp(p.Timestamp)
+		if err != nil {
+			return err
+		}
+		if err := w.setPoint(archive, align(timestamp, m.Retentions[archive].SecondsPerPoint()), p.Value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) updateAutomatic(w *chunkWriter, m Metadata, input []Point, now int) error {
+	// This preserves classic UpdateMany's newest-first routing and exact
+	// retention-boundary behaviour.
+	remaining := newestFirst(input)
+	for archive := range m.Retentions {
+		current, next := extractPoints(remaining, now, m.Retentions[archive].MaxRetention())
+		remaining = next
+		if err := s.updateRetention(w, m, archive, current); err != nil {
+			return err
+		}
+		if len(remaining) == 0 {
+			break
+		}
+	}
+	return nil
+}
+
+func newestFirst(input []Point) []Point {
+	result := append([]Point(nil), input...)
+	for i := 0; i < len(result)/2; i++ {
+		result[i], result[len(result)-i-1] = result[len(result)-i-1], result[i]
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].Timestamp > result[j].Timestamp })
+	return result
+}
+
+func (s *Store) updateRetention(w *chunkWriter, m Metadata, archive int, current []Point) error {
+	for i := 0; i < len(current)/2; i++ {
+		current[i], current[len(current)-i-1] = current[len(current)-i-1], current[i]
+	}
+	changed := make(map[int]struct{})
+	for _, p := range current {
+		timestamp, err := storageTimestamp(p.Timestamp)
+		if err != nil {
+			return err
+		}
+		interval := align(timestamp, m.Retentions[archive].SecondsPerPoint())
+		if err := w.setPoint(archive, interval, p.Value); err != nil {
+			return err
+		}
+		changed[interval] = struct{}{}
+	}
+	return s.propagate(w, m, archive, changed)
+}
+
+func (s *Store) commitUpdate(b *pebble.Batch, w *chunkWriter, m Metadata) error {
 	if m.Revision == math.MaxUint64 {
 		return errors.New("metric revision exhausted")
 	}
@@ -133,7 +160,7 @@ func (s *Store) propagate(reader *chunkWriter, m Metadata, start int, changed ma
 				continue
 			}
 			seen[interval] = struct{}{}
-			wrote, err := s.rollup(reader, m, archive, interval)
+			wrote, err := rollup(reader, m, archive, interval)
 			if err != nil {
 				return err
 			}
@@ -148,7 +175,7 @@ func (s *Store) propagate(reader *chunkWriter, m Metadata, start int, changed ma
 	return nil
 }
 
-func (s *Store) rollup(reader *chunkWriter, m Metadata, archive, interval int) (bool, error) {
+func rollup(reader *chunkWriter, m Metadata, archive, interval int) (bool, error) {
 	higher := m.Retentions[archive-1]
 	lower := m.Retentions[archive]
 	need := lower.SecondsPerPoint() / higher.SecondsPerPoint()

@@ -144,47 +144,70 @@ func getRange(reader pebble.Reader, m Metadata, archive, from, until int) ([]flo
 	zeroSlotPresent := false
 	for remaining > 0 {
 		count := min(remaining, slots-slot)
-		lower := chunkKey(m, archive, slot/chunkSlots)
-		upper := chunkKey(m, archive, (slot+count-1)/chunkSlots+1)
-		it, err := reader.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
-		if err != nil {
-			return nil, fmt.Errorf("iterate chunks: %w", err)
-		}
-		var c chunk
-		for it.First(); it.Valid(); it.Next() {
-			if err := decodeChunk(it.Value(), &c); err != nil {
-				it.Close()
-				return nil, err
-			}
-			if zeroInRange && binary.BigEndian.Uint32(it.Key()[19:]) == 0 && c.has(0) {
-				zeroSlotPresent = true
-			}
-			for i, p := range c.Points {
-				if !c.has(i) || p.Timestamp < int64(from) || p.Timestamp >= int64(until) {
-					continue
-				}
-				index := (p.Timestamp - int64(from)) / int64(step)
-				if index >= 0 && index < int64(len(values)) {
-					values[index] = p.Value
-				}
-			}
-		}
-		if err := errors.Join(it.Error(), it.Close()); err != nil {
-			return nil, fmt.Errorf("read chunks: %w", err)
-		}
-		remaining -= count
-		slot = 0
-	}
-	if zeroInRange && !zeroSlotPresent {
-		// Classic exposes the empty-slot timestamp zero on a query crossing
-		// the Unix epoch, but only when the archive contains another point.
-		hasPoints, err := hasArchivePoint(reader, m, archive)
+		present, err := readChunkRange(reader, m, archive, slot, count, from, until, step, values, zeroInRange)
 		if err != nil {
 			return nil, err
 		}
-		if hasPoints {
-			values[-from/step] = 0
-		}
+		zeroSlotPresent = zeroSlotPresent || present
+		remaining -= count
+		slot = 0
+	}
+	if err := applyEpochZeroSentinel(reader, m, archive, from, step, values, zeroInRange, zeroSlotPresent); err != nil {
+		return nil, err
 	}
 	return values, nil
+}
+
+func readChunkRange(reader pebble.Reader, m Metadata, archive, slot, count, from, until, step int, values []float64, zeroInRange bool) (bool, error) {
+	lower := chunkKey(m, archive, slot/chunkSlots)
+	upper := chunkKey(m, archive, (slot+count-1)/chunkSlots+1)
+	it, err := reader.NewIter(&pebble.IterOptions{LowerBound: lower, UpperBound: upper})
+	if err != nil {
+		return false, fmt.Errorf("iterate chunks: %w", err)
+	}
+	var c chunk
+	zeroSlotPresent := false
+	for it.First(); it.Valid(); it.Next() {
+		if err := decodeChunk(it.Value(), &c); err != nil {
+			it.Close()
+			return false, err
+		}
+		if zeroInRange && binary.BigEndian.Uint32(it.Key()[19:]) == 0 && c.has(0) {
+			zeroSlotPresent = true
+		}
+		setRangeValues(&c, from, until, step, values)
+	}
+	if err := errors.Join(it.Error(), it.Close()); err != nil {
+		return false, fmt.Errorf("read chunks: %w", err)
+	}
+	return zeroSlotPresent, nil
+}
+
+func setRangeValues(c *chunk, from, until, step int, values []float64) {
+	for slot := range c.Points {
+		point := &c.Points[slot]
+		if !c.has(slot) || point.Timestamp < int64(from) || point.Timestamp >= int64(until) {
+			continue
+		}
+		index := (point.Timestamp - int64(from)) / int64(step)
+		if index >= 0 && index < int64(len(values)) {
+			values[index] = point.Value
+		}
+	}
+}
+
+func applyEpochZeroSentinel(reader pebble.Reader, m Metadata, archive, from, step int, values []float64, zeroInRange, zeroSlotPresent bool) error {
+	if !zeroInRange || zeroSlotPresent {
+		return nil
+	}
+	// Classic exposes the empty-slot timestamp zero on a query crossing the
+	// Unix epoch, but only when the archive contains another point.
+	hasPoints, err := hasArchivePoint(reader, m, archive)
+	if err != nil {
+		return err
+	}
+	if hasPoints {
+		values[-from/step] = 0
+	}
+	return nil
 }

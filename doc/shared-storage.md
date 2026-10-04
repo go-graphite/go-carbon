@@ -101,7 +101,8 @@ Offload sources are independent of `nodes`, which describes the ingestion
 hashring using its original ports and instances. Cross-ring `bucky copy
 -offload` works with `nodes` omitted; source redirects are rejected. Missing
 source metrics return HTTP 404 so the client's `-ignore404` option applies.
-pprof runs on its separate configured listener.
+pprof runs on its separate configured listener. Both listeners use a 10-second
+HTTP header-read timeout.
 
 ## Migration and client usage
 

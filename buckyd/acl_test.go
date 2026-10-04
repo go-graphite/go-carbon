@@ -1,6 +1,7 @@
 package buckyd
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -33,7 +34,7 @@ func TestACLScopesOperationsAndRootToken(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := httptest.NewRequest("GET", "/", nil)
+			r := httptest.NewRequest("GET", "/", http.NoBody)
 			r.Header.Set(authHeader, tt.token)
 			got := s.allowed(tt.metric, tt.op, r) == nil
 			if got != tt.want {
@@ -44,7 +45,7 @@ func TestACLScopesOperationsAndRootToken(t *testing.T) {
 }
 
 func TestNoAuthAllowsRequests(t *testing.T) {
-	if err := (&Service{}).allowed("metric", "delete", httptest.NewRequest("GET", "/", nil)); err != nil {
+	if err := (&Service{}).allowed("metric", "delete", httptest.NewRequest("GET", "/", http.NoBody)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -60,7 +61,7 @@ func TestJWTRejectsExpiredAndWrongSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, signed := range []string{expired, token(t, []byte("wrong-secret"), []string{"*"}, []string{"*"})} {
-		r := httptest.NewRequest("GET", "/metrics", nil)
+		r := httptest.NewRequest("GET", "/metrics", http.NoBody)
 		r.Header.Set(authHeader, signed)
 		if err := s.allowed("*", "read", r); err == nil {
 			t.Fatal("invalid JWT accepted")
@@ -85,7 +86,7 @@ func TestOffloadTokenGrantsOnlySourceReadAndExpires(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest("GET", "/", nil)
+			r := httptest.NewRequest("GET", "/", http.NoBody)
 			r.Header.Set(authHeader, signed)
 			if err := s.allowed(tt.metric, "read", r); err != nil {
 				t.Fatalf("source read rejected: %v", err)

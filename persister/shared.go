@@ -24,32 +24,10 @@ func (p *Whisper) storeShared(metric string) {
 	ctx := context.Background()
 	_, err := p.metricStore.Metadata(ctx, metric)
 	if errors.Is(err, store.ErrNotFound) {
-		schema, ok := p.schemas.Match(metric)
-		if !ok {
-			p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
+		if !p.createSharedMetric(ctx, metric) {
 			return
 		}
-		aggr := p.aggregation.Match(metric)
-		if aggr == nil {
-			p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
-			return
-		}
-		retentions := make([]store.Retention, len(schema.Retentions))
-		for i, retention := range schema.Retentions {
-			retentions[i] = store.Retention{Step: retention.SecondsPerPoint(), Count: retention.NumberOfPoints()}
-		}
-		_, err = p.metricStore.Create(ctx, store.MetricConfig{
-			Name: metric, Retentions: retentions,
-			AggregationMethod: store.AggregationMethod(aggr.aggregationMethod), XFilesFactor: float32(aggr.xFilesFactor),
-		})
-		if err == nil {
-			atomic.AddUint32(&p.created, 1)
-			if p.tagsEnabled && p.taggedFn != nil && strings.Contains(metric, ";") {
-				p.taggedFn(metric, true)
-			}
-		} else if errors.Is(err, store.ErrExists) {
-			err = nil
-		}
+		err = nil
 	}
 	if err != nil {
 		p.logger.Error("prepare shared metric", zap.String("metric", metric), zap.Error(err))
@@ -76,4 +54,38 @@ func (p *Whisper) storeShared(metric string) {
 	if p.tagsEnabled && p.taggedFn != nil && strings.Contains(metric, ";") {
 		p.taggedFn(metric, false)
 	}
+}
+
+func (p *Whisper) createSharedMetric(ctx context.Context, metric string) bool {
+	schema, ok := p.schemas.Match(metric)
+	if !ok {
+		p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
+		return false
+	}
+	aggr := p.aggregation.Match(metric)
+	if aggr == nil {
+		p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
+		return false
+	}
+	retentions := make([]store.Retention, len(schema.Retentions))
+	for i, retention := range schema.Retentions {
+		retentions[i] = store.Retention{Step: retention.SecondsPerPoint(), Count: retention.NumberOfPoints()}
+	}
+	_, err := p.metricStore.Create(ctx, store.MetricConfig{
+		Name: metric, Retentions: retentions,
+		AggregationMethod: store.AggregationMethod(aggr.aggregationMethod), XFilesFactor: float32(aggr.xFilesFactor),
+	})
+	if err == nil {
+		atomic.AddUint32(&p.created, 1)
+		if p.tagsEnabled && p.taggedFn != nil && strings.Contains(metric, ";") {
+			p.taggedFn(metric, true)
+		}
+	} else if errors.Is(err, store.ErrExists) {
+		err = nil
+	}
+	if err != nil {
+		p.logger.Error("prepare shared metric", zap.String("metric", metric), zap.Error(err))
+		return false
+	}
+	return true
 }

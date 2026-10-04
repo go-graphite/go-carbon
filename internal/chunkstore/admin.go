@@ -53,11 +53,7 @@ func (s *Store) ListPage(ctx context.Context, prefix, after string, limit int) (
 	if limit < 1 || limit > 10000 {
 		return nil, errors.New("catalog page limit must be 1..10000")
 	}
-	lower := catalogKey(prefix)
-	if after != "" && strings.Compare(after, prefix) >= 0 {
-		lower = append(catalogKey(after), 0)
-	}
-	upper := prefixEnd(catalogKey(prefix))
+	lower, upper := catalogPageBounds(prefix, after)
 	if upper == nil || strings.Compare(string(lower), string(upper)) >= 0 {
 		return []Metadata{}, nil
 	}
@@ -73,20 +69,10 @@ func (s *Store) ListPage(ctx context.Context, prefix, after string, limit int) (
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		var m Metadata
-		if err := json.Unmarshal(it.Value(), &m); err != nil {
-			return nil, fmt.Errorf("decode catalog: %w", err)
-		}
-		v, closer, err := snap.Get(revisionKey(m))
+		m, err := catalogMetadata(snap, it.Value())
 		if err != nil {
-			return nil, fmt.Errorf("read revision: %w", err)
+			return nil, err
 		}
-		if len(v) != 8 {
-			closer.Close()
-			return nil, errors.New("invalid metric revision")
-		}
-		m.Revision = binary.BigEndian.Uint64(v)
-		closer.Close()
 		result = append(result, m)
 	}
 	if err := it.Error(); err != nil {
@@ -95,13 +81,38 @@ func (s *Store) ListPage(ctx context.Context, prefix, after string, limit int) (
 	return result, nil
 }
 
-func (s *Store) Delete(ctx context.Context, name string) error { return s.delete(ctx, name, nil) }
-
-func (s *Store) DeleteIfUnchanged(ctx context.Context, name string, expected Metadata) error {
-	return s.delete(ctx, name, &expected)
+func catalogPageBounds(prefix, after string) ([]byte, []byte) {
+	lower := catalogKey(prefix)
+	if after != "" && strings.Compare(after, prefix) >= 0 {
+		lower = append(catalogKey(after), 0)
+	}
+	return lower, prefixEnd(catalogKey(prefix))
 }
 
-func (s *Store) delete(ctx context.Context, name string, expected *Metadata) error {
+func catalogMetadata(reader pebble.Reader, value []byte) (Metadata, error) {
+	var m Metadata
+	if err := json.Unmarshal(value, &m); err != nil {
+		return Metadata{}, fmt.Errorf("decode catalog: %w", err)
+	}
+	v, closer, err := reader.Get(revisionKey(m))
+	if err != nil {
+		return Metadata{}, fmt.Errorf("read revision: %w", err)
+	}
+	defer closer.Close()
+	if len(v) != 8 {
+		return Metadata{}, errors.New("invalid metric revision")
+	}
+	m.Revision = binary.BigEndian.Uint64(v)
+	return m, nil
+}
+
+func (s *Store) Delete(ctx context.Context, name string) error { return s.deleteMetric(ctx, name, nil) }
+
+func (s *Store) DeleteIfUnchanged(ctx context.Context, name string, expected Metadata) error {
+	return s.deleteMetric(ctx, name, &expected)
+}
+
+func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadata) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -160,9 +171,10 @@ func snapshotFrom(reader pebble.Reader, name string) (Snapshot, error) {
 				it.Close()
 				return Snapshot{}, err
 			}
-			for slot, p := range c.Points {
+			for slot := range c.Points {
 				if c.has(slot) {
-					result.Archives[archive].Points = append(result.Archives[archive].Points, p)
+					point := &c.Points[slot]
+					result.Archives[archive].Points = append(result.Archives[archive].Points, *point)
 				}
 			}
 		}
@@ -177,14 +189,14 @@ func snapshotFrom(reader pebble.Reader, name string) (Snapshot, error) {
 }
 
 func (s *Store) Replace(ctx context.Context, snapshot Snapshot) (Metadata, error) {
-	return s.replace(ctx, snapshot, false)
+	return s.replaceSnapshot(ctx, snapshot, false)
 }
 
 func (s *Store) CreateFromSnapshot(ctx context.Context, snapshot Snapshot) (Metadata, error) {
-	return s.replace(ctx, snapshot, true)
+	return s.replaceSnapshot(ctx, snapshot, true)
 }
 
-func (s *Store) replace(ctx context.Context, snapshot Snapshot, mustAbsent bool) (Metadata, error) {
+func (s *Store) replaceSnapshot(ctx context.Context, snapshot Snapshot, mustAbsent bool) (Metadata, error) {
 	if err := ctx.Err(); err != nil {
 		return Metadata{}, err
 	}
@@ -212,36 +224,44 @@ func (s *Store) replaceCatalog(m Metadata, chunks []map[int][]byte, mustAbsent b
 		return Metadata{}, ErrExists
 	}
 	if missing {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		v, closer, err := s.db.Get(sequenceKey())
-		id := uint64(1)
-		if err == nil {
-			if len(v) != 8 {
-				closer.Close()
-				return Metadata{}, errors.New("invalid catalog sequence")
-			}
-			id = binary.BigEndian.Uint64(v)
-			closer.Close()
-			if id == math.MaxUint64 {
-				return Metadata{}, errors.New("metric IDs exhausted")
-			}
-			id++
-		} else if !errors.Is(err, pebble.ErrNotFound) {
-			return Metadata{}, err
-		}
-		m.ID, m.Generation, m.Revision = id, 1, 1
-	} else {
-		m.ID, m.Generation, m.Revision = old.ID, old.Generation+1, old.Revision+1
+		return s.createReplacement(m, chunks)
 	}
+	m.ID, m.Generation, m.Revision = old.ID, old.Generation+1, old.Revision+1
+	return s.commitReplacement(m, chunks, &old)
+}
+
+func (s *Store) createReplacement(m Metadata, chunks []map[int][]byte) (Metadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, closer, err := s.db.Get(sequenceKey())
+	id := uint64(1)
+	if err == nil {
+		if len(v) != 8 {
+			closer.Close()
+			return Metadata{}, errors.New("invalid catalog sequence")
+		}
+		id = binary.BigEndian.Uint64(v)
+		closer.Close()
+		if id == math.MaxUint64 {
+			return Metadata{}, errors.New("metric IDs exhausted")
+		}
+		id++
+	} else if !errors.Is(err, pebble.ErrNotFound) {
+		return Metadata{}, err
+	}
+	m.ID, m.Generation, m.Revision = id, 1, 1
+	return s.commitReplacement(m, chunks, nil)
+}
+
+func (s *Store) commitReplacement(m Metadata, chunks []map[int][]byte, old *Metadata) (Metadata, error) {
 	b := s.db.NewBatch()
 	defer b.Close()
-	if !missing {
+	if old != nil {
 		oldChunks := chunkPrefix(old.ID, old.Generation)
 		if err := b.DeleteRange(oldChunks, prefixEnd(oldChunks), nil); err != nil {
 			return Metadata{}, err
 		}
-		if err := b.Delete(revisionKey(old), nil); err != nil {
+		if err := b.Delete(revisionKey(*old), nil); err != nil {
 			return Metadata{}, err
 		}
 	}
@@ -262,7 +282,7 @@ func (s *Store) replaceCatalog(m Metadata, chunks []map[int][]byte, mustAbsent b
 	if err := b.Set(revisionKey(m), uint64Bytes(m.Revision), nil); err != nil {
 		return Metadata{}, err
 	}
-	if missing {
+	if old == nil {
 		if err := b.Set(sequenceKey(), uint64Bytes(m.ID), nil); err != nil {
 			return Metadata{}, err
 		}
@@ -324,9 +344,9 @@ func validateSnapshot(snapshot Snapshot) error {
 }
 
 func pointTimestamp(timestamp int64) (int, error) {
-	max := int64(^uint(0) >> 1)
-	min := -max - 1
-	if timestamp < min || timestamp > max {
+	maxInt := int64(^uint(0) >> 1)
+	minInt := -maxInt - 1
+	if timestamp < minInt || timestamp > maxInt {
 		return 0, errors.New("point timestamp overflows int")
 	}
 	return int(timestamp), nil
@@ -354,11 +374,7 @@ func (s *Store) Fill(ctx context.Context, source Snapshot) (Metadata, error) {
 	defer unlock()
 	dest, err := snapshotFrom(s.db, source.Metadata.Name)
 	if errors.Is(err, ErrNotFound) {
-		chunks, err := encodeSnapshotChunks(source.Metadata.Retentions, source.Archives)
-		if err != nil {
-			return Metadata{}, err
-		}
-		return s.replaceCatalog(source.Metadata, chunks, true)
+		return s.createFill(source)
 	}
 	if err != nil {
 		return Metadata{}, err
@@ -370,30 +386,10 @@ func (s *Store) Fill(ctx context.Context, source Snapshot) (Metadata, error) {
 	// Fetch, a NaN is a gap here: it never overwrites a value and is not kept.
 	// Replace copies archives verbatim, NaN included, exactly as classic does.
 	for i, archive := range source.Archives {
-		byTime := make(map[int64]float64, len(archive.Points)+len(dest.Archives[i].Points))
-		for _, p := range archive.Points {
-			if !math.IsNaN(p.Value) {
-				timestamp, err := storageTimestamp(p.Timestamp)
-				if err != nil {
-					return Metadata{}, err
-				}
-				byTime[int64(align(timestamp, dest.Metadata.Retentions[i].Step))] = p.Value
-			}
+		points, err := fillArchive(archive.Points, dest.Archives[i].Points, dest.Metadata.Retentions[i].Step)
+		if err != nil {
+			return Metadata{}, err
 		}
-		for _, p := range dest.Archives[i].Points {
-			if !math.IsNaN(p.Value) {
-				timestamp, err := storageTimestamp(p.Timestamp)
-				if err != nil {
-					return Metadata{}, err
-				}
-				byTime[int64(align(timestamp, dest.Metadata.Retentions[i].Step))] = p.Value
-			}
-		}
-		points := make([]Point, 0, len(byTime))
-		for timestamp, value := range byTime {
-			points = append(points, Point{Timestamp: timestamp, Value: value})
-		}
-		sort.Slice(points, func(a, b int) bool { return points[a].Timestamp < points[b].Timestamp })
 		dest.Archives[i].Points = points
 	}
 	chunks, err := encodeSnapshotChunks(dest.Metadata.Retentions, dest.Archives)
@@ -401,6 +397,44 @@ func (s *Store) Fill(ctx context.Context, source Snapshot) (Metadata, error) {
 		return Metadata{}, err
 	}
 	return s.replaceCatalog(dest.Metadata, chunks, false)
+}
+
+func (s *Store) createFill(source Snapshot) (Metadata, error) {
+	chunks, err := encodeSnapshotChunks(source.Metadata.Retentions, source.Archives)
+	if err != nil {
+		return Metadata{}, err
+	}
+	return s.replaceCatalog(source.Metadata, chunks, true)
+}
+
+func fillArchive(source, destination []Point, step int) ([]Point, error) {
+	byTime := make(map[int64]float64, len(source)+len(destination))
+	if err := addFillPoints(byTime, source, step); err != nil {
+		return nil, err
+	}
+	if err := addFillPoints(byTime, destination, step); err != nil {
+		return nil, err
+	}
+	points := make([]Point, 0, len(byTime))
+	for timestamp, value := range byTime {
+		points = append(points, Point{Timestamp: timestamp, Value: value})
+	}
+	sort.Slice(points, func(a, b int) bool { return points[a].Timestamp < points[b].Timestamp })
+	return points, nil
+}
+
+func addFillPoints(byTime map[int64]float64, input []Point, step int) error {
+	for _, p := range input {
+		if math.IsNaN(p.Value) {
+			continue
+		}
+		timestamp, err := storageTimestamp(p.Timestamp)
+		if err != nil {
+			return err
+		}
+		byTime[int64(align(timestamp, step))] = p.Value
+	}
+	return nil
 }
 
 func samePolicy(a, b MetricConfig) bool {

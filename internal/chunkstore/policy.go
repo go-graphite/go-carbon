@@ -14,30 +14,47 @@ func validate(c MetricConfig) error {
 		return errors.New("metric has no retentions")
 	}
 	for i, r := range c.Retentions {
-		if r.SecondsPerPoint() <= 0 || r.NumberOfPoints() <= 0 || r.NumberOfPoints() > math.MaxInt/r.SecondsPerPoint() {
-			return fmt.Errorf("invalid retention %d", i)
-		}
-		// Buckyd's classic Whisper header stores maximum retention as uint32.
-		// This also keeps chunk indexes and query end keys representable.
-		if uint64(r.MaxRetention()) > math.MaxUint32 {
-			return fmt.Errorf("retention %d exceeds the transfer format", i)
-		}
-		if i > 0 && r.SecondsPerPoint() <= c.Retentions[i-1].SecondsPerPoint() {
-			return errors.New("retentions must be increasing")
+		if err := validateRetention(r, i); err != nil {
+			return err
 		}
 		if i > 0 {
-			higher := c.Retentions[i-1]
-			if r.SecondsPerPoint()%higher.SecondsPerPoint() != 0 {
-				return errors.New("higher precision must evenly divide lower precision")
-			}
-			if higher.MaxRetention() >= r.MaxRetention() {
-				return errors.New("lower precision must cover a larger interval")
-			}
-			if higher.NumberOfPoints() < r.SecondsPerPoint()/higher.SecondsPerPoint() {
-				return errors.New("higher precision has too few points to consolidate")
+			if err := validateRetentionOrder(c.Retentions[i-1], r); err != nil {
+				return err
 			}
 		}
 	}
+	return validateAggregation(c)
+}
+
+func validateRetention(r Retention, index int) error {
+	if r.SecondsPerPoint() <= 0 || r.NumberOfPoints() <= 0 || r.NumberOfPoints() > math.MaxInt/r.SecondsPerPoint() {
+		return fmt.Errorf("invalid retention %d", index)
+	}
+	// Buckyd's classic Whisper header stores maximum retention as uint32.
+	// This also keeps chunk indexes and query end keys representable.
+	if uint64(r.MaxRetention()) > math.MaxUint32 {
+		return fmt.Errorf("retention %d exceeds the transfer format", index)
+	}
+	return nil
+}
+
+func validateRetentionOrder(higher, lower Retention) error {
+	if lower.SecondsPerPoint() <= higher.SecondsPerPoint() {
+		return errors.New("retentions must be increasing")
+	}
+	if lower.SecondsPerPoint()%higher.SecondsPerPoint() != 0 {
+		return errors.New("higher precision must evenly divide lower precision")
+	}
+	if higher.MaxRetention() >= lower.MaxRetention() {
+		return errors.New("lower precision must cover a larger interval")
+	}
+	if higher.NumberOfPoints() < lower.SecondsPerPoint()/higher.SecondsPerPoint() {
+		return errors.New("higher precision has too few points to consolidate")
+	}
+	return nil
+}
+
+func validateAggregation(c MetricConfig) error {
 	if c.AggregationMethod < Average || c.AggregationMethod > First {
 		return errors.New("unsupported aggregation method")
 	}
