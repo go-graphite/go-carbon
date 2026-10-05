@@ -252,7 +252,7 @@ github.com/googleapis/gax-go/v2/internallog
 github.com/googleapis/gax-go/v2/internallog/grpclog
 github.com/googleapis/gax-go/v2/internallog/internal
 github.com/googleapis/gax-go/v2/iterator
-# github.com/grafana/pyroscope-go v1.4.2
+# github.com/grafana/pyroscope-go v1.4.3
 ## explicit; go 1.25.0
 github.com/grafana/pyroscope-go
 github.com/grafana/pyroscope-go/internal/labelset
