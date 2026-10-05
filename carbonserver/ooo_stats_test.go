@@ -42,27 +42,8 @@ func TestFileScanOutOfOrderGauges(t *testing.T) {
 			listener.timeBuckets = make([]uint64, listener.buckets+1)
 			listener.SetWhisperData(dir)
 			listener.SetTrieIndex(trie)
-			scan := func(wantSidecars []string) {
-				t.Helper()
-				listener.updateFileList(dir, nil, nil)
-				var wantBytes uint64
-				for _, path := range wantSidecars {
-					info, err := os.Stat(path)
-					if err != nil {
-						t.Fatal(err)
-					}
-					stat, ok := info.Sys().(*syscall.Stat_t)
-					if !ok {
-						t.Fatal("filesystem does not report allocated blocks")
-					}
-					wantBytes += uint64(stat.Blocks) * 512
-				}
-				assertOutOfOrderGauges(t, listener, uint64(len(wantSidecars)), wantBytes)
-				if listener.metrics.MetricsKnown != uint64(len(paths)) {
-					t.Fatalf("metrics known = %d, want %d", listener.metrics.MetricsKnown, len(paths))
-				}
-			}
-			scan(nil)
+			wantMetrics := uint64(len(paths))
+			scanOutOfOrderGauges(t, listener, nil, wantMetrics)
 			for _, path := range sidecars {
 				if err := os.WriteFile(path, []byte("late points"), 0o600); err != nil {
 					t.Fatal(err)
@@ -71,14 +52,35 @@ func TestFileScanOutOfOrderGauges(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			scan(sidecars)
+			scanOutOfOrderGauges(t, listener, sidecars, wantMetrics)
 			for i, path := range sidecars {
 				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
-				scan(sidecars[i+1:])
+				scanOutOfOrderGauges(t, listener, sidecars[i+1:], wantMetrics)
 			}
 		})
+	}
+}
+
+func scanOutOfOrderGauges(t *testing.T, listener *CarbonserverListener, wantSidecars []string, wantMetrics uint64) {
+	t.Helper()
+	listener.updateFileList(listener.whisperData, nil, nil)
+	var wantBytes uint64
+	for _, path := range wantSidecars {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatal("filesystem does not report allocated blocks")
+		}
+		wantBytes += uint64(stat.Blocks) * 512
+	}
+	assertOutOfOrderGauges(t, listener, uint64(len(wantSidecars)), wantBytes)
+	if listener.metrics.MetricsKnown != wantMetrics {
+		t.Fatalf("metrics known = %d, want %d", listener.metrics.MetricsKnown, wantMetrics)
 	}
 }
 
