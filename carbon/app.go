@@ -284,10 +284,12 @@ func (app *App) ReloadConfig() error {
 	return nil
 }
 
-// Stop all socket listeners
-// Assumes we are holding app.Lock()
-func (app *App) stopListeners() {
+// stopListeners stops input and starts draining reads. The caller must wait for
+// the returned channel before exiting or closing storage used by active reads.
+// Assumes we are holding app.Lock().
+func (app *App) stopListeners() <-chan struct{} {
 	logger := zapwriter.Logger("app")
+	readsStopped := make(chan struct{})
 
 	if app.Api != nil {
 		app.Api.Stop()
@@ -314,16 +316,14 @@ func (app *App) stopListeners() {
 	}
 	if app.Carbonserver != nil {
 		carbonserver := app.Carbonserver
-		stop := func() {
+		go func() {
+			defer close(readsStopped)
 			carbonserver.Stop()
 			logger.Debug("carbonserver stopped")
-		}
-		if app.MetricStore != nil {
-			stop()
-		} else {
-			go stop()
-		}
+		}()
 		app.Carbonserver = nil
+	} else {
+		close(readsStopped)
 	}
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {
@@ -337,13 +337,14 @@ func (app *App) stopListeners() {
 		app.FlushTraces()
 		logger.Debug("traces flushed")
 	}
+	return readsStopped
 }
 
 func (app *App) stopAll() {
 	if app.Cache != nil {
 		_ = app.Cache.SetWriteoutBatching(0, 0)
 	}
-	app.stopListeners()
+	<-app.stopListeners()
 
 	logger := zapwriter.Logger("app")
 

@@ -115,10 +115,10 @@ func (app *App) DumpStop() error {
 
 	logger.Info("stop listeners")
 
-	stopped := make(chan struct{})
+	stopped := make(chan (<-chan struct{}), 1)
 
 	go func() {
-		app.stopListeners()
+		readsStopped := app.stopListeners()
 
 		if err := xlogWriter.Flush(); err != nil {
 			logger.Info("xlog flush failed", zap.Error(err))
@@ -130,13 +130,17 @@ func (app *App) DumpStop() error {
 			return
 		}
 
-		close(stopped)
+		stopped <- readsStopped
 	}()
 
 	select {
 	case <-time.After(5 * time.Second):
 		logger.Info("stop listeners timeout, force stop daemon")
-	case <-stopped:
+	case readsStopped := <-stopped:
+		// Input/WAL shutdown retains its existing timeout. Active reads have
+		// the carbonserver grace period, which can exceed that timeout. SIGUSR2
+		// exits immediately when DumpStop returns, so this wait is essential.
+		<-readsStopped
 		logger.Info("listeners stopped")
 	}
 
