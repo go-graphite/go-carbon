@@ -528,6 +528,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	if conf.Whisper.StorageBackend == "pebble-chunk" {
 		app.MetricStore, err = store.Open(sharedStorePath(conf), store.Options{
 			CacheSize: conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
+			SyncInterval: conf.Whisper.StoreSyncInterval.Value(),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("open shared storage: %w", err)

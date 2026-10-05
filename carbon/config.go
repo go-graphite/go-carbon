@@ -57,22 +57,23 @@ type commonConfig struct {
 }
 
 type whisperConfig struct {
-	StorageBackend      string  `toml:"storage-backend"`
-	StoreDir            string  `toml:"store-dir"`
-	StoreCacheSize      int64   `toml:"store-cache-size"`
-	StoreMemTableSize   uint64  `toml:"store-memtable-size"`
-	DataDir             string  `toml:"data-dir"`
-	SchemasFilename     string  `toml:"schemas-file"`
-	AggregationFilename string  `toml:"aggregation-file"`
-	QuotasFilename      string  `toml:"quotas-file"`
-	Workers             int     `toml:"workers"`
-	MaxUpdatesPerSecond int     `toml:"max-updates-per-second"`
-	Sparse              bool    `toml:"sparse-create"`
-	PhysicalSizeFactor  float32 `toml:"physical-size-factor"`
-	FLock               bool    `toml:"flock"`
-	Compressed          bool    `toml:"compressed"`
-	Enabled             bool    `toml:"enabled"`
-	HashFilenames       bool    `toml:"hash-filenames"`
+	StorageBackend      string    `toml:"storage-backend"`
+	StoreDir            string    `toml:"store-dir"`
+	StoreCacheSize      int64     `toml:"store-cache-size"`
+	StoreMemTableSize   uint64    `toml:"store-memtable-size"`
+	StoreSyncInterval   *Duration `toml:"store-sync-interval"`
+	DataDir             string    `toml:"data-dir"`
+	SchemasFilename     string    `toml:"schemas-file"`
+	AggregationFilename string    `toml:"aggregation-file"`
+	QuotasFilename      string    `toml:"quotas-file"`
+	Workers             int       `toml:"workers"`
+	MaxUpdatesPerSecond int       `toml:"max-updates-per-second"`
+	Sparse              bool      `toml:"sparse-create"`
+	PhysicalSizeFactor  float32   `toml:"physical-size-factor"`
+	FLock               bool      `toml:"flock"`
+	Compressed          bool      `toml:"compressed"`
+	Enabled             bool      `toml:"enabled"`
+	HashFilenames       bool      `toml:"hash-filenames"`
 	Schemas             persister.WhisperSchemas
 	Aggregation         *persister.WhisperAggregation
 	Quotas              persister.WhisperQuotas
@@ -268,6 +269,7 @@ func NewConfig() *Config {
 			StorageBackend:      "files",
 			StoreCacheSize:      256 << 20,
 			StoreMemTableSize:   64 << 20,
+			StoreSyncInterval:   &Duration{time.Second},
 			DataDir:             "/var/lib/graphite/whisper/",
 			SchemasFilename:     "/etc/go-carbon/storage-schemas.conf",
 			AggregationFilename: "",

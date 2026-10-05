@@ -35,6 +35,9 @@ func validateStorageConfig(cfg *Config) error {
 	if cfg.Whisper.StoreCacheSize <= 0 || cfg.Whisper.StoreMemTableSize < 64<<10 {
 		return errors.New("shared storage requires positive cache size and memtable size >= 65536")
 	}
+	if cfg.Whisper.StoreSyncInterval == nil || cfg.Whisper.StoreSyncInterval.Value() < 0 {
+		return errors.New("whisper.store-sync-interval must be a non-negative duration")
+	}
 	if cfg.Whisper.OnlineMigration {
 		return errors.New("online-migration is not supported by shared storage")
 	}
@@ -65,7 +68,8 @@ func storageSettingsChanged(old, next *Config) bool {
 	}
 	return sharedStorePath(old) != sharedStorePath(next) ||
 		old.Whisper.StoreCacheSize != next.Whisper.StoreCacheSize ||
-		old.Whisper.StoreMemTableSize != next.Whisper.StoreMemTableSize
+		old.Whisper.StoreMemTableSize != next.Whisper.StoreMemTableSize ||
+		old.Whisper.StoreSyncInterval.Value() != next.Whisper.StoreSyncInterval.Value()
 }
 
 // storeStats reports counters as deltas since the previous flush, like every
