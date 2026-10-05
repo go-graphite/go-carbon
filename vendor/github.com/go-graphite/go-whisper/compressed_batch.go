@@ -146,7 +146,7 @@ func (whisper *Whisper) updateCompressedOverlappingBatch(points []*TimeSeriesPoi
 		return err
 	}
 	name := auxiliaryPath(whisper.file.Name(), ".batch")
-	replay, err := CreateWithOptions(name, NewRetentionsNoPointer(whisper.Retentions()), whisper.aggregationMethod, whisper.xFilesFactor, &Options{InMemory: true})
+	replay, err := CreateWithOptions(name, NewRetentionsNoPointer(whisper.Retentions()), whisper.aggregationMethod, whisper.xFilesFactor, &Options{InMemory: true, Sparse: true})
 	if err != nil {
 		return fmt.Errorf("create overlapping batch scratch: %w", err)
 	}
@@ -159,13 +159,10 @@ func (whisper *Whisper) updateCompressedOverlappingBatch(points []*TimeSeriesPoi
 		if err != nil {
 			return err
 		}
-		values := make([]TimeSeriesPoint, len(stored))
-		for j, point := range stored {
-			values[j] = TimeSeriesPoint{Time: point.interval, Value: point.value}
-		}
-		if err := replay.ReplaceArchivePoints(i, values); err != nil {
-			return err
-		}
+		// fetchCompressed has already aligned points and resolved circular-slot
+		// aliases. Seed the fresh classic ring directly, retaining last-value
+		// precedence for duplicate timestamps without another full-size copy.
+		replay.seedReplayArchive(i, stored)
 	}
 	// Restore the caller order that UpdateMany's reverse/stable sort expects.
 	input := append([]*TimeSeriesPoint(nil), points...)
@@ -175,13 +172,7 @@ func (whisper *Whisper) updateCompressedOverlappingBatch(points []*TimeSeriesPoi
 	}
 	extras := make([][]extraPoint, len(whisper.archives))
 	for i := range extras {
-		stored, err := replay.ArchivePoints(i)
-		if err != nil {
-			return err
-		}
-		for _, point := range stored {
-			extras[i] = append(extras[i], extraPoint{dataPoint: dataPoint{point.Time, point.Value}, replace: true})
-		}
+		extras[i] = replay.replayArchivePoints(i)
 	}
 	rets := make([]*Retention, len(whisper.archives))
 	for i, archive := range whisper.archives {
@@ -189,4 +180,41 @@ func (whisper *Whisper) updateCompressedOverlappingBatch(points []*TimeSeriesPoi
 		rets[i] = &ret
 	}
 	return whisper.rewrite(rets, "batch", func(i int) []extraPoint { return extras[i] })
+}
+
+// seedReplayArchive is restricted to a newly created in-memory classic file and
+// points returned by fetchCompressed: intervals are aligned and different
+// timestamps never own the same circular slot.
+func (whisper *Whisper) seedReplayArchive(index int, points []dataPoint) {
+	if len(points) == 0 {
+		return
+	}
+	archive := whisper.archives[index]
+	data := whisper.file.(*memFile).data
+	base := points[0].interval
+	for _, point := range points {
+		offset := archive.PointOffset(base, point.interval)
+		packInt(data[offset:], point.interval, 0)
+		packFloat64(data[offset:], point.value, IntSize)
+	}
+}
+
+func (whisper *Whisper) replayArchivePoints(index int) []extraPoint {
+	archive := whisper.archives[index]
+	data := whisper.file.(*memFile).data[archive.Offset():archive.End()]
+	count := 0
+	for offset := 0; offset < len(data); offset += PointSize {
+		if unpackInt(data[offset:]) > 0 {
+			count++
+		}
+	}
+	points := make([]extraPoint, 0, count)
+	for offset := 0; offset < len(data); offset += PointSize {
+		point := unpackDataPoint(data[offset:])
+		if point.interval > 0 {
+			points = append(points, extraPoint{dataPoint: point, replace: true})
+		}
+	}
+	sort.Slice(points, func(i, j int) bool { return points[i].interval < points[j].interval })
+	return points
 }
