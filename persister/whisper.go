@@ -136,6 +136,8 @@ func NewWhisper(
 	}
 }
 
+// InitPrometheus attaches persister observations to the registry's histogram.
+// Config reload replaces the persister but retains its registry and counts.
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
 	p.prometheus = whisperPrometheus{
 		enabled: true,
@@ -147,10 +149,20 @@ func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
 			},
 		),
 	}
+	if err := reg.Register(p.prometheus.outOfOrderWriteLags); err != nil {
+		var registered prometheus.AlreadyRegisteredError
+		if !errors.As(err, &registered) {
+			panic(err)
+		}
+		existing, ok := registered.ExistingCollector.(prometheus.Histogram)
+		if !ok {
+			panic(err)
+		}
+		p.prometheus.outOfOrderWriteLags = existing
+	}
 	p.prometheus.outOfOrderWriteLag = func(t time.Duration) {
 		p.prometheus.outOfOrderWriteLags.Observe(t.Seconds())
 	}
-	reg.MustRegister(p.prometheus.outOfOrderWriteLags)
 }
 
 // SetOnlineMigration enable online migration
