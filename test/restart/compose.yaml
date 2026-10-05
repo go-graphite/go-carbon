@@ -1,0 +1,33 @@
+x-store: &store
+  image: python:3.13-slim
+  entrypoint: ["/opt/go-carbon", "-config", "/config/go-carbon.conf"]
+  stop_signal: SIGUSR2
+  stop_grace_period: 120s
+  cpus: 2
+  mem_limit: 1536m
+  environment:
+    GOGC: ${LAB_GOGC:-100}
+    GOMEMLIMIT: ${LAB_GOMEMLIMIT:-1200MiB}
+  depends_on: [observer]
+  volumes:
+    - ${CARBON_BINARY:?select a Linux binary}:/opt/go-carbon:ro
+    - ${LAB_CONFIG:?select generated config}:/config:ro
+    - data:/data
+
+services:
+  store:
+    <<: *store
+    hostname: store
+    ports:
+      - "127.0.0.1:${LAB_HTTP_PORT:-18080}:8080"
+      - "127.0.0.1:${LAB_TCP_PORT:-12003}:2003"
+      - "127.0.0.1:${LAB_PPROF_PORT:-17007}:7007"
+  observer:
+    image: python:3.13-slim
+    command: ["python3", "/observer.py"]
+    cpus: 0.5
+    mem_limit: 128m
+    ports: ["127.0.0.1:${LAB_STATS_PORT:-18090}:8090"]
+    volumes: ["./observer.py:/observer.py:ro"]
+volumes:
+  data:

@@ -17,21 +17,21 @@ import (
 // boundary. It includes ordered samples, late fills, duplicate corrections, and
 // values on both sides of the raw-retention boundary.
 func TestStoreBatchingReplay(t *testing.T) {
-	const now = 1_700_000_000
-	freezeWhisperNow(t, now)
+	freezeWhisperNow(t)
+	now := int(whisper.Now().Unix())
 	base := now - 15
 	base -= base % 10
 
 	sequence := []*points.Points{
-		batchPoints("batch.replay", base-40, 10, base-30, 20, base-20, 30, base-10, 40),
-		batchPoints("batch.replay", base-8, 50, base-6, 60, base-4, 70, base-2, 80),
+		batchPoints(base-40, 10, base-30, 20, base-20, 30, base-10, 40),
+		batchPoints(base-8, 50, base-6, 60, base-4, 70, base-2, 80),
 		// These are deliberately later than the initial writes.
-		batchPoints("batch.replay", base-30, 21, base-29, 21, base-8, 51, base-7, 52),
-		batchPoints("batch.replay", base-3, 71, base-1, 81, base-50, 5, base-49, 6),
+		batchPoints(base-30, 21, base-29, 21, base-8, 51, base-7, 52),
+		batchPoints(base-3, 71, base-1, 81, base-50, 5, base-49, 6),
 	}
 
-	baseline := runBatchingReplay(t, sequence, 4, now)
-	batched := runBatchingReplay(t, sequence, 8, now)
+	baseline := runBatchingReplay(t, sequence, 4)
+	batched := runBatchingReplay(t, sequence, 8)
 	for _, result := range []replayResult{baseline, batched} {
 		assertReplayValues(t, result.beforeMerge, base)
 		assertReplayValues(t, result.afterMerge, base)
@@ -46,8 +46,8 @@ func TestStoreBatchingReplay(t *testing.T) {
 // prevent a future batching implementation from treating the larger replay as
 // a timing artifact or as an expected coarse-archive sidecar limitation.
 func TestStoreBatchingReplayMinimalRegressions(t *testing.T) {
-	const now = 1_700_000_000
-	freezeWhisperNow(t, now)
+	freezeWhisperNow(t)
+	now := int(whisper.Now().Unix())
 	base := now - 15
 	base -= base % 10
 
@@ -58,22 +58,22 @@ func TestStoreBatchingReplayMinimalRegressions(t *testing.T) {
 		{
 			name: "late coarse correction",
 			sequence: []*points.Points{
-				batchPoints("batch.replay", base-40, 10, base-30, 20, base-20, 30, base-10, 40),
-				batchPoints("batch.replay", base-30, 21),
+				batchPoints(base-40, 10, base-30, 20, base-20, 30, base-10, 40),
+				batchPoints(base-30, 21),
 			},
 		},
 		{
 			name: "raw values mixed with expired points",
 			sequence: []*points.Points{
-				batchPoints("batch.replay", base-8, 50, base-6, 60, base-4, 70, base-2, 80),
-				batchPoints("batch.replay", base-3, 71, base-1, 81, base-50, 5, base-49, 6),
+				batchPoints(base-8, 50, base-6, 60, base-4, 70, base-2, 80),
+				batchPoints(base-3, 71, base-1, 81, base-50, 5, base-49, 6),
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			small := runBatchingReplay(t, tt.sequence, 4, now)
-			combined := runBatchingReplay(t, tt.sequence, 8, now)
+			small := runBatchingReplay(t, tt.sequence, 4)
+			combined := runBatchingReplay(t, tt.sequence, 8)
 			assertReplayEqual(t, "small versus combined before compaction", small.beforeMerge, combined.beforeMerge)
 			assertReplayEqual(t, "small versus combined after compaction", small.afterMerge, combined.afterMerge)
 		})
@@ -81,8 +81,8 @@ func TestStoreBatchingReplayMinimalRegressions(t *testing.T) {
 }
 
 func TestRetentionCutoffKeepsBoundary(t *testing.T) {
-	const now = 1_700_000_000
-	freezeWhisperNow(t, now)
+	freezeWhisperNow(t)
+	now := int(whisper.Now().Unix())
 
 	retentions := whisper.MustParseRetentionDefs("1s:10s,10s:1m")
 	for _, tt := range []struct {
@@ -133,8 +133,8 @@ func TestRetentionCutoffKeepsBoundary(t *testing.T) {
 }
 
 func TestThreeArchiveDirectCorrectionRecomputesLowerArchive(t *testing.T) {
-	const now = 1_700_000_000
-	freezeWhisperNow(t, now)
+	freezeWhisperNow(t)
+	now := int(whisper.Now().Unix())
 	base := now - 180
 	base -= base % 60
 	path := filepath.Join(t.TempDir(), "three-archive.wsp")
@@ -190,14 +190,15 @@ type seriesSnapshot struct {
 	values []float64
 }
 
-func freezeWhisperNow(t *testing.T, now int) {
+func freezeWhisperNow(t *testing.T) {
+	const now = 1_700_000_000
 	t.Helper()
 	previousNow := whisper.Now
 	whisper.Now = func() time.Time { return time.Unix(int64(now), 0) }
 	t.Cleanup(func() { whisper.Now = previousNow })
 }
 
-func runBatchingReplay(t *testing.T, sequence []*points.Points, batchSize, now int) replayResult {
+func runBatchingReplay(t *testing.T, sequence []*points.Points, batchSize int) replayResult {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -238,7 +239,7 @@ func runBatchingReplay(t *testing.T, sequence []*points.Points, batchSize, now i
 	}
 
 	path := filepath.Join(dir, "batch", "replay.wsp")
-	before := readReplaySnapshot(t, path, now)
+	before := readReplaySnapshot(t, path, int(whisper.Now().Unix()))
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{Compressed: true, FLock: true, OutOfOrder: true})
 	if err != nil {
 		t.Fatalf("open before merge: %v", err)
@@ -250,13 +251,13 @@ func runBatchingReplay(t *testing.T, sequence []*points.Points, batchSize, now i
 	if err := w.Close(); err != nil {
 		t.Fatalf("close after merge: %v", err)
 	}
-	after := readReplaySnapshot(t, path, now)
+	after := readReplaySnapshot(t, path, int(whisper.Now().Unix()))
 
 	return replayResult{beforeMerge: before, afterMerge: after}
 }
 
-func batchPoints(metric string, values ...int) *points.Points {
-	p := &points.Points{Metric: metric}
+func batchPoints(values ...int) *points.Points {
+	p := &points.Points{Metric: "batch.replay"}
 	for i := 0; i < len(values); i += 2 {
 		p.Data = append(p.Data, points.Point{Timestamp: int64(values[i]), Value: float64(values[i+1])})
 	}
