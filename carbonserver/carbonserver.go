@@ -301,7 +301,8 @@ type CarbonserverListener struct {
 
 	db *leveldb.DB
 
-	quotas                    []*Quota
+	quotas                    atomic.Value // []*Quota; immutable after publication
+	quotaReload               chan struct{}
 	estimateSize              func(metric string) (logicalSize, physicalSize, dataPoints int64)
 	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
@@ -517,6 +518,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 			returnedPoint:    func(int) {},
 		},
 		quotaAndUsageMetrics:  make(chan []points.Points, 1),
+		quotaReload:           make(chan struct{}, 1),
 		apiPerPathRatelimiter: map[string]*ApiPerPathRatelimiter{},
 		fileListCacheVersion:  FLCVersion1,
 	}
@@ -706,10 +708,10 @@ func (listener *CarbonserverListener) SetEstimateSize(f func(metric string) (log
 	listener.estimateSize = f
 }
 func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
-	listener.quotas = quotas
+	listener.quotas.Store(quotas)
 }
 func (listener *CarbonserverListener) isQuotaEnabled() bool {
-	return listener.quotas != nil
+	return listener.getQuotas() != nil
 }
 func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, inCache bool) bool {
 	fidx := listener.CurrentFileIndex()
@@ -897,6 +899,10 @@ uloop:
 			listener.statKnownMetrics(knownMetricsStatTicker)
 
 			continue uloop
+		case <-listener.quotaReload:
+			listener.refreshQuotaRules()
+
+			continue uloop
 		case <-quotaAndUsageStatTicker:
 			listener.refreshQuotaAndUsage(quotaAndUsageStatTicker)
 
@@ -1016,7 +1022,7 @@ func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex,
 	}
 
 	quotaStart := time.Now()
-	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.quotas...)
+	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.getQuotas()...)
 	if err != nil {
 		listener.logger.Error(
 			"refreshQuotaAndUsage",
@@ -1326,6 +1332,11 @@ func (u *fileListUpdate) stopped() bool {
 }
 
 func (u *fileListUpdate) refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker <-chan time.Time) {
+	select {
+	case <-u.listener.quotaReload:
+		u.listener.refreshQuotaRules()
+	default:
+	}
 	if u.listener.isQuotaEnabled() {
 		select {
 		case <-quotaAndUsageStatTicker:

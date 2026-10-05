@@ -178,7 +178,7 @@ func metricStoreFilesystemStats(path string, freeSpace, totalSpace *uint64) erro
 
 func (listener *CarbonserverListener) applySharedStoreQuotas(trieIdx *trieIndex) error {
 	started := time.Now()
-	throughputs, err := trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.quotas...)
+	throughputs, err := trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.getQuotas()...)
 	if err != nil {
 		return fmt.Errorf("apply shared metric-store quotas: %w", err)
 	}

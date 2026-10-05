@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,6 +72,8 @@ type App struct {
 	PromRegistry   *prometheus.Registry
 	exit           chan bool
 	FlushTraces    func()
+
+	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 }
 
 var registerPluginsOnce sync.Once
@@ -132,6 +135,15 @@ func (app *App) configure() error {
 	}
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
 		return errors.New("storage and buckyd settings require a restart")
+	}
+	if app.Carbonserver != nil {
+		if cfg.Carbonserver.QuotaUsageReportFrequency.Value() != app.Config.Carbonserver.QuotaUsageReportFrequency.Value() {
+			return errors.New("changing quota-usage-report-frequency requires a restart")
+		}
+		if err := app.Carbonserver.ReloadQuotas(cfg.getCarbonserverQuotas(cfg.Carbonserver.QuotaUsageReportFrequency.Value())); err != nil {
+			return err
+		}
+		app.quotaEstimateConfig.Store(cfg)
 	}
 	app.Config = cfg
 
@@ -671,8 +683,11 @@ func (app *App) configureCarbonserverQuotas(listener *carbonserver.CarbonserverL
 			return errors.New("concurrent-index and realtime-index needs to be enabled for quota control.")
 		}
 
+		app.quotaEstimateConfig.Store(conf)
+		sharedStore := app.MetricStore != nil
 		listener.SetEstimateSize(func(metric string) (logicalSize, physicalSize, dataPoints int64) {
-			schema, ok := app.Config.Whisper.Schemas.Match(metric)
+			cfg := app.quotaEstimateConfig.Load().(*Config)
+			schema, ok := cfg.Whisper.Schemas.Match(metric)
 
 			if !ok {
 				// Why not configurable: go-carbon users
@@ -683,12 +698,12 @@ func (app *App) configureCarbonserverQuotas(listener *carbonserver.CarbonserverL
 			for _, r := range schema.Retentions {
 				dataPoints += int64(r.NumberOfPoints())
 			}
-			if app.MetricStore != nil {
+			if sharedStore {
 				return int64(16+12*len(schema.Retentions)) + dataPoints*12, 0, dataPoints
 			}
 			logicalSize = 4096 + dataPoints*12
-			if app.Config.Whisper.Sparse { // we assume that physical size for sparse metrics takes only a part of the logical size
-				physicalSize = int64(app.Config.Whisper.PhysicalSizeFactor * float32(logicalSize))
+			if cfg.Whisper.Sparse { // we assume that physical size for sparse metrics takes only a part of the logical size
+				physicalSize = int64(cfg.Whisper.PhysicalSizeFactor * float32(logicalSize))
 			} else {
 				physicalSize = logicalSize
 			}

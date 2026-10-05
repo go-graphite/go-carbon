@@ -210,6 +210,15 @@ func main() {
 			collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 		http.Handle(cfg.Prometheus.Endpoint, promhttp.HandlerFor(app.PromRegistry, promhttp.HandlerOpts{}))
 	}
+	// Register before startup: restore/index warmup can take minutes. A HUP or
+	// USR2 received then must wait for startup instead of taking the default
+	// action and terminating the process in the middle of replay.
+	stopSignals := make(chan os.Signal, 1)
+	reloadSignals := make(chan os.Signal, 1)
+	signal.Notify(stopSignals, syscall.SIGUSR2)
+	signal.Notify(reloadSignals, syscall.SIGHUP)
+	defer signal.Stop(stopSignals)
+	defer signal.Stop(reloadSignals)
 	if err = app.Start(); err != nil {
 		mainLogger.Fatal(err.Error())
 	} else {
@@ -217,20 +226,16 @@ func main() {
 	}
 
 	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, syscall.SIGUSR2)
 		for {
-			<-c
+			<-stopSignals
 			app.DumpStop()
 			os.Exit(0)
 		}
 	}()
 
 	go func() {
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, syscall.SIGHUP)
 		for {
-			<-c
+			<-reloadSignals
 			mainLogger.Info("HUP received. Reload config")
 			if err := app.ReloadConfig(); err != nil {
 				mainLogger.Error("config reload failed", zap.Error(err))
