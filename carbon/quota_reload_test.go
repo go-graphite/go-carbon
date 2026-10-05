@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
@@ -27,22 +28,7 @@ func TestReloadConfigUpdatesQuotasWithoutRestart(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			server.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, time.Now().Unix()), false)
-			time.Sleep(time.Microsecond)
-		}
-	}()
-	defer func() { close(stop); wg.Wait() }()
+	defer checkQuotaConcurrently(server)()
 	for _, limit := range []int{10, 1, 20, 1, 0} {
 		if limit == 0 {
 			quota("")
@@ -114,4 +100,25 @@ func newQuotaReloadApp(t *testing.T) (*App, func(string)) {
 		t.Fatal(err)
 	}
 	return app, quota
+}
+
+// checkQuotaConcurrently exercises ingestion's quota path while configuration
+// reloads publish new rules and estimator snapshots.
+func checkQuotaConcurrently(server *carbonserver.CarbonserverListener) func() {
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			server.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, time.Now().Unix()), false)
+			time.Sleep(time.Microsecond)
+		}
+	}()
+	return func() { close(stop); wg.Wait() }
 }
