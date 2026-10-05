@@ -70,7 +70,7 @@ func newQuotaReloadApp(t *testing.T) (*App, func(string)) {
 	}
 	cfg.Udp.Enabled, cfg.Tcp.Enabled, cfg.Pickle.Enabled = false, false, false
 	cfg.Grpc.Enabled, cfg.Carbonlink.Enabled = false, false
-	cfg.Pprof.Enabled, cfg.Prometheus.Enabled = false, false
+	cfg.Pprof.Enabled, cfg.Prometheus.Enabled = false, true
 	cfg.Common.MetricInterval = &Duration{time.Hour}
 	cfg.Carbonserver.Enabled = true
 	l, err := net.Listen("tcp", "127.0.0.1:0")
