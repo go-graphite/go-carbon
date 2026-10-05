@@ -87,6 +87,8 @@ type metricStruct struct {
 	PointsReturned                       uint64
 	MetricsReturned                      uint64
 	MetricsKnown                         uint64
+	OOOFiles                             uint64
+	OOOPhysicalBytes                     uint64
 	FileScanTimeNS                       uint64
 	IndexBuildTimeNS                     uint64
 	MetricsFetched                       uint64
@@ -1089,6 +1091,8 @@ type fileListUpdate struct {
 	details             map[string]*protov3.MetricDetails
 	trieIdx             *trieIndex
 	metricsKnown        uint64
+	oooFiles            uint64
+	oooPhysicalBytes    uint64
 	infos               []zap.Field
 	cacheMetricNames    map[string]struct{}
 	cacheMetricLen      int
@@ -1097,6 +1101,7 @@ type fileListUpdate struct {
 	fileListCacheReader FileListCache
 	fileListCache       FileListCache
 	scanCancelled       bool
+	scanFailed          bool
 }
 
 func newFileListUpdate(listener *CarbonserverListener, cacheMetricNames map[string]struct{}) *fileListUpdate {
@@ -1234,6 +1239,7 @@ func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan ti
 		return false
 	}
 	if err != nil {
+		u.scanFailed = true
 		u.logger.Error("error getting file list", zap.Error(err))
 	}
 	return true
@@ -1283,10 +1289,19 @@ func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, 
 		return filepath.SkipAll
 	}
 	if walkErr != nil {
+		u.scanFailed = true
 		u.logger.Info("error processing", zap.String("path", path), zap.Error(walkErr))
 		return nil
 	}
 	u.refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker)
+	if info.Mode().IsRegular() && strings.HasSuffix(info.Name(), ".ooo") {
+		u.oooFiles++
+		size := info.Size()
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+			size = stat.Blocks * 512
+		}
+		u.oooPhysicalBytes += uint64(size)
+	}
 	if info.IsDir() || strings.HasSuffix(info.Name(), ".wsp") {
 		u.addFile(path, info)
 	}
@@ -1420,6 +1435,11 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 		return false
 	}
 	u.listener.UpdateFileIndex(index)
+	// File-list caches omit sidecars, and incomplete scans can undercount them.
+	if !u.readFromCache && !u.scanFailed {
+		atomic.StoreUint64(&u.listener.metrics.OOOFiles, u.oooFiles)
+		atomic.StoreUint64(&u.listener.metrics.OOOPhysicalBytes, u.oooPhysicalBytes)
+	}
 	u.logResult(fileScanRuntime, indexingRuntime, rdTimeUpdateRuntime, indexType, indexSize, pruned)
 	return u.readFromCache
 }
@@ -1759,6 +1779,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
 
 	senderRaw("metrics_known", &listener.metrics.MetricsKnown, send)
+	senderRaw("oooFiles", &listener.metrics.OOOFiles, send)
+	senderRaw("oooPhysicalBytes", &listener.metrics.OOOPhysicalBytes, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
 	sender("file_scan_time_ns", &listener.metrics.FileScanTimeNS, send)
 
