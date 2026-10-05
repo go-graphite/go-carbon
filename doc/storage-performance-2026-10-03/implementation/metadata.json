@@ -1,0 +1,25 @@
+{
+  "baseline_whisper": "d84403499e3246e577fc03159124714a42f21651",
+  "candidate_whisper": "16b07882e95e65a1eb2c3c8df22712e795622bde",
+  "consumer_base": "7029c88034a73c0d0d09b0a7042a29b2d5c588b9",
+  "go": "go1.27.1",
+  "os": "linux",
+  "arch": "arm64",
+  "gomaxprocs": 2,
+  "vm_cpus": 2,
+  "vm_memory_bytes": 2053586944,
+  "filesystem": "overlayfs",
+  "image": "golang:1.27.1-bookworm",
+  "image_digest": "sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195",
+  "bench_repetitions": 10,
+  "order": "baseline/candidate then candidate/baseline, alternating",
+  "read_candidate_stages": {
+    "reads1": "C0 + classic direct decoding + Pebble conditional iterator",
+    "compressed": "reads1 + compressed collision fast path and request scratch",
+    "accepted": "compressed + bounded decoded capacity + pooled write header + OOO read and expired-alias optimizations"
+  },
+  "build": "go test -p 2 -overlay /results/overlay.json -c -o /results/<stage>.test ./persister",
+  "source": "vendor-source Go overlay points to actual upstream checkout; frozen published baseline binary retained",
+  "timing": "Non-race Linux binaries. Later runs shared the host with separate macOS correctness tests; stable allocation deltas and balanced repetitions are primary evidence, not production CPU claims.",
+  "scale": "One candidate-only run per engine; 100000 metrics, 32 workers, three archives, ordered batches of 8, 2400000 points and 30000 reads; not an A/B speedup measurement."
+}

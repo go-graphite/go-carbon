@@ -1,0 +1,109 @@
+
+# probe-reads.txt
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/coarse-clean/classic-2         	    4096	     14077 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/classic-2         	    4096	     11365 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/classic-2         	    4096	     10838 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/classic-2         	    4096	     11123 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/classic-2         	    4096	     11406 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    4096	     31970 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    4096	     31336 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    4096	     30946 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    4096	     31438 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-2        	    4096	     32802 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    4096	     33753 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    4096	     35649 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    4096	     34358 ns/op	   45173 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    4096	     30970 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/cwhisper-ooo-2    	    4096	     30638 ns/op	   45174 B/op	     105 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    4096	      4876 ns/op	    4094 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    4096	      4811 ns/op	    4098 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    4096	      4886 ns/op	    4099 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    4096	      4888 ns/op	    4094 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-clean/pebble-2          	    4096	      4852 ns/op	    4100 B/op	      20 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    4096	     10543 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    4096	     10399 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    4096	     10562 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    4096	     10516 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/classic-2     	    4096	     11252 ns/op	   20592 B/op	      26 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    4096	     78262 ns/op	  150803 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    4096	     77220 ns/op	  150833 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    4096	     76122 ns/op	  150832 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    4096	     78968 ns/op	  150832 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/cwhisper-ooo-2         	    4096	     79273 ns/op	  150798 B/op	     203 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    4096	      4985 ns/op	    4051 B/op	      19 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    4096	      5352 ns/op	    4050 B/op	      19 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    4096	      5089 ns/op	    4054 B/op	      19 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    4096	      5054 ns/op	    4052 B/op	      19 allocs/op
+BenchmarkStorageProbe/coarse-corrected/pebble-2               	    4096	      4945 ns/op	    4050 B/op	      19 allocs/op
+PASS
+
+# probe-rollups-checked.txt
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/ordered-rollup/classic-2         	    4096	     30321 ns/op	      3790 ns/point	    7456 B/op	     118 allocs/op
+BenchmarkStorageProbe/ordered-rollup/classic-2         	    4096	     26393 ns/op	      3299 ns/point	    7455 B/op	     118 allocs/op
+BenchmarkStorageProbe/ordered-rollup/classic-2         	    4096	     27213 ns/op	      3402 ns/point	    7455 B/op	     118 allocs/op
+BenchmarkStorageProbe/ordered-rollup/classic-2         	    4096	     25764 ns/op	      3221 ns/point	    7455 B/op	     118 allocs/op
+BenchmarkStorageProbe/ordered-rollup/classic-2         	    4096	     26167 ns/op	      3271 ns/point	    7455 B/op	     118 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-2        	    4096	     12620 ns/op	      1577 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-2        	    4096	     12578 ns/op	      1572 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-2        	    4096	     12591 ns/op	      1574 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-2        	    4096	     12517 ns/op	      1565 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-2        	    4096	     12627 ns/op	      1578 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-ooo-2    	    4096	     13037 ns/op	      1630 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-ooo-2    	    4096	     12953 ns/op	      1619 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-ooo-2    	    4096	     12847 ns/op	      1606 ns/point	    5686 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-ooo-2    	    4096	     12839 ns/op	      1605 ns/point	    5702 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/cwhisper-ooo-2    	    4096	     13048 ns/op	      1631 ns/point	    5702 B/op	      43 allocs/op
+BenchmarkStorageProbe/ordered-rollup/pebble-2          	    4096	    211107 ns/op	     26388 ns/point	    6418 B/op	      89 allocs/op
+BenchmarkStorageProbe/ordered-rollup/pebble-2          	    4096	    212046 ns/op	     26506 ns/point	    6414 B/op	      89 allocs/op
+BenchmarkStorageProbe/ordered-rollup/pebble-2          	    4096	    209259 ns/op	     26157 ns/point	    6413 B/op	      89 allocs/op
+BenchmarkStorageProbe/ordered-rollup/pebble-2          	    4096	    205122 ns/op	     25640 ns/point	    6417 B/op	      89 allocs/op
+BenchmarkStorageProbe/ordered-rollup/pebble-2          	    4096	    208206 ns/op	     26026 ns/point	    6417 B/op	      89 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/classic-2      	    4096	     25881 ns/op	      3235 ns/point	    7271 B/op	     115 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/classic-2      	    4096	     25674 ns/op	      3209 ns/point	    7271 B/op	     115 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/classic-2      	    4096	     25813 ns/op	      3227 ns/point	    7271 B/op	     115 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/classic-2      	    4096	     26060 ns/op	      3257 ns/point	    7271 B/op	     115 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/classic-2      	    4096	     25519 ns/op	      3190 ns/point	    7271 B/op	     115 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2 	--- FAIL: BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2
+    profile_probe_test.go:143: cwhisper-ooo profile-rollup-before-compaction metric=metric query=[1700038567 1700039168]: timestamp=1700038990 step=10 classic=25.5 (4039800000000000) candidate=26.5 (403a800000000000)
+BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2 	--- FAIL: BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2
+    profile_probe_test.go:143: cwhisper-ooo profile-rollup-before-compaction metric=metric query=[1700038567 1700039168]: timestamp=1700038990 step=10 classic=25.5 (4039800000000000) candidate=26.5 (403a800000000000)
+BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2 	--- FAIL: BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2
+    profile_probe_test.go:143: cwhisper-ooo profile-rollup-before-compaction metric=metric query=[1700038567 1700039168]: timestamp=1700038990 step=10 classic=25.5 (4039800000000000) candidate=26.5 (403a800000000000)
+BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2 	--- FAIL: BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2
+    profile_probe_test.go:143: cwhisper-ooo profile-rollup-before-compaction metric=metric query=[1700038567 1700039168]: timestamp=1700038990 step=10 classic=25.5 (4039800000000000) candidate=26.5 (403a800000000000)
+BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2 	--- FAIL: BenchmarkStorageProbe/late-holes-rollup/cwhisper-ooo-2
+    profile_probe_test.go:143: cwhisper-ooo profile-rollup-before-compaction metric=metric query=[1700038567 1700039168]: timestamp=1700038990 step=10 classic=25.5 (4039800000000000) candidate=26.5 (403a800000000000)
+BenchmarkStorageProbe/late-holes-rollup/pebble-2       	    4096	    218166 ns/op	     27271 ns/point	    6230 B/op	      87 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/pebble-2       	    4096	    210279 ns/op	     26285 ns/point	    6229 B/op	      87 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/pebble-2       	    4096	    211708 ns/op	     26464 ns/point	    6232 B/op	      87 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/pebble-2       	    4096	    207732 ns/op	     25966 ns/point	    6231 B/op	      87 allocs/op
+BenchmarkStorageProbe/late-holes-rollup/pebble-2       	    4096	    238677 ns/op	     29835 ns/point	    6229 B/op	      87 allocs/op
+--- FAIL: BenchmarkStorageProbe
+    storage_bench_test.go:30: engine log:
+        2026/10/03 18:41:58 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble3924261175/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:41:59 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble1615311999/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:41:59 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble3267279402/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:00 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble408352387/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:00 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble219634869/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:01 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble1078531771/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:01 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble3905437542/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:02 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble2424245457/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:02 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble3378939347/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:03 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbeordered-rolluppebble1363463525/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:05 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble943470042/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:06 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble2285545848/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:06 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble923206569/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:07 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble839784434/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:07 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble751434118/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:08 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble3223136203/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:08 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble2678604318/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:09 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble1339618720/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:09 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble2459673964/001/db/000006.log with log number 000006 stopped reading at offset: 0; replayed 0 keys in 0 batches
+        2026/10/03 18:42:10 [JOB 1] WAL file /tmp/storage-bench/BenchmarkStorageProbelate-holes-rolluppebble2923247148/003/db/000011.log with log number 000011 stopped reading at offset: 0; replayed 0 keys in 0 batches
+FAIL

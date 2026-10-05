@@ -1,0 +1,5 @@
+goos: linux
+goarch: arm64
+pkg: github.com/go-graphite/go-carbon/persister
+BenchmarkStorageProbe/late-holes/cwhisper-ooo-2         	  118653	     28452 ns/op	      3557 ns/point	   11011 B/op	      61 allocs/op
+PASS

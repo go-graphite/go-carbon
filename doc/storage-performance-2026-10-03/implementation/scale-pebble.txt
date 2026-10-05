@@ -1,0 +1,8 @@
+=== RUN   TestStorageScaleProbe
+    scale_probe_test.go:17: engine=pebble metrics=100000 workers=32 setup=24.647125913s
+    scale_probe_test.go:35: engine=pebble points=2400000 reads=30000 wall=1m2.856400166s cpu-us/point=37.300 allocated-B/point=1141.5 batch-mixed-p95-us=21111.515 batch-mixed-p99-us=44217.870 maxrss-KiB=45800
+2026/10/03 19:36:49 [JOB 1] WAL file /tmp/storage-bench/TestStorageScaleProbe3153701377/001/db/001556.log with log number 001556 stopped reading at offset: 253917; replayed 3800 keys in 380 batches
+2026/10/03 19:36:54 [JOB 1] WAL file /tmp/storage-bench/TestStorageScaleProbe3153701377/001/db/001586.log with log number 001586 stopped reading at offset: 0; replayed 0 keys in 0 batches
+    scale_probe_test.go:48: engine=pebble verified-metrics=100000 maintenance-sample=252 maintenance=2.49179905s files=32 logical-bytes=186324382 allocated-bytes=186392576 live-heap-bytes=866520
+--- PASS: TestStorageScaleProbe (92.89s)
+PASS

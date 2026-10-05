@@ -1,0 +1,35 @@
+{
+  "created": "2026-10-03T18:24:06.809932+00:00",
+  "commit": "7029c88034a73c0d0d09b0a7042a29b2d5c588b9",
+  "gomaxprocs": 2,
+  "image": "golang:1.27.1-bookworm",
+  "repetitions": 10,
+  "matrix": {
+    "write_read_concurrent_rounds": 4096,
+    "maintenance_iterations": 64,
+    "reopen_iterations": 256
+  },
+  "durability": "Pebble WAL Sync; file engines unsynced write/close",
+  "scope": "local Linux VM; synthetic bounded cardinality, warm page cache",
+  "host_cpu": "Apple M3 Max",
+  "host_ram_bytes": 38654705664,
+  "linux_vcpus": 2,
+  "linux_ram_bytes": 2053586944,
+  "filesystem": "overlayfs",
+  "kernel": "Linux d1caeb4eed79 6.8.0-117-generic #117-Ubuntu SMP PREEMPT_DYNAMIC Thu May  7 17:26:37 UTC 2026 aarch64 GNU/Linux",
+  "image_digest": "sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195",
+  "whisper_version": "v0.0.0-20261003174933-d84403499e32",
+  "store_version": "v0.0.0-20261003174933-d84403499e32",
+  "pebble_version": "v1.1.5",
+  "engine_source_changes": false,
+  "probe_repetitions": 5,
+  "probe_iterations": 4096,
+  "cpu_profiles": "measured loop only, separate invocations from allocation and block profiles",
+  "allocation_profiles": "after-minus-before alloc_space with default sampling; profile-writer overhead can appear",
+  "raw_reports": "/tmp/go-carbon-storage-perf-d_p19n10",
+  "source_sha256": {
+    "go.mod": "8e956e9886c72c716e95fd29231e61e4d47cf1db6057ed2252a4efc34a4c09a3",
+    "vendor/github.com/go-graphite/go-whisper/compress.go": "42aa8e7140ef5255109b38bad44f7d19c71ac9b6666157de1db0c447a524e3bb",
+    "vendor/github.com/go-graphite/go-whisper/ooo.go": "3865d15a0fa4caf6e4b6aa4a178cec94851013525bcb8dca71a5b7396bd5bb0d"
+  }
+}

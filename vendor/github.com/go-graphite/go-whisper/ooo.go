@@ -317,12 +317,10 @@ func (whisper *Whisper) divertOutOfOrder(dropped []oooPoint) error {
 // The sidecar shares the main file's retentions, so archive i covers the same
 // intervals at the same step and the two value slices are directly aligned.
 // Base-archive sidecar points are later writes, so they replace encoded values.
-// Coarse sidecar points can be partial aggregates: only use those to fill holes
-// until compaction recomputes the complete aggregate from both files.
-//
-// So a diverted point shows up immediately at base resolution, but a coarse
-// window that already holds an aggregate keeps the stale one until
-// MergeOutOfOrder recomputes it - the encoded slot cannot be rewritten in place.
+// Coarse sidecar points can be partial aggregates. Fill holes with those, then
+// recompute affected windows from the union of main data and corrections using
+// the same rules as compaction. An acknowledged correction is visible at every
+// resolution without requiring a file rewrite on the read path.
 func (whisper *Whisper) mergeOutOfOrderValues(archiveIndex, fromTime, untilTime int, values []float64) error {
 	if whisper.oooBroken {
 		return nil
@@ -347,6 +345,27 @@ func (whisper *Whisper) mergeOutOfOrderValues(archiveIndex, fromTime, untilTime 
 	if archiveIndex >= len(sidecar.archives) {
 		return nil
 	}
+	if archiveIndex == 0 {
+		// Fetch represents both an empty slot and an explicit NaN as NaN.
+		// Inspect timestamps so a NaN correction still replaces a main value.
+		archive := sidecar.archives[0]
+		base := sidecar.getBaseInterval(archive)
+		if len(values) == 0 || base == 0 {
+			return nil
+		}
+		from := archive.Interval(fromTime)
+		until := from + len(values)*archive.secondsPerPoint
+		points, err := sidecar.readSeries(archive.PointOffset(base, from), archive.PointOffset(base, until), archive)
+		if err != nil {
+			return fmt.Errorf("fetch out-of-order raw slots: %w", err)
+		}
+		for i, point := range points {
+			if i < len(values) && point.interval == from+i*archive.secondsPerPoint {
+				values[i] = point.value
+			}
+		}
+		return nil
+	}
 
 	ts, err := sidecar.fetchFromArchive(sidecar.archives[archiveIndex], fromTime, untilTime)
 	if err != nil {
@@ -362,6 +381,28 @@ func (whisper *Whisper) mergeOutOfOrderValues(archiveIndex, fromTime, untilTime 
 		}
 		if !math.IsNaN(v) && (archiveIndex == 0 || math.IsNaN(values[i])) {
 			values[i] = v
+		}
+	}
+	if archiveIndex > 0 {
+		extras := make([][]dataPoint, archiveIndex+1)
+		from := whisper.archives[archiveIndex].Interval(fromTime)
+		until := from + len(values)*whisper.archives[archiveIndex].secondsPerPoint - 1
+		for i := 0; i < archiveIndex; i++ {
+			extras[i], err = readArchivePointsInRange(sidecar, i, from, until)
+			if err != nil {
+				return fmt.Errorf("read out-of-order rollup input: %w", err)
+			}
+		}
+		recomputed, err := whisper.recomputeAggregates(extras)
+		if err != nil {
+			return fmt.Errorf("recompute out-of-order read: %w", err)
+		}
+		archive := whisper.archives[archiveIndex]
+		for _, point := range recomputed[archiveIndex] {
+			index := (point.interval - from) / archive.secondsPerPoint
+			if point.interval >= from && index < len(values) {
+				values[index] = point.value
+			}
 		}
 	}
 
@@ -574,18 +615,18 @@ func (whisper *Whisper) rewriteArchiveCorrections(corrections [][]dataPoint) err
 }
 
 func (whisper *Whisper) recomputeArchiveAggregates(extras, corrections [][]dataPoint) ([][]dataPoint, error) {
-	out := make([][]dataPoint, len(whisper.archives))
+	out := make([][]dataPoint, len(extras))
 	if len(whisper.archives) < 2 || whisper.aggregationMethod == Mix {
 		return out, nil
 	}
 
-	for i := range whisper.archives {
+	for i := range extras {
 		if corrections != nil {
 			// Direct writes follow propagation from finer archives, so they win
 			// at the same slot before computing the next resolution down.
 			out[i], _ = mergeExtra(out[i], markExtras(corrections[i], true), maxInt)
 		}
-		if i+1 == len(whisper.archives) {
+		if i+1 == len(extras) {
 			break
 		}
 		higher, lower := whisper.archives[i], whisper.archives[i+1]
@@ -595,11 +636,7 @@ func (whisper *Whisper) recomputeArchiveAggregates(extras, corrections [][]dataP
 		// diverted at any archive, not only the base one, so a level with no
 		// change above it can still have one of its own - hence continue rather
 		// than stopping the cascade here.
-		changed := make([]dataPoint, 0, len(extras[i])+len(out[i]))
-		changed = append(changed, extras[i]...)
-		changed = append(changed, out[i]...)
-
-		touched := windowsOf(higher, changed)
+		touched := windowsOf(higher, extras[i], out[i])
 		if len(touched) == 0 {
 			continue
 		}
@@ -611,9 +648,10 @@ func (whisper *Whisper) recomputeArchiveAggregates(extras, corrections [][]dataP
 
 		perWindow := lower.secondsPerPoint / higher.secondsPerPoint
 
-		var next []dataPoint
+		next := make([]dataPoint, 0, len(touched))
+		known := make([]float64, 0, perWindow)
 		for _, start := range touched {
-			var known []float64
+			known = known[:0]
 			for t := start; t < start+lower.secondsPerPoint; t += higher.secondsPerPoint {
 				if v, ok := values[t]; ok {
 					known = append(known, v)
@@ -625,7 +663,6 @@ func (whisper *Whisper) recomputeArchiveAggregates(extras, corrections [][]dataP
 			next = append(next, dataPoint{start, aggregate(whisper.aggregationMethod, known)})
 		}
 
-		sort.Slice(next, func(a, b int) bool { return next[a].interval < next[b].interval })
 		out[i+1] = next
 	}
 
@@ -650,12 +687,15 @@ func (whisper *Whisper) mergedArchiveValues(index int, sidecar, recomputed []dat
 		until = archive.AggregateInterval(until) + archive.next.secondsPerPoint - archive.secondsPerPoint
 	}
 
-	series, err := whisper.storedPoints(archive, from, until)
+	// The shared live-rollup reader applies XFF and includes buffered tail
+	// windows. They are necessary when a correction cascades past a coarse
+	// archive whose final values have not yet reached encoded blocks.
+	series, err := whisper.fetchCompressed(int64(from), int64(until), archive)
 	if err != nil {
 		return nil, fmt.Errorf("recompute aggregates: read archive %d: %w", index, err)
 	}
 
-	values := make(map[int]float64, len(series)+len(sidecar)+len(recomputed))
+	values := make(map[int]float64, len(series))
 	for _, p := range series {
 		if p.interval != 0 {
 			values[p.interval] = p.value
@@ -728,21 +768,44 @@ func markExtras(points []dataPoint, replace bool) []extraPoint {
 //
 // This is fetchCompressed without its tail. For a non-base archive that
 // function also live aggregates whatever sits in the higher archives' buffers,
-// which is not what the file holds: it ignores xFilesFactor and drops its own
-// trailing group. Feeding those phantom values into an aggregation would inflate
-// the known-slot count and could fold a partial aggregate into a stored one.
-//
-// No reachable case is known - a diverted point is by construction older than
-// the buffers that would pollute it - but that argument rests on the ratio
-// between every adjacent pair of retentions, which callers choose. Reading
-// exactly what the file holds costs a few lines and does not.
+// which need not be physically present in the selected archive. Migration and
+// archive snapshots use this helper to preserve only the stored records.
 func (whisper *Whisper) storedPoints(archive *archiveInfo, from, until int) ([]dataPoint, error) {
-	var dst []dataPoint
-
-	buf := make([]byte, archive.blockSize)
-	for _, block := range archive.getSortedBlockRanges() {
-		if block.end < from || until < block.start {
+	blocks := archive.getSortedBlockRanges()
+	capacity := 0
+	for _, block := range blocks {
+		if block.start == 0 || block.end < from || until < block.start {
 			continue
+		}
+		first, last := block.start, block.end
+		if first < from {
+			first = from
+		}
+		if last > until {
+			last = until
+		}
+		count := (last-first)/archive.secondsPerPoint + 1
+		// Metadata is only a capacity hint; malformed counts cannot force
+		// allocations larger than the block's maximum encoded capacity.
+		if block.count >= 0 && block.count < maxInt && block.count/4 < archive.blockSize && count > block.count+1 {
+			count = block.count + 1
+		}
+		if count > archive.numberOfPoints-capacity {
+			count = archive.numberOfPoints - capacity
+		}
+		capacity += count
+	}
+	var dst []dataPoint
+	if capacity > 0 {
+		dst = make([]dataPoint, 0, capacity)
+	}
+	var buf []byte
+	for _, block := range blocks {
+		if block.start == 0 || block.end < from || until < block.start {
+			continue
+		}
+		if buf == nil {
+			buf = make([]byte, archive.blockSize)
 		}
 		if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
 			return nil, fmt.Errorf("read block %d: %w", block.index, err)
@@ -753,13 +816,11 @@ func (whisper *Whisper) storedPoints(archive *archiveInfo, from, until int) ([]d
 			return nil, fmt.Errorf("read block %d: %w", block.index, err)
 		}
 
-		for i := range buf {
-			buf[i] = 0
-		}
 	}
 
 	if archive.hasBuffer() {
-		for _, p := range unpackDataPoints(archive.buffer) {
+		for offset := 0; offset < len(archive.buffer); offset += PointSize {
+			p := unpackDataPoint(archive.buffer[offset:])
 			if p.interval != 0 && from <= p.interval && p.interval <= until {
 				dst = append(dst, p)
 			}
@@ -771,28 +832,32 @@ func (whisper *Whisper) storedPoints(archive *archiveInfo, from, until int) ([]d
 
 // windowsOf returns the distinct next-archive window starts that points fall
 // into, ascending.
-func windowsOf(archive *archiveInfo, points []dataPoint) []int {
-	if archive.next == nil || len(points) == 0 {
+func windowsOf(archive *archiveInfo, lists ...[]dataPoint) []int {
+	if archive.next == nil {
 		return nil
 	}
 
-	seen := make(map[int]struct{}, len(points))
 	var starts []int
-	for _, p := range points {
-		if p.interval <= 0 {
-			continue
+	for _, points := range lists {
+		for _, p := range points {
+			if p.interval <= 0 {
+				continue
+			}
+			start := archive.AggregateInterval(p.interval)
+			if len(starts) == 0 || starts[len(starts)-1] != start {
+				starts = append(starts, start)
+			}
 		}
-		start := archive.AggregateInterval(p.interval)
-		if _, ok := seen[start]; ok {
-			continue
-		}
-		seen[start] = struct{}{}
-		starts = append(starts, start)
+
 	}
-
 	sort.Ints(starts)
-
-	return starts
+	unique := starts[:0]
+	for _, start := range starts {
+		if len(unique) == 0 || unique[len(unique)-1] != start {
+			unique = append(unique, start)
+		}
+	}
+	return unique
 }
 
 // spanOf returns the inclusive interval range covered by the given point lists.
@@ -822,41 +887,63 @@ func readArchivePoints(w *Whisper, index int) ([]dataPoint, error) {
 }
 
 func readArchivePointsAt(w *Whisper, index int, now time.Time) ([]dataPoint, error) {
-	archive := w.archives[index]
+	// Fine corrections can outlive their own retention while still affecting
+	// retained coarse aggregates. Collision replay materializes them before
+	// a physical slot is overwritten.
+	return readArchivePointsInRange(w, index, int(now.Unix())-w.maxRetention, maxInt)
+}
 
-	// Sparse sidecars can have long retentions but few live points. Keep
-	// scratch space bounded and only allocate decoded points that survive.
+// Read only the circular spans that can contribute to the requested windows.
+// Scratch remains bounded even for a sparse sidecar with very long retentions.
+func readArchivePointsInRange(w *Whisper, index, from, until int) ([]dataPoint, error) {
+	archive := w.archives[index]
+	if until < from {
+		return nil, nil
+	}
+	from += mod(-from, archive.secondsPerPoint)
+	if until < from {
+		return nil, nil
+	}
+	offset, remaining := archive.Offset(), archive.Size()
+	if from >= 0 && until-from < archive.MaxRetention()-archive.secondsPerPoint {
+		base := w.getBaseInterval(archive)
+		if base == 0 {
+			return nil, nil
+		}
+		offset = archive.PointOffset(base, from)
+		remaining = ((until-from)/archive.secondsPerPoint + 1) * PointSize
+	}
 	bufferSize := 4096 * PointSize
-	if archive.Size() < bufferSize {
-		bufferSize = archive.Size()
+	if remaining < bufferSize {
+		bufferSize = remaining
 	}
 	buf := make([]byte, bufferSize)
-
-	// a classic archive is a ring buffer: unwritten slots are zero, and slots
-	// not yet overwritten since the last wrap hold points older than retention
-	oldest := int(now.Unix()) - archive.MaxRetention()
-
 	var points []dataPoint
-	for offset := 0; offset < archive.Size(); {
-		chunk := buf
-		if remaining := archive.Size() - offset; len(chunk) > remaining {
-			chunk = chunk[:remaining]
+	for remaining > 0 {
+		size := len(buf)
+		if size > remaining {
+			size = remaining
 		}
-		if err := w.fileReadAt(chunk, archive.Offset()+int64(offset)); err != nil {
+		if int64(size) > archive.End()-offset {
+			size = int(archive.End() - offset)
+		}
+		chunk := buf[:size]
+		if err := w.fileReadAt(chunk, offset); err != nil {
 			return nil, fmt.Errorf("read archive %d: %w", index, err)
 		}
 		for i := 0; i < len(chunk); i += PointSize {
 			p := unpackDataPoint(chunk[i : i+PointSize])
-			if p.interval <= 0 || p.interval < oldest {
-				continue
+			if p.interval > 0 && p.interval >= from && p.interval <= until {
+				points = append(points, p)
 			}
-			points = append(points, p)
 		}
-		offset += len(chunk)
+		remaining -= size
+		offset += int64(size)
+		if offset == archive.End() {
+			offset = archive.Offset()
+		}
 	}
-
 	sort.Slice(points, func(i, j int) bool { return points[i].interval < points[j].interval })
-
 	return points, nil
 }
 

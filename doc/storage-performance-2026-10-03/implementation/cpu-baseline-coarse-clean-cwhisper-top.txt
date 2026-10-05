@@ -1,0 +1,21 @@
+File: baseline.test
+Build ID: 9a15edda62d01f69cc94b527b3763df4bbd8f037
+Type: cpu
+Time: 2026-10-03 21:50:03 CEST
+Duration: 3.38s, Total samples = 3880ms (114.80%)
+Showing nodes accounting for 2070ms, 53.35% of 3880ms total
+Dropped 92 nodes (cum <= 19.40ms)
+Showing top 12 nodes out of 219
+      flat  flat%   sum%        cum   cum%
+     990ms 25.52% 25.52%      990ms 25.52%  internal/runtime/syscall/linux.Syscall6
+     150ms  3.87% 29.38%      260ms  6.70%  runtime.typedmemmove
+     140ms  3.61% 32.99%      270ms  6.96%  sort.partition_func
+     110ms  2.84% 35.82%      560ms 14.43%  runtime.mapassign_fast64
+     110ms  2.84% 38.66%      110ms  2.84%  runtime.memmove
+     100ms  2.58% 41.24%      240ms  6.19%  sort.insertionSort_func
+      90ms  2.32% 43.56%      130ms  3.35%  runtime.scanblock
+      80ms  2.06% 45.62%     2060ms 53.09%  github.com/go-graphite/go-whisper.(*Whisper).fetchCompressed
+      80ms  2.06% 47.68%       80ms  2.06%  github.com/go-graphite/go-whisper.(*Whisper).fetchCompressed.func1
+      80ms  2.06% 49.74%      100ms  2.58%  runtime.mapaccess2_fast64
+      80ms  2.06% 51.80%      220ms  5.67%  runtime.scanObject
+      60ms  1.55% 53.35%      420ms 10.82%  github.com/go-graphite/go-whisper.(*Whisper).filterCompressedSlots

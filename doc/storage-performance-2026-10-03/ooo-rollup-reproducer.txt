@@ -1,0 +1,4 @@
+=== RUN   TestStorageProbeLateRollup
+    profile_probe_test.go:173: cwhisper-ooo round=76 now=1700007024 batch=[{1700007016 64} {1700007017 65} {1700007018 66} {1700007019 67} {1700007020 68} {1700007021 69} {1700007022 70} {1700007023 71}] before-compaction metric=metric query=[1700003424 1700007024]: timestamp=1700006410 step=10 classic=68.5 (4051200000000000) candidate=66.5 (4050a00000000000)
+--- FAIL: TestStorageProbeLateRollup (0.10s)
+FAIL

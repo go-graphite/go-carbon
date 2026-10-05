@@ -1,0 +1,178 @@
+package persister
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"runtime/pprof"
+	"testing"
+
+	whisper "github.com/go-graphite/go-whisper"
+)
+
+// This measurement-only overlay leaves engine code unchanged. CPU profiles
+// contain only the measured loop; allocation profiles are before/after deltas.
+func perfProbeStart(b *testing.B) func() {
+	b.Helper()
+	prefix := os.Getenv("STORAGE_PROBE_PROFILE")
+	if prefix == "" {
+		return func() {}
+	}
+	var cpu *os.File
+	kind := os.Getenv("STORAGE_PROBE_KIND")
+	writeAlloc := func(suffix string) {
+		runtime.GC()
+		f, err := os.Create(prefix + suffix)
+		storageMust(b, err)
+		storageMust(b, pprof.Lookup("allocs").WriteTo(f, 0))
+		storageMust(b, f.Close())
+	}
+	if kind == "block" {
+		runtime.SetBlockProfileRate(1)
+	} else if kind == "cpu" {
+		var err error
+		cpu, err = os.Create(prefix + ".cpu.pprof")
+		storageMust(b, err)
+		storageMust(b, pprof.StartCPUProfile(cpu))
+	} else {
+		writeAlloc(".before.allocs.pprof")
+	}
+	return func() {
+		if kind == "block" {
+			runtime.SetBlockProfileRate(0)
+			f, err := os.Create(prefix + ".block.pprof")
+			storageMust(b, err)
+			storageMust(b, pprof.Lookup("block").WriteTo(f, 0))
+			storageMust(b, f.Close())
+		} else if cpu != nil {
+			pprof.StopCPUProfile()
+			storageMust(b, cpu.Close())
+		} else {
+			writeAlloc(".after.allocs.pprof")
+		}
+	}
+}
+
+func BenchmarkStorageProbe(b *testing.B) {
+	storageBenchmarkLogs(b)
+	for _, workload := range []string{"ordered", "late-holes", "ordered-rollup", "late-holes-rollup", "coarse-clean", "coarse-corrected"} {
+		for _, kind := range storageBackends {
+			if kind == "cwhisper" && (workload == "late-holes" || workload == "late-holes-rollup" || workload == "coarse-corrected") {
+				continue
+			}
+			b.Run(workload+"/"+kind, func(b *testing.B) {
+				now := storageTestClock(b)
+				s := newStorageBackend(b, kind, now)
+				oracle := newStorageBackend(b, "classic", now)
+				schema := "1s:10m"
+				isRollup := workload == "ordered-rollup" || workload == "late-holes-rollup"
+				late := workload == "late-holes" || workload == "late-holes-rollup"
+				if isRollup {
+					schema = "1s:10m,10s:1h,60s:6h"
+				}
+				isRead := workload == "coarse-clean" || workload == "coarse-corrected"
+				if isRead {
+					schema = "1s:30m,60s:1d"
+				}
+				c := storageConfig("metric", schema, whisper.Average, 0.5)
+				seed := storagePoints(storageEpoch-600, 600, 1)
+				if isRead {
+					seed = storagePoints(storageEpoch-1200, 1200, 1)
+				}
+				for _, engine := range []*storageBackend{oracle, s} {
+					storageMust(b, engine.create(c))
+					storageMust(b, engine.update(c.Name, seed))
+					storageMust(b, engine.compact([]string{c.Name}))
+				}
+				if workload == "coarse-corrected" {
+					correction := storagePoints(storageEpoch-1000, 120, 1)
+					for i := range correction {
+						correction[i].Value += 1000
+					}
+					for _, engine := range []*storageBackend{oracle, s} {
+						storageMust(b, engine.update(c.Name, correction))
+					}
+					if kind == "cwhisper-ooo" {
+						if _, err := os.Stat(s.path(c.Name) + ".ooo"); err != nil {
+							b.Fatal(err)
+						}
+					}
+				}
+				from, until := storageEpoch-21600, storageEpoch-120
+				if !isRead {
+					from, until = storageEpoch-600, storageEpoch
+				}
+				want, err := oracle.fetch(c.Name, from, until)
+				storageMust(b, err)
+				got, err := s.fetch(c.Name, from, until)
+				storageMust(b, err)
+				if diff := storageSeriesDiff(want, got); diff != "" {
+					b.Fatal(diff)
+				}
+				batch := make([]whisper.TimeSeriesPoint, 8)
+				stopProfile := perfProbeStart(b)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := 0; i < b.N; i++ {
+					if isRead {
+						got, err := s.fetch(c.Name, from, until)
+						storageMust(b, err)
+						if got == nil || len(got.values) != len(want.values) {
+							b.Fatal("read grid changed")
+						}
+					} else {
+						now.Store(int64(storageWriteBatch(batch, i, late)))
+						storageMust(b, s.update(c.Name, batch))
+					}
+				}
+				b.StopTimer()
+				stopProfile()
+				if isRead {
+					got, err := s.fetch(c.Name, from, until)
+					storageMust(b, err)
+					if diff := storageSeriesDiff(want, got); diff != "" {
+						b.Fatal(diff)
+					}
+				} else {
+					b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N*8), "ns/point")
+					if isRollup {
+						for i := 0; i < b.N; i++ {
+							now.Store(int64(storageWriteBatch(batch, i, late)))
+							storageMust(b, oracle.update(c.Name, batch))
+						}
+						storageCompare(b, oracle, s, c, "profile-rollup-before-compaction")
+					}
+					storageMust(b, s.compact([]string{c.Name}))
+					storageMust(b, s.reopen())
+					if isRollup {
+						storageCompare(b, oracle, s, c, "profile-rollup-compacted")
+					} else {
+						storageCheckWrittenWindow(b, s, []string{c.Name}, []int{b.N - 1}, 8, late, seed)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestStorageProbeLateRollup(t *testing.T) {
+	now := storageTestClock(t)
+	oracle := newStorageBackend(t, "classic", now)
+	s := newStorageBackend(t, "cwhisper-ooo", now)
+	c := storageConfig("metric", "1s:10m,10s:1h,60s:6h", whisper.Average, 0.5)
+	for _, engine := range []*storageBackend{oracle, s} {
+		storageMust(t, engine.create(c))
+		storageMust(t, engine.update(c.Name, storagePoints(storageEpoch-600, 600, 1)))
+		storageMust(t, engine.compact([]string{c.Name}))
+	}
+	batch := make([]whisper.TimeSeriesPoint, 8)
+	for i := 0; i < 4096; i++ {
+		now.Store(int64(storageWriteBatch(batch, i, true)))
+		storageMust(t, oracle.update(c.Name, batch))
+		storageMust(t, s.update(c.Name, batch))
+		storageCompare(t, oracle, s, c, fmt.Sprintf("round=%d now=%d batch=%v before-compaction", i, now.Load(), batch))
+	}
+	storageMust(t, s.compact([]string{c.Name}))
+	storageMust(t, s.reopen())
+	storageCompare(t, oracle, s, c, "final-compaction")
+}

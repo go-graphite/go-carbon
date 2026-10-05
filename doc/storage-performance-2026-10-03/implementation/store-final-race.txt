@@ -1,0 +1,2 @@
+ok  	github.com/go-graphite/go-whisper/store	12.169s
+ok  	github.com/go-graphite/go-whisper/store/cmd/storebench	1.972s
