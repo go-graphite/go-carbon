@@ -25,46 +25,7 @@ func TestQuotaReloadWhileServing(t *testing.T) {
 		t.Fatal(err)
 	}
 	url := "http://" + l.tcpListener.Addr().String() + "/metrics/find/?query=namespace.existing&format=json"
-	stop := make(chan struct{})
-	failures := make(chan error, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			res, err := http.Get(url)
-			if err != nil {
-				select {
-				case failures <- err:
-				default:
-				}
-				return
-			}
-			body, err := io.ReadAll(res.Body)
-			res.Body.Close()
-			if err != nil || res.StatusCode != 200 {
-				select {
-				case failures <- fmt.Errorf("read during reload: %d %s: %w", res.StatusCode, body, err):
-				default:
-				}
-				return
-			}
-		}
-	}()
-	defer func() {
-		close(stop)
-		wg.Wait()
-		select {
-		case err := <-failures:
-			t.Error(err)
-		default:
-		}
-	}()
+	defer checkQuotaReads(t, url)()
 	for _, limit := range []int64{20, 1, 30, 1, 0} {
 		var rules []*Quota
 		if limit > 0 {
@@ -133,4 +94,50 @@ func TestQuotaReloadPreservesUsageAndRemovesRules(t *testing.T) {
 		t.Fatal("removed rule still enforced")
 	}
 	ti.refreshUsage(ti.throughputs) // removed metadata must be safe for statistics
+}
+
+// checkQuotaReads continuously checks the live listener while rules change and
+// returns a cleanup that reports any read failure to the owning test.
+func checkQuotaReads(t *testing.T, url string) func() {
+	t.Helper()
+	stop := make(chan struct{})
+	failures := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			res, err := http.Get(url)
+			if err != nil {
+				select {
+				case failures <- err:
+				default:
+				}
+				return
+			}
+			body, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil || res.StatusCode != 200 {
+				select {
+				case failures <- fmt.Errorf("read during reload: %d %s: %w", res.StatusCode, body, err):
+				default:
+				}
+				return
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		wg.Wait()
+		select {
+		case err := <-failures:
+			t.Error(err)
+		default:
+		}
+	}
 }

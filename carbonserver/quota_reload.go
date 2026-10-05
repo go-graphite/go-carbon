@@ -40,8 +40,8 @@ func (listener *CarbonserverListener) ReloadQuotas(quotas []*Quota) error {
 	// means quota support was never initialized and skips refresh work entirely.
 	snapshot := make([]*Quota, len(quotas))
 	for i, q := range quotas {
-		copy := *q
-		snapshot[i] = &copy
+		rule := *q
+		snapshot[i] = &rule
 	}
 	listener.quotas.Store(snapshot)
 	select {

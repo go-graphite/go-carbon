@@ -1657,41 +1657,9 @@ func (q *QuotaUsage) String() string {
 //
 // this method is not goroutine-safe.
 func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
-	// Resolve every rule before publishing any changes. Last matching rule wins,
-	// and a malformed later pattern must leave the previous limits intact.
-	type assignment struct {
-		node  *trieNode
-		quota *Quota
-	}
-	pending := make(map[string]assignment)
-	depth := 0
-	for j := len(quotas) - 1; j >= 0; j-- {
-		quota := quotas[j]
-		if quota == nil {
-			return nil, fmt.Errorf("nil quota")
-		}
-		if quota.Pattern == "/" {
-			if _, exists := pending["/"]; !exists {
-				pending["/"] = assignment{ti.root, quota}
-			}
-			continue
-		}
-		paths, _, nodes, _, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
-		if err != nil {
-			return nil, err
-		}
-		for i, node := range nodes {
-			_, ok := node.meta.(*dirMeta)
-			if node.meta != nil && !ok {
-				continue
-			}
-			if c := strings.Count(paths[i], "."); c > depth {
-				depth = c
-			}
-			if _, exists := pending[paths[i]]; !exists {
-				pending[paths[i]] = assignment{node, quota}
-			}
-		}
+	pending, depth, err := ti.resolveQuotas(quotas)
+	if err != nil {
+		return nil, err
 	}
 
 	ti.setResetFrequency(resetFrequency)
@@ -1722,8 +1690,51 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	return ti.throughputs, nil
 }
 
-// refreshUsage updates usage data and generate stat metrics.
-// It can't be evoked with concurrent trieIndex.insert.
+// quotaAssignment binds a validated rule to a live namespace node.
+type quotaAssignment struct {
+	node  *trieNode
+	quota *Quota
+}
+
+// resolveQuotas prepares complete last-match-wins assignments without mutating
+// live limits. Validation failure leaves all current quota metadata untouched.
+func (ti *trieIndex) resolveQuotas(quotas []*Quota) (map[string]quotaAssignment, int, error) {
+	pending := make(map[string]quotaAssignment)
+	depth := 0
+	for j := len(quotas) - 1; j >= 0; j-- {
+		quota := quotas[j]
+		if quota == nil {
+			return nil, 0, fmt.Errorf("nil quota")
+		}
+		if quota.Pattern == "/" {
+			if _, exists := pending["/"]; !exists {
+				pending["/"] = quotaAssignment{ti.root, quota}
+			}
+			continue
+		}
+		paths, _, nodes, _, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		for i, node := range nodes {
+			_, ok := node.meta.(*dirMeta)
+			if node.meta != nil && !ok {
+				continue
+			}
+			if c := strings.Count(paths[i], "."); c > depth {
+				depth = c
+			}
+			if _, exists := pending[paths[i]]; !exists {
+				pending[paths[i]] = quotaAssignment{node, quota}
+			}
+		}
+	}
+
+	return pending, depth, nil
+}
+
+// refreshUsage updates usage data and generates stat metrics.
+// It cannot run concurrently with trieIndex.insert.
 func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files uint64) {
 	if throughputs == nil {
 		throughputs = newQuotaThroughputQuotaManager()

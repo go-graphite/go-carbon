@@ -857,27 +857,41 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 	return cacheMetricNames
 }
 
-func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
-	if listener.indexWarmupDone != nil {
-		select {
-		case <-listener.indexWarmupDone:
-		case <-exit:
-			return
-		}
+// waitForInitialIndex orders periodic updates after initial publication and
+// allows shutdown while the startup index is still being constructed.
+func (listener *CarbonserverListener) waitForInitialIndex(exit <-chan struct{}) bool {
+	if listener.indexWarmupDone == nil {
+		return true
 	}
-	cacheMetricNames := make(map[string]struct{})
-	var knownMetricsStatTicker, quotaAndUsageStatTicker <-chan time.Time
+	select {
+	case <-listener.indexWarmupDone:
+		return true
+	case <-exit:
+		return false
+	}
+}
+
+// fileListStatTickers selects quota accounting or lightweight metric counts.
+// The caller owns the returned stop function, including the no-ticker case.
+func (listener *CarbonserverListener) fileListStatTickers() (known, quotas <-chan time.Time, stop func()) {
 	if listener.isQuotaEnabled() {
 		ticker := time.NewTicker(listener.quotaUsageReportFrequency)
-		defer ticker.Stop()
-
-		quotaAndUsageStatTicker = ticker.C
-	} else if listener.trieIndex && listener.concurrentIndex && listener.realtimeIndex > 0 {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-
-		knownMetricsStatTicker = ticker.C
+		return nil, ticker.C, ticker.Stop
 	}
+	if listener.trieIndex && listener.concurrentIndex && listener.realtimeIndex > 0 {
+		ticker := time.NewTicker(time.Minute)
+		return ticker.C, nil, ticker.Stop
+	}
+	return nil, nil, func() {}
+}
+
+func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+	if !listener.waitForInitialIndex(exit) {
+		return
+	}
+	cacheMetricNames := make(map[string]struct{})
+	knownMetricsStatTicker, quotaAndUsageStatTicker, stopTickers := listener.fileListStatTickers()
+	defer stopTickers()
 
 uloop:
 	for {
