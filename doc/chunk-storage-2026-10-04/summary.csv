@@ -1,0 +1,13 @@
+environment,metrics,rounds,late,cache_mib,engine,cpu_us_point,wall_sec,rss_kib,allocated_bytes,allocated_b_per_point,logical_bytes,files,setup_sec,source_log
+dev-host-amazon-kvm-xfs,100000,8,false,256,pebble-chunks,21.984,107.881024120,746188,24109056,4461.5,24079256,14,332.718846536,raw/cache256-100k-8.txt
+dev-host-amazon-kvm-xfs,100000,8,false,256,cwhisper-ooo,23.583,49.020685920,74724,819200000,1128.5,528100000,200253,33.888652411,raw/cache256-cwhisper-ooo-repeat2.txt
+dev-host-amazon-kvm-xfs,100000,8,false,256,cwhisper-ooo,23.039,42.789989751,71276,819200000,1128.6,528100000,200253,32.294404361,raw/cache256-cwhisper-ooo-repeat3.txt
+dev-host-amazon-kvm-xfs,100000,8,false,256,pebble-chunks,21.371,100.248464980,735064,24109056,4463.7,24080406,14,340.768014513,raw/cache256-pebble-chunks-repeat2.txt
+dev-host-amazon-kvm-xfs,100000,8,false,256,pebble-chunks,22.492,107.599729186,734800,24096768,4462.9,24069346,14,328.256126443,raw/cache256-pebble-chunks-repeat3.txt
+dev-host-amazon-kvm-xfs,100000,8,false,64,cwhisper-ooo,23.503,52.393269979,79656,819200000,1126.0,528100000,200253,36.526897055,raw/scale-cwhisper-ooo-1.txt
+local-vm-linux-arm64-overlayfs,100000,80,false,256,pebble-chunks,4.910,262.397409347,919240,90783744,5889.0,90744413,21,34.562433514,raw/cache256-100k-80-1.txt
+local-vm-linux-arm64-overlayfs,100000,80,false,64,cwhisper-ooo,6.105,300.653942738,173048,819200000,751.2,727100000,200253,6.472557748,raw/chain-short-100k-cwhisper-ooo-1.txt
+local-vm-linux-arm64-overlayfs,1000000,8,false,256,pebble-chunks,5.367,276.942055875,996128,242610176,5904.3,242528441,42,548.430771480,raw/cache256-1m-8.txt
+local-vm-linux-arm64-overlayfs,1000000,8,false,256,cwhisper-ooo,9.106,512.894161623,229952,8192000000,1092.3,5281000000,2000253,66.598176145,raw/ooo-1m-8.txt
+local-vm-linux-arm64-overlayfs,100000,80,true,256,cwhisper-ooo,14.932,772.593636508,192040,2044891136,1882.9,2271279324,399747,6.849408704,raw/cache256-late-100k-cwhisper-ooo.txt
+local-vm-linux-arm64-overlayfs,100000,80,true,256,pebble-chunks,4.672,251.896687729,957416,90742784,5678.7,90691740,23,42.141831697,raw/cache256-late-100k-pebble-chunks.txt

@@ -1,0 +1,35 @@
+?   	github.com/go-graphite/go-carbon	[no test files]
+?   	github.com/go-graphite/go-carbon/api	[no test files]
+?   	github.com/go-graphite/go-carbon/api/sample/cache-query	[no test files]
+ok  	github.com/go-graphite/go-carbon/buckyd	1.845s
+ok  	github.com/go-graphite/go-carbon/cache	2.540s
+ok  	github.com/go-graphite/go-carbon/carbon	13.814s
+ok  	github.com/go-graphite/go-carbon/carbonserver	199.427s
+--- FAIL: TestThrottleChan (5.01s)
+    throttle_test.go:42: 
+        	Error Trace:	/tmp/go-carbon-chunks-validation-20261004/helper/throttle_test.go:42
+        	Error:      	Should be true
+        	Test:       	TestThrottleChan
+        	Messages:   	perSecond: 1000, bw: 895
+FAIL
+FAIL	github.com/go-graphite/go-carbon/helper	9.599s
+?   	github.com/go-graphite/go-carbon/helper/atomicfiles	[no test files]
+?   	github.com/go-graphite/go-carbon/helper/carbonpb	[no test files]
+?   	github.com/go-graphite/go-carbon/helper/carbonzipperpb	[no test files]
+?   	github.com/go-graphite/go-carbon/helper/grpcutil	[no test files]
+?   	github.com/go-graphite/go-carbon/helper/qa	[no test files]
+?   	github.com/go-graphite/go-carbon/helper/stat	[no test files]
+ok  	github.com/go-graphite/go-carbon/internal/chunkstore	1.694s
+ok  	github.com/go-graphite/go-carbon/internal/whisperio	1.181s
+ok  	github.com/go-graphite/go-carbon/persister	685.665s
+ok  	github.com/go-graphite/go-carbon/points	1.045s
+?   	github.com/go-graphite/go-carbon/receiver	[no test files]
+ok  	github.com/go-graphite/go-carbon/receiver/http	1.047s
+?   	github.com/go-graphite/go-carbon/receiver/kafka	[no test files]
+ok  	github.com/go-graphite/go-carbon/receiver/parse	1.036s
+ok  	github.com/go-graphite/go-carbon/receiver/pubsub	1.068s
+ok  	github.com/go-graphite/go-carbon/receiver/tcp	1.040s
+ok  	github.com/go-graphite/go-carbon/receiver/udp	1.042s
+ok  	github.com/go-graphite/go-carbon/tags	1.060s
+?   	github.com/go-graphite/go-carbon/tool/persister_configs_differ	[no test files]
+FAIL

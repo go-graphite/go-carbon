@@ -12,6 +12,16 @@ max-cpu = 4
 
 [whisper]
 data-dir = "/var/lib/graphite/whisper"
+# Storage backend: files (default) or experimental pebble-chunk shared storage.
+# Shared mode stores metric names in a catalog; it creates no per-metric files.
+# See doc/shared-storage.md for migration, quotas and transfer configuration.
+storage-backend = "files"
+# Pebble chunk store directory defaults to data-dir + "/.store-chunks" when empty.
+store-dir = ""
+# This budget includes Pebble memtable reservations; leave headroom beyond active
+# memtables for block-cache reads. It is not an RSS limit.
+store-cache-size = 268435456
+store-memtable-size = 67108864
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf. Required
 schemas-file = "/etc/go-carbon/storage-schemas.conf"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional
@@ -272,6 +282,35 @@ tagdb-update-interval = 100
 local-dir = "/var/lib/graphite/tagging/"
 # POST timeout
 tagdb-timeout = "1s"
+
+[buckyd]
+# Embedded buckytools transfer API. Requires whisper.storage-backend = "pebble-chunk".
+enabled = false
+bind = "0.0.0.0:4242"
+# Empty tmpdir uses the operating system temporary directory.
+tmpdir = ""
+auth-jwt-secret-file = ""
+# Empty node uses the hostname. Nodes describe the ingestion hashring using
+# HOST[:PORT][=INSTANCE]; offload sources do not need to be ring members.
+node = ""
+nodes = []
+hash = "carbon"
+replicas = 1
+# Optional dedicated pprof listener and Pyroscope collector.
+pprof = ""
+pyroscope = ""
+# Bounds concurrent exports/imports and encoded/decoded import size.
+max_transfers = 4
+max_body_bytes = 167772160
+# Legacy catalog-cache TTL in seconds; shared catalog reads have no TTL cache.
+timeout = 3600
+# Filesystem-only flags below must retain these values in shared mode.
+prefix = ""
+cache_path = ""
+sparse = false
+compressed = false
+mtime = false
+backend = "shared"
 
 [carbonserver]
 # Please NOTE: carbonserver is not intended to fully replace graphite-web

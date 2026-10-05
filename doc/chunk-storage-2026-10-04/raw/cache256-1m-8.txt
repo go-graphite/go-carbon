@@ -1,0 +1,9 @@
+=== RUN   TestStorageScale
+    storage_scale_test.go:90: engine=pebble-chunks metrics=1000000 workers=32 cache-MiB=256 memtable-MiB=64 rounds=8 late=false setup=9m8.43077148s
+    storage_scale_test.go:150: engine=pebble-chunks points=64000000 reads=800000 wall=4m36.942055875s cpu-us/point=5.367 allocated-B/point=5904.3 batch-p95-us=1606.427 batch-p99-us=5310.403 read-p99-us=71.869 maxrss-KiB=996128
+    storage_scale_test.go:153: cache-bytes=134237073 cache-hits=259342669 cache-misses=4554345 materializations=6000000 operands=15000000
+2026/10/04 12:06:03 [JOB 1] WAL file /tmp/TestStorageScale2362206341/001/db/000583.log with log number 000583 stopped reading at offset: 17133891; replayed 287872 keys in 71968 batches
+2026/10/04 12:06:21 [JOB 1] WAL file /tmp/TestStorageScale2362206341/001/db/000622.log with log number 000622 stopped reading at offset: 0; replayed 0 keys in 0 batches
+    storage_scale_test.go:206: engine=pebble-chunks verified-metrics=1000000 maintenance-sample=253 maintenance=2.48148133s files=42 logical-bytes=242528441 allocated-bytes=242610176
+--- PASS: TestStorageScale (843.63s)
+PASS

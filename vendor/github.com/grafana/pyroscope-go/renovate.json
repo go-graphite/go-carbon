@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>grafana/grafana-renovate-config//presets/base",
+    "security:only-security-updates"
+  ],
+  "packageRules": [
+    {
+      "description": "Always update these to latest, all update types. Overrides the wildcard enabled:false from security:only-security-updates.",
+      "matchPackageNames": [
+        "golang",
+        "github.com/grafana/pyroscope-go",
+        "github.com/grafana/pyroscope-go/godeltaprof"
+      ],
+      "enabled": true
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 package persister
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -13,12 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
 )
 
 const storageEpoch = 1700006400 // Divisible by every step used by these tests.
 
-var storageBackends = []string{"classic", "cwhisper", "cwhisper-ooo"}
+var storageBackends = []string{"classic", "cwhisper", "cwhisper-ooo", "pebble-chunk"}
 
 // Whisper exposes a process-wide clock. Keep these tests and benchmarks serial;
 // the atomic clock also permits concurrent storage operations at a fixed epoch.
@@ -32,11 +34,14 @@ func storageTestClock(tb testing.TB) *atomic.Int64 {
 	return now
 }
 
-// Files follow the persister's open/update/close lifecycle.
+// Files follow the persister's open/update/close lifecycle. Pebble has one shared
+// handle and synchronizes its WAL on every commit. Neither path adds a test-only
+// fsync, so benchmark names and documentation must retain this durability caveat.
 type storageBackend struct {
 	kind string
 	dir  string
 	now  *atomic.Int64
+	db   *chunkstore.Store
 }
 
 func newStorageBackend(tb testing.TB, kind string, now *atomic.Int64) *storageBackend {
@@ -47,8 +52,25 @@ func newStorageBackend(tb testing.TB, kind string, now *atomic.Int64) *storageBa
 	return s
 }
 
-func (*storageBackend) open() error  { return nil }
-func (*storageBackend) close() error { return nil }
+func (s *storageBackend) open() (err error) {
+	if s.kind == "pebble-chunk" {
+		s.db, err = chunkstore.Open(filepath.Join(s.dir, "db"), chunkstore.Options{
+			CacheSize: 8 << 20, MemTableSize: 4 << 20,
+			Now: func() time.Time { return time.Unix(s.now.Load(), 0) },
+		})
+		return err
+	}
+	return err
+}
+
+func (s *storageBackend) close() error {
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
 
 func (s *storageBackend) reopen() error {
 	if err := s.close(); err != nil {
@@ -82,6 +104,10 @@ func storageConfig(name, retentions string, method whisper.AggregationMethod, xf
 }
 
 func (s *storageBackend) create(c storageMetricConfig) error {
+	if s.db != nil {
+		_, err := s.db.Create(context.Background(), chunkConfig(c))
+		return err
+	}
 	w, err := whisper.CreateWithOptions(s.path(c.Name), whisper.NewRetentionsNoPointer(c.Retentions), c.AggregationMethod, c.XFilesFactor, s.options())
 	if err != nil {
 		return err
@@ -93,6 +119,13 @@ func (s *storageBackend) update(name string, input []whisper.TimeSeriesPoint) er
 	// Each engine gets the original input order, including duplicates, even if
 	// its implementation mutates the slice while sorting or aligning points.
 	values := slices.Clone(input)
+	if s.db != nil {
+		points := make([]chunkstore.Point, len(values))
+		for i, p := range values {
+			points[i] = chunkstore.Point{Timestamp: int64(p.Time), Value: p.Value}
+		}
+		return s.db.UpdateMany(context.Background(), name, points)
+	}
 	w, err := whisper.OpenWithOptions(s.path(name), s.options())
 	if err != nil {
 		return err
@@ -110,6 +143,13 @@ type storageSeries struct {
 }
 
 func (s *storageBackend) fetch(name string, from, until int) (*storageSeries, error) {
+	if s.db != nil {
+		v, err := s.db.Fetch(context.Background(), name, from, until)
+		if err != nil || v == nil {
+			return nil, err
+		}
+		return &storageSeries{v.FromTime, v.UntilTime, v.Step, v.Values}, nil
+	}
 	w, err := whisper.OpenWithOptions(s.path(name), s.options())
 	if err != nil {
 		return nil, err
@@ -123,6 +163,10 @@ func (s *storageBackend) fetch(name string, from, until int) (*storageSeries, er
 }
 
 func (s *storageBackend) metadata(name string) (storageMetricConfig, error) {
+	if s.db != nil {
+		m, err := s.db.Metadata(context.Background(), name)
+		return whisperConfig(m.MetricConfig), err
+	}
 	w, err := whisper.OpenWithOptions(s.path(name), s.options())
 	if err != nil {
 		return storageMetricConfig{}, err
@@ -132,6 +176,9 @@ func (s *storageBackend) metadata(name string) (storageMetricConfig, error) {
 }
 
 func (s *storageBackend) compact(names []string) error {
+	if s.db != nil {
+		return s.db.Compact()
+	}
 	if s.kind != "cwhisper-ooo" {
 		return nil
 	}

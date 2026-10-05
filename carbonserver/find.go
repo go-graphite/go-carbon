@@ -40,7 +40,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	atomic.AddUint64(&listener.metrics.FindRequests, 1)
 
-	format := req.FormValue("format")
+	format := findRequestFormat(req)
 	query := req.Form["query"]
 
 	var response *findResponse
@@ -56,18 +56,6 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		zap.String("url", req.URL.RequestURI()),
 		zap.String("peer", req.RemoteAddr),
 	))
-
-	accepts := req.Header["Accept"]
-	for _, accept := range accepts {
-		if accept == httpHeaders.ContentTypeCarbonAPIv3PB {
-			format = "carbonapi_v3_pb"
-			break
-		}
-	}
-
-	if format == "" {
-		format = "json"
-	}
 
 	formatCode, ok := knownFormats[format]
 	if !ok {
@@ -118,34 +106,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		return
 	}
 
-	var err error
-	fromCache := false
-	if listener.findCacheEnabled {
-		key := strings.Join(query, ",") + "&" + format
-		size := uint64(100 * 1024 * 1024)
-		var result interface{}
-		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
-			func() (interface{}, error) {
-				return listener.findMetrics(ctx, logger, t0, formatCode, query)
-			})
-		if err == nil {
-			listener.prometheus.cacheRequest("find", fromCache)
-			if fromCache {
-				atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
-			} else {
-				atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
-			}
-			response = result.(*findResponse)
-			if response.files == 0 {
-				err = errorNotFound{}
-			}
-		}
-	} else {
-		response, err = listener.findMetrics(ctx, logger, t0, formatCode, query)
-		if err == nil && response.files == 0 {
-			err = errorNotFound{}
-		}
-	}
+	response, fromCache, err := listener.findResponse(ctx, logger, t0, formatCode, format, query)
 
 	if err != nil || response == nil {
 		var code int
@@ -189,6 +150,51 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		zap.Uint32("lookups", response.lookups),
 	)
 
+}
+
+func findRequestFormat(req *http.Request) string {
+	format := req.FormValue("format")
+	for _, accept := range req.Header["Accept"] {
+		if accept == httpHeaders.ContentTypeCarbonAPIv3PB {
+			return "carbonapi_v3_pb"
+		}
+	}
+	if format == "" {
+		return "json"
+	}
+	return format
+}
+
+func (listener *CarbonserverListener) findResponse(ctx context.Context, logger *zap.Logger, t0 time.Time, formatCode responseFormat, format string, query []string) (*findResponse, bool, error) {
+	if !listener.findCacheEnabled || listener.getMetricStore() != nil {
+		return listener.findMetricsOrNotFound(ctx, logger, t0, formatCode, query)
+	}
+	key := strings.Join(query, ",") + "&" + format
+	result, fromCache, err := getWithCache(logger, listener.findCache, key, 100*1024*1024, 300, func() (interface{}, error) {
+		return listener.findMetrics(ctx, logger, t0, formatCode, query)
+	})
+	if err != nil {
+		return nil, fromCache, err
+	}
+	listener.prometheus.cacheRequest("find", fromCache)
+	if fromCache {
+		atomic.AddUint64(&listener.metrics.FindCacheHit, 1)
+	} else {
+		atomic.AddUint64(&listener.metrics.FindCacheMiss, 1)
+	}
+	response := result.(*findResponse)
+	if response.files == 0 {
+		return response, fromCache, errorNotFound{}
+	}
+	return response, fromCache, nil
+}
+
+func (listener *CarbonserverListener) findMetricsOrNotFound(ctx context.Context, logger *zap.Logger, t0 time.Time, format responseFormat, query []string) (*findResponse, bool, error) {
+	response, err := listener.findMetrics(ctx, logger, t0, format, query)
+	if err == nil && response.files == 0 {
+		err = errorNotFound{}
+	}
+	return response, false, err
 }
 
 type errorNotFound struct{}
@@ -382,7 +388,7 @@ func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Cont
 	var expandedGlobs interface{}
 	var err error
 	isCacheHit := false
-	if listener.globCacheEnabled {
+	if listener.globCacheEnabled && listener.getMetricStore() == nil {
 		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, size, 300,
 			func() (interface{}, error) {
 				return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
@@ -453,7 +459,7 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	var finalRes *protov2.GlobResponse
 	var lookups uint32
 
-	if listener.findCacheEnabled {
+	if listener.findCacheEnabled && listener.getMetricStore() == nil {
 		key := query + "&" + format + "grpc"
 		size := uint64(100 * 1024 * 1024)
 		var result interface{}

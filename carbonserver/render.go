@@ -326,7 +326,7 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 	var err error
 
 	var response fetchResponse
-	if listener.queryCacheEnabled {
+	if listener.queryCacheEnabled && listener.getMetricStore() == nil {
 		key, size := listener.getRenderCacheKeyAndSize(targets, format.String())
 		var res interface{}
 		cacheT0 := time.Now()
@@ -748,57 +748,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 		return prepareChan, nil
 	}
 
-	var responseChanToStream chan response
-	var fromCache bool
-	var err error
-	if listener.streamingQueryCacheEnabled {
-		key, size := listener.getRenderCacheKeyAndSize(targets, format.String()+"grpc")
-		var res interface{}
-		cacheT0 := time.Now()
-
-		item := listener.queryCache.getQueryItem(key, size, 60)
-		res, found := item.FetchOrLock()
-		switch {
-		case !found:
-			atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
-			responseChan, err := fetchMetricsFunc()
-			if err != nil {
-				item.StoreAbort()
-				tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
-			} else {
-				responseChanToStream = make(chan response, cap(responseChan))
-				go func() {
-					var responses []response
-					for r := range responseChan {
-						responses = append(responses, r)
-						responseChanToStream <- r
-					}
-					close(responseChanToStream)
-					item.StoreAndUnlock(responses)
-					tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
-				}()
-			}
-		case res != nil:
-			atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
-			cachedResponses := res.([]response)
-			responseChanToStream = make(chan response, getStreamingChannelSize(len(cachedResponses)))
-			go func() {
-				for _, r := range cachedResponses {
-					responseChanToStream <- r
-				}
-				close(responseChanToStream)
-				tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
-			}()
-			fromCache = true
-		default:
-			err = fmt.Errorf("invalid cache record for the request")
-			tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
-		}
-		listener.prometheus.cacheRequest("query", fromCache)
-		tle.FromCache = fromCache
-	} else {
-		responseChanToStream, err = fetchMetricsFunc()
-	}
+	responseChanToStream, fromCache, err := listener.renderResponseChannel(targets, format, tle, fetchMetricsFunc)
 
 	if err == nil {
 		streamT0 := time.Now()
@@ -844,6 +794,66 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 	)
 
 	return nil
+}
+
+func (listener *CarbonserverListener) renderResponseChannel(targets map[timeRange][]target, format responseFormat, tle *traceLogEntries, fetchMetrics func() (chan response, error)) (chan response, bool, error) {
+	if !listener.streamingQueryCacheEnabled || listener.getMetricStore() != nil {
+		responseChan, err := fetchMetrics()
+		return responseChan, false, err
+	}
+	key, size := listener.getRenderCacheKeyAndSize(targets, format.String()+"grpc")
+	cacheT0 := time.Now()
+	item := listener.queryCache.getQueryItem(key, size, 60)
+	res, found := item.FetchOrLock()
+	responseChan, fromCache, err := listener.renderCachedResponseChannel(item, res, found, fetchMetrics, tle, cacheT0)
+	toggle := float64(time.Since(cacheT0)) / float64(time.Second)
+	if err != nil || responseChan == nil {
+		tle.CacheDuration = toggle
+	}
+	listener.prometheus.cacheRequest("query", fromCache)
+	tle.FromCache = fromCache
+	return responseChan, fromCache, err
+}
+
+func (listener *CarbonserverListener) renderCachedResponseChannel(item *QueryItem, res interface{}, found bool, fetchMetrics func() (chan response, error), tle *traceLogEntries, cacheT0 time.Time) (chan response, bool, error) {
+	if !found {
+		atomic.AddUint64(&listener.metrics.QueryCacheMiss, 1)
+		responseChan, err := fetchMetrics()
+		if err != nil {
+			item.StoreAbort()
+			return nil, false, err
+		}
+		stream := make(chan response, cap(responseChan))
+		go storeAndStreamRenderResponses(item, responseChan, stream, tle, cacheT0)
+		return stream, false, nil
+	}
+	if res == nil {
+		return nil, false, fmt.Errorf("invalid cache record for the request")
+	}
+	atomic.AddUint64(&listener.metrics.QueryCacheHit, 1)
+	cachedResponses := res.([]response)
+	stream := make(chan response, getStreamingChannelSize(len(cachedResponses)))
+	go streamCachedRenderResponses(cachedResponses, stream, tle, cacheT0)
+	return stream, true, nil
+}
+
+func storeAndStreamRenderResponses(item *QueryItem, responseChan <-chan response, stream chan<- response, tle *traceLogEntries, cacheT0 time.Time) {
+	var responses []response
+	for r := range responseChan {
+		responses = append(responses, r)
+		stream <- r
+	}
+	close(stream)
+	item.StoreAndUnlock(responses)
+	tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
+}
+
+func streamCachedRenderResponses(responses []response, stream chan<- response, tle *traceLogEntries, cacheT0 time.Time) {
+	for _, r := range responses {
+		stream <- r
+	}
+	close(stream)
+	tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 }
 
 type traceLogEntries struct {

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
 )
 
@@ -22,17 +23,43 @@ import (
 func TestStorageScale(t *testing.T) {
 	kind, count, rounds, workers, late := storageScaleSettings(t)
 	now := storageTestClock(t)
-	s := newStorageBackend(t, kind, now)
+	memoryMiB := scaleInt(t, "STORAGE_SCALE_MEMORY_MIB", 64)
+	cacheMiB := scaleInt(t, "STORAGE_SCALE_CACHE_MIB", memoryMiB)
+	s, reopen := openStorageScaleBackend(t, kind, now, cacheMiB, memoryMiB)
 	names := storageBenchmarkNames(count)
 	config := storageConfig("metric", "1s:10m,10s:1h,60s:6h", whisper.Average, 0.5)
 	seed := storagePoints(storageEpoch-120, 120, 1)
-	setupStorageScale(t, s, names, config, seed, workers, rounds, late)
+	setupStorageScale(t, s, names, config, seed, workers, rounds, cacheMiB, memoryMiB, late)
 	oracle := newStorageBackend(t, "classic", now)
 	storageMust(t, oracle.create(config))
 	storageMust(t, oracle.update(config.Name, seed))
+	var storeBefore chunkstore.Stats
+	if s.db != nil {
+		storeBefore = s.db.Stats()
+	}
 	elapsed, before, after, memBefore, memAfter, batchLatencies, readLatencies := runStorageScale(t, s, oracle, names, config, rounds, workers, late, now)
 	logStorageScale(t, kind, count, rounds, elapsed, before, after, &memBefore, &memAfter, batchLatencies, readLatencies)
-	verifyStorageScale(t, s, oracle, names, config.Name, workers, now)
+	if s.db != nil {
+		stats := s.db.Stats()
+		t.Logf("cache-bytes=%d cache-hits=%d cache-misses=%d materializations=%d operands=%d", stats.CacheBytes, stats.CacheHits-storeBefore.CacheHits, stats.CacheMisses-storeBefore.CacheMisses, stats.Materializations-storeBefore.Materializations, stats.Operands-storeBefore.Operands)
+	}
+	verifyStorageScale(t, s, oracle, names, config.Name, workers, now, reopen)
+}
+
+func openStorageScaleBackend(t *testing.T, kind string, now *atomic.Int64, cacheMiB, memoryMiB int) (*storageBackend, func()) {
+	s := &storageBackend{kind: kind, dir: t.TempDir(), now: now}
+	open := func() error {
+		if kind != "pebble-chunk" {
+			return nil
+		}
+		clock := func() time.Time { return time.Unix(now.Load(), 0) }
+		var err error
+		s.db, err = chunkstore.Open(filepath.Join(s.dir, "db"), chunkstore.Options{CacheSize: int64(cacheMiB) << 20, MemTableSize: uint64(memoryMiB) << 20, Now: clock})
+		return err
+	}
+	storageMust(t, open())
+	t.Cleanup(func() { storageMust(t, s.close()) })
+	return s, func() { storageMust(t, s.close()); storageMust(t, open()) }
 }
 
 func storageScaleSettings(t *testing.T) (string, int, int, int, bool) {
@@ -46,7 +73,7 @@ func storageScaleSettings(t *testing.T) (string, int, int, int, bool) {
 	return kind, scaleInt(t, "STORAGE_SCALE_METRICS", 100000), scaleInt(t, "STORAGE_SCALE_ROUNDS", 3), scaleInt(t, "STORAGE_SCALE_WORKERS", 32), os.Getenv("STORAGE_SCALE_LATE") == "1"
 }
 
-func setupStorageScale(t *testing.T, s *storageBackend, names []string, config storageMetricConfig, seed []whisper.TimeSeriesPoint, workers, rounds int, late bool) {
+func setupStorageScale(t *testing.T, s *storageBackend, names []string, config storageMetricConfig, seed []whisper.TimeSeriesPoint, workers, rounds, cacheMiB, memoryMiB int, late bool) {
 	started := time.Now()
 	storageScaleParallel(t, workers, len(names), func(i int) error {
 		c := config
@@ -56,7 +83,7 @@ func setupStorageScale(t *testing.T, s *storageBackend, names []string, config s
 		}
 		return s.update(c.Name, seed)
 	})
-	t.Logf("engine=%s metrics=%d workers=%d rounds=%d late=%v setup=%s", s.kind, len(names), workers, rounds, late, time.Since(started))
+	t.Logf("engine=%s metrics=%d workers=%d cache-MiB=%d memtable-MiB=%d rounds=%d late=%v setup=%s", s.kind, len(names), workers, cacheMiB, memoryMiB, rounds, late, time.Since(started))
 }
 
 func runStorageScale(t *testing.T, s, oracle *storageBackend, names []string, config storageMetricConfig, rounds, workers int, late bool, now *atomic.Int64) (time.Duration, syscall.Rusage, syscall.Rusage, runtime.MemStats, runtime.MemStats, []int64, []int64) {
@@ -127,15 +154,15 @@ func logStorageScale(t *testing.T, kind string, count, rounds int, elapsed time.
 	t.Logf("engine=%s points=%d reads=%d wall=%s cpu-us/point=%.3f allocated-B/point=%.1f batch-p95-us=%.3f batch-p99-us=%.3f read-p99-us=%.3f maxrss-KiB=%d", kind, points, len(readLatencies), elapsed, (cpu(after)-cpu(before))*1e6/float64(points), float64(memAfter.TotalAlloc-memBefore.TotalAlloc)/float64(points), float64(batchLatencies[len(batchLatencies)*95/100])/1000, float64(batchLatencies[len(batchLatencies)*99/100])/1000, float64(readLatencies[len(readLatencies)*99/100])/1000, rss)
 }
 
-func verifyStorageScale(t *testing.T, s, oracle *storageBackend, names []string, configName string, workers int, now *atomic.Int64) {
-	storageMust(t, s.reopen())
+func verifyStorageScale(t *testing.T, s, oracle *storageBackend, names []string, configName string, workers int, now *atomic.Int64, reopen func()) {
+	reopen()
 	storageScaleCompare(t, s, oracle, names, configName, workers, now, 600)
 	sample := storageScaleSample(names)
 	verify := func() { storageScaleVerifySample(t, s, oracle, sample, configName, now) }
 	verify()
 	started := time.Now()
 	storageMust(t, s.compact(sample))
-	storageMust(t, s.reopen())
+	reopen()
 	verify()
 	storageMust(t, s.close()) // Stabilize obsolete-file deletion before counting disk.
 	files, logical, allocated := storageScaleFootprint(t, s.dir)

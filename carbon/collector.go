@@ -58,82 +58,7 @@ func NewCollector(app *App) *Collector {
 
 	logger = logger.With(zap.String("endpoint", c.endpoint))
 
-	if c.endpoint == MetricEndpointLocal {
-		// sender worker
-		storeFunc := app.Cache.Add
-
-		c.Go(func(exit chan bool) {
-			for {
-				select {
-				case <-exit:
-					return
-				case p := <-c.data:
-					storeFunc(p)
-				}
-			}
-		})
-	} else {
-		chunkSize := 32768
-		if endpoint.Scheme == "udp" {
-			chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
-		}
-
-		c.Go(func(exit chan bool) {
-			points.Glue(exit, c.data, chunkSize, time.Second, func(chunk []byte) {
-
-				var conn net.Conn
-				var err error
-				defaultTimeout := 5 * time.Second
-
-				// send data to endpoint
-			SendLoop:
-				for {
-
-					// check exit
-					select {
-					case <-exit:
-						break SendLoop
-					default:
-						// pass
-					}
-
-					// close old broken connection
-					if conn != nil {
-						conn.Close()
-						conn = nil
-					}
-
-					conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
-					if err != nil {
-						logger.Error("dial failed", zap.Error(err))
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					err = conn.SetDeadline(time.Now().Add(defaultTimeout))
-					if err != nil {
-						logger.Error("conn.SetDeadline failed", zap.Error(err))
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					_, err := conn.Write(chunk)
-					if err != nil {
-						logger.Error("conn.Write failed", zap.Error(err))
-						time.Sleep(time.Second)
-						continue SendLoop
-					}
-
-					break SendLoop
-				}
-
-				if conn != nil {
-					conn.Close()
-					conn = nil
-				}
-			})
-		})
-	}
+	c.startSender(app.Cache.Add, endpoint, logger)
 
 	sendCallback := func(moduleName string) func(metric string, value float64) {
 		return func(metric string, value float64) {
@@ -176,6 +101,9 @@ func NewCollector(app *App) *Collector {
 	if app.Persister != nil {
 		c.stats = append(c.stats, moduleCallback("persister", app.Persister))
 	}
+	if app.MetricStore != nil {
+		c.stats = append(c.stats, moduleCallback("storage", &storeStats{db: app.MetricStore}))
+	}
 
 	if app.Api != nil {
 		c.stats = append(c.stats, moduleCallback("grpc", app.Api))
@@ -186,19 +114,7 @@ func NewCollector(app *App) *Collector {
 	}
 
 	// collector worker
-	c.Go(func(exit chan bool) {
-		ticker := time.NewTicker(c.metricInterval)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-exit:
-				return
-			case <-ticker.C:
-				c.collect()
-			}
-		}
-	})
+	c.Go(c.run)
 
 	return c
 }
@@ -206,5 +122,102 @@ func NewCollector(app *App) *Collector {
 func (c *Collector) collect() {
 	for _, stat := range c.stats {
 		stat()
+	}
+}
+
+func (c *Collector) startSender(storeFunc func(*points.Points), endpoint *url.URL, logger *zap.Logger) {
+	if c.endpoint == MetricEndpointLocal {
+		// sender worker
+
+		c.Go(func(exit chan bool) {
+			for {
+				select {
+				case <-exit:
+					return
+				case p := <-c.data:
+					storeFunc(p)
+				}
+			}
+		})
+	} else {
+		chunkSize := 32768
+		if endpoint.Scheme == "udp" {
+			chunkSize = 1000 // nc limitation (1024 for udp) and mtu friendly
+		}
+
+		c.Go(func(exit chan bool) {
+			points.Glue(exit, c.data, chunkSize, time.Second, func(chunk []byte) {
+
+				sendMetricChunk(exit, chunk, endpoint, logger)
+			})
+		})
+	}
+
+}
+
+func sendMetricChunk(exit chan bool, chunk []byte, endpoint *url.URL, logger *zap.Logger) {
+	var conn net.Conn
+	var err error
+	defaultTimeout := 5 * time.Second
+
+	// send data to endpoint
+SendLoop:
+	for {
+
+		// check exit
+		select {
+		case <-exit:
+			break SendLoop
+		default:
+			// pass
+		}
+
+		// close old broken connection
+		if conn != nil {
+			conn.Close()
+			conn = nil
+		}
+
+		conn, err = net.DialTimeout(endpoint.Scheme, endpoint.Host, defaultTimeout)
+		if err != nil {
+			logger.Error("dial failed", zap.Error(err))
+			time.Sleep(time.Second)
+			continue SendLoop
+		}
+
+		err = conn.SetDeadline(time.Now().Add(defaultTimeout))
+		if err != nil {
+			logger.Error("conn.SetDeadline failed", zap.Error(err))
+			time.Sleep(time.Second)
+			continue SendLoop
+		}
+
+		_, err := conn.Write(chunk)
+		if err != nil {
+			logger.Error("conn.Write failed", zap.Error(err))
+			time.Sleep(time.Second)
+			continue SendLoop
+		}
+
+		break SendLoop
+	}
+
+	if conn != nil {
+		conn.Close()
+		conn = nil
+	}
+}
+
+func (c *Collector) run(exit chan bool) {
+	ticker := time.NewTicker(c.metricInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-exit:
+			return
+		case <-ticker.C:
+			c.collect()
+		}
 	}
 }

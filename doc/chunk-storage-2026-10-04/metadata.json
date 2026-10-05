@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-04",
+  "purpose": "pre-integration synthetic storage qualification evidence",
+  "qualification_status": "not a native deployment qualification",
+  "environments": {
+    "dev-host-amazon-kvm-xfs": {
+      "host": "dzhdanov-devdockerbuilkutt-02.eu-west-2.dev.booking.com",
+      "os": "Linux 5.14.0-729.el9.x86_64",
+      "architecture": "amd64",
+      "cpu": "8 vCPU, AMD EPYC 7571 under Amazon KVM",
+      "memory": "32 GiB",
+      "filesystem": "XFS",
+      "go": "go1.27.1",
+      "cgo_enabled": 0
+    },
+    "local-vm-linux-arm64-overlayfs": {
+      "os": "Linux",
+      "architecture": "arm64",
+      "cpu": "2 CPU",
+      "memory": "2 GiB",
+      "filesystem": "overlayfs",
+      "cgo_enabled": 0
+    }
+  },
+  "workload": {
+    "test": "persister.TestStorageScale",
+    "schema": "1s:10m,10s:1h,60s:6h",
+    "aggregation": "average",
+    "x_files_factor": 0.5,
+    "workers": 32,
+    "initial_points_per_metric": 120,
+    "write_batch_points": 8,
+    "read_pattern": "one fetch after every ten metric writes",
+    "correctness": "a classic oracle is updated after every round; all metrics are checked after reopen and a sampled set is checked after compaction/reopen"
+  },
+  "interpretation": {
+    "cpu_us_point": "process user plus system CPU divided by committed input points",
+    "allocated_bytes": "final on-disk allocated bytes from the maintenance log",
+    "allocated_b_per_point": "Go TotalAlloc delta divided by committed input points during the timed loop",
+    "rss_kib": "process maximum RSS reported after the timed loop",
+    "cache_budget": "Pebble reserves active memtable bytes from its configured cache. Cache MiB therefore needs block-cache headroom beyond memtables and is not an RSS limit.",
+    "file_backend_cache": "The cwhisper-ooo file backend does not use the Pebble cache option; its logged cache value is retained only as run configuration context."
+  },
+  "caveats": [
+    "The workload uses repeated synthetic values (timestamp modulo 101), not a captured production stream.",
+    "These results do not establish production latency, throughput, memory limits, or deployment safety.",
+    "The matched late-write cwhisper-ooo and pebble-chunks results are included.",
+    "Scale tests fully compact Pebble but merge file OOO sidecars only for sampled metrics; the separate fully-merged file probe is allocation-only and excluded from the timing CSV."
+  ],
+  "validation": {
+    "parent_go_carbon_commit": "218abb249c9c",
+    "go_whisper_pin": "16b07882e95e65a1eb2c3c8df22712e795622bde",
+    "tested_source_archive_sha256": "42bc7a67518dd4bba49530ac11bea2a93cad29d869af12ed48c5b3ca2f94755a",
+    "normal": "go test -p 4 -timeout 30m ./... passed",
+    "race": "go test -p 4 -race -timeout 30m ./...: all packages passed except helper/TestThrottleChan; unchanged baseline reproduced that timing failure, current focused test passed 3/3",
+    "vet": "go vet -p 4 ./... passed",
+    "scope": "Final Go source and dependency files matched the tested integration source; no commit, push or deployment.",
+    "source_of_logs": "validation/"
+  }
+}

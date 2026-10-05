@@ -2,12 +2,37 @@ package carbonserver
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 )
+
+func TestQuotaHandlerWithoutTrieIndex(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		index *fileIndex
+	}{
+		{name: "before initial scan"},
+		{name: "trigram index", index: &fileIndex{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener := NewCarbonserverListener(nil)
+			if tc.index != nil {
+				listener.UpdateFileIndex(tc.index)
+			}
+			response := httptest.NewRecorder()
+			listener.quotaHandler(response, httptest.NewRequest(http.MethodGet, "/admin/quota", http.NoBody))
+			if response.Code != http.StatusOK || response.Body.String() != "index doesn't exist." {
+				t.Fatalf("unexpected quota response: status=%d body=%q", response.Code, response.Body.String())
+			}
+		})
+	}
+}
 
 func TestInitialFileListCachePublishesNotificationsAndQuotas(t *testing.T) {
 	dir := t.TempDir()
@@ -71,6 +96,27 @@ func TestInitialIndexQuotaBeforeFirstTick(t *testing.T) {
 	}
 	if listener.ShouldThrottleMetric(points.OnePoint("namespace.existing", 1, 1), false) {
 		t.Fatal("existing series rejected by creation quota")
+	}
+}
+
+func TestFileScanCountsFreshDiskMetrics(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "namespace", "fresh.wsp")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	listener := NewCarbonserverListener(nil)
+	listener.SetWhisperData(dir)
+	listener.SetTrieIndex(true)
+	listener.SetConcurrentIndex(true)
+	if listener.updateFileList(dir, nil, nil) {
+		t.Fatal("disk scan must not report a cache load")
+	}
+	if listener.metrics.MetricsKnown != 1 {
+		t.Fatalf("metrics known = %d, want 1", listener.metrics.MetricsKnown)
 	}
 }
 

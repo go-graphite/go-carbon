@@ -17,8 +17,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/api"
+	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/tags"
@@ -60,6 +62,9 @@ type App struct {
 	CarbonLink     *cache.CarbonlinkListener
 	Persister      *persister.Whisper
 	Carbonserver   *carbonserver.CarbonserverListener
+	MetricStore    *store.Store
+	Buckyd         *buckyd.Service
+	buckydIndex    *metricIndexRefresher
 	Tags           *tags.Tags
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	PromRegisterer prometheus.Registerer
@@ -99,6 +104,9 @@ func (app *App) configure() error {
 	if err != nil {
 		return err
 	}
+	if err := validateStorageConfig(cfg); err != nil {
+		return err
+	}
 
 	// carbon-cache prefix
 	if hostname, err := os.Hostname(); err == nil {
@@ -108,6 +116,30 @@ func (app *App) configure() error {
 		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", "localhost")
 	}
 
+	if err := loadWhisperConfig(cfg); err != nil {
+		return err
+	}
+	if err := validateCacheConfig(cfg); err != nil {
+		return err
+	}
+
+	if err := validateMetricEndpoint(cfg); err != nil {
+		return err
+	}
+
+	if err := validateStorageConfig(cfg); err != nil {
+		return err
+	}
+	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
+		return errors.New("storage and buckyd settings require a restart")
+	}
+	app.Config = cfg
+
+	return nil
+}
+
+func loadWhisperConfig(cfg *Config) error {
+	var err error
 	if cfg.Whisper.Enabled {
 		cfg.Whisper.Schemas, err = persister.ReadWhisperSchemas(cfg.Whisper.SchemasFilename)
 		if err != nil {
@@ -130,26 +162,35 @@ func (app *App) configure() error {
 			cfg.Whisper.Aggregation = persister.NewWhisperAggregation()
 		}
 
-		if cfg.Whisper.OutOfOrder {
-			// the uncompressed format already writes points in any order
-			if !cfg.Whisper.Compressed && !cfg.Whisper.Schemas.AnyCompressed() {
-				return fmt.Errorf("whisper.out-of-order requires whisper.compressed, or a schema with compressed = true")
-			}
-			if cfg.Whisper.OutOfOrderCompactRate <= 0 {
-				return fmt.Errorf("whisper.out-of-order-compact-rate must be positive, got %d", cfg.Whisper.OutOfOrderCompactRate)
-			}
-			if cfg.Whisper.OutOfOrderCompactMinPoints < 0 {
-				return fmt.Errorf("whisper.out-of-order-compact-min-points must not be negative")
-			}
-			if cfg.Whisper.OutOfOrderCompactMinPoints > 0 &&
-				(cfg.Whisper.OutOfOrderCompactMaxPointAge.Value() <= 0 || cfg.Whisper.OutOfOrderCompactRetentionMargin.Value() <= 0) {
-				return fmt.Errorf("point-based out-of-order compaction requires positive max-point-age and retention-margin")
-			}
-			if cfg.Whisper.OutOfOrderCompactMinPoints == 0 && cfg.Whisper.OutOfOrderCompactThreshold <= 0 {
-				return fmt.Errorf("whisper.out-of-order-compact-threshold must be positive, got %d", cfg.Whisper.OutOfOrderCompactThreshold)
-			}
+		if cfg.Whisper.OutOfOrder && cfg.Whisper.StorageBackend == "files" {
+			return validateOutOfOrderConfig(cfg)
 		}
 	}
+	return nil
+}
+
+func validateOutOfOrderConfig(cfg *Config) error {
+	// the uncompressed format already writes points in any order
+	if !cfg.Whisper.Compressed && !cfg.Whisper.Schemas.AnyCompressed() {
+		return fmt.Errorf("whisper.out-of-order requires whisper.compressed, or a schema with compressed = true")
+	}
+	if cfg.Whisper.OutOfOrderCompactRate <= 0 {
+		return fmt.Errorf("whisper.out-of-order-compact-rate must be positive, got %d", cfg.Whisper.OutOfOrderCompactRate)
+	}
+	if cfg.Whisper.OutOfOrderCompactMinPoints < 0 {
+		return fmt.Errorf("whisper.out-of-order-compact-min-points must not be negative")
+	}
+	if cfg.Whisper.OutOfOrderCompactMinPoints > 0 &&
+		(cfg.Whisper.OutOfOrderCompactMaxPointAge.Value() <= 0 || cfg.Whisper.OutOfOrderCompactRetentionMargin.Value() <= 0) {
+		return fmt.Errorf("point-based out-of-order compaction requires positive max-point-age and retention-margin")
+	}
+	if cfg.Whisper.OutOfOrderCompactMinPoints == 0 && cfg.Whisper.OutOfOrderCompactThreshold <= 0 {
+		return fmt.Errorf("whisper.out-of-order-compact-threshold must be positive, got %d", cfg.Whisper.OutOfOrderCompactThreshold)
+	}
+	return nil
+}
+
+func validateCacheConfig(cfg *Config) error {
 	if !(cfg.Cache.WriteStrategy == "max" ||
 		cfg.Cache.WriteStrategy == "sorted" ||
 		cfg.Cache.WriteStrategy == "noop") {
@@ -161,6 +202,10 @@ func (app *App) configure() error {
 		return fmt.Errorf("cache.writeout-min-points and cache.writeout-max-delay must both be positive or both zero")
 	}
 
+	return nil
+}
+
+func validateMetricEndpoint(cfg *Config) error {
 	if cfg.Common.MetricEndpoint == "" {
 		cfg.Common.MetricEndpoint = MetricEndpointLocal
 	}
@@ -176,8 +221,6 @@ func (app *App) configure() error {
 			return fmt.Errorf("common.metric-endpoint supports only tcp and udp protocols. %#v is unsupported", u.Scheme)
 		}
 	}
-
-	app.Config = cfg
 
 	return nil
 }
@@ -258,15 +301,30 @@ func (app *App) stopListeners() {
 		logger.Debug("carbonlink stopped")
 	}
 
+	// Finish transfers and the catalog scan worker before closing the index.
+	if app.Buckyd != nil {
+		if err := app.Buckyd.Stop(); err != nil {
+			logger.Error("stop buckyd", zap.Error(err))
+		}
+		app.Buckyd = nil
+	}
+	if app.buckydIndex != nil {
+		app.buckydIndex.close()
+		app.buckydIndex = nil
+	}
 	if app.Carbonserver != nil {
 		carbonserver := app.Carbonserver
-		go func() {
+		stop := func() {
 			carbonserver.Stop()
 			logger.Debug("carbonserver stopped")
-		}()
+		}
+		if app.MetricStore != nil {
+			stop()
+		} else {
+			go stop()
+		}
 		app.Carbonserver = nil
 	}
-
 	if app.Receivers != nil {
 		for i := 0; i < len(app.Receivers); i++ {
 			app.Receivers[i].Stop()
@@ -312,6 +370,12 @@ func (app *App) stopAll() {
 		app.Collector = nil
 		logger.Debug("collector stopped")
 	}
+	if app.MetricStore != nil {
+		if err := app.MetricStore.Close(); err != nil {
+			logger.Error("close shared storage", zap.Error(err))
+		}
+		app.MetricStore = nil
+	}
 
 	if app.exit != nil {
 		close(app.exit)
@@ -350,6 +414,9 @@ func (app *App) startPersister() {
 		)
 		p.SetRequeue(app.Cache.Requeue)
 		p.SetWriteoutReady(app.Cache.WriteoutReady)
+		if app.MetricStore != nil {
+			p.SetMetricStore(app.MetricStore)
+		}
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
@@ -393,20 +460,72 @@ func (app *App) Start() (err error) {
 	}()
 
 	conf := app.Config
+	if err = validateStorageConfig(conf); err != nil {
+		return err
+	}
 
 	runtime.GOMAXPROCS(conf.Common.MaxCPU)
 
-	core := cache.New()
+	core, err := app.startStorage()
+	if err != nil {
+		return err
+	}
+	if err = app.startAPI(core); err != nil {
+		return err
+	}
+	app.startPersister()
+	restoreBeforeReceivers := conf.Dump.Enabled && conf.Whisper.Enabled &&
+		(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed())
+	newMetricsChan, err := app.configureCarbonserver(core)
+	if err != nil {
+		return err
+	}
+	// Replay compressed history before live input can advance block watermarks.
+	if restoreBeforeReceivers {
+		app.restoreBeforeReceivers(core)
+	}
+	if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
+		return err
+	}
+	if err = app.startReceivers(core); err != nil {
+		return err
+	}
+	if err = app.startCarbonlink(core); err != nil {
+		return err
+	}
+	if conf.Dump.Enabled && !restoreBeforeReceivers {
+		go app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	}
+	app.Collector = NewCollector(app)
+	return app.startBuckyd()
+}
+
+func (app *App) startStorage() (core *cache.Cache, err error) {
+	conf := app.Config
+	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
 	core.SetBloomSize(conf.Cache.BloomSize)
 	if err = core.SetWriteoutBatching(conf.Cache.WriteoutMinPoints, conf.Cache.WriteoutMaxDelay.Value()); err != nil {
-		return err
+		return nil, err
 	}
 
 	app.Cache = core
+	if conf.Whisper.StorageBackend == "pebble-chunk" {
+		app.MetricStore, err = store.Open(sharedStorePath(conf), store.Options{
+			CacheSize: conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("open shared storage: %w", err)
+		}
+	}
 
+	return core, nil
+}
+
+func (app *App) startAPI(core *cache.Cache) (err error) {
+	conf := app.Config
 	/* API start */
 	if conf.Grpc.Enabled {
 		var grpcAddr *net.TCPAddr
@@ -425,207 +544,222 @@ func (app *App) Start() (err error) {
 	}
 	/* API end */
 
-	/* WHISPER and TAGS start */
-	app.startPersister()
-	/* WHISPER and TAGS end */
+	return nil
+}
 
-	restoreBeforeReceivers := conf.Dump.Enabled && conf.Whisper.Enabled &&
-		(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed())
-	var newMetricsChan chan string
+func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan string, err error) {
+	conf := app.Config
+	if !conf.Carbonserver.Enabled {
+		return nil, nil
+	}
 
-	/* CARBONSERVER start */
-	if conf.Carbonserver.Enabled {
+	if app.MetricStore == nil && (conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex) {
+		if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
+			return nil, fmt.Errorf("failed to stat whisper data directory: %w", err)
+		} else if fi.Mode()&os.ModeSymlink == 1 {
+			return nil, fmt.Errorf("whisper data directory is a symlink")
+		}
+	}
+
+	apiPerPathRateLimiters, globQueryRateLimiters, err := app.carbonserverRateLimiters()
+	if err != nil {
+		return nil, err
+	}
+
+	// TODO: refactor: do not use var name the same as pkg name
+	carbonserver := carbonserver.NewCarbonserverListener(core.Get)
+	carbonserver.SetWhisperData(conf.Whisper.DataDir)
+	if app.MetricStore != nil {
+		carbonserver.SetWhisperData(sharedStorePath(conf))
+	}
+	carbonserver.SetMetricStore(app.MetricStore)
+	carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
+	carbonserver.SetEmptyResultOk(conf.Carbonserver.EmptyResultOk)
+	carbonserver.SetDoNotLog404s(conf.Carbonserver.DoNotLog404s)
+	carbonserver.SetFLock(app.Config.Whisper.FLock)
+	carbonserver.SetCompressed(app.Config.Whisper.Compressed)
+	carbonserver.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
+	carbonserver.SetFailOnMaxGlobs(conf.Carbonserver.FailOnMaxGlobs)
+	carbonserver.SetMaxMetricsGlobbed(conf.Carbonserver.MaxMetricsGlobbed)
+	carbonserver.SetMaxMetricsRendered(conf.Carbonserver.MaxMetricsRendered)
+	carbonserver.SetMaxFetchDataGoroutines(conf.Carbonserver.MaxFetchDataGoroutines)
+	carbonserver.SetBuckets(conf.Carbonserver.Buckets)
+	carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
+	carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
+	carbonserver.SetQuotaUsageReportFrequency(conf.Carbonserver.QuotaUsageReportFrequency.Value())
+	carbonserver.SetMaxCreatesPerSecond(conf.Carbonserver.MaxCreatesPerSecond)
+	carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
+	carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
+	carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
+	carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
+	carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
+	carbonserver.SetStreamingQueryCacheEnabled(conf.Carbonserver.StreamingQueryCacheEnabled)
+	carbonserver.SetFindCacheEnabled(conf.Carbonserver.FindCacheEnabled)
+	carbonserver.SetFindCacheSizeMB(conf.Carbonserver.FindCacheSizeMB)
+	carbonserver.SetGlobCacheEnabled(conf.Carbonserver.GlobCacheEnabled)
+	carbonserver.SetGlobCacheSizeMB(conf.Carbonserver.GlobCacheSizeMB)
+	carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
+	carbonserver.SetTrieIndex(conf.Carbonserver.TrieIndex)
+	carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
+	carbonserver.SetFileListCache(conf.Carbonserver.FileListCache)
+	carbonserver.SetFileListCacheVersion(conf.Carbonserver.FileListCacheVersion)
+	carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
+	carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
+	// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
+
+	carbonserver.SetMaxInflightRequests(conf.Carbonserver.MaxInflightRequests)
+	carbonserver.SetNoServiceWhenIndexIsNotReady(conf.Carbonserver.NoServiceWhenIndexIsNotReady)
+	carbonserver.SetRenderTraceLoggingEnabled(conf.Carbonserver.RenderTraceLoggingEnabled)
+
+	if conf.Carbonserver.RequestTimeout != nil {
+		carbonserver.SetRequestTimeout(conf.Carbonserver.RequestTimeout.Value())
+	}
+	if len(apiPerPathRateLimiters) > 0 {
+		carbonserver.SetAPIPerPathRateLimiter(apiPerPathRateLimiters)
+	}
+	if len(globQueryRateLimiters) > 0 {
+		carbonserver.SetHeavyGlobQueryRateLimiters(globQueryRateLimiters)
+	}
+
+	if err := app.configureCarbonserverQuotas(carbonserver); err != nil {
+		return nil, err
+	}
+
+	newMetricsChan = app.configureCarbonserverCache(core, carbonserver)
+
+	if conf.Prometheus.Enabled {
+		carbonserver.InitPrometheus(app.PromRegisterer)
+	}
+	if conf.Tracing.Enabled {
+		log.Printf("Otel tracing is removed in current verion, ignoring tracing.enabled=true")
+	}
+
+	carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
+	carbonserver.RegisterInternalInfoHandler("config", app.configInfo)
+
+	app.Carbonserver = carbonserver
+	return newMetricsChan, nil
+}
+
+func (app *App) carbonserverRateLimiters() (map[string]*carbonserver.ApiPerPathRatelimiter, []*carbonserver.GlobQueryRateLimiter, error) {
+	conf := app.Config
+	apiPerPathRateLimiters := map[string]*carbonserver.ApiPerPathRatelimiter{}
+	for _, rl := range conf.Carbonserver.APIPerPathRateLimiters {
+		var timeout time.Duration
+		if rl.RequestTimeout != nil {
+			timeout = rl.RequestTimeout.Value()
+		}
+		apiPerPathRateLimiters[rl.Path] = carbonserver.NewApiPerPathRatelimiter(rl.MaxInflightRequests, timeout)
+	}
+	var globQueryRateLimiters []*carbonserver.GlobQueryRateLimiter
+	for _, rl := range conf.Carbonserver.HeavyGlobQueryRateLimiters {
+		gqrl, err := carbonserver.NewGlobQueryRateLimiter(rl.Pattern, rl.MaxInflightRequests)
 		if err != nil {
-			return
+			return nil, nil, fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %w", rl.Pattern, err)
+		}
+		globQueryRateLimiters = append(globQueryRateLimiters, gqrl)
+	}
+
+	return apiPerPathRateLimiters, globQueryRateLimiters, nil
+}
+
+func (app *App) configureCarbonserverQuotas(listener *carbonserver.CarbonserverListener) error {
+	conf := app.Config
+	if app.Config.Whisper.Quotas != nil {
+		if !conf.Carbonserver.ConcurrentIndex || conf.Carbonserver.RealtimeIndex <= 0 {
+			return errors.New("concurrent-index and realtime-index needs to be enabled for quota control.")
 		}
 
-		if conf.Carbonserver.TrigramIndex || conf.Carbonserver.TrieIndex {
-			if fi, err := os.Lstat(conf.Whisper.DataDir); err != nil {
-				return fmt.Errorf("failed to stat whisper data directory: %w", err)
-			} else if fi.Mode()&os.ModeSymlink == 1 {
-				return fmt.Errorf("whisper data directory is a symlink")
-			}
-		}
+		listener.SetEstimateSize(func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+			schema, ok := app.Config.Whisper.Schemas.Match(metric)
 
-		apiPerPathRateLimiters := map[string]*carbonserver.ApiPerPathRatelimiter{}
-		for _, rl := range conf.Carbonserver.APIPerPathRateLimiters {
-			var timeout time.Duration
-			if rl.RequestTimeout != nil {
-				timeout = rl.RequestTimeout.Value()
-			}
-			apiPerPathRateLimiters[rl.Path] = carbonserver.NewApiPerPathRatelimiter(rl.MaxInflightRequests, timeout)
-		}
-		var globQueryRateLimiters []*carbonserver.GlobQueryRateLimiter
-		for _, rl := range conf.Carbonserver.HeavyGlobQueryRateLimiters {
-			gqrl, err := carbonserver.NewGlobQueryRateLimiter(rl.Pattern, rl.MaxInflightRequests)
-			if err != nil {
-				return fmt.Errorf("failed to init Carbonserver.HeavyGlobQueryRateLimiters %s: %w", rl.Pattern, err)
-			}
-			globQueryRateLimiters = append(globQueryRateLimiters, gqrl)
-		}
-
-		// TODO: refactor: do not use var name the same as pkg name
-		carbonserver := carbonserver.NewCarbonserverListener(core.Get)
-		carbonserver.SetWhisperData(conf.Whisper.DataDir)
-		carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
-		carbonserver.SetEmptyResultOk(conf.Carbonserver.EmptyResultOk)
-		carbonserver.SetDoNotLog404s(conf.Carbonserver.DoNotLog404s)
-		carbonserver.SetFLock(app.Config.Whisper.FLock)
-		carbonserver.SetCompressed(app.Config.Whisper.Compressed)
-		carbonserver.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
-		carbonserver.SetFailOnMaxGlobs(conf.Carbonserver.FailOnMaxGlobs)
-		carbonserver.SetMaxMetricsGlobbed(conf.Carbonserver.MaxMetricsGlobbed)
-		carbonserver.SetMaxMetricsRendered(conf.Carbonserver.MaxMetricsRendered)
-		carbonserver.SetMaxFetchDataGoroutines(conf.Carbonserver.MaxFetchDataGoroutines)
-		carbonserver.SetBuckets(conf.Carbonserver.Buckets)
-		carbonserver.SetMetricsAsCounters(conf.Carbonserver.MetricsAsCounters)
-		carbonserver.SetScanFrequency(conf.Carbonserver.ScanFrequency.Value())
-		carbonserver.SetQuotaUsageReportFrequency(conf.Carbonserver.QuotaUsageReportFrequency.Value())
-		carbonserver.SetMaxCreatesPerSecond(conf.Carbonserver.MaxCreatesPerSecond)
-		carbonserver.SetReadTimeout(conf.Carbonserver.ReadTimeout.Value())
-		carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
-		carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
-		carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
-		carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
-		carbonserver.SetStreamingQueryCacheEnabled(conf.Carbonserver.StreamingQueryCacheEnabled)
-		carbonserver.SetFindCacheEnabled(conf.Carbonserver.FindCacheEnabled)
-		carbonserver.SetFindCacheSizeMB(conf.Carbonserver.FindCacheSizeMB)
-		carbonserver.SetGlobCacheEnabled(conf.Carbonserver.GlobCacheEnabled)
-		carbonserver.SetGlobCacheSizeMB(conf.Carbonserver.GlobCacheSizeMB)
-		carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
-		carbonserver.SetTrieIndex(conf.Carbonserver.TrieIndex)
-		carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
-		carbonserver.SetFileListCache(conf.Carbonserver.FileListCache)
-		carbonserver.SetFileListCacheVersion(conf.Carbonserver.FileListCacheVersion)
-		carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
-		carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
-		// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())
-
-		carbonserver.SetMaxInflightRequests(conf.Carbonserver.MaxInflightRequests)
-		carbonserver.SetNoServiceWhenIndexIsNotReady(conf.Carbonserver.NoServiceWhenIndexIsNotReady)
-		carbonserver.SetRenderTraceLoggingEnabled(conf.Carbonserver.RenderTraceLoggingEnabled)
-
-		if conf.Carbonserver.RequestTimeout != nil {
-			carbonserver.SetRequestTimeout(conf.Carbonserver.RequestTimeout.Value())
-		}
-		if len(apiPerPathRateLimiters) > 0 {
-			carbonserver.SetAPIPerPathRateLimiter(apiPerPathRateLimiters)
-		}
-		if len(globQueryRateLimiters) > 0 {
-			carbonserver.SetHeavyGlobQueryRateLimiters(globQueryRateLimiters)
-		}
-
-		if app.Config.Whisper.Quotas != nil {
-			if !conf.Carbonserver.ConcurrentIndex || conf.Carbonserver.RealtimeIndex <= 0 {
-				return errors.New("concurrent-index and realtime-index needs to be enabled for quota control.")
+			if !ok {
+				// Why not configurable: go-carbon users
+				// should always make sure that there is a default retention policy.
+				return 4096 + 172800*12, 4096 + 172800*12, 172800 // 2 days of secondly data
 			}
 
-			carbonserver.SetEstimateSize(func(metric string) (logicalSize, physicalSize, dataPoints int64) {
-				schema, ok := app.Config.Whisper.Schemas.Match(metric)
-
-				if !ok {
-					// Why not configurable: go-carbon users
-					// should always make sure that there is a default retention policy.
-					return 4096 + 172800*12, 4096 + 172800*12, 172800 // 2 days of secondly data
-				}
-
-				for _, r := range schema.Retentions {
-					dataPoints += int64(r.NumberOfPoints())
-				}
-				logicalSize = 4096 + dataPoints*12
-				if app.Config.Whisper.Sparse { // we assume that physical size for sparse metrics takes only a part of the logical size
-					physicalSize = int64(app.Config.Whisper.PhysicalSizeFactor * float32(logicalSize))
-				} else {
-					physicalSize = logicalSize
-				}
-
-				return logicalSize, physicalSize, dataPoints
-			})
-
-			carbonserver.SetQuotas(app.Config.getCarbonserverQuotas(conf.Carbonserver.QuotaUsageReportFrequency.Value()))
-		}
-
-		var setConfigRetriever bool
-		if conf.Carbonserver.CacheScan {
-			carbonserver.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
-
-			setConfigRetriever = true
-		}
-
-		if conf.Carbonserver.RealtimeIndex > 0 {
-			newMetricsChan = carbonserver.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
-
-			setConfigRetriever = true
-		}
-		if setConfigRetriever {
-			retriever := &wspConfigRetriever{
-				getRetentionFunc: app.Persister.GetRetentionPeriod,
-				getAggrNameFunc:  app.Persister.GetAggrConf,
+			for _, r := range schema.Retentions {
+				dataPoints += int64(r.NumberOfPoints())
 			}
-			carbonserver.SetConfigRetriever(retriever)
-		}
-
-		if conf.Prometheus.Enabled {
-			carbonserver.InitPrometheus(app.PromRegisterer)
-		}
-		if conf.Tracing.Enabled {
-			log.Printf("Otel tracing is removed in current verion, ignoring tracing.enabled=true")
-		}
-
-		carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
-		carbonserver.RegisterInternalInfoHandler("config", func() map[string]interface{} {
-			infos := map[string]interface{}{}
-			for name, file := range map[string]string{
-				"app":         app.ConfigFilename,
-				"schema":      app.Config.Whisper.SchemasFilename,
-				"aggregation": app.Config.Whisper.AggregationFilename,
-				"quota":       app.Config.Whisper.QuotasFilename,
-			} {
-				if data, err := os.ReadFile(file); err != nil {
-					infos[name] = err.Error()
-				} else {
-					infos[name] = string(data)
-				}
+			if app.MetricStore != nil {
+				return int64(16+12*len(schema.Retentions)) + dataPoints*12, 0, dataPoints
 			}
-			return infos
+			logicalSize = 4096 + dataPoints*12
+			if app.Config.Whisper.Sparse { // we assume that physical size for sparse metrics takes only a part of the logical size
+				physicalSize = int64(app.Config.Whisper.PhysicalSizeFactor * float32(logicalSize))
+			} else {
+				physicalSize = logicalSize
+			}
+
+			return logicalSize, physicalSize, dataPoints
 		})
 
-		app.Carbonserver = carbonserver
-	}
-	/* CARBONSERVER end */
-
-	// Restore cwhisper data before receivers can advance block watermarks past
-	// replayed points. Keep the persister running so it can drain the cache.
-	if restoreBeforeReceivers {
-		logger := zapwriter.Logger("app")
-		logger.Info("restoring dump before starting receivers",
-			zap.String("path", conf.Dump.Path),
-			zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
-		)
-		restoreStart := time.Now()
-		app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
-		restoreLoaded := time.Now()
-		// Overlap saved-index loading with disk drain, after dump parsing has
-		// finished allocating the restored cache. Keep ingestion closed until
-		// those historical points have been persisted.
-		if app.Carbonserver != nil {
-			app.Carbonserver.WarmupIndex()
-		}
-		for !core.IsEmpty() {
-			time.Sleep(10 * time.Millisecond)
-		}
-		// The collector has not started yet. Separate the accumulated restore
-		// counters from live interval statistics instead of reporting minutes of
-		// creates/updates as the first single collection interval.
-		restoreStats := make(map[string]float64)
-		app.Persister.Stat(func(name string, value float64) { restoreStats[name] = value })
-		logger.Info("dump restored, starting receivers",
-			zap.Duration("load_seconds", restoreLoaded.Sub(restoreStart)),
-			zap.Duration("drain_seconds", time.Since(restoreLoaded)),
-			zap.Any("persister_stats", restoreStats),
-		)
+		listener.SetQuotas(app.Config.getCarbonserverQuotas(conf.Carbonserver.QuotaUsageReportFrequency.Value()))
 	}
 
+	return nil
+}
+
+func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonserver.CarbonserverListener) (newMetricsChan chan string) {
+	conf := app.Config
+	var setConfigRetriever bool
+	if conf.Carbonserver.CacheScan {
+		listener.SetCacheGetMetricsFunc(core.GetRecentNewMetrics)
+
+		setConfigRetriever = true
+	}
+
+	if conf.Carbonserver.RealtimeIndex > 0 {
+		newMetricsChan = listener.SetRealtimeIndex(conf.Carbonserver.RealtimeIndex)
+
+		setConfigRetriever = true
+	}
+	if setConfigRetriever {
+		retriever := &wspConfigRetriever{
+			getRetentionFunc: app.Persister.GetRetentionPeriod,
+			getAggrNameFunc:  app.Persister.GetAggrConf,
+		}
+		listener.SetConfigRetriever(retriever)
+	}
+
+	return newMetricsChan
+}
+
+func (app *App) restoreBeforeReceivers(core *cache.Cache) {
+	conf := app.Config
+
+	logger := zapwriter.Logger("app")
+	logger.Info("restoring dump before starting receivers",
+		zap.String("path", conf.Dump.Path),
+		zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
+	)
+	restoreStart := time.Now()
+	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	restoreLoaded := time.Now()
+	// Overlap saved-index loading with disk drain, after dump parsing has
+	// finished allocating the restored cache. Keep ingestion closed until
+	// those historical points have been persisted.
+	if app.Carbonserver != nil {
+		app.Carbonserver.WarmupIndex()
+	}
+	for !core.IsEmpty() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The collector has not started yet. Separate the accumulated restore
+	// counters from live interval statistics instead of reporting minutes of
+	// creates/updates as the first single collection interval.
+	restoreStats := make(map[string]float64)
+	app.Persister.Stat(func(name string, value float64) { restoreStats[name] = value })
+	logger.Info("dump restored, starting receivers",
+		zap.Duration("load_seconds", restoreLoaded.Sub(restoreStart)),
+		zap.Duration("drain_seconds", time.Since(restoreLoaded)),
+		zap.Any("persister_stats", restoreStats),
+	)
+}
+
+func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string) (err error) {
+	conf := app.Config
 	if cs := app.Carbonserver; cs != nil {
 		// Restore bypasses live quotas and notifications, just as before warmup.
 		// Start the filesystem scan only after restored files have been written.
@@ -647,6 +781,11 @@ func (app *App) Start() (err error) {
 		}
 	}
 
+	return nil
+}
+
+func (app *App) startReceivers(core *cache.Cache) (err error) {
+	conf := app.Config
 	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver
 	var rcvOptions map[string]interface{}
@@ -719,6 +858,11 @@ func (app *App) Start() (err error) {
 	}
 	/* CUSTOM RECEIVERS end */
 
+	return nil
+}
+
+func (app *App) startCarbonlink(core *cache.Cache) (err error) {
+	conf := app.Config
 	/* CARBONLINK start */
 	if conf.Carbonlink.Enabled {
 		var linkAddr *net.TCPAddr
@@ -739,17 +883,26 @@ func (app *App) Start() (err error) {
 	}
 	/* CARBONLINK end */
 
-	/* RESTORE start */
-	if conf.Dump.Enabled && !restoreBeforeReceivers {
-		go app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	return nil
+}
+
+func (app *App) startBuckyd() (err error) {
+	conf := app.Config
+	if conf.Buckyd.Enabled {
+		app.Buckyd, err = buckyd.New(conf.Buckyd, app.MetricStore)
+		if err != nil {
+			return fmt.Errorf("configure buckyd: %w", err)
+		}
+		if app.Carbonserver != nil {
+			app.buckydIndex = startMetricIndexRefresher(app.Carbonserver, buckydIndexRefreshInterval)
+			app.Buckyd.SetOnChange(app.buckydIndex.notify)
+		}
+		if err = app.Buckyd.Start(); err != nil {
+			return fmt.Errorf("start buckyd: %w", err)
+		}
 	}
-	/* RESTORE end */
 
-	/* COLLECTOR start */
-	app.Collector = NewCollector(app)
-	/* COLLECTOR end */
-
-	return
+	return nil
 }
 
 // Loop ...
@@ -764,6 +917,10 @@ func (app *App) Loop() {
 }
 
 func (app *App) CheckPersisterPolicyConsistencies(rate int, printInconsistentMetrics bool) {
+	if app.Config.Whisper.StorageBackend == "pebble-chunk" {
+		log.Print("the file policy consistency checker is unavailable for shared storage; inspect metric policies through carbonserver info")
+		return
+	}
 	p := persister.NewWhisper(
 		app.Config.Whisper.DataDir,
 		app.Config.Whisper.Schemas,
@@ -775,4 +932,21 @@ func (app *App) CheckPersisterPolicyConsistencies(rate int, printInconsistentMet
 		log.Printf("failed to check policy consistencies: %s\n", err)
 		return
 	}
+}
+
+func (app *App) configInfo() map[string]interface{} {
+	infos := map[string]interface{}{}
+	for name, file := range map[string]string{
+		"app":         app.ConfigFilename,
+		"schema":      app.Config.Whisper.SchemasFilename,
+		"aggregation": app.Config.Whisper.AggregationFilename,
+		"quota":       app.Config.Whisper.QuotasFilename,
+	} {
+		if data, err := os.ReadFile(file); err != nil {
+			infos[name] = err.Error()
+		} else {
+			infos[name] = string(data)
+		}
+	}
+	return infos
 }

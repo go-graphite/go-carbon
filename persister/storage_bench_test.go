@@ -319,7 +319,7 @@ func BenchmarkStorageConcurrentWrite(b *testing.B) {
 // with a particular compaction cadence, not hidden inside write throughput.
 func BenchmarkStorageMaintenance(b *testing.B) {
 	storageBenchmarkLogs(b)
-	for _, kind := range []string{"cwhisper-ooo"} {
+	for _, kind := range []string{"cwhisper-ooo", "pebble-chunk"} {
 		b.Run(kind, func(b *testing.B) {
 			now := storageTestClock(b)
 			s := newStorageBackend(b, kind, now)

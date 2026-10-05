@@ -40,6 +40,7 @@ type Whisper struct {
 	popConfirm          func(string) (*points.Points, bool)
 	requeue             func(*points.Points)
 	writeoutReady       func(string) bool
+	metricStore         MetricStore
 	tagsEnabled         bool
 	taggedFn            func(string, bool)
 	schemas             WhisperSchemas
@@ -416,6 +417,28 @@ func (p *Whisper) store(metric string) {
 		return
 	}
 
+	if p.metricStore != nil {
+		p.storeShared(metric)
+		return
+	}
+
+	path, ok := p.whisperPath(metric)
+	if !ok {
+		return
+	}
+	w, newFile := p.openOrCreateWhisper(metric, path)
+	if w == nil {
+		return
+	}
+	var err error
+	w, err = p.migrateWhisper(w, newFile, metric, path)
+	if err != nil {
+		return
+	}
+	p.writeWhisper(w, metric, path)
+}
+
+func (p *Whisper) whisperPath(metric string) (string, bool) {
 	var path string
 	if p.tagsEnabled && strings.IndexByte(metric, ';') >= 0 {
 		path = tags.FilePath(p.rootPath, metric, p.hashFilenames) + ".wsp"
@@ -428,7 +451,7 @@ func (p *Whisper) store(metric string) {
 			zap.String("path", path),
 			zap.Error(errors.New("path too long")))
 		p.popConfirm(metric)
-		return
+		return "", false
 	}
 	filenames := strings.Split(path, "/")
 	for _, filename := range filenames {
@@ -438,94 +461,94 @@ func (p *Whisper) store(metric string) {
 				zap.String("filename", filename),
 				zap.Error(errors.New("filename too long")))
 			p.popConfirm(metric)
-			return
+			return "", false
 		}
 	}
 
-	var newFile bool
+	return path, true
+}
+
+func (p *Whisper) openOrCreateWhisper(metric, path string) (*whisper.Whisper, bool) {
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
 		Sparse:     p.sparse,
 		FLock:      p.flock,
 		Compressed: p.compressed,
 		OutOfOrder: p.outOfOrder.enabled,
 	})
-	if err != nil {
-		// create new whisper if file not exists
-		if !os.IsNotExist(err) {
-			// There are cases that new files are created but data are not saved
-			// on disk due to edge issues like server panics/reboot. So it's
-			// better to treat empty files as NotExist to work around this
-			// problem.
-			stat, err2 := os.Stat(path)
-			if err2 != nil {
-				p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err2)))
-			}
-			if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
-				p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
-				if errors.Is(err, syscall.ENAMETOOLONG) {
-					p.popConfirm(metric)
-				}
-				return
-			}
-			if err := os.Remove(path); err != nil {
-				p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
+	if err == nil {
+		return w, false
+	}
+	if !p.prepareWhisperCreate(metric, path, err) {
+		return nil, false
+	}
+	return p.createWhisper(metric, path), true
+}
+
+func (p *Whisper) prepareWhisperCreate(metric, path string, err error) bool {
+	// create new whisper if file not exists
+	if !os.IsNotExist(err) {
+		// There are cases that new files are created but data are not saved
+		// on disk due to edge issues like server panics/reboot. So it's
+		// better to treat empty files as NotExist to work around this
+		// problem.
+		stat, err2 := os.Stat(path)
+		if err2 != nil {
+			p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err2)))
+		}
+		if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
+			p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
+			if errors.Is(err, syscall.ENAMETOOLONG) {
 				p.popConfirm(metric)
-				return
 			}
-			p.logger.Warn("deleted empty whisper file", zap.String("path", path))
+			return false
 		}
+		if err := os.Remove(path); err != nil {
+			p.logger.Error("failed to delete empty whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
+			p.popConfirm(metric)
+			return false
+		}
+		p.logger.Warn("deleted empty whisper file", zap.String("path", path))
+	}
 
-		schema, ok := p.schemas.Match(metric)
-		if !ok {
-			p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
-			return
-		}
+	return true
+}
 
-		aggr := p.aggregation.Match(metric)
-		if aggr == nil {
-			p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
-			return
-		}
+func (p *Whisper) createWhisper(metric, path string) *whisper.Whisper {
+	schema, ok := p.schemas.Match(metric)
+	if !ok {
+		p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
+		return nil
+	}
 
-		if err = os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
-			p.logger.Error("mkdir failed",
-				zap.String("dir", filepath.Dir(path)),
-				zap.Error(p.simplifyPathError(err)),
-				zap.String("path", path),
-			)
-			return
-		}
+	aggr := p.aggregation.Match(metric)
+	if aggr == nil {
+		p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
+		return nil
+	}
 
-		compressed := p.compressed
-		if schema.Compressed != nil {
-			compressed = *schema.Compressed
-		}
-		w, err = whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
-			Sparse:     p.sparse,
-			FLock:      p.flock,
-			Compressed: compressed,
-			OutOfOrder: p.outOfOrder.enabled,
-		})
-		if err != nil {
-			p.logger.Error("create new whisper file failed",
-				zap.String("path", path),
-				zap.Error(p.simplifyPathError(err)),
-				zap.String("retention", schema.RetentionStr),
-				zap.String("schema", schema.Name),
-				zap.String("aggregation", aggr.name),
-				zap.Float64("xFilesFactor", aggr.xFilesFactor),
-				zap.String("method", aggr.aggregationMethodStr),
-				zap.Bool("compressed", compressed),
-			)
-			return
-		}
-
-		if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
-			p.taggedFn(metric, true)
-		}
-
-		p.createLogger.Debug("created",
+	if err := os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
+		p.logger.Error("mkdir failed",
+			zap.String("dir", filepath.Dir(path)),
+			zap.Error(p.simplifyPathError(err)),
 			zap.String("path", path),
+		)
+		return nil
+	}
+
+	compressed := p.compressed
+	if schema.Compressed != nil {
+		compressed = *schema.Compressed
+	}
+	w, err := whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
+		Sparse:     p.sparse,
+		FLock:      p.flock,
+		Compressed: compressed,
+		OutOfOrder: p.outOfOrder.enabled,
+	})
+	if err != nil {
+		p.logger.Error("create new whisper file failed",
+			zap.String("path", path),
+			zap.Error(p.simplifyPathError(err)),
 			zap.String("retention", schema.RetentionStr),
 			zap.String("schema", schema.Name),
 			zap.String("aggregation", aggr.name),
@@ -533,15 +556,33 @@ func (p *Whisper) store(metric string) {
 			zap.String("method", aggr.aggregationMethodStr),
 			zap.Bool("compressed", compressed),
 		)
-
-		atomic.AddUint32(&p.created, 1)
-
-		newFile = true
+		return nil
 	}
 
+	if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
+		p.taggedFn(metric, true)
+	}
+
+	p.createLogger.Debug("created",
+		zap.String("path", path),
+		zap.String("retention", schema.RetentionStr),
+		zap.String("schema", schema.Name),
+		zap.String("aggregation", aggr.name),
+		zap.Float64("xFilesFactor", aggr.xFilesFactor),
+		zap.String("method", aggr.aggregationMethodStr),
+		zap.Bool("compressed", compressed),
+	)
+
+	atomic.AddUint32(&p.created, 1)
+
+	return w
+}
+
+func (p *Whisper) migrateWhisper(w *whisper.Whisper, newFile bool, metric, path string) (*whisper.Whisper, error) {
 	// Check if schema and aggregation is still up-to-date
 	if !newFile && p.onlineMigration.enabled {
 		// errors are logged already
+		var err error
 		w, _, err = p.checkAndUpdateSchemaAndAggregation(w, metric)
 		if err != nil {
 			if w != nil {
@@ -555,10 +596,14 @@ func (p *Whisper) store(metric string) {
 			})
 			if err != nil {
 				p.logger.Error("failed to reopen whisper file after schema migration", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
-				return
+				return nil, err
 			}
 		}
 	}
+	return w, nil
+}
+
+func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 	defer func() {
 		if w != nil {
 			_ = w.Close()

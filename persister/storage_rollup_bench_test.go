@@ -122,6 +122,14 @@ func TestStorageLateRollupRetentionWrap(t *testing.T) {
 	checkStorageLateRollupRetentionWrap(t, "cwhisper-ooo", whisper.Average, 0.5)
 }
 
+func TestStorageChunkLateRollupRetentionWrap(t *testing.T) {
+	for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Last, whisper.Max, whisper.Min, whisper.First} {
+		for _, xff := range []float32{0, 0.5, 1} {
+			t.Run(fmt.Sprintf("%s/xff=%g", method, xff), func(t *testing.T) { checkStorageLateRollupRetentionWrap(t, "pebble-chunk", method, xff) })
+		}
+	}
+}
+
 func checkStorageLateRollupRetentionWrap(t *testing.T, kind string, method whisper.AggregationMethod, xff float32) {
 	now := storageTestClock(t)
 	oracle := newStorageBackend(t, "classic", now)
