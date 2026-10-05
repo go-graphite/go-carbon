@@ -55,8 +55,8 @@ github.com/BurntSushi/toml/internal
 # github.com/DataDog/zstd v1.4.5
 ## explicit
 github.com/DataDog/zstd
-# github.com/IBM/sarama v1.60.2
-## explicit; go 1.25.0
+# github.com/IBM/sarama v1.61.1
+## explicit; go 1.26.0
 github.com/IBM/sarama
 github.com/IBM/sarama/internal/queue
 # github.com/NYTimes/gziphandler v1.1.1
@@ -365,8 +365,8 @@ github.com/munnerz/goautoneg
 ## explicit; go 1.13
 # github.com/onsi/gomega v1.10.1
 ## explicit
-# github.com/pierrec/lz4/v4 v4.1.29
-## explicit; go 1.17
+# github.com/pierrec/lz4/v4 v4.1.31
+## explicit; go 1.22
 github.com/pierrec/lz4/v4
 github.com/pierrec/lz4/v4/internal/lz4block
 github.com/pierrec/lz4/v4/internal/lz4errors

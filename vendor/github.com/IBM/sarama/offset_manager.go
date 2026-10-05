@@ -159,6 +159,12 @@ func (om *offsetManager) fetchInitialOffset(topic string, partition int32, retri
 
 	partitions := map[string][]int32{topic: {partition}}
 	req := NewOffsetFetchRequest(om.conf.Version, om.group, partitions)
+	// a read_committed consumer must not start below an offset that a
+	// transaction has committed but whose commit marker is not yet written
+	// (otherwise it reprocesses records whose output that transaction commits)
+	req.RequireStable = om.conf.Consumer.IsolationLevel == ReadCommitted && req.Version >= 7
+	// fall back to an unstable fetch on brokers before 2.5, as the Java consumer does
+	req.dropUnsupportedRequireStable = true
 	resp, err := broker.FetchOffset(req)
 	if err != nil {
 		if retries <= 0 {
@@ -185,8 +191,17 @@ func (om *offsetManager) fetchInitialOffset(topic string, partition int32, retri
 			return 0, 0, "", block.Err
 		}
 		om.releaseCoordinator(broker)
+		// a coordinator still loading __consumer_offsets answers FindCoordinator
+		// with itself while rejecting the fetch, so wait between attempts
+		// (otherwise the retry budget is spent in a few milliseconds)
+		backoff := om.computeBackoff(retries)
+		select {
+		case <-om.closing:
+			return 0, 0, "", block.Err
+		case <-time.After(backoff):
+		}
 		return om.fetchInitialOffset(topic, partition, retries-1)
-	case ErrOffsetsLoadInProgress:
+	case ErrOffsetsLoadInProgress, ErrUnstableOffsetCommit:
 		if retries <= 0 {
 			return 0, 0, "", block.Err
 		}
@@ -258,11 +273,19 @@ func (om *offsetManager) Commit() {
 	om.releasePOMs(false)
 }
 
-//lint:ignore U1000 // consumed by the cooperative rebalancing path added in a following PR; the only in-build caller here is the unit test (excluded by the integration build tag)
-func (om *offsetManager) setGeneration(generation int32) {
+// transitionGeneration keeps commits out while the coordinator establishes
+// the next generation and member id
+func (om *offsetManager) transitionGeneration(next func() (int32, string, error)) error {
 	om.generationLock.Lock()
 	defer om.generationLock.Unlock()
+
+	generation, memberID, err := next()
+	if err != nil {
+		return err
+	}
 	om.generation = generation
+	om.memberID = memberID
+	return nil
 }
 
 // partitionTargets names a subset of managed partitions; a nil set means all of them
@@ -496,8 +519,6 @@ func (om *offsetManager) asyncClosePOMs() {
 }
 
 // removePartitions closes partitions revoked during a rebalance, committing first when configured
-//
-//lint:ignore U1000 // consumed by the cooperative rebalancing path added in a following PR; the only in-build caller here is the unit test (excluded by the integration build tag)
 func (om *offsetManager) removePartitions(topicPartitions map[string][]int32) {
 	targets := make(partitionTargets, len(topicPartitions))
 	for topic, partitions := range topicPartitions {
