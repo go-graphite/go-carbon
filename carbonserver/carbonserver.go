@@ -301,7 +301,8 @@ type CarbonserverListener struct {
 
 	db *leveldb.DB
 
-	quotas                    []*Quota
+	quotas                    atomic.Value // []*Quota; immutable after publication
+	quotaReload               chan struct{}
 	estimateSize              func(metric string) (logicalSize, physicalSize, dataPoints int64)
 	quotaAndUsageMetrics      chan []points.Points
 	quotaUsageReportFrequency time.Duration
@@ -517,6 +518,7 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 			returnedPoint:    func(int) {},
 		},
 		quotaAndUsageMetrics:  make(chan []points.Points, 1),
+		quotaReload:           make(chan struct{}, 1),
 		apiPerPathRatelimiter: map[string]*ApiPerPathRatelimiter{},
 		fileListCacheVersion:  FLCVersion1,
 	}
@@ -706,10 +708,10 @@ func (listener *CarbonserverListener) SetEstimateSize(f func(metric string) (log
 	listener.estimateSize = f
 }
 func (listener *CarbonserverListener) SetQuotas(quotas []*Quota) {
-	listener.quotas = quotas
+	listener.quotas.Store(quotas)
 }
 func (listener *CarbonserverListener) isQuotaEnabled() bool {
-	return listener.quotas != nil
+	return listener.getQuotas() != nil
 }
 func (listener *CarbonserverListener) ShouldThrottleMetric(ps *points.Points, inCache bool) bool {
 	fidx := listener.CurrentFileIndex()
@@ -855,27 +857,41 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 	return cacheMetricNames
 }
 
-func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
-	if listener.indexWarmupDone != nil {
-		select {
-		case <-listener.indexWarmupDone:
-		case <-exit:
-			return
-		}
+// waitForInitialIndex orders periodic updates after initial publication and
+// allows shutdown while the startup index is still being constructed.
+func (listener *CarbonserverListener) waitForInitialIndex(exit <-chan struct{}) bool {
+	if listener.indexWarmupDone == nil {
+		return true
 	}
-	cacheMetricNames := make(map[string]struct{})
-	var knownMetricsStatTicker, quotaAndUsageStatTicker <-chan time.Time
+	select {
+	case <-listener.indexWarmupDone:
+		return true
+	case <-exit:
+		return false
+	}
+}
+
+// fileListStatTickers selects quota accounting or lightweight metric counts.
+// The caller owns the returned stop function, including the no-ticker case.
+func (listener *CarbonserverListener) fileListStatTickers() (known, quotas <-chan time.Time, stop func()) {
 	if listener.isQuotaEnabled() {
 		ticker := time.NewTicker(listener.quotaUsageReportFrequency)
-		defer ticker.Stop()
-
-		quotaAndUsageStatTicker = ticker.C
-	} else if listener.trieIndex && listener.concurrentIndex && listener.realtimeIndex > 0 {
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-
-		knownMetricsStatTicker = ticker.C
+		return nil, ticker.C, ticker.Stop
 	}
+	if listener.trieIndex && listener.concurrentIndex && listener.realtimeIndex > 0 {
+		ticker := time.NewTicker(time.Minute)
+		return ticker.C, nil, ticker.Stop
+	}
+	return nil, nil, func() {}
+}
+
+func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+	if !listener.waitForInitialIndex(exit) {
+		return
+	}
+	cacheMetricNames := make(map[string]struct{})
+	knownMetricsStatTicker, quotaAndUsageStatTicker, stopTickers := listener.fileListStatTickers()
+	defer stopTickers()
 
 uloop:
 	for {
@@ -895,6 +911,10 @@ uloop:
 			// like 2 hours or more, and with concurrent and
 			// realtime index, indexed metrics would grow even without disk scanning.
 			listener.statKnownMetrics(knownMetricsStatTicker)
+
+			continue uloop
+		case <-listener.quotaReload:
+			listener.refreshQuotaRules()
 
 			continue uloop
 		case <-quotaAndUsageStatTicker:
@@ -1016,7 +1036,7 @@ func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex,
 	}
 
 	quotaStart := time.Now()
-	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.quotas...)
+	throughputs, err := fidx.trieIdx.applyQuotas(listener.quotaUsageReportFrequency, listener.getQuotas()...)
 	if err != nil {
 		listener.logger.Error(
 			"refreshQuotaAndUsage",
@@ -1326,6 +1346,11 @@ func (u *fileListUpdate) stopped() bool {
 }
 
 func (u *fileListUpdate) refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker <-chan time.Time) {
+	select {
+	case <-u.listener.quotaReload:
+		u.listener.refreshQuotaRules()
+	default:
+	}
 	if u.listener.isQuotaEnabled() {
 		select {
 		case <-quotaAndUsageStatTicker:

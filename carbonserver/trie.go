@@ -298,6 +298,7 @@ type trieIndex struct {
 	maxCreatesTicker *helper.ThrottleTicker
 	throttledCreates uint64
 	throughputs      *throughputQuotaManager
+	quotaNodes       map[string]*dirMeta // owned by the index updater
 	resetFrequency   time.Duration
 	logger           *zap.Logger
 }
@@ -357,7 +358,7 @@ func (dm *dirMeta) update(quota *Quota) { dm.quota.Store(quota) }
 
 func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoints int64) bool {
 	quota, ok := dm.quota.Load().(*Quota)
-	if !ok {
+	if !ok || quota == nil {
 		return true
 	}
 
@@ -1468,6 +1469,9 @@ type Quota struct {
 }
 
 func (q *Quota) String() string {
+	if q == nil {
+		return "none"
+	}
 	return fmt.Sprintf("pattern:%s,dirs:%d,files:%d,points:%d,logical:%d,physical:%d,throughput:%d,policy:%s", q.Pattern, q.Namespaces, q.Metrics, q.DataPoints, q.LogicalSize, q.PhysicalSize, q.Throughput, q.DroppingPolicy)
 }
 
@@ -1571,7 +1575,7 @@ func (q *throughputUsagePerNamespace) offset() *throughputUsageDataPointsRecoder
 func (q *throughputUsagePerNamespace) withinQuota(c int64, resetFrequency time.Duration) bool {
 	quota := q.quota().Throughput
 	recorder := q.dpRecorder()
-	usage := recorder.dataPoints
+	usage := atomic.LoadInt64(&recorder.dataPoints)
 	if quota > 0 && usage+c > quota {
 		// slow path: ensure if it isn't due to untimely usage reset
 		//
@@ -1631,8 +1635,7 @@ func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerName
 	v.(*throughputUsagePerNamespace).quotaInfosv.Store(tuq.quotaInfos())
 }
 
-func (tu *throughputQuotaManager) setDepth(depth int) { atomic.AddInt64(&tu.depth, int64(depth)) }
-func (tu *throughputQuotaManager) getDepth() int      { return int(atomic.LoadInt64(&tu.depth)) }
+func (tu *throughputQuotaManager) getDepth() int { return int(atomic.LoadInt64(&tu.depth)) }
 
 // NOTE: Throughput is checked separately by throughputQuotaManager
 type QuotaUsage struct {
@@ -1654,89 +1657,84 @@ func (q *QuotaUsage) String() string {
 //
 // this method is not goroutine-safe.
 func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota) (*throughputQuotaManager, error) {
-	ti.setResetFrequency(resetFrequency)
-
-	// caveat (why updateChecker is needed):
-	//
-	// the current quota config file is last-match-wins, and with heavy
-	// concurrent quota enforcement, go-carbon should only update quota
-	// info per node once, otherwise it risks of having confusing and
-	// incorrect quota enforcement.
-	//
-	// for example, suppose we have the following quota configs:
-	//
-	//     [sys.*]
-	//         throughput = 1024
-	//     [sys.app]
-	//         throughput = 4096
-	//
-	// if sys.app is updated twice using top down order in the quota config
-	// file, there is a window that sys.app would have a quota with
-	// throughput of 1024, and if the namespace happen to be receiving more
-	// than 1024 data points during that window, it would trigger incorrect
-	// throttling.
-	//
-	// TODO: with updateChecker, it's also straightforward now to support
-	// first-match-wins in quota config file, but we would have to
-	// introduce a new flat to ask for it for backward compatibility.
-	updateChecker := map[string]bool{}
-
-	for j := len(quotas) - 1; j >= 0; j-- {
-		quota := quotas[j]
-		if quota.Pattern == "/" {
-			if !updateChecker["/"] {
-				meta := ti.root.meta.(*dirMeta)
-				meta.update(quota)
-				ti.throughputs.store("/", newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
-
-				updateChecker["/"] = true
-			}
-
-			continue
-		}
-
-		paths, _, nodes, _, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
-		if err != nil {
-			return nil, err
-		}
-
-		for i, node := range nodes {
-			if node.meta == nil {
-				node.meta = newDirMeta()
-			}
-
-			meta, ok := node.meta.(*dirMeta)
-			if !ok {
-				// could be a fileMeta
-				continue
-			}
-
-			if c := strings.Count(paths[i], "."); c > ti.throughputs.getDepth() {
-				ti.throughputs.setDepth(c)
-			}
-
-			if !updateChecker[paths[i]] {
-				ti.throughputs.store(paths[i], newThroughputUsagePerNamespace(ti.root.gen, quota, meta.usage))
-				meta.update(quota)
-
-				updateChecker[paths[i]] = true
-			}
-		}
+	pending, depth, err := ti.resolveQuotas(quotas)
+	if err != nil {
+		return nil, err
 	}
 
-	// delete stale entries
-	ti.throughputs.entries.Range(func(k, v interface{}) bool {
-		if v.(*throughputUsagePerNamespace).quotaInfos().gen != ti.root.gen {
+	ti.setResetFrequency(resetFrequency)
+	for path, old := range ti.quotaNodes {
+		if _, exists := pending[path]; !exists {
+			old.update(nil)
+		}
+	}
+	ti.quotaNodes = make(map[string]*dirMeta, len(pending))
+	for path, change := range pending {
+		if change.node.meta == nil {
+			change.node.meta = newDirMeta()
+		}
+		meta := change.node.meta.(*dirMeta)
+		meta.update(change.quota)
+		ti.throughputs.store(path, newThroughputUsagePerNamespace(ti.root.gen, change.quota, meta.usage))
+		ti.quotaNodes[path] = meta
+	}
+	// store retains the current throughput recorder for unchanged namespaces.
+	// Removed rules must stop enforcing immediately, even without a new scan.
+	ti.throughputs.entries.Range(func(k, _ interface{}) bool {
+		if _, exists := pending[k.(string)]; !exists {
 			ti.throughputs.entries.Delete(k)
 		}
 		return true
 	})
-
+	atomic.StoreInt64(&ti.throughputs.depth, int64(depth))
 	return ti.throughputs, nil
 }
 
-// refreshUsage updates usage data and generate stat metrics.
-// It can't be evoked with concurrent trieIndex.insert.
+// quotaAssignment binds a validated rule to a live namespace node.
+type quotaAssignment struct {
+	node  *trieNode
+	quota *Quota
+}
+
+// resolveQuotas prepares complete last-match-wins assignments without mutating
+// live limits. Validation failure leaves all current quota metadata untouched.
+func (ti *trieIndex) resolveQuotas(quotas []*Quota) (map[string]quotaAssignment, int, error) {
+	pending := make(map[string]quotaAssignment)
+	depth := 0
+	for j := len(quotas) - 1; j >= 0; j-- {
+		quota := quotas[j]
+		if quota == nil {
+			return nil, 0, fmt.Errorf("nil quota")
+		}
+		if quota.Pattern == "/" {
+			if _, exists := pending["/"]; !exists {
+				pending["/"] = quotaAssignment{ti.root, quota}
+			}
+			continue
+		}
+		paths, _, nodes, _, err := ti.query(strings.ReplaceAll(quota.Pattern, ".", "/"), 1<<31-1, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		for i, node := range nodes {
+			_, ok := node.meta.(*dirMeta)
+			if node.meta != nil && !ok {
+				continue
+			}
+			if c := strings.Count(paths[i], "."); c > depth {
+				depth = c
+			}
+			if _, exists := pending[paths[i]]; !exists {
+				pending[paths[i]] = quotaAssignment{node, quota}
+			}
+		}
+	}
+
+	return pending, depth, nil
+}
+
+// refreshUsage updates usage data and generates stat metrics.
+// It cannot run concurrently with trieIndex.insert.
 func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files uint64) {
 	if throughputs == nil {
 		throughputs = newQuotaThroughputQuotaManager()
@@ -1796,7 +1794,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files ui
 					}
 					var throughput int64
 					if te := throughputs.load(tname); te != nil {
-						throughput = te.offset().dataPoints
+						throughput = atomic.LoadInt64(&te.offset().dataPoints)
 					}
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
@@ -1879,7 +1877,10 @@ func (ti *trieIndex) generateTrieMetrics(metricName string, node *trieNode, thro
 
 	// Note: Timestamp for each points.Points are set by collector send logics
 	meta := node.meta.(*dirMeta)
-	quota := meta.quota.Load().(*Quota)
+	quota, _ := meta.quota.Load().(*Quota)
+	if quota == nil {
+		return
+	}
 	if quota.Namespaces > 0 {
 		ti.qauMetrics = append(
 			ti.qauMetrics,
@@ -2294,7 +2295,7 @@ mloop:
 
 func (*trieIndex) metricName(node *trieNode, name string) string {
 	var prefix string
-	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok {
+	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok && quota != nil {
 		prefix = quota.StatMetricPrefix
 	}
 	name = strings.ReplaceAll(name, ".", "-")

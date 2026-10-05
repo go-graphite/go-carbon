@@ -108,3 +108,16 @@ physical-size = 2,500,000,000,000
 data-points   =   200,000,000,000
 dropping-policy = new
 ```
+
+## Reloading rules
+
+Once quota support is enabled at startup, send `SIGHUP` to reload the quota file
+without restarting go-carbon. The existing index and listeners stay available.
+Rules are applied by the index updater; the log message `quota rules reloaded`
+confirms application. Changes do not reset throughput consumption for namespaces
+that remain configured. Removing a rule removes its limits, and an empty quota
+file clears all rules. Invalid files or glob patterns retain the previous rules.
+
+Enabling quota support for the first time, or changing
+`carbonserver.quota-usage-report-frequency`, still requires a restart. A reload
+signal received during startup is queued until recovery finishes.
