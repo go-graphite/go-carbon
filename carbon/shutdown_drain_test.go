@@ -18,17 +18,24 @@ import (
 // the SIGUSR2 path which exits the process as soon as DumpStop returns.
 func TestShutdownWaitsForActiveRead(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		dump bool
-		hold time.Duration
+		name      string
+		dump      bool
+		hold      time.Duration
+		slowInput bool
 	}{
 		{name: "Stop", hold: 100 * time.Millisecond},
 		// DumpStop has a five-second input timeout. Active reads must get the read
 		// server's own grace period, even when they exceed that input timeout.
 		{name: "DumpStop", dump: true, hold: 5500 * time.Millisecond},
+		{name: "DumpStopSlowInput", dump: true, hold: 5500 * time.Millisecond, slowInput: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, started, unblock, readDone := startBlockedShutdownRead(t)
+			if tc.slowInput {
+				releaseInput := make(chan struct{})
+				app.FlushTraces = func() { <-releaseInput }
+				t.Cleanup(func() { close(releaseInput) })
+			}
 			select {
 			case <-started:
 			case <-time.After(5 * time.Second):
@@ -66,6 +73,31 @@ func TestShutdownWaitsForActiveRead(t *testing.T) {
 	}
 }
 
+func TestDumpStopServesReadsDuringInputCleanup(t *testing.T) {
+	app, started, unblock, readDone := startBlockedShutdownRead(t)
+	<-started
+	inputStarted, releaseInput := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(releaseInput) }) }
+	t.Cleanup(release)
+	app.FlushTraces = func() { close(inputStarted); <-releaseInput }
+	stopped := make(chan error, 1)
+	go func() { stopped <- app.DumpStop() }()
+	<-inputStarted
+	// A new read must still be accepted while unrelated input cleanup runs.
+	if err := readShutdownResponse("http://" + app.Config.Carbonserver.Listen + "/admin/info?scopes=quick"); err != nil {
+		t.Error(err)
+	}
+	release()
+	unblock()
+	if err := <-readDone; err != nil {
+		t.Error(err)
+	}
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func startBlockedShutdownRead(t *testing.T) (*App, <-chan struct{}, func(), <-chan error) {
 	t.Helper()
 	app := New("")
@@ -84,11 +116,15 @@ func startBlockedShutdownRead(t *testing.T) (*App, <-chan struct{}, func(), <-ch
 		<-release
 		return map[string]interface{}{"complete": true}
 	})
+	cs.RegisterInternalInfoHandler("quick", func() map[string]interface{} {
+		return map[string]interface{}{"complete": true}
+	})
 	reserved, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	addr := reserved.Addr().String()
+	app.Config.Carbonserver.Listen = addr
 	reserved.Close()
 	if err := cs.Listen(addr); err != nil {
 		t.Fatal(err)

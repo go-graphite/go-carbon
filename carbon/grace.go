@@ -31,6 +31,8 @@ func (s *SyncWriter) Write(p []byte) (n int, err error) {
 }
 
 func (s *SyncWriter) Flush() error {
+	s.Lock()
+	defer s.Unlock()
 	return s.w.Flush()
 }
 
@@ -115,10 +117,11 @@ func (app *App) DumpStop() error {
 
 	logger.Info("stop listeners")
 
-	stopped := make(chan (<-chan struct{}), 1)
+	stopped := make(chan struct{})
 
 	go func() {
-		readsStopped := app.stopListeners()
+		defer close(stopped)
+		app.stopInputListeners()
 
 		if err := xlogWriter.Flush(); err != nil {
 			logger.Info("xlog flush failed", zap.Error(err))
@@ -129,20 +132,18 @@ func (app *App) DumpStop() error {
 			logger.Info("xlog close failed", zap.Error(err))
 			return
 		}
-
-		stopped <- readsStopped
 	}()
 
 	select {
 	case <-time.After(5 * time.Second):
-		logger.Info("stop listeners timeout, force stop daemon")
-	case readsStopped := <-stopped:
-		// Input/WAL shutdown retains its existing timeout. Active reads have
-		// the carbonserver grace period, which can exceed that timeout. SIGUSR2
-		// exits immediately when DumpStop returns, so this wait is essential.
-		<-readsStopped
-		logger.Info("listeners stopped")
+		logger.Info("stop input listeners timeout, draining reads before exit")
+	case <-stopped:
 	}
+	// Input/WAL cleanup must not close read listeners early or bypass their
+	// grace period on timeout. SIGUSR2 exits as soon as DumpStop returns.
+	logger.Info("stop read listeners")
+	<-app.stopReadListeners()
+	logger.Info("listeners stopped")
 
 	// logger.Info("stop all")
 	// app.stopAll()
