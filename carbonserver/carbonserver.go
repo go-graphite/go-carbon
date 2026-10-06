@@ -1322,6 +1322,11 @@ func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, 
 		return filepath.SkipAll
 	}
 	if walkErr != nil {
+		// Compaction and cleanup can remove entries after the walk lists them.
+		// A missing scan root still invalidates the scan.
+		if errors.Is(walkErr, os.ErrNotExist) && path != u.listener.whisperData {
+			return nil
+		}
 		u.scanFailed = true
 		u.logger.Info("error processing", zap.String("path", path), zap.Error(walkErr))
 		return nil
