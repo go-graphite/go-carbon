@@ -183,8 +183,15 @@ func Open(index, cache, wal []byte) (*Index, error) {
 			if r.offset != end || r.length == 0 || r.length > uint64(len(in.source[file]))-end || r.previous >= id {
 				return nil, fmt.Errorf("invalid recovery record chain")
 			}
-			if _, err := recordMetric(in.source[file][r.offset : r.offset+r.length]); err != nil {
+			name, err := recordMetric(in.source[file][r.offset : r.offset+r.length])
+			if err != nil {
 				return nil, err
+			}
+			// Cache keys must have the same spelling as their filesystem metric.
+			// Legacy aliases such as a..b or a/b require ordered persistence before
+			// reads; looking them up as a.b in the pending source would miss data.
+			if len(name) == 0 || name[0] == '.' || name[len(name)-1] == '.' || bytes.Contains(name, []byte("..")) || bytes.IndexByte(name, '/') >= 0 || bytes.IndexByte(name, 0) >= 0 {
+				return nil, fmt.Errorf("pending reads require canonical metric names")
 			}
 			end += r.length
 		}

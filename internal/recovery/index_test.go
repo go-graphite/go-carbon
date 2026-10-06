@@ -303,3 +303,31 @@ func TestRecoveryNewNames(t *testing.T) {
 		t.Fatal("new metric catalog", names)
 	}
 }
+
+func TestRecoveryRejectsAliasesRequiringLegacyPersistence(t *testing.T) {
+	for _, name := range []string{"", ".a", "a.", "a..b", "a/b", "a\x00b"} {
+		t.Run(fmt.Sprintf("%q", name), func(t *testing.T) {
+			p := points.OnePoint(name, 42, 1)
+			raw := p.AppendBinary(nil)
+			builder := NewBuilder(nil)
+			if err := builder.Add(0, p, len(raw)); err != nil {
+				t.Fatal(err)
+			}
+			var encoded bytes.Buffer
+			if err := builder.Write(&encoded); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(encoded.Bytes(), raw, nil); err == nil {
+				t.Fatal("alias checkpoint accepted for early reads")
+			}
+			// Its legacy source remains intact for the existing persistence fallback.
+			var restored []*points.Points
+			if err := points.ReadBinary(bytes.NewReader(raw), func(p *points.Points) { restored = append(restored, p) }); err != nil {
+				t.Fatal(err)
+			}
+			if len(restored) != 1 || !restored[0].Eq(p) {
+				t.Fatal("fallback source changed")
+			}
+		})
+	}
+}

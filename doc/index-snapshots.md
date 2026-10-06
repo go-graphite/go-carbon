@@ -70,7 +70,8 @@ files; no newer live values have been persisted over that history.
 
 A missing, corrupt, incompatible or mismatched checkpoint uses ordinary ordered
 restore before reads open. Extra dump generations also force that fallback.
-Tagged input and other storage modes keep their existing startup path. There is
+Tagged input, noncanonical metric names (for example `a..b` or `a/b`), and other
+storage modes keep their existing startup path. There is
 no additional configuration switch. The accelerator becomes usable after a
 complete saved index and a subsequent graceful stop; it does not make
 an uncached first boot instantaneous or eliminate the process handoff gap.
