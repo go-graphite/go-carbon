@@ -73,6 +73,7 @@ func TestShutdownWaitsForActiveRead(t *testing.T) {
 	}
 }
 
+// TestDumpStopServesReadsDuringInputCleanup checks new reads during blocked cleanup.
 func TestDumpStopServesReadsDuringInputCleanup(t *testing.T) {
 	app, started, unblock, readDone := startBlockedShutdownRead(t)
 	<-started

@@ -9,9 +9,8 @@ import (
 	"testing"
 )
 
-// GO_CARBON_FLC_BENCHMARK optionally selects a read-only captured cache. Only
-// the first million records are loaded, bounding an offline production probe.
-func BenchmarkFileListCacheWarmup(b *testing.B) {
+func benchmarkFileListCachePath(b *testing.B) string {
+	b.Helper()
 	path := os.Getenv("GO_CARBON_FLC_BENCHMARK")
 	if path == "" {
 		path = filepath.Join(b.TempDir(), "files.gz")
@@ -29,6 +28,14 @@ func BenchmarkFileListCacheWarmup(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+	return path
+}
+
+// BenchmarkFileListCacheWarmup measures saved-index decoding and trie construction.
+// GO_CARBON_FLC_BENCHMARK optionally selects a read-only captured cache. Only
+// the first million records are loaded, bounding an offline production probe.
+func BenchmarkFileListCacheWarmup(b *testing.B) {
+	path := benchmarkFileListCachePath(b)
 	b.ReportAllocs()
 	b.ResetTimer()
 	var records int
