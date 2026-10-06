@@ -29,9 +29,9 @@ const formatMarker = "go-carbon-chunks-v1\n"
 type Options struct {
 	CacheSize    int64
 	MemTableSize uint64
-	// SyncInterval controls WAL syncing for point updates. Zero syncs each
-	// update; a positive interval permits loss of updates since the last sync.
-	// Catalog mutations and snapshot imports always sync before returning.
+	// SyncInterval controls WAL syncing for successful store mutations. Zero
+	// syncs each mutation; a positive interval permits loss of mutations since
+	// the last sync.
 	SyncInterval time.Duration
 	Now          func() time.Time
 	fs           vfs.FS // Fault-injection tests use the same storage path as production.
@@ -114,7 +114,7 @@ func (s *Store) syncLoop(interval time.Duration) {
 			// records, without forcing a memtable flush or growing an idle WAL.
 			if err := s.db.LogData(nil, pebble.Sync); err != nil {
 				// Pebble already fails fatally on WAL I/O errors. Do not continue
-				// accepting updates if another sync error is ever returned.
+				// accepting mutations if another sync error is ever returned.
 				panic(fmt.Errorf("periodic store WAL sync: %w", err))
 			}
 		}
@@ -194,7 +194,7 @@ func (s *Store) Close() error {
 		<-s.syncDone
 	}
 	// Writers must be stopped before Close. Pebble flushes and syncs the WAL
-	// on close, including updates made after the final periodic sync.
+	// on close, including mutations made after the final periodic sync.
 	err := s.db.Close()
 	if s.cache != nil {
 		s.cache.Unref()
@@ -228,6 +228,17 @@ func (s *Store) lockMetric(name string) func() {
 	mu.Lock()
 	return mu.Unlock
 }
+
+func (s *Store) commit(batch *pebble.Batch) error {
+	if err := batch.Commit(s.writeOptions); err != nil {
+		return err
+	}
+	if !s.writeOptions.Sync {
+		s.pendingSync.Store(true)
+	}
+	return nil
+}
+
 func catalogKey(name string) []byte { return append([]byte("m/"), name...) }
 func sequenceKey() []byte           { return []byte("z/sequence") }
 func uint64Bytes(v uint64) []byte   { b := make([]byte, 8); binary.BigEndian.PutUint64(b, v); return b }
@@ -283,8 +294,8 @@ func (s *Store) Create(ctx context.Context, config MetricConfig) (Metadata, erro
 			return Metadata{}, err
 		}
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return Metadata{}, fmt.Errorf("sync create: %w", err)
+	if err := s.commit(b); err != nil {
+		return Metadata{}, fmt.Errorf("commit create: %w", err)
 	}
 	return m, nil
 }

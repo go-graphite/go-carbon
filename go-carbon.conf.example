@@ -22,9 +22,9 @@ store-dir = ""
 # memtables for block-cache reads. It is not an RSS limit.
 store-cache-size = 268435456
 store-memtable-size = 67108864
-# Pebble point-update WAL sync interval. "0s" syncs each update batch.
-# With periodic sync, a crash can lose updates since the last successful sync;
-# sync delays can extend the interval. Create/import/delete always sync.
+# Pebble WAL sync interval for all mutations, including buckyd transfers/deletes.
+# "0s" syncs each committed batch. With periodic sync, a crash can lose mutations
+# since the last successful sync; sync delays can extend the interval.
 # Requires restart. Ignored by the files backend.
 store-sync-interval = "1s"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf. Required

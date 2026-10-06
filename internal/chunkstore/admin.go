@@ -137,8 +137,8 @@ func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadat
 	if err := b.DeleteRange(metricChunks, prefixEnd(metricChunks), nil); err != nil {
 		return err
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return fmt.Errorf("sync delete %s: %w", name, err)
+	if err := s.commit(b); err != nil {
+		return fmt.Errorf("commit delete %s: %w", name, err)
 	}
 	return nil
 }
@@ -287,8 +287,8 @@ func (s *Store) commitReplacement(m Metadata, chunks []map[int][]byte, old *Meta
 			return Metadata{}, err
 		}
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return Metadata{}, fmt.Errorf("sync replace %s: %w", m.Name, err)
+	if err := s.commit(b); err != nil {
+		return Metadata{}, fmt.Errorf("commit replace %s: %w", m.Name, err)
 	}
 	return m, nil
 }

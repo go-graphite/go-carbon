@@ -44,29 +44,32 @@ apply to new metrics. Existing policies are preserved. Online policy migration
 is rejected.
 
 Writes may arrive out of order; archive updates use the shared WAL and require
-no per-metric sidecars. `store-sync-interval` defaults to `"1s"`: point updates
-return before WAL sync, and a background worker syncs pending updates once per
-interval. A process or machine crash can lose updates since the last successful
-sync, including points already confirmed out of the cache. Sync delays can
+no per-metric sidecars. `store-sync-interval` defaults to `"1s"`: mutations
+return before WAL sync, and a background worker syncs pending mutations once per
+interval. The same policy applies to point updates, metric creation/deletion,
+and buckyd imports, replacements and fills. A process or machine crash can lose
+mutations since the last successful sync, including points already confirmed
+out of the cache and acknowledged transfers or deletions. Sync delays can
 extend that loss window. Idle stores do not issue periodic WAL syncs. Graceful
-store shutdown syncs remaining updates.
+store shutdown syncs remaining mutations.
 
-Set `store-sync-interval = "0s"` to wait for WAL sync on every update batch.
-Negative intervals are rejected. Metric creation, deletion and snapshot
-imports/replacements always wait for WAL sync, regardless of this setting.
-Failed writes are requeued. Receiver acknowledgement still precedes persistence
-of an in-memory cache write.
+Set `store-sync-interval = "0s"` to wait for WAL sync on every mutation, including
+buckyd operations. Use this setting when migration requires durable
+acknowledgements. Negative intervals are rejected. Failed point writes are
+requeued. Receiver acknowledgement still precedes persistence of an in-memory
+cache write.
 
 Carbonserver builds trie/trigram indexes from the catalog and uses shared-store
 reads for render/info. The normal periodic scan discovers newly persisted
 metrics; realtime/cache discovery options retain their existing behavior.
 Transfer mutations schedule a catalog refresh at most once every 30 seconds;
-the normal `scan-frequency` remains active. Imports complete after a synced
-store commit, and the transfer temporary file is then removed. New metrics may
-take up to the next batched scan to appear in find/glob results. Shared mode
-bypasses response caches so deletion and replacement cannot leave cached
-results from an earlier generation. This affects performance and should be
-measured on representative workloads before rollout.
+the normal `scan-frequency` remains active. Imports complete after a store
+commit using the configured sync policy, and the transfer temporary file is
+then removed. New metrics may take up to the next batched scan to appear in
+find/glob results. Shared mode bypasses response caches so deletion and
+replacement cannot leave cached results from an earlier generation. This
+affects performance and should be measured on representative workloads before
+rollout.
 
 Metric count, data-point and logical-size quotas use classic Whisper capacity,
 including headers. Namespace physical-size quotas are rejected: compressed

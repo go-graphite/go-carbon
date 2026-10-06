@@ -21,7 +21,12 @@ import (
 
 func testService(t *testing.T) (*Service, *chunkstore.Store) {
 	t.Helper()
-	db, err := chunkstore.Open(t.TempDir(), chunkstore.Options{Now: func() time.Time { return time.Unix(10000, 0) }})
+	return testServiceWithSyncInterval(t, 0)
+}
+
+func testServiceWithSyncInterval(t *testing.T, interval time.Duration) (*Service, *chunkstore.Store) {
+	t.Helper()
+	db, err := chunkstore.Open(t.TempDir(), chunkstore.Options{SyncInterval: interval, Now: func() time.Time { return time.Unix(10000, 0) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +76,16 @@ func fixture(t *testing.T, value float64) []byte {
 }
 
 func TestMetricTransferSnappyStatAndConditionalDelete(t *testing.T) {
-	s, _ := testService(t)
+	for _, interval := range []time.Duration{0, time.Hour} {
+		t.Run(interval.String(), func(t *testing.T) {
+			checkMetricTransferWithSyncInterval(t, interval)
+		})
+	}
+}
+
+func checkMetricTransferWithSyncInterval(t *testing.T, interval time.Duration) {
+	t.Helper()
+	s, _ := testServiceWithSyncInterval(t, interval)
 	h := s.Handler()
 	body := fixture(t, 7)
 	var compressed bytes.Buffer
