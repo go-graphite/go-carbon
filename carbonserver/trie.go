@@ -287,6 +287,7 @@ func isAlphanumeric(c byte) bool {
 
 type trieIndex struct {
 	// builder is owned exclusively by initial index construction and cleared before publication.
+	snapshot      *indexSnapshot
 	builder       *trieBulkBuilder
 	root          *trieNode
 	fileExt       string
@@ -497,7 +498,7 @@ func (t *trieInsertError) Error() string { return t.typ }
 // insert considers path name ending with trieIndex.fileExt as a metric.
 //
 // insert returns either a file node or dir node, after inserted.
-func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
+func (ti *trieIndex) insertMutable(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
 	path = filepath.Clean(path)
 	if len(path) > 0 && path[0] == '/' { // skipcq: GO-S1005
 		path = path[1:]
@@ -721,7 +722,7 @@ func (ti *trieIndex) newDir() *trieNode {
 	return n
 }
 
-func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
+func (ti *trieIndex) queryMutable(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "*"
@@ -932,7 +933,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	return *(*string)(unsafe.Pointer(&r))
 }
 
-func (ti *trieIndex) allMetrics(sep byte) []string {
+func (ti *trieIndex) allMetricsMutable(sep byte) []string {
 	var files = make([]string, 0, ti.fileCount)
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
@@ -981,7 +982,7 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 // limit only applies when statsOnly is set to false.
 // count means the number of files/metrics under the trieNode.
 // skipcq: RVV-A0005
-func (ti *trieIndex) allMetricsNode(tn *trieNode, sep byte, prefix string, limit int, statsOnly bool) (files []string, fileNodes []*trieNode, count int, physicalSize, logicalSize int64) {
+func (ti *trieIndex) allMetricsNodeMutable(tn *trieNode, sep byte, prefix string, limit int, statsOnly bool) (files []string, fileNodes []*trieNode, count int, physicalSize, logicalSize int64) {
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
@@ -1100,7 +1101,7 @@ func (ti *trieIndex) dump(w io.Writer) {
 }
 
 // skipcq: RVV-A0006
-func (ti *trieIndex) getQuotaTree(w io.Writer) {
+func (ti *trieIndex) getQuotaTreeMutable(w io.Writer) {
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
@@ -1308,7 +1309,7 @@ func (tc *trieCounter) String() string {
 }
 
 //nolint:unparam // TODO - add test coverage for nodesByGen return value
-func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, countByChildren, nodesByGen *trieCounter) {
+func (ti *trieIndex) countNodesMutable() (count, files, dirs, onec, onefc, onedc int, countByChildren, nodesByGen *trieCounter) {
 	type state struct {
 		next      int
 		node      *trieNode
@@ -1734,7 +1735,7 @@ func (ti *trieIndex) resolveQuotas(quotas []*Quota) (map[string]quotaAssignment,
 
 // refreshUsage updates usage data and generates stat metrics.
 // It cannot run concurrently with trieIndex.insert.
-func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files uint64) {
+func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (files uint64) {
 	if throughputs == nil {
 		throughputs = newQuotaThroughputQuotaManager()
 	}
@@ -2217,7 +2218,7 @@ func (ti *trieIndex) metricDirs(ps *points.Points) ([]*trieNode, bool) {
 }
 
 // A nil dirs slice requests an allocation-free existence check.
-func (ti *trieIndex) metricPath(metric string, dirs []*trieNode) ([]*trieNode, bool) {
+func (ti *trieIndex) metricPathMutable(metric string, dirs []*trieNode) ([]*trieNode, bool) {
 	var node = ti.root
 	var mindex int
 	var isNew bool

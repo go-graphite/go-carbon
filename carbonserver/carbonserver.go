@@ -1123,6 +1123,8 @@ type fileListUpdate struct {
 	fileListCacheReader FileListCache
 	fileListCacheEntry  FLCEntry
 	fileListCache       FileListCache
+	snapshotWriter      *indexSnapshotWriter
+	snapshotReady       bool
 	scanCancelled       bool
 	scanFailed          bool
 }
@@ -1192,12 +1194,31 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 		return false
 	}
 	u.pruneRealtimeMetrics()
+	u.closeFileListCaches()
+	if u.snapshotReady && u.trieIdx != nil && u.trieIdx.snapshot != nil {
+		u.replaceSnapshot()
+	}
 	return u.publish(dir, quotaAndUsageStatTicker)
 }
 
 func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 	if !u.listener.trieIndex || u.fileIndex != nil || u.listener.fileListCache == "" {
 		return !cacheOnly
+	}
+	if u.listener.concurrentIndex {
+		started := time.Now()
+		if snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData); err == nil {
+			u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+			u.trieIdx.snapshot = snapshot
+			u.metricsKnown = 0
+			u.populateCacheMetrics(u.cacheMetricNames)
+			u.metricsKnown = snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+			u.readFromCache = true
+			u.infos = append(u.infos, zap.Duration("snapshot_load_time", time.Since(started)))
+			return true
+		} else if !os.IsNotExist(err) {
+			u.logger.Warn("index snapshot unavailable; loading legacy cache", zap.Error(err))
+		}
 	}
 	flc, err := NewFileListCache(u.listener.fileListCache, FLCVersionUnspecified, 'r')
 	if err != nil {
@@ -1292,17 +1313,42 @@ func (u *fileListUpdate) newFileListCacheWriter() FileListCache {
 		return nil
 	}
 	u.infos = append(u.infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
+	// Build restart snapshots only while a complete read index is already live.
+	// A first scan without a usable cache must not wait for snapshot construction.
+	if u.fileIndex != nil && u.listener.trieIndex && u.listener.concurrentIndex && flc.GetVersion() == FLCVersion2 {
+		if writer, err := newIndexSnapshotWriter(u.listener.fileListCache, u.listener.whisperData); err != nil {
+			u.logger.Warn("failed to prepare index snapshot", zap.Error(err))
+		} else {
+			u.snapshotWriter = writer
+		}
+	}
 	return flc
 }
 
 func (u *fileListUpdate) closeFileListCaches() {
+	defer func() { u.fileListCache, u.fileListCacheReader, u.snapshotWriter = nil, nil, nil }()
+	complete := !u.scanCancelled && !u.scanFailed
 	if u.fileListCache == nil {
-	} else if u.scanCancelled {
+		complete = false
+	} else if !complete {
 		if err := u.fileListCache.Abort(); err != nil {
 			u.logger.Error("failed to abort file list cache", zap.Error(err))
 		}
 	} else if err := u.fileListCache.Close(); err != nil {
+		complete = false
 		u.logger.Error("failed to close flie list cache", zap.Error(err))
+	}
+	if u.snapshotWriter != nil {
+		if complete {
+			if err := u.snapshotWriter.finish(); err != nil {
+				u.logger.Warn("failed to publish index snapshot", zap.Error(err))
+			} else {
+				u.snapshotReady = true
+				u.logger.Info("index snapshot written", zap.Uint64("records", u.snapshotWriter.manifest.Records))
+			}
+		} else {
+			_ = u.snapshotWriter.abort()
+		}
 	}
 	if u.fileListCacheReader != nil {
 		if err := u.fileListCacheReader.Close(); err != nil {
@@ -1415,6 +1461,16 @@ func (u *fileListUpdate) indexFile(name string, isFullMetric bool, logicalSize, 
 	if !u.listener.trieIndex {
 		u.files = append(u.files, name)
 	} else if isFullMetric {
+		// Do not materialize every mapped file as a heap node during a scan.
+		if u.trieIdx.snapshot != nil {
+			if entry, found, err := u.trieIdx.snapshot.lookup(name); err == nil && found {
+				u.metricsKnown++
+				if entry.FirstSeenAt == 0 {
+					return u.trieIdx.snapshot.openedAt
+				}
+				return entry.FirstSeenAt
+			}
+		}
 		node, err := u.trieIdx.insert(name, logicalSize, physicalSize, dataPoints, 0)
 		if err != nil {
 			u.listener.logTrieInsertError(u.logger, "updateFileList.trie: failed to index path", name, err)
@@ -1432,12 +1488,20 @@ func (u *fileListUpdate) cacheFile(name string, isFullMetric bool, dataPoints, l
 	if u.fileListCache == nil || (u.listener.trieIndex && !isFullMetric) {
 		return
 	}
-	if err := u.fileListCache.Write(&FLCEntry{Path: name, DataPoints: dataPoints, LogicalSize: logicalSize, PhysicalSize: physicalSize, FirstSeenAt: firstSeenAt}); err != nil {
+	entry := FLCEntry{Path: name, DataPoints: dataPoints, LogicalSize: logicalSize, PhysicalSize: physicalSize, FirstSeenAt: firstSeenAt}
+	if err := u.fileListCache.Write(&entry); err != nil {
 		u.logger.Error("failed to write to file list cache", zap.Error(err))
 		if err := u.fileListCache.Close(); err != nil {
 			u.logger.Error("failed to close flie list cache", zap.Error(err))
 		}
 		u.fileListCache = nil
+	}
+	if u.snapshotWriter != nil {
+		if err := u.snapshotWriter.append(&entry); err != nil {
+			u.logger.Warn("failed to build index snapshot", zap.Error(err))
+			_ = u.snapshotWriter.abort()
+			u.snapshotWriter = nil
+		}
 	}
 }
 
@@ -1459,7 +1523,17 @@ func (u *fileListUpdate) pruneRealtimeMetrics() {
 		// Fresh tries have no old generations or deleted branches. Insertion
 		// already maintains the compressed radix shape, so pruning adds a full
 		// traversal without changing this private tree.
-		if u.trieIdx.builder == nil {
+		if u.trieIdx.builder == nil && !u.scanFailed {
+			if u.trieIdx.snapshot != nil && u.listener.cacheGet != nil {
+				// A queued metric may still be awaiting its first disk write.
+				// Preserve those overlay entries even if this scan saw no file.
+				names, nodes, _, _, _ := u.trieIdx.allMetricsNodeMutable(u.trieIdx.root, '.', "", int(^uint(0)>>1), false)
+				for i, name := range names {
+					if nodes[i].gen != u.trieIdx.root.gen && len(u.listener.cacheGet(name)) > 0 {
+						u.listener.insertRealtimeMetric(u.trieIdx, name)
+					}
+				}
+			}
 			u.trieIdx.prune()
 		}
 	}
@@ -1471,11 +1545,14 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 		return u.readFromCache
 	}
 	fileScanRuntime := time.Since(u.started)
+	if u.trieIdx != nil && u.trieIdx.snapshot != nil {
+		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+	}
 	atomic.StoreUint64(&u.listener.metrics.MetricsKnown, u.metricsKnown)
 	atomic.AddUint64(&u.listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 	index, indexType, indexSize, pruned, indexingRuntime := u.buildIndex(freeSpace, totalSpace)
 	rdTimeUpdateRuntime := u.copyAccessTimes(index)
-	if u.fileIndex == nil {
+	if u.fileIndex == nil || (index.trieIdx != nil && index.trieIdx != u.fileIndex.trieIdx) {
 		// The first published index must already enforce its configured quotas.
 		quotaStarted := time.Now()
 		u.listener.refreshIndexQuotaAndUsage(index, quotaAndUsageStatTicker)
@@ -1518,6 +1595,9 @@ func (u *fileListUpdate) buildIndex(freeSpace, totalSpace uint64) (*fileIndex, s
 	started := time.Now()
 	if u.listener.trieIndex {
 		indexType, index.trieIdx = "trie", u.trieIdx
+		if u.trieIdx.snapshot != nil {
+			indexType = "snapshot+trie"
+		}
 		indexSize = u.addTrieStats(index)
 	} else {
 		index.files = u.files

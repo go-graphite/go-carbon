@@ -33,6 +33,7 @@ def main():
     ap.add_argument("--max-delay", default="0s")
     ap.add_argument("--max-updates", type=int, default=0)
     ap.add_argument("--drain-before-restart", action="store_true")
+    ap.add_argument("--require-snapshot", action="store_true")
     ap.add_argument("--names-file", type=Path)
     ap.add_argument("--gogc", type=int, default=100)
     ap.add_argument("--label", required=True)
@@ -262,6 +263,12 @@ print(json.dumps({'cpu_seconds': (int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'
         if args.drain_before_restart:
             boundary = time.time()
             wait_for(lambda: drained_after(boundary))
+        if args.require_snapshot:
+            def complete_snapshot():
+                script = "import json; from pathlib import Path; p=Path('/data/.file-list-cache.bin.snapshot.json'); print(json.dumps(json.loads(p.read_text()) if p.exists() else {}))"
+                manifest = json.loads(compose("exec", "-T", "store", "python3", "-c", script).stdout)
+                return manifest.get("Records", 0) >= len(set(names))
+            wait_for(complete_snapshot)
         summary["pre_restart_resources"] = resources()
         summary["pre_restart_stats"] = fetch("/", port=18090)
         phase[0] = "restart"
@@ -269,6 +276,12 @@ print(json.dumps({'cpu_seconds': (int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'
         compose("restart", "store", timeout=150)
         wait_for(ready)
         summary["restart_to_ready_seconds"] = time.monotonic() - restart
+        if args.require_snapshot:
+            log = compose("logs", "--no-color", "store").stdout
+            updates = [json.loads(line[line.index("{"):]) for line in log.splitlines()
+                       if '"message":"file list updated"' in line]
+            assert any(u.get("index_type") == "snapshot+trie" and u.get("read_from_cache") for u in updates), "restart did not use the complete snapshot"
+            summary["snapshot_startup_verified"] = True
         phase[0] = "recovered"
         summary["after_restart_values"] = check_values()
         # Validate persistence again after cache drain; do not count cache-only reads as disk durability.
