@@ -288,6 +288,7 @@ func isAlphanumeric(c byte) bool {
 type trieIndex struct {
 	// builder is owned exclusively by initial index construction and cleared before publication.
 	snapshot      *indexSnapshot
+	recoveryID    string
 	builder       *trieBulkBuilder
 	root          *trieNode
 	fileExt       string

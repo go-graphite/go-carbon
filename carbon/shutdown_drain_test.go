@@ -31,10 +31,13 @@ func TestShutdownWaitsForActiveRead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			app, started, unblock, readDone := startBlockedShutdownRead(t)
+			releaseInputCleanup := func() {}
 			if tc.slowInput {
 				releaseInput := make(chan struct{})
+				var once sync.Once
+				releaseInputCleanup = func() { once.Do(func() { close(releaseInput) }) }
 				app.FlushTraces = func() { <-releaseInput }
-				t.Cleanup(func() { close(releaseInput) })
+				t.Cleanup(releaseInputCleanup)
 			}
 			select {
 			case <-started:
@@ -57,6 +60,7 @@ func TestShutdownWaitsForActiveRead(t *testing.T) {
 				t.Fatalf("shutdown returned with an active read: %v", err)
 			case <-time.After(tc.hold):
 			}
+			releaseInputCleanup()
 			unblock()
 			if err := <-readDone; err != nil {
 				t.Fatal(err)

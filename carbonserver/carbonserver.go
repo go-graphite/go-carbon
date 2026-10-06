@@ -224,6 +224,8 @@ func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryIt
 }
 
 type CarbonserverListener struct {
+	indexStopOnce   sync.Once
+	startupScanGate <-chan struct{}
 	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
@@ -890,6 +892,13 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency 
 	if !listener.waitForInitialIndex(exit) {
 		return
 	}
+	if listener.startupScanGate != nil {
+		select {
+		case <-listener.startupScanGate:
+		case <-exit:
+			return
+		}
+	}
 	cacheMetricNames := make(map[string]struct{})
 	knownMetricsStatTicker, quotaAndUsageStatTicker, stopTickers := listener.fileListStatTickers()
 	defer stopTickers()
@@ -953,11 +962,14 @@ func (listener *CarbonserverListener) drainRealtimeMetrics(trie *trieIndex) {
 	}
 }
 
-func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metric string) {
+func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metric string) *trieNode {
 	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
-	if _, err := trie.insert(path, 0, 0, 0, 0); err != nil {
+	node, err := trie.insert(path, 0, 0, 0, 0)
+	if err != nil {
 		listener.logTrieInsertError(listener.logger, "failed to insert realtime metric", metric, err)
+		return nil
 	}
+	return node
 }
 
 func (listener *CarbonserverListener) startFileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
@@ -1103,30 +1115,31 @@ func metricFileSizes(path string, info os.FileInfo) (logical, physical int64, er
 }
 
 type fileListUpdate struct {
-	listener            *CarbonserverListener
-	logger              *zap.Logger
-	started             time.Time
-	fileIndex           *fileIndex
-	files               []string
-	filesLen            int
-	details             map[string]*protov3.MetricDetails
-	trieIdx             *trieIndex
-	metricsKnown        uint64
-	oooFiles            uint64
-	oooPhysicalBytes    uint64
-	lockFiles           uint64
-	infos               []zap.Field
-	cacheMetricNames    map[string]struct{}
-	cacheMetricLen      int
-	cacheIndexRuntime   time.Duration
-	readFromCache       bool
-	fileListCacheReader FileListCache
-	fileListCacheEntry  FLCEntry
-	fileListCache       FileListCache
-	snapshotWriter      *indexSnapshotWriter
-	snapshotReady       bool
-	scanCancelled       bool
-	scanFailed          bool
+	listener              *CarbonserverListener
+	logger                *zap.Logger
+	started               time.Time
+	fileIndex             *fileIndex
+	files                 []string
+	filesLen              int
+	details               map[string]*protov3.MetricDetails
+	trieIdx               *trieIndex
+	metricsKnown          uint64
+	oooFiles              uint64
+	oooPhysicalBytes      uint64
+	lockFiles             uint64
+	infos                 []zap.Field
+	cacheMetricNames      map[string]struct{}
+	cacheMetricLen        int
+	cacheIndexRuntime     time.Duration
+	readFromCache         bool
+	fileListCacheReader   FileListCache
+	fileListCacheEntry    FLCEntry
+	fileListCache         FileListCache
+	snapshotWriter        *indexSnapshotWriter
+	snapshotReady         bool
+	snapshotNotifications map[string]*trieNode
+	scanCancelled         bool
+	scanFailed            bool
 }
 
 func newFileListUpdate(listener *CarbonserverListener, cacheMetricNames map[string]struct{}) *fileListUpdate {
@@ -1195,7 +1208,7 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 	}
 	u.pruneRealtimeMetrics()
 	u.closeFileListCaches()
-	if u.snapshotReady && u.trieIdx != nil && u.trieIdx.snapshot != nil {
+	if u.snapshotReady && u.trieIdx != nil {
 		u.replaceSnapshot()
 	}
 	return u.publish(dir, quotaAndUsageStatTicker)
@@ -1210,6 +1223,9 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 		if snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData); err == nil {
 			u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
 			u.trieIdx.snapshot = snapshot
+			if err := u.trieIdx.loadSnapshotOverlay(u.listener.fileListCache); err != nil && !os.IsNotExist(err) {
+				u.logger.Warn("saved index overlay unavailable", zap.Error(err))
+			}
 			u.metricsKnown = 0
 			u.populateCacheMetrics(u.cacheMetricNames)
 			u.metricsKnown = snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
@@ -1423,7 +1439,7 @@ func (u *fileListUpdate) refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker 
 		}
 	}
 	if u.listener.trieIndex && u.listener.concurrentIndex {
-		u.listener.drainRealtimeMetrics(u.trieIdx)
+		u.drainRealtimeMetrics()
 	}
 }
 
@@ -1519,7 +1535,7 @@ func (u *fileListUpdate) addMetricDetails(info os.FileInfo, name string, isFullM
 func (u *fileListUpdate) pruneRealtimeMetrics() {
 	if u.listener.concurrentIndex && u.trieIdx != nil {
 		// Include notifications queued while loading the file-list cache.
-		u.listener.drainRealtimeMetrics(u.trieIdx)
+		u.drainRealtimeMetrics()
 		// Fresh tries have no old generations or deleted branches. Insertion
 		// already maintains the compressed radix shape, so pruning adds a full
 		// traversal without changing this private tree.
@@ -1558,7 +1574,10 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 		u.listener.refreshIndexQuotaAndUsage(index, quotaAndUsageStatTicker)
 		u.infos = append(u.infos, zap.Duration("initial_quota_usage_time", time.Since(quotaStarted)))
 	}
-	if u.stopped() {
+	// A complete snapshot may finish publication just as shutdown cancels the
+	// updater. Install that same generation before the shutdown overlay is saved;
+	// otherwise the live and on-disk bases would differ despite a complete scan.
+	if u.stopped() && !u.snapshotReady {
 		return false
 	}
 	if index.trieIdx != nil {
@@ -2011,13 +2030,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 func (listener *CarbonserverListener) Stop() error {
 	listener.stopOnce.Do(func() {
-		if listener.scanTicker != nil {
-			listener.scanTicker.Stop()
-		}
-		if listener.exitChan != nil {
-			close(listener.exitChan)
-		}
-		listener.indexWorkers.Wait()
+		listener.PauseIndexUpdates()
 		if listener.httpServer != nil {
 			shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := listener.httpServer.Shutdown(shutdownContext)
@@ -2738,4 +2751,29 @@ func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64
 		err = fmt.Errorf("invalid cache record for the request")
 	}
 	return
+}
+
+// PauseIndexUpdates preserves live read listeners while freezing their catalog
+// for graceful shutdown checkpoints. It is a terminal lifecycle operation.
+func (listener *CarbonserverListener) PauseIndexUpdates() {
+	listener.indexStopOnce.Do(func() {
+		if listener.scanTicker != nil {
+			listener.scanTicker.Stop()
+		}
+		if listener.exitChan != nil {
+			close(listener.exitChan)
+		}
+		listener.indexWorkers.Wait()
+	})
+}
+
+// SetStartupScanGate delays filesystem reconciliation during pending recovery;
+// immutable index reads can already be served while disk history catches up.
+func (listener *CarbonserverListener) SetStartupScanGate(gate <-chan struct{}) {
+	listener.startupScanGate = gate
+}
+func (listener *CarbonserverListener) WaitForWarmup() {
+	if listener.indexWarmupDone != nil {
+		<-listener.indexWarmupDone
+	}
 }

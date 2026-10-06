@@ -106,6 +106,9 @@ func TestIndexSnapshotWrittenByCompleteReconciliation(t *testing.T) {
 	if l.updateFileList(l.whisperData, nil, nil) {
 		t.Fatal("expected filesystem reconciliation")
 	}
+	if l.CurrentFileIndex().trieIdx.snapshot == nil {
+		t.Fatal("completed background scan retained the full heap trie")
+	}
 	s, err := openIndexSnapshot(l.fileListCache, l.whisperData)
 	if err != nil {
 		t.Fatal(err)

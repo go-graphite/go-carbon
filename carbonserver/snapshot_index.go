@@ -356,13 +356,41 @@ func (u *fileListUpdate) replaceSnapshot() {
 	old := u.trieIdx
 	next := newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
 	next.snapshot, next.throughputs = snapshot, old.throughputs
-	names, nodes, _, _, _ := old.allMetricsNodeMutable(old.root, '.', "", int(^uint(0)>>1), false)
-	for i, name := range names {
+	pending := u.snapshotNotifications
+	if pending == nil {
+		pending = make(map[string]*trieNode)
+	}
+	if old.snapshot != nil {
+		names, nodes, _, _, _ := old.allMetricsNodeMutable(old.root, '.', "", int(^uint(0)>>1), false)
+		for i, name := range names {
+			pending[name] = nodes[i]
+		}
+	}
+	// On the first conversion, the generation-pruned trie contains exactly the
+	// scanned files, notifications processed during that scan, and remaining
+	// cache-scan names. The first group is already in the snapshot: avoid a
+	// second traversal of every old heap node just to discover the small delta.
+	for path := range u.cacheMetricNames {
+		if strings.HasSuffix(path, ".wsp") {
+			name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".wsp"), "/", ".")
+			if _, ok := pending[name]; !ok {
+				pending[name] = nil
+			}
+		}
+	}
+	for name, node := range pending {
 		path := "/" + strings.ReplaceAll(name, ".", "/") + ".wsp"
 		if _, found, err := snapshot.lookup(path); err == nil && found {
 			continue
 		}
-		m := nodes[i].meta.(*fileMeta)
+		var m fileMeta
+		if node != nil {
+			source := node.meta.(*fileMeta)
+			m.logicalSize = atomic.LoadInt64(&source.logicalSize)
+			m.physicalSize = atomic.LoadInt64(&source.physicalSize)
+			m.dataPoints = atomic.LoadInt64(&source.dataPoints)
+			m.firstSeenAt = atomic.LoadInt64(&source.firstSeenAt)
+		}
 		if _, err := next.insertMutable(path, m.logicalSize, m.physicalSize, m.dataPoints, m.firstSeenAt); err != nil {
 			_ = snapshot.close()
 			u.logger.Warn("failed to transfer snapshot overlay", zap.Error(err))
@@ -385,4 +413,17 @@ func (ti *trieIndex) mutableDirectory(name string) *trieNode {
 		return nil
 	}
 	return dirs[len(dirs)-1]
+}
+
+func (u *fileListUpdate) drainRealtimeMetrics() {
+	for remaining := len(u.listener.newMetricsChan); remaining > 0; remaining-- {
+		metric := <-u.listener.newMetricsChan
+		node := u.listener.insertRealtimeMetric(u.trieIdx, metric)
+		if node != nil && u.snapshotWriter != nil {
+			if u.snapshotNotifications == nil {
+				u.snapshotNotifications = make(map[string]*trieNode)
+			}
+			u.snapshotNotifications[metric] = node
+		}
+	}
 }

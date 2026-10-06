@@ -38,7 +38,8 @@ type cacheSettings struct {
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	pending atomic.Pointer[pendingRecovery]
 
 	queueLastBuild time.Time
 
@@ -207,6 +208,16 @@ func (c *Cache) Get(key string) []points.Point {
 
 	var data []points.Point
 	shard.mu.Lock()
+	// Immutable recovery bytes remain visible until this same lock protects
+	// their complete handoff into items/notConfirmed.
+	var pendingErr error
+	data, pendingErr = c.pendingPoints(key)
+	if pendingErr != nil {
+		shard.mu.Unlock()
+		// A validated immutable record must decode. Failing the read is safer
+		// than returning a successful response with missing saved history.
+		panic(fmt.Errorf("read validated recovery source: %w", pendingErr))
+	}
 	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 		if p != nil && p.Metric == key {
 			if data == nil {
@@ -302,6 +313,9 @@ func (c *Cache) NotConfirmedLength() int32 {
 
 // IsEmpty reports whether the cache has neither queued nor in-flight points.
 func (c *Cache) IsEmpty() bool {
+	if r := c.pending.Load(); r != nil && r.remaining.Load() != 0 {
+		return false
+	}
 	for _, shard := range c.data {
 		shard.mu.RLock()
 		empty := len(shard.items) == 0 && shard.notConfirmedUsed == 0
@@ -385,6 +399,14 @@ func (c *Cache) add(p *points.Points, restored bool) {
 	shard := c.GetShard(p.Metric)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
+
+	// An Add may have loaded its settings before graceful diversion, then waited
+	// behind the shard dump. Recheck under the same lock so it cannot miss both
+	// the dump and the input log.
+	if current := c.settings.Load().(*cacheSettings); current.xlog != nil {
+		current.xlog(p)
+		return
+	}
 
 	values, exists := shard.items[p.Metric]
 	if c.throttle != nil && c.throttle(p, exists) {
@@ -522,4 +544,12 @@ func (c *Cache) GetInfo() map[string]interface{} {
 		"size":  c.stat.size,
 		"limit": s.maxSize,
 	}
+}
+
+// DivertToPointWriter requires a concurrency-safe writer. Once installed, a
+// shard dump observes every earlier Add; every later Add goes to this writer.
+func (c *Cache) DivertToPointWriter(write func(*points.Points) error) {
+	s := *c.settings.Load().(*cacheSettings)
+	s.xlog = write
+	c.settings.Store(&s)
 }

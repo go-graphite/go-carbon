@@ -504,12 +504,22 @@ func (app *App) Start() (err error) {
 	if err != nil {
 		return err
 	}
-	// Replay compressed history before live input can advance block watermarks.
+	// Live input cannot advance compressed block watermarks before old history
+	// drains. A validated checkpoint can serve reads throughout that drain.
+	readsStarted := false
 	if restoreBeforeReceivers {
-		app.restoreBeforeReceivers(core)
+		readsStarted, err = app.restoreWithPendingReads(core, newMetricsChan)
+		if err != nil {
+			return err
+		}
+		if !readsStarted {
+			app.restoreBeforeReceivers(core)
+		}
 	}
-	if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
-		return err
+	if !readsStarted {
+		if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
+			return err
+		}
 	}
 	if err = app.startReceivers(core); err != nil {
 		return err
