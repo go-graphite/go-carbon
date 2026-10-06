@@ -89,6 +89,7 @@ type metricStruct struct {
 	MetricsKnown                         uint64
 	OOOFiles                             uint64
 	OOOPhysicalBytes                     uint64
+	LockFiles                            uint64
 	FileScanTimeNS                       uint64
 	IndexBuildTimeNS                     uint64
 	MetricsFetched                       uint64
@@ -1113,6 +1114,7 @@ type fileListUpdate struct {
 	metricsKnown        uint64
 	oooFiles            uint64
 	oooPhysicalBytes    uint64
+	lockFiles           uint64
 	infos               []zap.Field
 	cacheMetricNames    map[string]struct{}
 	cacheMetricLen      int
@@ -1325,6 +1327,9 @@ func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, 
 		return nil
 	}
 	u.refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker)
+	if info.Mode().IsRegular() && strings.HasSuffix(info.Name(), ".lock") {
+		u.lockFiles++
+	}
 	if info.Mode().IsRegular() && strings.HasSuffix(info.Name(), ".ooo") {
 		u.oooFiles++
 		size := info.Size()
@@ -1475,6 +1480,7 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 	if !u.readFromCache && !u.scanFailed {
 		atomic.StoreUint64(&u.listener.metrics.OOOFiles, u.oooFiles)
 		atomic.StoreUint64(&u.listener.metrics.OOOPhysicalBytes, u.oooPhysicalBytes)
+		atomic.StoreUint64(&u.listener.metrics.LockFiles, u.lockFiles)
 	}
 	u.logResult(fileScanRuntime, indexingRuntime, rdTimeUpdateRuntime, indexType, indexSize, pruned)
 	return u.readFromCache
@@ -1817,6 +1823,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	senderRaw("metrics_known", &listener.metrics.MetricsKnown, send)
 	senderRaw("oooFiles", &listener.metrics.OOOFiles, send)
 	senderRaw("oooPhysicalBytes", &listener.metrics.OOOPhysicalBytes, send)
+	senderRaw("lockFiles", &listener.metrics.LockFiles, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
 	sender("file_scan_time_ns", &listener.metrics.FileScanTimeNS, send)
 
