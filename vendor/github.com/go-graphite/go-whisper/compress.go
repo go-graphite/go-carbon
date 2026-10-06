@@ -1025,7 +1025,15 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 				}
 				for offset := 0; offset < len(buffer); offset += PointSize {
 					if unpackDataPoint(buffer[offset:offset+PointSize]).interval == point.interval {
-						copy(buffer[offset:offset+PointSize], point.dataPoint.Bytes())
+						if op == "rollup" && point.interval <= archive.cblock.pn1.interval {
+							// This replacement and its downstream rollups are now
+							// encoded. A later flush must not divert it as a gap fill.
+							for j := offset; j < offset+PointSize; j++ {
+								buffer[j] = 0
+							}
+						} else {
+							copy(buffer[offset:offset+PointSize], point.dataPoint.Bytes())
+						}
 					}
 				}
 			}
@@ -1039,7 +1047,7 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		var mergeBuffer []dataPoint
 		var blockBuffer []byte
 		target := nwhisper.archives[i]
-		copyPrefix := op == "compact" && whisper.compVersion == nwhisper.compVersion &&
+		copyPrefix := (op == "compact" || op == "rollup") && whisper.compVersion == nwhisper.compVersion &&
 			archive.blockSize == target.blockSize && archive.blockCount <= target.blockCount
 		for _, block := range archive.getSortedBlockRanges() {
 			if op == "batch" {

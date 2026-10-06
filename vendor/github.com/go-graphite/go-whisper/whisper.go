@@ -1033,6 +1033,9 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 	var dropped []oooPoint
 	var corrections [][]dataPoint
 	if targetRetention == -1 && !whisper.opts.IgnoreNowOnWrite {
+		if err := whisper.materializeBufferedContinuation(points, now); err != nil {
+			return err
+		}
 		overlaps, err := whisper.compressedBatchOverlaps(points, now)
 		if err != nil {
 			return err
