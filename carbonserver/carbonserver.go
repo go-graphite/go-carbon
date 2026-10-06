@@ -1135,6 +1135,7 @@ func newFileListUpdate(listener *CarbonserverListener, cacheMetricNames map[stri
 	if listener.trieIndex {
 		if u.fileIndex == nil || !listener.concurrentIndex {
 			u.trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
+			u.trieIdx.builder = &trieBulkBuilder{}
 		} else {
 			u.trieIdx = u.fileIndex.trieIdx
 			u.trieIdx.root.gen++
@@ -1260,6 +1261,7 @@ func (u *fileListUpdate) readNextCacheEntry(flc FileListCache) bool {
 func (u *fileListUpdate) resetTrie() {
 	u.readFromCache = false
 	u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+	u.trieIdx.builder = &trieBulkBuilder{}
 }
 
 func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
@@ -1454,7 +1456,12 @@ func (u *fileListUpdate) pruneRealtimeMetrics() {
 	if u.listener.concurrentIndex && u.trieIdx != nil {
 		// Include notifications queued while loading the file-list cache.
 		u.listener.drainRealtimeMetrics(u.trieIdx)
-		u.trieIdx.prune()
+		// Fresh tries have no old generations or deleted branches. Insertion
+		// already maintains the compressed radix shape, so pruning adds a full
+		// traversal without changing this private tree.
+		if u.trieIdx.builder == nil {
+			u.trieIdx.prune()
+		}
 	}
 }
 
@@ -1470,10 +1477,15 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 	rdTimeUpdateRuntime := u.copyAccessTimes(index)
 	if u.fileIndex == nil {
 		// The first published index must already enforce its configured quotas.
+		quotaStarted := time.Now()
 		u.listener.refreshIndexQuotaAndUsage(index, quotaAndUsageStatTicker)
+		u.infos = append(u.infos, zap.Duration("initial_quota_usage_time", time.Since(quotaStarted)))
 	}
 	if u.stopped() {
 		return false
+	}
+	if index.trieIdx != nil {
+		index.trieIdx.builder = nil
 	}
 	u.listener.UpdateFileIndex(index)
 	// File-list caches omit sidecars, and incomplete scans can undercount them.
@@ -1521,7 +1533,12 @@ func (u *fileListUpdate) buildIndex(freeSpace, totalSpace uint64) (*fileIndex, s
 func (u *fileListUpdate) addTrieStats(index *fileIndex) int {
 	u.infos = append(u.infos, zap.Int("trie_depth", int(index.trieIdx.depth)), zap.String("longest_metric", index.trieIdx.longestMetric))
 	started := time.Now()
-	count, files, dirs, _, _, _, _, _ := index.trieIdx.countNodes()
+	var count, files, dirs int
+	if b := index.trieIdx.builder; b != nil {
+		count, files, dirs = b.nodes, index.trieIdx.fileCount, b.dirs
+	} else {
+		count, files, dirs, _, _, _, _, _ = index.trieIdx.countNodes()
+	}
 	atomic.StoreUint64(&u.listener.metrics.TrieNodes, uint64(count))
 	atomic.StoreUint64(&u.listener.metrics.TrieFiles, uint64(files))
 	atomic.StoreUint64(&u.listener.metrics.TrieDirs, uint64(dirs))

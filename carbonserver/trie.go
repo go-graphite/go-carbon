@@ -286,6 +286,8 @@ func isAlphanumeric(c byte) bool {
 }
 
 type trieIndex struct {
+	// builder is owned exclusively by initial index construction and cleared before publication.
+	builder       *trieBulkBuilder
 	root          *trieNode
 	fileExt       string
 	fileCount     int
@@ -597,16 +599,20 @@ outer:
 		split:
 			// case 5, 6, 7
 			prefix, suffix := child.c[:match], child.c[match:]
-			sn = &trieNode{c: suffix, childrens: child.childrens, gen: child.gen}
+			sn = ti.makeNode(suffix, child.childrens, child.gen)
 
-			cur.setChild(ci, &trieNode{c: prefix, childrens: &[]*trieNode{sn}, gen: ti.root.gen})
+			prefixNode := ti.makeNode(prefix, emptyTrieNodes, ti.root.gen)
+			ti.appendChild(prefixNode, sn)
+			cur.setChild(ci, prefixNode)
+			if ti.builder != nil {
+				ti.builder.nodes-- // the replaced prefix is no longer reachable
+			}
 			cur = (*cur.childrens)[ci]
 
 			if nlen-match > 0 {
-				newn = &trieNode{c: make([]byte, nlen-match), childrens: emptyTrieNodes, gen: ti.root.gen}
-				copy(newn.c, path[start:i])
+				newn = ti.makeNode(ti.copyLabel(path[start:i]), emptyTrieNodes, ti.root.gen)
 
-				cur.addChild(newn)
+				ti.appendChild(cur, newn)
 				cur = newn
 			}
 
@@ -615,9 +621,8 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-			newn = &trieNode{c: make([]byte, i-start), childrens: emptyTrieNodes, gen: ti.root.gen}
-			copy(newn.c, path[start:i])
-			cur.addChild(newn)
+			newn = ti.makeNode(ti.copyLabel(path[start:i]), emptyTrieNodes, ti.root.gen)
+			ti.appendChild(cur, newn)
 			cur = newn
 		}
 
@@ -638,7 +643,7 @@ outer:
 
 		if i < len(path) {
 			newn = ti.newDir()
-			cur.addChild(newn)
+			ti.appendChild(cur, newn)
 			cur = newn
 		}
 	}
@@ -662,7 +667,7 @@ outer:
 		}
 		if newDir {
 			child := ti.newDir()
-			cur.addChild(child)
+			ti.appendChild(cur, child)
 			cur = child
 		}
 
@@ -698,8 +703,8 @@ outer:
 			logicalSize, physicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
 		}
 
-		child := newFileNode(ti.root.gen, logicalSize, physicalSize, dataPoints, firstSeenAt)
-		cur.addChild(child)
+		child := ti.makeFileNode(logicalSize, physicalSize, dataPoints, firstSeenAt)
+		ti.appendChild(cur, child)
 		cur = child
 
 		ti.fileCount++
@@ -709,22 +714,13 @@ outer:
 }
 
 func (ti *trieIndex) newDir() *trieNode {
-	n := &trieNode{
-		c:         trieDirectorySeparator,
-		childrens: emptyTrieNodes,
-		gen:       ti.root.gen,
+	n := ti.makeNode(trieDirectorySeparator, emptyTrieNodes, ti.root.gen)
+	if ti.builder != nil {
+		ti.builder.dirs++
 	}
-
 	return n
 }
 
-// TODO: add some defensive logics against bad queries?
-// depth first search
-// TODO: refactor to make the function more readable. Some ideas:
-//   - to isolate Depth first search in separate class
-//   - probably we can optimize the length of existed arrays. It uses tree depth + 7, where tree depth is the longest path in the tree in characters
-//     but we should be able to calculate max required depth based on expr, we don't have to look into deeper levels than expr's depth unless there is some unknown corner case exist
-//   - get rid of 'goto', since it adds complexions
 func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
