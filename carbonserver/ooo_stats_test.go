@@ -78,13 +78,13 @@ func scanOutOfOrderGauges(t *testing.T, listener *CarbonserverListener, wantSide
 		}
 		wantBytes += uint64(stat.Blocks) * 512
 	}
-	assertOutOfOrderGauges(t, listener, uint64(len(wantSidecars)), wantBytes)
+	assertSidecarGauges(t, listener, uint64(len(wantSidecars)), wantBytes, 0)
 	if listener.metrics.MetricsKnown != wantMetrics {
 		t.Fatalf("metrics known = %d, want %d", listener.metrics.MetricsKnown, wantMetrics)
 	}
 }
 
-func TestOutOfOrderGaugesPreserveLastScan(t *testing.T) {
+func TestSidecarGaugesPreserveLastScan(t *testing.T) {
 	for _, name := range []string{"file-list cache", "cancelled scan", "scan error"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -94,6 +94,7 @@ func TestOutOfOrderGaugesPreserveLastScan(t *testing.T) {
 			listener.SetTrieIndex(true)
 			listener.metrics.OOOFiles = 3
 			listener.metrics.OOOPhysicalBytes = 8192
+			listener.metrics.LockFiles = 4
 			switch name {
 			case "file-list cache":
 				flcPath := filepath.Join(dir, "file-list-cache")
@@ -123,19 +124,19 @@ func TestOutOfOrderGaugesPreserveLastScan(t *testing.T) {
 				}
 				u.publish(dir, nil)
 			}
-			assertOutOfOrderGauges(t, listener, 3, 8192)
+			assertSidecarGauges(t, listener, 3, 8192, 4)
 		})
 	}
 }
 
-func assertOutOfOrderGauges(t *testing.T, listener *CarbonserverListener, wantFiles, wantBytes uint64) {
+func assertSidecarGauges(t *testing.T, listener *CarbonserverListener, wantFiles, wantBytes, wantLocks uint64) {
 	t.Helper()
 	for _, counters := range []bool{false, true} {
 		listener.SetMetricsAsCounters(counters)
 		for range 2 {
 			stats := make(map[string]float64)
 			listener.Stat(func(metric string, value float64) { stats[metric] = value })
-			for metric, want := range map[string]uint64{"oooFiles": wantFiles, "oooPhysicalBytes": wantBytes} {
+			for metric, want := range map[string]uint64{"oooFiles": wantFiles, "oooPhysicalBytes": wantBytes, "lockFiles": wantLocks} {
 				if got, ok := stats[metric]; !ok || got != float64(want) {
 					t.Errorf("%s (counters=%t) = %v, present=%t; want %d", metric, counters, got, ok, want)
 				}
