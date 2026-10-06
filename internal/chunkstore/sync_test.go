@@ -164,25 +164,7 @@ func TestSyncPolicyCrashRecovery(t *testing.T) {
 					t.Fatalf("WAL syncs before interval = %d, want %d", got, wantSyncs)
 				}
 				if tt.wait {
-					time.Sleep(tt.interval - time.Nanosecond)
-					synctest.Wait()
-					if got := fs.syncs.Load(); got != before {
-						t.Fatalf("WAL synced before configured interval: %d", got)
-					}
-					time.Sleep(time.Nanosecond)
-					synctest.Wait()
-					if got := fs.syncs.Load(); got != before+1 {
-						t.Fatalf("periodic WAL syncs = %d, want %d", got, before+1)
-					}
-					time.Sleep(2 * tt.interval)
-					synctest.Wait()
-					if got := fs.syncs.Load(); got != before+1 {
-						t.Fatalf("idle store synced its WAL: %d", got)
-					}
-					// A later, unsynced update must not survive the simulated crash.
-					if err := s.UpdateMany(context.Background(), "sync", []Point{{Timestamp: int64(now), Value: 99}}); err != nil {
-						t.Fatal(err)
-					}
+					checkPeriodicSyncBoundary(t, s, fs, before, tt.interval, now)
 				}
 
 				// Discard all unsynced bytes, including any writes Pebble makes
@@ -209,6 +191,29 @@ func TestSyncPolicyCrashRecovery(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func checkPeriodicSyncBoundary(t *testing.T, s *Store, fs *walSyncFS, before int64, interval time.Duration, now int) {
+	t.Helper()
+	time.Sleep(interval - time.Nanosecond)
+	synctest.Wait()
+	if got := fs.syncs.Load(); got != before {
+		t.Fatalf("WAL synced before configured interval: %d", got)
+	}
+	time.Sleep(time.Nanosecond)
+	synctest.Wait()
+	if got := fs.syncs.Load(); got != before+1 {
+		t.Fatalf("periodic WAL syncs = %d, want %d", got, before+1)
+	}
+	time.Sleep(2 * interval)
+	synctest.Wait()
+	if got := fs.syncs.Load(); got != before+1 {
+		t.Fatalf("idle store synced its WAL: %d", got)
+	}
+	// A later, unsynced update must not survive the simulated crash.
+	if err := s.UpdateMany(context.Background(), "sync", []Point{{Timestamp: int64(now), Value: 99}}); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -76,17 +76,7 @@ func TestSharedAppPersistsReloadsAndReopens(t *testing.T) {
 	if err := app.ReloadConfig(); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Whisper.StoreSyncInterval = &Duration{0}
-	writeSharedConfig(t, path, cfg)
-	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
-		t.Fatalf("sync interval changed during reload: %v", err)
-	}
-	cfg.Whisper.StoreSyncInterval = &Duration{time.Second}
-	cfg.Whisper.StoreDir += "-changed"
-	writeSharedConfig(t, path, cfg)
-	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
-		t.Fatalf("storage changed during reload: %v", err)
-	}
+	checkSharedAppReloadRequiresRestart(t, app, path, cfg)
 	app.Stop()
 	if app.MetricStore != nil || app.Buckyd != nil || app.Carbonserver != nil {
 		t.Fatal("components retained after Stop")
@@ -102,6 +92,21 @@ func TestSharedAppPersistsReloadsAndReopens(t *testing.T) {
 	}
 	if _, err := os.Stat(cfg.Whisper.DataDir); !os.IsNotExist(err) {
 		t.Fatalf("file directory used by shared backend: %v", err)
+	}
+}
+
+func checkSharedAppReloadRequiresRestart(t *testing.T, app *App, path string, cfg *Config) {
+	t.Helper()
+	cfg.Whisper.StoreSyncInterval = &Duration{0}
+	writeSharedConfig(t, path, cfg)
+	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("sync interval changed during reload: %v", err)
+	}
+	cfg.Whisper.StoreSyncInterval = &Duration{time.Second}
+	cfg.Whisper.StoreDir += "-changed"
+	writeSharedConfig(t, path, cfg)
+	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("storage changed during reload: %v", err)
 	}
 }
 
