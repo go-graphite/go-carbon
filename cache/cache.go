@@ -29,7 +29,7 @@ const shardCount = 1 << 10 // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
 	maxSize           int64
-	xlog              io.Writer
+	xlog              func(*points.Points) error
 	tagsEnabled       bool
 	writeoutMinPoints int
 	writeoutMaxDelay  time.Duration
@@ -320,8 +320,27 @@ func (c *Cache) Size() int64 {
 func (c *Cache) DivertToXlog(w io.Writer) {
 	s := c.settings.Load().(*cacheSettings)
 	newSettings := *s
-	newSettings.xlog = w
+	newSettings.xlog = nil
+	if w != nil {
+		newSettings.xlog = func(p *points.Points) error { _, err := p.WriteTo(w); return err }
+	}
 	c.settings.Store(&newSettings)
+}
+
+// DivertToBinaryXlog writes complete binary records under one lock. Binary dump
+// readers in older releases already support this format when the file ends in .bin.
+func (c *Cache) DivertToBinaryXlog(w io.Writer) {
+	var mu sync.Mutex
+	var buf []byte
+	s := *c.settings.Load().(*cacheSettings)
+	s.xlog = func(p *points.Points) error {
+		mu.Lock()
+		defer mu.Unlock()
+		buf = p.AppendBinary(buf[:0])
+		_, err := w.Write(buf)
+		return err
+	}
+	c.settings.Store(&s)
 }
 
 // send metric to the new metrics channel
@@ -349,7 +368,7 @@ func (c *Cache) add(p *points.Points, restored bool) {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
-		p.WriteTo(s.xlog)
+		s.xlog(p)
 		return
 	}
 

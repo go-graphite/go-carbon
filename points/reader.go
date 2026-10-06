@@ -17,7 +17,16 @@ func ReadPlain(r io.Reader, callback func(*Points)) error {
 	reader := bufio.NewReaderSize(r, MB)
 
 	for {
-		line, err := reader.ReadBytes('\n')
+		line, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// Preserve support for lines larger than the reader buffer without
+			// allocating a second byte slice for every ordinary WAL record.
+			prefix := append([]byte(nil), line...)
+			var rest []byte
+			rest, err = reader.ReadBytes('\n')
+			prefix = append(prefix, rest...)
+			line = prefix
+		}
 
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
@@ -59,18 +68,27 @@ func ReadBinary(r io.Reader, callback func(*Points)) error {
 		flush()
 
 		l, err := binary.ReadVarint(reader)
-		if l > MB {
-			return fmt.Errorf("metric name too long: %d", l)
-		} else if err != nil {
+		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
 			return err
 		}
+		if l < 0 || l > MB {
+			return fmt.Errorf("invalid metric name length: %d", l)
+		}
 
-		io.ReadAtLeast(reader, buf[:l], int(l))
+		if _, err := io.ReadFull(reader, buf[:l]); err != nil {
+			return err
+		}
 
-		cnt, _ := binary.ReadVarint(reader)
+		cnt, err := binary.ReadVarint(reader)
+		if err != nil {
+			return err
+		}
+		if cnt < 0 {
+			return fmt.Errorf("invalid point count: %d", cnt)
+		}
 
 		var v, t, v0, t0 int64
 
@@ -88,7 +106,10 @@ func ReadBinary(r io.Reader, callback func(*Points)) error {
 			t += t0
 
 			if i == int64(0) {
-				p = OnePoint(string(buf[:l]), math.Float64frombits(uint64(v)), t)
+				// Bound eager allocation for damaged input; large valid batches can
+				// still grow. Keep partial-record recovery of complete points.
+				p = &Points{Metric: string(buf[:l]), Data: make([]Point, 0, min(cnt, 16384))}
+				p.Add(math.Float64frombits(uint64(v)), t)
 			} else {
 				p.Add(math.Float64frombits(uint64(v)), t)
 			}

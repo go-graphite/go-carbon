@@ -111,6 +111,22 @@ func (p *Points) WriteBinaryTo(w io.Writer) (n int, err error) {
 	return
 }
 
+// AppendBinary appends the dump format used by WriteBinaryTo to reusable storage.
+// The returned bytes are owned by dst and do not alias the metric or its points.
+func (p *Points) AppendBinary(dst []byte) []byte {
+	dst = binary.AppendVarint(dst, int64(len(p.Metric)))
+	dst = append(dst, p.Metric...)
+	dst = binary.AppendVarint(dst, int64(len(p.Data)))
+	var value, timestamp int64
+	for _, point := range p.Data {
+		next := int64(math.Float64bits(point.Value))
+		dst = binary.AppendVarint(dst, next-value)
+		dst = binary.AppendVarint(dst, point.Timestamp-timestamp)
+		value, timestamp = next, point.Timestamp
+	}
+	return dst
+}
+
 // ParseText parse text protocol Point
 //
 //	host.Point.value 42 1422641531\n

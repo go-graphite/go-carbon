@@ -63,7 +63,7 @@ func (app *App) DumpStop() error {
 
 	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s.bin", filenamePostfix))
-	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s", filenamePostfix))
+	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s.bin", filenamePostfix))
 
 	// start dumpers
 	logger.Info("start cache dump", zap.String("filename", dumpFilename))
@@ -81,9 +81,9 @@ func (app *App) DumpStop() error {
 	if err != nil {
 		return err
 	}
-	xlogWriter := &SyncWriter{w: bufio.NewWriterSize(xlog, 4096)} // 4kb
+	xlogWriter := &SyncWriter{w: bufio.NewWriterSize(xlog, 4096)}
 
-	app.Cache.DivertToXlog(xlogWriter)
+	app.Cache.DivertToBinaryXlog(xlogWriter)
 
 	// stop cache
 	dumpStart := time.Now()
