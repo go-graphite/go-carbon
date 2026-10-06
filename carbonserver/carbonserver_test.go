@@ -246,16 +246,7 @@ func TestFetchDataReadBytesMetricIncrement(t *testing.T) {
 	}
 	defer generalFetchSingleMetricRemove(test) // remove metrics later
 	var trieNodes []*trieNode
-	trieNodes = append(trieNodes, &trieNode{ // readBytes update will go here
-		childrens: emptyTrieNodes,
-		gen:       0,
-		meta: &fileMeta{
-			logicalSize:  0,
-			physicalSize: 0,
-			dataPoints:   0,
-			firstSeenAt:  0,
-		},
-	})
+	trieNodes = append(trieNodes, newFileNode(0, 0, 0, 0, 0)) // readBytes update will go here
 	metrics, err := carbonserver.fetchData(test.name, "", []string{test.name}, []bool{true}, trieNodes, int32(test.from), int32(test.until))
 	if err != nil {
 		t.Fatal(err)
@@ -263,7 +254,7 @@ func TestFetchDataReadBytesMetricIncrement(t *testing.T) {
 	if len(metrics) != 1 || len(metrics[0].Values) != 5 {
 		t.Errorf("wrong number of metrics returned: should be 1 metric with 5 data points")
 	}
-	fm := trieNodes[0].meta.(*fileMeta)
+	fm := trieNodes[0].meta.Load().(*fileMeta)
 	if fm.readBytes != 5*12 { // 5 points * 12 bytes for each point
 		t.Errorf("Wrong number of read bytes, %d instead of 5*12 bytes", fm.readBytes)
 	}

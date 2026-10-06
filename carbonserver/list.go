@@ -174,7 +174,7 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 		if isFiles[i] {
 			result.Count += 1
 
-			if meta, ok := nodes[i].meta.(*fileMeta); ok && meta != nil {
+			if meta, ok := nodes[i].meta.Load().(*fileMeta); ok && meta != nil {
 				result.PhysicalSize += meta.physicalSize
 				result.LogicalSize += meta.logicalSize
 
@@ -202,8 +202,8 @@ func (listener *CarbonserverListener) queryMetricsList(query string, limit int, 
 		for i := 0; i < len(pmetrics) && len(result.Metrics) < limit; i++ {
 			result.Metrics = append(result.Metrics, ListMetricInfo{
 				Name:         pmetrics[i],
-				PhysicalSize: pnodes[i].meta.(*fileMeta).physicalSize,
-				LogicalSize:  pnodes[i].meta.(*fileMeta).logicalSize,
+				PhysicalSize: pnodes[i].meta.Load().(*fileMeta).physicalSize,
+				LogicalSize:  pnodes[i].meta.Load().(*fileMeta).logicalSize,
 			})
 		}
 	}
