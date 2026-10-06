@@ -1,17 +1,24 @@
 # Saved read indexes
 
 With `trie-index`, `concurrent-index`, and file-list-cache version 2 enabled,
-carbonserver builds an additional saved index during complete filesystem scans.
-The first scan without a usable cache still publishes the normal trie as soon as
-it is complete. Subsequent scans write the accelerator while that index serves
-requests. No additional configuration is required.
+carbonserver uses an additional saved index. If the accelerator is missing but a
+complete, ordered version-2 file list exists, startup builds the compact index
+directly from that catalogue without reconstructing the large heap trie. This
+one-time bootstrap takes longer than opening a prepared generation. It avoids
+waiting for a filesystem scan interrupted by legacy full-tree quota accounting.
+
+Without a usable saved catalogue, the first filesystem scan still publishes the
+normal trie as soon as it is complete. Subsequent complete scans write and install
+the accelerator while reads remain available. No additional configuration is
+required.
 
 The accelerator consists of an immutable finite-state transducer (FST), packed
 file metadata, and an atomically published manifest next to the existing file
 list cache. The manifest binds both files to their checksums, format version,
 data-root identity, and source cache generation. A missing, damaged, incompatible,
-or stale accelerator falls back to loading the ordinary file list cache. That
-cache remains compatible with older binaries.
+or stale accelerator is rebuilt from a supported saved catalogue. An unordered
+or older cache, failed bootstrap, or unavailable accelerator storage uses the
+ordinary trie loader. The cache remains compatible with older binaries.
 
 On a restart with a valid accelerator, carbonserver maps and validates the saved
 files instead of reconstructing a heap node graph for every metric. Initial
@@ -65,7 +72,7 @@ A missing, corrupt, incompatible or mismatched checkpoint uses ordinary ordered
 restore before reads open. Extra dump generations also force that fallback.
 Tagged input and other storage modes keep their existing startup path. There is
 no additional configuration switch. The accelerator becomes usable after a
-complete background snapshot and a subsequent graceful stop; it does not make
+complete saved index and a subsequent graceful stop; it does not make
 an uncached first boot instantaneous or eliminate the process handoff gap.
 
 For an opt-in offline test, `TestCapturedIndexSnapshot` reads the cache selected

@@ -1220,7 +1220,15 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 	}
 	if u.listener.concurrentIndex {
 		started := time.Now()
-		if snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData); err == nil {
+		snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData)
+		if err != nil {
+			// This one-time bootstrap uses the existing saved catalogue. Waiting
+			// for a filesystem scan can starve behind repeated quota traversals
+			// of a very large legacy trie before the first accelerator exists.
+			u.logger.Info("building compact index from saved file list")
+			snapshot, err = buildSnapshotFromCache(u.listener.fileListCache, u.listener.whisperData, u.listener.exitChan)
+		}
+		if err == nil {
 			u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
 			u.trieIdx.snapshot = snapshot
 			if err := u.trieIdx.loadSnapshotOverlay(u.listener.fileListCache); err != nil && !os.IsNotExist(err) {

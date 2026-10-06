@@ -223,6 +223,8 @@ func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
 	if err := os.WriteFile(snapshotManifestPath(cache), []byte("invalid"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// Older cache versions cannot build the accelerator and still use the trie.
+	rewriteCacheVersion(t, cache, FLCVersion1)
 	fallback := NewCarbonserverListener(nil)
 	fallback.SetWhisperData(root)
 	fallback.SetTrieIndex(true)

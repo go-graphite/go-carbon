@@ -100,8 +100,8 @@ func TestIndexSnapshotWrittenByCompleteReconciliation(t *testing.T) {
 	if !l.updateFileList(l.whisperData, nil, nil) {
 		t.Fatal("expected the legacy cache to warm the index")
 	}
-	if _, err := os.Stat(snapshotManifestPath(l.fileListCache)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatal("cache warmup must not rebuild a snapshot", err)
+	if _, err := os.Stat(snapshotManifestPath(l.fileListCache)); err != nil {
+		t.Fatal("saved catalogue did not bootstrap a compact index", err)
 	}
 	if l.updateFileList(l.whisperData, nil, nil) {
 		t.Fatal("expected filesystem reconciliation")

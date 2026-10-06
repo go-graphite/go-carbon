@@ -94,6 +94,7 @@ type indexSnapshotWriter struct {
 	key, previous           []byte
 	closed                  bool
 	failed                  error
+	expectedSource          *snapshotSource
 }
 
 func newIndexSnapshotWriter(fileListCache, root string) (_ *indexSnapshotWriter, err error) {
@@ -202,6 +203,9 @@ func (w *indexSnapshotWriter) finish() (err error) {
 	w.manifest.Source, err = snapshotSourceIdentity(w.fileListCache)
 	if err != nil {
 		return err
+	}
+	if w.expectedSource != nil && w.manifest.Source != *w.expectedSource {
+		return fmt.Errorf("file list cache changed during snapshot bootstrap")
 	}
 	if err = w.builder.Close(); err != nil {
 		return err
@@ -450,4 +454,50 @@ func (s *indexSnapshot) lookup(path string) (*FLCEntry, bool, error) {
 		return nil, false, err
 	}
 	return &FLCEntry{Path: path, LogicalSize: values[0], PhysicalSize: values[1], DataPoints: values[2], FirstSeenAt: values[3]}, true, nil
+}
+
+// buildSnapshotFromCache bootstraps a compact generation from the same complete
+// saved catalogue the legacy loader would publish. It does not wait for another
+// filesystem walk or construct a heap node for every metric. A legacy unordered
+// cache, unsupported format, cancellation, or write failure keeps the trie path.
+func buildSnapshotFromCache(cache, root string, stop <-chan struct{}) (*indexSnapshot, error) {
+	source, err := snapshotSourceIdentity(cache)
+	if err != nil {
+		return nil, err
+	}
+	reader, err := NewFileListCache(cache, FLCVersionUnspecified, 'r')
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	if reader.GetVersion() != FLCVersion2 {
+		return nil, fmt.Errorf("snapshot bootstrap requires file list cache v2")
+	}
+	writer, err := newIndexSnapshotWriter(cache, root)
+	if err != nil {
+		return nil, err
+	}
+	writer.expectedSource = &source
+	defer writer.abort()
+	for {
+		select {
+		case <-stop:
+			return nil, fmt.Errorf("snapshot bootstrap stopped")
+		default:
+		}
+		entry, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err = writer.append(entry); err != nil {
+			return nil, err
+		}
+	}
+	if err = writer.finish(); err != nil {
+		return nil, err
+	}
+	return openIndexSnapshot(cache, root)
 }

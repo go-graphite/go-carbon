@@ -118,6 +118,7 @@ func TestSnapshotOverlayRejectsCorruptOrStaleCheckpoint(t *testing.T) {
 
 func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
 	l := savedIndex(t, "existing.metric")
+	rewriteCacheVersion(t, l.fileListCache, FLCVersion1)
 	l.updateFileList(l.whisperData, nil, nil)
 	previous := l.CurrentFileIndex()
 	u := newFileListUpdate(l, nil)
