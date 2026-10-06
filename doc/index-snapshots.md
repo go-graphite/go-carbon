@@ -50,8 +50,10 @@ future restarts do not need to release the original large node graph at exit.
 For compressed Whisper with untagged input, graceful shutdown saves a small
 index overlay plus a pointer-free lookup table over the ordinary cache and input
 `.bin` files. The point manifest binds these files to the exact saved read-index
-generation, data-root identity, sizes and checksums. Shutdown stops index workers
-and persistence, diverts input, dumps the stable cache, and waits for input cleanup.
+generation, data-root identity, sizes and checksums. Shutdown stops index workers while persistence remains active, then stops
+persistence, diverts input, dumps the stable cache, and waits for input cleanup.
+Catalogue membership classification runs only after both source files have been
+closed and synchronized; optional checkpoint work cannot delay their durable save.
 Read listeners remain available until the durable checkpoint is complete.
 
 On the next start, go-carbon validates/maps both checkpoints in parallel, installs

@@ -1,10 +1,12 @@
 package recovery
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -101,5 +103,49 @@ func TestWriterProducesLegacyAndIndexedRecovery(t *testing.T) {
 	}
 	if err = wal.WritePoints(points.OnePoint("after-close", 1, 1)); !errors.Is(err, os.ErrClosed) {
 		t.Fatal("write after close", err)
+	}
+}
+
+// Optional catalogue work must never delay the authoritative legacy files.
+func TestCheckpointClassificationAfterDurableSources(t *testing.T) {
+	dir := t.TempDir()
+	closed := false
+	calls := 0
+	builder := NewBuilder(func(string) bool {
+		calls++
+		if !closed {
+			t.Fatal("catalogue lookup before durable dump completion")
+		}
+		return false
+	})
+	p := points.OnePoint("new.metric", 42, 100)
+	writer, err := NewWriter(filepath.Join(dir, "cache.1.2.bin"), 0, 4096, builder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = writer.WritePoints(p); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writer.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed = true
+	data, err := os.ReadFile(filepath.Join(dir, file.Name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []*points.Points
+	if err = points.ReadBinary(bytes.NewReader(data), func(p *points.Points) { got = append(got, p) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || !reflect.DeepEqual(got[0], p) {
+		t.Fatalf("legacy source differs: %v", got)
+	}
+	if _, err = WriteIndex(dir, builder); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("catalogue calls: %d", calls)
 	}
 }

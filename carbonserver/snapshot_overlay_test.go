@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +152,24 @@ func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
 	next := overlayListener(t, l.fileListCache, l.whisperData)
 	if next.RecoveryIndexID() != id || !next.MetricExists("during.scan") {
 		t.Fatal("checkpoint differs from durable base")
+	}
+}
+
+func TestSavedMetricLookupUsesCapturedBase(t *testing.T) {
+	cache, root, entries := snapshotFixture(t)
+	listener := overlayListener(t, cache, root)
+	lookup := listener.SavedMetricLookup()
+	for _, entry := range entries {
+		name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(entry.Path, "/"), ".wsp"), "/", ".")
+		if !lookup(name) {
+			t.Fatalf("missing saved metric %q", name)
+		}
+		if lookup(name + ".absent") {
+			t.Fatalf("unknown metric accepted %q", name)
+		}
+	}
+	listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "overlay.new")
+	if lookup("overlay.new") {
+		t.Fatal("mutable overlay incorrectly classified as saved base")
 	}
 }

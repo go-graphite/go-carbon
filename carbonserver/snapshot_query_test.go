@@ -166,3 +166,26 @@ func TestSnapshotGeneratedGlobParity(t *testing.T) {
 		}
 	}
 }
+
+func TestSnapshotNamespaceExistsMatchesFiles(t *testing.T) {
+	cache, root, entries := snapshotFixture(t)
+	s, err := openIndexSnapshot(cache, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	cases := []string{"/", "", "a", "a-sibling", "a0", "a.value", "b", "b.child", "空间", "空间.值", "missing", "z", "a-siblin", "b.child.more"}
+	for _, name := range cases {
+		prefix := "/" + strings.ReplaceAll(name, ".", "/") + "/"
+		if name == "/" || name == "" {
+			prefix = "/"
+		}
+		want := false
+		for _, entry := range entries {
+			want = want || strings.HasPrefix(entry.Path, prefix)
+		}
+		if got := s.namespaceExists(name); got != want {
+			t.Fatalf("namespace %q: got %v want %v", name, got, want)
+		}
+	}
+}

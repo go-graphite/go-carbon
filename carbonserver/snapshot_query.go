@@ -280,6 +280,21 @@ func (s *indexSnapshot) query(expr string, limit int, expand func([]string) ([]s
 	return names, leaves, nodes, lookups, err
 }
 
+// namespaceExists follows the prefix itself, without seeking a successor key.
+// Quota accounting only needs membership here; two ordered range searches per
+// mutable namespace can dominate shutdown on a large saved catalogue.
+func (s *indexSnapshot) namespaceExists(name string) bool {
+	defer runtime.KeepAlive(s)
+	state := s.index.Start()
+	for _, b := range snapshotNamespacePrefix(name) {
+		state = s.index.Accept(state, b)
+		if !s.index.CanMatch(state) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *indexSnapshot) lowerBound(key []byte) (uint64, error) {
 	defer runtime.KeepAlive(s)
 	i, err := s.index.Iterator(key, nil)

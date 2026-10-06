@@ -25,7 +25,6 @@ const (
 
 type heads struct {
 	cache, wal, count uint64
-	unknown           bool
 }
 type record struct{ offset, length, previous uint64 }
 
@@ -53,9 +52,6 @@ func (b *Builder) Add(file int, p *points.Points, size int) error {
 		return fmt.Errorf("invalid recovery record")
 	}
 	h := b.heads[p.Metric]
-	if h.count == 0 && b.known != nil {
-		h.unknown = !b.known(p.Metric)
-	}
 	previous := h.cache
 	if file == 1 {
 		previous = h.wal
@@ -105,7 +101,10 @@ func (b *Builder) Write(w io.Writer) error {
 			slot = (slot + 1) & (slots - 1)
 		}
 		put64(table[slot*slotSize:], hash, h.cache, h.wal, h.count)
-		if h.unknown {
+		// Classifying names is optional checkpoint work. Do it only after the
+		// ordinary cache and WAL files are complete and synchronized, so a slow
+		// catalogue lookup cannot delay the authoritative recovery dump.
+		if b.known != nil && !b.known(name) {
 			newSlots = append(newSlots, slot)
 		}
 	}

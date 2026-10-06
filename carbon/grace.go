@@ -53,6 +53,12 @@ func (app *App) DumpStop() error {
 	}
 	_ = app.Cache.SetWriteoutBatching(0, 0)
 
+	// Keep persistence and reads running while the index worker finishes. In
+	// particular, quota accounting must not leave incoming points accumulating
+	// without either persistence or WAL diversion.
+	if app.Carbonserver != nil {
+		app.Carbonserver.PauseIndexUpdates()
+	}
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
@@ -74,9 +80,8 @@ func (app *App) DumpStop() error {
 	// mutable overlay is checkpointed after all input notifications have drained.
 	var builder *recovery.Builder
 	if cs := app.Carbonserver; cs != nil {
-		cs.PauseIndexUpdates()
 		if cs.HasMappedIndex() && app.pendingReadsCompatible() {
-			builder = recovery.NewBuilder(cs.SavedMetricExists)
+			builder = recovery.NewBuilder(cs.SavedMetricLookup())
 		}
 	}
 	dump, err := recovery.NewWriter(dumpFilename, 0, 1<<20, builder)

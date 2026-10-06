@@ -198,3 +198,98 @@ func TestCapturedIndexSnapshotOpen(t *testing.T) {
 	}
 	t.Logf("index_publication records=%d quotas=%d seconds=%.6f allocated_bytes=%d heap_bytes=%d", index.trieIdx.snapshot.manifest.Records, len(index.trieIdx.quotaNodes), elapsed.Seconds(), after.TotalAlloc-before.TotalAlloc, after.HeapAlloc)
 }
+
+// Benchmark captured names rather than short synthetic keys. Both paths must
+// agree before comparing membership cost at a real catalogue size.
+func BenchmarkCapturedSnapshotMembership(b *testing.B) {
+	dir := os.Getenv("GO_CARBON_SNAPSHOT_DIR")
+	if dir == "" {
+		b.Skip("set prepared snapshot directory")
+	}
+	cache, root := filepath.Join(dir, "files.gzip"), filepath.Join(dir, "data-root")
+	s, err := openIndexSnapshot(cache, root)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer s.close()
+	listener := NewCarbonserverListener(nil)
+	ti := newTrie(".wsp", 0, nil)
+	ti.snapshot = s
+	listener.UpdateFileIndex(&fileIndex{trieIdx: ti})
+	lookup := listener.SavedMetricLookup()
+	reader, err := NewFileListCache(cache, FLCVersionUnspecified, 'r')
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer reader.Close()
+	var names []string
+	var namespaces []string
+	seen := make(map[string]bool)
+	for n := 0; n < 1000000; n++ {
+		e, err := reader.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			b.Fatal(err)
+		}
+		if n%127 != 0 {
+			continue
+		}
+		name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(e.Path, "/"), ".wsp"), "/", ".")
+		if !lookup(name) {
+			b.Fatalf("missing %q", name)
+		}
+		names = append(names, name)
+		metricNamespaces(name, func(prefix string) {
+			if !seen[prefix] {
+				seen[prefix] = true
+				namespaces = append(namespaces, prefix)
+			}
+		})
+	}
+	if len(names) == 0 {
+		b.Fatal("empty fixture")
+	}
+	for _, prefix := range namespaces {
+		start, end, err := s.namespaceRange(prefix)
+		if err != nil || s.namespaceExists(prefix) != (start != end) {
+			b.Fatalf("namespace differs %q: %v", prefix, err)
+		}
+	}
+	b.Run("metric-before", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			name := names[i%len(names)]
+			_, found, err := s.lookup("/" + strings.ReplaceAll(name, ".", "/") + ".wsp")
+			if err != nil || !found {
+				b.Fatal(name, err)
+			}
+		}
+	})
+	b.Run("metric-reader", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if !lookup(names[i%len(names)]) {
+				b.Fatal("missing")
+			}
+		}
+	})
+	b.Run("namespace-range", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			start, end, err := s.namespaceRange(namespaces[i%len(namespaces)])
+			if err != nil || start == end {
+				b.Fatal("missing", err)
+			}
+		}
+	})
+	b.Run("namespace-prefix", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if !s.namespaceExists(namespaces[i%len(namespaces)]) {
+				b.Fatal("missing")
+			}
+		}
+	})
+}

@@ -246,8 +246,7 @@ func (ti *trieIndex) overlayUsage() (map[string]QuotaUsage, map[string][2]int64,
 	}
 	extraDirs := 0
 	for name := range dirs {
-		start, end, err := ti.snapshot.namespaceRange(name)
-		if err != nil || start != end {
+		if ti.snapshot.namespaceExists(name) {
 			continue
 		}
 		parent := "/"

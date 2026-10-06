@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 )
@@ -206,16 +207,34 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	return overlayIdentity(m), nil
 }
 
-// SavedMetricExists is used while writing a pending-point checkpoint to record
-// only names absent from the immutable base. The small mutable overlay is saved
-// separately by CheckpointReadIndex.
-func (l *CarbonserverListener) SavedMetricExists(metric string) bool {
+// SavedMetricLookup captures one immutable generation for serialized checkpoint
+// construction. The returned function owns its reusable reader and key buffer
+// and must be called serially. It does not decode unrelated file metadata.
+func (l *CarbonserverListener) SavedMetricLookup() func(string) bool {
 	index := l.CurrentFileIndex()
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
-		return false
+		return func(string) bool { return false }
 	}
-	_, found, err := index.trieIdx.snapshot.lookup("/" + strings.ReplaceAll(metric, ".", "/") + ".wsp")
-	return err == nil && found
+	snapshot := index.trieIdx.snapshot
+	reader, err := snapshot.index.Reader()
+	if err != nil {
+		return func(string) bool { return false }
+	}
+	key := make([]byte, 0, 256)
+	return func(metric string) bool {
+		defer runtime.KeepAlive(snapshot)
+		key = append(key[:0], 0)
+		for i := 0; i < len(metric); i++ {
+			b := metric[i]
+			if b == '.' {
+				b = 0
+			}
+			key = append(key, b)
+		}
+		key = append(key, ".wsp"...)
+		_, found, err := reader.Get(key)
+		return err == nil && found
+	}
 }
 func (l *CarbonserverListener) HasMappedIndex() bool {
 	index := l.CurrentFileIndex()
