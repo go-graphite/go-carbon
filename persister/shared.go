@@ -44,8 +44,8 @@ func (p *Whisper) storeShared(metric string) {
 		}
 		return
 	}
-	// The store returns only after its WAL sync; unconfirmed cache points may
-	// be released now without weakening the persister durability boundary.
+	// Periodic-sync stores can confirm updates before the next WAL sync.
+	// Confirmed points are then subject to the configured crash-loss window.
 	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
 	atomic.AddUint32(&p.updateOperations, 1)
 	if p.confirm != nil {

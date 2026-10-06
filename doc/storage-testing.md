@@ -121,10 +121,12 @@ blocks or peak disk use**. Store memory limits are fixed at an 8 MiB cache and
 4 MiB memtable. Engine logs are captured during benchmarks so output remains
 parseable by benchstat, and printed if a benchmark fails.
 
-**Durability is different:** Pebble commits sync the WAL; file backends use their
-normal unsynced write/close path. These compare current application behavior,
-not equal power-loss guarantees. Explicit final compaction is outside the write
-timer (ordinary Pebble background work still runs); use the maintenance benchmark
+**Durability is different:** The harness uses synchronous Pebble WAL commits
+(`SyncInterval: 0`, equivalent to `whisper.store-sync-interval = "0s"`); file
+backends use their normal unsynced write/close path. The application defaults to
+a one-second WAL sync interval. These are not equal power-loss guarantees.
+Explicit final compaction is outside the write timer (ordinary Pebble background
+work still runs); use the maintenance benchmark
 and an intended compaction cadence to account for that cost. Fixed operation
 counts help compare the same number of submitted points. No timing threshold is
 enforced in CI.

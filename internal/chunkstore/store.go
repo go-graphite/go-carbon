@@ -29,14 +29,22 @@ const formatMarker = "go-carbon-chunks-v1\n"
 type Options struct {
 	CacheSize    int64
 	MemTableSize uint64
+	// SyncInterval controls WAL syncing for successful store mutations. Zero
+	// syncs each mutation; a positive interval permits loss of mutations since
+	// the last sync.
+	SyncInterval time.Duration
 	Now          func() time.Time
 	fs           vfs.FS // Fault-injection tests use the same storage path as production.
 }
 
 type Store struct {
-	db    *pebble.DB
-	cache *pebble.Cache
-	now   func() time.Time
+	db           *pebble.DB
+	cache        *pebble.Cache
+	now          func() time.Time
+	writeOptions *pebble.WriteOptions
+	pendingSync  atomic.Bool
+	syncStop     chan struct{}
+	syncDone     chan struct{}
 	// mu serializes metric ID allocation from the catalog sequence. Everything
 	// else that touches one metric is covered by its metricMu stripe.
 	mu               sync.Mutex
@@ -50,6 +58,9 @@ type Store struct {
 func Open(dir string, options Options) (*Store, error) {
 	if dir == "" {
 		return nil, errors.New("store directory is empty")
+	}
+	if options.SyncInterval < 0 {
+		return nil, errors.New("store sync interval must be non-negative")
 	}
 	fs := options.fs
 	if fs == nil {
@@ -65,7 +76,7 @@ func Open(dir string, options Options) (*Store, error) {
 		options.MemTableSize = 64 << 20
 	}
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Merger: chunkMerger, FS: fs}
-	s := &Store{now: options.Now}
+	s := &Store{now: options.Now, writeOptions: pebble.Sync}
 	if options.CacheSize > 0 {
 		s.cache = pebble.NewCache(options.CacheSize)
 		opts.Cache = s.cache
@@ -78,7 +89,36 @@ func Open(dir string, options Options) (*Store, error) {
 		return nil, fmt.Errorf("open chunk store: %w", err)
 	}
 	s.db = db
+	if options.SyncInterval > 0 {
+		s.writeOptions = pebble.NoSync
+		s.syncStop = make(chan struct{})
+		s.syncDone = make(chan struct{})
+		go s.syncLoop(options.SyncInterval)
+	}
 	return s, nil
+}
+
+func (s *Store) syncLoop(interval time.Duration) {
+	defer close(s.syncDone)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.syncStop:
+			return
+		case <-ticker.C:
+			if !s.pendingSync.Swap(false) {
+				continue
+			}
+			// LogData flushes Pebble's userspace WAL buffer and syncs all prior
+			// records, without forcing a memtable flush or growing an idle WAL.
+			if err := s.db.LogData(nil, pebble.Sync); err != nil {
+				// Pebble already fails fatally on WAL I/O errors. Do not continue
+				// accepting mutations if another sync error is ever returned.
+				panic(fmt.Errorf("periodic store WAL sync: %w", err))
+			}
+		}
+	}
 }
 
 func checkFormat(fs vfs.FS, dir string) error {
@@ -149,6 +189,12 @@ func createFormatMarker(fs vfs.FS, dir string) error {
 }
 
 func (s *Store) Close() error {
+	if s.syncStop != nil {
+		close(s.syncStop)
+		<-s.syncDone
+	}
+	// Writers must be stopped before Close. Pebble flushes and syncs the WAL
+	// on close, including mutations made after the final periodic sync.
 	err := s.db.Close()
 	if s.cache != nil {
 		s.cache.Unref()
@@ -182,6 +228,17 @@ func (s *Store) lockMetric(name string) func() {
 	mu.Lock()
 	return mu.Unlock
 }
+
+func (s *Store) commit(batch *pebble.Batch) error {
+	if err := batch.Commit(s.writeOptions); err != nil {
+		return err
+	}
+	if !s.writeOptions.Sync {
+		s.pendingSync.Store(true)
+	}
+	return nil
+}
+
 func catalogKey(name string) []byte { return append([]byte("m/"), name...) }
 func sequenceKey() []byte           { return []byte("z/sequence") }
 func uint64Bytes(v uint64) []byte   { b := make([]byte, 8); binary.BigEndian.PutUint64(b, v); return b }
@@ -237,8 +294,8 @@ func (s *Store) Create(ctx context.Context, config MetricConfig) (Metadata, erro
 			return Metadata{}, err
 		}
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return Metadata{}, fmt.Errorf("sync create: %w", err)
+	if err := s.commit(b); err != nil {
+		return Metadata{}, fmt.Errorf("commit create: %w", err)
 	}
 	return m, nil
 }

@@ -125,8 +125,8 @@ func (s *Store) commitUpdate(b *pebble.Batch, w *chunkWriter, m Metadata) error 
 	if err := b.Set(revisionKey(m), uint64Bytes(m.Revision+1), nil); err != nil {
 		return err
 	}
-	if err := b.Commit(pebble.Sync); err != nil {
-		return fmt.Errorf("sync update %s: %w", m.Name, err)
+	if err := s.commit(b); err != nil {
+		return fmt.Errorf("commit update %s: %w", m.Name, err)
 	}
 	s.materializations.Add(w.materialized)
 	s.operands.Add(w.operands)

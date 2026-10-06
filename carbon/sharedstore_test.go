@@ -76,11 +76,7 @@ func TestSharedAppPersistsReloadsAndReopens(t *testing.T) {
 	if err := app.ReloadConfig(); err != nil {
 		t.Fatal(err)
 	}
-	cfg.Whisper.StoreDir += "-changed"
-	writeSharedConfig(t, path, cfg)
-	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
-		t.Fatalf("storage changed during reload: %v", err)
-	}
+	checkSharedAppReloadRequiresRestart(t, app, path, cfg)
 	app.Stop()
 	if app.MetricStore != nil || app.Buckyd != nil || app.Carbonserver != nil {
 		t.Fatal("components retained after Stop")
@@ -96,6 +92,21 @@ func TestSharedAppPersistsReloadsAndReopens(t *testing.T) {
 	}
 	if _, err := os.Stat(cfg.Whisper.DataDir); !os.IsNotExist(err) {
 		t.Fatalf("file directory used by shared backend: %v", err)
+	}
+}
+
+func checkSharedAppReloadRequiresRestart(t *testing.T, app *App, path string, cfg *Config) {
+	t.Helper()
+	cfg.Whisper.StoreSyncInterval = &Duration{0}
+	writeSharedConfig(t, path, cfg)
+	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("sync interval changed during reload: %v", err)
+	}
+	cfg.Whisper.StoreSyncInterval = &Duration{time.Second}
+	cfg.Whisper.StoreDir += "-changed"
+	writeSharedConfig(t, path, cfg)
+	if err := app.ReloadConfig(); err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("storage changed during reload: %v", err)
 	}
 }
 
@@ -137,6 +148,7 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"migration", func(c *Config) { c.Whisper.OnlineMigration = true }},
 		{"physical quota", func(c *Config) { c.Whisper.Quotas = persister.WhisperQuotas{{PhysicalSize: 1}} }},
 		{"small memtable", func(c *Config) { c.Whisper.StoreMemTableSize = 1 }},
+		{"negative sync interval", func(c *Config) { c.Whisper.StoreSyncInterval = &Duration{-time.Second} }},
 		{"file buckyd", func(c *Config) { c.Whisper.StorageBackend = "files" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -150,6 +162,35 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 			}
 			if tt.name == "legacy pebble" && !strings.Contains(err.Error(), "migrate legacy data through buckyd") {
 				t.Fatalf("legacy backend guidance = %v", err)
+			}
+		})
+	}
+}
+
+func TestSharedStorageSyncIntervalConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want time.Duration
+	}{
+		{name: "default", want: time.Second},
+		{name: "synchronous", text: `store-sync-interval = "0s"`},
+		{name: "custom", text: `store-sync-interval = "250ms"`, want: 250 * time.Millisecond},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "carbon.conf")
+			if err := os.WriteFile(path, []byte("[whisper]\nstorage-backend = \"pebble-chunk\"\n"+tt.text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := ReadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateStorageConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Whisper.StoreSyncInterval.Value(); got != tt.want {
+				t.Fatalf("sync interval = %v, want %v", got, tt.want)
 			}
 		})
 	}

@@ -17,6 +17,7 @@ storage-backend = "pebble-chunk"
 store-dir = "/var/lib/graphite/shared"
 store-cache-size = 268435456
 store-memtable-size = 67108864
+store-sync-interval = "1s"
 # Existing schemas-file, aggregation-file and worker settings still apply.
 
 [buckyd]
@@ -37,25 +38,38 @@ cache budget needs headroom beyond active memtables for block-cache reads. It
 does not limit the process RSS.
 
 The process must be able to write the store and temporary directories. An empty
-`store-dir` selects `whisper.data-dir + "/.store-chunks"`. Backend, store memory/path
-and buckyd settings require restart; ordinary schema changes apply to new
-metrics. Existing policies are preserved. Online policy migration is rejected.
+`store-dir` selects `whisper.data-dir + "/.store-chunks"`. Backend, store memory,
+path, sync interval and buckyd settings require restart; ordinary schema changes
+apply to new metrics. Existing policies are preserved. Online policy migration
+is rejected.
 
 Writes may arrive out of order; archive updates use the shared WAL and require
-no per-metric sidecars. The persister confirms a cache batch only after a synced
-store commit and requeues failed writes. This durability boundary starts at
-persistence, not at receiver acknowledgement of an in-memory cache write.
+no per-metric sidecars. `store-sync-interval` defaults to `"1s"`: mutations
+return before WAL sync, and a background worker syncs pending mutations once per
+interval. The same policy applies to point updates, metric creation/deletion,
+and buckyd imports, replacements and fills. A process or machine crash can lose
+mutations since the last successful sync, including points already confirmed
+out of the cache and acknowledged transfers or deletions. Sync delays can
+extend that loss window. Idle stores do not issue periodic WAL syncs. Graceful
+store shutdown syncs remaining mutations.
+
+Set `store-sync-interval = "0s"` to wait for WAL sync on every mutation, including
+buckyd operations. Use this setting when migration requires durable
+acknowledgements. Negative intervals are rejected. Failed point writes are
+requeued. Receiver acknowledgement still precedes persistence of an in-memory
+cache write.
 
 Carbonserver builds trie/trigram indexes from the catalog and uses shared-store
 reads for render/info. The normal periodic scan discovers newly persisted
 metrics; realtime/cache discovery options retain their existing behavior.
 Transfer mutations schedule a catalog refresh at most once every 30 seconds;
-the normal `scan-frequency` remains active. Imports complete after the store
-commit, and the transfer temporary file is then removed. New metrics may take
-up to the next batched scan to appear in find/glob results. Shared mode
-bypasses response caches so deletion and replacement cannot leave cached
-results from an earlier generation. This affects performance and should be
-measured on representative workloads before rollout.
+the normal `scan-frequency` remains active. Imports complete after a store
+commit using the configured sync policy, and the transfer temporary file is
+then removed. New metrics may take up to the next batched scan to appear in
+find/glob results. Shared mode bypasses response caches so deletion and
+replacement cannot leave cached results from an earlier generation. This
+affects performance and should be measured on representative workloads before
+rollout.
 
 Metric count, data-point and logical-size quotas use classic Whisper capacity,
 including headers. Namespace physical-size quotas are rejected: compressed
@@ -149,7 +163,7 @@ Keys identify the metric, generation, archive and chunk; the number of live slot
 is bounded by the configured retentions.
 
 Updates preserve classic Whisper routing, correction order, aggregation and
-XFF behavior. Fine points and synchronous rollups commit in one synced Pebble
+XFF behavior. Fine points and their rollups commit in one atomic Pebble
 batch. Merge operands use last-mutation precedence, including when an older
 timestamp overwrites a circular slot. The format permits fewer than 32 pending
 operands; the engine writes a full chunk after four mutations to
@@ -173,15 +187,19 @@ legacy or unknown nonempty directory is rejected before opening Pebble. A
 migration must use separate stores and buckyd; there is no in-place conversion.
 New store directories, their newly created ancestors and the marker are synced.
 Pebble v1.1.5 terminates the process on WAL-sync failure. The test suite checks
-this fail-stop behavior and recovery of previously acknowledged writes.
+this fail-stop behavior for synchronous and periodic sync, plus recovery of
+previously synced writes. Periodic-sync tests also discard unsynced filesystem
+state to verify the loss window and the final sync on graceful shutdown.
 
 ## Qualification gate
 
 For matched work, CPU per committed input point must be at most 1.5 times
 cwhisper-OOO, and allocated disk after maintenance at most 50 percent. Reads,
 memory, setup cost and durability differences must also be reported. File
-engines use their ordinary unsynced write/close lifecycle; chunk commits retain
-WAL sync. Receiver acknowledgement still precedes persistence.
+engines use their ordinary unsynced write/close lifecycle. The benchmark harness
+uses synchronous chunk commits (`SyncInterval: 0`), matching
+`store-sync-interval = "0s"`; the application now defaults to periodic sync.
+Receiver acknowledgement still precedes persistence.
 
 Repeated Linux VM measurements are authorized for code integration. Deployment
 requires qualification on the intended native Linux storage and a representative
@@ -294,5 +312,5 @@ development-host sustained probe. Enabling Bloom filters regressed the
 was reverted.
 
 The retained cache-budget change leaves room for actual cached blocks after
-Pebble's memtable reservations. WAL sync remains enabled; no durability
-relaxation was used to meet the gate.
+Pebble's memtable reservations. These measurements used synchronous WAL
+commits; no durability relaxation was used to meet the gate.
