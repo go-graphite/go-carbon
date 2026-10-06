@@ -5,6 +5,53 @@ import (
 	"sort"
 )
 
+// A replay can encode an unfinished coarse window. Once finer writes complete
+// it, its replacement sits in the coarse buffer behind the encoded watermark.
+// Preserve that replacement with a tail correction, rather than replaying all
+// retained archives and encoding another unfinished window on every cycle.
+// Late, future and sidecar writes still need classic circular write ordering.
+func (whisper *Whisper) materializeBufferedContinuation(points []*TimeSeriesPoint, now int) error {
+	if !whisper.oooEnabled() || whisper.oooPath != "" || whisper.oooBroken || len(points) == 0 || points[0].Time > now {
+		return nil
+	}
+	base := whisper.archives[0]
+	_, latest := base.getRange()
+	for offset := 0; offset < len(base.buffer); offset += PointSize {
+		if interval := unpackInt(base.buffer[offset:]); interval > latest {
+			latest = interval
+		}
+	}
+	oldest := points[len(points)-1].Time
+	if now-oldest > base.MaxRetention() || base.Interval(oldest) <= latest {
+		return nil
+	}
+	var corrections [][]dataPoint
+	for i, archive := range whisper.archives[1:] {
+		for offset := 0; offset < len(archive.buffer); offset += PointSize {
+			point := unpackDataPoint(archive.buffer[offset:])
+			if point.interval == 0 || point.interval > archive.cblock.pn1.interval {
+				continue
+			}
+			if corrections == nil {
+				corrections = make([][]dataPoint, len(whisper.archives))
+			}
+			corrections[i+1] = append(corrections[i+1], point)
+		}
+	}
+	if corrections == nil {
+		return nil
+	}
+	for i := range corrections {
+		sort.Slice(corrections[i], func(a, b int) bool { return corrections[i][a].interval < corrections[i][b].interval })
+	}
+	recomputed, err := whisper.recomputeArchiveAggregates(make([][]dataPoint, len(whisper.archives)), corrections)
+	if err != nil {
+		return err
+	}
+	rets, _, _ := whisper.computeExtendedRetentions()
+	return whisper.rewrite(rets, "rollup", func(i int) []extraPoint { return markExtras(recomputed[i], true) })
+}
+
 // Materialize buffered rollups under the old policy before changing it. Reading
 // those buffers under the new aggregation would retroactively change history.
 func (whisper *Whisper) materializeCompressedRollups() error {
