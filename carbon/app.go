@@ -763,14 +763,13 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 		zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
 	)
 	restoreStart := time.Now()
-	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
-	restoreLoaded := time.Now()
-	// Overlap saved-index loading with disk drain, after dump parsing has
-	// finished allocating the restored cache. Keep ingestion closed until
-	// those historical points have been persisted.
+	// Build the saved index alongside both dump loading and disk drain. Neither
+	// read nor input listeners open until restored history has been persisted.
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
+	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	restoreLoaded := time.Now()
 	for !core.IsEmpty() {
 		time.Sleep(10 * time.Millisecond)
 	}

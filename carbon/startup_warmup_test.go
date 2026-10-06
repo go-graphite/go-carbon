@@ -26,7 +26,7 @@ func TestIndexWarmupOverlapsRestoreWithoutOpeningReceivers(t *testing.T) {
 	cfg.Whisper.Quotas = persister.WhisperQuotas{{Pattern: "/", Metrics: 1}}
 	cfg.Dump.Enabled = true
 	cfg.Dump.Path = root
-	cfg.Dump.RestorePerSecond = 0
+	cfg.Dump.RestorePerSecond = 1
 	cfg.Whisper.MaxUpdatesPerSecond = 1
 	cfg.Udp.Enabled = false
 	cfg.Pickle.Enabled = false
@@ -66,7 +66,7 @@ func TestIndexWarmupOverlapsRestoreWithoutOpeningReceivers(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- app.Start() }()
 	// Logs are synchronized by zapwriter.Test; do not read App fields while Start
-	// holds its mutex. Wait for the actual index publication during throttled disk drain.
+	// holds its mutex. Wait for index publication while dump loading is throttled.
 	deadline := time.Now().Add(10 * time.Second)
 	for !strings.Contains(zapwriter.TestString(), "file list updated") {
 		select {
@@ -78,6 +78,9 @@ func TestIndexWarmupOverlapsRestoreWithoutOpeningReceivers(t *testing.T) {
 			t.Fatal("index did not warm during restore")
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if strings.Contains(zapwriter.TestString(), `"message":"restore finished"`) {
+		t.Fatal("index warmup waited for dump loading to finish")
 	}
 	for _, addr := range []string{cfg.Tcp.Listen, cfg.Carbonserver.Listen} {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
