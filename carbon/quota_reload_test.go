@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -60,7 +61,7 @@ func TestReloadConfigUpdatesQuotasWithoutRestart(t *testing.T) {
 
 // newQuotaReloadApp starts a real trie-backed application and returns a writer
 // for its quota file so reload tests exercise the normal config parsing path.
-func newQuotaReloadApp(t *testing.T) (*App, func(string)) {
+func newQuotaReloadApp(t *testing.T, configure ...func(*Config)) (*App, func(string)) {
 	t.Helper()
 	root := t.TempDir()
 	path := TestConfig(root)
@@ -86,11 +87,17 @@ func newQuotaReloadApp(t *testing.T) (*App, func(string)) {
 	cfg.Whisper.QuotasFilename = filepath.Join(root, "quotas.conf")
 	quota := func(body string) {
 		t.Helper()
-		if err := os.WriteFile(cfg.Whisper.QuotasFilename, []byte(body), 0600); err != nil {
+		if err := os.WriteFile(cfg.Whisper.QuotasFilename+".tmp", []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(cfg.Whisper.QuotasFilename+".tmp", cfg.Whisper.QuotasFilename); err != nil {
 			t.Fatal(err)
 		}
 	}
 	quota("[/]\nmetrics=1\n")
+	for _, apply := range configure {
+		apply(cfg)
+	}
 	writeBatchingConfig(t, path, cfg)
 	app := New(path)
 	if err = app.ParseConfig(); err != nil {
@@ -121,4 +128,198 @@ func checkQuotaConcurrently(server *carbonserver.CarbonserverListener) func() {
 		}
 	}()
 	return func() { close(stop); wg.Wait() }
+}
+
+func TestQuotaReloadIntervalConfig(t *testing.T) {
+	if got := NewConfig().Whisper.QuotasReloadInterval.Value(); got != 0 {
+		t.Fatalf("default interval = %v; want disabled", got)
+	}
+	for _, interval := range []time.Duration{0, time.Minute, -time.Second} {
+		t.Run(interval.String(), func(t *testing.T) {
+			path := TestConfig(t.TempDir())
+			cfg, err := ReadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Whisper.QuotasReloadInterval = Duration{interval}
+			writeBatchingConfig(t, path, cfg)
+			app := New(path)
+			err = app.ParseConfig()
+			if interval < 0 {
+				if err == nil || !strings.Contains(err.Error(), "quotas-reload-interval") {
+					t.Fatalf("negative interval accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if app.Config.Whisper.QuotasReloadInterval.Value() != interval {
+				t.Fatal("interval changed in config round trip")
+			}
+		})
+	}
+}
+
+func waitQuotaThrottle(t *testing.T, server *carbonserver.CarbonserverListener, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for server.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("quota throttle did not become %t", want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func addQuotaExistingMetric(t *testing.T, app *App) {
+	t.Helper()
+	app.Cache.Add(points.OnePoint("namespace.existing", 1, time.Now().Unix()-2))
+	deadline := time.Now().Add(5 * time.Second)
+	for !app.Carbonserver.MetricExists("namespace.existing") {
+		if time.Now().After(deadline) {
+			t.Fatal("metric did not appear")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestQuotaReloadIntervalUpdatesOnlyQuotas(t *testing.T) {
+	defer zapwriter.Test()()
+	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
+		cfg.Whisper.QuotasReloadInterval = Duration{10 * time.Millisecond}
+	})
+	defer app.Stop()
+	server, cache, persister, collector := app.Carbonserver, app.Cache, app.Persister, app.Collector
+	addQuotaExistingMetric(t, app)
+	defer checkQuotaConcurrently(server)()
+	for _, limit := range []int{20, 1, 30, 1, 0, 1} {
+		if limit == 0 {
+			quota("")
+		} else {
+			quota(fmt.Sprintf("[/]\nmetrics=%d\n", limit))
+		}
+		waitQuotaThrottle(t, server, limit == 1)
+	}
+	if app.Carbonserver != server || app.Cache != cache || app.Persister != persister || app.Collector != collector {
+		t.Fatal("periodic reload replaced application components")
+	}
+
+	for _, body := range []string{"[/]\nmetrics=invalid\n", "[[]\nmetrics=20\n"} {
+		quota(body)
+		if err := app.quotaReloader.reload(); err == nil {
+			t.Fatalf("invalid quota accepted: %q", body)
+		}
+		if !server.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) {
+			t.Fatal("invalid reload changed active limits")
+		}
+	}
+	if err := os.Remove(app.Config.Whisper.QuotasFilename); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.quotaReloader.reload(); err == nil {
+		t.Fatal("missing quota file accepted")
+	}
+	if !server.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) {
+		t.Fatal("missing file removed active limits")
+	}
+	quota("[/]\nmetrics=20\n")
+	waitQuotaThrottle(t, server, false)
+}
+
+func TestQuotaReloadIntervalReconfigurationAndStop(t *testing.T) {
+	defer zapwriter.Test()()
+	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
+		cfg.Whisper.QuotasReloadInterval = Duration{time.Hour}
+	})
+	defer app.Stop()
+	addQuotaExistingMetric(t, app)
+	r := app.quotaReloader
+	setInterval := func(interval time.Duration) {
+		t.Helper()
+		cfg, err := ReadConfig(app.ConfigFilename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg.Whisper.QuotasReloadInterval = Duration{interval}
+		writeBatchingConfig(t, app.ConfigFilename, cfg)
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setInterval(10 * time.Millisecond)
+	quota("[/]\nmetrics=20\n")
+	waitQuotaThrottle(t, app.Carbonserver, false)
+	setInterval(0)
+	quota("[/]\nmetrics=1\n")
+	time.Sleep(50 * time.Millisecond)
+	if app.Carbonserver.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) {
+		t.Fatal("polling continued after disabling interval")
+	}
+	setInterval(10 * time.Millisecond)
+	waitQuotaThrottle(t, app.Carbonserver, true)
+	quota("[/]\nmetrics=20\n")
+	waitQuotaThrottle(t, app.Carbonserver, false)
+
+	// A path change must prevent the old file from publishing rules afterwards.
+	cfg, err := ReadConfig(app.ConfigFilename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Whisper.QuotasFilename += ".new"
+	if err := os.WriteFile(cfg.Whisper.QuotasFilename, []byte("[/]\nmetrics=1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeBatchingConfig(t, app.ConfigFilename, cfg)
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	waitQuotaThrottle(t, app.Carbonserver, true)
+	quota("")
+	time.Sleep(50 * time.Millisecond)
+	if !app.Carbonserver.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) {
+		t.Fatal("old quota file overwrote the new file's rules")
+	}
+	// A rejected main-config reload must leave the running poller intact.
+	cfg.Whisper.QuotasReloadInterval = Duration{-time.Second}
+	writeBatchingConfig(t, app.ConfigFilename, cfg)
+	if err := app.ReloadConfig(); err == nil {
+		t.Fatal("negative reload interval accepted")
+	}
+	if err := os.WriteFile(cfg.Whisper.QuotasFilename+".tmp", []byte("[/]\nmetrics=20\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(cfg.Whisper.QuotasFilename+".tmp", cfg.Whisper.QuotasFilename); err != nil {
+		t.Fatal(err)
+	}
+	waitQuotaThrottle(t, app.Carbonserver, false)
+
+	stopped := make(chan struct{})
+	go func() {
+		app.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown deadlocked with quota polling")
+	}
+	select {
+	case <-r.done:
+	default:
+		t.Fatal("shutdown left the quota poller running")
+	}
+}
+
+func TestQuotaReloadRetainsSharedStorageValidation(t *testing.T) {
+	defer zapwriter.Test()()
+	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
+		cfg.Whisper.StorageBackend = "pebble-chunk"
+		cfg.Whisper.QuotasReloadInterval = Duration{time.Hour}
+	})
+	defer app.Stop()
+	quota("[/]\nphysical-size=100\n")
+	if err := app.quotaReloader.reload(); err == nil || !strings.Contains(err.Error(), "physical-size") {
+		t.Fatalf("shared storage accepted physical-size quota: %v", err)
+	}
 }

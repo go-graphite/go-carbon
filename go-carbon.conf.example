@@ -34,6 +34,9 @@ aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
 # It's currently go-carbon only feature, not a standard graphite feature. Optional
 # More details in doc/quotas.md
 # quotas-file = "/etc/go-carbon/storage-quotas.conf"
+# Poll the quota file without restarting components. "0s" disables polling.
+# Reloadable via SIGHUP; quota support must be enabled at startup.
+quotas-reload-interval = "0s"
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
 # Limits the number of whisper update_many() calls per second. 0 - no limit

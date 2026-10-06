@@ -96,6 +96,87 @@ func TestQuotaReloadPreservesUsageAndRemovesRules(t *testing.T) {
 	ti.refreshUsage(ti.throughputs) // removed metadata must be safe for statistics
 }
 
+func TestQuotaReloadInitializesNewNamespaceUsage(t *testing.T) {
+	ti := newTrie(".wsp", 0, func(string) (int64, int64, int64) { return 10, 5, 2 })
+	for _, path := range []string{
+		"/namespace/one.wsp", "/namespace/two.wsp", "/namespace/a/one.wsp",
+		"/namespace/ab/two.wsp", "/namespace/a/deep/three.wsp",
+	} {
+		if _, err := ti.insert(path, 10, 5, 2, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root := &Quota{Pattern: "/", Metrics: 100, Throughput: 10}
+	if _, err := ti.applyQuotas(time.Hour, root); err != nil {
+		t.Fatal(err)
+	}
+	ti.refreshUsage(ti.throughputs)
+	if ti.throughputThrottle(points.OnePoint("namespace.one", 1, 1)) {
+		t.Fatal("initial throughput rejected")
+	}
+	recorder := ti.throughputs.load("/").dpRecorder()
+	if _, err := ti.applyQuotas(time.Hour, root, &Quota{Pattern: "namespace", Metrics: 1}); err != nil {
+		t.Fatal(err)
+	}
+	usage := ti.quotaNodes["namespace"].usage
+	want := QuotaUsage{Metrics: 5, Namespaces: 2, LogicalSize: 50, PhysicalSize: 25, DataPoints: 10}
+	if *usage != want {
+		t.Fatalf("new namespace usage = %+v; want %+v", *usage, want)
+	}
+	if ti.throughputs.load("/").dpRecorder() != recorder || atomic.LoadInt64(&recorder.dataPoints) != 1 {
+		t.Fatal("adding a rule reset the existing throughput window")
+	}
+	if !ti.throttle(points.OnePoint("namespace.new", 1, 1), false) {
+		t.Fatal("new namespace quota failed to enforce existing usage immediately")
+	}
+	// The usual accounting pass must agree with the initial subtree count.
+	ti.refreshUsage(ti.throughputs)
+	if *usage != want {
+		t.Fatalf("usage changed after accounting refresh: %+v; want %+v", *usage, want)
+	}
+}
+
+func TestQuotaReloadAddsNamespacesDuringIngestion(t *testing.T) {
+	ti := newTrie(".wsp", 0, func(string) (int64, int64, int64) { return 1, 1, 1 })
+	const namespaces = 50
+	for i := 0; i < namespaces; i++ {
+		if _, err := ti.insert(fmt.Sprintf("/namespace%d/existing.wsp", i), 1, 1, 1, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rules := []*Quota{{Pattern: "/", Metrics: 1000}}
+	if _, err := ti.applyQuotas(time.Hour, rules...); err != nil {
+		t.Fatal(err)
+	}
+	ti.refreshUsage(ti.throughputs)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for i := 0; i < namespaces; i++ {
+				ti.throttle(points.OnePoint(fmt.Sprintf("namespace%d.new", i), 1, 1), false)
+			}
+		}
+	}()
+	defer func() { close(stop); wg.Wait() }()
+	for i := 0; i < namespaces; i++ {
+		rules = append(rules, &Quota{Pattern: fmt.Sprintf("namespace%d", i), Metrics: 1})
+		if _, err := ti.applyQuotas(time.Hour, rules...); err != nil {
+			t.Fatal(err)
+		}
+		if !ti.throttle(points.OnePoint(fmt.Sprintf("namespace%d.new", i), 1, 1), false) {
+			t.Fatalf("namespace%d quota did not apply immediately", i)
+		}
+	}
+}
+
 // checkQuotaReads continuously checks the live listener while rules change and
 // returns a cleanup that reports any read failure to the owning test.
 func checkQuotaReads(t *testing.T, url string) func() {

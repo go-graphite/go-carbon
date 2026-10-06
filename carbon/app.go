@@ -74,6 +74,7 @@ type App struct {
 	FlushTraces    func()
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
+	quotaReloader       *quotaReloader
 }
 
 var registerPluginsOnce sync.Once
@@ -110,6 +111,9 @@ func (app *App) configure() error {
 	if err := validateStorageConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateQuotaReloadConfig(cfg); err != nil {
+		return err
+	}
 
 	// carbon-cache prefix
 	if hostname, err := os.Hostname(); err == nil {
@@ -136,6 +140,11 @@ func (app *App) configure() error {
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
 		return errors.New("storage and buckyd settings require a restart")
 	}
+	// Serialize publication with the file poller, which never takes app.Lock.
+	if app.quotaReloader != nil {
+		app.quotaReloader.mu.Lock()
+		defer app.quotaReloader.mu.Unlock()
+	}
 	if app.Carbonserver != nil {
 		if cfg.Carbonserver.QuotaUsageReportFrequency.Value() != app.Config.Carbonserver.QuotaUsageReportFrequency.Value() {
 			return errors.New("changing quota-usage-report-frequency requires a restart")
@@ -146,6 +155,9 @@ func (app *App) configure() error {
 		app.quotaEstimateConfig.Store(cfg)
 	}
 	app.Config = cfg
+	if app.quotaReloader != nil {
+		app.quotaReloader.configureLocked(cfg)
+	}
 
 	return nil
 }
@@ -325,6 +337,10 @@ func (app *App) stopInputListeners() {
 func (app *App) stopReadListeners() <-chan struct{} {
 	logger := zapwriter.Logger("app")
 	readsStopped := make(chan struct{})
+	if app.quotaReloader != nil {
+		app.quotaReloader.close()
+		app.quotaReloader = nil
+	}
 
 	if app.Api != nil {
 		app.Api.Stop()
@@ -487,6 +503,9 @@ func (app *App) Start() (err error) {
 	if err = validateStorageConfig(conf); err != nil {
 		return err
 	}
+	if err = validateQuotaReloadConfig(conf); err != nil {
+		return err
+	}
 
 	runtime.GOMAXPROCS(conf.Common.MaxCPU)
 
@@ -521,7 +540,13 @@ func (app *App) Start() (err error) {
 		go app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	}
 	app.Collector = NewCollector(app)
-	return app.startBuckyd()
+	if err = app.startBuckyd(); err != nil {
+		return err
+	}
+	if app.Carbonserver != nil {
+		app.quotaReloader = startQuotaReloader(app.Config, app.Carbonserver)
+	}
+	return nil
 }
 
 func (app *App) startStorage() (core *cache.Cache, err error) {
