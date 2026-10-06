@@ -296,10 +296,33 @@ func (app *App) ReloadConfig() error {
 	return nil
 }
 
-// stopListeners stops input and starts draining reads. The caller must wait for
+// stopListeners stops input and then starts draining reads. The caller must wait for
 // the returned channel before exiting or closing storage used by active reads.
 // Assumes we are holding app.Lock().
 func (app *App) stopListeners() <-chan struct{} {
+	app.stopInputListeners()
+	return app.stopReadListeners()
+}
+
+// Keep reads available while receivers and other input cleanup finish.
+// Assumes we are holding app.Lock().
+func (app *App) stopInputListeners() {
+	logger := zapwriter.Logger("app")
+	if app.Receivers != nil {
+		for i := 0; i < len(app.Receivers); i++ {
+			app.Receivers[i].Stop()
+			logger.Debug("receiver stopped", zap.String("name", app.Receivers[i].Name))
+		}
+		app.Receivers = nil
+	}
+	if app.FlushTraces != nil {
+		app.FlushTraces()
+		logger.Debug("traces flushed")
+	}
+}
+
+// Assumes we are holding app.Lock().
+func (app *App) stopReadListeners() <-chan struct{} {
 	logger := zapwriter.Logger("app")
 	readsStopped := make(chan struct{})
 
@@ -336,18 +359,6 @@ func (app *App) stopListeners() <-chan struct{} {
 		app.Carbonserver = nil
 	} else {
 		close(readsStopped)
-	}
-	if app.Receivers != nil {
-		for i := 0; i < len(app.Receivers); i++ {
-			app.Receivers[i].Stop()
-			logger.Debug("receiver stopped", zap.String("name", app.Receivers[i].Name))
-		}
-		app.Receivers = nil
-	}
-
-	if app.FlushTraces != nil {
-		app.FlushTraces()
-		logger.Debug("traces flushed")
 	}
 	return readsStopped
 }

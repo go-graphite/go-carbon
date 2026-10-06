@@ -395,7 +395,10 @@ func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoint
 	return true
 }
 
+// Child slice headers are replaced by setChildrens, never changed in place.
+// Share the empty header that the first addChild would otherwise discard.
 var emptyTrieNodes = &[]*trieNode{}
+var trieDirectorySeparator = []byte{'/'}
 
 // TODO: consider not initialize fileMeta if quota feature isn't enabled?
 func newFileNode(m uint8, logicalSize, physicalSize, dataPoints, firstSeenAt int64) *trieNode {
@@ -458,7 +461,7 @@ func newTrie(fileExt string, maxCreatesPerSecond int, estimateSize func(metric s
 	meta := newDirMeta()
 	maxCreatesTicker := helper.NewHardThrottleTicker(maxCreatesPerSecond)
 	return &trieIndex{
-		root:             &trieNode{childrens: &[]*trieNode{}, meta: meta},
+		root:             &trieNode{childrens: emptyTrieNodes, meta: meta},
 		fileExt:          fileExt,
 		maxCreatesTicker: maxCreatesTicker,
 		estimateSize:     estimateSize,
@@ -600,7 +603,7 @@ outer:
 			cur = (*cur.childrens)[ci]
 
 			if nlen-match > 0 {
-				newn = &trieNode{c: make([]byte, nlen-match), childrens: &[]*trieNode{}, gen: ti.root.gen}
+				newn = &trieNode{c: make([]byte, nlen-match), childrens: emptyTrieNodes, gen: ti.root.gen}
 				copy(newn.c, path[start:i])
 
 				cur.addChild(newn)
@@ -612,7 +615,7 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-			newn = &trieNode{c: make([]byte, i-start), childrens: &[]*trieNode{}, gen: ti.root.gen}
+			newn = &trieNode{c: make([]byte, i-start), childrens: emptyTrieNodes, gen: ti.root.gen}
 			copy(newn.c, path[start:i])
 			cur.addChild(newn)
 			cur = newn
@@ -707,8 +710,8 @@ outer:
 
 func (ti *trieIndex) newDir() *trieNode {
 	n := &trieNode{
-		c:         []byte{'/'},
-		childrens: &[]*trieNode{},
+		c:         trieDirectorySeparator,
+		childrens: emptyTrieNodes,
 		gen:       ti.root.gen,
 	}
 

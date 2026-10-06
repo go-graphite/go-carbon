@@ -94,6 +94,8 @@ type fileListCacheV1 struct {
 
 type fileListCacheV2 struct {
 	*fileListCacheCommon
+	pathLength  [flcv2StatFieldSize]byte
+	entryBuffer []byte
 }
 
 // ReadFileListCache dumps cache data in csv to writer.
@@ -290,7 +292,7 @@ func newFileListCacheV2ReadOnly(flcc *fileListCacheCommon) (*fileListCacheV2, er
 
 func (flc *fileListCacheV2) Write(entry *FLCEntry) error {
 	var offset int
-	var buf = make([]byte, flcv2StatFieldSize+len(entry.Path)+flcv2EntryStatLen)
+	buf := flc.buffer(flcv2StatFieldSize + len(entry.Path) + flcv2EntryStatLen)
 
 	binary.BigEndian.PutUint64(buf[offset:], uint64(len(entry.Path)))
 	offset += flcv2StatFieldSize
@@ -318,12 +320,27 @@ func (flc *fileListCacheV2) Write(entry *FLCEntry) error {
 }
 
 func (flc *fileListCacheV2) Read() (entry *FLCEntry, err error) {
-	var plenBuf [8]byte
-	if _, err = io.ReadFull(flc.reader, plenBuf[:]); err != nil {
-		err = fmt.Errorf("flcv2: failed to read path len: %w", err)
-		return
+	entry = new(FLCEntry)
+	if err = flc.readInto(entry); err != nil {
+		return nil, err
 	}
-	plen := int(binary.BigEndian.Uint64(plenBuf[:]))
+	return entry, nil
+}
+
+func (flc *fileListCacheV2) buffer(size int) []byte {
+	if cap(flc.entryBuffer) < size {
+		flc.entryBuffer = make([]byte, size)
+	}
+	return flc.entryBuffer[:size]
+}
+
+// readInto reuses the record and decode buffers during startup. Path still owns
+// its bytes: the trie may retain it as longestMetric after the next read.
+func (flc *fileListCacheV2) readInto(entry *FLCEntry) error {
+	if _, err := io.ReadFull(flc.reader, flc.pathLength[:]); err != nil {
+		return fmt.Errorf("flcv2: failed to read path len: %w", err)
+	}
+	pathLength := binary.BigEndian.Uint64(flc.pathLength[:])
 
 	// filepath on linux has a 4k limit, but we are timing it 2 here just to
 	// be flexible and avoid bugs or corruptions to causes panics or oom in
@@ -332,18 +349,23 @@ func (flc *fileListCacheV2) Read() (entry *FLCEntry, err error) {
 	// * https://man7.org/linux/man-pages/man3/realpath.3.html#NOTES
 	// * https://www.ibm.com/docs/en/spectrum-protect/8.1.9?topic=parameters-file-specification-syntax
 	const maxPathLen = 4096 * 2
-	if plen > maxPathLen {
-		err = fmt.Errorf("flcv2: illegal file path length %d (max: %d)", plen, maxPathLen)
-		return
+	if pathLength > maxPathLen {
+		return fmt.Errorf("flcv2: illegal file path length %d (max: %d)", pathLength, maxPathLen)
+	}
+	plen := int(pathLength)
+
+	data := flc.buffer(plen + flcv2EntryStatLen)
+	if _, err := io.ReadFull(flc.reader, data); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
+		return fmt.Errorf("flcv2: failed to read full data: %w", err)
+	}
+	if data[len(data)-1] != '\n' {
+		return errors.New("flcv2: invalid entry separator")
 	}
 
-	data := make([]byte, plen+flcv2EntryStatLen)
-	if _, err = io.ReadFull(flc.reader, data); err != nil {
-		err = fmt.Errorf("flcv2: failed to read full data: %w", err)
-		return
-	}
-
-	entry = &FLCEntry{
+	*entry = FLCEntry{
 		Path:         string(data[:plen]),
 		LogicalSize:  int64(binary.BigEndian.Uint64(data[plen:])),
 		PhysicalSize: int64(binary.BigEndian.Uint64(data[plen+flcv2StatFieldSize:])),
@@ -351,5 +373,5 @@ func (flc *fileListCacheV2) Read() (entry *FLCEntry, err error) {
 		FirstSeenAt:  int64(binary.BigEndian.Uint64(data[plen+flcv2StatFieldSize*3:])),
 	}
 
-	return
+	return nil
 }

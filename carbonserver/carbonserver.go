@@ -1119,6 +1119,7 @@ type fileListUpdate struct {
 	cacheIndexRuntime   time.Duration
 	readFromCache       bool
 	fileListCacheReader FileListCache
+	fileListCacheEntry  FLCEntry
 	fileListCache       FileListCache
 	scanCancelled       bool
 	scanFailed          bool
@@ -1220,7 +1221,17 @@ func (u *fileListUpdate) readNextCacheEntry(flc FileListCache) bool {
 		return false
 	default:
 	}
-	entry, err := flc.Read()
+	entry := &u.fileListCacheEntry
+	var err error
+	if reader, ok := flc.(interface{ readInto(*FLCEntry) error }); ok {
+		err = reader.readInto(entry)
+	} else {
+		var next *FLCEntry
+		next, err = flc.Read()
+		if err == nil {
+			*entry = *next
+		}
+	}
 	if errors.Is(err, io.EOF) {
 		return false
 	}

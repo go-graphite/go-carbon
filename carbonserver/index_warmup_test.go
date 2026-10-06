@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net/http"
@@ -115,15 +116,34 @@ func TestWarmupBeforeListenAndScanAfterRestore(t *testing.T) {
 }
 
 func TestWarmupInvalidCacheDefersDiskScan(t *testing.T) {
-	for _, missing := range []bool{false, true} {
-		t.Run(fmt.Sprint(missing), func(t *testing.T) {
+	for _, kind := range []string{"missing", "corrupt", "partial-record"} {
+		t.Run(kind, func(t *testing.T) {
 			l := savedIndex(t, "on.disk")
-			if missing {
+			switch kind {
+			case "missing":
 				if err := os.Remove(l.fileListCache); err != nil {
 					t.Fatal(err)
 				}
-			} else {
+			case "corrupt":
 				if err := os.WriteFile(l.fileListCache, []byte("corrupt"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "partial-record":
+				f, err := NewFileListCache(l.fileListCache, FLCVersion2, 'w')
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Write(&FLCEntry{Path: "/on/disk.wsp"}); err != nil {
+					t.Fatal(err)
+				}
+				// Valid gzip and a complete first entry, followed by a record
+				// header without its payload. This is not a complete index.
+				var header [8]byte
+				binary.BigEndian.PutUint64(header[:], 5)
+				if _, err := f.(*fileListCacheV2).writer.Write(header[:]); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Close(); err != nil {
 					t.Fatal(err)
 				}
 			}
