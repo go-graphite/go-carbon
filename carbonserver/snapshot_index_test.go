@@ -170,6 +170,47 @@ func TestSnapshotAdmissionMatchesRangeChecks(t *testing.T) {
 	}
 }
 
+func TestSnapshotQuotaReloadSeedsExistingUsage(t *testing.T) {
+	hybrid, oracle, _, _ := snapshotTrieFixture(t)
+	for _, index := range []*trieIndex{hybrid, oracle} {
+		index.estimateSize = func(string) (int64, int64, int64) { return 7, 11, 13 }
+		for _, path := range []string{"/a/newdir/value.wsp", "/a/newdir/other.wsp", "/b/child/new.wsp", "/overlay/deep/value.wsp"} {
+			if _, err := index.insert(path, 7, 11, 13, 12345); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := index.applyQuotas(time.Minute, &Quota{Pattern: "/", Metrics: 100}); err != nil {
+			t.Fatal(err)
+		}
+		index.refreshUsage(index.throughputs)
+	}
+	// Match previously unrestricted namespaces without a periodic usage refresh.
+	// Remove and re-add the same rules to cover reuse of cached virtual nodes.
+	for _, rules := range [][]*Quota{
+		{{Pattern: "*", Metrics: 1}, {Pattern: "*.*", Metrics: 1}},
+		{},
+		{{Pattern: "*", Metrics: 1}, {Pattern: "*.*", Metrics: 1}},
+	} {
+		for _, index := range []*trieIndex{hybrid, oracle} {
+			if _, err := index.applyQuotas(time.Minute, rules...); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, want := range oracle.quotaNodes {
+			got := hybrid.quotaNodes[name]
+			if got == nil || got.usage.Metrics != want.usage.Metrics || got.usage.Namespaces != want.usage.Namespaces ||
+				got.usage.LogicalSize != want.usage.LogicalSize || got.usage.PhysicalSize != want.usage.PhysicalSize || got.usage.DataPoints != want.usage.DataPoints {
+				t.Fatalf("new quota %q: got %+v want %+v", name, got, want.usage)
+			}
+		}
+		for _, metric := range []string{"a.new", "a.newdir.new", "b.child.newer", "overlay.deep.new"} {
+			if hybrid.throttle(points.OnePoint(metric, 1, 1), false) != oracle.throttle(points.OnePoint(metric, 1, 1), false) {
+				t.Fatalf("new quota admission differs for %q", metric)
+			}
+		}
+	}
+}
+
 func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
 	_, _, cache, root := snapshotTrieFixture(t)
 	listener := NewCarbonserverListener(nil)

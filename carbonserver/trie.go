@@ -321,10 +321,9 @@ type trieNode struct {
 	childrens *[]*trieNode
 	gen       uint8
 
-	meta trieMeta
+	// Directory metadata can be added by a quota reload while receivers read it.
+	meta atomic.Value // *dirMeta or *fileMeta, published once
 }
-
-type trieMeta interface{ trieMeta() }
 
 type fileMeta struct {
 	logicalSize  int64
@@ -344,8 +343,6 @@ type fileMeta struct {
 	firstSeenAt int64
 }
 
-func (*fileMeta) trieMeta() {}
-
 type dirMeta struct {
 	// type: *Quota
 	// note: the underlying Quota value is shared with other dir nodes.
@@ -357,7 +354,6 @@ type dirMeta struct {
 
 func newDirMeta() *dirMeta { return &dirMeta{usage: &QuotaUsage{}} }
 
-func (*dirMeta) trieMeta()              {}
 func (dm *dirMeta) update(quota *Quota) { dm.quota.Store(quota) }
 
 func (dm *dirMeta) withinQuota(metrics, namespaces, logical, physical, dataPoints int64) bool {
@@ -406,16 +402,17 @@ var trieDirectorySeparator = []byte{'/'}
 
 // TODO: consider not initialize fileMeta if quota feature isn't enabled?
 func newFileNode(m uint8, logicalSize, physicalSize, dataPoints, firstSeenAt int64) *trieNode {
-	return &trieNode{
+	n := &trieNode{
 		childrens: emptyTrieNodes,
 		gen:       m,
-		meta: &fileMeta{
-			logicalSize:  logicalSize,
-			physicalSize: physicalSize,
-			dataPoints:   dataPoints,
-			firstSeenAt:  firstSeenAt,
-		},
 	}
+	n.meta.Store(&fileMeta{
+		logicalSize:  logicalSize,
+		physicalSize: physicalSize,
+		dataPoints:   dataPoints,
+		firstSeenAt:  firstSeenAt,
+	})
+	return n
 }
 
 func (tn *trieNode) dir() bool  { return len(tn.c) == 1 && tn.c[0] == '/' }
@@ -449,23 +446,24 @@ func (tn *trieNode) setChild(i int, n *trieNode) {
 
 func (tn *trieNode) incrementReadHitsMetric() {
 	if tn.file() {
-		meta := tn.meta.(*fileMeta)
+		meta := tn.meta.Load().(*fileMeta)
 		atomic.AddInt64(&meta.readHits, 1)
 	}
 }
 func (tn *trieNode) incrementReadBytesMetric(bytesNumber int64) {
 	if tn.file() {
-		meta := tn.meta.(*fileMeta)
+		meta := tn.meta.Load().(*fileMeta)
 		atomic.AddInt64(&meta.readBytes, bytesNumber)
 	}
 }
 
 // nolint:unparam // fileExt always receives ".wsp"
 func newTrie(fileExt string, maxCreatesPerSecond int, estimateSize func(metric string) (logicalSize, physicalSize, dataPoints int64)) *trieIndex {
-	meta := newDirMeta()
+	root := &trieNode{childrens: emptyTrieNodes}
+	root.meta.Store(newDirMeta())
 	maxCreatesTicker := helper.NewHardThrottleTicker(maxCreatesPerSecond)
 	return &trieIndex{
-		root:             &trieNode{childrens: emptyTrieNodes, meta: meta},
+		root:             root,
 		fileExt:          fileExt,
 		maxCreatesTicker: maxCreatesTicker,
 		estimateSize:     estimateSize,
@@ -686,7 +684,7 @@ outer:
 			hasFileNode = true
 			c.gen = ti.root.gen
 
-			meta := c.meta.(*fileMeta)
+			meta := c.meta.Load().(*fileMeta)
 			if logicalSize > 0 || physicalSize > 0 || dataPoints > 0 {
 				atomic.StoreInt64(&meta.logicalSize, logicalSize)
 				atomic.StoreInt64(&meta.physicalSize, physicalSize)
@@ -1006,7 +1004,7 @@ func (ti *trieIndex) allMetricsNodeMutable(tn *trieNode, sep byte, prefix string
 
 		if cur.file() {
 			count++
-			if meta, ok := cur.meta.(*fileMeta); ok && meta != nil {
+			if meta, ok := cur.meta.Load().(*fileMeta); ok && meta != nil {
 				physicalSize += meta.physicalSize
 				logicalSize += meta.logicalSize
 			}
@@ -1053,7 +1051,7 @@ func (ti *trieIndex) dump(w io.Writer) {
 	var trieNodes = make([]*trieNode, depth)
 	var ident []byte
 
-	fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, "/", len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+	fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, "/", len(*cur.childrens), cur.gen, cur.meta.Load().(*dirMeta).quota.Load(), cur.meta.Load().(*dirMeta).usage, cur)
 	ident = append(ident, ' ', ' ')
 
 	for {
@@ -1072,8 +1070,8 @@ func (ti *trieIndex) dump(w io.Writer) {
 		switch {
 		case cur.file():
 			fmt.Fprintf(w, "%s$ (%d/%d) %p\n", ident, len(*cur.childrens), cur.gen, cur)
-		case cur.dir() && cur.meta != nil:
-			fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, cur.c, len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+		case cur.dir() && cur.meta.Load() != nil:
+			fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, cur.c, len(*cur.childrens), cur.gen, cur.meta.Load().(*dirMeta).quota.Load(), cur.meta.Load().(*dirMeta).usage, cur)
 		default:
 			fmt.Fprintf(w, "%s%s (%d/%d) %p\n", ident, cur.c, len(*cur.childrens), cur.gen, cur)
 		}
@@ -1111,7 +1109,7 @@ func (ti *trieIndex) getQuotaTreeMutable(w io.Writer) {
 	var trieNodes = make([]*trieNode, depth)
 	var ident []byte
 
-	fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, "/", len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+	fmt.Fprintf(w, "%s%s (%d/%d) (quota:%s usage:%s) %p\n", ident, "/", len(*cur.childrens), cur.gen, cur.meta.Load().(*dirMeta).quota.Load(), cur.meta.Load().(*dirMeta).usage, cur)
 	ident = append(ident, ' ', ' ')
 
 	for {
@@ -1127,10 +1125,10 @@ func (ti *trieIndex) getQuotaTreeMutable(w io.Writer) {
 			goto parent
 		}
 
-		if cur.dir() && cur.meta != nil {
+		if cur.dir() && cur.meta.Load() != nil {
 			name := ti.root.fullPath('.', trieNodes[:ncindex])
 
-			fmt.Fprintf(w, "%s%s %s (%d/%d) (quota:%s usage:%s) %p\n", ident, cur.c, name, len(*cur.childrens), cur.gen, cur.meta.(*dirMeta).quota.Load(), cur.meta.(*dirMeta).usage, cur)
+			fmt.Fprintf(w, "%s%s %s (%d/%d) (quota:%s usage:%s) %p\n", ident, cur.c, name, len(*cur.childrens), cur.gen, cur.meta.Load().(*dirMeta).quota.Load(), cur.meta.Load().(*dirMeta).usage, cur)
 		}
 
 		ident = append(ident, ' ', ' ')
@@ -1662,6 +1660,24 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	if err != nil {
 		return nil, err
 	}
+	// Virtual snapshot nodes have no child pointers. On reload, seed newly
+	// restricted namespaces before exposing limits. Initial publication already
+	// refreshes all usage after applying rules and before exposing the index.
+	var savedUsage map[string]QuotaUsage
+	if ti.snapshot != nil && ti.quotaNodes != nil {
+		savedUsage = make(map[string]QuotaUsage)
+		exists := ti.snapshot.namespaceLookup()
+		for path := range pending {
+			if ti.quotaNodes[path] != nil {
+				continue
+			}
+			usage, err := ti.snapshotQuotaUsage(path, exists)
+			if err != nil {
+				return nil, err
+			}
+			savedUsage[path] = usage
+		}
+	}
 
 	ti.setResetFrequency(resetFrequency)
 	for path, old := range ti.quotaNodes {
@@ -1671,11 +1687,28 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	}
 	ti.quotaNodes = make(map[string]*dirMeta, len(pending))
 	for path, change := range pending {
-		if change.node.meta == nil {
-			change.node.meta = newDirMeta()
+		meta, _ := change.node.meta.Load().(*dirMeta)
+		if usage, ok := savedUsage[path]; ok {
+			if meta == nil {
+				meta = newDirMeta()
+				change.node.meta.Store(meta)
+			}
+			atomic.StoreInt64(&meta.usage.Metrics, usage.Metrics)
+			atomic.StoreInt64(&meta.usage.Namespaces, usage.Namespaces)
+			atomic.StoreInt64(&meta.usage.LogicalSize, usage.LogicalSize)
+			atomic.StoreInt64(&meta.usage.PhysicalSize, usage.PhysicalSize)
+			atomic.StoreInt64(&meta.usage.DataPoints, usage.DataPoints)
 		}
-		meta := change.node.meta.(*dirMeta)
-		meta.update(change.quota)
+		if meta == nil {
+			// Seed a newly restricted namespace before publishing its limits.
+			// Counting only this subtree leaves existing throughput windows intact.
+			usage := quotaStorageUsage(change.node)
+			meta = &dirMeta{usage: &usage}
+			meta.update(change.quota)
+			change.node.meta.Store(meta)
+		} else {
+			meta.update(change.quota)
+		}
 		ti.throughputs.store(path, newThroughputUsagePerNamespace(ti.root.gen, change.quota, meta.usage))
 		ti.quotaNodes[path] = meta
 	}
@@ -1689,6 +1722,32 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	})
 	atomic.StoreInt64(&ti.throughputs.depth, int64(depth))
 	return ti.throughputs, nil
+}
+
+// quotaStorageUsage counts indexed files and immediate child namespaces. The
+// index updater owns the traversal; no reporting or throughput counters reset.
+func quotaStorageUsage(node *trieNode) (usage QuotaUsage) {
+	for _, child := range *node.childrens {
+		if child.file() {
+			meta := child.meta.Load().(*fileMeta)
+			usage.Metrics++
+			usage.LogicalSize += meta.logicalSize
+			usage.PhysicalSize += meta.physicalSize
+			usage.DataPoints += meta.dataPoints
+			continue
+		}
+		sub := quotaStorageUsage(child)
+		usage.Metrics += sub.Metrics
+		usage.LogicalSize += sub.LogicalSize
+		usage.PhysicalSize += sub.PhysicalSize
+		usage.DataPoints += sub.DataPoints
+		if child.dir() {
+			usage.Namespaces++
+		} else {
+			usage.Namespaces += sub.Namespaces
+		}
+	}
+	return usage
 }
 
 // quotaAssignment binds a validated rule to a live namespace node.
@@ -1718,8 +1777,8 @@ func (ti *trieIndex) resolveQuotas(quotas []*Quota) (map[string]quotaAssignment,
 			return nil, 0, err
 		}
 		for i, node := range nodes {
-			_, ok := node.meta.(*dirMeta)
-			if node.meta != nil && !ok {
+			_, ok := node.meta.Load().(*dirMeta)
+			if node.meta.Load() != nil && !ok {
 				continue
 			}
 			if c := strings.Count(paths[i], "."); c > depth {
@@ -1773,8 +1832,8 @@ func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (f
 	for {
 		if cur.next >= len(*cur.childrens) {
 			if (cur.node.dir() || cur.node == ti.root) && dirIndex >= 0 {
-				if cur.node.meta != nil && cur.node.meta.(*dirMeta) != nil && cur.node.meta.(*dirMeta).usage != nil {
-					usage := cur.node.meta.(*dirMeta).usage
+				if meta, _ := cur.node.meta.Load().(*dirMeta); meta != nil && meta.usage != nil {
+					usage := meta.usage
 					atomic.StoreInt64(&usage.Namespaces, dirs[dirIndex])
 					atomic.StoreInt64(&usage.Metrics, cur.files)
 					atomic.StoreInt64(&usage.LogicalSize, cur.logicalSize)
@@ -1826,15 +1885,16 @@ func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (f
 
 		if cur.node.file() {
 			cur.files++
-			cur.logicalSize += cur.node.meta.(*fileMeta).logicalSize
-			cur.physicalSize += cur.node.meta.(*fileMeta).physicalSize
-			cur.dataPoints += cur.node.meta.(*fileMeta).dataPoints
-			deltaReadHits := atomic.LoadInt64(&cur.node.meta.(*fileMeta).readHits)
+			meta := cur.node.meta.Load().(*fileMeta)
+			cur.logicalSize += meta.logicalSize
+			cur.physicalSize += meta.physicalSize
+			cur.dataPoints += meta.dataPoints
+			deltaReadHits := atomic.LoadInt64(&meta.readHits)
 			cur.readHits += deltaReadHits
-			atomic.AddInt64(&cur.node.meta.(*fileMeta).readHits, -deltaReadHits)
-			deltaReadBytes := atomic.LoadInt64(&cur.node.meta.(*fileMeta).readBytes)
+			atomic.AddInt64(&meta.readHits, -deltaReadHits)
+			deltaReadBytes := atomic.LoadInt64(&meta.readBytes)
 			cur.readBytes += deltaReadBytes
-			atomic.AddInt64(&cur.node.meta.(*fileMeta).readBytes, -deltaReadBytes)
+			atomic.AddInt64(&meta.readBytes, -deltaReadBytes)
 			files++
 
 			goto parent
@@ -1877,7 +1937,7 @@ func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (f
 func (ti *trieIndex) generateTrieMetrics(metricName string, node *trieNode, throughput, throttled, readHits, readBytes int64) {
 
 	// Note: Timestamp for each points.Points are set by collector send logics
-	meta := node.meta.(*dirMeta)
+	meta := node.meta.Load().(*dirMeta)
 	quota, _ := meta.quota.Load().(*Quota)
 	if quota == nil {
 		return
@@ -2196,7 +2256,7 @@ func (ti *trieIndex) throttleUsage(ps *points.Points, dirs []*trieNode) bool {
 			namespaces = 1
 		}
 
-		meta, ok := n.meta.(*dirMeta)
+		meta, ok := n.meta.Load().(*dirMeta)
 		if !ok || meta.withinQuota(1, namespaces, logicalSize, physicalSize, dataPoints) {
 			continue
 		}
@@ -2296,7 +2356,7 @@ mloop:
 
 func (*trieIndex) metricName(node *trieNode, name string) string {
 	var prefix string
-	if quota, ok := node.meta.(*dirMeta).quota.Load().(*Quota); ok && quota != nil {
+	if quota, ok := node.meta.Load().(*dirMeta).quota.Load().(*Quota); ok && quota != nil {
 		prefix = quota.StatMetricPrefix
 	}
 	name = strings.ReplaceAll(name, ".", "-")

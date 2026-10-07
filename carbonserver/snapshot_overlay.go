@@ -144,7 +144,7 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	defer writer.Abort()
 	names, nodes, _, _, _ := ti.allMetricsNodeMutable(ti.root, '.', "", int(^uint(0)>>1), false)
 	for i, name := range names {
-		m := nodes[i].meta.(*fileMeta)
+		m := nodes[i].meta.Load().(*fileMeta)
 		entry := FLCEntry{Path: "/" + strings.ReplaceAll(name, ".", "/") + ".wsp", LogicalSize: atomic.LoadInt64(&m.logicalSize), PhysicalSize: atomic.LoadInt64(&m.physicalSize), DataPoints: atomic.LoadInt64(&m.dataPoints), FirstSeenAt: atomic.LoadInt64(&m.firstSeenAt)}
 		if err = writer.Write(&entry); err != nil {
 			return "", err

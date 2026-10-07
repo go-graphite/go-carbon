@@ -42,7 +42,7 @@ func TestSnapshotQueryMatchesTrie(t *testing.T) {
 					for i, name := range names {
 						row := fmt.Sprintf("%s/%t", name, leaves[i])
 						if leaves[i] {
-							m := nodes[i].meta.(*fileMeta)
+							m := nodes[i].meta.Load().(*fileMeta)
 							row += fmt.Sprintf("/%d/%d/%d/%d", m.logicalSize, m.physicalSize, m.dataPoints, m.firstSeenAt)
 						}
 						result = append(result, row)

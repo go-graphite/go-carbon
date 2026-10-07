@@ -65,6 +65,6 @@ func (ti *trieIndex) makeFileNode(logicalSize, physicalSize, dataPoints, firstSe
 	n := ti.makeNode(nil, emptyTrieNodes, ti.root.gen)
 	m := ti.builder.metaBlock.alloc()
 	*m = fileMeta{logicalSize: logicalSize, physicalSize: physicalSize, dataPoints: dataPoints, firstSeenAt: firstSeenAt}
-	n.meta = m
+	n.meta.Store(m)
 	return n
 }

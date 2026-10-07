@@ -111,12 +111,30 @@ dropping-policy = new
 
 ## Reloading rules
 
+To reload changed rules automatically, configure a polling interval:
+
+```toml
+[whisper]
+quotas-file = "/etc/go-carbon/storage-quotas.conf"
+quotas-reload-interval = "1m"
+```
+
+The default `"0s"` disables polling; negative intervals are rejected. SIGHUP can
+change the interval or quota file path. Polling only reloads quotas, leaving the
+persister, collector, cache, and listeners running. Unchanged rules are skipped.
+Read or validation failures keep the last accepted rules and are retried on the
+next poll. Replace the file atomically to avoid reading a partially written file;
+an empty file intentionally clears all rules.
+
 Once quota support is enabled at startup, send `SIGHUP` to reload the quota file
 without restarting go-carbon. The existing index and listeners stay available.
 Rules are applied by the index updater; the log message `quota rules reloaded`
 confirms application. Changes do not reset throughput consumption for namespaces
 that remain configured. Removing a rule removes its limits, and an empty quota
 file clears all rules. Invalid files or glob patterns retain the previous rules.
+Newly matched namespaces use their existing indexed storage usage immediately.
+Rule application does not wait for a disk scan. Quota/usage metrics still follow
+`carbonserver.quota-usage-report-frequency`, independently of the polling interval.
 
 Enabling quota support for the first time, or changing
 `carbonserver.quota-usage-report-frequency`, still requires a restart. A reload

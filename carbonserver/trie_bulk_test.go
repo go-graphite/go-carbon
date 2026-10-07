@@ -80,7 +80,7 @@ func TestTrieBulkMatchesIncremental(t *testing.T) {
 				}
 				trie.refreshUsage(throughputs)
 			}
-			if !reflect.DeepEqual(reference.root.meta.(*dirMeta).usage, bulk.root.meta.(*dirMeta).usage) {
+			if !reflect.DeepEqual(reference.root.meta.Load().(*dirMeta).usage, bulk.root.meta.Load().(*dirMeta).usage) {
 				t.Fatal("bulk root usage differs")
 			}
 			for _, trie := range []*trieIndex{reference, bulk} {
@@ -113,7 +113,7 @@ func checkTrieEquivalent(t *testing.T, reference, bulk *trieIndex) {
 			t.Fatalf("query %q differs", glob)
 		}
 		for i := range an {
-			if af[i] && !reflect.DeepEqual(an[i].meta, bn[i].meta) {
+			if af[i] && !reflect.DeepEqual(an[i].meta.Load(), bn[i].meta.Load()) {
 				t.Fatalf("metadata differs for %q", a[i])
 			}
 		}

@@ -1498,8 +1498,8 @@ func (u *fileListUpdate) indexFile(name string, isFullMetric bool, logicalSize, 
 		node, err := u.trieIdx.insert(name, logicalSize, physicalSize, dataPoints, 0)
 		if err != nil {
 			u.listener.logTrieInsertError(u.logger, "updateFileList.trie: failed to index path", name, err)
-		} else if node.meta != nil {
-			firstSeenAt = node.meta.(*fileMeta).firstSeenAt
+		} else if node.meta.Load() != nil {
+			firstSeenAt = node.meta.Load().(*fileMeta).firstSeenAt
 		}
 	}
 	if isFullMetric {

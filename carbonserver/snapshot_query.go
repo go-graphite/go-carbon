@@ -191,7 +191,8 @@ func (s *indexSnapshot) directoryNode(name string) *trieNode {
 	if node, ok := s.nodes.directories.Load(name); ok {
 		return node.(*trieNode)
 	}
-	node := &trieNode{c: trieDirectorySeparator, childrens: emptyTrieNodes, meta: newDirMeta()}
+	node := &trieNode{c: trieDirectorySeparator, childrens: emptyTrieNodes}
+	node.meta.Store(newDirMeta())
 	actual, _ := s.nodes.directories.LoadOrStore(name, node)
 	return actual.(*trieNode)
 }

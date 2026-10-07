@@ -206,7 +206,7 @@ func (ti *trieIndex) allMetricsNode(node *trieNode, sep byte, prefix string, lim
 		if err != nil {
 			return false
 		}
-		m := n.meta.(*fileMeta)
+		m := n.meta.Load().(*fileMeta)
 		count++
 		physical += m.physicalSize
 		logical += m.logicalSize
@@ -239,7 +239,7 @@ func (ti *trieIndex) overlayUsage() (map[string]QuotaUsage, map[string][2]int64,
 	dirs := make(map[string]bool)
 	names, nodes, _, _, _ := ti.allMetricsNodeMutable(ti.root, '.', "", int(^uint(0)>>1), false)
 	for i, name := range names {
-		m := nodes[i].meta.(*fileMeta)
+		m := nodes[i].meta.Load().(*fileMeta)
 		hits := atomic.SwapInt64(&m.readHits, 0)
 		readBytes := atomic.SwapInt64(&m.readBytes, 0)
 		metricNamespaces(name, func(prefix string) {
@@ -276,13 +276,52 @@ func (ti *trieIndex) overlayUsage() (map[string]QuotaUsage, map[string][2]int64,
 	return usage, reads, extraDirs
 }
 
+// snapshotQuotaUsage counts only the affected mutable subtree and reads saved
+// totals from the packed prefix sums. It leaves throughput/read counters intact.
+func (ti *trieIndex) snapshotQuotaUsage(name string, exists func(string) bool) (QuotaUsage, error) {
+	usage, err := ti.snapshot.namespaceUsage(name)
+	if err != nil {
+		return usage, err
+	}
+	node := ti.mutableDirectory(name)
+	if node == nil {
+		return usage, nil
+	}
+	extra := quotaStorageUsage(node)
+	usage.Metrics += extra.Metrics
+	usage.LogicalSize += extra.LogicalSize
+	usage.PhysicalSize += extra.PhysicalSize
+	usage.DataPoints += extra.DataPoints
+	prefix := name + "."
+	if name == "/" || name == "" {
+		prefix = ""
+	}
+	var countDirectories func(*trieNode, string)
+	countDirectories = func(parent *trieNode, path string) {
+		for _, child := range *parent.childrens {
+			if child.file() {
+				continue
+			}
+			if child.dir() {
+				if !exists(path) {
+					usage.Namespaces++
+				}
+				continue
+			}
+			countDirectories(child, path+string(child.c))
+		}
+	}
+	countDirectories(node, prefix)
+	return usage, nil
+}
+
 func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) uint64 {
 	if ti.snapshot == nil {
 		return ti.refreshUsageMutable(throughputs)
 	}
 	extra, reads, _ := ti.overlayUsage()
 	ti.snapshot.nodes.files.Range(func(key, value any) bool {
-		m := value.(*trieNode).meta.(*fileMeta)
+		m := value.(*trieNode).meta.Load().(*fileMeta)
 		hits := atomic.SwapInt64(&m.readHits, 0)
 		readBytes := atomic.SwapInt64(&m.readBytes, 0)
 		if hits != 0 || readBytes != 0 {
@@ -298,7 +337,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) uint64 {
 			return
 		}
 		delta := extra[name]
-		u := node.meta.(*dirMeta).usage
+		u := node.meta.Load().(*dirMeta).usage
 		atomic.StoreInt64(&u.Metrics, base.Metrics+delta.Metrics)
 		atomic.StoreInt64(&u.Namespaces, base.Namespaces+delta.Namespaces)
 		atomic.StoreInt64(&u.LogicalSize, base.LogicalSize+delta.LogicalSize)
@@ -399,7 +438,7 @@ func (u *fileListUpdate) replaceSnapshot() {
 		}
 		var m fileMeta
 		if node != nil {
-			source := node.meta.(*fileMeta)
+			source := node.meta.Load().(*fileMeta)
 			m.logicalSize = atomic.LoadInt64(&source.logicalSize)
 			m.physicalSize = atomic.LoadInt64(&source.physicalSize)
 			m.dataPoints = atomic.LoadInt64(&source.dataPoints)

@@ -79,6 +79,8 @@ type whisperConfig struct {
 	Quotas              persister.WhisperQuotas
 	RemoveEmptyFile     bool `toml:"remove-empty-file"`
 
+	QuotasReloadInterval Duration `toml:"quotas-reload-interval"`
+
 	OnlineMigration            bool   `toml:"online-migration"`
 	OnlineMigrationRate        int    `toml:"online-migration-rate"` // metrics per second
 	OnlineMigrationGlobalScope string `toml:"online-migration-global-scope"`
