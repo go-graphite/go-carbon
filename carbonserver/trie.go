@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -512,17 +513,27 @@ func (ti *trieIndex) insertMutableBytes(path []byte, logicalSize, physicalSize, 
 	if len(path) > 0 && path[0] == '/' {
 		start = 1
 	}
-	for i := start; i <= len(path); i++ {
-		if i != len(path) && path[i] != '/' {
-			continue
+	for start <= len(path) {
+		n := bytes.IndexByte(path[start:], '/')
+		if n < 0 {
+			n = len(path) - start
 		}
-		n := i - start
 		if n == 0 || (n == 1 && path[start] == '.') || (n == 2 && path[start] == '.' && path[start+1] == '.') {
 			return ti.insertMutable(string(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
 		}
-		start = i + 1
+		start += n + 1
 	}
 	return insertMutablePath(ti, path, logicalSize, physicalSize, dataPoints, firstSeenAt)
+}
+
+func indexPathSeparator[P string | []byte](path P) int {
+	switch path := any(path).(type) {
+	case string:
+		return strings.IndexByte(path, '/')
+	case []byte:
+		return bytes.IndexByte(path, '/')
+	}
+	return -1
 }
 
 func insertMutablePath[P string | []byte](ti *trieIndex, path P, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
@@ -551,11 +562,13 @@ func insertMutablePath[P string | []byte](ti *trieIndex, path P, logicalSize, ph
 	var sn, newn *trieNode
 	var cur = ti.root
 outer:
-	// why len(path)+1: make sure the last node is also processed in the loop
-	for i := 0; i < len(path)+1; i++ {
-		// getting a full node
-		if i < len(path) && path[i] != '/' {
-			continue
+	// Include the final component, and let the standard library scan long
+	// components without checking each byte in the insertion loop.
+	for i := 0; i <= len(path); i++ {
+		if next := indexPathSeparator(path[i:]); next >= 0 {
+			i += next
+		} else {
+			i = len(path)
 		}
 
 		// case 1:
@@ -630,9 +643,12 @@ outer:
 
 			prefixNode := ti.makeNode(prefix, emptyTrieNodes, ti.root.gen)
 			ti.appendChild(prefixNode, sn)
-			cur.setChild(ci, prefixNode)
 			if ti.builder != nil {
+				// The bulk tree is private until publication, just like appendChild.
+				(*cur.childrens)[ci] = prefixNode
 				ti.builder.nodes-- // the replaced prefix is no longer reachable
+			} else {
+				cur.setChild(ci, prefixNode)
 			}
 			cur = (*cur.childrens)[ci]
 

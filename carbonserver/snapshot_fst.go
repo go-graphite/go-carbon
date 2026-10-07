@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -385,12 +386,14 @@ func openIndexSnapshot(fileListCache, root string) (_ *indexSnapshot, err error)
 			_ = s.close()
 		}
 	}()
-	s.indexMap, err = mapSnapshotFile(filepath.Dir(path), manifest.Index)
-	if err != nil {
-		return nil, err
-	}
-	s.metadataMap, err = mapSnapshotFile(filepath.Dir(path), manifest.Metadata)
-	if err != nil {
+	// Validate both immutable files concurrently, retaining both hashes and
+	// waiting for every mapping before cleanup can run on an error.
+	var checks [2]error
+	var wg sync.WaitGroup
+	wg.Go(func() { s.indexMap, checks[0] = mapSnapshotFile(filepath.Dir(path), manifest.Index) })
+	wg.Go(func() { s.metadataMap, checks[1] = mapSnapshotFile(filepath.Dir(path), manifest.Metadata) })
+	wg.Wait()
+	if err = errors.Join(checks[:]...); err != nil {
 		return nil, err
 	}
 	s.index, err = vellum.Load(s.indexMap)

@@ -1,7 +1,9 @@
 package carbonserver
 
 import (
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -53,7 +55,16 @@ func FuzzBorrowedTriePaths(f *testing.F) {
 		}
 		borrowed, owned := newTrie(".wsp", 0, nil), newTrie(".wsp", 0, nil)
 		borrowed.builder = &trieBulkBuilder{}
+		// Derive the expected metric catalogue independently of trie insertion.
+		files := map[string]bool{}
 		for _, path := range strings.Split(input, "\n") {
+			clean := strings.TrimPrefix(filepath.Clean(path), "/")
+			if strings.HasSuffix(clean, ".wsp") {
+				name := strings.TrimSuffix(clean, ".wsp")
+				if name != "" && !strings.HasSuffix(name, "/") {
+					files[name] = true
+				}
+			}
 			scratch := []byte(path)
 			got, ge := borrowed.insertMutableBytes(scratch, 1, 2, 3, 123)
 			want, we := owned.insertMutable(path, 1, 2, 3, 123)
@@ -66,6 +77,16 @@ func FuzzBorrowedTriePaths(f *testing.F) {
 		}
 		if borrowed.longestMetric != owned.longestMetric || !reflect.DeepEqual(borrowed.allMetrics('.'), owned.allMetrics('.')) {
 			t.Fatal("borrowed paths differ after buffer reuse")
+		}
+		want := make([]string, 0, len(files))
+		for name := range files {
+			want = append(want, strings.ReplaceAll(name, "/", "."))
+		}
+		got := borrowed.allMetrics('.')
+		slices.Sort(want)
+		slices.Sort(got)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("catalogue differs from cleaned source paths: got %q want %q", got, want)
 		}
 	})
 }

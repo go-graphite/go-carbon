@@ -31,6 +31,9 @@ The initial mutable trie uses the bulk loader and its construction counters,
 avoiding an immediate prune/count walk of a fresh tree. Quota accounting sums
 subtrees in one pass and retains totals only for the root and configured quota
 namespaces; every configured quota is still enforced before reads become ready.
+The loader reuses path decode buffers while retaining owned labels in the tree.
+Private construction avoids atomic child updates; published trees keep their
+existing concurrency protections.
 
 A later complete filesystem scan writes a replacement generation. Queued metric
 notifications continue updating the live overlay during that scan. Pending
@@ -72,6 +75,8 @@ a whole metric under its cache-shard lock, keeping it visible in either the save
 source, cache, or in-flight write list. The lookup compares full names after
 hashing; cache records precede input records, preserving later-value precedence.
 The three point-checkpoint files are checksum-validated concurrently. Startup
+also validates the two saved-catalogue files concurrently. Large recovery record
+tables use bounded parallel validation, including every range boundary. Startup
 logs distinguish checkpoint validation, remaining index wait, and insertion of
 previously unindexed names; overlap is not added twice to the readiness duration.
 
