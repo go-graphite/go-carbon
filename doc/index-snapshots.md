@@ -79,6 +79,12 @@ a whole metric under its cache-shard lock, keeping it visible in either the save
 source, cache, or in-flight write list. The lookup compares full names after
 hashing; cache records precede input records, preserving later-value precedence.
 The three point-checkpoint files are checksum-validated concurrently. Startup
+uses fixed 16 MiB SHA-256 chunks when available, with at most four checksum
+workers per file, and checks every byte before use. Writers calculate these
+digests alongside the whole-file digest while writing the authoritative bytes.
+The whole-file digest remains available to older readers; checkpoints without
+chunk digests retain whole-file validation. Invalid chunk sizes or counts reject
+the checkpoint rather than bypassing validation. Startup
 also validates the two saved-catalogue files concurrently. Large recovery record
 tables use bounded parallel validation, including every range boundary. Startup
 logs distinguish checkpoint validation, remaining index wait, and insertion of

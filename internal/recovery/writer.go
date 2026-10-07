@@ -2,9 +2,7 @@ package recovery
 
 import (
 	"bufio"
-	"crypto/sha256"
 	"errors"
-	"hash"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +17,7 @@ type Writer struct {
 	mu         sync.Mutex
 	file       *os.File
 	buffer     *bufio.Writer
-	hash       hash.Hash
+	hash       *fileDigester
 	builder    *Builder
 	source     int
 	scratch    []byte
@@ -33,7 +31,7 @@ func NewWriter(path string, source, bufferSize int, builder *Builder) (*Writer, 
 	if err != nil {
 		return nil, err
 	}
-	digest := sha256.New()
+	digest := newFileDigester()
 	return &Writer{file: file, buffer: bufio.NewWriterSize(io.MultiWriter(file, digest), bufferSize), hash: digest, builder: builder, source: source}, nil
 }
 
@@ -79,8 +77,7 @@ func (w *Writer) Close() (File, error) {
 		info, err := w.file.Stat()
 		w.err = err
 		if err == nil {
-			w.descriptor = File{Name: filepath.Base(w.file.Name()), Size: info.Size()}
-			copy(w.descriptor.SHA256[:], w.hash.Sum(nil))
+			w.descriptor = w.hash.descriptor(filepath.Base(w.file.Name()), info.Size())
 		}
 	}
 	w.err = errors.Join(w.err, w.file.Close())
@@ -101,7 +98,7 @@ func WriteIndex(dir string, builder *Builder) (File, error) {
 			_ = os.Remove(file.Name())
 		}
 	}()
-	digest := sha256.New()
+	digest := newFileDigester()
 	buffer := bufio.NewWriterSize(io.MultiWriter(file, digest), 1<<20)
 	if err = builder.Write(buffer); err != nil {
 		return File{}, err
@@ -116,8 +113,7 @@ func WriteIndex(dir string, builder *Builder) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	result := File{Name: filepath.Base(file.Name()), Size: info.Size()}
-	copy(result.SHA256[:], digest.Sum(nil))
+	result := digest.descriptor(filepath.Base(file.Name()), info.Size())
 	if err = file.Close(); err != nil {
 		return File{}, err
 	}

@@ -91,7 +91,7 @@ func TestWriterProducesLegacyAndIndexedRecovery(t *testing.T) {
 	for _, f := range []File{cacheFile, walFile} {
 		path := filepath.Join(dir, f.Name)
 		want, err := Describe(path)
-		if err != nil || want != f {
+		if err != nil || !reflect.DeepEqual(want, f) {
 			t.Fatal("streaming digest differs", want, err)
 		}
 		if err = points.ReadFromFile(path, func(p *points.Points) { legacy += uint64(len(p.Data)) }); err != nil {

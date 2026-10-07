@@ -606,12 +606,19 @@ outer:
 			}
 
 			nlen = i - start
-			start++
-			for match = 1; match < len(child.c) && match < nlen; match++ {
-				if child.c[match] != path[start] {
-					break
-				}
+			match = min(len(child.c), nlen)
+			if string(child.c[:match]) == string(path[start:start+match]) {
+				// Most shared labels match in full. Use the runtime's word-sized
+				// equality path, retaining the byte walk for actual radix splits.
+				start += match
+			} else {
 				start++
+				for match = 1; match < len(child.c) && match < nlen; match++ {
+					if child.c[match] != path[start] {
+						break
+					}
+					start++
+				}
 			}
 
 			if match == nlen {

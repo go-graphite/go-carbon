@@ -20,9 +20,11 @@ import (
 const manifestName = ".pending-points.json"
 
 type File struct {
-	Name   string
-	Size   int64
-	SHA256 [sha256.Size]byte
+	Name      string
+	Size      int64
+	SHA256    [sha256.Size]byte
+	ChunkSize int                 `json:",omitempty"`
+	Chunks    [][sha256.Size]byte `json:",omitempty"`
 }
 type Manifest struct {
 	Version           int
@@ -63,7 +65,7 @@ func Describe(path string) (File, error) {
 	if !info.Mode().IsRegular() {
 		return File{}, fmt.Errorf("recovery source is not a regular file")
 	}
-	hash := sha256.New()
+	hash := newFileDigester()
 	n, err := io.Copy(hash, f)
 	if err != nil {
 		return File{}, err
@@ -71,13 +73,11 @@ func Describe(path string) (File, error) {
 	if n != info.Size() {
 		return File{}, fmt.Errorf("recovery source changed while hashing")
 	}
-	result := File{Name: filepath.Base(path), Size: n}
-	copy(result.SHA256[:], hash.Sum(nil))
-	return result, nil
+	return hash.descriptor(filepath.Base(path), n), nil
 }
 
 func validFile(file File, prefix, suffix string) bool {
-	return file.Size >= 0 && filepath.Base(file.Name) == file.Name && strings.HasPrefix(file.Name, prefix) && strings.HasSuffix(file.Name, suffix)
+	return file.Size >= 0 && validChecksumShape(file) && filepath.Base(file.Name) == file.Name && strings.HasPrefix(file.Name, prefix) && strings.HasSuffix(file.Name, suffix)
 }
 func validManifest(m *Manifest) bool {
 	return m.Version == 1 && validFile(m.Cache, "cache.", ".bin") && validFile(m.WAL, "input.", ".bin") && validFile(m.Index, ".pending-index-", ".bin")
@@ -163,7 +163,7 @@ func mapFile(dir string, file File) (mmap.MMap, error) {
 		return nil, fmt.Errorf("recovery source size/type changed")
 	}
 	if file.Size == 0 {
-		if sha256.Sum256(nil) != file.SHA256 {
+		if !verifyFileChecksum(nil, file) {
 			return nil, fmt.Errorf("empty recovery source checksum mismatch")
 		}
 		return nil, nil
@@ -172,7 +172,7 @@ func mapFile(dir string, file File) (mmap.MMap, error) {
 	if err != nil {
 		return nil, err
 	}
-	if sha256.Sum256(data) != file.SHA256 {
+	if !verifyFileChecksum(data, file) {
 		_ = data.Unmap()
 		return nil, fmt.Errorf("recovery source checksum mismatch")
 	}
