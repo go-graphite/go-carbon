@@ -45,31 +45,43 @@ func TestPebbleChunkIgnorePhysicalQuotasConfig(t *testing.T) {
 					DroppingPolicy: "new", StatMetricPrefix: "custom",
 				}
 				cfg.Whisper.Quotas = persister.WhisperQuotas{raw, {Pattern: "/", PhysicalSize: 1}}
-				err = validateStorageConfig(cfg)
-				if backend == "pebble-chunk" && !tt.want {
-					if err == nil || !strings.Contains(err.Error(), "physical-size") {
-						t.Fatalf("physical quota accepted without opt-in: %v", err)
-					}
-				} else if err != nil {
-					t.Fatal(err)
-				}
-				quotas := cfg.getCarbonserverQuotas(2 * time.Minute)
-				want := carbonserver.Quota{
-					Pattern: raw.Pattern, Namespaces: 2, Metrics: 3, LogicalSize: 4,
-					PhysicalSize: 5, DataPoints: 6, Throughput: 14,
-					DroppingPolicy: carbonserver.QDPNew, StatMetricPrefix: "custom",
-				}
-				physicalOnly := carbonserver.Quota{Pattern: "/", PhysicalSize: 1, DroppingPolicy: carbonserver.QDPNew}
-				if backend == "pebble-chunk" && tt.want {
-					want.PhysicalSize, physicalOnly.PhysicalSize = 0, 0
-				}
-				if len(quotas) != 2 || *quotas[0] != want || *quotas[1] != physicalOnly {
-					t.Fatalf("effective quotas = %v, want [%v %v]", quotas, &want, &physicalOnly)
-				}
-				if cfg.Whisper.Quotas[0] != raw || cfg.Whisper.Quotas[1].PhysicalSize != 1 {
-					t.Fatal("conversion changed the configured quota values")
-				}
+				checkPhysicalQuotaValidation(t, cfg)
+				checkPhysicalQuotaConversion(t, cfg, raw)
 			})
 		}
+	}
+}
+
+func checkPhysicalQuotaValidation(t *testing.T, cfg *Config) {
+	t.Helper()
+	err := validateStorageConfig(cfg)
+	if cfg.Whisper.StorageBackend == "pebble-chunk" && !cfg.Whisper.PebbleChunkIgnorePhysicalQuotas {
+		if err == nil || !strings.Contains(err.Error(), "physical-size") {
+			t.Fatalf("physical quota accepted without opt-in: %v", err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func checkPhysicalQuotaConversion(t *testing.T, cfg *Config, raw persister.Quota) {
+	t.Helper()
+	quotas := cfg.getCarbonserverQuotas(2 * time.Minute)
+	want := carbonserver.Quota{
+		Pattern: raw.Pattern, Namespaces: 2, Metrics: 3, LogicalSize: 4,
+		PhysicalSize: 5, DataPoints: 6, Throughput: 14,
+		DroppingPolicy: carbonserver.QDPNew, StatMetricPrefix: "custom",
+	}
+	physicalOnly := carbonserver.Quota{Pattern: "/", PhysicalSize: 1, DroppingPolicy: carbonserver.QDPNew}
+	if cfg.Whisper.StorageBackend == "pebble-chunk" && cfg.Whisper.PebbleChunkIgnorePhysicalQuotas {
+		want.PhysicalSize, physicalOnly.PhysicalSize = 0, 0
+	}
+	if len(quotas) != 2 || *quotas[0] != want || *quotas[1] != physicalOnly {
+		t.Fatalf("effective quotas = %v, want [%v %v]", quotas, &want, &physicalOnly)
+	}
+	if cfg.Whisper.Quotas[0] != raw || cfg.Whisper.Quotas[1].PhysicalSize != 1 {
+		t.Fatal("conversion changed the configured quota values")
 	}
 }

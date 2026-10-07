@@ -340,49 +340,11 @@ func TestPebbleChunkIgnorePhysicalQuotasStartupAndReload(t *testing.T) {
 			defer app.Stop()
 			server := app.Carbonserver
 			if backend == "files" {
-				waitQuotaThrottle(t, server, true)
-				defer checkQuotaConcurrently(server)()
-				for _, reload := range []struct {
-					name string
-					run  func() error
-				}{
-					{name: "poll", run: app.quotaReloader.reload},
-					{name: "SIGHUP", run: app.ReloadConfig},
-				} {
-					t.Run(reload.name, func(t *testing.T) {
-						for _, size := range []string{"max", "2"} {
-							quota(fmt.Sprintf("[/]\nmetrics=20\nphysical-size=%s\n", size))
-							if err := reload.run(); err != nil {
-								t.Fatal(err)
-							}
-							waitQuotaThrottle(t, server, size == "2")
-						}
-					})
-				}
-				if !app.Config.Whisper.PebbleChunkIgnorePhysicalQuotas || app.Carbonserver != server {
-					t.Fatal("reload changed the configured flag or the running server")
-				}
+				checkFilePhysicalQuotaReloads(t, app, quota)
 				return
 			}
 			addQuotaExistingMetric(t, app)
-			if app.MetricStore != nil {
-				// Shared scans rebuild from the catalog, so the metric must be
-				// persisted before it can count towards the reloaded quota.
-				deadline := time.Now().Add(5 * time.Second)
-				for {
-					_, err := app.MetricStore.Metadata(context.Background(), "namespace.existing")
-					if err == nil {
-						break
-					}
-					if time.Now().After(deadline) {
-						t.Fatalf("metric not persisted: %v", err)
-					}
-					time.Sleep(time.Millisecond)
-				}
-				if err := server.RefreshMetricStoreIndex(); err != nil {
-					t.Fatal(err)
-				}
-			}
+			refreshSharedQuotaMetric(t, app)
 			waitQuotaThrottle(t, server, false)
 			if app.Config.Whisper.Quotas[0].PhysicalSize != 1 {
 				t.Fatal("startup changed the configured physical quota")
@@ -420,5 +382,55 @@ func TestPebbleChunkIgnorePhysicalQuotasStartupAndReload(t *testing.T) {
 			}
 			waitQuotaThrottle(t, server, true)
 		})
+	}
+}
+
+func checkFilePhysicalQuotaReloads(t *testing.T, app *App, quota func(string)) {
+	t.Helper()
+	server := app.Carbonserver
+	waitQuotaThrottle(t, server, true)
+	defer checkQuotaConcurrently(server)()
+	for _, reload := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "poll", run: app.quotaReloader.reload},
+		{name: "SIGHUP", run: app.ReloadConfig},
+	} {
+		t.Run(reload.name, func(t *testing.T) {
+			for _, size := range []string{"max", "2"} {
+				quota(fmt.Sprintf("[/]\nmetrics=20\nphysical-size=%s\n", size))
+				if err := reload.run(); err != nil {
+					t.Fatal(err)
+				}
+				waitQuotaThrottle(t, server, size == "2")
+			}
+		})
+	}
+	if !app.Config.Whisper.PebbleChunkIgnorePhysicalQuotas || app.Carbonserver != server {
+		t.Fatal("reload changed the configured flag or the running server")
+	}
+}
+
+func refreshSharedQuotaMetric(t *testing.T, app *App) {
+	t.Helper()
+	if app.MetricStore == nil {
+		t.Fatal("shared metric store missing")
+	}
+	// Shared scans rebuild from the catalog, so the metric must be
+	// persisted before it can count towards the reloaded quota.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := app.MetricStore.Metadata(context.Background(), "namespace.existing")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("metric not persisted: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := app.Carbonserver.RefreshMetricStoreIndex(); err != nil {
+		t.Fatal(err)
 	}
 }
