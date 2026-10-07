@@ -65,7 +65,6 @@ type App struct {
 	Carbonserver   *carbonserver.CarbonserverListener
 	MetricStore    *store.Store
 	Buckyd         *buckyd.Service
-	buckydIndex    *metricIndexRefresher
 	Tags           *tags.Tags
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	PromRegisterer prometheus.Registerer
@@ -75,6 +74,10 @@ type App struct {
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	quotaReloader       *quotaReloader
+	metricStoreIndex    *metricIndexRefresher
+	expirer             *metricExpirer
+	expirationStats     *expirationStats
+	storeRestoreDone    <-chan struct{}
 }
 
 var registerPluginsOnce sync.Once
@@ -102,39 +105,8 @@ func New(configFilename string) *App {
 
 // configure loads config from config file, schemas.conf, aggregation.conf
 func (app *App) configure() error {
-	var err error
-
-	cfg, err := ReadConfig(app.ConfigFilename)
+	cfg, err := loadConfig(app.ConfigFilename)
 	if err != nil {
-		return err
-	}
-	if err := validateStorageConfig(cfg); err != nil {
-		return err
-	}
-	if err := validateQuotaReloadConfig(cfg); err != nil {
-		return err
-	}
-
-	// carbon-cache prefix
-	if hostname, err := os.Hostname(); err == nil {
-		hostname = strings.ReplaceAll(hostname, ".", "_")
-		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", hostname)
-	} else {
-		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", "localhost")
-	}
-
-	if err := loadWhisperConfig(cfg); err != nil {
-		return err
-	}
-	if err := validateCacheConfig(cfg); err != nil {
-		return err
-	}
-
-	if err := validateMetricEndpoint(cfg); err != nil {
-		return err
-	}
-
-	if err := validateStorageConfig(cfg); err != nil {
 		return err
 	}
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
@@ -154,12 +126,54 @@ func (app *App) configure() error {
 		}
 		app.quotaEstimateConfig.Store(cfg)
 	}
+	// All fallible policy validation is complete. Join the old expiration
+	// worker before publishing the new policy, so reload cannot leave deletes
+	// running under an obsolete rule. ReloadConfig restarts it below.
+	app.stopExpiration()
 	app.Config = cfg
 	if app.quotaReloader != nil {
 		app.quotaReloader.configureLocked(cfg)
 	}
 
 	return nil
+}
+
+func loadConfig(filename string) (*Config, error) {
+	cfg, err := ReadConfig(filename)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStorageConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateQuotaReloadConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	// carbon-cache prefix
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.ReplaceAll(hostname, ".", "_")
+		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", hostname)
+	} else {
+		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", "localhost")
+	}
+
+	if err := loadWhisperConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := loadExpirationConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateCacheConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateMetricEndpoint(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateStorageConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func loadWhisperConfig(cfg *Config) error {
@@ -297,6 +311,7 @@ func (app *App) ReloadConfig() error {
 	}
 
 	app.startPersister()
+	app.startExpiration()
 
 	if app.Collector != nil {
 		app.Collector.Stop()
@@ -337,6 +352,7 @@ func (app *App) stopInputListeners() {
 func (app *App) stopReadListeners() <-chan struct{} {
 	logger := zapwriter.Logger("app")
 	readsStopped := make(chan struct{})
+	app.stopExpiration()
 	if app.quotaReloader != nil {
 		app.quotaReloader.close()
 		app.quotaReloader = nil
@@ -361,9 +377,9 @@ func (app *App) stopReadListeners() <-chan struct{} {
 		}
 		app.Buckyd = nil
 	}
-	if app.buckydIndex != nil {
-		app.buckydIndex.close()
-		app.buckydIndex = nil
+	if app.metricStoreIndex != nil {
+		app.metricStoreIndex.close()
+		app.metricStoreIndex = nil
 	}
 	if app.Carbonserver != nil {
 		carbonserver := app.Carbonserver
@@ -536,13 +552,27 @@ func (app *App) Start() (err error) {
 	if err = app.startCarbonlink(core); err != nil {
 		return err
 	}
+	return app.startBackgroundWorkers(core, restoreBeforeReceivers)
+}
+
+func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers bool) error {
+	conf := app.Config
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
-		go app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		restored := make(chan struct{})
+		app.storeRestoreDone = restored
+		go func() {
+			defer close(restored)
+			app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		}()
 	}
-	app.Collector = NewCollector(app)
-	if err = app.startBuckyd(); err != nil {
+	if app.MetricStore != nil && app.Carbonserver != nil {
+		app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
+	}
+	if err := app.startBuckyd(); err != nil {
 		return err
 	}
+	app.startExpiration()
+	app.Collector = NewCollector(app)
 	if app.Carbonserver != nil {
 		app.quotaReloader = startQuotaReloader(app.Config, app.Carbonserver)
 	}
@@ -551,6 +581,7 @@ func (app *App) Start() (err error) {
 
 func (app *App) startStorage() (core *cache.Cache, err error) {
 	conf := app.Config
+	app.storeRestoreDone = nil
 	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
@@ -569,6 +600,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("open shared storage: %w", err)
 		}
+		app.expirationStats = &expirationStats{}
 	}
 
 	return core, nil
@@ -946,9 +978,8 @@ func (app *App) startBuckyd() (err error) {
 		if err != nil {
 			return fmt.Errorf("configure buckyd: %w", err)
 		}
-		if app.Carbonserver != nil {
-			app.buckydIndex = startMetricIndexRefresher(app.Carbonserver, buckydIndexRefreshInterval)
-			app.Buckyd.SetOnChange(app.buckydIndex.notify)
+		if app.metricStoreIndex != nil {
+			app.Buckyd.SetOnChange(app.metricStoreIndex.notify)
 		}
 		if err = app.Buckyd.Start(); err != nil {
 			return fmt.Errorf("start buckyd: %w", err)

@@ -228,6 +228,23 @@ func (c *Cache) Get(key string) []points.Point {
 	return data
 }
 
+// Has reports whether key has unwritten points. Unlike Get it takes a read
+// lock, copies nothing, and does not count as a cache query.
+func (c *Cache) Has(key string) bool {
+	shard := c.GetShard(key)
+	shard.mu.RLock()
+	defer shard.mu.RUnlock()
+	if _, exists := shard.items[key]; exists {
+		return true
+	}
+	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+		if p != nil && p.Metric == key {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *Cache) Confirm(p *points.Points) {
 	shard := c.GetShard(p.Metric)
 

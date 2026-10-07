@@ -8,6 +8,28 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
+func TestCacheHas(t *testing.T) {
+	c := New()
+	if c.Has("hello.world") {
+		t.Fatal("empty cache reports metric")
+	}
+	c.Add(points.OnePoint("hello.world", 42, 10))
+	if !c.Has("hello.world") || c.Has("hello.other") {
+		t.Fatal("Has does not match cache contents")
+	}
+	p, exists := c.PopNotConfirmed("hello.world")
+	if !exists || !c.Has("hello.world") {
+		t.Fatal("unconfirmed metric not reported as pending")
+	}
+	c.Confirm(p)
+	if c.Has("hello.world") {
+		t.Fatal("confirmed metric still reported as pending")
+	}
+	if c.stat.queryCnt != 0 {
+		t.Fatalf("Has counted %d queries", c.stat.queryCnt)
+	}
+}
+
 func TestCache(t *testing.T) {
 
 	c := New()

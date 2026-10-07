@@ -38,6 +38,9 @@ func validateStorageConfig(cfg *Config) error {
 	if cfg.Whisper.StoreSyncInterval == nil || cfg.Whisper.StoreSyncInterval.Value() < 0 {
 		return errors.New("whisper.store-sync-interval must be a non-negative duration")
 	}
+	if err := validateExpirationConfig(cfg); err != nil {
+		return err
+	}
 	if cfg.Whisper.OnlineMigration {
 		return errors.New("online-migration is not supported by shared storage")
 	}

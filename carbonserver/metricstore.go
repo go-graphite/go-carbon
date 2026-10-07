@@ -97,27 +97,25 @@ func (listener *CarbonserverListener) loadMetricStoreCatalog(metricStore *store.
 }
 
 func (listener *CarbonserverListener) loadMetricStoreCatalogPages(metricStore *store.Store, files []string, details map[string]*protov3.MetricDetails, trieIdx *trieIndex, seenPaths map[string]struct{}) ([]string, map[string]*protov3.MetricDetails, *trieIndex, uint64, error) {
-	ctx := context.Background()
 	var metricsKnown uint64
-	var catalogAfter string
-	for {
-		page, err := metricStore.ListPage(ctx, "", catalogAfter, metricStoreCatalogPageSize)
-		if err != nil {
-			return nil, nil, nil, 0, fmt.Errorf("list shared metric-store catalog: %w", err)
-		}
+	var indexErr error
+	err := store.EachPage(context.Background(), metricStore.ListPage, "", metricStoreCatalogPageSize, func(page []store.Metadata) error {
 		for _, metadata := range page {
-			var indexErr error
 			files, indexErr = listener.addMetricStoreCatalogEntry(metadata, files, details, trieIdx, seenPaths)
 			if indexErr != nil {
-				return nil, nil, nil, 0, indexErr
+				return indexErr
 			}
 			metricsKnown++
 		}
-		if len(page) < metricStoreCatalogPageSize {
-			return files, details, trieIdx, metricsKnown, nil
-		}
-		catalogAfter = page[len(page)-1].Name
+		return nil
+	})
+	if indexErr != nil {
+		return nil, nil, nil, 0, indexErr
 	}
+	if err != nil {
+		return nil, nil, nil, 0, fmt.Errorf("list shared metric-store catalog: %w", err)
+	}
+	return files, details, trieIdx, metricsKnown, nil
 }
 
 func (listener *CarbonserverListener) addMetricStoreCatalogEntry(metadata store.Metadata, files []string, details map[string]*protov3.MetricDetails, trieIdx *trieIndex, seenPaths map[string]struct{}) ([]string, error) {

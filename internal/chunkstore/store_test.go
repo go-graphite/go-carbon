@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -14,11 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 )
 
 func TestOpenRejectsLegacyOrInvalidMarkerWithoutModification(t *testing.T) {
-	for _, marker := range []string{"", "go-carbon-chunks-v2\n", "go-carbon-chunks"} {
+	for _, marker := range []string{"", "go-carbon-chunks-v3\n", "go-carbon-chunks"} {
 		t.Run(marker, func(t *testing.T) {
 			fs := vfs.NewMem()
 			const dir = "/store"
@@ -65,6 +67,304 @@ func TestOpenRejectsLegacyOrInvalidMarkerWithoutModification(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOpenUpgradesV1MarkerAfterOpeningDatabase(t *testing.T) {
+	fs := vfs.NewMem()
+	const dir = "/store"
+	if err := fs.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fs.Create(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(formatMarkerV1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, Options{fs: fs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, s)
+	f, err = fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(f)
+	if err := errors.Join(readErr, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != formatMarkerV2 {
+		t.Fatalf("marker = %q, want %q", data, formatMarkerV2)
+	}
+}
+
+func TestEpochClockDoesNotEncodeUnknownActivity(t *testing.T) {
+	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return time.Unix(0, 0) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, s)
+	m := createTestMetric(t, s, "epoch")
+	got, err := s.Metadata(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastUpdate.IsZero() {
+		t.Fatal("epoch activity decoded as unknown")
+	}
+}
+
+func TestActivityTracksSuccessfulMutationsOnly(t *testing.T) {
+	now := time.Unix(100_000, 0)
+	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, s)
+	m := createTestMetric(t, s, "activity")
+	if !m.LastUpdate.Equal(now) {
+		t.Fatalf("created activity = %v, want %v", m.LastUpdate, now)
+	}
+	now = now.Add(time.Minute)
+	assertActivityIgnoresNoOpMutations(t, s, m, now)
+	now = now.Add(time.Minute)
+	if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_900, Value: 1}}, 60*256); err != nil {
+		t.Fatal(err)
+	}
+	assertSuccessfulActivityUpdate(t, s, m, now)
+	now = now.Add(-2 * time.Hour)
+	if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_840, Value: 2}}, 60*256); err != nil {
+		t.Fatal(err)
+	}
+	assertBackwardClockDoesNotMoveActivity(t, s, m.Name)
+}
+
+func assertActivityIgnoresNoOpMutations(t *testing.T, s *Store, m Metadata, now time.Time) {
+	t.Helper()
+	if err := s.UpdateMany(context.Background(), m.Name, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMany(context.Background(), m.Name, []Point{{Timestamp: 1, Value: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateManyForArchive(context.Background(), m.Name,
+		[]Point{{Timestamp: 99_900, Value: 99}, {Timestamp: -1, Value: 1}}, 60*256); err == nil {
+		t.Fatal("invalid point accepted after a valid point in the same batch")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.UpdateMany(ctx, m.Name, []Point{{Timestamp: now.Unix(), Value: 1}}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled update error = %v", err)
+	}
+	got, err := s.Metadata(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision != m.Revision || !got.LastUpdate.Equal(m.LastUpdate) {
+		t.Fatalf("no-op update changed metadata: %+v", got)
+	}
+}
+
+func assertSuccessfulActivityUpdate(t *testing.T, s *Store, m Metadata, now time.Time) {
+	t.Helper()
+	got, err := s.Metadata(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Revision != m.Revision+1 || !got.LastUpdate.Equal(now) {
+		t.Fatalf("successful update metadata = %+v, want revision %d activity %v", got, m.Revision+1, now)
+	}
+}
+
+func assertBackwardClockDoesNotMoveActivity(t *testing.T, s *Store, name string) {
+	t.Helper()
+	got, err := s.Metadata(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastUpdate.Equal(time.Unix(100_120, 0)) {
+		t.Fatalf("backward clock moved activity backward: %v", got.LastUpdate)
+	}
+}
+
+func TestInitializeActivityUpgradesLegacyRevisionOnce(t *testing.T) {
+	now := time.Unix(100_000, 0)
+	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, s)
+	m := createTestMetric(t, s, "legacy-activity")
+	if err := s.db.Set(revisionKey(m), uint64Bytes(m.Revision), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := s.Metadata(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !legacy.LastUpdate.IsZero() {
+		t.Fatalf("legacy activity = %v, want unknown", legacy.LastUpdate)
+	}
+	now = now.Add(time.Minute)
+	if err := s.InitializeActivity(context.Background(), m.Name, legacy); err != nil {
+		t.Fatal(err)
+	}
+	initialized, err := s.Metadata(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialized.Revision != legacy.Revision+1 || !initialized.LastUpdate.Equal(now) {
+		t.Fatalf("initialized metadata = %+v", initialized)
+	}
+	if err := s.InitializeActivity(context.Background(), m.Name, legacy); !errors.Is(err, ErrConflict) {
+		t.Fatalf("repeated initialization = %v, want ErrConflict", err)
+	}
+}
+
+func TestAdministrativeMutationsUseLocalActivityTime(t *testing.T) {
+	now := time.Unix(100_000, 0)
+	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, s)
+	config := MetricConfig{Name: "activity-admin", Retentions: []Retention{{Step: 60, Count: 256}}, AggregationMethod: Average}
+	snapshot := Snapshot{Metadata: Metadata{MetricConfig: config}, Archives: []Archive{{Retention: config.Retentions[0], Points: []Point{{Timestamp: 99_900, Value: 1}}}}}
+	snapshot.Metadata.LastUpdate = now.Add(24 * time.Hour)
+	imported, err := s.CreateFromSnapshot(context.Background(), snapshot)
+	if err != nil || !imported.LastUpdate.Equal(now) {
+		t.Fatalf("import = %+v, %v", imported, err)
+	}
+	now = now.Add(time.Minute)
+	replaced, err := s.Replace(context.Background(), snapshot)
+	if err != nil || !replaced.LastUpdate.Equal(now) {
+		t.Fatalf("replace = %+v, %v", replaced, err)
+	}
+	now = now.Add(time.Minute)
+	snapshot.Archives[0].Points = append(snapshot.Archives[0].Points, Point{Timestamp: 99_960, Value: 2})
+	filled, err := s.Fill(context.Background(), snapshot)
+	if err != nil || !filled.LastUpdate.Equal(now) {
+		t.Fatalf("fill = %+v, %v", filled, err)
+	}
+}
+
+func TestActivityRevisionIsAtomicWithDataAcrossRecovery(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		interval time.Duration
+		sync     bool
+		wantData bool
+	}{
+		{name: "synchronous", wantData: true},
+		{name: "unsynced", interval: time.Hour},
+		{name: "periodically synced", interval: time.Hour, sync: true, wantData: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testActivityRevisionRecovery(t, tt.interval, tt.sync, tt.wantData)
+		})
+	}
+}
+
+func testActivityRevisionRecovery(t *testing.T, interval time.Duration, sync, wantData bool) {
+	t.Helper()
+	strict := vfs.NewStrictMem()
+	now := time.Unix(100_000, 0)
+	s, err := Open("/store", Options{fs: strict, SyncInterval: interval, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := createTestMetric(t, s, "activity-recovery")
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	writeActivityRecoveryMutation(t, s, m.Name, sync)
+	closeForCrashRecovery(t, s, strict)
+	assertActivityRecovery(t, strict, m, now, wantData)
+}
+
+func writeActivityRecoveryMutation(t *testing.T, s *Store, name string, sync bool) {
+	t.Helper()
+	if err := s.UpdateManyForArchive(context.Background(), name, []Point{{Timestamp: 99_900, Value: 1}}, 60*256); err != nil {
+		t.Fatal(err)
+	}
+	if sync {
+		if err := s.db.LogData(nil, pebble.Sync); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func closeForCrashRecovery(t *testing.T, s *Store, strict *vfs.MemFS) {
+	t.Helper()
+	strict.SetIgnoreSyncs(true)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	strict.ResetToSyncedState()
+	strict.SetIgnoreSyncs(false)
+}
+
+func assertActivityRecovery(t *testing.T, strict *vfs.MemFS, m Metadata, now time.Time, wantData bool) {
+	t.Helper()
+	reopened, err := Open("/store", Options{fs: strict, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, reopened)
+	got, err := reopened.Snapshot(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantData {
+		if got.Metadata.Revision != m.Revision+1 || !got.Metadata.LastUpdate.Equal(now) || len(got.Archives[0].Points) != 1 {
+			t.Fatalf("recovered updated state = %+v", got)
+		}
+	} else if got.Metadata.Revision != m.Revision || !got.Metadata.LastUpdate.Equal(m.LastUpdate) || len(got.Archives[0].Points) != 0 {
+		t.Fatalf("recovered partial mutation = %+v", got)
+	}
+}
+
+func TestOpenLockFailureDoesNotUpgradeV1Marker(t *testing.T) {
+	fs := vfs.NewMem()
+	const dir = "/store"
+	if err := fs.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f, err := fs.Create(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte(formatMarkerV1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := pebble.Open(dir, &pebble.Options{FS: fs, Merger: chunkMerger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = locked.Close() }()
+	if _, err := Open(dir, Options{fs: fs}); err == nil {
+		t.Fatal("opened store despite held Pebble lock")
+	}
+	f, err = fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(f)
+	if err := errors.Join(readErr, f.Close()); err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != formatMarkerV1 {
+		t.Fatalf("lock failure upgraded marker to %q", data)
 	}
 }
 

@@ -104,6 +104,9 @@ func NewCollector(app *App) *Collector {
 	if app.MetricStore != nil {
 		c.stats = append(c.stats, moduleCallback("storage", &storeStats{db: app.MetricStore}))
 	}
+	if app.expirationStats != nil {
+		c.stats = append(c.stats, moduleCallback("storage.expiration", app.expirationStats))
+	}
 
 	if app.Api != nil {
 		c.stats = append(c.stats, moduleCallback("grpc", app.Api))
