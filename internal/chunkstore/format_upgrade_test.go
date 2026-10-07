@@ -16,12 +16,12 @@ import (
 func TestInterruptedFormatUpgradeCanRetryAndRecover(t *testing.T) {
 	for _, stage := range []string{"file sync", "rename", "directory sync"} {
 		t.Run(stage, func(t *testing.T) {
-			testInterruptedFormatUpgradeCanRetryAndRecover(t, stage)
+			checkInterruptedFormatUpgradeRecovery(t, stage)
 		})
 	}
 }
 
-func testInterruptedFormatUpgradeCanRetryAndRecover(t *testing.T, stage string) {
+func checkInterruptedFormatUpgradeRecovery(t *testing.T, stage string) {
 	t.Helper()
 	strict := vfs.NewStrictMem()
 	const dir = "/store"
