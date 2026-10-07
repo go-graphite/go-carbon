@@ -298,4 +298,61 @@ func BenchmarkCapturedSnapshotMembership(b *testing.B) {
 			}
 		}
 	})
+	// Repeated new names hit quota admission on every incoming point until
+	// persistence creates them. Exercise the whole ancestor walk, including
+	// long real prefixes, rather than only known-metric membership.
+	newNames := make([]string, len(names))
+	for i, name := range names {
+		newNames[i] = name + ".__snapshot_benchmark_new__"
+		want, wantNew := snapshotMetricPathWithRanges(ti, newNames[i], make([]*trieNode, 0, 32))
+		got, gotNew := ti.metricPath(newNames[i], make([]*trieNode, 0, 32))
+		if gotNew != wantNew || !gotNew || len(got) != len(want) {
+			b.Fatalf("ancestor mismatch: %q", newNames[i])
+		}
+		for j := range want {
+			if got[j] != want[j] {
+				b.Fatalf("quota ancestor mismatch: %q at %d", newNames[i], j)
+			}
+		}
+	}
+	for _, variant := range []struct {
+		name string
+		path func(*trieIndex, string, []*trieNode) ([]*trieNode, bool)
+	}{{"admission-ranges", snapshotMetricPathWithRanges}, {"admission-prefix", (*trieIndex).metricPath}} {
+		b.Run(variant.name, func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, isNew := variant.path(ti, newNames[i%len(newNames)], make([]*trieNode, 0, 32)); !isNew {
+					b.Fatal("unexpected existing metric")
+				}
+			}
+		})
+	}
+}
+
+// Original mapped admission path retained as an independent benchmark oracle.
+func snapshotMetricPathWithRanges(ti *trieIndex, metric string, dirs []*trieNode) ([]*trieNode, bool) {
+	if _, found, err := ti.snapshot.lookup("/" + strings.ReplaceAll(metric, ".", "/") + ti.fileExt); err == nil && found {
+		return dirs, false
+	}
+	if _, isNew := ti.metricPathMutable(metric, nil); !isNew {
+		return dirs, false
+	}
+	dirs = append(dirs, ti.root)
+	for end := 0; end < len(metric); end++ {
+		if metric[end] != '.' {
+			continue
+		}
+		name := metric[:end]
+		start, stop, err := ti.snapshot.namespaceRange(name)
+		exists := err == nil && start < stop
+		if !exists {
+			exists = ti.mutableDirectory(name) != nil
+		}
+		if !exists {
+			break
+		}
+		dirs = append(dirs, ti.snapshot.directoryNode(name))
+	}
+	return dirs, true
 }

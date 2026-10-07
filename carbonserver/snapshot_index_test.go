@@ -137,6 +137,39 @@ func TestSnapshotOverlayQuotaParity(t *testing.T) {
 	}
 }
 
+func TestSnapshotNewMetricAncestorsMatchTrie(t *testing.T) {
+	hybrid, oracle, _, _ := snapshotTrieFixture(t)
+	for _, index := range []*trieIndex{hybrid, oracle} {
+		for _, path := range []string{"/a/newdir/value.wsp", "/overlay/deep/value.wsp", "/空间/新/值.wsp"} {
+			if _, err := index.insert(path, 7, 11, 13, 12345); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, metric := range []string{
+		"a.value", "a.new", "a.newdir.new", "a.newdir.value.child", "a.unknown.child",
+		"a-sibling.new", "a0.new", "b.child.new", "b.child.more.new", "unknown.child",
+		"overlay.deep.new", "overlay.deep.value.child", "空间.新.另一", "空间.未见.值",
+	} {
+		got, gotNew := hybrid.metricPath(metric, make([]*trieNode, 0, 32))
+		want, wantNew := oracle.metricPath(metric, make([]*trieNode, 0, 32))
+		if gotNew != wantNew || gotNew && len(got) != len(want) {
+			t.Errorf("%q: new=%v ancestors=%d, want new=%v ancestors=%d", metric, gotNew, len(got), wantNew, len(want))
+		}
+	}
+}
+
+func TestSnapshotAdmissionMatchesRangeChecks(t *testing.T) {
+	hybrid, _, _, _ := snapshotTrieFixture(t)
+	for _, metric := range []string{"", ".a", "a..value", "a/value.new", "/.new", "a.\x00.new", "a.missing.child", "空间.新.值"} {
+		got, gotNew := hybrid.metricPath(metric, make([]*trieNode, 0, 32))
+		want, wantNew := snapshotMetricPathWithRanges(hybrid, metric, make([]*trieNode, 0, 32))
+		if gotNew != wantNew || !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: admission ancestors differ from range checks", metric)
+		}
+	}
+}
+
 func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
 	_, _, cache, root := snapshotTrieFixture(t)
 	listener := NewCarbonserverListener(nil)
