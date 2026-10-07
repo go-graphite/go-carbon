@@ -94,15 +94,31 @@ func (ti *trieIndex) loadSnapshotOverlay(cache string) error {
 		pending.builder = &trieBulkBuilder{}
 	}
 	var count uint64
+	v2, _ := reader.(*fileListCacheV2)
+	var entry FLCEntry
 	for {
-		entry, err := reader.Read()
+		var borrowed []byte
+		if v2 != nil {
+			borrowed, err = v2.readRecord(&entry)
+		} else {
+			var next *FLCEntry
+			next, err = reader.Read()
+			if next != nil {
+				entry = *next
+			}
+		}
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return err
 		}
-		if _, err = pending.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt); err != nil {
+		if v2 != nil {
+			_, err = pending.insertMutableBytes(borrowed, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
+		} else {
+			_, err = pending.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
+		}
+		if err != nil {
 			return err
 		}
 		count++

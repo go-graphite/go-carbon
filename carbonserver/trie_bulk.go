@@ -33,16 +33,18 @@ func (ti *trieIndex) makeNode(label []byte, children *[]*trieNode, generation ui
 	return &trieNode{c: label, childrens: children, gen: generation}
 }
 
-func (ti *trieIndex) copyLabel(label string) []byte {
+func copyTrieLabel[P string | []byte](ti *trieIndex, label P) []byte {
 	if ti.builder == nil {
-		return []byte(label)
+		return []byte(string(label))
 	}
 	b := ti.builder
 	if len(b.labels) < len(label) {
 		b.labels = make([]byte, max(16*1024, len(label)))
 	}
 	buf := b.labels[:len(label):len(label)]
-	copy(buf, label)
+	for i := 0; i < len(label); i++ {
+		buf[i] = label[i]
+	}
 	b.labels = b.labels[len(label):]
 	return buf
 }

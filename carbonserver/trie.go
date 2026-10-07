@@ -498,26 +498,53 @@ func (t *trieInsertError) Error() string { return t.typ }
 //
 // insert returns either a file node or dir node, after inserted.
 func (ti *trieIndex) insertMutable(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
-	path = filepath.Clean(path)
+	return insertMutablePath(ti, filepath.Clean(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
+}
+
+// insertMutableBytes consumes a borrowed decode buffer synchronously. The generic
+// builder copies retained labels and the longest path; it never stores the input
+// slice. Noncanonical filesystem paths retain filepath.Clean's legacy behavior.
+func (ti *trieIndex) insertMutableBytes(path []byte, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
+	if filepath.Separator != '/' {
+		return ti.insertMutable(string(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
+	}
+	start := 0
+	if len(path) > 0 && path[0] == '/' {
+		start = 1
+	}
+	for i := start; i <= len(path); i++ {
+		if i != len(path) && path[i] != '/' {
+			continue
+		}
+		n := i - start
+		if n == 0 || (n == 1 && path[start] == '.') || (n == 2 && path[start] == '.' && path[start+1] == '.') {
+			return ti.insertMutable(string(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
+		}
+		start = i + 1
+	}
+	return insertMutablePath(ti, path, logicalSize, physicalSize, dataPoints, firstSeenAt)
+}
+
+func insertMutablePath[P string | []byte](ti *trieIndex, path P, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
 	if len(path) > 0 && path[0] == '/' { // skipcq: GO-S1005
 		path = path[1:]
 	}
-	if path == "" || path == "." {
+	if len(path) == 0 || (len(path) == 1 && path[0] == '.') {
 		return nil, nil
 	}
 
-	isFile := strings.HasSuffix(path, ti.fileExt)
+	isFile := len(path) >= len(ti.fileExt) && string(path[len(path)-len(ti.fileExt):]) == ti.fileExt
 	if isFile {
 		path = path[:len(path)-len(ti.fileExt)]
 	}
 
-	if path == "" || path[len(path)-1] == '/' {
+	if len(path) == 0 || path[len(path)-1] == '/' {
 		return nil, nilFilenameError("metric filename is nil")
 	}
 
 	if uint64(len(path)) > ti.getDepth() {
 		ti.setDepth(uint64(len(path)))
-		ti.longestMetric = path
+		ti.longestMetric = string(path)
 	}
 
 	var start, nlen int
@@ -610,7 +637,7 @@ outer:
 			cur = (*cur.childrens)[ci]
 
 			if nlen-match > 0 {
-				newn = ti.makeNode(ti.copyLabel(path[start:i]), emptyTrieNodes, ti.root.gen)
+				newn = ti.makeNode(copyTrieLabel(ti, path[start:i]), emptyTrieNodes, ti.root.gen)
 
 				ti.appendChild(cur, newn)
 				cur = newn
@@ -621,7 +648,7 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-			newn = ti.makeNode(ti.copyLabel(path[start:i]), emptyTrieNodes, ti.root.gen)
+			newn = ti.makeNode(copyTrieLabel(ti, path[start:i]), emptyTrieNodes, ti.root.gen)
 			ti.appendChild(cur, newn)
 			cur = newn
 		}
@@ -700,7 +727,7 @@ outer:
 	}
 	if !hasFileNode {
 		if ti.estimateSize != nil && logicalSize == 0 && physicalSize == 0 && dataPoints == 0 {
-			logicalSize, physicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
+			logicalSize, physicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(string(path), "/", "."))
 		}
 
 		child := ti.makeFileNode(logicalSize, physicalSize, dataPoints, firstSeenAt)

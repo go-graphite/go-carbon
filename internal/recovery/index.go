@@ -6,9 +6,11 @@ package recovery
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"runtime"
 	"slices"
 	"sync"
 
@@ -175,29 +177,10 @@ func Open(index, cache, wal []byte) (*Index, error) {
 	if offset != uint64(len(index)) {
 		return nil, fmt.Errorf("trailing recovery index bytes")
 	}
-	for file, count := range in.recordCounts {
-		end := uint64(0)
-		for id := uint64(1); id <= count; id++ {
-			r := in.record(file, id)
-			if r.offset != end || r.length == 0 || r.length > uint64(len(in.source[file]))-end || r.previous >= id {
-				return nil, fmt.Errorf("invalid recovery record chain")
-			}
-			name, err := recordMetric(in.source[file][r.offset : r.offset+r.length])
-			if err != nil {
-				return nil, err
-			}
-			// Cache keys must have the same spelling as their filesystem metric.
-			// Legacy aliases such as a..b or a/b require ordered persistence before
-			// reads; looking them up as a.b in the pending source would miss data.
-			if len(name) == 0 || name[0] == '.' || name[len(name)-1] == '.' || bytes.Contains(name, []byte("..")) || bytes.IndexByte(name, '/') >= 0 || bytes.IndexByte(name, 0) >= 0 {
-				return nil, fmt.Errorf("pending reads require canonical metric names")
-			}
-			end += r.length
-		}
-		if end != uint64(len(in.source[file])) {
-			return nil, fmt.Errorf("unindexed recovery source bytes")
-		}
+	if err := in.validateRecords(); err != nil {
+		return nil, err
 	}
+
 	var metrics, total uint64
 	for slot := uint64(0); slot < in.slots; slot++ {
 		_, h := in.slot(slot)
@@ -229,6 +212,84 @@ func Open(index, cache, wal []byte) (*Index, error) {
 		previous = slot
 	}
 	return in, nil
+}
+
+// validateRecords checks independent bounded ranges of the immutable source
+// tables. Every range verifies its boundary against the preceding record, so
+// parallelism does not weaken the complete contiguous-source requirement.
+func (in *Index) validateRecords() error {
+	const recordsPerRange = 256 * 1024
+	type recordRange struct {
+		file        int
+		first, last uint64
+	}
+	var ranges []recordRange
+	for file, count := range in.recordCounts {
+		if count == 0 && len(in.source[file]) != 0 {
+			return fmt.Errorf("unindexed recovery source bytes")
+		}
+		for first := uint64(1); first <= count; first += recordsPerRange {
+			ranges = append(ranges, recordRange{file, first, min(count, first+recordsPerRange-1)})
+		}
+	}
+	if len(ranges) == 0 {
+		return nil
+	}
+	workers := min(8, runtime.GOMAXPROCS(0), len(ranges))
+	if workers == 1 {
+		for _, r := range ranges {
+			if err := in.validateRecordRange(r.file, r.first, r.last); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	checks := make([]error, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Go(func() {
+			for i := worker; i < len(ranges); i += workers {
+				r := ranges[i]
+				if err := in.validateRecordRange(r.file, r.first, r.last); err != nil {
+					checks[worker] = err
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	return errors.Join(checks...)
+}
+
+func (in *Index) validateRecordRange(file int, first, last uint64) error {
+	sourceSize := uint64(len(in.source[file]))
+	end := uint64(0)
+	if first > 1 {
+		previous := in.record(file, first-1)
+		if previous.offset > sourceSize || previous.length > sourceSize-previous.offset {
+			return fmt.Errorf("invalid recovery record chain")
+		}
+		end = previous.offset + previous.length
+	}
+	for id := first; id <= last; id++ {
+		r := in.record(file, id)
+		if r.offset != end || r.length == 0 || r.length > sourceSize-end || r.previous >= id {
+			return fmt.Errorf("invalid recovery record chain")
+		}
+		name, err := recordMetric(in.source[file][r.offset : r.offset+r.length])
+		if err != nil {
+			return err
+		}
+		// Canonical names must match filesystem spelling before pending reads open.
+		if len(name) == 0 || name[0] == '.' || name[len(name)-1] == '.' || bytes.Contains(name, []byte("..")) || bytes.IndexByte(name, '/') >= 0 || bytes.IndexByte(name, 0) >= 0 {
+			return fmt.Errorf("pending reads require canonical metric names")
+		}
+		end += r.length
+	}
+	if last == in.recordCounts[file] && end != sourceSize {
+		return fmt.Errorf("unindexed recovery source bytes")
+	}
+	return nil
 }
 
 func (in *Index) record(file int, id uint64) record {
