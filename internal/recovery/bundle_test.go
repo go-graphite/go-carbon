@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/points"
@@ -162,12 +163,49 @@ func TestBundleRejectsCorruptStaleOrPartialState(t *testing.T) {
 			case "truncated index":
 				alter(".pending-index-1234.bin", nil)
 			case "oversized manifest":
-				alter(manifestName, make([]byte, 16385))
+				alter(manifestName, make([]byte, maxManifestSize+1))
 			}
 			if b, err := OpenBundle(dir, root); err == nil {
 				_ = b.Close()
 				t.Fatal("accepted", scenario)
 			}
 		})
+	}
+}
+
+func TestLargeManifestRoundtripAndPublishLimit(t *testing.T) {
+	dir, root := bundleFixture(t)
+	raw, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m Manifest
+	if err = json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the complete publisher/reader boundary beyond the former 16 KiB
+	// limit without constructing several GiB of source data just for digests.
+	id := strings.Repeat("x", 32<<10)
+	if err = Publish(dir, root, m.Cache, m.WAL, m.Index, id); err != nil {
+		t.Fatal(err)
+	}
+	b, err := OpenBundle(dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if b.ReadIndexID() != id || b.Points() != 4 {
+		t.Fatal("large manifest lost identity or data")
+	}
+	before, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = Publish(dir, root, m.Cache, m.WAL, m.Index, strings.Repeat("x", maxManifestSize)); err == nil {
+		t.Fatal("published a manifest the reader cannot accept")
+	}
+	after, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("failed publication replaced the usable manifest", err)
 	}
 }

@@ -17,7 +17,12 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
-const manifestName = ".pending-points.json"
+const (
+	manifestName = ".pending-points.json"
+	// Chunk digests grow with checkpoint size. Bound metadata independently of
+	// source bytes while allowing large production dumps to use the fast path.
+	maxManifestSize = 1 << 20
+)
 
 type File struct {
 	Name      string
@@ -97,6 +102,9 @@ func Publish(dir, root string, cache, wal, index File, readIndexID string) error
 	data, err := json.Marshal(manifest)
 	if err != nil {
 		return err
+	}
+	if len(data) > maxManifestSize {
+		return fmt.Errorf("recovery manifest oversized")
 	}
 	file, err := os.CreateTemp(dir, ".pending-manifest-*")
 	if err != nil {
@@ -184,12 +192,12 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 	if err != nil {
 		return nil, err
 	}
-	raw, readErr := io.ReadAll(io.LimitReader(f, 16385))
+	raw, readErr := io.ReadAll(io.LimitReader(f, maxManifestSize+1))
 	closeErr := f.Close()
 	if err = errors.Join(readErr, closeErr); err != nil {
 		return nil, err
 	}
-	if len(raw) > 16384 {
+	if len(raw) > maxManifestSize {
 		return nil, fmt.Errorf("recovery manifest oversized")
 	}
 	var manifest Manifest
