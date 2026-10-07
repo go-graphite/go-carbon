@@ -76,8 +76,9 @@ func (app *App) DumpStop() error {
 	logger.Info("start cache dump", zap.String("filename", dumpFilename))
 	logger.Info("start wal write", zap.String("filename", xlogFilename))
 
-	// Freeze the read generation while its listeners remain available. The tiny
-	// mutable overlay is checkpointed after all input notifications have drained.
+	// The read generation is frozen and listeners remain available. Checkpoint
+	// that exact overlay alongside the dump; later input names are indexed by the
+	// pending checkpoint because the stopped worker cannot add them to the overlay.
 	var builder *recovery.Builder
 	if cs := app.Carbonserver; cs != nil {
 		if cs.HasMappedIndex() && app.pendingReadsCompatible() {

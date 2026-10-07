@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/blevesearch/mmap-go"
@@ -226,13 +227,17 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 			_ = b.Close()
 		}
 	}()
-	for _, file := range []File{manifest.Cache, manifest.WAL, manifest.Index} {
-		var data mmap.MMap
-		data, err = mapFile(dir, file)
-		if err != nil {
-			return nil, err
-		}
-		b.maps = append(b.maps, data)
+	// These three immutable files are independent. Keep every checksum and
+	// structural check, but overlap validation instead of hashing serially.
+	b.maps = make(mappings, 3)
+	checks := make([]error, len(b.maps))
+	var wg sync.WaitGroup
+	for i, file := range []File{manifest.Cache, manifest.WAL, manifest.Index} {
+		wg.Go(func() { b.maps[i], checks[i] = mapFile(dir, file) })
+	}
+	wg.Wait()
+	if err = errors.Join(checks...); err != nil {
+		return nil, err
 	}
 	b.index, err = Open(b.maps[2], b.maps[0], b.maps[1])
 	if err != nil {

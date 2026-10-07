@@ -27,6 +27,11 @@ Metric discovery uses the existing Graphite glob compiler. Exact existence,
 metadata, namespace listing, and quota checks include both the saved index and a
 small mutable trie of newly observed metrics.
 
+The initial mutable trie uses the bulk loader and its construction counters,
+avoiding an immediate prune/count walk of a fresh tree. Quota accounting sums
+subtrees in one pass and retains totals only for the root and configured quota
+namespaces; every configured quota is still enforced before reads become ready.
+
 A later complete filesystem scan writes a replacement generation. Queued metric
 notifications continue updating the live overlay during that scan. Pending
 metrics still in cache survive reconciliation; metrics now included in the new
@@ -57,6 +62,8 @@ the stable cache, and waits for input cleanup.
 Catalogue membership classification runs only after both source files have been
 closed and synchronized; optional checkpoint work cannot delay their durable save.
 Read listeners remain available until the durable checkpoint is complete.
+The point index classifies names against that frozen saved catalogue, including
+its overlay, so startup inserts only names that arrived after the index froze.
 
 On the next start, go-carbon validates/maps both checkpoints in parallel, installs
 all saved metric names and initial quotas, and opens read listeners. A cache read
@@ -64,6 +71,9 @@ can fetch unclaimed points directly from their saved records. Recovery transfers
 a whole metric under its cache-shard lock, keeping it visible in either the saved
 source, cache, or in-flight write list. The lookup compares full names after
 hashing; cache records precede input records, preserving later-value precedence.
+The three point-checkpoint files are checksum-validated concurrently. Startup
+logs distinguish checkpoint validation, remaining index wait, and insertion of
+previously unindexed names; overlap is not added twice to the readiness duration.
 
 Input receivers retain their existing recovery gate until all old history has
 persisted. This prevents newer live points from advancing compressed block

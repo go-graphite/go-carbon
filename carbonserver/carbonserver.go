@@ -1230,6 +1230,7 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 		}
 		if err == nil {
 			u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+			u.trieIdx.builder = &trieBulkBuilder{}
 			u.trieIdx.snapshot = snapshot
 			if err := u.trieIdx.loadSnapshotOverlay(u.listener.fileListCache); err != nil && !os.IsNotExist(err) {
 				u.logger.Warn("saved index overlay unavailable", zap.Error(err))
@@ -1643,6 +1644,9 @@ func (u *fileListUpdate) addTrieStats(index *fileIndex) int {
 	var count, files, dirs int
 	if b := index.trieIdx.builder; b != nil {
 		count, files, dirs = b.nodes, index.trieIdx.fileCount, b.dirs
+		if index.trieIdx.snapshot != nil {
+			files += int(index.trieIdx.snapshot.manifest.Records)
+		}
 	} else {
 		count, files, dirs, _, _, _, _, _ = index.trieIdx.countNodes()
 	}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,6 +44,11 @@ func TestSnapshotOverlayCheckpoint(t *testing.T) {
 		t.Fatal("queued notification not checkpointed")
 	}
 	next := overlayListener(t, cache, root)
+	ti := next.CurrentFileIndex().trieIdx
+	_, files, _, _, _, _, _, _ := ti.countNodes()
+	if got := atomic.LoadUint64(&next.metrics.TrieFiles); got != uint64(files) {
+		t.Fatalf("bulk snapshot file counter %d != %d", got, files)
+	}
 	if id != next.RecoveryIndexID() {
 		t.Fatal("checkpoint identity changed")
 	}
@@ -155,9 +161,11 @@ func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
 	}
 }
 
-func TestSavedMetricLookupUsesCapturedBase(t *testing.T) {
+func TestSavedMetricLookupUsesFrozenCatalogue(t *testing.T) {
 	cache, root, entries := snapshotFixture(t)
 	listener := overlayListener(t, cache, root)
+	listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "overlay.new")
+	listener.PauseIndexUpdates()
 	lookup := listener.SavedMetricLookup()
 	for _, entry := range entries {
 		name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(entry.Path, "/"), ".wsp"), "/", ".")
@@ -168,8 +176,11 @@ func TestSavedMetricLookupUsesCapturedBase(t *testing.T) {
 			t.Fatalf("unknown metric accepted %q", name)
 		}
 	}
-	listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "overlay.new")
-	if lookup("overlay.new") {
-		t.Fatal("mutable overlay incorrectly classified as saved base")
+	if !lookup("overlay.new") {
+		t.Fatal("saved overlay metric classified as new")
+	}
+	listener.UpdateFileIndex(&fileIndex{trieIdx: newTrie(".wsp", 0, nil)})
+	if !lookup("overlay.new") || lookup("after.freeze") {
+		t.Fatal("lookup did not retain its frozen catalogue")
 	}
 }

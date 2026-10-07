@@ -27,6 +27,7 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	cs.WarmupIndex()
 	started := time.Now()
 	bundle, err := recovery.OpenBundle(app.Config.Dump.Path, app.Config.Whisper.DataDir)
+	opened := time.Now()
 	logger := zapwriter.Logger("app")
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -35,15 +36,23 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		return false, nil
 	}
 	cs.WaitForWarmup()
+	indexReady := time.Now()
 	if !cs.HasMappedIndex() || bundle.ReadIndexID() == "" || cs.RecoveryIndexID() != bundle.ReadIndexID() {
 		_ = bundle.Close()
 		logger.Info("pending read checkpoint does not match read index; using ordered restore")
 		return false, nil
 	}
-	if err = cs.PreparePendingReadIndex(bundle.NewNames); err != nil {
+	preparedNames := 0
+	if err = cs.PreparePendingReadIndex(func(visit func(string) error) error {
+		return bundle.NewNames(func(name string) error {
+			preparedNames++
+			return visit(name)
+		})
+	}); err != nil {
 		_ = bundle.Close()
 		return false, err
 	}
+	prepared := time.Now()
 	if err = core.AttachPendingRecovery(bundle); err != nil {
 		_ = bundle.Close()
 		return false, err
@@ -54,7 +63,10 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	if err = app.listenCarbonserver(core, newMetrics); err != nil {
 		return false, err
 	}
-	logger.Info("serving reads from pending checkpoint", zap.Duration("runtime", time.Since(started)), zap.Uint64("points", bundle.Points()), zap.Uint64("metrics", bundle.Metrics()))
+	logger.Info("serving reads from pending checkpoint", zap.Duration("runtime", time.Since(started)),
+		zap.Duration("checkpoint_open_time", opened.Sub(started)), zap.Duration("index_wait_time", indexReady.Sub(opened)),
+		zap.Duration("pending_index_time", prepared.Sub(indexReady)), zap.Int("pending_new_names", preparedNames),
+		zap.Uint64("points", bundle.Points()), zap.Uint64("metrics", bundle.Metrics()))
 	if err = core.RecoverPending(nil, app.Config.Dump.RestorePerSecond); err != nil {
 		return true, err
 	}

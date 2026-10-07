@@ -90,6 +90,9 @@ func (ti *trieIndex) loadSnapshotOverlay(cache string) error {
 	defer reader.Close()
 	// Decode into a private overlay; an invalid tail must not publish its prefix.
 	pending := newTrie(ti.fileExt, 0, ti.estimateSize)
+	if ti.builder != nil {
+		pending.builder = &trieBulkBuilder{}
+	}
 	var count uint64
 	for {
 		entry, err := reader.Read()
@@ -108,6 +111,7 @@ func (ti *trieIndex) loadSnapshotOverlay(cache string) error {
 		return fmt.Errorf("snapshot overlay record count differs")
 	}
 	ti.root, ti.depth, ti.fileCount, ti.longestMetric = pending.root, pending.depth, pending.fileCount, pending.longestMetric
+	ti.builder = pending.builder
 	ti.recoveryID = overlayIdentity(m)
 	return nil
 }
@@ -207,9 +211,10 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	return overlayIdentity(m), nil
 }
 
-// SavedMetricLookup captures one immutable generation for serialized checkpoint
-// construction. The returned function owns its reusable reader and key buffer
-// and must be called serially. It does not decode unrelated file metadata.
+// SavedMetricLookup captures the read generation after PauseIndexUpdates for
+// serialized checkpoint construction. The saved overlay belongs to this same
+// frozen generation, so its metrics need no reinsertion on restart. The returned
+// function owns its reusable reader and key buffer and must be called serially.
 func (l *CarbonserverListener) SavedMetricLookup() func(string) bool {
 	index := l.CurrentFileIndex()
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
@@ -233,7 +238,11 @@ func (l *CarbonserverListener) SavedMetricLookup() func(string) bool {
 		}
 		key = append(key, ".wsp"...)
 		_, found, err := reader.Get(key)
-		return err == nil && found
+		if err != nil || found {
+			return err == nil && found
+		}
+		_, isNew := index.trieIdx.metricPathMutable(metric, nil)
+		return !isNew
 	}
 }
 func (l *CarbonserverListener) HasMappedIndex() bool {

@@ -234,45 +234,72 @@ func metricNamespaces(name string, visit func(string)) {
 // Overlay usage is computed only from new metrics. A namespace contributes to
 // its parent's Namespaces quota exactly once, and only if absent from the base.
 func (ti *trieIndex) overlayUsage() (map[string]QuotaUsage, map[string][2]int64, int) {
-	usage := make(map[string]QuotaUsage)
-	reads := make(map[string][2]int64)
-	dirs := make(map[string]bool)
-	names, nodes, _, _, _ := ti.allMetricsNodeMutable(ti.root, '.', "", int(^uint(0)>>1), false)
-	for i, name := range names {
-		m := nodes[i].meta.Load().(*fileMeta)
-		hits := atomic.SwapInt64(&m.readHits, 0)
-		readBytes := atomic.SwapInt64(&m.readBytes, 0)
-		metricNamespaces(name, func(prefix string) {
-			u := usage[prefix]
-			u.Metrics++
-			u.LogicalSize += m.logicalSize
-			u.PhysicalSize += m.physicalSize
-			u.DataPoints += m.dataPoints
-			usage[prefix] = u
-			r := reads[prefix]
-			r[0] += hits
-			r[1] += readBytes
-			reads[prefix] = r
-			if prefix != "/" {
-				dirs[prefix] = true
-			}
-		})
-	}
+	usage := make(map[string]QuotaUsage, len(ti.quotaNodes)+1)
+	reads := make(map[string][2]int64, len(ti.quotaNodes)+1)
+	path := make([]byte, 0, 256)
 	extraDirs := 0
-	exists := ti.snapshot.namespaceLookup()
-	for name := range dirs {
-		if exists(name) {
-			continue
+	fst := ti.snapshot.index
+	defer runtime.KeepAlive(ti.snapshot)
+
+	// Aggregate each subtree once. Carry the immutable automaton state along
+	// the same edges instead of looking up every ancestor of every metric.
+	// Only root and configured quotas consume totals; do not materialize names
+	// or maps for the millions of other metrics and namespaces.
+	var visit func(*trieNode, int) (QuotaUsage, [2]int64)
+	visit = func(node *trieNode, state int) (QuotaUsage, [2]int64) {
+		if node != ti.root && node.file() {
+			m := node.meta.Load().(*fileMeta)
+			return QuotaUsage{Metrics: 1, LogicalSize: m.logicalSize, PhysicalSize: m.physicalSize, DataPoints: m.dataPoints},
+				[2]int64{atomic.SwapInt64(&m.readHits, 0), atomic.SwapInt64(&m.readBytes, 0)}
 		}
-		parent := "/"
-		if i := strings.LastIndexByte(name, '.'); i >= 0 {
-			parent = name[:i]
+		length := len(path)
+		isDir := node.dir()
+		if isDir {
+			if fst.CanMatch(state) {
+				state = fst.Accept(state, 0)
+			}
+			path = append(path, '.')
+		} else {
+			path = append(path, node.c...)
+			for _, c := range node.c {
+				if !fst.CanMatch(state) {
+					break
+				}
+				state = fst.Accept(state, c)
+			}
 		}
-		u := usage[parent]
-		u.Namespaces++
-		usage[parent] = u
-		extraDirs++
+		var total QuotaUsage
+		var read [2]int64
+		children := node.getChildrens()
+		for i := range children {
+			u, r := visit(node.getChild(children, i), state)
+			total.Metrics += u.Metrics
+			total.Namespaces += u.Namespaces
+			total.LogicalSize += u.LogicalSize
+			total.PhysicalSize += u.PhysicalSize
+			total.DataPoints += u.DataPoints
+			read[0] += r[0]
+			read[1] += r[1]
+		}
+		if node == ti.root {
+			usage["/"], reads["/"] = total, read
+		} else if isDir {
+			if _, configured := ti.quotaNodes[string(path[:length])]; configured {
+				name := string(path[:length])
+				usage[name], reads[name] = total, read
+			}
+			// A namespace contributes one immediate child to its parent only
+			// when it contains metrics and is absent from the immutable base.
+			total.Namespaces = 0
+			if total.Metrics != 0 && !fst.CanMatch(state) {
+				total.Namespaces = 1
+				extraDirs++
+			}
+		}
+		path = path[:length]
+		return total, read
 	}
+	visit(ti.root, fst.Accept(fst.Start(), 0))
 	return usage, reads, extraDirs
 }
 
