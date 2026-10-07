@@ -161,10 +161,14 @@ func (s *indexSnapshot) walkNamespace(name string, visit func(string, uint64) bo
 }
 
 func (ti *trieIndex) allMetrics(sep byte) []string {
-	files := ti.allMetricsMutable(sep)
+	extra := ti.allMetricsMutable(sep)
 	if ti.snapshot == nil {
-		return files
+		return extra
 	}
+	// Keep the largely ordered snapshot separate from the sorted mutable trie.
+	// Prepending the overlay defeats the sort's nearly sorted input fast path
+	// and repeatedly grows a slice containing every metric in a large snapshot.
+	files := make([]string, 0, ti.snapshot.index.Len()+len(extra))
 	_ = ti.snapshot.walkNamespace("/", func(name string, _ uint64) bool {
 		if sep != '.' {
 			name = strings.ReplaceAll(name, ".", string(sep))
@@ -172,7 +176,21 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 		files = append(files, name)
 		return true
 	})
+	// Encoded path order differs from metric order (NUL separators and .wsp),
+	// so the decoded snapshot still needs sorting before the linear merge.
 	sort.Strings(files)
+	base := len(files)
+	files = files[:base+len(extra)]
+	// Merge backwards into the reserved space without overwriting unread names.
+	for i, j, k := base-1, len(extra)-1, len(files)-1; j >= 0; k-- {
+		if i >= 0 && files[i] > extra[j] {
+			files[k] = files[i]
+			i--
+		} else {
+			files[k] = extra[j]
+			j--
+		}
+	}
 	return files
 }
 
