@@ -79,7 +79,8 @@ type whisperConfig struct {
 	Quotas              persister.WhisperQuotas
 	RemoveEmptyFile     bool `toml:"remove-empty-file"`
 
-	QuotasReloadInterval Duration `toml:"quotas-reload-interval"`
+	QuotasReloadInterval            Duration `toml:"quotas-reload-interval"`
+	PebbleChunkIgnorePhysicalQuotas bool     `toml:"pebble-chunk-ignore-physical-quotas"`
 
 	OnlineMigration            bool   `toml:"online-migration"`
 	OnlineMigrationRate        int    `toml:"online-migration-rate"` // metrics per second
@@ -483,6 +484,9 @@ retentions = 60:43200,3600:43800`), 0600)
 func (c *Config) getCarbonserverQuotas(reportFrequency time.Duration) (quotas []*carbonserver.Quota) {
 	minutes := int64(reportFrequency / time.Minute)
 	for _, q := range c.Whisper.Quotas {
+		if c.Whisper.StorageBackend == "pebble-chunk" && c.Whisper.PebbleChunkIgnorePhysicalQuotas {
+			q.PhysicalSize = 0
+		}
 		quotas = append(quotas, &carbonserver.Quota{
 			Pattern:          q.Pattern,
 			Namespaces:       q.Namespaces,

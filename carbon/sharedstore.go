@@ -51,8 +51,8 @@ func validateSharedStoragePolicies(cfg *Config) error {
 		}
 	}
 	for _, quota := range cfg.Whisper.Quotas {
-		if quota.PhysicalSize > 0 {
-			return errors.New("namespace physical-size quotas are unavailable with shared storage; use logical-size quotas")
+		if quota.PhysicalSize > 0 && !cfg.Whisper.PebbleChunkIgnorePhysicalQuotas {
+			return errors.New("namespace physical-size quotas are unavailable with shared storage; use logical-size quotas or set whisper.pebble-chunk-ignore-physical-quotas = true")
 		}
 	}
 	return nil
