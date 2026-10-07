@@ -49,6 +49,7 @@ type chunkWriter struct {
 	metadata               Metadata
 	chunks                 map[chunkAddress]*writeChunk
 	materialized, operands uint64
+	dirty                  bool
 }
 
 func newChunkWriter(s *Store, m Metadata) *chunkWriter {
@@ -90,6 +91,7 @@ func (w *chunkWriter) setPoint(archive, timestamp int, value float64) error {
 	c.current.set(slot%chunkSlots, p)
 	c.delta.set(slot%chunkSlots, p)
 	c.dirty = true
+	w.dirty = true
 	return nil
 }
 func (w *chunkWriter) getPoint(archive, timestamp int) (float64, bool, error) {
@@ -126,6 +128,10 @@ func (w *chunkWriter) commit(b *pebble.Batch) error {
 		}
 	}
 	return nil
+}
+
+func (w *chunkWriter) changed() bool {
+	return w.dirty
 }
 
 func getRange(reader pebble.Reader, m Metadata, archive, from, until int) ([]float64, error) {

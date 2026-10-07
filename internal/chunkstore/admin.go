@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -27,22 +28,41 @@ type Snapshot struct {
 	Archives []Archive
 }
 
-// List returns every metric whose name starts with prefix. It reads successive
-// pages, so concurrent catalog changes may affect entries between pages.
-func (s *Store) List(ctx context.Context, prefix string) ([]Metadata, error) {
-	var result []Metadata
+// PageLister is the catalog paging contract implemented by Store.ListPage.
+type PageLister func(ctx context.Context, prefix, after string, limit int) ([]Metadata, error)
+
+// EachPage walks the catalog under prefix in limit-sized pages and calls fn
+// for each page until the catalog is exhausted or fn returns an error. Pages
+// are read successively, so concurrent catalog changes may affect entries
+// between pages.
+func EachPage(ctx context.Context, list PageLister, prefix string, limit int, fn func([]Metadata) error) error {
 	after := ""
 	for {
-		page, err := s.ListPage(ctx, prefix, after, 10000)
+		page, err := list(ctx, prefix, after, limit)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		result = append(result, page...)
-		if len(page) < 10000 {
-			return result, nil
+		if err := fn(page); err != nil {
+			return err
+		}
+		if len(page) < limit {
+			return nil
 		}
 		after = page[len(page)-1].Name
 	}
+}
+
+// List returns every metric whose name starts with prefix.
+func (s *Store) List(ctx context.Context, prefix string) ([]Metadata, error) {
+	var result []Metadata
+	err := EachPage(ctx, s.ListPage, prefix, 10000, func(page []Metadata) error {
+		result = append(result, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 // ListPage returns a snapshot-consistent catalog page, exclusive of after.
@@ -99,10 +119,9 @@ func catalogMetadata(reader pebble.Reader, value []byte) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("read revision: %w", err)
 	}
 	defer closer.Close()
-	if len(v) != 8 {
-		return Metadata{}, errors.New("invalid metric revision")
+	if err := decodeRevision(v, &m); err != nil {
+		return Metadata{}, err
 	}
-	m.Revision = binary.BigEndian.Uint64(v)
 	return m, nil
 }
 
@@ -110,6 +129,38 @@ func (s *Store) Delete(ctx context.Context, name string) error { return s.delete
 
 func (s *Store) DeleteIfUnchanged(ctx context.Context, name string, expected Metadata) error {
 	return s.deleteMetric(ctx, name, &expected)
+}
+
+// InitializeActivity assigns an activity time to a legacy metric whose
+// revision record predates activity tracking. It only mutates the exact
+// revision observed by the caller, so an expiration scan cannot race a write.
+func (s *Store) InitializeActivity(ctx context.Context, name string, expected Metadata) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	unlock := s.lockMetric(name)
+	defer unlock()
+	m, err := metadataFrom(s.db, name)
+	if err != nil {
+		return err
+	}
+	if m.ID != expected.ID || m.Generation != expected.Generation || m.Revision != expected.Revision || !m.LastUpdate.IsZero() {
+		return ErrConflict
+	}
+	if m.Revision == math.MaxUint64 {
+		return errors.New("metric revision exhausted")
+	}
+	m.Revision++
+	m.LastUpdate = s.nextActivity(time.Time{})
+	b := s.db.NewBatch()
+	defer b.Close()
+	if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
+		return err
+	}
+	if err := s.commit(b); err != nil {
+		return fmt.Errorf("commit activity initialization %s: %w", name, err)
+	}
+	return nil
 }
 
 func (s *Store) deleteMetric(ctx context.Context, name string, expected *Metadata) error {
@@ -224,9 +275,10 @@ func (s *Store) replaceCatalog(m Metadata, chunks []map[int][]byte, mustAbsent b
 		return Metadata{}, ErrExists
 	}
 	if missing {
+		m.LastUpdate = s.nextActivity(time.Time{})
 		return s.createReplacement(m, chunks)
 	}
-	m.ID, m.Generation, m.Revision = old.ID, old.Generation+1, old.Revision+1
+	m.ID, m.Generation, m.Revision, m.LastUpdate = old.ID, old.Generation+1, old.Revision+1, s.nextActivity(old.LastUpdate)
 	return s.commitReplacement(m, chunks, &old)
 }
 
@@ -279,7 +331,7 @@ func (s *Store) commitReplacement(m Metadata, chunks []map[int][]byte, old *Meta
 	if err := b.Set(catalogKey(m.Name), encoded, nil); err != nil {
 		return Metadata{}, err
 	}
-	if err := b.Set(revisionKey(m), uint64Bytes(m.Revision), nil); err != nil {
+	if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 		return Metadata{}, err
 	}
 	if old == nil {

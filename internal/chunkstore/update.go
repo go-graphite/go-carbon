@@ -50,6 +50,9 @@ func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRet
 			return err
 		}
 	}
+	if !w.changed() {
+		return nil
+	}
 	return s.commitUpdate(b, w, m)
 }
 
@@ -122,7 +125,9 @@ func (s *Store) commitUpdate(b *pebble.Batch, w *chunkWriter, m Metadata) error 
 	if err := w.commit(b); err != nil {
 		return err
 	}
-	if err := b.Set(revisionKey(m), uint64Bytes(m.Revision+1), nil); err != nil {
+	m.Revision++
+	m.LastUpdate = s.nextActivity(m.LastUpdate)
+	if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 		return err
 	}
 	if err := s.commit(b); err != nil {

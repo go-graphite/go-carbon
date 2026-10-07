@@ -24,7 +24,12 @@ var (
 	ErrFormat   = errors.New("unsupported chunk store format")
 )
 
-const formatMarker = "go-carbon-chunks-v1\n"
+const (
+	formatMarkerV1     = "go-carbon-chunks-v1\n"
+	formatMarkerV2     = "go-carbon-chunks-v2\n"
+	legacyRevisionSize = 8
+	revisionSize       = 16
+)
 
 type Options struct {
 	CacheSize    int64
@@ -66,7 +71,8 @@ func Open(dir string, options Options) (*Store, error) {
 	if fs == nil {
 		fs = vfs.Default
 	}
-	if err := checkFormat(fs, dir); err != nil {
+	format, created, err := checkFormat(fs, dir)
+	if err != nil {
 		return nil, err
 	}
 	if options.Now == nil {
@@ -89,6 +95,20 @@ func Open(dir string, options Options) (*Store, error) {
 		return nil, fmt.Errorf("open chunk store: %w", err)
 	}
 	s.db = db
+	if format == 1 {
+		if err := upgradeFormatMarker(fs, dir); err != nil {
+			return nil, s.openFailure(db, fmt.Errorf("upgrade chunk store format: %w", err))
+		}
+	}
+	// An interrupted upgrade may have completed the rename while its directory
+	// sync failed. Re-sync an accepted v2 marker while Pebble owns the database
+	// lock, before allowing any v2 revision record to be written. A marker
+	// created by this Open was already synced by createFormatMarker.
+	if !created {
+		if err := syncFormatMarker(fs, dir); err != nil {
+			return nil, s.openFailure(db, fmt.Errorf("sync chunk store marker: %w", err))
+		}
+	}
 	if options.SyncInterval > 0 {
 		s.writeOptions = pebble.NoSync
 		s.syncStop = make(chan struct{})
@@ -96,6 +116,14 @@ func Open(dir string, options Options) (*Store, error) {
 		go s.syncLoop(options.SyncInterval)
 	}
 	return s, nil
+}
+
+func (s *Store) openFailure(db *pebble.DB, err error) error {
+	closeErr := db.Close()
+	if s.cache != nil {
+		s.cache.Unref()
+	}
+	return errors.Join(err, closeErr)
 }
 
 func (s *Store) syncLoop(interval time.Duration) {
@@ -121,31 +149,41 @@ func (s *Store) syncLoop(interval time.Duration) {
 	}
 }
 
-func checkFormat(fs vfs.FS, dir string) error {
+// checkFormat returns the on-disk format version and whether this call
+// created (and synced) the marker for a new store.
+func checkFormat(fs vfs.FS, dir string) (format int, created bool, err error) {
 	names, err := fs.List(dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("list store directory: %w", err)
+		return 0, false, fmt.Errorf("list store directory: %w", err)
 	}
 	if len(names) > 0 {
-		return checkFormatMarker(fs, dir)
+		format, err = checkFormatMarker(fs, dir)
+		return format, false, err
 	}
-	return createFormatMarker(fs, dir)
+	if err := createFormatMarker(fs, dir); err != nil {
+		return 0, false, err
+	}
+	return 2, true, nil
 }
 
-func checkFormatMarker(fs vfs.FS, dir string) error {
+func checkFormatMarker(fs vfs.FS, dir string) (int, error) {
 	f, err := fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
 	if err != nil {
-		return fmt.Errorf("%w: missing marker; migrate legacy data through buckyd", ErrFormat)
+		return 0, fmt.Errorf("%w: missing marker; migrate legacy data through buckyd", ErrFormat)
 	}
-	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarker)+1)))
+	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarkerV2)+1)))
 	closeErr := f.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
-		return fmt.Errorf("read store marker: %w", err)
+		return 0, fmt.Errorf("read store marker: %w", err)
 	}
-	if string(data) != formatMarker {
-		return ErrFormat
+	switch string(data) {
+	case formatMarkerV1:
+		return 1, nil
+	case formatMarkerV2:
+		return 2, nil
+	default:
+		return 0, ErrFormat
 	}
-	return nil
 }
 
 func createFormatMarker(fs vfs.FS, dir string) error {
@@ -171,21 +209,60 @@ func createFormatMarker(fs vfs.FS, dir string) error {
 	if err != nil {
 		return err
 	}
-	_, writeErr := f.Write([]byte(formatMarker))
+	_, writeErr := f.Write([]byte(formatMarkerV2))
 	syncErr := f.Sync()
 	if err := errors.Join(writeErr, syncErr, f.Close()); err != nil {
 		return fmt.Errorf("write store marker: %w", err)
 	}
-	for _, path := range append([]string{dir}, parents...) {
-		d, err := fs.OpenDir(path)
-		if err != nil {
-			return err
-		}
-		if err := errors.Join(d.Sync(), d.Close()); err != nil {
+	if err := syncStoreDirectory(fs, dir); err != nil {
+		return err
+	}
+	for _, path := range parents {
+		if err := syncStoreDirectory(fs, path); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func upgradeFormatMarker(fs vfs.FS, dir string) error {
+	temporary := fs.PathJoin(dir, "CHUNKSTORE.upgrade")
+	f, err := fs.Create(temporary)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write([]byte(formatMarkerV2))
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return fmt.Errorf("write upgraded store marker: %w", err)
+	}
+	if err := fs.Rename(temporary, fs.PathJoin(dir, "CHUNKSTORE")); err != nil {
+		return fmt.Errorf("replace store marker: %w", err)
+	}
+	if err := syncStoreDirectory(fs, dir); err != nil {
+		return fmt.Errorf("sync upgraded store marker: %w", err)
+	}
+	return nil
+}
+
+func syncStoreDirectory(fs vfs.FS, dir string) error {
+	d, err := fs.OpenDir(dir)
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
+func syncFormatMarker(fs vfs.FS, dir string) error {
+	f, err := fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		return err
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		return err
+	}
+	return syncStoreDirectory(fs, dir)
 }
 
 func (s *Store) Close() error {
@@ -201,7 +278,8 @@ func (s *Store) Close() error {
 	}
 	return err
 }
-func (s *Store) Flush() error { return s.db.Flush() }
+func (s *Store) Flush() error                         { return s.db.Flush() }
+func (s *Store) AsyncFlush() (<-chan struct{}, error) { return s.db.AsyncFlush() }
 func (s *Store) Compact() error {
 	if err := s.db.Flush(); err != nil {
 		return err
@@ -242,6 +320,44 @@ func (s *Store) commit(batch *pebble.Batch) error {
 func catalogKey(name string) []byte { return append([]byte("m/"), name...) }
 func sequenceKey() []byte           { return []byte("z/sequence") }
 func uint64Bytes(v uint64) []byte   { b := make([]byte, 8); binary.BigEndian.PutUint64(b, v); return b }
+func revisionBytes(m Metadata) []byte {
+	b := make([]byte, revisionSize)
+	binary.BigEndian.PutUint64(b[:8], m.Revision)
+	if !m.LastUpdate.IsZero() {
+		binary.BigEndian.PutUint64(b[8:], uint64(m.LastUpdate.UnixNano()))
+	}
+	return b
+}
+func decodeRevision(value []byte, m *Metadata) error {
+	switch len(value) {
+	case legacyRevisionSize:
+		m.Revision = binary.BigEndian.Uint64(value)
+		m.LastUpdate = time.Time{}
+	case revisionSize:
+		m.Revision = binary.BigEndian.Uint64(value[:8])
+		nanos := int64(binary.BigEndian.Uint64(value[8:]))
+		if nanos == 0 {
+			m.LastUpdate = time.Time{}
+		} else {
+			m.LastUpdate = time.Unix(0, nanos)
+		}
+	default:
+		return errors.New("invalid metric revision")
+	}
+	return nil
+}
+func (s *Store) nextActivity(previous time.Time) time.Time {
+	now := time.Unix(0, s.now().UnixNano())
+	if !previous.IsZero() && now.Before(previous) {
+		return previous
+	}
+	// An all-zero encoded timestamp means "activity unknown"; a clock that
+	// reads exactly the Unix epoch must not collide with that sentinel.
+	if now.UnixNano() == 0 {
+		return time.Unix(0, 1)
+	}
+	return now
+}
 func revisionKey(m Metadata) []byte {
 	b := make([]byte, 17)
 	b[0] = 'r'
@@ -282,14 +398,14 @@ func (s *Store) Create(ctx context.Context, config MetricConfig) (Metadata, erro
 	} else if !errors.Is(err, pebble.ErrNotFound) {
 		return Metadata{}, err
 	}
-	m := Metadata{MetricConfig: cloneConfig(config), ID: id, Generation: 1, Revision: 1}
+	m := Metadata{MetricConfig: cloneConfig(config), ID: id, Generation: 1, Revision: 1, LastUpdate: s.nextActivity(time.Time{})}
 	encoded, err := json.Marshal(m)
 	if err != nil {
 		return Metadata{}, err
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
-	for _, kv := range []struct{ k, v []byte }{{catalogKey(config.Name), encoded}, {sequenceKey(), uint64Bytes(id)}, {revisionKey(m), uint64Bytes(1)}} {
+	for _, kv := range []struct{ k, v []byte }{{catalogKey(config.Name), encoded}, {sequenceKey(), uint64Bytes(id)}, {revisionKey(m), revisionBytes(m)}} {
 		if err := b.Set(kv.k, kv.v, nil); err != nil {
 			return Metadata{}, err
 		}
@@ -327,9 +443,8 @@ func metadataFrom(reader pebble.Reader, name string) (Metadata, error) {
 		return Metadata{}, fmt.Errorf("read revision: %w", err)
 	}
 	defer closer.Close()
-	if len(v) != 8 {
-		return Metadata{}, errors.New("invalid metric revision")
+	if err := decodeRevision(v, &m); err != nil {
+		return Metadata{}, err
 	}
-	m.Revision = binary.BigEndian.Uint64(v)
 	return m, nil
 }

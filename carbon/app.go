@@ -65,7 +65,6 @@ type App struct {
 	Carbonserver   *carbonserver.CarbonserverListener
 	MetricStore    *store.Store
 	Buckyd         *buckyd.Service
-	buckydIndex    *metricIndexRefresher
 	Tags           *tags.Tags
 	Collector      *Collector // (!!!) Should be re-created on every change config/modules
 	PromRegisterer prometheus.Registerer
@@ -75,6 +74,10 @@ type App struct {
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	quotaReloader       *quotaReloader
+	metricStoreIndex    *metricIndexRefresher
+	expirer             *metricExpirer
+	expirationStats     *expirationStats
+	storeRestoreDone    <-chan struct{}
 }
 
 var registerPluginsOnce sync.Once
@@ -126,6 +129,9 @@ func (app *App) configure() error {
 	if err := loadWhisperConfig(cfg); err != nil {
 		return err
 	}
+	if err := loadExpirationConfig(cfg); err != nil {
+		return err
+	}
 	if err := validateCacheConfig(cfg); err != nil {
 		return err
 	}
@@ -154,6 +160,10 @@ func (app *App) configure() error {
 		}
 		app.quotaEstimateConfig.Store(cfg)
 	}
+	// All fallible policy validation is complete. Join the old expiration
+	// worker before publishing the new policy, so reload cannot leave deletes
+	// running under an obsolete rule. ReloadConfig restarts it below.
+	app.stopExpiration()
 	app.Config = cfg
 	if app.quotaReloader != nil {
 		app.quotaReloader.configureLocked(cfg)
@@ -297,6 +307,7 @@ func (app *App) ReloadConfig() error {
 	}
 
 	app.startPersister()
+	app.startExpiration()
 
 	if app.Collector != nil {
 		app.Collector.Stop()
@@ -337,6 +348,7 @@ func (app *App) stopInputListeners() {
 func (app *App) stopReadListeners() <-chan struct{} {
 	logger := zapwriter.Logger("app")
 	readsStopped := make(chan struct{})
+	app.stopExpiration()
 	if app.quotaReloader != nil {
 		app.quotaReloader.close()
 		app.quotaReloader = nil
@@ -361,9 +373,9 @@ func (app *App) stopReadListeners() <-chan struct{} {
 		}
 		app.Buckyd = nil
 	}
-	if app.buckydIndex != nil {
-		app.buckydIndex.close()
-		app.buckydIndex = nil
+	if app.metricStoreIndex != nil {
+		app.metricStoreIndex.close()
+		app.metricStoreIndex = nil
 	}
 	if app.Carbonserver != nil {
 		carbonserver := app.Carbonserver
@@ -537,12 +549,21 @@ func (app *App) Start() (err error) {
 		return err
 	}
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
-		go app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		restored := make(chan struct{})
+		app.storeRestoreDone = restored
+		go func() {
+			defer close(restored)
+			app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+		}()
 	}
-	app.Collector = NewCollector(app)
+	if app.MetricStore != nil && app.Carbonserver != nil {
+		app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
+	}
 	if err = app.startBuckyd(); err != nil {
 		return err
 	}
+	app.startExpiration()
+	app.Collector = NewCollector(app)
 	if app.Carbonserver != nil {
 		app.quotaReloader = startQuotaReloader(app.Config, app.Carbonserver)
 	}
@@ -551,6 +572,7 @@ func (app *App) Start() (err error) {
 
 func (app *App) startStorage() (core *cache.Cache, err error) {
 	conf := app.Config
+	app.storeRestoreDone = nil
 	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
@@ -569,6 +591,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		if err != nil {
 			return nil, fmt.Errorf("open shared storage: %w", err)
 		}
+		app.expirationStats = &expirationStats{}
 	}
 
 	return core, nil
@@ -946,9 +969,8 @@ func (app *App) startBuckyd() (err error) {
 		if err != nil {
 			return fmt.Errorf("configure buckyd: %w", err)
 		}
-		if app.Carbonserver != nil {
-			app.buckydIndex = startMetricIndexRefresher(app.Carbonserver, buckydIndexRefreshInterval)
-			app.Buckyd.SetOnChange(app.buckydIndex.notify)
+		if app.metricStoreIndex != nil {
+			app.Buckyd.SetOnChange(app.metricStoreIndex.notify)
 		}
 		if err = app.Buckyd.Start(); err != nil {
 			return fmt.Errorf("start buckyd: %w", err)

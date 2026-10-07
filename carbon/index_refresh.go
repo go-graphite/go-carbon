@@ -8,9 +8,9 @@ import (
 	"go.uber.org/zap"
 )
 
-const buckydIndexRefreshInterval = 30 * time.Second
+const metricStoreIndexRefreshInterval = 30 * time.Second
 
-// metricIndexRefresher coalesces transfer mutations into bounded catalog scans.
+// metricIndexRefresher coalesces transfer and expiration mutations into catalog scans.
 // A buffered signal also records mutations that arrive during an active scan.
 type metricIndexRefresher struct {
 	changes chan struct{}
@@ -36,7 +36,8 @@ func startMetricIndexRefresher(listener *carbonserver.CarbonserverListener, inte
 				select {
 				case <-r.changes:
 					if err := listener.RefreshMetricStoreIndex(); err != nil {
-						zapwriter.Logger("buckyd").Error("refresh shared metric index", zap.Error(err))
+						zapwriter.Logger("storage").Error("refresh shared metric index", zap.Error(err))
+						r.notify()
 					}
 				default:
 				}

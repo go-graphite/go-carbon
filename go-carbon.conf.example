@@ -27,6 +27,19 @@ store-memtable-size = 67108864
 # since the last successful sync; sync delays can extend the interval.
 # Requires restart. Ignored by the files backend.
 store-sync-interval = "1s"
+# Automatically remove idle metrics from pebble-chunk storage. "0s" disables
+# the global policy. Matching entries in store-expiration-file override this
+# value; a matching "0s" explicitly keeps a metric.
+# Activity is the last successful storage write, not the sample timestamp.
+# Tracking is always on, including while expiration is disabled.
+store-expiration = "0s"
+# Optional ordered INI file. Each section needs pattern and expiration. The
+# first regex match wins, so put keep exceptions before broader namespaces.
+# store-expiration-file = "/etc/go-carbon/storage-expiration.conf"
+# Cleanup starts immediately when enabled and then runs after each completed
+# sweep. It examines this many catalog entries per second in pages of 256.
+store-expiration-check-interval = "1h"
+store-expiration-scan-rate = 1000
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf. Required
 schemas-file = "/etc/go-carbon/storage-schemas.conf"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional

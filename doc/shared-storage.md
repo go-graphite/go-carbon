@@ -18,6 +18,10 @@ store-dir = "/var/lib/graphite/shared"
 store-cache-size = 268435456
 store-memtable-size = 67108864
 store-sync-interval = "1s"
+store-expiration = "0s"
+store-expiration-file = "/etc/go-carbon/storage-expiration.conf"
+store-expiration-check-interval = "1h"
+store-expiration-scan-rate = 1000
 # Existing schemas-file, aggregation-file and worker settings still apply.
 
 [buckyd]
@@ -42,6 +46,57 @@ The process must be able to write the store and temporary directories. An empty
 path, sync interval and buckyd settings require restart; ordinary schema changes
 apply to new metrics. Existing policies are preserved. Online policy migration
 is rejected.
+
+## Metric expiration
+
+`store-expiration` deletes idle metrics from the shared catalog and storage.
+`"0s"` disables the global policy. An optional `store-expiration-file` uses the
+same ordered INI style as the other Whisper policy files; each section has a
+regular-expression `pattern` and an `expiration` duration. The first matching
+rule wins. A `0s` rule explicitly keeps matching metrics, so place exceptions
+before broader rules:
+
+```ini
+[keep-important-jobs]
+pattern = ^jobs\.important\.
+expiration = 0s
+
+[short-lived-jobs]
+pattern = ^jobs\.
+expiration = 24h
+```
+
+The override file is active even when global expiration is disabled. Expiration
+uses the last successful local storage write, rather than the newest sample
+timestamp; reads, rejected writes and no-op writes do not refresh it. Imported
+metrics use their local import time. Activity is tracked for every shared-store
+metric even while all expiration policies are disabled.
+
+Cleanup begins immediately after expiration becomes enabled and starts its next
+sweep only after `store-expiration-check-interval` following the preceding
+sweep. It checks catalog pages of 256 metrics and limits examination to
+`store-expiration-scan-rate` metrics per second (defaults: `1h` and `1000`).
+The schedule is approximate by design. A first sweep assigns legacy metrics an
+activity time and gives them a full grace period before considering deletion.
+Policy-file changes are reloadable through SIGHUP: a complete replacement must
+parse successfully or the previous policy remains in use.
+
+Cleanup waits for startup dump loading to finish and stops before a graceful
+dump begins. It skips metrics with queued or in-flight cache points at the
+candidate check. A new arrival can still race deletion: if it has committed,
+the revision check prevents deletion; otherwise the persister recreates the
+metric and retains the new points, with the expired history removed.
+
+Catalog/index removal is coalesced for about 30 seconds, including installations
+without embedded buckyd. A sweep that deletes metrics asynchronously requests a
+memtable flush. Pebble reclaims physical bytes later through normal compaction;
+expiration has no immediate space-reclamation deadline.
+`storage.expiration.examined`, `storage.expiration.initialized`,
+`storage.expiration.deleted`, `storage.expiration.conflicts`,
+`storage.expiration.pending`, and `storage.expiration.errors` are counters since
+the previous internal metrics flush. `storage.expiration.sweepDurationNs` and
+`storage.expiration.lastSuccessTime` report the latest sweep duration and
+successful completion timestamp.
 
 Writes may arrive out of order; archive updates use the shared WAL and require
 no per-metric sidecars. `store-sync-interval` defaults to `"1s"`: mutations
@@ -186,10 +241,13 @@ authentication, offload and revision-token protocol. go-carbon retains the root
 go-whisper library for classic files and transfer format helpers. Buckytools is a
 separate client executable; go-carbon does not import or require that module.
 
-The format marker is `CHUNKSTORE`, containing `go-carbon-chunks-v1`. Opening a
-legacy or unknown nonempty directory is rejected before opening Pebble. A
-migration must use separate stores and buckyd; there is no in-place conversion.
-New store directories, their newly created ancestors and the marker are synced.
+The format marker is `CHUNKSTORE`, containing `go-carbon-chunks-v2`. Opening a
+legacy or unknown nonempty directory is rejected before opening Pebble. A v1
+store is upgraded in place before v2 records are written; older binaries reject
+the upgraded store, even when expiration is disabled. A migration from an
+unrelated legacy store must use separate stores and buckyd; there is no in-place
+conversion. New store directories, their newly created ancestors and the marker
+are synced.
 Pebble v1.1.5 terminates the process on WAL-sync failure. The test suite checks
 this fail-stop behavior for synchronous and periodic sync, plus recovery of
 previously synced writes. Periodic-sync tests also discard unsynced filesystem

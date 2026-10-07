@@ -50,6 +50,9 @@ func (app *App) DumpStop() error {
 	if !app.Config.Dump.Enabled {
 		return nil
 	}
+	// Once input is diverted to xlog, pending writes are no longer visible to
+	// expiration's cache check. Finish cleanup before entering the dump phase.
+	app.stopExpiration()
 	_ = app.Cache.SetWriteoutBatching(0, 0)
 
 	if app.Persister != nil {

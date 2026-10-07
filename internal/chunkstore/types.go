@@ -4,6 +4,7 @@ package chunkstore
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -60,7 +61,8 @@ type Metadata struct {
 	MetricConfig
 	ID         uint64
 	Generation uint64
-	Revision   uint64 `json:"-"`
+	Revision   uint64    `json:"-"`
+	LastUpdate time.Time `json:"-"`
 }
 
 type Series struct {

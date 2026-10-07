@@ -82,6 +82,12 @@ type whisperConfig struct {
 	QuotasReloadInterval            Duration `toml:"quotas-reload-interval"`
 	PebbleChunkIgnorePhysicalQuotas bool     `toml:"pebble-chunk-ignore-physical-quotas"`
 
+	StoreExpiration              *Duration                        `toml:"store-expiration"`
+	StoreExpirationFilename      string                           `toml:"store-expiration-file"`
+	StoreExpirationCheckInterval *Duration                        `toml:"store-expiration-check-interval"`
+	StoreExpirationScanRate      int                              `toml:"store-expiration-scan-rate"`
+	ExpirationRules              persister.WhisperExpirationRules `toml:"-"`
+
 	OnlineMigration            bool   `toml:"online-migration"`
 	OnlineMigrationRate        int    `toml:"online-migration-rate"` // metrics per second
 	OnlineMigrationGlobalScope string `toml:"online-migration-global-scope"`
@@ -282,6 +288,10 @@ func NewConfig() *Config {
 			PhysicalSizeFactor:  0.75,
 			FLock:               false,
 			HashFilenames:       true,
+
+			StoreExpiration:              &Duration{0},
+			StoreExpirationCheckInterval: &Duration{time.Hour},
+			StoreExpirationScanRate:      1000,
 
 			OnlineMigration:            false,
 			OnlineMigrationRate:        5,
