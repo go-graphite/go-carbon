@@ -409,10 +409,11 @@ func (whisper *Whisper) fetchCompressed(start, end int64, archive *archiveInfo) 
 	if err != nil {
 		return nil, err
 	}
+	completeSnapshot := start == 1 && end == int64(maxInt)
 
 	base := whisper.archives[0]
 	if base == archive {
-		return whisper.filterCompressedSlots(archive, dst)
+		return whisper.filterCompressedSlotsWithSnapshot(archive, dst, completeSnapshot)
 	}
 
 	// Start live aggregation. This probably has a read peformance hit.
@@ -511,7 +512,7 @@ func (whisper *Whisper) fetchCompressed(start, end int64, archive *archiveInfo) 
 	if whisper.aggregationMethod == Mix {
 		return dst, nil
 	}
-	dst, err = whisper.filterCompressedSlots(archive, dst)
+	dst, err = whisper.filterCompressedSlotsWithSnapshot(archive, dst, completeSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -527,6 +528,12 @@ func (whisper *Whisper) fetchCompressed(start, end int64, archive *archiveInfo) 
 // Blocks can retain more than the logical circular archive. A newer sample
 // occupying the same slot invalidates the older one, including future writes.
 func (whisper *Whisper) filterCompressedSlots(archive *archiveInfo, points []dataPoint) ([]dataPoint, error) {
+	return whisper.filterCompressedSlotsWithSnapshot(archive, points, false)
+}
+
+// completeSnapshot means points includes every stored timestamp, together with
+// any virtual rollups. Range reads still need newer slot owners outside points.
+func (whisper *Whisper) filterCompressedSlotsWithSnapshot(archive *archiveInfo, points []dataPoint, completeSnapshot bool) ([]dataPoint, error) {
 	if whisper.aggregationMethod == Mix {
 		return points, nil
 	}
@@ -549,11 +556,20 @@ func (whisper *Whisper) filterCompressedSlots(archive *archiveInfo, points []dat
 	if latestInterval < newerFrom {
 		return points, nil
 	}
-	newer, err := whisper.storedPoints(archive, newerFrom, maxInt)
-	if err != nil {
-		return nil, err
+	var newer []dataPoint
+	if !completeSnapshot {
+		var err error
+		newer, err = whisper.storedPoints(archive, newerFrom, maxInt)
+		if err != nil {
+			return nil, err
+		}
 	}
-	latest := make(map[int]int, len(points)+len(newer))
+	// Aliases share a slot, so the hint must not grow with retained history.
+	capacity := archive.numberOfPoints
+	if len(points) < capacity && len(newer) < capacity-len(points) {
+		capacity = len(points) + len(newer)
+	}
+	latest := make(map[int]int, capacity)
 	for _, ps := range [][]dataPoint{points, newer} {
 		for _, p := range ps {
 			slot := mod(p.interval/archive.secondsPerPoint, archive.numberOfPoints)
@@ -942,8 +958,9 @@ func (whisper *Whisper) computeExtendedRetentions() (rets []*Retention, extend b
 // rewrite rebuilds the whole compressed file under the given retentions by
 // streaming populated blocks into a sibling temp file, which is then renamed
 // into place. Compaction can copy unchanged leading blocks without decoding.
-// op names the operation and its temp suffix
-// ("extend", "compact").
+// op names the operation and its temp suffix ("extend", "compact", "rollup",
+// "batch", "grow"). "rollup" additionally clears a buffered slot whose replace
+// point is now encoded, so a later flush cannot divert it as a gap fill.
 //
 // extra optionally supplies additional points to merge into archive i as it is
 // rewritten. They must be sorted ascending by interval. Where an interval is
@@ -1025,7 +1042,7 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 				}
 				for offset := 0; offset < len(buffer); offset += PointSize {
 					if unpackDataPoint(buffer[offset:offset+PointSize]).interval == point.interval {
-						if op == "rollup" && point.interval <= archive.cblock.pn1.interval {
+						if op == "rollup" && archive.bufferedBehindWatermark(point.interval) {
 							// This replacement and its downstream rollups are now
 							// encoded. A later flush must not divert it as a gap fill.
 							for j := offset; j < offset+PointSize; j++ {

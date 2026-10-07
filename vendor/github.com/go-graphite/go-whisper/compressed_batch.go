@@ -9,9 +9,26 @@ import (
 // it, its replacement sits in the coarse buffer behind the encoded watermark.
 // Preserve that replacement with a tail correction, rather than replaying all
 // retained archives and encoding another unfinished window on every cycle.
-// Late, future and sidecar writes still need classic circular write ordering.
+// Late, future and sidecar writes, and a batch mixing late and fresh points,
+// still take the classic circular write ordering of a full replay.
 func (whisper *Whisper) materializeBufferedContinuation(points []*TimeSeriesPoint, now int) error {
 	if !whisper.oooEnabled() || whisper.oooPath != "" || whisper.oooBroken || len(points) == 0 || points[0].Time > now {
+		return nil
+	}
+	var corrections [][]dataPoint
+	for i, archive := range whisper.archives[1:] {
+		for offset := 0; offset < len(archive.buffer); offset += PointSize {
+			point := unpackDataPoint(archive.buffer[offset:])
+			if !archive.bufferedBehindWatermark(point.interval) {
+				continue
+			}
+			if corrections == nil {
+				corrections = make([][]dataPoint, len(whisper.archives))
+			}
+			corrections[i+1] = append(corrections[i+1], point)
+		}
+	}
+	if corrections == nil {
 		return nil
 	}
 	base := whisper.archives[0]
@@ -25,22 +42,6 @@ func (whisper *Whisper) materializeBufferedContinuation(points []*TimeSeriesPoin
 	if now-oldest > base.MaxRetention() || base.Interval(oldest) <= latest {
 		return nil
 	}
-	var corrections [][]dataPoint
-	for i, archive := range whisper.archives[1:] {
-		for offset := 0; offset < len(archive.buffer); offset += PointSize {
-			point := unpackDataPoint(archive.buffer[offset:])
-			if point.interval == 0 || point.interval > archive.cblock.pn1.interval {
-				continue
-			}
-			if corrections == nil {
-				corrections = make([][]dataPoint, len(whisper.archives))
-			}
-			corrections[i+1] = append(corrections[i+1], point)
-		}
-	}
-	if corrections == nil {
-		return nil
-	}
 	for i := range corrections {
 		sort.Slice(corrections[i], func(a, b int) bool { return corrections[i][a].interval < corrections[i][b].interval })
 	}
@@ -50,6 +51,16 @@ func (whisper *Whisper) materializeBufferedContinuation(points []*TimeSeriesPoin
 	}
 	rets, _, _ := whisper.computeExtendedRetentions()
 	return whisper.rewrite(rets, "rollup", func(i int) []extraPoint { return markExtras(recomputed[i], true) })
+}
+
+// bufferedBehindWatermark reports whether a buffered interval is already
+// covered by this archive's encoded blocks. A replay or compaction can encode an
+// unfinished window; its finished replacement then lands behind the watermark,
+// where a flush would demote it to a gap-filling sidecar value. Detection in
+// compressedBatchOverlaps and remediation in materializeBufferedContinuation
+// must agree on this rule.
+func (archive *archiveInfo) bufferedBehindWatermark(interval int) bool {
+	return interval != 0 && interval <= archive.cblock.pn1.interval
 }
 
 // Materialize buffered rollups under the old policy before changing it. Reading
@@ -120,7 +131,7 @@ func (whisper *Whisper) compressedBatchOverlaps(points []*TimeSeriesPoint, now i
 			// A rewritten partial window may acquire a newer aggregate in
 			// its buffer. Preserve that replacement before flushing would
 			// demote it to a gap-filling coarse sidecar value.
-			if index > 0 && interval != 0 && interval <= archive.cblock.pn1.interval {
+			if index > 0 && archive.bufferedBehindWatermark(interval) {
 				return true, nil
 			}
 			if interval > latest {

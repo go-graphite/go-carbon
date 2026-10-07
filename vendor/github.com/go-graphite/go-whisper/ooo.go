@@ -623,7 +623,9 @@ func (whisper *Whisper) recomputeArchiveAggregates(extras, corrections [][]dataP
 	for i := range extras {
 		if corrections != nil {
 			// Direct writes follow propagation from finer archives, so they win
-			// at the same slot before computing the next resolution down.
+			// at the same slot before computing the next resolution down. The
+			// buffered rollups materializeBufferedContinuation passes here get
+			// the same precedence over a recompute from the finer archive.
 			out[i], _ = mergeExtra(out[i], markExtras(corrections[i], true), maxInt)
 		}
 		if i+1 == len(extras) {
@@ -880,12 +882,8 @@ func spanOf(lists ...[]dataPoint) (from, until int, ok bool) {
 	return from, until, ok
 }
 
-// readArchivePoints returns every live point in archive index of a classic
+// readArchivePointsAt returns every live point in archive index of a classic
 // whisper file, ascending by interval.
-func readArchivePoints(w *Whisper, index int) ([]dataPoint, error) {
-	return readArchivePointsAt(w, index, Now())
-}
-
 func readArchivePointsAt(w *Whisper, index int, now time.Time) ([]dataPoint, error) {
 	// Fine corrections can outlive their own retention while still affecting
 	// retained coarse aggregates. Collision replay materializes them before
