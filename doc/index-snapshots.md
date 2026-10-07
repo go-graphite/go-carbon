@@ -42,16 +42,18 @@ administration view identifies the snapshot and lists assigned namespaces.
 
 Building the next generation temporarily requires space for both the current and
 replacement accelerator. Accelerator write failures leave reads available and
-are logged; the legacy cache still provides the recovery fallback. The first complete background generation also replaces the live heap trie, so
-future restarts do not need to release the original large node graph at exit.
+are logged; the legacy cache still provides the recovery fallback. The first
+complete background generation also replaces the live heap trie, so future
+restarts do not need to release the original large node graph at exit.
 
 ## Reads during compressed-history recovery
 
 For compressed Whisper with untagged input, graceful shutdown saves a small
 index overlay plus a pointer-free lookup table over the ordinary cache and input
 `.bin` files. The point manifest binds these files to the exact saved read-index
-generation, data-root identity, sizes and checksums. Shutdown stops index workers while persistence remains active, then stops
-persistence, diverts input, dumps the stable cache, and waits for input cleanup.
+generation, data-root identity, sizes and checksums. Shutdown stops index workers
+while persistence remains active, then stops persistence, diverts input, dumps
+the stable cache, and waits for input cleanup.
 Catalogue membership classification runs only after both source files have been
 closed and synchronized; optional checkpoint work cannot delay their durable save.
 Read listeners remain available until the durable checkpoint is complete.
@@ -73,10 +75,10 @@ files; no newer live values have been persisted over that history.
 A missing, corrupt, incompatible or mismatched checkpoint uses ordinary ordered
 restore before reads open. Extra dump generations also force that fallback.
 Tagged input, noncanonical metric names (for example `a..b` or `a/b`), and other
-storage modes keep their existing startup path. There is
-no additional configuration switch. The accelerator becomes usable after a
-complete saved index and a subsequent graceful stop; it does not make
-an uncached first boot instantaneous or eliminate the process handoff gap.
+storage modes keep their existing startup path. There is no additional
+configuration switch. The accelerator becomes usable after a complete saved
+index and a subsequent graceful stop; it does not make an uncached first boot
+instantaneous or eliminate the process handoff gap.
 
 For an opt-in offline test, `TestCapturedIndexSnapshot` reads the cache selected
 by `GO_CARBON_SNAPSHOT_FLC` and writes only into `GO_CARBON_SNAPSHOT_DIR`. It checks
