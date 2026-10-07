@@ -747,6 +747,17 @@ func (listener *CarbonserverListener) MetricExists(metric string) bool {
 // warmup finishes, including when the saved index is absent or corrupt.
 // Configure the listener fully before calling this method.
 func (listener *CarbonserverListener) WarmupIndex() {
+	listener.warmupIndex(nil)
+}
+
+// WarmupIndexWithPending incorporates validated saved names before the first
+// quota refresh and publication. prepare may wait for parallel checkpoint I/O;
+// it must finish even when that checkpoint cannot be used.
+func (listener *CarbonserverListener) WarmupIndexWithPending(prepare func(string, func(string) error) error) {
+	listener.warmupIndex(prepare)
+}
+
+func (listener *CarbonserverListener) warmupIndex(prepare func(string, func(string) error) error) {
 	if listener.getMetricStore() != nil || !listener.trieIndex || listener.scanFrequency == 0 || listener.fileListCache == "" {
 		return
 	}
@@ -756,7 +767,7 @@ func (listener *CarbonserverListener) WarmupIndex() {
 		go func() {
 			defer listener.indexWorkers.Done()
 			defer close(listener.indexWarmupDone)
-			listener.updateFileListWithCache(listener.whisperData, nil, nil, true)
+			listener.updateFileListWithPending(listener.whisperData, nil, nil, true, prepare)
 		}()
 	})
 }
@@ -1182,6 +1193,10 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 }
 
 func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool) (readFromCache bool) {
+	return listener.updateFileListWithPending(dir, cacheMetricNames, quotaAndUsageStatTicker, cacheOnly, nil)
+}
+
+func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error) error) (readFromCache bool) {
 	if metricStore := listener.getMetricStore(); metricStore != nil {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
 			listener.logger.Error("failed to update shared metric-store index", zap.Error(err))
@@ -1206,6 +1221,13 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 	if !u.readFromCache && !u.scanFiles(dir, quotaAndUsageStatTicker) {
 		return false
 	}
+	if prepare != nil && u.trieIdx != nil && u.trieIdx.snapshot != nil {
+		if err := prepare(u.trieIdx.recoveryID, u.trieIdx.insertPendingMetric); err != nil {
+			logger.Warn("saved metric names unavailable", zap.Error(err))
+			return false
+		}
+		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+	}
 	u.pruneRealtimeMetrics()
 	u.closeFileListCaches()
 	if u.snapshotReady && u.trieIdx != nil {
@@ -1220,7 +1242,17 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 	}
 	if u.listener.concurrentIndex {
 		started := time.Now()
+		pending := newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+		pending.builder = &trieBulkBuilder{}
+		var overlay *trieIndex
+		var overlayBase string
+		var overlayErr error
+		var overlayRead sync.WaitGroup
+		overlayRead.Go(func() {
+			overlay, overlayBase, overlayErr = pending.readSnapshotOverlay(u.listener.fileListCache)
+		})
 		snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData)
+		overlayRead.Wait()
 		if err != nil {
 			// This one-time bootstrap uses the existing saved catalogue. Waiting
 			// for a filesystem scan can starve behind repeated quota traversals
@@ -1229,11 +1261,13 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 			snapshot, err = buildSnapshotFromCache(u.listener.fileListCache, u.listener.whisperData, u.listener.exitChan)
 		}
 		if err == nil {
-			u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
-			u.trieIdx.builder = &trieBulkBuilder{}
+			u.trieIdx = pending
 			u.trieIdx.snapshot = snapshot
-			if err := u.trieIdx.loadSnapshotOverlay(u.listener.fileListCache); err != nil && !os.IsNotExist(err) {
-				u.logger.Warn("saved index overlay unavailable", zap.Error(err))
+			if overlayErr == nil {
+				overlayErr = u.trieIdx.installSnapshotOverlay(overlay, overlayBase)
+			}
+			if overlayErr != nil && !os.IsNotExist(overlayErr) {
+				u.logger.Warn("saved index overlay unavailable", zap.Error(overlayErr))
 			}
 			u.metricsKnown = 0
 			u.populateCacheMetrics(u.cacheMetricNames)

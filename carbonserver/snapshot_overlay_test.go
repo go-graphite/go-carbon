@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,13 @@ import (
 )
 
 func overlayListener(t *testing.T, cache, root string) *CarbonserverListener {
+	l := unstartedOverlayListener(t, cache, root)
+	l.WarmupIndex()
+	l.WaitForWarmup()
+	return l
+}
+
+func unstartedOverlayListener(t *testing.T, cache, root string) *CarbonserverListener {
 	t.Helper()
 	l := NewCarbonserverListener(nil)
 	l.SetWhisperData(root)
@@ -25,10 +33,47 @@ func overlayListener(t *testing.T, cache, root string) *CarbonserverListener {
 	l.SetQuotaUsageReportFrequency(time.Minute)
 	l.SetEstimateSize(func(string) (int64, int64, int64) { return 1024, 4096, 60 })
 	l.SetQuotas([]*Quota{{Pattern: "/", Metrics: 1}})
-	l.WarmupIndex()
-	l.WaitForWarmup()
 	t.Cleanup(func() { _ = l.Stop() })
 	return l
+}
+
+func TestPendingNamesGateInitialPublicationAndQuota(t *testing.T) {
+	cache, root, _ := snapshotFixture(t)
+	first := overlayListener(t, cache, root)
+	id, err := first.CheckpointReadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(first.CurrentFileIndex().trieIdx.allMetrics('.'))
+	next := unstartedOverlayListener(t, cache, root)
+	next.SetQuotas([]*Quota{{Pattern: "/", Metrics: int64(before + 1)}})
+	entered, release := make(chan struct{}), make(chan struct{})
+	next.WarmupIndexWithPending(func(gotID string, visit func(string) error) error {
+		close(entered)
+		<-release
+		if gotID != id {
+			return fmt.Errorf("catalogue identity %q != %q", gotID, id)
+		}
+		return visit("checkpoint.only")
+	})
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("warmup did not reach pending checkpoint gate")
+	}
+	if next.CurrentFileIndex() != nil {
+		close(release)
+		t.Fatal("published before checkpoint validation completed")
+	}
+	close(release)
+	next.WaitForWarmup()
+	if !next.MetricExists("checkpoint.only") || next.RecoveryIndexID() != id {
+		t.Fatal("checkpoint name or generation missing at publication")
+	}
+	if !next.ShouldThrottleMetric(points.OnePoint("another.metric", 1, 1), false) {
+		t.Fatal("first publication did not include checkpoint name in quota usage")
+	}
 }
 
 func TestSnapshotOverlayCheckpoint(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path"
-	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -69,32 +68,6 @@ func (app *App) DumpStop() error {
 
 	logger.Info("grace stop with dump inited")
 
-	checkpointSaved, err := app.dumpAndCheckpoint(logger)
-	if err != nil {
-		return err
-	}
-	if checkpointSaved {
-		// Construction tables can occupy gigabytes. Their owners have returned
-		// and both writers are closed; reclaim unused heap while reads still work,
-		// rather than leaving all page teardown to the unavailable exit interval.
-		start := time.Now()
-		debug.FreeOSMemory()
-		logger.Info("checkpoint construction memory released", zap.Duration("runtime", time.Since(start)))
-	}
-	logger.Info("stop read listeners")
-	<-app.stopReadListeners()
-	logger.Info("listeners stopped")
-
-	// logger.Info("stop all")
-	// app.stopAll()
-
-	return nil
-}
-
-// dumpAndCheckpoint finishes the durable source files and optional index while
-// read listeners remain available. Keep construction objects in this scope so
-// their memory can be reclaimed before the read listeners close.
-func (app *App) dumpAndCheckpoint(logger *zap.Logger) (bool, error) {
 	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s.bin", filenamePostfix))
 	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s.bin", filenamePostfix))
@@ -114,12 +87,12 @@ func (app *App) dumpAndCheckpoint(logger *zap.Logger) (bool, error) {
 	}
 	dump, err := recovery.NewWriter(dumpFilename, 0, 1<<20, builder)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer dump.Close()
 	xlog, err := recovery.NewWriter(xlogFilename, 1, 4096, builder)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer xlog.Close()
 	app.Cache.DivertToPointWriter(xlog.WritePoints)
@@ -128,11 +101,11 @@ func (app *App) dumpAndCheckpoint(logger *zap.Logger) (bool, error) {
 	cacheSize := app.Cache.Size()
 	if err = app.Cache.DumpPoints(dump.WritePoints); err != nil {
 		logger.Error("dump failed", zap.Error(err))
-		return false, err
+		return err
 	}
 	cacheFile, err := dump.Close()
 	if err != nil {
-		return false, err
+		return err
 	}
 	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Duration("runtime", time.Since(dumpStart)))
 
@@ -146,11 +119,10 @@ func (app *App) dumpAndCheckpoint(logger *zap.Logger) (bool, error) {
 	}
 	walFile, err := xlog.Close()
 	if err != nil {
-		return false, err
+		return err
 	}
 	logger.Info("dump finished")
 
-	checkpointSaved := false
 	if builder != nil {
 		// The ordinary .bin files remain usable even if the optional accelerator
 		// cannot be published. Never advertise a partial point/catalogue pair.
@@ -160,7 +132,6 @@ func (app *App) dumpAndCheckpoint(logger *zap.Logger) (bool, error) {
 			index, checkpointErr = recovery.WriteIndex(app.Config.Dump.Path, builder)
 			if checkpointErr == nil {
 				checkpointErr = recovery.Publish(app.Config.Dump.Path, app.Config.Whisper.DataDir, cacheFile, walFile, index, readID)
-				checkpointSaved = checkpointErr == nil
 			}
 		}
 		if checkpointErr != nil {
@@ -169,7 +140,14 @@ func (app *App) dumpAndCheckpoint(logger *zap.Logger) (bool, error) {
 			logger.Info("pending read checkpoint saved")
 		}
 	}
-	return checkpointSaved, nil
+	logger.Info("stop read listeners")
+	<-app.stopReadListeners()
+	logger.Info("listeners stopped")
+
+	// logger.Info("stop all")
+	// app.stopAll()
+
+	return nil
 }
 
 // RestoreFromFile read and parse data from single file

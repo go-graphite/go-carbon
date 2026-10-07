@@ -24,9 +24,29 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		return false, nil
 	}
 	cs := app.Carbonserver
-	cs.WarmupIndex()
 	started := time.Now()
-	bundle, err := recovery.OpenBundle(app.Config.Dump.Path, app.Config.Whisper.DataDir)
+	checkpointLoaded := make(chan struct{})
+	var bundle *recovery.Bundle
+	var err, prepareErr error
+	preparedNames := 0
+	prepared := false
+	var prepareTime time.Duration
+	cs.WarmupIndexWithPending(func(indexID string, visit func(string) error) error {
+		<-checkpointLoaded
+		if err != nil || bundle.ReadIndexID() == "" || bundle.ReadIndexID() != indexID {
+			return nil
+		}
+		prepareStart := time.Now()
+		prepareErr = bundle.NewNames(func(name string) error {
+			preparedNames++
+			return visit(name)
+		})
+		prepareTime = time.Since(prepareStart)
+		prepared = prepareErr == nil
+		return prepareErr
+	})
+	bundle, err = recovery.OpenBundle(app.Config.Dump.Path, app.Config.Whisper.DataDir)
+	close(checkpointLoaded)
 	opened := time.Now()
 	logger := zapwriter.Logger("app")
 	if err != nil {
@@ -37,22 +57,15 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	}
 	cs.WaitForWarmup()
 	indexReady := time.Now()
-	if !cs.HasMappedIndex() || bundle.ReadIndexID() == "" || cs.RecoveryIndexID() != bundle.ReadIndexID() {
+	if prepareErr != nil {
+		_ = bundle.Close()
+		return false, prepareErr
+	}
+	if !prepared || !cs.HasMappedIndex() || cs.RecoveryIndexID() != bundle.ReadIndexID() {
 		_ = bundle.Close()
 		logger.Info("pending read checkpoint does not match read index; using ordered restore")
 		return false, nil
 	}
-	preparedNames := 0
-	if err = cs.PreparePendingReadIndex(func(visit func(string) error) error {
-		return bundle.NewNames(func(name string) error {
-			preparedNames++
-			return visit(name)
-		})
-	}); err != nil {
-		_ = bundle.Close()
-		return false, err
-	}
-	prepared := time.Now()
 	if err = core.AttachPendingRecovery(bundle); err != nil {
 		_ = bundle.Close()
 		return false, err
@@ -65,7 +78,7 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	}
 	logger.Info("serving reads from pending checkpoint", zap.Duration("runtime", time.Since(started)),
 		zap.Duration("checkpoint_open_time", opened.Sub(started)), zap.Duration("index_wait_time", indexReady.Sub(opened)),
-		zap.Duration("pending_index_time", prepared.Sub(indexReady)), zap.Int("pending_new_names", preparedNames),
+		zap.Duration("pending_names_time", prepareTime), zap.Int("pending_new_names", preparedNames),
 		zap.Uint64("points", bundle.Points()), zap.Uint64("metrics", bundle.Metrics()))
 	if err = core.RecoverPending(nil, app.Config.Dump.RestorePerSecond); err != nil {
 		return true, err

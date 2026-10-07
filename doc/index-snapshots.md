@@ -34,6 +34,8 @@ namespaces; every configured quota is still enforced before reads become ready.
 The loader reuses path decode buffers while retaining owned labels in the tree.
 Private construction avoids atomic child updates; published trees keep their
 existing concurrency protections.
+Overlay decoding runs alongside base-file validation. The decoded overlay stays
+private until both jobs finish and their generation identities match.
 
 A later complete filesystem scan writes a replacement generation. Queued metric
 notifications continue updating the live overlay during that scan. Pending
@@ -69,7 +71,9 @@ The point index classifies names against that frozen saved catalogue, including
 its overlay, so startup inserts only names that arrived after the index froze.
 
 On the next start, go-carbon validates/maps both checkpoints in parallel, installs
-all saved metric names and initial quotas, and opens read listeners. A cache read
+all saved metric names in the private index, applies initial quotas once, and
+opens read listeners. Initial publication waits for checkpoint validation and
+name insertion; no partially accounted index becomes visible. A cache read
 can fetch unclaimed points directly from their saved records. Recovery transfers
 a whole metric under its cache-shard lock, keeping it visible in either the saved
 source, cache, or in-flight write list. The lookup compares full names after
@@ -78,7 +82,8 @@ The three point-checkpoint files are checksum-validated concurrently. Startup
 also validates the two saved-catalogue files concurrently. Large recovery record
 tables use bounded parallel validation, including every range boundary. Startup
 logs distinguish checkpoint validation, remaining index wait, and insertion of
-previously unindexed names; overlap is not added twice to the readiness duration.
+previously unindexed names. The pending-name timer is nested inside warmup and
+may overlap checkpoint/index loading; do not add it again to the readiness duration.
 
 Input receivers retain their existing recovery gate until all old history has
 persisted. This prevents newer live points from advancing compressed block

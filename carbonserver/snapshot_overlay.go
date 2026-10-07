@@ -59,33 +59,32 @@ func readOverlayManifest(path string) (snapshotOverlayManifest, error) {
 	return m, nil
 }
 
-func (ti *trieIndex) loadSnapshotOverlay(cache string) error {
+// readSnapshotOverlay builds privately so decoding can overlap validation of the
+// immutable base. The caller must check the generation before installing it.
+func (ti *trieIndex) readSnapshotOverlay(cache string) (_ *trieIndex, base string, err error) {
 	m, err := readOverlayManifest(overlayManifestPath(cache))
 	if err != nil {
-		return err
-	}
-	if m.Base != ti.snapshot.identity() {
-		return fmt.Errorf("snapshot overlay belongs to another generation")
+		return nil, "", err
 	}
 	path := filepath.Join(filepath.Dir(cache), m.File.Name)
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	digest := sha256.New()
 	size, hashErr := io.Copy(digest, file)
 	closeErr := file.Close()
 	if err = errors.Join(hashErr, closeErr); err != nil {
-		return err
+		return nil, "", err
 	}
 	var checksum [sha256.Size]byte
 	copy(checksum[:], digest.Sum(nil))
 	if size != m.File.Size || checksum != m.File.SHA256 {
-		return fmt.Errorf("snapshot overlay checksum differs")
+		return nil, "", fmt.Errorf("snapshot overlay checksum differs")
 	}
 	reader, err := NewFileListCache(path, FLCVersion2, 'r')
 	if err != nil {
-		return err
+		return nil, "", err
 	}
 	defer reader.Close()
 	// Decode into a private overlay; an invalid tail must not publish its prefix.
@@ -111,7 +110,7 @@ func (ti *trieIndex) loadSnapshotOverlay(cache string) error {
 			break
 		}
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		if v2 != nil {
 			_, err = pending.insertMutableBytes(borrowed, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
@@ -119,16 +118,24 @@ func (ti *trieIndex) loadSnapshotOverlay(cache string) error {
 			_, err = pending.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
 		}
 		if err != nil {
-			return err
+			return nil, "", err
 		}
 		count++
 	}
 	if count != m.Records {
-		return fmt.Errorf("snapshot overlay record count differs")
+		return nil, "", fmt.Errorf("snapshot overlay record count differs")
+	}
+	pending.recoveryID = overlayIdentity(m)
+	return pending, m.Base, nil
+}
+
+func (ti *trieIndex) installSnapshotOverlay(pending *trieIndex, base string) error {
+	if ti.snapshot == nil || base != ti.snapshot.identity() {
+		return fmt.Errorf("snapshot overlay belongs to another generation")
 	}
 	ti.root, ti.depth, ti.fileCount, ti.longestMetric = pending.root, pending.depth, pending.fileCount, pending.longestMetric
 	ti.builder = pending.builder
-	ti.recoveryID = overlayIdentity(m)
+	ti.recoveryID = pending.recoveryID
 	return nil
 }
 
@@ -281,10 +288,7 @@ func (l *CarbonserverListener) PreparePendingReadIndex(visit func(func(string) e
 		return fmt.Errorf("mapped read index unavailable")
 	}
 	before := index.trieIdx.fileCount
-	if err := visit(func(name string) error {
-		_, err := index.trieIdx.insert("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
-		return err
-	}); err != nil {
+	if err := visit(index.trieIdx.insertPendingMetric); err != nil {
 		return err
 	}
 	// Warmup already applied complete quotas. Recalculate only when pending
@@ -294,4 +298,9 @@ func (l *CarbonserverListener) PreparePendingReadIndex(visit func(func(string) e
 	}
 	atomic.StoreUint64(&l.metrics.MetricsKnown, index.trieIdx.snapshot.manifest.Records+uint64(index.trieIdx.fileCount))
 	return nil
+}
+
+func (ti *trieIndex) insertPendingMetric(name string) error {
+	_, err := ti.insert("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
+	return err
 }
