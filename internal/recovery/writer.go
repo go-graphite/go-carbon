@@ -71,6 +71,9 @@ func (w *Writer) Close() (File, error) {
 		return w.descriptor, w.err
 	}
 	w.closed = true
+	// Cache diversion can retain this closed writer until process exit. The
+	// caller owns the completed builder; do not retain its construction tables.
+	w.builder = nil
 	w.err = errors.Join(w.err, w.buffer.Flush(), w.file.Sync())
 	if w.err == nil {
 		info, err := w.file.Stat()
