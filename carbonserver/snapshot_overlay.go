@@ -255,13 +255,18 @@ func (l *CarbonserverListener) PreparePendingReadIndex(visit func(func(string) e
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
 		return fmt.Errorf("mapped read index unavailable")
 	}
+	before := index.trieIdx.fileCount
 	if err := visit(func(name string) error {
 		_, err := index.trieIdx.insert("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
 		return err
 	}); err != nil {
 		return err
 	}
-	l.refreshIndexQuotaAndUsage(index, nil)
+	// Warmup already applied complete quotas. Recalculate only when pending
+	// records actually extend that catalogue; most names are in the saved overlay.
+	if index.trieIdx.fileCount != before {
+		l.refreshIndexQuotaAndUsage(index, nil)
+	}
 	atomic.StoreUint64(&l.metrics.MetricsKnown, index.trieIdx.snapshot.manifest.Records+uint64(index.trieIdx.fileCount))
 	return nil
 }

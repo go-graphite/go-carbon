@@ -174,7 +174,8 @@ func TestSnapshotNamespaceExistsMatchesFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.close()
-	cases := []string{"/", "", "a", "a-sibling", "a0", "a.value", "b", "b.child", "空间", "空间.值", "missing", "z", "a-siblin", "b.child.more"}
+	lookup := s.namespaceLookup()
+	cases := []string{"b.child.more", "b.child", "missing.child", "missing", "/", "", "a", "a-sibling", "a0", "a.value", "b", "b.child", "空间", "空间.值", "missing", "z", "a-siblin", "b.child.more"}
 	for _, name := range cases {
 		prefix := "/" + strings.ReplaceAll(name, ".", "/") + "/"
 		if name == "/" || name == "" {
@@ -186,6 +187,9 @@ func TestSnapshotNamespaceExistsMatchesFiles(t *testing.T) {
 		}
 		if got := s.namespaceExists(name); got != want {
 			t.Fatalf("namespace %q: got %v want %v", name, got, want)
+		}
+		if got := lookup(name); got != want {
+			t.Fatalf("cached namespace %q: got %v want %v", name, got, want)
 		}
 	}
 }

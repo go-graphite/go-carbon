@@ -295,6 +295,38 @@ func (s *indexSnapshot) namespaceExists(name string) bool {
 	return true
 }
 
+// namespaceLookup shares ancestor states across one batch of namespace checks.
+// A large mutable overlay often repeats a long common prefix in every name;
+// restarting the FST walk at the root for each namespace amplifies that work.
+// The returned function is private to one quota refresh and is not concurrent.
+func (s *indexSnapshot) namespaceLookup() func(string) bool {
+	root := s.index.Accept(s.index.Start(), 0)
+	states := map[string]int{"/": root, "": root}
+	var stateFor func(string) int
+	stateFor = func(name string) int {
+		if state, ok := states[name]; ok {
+			return state
+		}
+		parent, component := "/", name
+		if at := strings.LastIndexByte(name, '.'); at >= 0 {
+			parent, component = name[:at], name[at+1:]
+		}
+		state := stateFor(parent)
+		for i := 0; i < len(component) && s.index.CanMatch(state); i++ {
+			state = s.index.Accept(state, component[i])
+		}
+		if s.index.CanMatch(state) {
+			state = s.index.Accept(state, 0)
+		}
+		states[name] = state
+		return state
+	}
+	return func(name string) bool {
+		defer runtime.KeepAlive(s)
+		return s.index.CanMatch(stateFor(name))
+	}
+}
+
 func (s *indexSnapshot) lowerBound(key []byte) (uint64, error) {
 	defer runtime.KeepAlive(s)
 	i, err := s.index.Iterator(key, nil)

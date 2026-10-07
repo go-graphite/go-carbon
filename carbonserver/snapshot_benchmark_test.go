@@ -196,7 +196,13 @@ func TestCapturedIndexSnapshotOpen(t *testing.T) {
 	if index == nil || index.trieIdx.snapshot == nil {
 		t.Fatal("complete snapshot not published")
 	}
-	t.Logf("index_publication records=%d quotas=%d seconds=%.6f allocated_bytes=%d heap_bytes=%d", index.trieIdx.snapshot.manifest.Records, len(index.trieIdx.quotaNodes), elapsed.Seconds(), after.TotalAlloc-before.TotalAlloc, after.HeapAlloc)
+	if os.Getenv("GO_CARBON_REQUIRE_OVERLAY") != "" {
+		m, err := readOverlayManifest(overlayManifestPath(l.fileListCache))
+		if err != nil || uint64(index.trieIdx.fileCount) != m.Records {
+			t.Fatal("captured overlay not fully loaded", index.trieIdx.fileCount, m.Records, err)
+		}
+	}
+	t.Logf("index_publication records=%d overlay_records=%d quotas=%d seconds=%.6f allocated_bytes=%d heap_bytes=%d", index.trieIdx.snapshot.manifest.Records, index.trieIdx.fileCount, len(index.trieIdx.quotaNodes), elapsed.Seconds(), after.TotalAlloc-before.TotalAlloc, after.HeapAlloc)
 }
 
 // Benchmark captured names rather than short synthetic keys. Both paths must
