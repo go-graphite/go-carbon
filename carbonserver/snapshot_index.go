@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/blevesearch/vellum"
@@ -160,6 +161,152 @@ func (s *indexSnapshot) walkNamespace(name string, visit func(string, uint64) bo
 	return err
 }
 
+// appendMetricNamesRange owns decoded names in chunks for the lifetime of the list.
+// Unlike namespace callbacks, a full list retains every name together, so it
+// can share append-only storage without pinning chunks for individual lookups.
+func (s *indexSnapshot) appendMetricNamesRange(files []string, sep byte, startKey, endKey []byte) []string {
+	defer runtime.KeepAlive(s)
+	it, err := s.index.Iterator(startKey, endKey)
+	if it != nil {
+		defer it.Close()
+	}
+	var chunk strings.Builder
+	for err == nil {
+		key, _ := it.Current()
+		name := key[1 : len(key)-4]
+		if chunk.Cap()-chunk.Len() < len(name) {
+			chunk = strings.Builder{}
+			// Small partitions should not each retain a mostly empty 1MiB
+			// chunk. Estimate from the remaining names, with bounded growth.
+			size := min(cap(files)-len(files), (1<<20)/max(len(name), 1)) * len(name)
+			chunk.Grow(max(4<<10, len(name), size))
+		}
+		start := chunk.Len()
+		for {
+			i := bytes.IndexByte(name, 0)
+			if i < 0 {
+				_, _ = chunk.Write(name)
+				break
+			}
+			_, _ = chunk.Write(name[:i])
+			_ = chunk.WriteByte('.')
+			name = name[i+1:]
+		}
+		metric := chunk.String()[start:]
+		if sep != '.' {
+			metric = strings.ReplaceAll(metric, ".", string(sep))
+		}
+		files = append(files, metric)
+		err = it.Next()
+	}
+	return files
+}
+
+type snapshotMetricRange struct {
+	start, end  []byte
+	first, last int
+}
+
+// Snapshot values are consecutive row numbers in encoded-key order, as used by
+// namespaceRange. Probe prefix boundaries to split skewed namespaces without a
+// preliminary traversal of every metric or changes to the saved index format.
+func (s *indexSnapshot) metricListRanges(workers int) []snapshotMetricRange {
+	defer runtime.KeepAlive(s)
+	ranges := []snapshotMetricRange{{[]byte{0}, []byte{1}, 0, s.index.Len()}}
+	limit := max(s.index.Len()/(workers*2), 1)
+	for len(ranges) < 256 {
+		largest := 0
+		for i := range ranges {
+			if ranges[i].last-ranges[i].first > ranges[largest].last-ranges[largest].first {
+				largest = i
+			}
+		}
+		r := ranges[largest]
+		if r.last-r.first <= limit {
+			break
+		}
+		state := s.index.Start()
+		for _, c := range r.start {
+			state = s.index.Accept(state, c)
+		}
+		var children []snapshotMetricRange
+		if s.index.IsMatch(state) {
+			children = append(children, snapshotMetricRange{r.start, nil, r.first, 0})
+		}
+		for c := 0; c < 256; c++ {
+			if !s.index.CanMatch(s.index.Accept(state, byte(c))) {
+				continue
+			}
+			prefix := append(bytes.Clone(r.start), byte(c))
+			it, err := s.index.Iterator(prefix, r.end)
+			if err != nil {
+				if it != nil {
+					_ = it.Close()
+				}
+				return nil
+			}
+			_, row := it.Current()
+			_ = it.Close()
+			if row < uint64(r.first) || row >= uint64(r.last) ||
+				len(children) > 0 && row <= uint64(children[len(children)-1].first) {
+				return nil
+			}
+			if len(children) > 0 {
+				children[len(children)-1].end = prefix
+				children[len(children)-1].last = int(row)
+			}
+			children = append(children, snapshotMetricRange{prefix, nil, int(row), 0})
+		}
+		if len(children) == 0 || children[0].first != r.first {
+			return nil
+		}
+		children[len(children)-1].end = r.end
+		children[len(children)-1].last = r.last
+		ranges = append(ranges[:largest], append(children, ranges[largest+1:]...)...)
+	}
+	return ranges
+}
+
+func (s *indexSnapshot) appendMetricNamesParallel(files []string, sep byte, workers int) []string {
+	defer runtime.KeepAlive(s)
+	ranges := s.metricListRanges(workers)
+	if len(ranges) < 2 {
+		return s.appendMetricNamesRange(files, sep, []byte{0}, []byte{1})
+	}
+	base := len(files)
+	files = files[:base+s.index.Len()]
+	jobs := make(chan snapshotMetricRange, len(ranges))
+	for _, r := range ranges {
+		jobs <- r
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	var incomplete atomic.Bool
+	for range workers {
+		wg.Go(func() {
+			for r := range jobs {
+				part := files[base+r.first : base+r.last : base+r.last]
+				if len(s.appendMetricNamesRange(part[:0], sep, r.start, r.end)) != len(part) {
+					incomplete.Store(true)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if incomplete.Load() {
+		return s.appendMetricNamesRange(files[:base], sep, []byte{0}, []byte{1})
+	}
+	return files
+}
+
+func (s *indexSnapshot) appendMetricNames(files []string, sep byte) []string {
+	workers := min(4, runtime.GOMAXPROCS(0))
+	if s.index.Len() < 1_000_000 || workers == 1 {
+		return s.appendMetricNamesRange(files, sep, []byte{0}, []byte{1})
+	}
+	return s.appendMetricNamesParallel(files, sep, workers)
+}
+
 func (ti *trieIndex) allMetrics(sep byte) []string {
 	extra := ti.allMetricsMutable(sep)
 	if ti.snapshot == nil {
@@ -169,13 +316,7 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 	// Prepending the overlay defeats the sort's nearly sorted input fast path
 	// and repeatedly grows a slice containing every metric in a large snapshot.
 	files := make([]string, 0, ti.snapshot.index.Len()+len(extra))
-	_ = ti.snapshot.walkNamespace("/", func(name string, _ uint64) bool {
-		if sep != '.' {
-			name = strings.ReplaceAll(name, ".", string(sep))
-		}
-		files = append(files, name)
-		return true
-	})
+	files = ti.snapshot.appendMetricNames(files, sep)
 	// Encoded path order differs from metric order (NUL separators and .wsp),
 	// so the decoded snapshot still needs sorting before the linear merge.
 	sort.Strings(files)
