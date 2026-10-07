@@ -47,6 +47,8 @@ func TestBorrowedTriePathsMatchOwnedAndRetainStorage(t *testing.T) {
 }
 
 func FuzzBorrowedTriePaths(f *testing.F) {
+	f.Add("../00\n/../000")
+	f.Add("/alpha/long_shared/one.wsp\n/alpha/long_shared/two.wsp\n/alpha/lon/three.wsp\n/alpha/long_shared/../four.wsp\n/alpha/long_shared//five.wsp\n/alpha.wsp\n/alpha/long_shared/six.wsp")
 	f.Add("/shared/metric.wsp\n/shared/metrics.wsp\n/shared/met.wsp\n/shared/metric/child.wsp")
 	f.Add("/a//b.wsp\n/a/./c.wsp\n/a/../d.wsp\n/é/東京.wsp\n/\n.")
 	f.Fuzz(func(t *testing.T, input string) {

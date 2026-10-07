@@ -513,6 +513,13 @@ func (ti *trieIndex) insertMutableBytes(path []byte, logicalSize, physicalSize, 
 	if len(path) > 0 && path[0] == '/' {
 		start = 1
 	}
+	// filepath.Clean may retain leading parents in a relative path. They must
+	// not bypass cleaning when the next borrowed path is absolute.
+	if b := ti.builder; b != nil && b.generation == ti.root.gen && !bytes.HasPrefix(b.prefix, []byte("../")) {
+		if matched := bulkDirectoryMatch(b, path[start:]); matched >= 0 {
+			start += b.directories[matched].end
+		}
+	}
 	for start <= len(path) {
 		n := bytes.IndexByte(path[start:], '/')
 		if n < 0 {
@@ -558,13 +565,13 @@ func insertMutablePath[P string | []byte](ti *trieIndex, path P, logicalSize, ph
 		ti.longestMetric = string(path)
 	}
 
-	var start, nlen int
+	var nlen int
 	var sn, newn *trieNode
-	var cur = ti.root
+	start, cur := bulkDirectoryStart(ti, path)
 outer:
 	// Include the final component, and let the standard library scan long
 	// components without checking each byte in the insertion loop.
-	for i := 0; i <= len(path); i++ {
+	for i := start; i <= len(path); i++ {
 		if next := indexPathSeparator(path[i:]); next >= 0 {
 			i += next
 		} else {
@@ -687,6 +694,7 @@ outer:
 			if child.dir() {
 				cur = child
 				cur.gen = ti.root.gen
+				rememberBulkDirectory(ti, path, i+1, cur)
 				continue outer
 			}
 		}
@@ -695,6 +703,7 @@ outer:
 			newn = ti.newDir()
 			ti.appendChild(cur, newn)
 			cur = newn
+			rememberBulkDirectory(ti, path, i+1, cur)
 		}
 	}
 
