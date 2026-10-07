@@ -103,9 +103,7 @@ func TestSnapshotOverlayCheckpoint(t *testing.T) {
 	if !next.ShouldThrottleMetric(points.OnePoint("another.metric", 1, 1), false) {
 		t.Fatal("initial quota missing")
 	}
-	if err = next.PreparePendingReadIndex(func(visit func(string) error) error { return visit("wal.only") }); err != nil {
-		t.Fatal(err)
-	}
+	next.insertRealtimeMetric(next.CurrentFileIndex().trieIdx, "wal.only")
 	if !next.MetricExists("wal.only") {
 		t.Fatal("unindexed WAL name missing")
 	}

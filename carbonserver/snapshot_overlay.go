@@ -280,26 +280,6 @@ func (l *CarbonserverListener) RecoveryIndexID() string {
 	return index.trieIdx.recoveryID
 }
 
-// PreparePendingReadIndex runs after warmup and before Listen. It preserves the
-// complete-index and initial-quota gates when saved points introduce new names.
-func (l *CarbonserverListener) PreparePendingReadIndex(visit func(func(string) error) error) error {
-	index := l.CurrentFileIndex()
-	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
-		return fmt.Errorf("mapped read index unavailable")
-	}
-	before := index.trieIdx.fileCount
-	if err := visit(index.trieIdx.insertPendingMetric); err != nil {
-		return err
-	}
-	// Warmup already applied complete quotas. Recalculate only when pending
-	// records actually extend that catalogue; most names are in the saved overlay.
-	if index.trieIdx.fileCount != before {
-		l.refreshIndexQuotaAndUsage(index, nil)
-	}
-	atomic.StoreUint64(&l.metrics.MetricsKnown, index.trieIdx.snapshot.manifest.Records+uint64(index.trieIdx.fileCount))
-	return nil
-}
-
 func (ti *trieIndex) insertPendingMetric(name string) error {
 	_, err := ti.insert("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
 	return err
