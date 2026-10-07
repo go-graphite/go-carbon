@@ -37,6 +37,10 @@ aggregation-file = "/etc/go-carbon/storage-aggregation.conf"
 # Poll the quota file without restarting components. "0s" disables polling.
 # Reloadable via SIGHUP; quota support must be enabled at startup.
 quotas-reload-interval = "0s"
+# Pebble-chunk only: accept physical-size limits and ignore them while keeping
+# all other quota controls active. Ignored by other backends.
+# Reloadable via SIGHUP.
+pebble-chunk-ignore-physical-quotas = false
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
 # Limits the number of whisper update_many() calls per second. 0 - no limit

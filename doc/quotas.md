@@ -26,6 +26,13 @@ If `whisper.sparse-create` or `whisper.compressed` is enabled, logical size coul
 
 Distinguishing them gives us control for that scenario.
 
+With `pebble-chunk`, physical-size limits are rejected because storage is shared
+across metrics. Set `pebble-chunk-ignore-physical-quotas = true` in `[whisper]` to
+accept and ignore those limits while keeping every other quota control active.
+This option defaults to `false`, is reloadable via SIGHUP, and has no effect on
+other storage backends. Ignored physical-size limits produce no per-namespace
+physical quota or usage metrics.
+
 ### `data-points` and `logical-size`
 
 Usually, `data_points` corresponds to `logical-size` as they are both determined by its matching retention policy.

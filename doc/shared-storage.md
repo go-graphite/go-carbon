@@ -72,8 +72,12 @@ affects performance and should be measured on representative workloads before
 rollout.
 
 Metric count, data-point and logical-size quotas use classic Whisper capacity,
-including headers. Namespace physical-size quotas are rejected: compressed
-tables and the WAL are shared across metrics. `storage.diskBytes`,
+including headers. Namespace physical-size quotas are rejected by default:
+compressed tables and the WAL are shared across metrics. Set
+`whisper.pebble-chunk-ignore-physical-quotas = true` to accept existing quota
+files and ignore only their physical-size limits. Other quota controls still
+apply. This setting applies only to `pebble-chunk` and is reloadable via SIGHUP;
+startup and quota-file polling use the same policy. `storage.diskBytes`,
 `storage.walBytes`, `storage.memTableBytes` and `storage.cacheBytes` report
 store-wide accounting. `storage.cacheHits`, `storage.cacheMisses`,
 `storage.chunkMaterializations` and `storage.chunkOperands` expose cache and

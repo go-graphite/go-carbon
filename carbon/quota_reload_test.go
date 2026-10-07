@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -321,5 +322,115 @@ func TestQuotaReloadRetainsSharedStorageValidation(t *testing.T) {
 	quota("[/]\nphysical-size=100\n")
 	if err := app.quotaReloader.reload(); err == nil || !strings.Contains(err.Error(), "physical-size") {
 		t.Fatalf("shared storage accepted physical-size quota: %v", err)
+	}
+}
+
+func TestPebbleChunkIgnorePhysicalQuotasStartupAndReload(t *testing.T) {
+	defer zapwriter.Test()()
+	for _, backend := range []string{"files", "pebble-chunk"} {
+		t.Run(backend, func(t *testing.T) {
+			app, quota := newQuotaReloadApp(t, func(cfg *Config) {
+				cfg.Whisper.StorageBackend = backend
+				cfg.Whisper.PebbleChunkIgnorePhysicalQuotas = true
+				cfg.Whisper.QuotasReloadInterval = Duration{time.Hour}
+				if err := os.WriteFile(cfg.Whisper.QuotasFilename, []byte("[/]\nmetrics=20\nphysical-size=1\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			})
+			defer app.Stop()
+			server := app.Carbonserver
+			if backend == "files" {
+				checkFilePhysicalQuotaReloads(t, app, quota)
+				return
+			}
+			addQuotaExistingMetric(t, app)
+			refreshSharedQuotaMetric(t, app)
+			waitQuotaThrottle(t, server, false)
+			if app.Config.Whisper.Quotas[0].PhysicalSize != 1 {
+				t.Fatal("startup changed the configured physical quota")
+			}
+			defer checkQuotaConcurrently(server)()
+			for _, limit := range []int{1, 20} {
+				quota(fmt.Sprintf("[/]\nmetrics=%d\nphysical-size=2\n", limit))
+				if err := app.quotaReloader.reload(); err != nil {
+					t.Fatal(err)
+				}
+				waitQuotaThrottle(t, server, limit == 1)
+			}
+
+			cfg, err := ReadConfig(app.ConfigFilename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.Whisper.PebbleChunkIgnorePhysicalQuotas = false
+			writeBatchingConfig(t, app.ConfigFilename, cfg)
+			err = app.ReloadConfig()
+			if err == nil || !strings.Contains(err.Error(), "physical-size") {
+				t.Fatalf("shared storage accepted physical quotas after disabling opt-in: %v", err)
+			}
+			if !app.Config.Whisper.PebbleChunkIgnorePhysicalQuotas {
+				t.Fatal("rejected reload changed the ignore policy")
+			}
+			waitQuotaThrottle(t, server, false)
+
+			quota("[/]\nmetrics=1\n")
+			if err := app.ReloadConfig(); err != nil {
+				t.Fatal(err)
+			}
+			if app.Config.Whisper.PebbleChunkIgnorePhysicalQuotas || app.Carbonserver != server {
+				t.Fatal("SIGHUP did not update the ignore policy on the running server")
+			}
+			waitQuotaThrottle(t, server, true)
+		})
+	}
+}
+
+func checkFilePhysicalQuotaReloads(t *testing.T, app *App, quota func(string)) {
+	t.Helper()
+	server := app.Carbonserver
+	waitQuotaThrottle(t, server, true)
+	defer checkQuotaConcurrently(server)()
+	for _, reload := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "poll", run: app.quotaReloader.reload},
+		{name: "SIGHUP", run: app.ReloadConfig},
+	} {
+		t.Run(reload.name, func(t *testing.T) {
+			for _, size := range []string{"max", "2"} {
+				quota(fmt.Sprintf("[/]\nmetrics=20\nphysical-size=%s\n", size))
+				if err := reload.run(); err != nil {
+					t.Fatal(err)
+				}
+				waitQuotaThrottle(t, server, size == "2")
+			}
+		})
+	}
+	if !app.Config.Whisper.PebbleChunkIgnorePhysicalQuotas || app.Carbonserver != server {
+		t.Fatal("reload changed the configured flag or the running server")
+	}
+}
+
+func refreshSharedQuotaMetric(t *testing.T, app *App) {
+	t.Helper()
+	if app.MetricStore == nil {
+		t.Fatal("shared metric store missing")
+	}
+	// Shared scans rebuild from the catalog, so the metric must be
+	// persisted before it can count towards the reloaded quota.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := app.MetricStore.Metadata(context.Background(), "namespace.existing")
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("metric not persisted: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := app.Carbonserver.RefreshMetricStoreIndex(); err != nil {
+		t.Fatal(err)
 	}
 }
