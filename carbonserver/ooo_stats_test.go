@@ -129,6 +129,63 @@ func TestSidecarGaugesPreserveLastScan(t *testing.T) {
 	}
 }
 
+func TestFileScanGaugesAfterWalkError(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		walkErr      error
+		preserveLast bool
+	}{
+		{name: "removed sidecar", path: "removed.wsp.ooo", walkErr: syscall.ENOENT},
+		{name: "removed lock", path: "removed.wsp.lock", walkErr: syscall.ENOENT},
+		{name: "removed metric", path: "removed.wsp", walkErr: os.ErrNotExist},
+		{name: "removed directory", path: "removed", walkErr: os.ErrNotExist},
+		{name: "missing root", walkErr: os.ErrNotExist, preserveLast: true},
+		{name: "permission denied", path: "unreadable", walkErr: os.ErrPermission, preserveLast: true},
+		{name: "I/O error", path: "unreadable", walkErr: syscall.EIO, preserveLast: true},
+	}
+	for _, trie := range []bool{false, true} {
+		for _, tt := range tests {
+			t.Run(fmt.Sprintf("trie=%t/%s", trie, tt.name), func(t *testing.T) {
+				dir := t.TempDir()
+				sidecar := filepath.Join(dir, "metric.wsp.ooo")
+				for _, path := range []string{sidecar, filepath.Join(dir, "metric.wsp.lock")} {
+					if err := os.WriteFile(path, []byte("late points"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				info, err := os.Stat(sidecar)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantBytes := uint64(info.Sys().(*syscall.Stat_t).Blocks) * 512
+				listener := NewCarbonserverListener(nil)
+				listener.timeBuckets = make([]uint64, listener.buckets+1)
+				listener.SetWhisperData(dir)
+				listener.SetTrieIndex(trie)
+				listener.metrics.OOOFiles = 3
+				listener.metrics.OOOPhysicalBytes = 8192
+				listener.metrics.LockFiles = 4
+				u := newFileListUpdate(listener, nil)
+				path := filepath.Join(dir, tt.path)
+				walkErr := fmt.Errorf("walking: %w", &os.PathError{Op: "lstat", Path: path, Err: tt.walkErr})
+				if err := u.walkFile(path, nil, walkErr, nil); err != nil {
+					t.Fatal(err)
+				}
+				if !u.scanFiles(dir, nil) {
+					t.Fatal("scan did not complete")
+				}
+				u.publish(dir, nil)
+				if tt.preserveLast {
+					assertSidecarGauges(t, listener, 3, 8192, 4)
+				} else {
+					assertSidecarGauges(t, listener, 1, wantBytes, 1)
+				}
+			})
+		}
+	}
+}
+
 func assertSidecarGauges(t *testing.T, listener *CarbonserverListener, wantFiles, wantBytes, wantLocks uint64) {
 	t.Helper()
 	for _, counters := range []bool{false, true} {
