@@ -132,6 +132,21 @@ func TestActivityTracksSuccessfulMutationsOnly(t *testing.T) {
 		t.Fatalf("created activity = %v, want %v", m.LastUpdate, now)
 	}
 	now = now.Add(time.Minute)
+	assertActivityIgnoresNoOpMutations(t, s, m, now)
+	now = now.Add(time.Minute)
+	if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_900, Value: 1}}, 60*256); err != nil {
+		t.Fatal(err)
+	}
+	assertSuccessfulActivityUpdate(t, s, m, now)
+	now = now.Add(-2 * time.Hour)
+	if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_840, Value: 2}}, 60*256); err != nil {
+		t.Fatal(err)
+	}
+	assertBackwardClockDoesNotMoveActivity(t, s, m.Name)
+}
+
+func assertActivityIgnoresNoOpMutations(t *testing.T, s *Store, m Metadata, now time.Time) {
+	t.Helper()
 	if err := s.UpdateMany(context.Background(), m.Name, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -154,22 +169,22 @@ func TestActivityTracksSuccessfulMutationsOnly(t *testing.T) {
 	if got.Revision != m.Revision || !got.LastUpdate.Equal(m.LastUpdate) {
 		t.Fatalf("no-op update changed metadata: %+v", got)
 	}
-	now = now.Add(time.Minute)
-	if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_900, Value: 1}}, 60*256); err != nil {
-		t.Fatal(err)
-	}
-	got, err = s.Metadata(context.Background(), m.Name)
+}
+
+func assertSuccessfulActivityUpdate(t *testing.T, s *Store, m Metadata, now time.Time) {
+	t.Helper()
+	got, err := s.Metadata(context.Background(), m.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Revision != m.Revision+1 || !got.LastUpdate.Equal(now) {
 		t.Fatalf("successful update metadata = %+v, want revision %d activity %v", got, m.Revision+1, now)
 	}
-	now = now.Add(-2 * time.Hour)
-	if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_840, Value: 2}}, 60*256); err != nil {
-		t.Fatal(err)
-	}
-	got, err = s.Metadata(context.Background(), m.Name)
+}
+
+func assertBackwardClockDoesNotMoveActivity(t *testing.T, s *Store, name string) {
+	t.Helper()
+	got, err := s.Metadata(context.Background(), name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,48 +266,68 @@ func TestActivityRevisionIsAtomicWithDataAcrossRecovery(t *testing.T) {
 		{name: "periodically synced", interval: time.Hour, sync: true, wantData: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			strict := vfs.NewStrictMem()
-			now := time.Unix(100_000, 0)
-			s, err := Open("/store", Options{fs: strict, SyncInterval: tt.interval, Now: func() time.Time { return now }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			m := createTestMetric(t, s, "activity-recovery")
-			if err := s.Flush(); err != nil {
-				t.Fatal(err)
-			}
-			now = now.Add(time.Minute)
-			if err := s.UpdateManyForArchive(context.Background(), m.Name, []Point{{Timestamp: 99_900, Value: 1}}, 60*256); err != nil {
-				t.Fatal(err)
-			}
-			if tt.sync {
-				if err := s.db.LogData(nil, pebble.Sync); err != nil {
-					t.Fatal(err)
-				}
-			}
-			strict.SetIgnoreSyncs(true)
-			if err := s.Close(); err != nil {
-				t.Fatal(err)
-			}
-			strict.ResetToSyncedState()
-			strict.SetIgnoreSyncs(false)
-			reopened, err := Open("/store", Options{fs: strict, Now: func() time.Time { return now }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeTestStore(t, reopened)
-			got, err := reopened.Snapshot(context.Background(), m.Name)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tt.wantData {
-				if got.Metadata.Revision != m.Revision+1 || !got.Metadata.LastUpdate.Equal(now) || len(got.Archives[0].Points) != 1 {
-					t.Fatalf("recovered updated state = %+v", got)
-				}
-			} else if got.Metadata.Revision != m.Revision || !got.Metadata.LastUpdate.Equal(m.LastUpdate) || len(got.Archives[0].Points) != 0 {
-				t.Fatalf("recovered partial mutation = %+v", got)
-			}
+			testActivityRevisionRecovery(t, tt.interval, tt.sync, tt.wantData)
 		})
+	}
+}
+
+func testActivityRevisionRecovery(t *testing.T, interval time.Duration, sync, wantData bool) {
+	t.Helper()
+	strict := vfs.NewStrictMem()
+	now := time.Unix(100_000, 0)
+	s, err := Open("/store", Options{fs: strict, SyncInterval: interval, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := createTestMetric(t, s, "activity-recovery")
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	writeActivityRecoveryMutation(t, s, m.Name, sync)
+	closeForCrashRecovery(t, s, strict)
+	assertActivityRecovery(t, strict, m, now, wantData)
+}
+
+func writeActivityRecoveryMutation(t *testing.T, s *Store, name string, sync bool) {
+	t.Helper()
+	if err := s.UpdateManyForArchive(context.Background(), name, []Point{{Timestamp: 99_900, Value: 1}}, 60*256); err != nil {
+		t.Fatal(err)
+	}
+	if sync {
+		if err := s.db.LogData(nil, pebble.Sync); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func closeForCrashRecovery(t *testing.T, s *Store, strict *vfs.MemFS) {
+	t.Helper()
+	strict.SetIgnoreSyncs(true)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	strict.ResetToSyncedState()
+	strict.SetIgnoreSyncs(false)
+}
+
+func assertActivityRecovery(t *testing.T, strict *vfs.MemFS, m Metadata, now time.Time, wantData bool) {
+	t.Helper()
+	reopened, err := Open("/store", Options{fs: strict, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, reopened)
+	got, err := reopened.Snapshot(context.Background(), m.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantData {
+		if got.Metadata.Revision != m.Revision+1 || !got.Metadata.LastUpdate.Equal(now) || len(got.Archives[0].Points) != 1 {
+			t.Fatalf("recovered updated state = %+v", got)
+		}
+	} else if got.Metadata.Revision != m.Revision || !got.Metadata.LastUpdate.Equal(m.LastUpdate) || len(got.Archives[0].Points) != 0 {
+		t.Fatalf("recovered partial mutation = %+v", got)
 	}
 }
 

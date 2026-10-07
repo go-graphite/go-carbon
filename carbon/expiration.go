@@ -56,6 +56,19 @@ type metricExpirer struct {
 	restored   <-chan struct{}
 }
 
+func validateExpirationConfig(cfg *Config) error {
+	if cfg.Whisper.StoreExpiration == nil || cfg.Whisper.StoreExpiration.Value() < 0 {
+		return errors.New("whisper.store-expiration must be a non-negative duration")
+	}
+	if cfg.Whisper.StoreExpirationCheckInterval == nil || cfg.Whisper.StoreExpirationCheckInterval.Value() <= 0 {
+		return errors.New("whisper.store-expiration-check-interval must be a positive duration")
+	}
+	if cfg.Whisper.StoreExpirationScanRate <= 0 {
+		return errors.New("whisper.store-expiration-scan-rate must be positive")
+	}
+	return nil
+}
+
 func loadExpirationConfig(cfg *Config) error {
 	if cfg.Whisper.StorageBackend != "pebble-chunk" || cfg.Whisper.StoreExpirationFilename == "" {
 		return nil

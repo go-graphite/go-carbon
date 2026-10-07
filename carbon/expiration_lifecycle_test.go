@@ -22,68 +22,14 @@ func TestExpirationReloadAndIndexWithoutBuckyd(t *testing.T) {
 			name = "trie"
 		}
 		t.Run(name, func(t *testing.T) {
-			path, cfg := sharedAppConfig(t)
-			cfg.Buckyd.Enabled = false
-			cfg.Whisper.Enabled = false
-			cfg.Carbonserver.TrieIndex, cfg.Carbonserver.TrigramIndex = trie, !trie
-			cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
-			cfg.Whisper.StoreExpirationFilename = filepath.Join(t.TempDir(), "expiration.conf")
-			writeExpirationPolicy(t, cfg.Whisper.StoreExpirationFilename, "[jobs]\npattern = ^jobs\\.\nexpiration = 0s\n")
-			writeSharedConfig(t, path, cfg)
-			db, err := store.Open(cfg.Whisper.StoreDir, store.Options{Now: func() time.Time { return time.Now().Add(-48 * time.Hour) }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			createExpirationMetric(t, db, "jobs.old")
-			createExpirationMetric(t, db, "permanent")
-			if err := db.Close(); err != nil {
-				t.Fatal(err)
-			}
-			app := New(path)
-			if err := app.ParseConfig(); err != nil {
-				t.Fatal(err)
-			}
-			if err := app.Start(); err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(app.Stop)
-			if app.Buckyd != nil || app.expirer != nil || app.metricStoreIndex == nil {
-				t.Fatal("unexpected startup workers")
-			}
-			// Exercise the same coalescing worker with a short test cadence.
-			app.Lock()
-			app.metricStoreIndex.close()
-			app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, 5*time.Millisecond)
-			app.Unlock()
-			if err := app.Carbonserver.RefreshMetricStoreIndex(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := app.Carbonserver.Find(context.Background(), &protov2.GlobRequest{Query: "jobs.old"}); err != nil {
-				t.Fatalf("initial index missing metric: %v", err)
-			}
-			writeExpirationPolicy(t, cfg.Whisper.StoreExpirationFilename, "[jobs]\npattern = ^jobs\\.\nexpiration = 24h\n")
-			if err := app.ReloadConfig(); err != nil {
-				t.Fatal(err)
-			}
-			if app.expirer == nil || app.Config.Whisper.StoreExpiration.Value() != 0 {
-				t.Fatal("override-only expiration did not start")
-			}
-			waitExpiration(t, func() bool {
-				_, err := app.Carbonserver.Find(context.Background(), &protov2.GlobRequest{Query: "jobs.old"})
-				return status.Code(err) == codes.NotFound
-			})
-			if _, err := app.MetricStore.Metadata(context.Background(), "jobs.old"); !errors.Is(err, store.ErrNotFound) {
-				t.Fatalf("expired metric still in catalog: %v", err)
-			}
-			if _, err := app.MetricStore.Metadata(context.Background(), "permanent"); err != nil {
-				t.Fatalf("unmatched metric deleted: %v", err)
-			}
+			app, policyPath := startExpirationIndexApp(t, trie)
+			enableExpirationAndCheckIndex(t, app, policyPath)
 			previous := app.expirer
-			writeExpirationPolicy(t, cfg.Whisper.StoreExpirationFilename, "[bad]\npattern = [\nexpiration = 1s\n")
+			writeExpirationPolicy(t, policyPath, "[bad]\npattern = [\nexpiration = 1s\n")
 			if err := app.ReloadConfig(); err == nil || app.expirer != previous {
 				t.Fatal("invalid reload replaced live expiration policy")
 			}
-			writeExpirationPolicy(t, cfg.Whisper.StoreExpirationFilename, "[jobs]\npattern = ^jobs\\.\nexpiration = 0s\n")
+			writeExpirationPolicy(t, policyPath, "[jobs]\npattern = ^jobs\\.\nexpiration = 0s\n")
 			if err := app.ReloadConfig(); err != nil {
 				t.Fatal(err)
 			}
@@ -96,6 +42,71 @@ func TestExpirationReloadAndIndexWithoutBuckyd(t *testing.T) {
 				t.Fatal("reload did not join previous worker")
 			}
 		})
+	}
+}
+
+func startExpirationIndexApp(t *testing.T, trie bool) (*App, string) {
+	t.Helper()
+	path, cfg := sharedAppConfig(t)
+	cfg.Buckyd.Enabled = false
+	cfg.Whisper.Enabled = false
+	cfg.Carbonserver.TrieIndex, cfg.Carbonserver.TrigramIndex = trie, !trie
+	cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
+	cfg.Whisper.StoreExpirationFilename = filepath.Join(t.TempDir(), "expiration.conf")
+	writeExpirationPolicy(t, cfg.Whisper.StoreExpirationFilename, "[jobs]\npattern = ^jobs\\.\nexpiration = 0s\n")
+	writeSharedConfig(t, path, cfg)
+	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{Now: func() time.Time { return time.Now().Add(-48 * time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createExpirationMetric(t, db, "jobs.old")
+	createExpirationMetric(t, db, "permanent")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	app := New(path)
+	if err := app.ParseConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Stop)
+	if app.Buckyd != nil || app.expirer != nil || app.metricStoreIndex == nil {
+		t.Fatal("unexpected startup workers")
+	}
+	// Exercise the same coalescing worker with a short test cadence.
+	app.Lock()
+	app.metricStoreIndex.close()
+	app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, 5*time.Millisecond)
+	app.Unlock()
+	if err := app.Carbonserver.RefreshMetricStoreIndex(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.Carbonserver.Find(context.Background(), &protov2.GlobRequest{Query: "jobs.old"}); err != nil {
+		t.Fatalf("initial index missing metric: %v", err)
+	}
+	return app, cfg.Whisper.StoreExpirationFilename
+}
+
+func enableExpirationAndCheckIndex(t *testing.T, app *App, policyPath string) {
+	t.Helper()
+	writeExpirationPolicy(t, policyPath, "[jobs]\npattern = ^jobs\\.\nexpiration = 24h\n")
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if app.expirer == nil || app.Config.Whisper.StoreExpiration.Value() != 0 {
+		t.Fatal("override-only expiration did not start")
+	}
+	waitExpiration(t, func() bool {
+		_, err := app.Carbonserver.Find(context.Background(), &protov2.GlobRequest{Query: "jobs.old"})
+		return status.Code(err) == codes.NotFound
+	})
+	if _, err := app.MetricStore.Metadata(context.Background(), "jobs.old"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired metric still in catalog: %v", err)
+	}
+	if _, err := app.MetricStore.Metadata(context.Background(), "permanent"); err != nil {
+		t.Fatalf("unmatched metric deleted: %v", err)
 	}
 }
 

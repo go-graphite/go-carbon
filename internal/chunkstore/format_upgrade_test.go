@@ -16,64 +16,103 @@ import (
 func TestInterruptedFormatUpgradeCanRetryAndRecover(t *testing.T) {
 	for _, stage := range []string{"file sync", "rename", "directory sync"} {
 		t.Run(stage, func(t *testing.T) {
-			strict := vfs.NewStrictMem()
-			const dir = "/store"
-			now := time.Unix(100_000, 0)
-			s, err := Open(dir, Options{fs: strict, Now: func() time.Time { return now }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			m := createTestMetric(t, s, "legacy")
-			if err := s.db.Set(revisionKey(m), uint64Bytes(m.Revision), pebble.Sync); err != nil {
-				t.Fatal(err)
-			}
-			closeTestStore(t, s)
-			writeTestFormatMarker(t, strict, dir, formatMarkerV1)
-			fs := &upgradeFailureFS{FS: strict, stage: stage}
-			fs.fail.Store(true)
-			if opened, err := Open(dir, Options{fs: fs}); err == nil {
-				closeTestStore(t, opened)
-				t.Fatal("injected upgrade failure accepted")
-			} else if !strings.Contains(err.Error(), "injected") {
-				t.Fatalf("unexpected upgrade error: %v", err)
-			}
-			fs.fail.Store(false)
-			// Retry without resetting memory: directory-sync failure leaves the
-			// renamed v2 marker visible but not yet durable.
-			retried, err := Open(dir, Options{fs: fs, Now: func() time.Time { return now }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			legacy, err := retried.Metadata(context.Background(), m.Name)
-			if err != nil || !legacy.LastUpdate.IsZero() {
-				t.Fatalf("legacy metric changed during marker upgrade: %+v, %v", legacy, err)
-			}
-			if err := retried.InitializeActivity(context.Background(), m.Name, legacy); err != nil {
-				t.Fatal(err)
-			}
-			closeForRecovery(t, retried, strict, true)
-			f, err := strict.Open(dir + "/CHUNKSTORE")
-			if err != nil {
-				t.Fatal(err)
-			}
-			marker, readErr := io.ReadAll(f)
-			if err := errors.Join(readErr, f.Close()); err != nil || string(marker) != formatMarkerV2 {
-				t.Fatalf("marker after crash=%q, error=%v", marker, err)
-			}
-			now = now.Add(time.Hour)
-			recovered, err := Open(dir, Options{fs: strict, Now: func() time.Time { return now }})
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeTestStore(t, recovered)
-			got, err := recovered.Metadata(context.Background(), m.Name)
-			if err != nil || !got.LastUpdate.Equal(now.Add(-time.Hour)) {
-				t.Fatalf("bootstrap grace was lost across restart: %+v, %v", got, err)
-			}
-			if err := recovered.InitializeActivity(context.Background(), m.Name, got); !errors.Is(err, ErrConflict) {
-				t.Fatalf("restart reset grace period: %v", err)
-			}
+			testInterruptedFormatUpgradeCanRetryAndRecover(t, stage)
 		})
+	}
+}
+
+func testInterruptedFormatUpgradeCanRetryAndRecover(t *testing.T, stage string) {
+	t.Helper()
+	strict := vfs.NewStrictMem()
+	const dir = "/store"
+	now := time.Unix(100_000, 0)
+	m := prepareLegacyStoreForUpgrade(t, strict, dir, now)
+	fs := &upgradeFailureFS{FS: strict, stage: stage}
+	failFormatUpgrade(t, dir, fs)
+
+	legacy := retryFormatUpgrade(t, dir, fs, m.Name, now)
+	if err := legacy.store.InitializeActivity(context.Background(), m.Name, legacy.metadata); err != nil {
+		t.Fatal(err)
+	}
+	closeForRecovery(t, legacy.store, strict, true)
+	assertFormatMarker(t, strict, dir, formatMarkerV2)
+
+	now = now.Add(time.Hour)
+	assertRecoveredUpgradeGrace(t, strict, dir, m, now)
+}
+
+type retriedLegacyMetric struct {
+	store    *Store
+	metadata Metadata
+}
+
+func prepareLegacyStoreForUpgrade(t *testing.T, fs vfs.FS, dir string, now time.Time) Metadata {
+	t.Helper()
+	s, err := Open(dir, Options{fs: fs, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := createTestMetric(t, s, "legacy")
+	if err := s.db.Set(revisionKey(m), uint64Bytes(m.Revision), pebble.Sync); err != nil {
+		t.Fatal(err)
+	}
+	closeTestStore(t, s)
+	writeTestFormatMarker(t, fs, dir, formatMarkerV1)
+	return m
+}
+
+func failFormatUpgrade(t *testing.T, dir string, fs *upgradeFailureFS) {
+	t.Helper()
+	fs.fail.Store(true)
+	if opened, err := Open(dir, Options{fs: fs}); err == nil {
+		closeTestStore(t, opened)
+		t.Fatal("injected upgrade failure accepted")
+	} else if !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("unexpected upgrade error: %v", err)
+	}
+	fs.fail.Store(false)
+}
+
+func retryFormatUpgrade(t *testing.T, dir string, fs *upgradeFailureFS, name string, now time.Time) retriedLegacyMetric {
+	t.Helper()
+	// Retry without resetting memory: directory-sync failure leaves the
+	// renamed v2 marker visible but not yet durable.
+	retried, err := Open(dir, Options{fs: fs, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := retried.Metadata(context.Background(), name)
+	if err != nil || !legacy.LastUpdate.IsZero() {
+		t.Fatalf("legacy metric changed during marker upgrade: %+v, %v", legacy, err)
+	}
+	return retriedLegacyMetric{store: retried, metadata: legacy}
+}
+
+func assertFormatMarker(t *testing.T, fs vfs.FS, dir, want string) {
+	t.Helper()
+	f, err := fs.Open(dir + "/CHUNKSTORE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker, readErr := io.ReadAll(f)
+	if err := errors.Join(readErr, f.Close()); err != nil || string(marker) != want {
+		t.Fatalf("marker after crash=%q, error=%v", marker, err)
+	}
+}
+
+func assertRecoveredUpgradeGrace(t *testing.T, fs vfs.FS, dir string, m Metadata, now time.Time) {
+	t.Helper()
+	recovered, err := Open(dir, Options{fs: fs, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeTestStore(t, recovered)
+	got, err := recovered.Metadata(context.Background(), m.Name)
+	if err != nil || !got.LastUpdate.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("bootstrap grace was lost across restart: %+v, %v", got, err)
+	}
+	if err := recovered.InitializeActivity(context.Background(), m.Name, got); !errors.Is(err, ErrConflict) {
+		t.Fatalf("restart reset grace period: %v", err)
 	}
 }
 

@@ -105,42 +105,8 @@ func New(configFilename string) *App {
 
 // configure loads config from config file, schemas.conf, aggregation.conf
 func (app *App) configure() error {
-	var err error
-
-	cfg, err := ReadConfig(app.ConfigFilename)
+	cfg, err := loadConfig(app.ConfigFilename)
 	if err != nil {
-		return err
-	}
-	if err := validateStorageConfig(cfg); err != nil {
-		return err
-	}
-	if err := validateQuotaReloadConfig(cfg); err != nil {
-		return err
-	}
-
-	// carbon-cache prefix
-	if hostname, err := os.Hostname(); err == nil {
-		hostname = strings.ReplaceAll(hostname, ".", "_")
-		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", hostname)
-	} else {
-		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", "localhost")
-	}
-
-	if err := loadWhisperConfig(cfg); err != nil {
-		return err
-	}
-	if err := loadExpirationConfig(cfg); err != nil {
-		return err
-	}
-	if err := validateCacheConfig(cfg); err != nil {
-		return err
-	}
-
-	if err := validateMetricEndpoint(cfg); err != nil {
-		return err
-	}
-
-	if err := validateStorageConfig(cfg); err != nil {
 		return err
 	}
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
@@ -170,6 +136,44 @@ func (app *App) configure() error {
 	}
 
 	return nil
+}
+
+func loadConfig(filename string) (*Config, error) {
+	cfg, err := ReadConfig(filename)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateStorageConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateQuotaReloadConfig(cfg); err != nil {
+		return nil, err
+	}
+
+	// carbon-cache prefix
+	if hostname, err := os.Hostname(); err == nil {
+		hostname = strings.ReplaceAll(hostname, ".", "_")
+		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", hostname)
+	} else {
+		cfg.Common.GraphPrefix = strings.ReplaceAll(cfg.Common.GraphPrefix, "{host}", "localhost")
+	}
+
+	if err := loadWhisperConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := loadExpirationConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateCacheConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateMetricEndpoint(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateStorageConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func loadWhisperConfig(cfg *Config) error {
@@ -548,6 +552,11 @@ func (app *App) Start() (err error) {
 	if err = app.startCarbonlink(core); err != nil {
 		return err
 	}
+	return app.startBackgroundWorkers(core, restoreBeforeReceivers)
+}
+
+func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers bool) error {
+	conf := app.Config
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
 		restored := make(chan struct{})
 		app.storeRestoreDone = restored
@@ -559,7 +568,7 @@ func (app *App) Start() (err error) {
 	if app.MetricStore != nil && app.Carbonserver != nil {
 		app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
 	}
-	if err = app.startBuckyd(); err != nil {
+	if err := app.startBuckyd(); err != nil {
 		return err
 	}
 	app.startExpiration()
