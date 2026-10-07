@@ -539,12 +539,22 @@ func (app *App) Start() (err error) {
 	if err != nil {
 		return err
 	}
-	// Replay compressed history before live input can advance block watermarks.
+	// Live input cannot advance compressed block watermarks before old history
+	// drains. A validated checkpoint can serve reads throughout that drain.
+	readsStarted := false
 	if restoreBeforeReceivers {
-		app.restoreBeforeReceivers(core)
+		readsStarted, err = app.restoreWithPendingReads(core, newMetricsChan)
+		if err != nil {
+			return err
+		}
+		if !readsStarted {
+			app.restoreBeforeReceivers(core)
+		}
 	}
-	if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
-		return err
+	if !readsStarted {
+		if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
+			return err
+		}
 	}
 	if err = app.startReceivers(core); err != nil {
 		return err
@@ -820,14 +830,13 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 		zap.Int("restorePerSecond", conf.Dump.RestorePerSecond),
 	)
 	restoreStart := time.Now()
-	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
-	restoreLoaded := time.Now()
-	// Overlap saved-index loading with disk drain, after dump parsing has
-	// finished allocating the restored cache. Keep ingestion closed until
-	// those historical points have been persisted.
+	// Build the saved index alongside both dump loading and disk drain. Neither
+	// read nor input listeners open until restored history has been persisted.
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
+	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	restoreLoaded := time.Now()
 	for !core.IsEmpty() {
 		time.Sleep(10 * time.Millisecond)
 	}

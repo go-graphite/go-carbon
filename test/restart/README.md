@@ -53,3 +53,13 @@ availability. Batching deliberately keeps points in memory longer; a successful
 SIGUSR2 test does not prove those points survive SIGKILL or a machine failure.
 Likewise a faster local restart does not prove a production deployment can restart
 all replicas together. Keep readiness and replica-availability gates in the rollout.
+
+Pass `--require-snapshot` when validating the saved-index path. The harness waits
+for a complete accelerator before restarting and verifies that the new process
+actually used it. Retained values are checked again after readiness and after
+persistence drains, just as in the ordinary restart run.
+
+Add `--crash-recovery` with a nonempty backlog and `--require-snapshot` to
+kill the new process while it is serving saved points but intake is still closed.
+The test verifies the recovery gate was still active, starts another process on
+the same volume, and checks every value again before and after persistence.

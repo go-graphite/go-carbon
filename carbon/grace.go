@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/recovery"
 
 	"go.uber.org/zap"
 
@@ -55,6 +56,12 @@ func (app *App) DumpStop() error {
 	app.stopExpiration()
 	_ = app.Cache.SetWriteoutBatching(0, 0)
 
+	// Keep persistence and reads running while the index worker finishes. In
+	// particular, quota accounting must not leave incoming points accumulating
+	// without either persistence or WAL diversion.
+	if app.Carbonserver != nil {
+		app.Carbonserver.PauseIndexUpdates()
+	}
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
@@ -66,84 +73,76 @@ func (app *App) DumpStop() error {
 
 	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 	dumpFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("cache.%s.bin", filenamePostfix))
-	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s", filenamePostfix))
+	xlogFilename := path.Join(app.Config.Dump.Path, fmt.Sprintf("input.%s.bin", filenamePostfix))
 
 	// start dumpers
 	logger.Info("start cache dump", zap.String("filename", dumpFilename))
 	logger.Info("start wal write", zap.String("filename", xlogFilename))
 
-	// open dump file
-	dump, err := os.Create(dumpFilename)
+	// The read generation is frozen and listeners remain available. Checkpoint
+	// that exact overlay alongside the dump; later input names are indexed by the
+	// pending checkpoint because the stopped worker cannot add them to the overlay.
+	var builder *recovery.Builder
+	if cs := app.Carbonserver; cs != nil {
+		if cs.HasMappedIndex() && app.pendingReadsCompatible() {
+			builder = recovery.NewBuilder(cs.SavedMetricLookup())
+		}
+	}
+	dump, err := recovery.NewWriter(dumpFilename, 0, 1<<20, builder)
 	if err != nil {
 		return err
 	}
-	dumpWriter := bufio.NewWriterSize(dump, 1048576) // 1Mb
-
-	// start input dumper
-	xlog, err := os.Create(xlogFilename)
+	defer dump.Close()
+	xlog, err := recovery.NewWriter(xlogFilename, 1, 4096, builder)
 	if err != nil {
 		return err
 	}
-	xlogWriter := &SyncWriter{w: bufio.NewWriterSize(xlog, 4096)} // 4kb
+	defer xlog.Close()
+	app.Cache.DivertToPointWriter(xlog.WritePoints)
 
-	app.Cache.DivertToXlog(xlogWriter)
-
-	// stop cache
 	dumpStart := time.Now()
 	cacheSize := app.Cache.Size()
-
-	// dump cache
-	err = app.Cache.DumpBinary(dumpWriter)
+	if err = app.Cache.DumpPoints(dump.WritePoints); err != nil {
+		logger.Error("dump failed", zap.Error(err))
+		return err
+	}
+	cacheFile, err := dump.Close()
 	if err != nil {
-		logger.Info("dump failed", zap.Error(err))
 		return err
 	}
-
-	logger.Info("cache dump finished",
-		zap.Int64("records", int64(cacheSize)),
-		zap.Duration("runtime", time.Since(dumpStart)),
-	)
-
-	if err = dumpWriter.Flush(); err != nil {
-		logger.Info("dump flush failed", zap.Error(err))
-		return err
-	}
-
-	if err = dump.Close(); err != nil {
-		logger.Info("dump close failed", zap.Error(err))
-		return err
-	}
-
-	// cache dump finished
-
-	logger.Info("dump finished")
-
-	logger.Info("stop listeners")
+	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Duration("runtime", time.Since(dumpStart)))
 
 	stopped := make(chan struct{})
-
-	go func() {
-		defer close(stopped)
-		app.stopInputListeners()
-
-		if err := xlogWriter.Flush(); err != nil {
-			logger.Info("xlog flush failed", zap.Error(err))
-			return
-		}
-
-		if err := xlog.Close(); err != nil {
-			logger.Info("xlog close failed", zap.Error(err))
-			return
-		}
-	}()
-
+	go func() { defer close(stopped); app.stopInputListeners() }()
 	select {
 	case <-time.After(5 * time.Second):
-		logger.Info("stop input listeners timeout, draining reads before exit")
+		logger.Info("waiting for input cleanup with read listeners available")
+		<-stopped
 	case <-stopped:
 	}
-	// Input/WAL cleanup must not close read listeners early or bypass their
-	// grace period on timeout. SIGUSR2 exits as soon as DumpStop returns.
+	walFile, err := xlog.Close()
+	if err != nil {
+		return err
+	}
+	logger.Info("dump finished")
+
+	if builder != nil {
+		// The ordinary .bin files remain usable even if the optional accelerator
+		// cannot be published. Never advertise a partial point/catalogue pair.
+		readID, checkpointErr := app.Carbonserver.CheckpointReadIndex()
+		if checkpointErr == nil && readID != "" {
+			var index recovery.File
+			index, checkpointErr = recovery.WriteIndex(app.Config.Dump.Path, builder)
+			if checkpointErr == nil {
+				checkpointErr = recovery.Publish(app.Config.Dump.Path, app.Config.Whisper.DataDir, cacheFile, walFile, index, readID)
+			}
+		}
+		if checkpointErr != nil {
+			logger.Warn("pending read checkpoint unavailable; saved legacy dump", zap.Error(checkpointErr))
+		} else {
+			logger.Info("pending read checkpoint saved")
+		}
+	}
 	logger.Info("stop read listeners")
 	<-app.stopReadListeners()
 	logger.Info("listeners stopped")

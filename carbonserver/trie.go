@@ -1,6 +1,7 @@
 package carbonserver
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -286,6 +287,10 @@ func isAlphanumeric(c byte) bool {
 }
 
 type trieIndex struct {
+	// builder is owned exclusively by initial index construction and cleared before publication.
+	snapshot      *indexSnapshot
+	recoveryID    string
+	builder       *trieBulkBuilder
 	root          *trieNode
 	fileExt       string
 	fileCount     int
@@ -493,38 +498,84 @@ func (t *trieInsertError) Error() string { return t.typ }
 // insert considers path name ending with trieIndex.fileExt as a metric.
 //
 // insert returns either a file node or dir node, after inserted.
-func (ti *trieIndex) insert(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
-	path = filepath.Clean(path)
+func (ti *trieIndex) insertMutable(path string, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
+	return insertMutablePath(ti, filepath.Clean(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
+}
+
+// insertMutableBytes consumes a borrowed decode buffer synchronously. The generic
+// builder copies retained labels and the longest path; it never stores the input
+// slice. Noncanonical filesystem paths retain filepath.Clean's legacy behavior.
+func (ti *trieIndex) insertMutableBytes(path []byte, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
+	if filepath.Separator != '/' {
+		return ti.insertMutable(string(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
+	}
+	start := 0
+	if len(path) > 0 && path[0] == '/' {
+		start = 1
+	}
+	// filepath.Clean may retain leading parents in a relative path. They must
+	// not bypass cleaning when the next borrowed path is absolute.
+	if b := ti.builder; b != nil && b.generation == ti.root.gen && !bytes.HasPrefix(b.prefix, []byte("../")) {
+		if matched := bulkDirectoryMatch(b, path[start:]); matched >= 0 {
+			start += b.directories[matched].end
+		}
+	}
+	for start <= len(path) {
+		n := bytes.IndexByte(path[start:], '/')
+		if n < 0 {
+			n = len(path) - start
+		}
+		if n == 0 || (n == 1 && path[start] == '.') || (n == 2 && path[start] == '.' && path[start+1] == '.') {
+			return ti.insertMutable(string(path), logicalSize, physicalSize, dataPoints, firstSeenAt)
+		}
+		start += n + 1
+	}
+	return insertMutablePath(ti, path, logicalSize, physicalSize, dataPoints, firstSeenAt)
+}
+
+func indexPathSeparator[P string | []byte](path P) int {
+	switch path := any(path).(type) {
+	case string:
+		return strings.IndexByte(path, '/')
+	case []byte:
+		return bytes.IndexByte(path, '/')
+	}
+	return -1
+}
+
+func insertMutablePath[P string | []byte](ti *trieIndex, path P, logicalSize, physicalSize, dataPoints, firstSeenAt int64) (*trieNode, error) {
 	if len(path) > 0 && path[0] == '/' { // skipcq: GO-S1005
 		path = path[1:]
 	}
-	if path == "" || path == "." {
+	if len(path) == 0 || (len(path) == 1 && path[0] == '.') {
 		return nil, nil
 	}
 
-	isFile := strings.HasSuffix(path, ti.fileExt)
+	isFile := len(path) >= len(ti.fileExt) && string(path[len(path)-len(ti.fileExt):]) == ti.fileExt
 	if isFile {
 		path = path[:len(path)-len(ti.fileExt)]
 	}
 
-	if path == "" || path[len(path)-1] == '/' {
+	if len(path) == 0 || path[len(path)-1] == '/' {
 		return nil, nilFilenameError("metric filename is nil")
 	}
 
 	if uint64(len(path)) > ti.getDepth() {
 		ti.setDepth(uint64(len(path)))
-		ti.longestMetric = path
+		ti.longestMetric = string(path)
 	}
 
-	var start, nlen int
+	var nlen int
 	var sn, newn *trieNode
-	var cur = ti.root
+	start, cur := bulkDirectoryStart(ti, path)
 outer:
-	// why len(path)+1: make sure the last node is also processed in the loop
-	for i := 0; i < len(path)+1; i++ {
-		// getting a full node
-		if i < len(path) && path[i] != '/' {
-			continue
+	// Include the final component, and let the standard library scan long
+	// components without checking each byte in the insertion loop.
+	for i := start; i <= len(path); i++ {
+		if next := indexPathSeparator(path[i:]); next >= 0 {
+			i += next
+		} else {
+			i = len(path)
 		}
 
 		// case 1:
@@ -562,12 +613,19 @@ outer:
 			}
 
 			nlen = i - start
-			start++
-			for match = 1; match < len(child.c) && match < nlen; match++ {
-				if child.c[match] != path[start] {
-					break
-				}
+			match = min(len(child.c), nlen)
+			if string(child.c[:match]) == string(path[start:start+match]) {
+				// Most shared labels match in full. Use the runtime's word-sized
+				// equality path, retaining the byte walk for actual radix splits.
+				start += match
+			} else {
 				start++
+				for match = 1; match < len(child.c) && match < nlen; match++ {
+					if child.c[match] != path[start] {
+						break
+					}
+					start++
+				}
 			}
 
 			if match == nlen {
@@ -595,16 +653,23 @@ outer:
 		split:
 			// case 5, 6, 7
 			prefix, suffix := child.c[:match], child.c[match:]
-			sn = &trieNode{c: suffix, childrens: child.childrens, gen: child.gen}
+			sn = ti.makeNode(suffix, child.childrens, child.gen)
 
-			cur.setChild(ci, &trieNode{c: prefix, childrens: &[]*trieNode{sn}, gen: ti.root.gen})
+			prefixNode := ti.makeNode(prefix, emptyTrieNodes, ti.root.gen)
+			ti.appendChild(prefixNode, sn)
+			if ti.builder != nil {
+				// The bulk tree is private until publication, just like appendChild.
+				(*cur.childrens)[ci] = prefixNode
+				ti.builder.nodes-- // the replaced prefix is no longer reachable
+			} else {
+				cur.setChild(ci, prefixNode)
+			}
 			cur = (*cur.childrens)[ci]
 
 			if nlen-match > 0 {
-				newn = &trieNode{c: make([]byte, nlen-match), childrens: emptyTrieNodes, gen: ti.root.gen}
-				copy(newn.c, path[start:i])
+				newn = ti.makeNode(copyTrieLabel(ti, path[start:i]), emptyTrieNodes, ti.root.gen)
 
-				cur.addChild(newn)
+				ti.appendChild(cur, newn)
 				cur = newn
 			}
 
@@ -613,9 +678,8 @@ outer:
 
 		// case 4 & 2
 		if i-start > 0 {
-			newn = &trieNode{c: make([]byte, i-start), childrens: emptyTrieNodes, gen: ti.root.gen}
-			copy(newn.c, path[start:i])
-			cur.addChild(newn)
+			newn = ti.makeNode(copyTrieLabel(ti, path[start:i]), emptyTrieNodes, ti.root.gen)
+			ti.appendChild(cur, newn)
 			cur = newn
 		}
 
@@ -630,14 +694,16 @@ outer:
 			if child.dir() {
 				cur = child
 				cur.gen = ti.root.gen
+				rememberBulkDirectory(ti, path, i+1, cur)
 				continue outer
 			}
 		}
 
 		if i < len(path) {
 			newn = ti.newDir()
-			cur.addChild(newn)
+			ti.appendChild(cur, newn)
 			cur = newn
+			rememberBulkDirectory(ti, path, i+1, cur)
 		}
 	}
 
@@ -660,7 +726,7 @@ outer:
 		}
 		if newDir {
 			child := ti.newDir()
-			cur.addChild(child)
+			ti.appendChild(cur, child)
 			cur = child
 		}
 
@@ -693,11 +759,11 @@ outer:
 	}
 	if !hasFileNode {
 		if ti.estimateSize != nil && logicalSize == 0 && physicalSize == 0 && dataPoints == 0 {
-			logicalSize, physicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(path, "/", "."))
+			logicalSize, physicalSize, dataPoints = ti.estimateSize(strings.ReplaceAll(string(path), "/", "."))
 		}
 
-		child := newFileNode(ti.root.gen, logicalSize, physicalSize, dataPoints, firstSeenAt)
-		cur.addChild(child)
+		child := ti.makeFileNode(logicalSize, physicalSize, dataPoints, firstSeenAt)
+		ti.appendChild(cur, child)
 		cur = child
 
 		ti.fileCount++
@@ -707,23 +773,14 @@ outer:
 }
 
 func (ti *trieIndex) newDir() *trieNode {
-	n := &trieNode{
-		c:         trieDirectorySeparator,
-		childrens: emptyTrieNodes,
-		gen:       ti.root.gen,
+	n := ti.makeNode(trieDirectorySeparator, emptyTrieNodes, ti.root.gen)
+	if ti.builder != nil {
+		ti.builder.dirs++
 	}
-
 	return n
 }
 
-// TODO: add some defensive logics against bad queries?
-// depth first search
-// TODO: refactor to make the function more readable. Some ideas:
-//   - to isolate Depth first search in separate class
-//   - probably we can optimize the length of existed arrays. It uses tree depth + 7, where tree depth is the longest path in the tree in characters
-//     but we should be able to calculate max required depth based on expr, we don't have to look into deeper levels than expr's depth unless there is some unknown corner case exist
-//   - get rid of 'goto', since it adds complexions
-func (ti *trieIndex) query(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
+func (ti *trieIndex) queryMutable(expr string, limit int, expand func(globs []string) ([]string, error)) (files []string, isFiles []bool, nodes []*trieNode, its uint32, err error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		expr = "*"
@@ -934,7 +991,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 	return *(*string)(unsafe.Pointer(&r))
 }
 
-func (ti *trieIndex) allMetrics(sep byte) []string {
+func (ti *trieIndex) allMetricsMutable(sep byte) []string {
 	var files = make([]string, 0, ti.fileCount)
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
@@ -983,7 +1040,7 @@ func (ti *trieIndex) allMetrics(sep byte) []string {
 // limit only applies when statsOnly is set to false.
 // count means the number of files/metrics under the trieNode.
 // skipcq: RVV-A0005
-func (ti *trieIndex) allMetricsNode(tn *trieNode, sep byte, prefix string, limit int, statsOnly bool) (files []string, fileNodes []*trieNode, count int, physicalSize, logicalSize int64) {
+func (ti *trieIndex) allMetricsNodeMutable(tn *trieNode, sep byte, prefix string, limit int, statsOnly bool) (files []string, fileNodes []*trieNode, count int, physicalSize, logicalSize int64) {
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
@@ -1102,7 +1159,7 @@ func (ti *trieIndex) dump(w io.Writer) {
 }
 
 // skipcq: RVV-A0006
-func (ti *trieIndex) getQuotaTree(w io.Writer) {
+func (ti *trieIndex) getQuotaTreeMutable(w io.Writer) {
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
@@ -1310,7 +1367,7 @@ func (tc *trieCounter) String() string {
 }
 
 //nolint:unparam // TODO - add test coverage for nodesByGen return value
-func (ti *trieIndex) countNodes() (count, files, dirs, onec, onefc, onedc int, countByChildren, nodesByGen *trieCounter) {
+func (ti *trieIndex) countNodesMutable() (count, files, dirs, onec, onefc, onedc int, countByChildren, nodesByGen *trieCounter) {
 	type state struct {
 		next      int
 		node      *trieNode
@@ -1662,6 +1719,24 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	if err != nil {
 		return nil, err
 	}
+	// Virtual snapshot nodes have no child pointers. On reload, seed newly
+	// restricted namespaces before exposing limits. Initial publication already
+	// refreshes all usage after applying rules and before exposing the index.
+	var savedUsage map[string]QuotaUsage
+	if ti.snapshot != nil && ti.quotaNodes != nil {
+		savedUsage = make(map[string]QuotaUsage)
+		exists := ti.snapshot.namespaceLookup()
+		for path := range pending {
+			if ti.quotaNodes[path] != nil {
+				continue
+			}
+			usage, err := ti.snapshotQuotaUsage(path, exists)
+			if err != nil {
+				return nil, err
+			}
+			savedUsage[path] = usage
+		}
+	}
 
 	ti.setResetFrequency(resetFrequency)
 	for path, old := range ti.quotaNodes {
@@ -1672,6 +1747,17 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 	ti.quotaNodes = make(map[string]*dirMeta, len(pending))
 	for path, change := range pending {
 		meta, _ := change.node.meta.Load().(*dirMeta)
+		if usage, ok := savedUsage[path]; ok {
+			if meta == nil {
+				meta = newDirMeta()
+				change.node.meta.Store(meta)
+			}
+			atomic.StoreInt64(&meta.usage.Metrics, usage.Metrics)
+			atomic.StoreInt64(&meta.usage.Namespaces, usage.Namespaces)
+			atomic.StoreInt64(&meta.usage.LogicalSize, usage.LogicalSize)
+			atomic.StoreInt64(&meta.usage.PhysicalSize, usage.PhysicalSize)
+			atomic.StoreInt64(&meta.usage.DataPoints, usage.DataPoints)
+		}
 		if meta == nil {
 			// Seed a newly restricted namespace before publishing its limits.
 			// Counting only this subtree leaves existing throughput windows intact.
@@ -1768,7 +1854,7 @@ func (ti *trieIndex) resolveQuotas(quotas []*Quota) (map[string]quotaAssignment,
 
 // refreshUsage updates usage data and generates stat metrics.
 // It cannot run concurrently with trieIndex.insert.
-func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) (files uint64) {
+func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (files uint64) {
 	if throughputs == nil {
 		throughputs = newQuotaThroughputQuotaManager()
 	}
@@ -2252,7 +2338,7 @@ func (ti *trieIndex) metricDirs(ps *points.Points) ([]*trieNode, bool) {
 }
 
 // A nil dirs slice requests an allocation-free existence check.
-func (ti *trieIndex) metricPath(metric string, dirs []*trieNode) ([]*trieNode, bool) {
+func (ti *trieIndex) metricPathMutable(metric string, dirs []*trieNode) ([]*trieNode, bool) {
 	var node = ti.root
 	var mindex int
 	var isNew bool

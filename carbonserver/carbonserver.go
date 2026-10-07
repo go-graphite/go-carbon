@@ -224,6 +224,8 @@ func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryIt
 }
 
 type CarbonserverListener struct {
+	indexStopOnce   sync.Once
+	startupScanGate <-chan struct{}
 	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
@@ -745,6 +747,17 @@ func (listener *CarbonserverListener) MetricExists(metric string) bool {
 // warmup finishes, including when the saved index is absent or corrupt.
 // Configure the listener fully before calling this method.
 func (listener *CarbonserverListener) WarmupIndex() {
+	listener.warmupIndex(nil)
+}
+
+// WarmupIndexWithPending incorporates validated saved names before the first
+// quota refresh and publication. prepare may wait for parallel checkpoint I/O;
+// it must finish even when that checkpoint cannot be used.
+func (listener *CarbonserverListener) WarmupIndexWithPending(prepare func(string, func(string) error) error) {
+	listener.warmupIndex(prepare)
+}
+
+func (listener *CarbonserverListener) warmupIndex(prepare func(string, func(string) error) error) {
 	if listener.getMetricStore() != nil || !listener.trieIndex || listener.scanFrequency == 0 || listener.fileListCache == "" {
 		return
 	}
@@ -754,7 +767,7 @@ func (listener *CarbonserverListener) WarmupIndex() {
 		go func() {
 			defer listener.indexWorkers.Done()
 			defer close(listener.indexWarmupDone)
-			listener.updateFileListWithCache(listener.whisperData, nil, nil, true)
+			listener.updateFileListWithPending(listener.whisperData, nil, nil, true, prepare)
 		}()
 	})
 }
@@ -890,6 +903,13 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency 
 	if !listener.waitForInitialIndex(exit) {
 		return
 	}
+	if listener.startupScanGate != nil {
+		select {
+		case <-listener.startupScanGate:
+		case <-exit:
+			return
+		}
+	}
 	cacheMetricNames := make(map[string]struct{})
 	knownMetricsStatTicker, quotaAndUsageStatTicker, stopTickers := listener.fileListStatTickers()
 	defer stopTickers()
@@ -953,11 +973,14 @@ func (listener *CarbonserverListener) drainRealtimeMetrics(trie *trieIndex) {
 	}
 }
 
-func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metric string) {
+func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metric string) *trieNode {
 	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
-	if _, err := trie.insert(path, 0, 0, 0, 0); err != nil {
+	node, err := trie.insert(path, 0, 0, 0, 0)
+	if err != nil {
 		listener.logTrieInsertError(listener.logger, "failed to insert realtime metric", metric, err)
+		return nil
 	}
+	return node
 }
 
 func (listener *CarbonserverListener) startFileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
@@ -1103,28 +1126,31 @@ func metricFileSizes(path string, info os.FileInfo) (logical, physical int64, er
 }
 
 type fileListUpdate struct {
-	listener            *CarbonserverListener
-	logger              *zap.Logger
-	started             time.Time
-	fileIndex           *fileIndex
-	files               []string
-	filesLen            int
-	details             map[string]*protov3.MetricDetails
-	trieIdx             *trieIndex
-	metricsKnown        uint64
-	oooFiles            uint64
-	oooPhysicalBytes    uint64
-	lockFiles           uint64
-	infos               []zap.Field
-	cacheMetricNames    map[string]struct{}
-	cacheMetricLen      int
-	cacheIndexRuntime   time.Duration
-	readFromCache       bool
-	fileListCacheReader FileListCache
-	fileListCacheEntry  FLCEntry
-	fileListCache       FileListCache
-	scanCancelled       bool
-	scanFailed          bool
+	listener              *CarbonserverListener
+	logger                *zap.Logger
+	started               time.Time
+	fileIndex             *fileIndex
+	files                 []string
+	filesLen              int
+	details               map[string]*protov3.MetricDetails
+	trieIdx               *trieIndex
+	metricsKnown          uint64
+	oooFiles              uint64
+	oooPhysicalBytes      uint64
+	lockFiles             uint64
+	infos                 []zap.Field
+	cacheMetricNames      map[string]struct{}
+	cacheMetricLen        int
+	cacheIndexRuntime     time.Duration
+	readFromCache         bool
+	fileListCacheReader   FileListCache
+	fileListCacheEntry    FLCEntry
+	fileListCache         FileListCache
+	snapshotWriter        *indexSnapshotWriter
+	snapshotReady         bool
+	snapshotNotifications map[string]*trieNode
+	scanCancelled         bool
+	scanFailed            bool
 }
 
 func newFileListUpdate(listener *CarbonserverListener, cacheMetricNames map[string]struct{}) *fileListUpdate {
@@ -1135,6 +1161,7 @@ func newFileListUpdate(listener *CarbonserverListener, cacheMetricNames map[stri
 	if listener.trieIndex {
 		if u.fileIndex == nil || !listener.concurrentIndex {
 			u.trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
+			u.trieIdx.builder = &trieBulkBuilder{}
 		} else {
 			u.trieIdx = u.fileIndex.trieIdx
 			u.trieIdx.root.gen++
@@ -1166,6 +1193,10 @@ func (listener *CarbonserverListener) updateFileList(dir string, cacheMetricName
 }
 
 func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool) (readFromCache bool) {
+	return listener.updateFileListWithPending(dir, cacheMetricNames, quotaAndUsageStatTicker, cacheOnly, nil)
+}
+
+func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error) error) (readFromCache bool) {
 	if metricStore := listener.getMetricStore(); metricStore != nil {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
 			listener.logger.Error("failed to update shared metric-store index", zap.Error(err))
@@ -1190,13 +1221,63 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 	if !u.readFromCache && !u.scanFiles(dir, quotaAndUsageStatTicker) {
 		return false
 	}
+	if prepare != nil && u.trieIdx != nil && u.trieIdx.snapshot != nil {
+		if err := prepare(u.trieIdx.recoveryID, u.trieIdx.insertPendingMetric); err != nil {
+			logger.Warn("saved metric names unavailable", zap.Error(err))
+			return false
+		}
+		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+	}
 	u.pruneRealtimeMetrics()
+	u.closeFileListCaches()
+	if u.snapshotReady && u.trieIdx != nil {
+		u.replaceSnapshot()
+	}
 	return u.publish(dir, quotaAndUsageStatTicker)
 }
 
 func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 	if !u.listener.trieIndex || u.fileIndex != nil || u.listener.fileListCache == "" {
 		return !cacheOnly
+	}
+	if u.listener.concurrentIndex {
+		started := time.Now()
+		pending := newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+		pending.builder = &trieBulkBuilder{}
+		var overlay *trieIndex
+		var overlayBase string
+		var overlayErr error
+		var overlayRead sync.WaitGroup
+		overlayRead.Go(func() {
+			overlay, overlayBase, overlayErr = pending.readSnapshotOverlay(u.listener.fileListCache)
+		})
+		snapshot, err := openIndexSnapshot(u.listener.fileListCache, u.listener.whisperData)
+		overlayRead.Wait()
+		if err != nil {
+			// This one-time bootstrap uses the existing saved catalogue. Waiting
+			// for a filesystem scan can starve behind repeated quota traversals
+			// of a very large legacy trie before the first accelerator exists.
+			u.logger.Info("building compact index from saved file list")
+			snapshot, err = buildSnapshotFromCache(u.listener.fileListCache, u.listener.whisperData, u.listener.exitChan)
+		}
+		if err == nil {
+			u.trieIdx = pending
+			u.trieIdx.snapshot = snapshot
+			if overlayErr == nil {
+				overlayErr = u.trieIdx.installSnapshotOverlay(overlay, overlayBase)
+			}
+			if overlayErr != nil && !os.IsNotExist(overlayErr) {
+				u.logger.Warn("saved index overlay unavailable", zap.Error(overlayErr))
+			}
+			u.metricsKnown = 0
+			u.populateCacheMetrics(u.cacheMetricNames)
+			u.metricsKnown = snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+			u.readFromCache = true
+			u.infos = append(u.infos, zap.Duration("snapshot_load_time", time.Since(started)))
+			return true
+		} else if !os.IsNotExist(err) {
+			u.logger.Warn("index snapshot unavailable; loading legacy cache", zap.Error(err))
+		}
 	}
 	flc, err := NewFileListCache(u.listener.fileListCache, FLCVersionUnspecified, 'r')
 	if err != nil {
@@ -1260,6 +1341,7 @@ func (u *fileListUpdate) readNextCacheEntry(flc FileListCache) bool {
 func (u *fileListUpdate) resetTrie() {
 	u.readFromCache = false
 	u.trieIdx = newTrie(".wsp", u.listener.maxCreatesPerSecond, u.listener.estimateSize)
+	u.trieIdx.builder = &trieBulkBuilder{}
 }
 
 func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
@@ -1290,17 +1372,42 @@ func (u *fileListUpdate) newFileListCacheWriter() FileListCache {
 		return nil
 	}
 	u.infos = append(u.infos, zap.Int("file_list_cache_version", int(flc.GetVersion())))
+	// Build restart snapshots only while a complete read index is already live.
+	// A first scan without a usable cache must not wait for snapshot construction.
+	if u.fileIndex != nil && u.listener.trieIndex && u.listener.concurrentIndex && flc.GetVersion() == FLCVersion2 {
+		if writer, err := newIndexSnapshotWriter(u.listener.fileListCache, u.listener.whisperData); err != nil {
+			u.logger.Warn("failed to prepare index snapshot", zap.Error(err))
+		} else {
+			u.snapshotWriter = writer
+		}
+	}
 	return flc
 }
 
 func (u *fileListUpdate) closeFileListCaches() {
+	defer func() { u.fileListCache, u.fileListCacheReader, u.snapshotWriter = nil, nil, nil }()
+	complete := !u.scanCancelled && !u.scanFailed
 	if u.fileListCache == nil {
-	} else if u.scanCancelled {
+		complete = false
+	} else if !complete {
 		if err := u.fileListCache.Abort(); err != nil {
 			u.logger.Error("failed to abort file list cache", zap.Error(err))
 		}
 	} else if err := u.fileListCache.Close(); err != nil {
+		complete = false
 		u.logger.Error("failed to close flie list cache", zap.Error(err))
+	}
+	if u.snapshotWriter != nil {
+		if complete {
+			if err := u.snapshotWriter.finish(); err != nil {
+				u.logger.Warn("failed to publish index snapshot", zap.Error(err))
+			} else {
+				u.snapshotReady = true
+				u.logger.Info("index snapshot written", zap.Uint64("records", u.snapshotWriter.manifest.Records))
+			}
+		} else {
+			_ = u.snapshotWriter.abort()
+		}
 	}
 	if u.fileListCacheReader != nil {
 		if err := u.fileListCacheReader.Close(); err != nil {
@@ -1380,7 +1487,7 @@ func (u *fileListUpdate) refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker 
 		}
 	}
 	if u.listener.trieIndex && u.listener.concurrentIndex {
-		u.listener.drainRealtimeMetrics(u.trieIdx)
+		u.drainRealtimeMetrics()
 	}
 }
 
@@ -1418,6 +1525,16 @@ func (u *fileListUpdate) indexFile(name string, isFullMetric bool, logicalSize, 
 	if !u.listener.trieIndex {
 		u.files = append(u.files, name)
 	} else if isFullMetric {
+		// Do not materialize every mapped file as a heap node during a scan.
+		if u.trieIdx.snapshot != nil {
+			if entry, found, err := u.trieIdx.snapshot.lookup(name); err == nil && found {
+				u.metricsKnown++
+				if entry.FirstSeenAt == 0 {
+					return u.trieIdx.snapshot.openedAt
+				}
+				return entry.FirstSeenAt
+			}
+		}
 		node, err := u.trieIdx.insert(name, logicalSize, physicalSize, dataPoints, 0)
 		if err != nil {
 			u.listener.logTrieInsertError(u.logger, "updateFileList.trie: failed to index path", name, err)
@@ -1435,12 +1552,20 @@ func (u *fileListUpdate) cacheFile(name string, isFullMetric bool, dataPoints, l
 	if u.fileListCache == nil || (u.listener.trieIndex && !isFullMetric) {
 		return
 	}
-	if err := u.fileListCache.Write(&FLCEntry{Path: name, DataPoints: dataPoints, LogicalSize: logicalSize, PhysicalSize: physicalSize, FirstSeenAt: firstSeenAt}); err != nil {
+	entry := FLCEntry{Path: name, DataPoints: dataPoints, LogicalSize: logicalSize, PhysicalSize: physicalSize, FirstSeenAt: firstSeenAt}
+	if err := u.fileListCache.Write(&entry); err != nil {
 		u.logger.Error("failed to write to file list cache", zap.Error(err))
 		if err := u.fileListCache.Close(); err != nil {
 			u.logger.Error("failed to close flie list cache", zap.Error(err))
 		}
 		u.fileListCache = nil
+	}
+	if u.snapshotWriter != nil {
+		if err := u.snapshotWriter.append(&entry); err != nil {
+			u.logger.Warn("failed to build index snapshot", zap.Error(err))
+			_ = u.snapshotWriter.abort()
+			u.snapshotWriter = nil
+		}
 	}
 }
 
@@ -1458,8 +1583,23 @@ func (u *fileListUpdate) addMetricDetails(info os.FileInfo, name string, isFullM
 func (u *fileListUpdate) pruneRealtimeMetrics() {
 	if u.listener.concurrentIndex && u.trieIdx != nil {
 		// Include notifications queued while loading the file-list cache.
-		u.listener.drainRealtimeMetrics(u.trieIdx)
-		u.trieIdx.prune()
+		u.drainRealtimeMetrics()
+		// Fresh tries have no old generations or deleted branches. Insertion
+		// already maintains the compressed radix shape, so pruning adds a full
+		// traversal without changing this private tree.
+		if u.trieIdx.builder == nil && !u.scanFailed {
+			if u.trieIdx.snapshot != nil && u.listener.cacheGet != nil {
+				// A queued metric may still be awaiting its first disk write.
+				// Preserve those overlay entries even if this scan saw no file.
+				names, nodes, _, _, _ := u.trieIdx.allMetricsNodeMutable(u.trieIdx.root, '.', "", int(^uint(0)>>1), false)
+				for i, name := range names {
+					if nodes[i].gen != u.trieIdx.root.gen && len(u.listener.cacheGet(name)) > 0 {
+						u.listener.insertRealtimeMetric(u.trieIdx, name)
+					}
+				}
+			}
+			u.trieIdx.prune()
+		}
 	}
 }
 
@@ -1469,16 +1609,27 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 		return u.readFromCache
 	}
 	fileScanRuntime := time.Since(u.started)
+	if u.trieIdx != nil && u.trieIdx.snapshot != nil {
+		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+	}
 	atomic.StoreUint64(&u.listener.metrics.MetricsKnown, u.metricsKnown)
 	atomic.AddUint64(&u.listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
 	index, indexType, indexSize, pruned, indexingRuntime := u.buildIndex(freeSpace, totalSpace)
 	rdTimeUpdateRuntime := u.copyAccessTimes(index)
-	if u.fileIndex == nil {
+	if u.fileIndex == nil || (index.trieIdx != nil && index.trieIdx != u.fileIndex.trieIdx) {
 		// The first published index must already enforce its configured quotas.
+		quotaStarted := time.Now()
 		u.listener.refreshIndexQuotaAndUsage(index, quotaAndUsageStatTicker)
+		u.infos = append(u.infos, zap.Duration("initial_quota_usage_time", time.Since(quotaStarted)))
 	}
-	if u.stopped() {
+	// A complete snapshot may finish publication just as shutdown cancels the
+	// updater. Install that same generation before the shutdown overlay is saved;
+	// otherwise the live and on-disk bases would differ despite a complete scan.
+	if u.stopped() && !u.snapshotReady {
 		return false
+	}
+	if index.trieIdx != nil {
+		index.trieIdx.builder = nil
 	}
 	u.listener.UpdateFileIndex(index)
 	// File-list caches omit sidecars, and incomplete scans can undercount them.
@@ -1511,6 +1662,9 @@ func (u *fileListUpdate) buildIndex(freeSpace, totalSpace uint64) (*fileIndex, s
 	started := time.Now()
 	if u.listener.trieIndex {
 		indexType, index.trieIdx = "trie", u.trieIdx
+		if u.trieIdx.snapshot != nil {
+			indexType = "snapshot+trie"
+		}
 		indexSize = u.addTrieStats(index)
 	} else {
 		index.files = u.files
@@ -1526,7 +1680,15 @@ func (u *fileListUpdate) buildIndex(freeSpace, totalSpace uint64) (*fileIndex, s
 func (u *fileListUpdate) addTrieStats(index *fileIndex) int {
 	u.infos = append(u.infos, zap.Int("trie_depth", int(index.trieIdx.depth)), zap.String("longest_metric", index.trieIdx.longestMetric))
 	started := time.Now()
-	count, files, dirs, _, _, _, _, _ := index.trieIdx.countNodes()
+	var count, files, dirs int
+	if b := index.trieIdx.builder; b != nil {
+		count, files, dirs = b.nodes, index.trieIdx.fileCount, b.dirs
+		if index.trieIdx.snapshot != nil {
+			files += int(index.trieIdx.snapshot.manifest.Records)
+		}
+	} else {
+		count, files, dirs, _, _, _, _, _ = index.trieIdx.countNodes()
+	}
 	atomic.StoreUint64(&u.listener.metrics.TrieNodes, uint64(count))
 	atomic.StoreUint64(&u.listener.metrics.TrieFiles, uint64(files))
 	atomic.StoreUint64(&u.listener.metrics.TrieDirs, uint64(dirs))
@@ -1919,13 +2081,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 func (listener *CarbonserverListener) Stop() error {
 	listener.stopOnce.Do(func() {
-		if listener.scanTicker != nil {
-			listener.scanTicker.Stop()
-		}
-		if listener.exitChan != nil {
-			close(listener.exitChan)
-		}
-		listener.indexWorkers.Wait()
+		listener.PauseIndexUpdates()
 		if listener.httpServer != nil {
 			shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := listener.httpServer.Shutdown(shutdownContext)
@@ -2646,4 +2802,29 @@ func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64
 		err = fmt.Errorf("invalid cache record for the request")
 	}
 	return
+}
+
+// PauseIndexUpdates preserves live read listeners while freezing their catalog
+// for graceful shutdown checkpoints. It is a terminal lifecycle operation.
+func (listener *CarbonserverListener) PauseIndexUpdates() {
+	listener.indexStopOnce.Do(func() {
+		if listener.scanTicker != nil {
+			listener.scanTicker.Stop()
+		}
+		if listener.exitChan != nil {
+			close(listener.exitChan)
+		}
+		listener.indexWorkers.Wait()
+	})
+}
+
+// SetStartupScanGate delays filesystem reconciliation during pending recovery;
+// immutable index reads can already be served while disk history catches up.
+func (listener *CarbonserverListener) SetStartupScanGate(gate <-chan struct{}) {
+	listener.startupScanGate = gate
+}
+func (listener *CarbonserverListener) WaitForWarmup() {
+	if listener.indexWarmupDone != nil {
+		<-listener.indexWarmupDone
+	}
 }

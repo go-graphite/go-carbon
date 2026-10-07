@@ -36,6 +36,12 @@ func benchmarkFileListCachePath(b *testing.B) string {
 // the first million records are loaded, bounding an offline production probe.
 func BenchmarkFileListCacheWarmup(b *testing.B) {
 	path := benchmarkFileListCachePath(b)
+	b.Run("incremental", func(b *testing.B) { benchmarkFileListCacheWarmup(b, path, false) })
+	b.Run("bulk", func(b *testing.B) { benchmarkFileListCacheWarmup(b, path, true) })
+}
+
+func benchmarkFileListCacheWarmup(b *testing.B, path string, bulk bool) {
+	b.Helper()
 	b.ReportAllocs()
 	b.ResetTimer()
 	var records int
@@ -45,6 +51,9 @@ func BenchmarkFileListCacheWarmup(b *testing.B) {
 			b.Fatal(err)
 		}
 		trie := newTrie(".wsp", 0, nil)
+		if bulk {
+			trie.builder = &trieBulkBuilder{}
+		}
 		var entry FLCEntry
 		records = 0
 		for ; records < 1000000; records++ {

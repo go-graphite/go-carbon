@@ -34,6 +34,8 @@ require (
 )
 
 require (
+	github.com/blevesearch/mmap-go v1.2.0
+	github.com/blevesearch/vellum v1.2.0
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/greatroar/blobloom v0.8.1
 	github.com/zeebo/xxh3 v1.1.0
@@ -43,6 +45,7 @@ require (
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
+	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/cockroachdb/errors v1.11.3 // indirect
 	github.com/cockroachdb/fifo v0.0.0-20240606204812-0bbfbd93a7ce // indirect
 	github.com/cockroachdb/logtags v0.0.0-20230118201751-21c54148d20b // indirect

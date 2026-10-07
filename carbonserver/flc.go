@@ -337,8 +337,19 @@ func (flc *fileListCacheV2) buffer(size int) []byte {
 // readInto reuses the record and decode buffers during startup. Path still owns
 // its bytes: the trie may retain it as longestMetric after the next read.
 func (flc *fileListCacheV2) readInto(entry *FLCEntry) error {
+	path, err := flc.readRecord(entry)
+	if err != nil {
+		return err
+	}
+	entry.Path = string(path)
+	return nil
+}
+
+// readRecord borrows the path until the next read. Read/readInto retain their
+// owned-string contract; only synchronous index construction uses this method.
+func (flc *fileListCacheV2) readRecord(entry *FLCEntry) ([]byte, error) {
 	if _, err := io.ReadFull(flc.reader, flc.pathLength[:]); err != nil {
-		return fmt.Errorf("flcv2: failed to read path len: %w", err)
+		return nil, fmt.Errorf("flcv2: failed to read path len: %w", err)
 	}
 	pathLength := binary.BigEndian.Uint64(flc.pathLength[:])
 
@@ -350,7 +361,7 @@ func (flc *fileListCacheV2) readInto(entry *FLCEntry) error {
 	// * https://www.ibm.com/docs/en/spectrum-protect/8.1.9?topic=parameters-file-specification-syntax
 	const maxPathLen = 4096 * 2
 	if pathLength > maxPathLen {
-		return fmt.Errorf("flcv2: illegal file path length %d (max: %d)", pathLength, maxPathLen)
+		return nil, fmt.Errorf("flcv2: illegal file path length %d (max: %d)", pathLength, maxPathLen)
 	}
 	plen := int(pathLength)
 
@@ -359,19 +370,18 @@ func (flc *fileListCacheV2) readInto(entry *FLCEntry) error {
 		if errors.Is(err, io.EOF) {
 			err = io.ErrUnexpectedEOF
 		}
-		return fmt.Errorf("flcv2: failed to read full data: %w", err)
+		return nil, fmt.Errorf("flcv2: failed to read full data: %w", err)
 	}
 	if data[len(data)-1] != '\n' {
-		return errors.New("flcv2: invalid entry separator")
+		return nil, errors.New("flcv2: invalid entry separator")
 	}
 
 	*entry = FLCEntry{
-		Path:         string(data[:plen]),
 		LogicalSize:  int64(binary.BigEndian.Uint64(data[plen:])),
 		PhysicalSize: int64(binary.BigEndian.Uint64(data[plen+flcv2StatFieldSize:])),
 		DataPoints:   int64(binary.BigEndian.Uint64(data[plen+flcv2StatFieldSize*2:])),
 		FirstSeenAt:  int64(binary.BigEndian.Uint64(data[plen+flcv2StatFieldSize*3:])),
 	}
 
-	return nil
+	return data[:plen], nil
 }
