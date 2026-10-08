@@ -213,10 +213,10 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			lastDeadline = now
 		}
 
-		line, err := reader.ReadBytes('\n')
+		line, err := readPlainLine(reader)
 
 		if err != nil {
-			if err == io.EOF {
+			if err == io.EOF { //nolint:errorlint // Preserve legacy direct EOF classification; wrapped transport errors are read errors.
 				if len(line) > 0 {
 					rcv.logger.Warn("unfinished line", zap.String("line", string(line)))
 				}
@@ -240,6 +240,22 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 			}
 		}
 	}
+}
+
+func readPlainLine(reader *bufio.Reader) ([]byte, error) {
+	line, err := reader.ReadSlice('\n')
+	if err != bufio.ErrBufferFull { //nolint:errorlint // Only the direct ReadSlice sentinel requests another fragment; wrapped errors must be returned.
+		return line, err
+	}
+
+	// ReadSlice reuses its buffer. Copy only an oversized line before reading
+	// the next fragment, so the normal path stays allocation-free here.
+	fullLine := append([]byte(nil), line...)
+	for err == bufio.ErrBufferFull { //nolint:errorlint // Only the direct ReadSlice sentinel requests another fragment; wrapped errors must be returned.
+		line, err = reader.ReadSlice('\n')
+		fullLine = append(fullLine, line...)
+	}
+	return fullLine, err
 }
 
 func (rcv *TCP) handleFraming(conn net.Conn) {
