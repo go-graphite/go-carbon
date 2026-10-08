@@ -3,6 +3,7 @@ package carbonserver
 import (
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -94,6 +95,70 @@ func TestQuotaReloadPreservesUsageAndRemovesRules(t *testing.T) {
 		t.Fatal("removed rule still enforced")
 	}
 	ti.refreshUsage(ti.throughputs) // removed metadata must be safe for statistics
+}
+
+func TestUnlimitedThroughputQuotaStillAccounts(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit int64
+	}{
+		{name: "zero", limit: 0},
+		{name: "negative", limit: -1},
+		{name: "max", limit: math.MaxInt64},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := newThroughputUsagePerNamespace(0, &Quota{Throughput: tt.limit}, &QuotaUsage{})
+			q.increase(2)
+			if !q.withinQuota(1, time.Hour) {
+				t.Fatal("unlimited throughput quota rejected a point")
+			}
+
+			previous := q.offset()
+			if got := atomic.LoadInt64(&previous.dataPoints); got != 2 {
+				t.Fatalf("previous-window throughput = %d, want 2", got)
+			}
+			q.increase(1)
+			if got := atomic.LoadInt64(&q.dpRecorder().dataPoints); got != 1 {
+				t.Fatalf("new-window throughput = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestQuotaReloadFromUnlimitedThroughputPreservesUsage(t *testing.T) {
+	ti := newTrie(".wsp", 0, nil)
+	if _, err := ti.insert("/namespace/metric.wsp", 0, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	apply := func(limit int64) {
+		t.Helper()
+		if _, err := ti.applyQuotas(time.Hour, &Quota{
+			Pattern: "namespace", Throughput: limit, DroppingPolicy: QDPNew,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	apply(math.MaxInt64)
+	ps := points.OnePoint("namespace.metric", 1, 1)
+	for range 3 {
+		if ti.throughputThrottle(ps) {
+			t.Fatal("unlimited throughput quota throttled a point")
+		}
+	}
+	recorder := ti.throughputs.load("namespace")
+
+	apply(3)
+	if ti.throughputs.load("namespace") != recorder {
+		t.Fatal("reload replaced throughput accounting")
+	}
+	if got := atomic.LoadInt64(&recorder.dpRecorder().dataPoints); got != 3 {
+		t.Fatalf("reload changed accepted throughput to %d, want 3", got)
+	}
+	if !ti.throughputThrottle(ps) {
+		t.Fatal("finite throughput quota did not enforce usage accepted while unlimited")
+	}
 }
 
 func TestQuotaReloadInitializesNewNamespaceUsage(t *testing.T) {
