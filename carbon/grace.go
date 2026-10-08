@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 
 	"go.uber.org/zap"
@@ -145,6 +146,7 @@ func (app *App) DumpStop() error {
 			logger.Info("pending read checkpoint saved")
 		}
 	}
+	app.handOffReads(logger)
 	logger.Info("stop read listeners")
 	<-app.stopReadListeners()
 	logger.Info("listeners stopped")
@@ -153,6 +155,61 @@ func (app *App) DumpStop() error {
 	// app.stopAll()
 
 	return nil
+}
+
+// readHandoffTimeout bounds how long a stopped instance keeps serving reads for
+// a successor that is still restoring before it falls back to closing them.
+const readHandoffTimeout = 30 * time.Minute
+
+func readHandoffPath(conf *Config) string { return path.Join(conf.Dump.Path, "read-handoff.sock") }
+
+// RegisterReadHandoff claims the read listener of a stopping instance, if one
+// offers it. Call it as early as possible after parsing the config: a stopping
+// instance waits only handoff.RegisterTimeout before closing its listener.
+func (app *App) RegisterReadHandoff() {
+	if app.Config.Dump.Path != "" && app.Config.Carbonserver.Enabled {
+		app.handoffClaim = handoff.Register(readHandoffPath(app.Config))
+	}
+}
+
+// SetReadHandoff enables read handoff on dump stop. release must let the next
+// instance start (for example by ending a supervisor) and free every resource
+// it would bind, except the read listener this instance keeps serving.
+// successor is the binary the service manager will start next.
+func (app *App) SetReadHandoff(successor string, release func()) {
+	app.Lock()
+	app.readSuccessor, app.readRelease = successor, release
+	app.Unlock()
+}
+
+// handOffReads runs after input stopped and the dump and checkpoint are
+// durable. Data this instance serves is then frozen and equals what the next
+// instance serves once ready, so both may accept on the same socket until the
+// successor reports it serves. The successor opens intake only after this
+// instance stopped accepting. On any failure reads stop normally.
+func (app *App) handOffReads(logger *zap.Logger) {
+	cs := app.Carbonserver
+	if app.readRelease == nil || cs == nil || cs.HTTPListener() == nil || app.MetricStore != nil || app.Tags != nil {
+		return
+	}
+	if !handoff.SuccessorSupported(app.readSuccessor) {
+		logger.Info("next binary does not support read handoff", zap.String("binary", app.readSuccessor))
+		return
+	}
+	offer, err := handoff.NewOffer(readHandoffPath(app.Config))
+	if err != nil {
+		logger.Warn("read handoff unavailable", zap.Error(err))
+		return
+	}
+	logger.Info("serving reads until successor takes over")
+	app.readRelease()
+	started := time.Now()
+	taken, err := offer.Serve(readHandoffTimeout, cs.HTTPListener(), cs.StopAccepting)
+	if taken {
+		logger.Info("read listener handed off", zap.Duration("wait", time.Since(started)), zap.Error(err))
+	} else {
+		logger.Warn("read handoff not taken", zap.Duration("wait", time.Since(started)), zap.Error(err))
+	}
 }
 
 // ReleaseForHandoff closes state another instance would lock or treat as

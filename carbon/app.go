@@ -22,6 +22,7 @@ import (
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/carbonserver"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/tags"
@@ -71,6 +72,11 @@ type App struct {
 	PromRegistry   *prometheus.Registry
 	exit           chan bool
 	FlushTraces    func()
+	// readRelease, when set, lets the next instance start while this one keeps
+	// serving reads after a dump stop (see SetReadHandoff).
+	readRelease   func()
+	readSuccessor string
+	handoffClaim  *handoff.Claim
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	quotaReloader       *quotaReloader
@@ -669,6 +675,14 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetEmptyResultOk(conf.Carbonserver.EmptyResultOk)
 	carbonserver.SetDoNotLog404s(conf.Carbonserver.DoNotLog404s)
 	carbonserver.SetFLock(app.Config.Whisper.FLock)
+	if claim := app.handoffClaim; claim != nil {
+		// A stopping instance offered its listener: take it, or, if that
+		// fails, wait while it closes its copy instead of failing to bind.
+		app.handoffClaim = nil
+		carbonserver.SetListenerInheritor(func(addr *net.TCPAddr) (net.Listener, func() error, error) {
+			return claim.Take(addr)
+		})
+	}
 	carbonserver.SetCompressed(app.Config.Whisper.Compressed)
 	carbonserver.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
 	carbonserver.SetFailOnMaxGlobs(conf.Carbonserver.FailOnMaxGlobs)
