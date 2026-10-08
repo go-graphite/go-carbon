@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -147,5 +148,39 @@ func TestCheckpointClassificationAfterDurableSources(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("catalogue calls: %d", calls)
+	}
+}
+
+type failAfter struct{ left int }
+
+func (f *failAfter) Write(p []byte) (int, error) {
+	if f.left -= len(p); f.left < 0 {
+		return 0, io.ErrClosedPipe
+	}
+	return len(p), nil
+}
+
+func TestPipelinePreservesOrderAndReportsFailure(t *testing.T) {
+	var file, digest bytes.Buffer
+	p := newPipeline(&file, &digest, 7)
+	var want []byte
+	for i := 0; i < 1000; i++ {
+		chunk := []byte(fmt.Sprintf("%d,", i))
+		want = append(want, chunk...)
+		if _, err := p.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := p.Flush(); err != nil || !bytes.Equal(file.Bytes(), want) || !bytes.Equal(digest.Bytes(), want) {
+		t.Fatal("pipeline reordered or lost bytes", err)
+	}
+
+	p = newPipeline(&failAfter{left: 64}, io.Discard, 16)
+	var err error
+	for i := 0; i < 100 && err == nil; i++ {
+		_, err = p.Write(make([]byte, 16))
+	}
+	if !errors.Is(errors.Join(err, p.Flush()), io.ErrClosedPipe) {
+		t.Fatal("write failure not reported")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -85,7 +86,8 @@ func (app *App) DumpStop() error {
 	var builder *recovery.Builder
 	if cs := app.Carbonserver; cs != nil {
 		if cs.HasMappedIndex() && app.pendingReadsCompatible() {
-			builder = recovery.NewBuilder(cs.SavedMetricLookup())
+			builder = recovery.NewConcurrentBuilder(cs.SavedMetricLookups(), checkpointWorkers())
+			builder.Reserve(int(app.Cache.Len()) + int(app.Cache.NotConfirmedLength()))
 		}
 	}
 	dump, err := recovery.NewWriter(dumpFilename, 0, 1<<20, builder)
@@ -151,6 +153,12 @@ func (app *App) DumpStop() error {
 	// app.stopAll()
 
 	return nil
+}
+
+// checkpointWorkers bounds catalogue classification so reads, which remain
+// available during the checkpoint, keep most of the host's CPU.
+func checkpointWorkers() int {
+	return min(max(runtime.GOMAXPROCS(0)/4, 1), 8)
 }
 
 // RestoreFromFile read and parse data from single file

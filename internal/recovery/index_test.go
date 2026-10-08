@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/cespare/xxhash/v2"
@@ -301,6 +302,59 @@ func TestRecoveryNewNames(t *testing.T) {
 	}
 	if !reflect.DeepEqual(names, map[string]bool{"new": true, "other": true}) {
 		t.Fatal("new metric catalog", names)
+	}
+}
+
+func TestConcurrentBuilderMatchesSerial(t *testing.T) {
+	var known sync.Map
+	var lookups atomic.Int32
+	newKnown := func() func(string) bool {
+		lookups.Add(1)
+		var calls int // a data race here would mean a lookup was shared
+		return func(name string) bool {
+			calls++
+			_, ok := known.Load(name)
+			return ok
+		}
+	}
+	serial := NewBuilder(func(name string) bool { _, ok := known.Load(name); return ok })
+	concurrent := NewConcurrentBuilder(newKnown, 7)
+	var source []byte
+	for i := 0; i < 50000; i++ {
+		name := fmt.Sprintf("m.%d", i%20011)
+		if i%3 == 0 {
+			known.Store(name, true)
+		}
+		p := points.OnePoint(name, float64(i), int64(i))
+		raw := p.AppendBinary(nil)
+		source = append(source, raw...)
+		for _, b := range []*Builder{serial, concurrent} {
+			if err := b.Add(0, p, len(raw)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	collect := func(b *Builder) map[string]bool {
+		var data bytes.Buffer
+		if err := b.Write(&data); err != nil {
+			t.Fatal(err)
+		}
+		index, err := Open(data.Bytes(), source, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := map[string]bool{}
+		if err = index.NewNames(func(name string) error { names[name] = true; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return names
+	}
+	want, got := collect(serial), collect(concurrent)
+	if len(want) == 0 || !reflect.DeepEqual(want, got) {
+		t.Fatal("concurrent new metric catalogue differs", len(want), len(got))
+	}
+	if n := lookups.Load(); n < 2 || n > 7 {
+		t.Fatal("unexpected lookup count", n)
 	}
 }
 
