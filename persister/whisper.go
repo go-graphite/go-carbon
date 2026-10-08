@@ -108,9 +108,10 @@ type Whisper struct {
 
 // NewWhisper create instance of Whisper
 type whisperPrometheus struct {
-	enabled             bool
-	outOfOrderWriteLags prometheus.Histogram
-	outOfOrderWriteLag  func(time.Duration)
+	enabled                     bool
+	outOfOrderWriteLags         prometheus.Histogram
+	outOfOrderWriteLagHistogram *writeLagHistogram
+	outOfOrderWriteLag          func(time.Duration)
 }
 
 func NewWhisper(
@@ -139,28 +140,31 @@ func NewWhisper(
 // InitPrometheus attaches persister observations to the registry's histogram.
 // Config reload replaces the persister but retains its registry and counts.
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
+	histogram := newWriteLagHistogram()
 	p.prometheus = whisperPrometheus{
-		enabled: true,
-		outOfOrderWriteLags: prometheus.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "out_of_order_write_lag_exp",
-				Help:    "Lag for incoming datapoints (exponential buckets)",
-				Buckets: prometheus.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 30),
-			},
-		),
+		enabled:                     true,
+		outOfOrderWriteLagHistogram: histogram,
 	}
-	if err := reg.Register(p.prometheus.outOfOrderWriteLags); err != nil {
+	if err := reg.Register(histogram); err != nil {
 		var registered prometheus.AlreadyRegisteredError
 		if !errors.As(err, &registered) {
 			panic(err)
 		}
-		existing, ok := registered.ExistingCollector.(prometheus.Histogram)
-		if !ok {
+		switch existing := registered.ExistingCollector.(type) {
+		case *writeLagHistogram:
+			p.prometheus.outOfOrderWriteLagHistogram = existing
+		case prometheus.Histogram:
+			p.prometheus.outOfOrderWriteLagHistogram = nil
+			p.prometheus.outOfOrderWriteLags = existing
+		default:
 			panic(err)
 		}
-		p.prometheus.outOfOrderWriteLags = existing
 	}
 	p.prometheus.outOfOrderWriteLag = func(t time.Duration) {
+		if histogram := p.prometheus.outOfOrderWriteLagHistogram; histogram != nil {
+			histogram.observeDuration(t)
+			return
+		}
 		p.prometheus.outOfOrderWriteLags.Observe(t.Seconds())
 	}
 }
@@ -270,6 +274,10 @@ func (p *Whisper) registerOutOfOrderWriteLags(points []*whisper.TimeSeriesPoint)
 		return
 	}
 	now := time.Now()
+	if histogram := p.prometheus.outOfOrderWriteLagHistogram; histogram != nil {
+		histogram.observePoints(points, now)
+		return
+	}
 	for _, point := range points {
 		lag := now.Sub(time.Unix(int64(point.Time), 0))
 		p.prometheus.outOfOrderWriteLag(lag)
