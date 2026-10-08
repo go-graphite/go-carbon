@@ -3,11 +3,14 @@
 package handoff
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,12 +23,22 @@ func TestHandoffKeepsSocketAccepting(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := old.Addr().(*net.TCPAddr)
-	serve := func(ln net.Listener, body string) *http.Server {
-		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) })}
+	serve := func(ln net.Listener, body string, state func(net.Conn, http.ConnState)) *http.Server {
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }), ConnState: state}
 		go func() { _ = srv.Serve(ln) }()
 		return srv
 	}
-	oldSrv := serve(old, "old")
+	// Like carbonserver, the old server must answer connections it accepted
+	// before it stopped accepting: http.Server drops requests read after
+	// Shutdown began, so wait until its connections are idle first.
+	var conns sync.Map
+	oldSrv := serve(old, "old", func(c net.Conn, s http.ConnState) {
+		if s == http.StateClosed || s == http.StateHijacked {
+			conns.Delete(c)
+		} else {
+			conns.Store(c, s)
+		}
+	})
 	offer, err := NewOffer(path)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +88,7 @@ func TestHandoffKeepsSocketAccepting(t *testing.T) {
 	if err != nil || ln == nil {
 		t.Fatal("take", err)
 	}
-	newSrv := serve(ln, "new")
+	newSrv := serve(ln, "new", nil)
 	defer newSrv.Close()
 	if err = commit(); err != nil || !stopped.Load() {
 		t.Fatal("commit", err)
@@ -83,7 +96,16 @@ func TestHandoffKeepsSocketAccepting(t *testing.T) {
 	if !<-result {
 		t.Fatal("offer not taken")
 	}
-	_ = oldSrv.Close()
+	for busy := true; busy; {
+		busy = false
+		conns.Range(func(_, s any) bool { busy = s.(http.ConnState) != http.StateIdle; return !busy })
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err = oldSrv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
+		t.Fatal(err)
+	}
 	time.Sleep(100 * time.Millisecond)
 	close(done)
 	if failures.Load() != 0 || served.Load() == 0 {
