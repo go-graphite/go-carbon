@@ -109,8 +109,7 @@ type Whisper struct {
 // NewWhisper create instance of Whisper
 type whisperPrometheus struct {
 	enabled             bool
-	outOfOrderWriteLags prometheus.Histogram
-	outOfOrderWriteLag  func(time.Duration)
+	outOfOrderWriteLags *writeLagHistogram
 }
 
 func NewWhisper(
@@ -139,29 +138,21 @@ func NewWhisper(
 // InitPrometheus attaches persister observations to the registry's histogram.
 // Config reload replaces the persister but retains its registry and counts.
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
+	histogram := newWriteLagHistogram()
 	p.prometheus = whisperPrometheus{
-		enabled: true,
-		outOfOrderWriteLags: prometheus.NewHistogram(
-			prometheus.HistogramOpts{
-				Name:    "out_of_order_write_lag_exp",
-				Help:    "Lag for incoming datapoints (exponential buckets)",
-				Buckets: prometheus.ExponentialBuckets(time.Millisecond.Seconds(), 2.0, 30),
-			},
-		),
+		enabled:             true,
+		outOfOrderWriteLags: histogram,
 	}
-	if err := reg.Register(p.prometheus.outOfOrderWriteLags); err != nil {
+	if err := reg.Register(histogram); err != nil {
 		var registered prometheus.AlreadyRegisteredError
 		if !errors.As(err, &registered) {
 			panic(err)
 		}
-		existing, ok := registered.ExistingCollector.(prometheus.Histogram)
+		existing, ok := registered.ExistingCollector.(*writeLagHistogram)
 		if !ok {
 			panic(err)
 		}
 		p.prometheus.outOfOrderWriteLags = existing
-	}
-	p.prometheus.outOfOrderWriteLag = func(t time.Duration) {
-		p.prometheus.outOfOrderWriteLags.Observe(t.Seconds())
 	}
 }
 
@@ -269,11 +260,7 @@ func (p *Whisper) registerOutOfOrderWriteLags(points []*whisper.TimeSeriesPoint)
 	if !p.prometheus.enabled {
 		return
 	}
-	now := time.Now()
-	for _, point := range points {
-		lag := now.Sub(time.Unix(int64(point.Time), 0))
-		p.prometheus.outOfOrderWriteLag(lag)
-	}
+	p.prometheus.outOfOrderWriteLags.observePoints(points, time.Now())
 }
 func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.TimeSeriesPoint) (err error) {
 	defer func() {

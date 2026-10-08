@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1632,6 +1633,11 @@ func (q *throughputUsagePerNamespace) offset() *throughputUsageDataPointsRecoder
 // current usage is above that dynamically calculated result.
 func (q *throughputUsagePerNamespace) withinQuota(c int64, resetFrequency time.Duration) bool {
 	quota := q.quota().Throughput
+	// INI throughput=max is parsed as math.MaxInt64. Unlimited quotas still
+	// account for accepted points in increase, but do not need to read usage.
+	if quota <= 0 || quota == math.MaxInt64 {
+		return true
+	}
 	recorder := q.dpRecorder()
 	usage := atomic.LoadInt64(&recorder.dataPoints)
 	if quota > 0 && usage+c > quota {

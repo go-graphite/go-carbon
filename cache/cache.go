@@ -48,7 +48,11 @@ type Cache struct {
 	writeStrategy WriteStrategy
 	writeoutQueue *WriteoutQueue
 
+	// Keep read-mostly settings off the cache lines written by counters and
+	// queue bookkeeping, including machines with 128-byte cache lines.
+	_        [128]byte
 	settings atomic.Value // cacheSettings
+	_        [128]byte
 
 	stat struct {
 		size                int64  // changing via atomic
