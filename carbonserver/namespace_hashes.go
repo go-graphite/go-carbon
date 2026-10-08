@@ -3,7 +3,10 @@ package carbonserver
 import (
 	"bufio"
 	"bytes"
+	"cmp"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -48,9 +51,85 @@ type namespaceHashes struct {
 	hashes [][]uint64 // sorted and unique
 }
 
-type namespaceHashesEntry struct {
+// snapshotRowHashes holds the CityHash64 of every snapshot metric below a
+// prefix, indexed by snapshot row. Rows are consecutive in key order, so the
+// metrics of any namespace, at any depth, occupy one contiguous row range.
+type snapshotRowHashes struct {
+	first  uint64
+	hashes []uint64
+	tops   []string // namespaces directly below the prefix, in key order
+
+	// Assembled namespaces for recent enabled lists; scheduled consumers
+	// repeat the same list, so most requests only merge the overlay.
+	mu        sync.Mutex
+	assembled map[string]*assembledNamespaces
+}
+
+const maxAssembledNamespaceLists = 2
+
+type assembledNamespaces struct {
 	ready chan struct{}
 	value *namespaceHashes
+	err   error
+}
+
+func namespaceListKey(include map[string]bool) string {
+	if include == nil {
+		return ""
+	}
+	names := make([]string, 0, len(include))
+	for ns := range include {
+		names = append(names, ns)
+	}
+	slices.Sort(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\n")))
+	return hex.EncodeToString(sum[:])
+}
+
+// cachedNamespaces returns namespaces for include, assembling each distinct
+// enabled list once per generation. Concurrent callers wait for one assembly.
+func (h *snapshotRowHashes) cachedNamespaces(s *indexSnapshot, prefix string, include map[string]bool) (*namespaceHashes, error) {
+	key := namespaceListKey(include)
+	h.mu.Lock()
+	e, ok := h.assembled[key]
+	if !ok {
+		if h.assembled == nil {
+			h.assembled = make(map[string]*assembledNamespaces)
+		}
+		for k := range h.assembled {
+			if len(h.assembled) < maxAssembledNamespaceLists {
+				break
+			}
+			delete(h.assembled, k)
+		}
+		e = &assembledNamespaces{ready: make(chan struct{})}
+		h.assembled[key] = e
+	}
+	h.mu.Unlock()
+	if ok {
+		<-e.ready
+		return e.value, e.err
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			e.value, e.err = nil, fmt.Errorf("namespace hashes: %v", r)
+		}
+		if e.err != nil {
+			h.mu.Lock()
+			if h.assembled[key] == e {
+				delete(h.assembled, key)
+			}
+			h.mu.Unlock()
+		}
+		close(e.ready)
+	}()
+	e.value, e.err = h.namespaces(s, prefix, include)
+	return e.value, e.err
+}
+
+type namespaceHashesEntry struct {
+	ready chan struct{}
+	value *snapshotRowHashes
 	err   error
 }
 
@@ -67,32 +146,25 @@ func namespaceHashesPrefix(prefix string) (name string, strip int) {
 	return name, len(name) + 1
 }
 
-// namespaceHashes returns the hashes of every snapshot metric below prefix,
+// namespaceHashes returns the row hashes of every snapshot metric below prefix,
 // computing them once per snapshot generation. Concurrent callers wait for the
 // same computation.
-func (s *indexSnapshot) namespaceHashes(prefix string) (*namespaceHashes, error) {
-	if v, ok := s.hashes.Load(prefix); ok {
-		e := v.(*namespaceHashesEntry)
-		<-e.ready
-		return e.value, e.err
-	}
-	if s.hashesCached.Add(1) > maxCachedNamespaceHashPrefixes {
-		s.hashesCached.Add(-1)
-		return s.computeNamespaceHashes(prefix)
-	}
+func (s *indexSnapshot) namespaceHashes(prefix string) (*snapshotRowHashes, error) {
 	e := &namespaceHashesEntry{ready: make(chan struct{})}
 	if v, loaded := s.hashes.LoadOrStore(prefix, e); loaded {
-		s.hashesCached.Add(-1)
 		e = v.(*namespaceHashesEntry)
 		<-e.ready
 		return e.value, e.err
 	}
+	// Beyond the limit, concurrent callers still share the computation, but
+	// the result is not retained.
+	retain := s.hashesCached.Add(1) <= maxCachedNamespaceHashPrefixes
 	// Waiters must be released even if the computation panics.
 	defer func() {
 		if r := recover(); r != nil {
 			e.value, e.err = nil, fmt.Errorf("namespace hashes: %v", r)
 		}
-		if e.err != nil {
+		if !retain || e.err != nil {
 			s.hashes.Delete(prefix)
 			s.hashesCached.Add(-1)
 		}
@@ -102,7 +174,7 @@ func (s *indexSnapshot) namespaceHashes(prefix string) (*namespaceHashes, error)
 	return e.value, e.err
 }
 
-func (s *indexSnapshot) computeNamespaceHashes(prefix string) (*namespaceHashes, error) {
+func (s *indexSnapshot) computeNamespaceHashes(prefix string) (*snapshotRowHashes, error) {
 	defer runtime.KeepAlive(s)
 	name, _ := namespaceHashesPrefix(prefix)
 	start := snapshotNamespacePrefix(name)
@@ -112,14 +184,15 @@ func (s *indexSnapshot) computeNamespaceHashes(prefix string) (*namespaceHashes,
 	if err != nil {
 		return nil, err
 	}
-	workers := max(1, min(8, runtime.GOMAXPROCS(0)/2))
+	h := &snapshotRowHashes{first: first, hashes: make([]uint64, last-first)}
+	workers := namespaceHashesWorkers()
 	ranges := []snapshotMetricRange{{start, end, int(first), int(last)}}
 	if last-first >= namespaceHashesSplitMin && workers > 1 {
 		if split := s.splitMetricRange(ranges[0], workers); len(split) > 1 {
 			ranges = split
 		}
 	}
-	parts := make([][]namespaceHashSegment, len(ranges))
+	tops := make([][]string, len(ranges))
 	errs := make([]error, len(ranges))
 	jobs := make(chan int, len(ranges))
 	for i := range ranges {
@@ -130,7 +203,7 @@ func (s *indexSnapshot) computeNamespaceHashes(prefix string) (*namespaceHashes,
 	for range min(workers, len(ranges)) {
 		wg.Go(func() {
 			for i := range jobs {
-				parts[i], errs[i] = s.hashNamespaceRange(len(start), ranges[i].start, ranges[i].end)
+				tops[i], errs[i] = s.hashRowRange(h, len(start), ranges[i].start, ranges[i].end)
 			}
 		})
 	}
@@ -138,36 +211,36 @@ func (s *indexSnapshot) computeNamespaceHashes(prefix string) (*namespaceHashes,
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
-	// Keys are ordered by namespace, so a namespace split between ranges
-	// continues in the first segment of the next range.
-	var segments []namespaceHashSegment
-	for _, part := range parts {
-		for _, seg := range part {
-			if n := len(segments); n > 0 && segments[n-1].name == seg.name {
-				segments[n-1].hashes = append(segments[n-1].hashes, seg.hashes...)
-			} else {
-				segments = append(segments, seg)
+	// A namespace split between ranges continues in the next range.
+	for _, part := range tops {
+		for _, top := range part {
+			if n := len(h.tops); n == 0 || h.tops[n-1] != top {
+				h.tops = append(h.tops, top)
 			}
 		}
 	}
-	return newNamespaceHashes(segments, workers), nil
+	return h, nil
 }
 
-// hashNamespaceRange hashes snapshot keys "<prefix>\x00<namespace>\x00...wsp"
-// as "<namespace>.<...>". Metrics directly below the prefix belong to no namespace.
-func (s *indexSnapshot) hashNamespaceRange(strip int, start, end []byte) ([]namespaceHashSegment, error) {
+func namespaceHashesWorkers() int {
+	return max(1, min(8, runtime.GOMAXPROCS(0)/2))
+}
+
+// hashRowRange hashes snapshot keys "<prefix>\x00<namespace>\x00...wsp" as
+// "<namespace>.<...>". Metrics directly below the prefix belong to no namespace.
+func (s *indexSnapshot) hashRowRange(h *snapshotRowHashes, strip int, start, end []byte) ([]string, error) {
 	it, err := s.index.Iterator(start, end)
 	if it != nil {
 		defer it.Close()
 	}
-	var segments []namespaceHashSegment
+	var tops []string
 	buf := make([]byte, 0, 256)
 	for err == nil {
-		key, _ := it.Current()
+		key, row := it.Current()
 		rest := key[strip : len(key)-len(".wsp")]
 		if i := bytes.IndexByte(rest, 0); i > 0 {
-			if n := len(segments); n == 0 || segments[n-1].name != string(rest[:i]) {
-				segments = append(segments, namespaceHashSegment{name: string(rest[:i])})
+			if n := len(tops); n == 0 || tops[n-1] != string(rest[:i]) {
+				tops = append(tops, string(rest[:i]))
 			}
 			buf = append(buf[:0], rest...)
 			for j, c := range buf {
@@ -175,15 +248,74 @@ func (s *indexSnapshot) hashNamespaceRange(strip int, start, end []byte) ([]name
 					buf[j] = '.'
 				}
 			}
-			seg := &segments[len(segments)-1]
-			seg.hashes = append(seg.hashes, city.Hash64(buf))
+			h.hashes[row-h.first] = city.Hash64(buf)
 		}
 		err = it.Next()
 	}
 	if errors.Is(err, vellum.ErrIteratorDone) {
 		err = nil
 	}
-	return segments, err
+	return tops, err
+}
+
+type namespaceRows struct {
+	name       string
+	start, end uint64
+	children   [][2]uint64 // nested enabled namespaces, by start row
+}
+
+// namespaces assigns snapshot metrics to their longest enabled namespace, as
+// the hash generator does: with "a" and "a.b" enabled, "a.b.x" belongs only to
+// "a.b". Without include, every namespace directly below the prefix is used.
+func (h *snapshotRowHashes) namespaces(s *indexSnapshot, prefix string, include map[string]bool) (*namespaceHashes, error) {
+	defer runtime.KeepAlive(s)
+	name, _ := namespaceHashesPrefix(prefix)
+	if include == nil {
+		include = make(map[string]bool, len(h.tops))
+		for _, top := range h.tops {
+			include[top] = true
+		}
+	}
+	var rows []*namespaceRows
+	for ns := range include {
+		full := ns
+		if name != "" {
+			full = name + "." + ns
+		}
+		start, end, err := s.namespaceRange(full)
+		if err != nil {
+			return nil, err
+		}
+		if start < end {
+			rows = append(rows, &namespaceRows{name: ns, start: start, end: end})
+		}
+	}
+	// Ranges of distinct namespaces are nested or disjoint. A namespace holding
+	// only a nested enabled namespace has the same range; the shorter name is
+	// the ancestor.
+	slices.SortFunc(rows, func(a, b *namespaceRows) int {
+		return cmp.Or(cmp.Compare(a.start, b.start), cmp.Compare(b.end, a.end), cmp.Compare(len(a.name), len(b.name)))
+	})
+	var stack []*namespaceRows
+	for _, r := range rows {
+		for len(stack) > 0 && stack[len(stack)-1].end <= r.start {
+			stack = stack[:len(stack)-1]
+		}
+		if n := len(stack); n > 0 {
+			stack[n-1].children = append(stack[n-1].children, [2]uint64{r.start, r.end})
+		}
+		stack = append(stack, r)
+	}
+	segments := make([]namespaceHashSegment, len(rows))
+	for i, r := range rows {
+		segments[i].name = r.name
+		next := r.start
+		for _, c := range append(r.children, [2]uint64{r.end, r.end}) {
+			segments[i].hashes = append(segments[i].hashes, h.hashes[next-h.first:c[0]-h.first]...)
+			next = c[1]
+		}
+	}
+	return newNamespaceHashes(segments, namespaceHashesWorkers()), nil
 }
 
 func newNamespaceHashes(segments []namespaceHashSegment, workers int) *namespaceHashes {
@@ -218,8 +350,9 @@ func newNamespaceHashes(segments []namespaceHashSegment, workers int) *namespace
 	return h
 }
 
-// namesNamespaceHashes groups and hashes full metric names below prefix.
-func namesNamespaceHashes(names []string, prefix string) *namespaceHashes {
+// namesNamespaceHashes hashes full metric names below prefix into their longest
+// enabled namespace, or their first component without include.
+func namesNamespaceHashes(names []string, prefix string, include map[string]bool) *namespaceHashes {
 	name, strip := namespaceHashesPrefix(prefix)
 	index := make(map[string]int)
 	var segments []namespaceHashSegment
@@ -227,16 +360,27 @@ func namesNamespaceHashes(names []string, prefix string) *namespaceHashes {
 		if strip > 0 && (len(metric) <= strip || metric[strip-1] != '.' || metric[:strip-1] != name) {
 			continue
 		}
-		rest := metric[strip:]
-		i := strings.IndexByte(rest, '.')
-		if i <= 0 {
+		rest, match := metric[strip:], ""
+		for i := 0; i < len(rest); i++ {
+			if rest[i] != '.' {
+				continue
+			}
+			if include == nil {
+				match = rest[:i]
+				break
+			}
+			if include[rest[:i]] {
+				match = rest[:i]
+			}
+		}
+		if match == "" {
 			continue
 		}
-		j, ok := index[rest[:i]]
+		j, ok := index[match]
 		if !ok {
 			j = len(segments)
-			index[rest[:i]] = j
-			segments = append(segments, namespaceHashSegment{name: rest[:i]})
+			index[match] = j
+			segments = append(segments, namespaceHashSegment{name: match})
 		}
 		segments[j].hashes = append(segments[j].hashes, city.Hash64([]byte(rest)))
 	}
@@ -311,22 +455,6 @@ func writeNamespaceHashes(w io.Writer, base, overlay *namespaceHashes, include m
 	return namespaces, err
 }
 
-// mergeNamespaceHashSets combines sets with disjoint namespace names.
-func mergeNamespaceHashSets(a, b *namespaceHashes) *namespaceHashes {
-	out := &namespaceHashes{}
-	i, j := 0, 0
-	for i < len(a.names) || j < len(b.names) {
-		if j >= len(b.names) || i < len(a.names) && a.names[i] < b.names[j] {
-			out.names, out.counts, out.hashes = append(out.names, a.names[i]), append(out.counts, a.counts[i]), append(out.hashes, a.hashes[i])
-			i++
-		} else {
-			out.names, out.counts, out.hashes = append(out.names, b.names[j]), append(out.counts, b.counts[j]), append(out.hashes, b.hashes[j])
-			j++
-		}
-	}
-	return out
-}
-
 func mergeUniqueHashes(a, b []uint64, emit func(uint64)) {
 	var last uint64
 	first := true
@@ -344,125 +472,64 @@ func mergeUniqueHashes(a, b []uint64, emit func(uint64)) {
 	}
 }
 
-// currentNamespaceHashes returns the per-namespace base for the current index
-// and the full names of metrics absent from it: the mutable overlay, or every
-// metric when there is no snapshot.
-func (listener *CarbonserverListener) currentNamespaceHashes(prefix string) (*namespaceHashes, []string, *indexSnapshot, error) {
+// currentNamespaceHashes returns the hashes of the current index below prefix:
+// snapshot metrics from the per-generation row hashes, merged with the mutable
+// overlay hashed per request (every metric when there is no snapshot).
+func (listener *CarbonserverListener) currentNamespaceHashes(prefix string, include map[string]bool) (base, overlay *namespaceHashes, err error) {
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil {
-		return nil, nil, nil, errMetricsListEmpty
+		return nil, nil, errMetricsListEmpty
 	}
 	ti := fidx.trieIdx
 	if !listener.trieIndex || ti == nil || ti.snapshot == nil {
 		names, err := listener.getMetricsList()
-		return &namespaceHashes{}, names, nil, err
+		if err != nil {
+			return nil, nil, err
+		}
+		return &namespaceHashes{}, namesNamespaceHashes(names, prefix, include), nil
 	}
-	base, err := ti.snapshot.namespaceHashes(prefix)
+	rows, err := ti.snapshot.namespaceHashes(prefix)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	// Remember only retained prefixes, so arbitrary request prefixes cannot
 	// grow the prewarm set beyond the per-snapshot cache limit.
 	if _, cached := ti.snapshot.hashes.Load(prefix); cached {
-		listener.namespaceHashPrefixes.Store(prefix, struct{}{})
+		listener.namespaceHashPrefixes.Store(prefix, include)
+	}
+	if base, err = rows.cachedNamespaces(ti.snapshot, prefix, include); err != nil {
+		return nil, nil, err
 	}
 	name, _ := namespaceHashesPrefix(prefix)
 	var names []string
 	if dir := ti.mutableDirectory(name); dir != nil {
 		names, _, _, _, _ = ti.allMetricsNodeMutable(dir, '.', name, int(^uint(0)>>1), false)
 	}
-	return base, names, ti.snapshot, nil
+	if include == nil {
+		include = make(map[string]bool, len(rows.tops))
+		for _, top := range rows.tops {
+			include[top] = true
+		}
+		// New first-level namespaces exist only in the overlay.
+		for _, n := range namesNamespaceHashes(names, prefix, nil).names {
+			include[n] = true
+		}
+	}
+	return base, namesNamespaceHashes(names, prefix, include), nil
 }
 
-// The hash generator assigns each metric to its longest enabled namespace
-// prefix, so with "a" and "a.b" enabled "a.b.x" belongs only to "a.b". Cached
-// hashes are grouped by first component; a requested dotted namespace makes
-// its whole first-component group "affected", recomputed from its metrics.
-func affectedNamespaceTops(include map[string]bool) map[string]bool {
-	var tops map[string]bool
-	for ns := range include {
-		if top, _, dotted := strings.Cut(ns, "."); dotted {
-			if tops == nil {
-				tops = make(map[string]bool)
-			}
-			tops[top] = true
-		}
-	}
-	return tops
-}
-
-func withoutNamespaceTops(h *namespaceHashes, tops map[string]bool) *namespaceHashes {
-	if len(tops) == 0 {
-		return h
-	}
-	out := &namespaceHashes{}
-	for i, name := range h.names {
-		if !tops[name] {
-			out.names = append(out.names, name)
-			out.counts = append(out.counts, h.counts[i])
-			out.hashes = append(out.hashes, h.hashes[i])
-		}
-	}
-	return out
-}
-
-// longestMatchNamespaceHashes hashes metric names (prefix removed) below the
-// affected tops into their longest enabled namespace.
-func longestMatchNamespaceHashes(s *indexSnapshot, prefix string, names []string, tops, include map[string]bool) (*namespaceHashes, error) {
-	index := make(map[string]int)
-	var segments []namespaceHashSegment
-	add := func(rest string) {
-		match := ""
-		for i := 0; i < len(rest); i++ {
-			if rest[i] == '.' && include[rest[:i]] {
-				match = rest[:i]
-			}
-		}
-		if match == "" {
-			return
-		}
-		j, ok := index[match]
-		if !ok {
-			j = len(segments)
-			index[match] = j
-			segments = append(segments, namespaceHashSegment{name: match})
-		}
-		segments[j].hashes = append(segments[j].hashes, city.Hash64([]byte(rest)))
-	}
-	name, strip := namespaceHashesPrefix(prefix)
-	for _, metric := range names {
-		if strip > 0 && (len(metric) <= strip || metric[strip-1] != '.' || metric[:strip-1] != name) {
-			continue
-		}
-		if top, _, ok := strings.Cut(metric[strip:], "."); ok && tops[top] {
-			add(metric[strip:])
-		}
-	}
-	if s != nil {
-		for top := range tops {
-			ns := top
-			if name != "" {
-				ns = name + "." + top
-			}
-			if err := s.walkNamespace(ns, func(metric string, _ uint64) bool {
-				add(metric[strip:])
-				return true
-			}); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return newNamespaceHashes(segments, 1), nil
-}
-
-// prewarmNamespaceHashes computes hashes for previously requested prefixes as
-// soon as a new snapshot generation is published.
+// prewarmNamespaceHashes computes hashes for previously requested prefixes, and
+// their last enabled list, as soon as a new snapshot generation is published.
 func (listener *CarbonserverListener) prewarmNamespaceHashes(s *indexSnapshot) {
-	listener.namespaceHashPrefixes.Range(func(key, _ any) bool {
-		prefix := key.(string)
+	listener.namespaceHashPrefixes.Range(func(key, value any) bool {
+		prefix, include := key.(string), value.(map[string]bool)
 		go func() {
 			t0 := time.Now()
-			if _, err := s.namespaceHashes(prefix); err != nil {
+			rows, err := s.namespaceHashes(prefix)
+			if err == nil {
+				_, err = rows.cachedNamespaces(s, prefix, include)
+			}
+			if err != nil {
 				listener.logger.Warn("namespace hashes prewarm failed", zap.String("prefix", prefix), zap.Error(err))
 				return
 			}
@@ -505,27 +572,14 @@ func (listener *CarbonserverListener) namespaceHashesHandler(wr http.ResponseWri
 		return
 	}
 
-	base, names, snapshot, err := listener.currentNamespaceHashes(prefix)
-	var overlay *namespaceHashes
-	if err == nil {
-		tops := affectedNamespaceTops(include)
-		base = withoutNamespaceTops(base, tops)
-		overlay = withoutNamespaceTops(namesNamespaceHashes(names, prefix), tops)
-		if len(tops) > 0 {
-			var affected *namespaceHashes
-			affected, err = longestMatchNamespaceHashes(snapshot, prefix, names, tops, include)
-			if err == nil {
-				overlay = mergeNamespaceHashSets(overlay, affected)
-			}
-		}
-	}
+	base, overlay, err := listener.currentNamespaceHashes(prefix, include)
 	if err != nil {
 		fail(http.StatusInternalServerError, "can't compute namespace hashes", err)
 		return
 	}
 	acquired := time.Since(t0)
 	wr.Header().Set("Content-Type", "application/octet-stream")
-	namespaces, err := writeNamespaceHashes(wr, base, overlay, include, time.Now().Unix())
+	namespaces, err := writeNamespaceHashes(wr, base, overlay, nil, time.Now().Unix())
 	accessLogger.Info("namespace hashes served",
 		zap.Duration("runtime_seconds", time.Since(t0)),
 		zap.Duration("acquire_seconds", acquired),

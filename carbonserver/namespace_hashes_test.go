@@ -215,6 +215,8 @@ func TestNamespaceHashesDottedNamespaces(t *testing.T) {
 	names := []string{
 		"p.a.x", "p.a.y.z", "p.a.b.c", "p.a.b.d.e", "p.a.b.d.f", "p.a.bc.x",
 		"p.a.b", "p.c.d.e", "p.c.x", "p.e.f.g", "q.a.b.c",
+		// "h" and "h.i" cover the same snapshot rows.
+		"p.h.i.j", "p.h.i.k", "p.z.y.x.w",
 	}
 	ti := newTrie(".wsp", 0, nil)
 	ti.snapshot = namespaceHashesSnapshot(t, names)
@@ -238,6 +240,7 @@ func TestNamespaceHashesDottedNamespaces(t *testing.T) {
 		{"a.b", "c"},          // dotted without its top
 		{"a.b.", "a", "e", "new"},
 		{"c.d", "a.bc", "zz.y"},
+		{"h.i", "h", "z", "z.y", "z.y.x"},
 	} {
 		body := strings.Join(enabled, "\n") + "\n"
 		trimmed := make([]string, len(enabled))
@@ -281,7 +284,11 @@ func TestNamespaceHashesCachedPrefixLimit(t *testing.T) {
 		t.Fatalf("remembered prefixes %q", prefixes)
 	}
 	for _, prefix := range prefixes {
-		if _, err := next.namespaceHashes(prefix); err != nil {
+		rows, err := next.namespaceHashes(prefix)
+		if err == nil {
+			_, err = rows.cachedNamespaces(next, prefix, nil)
+		}
+		if err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -304,14 +311,28 @@ func TestNamespaceHashesWithoutSnapshot(t *testing.T) {
 	}
 }
 
-// GO_CARBON_SNAPSHOT_FST optionally selects a captured immutable index and
-// GO_CARBON_NSHASH_PREFIX its namespace prefix. GO_CARBON_NSHASH_VERIFY=1
-// also compares the response with the full metric list oracle.
+// GO_CARBON_SNAPSHOT_FST optionally selects a captured immutable index,
+// GO_CARBON_NSHASH_PREFIX its namespace prefix and GO_CARBON_NSHASH_ENABLED a
+// file of enabled namespaces to POST. GO_CARBON_NSHASH_VERIFY=1 also compares
+// the response with the full metric list oracle.
 func BenchmarkNamespaceHashes(b *testing.B) {
 	ti, _ := snapshotListBenchmarkIndex(b)
 	prefix := "metrics."
 	if p := os.Getenv("GO_CARBON_NSHASH_PREFIX"); p != "" {
 		prefix = p
+	}
+	var body *string
+	var enabled []string
+	if path := os.Getenv("GO_CARBON_NSHASH_ENABLED"); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		s := string(data)
+		body = &s
+		for ns := range parseHashNamespaces(data) {
+			enabled = append(enabled, ns)
+		}
 	}
 	_, server := namespaceHashesServer(b, ti)
 	runtime.GC()
@@ -328,14 +349,14 @@ func BenchmarkNamespaceHashes(b *testing.B) {
 	var size int
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		code, got := requestNamespaceHashes(b, server, prefix, nil)
+		code, got := requestNamespaceHashes(b, server, prefix, body)
 		if code != http.StatusOK {
 			b.Fatalf("status %d", code)
 		}
 		size = len(got)
 		if i == 0 && os.Getenv("GO_CARBON_NSHASH_VERIFY") == "1" {
 			b.StopTimer()
-			if want := namespaceHashesOracle(ti.allMetrics('.'), prefix, nil); !bytes.Equal(got[13:], want[13:]) {
+			if want := namespaceHashesOracle(ti.allMetrics('.'), prefix, enabled); !bytes.Equal(got[13:], want[13:]) {
 				b.Fatal("response differs from metric list oracle")
 			}
 			b.StartTimer()
