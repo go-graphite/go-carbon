@@ -250,6 +250,8 @@ type CarbonserverListener struct {
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
 	inheritListener   func(*net.TCPAddr) (net.Listener, func() error, error)
+	stoppedAccepting  atomic.Bool
+	connStates        sync.Map // net.Conn -> http.ConnState, while open
 	grpcListener      *net.TCPListener
 	httpServer        *http.Server
 	grpcServer        *grpc.Server
@@ -633,11 +635,38 @@ func (listener *CarbonserverListener) HTTPListener() *net.TCPListener { return l
 // StopAccepting closes the HTTP socket without draining requests. Keep-alive is
 // disabled so in-flight responses close their connections; Stop still drains.
 func (listener *CarbonserverListener) StopAccepting() {
+	listener.stoppedAccepting.Store(true)
 	if listener.httpServer != nil {
 		listener.httpServer.SetKeepAlivesEnabled(false)
 	}
 	if listener.tcpListener != nil {
 		_ = listener.tcpListener.Close()
+	}
+}
+
+func (listener *CarbonserverListener) trackConnState(c net.Conn, state http.ConnState) {
+	if state == http.StateClosed || state == http.StateHijacked {
+		listener.connStates.Delete(c)
+	} else {
+		listener.connStates.Store(c, state)
+	}
+}
+
+// waitBusyConns waits until every open connection is idle. http.Server drops,
+// without a response, a request it reads once Shutdown began; after a socket
+// handoff, connections accepted just before StopAccepting may still be unread.
+func (listener *CarbonserverListener) waitBusyConns(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		busy := false
+		listener.connStates.Range(func(_, state any) bool {
+			busy = state.(http.ConnState) != http.StateIdle
+			return !busy
+		})
+		if !busy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -2106,10 +2135,14 @@ func (listener *CarbonserverListener) Stop() error {
 	listener.stopOnce.Do(func() {
 		listener.PauseIndexUpdates()
 		if listener.httpServer != nil {
+			if listener.stoppedAccepting.Load() {
+				listener.waitBusyConns(30 * time.Second)
+			}
 			shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := listener.httpServer.Shutdown(shutdownContext)
 			cancel()
-			if err != nil {
+			// StopAccepting already closed the listener; that is not a failure.
+			if err != nil && !errors.Is(err, net.ErrClosed) {
 				listener.logger.Warn("failed to gracefully stop HTTP server", zap.Error(err))
 				listener.httpServer.Close()
 			}
@@ -2393,6 +2426,7 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		ReadTimeout:  listener.readTimeout,
 		IdleTimeout:  listener.idleTimeout,
 		WriteTimeout: listener.writeTimeout,
+		ConnState:    listener.trackConnState,
 	}
 
 	listener.httpServer = srv
