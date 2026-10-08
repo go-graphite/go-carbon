@@ -250,6 +250,9 @@ type CarbonserverListener struct {
 	stopOnce          sync.Once
 	metricsAsCounters bool
 	tcpListener       *net.TCPListener
+	inheritListener   func(*net.TCPAddr) (net.Listener, func() error, error)
+	stoppedAccepting  atomic.Bool
+	connStates        sync.Map // net.Conn -> http.ConnState, while open
 	grpcListener      *net.TCPListener
 	httpServer        *http.Server
 	grpcServer        *grpc.Server
@@ -622,6 +625,55 @@ func (listener *CarbonserverListener) SetMaxMetricsRendered(m int) {
 func (listener *CarbonserverListener) SetMaxFetchDataGoroutines(m int) {
 	listener.maxFetchDataGoroutines = m
 }
+
+// SetListenerInheritor lets Listen take its HTTP socket from a stopping
+// instance. inherit returns a nil listener when none is offered; commit is
+// called once this listener serves and returns when the old one stopped.
+func (listener *CarbonserverListener) SetListenerInheritor(inherit func(*net.TCPAddr) (net.Listener, func() error, error)) {
+	listener.inheritListener = inherit
+}
+
+// HTTPListener returns the HTTP socket for handing to a successor.
+func (listener *CarbonserverListener) HTTPListener() *net.TCPListener { return listener.tcpListener }
+
+// StopAccepting closes the HTTP socket without draining requests. Keep-alive is
+// disabled so in-flight responses close their connections; Stop still drains.
+func (listener *CarbonserverListener) StopAccepting() {
+	listener.stoppedAccepting.Store(true)
+	if listener.httpServer != nil {
+		listener.httpServer.SetKeepAlivesEnabled(false)
+	}
+	if listener.tcpListener != nil {
+		_ = listener.tcpListener.Close()
+	}
+}
+
+func (listener *CarbonserverListener) trackConnState(c net.Conn, state http.ConnState) {
+	if state == http.StateClosed || state == http.StateHijacked {
+		listener.connStates.Delete(c)
+	} else {
+		listener.connStates.Store(c, state)
+	}
+}
+
+// waitBusyConns waits until every open connection is idle. http.Server drops,
+// without a response, a request it reads once Shutdown began; after a socket
+// handoff, connections accepted just before StopAccepting may still be unread.
+func (listener *CarbonserverListener) waitBusyConns(timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		busy := false
+		listener.connStates.Range(func(_, state any) bool {
+			busy = state.(http.ConnState) != http.StateIdle
+			return !busy
+		})
+		if !busy {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func (listener *CarbonserverListener) SetFLock(flock bool) {
 	listener.flock = flock
 }
@@ -2088,10 +2140,14 @@ func (listener *CarbonserverListener) Stop() error {
 	listener.stopOnce.Do(func() {
 		listener.PauseIndexUpdates()
 		if listener.httpServer != nil {
+			if listener.stoppedAccepting.Load() {
+				listener.waitBusyConns(30 * time.Second)
+			}
 			shutdownContext, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			err := listener.httpServer.Shutdown(shutdownContext)
 			cancel()
-			if err != nil {
+			// StopAccepting already closed the listener; that is not a failure.
+			if err != nil && !errors.Is(err, net.ErrClosed) {
 				listener.logger.Warn("failed to gracefully stop HTTP server", zap.Error(err))
 				listener.httpServer.Close()
 			}
@@ -2309,8 +2365,8 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 	if err != nil {
 		return err
 	}
-	listener.tcpListener, err = net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
+	var commit func() error
+	if listener.tcpListener, commit, err = listener.bindHTTP(tcpAddr); err != nil {
 		return err
 	}
 
@@ -2375,18 +2431,76 @@ func (listener *CarbonserverListener) Listen(listen string) error {
 		ReadTimeout:  listener.readTimeout,
 		IdleTimeout:  listener.idleTimeout,
 		WriteTimeout: listener.writeTimeout,
+		ConnState:    listener.trackConnState,
 	}
 
 	listener.httpServer = srv
+	if commit != nil {
+		// The old instance answers correctly meanwhile; this one must not
+		// accept from the shared socket before it can.
+		listener.waitIndexForHandoff()
+	}
 	listener.serverWG.Add(1)
 	go func() {
 		defer listener.serverWG.Done()
-		if err := srv.Serve(listener.tcpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(listener.tcpListener); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			listener.logger.Error("HTTP server stopped", zap.Error(err))
 		}
 	}()
+	if commit != nil {
+		// Return only after the old instance stopped accepting, so nothing
+		// started after Listen (such as intake) can race its frozen reads.
+		if err := commit(); err != nil {
+			logger.Warn("old instance did not confirm read handoff", zap.Error(err))
+		} else {
+			logger.Info("took over read listener from stopping instance")
+		}
+	}
 
 	return nil
+}
+
+// handoffIndexWait stays below the stopping instance's offer timeout, after
+// which it closes its socket copy and this instance must serve regardless.
+const handoffIndexWait = 25 * time.Minute
+
+func (listener *CarbonserverListener) waitIndexForHandoff() {
+	if !listener.trieIndex && !listener.trigramIndex {
+		return
+	}
+	started := time.Now()
+	for listener.CurrentFileIndex() == nil && time.Since(started) < handoffIndexWait {
+		time.Sleep(10 * time.Millisecond)
+	}
+	listener.logger.Info("index ready for read handoff", zap.Duration("wait", time.Since(started)), zap.Bool("ready", listener.CurrentFileIndex() != nil))
+}
+
+// bindHTTP inherits the socket from a stopping instance when one offers it.
+// After a declined or failed handoff that instance closes its socket within
+// its request drain time, so a busy address is retried for that long.
+func (listener *CarbonserverListener) bindHTTP(addr *net.TCPAddr) (*net.TCPListener, func() error, error) {
+	if listener.inheritListener == nil {
+		ln, err := net.ListenTCP("tcp", addr)
+		return ln, nil, err
+	}
+	inherited, commit, err := listener.inheritListener(addr)
+	if err != nil {
+		listener.logger.Warn("read listener handoff failed; binding", zap.Error(err))
+	}
+	if inherited != nil {
+		if ln, ok := inherited.(*net.TCPListener); ok {
+			return ln, commit, nil
+		}
+		_ = inherited.Close()
+	}
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		ln, err := net.ListenTCP("tcp", addr)
+		if err == nil || !errors.Is(err, syscall.EADDRINUSE) || time.Now().After(deadline) {
+			return ln, nil, err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (listener *CarbonserverListener) startIndexUpdater() {

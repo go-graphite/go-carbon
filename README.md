@@ -592,6 +592,13 @@ path = "/var/lib/graphite/dump/"
 # restart finishes inside whatever grace period your health check or supervisor
 # allows.
 restore-per-second = 0
+# Run as a small parent process that exits as soon as a USR2 dump stop has
+# written its durable files and closed every listener, instead of waiting for
+# the worker to exit. Freeing a large heap can take several seconds of kernel
+# time; with a service manager that only tracks the main process (for systemd,
+# KillMode=process) the next instance starts while that memory is reclaimed.
+# The host needs room for both processes briefly. Not supported with -daemon.
+handoff-supervisor = false
 
 [pprof]
 listen = "localhost:7007"

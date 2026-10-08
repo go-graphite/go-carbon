@@ -239,10 +239,20 @@ func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 // frozen generation, so its metrics need no reinsertion on restart. The returned
 // function owns its reusable reader and key buffer and must be called serially.
 func (l *CarbonserverListener) SavedMetricLookup() func(string) bool {
+	return l.SavedMetricLookups()()
+}
+
+// SavedMetricLookups captures the frozen generation once and returns a factory
+// of independent SavedMetricLookup functions, one per checkpoint worker.
+func (l *CarbonserverListener) SavedMetricLookups() func() func(string) bool {
 	index := l.CurrentFileIndex()
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
-		return func(string) bool { return false }
+		return func() func(string) bool { return func(string) bool { return false } }
 	}
+	return func() func(string) bool { return savedMetricLookup(index) }
+}
+
+func savedMetricLookup(index *fileIndex) func(string) bool {
 	snapshot := index.trieIdx.snapshot
 	reader, err := snapshot.index.Reader()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -225,5 +226,38 @@ func TestSavedMetricLookupUsesFrozenCatalogue(t *testing.T) {
 	listener.UpdateFileIndex(&fileIndex{trieIdx: newTrie(".wsp", 0, nil)})
 	if !lookup("overlay.new") || lookup("after.freeze") {
 		t.Fatal("lookup did not retain its frozen catalogue")
+	}
+}
+
+func TestSavedMetricLookupsAreIndependent(t *testing.T) {
+	cache, root, entries := snapshotFixture(t)
+	listener := overlayListener(t, cache, root)
+	listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "overlay.new")
+	listener.PauseIndexUpdates()
+	lookups := listener.SavedMetricLookups()
+	listener.UpdateFileIndex(&fileIndex{trieIdx: newTrie(".wsp", 0, nil)})
+	var wg sync.WaitGroup
+	errs := make(chan string, 4)
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			lookup := lookups()
+			for _, entry := range entries {
+				name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(entry.Path, "/"), ".wsp"), "/", ".")
+				if !lookup(name) || lookup(name+".absent") {
+					errs <- name
+					return
+				}
+			}
+			if !lookup("overlay.new") || lookup("after.freeze") {
+				errs <- "overlay"
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for name := range errs {
+		t.Fatal("concurrent lookup misclassified", name)
 	}
 }

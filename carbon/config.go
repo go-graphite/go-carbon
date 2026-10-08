@@ -207,9 +207,10 @@ type pprofConfig struct {
 }
 
 type dumpConfig struct {
-	Enabled          bool   `toml:"enabled"`
-	Path             string `toml:"path"`
-	RestorePerSecond int    `toml:"restore-per-second"`
+	Enabled           bool   `toml:"enabled"`
+	Path              string `toml:"path"`
+	RestorePerSecond  int    `toml:"restore-per-second"`
+	HandoffSupervisor bool   `toml:"handoff-supervisor"`
 }
 
 type prometheusConfig struct {

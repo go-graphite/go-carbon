@@ -49,7 +49,7 @@ func TestCapturedPendingCheckpoint(t *testing.T) {
 	ti := newTrie(".wsp", 0, nil)
 	ti.snapshot = s
 	listener.UpdateFileIndex(&fileIndex{trieIdx: ti})
-	builder := recovery.NewBuilder(listener.SavedMetricLookup())
+	builder := recovery.NewConcurrentBuilder(listener.SavedMetricLookups(), 8)
 	writers := make([]*recovery.Writer, 2)
 	defer func() {
 		for _, w := range writers {

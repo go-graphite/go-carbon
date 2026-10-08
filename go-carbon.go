@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/carbon"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -72,8 +73,19 @@ func main() {
 
 	cat := flag.String("cat", "", "Print cache dump file")
 	printFLC := flag.String("print-file-list-cache", "", "Print file list cache. (format: $path_to_cache. example: /var/lib/carbon/carbonserver-file-list-cache.bin)")
+	handoffProtocol := flag.Bool("handoff-protocol", false, "Print the supported read handoff protocol and exit")
 
 	flag.Parse()
+
+	if *handoffProtocol {
+		fmt.Println(handoff.Protocol)
+		return
+	}
+
+	release, err := supervisedRelease()
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if *printVersion {
 		fmt.Println(Version)
@@ -135,6 +147,14 @@ func main() {
 		return
 	}
 
+	if cfg.Dump.HandoffSupervisor && release == nil {
+		if *isDaemon {
+			log.Fatal("dump.handoff-supervisor is not supported with -daemon")
+		}
+		os.Exit(runSupervisor())
+	}
+	app.RegisterReadHandoff()
+
 	for i := 0; i < len(cfg.Logging); i++ {
 		if err := zapwriter.PrepareFileForUser(cfg.Logging[i].File, runAsUser); err != nil {
 			log.Fatal(err)
@@ -185,9 +205,9 @@ func main() {
 	/* CONFIG end */
 
 	// pprof
-	// httpStop := func() {}
+	httpStop := func() {}
 	if cfg.Pprof.Enabled || cfg.Prometheus.Enabled {
-		_, err = httpServe(cfg.Pprof.Listen)
+		httpStop, err = httpServe(cfg.Pprof.Listen)
 		if err != nil {
 			mainLogger.Fatal(err.Error())
 		}
@@ -225,10 +245,30 @@ func main() {
 		mainLogger.Info("started")
 	}
 
+	// A supervisor may let the next instance start once this one holds no
+	// listener, lock, or unsynchronized file other than the read socket it
+	// hands over. DumpStop returns early with listeners open on failure.
+	var released bool
+	releaseToSupervisor := func() {
+		httpStop()
+		mainLogger.Info("releasing to supervisor")
+		if err := release(); err != nil {
+			mainLogger.Error("supervisor release failed", zap.Error(err))
+		}
+		released = true
+	}
+	if release != nil && cfg.Dump.Enabled {
+		// Runs inside DumpStop, which hands off only without tags or a
+		// shared store, so there is no other state to release first.
+		app.SetReadHandoff(successorBinary(), releaseToSupervisor)
+	}
 	go func() {
 		for {
 			<-stopSignals
-			app.DumpStop()
+			if err := app.DumpStop(); err == nil && release != nil && cfg.Dump.Enabled && !released {
+				app.ReleaseForHandoff()
+				releaseToSupervisor()
+			}
 			os.Exit(0)
 		}
 	}()

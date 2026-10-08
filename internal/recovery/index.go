@@ -34,16 +34,40 @@ type record struct{ offset, length, previous uint64 }
 // written. Separate chains preserve cache-before-input replay order even when
 // the two writers run concurrently and their records interleave.
 type Builder struct {
-	mu      sync.Mutex
-	heads   map[string]heads
-	records [2][]record
-	sizes   [2]uint64
-	points  uint64
-	known   func(string) bool
+	mu       sync.Mutex
+	heads    map[string]heads
+	records  [2][]record
+	sizes    [2]uint64
+	points   uint64
+	newKnown func() func(string) bool
+	workers  int
 }
 
+// NewBuilder classifies names serially with known, which need not be safe for
+// concurrent use.
 func NewBuilder(known func(string) bool) *Builder {
-	return &Builder{heads: make(map[string]heads), known: known}
+	b := &Builder{heads: make(map[string]heads), workers: 1}
+	if known != nil {
+		b.newKnown = func() func(string) bool { return known }
+	}
+	return b
+}
+
+// NewConcurrentBuilder hashes and classifies names on up to workers goroutines.
+// newKnown is called once per worker; each returned function is used serially.
+func NewConcurrentBuilder(newKnown func() func(string) bool, workers int) *Builder {
+	return &Builder{heads: make(map[string]heads), newKnown: newKnown, workers: max(workers, 1)}
+}
+
+// Reserve sizes the tables for an expected number of metrics before writers
+// start, so growing them cannot stall the cache dump. It is only a hint.
+func (b *Builder) Reserve(metrics int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.heads) == 0 && metrics > 0 {
+		b.heads = make(map[string]heads, metrics)
+		b.records[0] = make([]record, 0, metrics)
+	}
 }
 
 // Add must be called only after a complete record was successfully written.
@@ -94,19 +118,24 @@ func (b *Builder) Write(w io.Writer) error {
 	for uint64(len(b.heads))*4 > slots*3 {
 		slots *= 2
 	}
+	names := make([]string, 0, len(b.heads))
+	for name := range b.heads {
+		names = append(names, name)
+	}
+	// Classifying names is optional checkpoint work. Do it only after the
+	// ordinary cache and WAL files are complete and synchronized, so a slow
+	// catalogue lookup cannot delay the authoritative recovery dump.
+	hashes, isNew := b.classify(names)
 	table := make([]byte, slots*slotSize)
 	var newSlots []uint64
-	for name, h := range b.heads {
-		hash := xxhash.Sum64String(name)
-		slot := hash & (slots - 1)
+	for i, name := range names {
+		h := b.heads[name]
+		slot := hashes[i] & (slots - 1)
 		for get64(table, slot*slotSize+8) != 0 || get64(table, slot*slotSize+16) != 0 {
 			slot = (slot + 1) & (slots - 1)
 		}
-		put64(table[slot*slotSize:], hash, h.cache, h.wal, h.count)
-		// Classifying names is optional checkpoint work. Do it only after the
-		// ordinary cache and WAL files are complete and synchronized, so a slow
-		// catalogue lookup cannot delay the authoritative recovery dump.
-		if b.known != nil && !b.known(name) {
+		put64(table[slot*slotSize:], hashes[i], h.cache, h.wal, h.count)
+		if isNew != nil && isNew[i] {
 			newSlots = append(newSlots, slot)
 		}
 	}
@@ -136,6 +165,38 @@ func (b *Builder) Write(w io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// classify hashes every name and, with a catalogue, marks names it lacks.
+// Contiguous chunks keep each worker's lookups independent of the others.
+func (b *Builder) classify(names []string) ([]uint64, []bool) {
+	hashes := make([]uint64, len(names))
+	var isNew []bool
+	if b.newKnown != nil {
+		isNew = make([]bool, len(names))
+	}
+	workers := min(b.workers, max(len(names)/4096, 1))
+	chunk := (len(names) + workers - 1) / workers
+	var wg sync.WaitGroup
+	for start := 0; start < len(names); start += chunk {
+		end := min(start+chunk, len(names))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var known func(string) bool
+			if isNew != nil {
+				known = b.newKnown()
+			}
+			for i := start; i < end; i++ {
+				hashes[i] = xxhash.Sum64String(names[i])
+				if known != nil {
+					isNew[i] = !known(names[i])
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return hashes, isNew
 }
 
 // Index borrows immutable, checksum-validated source/index buffers. Its owner
