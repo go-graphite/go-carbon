@@ -75,6 +75,11 @@ func main() {
 
 	flag.Parse()
 
+	release, err := supervisedRelease()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	if *printVersion {
 		fmt.Println(Version)
 		fmt.Println(BuildVersion)
@@ -135,6 +140,13 @@ func main() {
 		return
 	}
 
+	if cfg.Dump.HandoffSupervisor && release == nil {
+		if *isDaemon {
+			log.Fatal("dump.handoff-supervisor is not supported with -daemon")
+		}
+		os.Exit(runSupervisor())
+	}
+
 	for i := 0; i < len(cfg.Logging); i++ {
 		if err := zapwriter.PrepareFileForUser(cfg.Logging[i].File, runAsUser); err != nil {
 			log.Fatal(err)
@@ -185,9 +197,9 @@ func main() {
 	/* CONFIG end */
 
 	// pprof
-	// httpStop := func() {}
+	httpStop := func() {}
 	if cfg.Pprof.Enabled || cfg.Prometheus.Enabled {
-		_, err = httpServe(cfg.Pprof.Listen)
+		httpStop, err = httpServe(cfg.Pprof.Listen)
 		if err != nil {
 			mainLogger.Fatal(err.Error())
 		}
@@ -228,7 +240,18 @@ func main() {
 	go func() {
 		for {
 			<-stopSignals
-			app.DumpStop()
+			// A supervisor may let the next instance start once this one holds
+			// no listener, lock, or unsynchronized file. DumpStop returns early
+			// with listeners still open on failure, so release only on success.
+			if err := app.DumpStop(); err == nil && release != nil && cfg.Dump.Enabled {
+				httpStop()
+				app.ReleaseForHandoff()
+				// The supervisor's exit may kill this process at once.
+				mainLogger.Info("releasing to supervisor")
+				if err = release(); err != nil {
+					mainLogger.Error("supervisor release failed", zap.Error(err))
+				}
+			}
 			os.Exit(0)
 		}
 	}()

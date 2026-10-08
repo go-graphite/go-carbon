@@ -155,6 +155,24 @@ func (app *App) DumpStop() error {
 	return nil
 }
 
+// ReleaseForHandoff closes state another instance would lock or treat as
+// corrupt if still held, after a successful DumpStop. The process must then exit
+// without touching persistence; its remaining teardown is memory only.
+func (app *App) ReleaseForHandoff() {
+	app.Lock()
+	defer app.Unlock()
+	if app.Tags != nil {
+		app.Tags.Stop()
+		app.Tags = nil
+	}
+	if app.MetricStore != nil {
+		if err := app.MetricStore.Close(); err != nil {
+			zapwriter.Logger("dump").Error("close shared storage", zap.Error(err))
+		}
+		app.MetricStore = nil
+	}
+}
+
 // checkpointWorkers bounds catalogue classification so reads, which remain
 // available during the checkpoint, keep most of the host's CPU.
 func checkpointWorkers() int {
