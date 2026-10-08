@@ -182,6 +182,9 @@ github.com/getsentry/sentry-go/internal/otel/baggage
 github.com/getsentry/sentry-go/internal/otel/baggage/internal/baggage
 github.com/getsentry/sentry-go/internal/ratelimit
 github.com/getsentry/sentry-go/internal/traceparser
+# github.com/go-faster/city v1.0.1
+## explicit; go 1.17
+github.com/go-faster/city
 # github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed
 ## explicit
 github.com/go-graphite/carbonzipper/zipper/httpHeaders

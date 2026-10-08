@@ -335,7 +335,7 @@ func (s *indexSnapshot) lowerBound(key []byte) (uint64, error) {
 		defer i.Close()
 	}
 	if errors.Is(err, vellum.ErrIteratorDone) {
-		return s.metadata.count, nil
+		return uint64(s.index.Len()), nil
 	}
 	if err != nil {
 		return 0, err

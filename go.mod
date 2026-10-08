@@ -37,6 +37,7 @@ require (
 	github.com/blevesearch/mmap-go v1.2.0
 	github.com/blevesearch/vellum v1.2.0
 	github.com/cockroachdb/pebble v1.1.5
+	github.com/go-faster/city v1.0.1
 	github.com/greatroar/blobloom v0.8.1
 	github.com/zeebo/xxh3 v1.1.0
 	golang.org/x/net v0.59.0
@@ -68,7 +69,7 @@ require (
 	cloud.google.com/go/iam v1.12.0 // indirect
 	cloud.google.com/go/pubsub/v2 v2.6.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/eapache/go-resiliency v1.7.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect

@@ -538,6 +538,7 @@ stats-percentiles = [99, 98, 95, 75, 50]
 #     "/metrics/find/"
 #     "/metrics/list/"
 #     "/metrics/list_query/"
+#     "/metrics/namespace-hashes/"
 #     "/metrics/details/"
 #     "/render/"
 #     "/info/"
