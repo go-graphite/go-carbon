@@ -56,10 +56,6 @@ func (h *writeLagHistogram) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstHistogramWithCreatedTimestamp(h.desc, count, sum, buckets, h.created)
 }
 
-func (h *writeLagHistogram) observeDuration(lag time.Duration) {
-	h.observeValue(lag.Seconds())
-}
-
 func (h *writeLagHistogram) observePoints(points []*whisper.TimeSeriesPoint, now time.Time) {
 	if len(points) == 0 {
 		return
@@ -84,16 +80,6 @@ func (h *writeLagHistogram) observePoints(points []*whisper.TimeSeriesPoint, now
 		}
 	}
 	h.merge(uint64(len(points)), sum, &buckets, minBucket, maxBucket)
-}
-
-func (h *writeLagHistogram) observeValue(value float64) {
-	var buckets [writeLagHistogramBucketCount]uint64
-	minBucket, maxBucket := writeLagHistogramBucketCount, -1
-	if bucket := sort.SearchFloat64s(h.bounds, value); bucket < len(h.bounds) {
-		buckets[bucket] = 1
-		minBucket, maxBucket = bucket, bucket
-	}
-	h.merge(1, value, &buckets, minBucket, maxBucket)
 }
 
 func (h *writeLagHistogram) merge(count uint64, sum float64, buckets *[writeLagHistogramBucketCount]uint64, minBucket, maxBucket int) {

@@ -32,7 +32,8 @@ func TestPrometheusPersisterReplacement(t *testing.T) {
 			for i := 1; i <= 3; i++ {
 				p := new(Whisper)
 				p.InitPrometheus(registerer)
-				p.prometheus.outOfOrderWriteLag(time.Duration(i) * time.Second)
+				p.prometheus.outOfOrderWriteLags.observePoints(
+					[]*whisper.TimeSeriesPoint{{Time: 0}}, time.Unix(int64(i), 0))
 				families, err := registry.Gather()
 				if err != nil {
 					t.Fatal(err)
@@ -191,29 +192,6 @@ func TestPrometheusPersisterBatch(t *testing.T) {
 	maxSum := 2 * after.Sub(time.Unix(base, 0)).Seconds()
 	if sum := histogram.GetSampleSum(); sum < minSum-1e-12 || sum > maxSum+1e-12 {
 		t.Fatalf("sample sum = %v, want [%v, %v]", sum, minSum, maxSum)
-	}
-}
-
-func TestPrometheusPersisterStandardHistogramFallback(t *testing.T) {
-	registry := prometheus.NewPedanticRegistry()
-	standard := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    "out_of_order_write_lag_exp",
-		Help:    "Lag for incoming datapoints (exponential buckets)",
-		Buckets: writeLagHistogramBuckets,
-	})
-	registry.MustRegister(standard)
-
-	p := new(Whisper)
-	p.InitPrometheus(registry)
-	if p.prometheus.outOfOrderWriteLagHistogram != nil {
-		t.Fatal("private histogram replaced a pre-registered standard histogram")
-	}
-	p.registerOutOfOrderWriteLags([]*whisper.TimeSeriesPoint{{Time: int(time.Now().Unix())}})
-	p.prometheus.outOfOrderWriteLag(time.Second)
-
-	_, histogram := gatherOneHistogram(t, registry)
-	if got := histogram.GetSampleCount(); got != 2 {
-		t.Fatalf("fallback sample count = %d, want 2", got)
 	}
 }
 

@@ -108,10 +108,8 @@ type Whisper struct {
 
 // NewWhisper create instance of Whisper
 type whisperPrometheus struct {
-	enabled                     bool
-	outOfOrderWriteLags         prometheus.Histogram
-	outOfOrderWriteLagHistogram *writeLagHistogram
-	outOfOrderWriteLag          func(time.Duration)
+	enabled             bool
+	outOfOrderWriteLags *writeLagHistogram
 }
 
 func NewWhisper(
@@ -142,30 +140,19 @@ func NewWhisper(
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
 	histogram := newWriteLagHistogram()
 	p.prometheus = whisperPrometheus{
-		enabled:                     true,
-		outOfOrderWriteLagHistogram: histogram,
+		enabled:             true,
+		outOfOrderWriteLags: histogram,
 	}
 	if err := reg.Register(histogram); err != nil {
 		var registered prometheus.AlreadyRegisteredError
 		if !errors.As(err, &registered) {
 			panic(err)
 		}
-		switch existing := registered.ExistingCollector.(type) {
-		case *writeLagHistogram:
-			p.prometheus.outOfOrderWriteLagHistogram = existing
-		case prometheus.Histogram:
-			p.prometheus.outOfOrderWriteLagHistogram = nil
-			p.prometheus.outOfOrderWriteLags = existing
-		default:
+		existing, ok := registered.ExistingCollector.(*writeLagHistogram)
+		if !ok {
 			panic(err)
 		}
-	}
-	p.prometheus.outOfOrderWriteLag = func(t time.Duration) {
-		if histogram := p.prometheus.outOfOrderWriteLagHistogram; histogram != nil {
-			histogram.observeDuration(t)
-			return
-		}
-		p.prometheus.outOfOrderWriteLags.Observe(t.Seconds())
+		p.prometheus.outOfOrderWriteLags = existing
 	}
 }
 
@@ -273,15 +260,7 @@ func (p *Whisper) registerOutOfOrderWriteLags(points []*whisper.TimeSeriesPoint)
 	if !p.prometheus.enabled {
 		return
 	}
-	now := time.Now()
-	if histogram := p.prometheus.outOfOrderWriteLagHistogram; histogram != nil {
-		histogram.observePoints(points, now)
-		return
-	}
-	for _, point := range points {
-		lag := now.Sub(time.Unix(int64(point.Time), 0))
-		p.prometheus.outOfOrderWriteLag(lag)
-	}
+	p.prometheus.outOfOrderWriteLags.observePoints(points, time.Now())
 }
 func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.TimeSeriesPoint) (err error) {
 	defer func() {
