@@ -22,11 +22,16 @@ import (
 )
 
 // namespaceHashesOracle follows events_generate_metric_hashes.pl: read the full
-// metric list, strip the prefix, select "<namespace>." names, then write each
-// namespace's name count and sorted unique CityHash64 values.
+// metric list, strip the prefix, assign each name to its longest enabled
+// "<namespace>." prefix (Regexp::Trie's greedy optional suffixes), then write
+// each namespace's name count and sorted unique CityHash64 values.
 func namespaceHashesOracle(names []string, prefix string, enabled []string) []byte {
 	if prefix != "" && !strings.HasSuffix(prefix, ".") {
 		prefix += "."
+	}
+	enabledSet := make(map[string]bool)
+	for _, ns := range enabled {
+		enabledSet[ns] = true
 	}
 	groups := make(map[string][]uint64)
 	for _, name := range names {
@@ -34,8 +39,14 @@ func namespaceHashesOracle(names []string, prefix string, enabled []string) []by
 		if !ok {
 			continue
 		}
-		if ns, _, ok := strings.Cut(rest, "."); ok && ns != "" {
-			groups[ns] = append(groups[ns], city.Hash64([]byte(rest)))
+		match := ""
+		for i := range len(rest) {
+			if rest[i] == '.' && (enabled == nil && i > 0 && !strings.Contains(rest[:i], ".") || enabledSet[rest[:i]]) {
+				match = rest[:i]
+			}
+		}
+		if match != "" {
+			groups[match] = append(groups[match], city.Hash64([]byte(rest)))
 		}
 	}
 	if enabled == nil {
@@ -200,13 +211,46 @@ func TestNamespaceHashesMatchesMetricList(t *testing.T) {
 	}
 }
 
-func TestNamespaceHashesRejectsDottedNamespace(t *testing.T) {
+func TestNamespaceHashesDottedNamespaces(t *testing.T) {
+	names := []string{
+		"p.a.x", "p.a.y.z", "p.a.b.c", "p.a.b.d.e", "p.a.b.d.f", "p.a.bc.x",
+		"p.a.b", "p.c.d.e", "p.c.x", "p.e.f.g", "q.a.b.c",
+	}
 	ti := newTrie(".wsp", 0, nil)
-	ti.snapshot = namespaceHashesSnapshot(t, []string{"p.a.b"})
+	ti.snapshot = namespaceHashesSnapshot(t, names)
+	for _, name := range []string{"p.a.b.new", "p.a.new", "p.c.d.new", "p.new.x.y"} {
+		if _, err := ti.insertMutable("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
 	_, server := namespaceHashesServer(t, ti)
-	body := "a\nb.c\n"
-	if code, _ := requestNamespaceHashes(t, server, "p.", &body); code != http.StatusBadRequest {
-		t.Fatalf("status %d, want 400", code)
+	plain := newTrie(".wsp", 0, nil)
+	for _, name := range append(names, "p.a.b.new", "p.a.new", "p.c.d.new", "p.new.x.y") {
+		if _, err := plain.insertMutable("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, plainServer := namespaceHashesServer(t, plain)
+	all := ti.allMetrics('.')
+	for _, enabled := range [][]string{
+		{"a", "a.b"},          // a.b.* only in a.b
+		{"a", "a.b", "a.b.d"}, // nested chain
+		{"a.b", "c"},          // dotted without its top
+		{"a.b.", "a", "e", "new"},
+		{"c.d", "a.bc", "zz.y"},
+	} {
+		body := strings.Join(enabled, "\n") + "\n"
+		trimmed := make([]string, len(enabled))
+		for i, ns := range enabled {
+			trimmed[i] = strings.TrimRight(ns, ".")
+		}
+		want := namespaceHashesOracle(all, "p.", trimmed)
+		for label, srv := range map[string]*httptest.Server{"snapshot": server, "trie": plainServer} {
+			code, got := requestNamespaceHashes(t, srv, "p.", &body)
+			if code != http.StatusOK || !bytes.Equal(got[13:], want[13:]) {
+				t.Errorf("%s %q: status %d, response differs from metric list oracle", label, enabled, code)
+			}
+		}
 	}
 }
 

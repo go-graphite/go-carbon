@@ -42,8 +42,6 @@ const maxNamespaceHashesRequestBody = 16 << 20
 // Smaller generations are hashed by a single iterator.
 var namespaceHashesSplitMin uint64 = 1_000_000
 
-var errDottedNamespace = errors.New("namespaces must not contain '.'")
-
 type namespaceHashes struct {
 	names  []string
 	counts []uint64
@@ -247,7 +245,7 @@ func namesNamespaceHashes(names []string, prefix string) *namespaceHashes {
 
 // parseHashNamespaces reads the requested namespaces one per line, trimmed as
 // the hash generator trims its enabled namespace list.
-func parseHashNamespaces(body []byte) (map[string]bool, error) {
+func parseHashNamespaces(body []byte) map[string]bool {
 	namespaces := make(map[string]bool)
 	for line := range strings.Lines(string(body)) {
 		ns := strings.TrimLeftFunc(line, unicode.IsSpace)
@@ -255,12 +253,9 @@ func parseHashNamespaces(body []byte) (map[string]bool, error) {
 		if ns == "" {
 			continue
 		}
-		if strings.IndexByte(ns, '.') >= 0 {
-			return nil, fmt.Errorf("%w: %q", errDottedNamespace, ns)
-		}
 		namespaces[ns] = true
 	}
-	return namespaces, nil
+	return namespaces
 }
 
 // writeNamespaceHashes merges the snapshot base with the mutable overlay.
@@ -316,6 +311,22 @@ func writeNamespaceHashes(w io.Writer, base, overlay *namespaceHashes, include m
 	return namespaces, err
 }
 
+// mergeNamespaceHashSets combines sets with disjoint namespace names.
+func mergeNamespaceHashSets(a, b *namespaceHashes) *namespaceHashes {
+	out := &namespaceHashes{}
+	i, j := 0, 0
+	for i < len(a.names) || j < len(b.names) {
+		if j >= len(b.names) || i < len(a.names) && a.names[i] < b.names[j] {
+			out.names, out.counts, out.hashes = append(out.names, a.names[i]), append(out.counts, a.counts[i]), append(out.hashes, a.hashes[i])
+			i++
+		} else {
+			out.names, out.counts, out.hashes = append(out.names, b.names[j]), append(out.counts, b.counts[j]), append(out.hashes, b.hashes[j])
+			j++
+		}
+	}
+	return out
+}
+
 func mergeUniqueHashes(a, b []uint64, emit func(uint64)) {
 	var last uint64
 	first := true
@@ -333,22 +344,22 @@ func mergeUniqueHashes(a, b []uint64, emit func(uint64)) {
 	}
 }
 
-func (listener *CarbonserverListener) currentNamespaceHashes(prefix string) (base, overlay *namespaceHashes, err error) {
+// currentNamespaceHashes returns the per-namespace base for the current index
+// and the full names of metrics absent from it: the mutable overlay, or every
+// metric when there is no snapshot.
+func (listener *CarbonserverListener) currentNamespaceHashes(prefix string) (*namespaceHashes, []string, *indexSnapshot, error) {
 	fidx := listener.CurrentFileIndex()
 	if fidx == nil {
-		return nil, nil, errMetricsListEmpty
+		return nil, nil, nil, errMetricsListEmpty
 	}
 	ti := fidx.trieIdx
 	if !listener.trieIndex || ti == nil || ti.snapshot == nil {
 		names, err := listener.getMetricsList()
-		if err != nil {
-			return nil, nil, err
-		}
-		return namesNamespaceHashes(names, prefix), &namespaceHashes{}, nil
+		return &namespaceHashes{}, names, nil, err
 	}
-	base, err = ti.snapshot.namespaceHashes(prefix)
+	base, err := ti.snapshot.namespaceHashes(prefix)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	// Remember only retained prefixes, so arbitrary request prefixes cannot
 	// grow the prewarm set beyond the per-snapshot cache limit.
@@ -360,7 +371,88 @@ func (listener *CarbonserverListener) currentNamespaceHashes(prefix string) (bas
 	if dir := ti.mutableDirectory(name); dir != nil {
 		names, _, _, _, _ = ti.allMetricsNodeMutable(dir, '.', name, int(^uint(0)>>1), false)
 	}
-	return base, namesNamespaceHashes(names, prefix), nil
+	return base, names, ti.snapshot, nil
+}
+
+// The hash generator assigns each metric to its longest enabled namespace
+// prefix, so with "a" and "a.b" enabled "a.b.x" belongs only to "a.b". Cached
+// hashes are grouped by first component; a requested dotted namespace makes
+// its whole first-component group "affected", recomputed from its metrics.
+func affectedNamespaceTops(include map[string]bool) map[string]bool {
+	var tops map[string]bool
+	for ns := range include {
+		if top, _, dotted := strings.Cut(ns, "."); dotted {
+			if tops == nil {
+				tops = make(map[string]bool)
+			}
+			tops[top] = true
+		}
+	}
+	return tops
+}
+
+func withoutNamespaceTops(h *namespaceHashes, tops map[string]bool) *namespaceHashes {
+	if len(tops) == 0 {
+		return h
+	}
+	out := &namespaceHashes{}
+	for i, name := range h.names {
+		if !tops[name] {
+			out.names = append(out.names, name)
+			out.counts = append(out.counts, h.counts[i])
+			out.hashes = append(out.hashes, h.hashes[i])
+		}
+	}
+	return out
+}
+
+// longestMatchNamespaceHashes hashes metric names (prefix removed) below the
+// affected tops into their longest enabled namespace.
+func longestMatchNamespaceHashes(s *indexSnapshot, prefix string, names []string, tops, include map[string]bool) (*namespaceHashes, error) {
+	index := make(map[string]int)
+	var segments []namespaceHashSegment
+	add := func(rest string) {
+		match := ""
+		for i := 0; i < len(rest); i++ {
+			if rest[i] == '.' && include[rest[:i]] {
+				match = rest[:i]
+			}
+		}
+		if match == "" {
+			return
+		}
+		j, ok := index[match]
+		if !ok {
+			j = len(segments)
+			index[match] = j
+			segments = append(segments, namespaceHashSegment{name: match})
+		}
+		segments[j].hashes = append(segments[j].hashes, city.Hash64([]byte(rest)))
+	}
+	name, strip := namespaceHashesPrefix(prefix)
+	for _, metric := range names {
+		if strip > 0 && (len(metric) <= strip || metric[strip-1] != '.' || metric[:strip-1] != name) {
+			continue
+		}
+		if top, _, ok := strings.Cut(metric[strip:], "."); ok && tops[top] {
+			add(metric[strip:])
+		}
+	}
+	if s != nil {
+		for top := range tops {
+			ns := top
+			if name != "" {
+				ns = name + "." + top
+			}
+			if err := s.walkNamespace(ns, func(metric string, _ uint64) bool {
+				add(metric[strip:])
+				return true
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return newNamespaceHashes(segments, 1), nil
 }
 
 // prewarmNamespaceHashes computes hashes for previously requested prefixes as
@@ -403,9 +495,7 @@ func (listener *CarbonserverListener) namespaceHashesHandler(wr http.ResponseWri
 	var include map[string]bool
 	if req.Method == http.MethodPost {
 		body, err := io.ReadAll(http.MaxBytesReader(wr, req.Body, maxNamespaceHashesRequestBody))
-		if err == nil {
-			include, err = parseHashNamespaces(body)
-		}
+		include = parseHashNamespaces(body)
 		if err != nil {
 			fail(http.StatusBadRequest, "invalid namespace list", err)
 			return
@@ -415,7 +505,20 @@ func (listener *CarbonserverListener) namespaceHashesHandler(wr http.ResponseWri
 		return
 	}
 
-	base, overlay, err := listener.currentNamespaceHashes(prefix)
+	base, names, snapshot, err := listener.currentNamespaceHashes(prefix)
+	var overlay *namespaceHashes
+	if err == nil {
+		tops := affectedNamespaceTops(include)
+		base = withoutNamespaceTops(base, tops)
+		overlay = withoutNamespaceTops(namesNamespaceHashes(names, prefix), tops)
+		if len(tops) > 0 {
+			var affected *namespaceHashes
+			affected, err = longestMatchNamespaceHashes(snapshot, prefix, names, tops, include)
+			if err == nil {
+				overlay = mergeNamespaceHashSets(overlay, affected)
+			}
+		}
+	}
 	if err != nil {
 		fail(http.StatusInternalServerError, "can't compute namespace hashes", err)
 		return
