@@ -211,9 +211,13 @@ type snapshotMetricRange struct {
 // namespaceRange. Probe prefix boundaries to split skewed namespaces without a
 // preliminary traversal of every metric or changes to the saved index format.
 func (s *indexSnapshot) metricListRanges(workers int) []snapshotMetricRange {
+	return s.splitMetricRange(snapshotMetricRange{[]byte{0}, []byte{1}, 0, s.index.Len()}, workers)
+}
+
+func (s *indexSnapshot) splitMetricRange(whole snapshotMetricRange, workers int) []snapshotMetricRange {
 	defer runtime.KeepAlive(s)
-	ranges := []snapshotMetricRange{{[]byte{0}, []byte{1}, 0, s.index.Len()}}
-	limit := max(s.index.Len()/(workers*2), 1)
+	ranges := []snapshotMetricRange{whole}
+	limit := max((whole.last-whole.first)/(workers*2), 1)
 	for len(ranges) < 256 {
 		largest := 0
 		for i := range ranges {
@@ -638,6 +642,7 @@ func (u *fileListUpdate) replaceSnapshot() {
 	}
 	u.listener.drainRealtimeMetrics(next)
 	u.trieIdx = next
+	u.listener.prewarmNamespaceHashes(snapshot)
 	u.metricsKnown = snapshot.manifest.Records + uint64(next.fileCount)
 }
 

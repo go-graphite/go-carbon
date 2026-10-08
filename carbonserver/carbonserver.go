@@ -75,6 +75,7 @@ type metricStruct struct {
 	FindZero                             uint64
 	InfoRequests                         uint64
 	ListRequests                         uint64
+	NamespaceHashesRequests              uint64
 	ListQueryRequests                    uint64
 	DetailsRequests                      uint64
 	CacheHit                             uint64
@@ -289,6 +290,9 @@ type CarbonserverListener struct {
 	metricStoreIndexMu sync.Mutex
 	sharedRequestMu    sync.RWMutex
 	sharedStoreStopped bool
+
+	// Prefixes requested from /metrics/namespace-hashes/, prewarmed per snapshot.
+	namespaceHashPrefixes sync.Map
 
 	metrics       *metricStruct
 	requestsTimes requestsTimes
@@ -1972,6 +1976,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("find_requests", &listener.metrics.FindRequests, send)
 	sender("find_zero", &listener.metrics.FindZero, send)
 	sender("list_requests", &listener.metrics.ListRequests, send)
+	sender("namespace_hashes_requests", &listener.metrics.NamespaceHashesRequests, send)
 	sender("details_requests", &listener.metrics.DetailsRequests, send)
 	sender("cache_hit", &listener.metrics.CacheHit, send)
 	sender("cache_miss", &listener.metrics.CacheMiss, send)
@@ -2410,6 +2415,7 @@ func (listener *CarbonserverListener) newHTTPMux() *http.ServeMux {
 	mux.HandleFunc("/metrics/find/", wrap(listener.findHandler, statusCodes["find"]))
 	mux.HandleFunc("/metrics/list/", wrap(listener.listHandler, statusCodes["list"]))
 	mux.HandleFunc("/metrics/list_query/", wrap(listener.listQueryHandler, statusCodes["list"]))
+	mux.HandleFunc("/metrics/namespace-hashes/", wrap(listener.namespaceHashesHandler, statusCodes["list"]))
 	mux.HandleFunc("/metrics/details/", wrap(listener.detailsHandler, statusCodes["details"]))
 	mux.HandleFunc("/render/", wrap(listener.renderHandler, statusCodes["render"]))
 	mux.HandleFunc("/info/", wrap(listener.infoHandler, statusCodes["info"]))

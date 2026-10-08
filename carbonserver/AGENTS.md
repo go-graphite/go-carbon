@@ -17,6 +17,7 @@ This is the largest package in go-carbon.
 | `find.go` | `/metrics/find/` endpoint — glob-based metric discovery. |
 | `render.go` | `/render/` endpoint — fetches time-series data for matched metrics. |
 | `list.go` | `/metrics/list/` endpoint — enumerates all known metrics. |
+| `namespace_hashes.go` | `/metrics/namespace-hashes/` endpoint — per-namespace metric counts and CityHash64 lists (NamespaceHashesFile format), computed once per snapshot generation. |
 | `details.go` | `/metrics/details/` endpoint — returns metric metadata. |
 | `info.go` | `/metrics/info/` endpoint — returns whisper file info (retentions, aggregation). |
 | `fetchfromdisk.go` | Reads data points from `.wsp` whisper files on disk. |

@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -334,6 +335,9 @@ type indexSnapshot struct {
 	indexMap, metadataMap mmap.MMap
 	index                 *vellum.FST
 	metadata              *snapshotMetadata
+	// Namespace hashes computed for this generation, keyed by request prefix.
+	hashes       sync.Map
+	hashesCached atomic.Int32
 }
 
 func mapSnapshotFile(dir string, expected snapshotFile) (_ mmap.MMap, err error) {
