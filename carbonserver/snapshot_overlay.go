@@ -290,7 +290,10 @@ func (l *CarbonserverListener) RecoveryIndexID() string {
 	return index.trieIdx.recoveryID
 }
 
+// insertPendingMetric adds a name the checkpoint classified as absent from this
+// exact snapshot generation (the caller matched its read-index ID), so the
+// snapshot lookup in insert, ~6µs per name on large hosts, is skipped.
 func (ti *trieIndex) insertPendingMetric(name string) error {
-	_, err := ti.insert("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
+	_, err := ti.insertMutable("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
 	return err
 }
