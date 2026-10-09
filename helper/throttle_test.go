@@ -39,6 +39,13 @@ func TestThrottleChan(t *testing.T) {
 		bw := doTestThrottleTicker(perSecond, time.Second, false)
 		max := float64(perSecond) * 1.10
 		min := float64(perSecond) * 0.90
+		if raceDetector {
+			// The soft throttle sends on time.Ticker ticks, which are dropped
+			// when its goroutine is late. Under the race detector on a shared
+			// CI runner that loses more than a tenth of 1ms ticks; the rate
+			// must still never exceed the limit.
+			min = float64(perSecond) * 0.75
+		}
 		assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
 		assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
 	}
