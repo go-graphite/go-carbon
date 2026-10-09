@@ -271,6 +271,8 @@ func TestDumpDuringPendingRecovery(t *testing.T) {
 	}
 }
 
+// Raw-copied unclaimed records must restore exactly like the decoded ones,
+// each metric once, across any number of parts.
 func TestDumpPendingRangesCoverEachMetricOnce(t *testing.T) {
 	bundle := pendingFixture(t)
 	c := New()
@@ -279,14 +281,27 @@ func TestDumpPendingRangesCoverEachMetricOnce(t *testing.T) {
 	}
 	c.Add(points.OnePoint("metric", 9, 10)) // claimed: must come from the cache instead
 	for _, parts := range []int{1, 2, 3, 7} {
-		seen := map[string]int{}
-		for seg := 0; seg < parts; seg++ {
-			if err := c.DumpPendingRange(seg, parts, func(p *points.Points) error { seen[p.Metric]++; return nil }); err != nil {
-				t.Fatal(err)
-			}
+		path := filepath.Join(t.TempDir(), "dump.bin")
+		w, err := recovery.NewWriter(path, 0, 1<<20, nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(seen, map[string]int{"other": 1}) {
-			t.Fatal("pending parts", parts, seen)
+		if err = w.WriteSegments(parts, func(seg int, out *recovery.Segment) error { return c.DumpPendingRange(seg, parts, out) }); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		got := map[string][]points.Point{}
+		f, _ := os.Open(path)
+		err = points.ReadBinary(f, func(p *points.Points) { got[p.Metric] = append(got[p.Metric], p.Data...) })
+		_ = f.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string][]points.Point{"other": {{Value: 5, Timestamp: 1}, {Value: 6, Timestamp: 2}}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatal("pending parts", parts, got)
 		}
 	}
 }

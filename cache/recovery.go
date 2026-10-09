@@ -210,20 +210,11 @@ func (c *Cache) PendingOutstanding() uint64 {
 // dumpPending writes saved metrics that were never claimed. Callers must have
 // diverted input and stopped RecoverPending, so no claim can race the dump.
 func (c *Cache) dumpPending(write func(*points.Points) error) error {
-	return c.DumpPendingRange(0, 1, write)
-}
-
-// DumpPendingRange writes unclaimed saved metrics of part seg of parts. Parts
-// are disjoint slot ranges, and unclaimed metrics have no cache data, so parts
-// may be encoded concurrently with each other and with DumpShards.
-func (c *Cache) DumpPendingRange(seg, parts int, write func(*points.Points) error) error {
 	r := c.pending.Load()
 	if r == nil {
 		return nil
 	}
-	slots := r.bundle.Slots()
-	lo, hi := slots*uint64(seg)/uint64(parts), slots*uint64(seg+1)/uint64(parts)
-	for slot := lo; slot < hi; slot++ {
+	for slot := uint64(0); slot < r.bundle.Slots(); slot++ {
 		name, found, err := r.bundle.Name(slot)
 		if err != nil {
 			return err
@@ -239,6 +230,31 @@ func (c *Cache) DumpPendingRange(seg, parts int, write func(*points.Points) erro
 			return errors.New("pending recovery metric identity differs")
 		}
 		if err = write(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// DumpPendingRange copies the unclaimed saved metrics of part seg of parts as
+// their original encoded records, without decoding them. Parts are disjoint
+// slot ranges, and unclaimed metrics have no cache data, so parts may be
+// written concurrently with each other and with DumpShards.
+func (c *Cache) DumpPendingRange(seg, parts int, out *recovery.Segment) error {
+	r := c.pending.Load()
+	if r == nil {
+		return nil
+	}
+	slots := r.bundle.Slots()
+	for slot := slots * uint64(seg) / uint64(parts); slot < slots*uint64(seg+1)/uint64(parts); slot++ {
+		name, found, err := r.bundle.Name(slot)
+		if err != nil {
+			return err
+		}
+		if !found || r.isClaimed(slot) {
+			continue
+		}
+		if err = r.bundle.RawRecords(slot, func(raw []byte, count int) error { return out.WriteRaw(name, raw, count) }); err != nil {
 			return err
 		}
 	}

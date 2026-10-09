@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/go-graphite/go-carbon/points"
@@ -34,17 +35,16 @@ type record struct{ offset, length, previous uint64 }
 // written. Separate chains preserve cache-before-input replay order even when
 // the two writers run concurrently and their records interleave.
 //
-// Metrics are numbered in first-seen order. Prepare hashes and classifies a
-// prefix of them without holding the lock, so that work can run while input is
-// still being written; Write then handles only the remainder.
+// Metrics get dense ids in a sharded map, so concurrent dump segments resolve
+// them in parallel; each source then appends its records under its own lock.
+// Prepare hashes and classifies the ids allocated so far without blocking
+// writers, so that work can overlap the dump; Write handles the remainder.
 type Builder struct {
-	mu         sync.Mutex
-	ids        map[string]uint32
-	names      []string
-	heads      []heads
-	records    [2][]record
-	sizes      [2]uint64
-	points     uint64
+	shards     [idShards]idShard
+	next       atomic.Uint32
+	pages      [1 << (32 - pageBits)]atomic.Pointer[entryPage]
+	hint       int
+	src        [2]source
 	newKnown   func() func(string) bool
 	workers    int
 	prepareMu  sync.Mutex
@@ -53,10 +53,36 @@ type Builder struct {
 	classified int
 }
 
+const (
+	idShards = 256
+	pageBits = 16
+)
+
+type idShard struct {
+	mu  sync.Mutex
+	ids map[string]uint32
+	_   [40]byte // keep neighbouring locks off one cache line
+}
+
+// entry fields of one source are written only under that source's lock.
+type entry struct {
+	name                 string
+	cache, wal           uint64
+	cacheCount, walCount uint64
+}
+type entryPage [1 << pageBits]entry
+
+type source struct {
+	mu      sync.Mutex
+	records []record
+	size    uint64
+	points  uint64
+}
+
 // NewBuilder classifies names serially with known, which need not be safe for
 // concurrent use.
 func NewBuilder(known func(string) bool) *Builder {
-	b := &Builder{ids: make(map[string]uint32), workers: 1}
+	b := &Builder{workers: 1}
 	if known != nil {
 		b.newKnown = func() func(string) bool { return known }
 	}
@@ -66,95 +92,93 @@ func NewBuilder(known func(string) bool) *Builder {
 // NewConcurrentBuilder hashes and classifies names on up to workers goroutines.
 // newKnown is called once per worker; each returned function is used serially.
 func NewConcurrentBuilder(newKnown func() func(string) bool, workers int) *Builder {
-	return &Builder{ids: make(map[string]uint32), newKnown: newKnown, workers: max(workers, 1)}
+	return &Builder{newKnown: newKnown, workers: max(workers, 1)}
 }
 
 // Reserve sizes the tables for an expected number of metrics before writers
 // start, so growing them cannot stall the cache dump. It is only a hint.
 func (b *Builder) Reserve(metrics int) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if len(b.names) == 0 && metrics > 0 {
-		b.ids = make(map[string]uint32, metrics)
-		b.names = make([]string, 0, metrics)
-		b.heads = make([]heads, 0, metrics)
-		b.records[0] = make([]record, 0, metrics)
+	if metrics <= 0 || b.next.Load() != 0 {
+		return
 	}
+	b.hint = metrics
+	b.src[0].mu.Lock()
+	if len(b.src[0].records) == 0 {
+		b.src[0].records = make([]record, 0, metrics)
+	}
+	b.src[0].mu.Unlock()
 }
 
-// Add must be called only after a complete record was successfully written.
-func (b *Builder) Add(file int, p *points.Points, size int) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if file < 0 || file > 1 || size <= 0 || len(p.Data) == 0 {
-		return fmt.Errorf("invalid recovery record")
+func (b *Builder) entry(id uint32) *entry {
+	return &b.pages[id>>pageBits].Load()[id&(1<<pageBits-1)]
+}
+
+// ID returns the dense id of metric, allocating one on first use. It is safe
+// for concurrent use.
+func (b *Builder) ID(metric string) (uint32, error) {
+	s := &b.shards[xxhash.Sum64String(metric)&(idShards-1)]
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id, ok := s.ids[metric]; ok {
+		return id, nil
 	}
-	id, ok := b.ids[p.Metric]
-	if !ok {
-		if len(b.names) >= math.MaxUint32 {
-			return fmt.Errorf("too many recovery metrics")
-		}
-		id = uint32(len(b.names))
-		b.ids[p.Metric] = id
-		b.names = append(b.names, p.Metric)
-		b.heads = append(b.heads, heads{})
+	if s.ids == nil {
+		s.ids = make(map[string]uint32, b.hint/idShards)
 	}
-	h := &b.heads[id]
-	previous := h.cache
-	if file == 1 {
-		previous = h.wal
+	id := b.next.Add(1) - 1
+	if id == math.MaxUint32 {
+		return 0, fmt.Errorf("too many recovery metrics")
 	}
-	b.records[file] = append(b.records[file], record{b.sizes[file], uint64(size), previous})
-	b.sizes[file] += uint64(size)
-	if file == 0 {
-		h.cache = uint64(len(b.records[0]))
-	} else {
-		h.wal = uint64(len(b.records[1]))
+	page := &b.pages[id>>pageBits]
+	if page.Load() == nil {
+		page.CompareAndSwap(nil, new(entryPage))
 	}
-	h.count += uint64(len(p.Data))
-	b.points += uint64(len(p.Data))
-	return nil
+	b.entry(id).name = metric
+	s.ids[metric] = id
+	return id, nil
 }
 
 // BatchEntry describes one complete record already written by a segment.
 type BatchEntry struct {
-	Metric string
-	Size   int
-	Count  int
+	ID    uint32
+	Size  int
+	Count int
+}
+
+// Add must be called only after a complete record was successfully written.
+func (b *Builder) Add(file int, p *points.Points, size int) error {
+	if file < 0 || file > 1 || size <= 0 || len(p.Data) == 0 {
+		return fmt.Errorf("invalid recovery record")
+	}
+	id, err := b.ID(p.Metric)
+	if err != nil {
+		return err
+	}
+	return b.AddBatch(file, []BatchEntry{{ID: id, Size: size, Count: len(p.Data)}})
 }
 
 // AddBatch registers consecutive records of one source under a single lock.
 func (b *Builder) AddBatch(file int, entries []BatchEntry) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	if file < 0 || file > 1 {
+		return fmt.Errorf("invalid recovery record")
+	}
+	src := &b.src[file]
+	src.mu.Lock()
+	defer src.mu.Unlock()
 	for _, e := range entries {
-		if file < 0 || file > 1 || e.Size <= 0 || e.Count <= 0 {
+		if e.Size <= 0 || e.Count <= 0 || e.ID >= b.next.Load() {
 			return fmt.Errorf("invalid recovery record")
 		}
-		id, ok := b.ids[e.Metric]
-		if !ok {
-			if len(b.names) >= math.MaxUint32 {
-				return fmt.Errorf("too many recovery metrics")
-			}
-			id = uint32(len(b.names))
-			b.ids[e.Metric] = id
-			b.names = append(b.names, e.Metric)
-			b.heads = append(b.heads, heads{})
-		}
-		h := &b.heads[id]
-		previous := h.cache
+		m := b.entry(e.ID)
+		head, count := &m.cache, &m.cacheCount
 		if file == 1 {
-			previous = h.wal
+			head, count = &m.wal, &m.walCount
 		}
-		b.records[file] = append(b.records[file], record{b.sizes[file], uint64(e.Size), previous})
-		b.sizes[file] += uint64(e.Size)
-		if file == 0 {
-			h.cache = uint64(len(b.records[0]))
-		} else {
-			h.wal = uint64(len(b.records[1]))
-		}
-		h.count += uint64(e.Count)
-		b.points += uint64(e.Count)
+		src.records = append(src.records, record{src.size, uint64(e.Size), *head})
+		src.size += uint64(e.Size)
+		*head = uint64(len(src.records))
+		*count += uint64(e.Count)
+		src.points += uint64(e.Count)
 	}
 	return nil
 }
@@ -164,20 +188,28 @@ func (b *Builder) AddBatch(file int, entries []BatchEntry) error {
 func (b *Builder) Prepare() {
 	b.prepareMu.Lock()
 	defer b.prepareMu.Unlock()
-	b.mu.Lock()
-	start, names := b.classified, b.names[b.classified:]
-	b.mu.Unlock()
-	if len(names) == 0 {
+	// Ids are allocated and named under their shard lock; holding every shard
+	// makes all ids below next fully published.
+	for i := range b.shards {
+		b.shards[i].mu.Lock()
+	}
+	n := int(b.next.Load())
+	for i := range b.shards {
+		b.shards[i].mu.Unlock()
+	}
+	if n == b.classified {
 		return
 	}
+	names := make([]string, n-b.classified)
+	for i := range names {
+		names[i] = b.entry(uint32(b.classified + i)).name
+	}
 	hashes, isNew := b.classify(names)
-	b.mu.Lock()
 	b.hashes = append(b.hashes, hashes...)
 	if isNew != nil {
 		b.isNew = append(b.isNew, isNew...)
 	}
-	b.classified = start + len(names)
-	b.mu.Unlock()
+	b.classified = n
 }
 
 func put64(dst []byte, values ...uint64) {
@@ -189,6 +221,7 @@ func get64(data []byte, offset uint64) uint64 { return binary.LittleEndian.Uint6
 
 // Write serializes a pointer-free open-addressed hash table and record chains.
 // Hashes choose slots only: lookup always compares the complete metric bytes.
+// Writers must have finished.
 func (b *Builder) Write(w io.Writer) error {
 	write := func(data []byte) error {
 		n, err := w.Write(data)
@@ -202,19 +235,25 @@ func (b *Builder) Write(w io.Writer) error {
 	b.Prepare()
 	b.prepareMu.Lock()
 	defer b.prepareMu.Unlock()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.classified != len(b.names) {
+	for i := range b.src {
+		b.src[i].mu.Lock()
+		defer b.src[i].mu.Unlock()
+	}
+	metrics := uint64(b.next.Load())
+	if uint64(b.classified) != metrics {
 		return fmt.Errorf("recovery metrics added during index write")
 	}
 	slots := uint64(2)
-	for uint64(len(b.names))*4 > slots*3 {
+	for metrics*4 > slots*3 {
 		slots *= 2
 	}
-	table, newSlots := buildTable(slots, b.hashes, b.heads, b.isNew, b.workers)
+	table, newSlots := buildTable(slots, b.hashes, func(id uint32) heads {
+		m := b.entry(id)
+		return heads{cache: m.cache, wal: m.wal, count: m.cacheCount + m.walCount}
+	}, b.isNew, b.workers)
 	header := make([]byte, headerSize)
 	copy(header, magic)
-	put64(header[8:], uint64(len(b.records[0])), uint64(len(b.records[1])), slots, uint64(len(b.names)), b.points, b.sizes[0], b.sizes[1], uint64(len(newSlots)))
+	put64(header[8:], uint64(len(b.src[0].records)), uint64(len(b.src[1].records)), slots, metrics, b.src[0].points+b.src[1].points, b.src[0].size, b.src[1].size, uint64(len(newSlots)))
 	if err := write(header); err != nil {
 		return err
 	}
@@ -230,8 +269,8 @@ func (b *Builder) Write(w io.Writer) error {
 		batch = batch[:0]
 		return err
 	}
-	for _, records := range b.records {
-		for _, r := range records {
+	for i := range b.src {
+		for _, r := range b.src[i].records {
 			if err := flush(false); err != nil {
 				return err
 			}
@@ -254,7 +293,7 @@ func (b *Builder) Write(w io.Writer) error {
 // regions and probe only within them; entries that would cross a region end are
 // placed afterwards by a serial pass. Any insertion order yields valid probe
 // chains, so the result answers lookups exactly like a serial build.
-func buildTable(slots uint64, hashes []uint64, hs []heads, isNew []bool, workers int) ([]byte, []uint64) {
+func buildTable(slots uint64, hashes []uint64, get func(uint32) heads, isNew []bool, workers int) ([]byte, []uint64) {
 	table := make([]byte, slots*slotSize)
 	regions := uint64(1)
 	for int(regions) < workers && regions*2 <= slots/4096 {
@@ -270,7 +309,8 @@ func buildTable(slots uint64, hashes []uint64, hs []heads, isNew []bool, workers
 		return get64(table, slot*slotSize+8) == 0 && get64(table, slot*slotSize+16) == 0
 	}
 	place := func(id uint32, slot uint64) uint64 {
-		put64(table[slot*slotSize:], hashes[id], hs[id].cache, hs[id].wal, hs[id].count)
+		h := get(id)
+		put64(table[slot*slotSize:], hashes[id], h.cache, h.wal, h.count)
 		return slot
 	}
 	deferred := make([][]uint32, regions)
@@ -547,6 +587,43 @@ func (in *Index) Find(metric string) (uint64, bool, error) {
 		slot = (slot + 1) & (in.slots - 1)
 	}
 	return 0, false, fmt.Errorf("recovery hash table has no empty slot")
+}
+
+// RawRecords visits slot's records in replay order (cache chain, then WAL
+// chain) as their exact encoded bytes, each with its point count. The bytes
+// borrow the mapped source.
+func (in *Index) RawRecords(slot uint64, visit func(raw []byte, count int) error) error {
+	if slot >= in.slots {
+		return fmt.Errorf("invalid recovery slot number")
+	}
+	_, h := in.slot(slot)
+	if h.count == 0 {
+		return nil
+	}
+	var chain []uint64
+	for file, head := range []uint64{h.cache, h.wal} {
+		chain = chain[:0]
+		for id := head; id != 0; id = in.record(file, id).previous {
+			chain = append(chain, id)
+		}
+		for i := len(chain) - 1; i >= 0; i-- {
+			r := in.record(file, chain[i])
+			raw := in.source[file][r.offset : r.offset+r.length]
+			name, err := recordMetric(raw)
+			if err != nil {
+				return err
+			}
+			_, n := binary.Varint(raw)
+			count, m := binary.Varint(raw[n+len(name):])
+			if m <= 0 || count <= 0 {
+				return fmt.Errorf("invalid recovery record point count")
+			}
+			if err = visit(raw, int(count)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (in *Index) Read(slot uint64) (*points.Points, error) {

@@ -209,7 +209,7 @@ func TestWriteSegmentsMatchesSerial(t *testing.T) {
 			t.Fatal(err)
 		}
 		if parallel {
-			err = w.WriteSegments(segments, metrics)
+			err = w.WriteSegments(segments, func(seg int, out *Segment) error { return metrics(seg, out.WritePoints) })
 		} else {
 			for seg := 0; seg < segments && err == nil; seg++ {
 				err = metrics(seg, w.WritePoints)
@@ -236,7 +236,32 @@ func TestWriteSegmentsMatchesSerial(t *testing.T) {
 	if !bytes.Equal(sd, pd) || len(sd) == 0 {
 		t.Fatal("segmented dump bytes differ")
 	}
-	if !bytes.Equal(si, pi) {
-		t.Fatal("segmented dump index differs")
+	// Ids are assigned concurrently, so colliding slots may be ordered
+	// differently; every lookup must still answer identically.
+	sx, err := Open(si, sd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	px, err := Open(pi, pd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sx.Metrics() != px.Metrics() || sx.Points() != px.Points() {
+		t.Fatal("segmented dump aggregates differ")
+	}
+	for seg := 0; seg < segments; seg++ {
+		for i := seg; i < 30000; i += segments {
+			name := fmt.Sprintf("seg%d.m%d", seg, i)
+			ss, sok, _ := sx.Find(name)
+			ps, pok, _ := px.Find(name)
+			if !sok || !pok {
+				t.Fatal("metric missing", name)
+			}
+			a, _ := sx.Read(ss)
+			b, _ := px.Read(ps)
+			if !reflect.DeepEqual(a, b) {
+				t.Fatal("history differs", name)
+			}
+		}
 	}
 }

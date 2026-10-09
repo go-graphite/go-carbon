@@ -105,43 +105,60 @@ func (app *App) DumpStop() error {
 	defer xlog.Close()
 	app.Cache.DivertToPointWriter(xlog.WritePoints)
 
+	// Checkpoint work overlaps the dump: the read-index overlay belongs to the
+	// frozen read generation (diverted input cannot add names to it), and the
+	// builder classifies metrics as dump segments register them. Only metrics
+	// first seen afterwards and the final write remain once input stops.
+	var readID string
+	var checkpointErr error
+	dumpDone := make(chan struct{})
+	var checkpointWork sync.WaitGroup
+	if builder != nil {
+		checkpointWork.Go(func() { readID, checkpointErr = app.Carbonserver.CheckpointReadIndex() })
+		checkpointWork.Go(func() {
+			for {
+				select {
+				case <-dumpDone:
+					return
+				case <-time.After(200 * time.Millisecond):
+					builder.Prepare()
+				}
+			}
+		})
+	}
+
 	dumpStart := time.Now()
 	cacheSize := app.Cache.Size()
 	// Unclaimed saved metrics (after an interrupted recovery), then cache shard
 	// ranges: all encoded concurrently and appended in order, so the file has
 	// the same format as a serial dump.
-	segments := checkpointWorkers()
-	err = dump.WriteSegments(2*segments, func(seg int, emit func(*points.Points) error) error {
+	segments := dumpSegments()
+	err = dump.WriteSegments(2*segments, func(seg int, out *recovery.Segment) error {
 		if seg < segments {
-			return app.Cache.DumpPendingRange(seg, segments, emit)
+			return app.Cache.DumpPendingRange(seg, segments, out)
 		}
 		seg -= segments
-		return app.Cache.DumpShards(seg*cache.ShardCount/segments, (seg+1)*cache.ShardCount/segments, emit)
+		return app.Cache.DumpShards(seg*cache.ShardCount/segments, (seg+1)*cache.ShardCount/segments, out.WritePoints)
 	})
+	if err == nil {
+		_, err = dump.Close()
+	}
+	close(dumpDone)
 	if err != nil {
+		checkpointWork.Wait()
 		logger.Error("dump failed", zap.Error(err))
 		return err
 	}
-	cacheFile, err := dump.Close()
-	if err != nil {
-		return err
-	}
-	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Duration("runtime", time.Since(dumpStart)))
+	cacheFile, _ := dump.Close()
+	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("segments", 2*segments), zap.Duration("runtime", time.Since(dumpStart)))
 
-	// Input still flows into the WAL here. Do the expensive checkpoint work now
-	// (catalogue classification of every metric seen so far and the read-index
-	// overlay), so only WAL-first metrics and the final write remain once input
-	// stops. The overlay belongs to the frozen read generation and diverted
-	// input cannot add names to it.
-	var readID string
-	var checkpointErr error
+	// Input still flows into the WAL: finish classifying dump metrics and wait
+	// for the overlay before stopping input.
 	if builder != nil {
 		prepareStart := time.Now()
-		var overlay sync.WaitGroup
-		overlay.Go(func() { readID, checkpointErr = app.Carbonserver.CheckpointReadIndex() })
 		builder.Prepare()
-		overlay.Wait()
-		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Error(checkpointErr))
+		checkpointWork.Wait()
+		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Duration("since_dump_start", time.Since(dumpStart)), zap.Error(checkpointErr))
 	}
 
 	inputStopped := time.Now()
@@ -263,6 +280,12 @@ func (app *App) ReleaseForHandoff() {
 		}
 		app.MetricStore = nil
 	}
+}
+
+// dumpSegments sets the dump fan-out. The dump is on the restart's critical
+// path, so it may use half the cores; reads keep the rest.
+func dumpSegments() int {
+	return min(max(runtime.GOMAXPROCS(0)/2, 1), 128)
 }
 
 // checkpointWorkers bounds catalogue classification so reads, which remain

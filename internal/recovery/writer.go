@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -195,34 +196,68 @@ type segment struct {
 	err     error
 }
 
+// Segment collects one concurrently encoded part of a WriteSegments call.
+type Segment struct {
+	s       *segment
+	cur     []byte
+	builder *Builder
+}
+
+// WritePoints encodes p as one legacy record.
+func (g *Segment) WritePoints(p *points.Points) error {
+	if len(p.Data) == 0 {
+		return nil
+	}
+	start := len(g.cur)
+	g.cur = p.AppendBinary(g.cur)
+	return g.added(p.Metric, len(g.cur)-start, len(p.Data))
+}
+
+// WriteRaw appends one complete legacy record for metric holding count points,
+// already encoded (e.g. mapped from a previous dump). It is not validated.
+func (g *Segment) WriteRaw(metric string, raw []byte, count int) error {
+	if len(raw) == 0 || count <= 0 {
+		return fmt.Errorf("invalid raw recovery record")
+	}
+	g.cur = append(g.cur, raw...)
+	return g.added(metric, len(raw), count)
+}
+
+func (g *Segment) added(metric string, size, count int) error {
+	var id uint32
+	if g.builder != nil {
+		var err error
+		if id, err = g.builder.ID(metric); err != nil {
+			return err
+		}
+	}
+	g.s.entries = append(g.s.entries, BatchEntry{ID: id, Size: size, Count: count})
+	if len(g.cur) >= segmentChunk {
+		g.s.chunks = append(g.s.chunks, g.cur)
+		g.cur = make([]byte, 0, segmentChunk+4096)
+	}
+	return nil
+}
+
 // WriteSegments encodes n independent record sequences concurrently and appends
-// them to the file in segment order, as if written serially. fill(i, emit) must
-// emit segment i's points in their required order; segments must not share a
-// metric, so per-metric chains keep their order.
-func (w *Writer) WriteSegments(n int, fill func(seg int, emit func(*points.Points) error) error) error {
+// them to the file in segment order, as if written serially. fill(i, seg) must
+// write segment i's records in their required order; segments must not share a
+// metric, so per-metric chains keep their order. Metric ids are resolved in the
+// segment goroutines; the ordered append does only array work.
+func (w *Writer) WriteSegments(n int, fill func(i int, seg *Segment) error) error {
+	w.mu.Lock()
+	builder := w.builder
+	w.mu.Unlock()
 	segs := make([]segment, n)
 	done := make([]chan struct{}, n)
 	for i := range segs {
 		done[i] = make(chan struct{})
 		go func() {
 			defer close(done[i])
-			s := &segs[i]
-			cur := make([]byte, 0, segmentChunk+4096)
-			s.err = fill(i, func(p *points.Points) error {
-				if len(p.Data) == 0 {
-					return nil
-				}
-				start := len(cur)
-				cur = p.AppendBinary(cur)
-				s.entries = append(s.entries, BatchEntry{Metric: p.Metric, Size: len(cur) - start, Count: len(p.Data)})
-				if len(cur) >= segmentChunk {
-					s.chunks = append(s.chunks, cur)
-					cur = make([]byte, 0, segmentChunk+4096)
-				}
-				return nil
-			})
-			if len(cur) > 0 {
-				s.chunks = append(s.chunks, cur)
+			g := &Segment{s: &segs[i], cur: make([]byte, 0, segmentChunk+4096), builder: builder}
+			g.s.err = fill(i, g)
+			if len(g.cur) > 0 {
+				g.s.chunks = append(g.s.chunks, g.cur)
 			}
 		}()
 	}
