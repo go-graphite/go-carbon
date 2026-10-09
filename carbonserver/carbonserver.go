@@ -909,7 +909,7 @@ func (listener *CarbonserverListener) UpdateMetricsAccessTimesByRequest(metrics 
 	listener.UpdateMetricsAccessTimes(accessTimes, false)
 }
 
-func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []map[string]struct{}) map[string]struct{} {
+func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []map[string]struct{}, storable func(string) bool) map[string]struct{} {
 	// splits each new metric from cache-scan and inserts
 	// into the current cacheMetricNames map
 	// in: new.metric.name1 --> split by "."
@@ -918,6 +918,9 @@ func splitAndInsert(cacheMetricNames map[string]struct{}, newCacheMetricNames []
 	// during filescan walk
 	for _, shardAddMap := range newCacheMetricNames {
 		for newMetric := range shardAddMap {
+			if !storable(newMetric) {
+				continue
+			}
 			split := strings.Split(newMetric, ".")
 			fileName := "/"
 			for i, seg := range split {
@@ -1019,7 +1022,10 @@ uloop:
 			// cacheMetricNames maintains all new metric names added in cache
 			// when cache-scan is enabled in conf
 			newCacheMetricNames := listener.cacheGetRecentMetrics()
-			cacheMetricNames = splitAndInsert(cacheMetricNames, newCacheMetricNames)
+			cacheMetricNames = splitAndInsert(cacheMetricNames, newCacheMetricNames, func(metric string) bool {
+				_, ok := listener.storableMetricPath(metric)
+				return ok
+			})
 		}
 
 		if listener.updateFileList(dir, cacheMetricNames, quotaAndUsageStatTicker) {
@@ -1037,13 +1043,25 @@ func (listener *CarbonserverListener) drainRealtimeMetrics(trie *trieIndex) {
 }
 
 func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metric string) *trieNode {
-	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
+	path, ok := listener.storableMetricPath(metric)
+	if !ok {
+		return nil
+	}
 	node, err := trie.insert(path, 0, 0, 0, 0)
 	if err != nil {
 		listener.logTrieInsertError(listener.logger, "failed to insert realtime metric", metric, err)
 		return nil
 	}
 	return node
+}
+
+// storableMetricPath returns the index path of metric and whether the persister
+// can create its whisper file. The persister drops longer names, so indexing one
+// would only list points that never leave the cache, and each scan would carry
+// it over again. Tagged names are stored under a different path and kept.
+func (listener *CarbonserverListener) storableMetricPath(metric string) (string, bool) {
+	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
+	return path, strings.IndexByte(metric, ';') >= 0 || helper.WhisperPathFits(listener.whisperData+path)
 }
 
 func (listener *CarbonserverListener) startFileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
@@ -1285,7 +1303,7 @@ func (listener *CarbonserverListener) updateFileListWithPending(dir string, cach
 		return false
 	}
 	if prepare != nil && u.trieIdx != nil && u.trieIdx.snapshot != nil {
-		if err := prepare(u.trieIdx.recoveryID, u.trieIdx.insertPendingMetric); err != nil {
+		if err := prepare(u.trieIdx.recoveryID, u.insertPendingMetric); err != nil {
 			logger.Warn("saved metric names unavailable", zap.Error(err))
 			return false
 		}
