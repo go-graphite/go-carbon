@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"math/rand/v2"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1549,8 +1548,10 @@ type throughputUsagePerNamespaceQuotaInfo struct {
 
 // throughputStripes spreads the accounting of unlimited namespaces: every
 // point ingested below such a namespace, including all points for the root,
-// would otherwise increment one shared counter.
-const throughputStripes = 64
+// would otherwise increment one shared counter. A point's stripe is its cache
+// shard, so each stripe is written under one shard lock and its cache line
+// moves between CPUs only with that lock.
+const throughputStripes = 1024
 
 type paddedCounter struct {
 	n int64
@@ -1614,13 +1615,14 @@ func (q *throughputUsagePerNamespace) dpRecorder() *throughputUsageDataPointsRec
 	return q.dpRecorderv.Load().(*throughputUsageDataPointsRecoder)
 }
 
-func (q *throughputUsagePerNamespace) increase(x int64) {
+// increase accounts x accepted points; stripe selects the counter for an
+// unlimited namespace (see throughputStripes).
+func (q *throughputUsagePerNamespace) increase(x int64, stripe uint64) {
 	recorder := q.dpRecorder()
 	// withinQuota never reads the usage of an unlimited namespace, so only
-	// reports need its exact sum. A quota newly made finite starts enforcing
-	// from the next reset.
+	// reports need its exact sum.
 	if quota := q.quota().Throughput; quota <= 0 || quota == math.MaxInt64 {
-		atomic.AddInt64(&recorder.unlimited[rand.Uint32()%throughputStripes].n, x)
+		atomic.AddInt64(&recorder.unlimited[stripe%throughputStripes].n, x)
 		return
 	}
 	atomic.AddInt64(&recorder.dataPoints, x)
@@ -2304,8 +2306,9 @@ func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
 		// batch increasing the counter to avoid potential
 		// over-throttling/accounting in parent nodes as the data is
 		// later on dropped due to lower child quotas.
+		stripe := helper.HashString(ps.Metric) // the cache shard, see throughputStripes
 		for _, tu := range tus {
-			tu.increase(dataLen)
+			tu.increase(dataLen, stripe)
 		}
 	}
 	return false
