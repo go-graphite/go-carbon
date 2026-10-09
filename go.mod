@@ -40,7 +40,7 @@ require (
 	github.com/go-faster/city v1.0.1
 	github.com/greatroar/blobloom v0.8.1
 	github.com/zeebo/xxh3 v1.1.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	google.golang.org/protobuf v1.36.12
 )
 

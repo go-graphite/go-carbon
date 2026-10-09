@@ -33,6 +33,12 @@ build-linux: ## Build the binary for linux and amd64
 debug:
 	$(GO) build -mod vendor -ldflags=-compressdwarf=false -gcflags=all='-l -N' $(MODULE)
 
+# Targets that name no file; "test" would otherwise be up to date because of
+# the test/ directory, and run nothing.
+.PHONY: all build-linux debug run-test test clean image package-tree gox-build \
+	nfpm-deb nfpm-rpm packagecloud-push packagecloud-push-rpm packagecloud-push-deb \
+	packagecloud-autobuilds packagecloud-stable sum-files
+
 run-test:
 	$(GO) $(COMMAND) ./...
 
