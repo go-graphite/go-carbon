@@ -125,6 +125,9 @@ func TestCapturedPendingCheckpoint(t *testing.T) {
 		}
 	}
 	dumpSeconds := time.Since(started).Seconds()
+	prepareStarted := time.Now()
+	builder.Prepare()
+	prepareSeconds := time.Since(prepareStarted).Seconds()
 	checkpointStarted := time.Now()
 	index, err := recovery.WriteIndex(out, builder)
 	if err != nil {
@@ -191,7 +194,7 @@ func TestCapturedPendingCheckpoint(t *testing.T) {
 			t.Fatal("legacy source content differs", i)
 		}
 	}
-	result := map[string]any{"metrics": count, "points": pointCount, "new_names": newNames, "dump_seconds": dumpSeconds, "checkpoint_seconds": checkpointSeconds, "open_seconds": openSeconds, "source_bytes": files[0].Size + files[1].Size, "index_bytes": index.Size, "sampled_histories": len(samples)}
+	result := map[string]any{"metrics": count, "points": pointCount, "new_names": newNames, "dump_seconds": dumpSeconds, "prepare_seconds": prepareSeconds, "checkpoint_seconds": checkpointSeconds, "open_seconds": openSeconds, "source_bytes": files[0].Size + files[1].Size, "index_bytes": index.Size, "sampled_histories": len(samples)}
 	raw, _ := json.Marshal(result)
 	t.Log(string(raw))
 	if err = os.WriteFile(filepath.Join(out, "result.json"), raw, 0600); err != nil {

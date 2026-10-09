@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 )
 
 // file list cache
@@ -372,4 +373,51 @@ func (flc *fileListCacheV2) readRecord(entry *FLCEntry) ([]byte, error) {
 	}
 
 	return data[:plen], nil
+}
+
+// writeFLCv2Members writes an FLC v2 cache as one gzip member per chunk of
+// entries, compressed concurrently. gzip readers, including NewFileListCache in
+// older releases, read concatenated members as one stream, so the file is
+// equivalent to one written by fileListCacheV2.
+func writeFLCv2Members(w io.Writer, n, workers int, entry func(i int, e *FLCEntry)) error {
+	workers = max(1, min(workers, n/65536+1))
+	members := make([][]byte, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for k := range workers {
+		wg.Go(func() {
+			var out bytes.Buffer
+			z := gzip.NewWriter(&out)
+			flc := &fileListCacheV2{fileListCacheCommon: &fileListCacheCommon{version: FLCVersion2, mode: 'w', writer: z}}
+			if k == 0 {
+				if _, errs[k] = z.Write([]byte(version2MagicString)); errs[k] != nil {
+					return
+				}
+			}
+			var e FLCEntry
+			for i := k * n / workers; i < (k+1)*n/workers; i++ {
+				entry(i, &e)
+				if errs[k] = flc.Write(&e); errs[k] != nil {
+					return
+				}
+			}
+			// Flush before Close like fileListCacheCommon.Close: the sync
+			// block keeps a reader's magic read from coinciding with EOF
+			// when a member holds no entries.
+			if errs[k] = z.Flush(); errs[k] == nil {
+				errs[k] = z.Close()
+			}
+			members[k] = out.Bytes()
+		})
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	for _, m := range members {
+		if _, err := w.Write(m); err != nil {
+			return err
+		}
+	}
+	return nil
 }

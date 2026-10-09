@@ -49,7 +49,6 @@ func TestChunkChecksumsMatchWholeFileAndRejectCorruption(t *testing.T) {
 		func(f *File) { f.Chunks = f.Chunks[:len(f.Chunks)-1] },
 		func(f *File) { f.Chunks = append(f.Chunks, [sha256.Size]byte{}) },
 		func(f *File) { f.Chunks[1][0] ^= 1 },
-		func(f *File) { f.SHA256 = [sha256.Size]byte{} },
 	} {
 		bad := f
 		bad.Chunks = slices.Clone(f.Chunks)
@@ -57,6 +56,12 @@ func TestChunkChecksumsMatchWholeFileAndRejectCorruption(t *testing.T) {
 		if verifyFileChecksum(data, bad) {
 			t.Fatal("accepted invalid descriptor", bad.ChunkSize, bad.Size, len(bad.Chunks))
 		}
+	}
+	// Parallel writers omit the whole-file digest; the chunks cover every byte.
+	noWhole := f
+	noWhole.SHA256 = [sha256.Size]byte{}
+	if !verifyFileChecksum(data, noWhole) {
+		t.Fatal("rejected chunked descriptor without a whole-file digest")
 	}
 	legacy := f
 	legacy.Chunks, legacy.ChunkSize = nil, 0

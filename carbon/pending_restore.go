@@ -70,9 +70,15 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		_ = bundle.Close()
 		return false, err
 	}
+	// The first filesystem scan must not run before checkpoint-only metrics
+	// have Whisper files, or it would drop them from the index.
 	gate := make(chan struct{})
 	cs.SetStartupScanGate(gate)
-	defer close(gate)
+	defer func() {
+		if app.pendingDone == nil {
+			close(gate)
+		}
+	}()
 	if err = app.listenCarbonserver(core, newMetrics); err != nil {
 		return false, err
 	}
@@ -80,18 +86,43 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		zap.Duration("checkpoint_open_time", opened.Sub(started)), zap.Duration("index_wait_time", indexReady.Sub(opened)),
 		zap.Duration("pending_names_time", prepareTime), zap.Int("pending_new_names", preparedNames),
 		zap.Uint64("points", bundle.Points()), zap.Uint64("metrics", bundle.Metrics()))
-	if err = core.RecoverPending(nil, app.Config.Dump.RestorePerSecond); err != nil {
-		return true, err
-	}
-	loaded := time.Now()
-	for !core.IsEmpty() {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if err = core.FinishPendingRecovery(); err != nil {
-		return true, err
-	}
-	stats := make(map[string]float64)
-	app.Persister.Stat(func(name string, value float64) { stats[name] = value })
-	logger.Info("pending checkpoint persisted, starting receivers", zap.Duration("load_seconds", loaded.Sub(started)), zap.Duration("drain_seconds", time.Since(loaded)), zap.Any("persister_stats", stats))
+	// Receivers open now: the first live write of a metric claims its saved
+	// history into the same cache item (see cache.pendingRecovery), so saved
+	// points still reach disk no later than newer live points of that metric.
+	stop, done := make(chan struct{}), make(chan struct{})
+	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
+	go func() {
+		defer close(done)
+		defer close(gate)
+		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
+			logger.Warn("pending recovery stopped", zap.Error(err))
+			return
+		}
+		loaded := time.Now()
+		for core.PendingOutstanding() != 0 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		if err := core.FinishPendingRecovery(); err != nil {
+			logger.Error("pending recovery not retired", zap.Error(err))
+			return
+		}
+		stats := make(map[string]float64)
+		app.Persister.Stat(func(name string, value float64) { stats[name] = value })
+		logger.Info("pending checkpoint persisted", zap.Duration("load_seconds", loaded.Sub(started)), zap.Duration("drain_seconds", time.Since(loaded)), zap.Any("persister_stats", stats))
+	}()
 	return true, nil
+}
+
+// stopPendingRecovery ends background recovery before a dump. Unclaimed saved
+// metrics are then written by DumpPoints and claimed ones are in cache.
+func (app *App) stopPendingRecovery() {
+	if app.pendingStop != nil {
+		close(app.pendingStop)
+		<-app.pendingDone
+		app.pendingStop, app.pendingDone = nil, nil
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -64,6 +65,7 @@ func (app *App) DumpStop() error {
 	if app.Carbonserver != nil {
 		app.Carbonserver.PauseIndexUpdates()
 	}
+	app.stopPendingRecovery()
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
@@ -103,18 +105,78 @@ func (app *App) DumpStop() error {
 	defer xlog.Close()
 	app.Cache.DivertToPointWriter(xlog.WritePoints)
 
+	// Checkpoint work overlaps the dump: the read-index overlay belongs to the
+	// frozen read generation (diverted input cannot add names to it), and the
+	// builder classifies metrics as dump segments register them. Only metrics
+	// first seen afterwards and the final write remain once input stops.
+	var readID string
+	var checkpointErr error
+	var overlayDone time.Time
+	dumpDone := make(chan struct{})
+	var checkpointWork sync.WaitGroup
+	if builder != nil {
+		checkpointWork.Go(func() {
+			readID, checkpointErr = app.Carbonserver.CheckpointReadIndex()
+			overlayDone = time.Now()
+		})
+		checkpointWork.Go(func() {
+			for {
+				select {
+				case <-dumpDone:
+					return
+				case <-time.After(200 * time.Millisecond):
+					builder.Prepare()
+				}
+			}
+		})
+	}
+
 	dumpStart := time.Now()
 	cacheSize := app.Cache.Size()
-	if err = app.Cache.DumpPoints(dump.WritePoints); err != nil {
+	// Unclaimed saved metrics (after an interrupted recovery), then cache shard
+	// ranges: all encoded concurrently and appended in order, so the file has
+	// the same format as a serial dump.
+	// One segment per cache shard keeps segments small, so the bounded worker
+	// window recycles buffers.
+	const segments = cache.ShardCount
+	err = dump.WriteSegments(2*segments, dumpWorkers(), func(seg int, out *recovery.Segment) error {
+		if seg < segments {
+			return app.Cache.DumpPendingRange(seg, segments, out)
+		}
+		return app.Cache.DumpShards(seg-segments, seg-segments+1, out.WritePoints)
+	})
+	encoded := time.Since(dumpStart)
+	var cacheFile recovery.File
+	if err == nil {
+		cacheFile, err = dump.Flush()
+	}
+	close(dumpDone)
+	if err != nil {
+		checkpointWork.Wait()
 		logger.Error("dump failed", zap.Error(err))
 		return err
 	}
-	cacheFile, err := dump.Close()
-	if err != nil {
-		return err
-	}
-	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Duration("runtime", time.Since(dumpStart)))
+	// Make the dump durable while the checkpoint is prepared. It must be on
+	// disk before old sources are retired or a checkpoint referencing it is
+	// published.
+	cacheSynced := make(chan error, 1)
+	syncStart := time.Now()
+	go func() { cacheSynced <- dump.Sync() }()
+	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("workers", dumpWorkers()), zap.Duration("encode_runtime", encoded), zap.Duration("runtime", time.Since(dumpStart)))
 
+	// Input still flows into the WAL: finish classifying dump metrics and wait
+	// for the overlay before stopping input.
+	if builder != nil {
+		prepareStart := time.Now()
+		// The dump's cores are free now: finish classification on them.
+		builder.SetWorkers(dumpWorkers())
+		builder.Prepare()
+		classified := time.Since(prepareStart)
+		checkpointWork.Wait()
+		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Duration("classify_runtime", classified), zap.Duration("overlay_since_dump_start", overlayDone.Sub(dumpStart)), zap.Duration("since_dump_start", time.Since(dumpStart)), zap.Error(checkpointErr))
+	}
+
+	inputStopped := time.Now()
 	stopped := make(chan struct{})
 	go func() { defer close(stopped); app.stopInputListeners() }()
 	select {
@@ -127,15 +189,27 @@ func (app *App) DumpStop() error {
 	if err != nil {
 		return err
 	}
-	logger.Info("dump finished")
+	waitStart := time.Now()
+	if err = <-cacheSynced; err != nil {
+		logger.Error("dump sync failed", zap.Error(err))
+		return err
+	}
+	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+time.Since(waitStart)), zap.Duration("cache_sync_wait", time.Since(waitStart)))
+	// The new dump holds every saved point not yet on disk, so a pending
+	// generation from the previous restart is now redundant.
+	if err = app.Cache.RetirePendingSources(); err != nil {
+		logger.Warn("previous recovery sources not retired", zap.Error(err))
+	}
 
 	if builder != nil {
 		// The ordinary .bin files remain usable even if the optional accelerator
 		// cannot be published. Never advertise a partial point/catalogue pair.
-		readID, checkpointErr := app.Carbonserver.CheckpointReadIndex()
+		finalizeStart := time.Now()
+		var indexWritten time.Time
 		if checkpointErr == nil && readID != "" {
 			var index recovery.File
 			index, checkpointErr = recovery.WriteIndex(app.Config.Dump.Path, builder)
+			indexWritten = time.Now()
 			if checkpointErr == nil {
 				checkpointErr = recovery.Publish(app.Config.Dump.Path, app.Config.Whisper.DataDir, cacheFile, walFile, index, readID)
 			}
@@ -143,7 +217,7 @@ func (app *App) DumpStop() error {
 		if checkpointErr != nil {
 			logger.Warn("pending read checkpoint unavailable; saved legacy dump", zap.Error(checkpointErr))
 		} else {
-			logger.Info("pending read checkpoint saved")
+			logger.Info("pending read checkpoint saved", zap.Duration("finalize_runtime", time.Since(finalizeStart)), zap.Duration("index_write_runtime", indexWritten.Sub(finalizeStart)), zap.Duration("input_closed_for", time.Since(inputStopped)))
 		}
 	}
 	app.handOffReads(logger)
@@ -230,10 +304,16 @@ func (app *App) ReleaseForHandoff() {
 	}
 }
 
+// dumpWorkers sets the dump fan-out. The dump is on the restart's critical
+// path, so it may use half the cores; reads keep the rest.
+func dumpWorkers() int {
+	return min(max(runtime.GOMAXPROCS(0)/2, 1), 128)
+}
+
 // checkpointWorkers bounds catalogue classification so reads, which remain
 // available during the checkpoint, keep most of the host's CPU.
 func checkpointWorkers() int {
-	return min(max(runtime.GOMAXPROCS(0)/4, 1), 8)
+	return min(max(runtime.GOMAXPROCS(0)/4, 1), 32)
 }
 
 // RestoreFromFile read and parse data from single file

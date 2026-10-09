@@ -252,6 +252,11 @@ func (c *Cache) Has(key string) bool {
 	if _, exists := shard.items[key]; exists {
 		return true
 	}
+	if r := c.pending.Load(); r != nil {
+		if slot, found, err := r.bundle.Find(key); err != nil || (found && !r.isClaimed(slot)) {
+			return true
+		}
+	}
 	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 		if p != nil && p.Metric == key {
 			return true
@@ -267,6 +272,9 @@ func (c *Cache) Confirm(p *points.Points) {
 	removeNotConfirmed(shard, p)
 	delete(shard.firstArrival, p)
 	shard.mu.Unlock()
+	if r := c.pending.Load(); r != nil {
+		r.persisted(p)
+	}
 }
 
 func removeNotConfirmed(shard *Shard, p *points.Points) bool {
@@ -295,6 +303,9 @@ func (c *Cache) Requeue(p *points.Points) {
 
 	count := len(p.Data)
 	if current, exists := shard.items[p.Metric]; exists {
+		if r := c.pending.Load(); r != nil {
+			r.moved(current, p)
+		}
 		p.Data = append(p.Data, current.Data...)
 		// A missing arrival marks restored or previously unbatched data ready.
 		first, other := shard.firstArrival[p], shard.firstArrival[current]
@@ -427,6 +438,14 @@ func (c *Cache) add(p *points.Points, restored bool) {
 	if current := c.settings.Load().(*cacheSettings); current.xlog != nil {
 		current.xlog(p)
 		return
+	}
+
+	if r := c.pending.Load(); r != nil {
+		if err := c.claimForWrite(r, shard, p.Metric); err != nil {
+			// A validated immutable record must decode; dropping its history
+			// silently would lose already accepted points.
+			panic(fmt.Errorf("claim validated recovery source: %w", err))
+		}
 	}
 
 	values, exists := shard.items[p.Metric]

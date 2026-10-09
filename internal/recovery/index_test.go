@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -383,5 +384,71 @@ func TestRecoveryRejectsAliasesRequiringLegacyPersistence(t *testing.T) {
 				t.Fatal("fallback source changed")
 			}
 		})
+	}
+}
+
+// Parallel table regions and records added after Prepare must give the same
+// lookups, counts and new-name catalogue as one serial build.
+func TestBuilderPrepareThenWriteAcrossRegions(t *testing.T) {
+	known := func(name string) bool { return !strings.HasSuffix(name, "7") }
+	serial := NewBuilder(known)
+	parallel := NewConcurrentBuilder(func() func(string) bool { return known }, 16)
+	var source [2][]byte
+	add := func(file int, name string, v float64) {
+		p := points.OnePoint(name, v, int64(v))
+		raw := p.AppendBinary(nil)
+		source[file] = append(source[file], raw...)
+		for _, b := range []*Builder{serial, parallel} {
+			if err := b.Add(file, p, len(raw)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for i := 0; i < 200000; i++ {
+		add(0, fmt.Sprintf("m.%d", i), float64(i))
+	}
+	parallel.Prepare()
+	// WAL records after Prepare: existing metrics and metrics first seen here.
+	for i := 0; i < 220000; i += 3 {
+		add(1, fmt.Sprintf("m.%d", i), float64(i)+0.5)
+	}
+	open := func(b *Builder) (*Index, map[string]bool) {
+		var data bytes.Buffer
+		if err := b.Write(&data); err != nil {
+			t.Fatal(err)
+		}
+		index, err := Open(data.Bytes(), source[0], source[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := map[string]bool{}
+		if err = index.NewNames(func(name string) error { names[name] = true; return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return index, names
+	}
+	si, snew := open(serial)
+	pi, pnew := open(parallel)
+	if len(snew) == 0 || !reflect.DeepEqual(snew, pnew) {
+		t.Fatal("new-name catalogue differs", len(snew), len(pnew))
+	}
+	if si.Metrics() != pi.Metrics() || si.Points() != pi.Points() {
+		t.Fatal("aggregates differ")
+	}
+	for i := 0; i < 220000; i += 97 {
+		name := fmt.Sprintf("m.%d", i)
+		ss, sok, _ := si.Find(name)
+		ps, pok, _ := pi.Find(name)
+		if sok != pok {
+			t.Fatal("find differs", name)
+		}
+		if !sok {
+			continue
+		}
+		a, _ := si.Read(ss)
+		b, _ := pi.Read(ps)
+		if !reflect.DeepEqual(a, b) {
+			t.Fatal("history differs", name)
+		}
 	}
 }

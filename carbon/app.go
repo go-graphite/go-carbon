@@ -75,6 +75,8 @@ type App struct {
 	// readRelease, when set, lets the next instance start while this one keeps
 	// serving reads after a dump stop (see SetReadHandoff).
 	readRelease   func()
+	pendingStop   chan struct{}
+	pendingDone   chan struct{}
 	readSuccessor string
 	handoffClaim  *handoff.Claim
 
