@@ -286,7 +286,7 @@ func TestDumpPendingRangesCoverEachMetricOnce(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = w.WriteSegments(parts, func(seg int, out *recovery.Segment) error { return c.DumpPendingRange(seg, parts, out) }); err != nil {
+		if err = w.WriteSegments(parts, 2, func(seg int, out *recovery.Segment) error { return c.DumpPendingRange(seg, parts, out) }); err != nil {
 			t.Fatal(err)
 		}
 		if _, err = w.Close(); err != nil {

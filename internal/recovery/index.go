@@ -35,33 +35,37 @@ type record struct{ offset, length, previous uint64 }
 // written. Separate chains preserve cache-before-input replay order even when
 // the two writers run concurrently and their records interleave.
 //
-// Metrics get dense ids in a sharded map, so concurrent dump segments resolve
-// them in parallel; each source then appends its records under its own lock.
-// Prepare hashes and classifies the ids allocated so far without blocking
-// writers, so that work can overlap the dump; Write handles the remainder.
+// Metric ids are allocated per shard of a 256-way map, with entries in pages
+// owned by that shard, so concurrent dump segments neither contend on one
+// counter nor write neighbouring entries in shared cache lines. Each source
+// then appends its records under its own lock. Prepare hashes and classifies
+// the metrics seen so far without blocking writers, so that work can overlap
+// the dump; Write handles the remainder.
 type Builder struct {
 	shards     [idShards]idShard
-	next       atomic.Uint32
-	pages      [1 << (32 - pageBits)]atomic.Pointer[entryPage]
 	hint       int
 	src        [2]source
 	newKnown   func() func(string) bool
 	workers    int
 	prepareMu  sync.Mutex
+	order      []uint32 // classified ids in table order
 	hashes     []uint64
 	isNew      []bool
-	classified int
+	classified [idShards]uint32
 }
 
 const (
-	idShards = 256
-	pageBits = 16
+	idShards   = 256
+	shardBits  = 8
+	pageBits   = 12
+	shardPages = 1 << (32 - shardBits - pageBits)
 )
 
 type idShard struct {
-	mu  sync.Mutex
-	ids map[string]uint32
-	_   [40]byte // keep neighbouring locks off one cache line
+	mu    sync.Mutex
+	ids   map[string]uint32
+	count uint32
+	pages [shardPages]atomic.Pointer[entryPage]
 }
 
 // entry fields of one source are written only under that source's lock.
@@ -98,7 +102,7 @@ func NewConcurrentBuilder(newKnown func() func(string) bool, workers int) *Build
 // Reserve sizes the tables for an expected number of metrics before writers
 // start, so growing them cannot stall the cache dump. It is only a hint.
 func (b *Builder) Reserve(metrics int) {
-	if metrics <= 0 || b.next.Load() != 0 {
+	if metrics <= 0 {
 		return
 	}
 	b.hint = metrics
@@ -109,33 +113,37 @@ func (b *Builder) Reserve(metrics int) {
 	b.src[0].mu.Unlock()
 }
 
+// entry returns the entry of an id returned by ID.
 func (b *Builder) entry(id uint32) *entry {
-	return &b.pages[id>>pageBits].Load()[id&(1<<pageBits-1)]
+	local := id >> shardBits
+	return &b.shards[id&(idShards-1)].pages[local>>pageBits].Load()[local&(1<<pageBits-1)]
 }
 
-// ID returns the dense id of metric, allocating one on first use. It is safe
-// for concurrent use.
+// ID returns the id of metric, allocating one on first use. It is safe for
+// concurrent use.
 func (b *Builder) ID(metric string) (uint32, error) {
-	s := &b.shards[xxhash.Sum64String(metric)&(idShards-1)]
+	shard := uint32(xxhash.Sum64String(metric) & (idShards - 1))
+	s := &b.shards[shard]
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if id, ok := s.ids[metric]; ok {
-		return id, nil
+	if local, ok := s.ids[metric]; ok {
+		return local<<shardBits | shard, nil
 	}
 	if s.ids == nil {
 		s.ids = make(map[string]uint32, b.hint/idShards)
 	}
-	id := b.next.Add(1) - 1
-	if id == math.MaxUint32 {
+	local := s.count
+	if local >= 1<<(32-shardBits) {
 		return 0, fmt.Errorf("too many recovery metrics")
 	}
-	page := &b.pages[id>>pageBits]
+	page := &s.pages[local>>pageBits]
 	if page.Load() == nil {
-		page.CompareAndSwap(nil, new(entryPage))
+		page.Store(new(entryPage))
 	}
-	b.entry(id).name = metric
-	s.ids[metric] = id
-	return id, nil
+	page.Load()[local&(1<<pageBits-1)].name = metric
+	s.ids[metric] = local
+	s.count++
+	return local<<shardBits | shard, nil
 }
 
 // BatchEntry describes one complete record already written by a segment.
@@ -166,7 +174,7 @@ func (b *Builder) AddBatch(file int, entries []BatchEntry) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	for _, e := range entries {
-		if e.Size <= 0 || e.Count <= 0 || e.ID >= b.next.Load() {
+		if e.Size <= 0 || e.Count <= 0 {
 			return fmt.Errorf("invalid recovery record")
 		}
 		m := b.entry(e.ID)
@@ -188,28 +196,32 @@ func (b *Builder) AddBatch(file int, entries []BatchEntry) error {
 func (b *Builder) Prepare() {
 	b.prepareMu.Lock()
 	defer b.prepareMu.Unlock()
-	// Ids are allocated and named under their shard lock; holding every shard
-	// makes all ids below next fully published.
+	var counts [idShards]uint32
 	for i := range b.shards {
 		b.shards[i].mu.Lock()
-	}
-	n := int(b.next.Load())
-	for i := range b.shards {
+		counts[i] = b.shards[i].count
 		b.shards[i].mu.Unlock()
 	}
-	if n == b.classified {
+	var ids []uint32
+	for shard := range b.shards {
+		for local := b.classified[shard]; local < counts[shard]; local++ {
+			ids = append(ids, local<<shardBits|uint32(shard))
+		}
+	}
+	if len(ids) == 0 {
 		return
 	}
-	names := make([]string, n-b.classified)
-	for i := range names {
-		names[i] = b.entry(uint32(b.classified + i)).name
+	names := make([]string, len(ids))
+	for i, id := range ids {
+		names[i] = b.entry(id).name
 	}
 	hashes, isNew := b.classify(names)
+	b.order = append(b.order, ids...)
 	b.hashes = append(b.hashes, hashes...)
 	if isNew != nil {
 		b.isNew = append(b.isNew, isNew...)
 	}
-	b.classified = n
+	b.classified = counts
 }
 
 func put64(dst []byte, values ...uint64) {
@@ -239,16 +251,18 @@ func (b *Builder) Write(w io.Writer) error {
 		b.src[i].mu.Lock()
 		defer b.src[i].mu.Unlock()
 	}
-	metrics := uint64(b.next.Load())
-	if uint64(b.classified) != metrics {
-		return fmt.Errorf("recovery metrics added during index write")
+	metrics := uint64(len(b.order))
+	for i := range b.shards {
+		if b.shards[i].count != b.classified[i] {
+			return fmt.Errorf("recovery metrics added during index write")
+		}
 	}
 	slots := uint64(2)
 	for metrics*4 > slots*3 {
 		slots *= 2
 	}
-	table, newSlots := buildTable(slots, b.hashes, func(id uint32) heads {
-		m := b.entry(id)
+	table, newSlots := buildTable(slots, b.hashes, func(k uint32) heads {
+		m := b.entry(b.order[k])
 		return heads{cache: m.cache, wal: m.wal, count: m.cacheCount + m.walCount}
 	}, b.isNew, b.workers)
 	header := make([]byte, headerSize)

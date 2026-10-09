@@ -29,7 +29,7 @@ func TestScaleDump(t *testing.T) {
 		c.Add(p)
 	}
 	dir := t.TempDir()
-	segments := 32
+	segments := ShardCount
 	b := recovery.NewConcurrentBuilder(nil, 16)
 	b.Reserve(int(c.Len()))
 	w, err := recovery.NewWriter(filepath.Join(dir, "cache.bin"), 0, 1<<20, b)
@@ -37,12 +37,11 @@ func TestScaleDump(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	err = w.WriteSegments(2*segments, func(seg int, out *recovery.Segment) error {
+	err = w.WriteSegments(2*segments, 16, func(seg int, out *recovery.Segment) error {
 		if seg < segments {
 			return c.DumpPendingRange(seg, segments, out)
 		}
-		seg -= segments
-		return c.DumpShards(seg*ShardCount/segments, (seg+1)*ShardCount/segments, out.WritePoints)
+		return c.DumpShards(seg-segments, seg-segments+1, out.WritePoints)
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -209,7 +211,7 @@ func TestWriteSegmentsMatchesSerial(t *testing.T) {
 			t.Fatal(err)
 		}
 		if parallel {
-			err = w.WriteSegments(segments, func(seg int, out *Segment) error { return metrics(seg, out.WritePoints) })
+			err = w.WriteSegments(segments, 3, func(seg int, out *Segment) error { return metrics(seg, out.WritePoints) })
 		} else {
 			for seg := 0; seg < segments && err == nil; seg++ {
 				err = metrics(seg, w.WritePoints)
@@ -263,5 +265,46 @@ func TestWriteSegmentsMatchesSerial(t *testing.T) {
 				t.Fatal("history differs", name)
 			}
 		}
+	}
+}
+
+// A failing segment stops the bounded workers without deadlock; no worker may
+// run more than the window ahead of the ordered append.
+func TestWriteSegmentsFailureAndWindow(t *testing.T) {
+	w, err := NewWriter(filepath.Join(t.TempDir(), "d.bin"), 0, 1<<20, NewBuilder(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	var started, maxAhead atomic.Int64
+	var appended atomic.Int64
+	boom := errors.New("boom")
+	done := make(chan error, 1)
+	go func() {
+		done <- w.WriteSegments(5000, 4, func(i int, out *Segment) error {
+			started.Add(1)
+			if ahead := int64(i) - appended.Load(); ahead > maxAhead.Load() {
+				maxAhead.Store(ahead)
+			}
+			if i == 3000 {
+				return boom
+			}
+			appended.Store(int64(i)) // segments finish roughly in order here
+			return out.WritePoints(points.OnePoint(fmt.Sprintf("m%d", i), 1, 1))
+		})
+	}()
+	select {
+	case err = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("WriteSegments deadlocked after a failure")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatal("error not returned", err)
+	}
+	if started.Load() > 3000+2*4+4 {
+		t.Fatal("workers kept running after failure", started.Load())
+	}
+	if maxAhead.Load() > 2*4+4 {
+		t.Fatal("workers ran beyond the window", maxAhead.Load())
 	}
 }

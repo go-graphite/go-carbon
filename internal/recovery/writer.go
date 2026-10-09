@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -41,8 +42,9 @@ func NewWriter(path string, source, bufferSize int, builder *Builder) (*Writer, 
 // written, in file order, while hashing overlaps the write.
 // block is a buffer moving through the stages; only pooled ones are recycled.
 type block struct {
-	buf    []byte
-	pooled bool
+	buf     []byte
+	pooled  bool
+	release func([]byte)
 }
 
 type pipeline struct {
@@ -85,10 +87,13 @@ func newPipeline(file io.Writer, size int, hashes ...io.Writer) *pipeline {
 				} else {
 					_, _ = stage.Write(b.buf)
 				}
-				if !last {
+				switch {
+				case !last:
 					out <- b
-				} else if b.pooled {
+				case b.pooled:
 					p.free <- b.buf[:0]
+				case b.release != nil:
+					b.release(b.buf)
 				}
 			}
 		}(in, out)
@@ -122,7 +127,7 @@ func (p *pipeline) Write(data []byte) (int, error) {
 		p.current = append(p.current, data[:take]...)
 		data = data[take:]
 		if len(p.current) == p.size {
-			p.full <- block{p.current, true}
+			p.full <- block{buf: p.current, pooled: true}
 			p.current = <-p.free
 		}
 	}
@@ -130,8 +135,9 @@ func (p *pipeline) Write(data []byte) (int, error) {
 }
 
 // Submit passes a complete buffer through every stage without copying it. The
-// caller must not modify buf afterwards. Pending bytes from Write go first.
-func (p *pipeline) Submit(buf []byte) error {
+// caller must not modify buf until release (if any) is called with it after
+// the last stage. Pending bytes from Write go first.
+func (p *pipeline) Submit(buf []byte, release func([]byte)) error {
 	if err := p.failed(); err != nil {
 		return err
 	}
@@ -139,10 +145,10 @@ func (p *pipeline) Submit(buf []byte) error {
 		return nil
 	}
 	if len(p.current) > 0 {
-		p.full <- block{p.current, true}
+		p.full <- block{buf: p.current, pooled: true}
 		p.current = <-p.free
 	}
-	p.full <- block{buf, false}
+	p.full <- block{buf: buf, release: release}
 	return nil
 }
 
@@ -152,7 +158,7 @@ func (p *pipeline) Flush() error {
 		return p.failed()
 	}
 	if len(p.current) > 0 {
-		p.full <- block{p.current, true}
+		p.full <- block{buf: p.current, pooled: true}
 	}
 	close(p.full)
 	<-p.done
@@ -188,12 +194,21 @@ func (w *Writer) WritePoints(p *points.Points) error {
 }
 
 // segmentChunk bounds each encoded buffer; records never span two buffers.
-const segmentChunk = 4 << 20
+const segmentChunk = 1 << 20
+
+var chunkPool = sync.Pool{New: func() any { return make([]byte, 0, segmentChunk+4096) }}
+
+func releaseChunk(buf []byte) {
+	if cap(buf) == segmentChunk+4096 {
+		chunkPool.Put(buf[:0]) //nolint:staticcheck // slices are the pooled values
+	}
+}
 
 type segment struct {
 	chunks  [][]byte
 	entries []BatchEntry
 	err     error
+	done    chan struct{}
 }
 
 // Segment collects one concurrently encoded part of a WriteSegments call.
@@ -234,45 +249,86 @@ func (g *Segment) added(metric string, size, count int) error {
 	g.s.entries = append(g.s.entries, BatchEntry{ID: id, Size: size, Count: count})
 	if len(g.cur) >= segmentChunk {
 		g.s.chunks = append(g.s.chunks, g.cur)
-		g.cur = make([]byte, 0, segmentChunk+4096)
+		g.cur = chunkPool.Get().([]byte)
 	}
 	return nil
 }
 
-// WriteSegments encodes n independent record sequences concurrently and appends
-// them to the file in segment order, as if written serially. fill(i, seg) must
-// write segment i's records in their required order; segments must not share a
-// metric, so per-metric chains keep their order. Metric ids are resolved in the
-// segment goroutines; the ordered append does only array work.
-func (w *Writer) WriteSegments(n int, fill func(i int, seg *Segment) error) error {
+// WriteSegments encodes n independent record sequences on up to parallel
+// goroutines and appends them to the file in segment order, as if written
+// serially. fill(i, seg) must write segment i's records in their required
+// order; segments must not share a metric, so per-metric chains keep their
+// order. Metric ids are resolved by the workers; the ordered append does only
+// array work. Workers stay within a bounded window ahead of the append, so
+// encoded buffers are recycled instead of the whole file being held in memory.
+func (w *Writer) WriteSegments(n, parallel int, fill func(i int, seg *Segment) error) error {
 	w.mu.Lock()
 	builder := w.builder
 	w.mu.Unlock()
+	parallel = max(1, min(parallel, n))
 	segs := make([]segment, n)
-	done := make([]chan struct{}, n)
 	for i := range segs {
-		done[i] = make(chan struct{})
-		go func() {
-			defer close(done[i])
-			g := &Segment{s: &segs[i], cur: make([]byte, 0, segmentChunk+4096), builder: builder}
-			g.s.err = fill(i, g)
-			if len(g.cur) > 0 {
-				g.s.chunks = append(g.s.chunks, g.cur)
+		segs[i].done = make(chan struct{})
+	}
+	window := make(chan struct{}, 2*parallel)
+	var next atomic.Int64
+	stop := make(chan struct{})
+	var workers sync.WaitGroup
+	for range parallel {
+		workers.Go(func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				select {
+				case window <- struct{}{}:
+				case <-stop:
+					return
+				}
+				i := int(next.Add(1) - 1)
+				if i >= n {
+					<-window
+					return
+				}
+				s := &segs[i]
+				g := &Segment{s: s, cur: chunkPool.Get().([]byte), builder: builder}
+				s.err = fill(i, g)
+				if len(g.cur) > 0 {
+					s.chunks = append(s.chunks, g.cur)
+				} else {
+					releaseChunk(g.cur)
+				}
+				close(s.done)
 			}
-		}()
+		})
 	}
 	var err error
 	for i := range segs {
-		<-done[i]
+		<-segs[i].done
 		if err == nil {
 			err = segs[i].err
 		}
 		if err == nil {
 			err = w.appendSegment(&segs[i])
+		} else {
+			for _, c := range segs[i].chunks {
+				releaseChunk(c)
+			}
 		}
-		segs[i] = segment{}
+		segs[i] = segment{done: segs[i].done}
+		<-window
+		if err != nil {
+			// Workers finish their current segment and exit; their chunks
+			// are simply dropped.
+			close(stop)
+			workers.Wait()
+			return err
+		}
 	}
-	return err
+	workers.Wait()
+	return nil
 }
 
 func (w *Writer) appendSegment(s *segment) error {
@@ -285,7 +341,7 @@ func (w *Writer) appendSegment(s *segment) error {
 		return os.ErrClosed
 	}
 	for _, chunk := range s.chunks {
-		if w.err = w.buffer.Submit(chunk); w.err != nil {
+		if w.err = w.buffer.Submit(chunk, releaseChunk); w.err != nil {
 			return w.err
 		}
 	}

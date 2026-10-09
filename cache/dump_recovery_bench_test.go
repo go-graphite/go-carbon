@@ -47,7 +47,7 @@ func BenchmarkDumpPointsRecovery(b *testing.B) {
 				if segments == 1 {
 					err = c.DumpPoints(dump.WritePoints)
 				} else {
-					err = dump.WriteSegments(segments, func(seg int, out *recovery.Segment) error {
+					err = dump.WriteSegments(segments, segments, func(seg int, out *recovery.Segment) error {
 						return c.DumpShards(seg*ShardCount/segments, (seg+1)*ShardCount/segments, out.WritePoints)
 					})
 				}

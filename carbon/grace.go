@@ -132,13 +132,14 @@ func (app *App) DumpStop() error {
 	// Unclaimed saved metrics (after an interrupted recovery), then cache shard
 	// ranges: all encoded concurrently and appended in order, so the file has
 	// the same format as a serial dump.
-	segments := dumpSegments()
-	err = dump.WriteSegments(2*segments, func(seg int, out *recovery.Segment) error {
+	// One segment per cache shard keeps segments small, so the bounded worker
+	// window recycles buffers.
+	const segments = cache.ShardCount
+	err = dump.WriteSegments(2*segments, dumpWorkers(), func(seg int, out *recovery.Segment) error {
 		if seg < segments {
 			return app.Cache.DumpPendingRange(seg, segments, out)
 		}
-		seg -= segments
-		return app.Cache.DumpShards(seg*cache.ShardCount/segments, (seg+1)*cache.ShardCount/segments, out.WritePoints)
+		return app.Cache.DumpShards(seg-segments, seg-segments+1, out.WritePoints)
 	})
 	if err == nil {
 		_, err = dump.Close()
@@ -150,7 +151,7 @@ func (app *App) DumpStop() error {
 		return err
 	}
 	cacheFile, _ := dump.Close()
-	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("segments", 2*segments), zap.Duration("runtime", time.Since(dumpStart)))
+	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("workers", dumpWorkers()), zap.Duration("runtime", time.Since(dumpStart)))
 
 	// Input still flows into the WAL: finish classifying dump metrics and wait
 	// for the overlay before stopping input.
@@ -282,9 +283,9 @@ func (app *App) ReleaseForHandoff() {
 	}
 }
 
-// dumpSegments sets the dump fan-out. The dump is on the restart's critical
+// dumpWorkers sets the dump fan-out. The dump is on the restart's critical
 // path, so it may use half the cores; reads keep the rest.
-func dumpSegments() int {
+func dumpWorkers() int {
 	return min(max(runtime.GOMAXPROCS(0)/2, 1), 128)
 }
 

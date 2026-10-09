@@ -247,11 +247,14 @@ func (c *Cache) DumpPendingRange(seg, parts int, out *recovery.Segment) error {
 	}
 	slots := r.bundle.Slots()
 	for slot := slots * uint64(seg) / uint64(parts); slot < slots*uint64(seg+1)/uint64(parts); slot++ {
+		if r.isClaimed(slot) {
+			continue
+		}
 		name, found, err := r.bundle.Name(slot)
 		if err != nil {
 			return err
 		}
-		if !found || r.isClaimed(slot) {
+		if !found {
 			continue
 		}
 		if err = r.bundle.RawRecords(slot, func(raw []byte, count int) error { return out.WriteRaw(name, raw, count) }); err != nil {
