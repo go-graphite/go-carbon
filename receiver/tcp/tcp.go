@@ -109,7 +109,6 @@ func (rcv *TCP) SetPointOut(out func(name []byte, value float64, timestamp int64
 	if rcv.buffer == nil {
 		rcv.pointOut.Store(&out)
 	}
-
 }
 
 // Addr returns binded socket address. For bind port 0 in tests

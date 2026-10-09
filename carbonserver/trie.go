@@ -2329,6 +2329,10 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		return false
 	}
 
+	// Metrics re-enter the cache after every write; most exist already.
+	if _, isNew := ti.metricPath(ps.Metric, nil); !isNew {
+		return false
+	}
 	dirs, isNew := ti.metricDirs(ps)
 	if !isNew {
 		return false

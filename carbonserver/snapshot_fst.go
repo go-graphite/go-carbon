@@ -529,6 +529,30 @@ func (s *indexSnapshot) close() error {
 	return err
 }
 
+// containsMetric reports whether the generation holds the file of a dotted
+// metric name. Unlike lookup it does not allocate: ingestion asks this for
+// every metric entering the cache.
+func (s *indexSnapshot) containsMetric(metric, fileExt string) (bool, error) {
+	defer runtime.KeepAlive(s)
+	// Walk the existing immutable cursor directly: neither a key buffer nor
+	// vellum's per-reader traversal scratch is needed, even for long names.
+	cursor := s.keys
+	state := cursor.accept(cursor.start(), 0)
+	for i := 0; i < len(metric); i++ {
+		c := metric[i]
+		switch c {
+		case 0:
+			return false, fmt.Errorf("snapshot path contains NUL")
+		case '.', '/':
+			c = 0
+		}
+		state = cursor.accept(state, c)
+	}
+	state = cursor.acceptString(state, fileExt)
+	found, _ := cursor.final(state)
+	return found, nil
+}
+
 func (s *indexSnapshot) lookup(path string) (*FLCEntry, bool, error) {
 	defer runtime.KeepAlive(s)
 	key, err := encodeSnapshotPath(nil, path)

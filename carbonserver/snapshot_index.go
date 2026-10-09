@@ -44,7 +44,7 @@ func (ti *trieIndex) metricPath(metric string, dirs []*trieNode) ([]*trieNode, b
 	if ti.snapshot == nil {
 		return ti.metricPathMutable(metric, dirs)
 	}
-	if _, found, err := ti.snapshot.lookup("/" + strings.ReplaceAll(metric, ".", "/") + ti.fileExt); err == nil && found {
+	if found, err := ti.snapshot.containsMetric(metric, ti.fileExt); err == nil && found {
 		return dirs, false
 	}
 	if _, isNew := ti.metricPathMutable(metric, nil); !isNew {

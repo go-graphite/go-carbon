@@ -553,7 +553,6 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 
 	count := len(p.Data)
 	if !recovered && c.overflows(s, count) {
-
 		return
 	}
 
@@ -599,7 +598,6 @@ func (c *Cache) overflows(s *cacheSettings, count int) bool {
 // addedLocked finishes adding count points to values, which the locked shard
 // holds under values.Metric.
 func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *points.Points, count int, exists, restored bool) {
-
 	// if we have both new metric channel and bloom filter
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
