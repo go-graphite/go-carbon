@@ -112,11 +112,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if c, err := net.DialTimeout("tcp", cfg.Tcp.Listen, 100*time.Millisecond); err == nil {
-		c.Close()
-		t.Fatal("input opened before old history persisted")
-	}
-	check := func() {
+	check := func(extra map[string]float64) {
 		t.Helper()
 		url := fmt.Sprintf("http://%s/render/?target=existing.metric&target=cache.only&target=wal.only&from=%d&until=%d&format=json", cfg.Carbonserver.Listen, stamp-1, stamp+3)
 		resp, err := http.Get(url)
@@ -151,28 +147,70 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 				}
 			}
 		}
-		for key, want := range map[string]float64{fmt.Sprintf("existing.metric/%d", stamp): 1, fmt.Sprintf("existing.metric/%d", stamp+1): 4, fmt.Sprintf("cache.only/%d", stamp+1): 3, fmt.Sprintf("wal.only/%d", stamp+1): 5} {
+		want := map[string]float64{fmt.Sprintf("existing.metric/%d", stamp): 1, fmt.Sprintf("existing.metric/%d", stamp+1): 4, fmt.Sprintf("cache.only/%d", stamp+1): 3, fmt.Sprintf("wal.only/%d", stamp+1): 5}
+		for k, v := range extra {
+			want[k] = v
+		}
+		for key, want := range want {
 			if got, ok := values[key]; !ok || got != want {
 				t.Fatalf("%s = %v/%t, want %v; %s", key, got, ok, want, raw)
 			}
 		}
 	}
-	check()
+	check(nil)
+	// Input opens with reads, while saved metrics are still outstanding.
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("pending recovery stalled")
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup did not return after pending reads opened")
 	}
-	check()
-	if c, err := net.DialTimeout("tcp", cfg.Tcp.Listen, time.Second); err != nil {
-		t.Fatal("input did not open after recovery", err)
-	} else {
-		c.Close()
+	if next.Cache.PendingOutstanding() == 0 {
+		t.Fatal("recovery finished before input could overlap it")
 	}
-	if !next.Cache.IsEmpty() {
-		t.Fatal("input opened before recovery drained")
+	c, err := net.DialTimeout("tcp", cfg.Tcp.Listen, time.Second)
+	if err != nil {
+		t.Fatal("input did not open with pending reads", err)
 	}
+	// A live write claims the metric's saved history first; reads and the
+	// eventual persisted file must hold both, saved values unchanged.
+	if _, err = fmt.Fprintf(c, "existing.metric 6 %d\nwal.only 7 %d\nlive.only 8 %d\n", stamp+2, stamp+2, stamp+2); err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	live := map[string]float64{fmt.Sprintf("existing.metric/%d", stamp+2): 6, fmt.Sprintf("wal.only/%d", stamp+2): 7}
+	deadline = time.Now().Add(5 * time.Second)
+	for next.Cache.Get("live.only") == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("live input not received")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	check(live)
+	deadline = time.Now().Add(20 * time.Second)
+	for !strings.Contains(zapwriter.TestString(), "pending checkpoint persisted") {
+		if time.Now().After(deadline) {
+			t.Fatal("pending recovery stalled", zapwriter.TestString())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	entries, err := os.ReadDir(cfg.Dump.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "cache.") || strings.HasPrefix(e.Name(), "input.") {
+			t.Fatal("recovery source not retired", e.Name())
+		}
+	}
+	deadline = time.Now().Add(20 * time.Second)
+	for !next.Cache.IsEmpty() {
+		if time.Now().After(deadline) {
+			t.Fatal("cache did not drain")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	check(live)
 }

@@ -194,3 +194,79 @@ func TestPendingRecoveryRejectsInvalidAttach(t *testing.T) {
 		t.Fatal("attached twice")
 	}
 }
+
+// A live write may arrive before RecoverPending reaches the metric. Its saved
+// history must enter the same item first, and the sources may retire only after
+// that item (not merely the claim) is confirmed on disk.
+func TestLiveWriteClaimsSavedHistoryFirst(t *testing.T) {
+	bundle := pendingFixture(t)
+	c := New()
+	if err := c.AttachPendingRecovery(bundle); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Has("metric") || !c.Has("other") || c.Has("absent") {
+		t.Fatal("pending metrics invisible to Has")
+	}
+	c.Add(points.OnePoint("metric", 9, 10))
+	want := []points.Point{{Value: 1, Timestamp: 1}, {Value: 2, Timestamp: 2}, {Value: 3, Timestamp: 1}, {Value: 9, Timestamp: 10}}
+	if got := c.Get("metric"); !reflect.DeepEqual(got, want) {
+		t.Fatal("live write did not follow saved history", got)
+	}
+	if got := c.PendingOutstanding(); got != 2 { // "other" unclaimed + "metric" unpersisted
+		t.Fatal("outstanding", got)
+	}
+	batch, ok := c.PopNotConfirmed("metric")
+	if !ok || !reflect.DeepEqual(batch.Data, want) {
+		t.Fatal("persister batch differs", batch)
+	}
+	// A later live point creates a new item; a failed write merges back.
+	c.Add(points.OnePoint("metric", 11, 12))
+	c.Requeue(batch)
+	if err := c.RecoverPending(nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.FinishPendingRecovery(); err == nil {
+		t.Fatal("retired with unpersisted saved history")
+	}
+	for _, name := range []string{"metric", "other"} {
+		p, ok := c.PopNotConfirmed(name)
+		if !ok {
+			t.Fatal(name)
+		}
+		if name == "metric" && len(p.Data) != 5 {
+			t.Fatal("requeued batch lost points", p.Data)
+		}
+		c.Confirm(p)
+	}
+	if got := c.PendingOutstanding(); got != 0 {
+		t.Fatal("outstanding after confirm", got)
+	}
+	if err := c.FinishPendingRecovery(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A dump taken mid-recovery must hold unclaimed saved metrics as well as
+// claimed ones still in cache, each exactly once and in replay order.
+func TestDumpDuringPendingRecovery(t *testing.T) {
+	bundle := pendingFixture(t)
+	c := New()
+	if err := c.AttachPendingRecovery(bundle); err != nil {
+		t.Fatal(err)
+	}
+	c.Add(points.OnePoint("metric", 9, 10))
+	got := map[string][]points.Point{}
+	if err := c.DumpPoints(func(p *points.Points) error {
+		got[p.Metric] = append(got[p.Metric], p.Data...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]points.Point{
+		"metric": {{Value: 1, Timestamp: 1}, {Value: 2, Timestamp: 2}, {Value: 3, Timestamp: 1}, {Value: 9, Timestamp: 10}},
+		"other":  {{Value: 5, Timestamp: 1}, {Value: 6, Timestamp: 2}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("dump during recovery", got)
+	}
+}
