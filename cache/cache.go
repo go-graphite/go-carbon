@@ -15,6 +15,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/greatroar/blobloom"
+	"github.com/zeebo/xxh3"
 )
 
 type WriteStrategy int
@@ -88,6 +89,9 @@ type Shard struct {
 	// Cache.stat.size. Publishing in batches keeps ingestion from serializing
 	// on one shared counter.
 	sizeDelta int64
+	// scratch passes AddPoint's point to the throttle under mu.
+	scratch     points.Points
+	scratchData [1]points.Point
 }
 
 // Creates a new cache instance
@@ -453,6 +457,45 @@ func (c *Cache) Add(p *points.Points) {
 	c.add(p, false, false)
 }
 
+// AddPoint adds one point. name may alias a buffer the caller reuses: unlike
+// Add, appending to a cached metric copies and allocates nothing.
+func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
+	s := c.settings.Load().(*cacheSettings)
+	// add claims pending recovered history before live points.
+	if s.xlog != nil || s.tagsEnabled || c.pending.Load() != nil {
+		c.add(points.OnePoint(string(name), value, timestamp), false, false)
+		return
+	}
+
+	shard := c.data[xxh3.Hash(name)&(shardCount-1)] // as GetShard
+	shard.mu.Lock()
+	values, exists := shard.items[string(name)]
+	// Like add, recheck diversion under the lock.
+	if !exists || c.settings.Load().(*cacheSettings).xlog != nil {
+		shard.mu.Unlock()
+		c.add(points.OnePoint(string(name), value, timestamp), false, false)
+		return
+	}
+	defer shard.mu.Unlock()
+
+	point := points.Point{Value: value, Timestamp: timestamp}
+	if c.throttle != nil {
+		// The throttle does not retain the points of a cached metric.
+		shard.scratchData[0] = point
+		shard.scratch.Metric, shard.scratch.Data = values.Metric, shard.scratchData[:]
+		throttled := c.throttle(&shard.scratch, true)
+		shard.scratch.Metric = ""
+		if throttled {
+			return
+		}
+	}
+	if c.overflows(s, 1) {
+		return
+	}
+	values.Data = append(values.Data, point)
+	c.addedLocked(shard, s, values, 1, true, false)
+}
+
 // AddRestored adds dump data without starting a new buffering deadline.
 func (c *Cache) AddRestored(p *points.Points) {
 	c.add(p, true, false)
@@ -509,8 +552,8 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	}
 
 	count := len(p.Data)
-	if !recovered && s.maxSize > 0 && c.approxSize() > s.maxSize {
-		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
+	if !recovered && c.overflows(s, count) {
+
 		return
 	}
 
@@ -542,14 +585,29 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 		}
 	}
 
+	c.addedLocked(shard, s, values, count, exists, restored)
+}
+
+func (c *Cache) overflows(s *cacheSettings, count int) bool {
+	if s.maxSize > 0 && c.approxSize() > s.maxSize {
+		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
+		return true
+	}
+	return false
+}
+
+// addedLocked finishes adding count points to values, which the locked shard
+// holds under values.Metric.
+func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *points.Points, count int, exists, restored bool) {
+
 	// if we have both new metric channel and bloom filter
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
-		if hash := helper.HashString(p.Metric); !c.newMetricCf.Has(hash) {
+		if hash := helper.HashString(values.Metric); !c.newMetricCf.Has(hash) {
 			// Suppress notifications only for an indexed metric or a successful
 			// enqueue. A full queue must allow unknown metrics to retry.
-			if (c.metricExists != nil && c.metricExists(p.Metric)) || sendMetricToNewMetricChan(c, p.Metric) {
+			if (c.metricExists != nil && c.metricExists(values.Metric)) || sendMetricToNewMetricChan(c, values.Metric) {
 				c.newMetricCf.Add(hash)
 			}
 		}

@@ -99,6 +99,17 @@ type TCP struct {
 	logger              *zap.Logger
 	decompressor        decompressor
 	handoff             handoffState
+	pointOut            atomic.Pointer[func(name []byte, value float64, timestamp int64)]
+}
+
+// SetPointOut makes plain-text connections accepted afterwards pass each
+// point to out instead of allocating it for the store. out must not retain
+// name. A buffered receiver keeps using its store.
+func (rcv *TCP) SetPointOut(out func(name []byte, value float64, timestamp int64)) {
+	if rcv.buffer == nil {
+		rcv.pointOut.Store(&out)
+	}
+
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -232,6 +243,11 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	var received uint32
 	defer func() { atomic.AddUint32(&rcv.metricsReceived, received) }()
 
+	var pointOut func(name []byte, value float64, timestamp int64)
+	if out := rcv.pointOut.Load(); out != nil {
+		pointOut = *out
+	}
+
 	for lines := 0; ; lines++ {
 		if received != 0 && (reader.Buffered() == 0 || received >= 1024) {
 			atomic.AddUint32(&rcv.metricsReceived, received)
@@ -279,7 +295,11 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 				)
 			} else {
 				received++
-				rcv.out(points.OnePoint(string(name), value, timestamp))
+				if pointOut != nil {
+					pointOut(name, value, timestamp)
+				} else {
+					rcv.out(points.OnePoint(string(name), value, timestamp))
+				}
 			}
 		}
 	}

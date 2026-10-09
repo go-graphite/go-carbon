@@ -972,6 +972,11 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		} else if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
 			return
 		}
+		if r, ok := rcv.(interface {
+			SetPointOut(func(name []byte, value float64, timestamp int64))
+		}); ok {
+			r.SetPointOut(core.AddPoint)
+		}
 
 		if conf.Prometheus.Enabled {
 			rcv.InitPrometheus(app.PromRegisterer)

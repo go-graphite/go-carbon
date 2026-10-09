@@ -391,3 +391,42 @@ func compressionOrIdentity(compression string) string {
 }
 
 var tcpBenchmarkPoint *points.Points
+
+func TestSetPointOutReceivesPlainPoints(t *testing.T) {
+	r, err := receiver.New("tcp", map[string]interface{}{
+		"protocol": "tcp",
+		"listen":   "localhost:0",
+	}, func(p *points.Points) { t.Errorf("store received %v", p) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	type point struct {
+		name      string
+		value     float64
+		timestamp int64
+	}
+	got := make(chan point, 2)
+	r.(*TCP).SetPointOut(func(name []byte, value float64, timestamp int64) {
+		got <- point{string(name), value, timestamp}
+	})
+
+	conn, err := net.Dial("tcp", r.(*TCP).Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("hello.world 42.15 1422698155\nsecond 1 2\n")); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []point{{"hello.world", 42.15, 1422698155}, {"second", 1, 2}} {
+		select {
+		case p := <-got:
+			if p != want {
+				t.Fatalf("got %+v, want %+v", p, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("point not received")
+		}
+	}
+}
