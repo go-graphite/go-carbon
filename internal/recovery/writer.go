@@ -87,10 +87,13 @@ type sinkRegion struct {
 	filled int
 }
 
-const (
-	sinkWriters  = 8
-	sinkInflight = 256
-)
+const sinkInflight = 256
+
+// sinkWriters is how many goroutines write buffers at their offsets. XFS
+// serializes buffered writes to one file: on graphitestore NVMe hosts 1, 2, 4
+// and 8 writers all reached ~1.9GB/s (TestSinkHostThroughput), while 8
+// writers spent ~31 CPU-seconds of a production dump spinning on the lock.
+var sinkWriters = 2
 
 func newSink(file io.WriterAt, size int) *sink {
 	s := &sink{file: file, size: size, free: make(chan []byte, sinkInflight), writes: make(chan func(), sinkInflight), inflight: make(chan struct{}, sinkInflight)}
