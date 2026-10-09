@@ -709,6 +709,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
 	carbonserver.SetFileListCache(conf.Carbonserver.FileListCache)
 	carbonserver.SetFileListCacheVersion(conf.Carbonserver.FileListCacheVersion)
+	carbonserver.SetScanWorkers(conf.Carbonserver.ScanWorkers)
 	carbonserver.SetInternalStatsDir(conf.Carbonserver.InternalStatsDir)
 	carbonserver.SetPercentiles(conf.Carbonserver.Percentiles)
 	// carbonserver.SetQueryTimeout(conf.Carbonserver.QueryTimeout.Value())

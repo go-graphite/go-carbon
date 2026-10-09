@@ -215,10 +215,16 @@ func (s *indexSnapshot) metricListRanges(workers int) []snapshotMetricRange {
 }
 
 func (s *indexSnapshot) splitMetricRange(whole snapshotMetricRange, workers int) []snapshotMetricRange {
+	return s.splitMetricRangeInto(whole, workers*2, 256)
+}
+
+// splitMetricRangeInto splits until every range holds at most 1/parts of the
+// rows, or there are maxRanges ranges.
+func (s *indexSnapshot) splitMetricRangeInto(whole snapshotMetricRange, parts, maxRanges int) []snapshotMetricRange {
 	defer runtime.KeepAlive(s)
 	ranges := []snapshotMetricRange{whole}
-	limit := max((whole.last-whole.first)/(workers*2), 1)
-	for len(ranges) < 256 {
+	limit := max((whole.last-whole.first)/parts, 1)
+	for len(ranges) < maxRanges {
 		largest := 0
 		for i := range ranges {
 			if ranges[i].last-ranges[i].first > ranges[largest].last-ranges[largest].first {

@@ -284,6 +284,7 @@ type CarbonserverListener struct {
 
 	fileListCacheVersion FLCVersion
 	fileListCache        string
+	scanWorkers          int
 
 	realtimeIndex  int
 	newMetricsChan chan string
@@ -756,6 +757,12 @@ func (listener *CarbonserverListener) SetFileListCacheVersion(version int) {
 }
 func (listener *CarbonserverListener) SetFileListCache(path string) {
 	listener.fileListCache = path
+}
+
+// SetScanWorkers sets the number of parallel full-scan workers: 0 picks a
+// default from GOMAXPROCS, 1 keeps the sequential scan.
+func (listener *CarbonserverListener) SetScanWorkers(workers int) {
+	listener.scanWorkers = workers
 }
 func (listener *CarbonserverListener) SetInternalStatsDir(dbPath string) {
 	listener.internalStatsDir = dbPath
@@ -1401,6 +1408,13 @@ func (u *fileListUpdate) resetTrie() {
 }
 
 func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
+	if workers := u.scanWorkers(dir); workers > 1 {
+		return u.scanFilesParallel(dir, quotaAndUsageStatTicker, workers)
+	}
+	return u.scanFilesSequential(dir, quotaAndUsageStatTicker)
+}
+
+func (u *fileListUpdate) scanFilesSequential(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
 	u.fileListCache = u.newFileListCacheWriter()
 	u.logWhisperDataDir(dir)
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {

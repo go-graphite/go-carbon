@@ -427,6 +427,17 @@ trie-index = false
 #
 # file-list-cache-version = 2
 
+# Number of goroutines walking the whisper tree during a full index scan.
+# Workers split the tree into ranges of the previous index snapshot and build
+# the next snapshot and file list cache in parallel. Directories that did not
+# change since the previous parallel scan are not read again: their listings
+# come from the previous snapshot, while every metric file is still stat'ed.
+# Requires trie-index, concurrent-index, file-list-cache-version = 2 and an
+# existing snapshot, and is not used with internal-stats-dir. 0 picks a quarter
+# of the CPUs, at least 2 and at most 16; 1 keeps the sequential scan.
+#
+# scan-workers = 0
+
 # Enable concurrently building index without maintaining a new copy
 # index structure. More memory efficient.
 # Currently only trie-index is supported. (EXPERIMENTAL)

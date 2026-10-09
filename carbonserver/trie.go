@@ -2345,7 +2345,20 @@ func (ti *trieIndex) metricDirs(ps *points.Points) ([]*trieNode, bool) {
 
 // A nil dirs slice requests an allocation-free existence check.
 func (ti *trieIndex) metricPathMutable(metric string, dirs []*trieNode) ([]*trieNode, bool) {
+	dirs, _, isNew := ti.metricPathMutableNode(metric, dirs)
+	return dirs, isNew
+}
+
+// mutableFileNode returns the overlay file node of metric, if any. Like the
+// other read paths, it is safe to call concurrently with the index updater.
+func (ti *trieIndex) mutableFileNode(metric string) *trieNode {
+	_, file, _ := ti.metricPathMutableNode(metric, nil)
+	return file
+}
+
+func (ti *trieIndex) metricPathMutableNode(metric string, dirs []*trieNode) ([]*trieNode, *trieNode, bool) {
 	var node = ti.root
+	var file *trieNode
 	var mindex int
 	var isNew bool
 
@@ -2401,6 +2414,7 @@ mloop:
 			child := node.getChild(childrens, i)
 			if mindex >= len(metric) {
 				if child.file() {
+					file = child
 					break mloop
 				}
 
@@ -2416,7 +2430,7 @@ mloop:
 		isNew = true
 		break
 	}
-	return dirs, isNew
+	return dirs, file, isNew
 }
 
 func (*trieIndex) metricName(node *trieNode, name string) string {
