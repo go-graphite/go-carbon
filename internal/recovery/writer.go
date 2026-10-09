@@ -1,7 +1,6 @@
 package recovery
 
 import (
-	"bufio"
 	"errors"
 	"io"
 	"os"
@@ -32,50 +31,68 @@ func NewWriter(path string, source, bufferSize int, builder *Builder) (*Writer, 
 		return nil, err
 	}
 	digest := newFileDigester()
-	return &Writer{file: file, buffer: newPipeline(file, digest, bufferSize), hash: digest, builder: builder, source: source}, nil
+	return &Writer{file: file, buffer: newPipeline(file, bufferSize, digest.wholeWriter(), digest.chunkWriter()), hash: digest, builder: builder, source: source}, nil
 }
 
 // pipeline keeps file writes and checksums off the encoding goroutine. Full
-// buffers pass in order through a write stage and then a hash stage, so the
-// digest always describes exactly the bytes written, in file order.
+// buffers pass in order through the file write and then each hash stage, every
+// stage on its own goroutine, so the digests always describe exactly the bytes
+// written, in file order, while hashing overlaps the write.
+// block is a buffer moving through the stages; only pooled ones are recycled.
+type block struct {
+	buf    []byte
+	pooled bool
+}
+
 type pipeline struct {
-	current       []byte
-	size          int
-	full, written chan []byte
-	free          chan []byte
-	done          chan struct{}
-	mu            sync.Mutex
-	err           error
+	current []byte
+	size    int
+	full    chan block
+	free    chan []byte
+	done    chan struct{}
+	mu      sync.Mutex
+	err     error
 }
 
 const pipelineBuffers = 4
 
-func newPipeline(file io.Writer, digest io.Writer, size int) *pipeline {
-	p := &pipeline{size: size, full: make(chan []byte, pipelineBuffers), written: make(chan []byte, pipelineBuffers), free: make(chan []byte, pipelineBuffers), done: make(chan struct{})}
+func newPipeline(file io.Writer, size int, hashes ...io.Writer) *pipeline {
+	p := &pipeline{size: size, full: make(chan block, pipelineBuffers), free: make(chan []byte, pipelineBuffers), done: make(chan struct{})}
 	p.current = make([]byte, 0, size)
 	for i := 1; i < pipelineBuffers; i++ {
 		p.free <- make([]byte, 0, size)
 	}
-	go func() {
-		defer close(p.written)
-		for buf := range p.full {
-			if p.failed() == nil {
-				n, err := file.Write(buf)
-				if err == nil && n != len(buf) {
-					err = io.ErrShortWrite
-				}
-				p.fail(err)
+	in := p.full
+	for i, stage := range append([]io.Writer{file}, hashes...) {
+		out := make(chan block, pipelineBuffers)
+		last := i == len(hashes)
+		go func(in <-chan block, out chan<- block) {
+			if last {
+				defer close(p.done)
+			} else {
+				defer close(out)
 			}
-			p.written <- buf
-		}
-	}()
-	go func() {
-		defer close(p.done)
-		for buf := range p.written {
-			_, _ = digest.Write(buf)
-			p.free <- buf[:0]
-		}
-	}()
+			for b := range in {
+				if i == 0 {
+					if p.failed() == nil {
+						n, err := stage.Write(b.buf)
+						if err == nil && n != len(b.buf) {
+							err = io.ErrShortWrite
+						}
+						p.fail(err)
+					}
+				} else {
+					_, _ = stage.Write(b.buf)
+				}
+				if !last {
+					out <- b
+				} else if b.pooled {
+					p.free <- b.buf[:0]
+				}
+			}
+		}(in, out)
+		in = out
+	}
 	return p
 }
 
@@ -104,11 +121,28 @@ func (p *pipeline) Write(data []byte) (int, error) {
 		p.current = append(p.current, data[:take]...)
 		data = data[take:]
 		if len(p.current) == p.size {
-			p.full <- p.current
+			p.full <- block{p.current, true}
 			p.current = <-p.free
 		}
 	}
 	return n, nil
+}
+
+// Submit passes a complete buffer through every stage without copying it. The
+// caller must not modify buf afterwards. Pending bytes from Write go first.
+func (p *pipeline) Submit(buf []byte) error {
+	if err := p.failed(); err != nil {
+		return err
+	}
+	if len(buf) == 0 {
+		return nil
+	}
+	if len(p.current) > 0 {
+		p.full <- block{p.current, true}
+		p.current = <-p.free
+	}
+	p.full <- block{buf, false}
+	return nil
 }
 
 // Flush hands over the final buffer and waits for both stages. It is terminal.
@@ -117,7 +151,7 @@ func (p *pipeline) Flush() error {
 		return p.failed()
 	}
 	if len(p.current) > 0 {
-		p.full <- p.current
+		p.full <- block{p.current, true}
 	}
 	close(p.full)
 	<-p.done
@@ -148,6 +182,80 @@ func (w *Writer) WritePoints(p *points.Points) error {
 	}
 	if w.builder != nil {
 		w.err = w.builder.Add(w.source, p, n)
+	}
+	return w.err
+}
+
+// segmentChunk bounds each encoded buffer; records never span two buffers.
+const segmentChunk = 4 << 20
+
+type segment struct {
+	chunks  [][]byte
+	entries []BatchEntry
+	err     error
+}
+
+// WriteSegments encodes n independent record sequences concurrently and appends
+// them to the file in segment order, as if written serially. fill(i, emit) must
+// emit segment i's points in their required order; segments must not share a
+// metric, so per-metric chains keep their order.
+func (w *Writer) WriteSegments(n int, fill func(seg int, emit func(*points.Points) error) error) error {
+	segs := make([]segment, n)
+	done := make([]chan struct{}, n)
+	for i := range segs {
+		done[i] = make(chan struct{})
+		go func() {
+			defer close(done[i])
+			s := &segs[i]
+			cur := make([]byte, 0, segmentChunk+4096)
+			s.err = fill(i, func(p *points.Points) error {
+				if len(p.Data) == 0 {
+					return nil
+				}
+				start := len(cur)
+				cur = p.AppendBinary(cur)
+				s.entries = append(s.entries, BatchEntry{Metric: p.Metric, Size: len(cur) - start, Count: len(p.Data)})
+				if len(cur) >= segmentChunk {
+					s.chunks = append(s.chunks, cur)
+					cur = make([]byte, 0, segmentChunk+4096)
+				}
+				return nil
+			})
+			if len(cur) > 0 {
+				s.chunks = append(s.chunks, cur)
+			}
+		}()
+	}
+	var err error
+	for i := range segs {
+		<-done[i]
+		if err == nil {
+			err = segs[i].err
+		}
+		if err == nil {
+			err = w.appendSegment(&segs[i])
+		}
+		segs[i] = segment{}
+	}
+	return err
+}
+
+func (w *Writer) appendSegment(s *segment) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return w.err
+	}
+	if w.closed {
+		return os.ErrClosed
+	}
+	for _, chunk := range s.chunks {
+		if w.err = w.buffer.Submit(chunk); w.err != nil {
+			return w.err
+		}
+	}
+	if w.builder != nil && len(s.entries) > 0 {
+		w.err = w.builder.AddBatch(w.source, s.entries)
 	}
 	return w.err
 }
@@ -189,7 +297,7 @@ func WriteIndex(dir string, builder *Builder) (File, error) {
 		}
 	}()
 	digest := newFileDigester()
-	buffer := bufio.NewWriterSize(io.MultiWriter(file, digest), 1<<20)
+	buffer := newPipeline(file, 1<<20, digest.wholeWriter(), digest.chunkWriter())
 	if err = builder.Write(buffer); err != nil {
 		return File{}, err
 	}

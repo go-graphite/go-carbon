@@ -162,7 +162,7 @@ func (f *failAfter) Write(p []byte) (int, error) {
 
 func TestPipelinePreservesOrderAndReportsFailure(t *testing.T) {
 	var file, digest bytes.Buffer
-	p := newPipeline(&file, &digest, 7)
+	p := newPipeline(&file, 7, &digest)
 	var want []byte
 	for i := 0; i < 1000; i++ {
 		chunk := []byte(fmt.Sprintf("%d,", i))
@@ -175,12 +175,68 @@ func TestPipelinePreservesOrderAndReportsFailure(t *testing.T) {
 		t.Fatal("pipeline reordered or lost bytes", err)
 	}
 
-	p = newPipeline(&failAfter{left: 64}, io.Discard, 16)
+	p = newPipeline(&failAfter{left: 64}, 16, io.Discard)
 	var err error
 	for i := 0; i < 100 && err == nil; i++ {
 		_, err = p.Write(make([]byte, 16))
 	}
 	if !errors.Is(errors.Join(err, p.Flush()), io.ErrClosedPipe) {
 		t.Fatal("write failure not reported")
+	}
+}
+
+// Concurrent segments must produce the exact file and index a serial writer
+// would, so older binaries and the legacy restore path read it unchanged.
+func TestWriteSegmentsMatchesSerial(t *testing.T) {
+	dir := t.TempDir()
+	const segments = 7
+	metrics := func(seg int, emit func(*points.Points) error) error {
+		for i := seg; i < 30000; i += segments {
+			p := &points.Points{Metric: fmt.Sprintf("seg%d.m%d", seg, i)}
+			for j := 0; j <= i%5; j++ {
+				p.Data = append(p.Data, points.Point{Value: float64(i*10 + j), Timestamp: int64(1000 + j)})
+			}
+			if err := emit(p); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	write := func(name string, parallel bool) ([]byte, []byte) {
+		b := NewConcurrentBuilder(nil, 4)
+		w, err := NewWriter(filepath.Join(dir, name), 0, 1<<20, b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parallel {
+			err = w.WriteSegments(segments, metrics)
+		} else {
+			for seg := 0; seg < segments && err == nil; seg++ {
+				err = metrics(seg, w.WritePoints)
+			}
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		var index bytes.Buffer
+		if err = b.Write(&index); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data, index.Bytes()
+	}
+	sd, si := write("serial.bin", false)
+	pd, pi := write("parallel.bin", true)
+	if !bytes.Equal(sd, pd) || len(sd) == 0 {
+		t.Fatal("segmented dump bytes differ")
+	}
+	if !bytes.Equal(si, pi) {
+		t.Fatal("segmented dump index differs")
 	}
 }

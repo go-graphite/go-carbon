@@ -23,8 +23,9 @@ func BenchmarkDumpPointsRecovery(b *testing.B) {
 		}
 		c.Add(p)
 	}
-	for _, wal := range []bool{false, true} {
-		b.Run(fmt.Sprintf("wal=%v", wal), func(b *testing.B) {
+	for _, segments := range []int{1, 8, 16} {
+		wal := false
+		b.Run(fmt.Sprintf("segments=%d", segments), func(b *testing.B) {
 			for n := 0; n < b.N; n++ {
 				dir := b.TempDir()
 				builder := recovery.NewConcurrentBuilder(nil, 1)
@@ -42,7 +43,15 @@ func BenchmarkDumpPointsRecovery(b *testing.B) {
 					done <- count
 				}()
 				start := time.Now()
-				if err := c.DumpPoints(dump.WritePoints); err != nil {
+				var err error
+				if segments == 1 {
+					err = c.DumpPoints(dump.WritePoints)
+				} else {
+					err = dump.WriteSegments(segments, func(seg int, emit func(*points.Points) error) error {
+						return c.DumpShards(seg*ShardCount/segments, (seg+1)*ShardCount/segments, emit)
+					})
+				}
+				if err != nil {
 					b.Fatal(err)
 				}
 				if _, err := dump.Close(); err != nil {

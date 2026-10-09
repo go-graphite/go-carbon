@@ -3,6 +3,7 @@ package recovery
 import (
 	"crypto/sha256"
 	"hash"
+	"io"
 	"runtime"
 	"slices"
 	"sync"
@@ -24,8 +25,21 @@ func newFileDigester() *fileDigester {
 }
 
 func (d *fileDigester) Write(p []byte) (int, error) {
-	n := len(p)
 	_, _ = d.whole.Write(p)
+	return d.writeChunks(p)
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// wholeWriter and chunkWriter split the two digests so separate pipeline stages
+// can compute them concurrently; each must see every byte in file order.
+func (d *fileDigester) wholeWriter() io.Writer { return d.whole }
+func (d *fileDigester) chunkWriter() io.Writer { return writerFunc(d.writeChunks) }
+
+func (d *fileDigester) writeChunks(p []byte) (int, error) {
+	n := len(p)
 	for len(p) > 0 {
 		take := min(len(p), checksumChunkSize-d.chunkBytes)
 		_, _ = d.chunk.Write(p[:take])
@@ -71,7 +85,9 @@ func verifyFileChecksum(data []byte, f File) bool {
 	if len(f.Chunks) <= 1 {
 		return sha256.Sum256(data) == f.SHA256
 	}
-	workers := min(4, runtime.GOMAXPROCS(0), len(f.Chunks))
+	// Startup waits on this: use enough workers that hashing, not one core per
+	// file, bounds it. Callers verify independent files concurrently.
+	workers := min(16, runtime.GOMAXPROCS(0), len(f.Chunks))
 	var bad atomic.Bool
 	var wg sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {

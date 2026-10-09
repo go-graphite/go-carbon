@@ -33,20 +33,30 @@ type record struct{ offset, length, previous uint64 }
 // Builder records offsets while the ordinary binary dump and input WAL are
 // written. Separate chains preserve cache-before-input replay order even when
 // the two writers run concurrently and their records interleave.
+//
+// Metrics are numbered in first-seen order. Prepare hashes and classifies a
+// prefix of them without holding the lock, so that work can run while input is
+// still being written; Write then handles only the remainder.
 type Builder struct {
-	mu       sync.Mutex
-	heads    map[string]heads
-	records  [2][]record
-	sizes    [2]uint64
-	points   uint64
-	newKnown func() func(string) bool
-	workers  int
+	mu         sync.Mutex
+	ids        map[string]uint32
+	names      []string
+	heads      []heads
+	records    [2][]record
+	sizes      [2]uint64
+	points     uint64
+	newKnown   func() func(string) bool
+	workers    int
+	prepareMu  sync.Mutex
+	hashes     []uint64
+	isNew      []bool
+	classified int
 }
 
 // NewBuilder classifies names serially with known, which need not be safe for
 // concurrent use.
 func NewBuilder(known func(string) bool) *Builder {
-	b := &Builder{heads: make(map[string]heads), workers: 1}
+	b := &Builder{ids: make(map[string]uint32), workers: 1}
 	if known != nil {
 		b.newKnown = func() func(string) bool { return known }
 	}
@@ -56,7 +66,7 @@ func NewBuilder(known func(string) bool) *Builder {
 // NewConcurrentBuilder hashes and classifies names on up to workers goroutines.
 // newKnown is called once per worker; each returned function is used serially.
 func NewConcurrentBuilder(newKnown func() func(string) bool, workers int) *Builder {
-	return &Builder{heads: make(map[string]heads), newKnown: newKnown, workers: max(workers, 1)}
+	return &Builder{ids: make(map[string]uint32), newKnown: newKnown, workers: max(workers, 1)}
 }
 
 // Reserve sizes the tables for an expected number of metrics before writers
@@ -64,8 +74,10 @@ func NewConcurrentBuilder(newKnown func() func(string) bool, workers int) *Build
 func (b *Builder) Reserve(metrics int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.heads) == 0 && metrics > 0 {
-		b.heads = make(map[string]heads, metrics)
+	if len(b.names) == 0 && metrics > 0 {
+		b.ids = make(map[string]uint32, metrics)
+		b.names = make([]string, 0, metrics)
+		b.heads = make([]heads, 0, metrics)
 		b.records[0] = make([]record, 0, metrics)
 	}
 }
@@ -77,7 +89,17 @@ func (b *Builder) Add(file int, p *points.Points, size int) error {
 	if file < 0 || file > 1 || size <= 0 || len(p.Data) == 0 {
 		return fmt.Errorf("invalid recovery record")
 	}
-	h := b.heads[p.Metric]
+	id, ok := b.ids[p.Metric]
+	if !ok {
+		if len(b.names) >= math.MaxUint32 {
+			return fmt.Errorf("too many recovery metrics")
+		}
+		id = uint32(len(b.names))
+		b.ids[p.Metric] = id
+		b.names = append(b.names, p.Metric)
+		b.heads = append(b.heads, heads{})
+	}
+	h := &b.heads[id]
 	previous := h.cache
 	if file == 1 {
 		previous = h.wal
@@ -91,8 +113,71 @@ func (b *Builder) Add(file int, p *points.Points, size int) error {
 	}
 	h.count += uint64(len(p.Data))
 	b.points += uint64(len(p.Data))
-	b.heads[p.Metric] = h
 	return nil
+}
+
+// BatchEntry describes one complete record already written by a segment.
+type BatchEntry struct {
+	Metric string
+	Size   int
+	Count  int
+}
+
+// AddBatch registers consecutive records of one source under a single lock.
+func (b *Builder) AddBatch(file int, entries []BatchEntry) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, e := range entries {
+		if file < 0 || file > 1 || e.Size <= 0 || e.Count <= 0 {
+			return fmt.Errorf("invalid recovery record")
+		}
+		id, ok := b.ids[e.Metric]
+		if !ok {
+			if len(b.names) >= math.MaxUint32 {
+				return fmt.Errorf("too many recovery metrics")
+			}
+			id = uint32(len(b.names))
+			b.ids[e.Metric] = id
+			b.names = append(b.names, e.Metric)
+			b.heads = append(b.heads, heads{})
+		}
+		h := &b.heads[id]
+		previous := h.cache
+		if file == 1 {
+			previous = h.wal
+		}
+		b.records[file] = append(b.records[file], record{b.sizes[file], uint64(e.Size), previous})
+		b.sizes[file] += uint64(e.Size)
+		if file == 0 {
+			h.cache = uint64(len(b.records[0]))
+		} else {
+			h.wal = uint64(len(b.records[1]))
+		}
+		h.count += uint64(e.Count)
+		b.points += uint64(e.Count)
+	}
+	return nil
+}
+
+// Prepare hashes and classifies every metric seen so far. Writers may keep
+// adding records meanwhile; Write classifies only metrics first seen later.
+func (b *Builder) Prepare() {
+	b.prepareMu.Lock()
+	defer b.prepareMu.Unlock()
+	b.mu.Lock()
+	start, names := b.classified, b.names[b.classified:]
+	b.mu.Unlock()
+	if len(names) == 0 {
+		return
+	}
+	hashes, isNew := b.classify(names)
+	b.mu.Lock()
+	b.hashes = append(b.hashes, hashes...)
+	if isNew != nil {
+		b.isNew = append(b.isNew, isNew...)
+	}
+	b.classified = start + len(names)
+	b.mu.Unlock()
 }
 
 func put64(dst []byte, values ...uint64) {
@@ -112,59 +197,123 @@ func (b *Builder) Write(w io.Writer) error {
 		}
 		return err
 	}
+	// Classifying names is optional checkpoint work. Callers Prepare after the
+	// authoritative dump is complete, so catalogue lookups never delay it.
+	b.Prepare()
+	b.prepareMu.Lock()
+	defer b.prepareMu.Unlock()
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.classified != len(b.names) {
+		return fmt.Errorf("recovery metrics added during index write")
+	}
 	slots := uint64(2)
-	for uint64(len(b.heads))*4 > slots*3 {
+	for uint64(len(b.names))*4 > slots*3 {
 		slots *= 2
 	}
-	names := make([]string, 0, len(b.heads))
-	for name := range b.heads {
-		names = append(names, name)
-	}
-	// Classifying names is optional checkpoint work. Do it only after the
-	// ordinary cache and WAL files are complete and synchronized, so a slow
-	// catalogue lookup cannot delay the authoritative recovery dump.
-	hashes, isNew := b.classify(names)
-	table := make([]byte, slots*slotSize)
-	var newSlots []uint64
-	for i, name := range names {
-		h := b.heads[name]
-		slot := hashes[i] & (slots - 1)
-		for get64(table, slot*slotSize+8) != 0 || get64(table, slot*slotSize+16) != 0 {
-			slot = (slot + 1) & (slots - 1)
-		}
-		put64(table[slot*slotSize:], hashes[i], h.cache, h.wal, h.count)
-		if isNew != nil && isNew[i] {
-			newSlots = append(newSlots, slot)
-		}
-	}
+	table, newSlots := buildTable(slots, b.hashes, b.heads, b.isNew, b.workers)
 	header := make([]byte, headerSize)
 	copy(header, magic)
-	put64(header[8:], uint64(len(b.records[0])), uint64(len(b.records[1])), slots, uint64(len(b.heads)), b.points, b.sizes[0], b.sizes[1], uint64(len(newSlots)))
+	put64(header[8:], uint64(len(b.records[0])), uint64(len(b.records[1])), slots, uint64(len(b.names)), b.points, b.sizes[0], b.sizes[1], uint64(len(newSlots)))
 	if err := write(header); err != nil {
 		return err
 	}
 	if err := write(table); err != nil {
 		return err
 	}
-	var row [recordSize]byte
+	batch := make([]byte, 0, 1<<20)
+	flush := func(force bool) error {
+		if len(batch) == 0 || (!force && len(batch)+recordSize <= cap(batch)) {
+			return nil
+		}
+		err := write(batch)
+		batch = batch[:0]
+		return err
+	}
 	for _, records := range b.records {
 		for _, r := range records {
-			put64(row[:], r.offset, r.length, r.previous)
-			if err := write(row[:]); err != nil {
+			if err := flush(false); err != nil {
 				return err
 			}
+			batch = binary.LittleEndian.AppendUint64(batch, r.offset)
+			batch = binary.LittleEndian.AppendUint64(batch, r.length)
+			batch = binary.LittleEndian.AppendUint64(batch, r.previous)
 		}
 	}
 	slices.Sort(newSlots)
 	for _, slot := range newSlots {
-		put64(row[:8], slot)
-		if err := write(row[:8]); err != nil {
+		if err := flush(false); err != nil {
 			return err
 		}
+		batch = binary.LittleEndian.AppendUint64(batch, slot)
 	}
-	return nil
+	return flush(true)
+}
+
+// buildTable places every metric by linear probing. Workers own disjoint slot
+// regions and probe only within them; entries that would cross a region end are
+// placed afterwards by a serial pass. Any insertion order yields valid probe
+// chains, so the result answers lookups exactly like a serial build.
+func buildTable(slots uint64, hashes []uint64, hs []heads, isNew []bool, workers int) ([]byte, []uint64) {
+	table := make([]byte, slots*slotSize)
+	regions := uint64(1)
+	for int(regions) < workers && regions*2 <= slots/4096 {
+		regions *= 2
+	}
+	width := slots / regions
+	byRegion := make([][]uint32, regions)
+	for id, h := range hashes {
+		r := (h & (slots - 1)) / width
+		byRegion[r] = append(byRegion[r], uint32(id))
+	}
+	empty := func(slot uint64) bool {
+		return get64(table, slot*slotSize+8) == 0 && get64(table, slot*slotSize+16) == 0
+	}
+	place := func(id uint32, slot uint64) uint64 {
+		put64(table[slot*slotSize:], hashes[id], hs[id].cache, hs[id].wal, hs[id].count)
+		return slot
+	}
+	deferred := make([][]uint32, regions)
+	found := make([][]uint64, regions)
+	var wg sync.WaitGroup
+	for r := uint64(0); r < regions; r++ {
+		wg.Go(func() {
+			hi := (r + 1) * width
+			for _, id := range byRegion[r] {
+				slot := hashes[id] & (slots - 1)
+				for slot < hi && !empty(slot) {
+					slot++
+				}
+				if slot == hi {
+					deferred[r] = append(deferred[r], id)
+					continue
+				}
+				if isNew != nil && isNew[id] {
+					found[r] = append(found[r], place(id, slot))
+				} else {
+					place(id, slot)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	var newSlots []uint64
+	for r := range found {
+		newSlots = append(newSlots, found[r]...)
+	}
+	for _, ids := range deferred {
+		for _, id := range ids {
+			slot := hashes[id] & (slots - 1)
+			for !empty(slot) {
+				slot = (slot + 1) & (slots - 1)
+			}
+			place(id, slot)
+			if isNew != nil && isNew[id] {
+				newSlots = append(newSlots, slot)
+			}
+		}
+	}
+	return table, newSlots
 }
 
 // classify hashes every name and, with a catalogue, marks names it lacks.
@@ -180,9 +329,7 @@ func (b *Builder) classify(names []string) ([]uint64, []bool) {
 	var wg sync.WaitGroup
 	for start := 0; start < len(names); start += chunk {
 		end := min(start+chunk, len(names))
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			var known func(string) bool
 			if isNew != nil {
 				known = b.newKnown()
@@ -193,7 +340,7 @@ func (b *Builder) classify(names []string) ([]uint64, []bool) {
 					isNew[i] = !known(names[i])
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	return hashes, isNew
