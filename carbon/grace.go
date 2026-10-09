@@ -111,10 +111,14 @@ func (app *App) DumpStop() error {
 	// first seen afterwards and the final write remain once input stops.
 	var readID string
 	var checkpointErr error
+	var overlayDone time.Time
 	dumpDone := make(chan struct{})
 	var checkpointWork sync.WaitGroup
 	if builder != nil {
-		checkpointWork.Go(func() { readID, checkpointErr = app.Carbonserver.CheckpointReadIndex() })
+		checkpointWork.Go(func() {
+			readID, checkpointErr = app.Carbonserver.CheckpointReadIndex()
+			overlayDone = time.Now()
+		})
 		checkpointWork.Go(func() {
 			for {
 				select {
@@ -141,8 +145,10 @@ func (app *App) DumpStop() error {
 		}
 		return app.Cache.DumpShards(seg-segments, seg-segments+1, out.WritePoints)
 	})
+	encoded := time.Since(dumpStart)
+	var cacheFile recovery.File
 	if err == nil {
-		_, err = dump.Close()
+		cacheFile, err = dump.Flush()
 	}
 	close(dumpDone)
 	if err != nil {
@@ -150,8 +156,13 @@ func (app *App) DumpStop() error {
 		logger.Error("dump failed", zap.Error(err))
 		return err
 	}
-	cacheFile, _ := dump.Close()
-	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("workers", dumpWorkers()), zap.Duration("runtime", time.Since(dumpStart)))
+	// Make the dump durable while the checkpoint is prepared. It must be on
+	// disk before old sources are retired or a checkpoint referencing it is
+	// published.
+	cacheSynced := make(chan error, 1)
+	syncStart := time.Now()
+	go func() { cacheSynced <- dump.Sync() }()
+	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("workers", dumpWorkers()), zap.Duration("encode_runtime", encoded), zap.Duration("runtime", time.Since(dumpStart)))
 
 	// Input still flows into the WAL: finish classifying dump metrics and wait
 	// for the overlay before stopping input.
@@ -160,8 +171,9 @@ func (app *App) DumpStop() error {
 		// The dump's cores are free now: finish classification on them.
 		builder.SetWorkers(dumpWorkers())
 		builder.Prepare()
+		classified := time.Since(prepareStart)
 		checkpointWork.Wait()
-		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Duration("since_dump_start", time.Since(dumpStart)), zap.Error(checkpointErr))
+		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Duration("classify_runtime", classified), zap.Duration("overlay_since_dump_start", overlayDone.Sub(dumpStart)), zap.Duration("since_dump_start", time.Since(dumpStart)), zap.Error(checkpointErr))
 	}
 
 	inputStopped := time.Now()
@@ -177,7 +189,12 @@ func (app *App) DumpStop() error {
 	if err != nil {
 		return err
 	}
-	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)))
+	waitStart := time.Now()
+	if err = <-cacheSynced; err != nil {
+		logger.Error("dump sync failed", zap.Error(err))
+		return err
+	}
+	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+time.Since(waitStart)), zap.Duration("cache_sync_wait", time.Since(waitStart)))
 	// The new dump holds every saved point not yet on disk, so a pending
 	// generation from the previous restart is now redundant.
 	if err = app.Cache.RetirePendingSources(); err != nil {
@@ -188,9 +205,11 @@ func (app *App) DumpStop() error {
 		// The ordinary .bin files remain usable even if the optional accelerator
 		// cannot be published. Never advertise a partial point/catalogue pair.
 		finalizeStart := time.Now()
+		var indexWritten time.Time
 		if checkpointErr == nil && readID != "" {
 			var index recovery.File
 			index, checkpointErr = recovery.WriteIndex(app.Config.Dump.Path, builder)
+			indexWritten = time.Now()
 			if checkpointErr == nil {
 				checkpointErr = recovery.Publish(app.Config.Dump.Path, app.Config.Whisper.DataDir, cacheFile, walFile, index, readID)
 			}
@@ -198,7 +217,7 @@ func (app *App) DumpStop() error {
 		if checkpointErr != nil {
 			logger.Warn("pending read checkpoint unavailable; saved legacy dump", zap.Error(checkpointErr))
 		} else {
-			logger.Info("pending read checkpoint saved", zap.Duration("finalize_runtime", time.Since(finalizeStart)), zap.Duration("input_closed_for", time.Since(inputStopped)))
+			logger.Info("pending read checkpoint saved", zap.Duration("finalize_runtime", time.Since(finalizeStart)), zap.Duration("index_write_runtime", indexWritten.Sub(finalizeStart)), zap.Duration("input_closed_for", time.Since(inputStopped)))
 		}
 	}
 	app.handOffReads(logger)

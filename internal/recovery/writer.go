@@ -25,6 +25,8 @@ type Writer struct {
 	closed     bool
 	err        error
 	descriptor File
+	syncOnce   sync.Once
+	syncErr    error
 }
 
 func NewWriter(path string, source, bufferSize int, builder *Builder) (*Writer, error) {
@@ -442,7 +444,16 @@ func (w *Writer) appendSegment(s *segment) error {
 	return w.err
 }
 
+// Close flushes, synchronizes and closes the file.
 func (w *Writer) Close() (File, error) {
+	f, err := w.Flush()
+	return f, errors.Join(err, w.Sync())
+}
+
+// Flush writes every accepted record and describes the file, without waiting
+// for it to reach the disk; Sync completes durability. No records are accepted
+// afterwards.
+func (w *Writer) Flush() (File, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.closed {
@@ -452,7 +463,7 @@ func (w *Writer) Close() (File, error) {
 	// Cache diversion can retain this closed writer until process exit. The
 	// caller owns the completed builder; do not retain its construction tables.
 	w.builder = nil
-	w.err = errors.Join(w.err, w.buffer.Flush(), w.file.Sync())
+	w.err = errors.Join(w.err, w.buffer.Flush())
 	if w.err == nil {
 		info, err := w.file.Stat()
 		w.err = err
@@ -460,12 +471,28 @@ func (w *Writer) Close() (File, error) {
 			w.descriptor = w.buffer.descriptor(filepath.Base(w.file.Name()), info.Size())
 		}
 	}
-	w.err = errors.Join(w.err, w.file.Close())
 	return w.descriptor, w.err
 }
 
-// WriteIndex creates a synchronized hidden sidecar. Until Publish succeeds, the
-// two ordinary source files remain independently recoverable by older binaries.
+// Sync makes the flushed file durable and closes it. It is idempotent and may
+// run concurrently with Close.
+func (w *Writer) Sync() error {
+	w.syncOnce.Do(func() {
+		if _, err := w.Flush(); err != nil {
+			w.syncErr = errors.Join(err, w.file.Close())
+			return
+		}
+		w.syncErr = errors.Join(w.file.Sync(), w.file.Close())
+	})
+	return w.syncErr
+}
+
+// WriteIndex creates the hidden index sidecar. It is not synchronized: the
+// index only accelerates recovery, and Publish records its chunk checksums. If
+// a crash loses unwritten index pages, opening the bundle fails its checksum
+// and startup uses the ordinary ordered restore of the two source files, which
+// callers synchronize before publishing. A normal restart reads the index from
+// the page cache.
 func WriteIndex(dir string, builder *Builder) (File, error) {
 	file, err := os.CreateTemp(dir, ".pending-index-*.bin")
 	if err != nil {
@@ -483,9 +510,6 @@ func WriteIndex(dir string, builder *Builder) (File, error) {
 		return File{}, err
 	}
 	if err = buffer.Flush(); err != nil {
-		return File{}, err
-	}
-	if err = file.Sync(); err != nil {
 		return File{}, err
 	}
 	info, err := file.Stat()
