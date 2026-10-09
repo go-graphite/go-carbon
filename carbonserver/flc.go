@@ -291,32 +291,20 @@ func newFileListCacheV2ReadOnly(flcc *fileListCacheCommon) (*fileListCacheV2, er
 }
 
 func (flc *fileListCacheV2) Write(entry *FLCEntry) error {
-	var offset int
-	buf := flc.buffer(flcv2StatFieldSize + len(entry.Path) + flcv2EntryStatLen)
-
-	binary.BigEndian.PutUint64(buf[offset:], uint64(len(entry.Path)))
-	offset += flcv2StatFieldSize
-
-	copy(buf[offset:], []byte(entry.Path))
-	offset += len(entry.Path)
-
-	binary.BigEndian.PutUint64(buf[offset:], uint64(entry.LogicalSize))
-	offset += flcv2StatFieldSize
-
-	binary.BigEndian.PutUint64(buf[offset:], uint64(entry.PhysicalSize))
-	offset += flcv2StatFieldSize
-
-	binary.BigEndian.PutUint64(buf[offset:], uint64(entry.DataPoints))
-	offset += flcv2StatFieldSize
-
-	binary.BigEndian.PutUint64(buf[offset:], uint64(entry.FirstSeenAt))
-	offset += flcv2StatFieldSize
-
-	buf[offset] = '\n'
-
-	_, err := flc.writer.Write(buf)
+	flc.entryBuffer = appendFLCv2Entry(flc.entryBuffer[:0], entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
+	_, err := flc.writer.Write(flc.entryBuffer)
 
 	return err
+}
+
+func appendFLCv2Entry[P string | []byte](dst []byte, path P, logicalSize, physicalSize, dataPoints, firstSeenAt int64) []byte {
+	dst = binary.BigEndian.AppendUint64(dst, uint64(len(path)))
+	dst = append(dst, path...)
+	dst = binary.BigEndian.AppendUint64(dst, uint64(logicalSize))
+	dst = binary.BigEndian.AppendUint64(dst, uint64(physicalSize))
+	dst = binary.BigEndian.AppendUint64(dst, uint64(dataPoints))
+	dst = binary.BigEndian.AppendUint64(dst, uint64(firstSeenAt))
+	return append(dst, '\n')
 }
 
 func (flc *fileListCacheV2) Read() (entry *FLCEntry, err error) {

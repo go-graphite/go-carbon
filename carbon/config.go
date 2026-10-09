@@ -175,6 +175,7 @@ type carbonserverConfig struct {
 
 	FileListCache        string `toml:"file-list-cache"`
 	FileListCacheVersion int    `toml:"file-list-cache-version"`
+	ScanWorkers          int    `toml:"scan-workers"`
 
 	QuotaUsageReportFrequency *Duration `toml:"quota-usage-report-frequency"`
 	MaxCreatesPerSecond       int       `toml:"max-creates-per-second"`

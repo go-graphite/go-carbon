@@ -99,7 +99,21 @@ type indexSnapshotWriter struct {
 	expectedSource          *snapshotSource
 }
 
-func newIndexSnapshotWriter(fileListCache, root string) (_ *indexSnapshotWriter, err error) {
+func newIndexSnapshotWriter(fileListCache, root string) (*indexSnapshotWriter, error) {
+	w, err := newIndexSnapshotFiles(fileListCache, root)
+	if err != nil {
+		return nil, err
+	}
+	if w.builder, err = vellum.New(w.indexBuffer, nil); err != nil {
+		_ = w.abort()
+		return nil, err
+	}
+	return w, nil
+}
+
+// newIndexSnapshotFiles prepares the generation files without an FST builder,
+// for writers that encode the index themselves.
+func newIndexSnapshotFiles(fileListCache, root string) (_ *indexSnapshotWriter, err error) {
 	w := &indexSnapshotWriter{fileListCache: fileListCache, manifestPath: snapshotManifestPath(fileListCache)}
 	w.manifest.Version = indexSnapshotVersion
 	w.manifest.Root, w.manifest.Device, w.manifest.Inode, err = snapshotRootIdentity(root)
@@ -123,10 +137,6 @@ func newIndexSnapshotWriter(fileListCache, root string) (_ *indexSnapshotWriter,
 	w.indexHash, w.metaHash = sha256.New(), sha256.New()
 	w.indexBuffer = bufio.NewWriterSize(io.MultiWriter(w.indexFile, w.indexHash), 1<<20)
 	w.metaBuffer = bufio.NewWriterSize(io.MultiWriter(w.metaFile, w.metaHash), 1<<20)
-	w.builder, err = vellum.New(w.indexBuffer, nil)
-	if err != nil {
-		return nil, err
-	}
 	w.metadata.w = w.metaBuffer
 	return w, nil
 }
@@ -209,8 +219,10 @@ func (w *indexSnapshotWriter) finish() (err error) {
 	if w.expectedSource != nil && w.manifest.Source != *w.expectedSource {
 		return fmt.Errorf("file list cache changed during snapshot bootstrap")
 	}
-	if err = w.builder.Close(); err != nil {
-		return err
+	if w.builder != nil {
+		if err = w.builder.Close(); err != nil {
+			return err
+		}
 	}
 	if err = w.metadata.finish(); err != nil {
 		return err
