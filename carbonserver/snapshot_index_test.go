@@ -314,6 +314,50 @@ func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
 	}
 }
 
+func TestRealtimeIndexSkipsUnstorableMetrics(t *testing.T) {
+	_, _, cache, root := snapshotTrieFixture(t)
+	long := "flink.tsk." + strings.Repeat("operator-", 40) + ".numRecordsIn"
+	l := NewCarbonserverListener(func(name string) []points.Point {
+		if name == "pending.value" || name == long {
+			return []points.Point{{Value: 1, Timestamp: 1}}
+		}
+		return nil
+	})
+	l.SetWhisperData(root)
+	l.SetTrieIndex(true)
+	l.SetConcurrentIndex(true)
+	l.SetFileListCache(cache)
+	l.SetFileListCacheVersion(int(FLCVersion2))
+	l.SetRealtimeIndex(10)
+	if !l.updateFileList(root, nil, nil) {
+		t.Fatal("warmup failed")
+	}
+	trie := l.CurrentFileIndex().trieIdx
+	if node := l.insertRealtimeMetric(trie, long); node != nil || l.MetricExists(long) {
+		t.Fatal("indexed a metric the persister cannot store")
+	}
+	l.insertRealtimeMetric(trie, "pending.value")
+	// An index or saved overlay from an earlier release may still hold one.
+	path, _ := l.storableMetricPath(long)
+	if _, err := trie.insert(path, 0, 0, 0, 0); err != nil || !l.MetricExists(long) {
+		t.Fatal("setup failed", err)
+	}
+	l.updateFileList(root, nil, nil)
+	if !l.MetricExists("pending.value") {
+		t.Fatal("scan removed accepted points awaiting persistence")
+	}
+	if l.MetricExists(long) {
+		t.Fatal("scan retained a metric the persister cannot store")
+	}
+	cached := splitAndInsert(map[string]struct{}{}, []map[string]struct{}{{long: {}, "cached.value": {}}}, func(metric string) bool {
+		_, ok := l.storableMetricPath(metric)
+		return ok
+	})
+	if _, ok := cached["/cached/value.wsp"]; !ok || len(cached) != 2 {
+		t.Fatalf("cache-scan names: %v", cached)
+	}
+}
+
 func TestSnapshotScanPreservesUnpersistedMetric(t *testing.T) {
 	_, _, cache, root := snapshotTrieFixture(t)
 	l := NewCarbonserverListener(func(name string) []points.Point {

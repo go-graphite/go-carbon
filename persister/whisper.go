@@ -26,8 +26,8 @@ import (
 )
 
 const storeMutexCount = 1 << 15 // 32768
-const maxPathLength = 4095
-const maxFilenameLength = 255
+const maxPathLength = helper.MaxWhisperPathLength
+const maxFilenameLength = helper.MaxWhisperFilenameLength
 
 type StoreFunc func(metric string)
 

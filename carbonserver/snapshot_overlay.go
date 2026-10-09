@@ -290,6 +290,13 @@ func (l *CarbonserverListener) RecoveryIndexID() string {
 	return index.trieIdx.recoveryID
 }
 
+func (u *fileListUpdate) insertPendingMetric(name string) error {
+	if _, ok := u.listener.storableMetricPath(name); !ok {
+		return nil
+	}
+	return u.trieIdx.insertPendingMetric(name)
+}
+
 func (ti *trieIndex) insertPendingMetric(name string) error {
 	_, err := ti.insert("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0)
 	return err
