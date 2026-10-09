@@ -166,11 +166,12 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 
 	atomic.AddUint64(&listener.metrics.RenderRequests, 1)
 
-	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+	url := req.URL.RequestURI()
+	accessLogger := newRequestLogger(ctx, listener.accessLogger,
 		zap.String("handler", "render"),
-		zap.String("url", req.URL.RequestURI()),
+		zap.String("url", url),
 		zap.String("peer", req.RemoteAddr),
-	))
+	)
 
 	format, err := getFormat(req)
 	if err != nil {
@@ -183,9 +184,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		return
 	}
 
-	accessLogger = accessLogger.With(
-		zap.String("format", format.String()),
-	)
+	accessLogger.with(zap.String("format", format.String()))
 
 	targets, err := getTargets(req, format)
 	if err != nil {
@@ -199,23 +198,23 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	}
 
 	tgs := getTargetNames(targets)
-	accessLogger = accessLogger.With(
-		zap.Strings("targets", tgs),
-	)
+	accessLogger.with(zap.Strings("targets", tgs))
 
-	logger := TraceContextToZap(ctx, listener.logger.With(
+	logger := newRequestLogger(ctx, listener.logger,
 		zap.String("handler", "render"),
-		zap.String("url", req.URL.RequestURI()),
+		zap.String("url", url),
 		zap.String("peer", req.RemoteAddr),
 		zap.Strings("targets", tgs),
 		zap.String("format", format.String()),
-	))
+	)
 
 	tle := &traceLogEntries{}
 	if listener.renderTraceLoggingEnabled {
 		defer func() {
-			tle.TotalDuration = float64(time.Since(t0)) / float64(time.Second)
-			logger.Info("render trace", zap.Any("trace_log_entries", *tle))
+			if ce := logger.check(zap.InfoLevel, "render trace"); ce != nil {
+				tle.TotalDuration = float64(time.Since(t0)) / float64(time.Second)
+				logger.write(ce, zap.Any("trace_log_entries", *tle))
+			}
 		}()
 	}
 	// Make sure we log which metric caused a panic()
@@ -236,7 +235,7 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		}
 	}()
 
-	response, fromCache, err := listener.fetchWithCache(ctx, logger, format, targets, tle)
+	response, fromCache, err := listener.fetchWithCache(ctx, logger.zap(), format, targets, tle)
 	tle.FetchSize = response.memoryUsed
 	tle.MetricsFetched = response.metricsFetched
 	tle.ValuesFetched = response.valuesFetched
@@ -273,15 +272,17 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 	wr.Write(response.data)
 
 	atomic.AddUint64(&listener.metrics.FetchSize, uint64(response.memoryUsed))
-	logger.Info("fetch served",
-		zap.Duration("runtime_seconds", time.Since(t0)),
-		zap.Bool("query_cache_enabled", listener.queryCacheEnabled),
-		zap.Bool("from_cache", fromCache),
-		zap.Int("metrics_fetched", response.metricsFetched),
-		zap.Int("values_fetched", response.valuesFetched),
-		zap.Int("memory_used_bytes", response.memoryUsed),
-		zap.Int("http_code", http.StatusOK),
-	)
+	if ce := logger.check(zap.InfoLevel, "fetch served"); ce != nil {
+		logger.write(ce,
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.Bool("query_cache_enabled", listener.queryCacheEnabled),
+			zap.Bool("from_cache", fromCache),
+			zap.Int("metrics_fetched", response.metricsFetched),
+			zap.Int("values_fetched", response.valuesFetched),
+			zap.Int("memory_used_bytes", response.memoryUsed),
+			zap.Int("http_code", http.StatusOK),
+		)
+	}
 }
 
 func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeRange][]target, format string) (string, uint64) {
@@ -319,7 +320,7 @@ func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeR
 }
 
 func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target, tle *traceLogEntries) (fetchResponse, bool, error) {
-	logger = logger.With(
+	logger = logger.WithLazy(
 		zap.String("function", "fetchWithCache"),
 	)
 	fromCache := false
@@ -385,6 +386,11 @@ func getStreamingChannelSize(filesCount int) int {
 
 func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, responseChan chan<- response) {
 	defer close(responseChan)
+	listener.fetchTargets(ctx, format, targets, metricGlobMap, func(r response) { responseChan <- r })
+}
+
+// fetchTargets passes each fetched series to emit, in the caller's goroutine.
+func (listener *CarbonserverListener) fetchTargets(ctx context.Context, format responseFormat, targets map[timeRange][]target, metricGlobMap map[string]globs, emit func(response)) {
 	for tr, ts := range targets {
 		for _, metric := range ts {
 			select {
@@ -449,7 +455,7 @@ func (listener *CarbonserverListener) prepareDataStream(ctx context.Context, for
 					continue
 				}
 				for i := range res {
-					responseChan <- res[i]
+					emit(res[i])
 				}
 			} else {
 				listener.accessLogger.Debug("expand globs returned an error",
@@ -480,23 +486,19 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 	}
 	metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
-	responseChan := make(chan response, renderResponseBufferSize(targets, metricGlobMap))
-	go func() {
-		prepareT0 := time.Now()
-		listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
-		tle.PrepareDuration = float64(time.Since(prepareT0)) / float64(time.Second)
-	}()
+	// Collect directly: a buffered channel and goroutine per request cost more
+	// than the typical single-series fetch they would overlap with.
+	prepareT0 := time.Now()
+	listener.fetchTargets(ctx, format, targets, metricGlobMap, func(r response) {
+		if format == protoV2Format || format == jsonFormat {
+			multiv2.Metrics = append(multiv2.Metrics, r.proto2())
+		} else {
+			multiv3.Metrics = append(multiv3.Metrics, r.proto3())
+		}
+	})
+	tle.PrepareDuration = float64(time.Since(prepareT0)) / float64(time.Second)
 
 	var metrics []string
-	for renderResponse := range responseChan {
-		if format == protoV2Format || format == jsonFormat {
-			res := renderResponse.proto2()
-			multiv2.Metrics = append(multiv2.Metrics, res)
-		} else {
-			res := renderResponse.proto3()
-			multiv3.Metrics = append(multiv3.Metrics, res)
-		}
-	}
 
 	if listener.checkRequestCtx(ctx) != nil {
 		err := fmt.Errorf("time out while preparing data proto")
@@ -616,36 +618,44 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 	} else {
 		maxFetchDataGoroutines = 2 * runtime.GOMAXPROCS(0)
 	}
-	sem := make(chan struct{}, maxFetchDataGoroutines)
-	for i, fileName := range files {
-		wg.Add(1)
-		sem <- struct{}{} // acquire a slot
-		go func(i int, fileName string) {
-			defer wg.Done()
-			defer func() { <-sem }() // release the slot
-			if !leafs[i] {
-				listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression),
-					zap.String("metricName", metric), zap.String("fileName", fileName))
-				// can't fetch a directory
-				return
-			}
-			response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
-			mu.Lock()
-			defer mu.Unlock()
-			if err == nil {
-				multi = append(multi, response)
-				if listener.trieIndex {
-					readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
-					if len(trieNodes) > i {
-						trieNodes[i].incrementReadBytesMetric(readBytesNumber)
-					}
+	fetch := func(i int, fileName string) {
+		if !leafs[i] {
+			listener.logger.Debug("skipping directory", zap.String("PathExpression", pathExpression),
+				zap.String("metricName", metric), zap.String("fileName", fileName))
+			// can't fetch a directory
+			return
+		}
+		response, err := listener.fetchSingleMetric(fileName, pathExpression, fromTime, untilTime)
+		mu.Lock()
+		defer mu.Unlock()
+		if err == nil {
+			multi = append(multi, response)
+			if listener.trieIndex {
+				readBytesNumber := int64(len(response.Values) * whisper.PointSize) // bytes read from the disc, 12 bytes for each point
+				if len(trieNodes) > i {
+					trieNodes[i].incrementReadBytesMetric(readBytesNumber)
 				}
-			} else {
-				errs = append(errs, err)
 			}
-		}(i, fileName)
+		} else {
+			errs = append(errs, err)
+		}
 	}
-	wg.Wait()
+	if len(files) == 1 {
+		// Most targets name one series; fetching it needs no fan-out.
+		fetch(0, files[0])
+	} else {
+		sem := make(chan struct{}, maxFetchDataGoroutines)
+		for i, fileName := range files {
+			wg.Add(1)
+			sem <- struct{}{} // acquire a slot
+			go func(i int, fileName string) {
+				defer wg.Done()
+				defer func() { <-sem }() // release the slot
+				fetch(i, fileName)
+			}(i, fileName)
+		}
+		wg.Wait()
+	}
 	if len(errs) != 0 {
 		listener.logger.Warn("errors occur while fetching data",
 			zap.Any("errors", errs),
