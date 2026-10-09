@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -153,36 +154,69 @@ func TestCheckpointClassificationAfterDurableSources(t *testing.T) {
 	}
 }
 
-type failAfter struct{ left int }
+type failAt struct{ limit int64 }
 
-func (f *failAfter) Write(p []byte) (int, error) {
-	if f.left -= len(p); f.left < 0 {
+func (f failAt) WriteAt(p []byte, off int64) (int, error) {
+	if off+int64(len(p)) > f.limit {
 		return 0, io.ErrClosedPipe
 	}
 	return len(p), nil
 }
 
-func TestPipelinePreservesOrderAndReportsFailure(t *testing.T) {
-	var file, digest bytes.Buffer
-	p := newPipeline(&file, 7, &digest)
+// Out-of-order parallel writes and per-chunk hashing must still produce the
+// exact bytes and the chunk digests a serial hash gives.
+func TestSinkMatchesSerialDigest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	s := newSink(f, 4096)
 	var want []byte
-	for i := 0; i < 1000; i++ {
-		chunk := []byte(fmt.Sprintf("%d,", i))
-		want = append(want, chunk...)
-		if _, err := p.Write(chunk); err != nil {
+	released := 0
+	rng := rand.New(rand.NewSource(1))
+	for len(want) < 3*checksumChunkSize+12345 {
+		data := make([]byte, 1+rng.Intn(3<<20))
+		rng.Read(data)
+		want = append(want, data...)
+		if rng.Intn(2) == 0 {
+			if _, err = s.Write(data); err != nil {
+				t.Fatal(err)
+			}
+		} else if err = s.Submit(data, func([]byte) { released++ }); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := p.Flush(); err != nil || !bytes.Equal(file.Bytes(), want) || !bytes.Equal(digest.Bytes(), want) {
-		t.Fatal("pipeline reordered or lost bytes", err)
+	if err = s.Flush(); err != nil {
+		t.Fatal(err)
 	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatal("sink bytes differ", err)
+	}
+	d := newFileDigester()
+	_, _ = d.Write(want)
+	serial := d.descriptor("s.bin", int64(len(want)))
+	desc := s.descriptor("s.bin", int64(len(want)))
+	if !reflect.DeepEqual(desc.Chunks, serial.Chunks) || desc.ChunkSize != serial.ChunkSize || desc.SHA256 != ([32]byte{}) {
+		t.Fatal("sink chunk digests differ")
+	}
+	if !verifyFileChecksum(got, desc) {
+		t.Fatal("sink descriptor does not verify")
+	}
+	if released == 0 {
+		t.Fatal("submitted buffers not released")
+	}
+}
 
-	p = newPipeline(&failAfter{left: 64}, 16, io.Discard)
+func TestSinkReportsWriteFailure(t *testing.T) {
+	s := newSink(failAt{limit: 64 << 10}, 16<<10)
 	var err error
 	for i := 0; i < 100 && err == nil; i++ {
-		_, err = p.Write(make([]byte, 16))
+		_, err = s.Write(make([]byte, 16<<10))
 	}
-	if !errors.Is(errors.Join(err, p.Flush()), io.ErrClosedPipe) {
+	if !errors.Is(errors.Join(err, s.Flush()), io.ErrClosedPipe) {
 		t.Fatal("write failure not reported")
 	}
 }

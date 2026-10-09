@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -17,8 +18,7 @@ import (
 type Writer struct {
 	mu         sync.Mutex
 	file       *os.File
-	buffer     *pipeline
-	hash       *fileDigester
+	buffer     *sink
 	builder    *Builder
 	source     int
 	scratch    []byte
@@ -32,138 +32,229 @@ func NewWriter(path string, source, bufferSize int, builder *Builder) (*Writer, 
 	if err != nil {
 		return nil, err
 	}
-	digest := newFileDigester()
-	return &Writer{file: file, buffer: newPipeline(file, bufferSize, digest.wholeWriter(), digest.chunkWriter()), hash: digest, builder: builder, source: source}, nil
+	return &Writer{file: file, buffer: newSink(file, bufferSize), builder: builder, source: source}, nil
 }
 
-// pipeline keeps file writes and checksums off the encoding goroutine. Full
-// buffers pass in order through the file write and then each hash stage, every
-// stage on its own goroutine, so the digests always describe exactly the bytes
-// written, in file order, while hashing overlaps the write.
-// block is a buffer moving through the stages; only pooled ones are recycled.
-type block struct {
+// sink writes buffers at their file offsets on a pool of goroutines and hashes
+// each fixed checksum chunk on its own goroutine, so neither the file write nor
+// hashing is a serial bottleneck. Bytes within a chunk are hashed in file order.
+// A buffer is released once it is written and every chunk it overlaps has
+// hashed it. No whole-file digest is computed: validChecksumShape accepts its
+// absence for multi-chunk files (older binaries then use ordered restore).
+type sink struct {
+	file     io.WriterAt
+	size     int
+	current  []byte
+	free     chan []byte
+	offset   int64
+	region   *sinkRegion
+	chunks   []*[sha256.Size]byte
+	writes   chan func()
+	writers  sync.WaitGroup
+	pending  sync.WaitGroup
+	inflight chan struct{}
+	mu       sync.Mutex
+	err      error
+	flushed  bool
+}
+
+type sinkBlock struct {
+	s       *sink
 	buf     []byte
-	pooled  bool
+	refs    atomic.Int32
 	release func([]byte)
 }
 
-type pipeline struct {
-	current []byte
-	size    int
-	full    chan block
-	free    chan []byte
-	done    chan struct{}
-	mu      sync.Mutex
-	err     error
+func (b *sinkBlock) done() {
+	if b.refs.Add(-1) == 0 {
+		if b.release != nil {
+			b.release(b.buf)
+		}
+		<-b.s.inflight
+	}
 }
 
-const pipelineBuffers = 4
-
-func newPipeline(file io.Writer, size int, hashes ...io.Writer) *pipeline {
-	p := &pipeline{size: size, full: make(chan block, pipelineBuffers), free: make(chan []byte, pipelineBuffers), done: make(chan struct{})}
-	p.current = make([]byte, 0, size)
-	for i := 1; i < pipelineBuffers; i++ {
-		p.free <- make([]byte, 0, size)
-	}
-	in := p.full
-	for i, stage := range append([]io.Writer{file}, hashes...) {
-		out := make(chan block, pipelineBuffers)
-		last := i == len(hashes)
-		go func(in <-chan block, out chan<- block) {
-			if last {
-				defer close(p.done)
-			} else {
-				defer close(out)
-			}
-			for b := range in {
-				if i == 0 {
-					if p.failed() == nil {
-						n, err := stage.Write(b.buf)
-						if err == nil && n != len(b.buf) {
-							err = io.ErrShortWrite
-						}
-						p.fail(err)
-					}
-				} else {
-					_, _ = stage.Write(b.buf)
-				}
-				switch {
-				case !last:
-					out <- b
-				case b.pooled:
-					p.free <- b.buf[:0]
-				case b.release != nil:
-					b.release(b.buf)
-				}
-			}
-		}(in, out)
-		in = out
-	}
-	return p
+type sinkPiece struct {
+	blk  *sinkBlock
+	data []byte
 }
 
-func (p *pipeline) fail(err error) {
+// sinkRegion hashes one checksum chunk; pieces arrive in file order.
+type sinkRegion struct {
+	pieces chan sinkPiece
+	filled int
+}
+
+const (
+	sinkWriters  = 8
+	sinkInflight = 256
+)
+
+func newSink(file io.WriterAt, size int) *sink {
+	s := &sink{file: file, size: size, free: make(chan []byte, sinkInflight), writes: make(chan func(), sinkInflight), inflight: make(chan struct{}, sinkInflight)}
+	s.current = make([]byte, 0, size)
+	for range sinkWriters {
+		s.writers.Go(func() {
+			for job := range s.writes {
+				job()
+			}
+		})
+	}
+	return s
+}
+
+func (s *sink) fail(err error) {
 	if err != nil {
-		p.mu.Lock()
-		p.err = errors.Join(p.err, err)
-		p.mu.Unlock()
+		s.mu.Lock()
+		s.err = errors.Join(s.err, err)
+		s.mu.Unlock()
 	}
 }
-func (p *pipeline) failed() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.err
+func (s *sink) failed() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
 }
 
-// Write reports an earlier stage failure; bytes accepted here may still fail
-// later, which Flush reports.
-func (p *pipeline) Write(data []byte) (int, error) {
-	if err := p.failed(); err != nil {
+func (s *sink) recycle(buf []byte) {
+	select {
+	case s.free <- buf[:0]:
+	default:
+	}
+}
+
+func (s *sink) startRegion() {
+	r := &sinkRegion{pieces: make(chan sinkPiece, 64)}
+	digest := new([sha256.Size]byte)
+	s.chunks = append(s.chunks, digest)
+	s.region = r
+	s.pending.Go(func() {
+		h := sha256.New()
+		for p := range r.pieces {
+			_, _ = h.Write(p.data)
+			p.blk.done()
+		}
+		h.Sum(digest[:0])
+	})
+}
+
+// dispatch hands buf to the writers and the chunk hashers.
+func (s *sink) dispatch(buf []byte, release func([]byte)) {
+	s.inflight <- struct{}{}
+	blk := &sinkBlock{s: s, buf: buf, release: release}
+	blk.refs.Store(1) // the write
+	off := s.offset
+	s.offset += int64(len(buf))
+	for data := buf; len(data) > 0; {
+		if s.region == nil {
+			s.startRegion()
+		}
+		take := min(len(data), checksumChunkSize-s.region.filled)
+		blk.refs.Add(1)
+		s.region.pieces <- sinkPiece{blk, data[:take]}
+		s.region.filled += take
+		data = data[take:]
+		if s.region.filled == checksumChunkSize {
+			close(s.region.pieces)
+			s.region = nil
+		}
+	}
+	s.pending.Add(1)
+	s.writes <- func() {
+		defer s.pending.Done()
+		if s.failed() == nil {
+			n, err := s.file.WriteAt(buf, off)
+			if err == nil && n != len(buf) {
+				err = io.ErrShortWrite
+			}
+			s.fail(err)
+		}
+		blk.done()
+	}
+}
+
+// Write copies data into pooled buffers. It reports an earlier failure; bytes
+// accepted here may still fail later, which Flush reports.
+func (s *sink) Write(data []byte) (int, error) {
+	if err := s.failed(); err != nil {
 		return 0, err
 	}
 	n := len(data)
 	for len(data) > 0 {
-		take := min(len(data), p.size-len(p.current))
-		p.current = append(p.current, data[:take]...)
+		take := min(len(data), s.size-len(s.current))
+		s.current = append(s.current, data[:take]...)
 		data = data[take:]
-		if len(p.current) == p.size {
-			p.full <- block{buf: p.current, pooled: true}
-			p.current = <-p.free
+		if len(s.current) == s.size {
+			s.dispatch(s.current, s.recycle)
+			s.current = s.next()
 		}
 	}
 	return n, nil
 }
 
-// Submit passes a complete buffer through every stage without copying it. The
-// caller must not modify buf until release (if any) is called with it after
-// the last stage. Pending bytes from Write go first.
-func (p *pipeline) Submit(buf []byte, release func([]byte)) error {
-	if err := p.failed(); err != nil {
+func (s *sink) next() []byte {
+	select {
+	case buf := <-s.free:
+		return buf
+	default:
+		return make([]byte, 0, s.size)
+	}
+}
+
+// Submit writes a complete buffer without copying it. The caller must not
+// modify buf until release (if any) is called with it. Pending bytes from
+// Write go first.
+func (s *sink) Submit(buf []byte, release func([]byte)) error {
+	if err := s.failed(); err != nil {
 		return err
 	}
 	if len(buf) == 0 {
 		return nil
 	}
-	if len(p.current) > 0 {
-		p.full <- block{buf: p.current, pooled: true}
-		p.current = <-p.free
+	if len(s.current) > 0 {
+		s.dispatch(s.current, s.recycle)
+		s.current = s.next()
 	}
-	p.full <- block{buf: buf, release: release}
+	s.dispatch(buf, release)
 	return nil
 }
 
-// Flush hands over the final buffer and waits for both stages. It is terminal.
-func (p *pipeline) Flush() error {
-	if p.full == nil {
-		return p.failed()
+// Flush writes the final buffer and waits for every write and hash. It is
+// terminal.
+func (s *sink) Flush() error {
+	if s.flushed {
+		return s.failed()
 	}
-	if len(p.current) > 0 {
-		p.full <- block{buf: p.current, pooled: true}
+	s.flushed = true
+	if len(s.current) > 0 {
+		s.dispatch(s.current, nil)
 	}
-	close(p.full)
-	<-p.done
-	p.full, p.current = nil, nil
-	return p.failed()
+	s.current = nil
+	if s.region != nil {
+		close(s.region.pieces)
+		s.region = nil
+	}
+	s.pending.Wait()
+	close(s.writes)
+	s.writers.Wait()
+	return s.failed()
+}
+
+// descriptor describes the flushed bytes.
+func (s *sink) descriptor(name string, size int64) File {
+	f := File{Name: name, Size: size}
+	if len(s.chunks) == 0 {
+		f.SHA256 = sha256.Sum256(nil)
+		return f
+	}
+	f.ChunkSize = checksumChunkSize
+	for _, c := range s.chunks {
+		f.Chunks = append(f.Chunks, *c)
+	}
+	if len(f.Chunks) == 1 {
+		f.SHA256 = f.Chunks[0]
+	}
+	return f
 }
 
 func (w *Writer) WritePoints(p *points.Points) error {
@@ -366,7 +457,7 @@ func (w *Writer) Close() (File, error) {
 		info, err := w.file.Stat()
 		w.err = err
 		if err == nil {
-			w.descriptor = w.hash.descriptor(filepath.Base(w.file.Name()), info.Size())
+			w.descriptor = w.buffer.descriptor(filepath.Base(w.file.Name()), info.Size())
 		}
 	}
 	w.err = errors.Join(w.err, w.file.Close())
@@ -387,8 +478,7 @@ func WriteIndex(dir string, builder *Builder) (File, error) {
 			_ = os.Remove(file.Name())
 		}
 	}()
-	digest := newFileDigester()
-	buffer := newPipeline(file, 1<<20, digest.wholeWriter(), digest.chunkWriter())
+	buffer := newSink(file, 1<<20)
 	if err = builder.Write(buffer); err != nil {
 		return File{}, err
 	}
@@ -402,7 +492,7 @@ func WriteIndex(dir string, builder *Builder) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	result := digest.descriptor(filepath.Base(file.Name()), info.Size())
+	result := buffer.descriptor(filepath.Base(file.Name()), info.Size())
 	if err = file.Close(); err != nil {
 		return File{}, err
 	}

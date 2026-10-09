@@ -113,6 +113,14 @@ func (b *Builder) Reserve(metrics int) {
 	b.src[0].mu.Unlock()
 }
 
+// SetWorkers changes how many goroutines later Prepare and Write calls use,
+// e.g. once the dump has released its cores.
+func (b *Builder) SetWorkers(n int) {
+	b.prepareMu.Lock()
+	b.workers = max(n, 1)
+	b.prepareMu.Unlock()
+}
+
 // entry returns the entry of an id returned by ID.
 func (b *Builder) entry(id uint32) *entry {
 	local := id >> shardBits

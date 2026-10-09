@@ -157,6 +157,8 @@ func (app *App) DumpStop() error {
 	// for the overlay before stopping input.
 	if builder != nil {
 		prepareStart := time.Now()
+		// The dump's cores are free now: finish classification on them.
+		builder.SetWorkers(dumpWorkers())
 		builder.Prepare()
 		checkpointWork.Wait()
 		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Duration("since_dump_start", time.Since(dumpStart)), zap.Error(checkpointErr))

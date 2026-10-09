@@ -74,8 +74,10 @@ func validChecksumShape(f File) bool {
 	if len(f.Chunks) == 0 {
 		return f.ChunkSize == 0
 	}
+	// Multi-chunk files need no whole-file digest: the chunks cover every
+	// byte. Writers older than this rule always set one.
 	return f.Size > 0 && f.ChunkSize == checksumChunkSize && int64(len(f.Chunks)) == (f.Size-1)/checksumChunkSize+1 &&
-		f.SHA256 != [sha256.Size]byte{} && (len(f.Chunks) != 1 || f.Chunks[0] == f.SHA256)
+		(len(f.Chunks) != 1 || f.Chunks[0] == f.SHA256)
 }
 
 func verifyFileChecksum(data []byte, f File) bool {
