@@ -11,7 +11,7 @@ import (
 	"github.com/blevesearch/vellum"
 )
 
-func buildTestFST(t testing.TB, keys [][]byte, base uint64) []byte {
+func buildTestFST(t testing.TB, keys [][]byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	b, err := vellum.New(&buf, nil)
@@ -19,7 +19,25 @@ func buildTestFST(t testing.TB, keys [][]byte, base uint64) []byte {
 		t.Fatal(err)
 	}
 	for i, k := range keys {
-		if err := b.Insert(k, base+uint64(i)); err != nil {
+		if err := b.Insert(k, uint64(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func buildTestFSTValues(t testing.TB, keys [][]byte, values []uint64) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	b, err := vellum.New(&buf, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, k := range keys {
+		if err := b.Insert(k, values[i]); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -30,9 +48,15 @@ func buildTestFST(t testing.TB, keys [][]byte, base uint64) []byte {
 }
 
 func joinTestFST(t testing.TB, keys [][]byte, cuts []int) []byte {
+	return joinTestFSTValues(t, keys, nil, cuts)
+}
+
+// joinTestFSTValues joins shards of keys; with values, each shard keeps them
+// instead of numbering rows.
+func joinTestFSTValues(t testing.TB, keys [][]byte, values []uint64, cuts []int) []byte {
 	t.Helper()
 	var out bytes.Buffer
-	j, err := newFSTJoiner(&out)
+	j, err := newFSTJoinerMode(&out, values != nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +75,10 @@ func joinTestFST(t testing.TB, keys [][]byte, cuts []int) []byte {
 		if end < len(keys) {
 			right = scanCommonPrefix(part[len(part)-1], keys[end])
 		}
-		data := buildTestFST(t, part, 0)
+		data := buildTestFST(t, part)
+		if values != nil {
+			data = buildTestFSTValues(t, part, values[start:end])
+		}
 		shard, err := newFSTShard(data, part[0], part[len(part)-1], uint64(len(part)), left, right)
 		if err != nil {
 			t.Fatal(err)
@@ -206,7 +233,7 @@ func TestFSTJoinRejectsUnorderedShards(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, keys := range [][][]byte{{[]byte("b")}, {[]byte("a")}} {
-		data := buildTestFST(t, keys, 0)
+		data := buildTestFST(t, keys)
 		shard, err := newFSTShard(data, keys[0], keys[0], 1, 1, 1)
 		if err != nil {
 			t.Fatal(err)
@@ -216,4 +243,45 @@ func TestFSTJoinRejectsUnorderedShards(t *testing.T) {
 		}
 	}
 	t.Fatal("out-of-order shard accepted")
+}
+
+func TestFSTJoinKeepsValues(t *testing.T) {
+	rng := rand.New(rand.NewSource(5))
+	for iter := 0; iter < 200; iter++ {
+		keys := randomFSTKeys(rng, 1+rng.Intn(300))
+		values := make([]uint64, len(keys))
+		for i := range values {
+			// Small codes, large counts and zeros, in no particular order.
+			switch rng.Intn(3) {
+			case 0:
+				values[i] = uint64(rng.Intn(4))
+			case 1:
+				values[i] = uint64(rng.Int63n(1 << 40))
+			}
+		}
+		var cuts []int
+		for i := rng.Intn(min(len(keys), 20)); i > 0; i-- {
+			cuts = append(cuts, rng.Intn(len(keys)+1))
+		}
+		slices.Sort(cuts)
+		cuts = slices.Compact(cuts)
+		for _, data := range [][]byte{buildTestFSTValues(t, keys, values), joinTestFSTValues(t, keys, values, cuts)} {
+			fst, err := vellum.Load(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c, err := newFSTCursor(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, k := range keys {
+				if v, ok, err := fst.Get(k); err != nil || !ok || v != values[i] {
+					t.Fatalf("%d: get %q = %d %t %v, want %d", iter, k, v, ok, err, values[i])
+				}
+				if final, v := c.final(c.acceptBytes(c.start(), k)); !final || v != values[i] {
+					t.Fatalf("%d: cursor %q = %d %t, want %d", iter, k, v, final, values[i])
+				}
+			}
+		}
+	}
 }

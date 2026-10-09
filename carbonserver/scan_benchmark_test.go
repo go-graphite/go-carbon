@@ -63,22 +63,51 @@ func TestScanProbe(t *testing.T) {
 	if !l.updateFileList(root, nil, nil) {
 		t.Fatal("saved generation not loaded")
 	}
-	old := l.CurrentFileIndex().trieIdx.snapshot.manifest.Records
-	runtime.GC()
-	var before runtime.MemStats
-	runtime.ReadMemStats(&before)
-	heap := sampleHeapPeak()
-	started, usage := time.Now(), scanUsage()
-	l.updateFileList(root, nil, nil)
-	t.Logf("go heap in use: %dMB before, %dMB peak during scan", before.HeapInuse>>20, heap()>>20)
-	fields := log.last(t)
-	t.Logf("parallel scan: %s, %s, workers=%v ranges=%v splits=%v idle=%v files=%v new=%v plan=%v walk=%v slowest=%v publish=%v", time.Since(started), usage.since(),
-		fields["scan_workers"], fields["scan_ranges"], fields["scan_splits"], fields["scan_idle_time"], fields["Files"], fields["scan_new_metrics"],
-		fields["scan_plan_time"], fields["scan_walk_time"], fields["scan_slowest_range"], fields["scan_publish_time"])
-	logScanRanges(t, log)
-	snapshot := l.CurrentFileIndex().trieIdx.snapshot
-	t.Logf("records: %d before, %d after", old, snapshot.manifest.Records)
-	verifyScanGeneration(t, cache, snapshot)
+	repeat, _ := strconv.Atoi(os.Getenv("GO_CARBON_SCAN_REPEAT"))
+	for i := range max(repeat, 1) {
+		old := l.CurrentFileIndex().trieIdx.snapshot.manifest.Records
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+		heap := sampleHeapPeak()
+		profile := os.Getenv("GO_CARBON_SCAN_CPUPROFILE")
+		if profile != "" && i == max(repeat, 1)-1 {
+			f, err := os.Create(profile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pprof.StartCPUProfile(f); err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+		}
+		if marker := os.Getenv("GO_CARBON_SCAN_MARKER"); marker != "" {
+			_ = os.WriteFile(marker, []byte(fmt.Sprint(i+1)), 0o644)
+		}
+		started, usage := time.Now(), scanUsage()
+		l.updateFileList(root, nil, nil)
+		if profile != "" && i == max(repeat, 1)-1 {
+			pprof.StopCPUProfile()
+		}
+		t.Logf("scan %d: go heap in use: %dMB before, %dMB peak during scan", i+1, before.HeapInuse>>20, heap()>>20)
+		fields := log.last(t)
+		t.Logf("scan %d: parallel scan: %s, %s, workers=%v ranges=%v splits=%v idle=%v listed=%v replayed=%v files=%v new=%v plan=%v walk=%v slowest=%v publish=%v", i+1,
+			time.Since(started), usage.since(), fields["scan_workers"], fields["scan_ranges"], fields["scan_splits"], fields["scan_idle_time"],
+			fields["scan_listed_dirs"], fields["scan_replayed_dirs"], fields["Files"], fields["scan_new_metrics"],
+			fields["scan_plan_time"], fields["scan_walk_time"], fields["scan_slowest_range"], fields["scan_publish_time"])
+		logScanRanges(t, log)
+		snapshot := l.CurrentFileIndex().trieIdx.snapshot
+		t.Logf("scan %d: records: %d before, %d after", i+1, old, snapshot.manifest.Records)
+		if manifest := snapshot.manifest; manifest.Dirs != nil {
+			t.Logf("scan %d: catalogue %dMB, index %dMB", i+1, manifest.Dirs.Size>>20, manifest.Index.Size>>20)
+		}
+		if os.Getenv("GO_CARBON_SCAN_VERIFY") != "0" {
+			verifyScanGeneration(t, cache, snapshot)
+		}
+		log.mu.Lock()
+		log.ranges = nil
+		log.mu.Unlock()
+	}
 }
 
 // logScanRanges reports the slowest ranges of the last scan, which bound

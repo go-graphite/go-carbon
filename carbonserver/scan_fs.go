@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"errors"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -19,11 +20,6 @@ const (
 	scanTypeSymlink
 	scanTypeOther
 )
-
-type scanDirent struct {
-	name string
-	typ  scanType
-}
 
 func scanModeType(mode uint32) scanType {
 	switch mode & unix.S_IFMT {
@@ -67,4 +63,42 @@ func scanStat(dirfd int, name string, follow bool, st *unix.Stat_t) error {
 			return err
 		}
 	}
+}
+
+// scanNames stores a directory's entry names in chunks, so names are views
+// that cost no allocation each and growing never copies (and so never keeps)
+// earlier names. The chunks are reused for the next directory at the same
+// depth, when the entries of this one are gone; names must not be retained
+// beyond that.
+type scanNames struct {
+	chunks [][]byte
+	cur    int
+}
+
+func (n *scanNames) reset() {
+	n.cur = 0
+	if len(n.chunks) > 0 {
+		n.chunks[0] = n.chunks[0][:0]
+	}
+}
+
+func (n *scanNames) add(name []byte) string {
+	if len(n.chunks) == 0 {
+		n.chunks = append(n.chunks, make([]byte, 0, max(64<<10, len(name))))
+	}
+	c := &n.chunks[n.cur]
+	if len(*c)+len(name) > cap(*c) {
+		n.cur++
+		if n.cur == len(n.chunks) {
+			n.chunks = append(n.chunks, nil)
+		}
+		c = &n.chunks[n.cur]
+		if cap(*c) < len(name) {
+			*c = make([]byte, 0, max(64<<10, len(name)))
+		}
+		*c = (*c)[:0]
+	}
+	start := len(*c)
+	*c = append(*c, name...)
+	return unsafe.String(unsafe.SliceData((*c)[start:]), len(name)) // skipcq: GSC-G103
 }

@@ -37,6 +37,11 @@ type indexSnapshotManifest struct {
 	Records         uint64
 	Index, Metadata snapshotFile
 	Source          snapshotSource
+	// Optional, written by parallel scans: the directory catalogue (see
+	// scan_dirs.go) and when the scan started, in Unix nanoseconds. Readers
+	// that predate them ignore both.
+	Dirs        *snapshotFile `json:",omitempty"`
+	ScanStarted int64         `json:",omitempty"`
 }
 
 type snapshotSource struct {
@@ -91,6 +96,9 @@ type indexSnapshotWriter struct {
 	indexFile, metaFile     *os.File
 	indexHash, metaHash     hash.Hash
 	indexBuffer, metaBuffer *bufio.Writer
+	dirsFile                *os.File
+	dirsHash                hash.Hash
+	dirsBuffer              *bufio.Writer
 	builder                 *vellum.Builder
 	metadata                snapshotMetadataWriter
 	key, previous           []byte
@@ -139,6 +147,16 @@ func newIndexSnapshotFiles(fileListCache, root string) (_ *indexSnapshotWriter, 
 	w.metaBuffer = bufio.NewWriterSize(io.MultiWriter(w.metaFile, w.metaHash), 1<<20)
 	w.metadata.w = w.metaBuffer
 	return w, nil
+}
+
+// addDirs prepares the optional directory catalogue file.
+func (w *indexSnapshotWriter) addDirs() (err error) {
+	if w.dirsFile, err = os.CreateTemp(filepath.Dir(w.manifestPath), ".carbon-index-*.dirs"); err != nil {
+		return err
+	}
+	w.dirsHash = sha256.New()
+	w.dirsBuffer = bufio.NewWriterSize(io.MultiWriter(w.dirsFile, w.dirsHash), 1<<20)
+	return nil
 }
 
 // encodeSnapshotPath uses a separator smaller than every legal filename byte.
@@ -241,6 +259,19 @@ func (w *indexSnapshotWriter) finish() (err error) {
 	if err != nil {
 		return err
 	}
+	if w.dirsFile != nil {
+		if err = errors.Join(w.dirsBuffer.Flush(), w.dirsFile.Sync()); err != nil {
+			return err
+		}
+		dirs, err := snapshotWrittenFile(w.dirsFile, w.dirsHash)
+		if err != nil {
+			return err
+		}
+		w.manifest.Dirs = &dirs
+		if err = w.dirsFile.Close(); err != nil {
+			return err
+		}
+	}
 	if err = errors.Join(w.indexFile.Close(), w.metaFile.Close()); err != nil {
 		return err
 	}
@@ -262,7 +293,22 @@ func (w *indexSnapshotWriter) finish() (err error) {
 	if previous != nil {
 		removeSnapshotFiles(filepath.Dir(w.manifestPath), previous)
 	}
+	removeOrphanDirs(filepath.Dir(w.manifestPath), &w.manifest)
 	return nil
+}
+
+// removeOrphanDirs deletes directory catalogues no manifest refers to, such as
+// one left behind when a release that predates them replaced its generation.
+func removeOrphanDirs(dir string, current *indexSnapshotManifest) {
+	names, err := filepath.Glob(filepath.Join(dir, ".carbon-index-*.dirs"))
+	if err != nil {
+		return
+	}
+	for _, name := range names {
+		if current.Dirs == nil || filepath.Base(name) != current.Dirs.Name {
+			_ = os.Remove(name)
+		}
+	}
 }
 
 func publishSnapshotManifest(path string, data []byte) (published bool, err error) {
@@ -296,7 +342,7 @@ func (w *indexSnapshotWriter) abort() error {
 	}
 	w.closed = true
 	var err error
-	for _, file := range []*os.File{w.indexFile, w.metaFile} {
+	for _, file := range []*os.File{w.indexFile, w.metaFile, w.dirsFile} {
 		if file != nil {
 			err = errors.Join(err, file.Close(), os.Remove(file.Name()))
 		}
@@ -309,7 +355,11 @@ func validSnapshotFileName(name, extension string) bool {
 }
 
 func removeSnapshotFiles(dir string, manifest *indexSnapshotManifest) {
-	for _, file := range []struct{ name, ext string }{{manifest.Index.Name, ".fst"}, {manifest.Metadata.Name, ".meta"}} {
+	files := []struct{ name, ext string }{{manifest.Index.Name, ".fst"}, {manifest.Metadata.Name, ".meta"}}
+	if manifest.Dirs != nil {
+		files = append(files, struct{ name, ext string }{manifest.Dirs.Name, ".dirs"})
+	}
+	for _, file := range files {
 		if validSnapshotFileName(file.name, file.ext) {
 			_ = os.Remove(filepath.Join(dir, file.name))
 		}
@@ -333,7 +383,8 @@ func readIndexSnapshotManifest(path string) (*indexSnapshotManifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, err
 	}
-	if manifest.Version != indexSnapshotVersion || !validSnapshotFileName(manifest.Index.Name, ".fst") || !validSnapshotFileName(manifest.Metadata.Name, ".meta") {
+	if manifest.Version != indexSnapshotVersion || !validSnapshotFileName(manifest.Index.Name, ".fst") || !validSnapshotFileName(manifest.Metadata.Name, ".meta") ||
+		manifest.Dirs != nil && !validSnapshotFileName(manifest.Dirs.Name, ".dirs") {
 		return nil, fmt.Errorf("unsupported index snapshot")
 	}
 	return &manifest, nil
@@ -347,6 +398,11 @@ type indexSnapshot struct {
 	indexMap, metadataMap mmap.MMap
 	index                 *vellum.FST
 	metadata              *snapshotMetadata
+	// keys reads index states directly; dirs is the optional directory
+	// catalogue of the scan that wrote this generation.
+	keys    *fstCursor
+	dirsMap mmap.MMap
+	dirs    *fstCursor
 	// Namespace hashes computed for this generation, keyed by request prefix.
 	hashes       sync.Map
 	hashesCached atomic.Int32
@@ -404,10 +460,13 @@ func openIndexSnapshot(fileListCache, root string) (_ *indexSnapshot, err error)
 	}()
 	// Validate both immutable files concurrently, retaining both hashes and
 	// waiting for every mapping before cleanup can run on an error.
-	var checks [2]error
+	var checks [3]error
 	var wg sync.WaitGroup
 	wg.Go(func() { s.indexMap, checks[0] = mapSnapshotFile(filepath.Dir(path), manifest.Index) })
 	wg.Go(func() { s.metadataMap, checks[1] = mapSnapshotFile(filepath.Dir(path), manifest.Metadata) })
+	if manifest.Dirs != nil {
+		wg.Go(func() { s.dirsMap, checks[2] = mapSnapshotFile(filepath.Dir(path), *manifest.Dirs) })
+	}
 	wg.Wait()
 	if err = errors.Join(checks[:]...); err != nil {
 		return nil, err
@@ -423,7 +482,16 @@ func openIndexSnapshot(fileListCache, root string) (_ *indexSnapshot, err error)
 	if uint64(s.index.Len()) != manifest.Records || s.metadata.count != manifest.Records {
 		return nil, fmt.Errorf("snapshot record counts differ")
 	}
-	s.cleanup = runtime.AddCleanup(s, func(m snapshotMappings) { _ = m.close() }, snapshotMappings{s.index, s.indexMap, s.metadataMap})
+	if s.keys, err = newFSTCursor(s.indexMap); err != nil {
+		return nil, err
+	}
+	if s.dirsMap != nil {
+		// An unreadable catalogue only disables skipping unchanged directories.
+		if _, loadErr := vellum.Load(s.dirsMap); loadErr == nil {
+			s.dirs, _ = newFSTCursor(s.dirsMap)
+		}
+	}
+	s.cleanup = runtime.AddCleanup(s, func(m snapshotMappings) { _ = m.close() }, snapshotMappings{s.index, s.indexMap, s.metadataMap, s.dirsMap})
 	return s, nil
 }
 
@@ -431,8 +499,8 @@ func openIndexSnapshot(fileListCache, root string) (_ *indexSnapshot, err error)
 // using an index retired by a concurrent scan. Cached result nodes own their
 // metadata and never point into the mappings.
 type snapshotMappings struct {
-	index                 *vellum.FST
-	indexMap, metadataMap mmap.MMap
+	index                          *vellum.FST
+	indexMap, metadataMap, dirsMap mmap.MMap
 }
 
 func (m snapshotMappings) close() error {
@@ -446,6 +514,9 @@ func (m snapshotMappings) close() error {
 	if m.metadataMap != nil {
 		err = errors.Join(err, m.metadataMap.Unmap())
 	}
+	if m.dirsMap != nil {
+		err = errors.Join(err, m.dirsMap.Unmap())
+	}
 	return err
 }
 
@@ -453,8 +524,8 @@ func (m snapshotMappings) close() error {
 // Published generations use the reachability cleanup above.
 func (s *indexSnapshot) close() error {
 	s.cleanup.Stop()
-	err := (snapshotMappings{s.index, s.indexMap, s.metadataMap}).close()
-	s.index, s.indexMap, s.metadataMap = nil, nil, nil
+	err := (snapshotMappings{s.index, s.indexMap, s.metadataMap, s.dirsMap}).close()
+	s.index, s.indexMap, s.metadataMap, s.dirsMap = nil, nil, nil, nil
 	return err
 }
 

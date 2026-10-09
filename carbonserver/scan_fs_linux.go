@@ -10,9 +10,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// scanReadDir appends the entries of the open directory fd. getdents64 reports
-// each entry's type, so directories need no separate stat call.
-func scanReadDir(fd int, buf []byte, entries []scanDirent) ([]scanDirent, error) {
+// scanReadDir appends the entries of the open directory fd, their names
+// stored in names. getdents64 reports each entry's type, so
+// directories need no separate stat call.
+func scanReadDir(fd int, buf []byte, names *scanNames, entries []scanDirent) ([]scanDirent, error) {
 	for {
 		n, err := unix.Getdents(fd, buf)
 		if errors.Is(err, unix.EINTR) {
@@ -37,7 +38,7 @@ func scanReadDir(fd int, buf []byte, entries []scanDirent) ([]scanDirent, error)
 			if ino == 0 || string(name) == "." || string(name) == ".." {
 				continue
 			}
-			entries = append(entries, scanDirent{name: string(name), typ: scanDirentType(typ)})
+			entries = append(entries, scanDirent{name: names.add(name), typ: scanDirentType(typ)})
 		}
 	}
 }

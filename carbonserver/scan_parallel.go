@@ -12,17 +12,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/blevesearch/vellum"
-	"github.com/go-graphite/go-whisper"
 	"github.com/klauspost/compress/gzip"
 	"go.uber.org/zap"
-	"golang.org/x/sys/unix"
 )
 
 // Parallel full scan.
@@ -36,7 +31,9 @@ import (
 // a gzip member of the file list cache, spooled to the worker's unlinked temp
 // files. One committer copies those outputs in key order, so the published
 // generation is equivalent to a sequential scan of the same tree, and workers
-// never wait for an earlier range or keep its outputs in memory.
+// never wait for an earlier range or keep its outputs in memory. Directories
+// that did not change since the previous scan are not read again (see
+// scanWalker).
 
 const scanMaxWorkers = 16
 
@@ -65,6 +62,9 @@ type parallelScan struct {
 	stop     chan struct{}
 	out      *parallelScanOutput
 	sched    *scanScheduler
+	// Directories whose ctime is older than this, in Unix nanoseconds, reuse
+	// the previous generation's listing; 0 lists every directory.
+	replayCutoff int64
 
 	spoolMu sync.Mutex
 	spools  []*scanSpool
@@ -82,6 +82,7 @@ type scanRange struct {
 	progress         atomic.Int64
 
 	shard      *fstShard
+	dirsShard  *fstShard
 	rows       int
 	spool      *scanSpool
 	segments   [scanSpoolFiles]scanSegment
@@ -89,6 +90,7 @@ type scanRange struct {
 	cacheHits  []string
 
 	files, metricsKnown, lockFiles, oooFiles, oooPhysicalBytes uint64
+	listedDirs, replayedDirs                                   uint64
 
 	walkErr   error // the tree could not be read completely
 	outputErr error // only the saved generation is unusable
@@ -114,6 +116,8 @@ func (u *fileListUpdate) scanFilesParallel(dir string, quotaAndUsageStatTicker <
 		u: u, root: dir, old: u.trieIdx.snapshot, live: u.trieIdx, estimate: u.listener.estimateSize,
 		cached: u.cacheMetricNames, now: started.Unix(), stop: make(chan struct{}), out: out,
 	}
+	s.replayCutoff = replayCutoff(s.old, started)
+	out.snapshot.manifest.ScanStarted = started.UnixNano()
 	// Realtime notifications received during the scan are carried into the
 	// next generation, as with the sequential snapshot writer.
 	u.snapshotWriter = out.snapshot
@@ -150,6 +154,7 @@ func (u *fileListUpdate) scanFilesParallel(dir string, quotaAndUsageStatTicker <
 	defer ticker.Stop()
 	completed := make(map[string]*scanRange)
 	var newMetrics int
+	var listed, replayed uint64
 	var slowest time.Duration
 	var cacheHits []string
 	var broken bool
@@ -164,6 +169,7 @@ func (u *fileListUpdate) scanFilesParallel(dir string, quotaAndUsageStatTicker <
 			delete(completed, string(head))
 			head = r.end
 			newMetrics += len(r.newMetrics)
+			listed, replayed = listed+r.listedDirs, replayed+r.replayedDirs
 			slowest = max(slowest, r.elapsed)
 			u.logger.Debug("scan range", zap.Int("range", r.index), zap.ByteString("start", r.start), zap.Duration("elapsed", r.elapsed),
 				zap.Uint64("files", r.files), zap.Int("metrics", r.rows), zap.Int("expected", r.expected))
@@ -217,9 +223,25 @@ func (u *fileListUpdate) scanFilesParallel(dir string, quotaAndUsageStatTicker <
 	u.infos = append(u.infos,
 		zap.Int("scan_workers", workers), zap.Int("scan_ranges", sched.ranges), zap.Int("scan_splits", sched.splits), zap.Duration("scan_idle_time", sched.idle),
 		zap.Int("scan_new_metrics", newMetrics), zap.Duration("scan_plan_time", planTime),
+		zap.Uint64("scan_listed_dirs", listed), zap.Uint64("scan_replayed_dirs", replayed),
 		zap.Duration("scan_walk_time", walkTime), zap.Duration("scan_slowest_range", slowest), zap.Duration("scan_publish_time", time.Since(started)-walkTime),
 	)
 	return true
+}
+
+// scanReplayMargin covers coarse kernel timestamps and small clock steps
+// between a directory change and the scan start it is compared with.
+var scanReplayMargin = time.Minute
+
+// replayCutoff returns the ctime below which a directory is known unchanged
+// since the previous generation's scan listed it, or 0 if that generation has
+// no catalogue or the clock went back since its scan started.
+func replayCutoff(old *indexSnapshot, now time.Time) int64 {
+	started := old.manifest.ScanStarted
+	if old.dirs == nil || started == 0 || now.UnixNano() < started {
+		return 0
+	}
+	return started - scanReplayMargin.Nanoseconds()
 }
 
 // scanPlanOverride replaces the initial plan in tests.
@@ -396,6 +418,7 @@ const (
 	scanSpoolFST = iota
 	scanSpoolMeta
 	scanSpoolFLC
+	scanSpoolDirs
 	scanSpoolFiles
 )
 
@@ -520,448 +543,13 @@ func (s *indexSnapshot) scanRangesInto(parts, maxRanges int) []snapshotMetricRan
 	return ranges
 }
 
-type scanWalker struct {
-	scan        *parallelScan
-	r           *scanRange
-	buf         []byte
-	levels      [][]scanDirent
-	pos, prefix []int // per depth: current entry and length of its directory key
-	dirs        int   // directories entered, to retry a split only after descending
-	splitTried  int
-	path, key   []byte // trimmed path of the current entry and its encoded key
-	first, last []byte
-	fst         *vellum.Builder
-	fstBuf      bytes.Buffer
-	gz          *gzip.Writer
-	spool       *scanSpool
-	record, row []byte
-	st, sidecar unix.Stat_t
-
-	old     *vellum.FSTIterator
-	oldKey  []byte
-	oldRow  uint64
-	oldDone bool
-}
-
-func (w *scanWalker) walkRange(r *scanRange) {
-	w.r = r
-	w.path, w.key = w.path[:0], w.key[:0]
-	w.splitTried = -1
-	w.fstBuf.Reset()
-	var err error
-	if w.spool == nil {
-		w.spool, err = w.scan.newSpool()
-	}
-	if err == nil && w.fst == nil {
-		w.fst, err = vellum.New(&w.fstBuf, nil)
-	} else if err == nil {
-		err = w.fst.Reset(&w.fstBuf)
-	}
-	if err != nil {
-		r.outputErr = err
-	} else {
-		r.spool, r.segments = w.spool, w.spool.mark()
-		flc := scanSpoolWriter{w.spool, scanSpoolFLC}
-		if w.gz == nil {
-			w.gz = gzip.NewWriter(flc)
-		} else {
-			w.gz.Reset(flc)
-		}
-	}
-	w.openOld()
-	fd, err := scanOpenRoot(w.scan.root)
-	if err != nil {
-		w.walkError(err)
-	} else {
-		if r.index == 0 {
-			r.files++ // the data directory itself, as filepath.Walk reports it
-		}
-		w.walkDir(fd, 0)
-		_ = unix.Close(fd)
-	}
-	if w.old != nil {
-		_ = w.old.Close()
-		w.old = nil
-	}
-	w.finish()
-}
-
-func (w *scanWalker) openOld() {
-	it, err := w.scan.old.index.Iterator(w.r.start, w.r.end)
-	w.old, w.oldDone = it, err != nil
-	if err != nil && !errors.Is(err, vellum.ErrIteratorDone) {
-		w.r.outputErr = err
-	}
-	if !w.oldDone {
-		w.oldKey, w.oldRow = it.Current()
-	}
-}
-
-// lookupOld finds key in the previous generation. Keys arrive in increasing
-// order, so one iterator over the range replaces a lookup per file.
-func (w *scanWalker) lookupOld(key []byte) (uint64, bool) {
-	for !w.oldDone {
-		switch c := bytes.Compare(w.oldKey, key); {
-		case c == 0:
-			return w.oldRow, true
-		case c > 0:
-			return 0, false
-		}
-		if err := w.old.Next(); err != nil {
-			w.oldDone = true
-			if !errors.Is(err, vellum.ErrIteratorDone) {
-				w.r.outputErr = err
-			}
-			break
-		}
-		w.oldKey, w.oldRow = w.old.Current()
-		w.r.progress.Store(int64(w.oldRow))
-	}
-	return 0, false
-}
-
-func (w *scanWalker) walkDir(fd, depth int) {
-	if w.scan.stopped() {
-		w.r.cancelled = true
-		return
-	}
-	w.dirs++
-	for len(w.levels) <= depth {
-		w.levels, w.pos, w.prefix = append(w.levels, nil), append(w.pos, 0), append(w.prefix, 0)
-	}
-	entries, err := scanReadDir(fd, w.buf, w.levels[depth][:0])
-	w.levels[depth] = entries
-	if err != nil {
-		w.walkError(err)
-		return
-	}
-	// Byte order of names is filepath.Walk order, and with '/' encoded as the
-	// smallest byte it is also the order of snapshot keys.
-	slices.SortFunc(entries, func(a, b scanDirent) int { return strings.Compare(a.name, b.name) })
-	pathLen, keyLen := len(w.path), len(w.key)
-	defer func() {
-		w.path, w.key = w.path[:pathLen], w.key[:keyLen]
-		// Keep small listings for reuse but not the rare huge directory's.
-		if cap(w.levels[depth]) > 4096 {
-			w.levels[depth] = nil
-		}
-	}()
-	for i := range entries {
-		if w.r.cancelled {
-			return
-		}
-		e := &entries[i]
-		w.path = append(append(w.path[:pathLen], '/'), e.name...)
-		w.key = append(append(w.key[:keyLen], 0), e.name...)
-		if bytes.Compare(w.key, w.r.end) >= 0 {
-			return // later entries and their subtrees follow this one
-		}
-		inRange := bytes.Compare(w.key, w.r.start) >= 0
-		subtree := scanCompareSuffixed(w.key, 0, w.r.end) < 0 && scanCompareSuffixed(w.key, 1, w.r.start) > 0
-		if !inRange && !subtree {
-			continue
-		}
-		w.pos[depth], w.prefix[depth] = i, keyLen
-		if w.r.split.Load() {
-			w.split(depth)
-		}
-		typ := e.typ
-		if typ == scanTypeUnknown {
-			if err := scanStat(fd, e.name, false, &w.st); err != nil {
-				w.walkError(err)
-				continue
-			}
-			typ = scanModeType(uint32(w.st.Mode))
-		}
-		wsp := strings.HasSuffix(e.name, ".wsp")
-		if typ == scanTypeDir {
-			if inRange {
-				w.r.files++
-				if wsp {
-					w.metric(fd, e.name, entries, true)
-				}
-			}
-			if subtree {
-				if child, err := scanOpenDir(fd, e.name); err != nil {
-					w.walkError(err)
-				} else {
-					w.walkDir(child, depth+1)
-					_ = unix.Close(child)
-				}
-			}
-			continue
-		}
-		if !inRange {
-			continue
-		}
-		if typ == scanTypeRegular && strings.HasSuffix(e.name, ".lock") {
-			w.r.lockFiles++
-		} else if typ == scanTypeRegular && strings.HasSuffix(e.name, ".ooo") {
-			if err := scanStat(fd, e.name, false, &w.st); err != nil {
-				w.walkError(err)
-				continue
-			}
-			w.r.oooFiles++
-			w.r.oooPhysicalBytes += uint64(w.st.Blocks) * 512
-		}
-		if wsp {
-			w.metric(fd, e.name, entries, false)
-		}
-	}
-}
-
-// split gives away about half of the work left in the range. The candidates
-// are later entries of the directories leading to the current entry, which all
-// sort after it. The previous generation's row numbers measure the work from
-// each candidate to the end of the range: it shrinks along a directory's
-// entries and grows with depth. So the split goes into the shallowest directory
-// whose remaining entries hold at least half of the work, at the entry closest
-// to the middle. Until the walk enters another directory, nothing better than
-// a failed attempt appears.
-func (w *scanWalker) split(depth int) {
-	if w.splitTried == w.dirs {
-		return
-	}
-	w.splitTried = w.dirs
-	r := w.r
-	half := r.remaining() / 2
-	if half < scanMinSplitRows {
-		return
-	}
-	var err error
-	share := func(d, i int) int64 {
-		row, rowErr := w.scan.old.rowAt(w.siblingKey(d, i))
-		if rowErr != nil {
-			err = rowErr
-			return 0
-		}
-		return r.endRow - row
-	}
-	for d := 0; d <= depth && err == nil; d++ {
-		entries := w.levels[d]
-		lo := w.pos[d] + 1
-		// Entries at or after the end of the range belong to later ranges.
-		hi := lo + sort.Search(len(entries)-lo, func(i int) bool { return bytes.Compare(w.siblingKey(d, lo+i), r.end) >= 0 })
-		if lo >= hi || share(d, lo) < half {
-			continue
-		}
-		// The last entry still leaving at least half of the work to give away.
-		m := lo + sort.Search(hi-lo, func(i int) bool { return share(d, lo+i) < half }) - 1
-		if m+1 < hi && abs(share(d, m+1)-half) < abs(share(d, m)-half) {
-			m++
-		}
-		key := w.siblingKey(d, m)
-		row, rowErr := w.scan.old.rowAt(key)
-		if err == nil && rowErr == nil && r.endRow-row >= scanMinSplitRows && bytes.Compare(key, r.start) > 0 {
-			w.scan.sched.donate(r, key, row)
-		}
-		return
-	}
-}
-
-// siblingKey returns the key of entry i of the directory at depth d on the
-// current path.
-func (w *scanWalker) siblingKey(d, i int) []byte {
-	name := w.levels[d][i].name
-	key := make([]byte, 0, w.prefix[d]+1+len(name))
-	return append(append(append(key, w.key[:w.prefix[d]]...), 0), name...)
-}
-
-func abs(v int64) int64 {
-	if v < 0 {
-		return -v
-	}
-	return v
-}
-
-// rowAt returns the row of the first saved key at or after key: rows are
-// consecutive in key order, so it is the number of saved keys before key.
-func (s *indexSnapshot) rowAt(key []byte) (int64, error) {
-	defer runtime.KeepAlive(s)
-	it, err := s.index.Iterator(key, nil)
-	if errors.Is(err, vellum.ErrIteratorDone) {
-		return int64(s.index.Len()), nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	defer it.Close()
-	_, row := it.Current()
-	return int64(row), nil
-}
-
-// walkError ignores entries removed since their directory was listed, as the
-// sequential scan does; anything else leaves the scan incomplete.
-func (w *scanWalker) walkError(err error) {
-	if errors.Is(err, unix.ENOENT) {
-		return
-	}
-	w.scan.logWalkError(w.path, err)
-	if w.r.walkErr == nil {
-		w.r.walkErr = fmt.Errorf("%s: %w", w.path, err)
-	}
-}
-
-func (w *scanWalker) metric(fd int, name string, siblings []scanDirent, isDir bool) {
-	if err := scanStat(fd, name, false, &w.st); err != nil {
-		w.walkError(err)
-		return
-	}
-	if !isDir {
-		w.r.files++
-	}
-	logical, physical := w.st.Size, w.st.Blocks*512
-	// The listing shows whether a sidecar exists; most metrics have none.
-	sidecar := whisper.OutOfOrderSidecarPath(name)
-	if _, ok := slices.BinarySearchFunc(siblings, sidecar, func(e scanDirent, name string) int { return strings.Compare(e.name, name) }); ok {
-		if err := scanStat(fd, sidecar, true, &w.sidecar); err == nil {
-			logical += w.sidecar.Size
-			physical += w.sidecar.Blocks * 512
-		} else if !errors.Is(err, unix.ENOENT) {
-			w.scan.u.logger.Info("failed to stat out-of-order sidecar", zap.ByteString("path", w.path), zap.Error(err))
-		}
-	}
-	var metric string
-	var dataPoints int64
-	if w.scan.estimate != nil {
-		metric = scanMetricName(w.path)
-		_, _, dataPoints = w.scan.estimate(metric)
-	}
-	var firstSeenAt int64
-	if _, ok := w.scan.cached[string(w.path)]; ok {
-		w.r.cacheHits = append(w.r.cacheHits, string(w.path))
-	} else if row, ok := w.lookupOld(w.key); ok {
-		w.r.metricsKnown++
-		firstSeenAt = w.scan.old.openedAt
-		if values, err := w.scan.old.metadata.get(row); err == nil && values[3] != 0 {
-			firstSeenAt = values[3]
-		}
-	} else {
-		w.r.metricsKnown++
-		if metric == "" {
-			metric = scanMetricName(w.path)
-		}
-		// Keep the time the realtime index first saw a metric awaiting its file.
-		firstSeenAt = w.scan.now
-		if node := w.scan.live.mutableFileNode(metric); node != nil {
-			if meta, ok := node.meta.Load().(*fileMeta); ok {
-				if seen := atomic.LoadInt64(&meta.firstSeenAt); seen != 0 && seen < firstSeenAt {
-					firstSeenAt = seen
-				}
-			}
-		}
-		w.r.newMetrics = append(w.r.newMetrics, scanNewMetric{string(w.path), logical, physical, dataPoints, firstSeenAt})
-	}
-	w.emit(logical, physical, dataPoints, firstSeenAt)
-}
-
-func scanMetricName(path []byte) string {
-	if len(path) < len("/.wsp") {
-		return ""
-	}
-	var b strings.Builder
-	b.Grow(len(path) - len("/.wsp"))
-	for _, c := range path[1 : len(path)-len(".wsp")] {
-		if c == '/' {
-			c = '.'
-		}
-		_ = b.WriteByte(c)
-	}
-	return b.String()
-}
-
-func (w *scanWalker) emit(logical, physical, dataPoints, firstSeenAt int64) {
-	r := w.r
-	if r.outputErr != nil {
-		return
-	}
-	if bytes.HasSuffix(w.path, []byte("/.wsp")) {
-		r.outputErr = fmt.Errorf("snapshot requires a complete metric path: %q", w.path)
-		return
-	}
-	if r.rows == 0 {
-		w.first = append(w.first[:0], w.key...)
-	}
-	if err := w.fst.Insert(w.key, uint64(r.rows)); err != nil {
-		r.outputErr = err
-		return
-	}
-	r.rows++
-	w.last = append(w.last[:0], w.key...)
-	w.row = w.row[:0]
-	for _, v := range [4]int64{logical, physical, dataPoints, firstSeenAt} {
-		w.row = binary.LittleEndian.AppendUint64(w.row, uint64(v))
-	}
-	if _, err := (scanSpoolWriter{w.spool, scanSpoolMeta}).Write(w.row); err != nil {
-		r.outputErr = err
-		return
-	}
-	w.record = appendFLCv2Entry(w.record[:0], w.path, logical, physical, dataPoints, firstSeenAt)
-	if _, err := w.gz.Write(w.record); err != nil {
-		r.outputErr = err
-	}
-}
-
-func (w *scanWalker) finish() {
-	r := w.r
-	w.r = nil
-	if r.outputErr != nil {
-		return
-	}
-	r.outputErr = errors.Join(w.fst.Close(), w.gz.Close())
-	if r.outputErr == nil && r.walkErr == nil && !r.cancelled && r.rows > 0 {
-		// Only prefixes shared with a neighbouring range are re-encoded when
-		// joining; they are no longer than the common prefix with the bounds.
-		left, right := scanCommonPrefix(w.first, r.start), scanCommonPrefix(w.last, r.end)
-		data := w.fstBuf.Bytes()
-		if r.shard, r.outputErr = newFSTShard(data, bytes.Clone(w.first), bytes.Clone(w.last), uint64(r.rows), left, right); r.outputErr == nil {
-			_, r.outputErr = (scanSpoolWriter{w.spool, scanSpoolFST}).Write(fstShardBody(data))
-		}
-	}
-	if err := w.spool.seal(&r.segments); r.outputErr == nil {
-		r.outputErr = err
-	}
-}
-
-func scanCommonPrefix(a, b []byte) int {
-	n := min(len(a), len(b))
-	for i := range n {
-		if a[i] != b[i] {
-			return i
-		}
-	}
-	return n
-}
-
-// scanCompareSuffixed compares key followed by byte c with bound.
-func scanCompareSuffixed(key []byte, c byte, bound []byte) int {
-	n := len(key)
-	if len(bound) <= n {
-		if r := bytes.Compare(key[:len(bound)], bound); r != 0 {
-			return r
-		}
-		return 1
-	}
-	if r := bytes.Compare(key, bound[:n]); r != 0 {
-		return r
-	}
-	switch {
-	case c < bound[n]:
-		return -1
-	case c > bound[n]:
-		return 1
-	case len(bound) == n+1:
-		return 0
-	}
-	return -1
-}
-
 // parallelScanOutput writes the next generation: the FST from joined shards,
 // metadata rows in key order, and the file list cache as consecutive gzip
 // members, which gzip readers decode as one stream.
 type parallelScanOutput struct {
 	snapshot *indexSnapshotWriter
 	fst      *fstJoiner
+	dirs     *fstJoiner
 	cache    string
 	flc      *os.File
 	flcBuf   *bufio.Writer
@@ -981,6 +569,12 @@ func newParallelScanOutput(cache, root string) (_ *parallelScanOutput, err error
 	if o.fst, err = newFSTJoiner(o.snapshot.indexBuffer); err != nil {
 		return nil, err
 	}
+	if err = o.snapshot.addDirs(); err != nil {
+		return nil, err
+	}
+	if o.dirs, err = newFSTValueJoiner(o.snapshot.dirsBuffer); err != nil {
+		return nil, err
+	}
 	if o.flc, err = os.Create(cache + ".tmp"); err != nil {
 		return nil, err
 	}
@@ -998,6 +592,11 @@ func newParallelScanOutput(cache, root string) (_ *parallelScanOutput, err error
 }
 
 func (o *parallelScanOutput) add(r *scanRange) error {
+	if r.dirsShard != nil {
+		if err := o.dirs.add(r.dirsShard, r.spool.reader(scanSpoolDirs, r.segments[scanSpoolDirs])); err != nil {
+			return err
+		}
+	}
 	if r.rows == 0 {
 		return nil
 	}
@@ -1035,7 +634,7 @@ func (o *parallelScanOutput) add(r *scanRange) error {
 // finish publishes the file list cache before the snapshot that names it as
 // its source, like the sequential writers.
 func (o *parallelScanOutput) finish() error {
-	if err := o.fst.finish(); err != nil {
+	if err := errors.Join(o.fst.finish(), o.dirs.finish()); err != nil {
 		return err
 	}
 	err := errors.Join(o.flcBuf.Flush(), o.flc.Sync())

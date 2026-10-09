@@ -46,8 +46,9 @@ type fstTransition struct {
 	addr int // shard-local, or joined-file address once re-encoded
 }
 
-// newFSTShard describes a complete vellum FST built with values 0..count-1 in
-// key order. The joiner appends its node bytes, fstShardBody(data).
+// newFSTShard describes a complete vellum FST of count keys: rows 0..count-1
+// in key order, or any values for a value joiner. The joiner appends its node
+// bytes, fstShardBody(data).
 // leftDepth and rightDepth bound the prefixes of the first and last key that a
 // neighbouring shard may share: at most the common prefix with its keys.
 func newFSTShard(data, first, last []byte, count uint64, leftDepth, rightDepth int) (*fstShard, error) {
@@ -128,10 +129,22 @@ type fstJoiner struct {
 	count  uint64
 	shards []*fstShard
 	buf    []byte
+	values bool // shard values are kept as they are instead of numbered on
 }
 
+// newFSTJoiner joins shards whose values are rows numbered from zero: the
+// joined FST numbers rows across all shards.
 func newFSTJoiner(w io.Writer) (*fstJoiner, error) {
-	j := &fstJoiner{w: w}
+	return newFSTJoinerMode(w, false)
+}
+
+// newFSTValueJoiner joins shards whose values are kept unchanged.
+func newFSTValueJoiner(w io.Writer) (*fstJoiner, error) {
+	return newFSTJoinerMode(w, true)
+}
+
+func newFSTJoinerMode(w io.Writer, values bool) (*fstJoiner, error) {
+	j := &fstJoiner{w: w, values: values}
 	header := binary.LittleEndian.AppendUint64(nil, fstVersion)
 	header = binary.LittleEndian.AppendUint64(header, 0) // type
 	return j, j.write(header)
@@ -152,6 +165,9 @@ func (j *fstJoiner) add(s *fstShard, body io.Reader) error {
 		return fmt.Errorf("fst shards are not strictly ordered")
 	}
 	s.offset, s.base = j.pos, j.count
+	if j.values {
+		s.base = 0
+	}
 	n, err := io.CopyN(j.w, body, int64(s.size))
 	j.pos += int(n)
 	if err != nil {

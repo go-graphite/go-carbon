@@ -466,3 +466,173 @@ func TestParallelScanSplitsRunningRanges(t *testing.T) {
 		})
 	}
 }
+
+// writeLockedTree adds lock files the way whisper keeps them: beside most
+// metric files, left behind by deleted metrics, and alone in a directory.
+func writeLockedTree(t *testing.T, root string, metrics []string) {
+	t.Helper()
+	for i, rel := range metrics {
+		if i%17 != 0 { // some metrics have no lock file
+			writeScanFile(t, filepath.Join(root, rel)+".lock", 0)
+		}
+	}
+	for i := range 30 {
+		writeScanFile(t, filepath.Join(root, fmt.Sprintf("ns%02d", i%12), fmt.Sprintf("gone%d.wsp.lock", i)), 0)
+	}
+	writeScanFile(t, filepath.Join(root, "ns08", "lockonly", "a.wsp.lock"), 0)
+	writeScanFile(t, filepath.Join(root, "ns08", "lockonly", "deeper", "b.wsp.lock"), 0)
+	writeScanFile(t, filepath.Join(root, "ns09", "side.ooo", "inner.wsp"), 5)
+	writeScanFile(t, filepath.Join(root, "ns09", "plain.ooo"), 77)
+	if err := os.MkdirAll(filepath.Join(root, "ns10", "e1", "e2", "e3"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// mutateWithoutDirChanges changes files in place: no directory's ctime moves,
+// so replayed listings must still see the new sizes.
+func mutateWithoutDirChanges(t *testing.T, root string, metrics []string) {
+	t.Helper()
+	for _, rel := range metrics[1:11] {
+		if err := os.Truncate(whisper.OutOfOrderSidecarPath(filepath.Join(root, rel)), 50000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rel := range metrics[300:310] {
+		if err := os.Truncate(filepath.Join(root, rel), 12345); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func scanLogField(t *testing.T, log *scanLog, field string) float64 {
+	t.Helper()
+	v, ok := log.last(t)[field].(float64)
+	if !ok {
+		t.Fatalf("scan log has no %s: %v", field, log.last(t))
+	}
+	return v
+}
+
+func TestParallelScanReplaysUnchangedDirectories(t *testing.T) {
+	defer func(margin time.Duration) { scanReplayMargin = margin }(scanReplayMargin)
+	scanReplayMargin = 0
+	rng := rand.New(rand.NewSource(11))
+	root := t.TempDir()
+	metrics := writeScanTree(t, root, rng)
+	writeLockedTree(t, root, metrics)
+	time.Sleep(20 * time.Millisecond)
+	baseCache := filepath.Join(t.TempDir(), "flc.bin")
+	base, baseLog := newScanTestListener(root, baseCache, 4)
+	base.updateFileList(root, nil, nil) // first index and cache
+	base.updateFileList(root, nil, nil) // first snapshot, sequential
+	base.updateFileList(root, nil, nil) // first catalogue, every directory listed
+	if scanLogField(t, baseLog, "scan_replayed_dirs") != 0 {
+		t.Fatal("replayed without a previous catalogue")
+	}
+	manifest, err := readIndexSnapshotManifest(snapshotManifestPath(baseCache))
+	if err != nil || manifest.Dirs == nil || manifest.ScanStarted == 0 {
+		t.Fatalf("generation without catalogue: %+v %v", manifest, err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	baseEntries := map[string]int64{}
+	for _, e := range readScanCache(t, baseCache) {
+		baseEntries[e.Path] = e.FirstSeenAt
+	}
+	mutateScanTree(t, root, metrics, rng)
+	mutateWithoutDirChanges(t, root, metrics)
+	// Directory changes deep below directories that did not change.
+	writeScanFile(t, filepath.Join(root, "ns10", "e1", "e2", "e3", "new.wsp"), 9)
+	writeScanFile(t, filepath.Join(root, "ns08", "lockonly", "deeper", "c.wsp.lock"), 0)
+	if err := os.Remove(filepath.Join(root, metrics[500])); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Now().Unix()
+	type result struct {
+		cache string
+		l     *CarbonserverListener
+		log   *scanLog
+	}
+	results := map[int]*result{}
+	for _, workers := range []int{1, 4} {
+		cache := linkGeneration(t, baseCache, t.TempDir())
+		l, log := newScanTestListener(root, cache, workers)
+		if !l.updateFileList(root, nil, nil) {
+			t.Fatal("saved generation not loaded")
+		}
+		l.updateFileList(root, nil, nil)
+		results[workers] = &result{cache, l, log}
+	}
+	to := time.Now().Unix()
+	seq, par := results[1], results[4]
+	replayed, listed := scanLogField(t, par.log, "scan_replayed_dirs"), scanLogField(t, par.log, "scan_listed_dirs")
+	t.Logf("changed tree: replayed %v, listed %v, lock files %d, ooo %d", replayed, listed, par.l.metrics.LockFiles, par.l.metrics.OOOFiles)
+	if replayed == 0 || listed >= replayed {
+		t.Fatalf("unchanged directories were listed: replayed %v, listed %v", replayed, listed)
+	}
+	for _, field := range []string{"Files", "metrics_known"} {
+		if g, w := par.log.last(t)[field], seq.log.last(t)[field]; g != w {
+			t.Fatalf("%s: replaying scan %v, sequential %v", field, g, w)
+		}
+	}
+	compareScanEntries(t, "file list cache", readScanCache(t, par.cache), readScanCache(t, seq.cache), baseEntries, from, to)
+	compareScanEntries(t, "snapshot", readScanSnapshot(t, par.cache, root), readScanSnapshot(t, seq.cache, root), baseEntries, from, to)
+	if g, w := par.l.metrics, seq.l.metrics; g.OOOFiles != w.OOOFiles || g.OOOPhysicalBytes != w.OOOPhysicalBytes || g.LockFiles != w.LockFiles || g.MetricsKnown != w.MetricsKnown {
+		t.Fatalf("gauges: replaying %d/%d/%d/%d, sequential %d/%d/%d/%d", g.OOOFiles, g.OOOPhysicalBytes, g.LockFiles, g.MetricsKnown, w.OOOFiles, w.OOOPhysicalBytes, w.LockFiles, w.MetricsKnown)
+	}
+
+	// Nothing changed since: the next scan replays all but the root listings
+	// each range opens, and writes the same generation.
+	time.Sleep(20 * time.Millisecond)
+	before := readScanCache(t, par.cache)
+	beforeLocks := par.l.metrics.LockFiles
+	par.l.updateFileList(root, nil, nil)
+	t.Logf("unchanged tree: replayed %v, listed %v, ranges %v", scanLogField(t, par.log, "scan_replayed_dirs"), scanLogField(t, par.log, "scan_listed_dirs"), scanLogField(t, par.log, "scan_ranges"))
+	if listed := scanLogField(t, par.log, "scan_listed_dirs"); listed > scanLogField(t, par.log, "scan_ranges") {
+		t.Fatalf("unchanged tree listed %v directories in %v ranges", listed, scanLogField(t, par.log, "scan_ranges"))
+	}
+	if got := readScanCache(t, par.cache); !slices.Equal(got, before) {
+		t.Fatalf("unchanged tree: %d entries, previously %d", len(got), len(before))
+	}
+	if par.l.metrics.LockFiles != beforeLocks {
+		t.Fatalf("lock files %d, previously %d", par.l.metrics.LockFiles, beforeLocks)
+	}
+}
+
+// A clock stepped back, or a recent previous scan within the margin, lists
+// every directory.
+func TestParallelScanReplayCutoff(t *testing.T) {
+	snapshot := &indexSnapshot{dirs: &fstCursor{}}
+	now := time.Now()
+	snapshot.manifest.ScanStarted = now.Add(-time.Hour).UnixNano()
+	if got := replayCutoff(snapshot, now); got != snapshot.manifest.ScanStarted-scanReplayMargin.Nanoseconds() {
+		t.Fatalf("cutoff %d", got)
+	}
+	snapshot.manifest.ScanStarted = now.Add(time.Second).UnixNano()
+	if replayCutoff(snapshot, now) != 0 {
+		t.Fatal("replay after the clock went back")
+	}
+	snapshot.dirs = nil
+	snapshot.manifest.ScanStarted = now.Add(-time.Hour).UnixNano()
+	if replayCutoff(snapshot, now) != 0 {
+		t.Fatal("replay without a catalogue")
+	}
+}
+
+func TestScanNamesKeepEarlierNames(t *testing.T) {
+	var names scanNames
+	for round := range 3 {
+		names.reset()
+		var got, want []string
+		for i := range 20000 {
+			name := []byte(fmt.Sprintf("r%d-name-%05d%s", round, i, strings.Repeat("x", i%300)))
+			got = append(got, names.add(name))
+			want = append(want, string(name))
+		}
+		got = append(got, names.add(bytes.Repeat([]byte("y"), 100<<10)))
+		want = append(want, strings.Repeat("y", 100<<10))
+		if !slices.Equal(got, want) {
+			t.Fatalf("round %d: names changed after later additions", round)
+		}
+	}
+}

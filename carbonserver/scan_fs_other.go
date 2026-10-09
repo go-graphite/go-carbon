@@ -11,7 +11,7 @@ import (
 
 // scanReadDir appends the entries of the open directory fd, using the
 // portable directory reader on a duplicate descriptor.
-func scanReadDir(fd int, _ []byte, entries []scanDirent) ([]scanDirent, error) {
+func scanReadDir(fd int, _ []byte, _ *scanNames, entries []scanDirent) ([]scanDirent, error) {
 	dup, err := unix.Dup(fd)
 	if err != nil {
 		return entries, err
