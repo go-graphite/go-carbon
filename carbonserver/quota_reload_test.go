@@ -115,11 +115,11 @@ func TestUnlimitedThroughputQuotaStillAccounts(t *testing.T) {
 			}
 
 			previous := q.offset()
-			if got := atomic.LoadInt64(&previous.dataPoints); got != 2 {
+			if got := previous.total(); got != 2 {
 				t.Fatalf("previous-window throughput = %d, want 2", got)
 			}
 			q.increase(1)
-			if got := atomic.LoadInt64(&q.dpRecorder().dataPoints); got != 1 {
+			if got := q.dpRecorder().total(); got != 1 {
 				t.Fatalf("new-window throughput = %d, want 1", got)
 			}
 		})

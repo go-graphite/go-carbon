@@ -543,7 +543,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) uint64 {
 		var throughput int64
 		if throughputs != nil {
 			if te := throughputs.load(name); te != nil {
-				throughput = atomic.LoadInt64(&te.offset().dataPoints)
+				throughput = te.offset().total()
 			}
 		}
 		throttled := atomic.SwapInt64(&u.Throttled, 0)

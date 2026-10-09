@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1546,10 +1547,39 @@ type throughputUsagePerNamespaceQuotaInfo struct {
 	usage *QuotaUsage
 }
 
+// throughputStripes spreads the accounting of unlimited namespaces: every
+// point ingested below such a namespace, including all points for the root,
+// would otherwise increment one shared counter.
+const throughputStripes = 64
+
+type paddedCounter struct {
+	n int64
+	_ [120]byte // keep stripes on separate cache lines
+}
+
 // check comment in *throughputUsageDataPointsRecoder.offset.
 type throughputUsageDataPointsRecoder struct {
-	dataPoints int64
+	dataPoints int64 // enforced usage of limited namespaces
 	resetAt    time.Time
+	unlimited  [throughputStripes]paddedCounter
+}
+
+// foldUnlimited moves unlimited accounting into the enforced usage.
+func (r *throughputUsageDataPointsRecoder) foldUnlimited() {
+	for i := range r.unlimited {
+		if n := atomic.SwapInt64(&r.unlimited[i].n, 0); n != 0 {
+			atomic.AddInt64(&r.dataPoints, n)
+		}
+	}
+}
+
+// total returns all points accounted by the recorder.
+func (r *throughputUsageDataPointsRecoder) total() int64 {
+	n := atomic.LoadInt64(&r.dataPoints)
+	for i := range r.unlimited {
+		n += atomic.LoadInt64(&r.unlimited[i].n)
+	}
+	return n
 }
 
 func newThroughputUsageDataPointsRecorder() *throughputUsageDataPointsRecoder {
@@ -1585,7 +1615,15 @@ func (q *throughputUsagePerNamespace) dpRecorder() *throughputUsageDataPointsRec
 }
 
 func (q *throughputUsagePerNamespace) increase(x int64) {
-	atomic.AddInt64(&q.dpRecorder().dataPoints, x)
+	recorder := q.dpRecorder()
+	// withinQuota never reads the usage of an unlimited namespace, so only
+	// reports need its exact sum. A quota newly made finite starts enforcing
+	// from the next reset.
+	if quota := q.quota().Throughput; quota <= 0 || quota == math.MaxInt64 {
+		atomic.AddInt64(&recorder.unlimited[rand.Uint32()%throughputStripes].n, x)
+		return
+	}
+	atomic.AddInt64(&recorder.dataPoints, x)
 }
 
 // offset tries to avoid a potential over-enforcement due to a race condition by
@@ -1696,7 +1734,10 @@ func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerName
 		return
 	}
 
-	v.(*throughputUsagePerNamespace).quotaInfosv.Store(tuq.quotaInfos())
+	existing := v.(*throughputUsagePerNamespace)
+	existing.quotaInfosv.Store(tuq.quotaInfos())
+	// A namespace made finite must enforce usage accepted while unlimited.
+	existing.dpRecorder().foldUnlimited()
 }
 
 func (tu *throughputQuotaManager) getDepth() int { return int(atomic.LoadInt64(&tu.depth)) }
@@ -1919,7 +1960,7 @@ func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (f
 					}
 					var throughput int64
 					if te := throughputs.load(tname); te != nil {
-						throughput = atomic.LoadInt64(&te.offset().dataPoints)
+						throughput = te.offset().total()
 					}
 
 					throttled := atomic.LoadInt64(&usage.Throttled)

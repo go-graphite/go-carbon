@@ -29,6 +29,7 @@ const shardCount = 1 << 10 // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
 	maxSize           int64
+	sizeSlack         int64 // see sizeSlackFor
 	xlog              func(*points.Points) error
 	tagsEnabled       bool
 	writeoutMinPoints int
@@ -55,7 +56,7 @@ type Cache struct {
 	_        [128]byte
 
 	stat struct {
-		size                int64  // changing via atomic
+		size                int64  // published part of the size, changing via atomic; see Shard.sizeDelta
 		queueBuildCnt       uint32 // number of times writeout queue was built
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTime   uint32 // in milliseconds
@@ -83,6 +84,10 @@ type Shard struct {
 	adds             map[string]struct{} // map to maintain all the new metric names
 	// Keyed by batch so in-flight writes retain their arrival time on retry.
 	firstArrival map[*points.Points]time.Time
+	// Points added (or removed, if negative) but not yet published to
+	// Cache.stat.size. Publishing in batches keeps ingestion from serializing
+	// on one shared counter.
+	sizeDelta int64
 }
 
 // Creates a new cache instance
@@ -101,6 +106,7 @@ func New() *Cache {
 
 	settings := cacheSettings{
 		maxSize:     1000000,
+		sizeSlack:   sizeSlackFor(1000000),
 		tagsEnabled: false,
 		xlog:        nil,
 	}
@@ -141,6 +147,7 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 	s := c.settings.Load().(*cacheSettings)
 	newSettings := *s
 	newSettings.maxSize = int64(maxSize)
+	newSettings.sizeSlack = sizeSlackFor(newSettings.maxSize)
 	c.settings.Store(&newSettings)
 	c.writeoutQueue.notifyAt(time.Now())
 }
@@ -320,7 +327,7 @@ func (c *Cache) Requeue(p *points.Points) {
 		delete(shard.firstArrival, current)
 	}
 	shard.items[p.Metric] = p
-	atomic.AddInt64(&c.stat.size, int64(count))
+	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
 	c.writeoutQueue.notifyAt(time.Now())
 }
 
@@ -362,8 +369,46 @@ func (c *Cache) IsEmpty() bool {
 	return true
 }
 
+// Size returns the number of cached points. It visits every shard; hot paths
+// use approxSize instead.
 func (c *Cache) Size() int64 {
+	size := atomic.LoadInt64(&c.stat.size)
+	for _, shard := range c.data {
+		shard.mu.RLock()
+		size += shard.sizeDelta
+		shard.mu.RUnlock()
+	}
+	return size
+}
+
+// approxSize differs from Size by at most shardCount*sizeSlack points.
+func (c *Cache) approxSize() int64 {
 	return atomic.LoadInt64(&c.stat.size)
+}
+
+// sizeSlackFor bounds the unpublished part of the size to 1/64 of maxSize,
+// and to 4096 points per shard. Small caches publish every change.
+func sizeSlackFor(maxSize int64) int64 {
+	const maxSlack = 4096
+	if maxSize <= 0 {
+		return maxSlack
+	}
+	return min(maxSize/(shardCount*64), maxSlack)
+}
+
+// addSizeLocked records n points added to (or removed from) the locked shard.
+// It returns the approximate cache size before and after this change, which
+// differ only when the shard publishes its accumulated delta.
+func (c *Cache) addSizeLocked(shard *Shard, n, slack int64) (before, after int64) {
+	shard.sizeDelta += n
+	if shard.sizeDelta >= -slack && shard.sizeDelta <= slack {
+		size := atomic.LoadInt64(&c.stat.size)
+		return size, size
+	}
+	delta := shard.sizeDelta
+	shard.sizeDelta = 0
+	after = atomic.AddInt64(&c.stat.size, delta)
+	return after - delta, after
 }
 
 func (c *Cache) DivertToXlog(w io.Writer) {
@@ -464,7 +509,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	}
 
 	count := len(p.Data)
-	if !recovered && s.maxSize > 0 && c.Size() > s.maxSize {
+	if !recovered && s.maxSize > 0 && c.approxSize() > s.maxSize {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
 		return
 	}
@@ -510,13 +555,13 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 		}
 
 	}
-	size := atomic.AddInt64(&c.stat.size, int64(count))
+	before, size := c.addSizeLocked(shard, int64(count), s.sizeSlack)
 	if restored {
 		delete(shard.firstArrival, values)
 	}
 	if s.batching() {
 		crossedThreshold := len(values.Data) >= s.writeoutMinPoints && len(values.Data)-count < s.writeoutMinPoints
-		if restored || crossedThreshold || (s.underPressure(size) && !s.underPressure(size-int64(count))) {
+		if restored || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
 			c.writeoutQueue.notifyAt(time.Now())
 		} else if !exists {
 			c.writeoutQueue.notifyAt(shard.firstArrival[values].Add(s.writeoutMaxDelay))
@@ -532,10 +577,11 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	p, exists = shard.items[key]
 	delete(shard.items, key)
 	delete(shard.firstArrival, p)
-	shard.mu.Unlock()
-
 	if exists {
-		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
+		c.addSizeLocked(shard, -int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
+	}
+	shard.mu.Unlock()
+	if exists {
 		// The persister pops a metric it will never write, such as one whose
 		// path is too long. Saved points it held are settled as well, or
 		// pending recovery, and the first scan behind it, would wait forever.
@@ -561,12 +607,9 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
+		c.addSizeLocked(shard, -int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
 	}
 	shard.mu.Unlock()
-
-	if exists {
-		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
-	}
 
 	return p, exists
 }
@@ -603,7 +646,7 @@ func (c *Cache) GetInfo() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"size":  c.stat.size,
+		"size":  c.Size(),
 		"limit": s.maxSize,
 	}
 }

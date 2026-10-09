@@ -150,7 +150,7 @@ func (c *Cache) RecoverPending(stop <-chan struct{}, pointsPerSecond int) error 
 			settings := c.settings.Load().(*cacheSettings)
 			// Reserve half the configured cache for in-flight work. One large metric
 			// can always progress once the cache has drained.
-			if settings.maxSize <= 0 || c.Size() == 0 || c.Size()+int64(count) <= settings.maxSize/2 {
+			if settings.maxSize <= 0 || c.approxSize()+int64(count) <= settings.maxSize/2 || c.Size() == 0 {
 				break
 			}
 			select {
@@ -213,7 +213,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 		return errors.New("pending recovery metric identity differs")
 	}
 	shard.items[name] = p
-	atomic.AddInt64(&c.stat.size, int64(len(p.Data)))
+	c.addSizeLocked(shard, int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
 	r.track(p)
 	r.claim(slot)
 	c.writeoutQueue.notifyAt(time.Now())

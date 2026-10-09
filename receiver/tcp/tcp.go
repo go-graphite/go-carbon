@@ -227,15 +227,29 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	readTimeout := 2 * time.Minute
 	tracked.setReadDeadline(conn, lastDeadline.Add(readTimeout))
 
-	for {
+	// Count locally and publish before any read that may block: every
+	// connection incrementing the shared counter per point serializes them.
+	var received uint32
+	defer func() { atomic.AddUint32(&rcv.metricsReceived, received) }()
+
+	for lines := 0; ; lines++ {
+		if received != 0 && (reader.Buffered() == 0 || received >= 1024) {
+			atomic.AddUint32(&rcv.metricsReceived, received)
+			received = 0
+		}
 		if tracked.detaching() {
 			detached = rcv.detach(tracked, reader, rest, nil)
 			return
 		}
-		now := time.Now()
-		if now.Sub(lastDeadline) > (readTimeout / 4) {
-			tracked.setReadDeadline(conn, now.Add(readTimeout))
-			lastDeadline = now
+
+		// Reading the clock per line is measurable at millions of points per
+		// second; the deadline only needs refreshing well within readTimeout.
+		if lines%64 == 0 || reader.Buffered() == 0 {
+			now := time.Now()
+			if now.Sub(lastDeadline) > (readTimeout / 4) {
+				tracked.setReadDeadline(conn, now.Add(readTimeout))
+				lastDeadline = now
+			}
 		}
 
 		line, err := readPlainLine(reader)
@@ -264,7 +278,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 					zap.String("peer", conn.RemoteAddr().String()),
 				)
 			} else {
-				atomic.AddUint32(&rcv.metricsReceived, 1)
+				received++
 				rcv.out(points.OnePoint(string(name), value, timestamp))
 			}
 		}
