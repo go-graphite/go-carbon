@@ -270,3 +270,23 @@ func TestDumpDuringPendingRecovery(t *testing.T) {
 		t.Fatal("dump during recovery", got)
 	}
 }
+
+func TestDumpPendingRangesCoverEachMetricOnce(t *testing.T) {
+	bundle := pendingFixture(t)
+	c := New()
+	if err := c.AttachPendingRecovery(bundle); err != nil {
+		t.Fatal(err)
+	}
+	c.Add(points.OnePoint("metric", 9, 10)) // claimed: must come from the cache instead
+	for _, parts := range []int{1, 2, 3, 7} {
+		seen := map[string]int{}
+		for seg := 0; seg < parts; seg++ {
+			if err := c.DumpPendingRange(seg, parts, func(p *points.Points) error { seen[p.Metric]++; return nil }); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !reflect.DeepEqual(seen, map[string]int{"other": 1}) {
+			t.Fatal("pending parts", parts, seen)
+		}
+	}
+}

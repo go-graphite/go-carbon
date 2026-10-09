@@ -74,9 +74,6 @@ func (c *Cache) DumpBinary(w io.Writer) error {
 	})
 }
 
-// DumpPending writes saved metrics recovery has not claimed (see DumpPoints).
-func (c *Cache) DumpPending(write func(*points.Points) error) error { return c.dumpPending(write) }
-
 // ShardCount is the number of independent cache shards for DumpShards.
 const ShardCount = shardCount
 

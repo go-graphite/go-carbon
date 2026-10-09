@@ -107,15 +107,17 @@ func (app *App) DumpStop() error {
 
 	dumpStart := time.Now()
 	cacheSize := app.Cache.Size()
-	// Unclaimed saved metrics first, then shard ranges encoded concurrently and
-	// appended in order: the file is identical in format to a serial dump.
-	err = app.Cache.DumpPending(dump.WritePoints)
-	if err == nil {
-		segments := checkpointWorkers()
-		err = dump.WriteSegments(segments, func(seg int, emit func(*points.Points) error) error {
-			return app.Cache.DumpShards(seg*cache.ShardCount/segments, (seg+1)*cache.ShardCount/segments, emit)
-		})
-	}
+	// Unclaimed saved metrics (after an interrupted recovery), then cache shard
+	// ranges: all encoded concurrently and appended in order, so the file has
+	// the same format as a serial dump.
+	segments := checkpointWorkers()
+	err = dump.WriteSegments(2*segments, func(seg int, emit func(*points.Points) error) error {
+		if seg < segments {
+			return app.Cache.DumpPendingRange(seg, segments, emit)
+		}
+		seg -= segments
+		return app.Cache.DumpShards(seg*cache.ShardCount/segments, (seg+1)*cache.ShardCount/segments, emit)
+	})
 	if err != nil {
 		logger.Error("dump failed", zap.Error(err))
 		return err
