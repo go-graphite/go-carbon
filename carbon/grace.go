@@ -164,8 +164,10 @@ func (app *App) DumpStop() error {
 	go func() { cacheSynced <- dump.Sync() }()
 	logger.Info("cache dump finished", zap.Int64("records", int64(cacheSize)), zap.Int("workers", dumpWorkers()), zap.Duration("encode_runtime", encoded), zap.Duration("runtime", time.Since(dumpStart)))
 
-	// Input still flows into the WAL: finish classifying dump metrics and wait
-	// for the overlay before stopping input.
+	// Input still flows into the WAL: finish classifying dump metrics, wait
+	// for the overlay, and wait for the dump to reach disk before stopping
+	// input. Each of these can take seconds on a large cache, and every second
+	// input is closed, senders must buffer or drop.
 	if builder != nil {
 		prepareStart := time.Now()
 		// The dump's cores are free now: finish classification on them.
@@ -174,6 +176,16 @@ func (app *App) DumpStop() error {
 		classified := time.Since(prepareStart)
 		checkpointWork.Wait()
 		logger.Info("pending read checkpoint prepared", zap.Duration("runtime", time.Since(prepareStart)), zap.Duration("classify_runtime", classified), zap.Duration("overlay_since_dump_start", overlayDone.Sub(dumpStart)), zap.Duration("since_dump_start", time.Since(dumpStart)), zap.Error(checkpointErr))
+	}
+	waitStart := time.Now()
+	if err = <-cacheSynced; err != nil {
+		logger.Error("dump sync failed", zap.Error(err))
+		return err
+	}
+	syncWait := time.Since(waitStart)
+	if builder != nil {
+		// Names first seen in the WAL during the sync.
+		builder.Prepare()
 	}
 
 	inputStopped := time.Now()
@@ -189,12 +201,7 @@ func (app *App) DumpStop() error {
 	if err != nil {
 		return err
 	}
-	waitStart := time.Now()
-	if err = <-cacheSynced; err != nil {
-		logger.Error("dump sync failed", zap.Error(err))
-		return err
-	}
-	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+time.Since(waitStart)), zap.Duration("cache_sync_wait", time.Since(waitStart)))
+	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+syncWait), zap.Duration("cache_sync_wait", syncWait))
 	// The new dump holds every saved point not yet on disk, so a pending
 	// generation from the previous restart is now redundant.
 	if err = app.Cache.RetirePendingSources(); err != nil {
