@@ -18,19 +18,40 @@ import (
 // Live input may arrive before every saved metric is claimed. The first live
 // write for a metric claims its saved history into the same cache item under
 // that shard lock, so saved points never reach disk after newer live points of
-// the same metric. unpersisted tracks claimed items until the persister
-// confirms them; the sources are retired only when none remain.
+// the same metric. unpersisted tracks claimed items, with their failed writes,
+// until the persister confirms them; the sources are retired only when none
+// remain.
 type pendingRecovery struct {
 	bundle      *recovery.Bundle
 	claimed     []atomic.Uint64
 	remaining   atomic.Uint64
 	mu          sync.Mutex
-	unpersisted map[*points.Points]struct{}
+	unpersisted map[*points.Points]int
 }
+
+// pendingWriteAttempts bounds how often a saved metric may fail to write
+// before recovery stops waiting for it. Its points stay in the cache and keep
+// being retried like live points; a file the persister cannot update must not
+// hold back source retirement and the first scan forever.
+const pendingWriteAttempts = 3
 
 func (r *pendingRecovery) track(p *points.Points) {
 	r.mu.Lock()
-	r.unpersisted[p] = struct{}{}
+	r.unpersisted[p] = 0
+	r.mu.Unlock()
+}
+
+// failed counts a write the persister handed back and settles the metric once
+// it has failed pendingWriteAttempts times.
+func (r *pendingRecovery) failed(p *points.Points) {
+	r.mu.Lock()
+	if n, ok := r.unpersisted[p]; ok {
+		if n+1 >= pendingWriteAttempts {
+			delete(r.unpersisted, p)
+		} else {
+			r.unpersisted[p] = n + 1
+		}
+	}
 	r.mu.Unlock()
 }
 
@@ -43,9 +64,9 @@ func (r *pendingRecovery) persisted(p *points.Points) {
 
 func (r *pendingRecovery) moved(from, to *points.Points) {
 	r.mu.Lock()
-	if _, ok := r.unpersisted[from]; ok {
+	if n, ok := r.unpersisted[from]; ok {
 		delete(r.unpersisted, from)
-		r.unpersisted[to] = struct{}{}
+		r.unpersisted[to] = max(n, r.unpersisted[to])
 	}
 	r.mu.Unlock()
 }
@@ -72,7 +93,7 @@ func (c *Cache) AttachPendingRecovery(bundle *recovery.Bundle) error {
 	if !c.IsEmpty() {
 		return errors.New("cannot attach recovery to a nonempty cache")
 	}
-	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64), unpersisted: make(map[*points.Points]struct{})}
+	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64), unpersisted: make(map[*points.Points]int)}
 	r.remaining.Store(bundle.Metrics())
 	if !c.pending.CompareAndSwap(nil, r) {
 		return errors.New("pending recovery already attached")

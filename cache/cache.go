@@ -301,6 +301,9 @@ func (c *Cache) Requeue(p *points.Points) {
 		return
 	}
 
+	if r := c.pending.Load(); r != nil {
+		r.failed(p)
+	}
 	count := len(p.Data)
 	if current, exists := shard.items[p.Metric]; exists {
 		if r := c.pending.Load(); r != nil {
