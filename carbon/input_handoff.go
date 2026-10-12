@@ -3,8 +3,10 @@ package carbon
 import (
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"time"
@@ -211,9 +213,12 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 			return fmt.Errorf("lock input tail %s: %w", path, err)
 		}
 		waited := time.Since(started)
-		count := 0
-		err = points.ReadFromFile(path, func(p *points.Points) {
-			count += len(p.Data)
+		workers := min(runtime.GOMAXPROCS(0), 32)
+		if app.Config.Tags.Enabled {
+			// Different raw tag orders may normalize to the same cache key.
+			workers = 1
+		}
+		count, err := replayInputTail(path, workers, func(p *points.Points) {
 			// These points were accepted before the checkpoint. Never apply
 			// live quotas again or discard them because recovery filled cache.
 			// Reserve space before admitting another record; a single metric
@@ -225,7 +230,7 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 			core.AddRecovered(p)
 		})
 		_ = release()
-		logger.Info("input tail loaded", zap.String("filename", path), zap.Int("points", count),
+		logger.Info("input tail loaded", zap.String("filename", path), zap.Int("points", count), zap.Int("workers", workers),
 			zap.Duration("lock_wait", waited), zap.Duration("runtime", time.Since(started)), zap.Error(err))
 		if err != nil {
 			return fmt.Errorf("read input tail %s: %w", path, err)
@@ -265,4 +270,40 @@ func takeInputReceiver(in *handoff.Input, name string) *tcp.Handoff {
 		return h
 	}
 	return nil
+}
+
+// replayInputTail overlaps checkpoint claims and cache writes for independent
+// metrics. A metric always uses one FIFO worker, so corrections retain their
+// on-disk order. Wait for every worker even on a read error: callers must not
+// release the tail lock or open live input while recovered writes are in flight.
+func replayInputTail(path string, workers int, add func(*points.Points)) (int, error) {
+	count := 0
+	if workers <= 1 {
+		err := points.ReadFromFile(path, func(p *points.Points) {
+			count += len(p.Data)
+			add(p)
+		})
+		return count, err
+	}
+	queues := make([]chan *points.Points, workers)
+	var wg sync.WaitGroup
+	for i := range queues {
+		// Bound read-ahead independently of the tail's size.
+		queue := make(chan *points.Points, 32)
+		queues[i] = queue
+		wg.Go(func() {
+			for p := range queue {
+				add(p)
+			}
+		})
+	}
+	err := points.ReadFromFile(path, func(p *points.Points) {
+		count += len(p.Data)
+		queues[uint64(crc32.ChecksumIEEE([]byte(p.Metric)))%uint64(workers)] <- p
+	})
+	for _, queue := range queues {
+		close(queue)
+	}
+	wg.Wait()
+	return count, err
 }
