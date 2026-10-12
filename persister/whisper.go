@@ -39,6 +39,7 @@ type Whisper struct {
 	confirm             func(*points.Points)
 	popConfirm          func(string) (*points.Points, bool)
 	requeue             func(*points.Points)
+	backlogged          func() bool
 	writeoutReady       func(string) bool
 	metricStore         MetricStore
 	tagsEnabled         bool
@@ -205,6 +206,12 @@ func (p *Whisper) SetFLock(flock bool) {
 
 func (p *Whisper) SetCompressed(compressed bool) {
 	p.compressed = compressed
+}
+
+// SetBacklogged lets workers exceed max-updates-per-second while backlogged
+// reports true, so restored or accumulating points drain at full speed.
+func (p *Whisper) SetBacklogged(backlogged func() bool) {
+	p.backlogged = backlogged
 }
 
 // SetRequeue configures how failed writes are returned to the live cache.
@@ -657,10 +664,12 @@ func (p *Whisper) worker(exit chan bool) {
 
 LOOP:
 	for {
-		select {
-		case <-p.updateTicker.C:
-		case <-exit:
-			return
+		if p.backlogged == nil || !p.backlogged() {
+			select {
+			case <-p.updateTicker.C:
+			case <-exit:
+				return
+			}
 		}
 
 		metric := p.recv(exit)

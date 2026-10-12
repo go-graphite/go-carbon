@@ -334,3 +334,29 @@ func BenchmarkBatchingCacheCycle(b *testing.B) {
 		})
 	}
 }
+
+func TestBacklogged(t *testing.T) {
+	c := New()
+	c.SetMaxSize(100)
+	if c.Backlogged() {
+		t.Fatal("empty cache is backlogged")
+	}
+	for i := 0; i < 75; i++ {
+		c.Add(points.OnePoint(fmt.Sprintf("metric.%d", i), 1, 1))
+	}
+	if c.Backlogged() {
+		t.Fatal("cache at three quarters of max-size is backlogged")
+	}
+	c.Add(points.OnePoint("metric.over", 1, 1))
+	if !c.Backlogged() {
+		t.Fatal("cache above three quarters of max-size is not backlogged")
+	}
+
+	pending := New()
+	if err := pending.AttachPendingRecovery(pendingFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	if !pending.Backlogged() {
+		t.Fatal("cache with pending recovery is not backlogged")
+	}
+}
