@@ -172,6 +172,47 @@ func TestPendingRecoveryRetiresDroppedMetric(t *testing.T) {
 	}
 }
 
+// A saved metric whose file the persister cannot update keeps failing. After
+// pendingWriteAttempts failed writes recovery stops waiting for it, while its
+// points stay in the cache for further retries.
+func TestPendingRecoverySettlesRepeatedlyFailingMetric(t *testing.T) {
+	c := New()
+	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RecoverPending(nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	want := c.Get("metric")
+	for attempt := 1; attempt <= pendingWriteAttempts; attempt++ {
+		if n := c.PendingOutstanding(); n != 2 {
+			t.Fatalf("before failed write %d: outstanding = %d, want 2", attempt, n)
+		}
+		p, ok := c.PopNotConfirmed("metric")
+		if !ok {
+			t.Fatal("missing recovered metric")
+		}
+		c.Requeue(p)
+	}
+	if n := c.PendingOutstanding(); n != 1 {
+		t.Fatalf("outstanding = %d after %d failed writes, want 1", n, pendingWriteAttempts)
+	}
+	if got := c.Get("metric"); !reflect.DeepEqual(got, want) {
+		t.Fatal("settled metric lost points", got)
+	}
+	p, ok := c.PopNotConfirmed("other")
+	if !ok {
+		t.Fatal("missing recovered metric")
+	}
+	c.Confirm(p)
+	if err := c.FinishPendingRecovery(); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Get("metric"); !reflect.DeepEqual(got, want) {
+		t.Fatal("points lost when recovery retired", got)
+	}
+}
+
 func TestPendingRecoveryCapacityAndCancellation(t *testing.T) {
 	c := New()
 	c.SetMaxSize(2)

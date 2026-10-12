@@ -3,6 +3,7 @@ package carbon
 import (
 	"errors"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -72,11 +73,15 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	}
 	// The first filesystem scan must not run before checkpoint-only metrics
 	// have Whisper files, or it would drop them from the index.
-	gate := make(chan struct{})
+	gate, openGate, stopGateLimit := newScanGate(pendingScanGateLimit, func() {
+		logger.Warn("first scan no longer waits for pending recovery",
+			zap.Duration("limit", pendingScanGateLimit), zap.Uint64("outstanding", core.PendingOutstanding()))
+	})
 	cs.SetStartupScanGate(gate)
 	defer func() {
 		if app.pendingDone == nil {
-			close(gate)
+			stopGateLimit()
+			openGate()
 		}
 	}()
 	if err = app.listenCarbonserver(core, newMetrics); err != nil {
@@ -93,7 +98,8 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
 	go func() {
 		defer close(done)
-		defer close(gate)
+		defer openGate()
+		defer stopGateLimit()
 		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
 			logger.Warn("pending recovery stopped", zap.Error(err))
 			return
@@ -115,6 +121,25 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		logger.Info("pending checkpoint persisted", zap.Duration("load_seconds", loaded.Sub(started)), zap.Duration("drain_seconds", time.Since(loaded)), zap.Any("persister_stats", stats))
 	}()
 	return true, nil
+}
+
+// pendingScanGateLimit bounds how long the first scan waits for pending
+// recovery. Recovery normally drains within minutes; a saved metric the
+// persister keeps failing to write in a way the cache cannot observe must not
+// stop the store from scanning until its next restart.
+var pendingScanGateLimit = time.Hour
+
+// newScanGate returns a gate that open closes, or that closes by itself after
+// limit, calling onLimit first. stop cancels the limit.
+func newScanGate(limit time.Duration, onLimit func()) (gate chan struct{}, open func(), stop func()) {
+	gate = make(chan struct{})
+	var once sync.Once
+	open = func() { once.Do(func() { close(gate) }) }
+	timer := time.AfterFunc(limit, func() {
+		onLimit()
+		open()
+	})
+	return gate, open, func() { timer.Stop() }
 }
 
 // stopPendingRecovery ends background recovery before a dump. Unclaimed saved

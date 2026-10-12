@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,4 +214,29 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	check(live)
+}
+
+func TestScanGateOpensAtLimit(t *testing.T) {
+	var limited atomic.Bool
+	gate, _, stop := newScanGate(20*time.Millisecond, func() { limited.Store(true) })
+	defer stop()
+	select {
+	case <-gate:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gate did not open at its limit")
+	}
+	if !limited.Load() {
+		t.Fatal("limit callback did not run before the gate opened")
+	}
+
+	limited.Store(false)
+	gate, open, stop := newScanGate(50*time.Millisecond, func() { limited.Store(true) })
+	stop()
+	open()
+	open()
+	<-gate
+	time.Sleep(100 * time.Millisecond)
+	if limited.Load() {
+		t.Fatal("stopped limit still fired")
+	}
 }
