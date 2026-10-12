@@ -520,6 +520,12 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 
 	if exists {
 		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
+		// The persister pops a metric it will never write, such as one whose
+		// path is too long. Saved points it held are settled as well, or
+		// pending recovery, and the first scan behind it, would wait forever.
+		if r := c.pending.Load(); r != nil {
+			r.persisted(p)
+		}
 	}
 
 	return p, exists

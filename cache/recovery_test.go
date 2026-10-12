@@ -146,6 +146,32 @@ func TestPendingReadHandoffAndPersistence(t *testing.T) {
 	}
 }
 
+// The persister drops a metric it cannot store with Pop. A saved metric dropped
+// that way must not keep pending recovery from draining.
+func TestPendingRecoveryRetiresDroppedMetric(t *testing.T) {
+	c := New()
+	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RecoverPending(nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := c.PopNotConfirmed("metric")
+	if !ok {
+		t.Fatal("missing recovered metric")
+	}
+	c.Confirm(p)
+	if _, ok := c.Pop("other"); !ok {
+		t.Fatal("missing recovered metric to drop")
+	}
+	if n := c.PendingOutstanding(); n != 0 {
+		t.Fatalf("pending outstanding = %d after every saved metric was written or dropped", n)
+	}
+	if err := c.FinishPendingRecovery(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPendingRecoveryCapacityAndCancellation(t *testing.T) {
 	c := New()
 	c.SetMaxSize(2)
