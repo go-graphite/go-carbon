@@ -25,6 +25,13 @@ func (c *Cache) SetWriteoutBatching(minPoints int, maxDelay time.Duration) error
 	return nil
 }
 
+// Backlogged reports whether writes should not be rate-limited: restored
+// points are still pending, or the cache holds over three quarters of
+// max-size, where writeout batching is released too.
+func (c *Cache) Backlogged() bool {
+	return c.pending.Load() != nil || c.settings.Load().(*cacheSettings).underPressure(c.approxSize())
+}
+
 func (c *Cache) batchWrites(s *cacheSettings) bool {
 	return s.batching() && !s.underPressure(c.approxSize())
 }

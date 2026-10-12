@@ -130,3 +130,43 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 		}
 	}
 }
+
+func TestBackloggedLiftsUpdateRateLimit(t *testing.T) {
+	for _, backlogged := range []bool{false, true} {
+		qa.Root(t, func(root string) {
+			ch := make(chan *points.Points, 100)
+			recv, pop := makeRecvPopFromChan(ch)
+			p := NewWhisper(root, nil, nil, recv, pop, nil, nil)
+			p.SetWorkers(2)
+			p.SetMaxUpdatesPerSecond(1)
+			var lifted atomic.Bool
+			lifted.Store(backlogged)
+			p.SetBacklogged(lifted.Load)
+			var stored atomic.Int32
+			p.mockStore = func() (StoreFunc, func()) {
+				return func(metric string) {
+					pop(metric)
+					stored.Add(1)
+				}, nil
+			}
+			for i := 0; i < 50; i++ {
+				ch <- points.NowPoint(fmt.Sprintf("m%d", i), 1)
+			}
+			if err := p.Start(); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for stored.Load() < 50 && time.Now().Before(deadline) {
+				time.Sleep(5 * time.Millisecond)
+			}
+			p.Stop() // must not hang while backlogged
+			got := stored.Load()
+			if backlogged && got != 50 {
+				t.Fatalf("backlogged persister stored %d of 50 metrics", got)
+			}
+			if !backlogged && got > 4 {
+				t.Fatalf("rate-limited persister stored %d metrics in 2s at 1/s", got)
+			}
+		})
+	}
+}
