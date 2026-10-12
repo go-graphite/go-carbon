@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blevesearch/vellum"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -167,6 +168,47 @@ func TestSnapshotAdmissionMatchesRangeChecks(t *testing.T) {
 		if gotNew != wantNew || !reflect.DeepEqual(got, want) {
 			t.Errorf("%q: admission ancestors differ from range checks", metric)
 		}
+	}
+}
+
+// Quota checks run for every point while a new metric waits for persistence.
+// Longer shared prefixes must not allocate a decoded FST state per input byte.
+func TestSnapshotAdmissionPrefixAllocations(t *testing.T) {
+	prefixes := []string{"a", strings.Repeat(strings.Repeat("n", 64)+".", 8) + "tail"}
+	var keys [][]byte
+	for _, prefix := range prefixes {
+		key, err := encodeSnapshotPath(nil, "/"+strings.ReplaceAll(prefix, ".", "/")+"/stored.wsp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, key)
+	}
+	data := buildTestFST(t, keys)
+	index, err := vellum.Load(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = index.Close() })
+	cursor, err := newFSTCursor(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ti := newTrie(".wsp", 0, nil)
+	ti.snapshot = &indexSnapshot{index: index, keys: cursor}
+	allocs := make([]float64, len(prefixes))
+	for i, prefix := range prefixes {
+		metric := prefix + ".new"
+		got, gotNew := ti.metricPath(metric, make([]*trieNode, 0, 32))
+		want, wantNew := snapshotMetricPathWithRanges(ti, metric, make([]*trieNode, 0, 32))
+		if !gotNew || !wantNew || !reflect.DeepEqual(got, want) {
+			t.Fatal("quota ancestors differ from range checks")
+		}
+		allocs[i] = testing.AllocsPerRun(100, func() {
+			ti.metricPath(metric, make([]*trieNode, 0, 32))
+		})
+	}
+	if allocs[1] > allocs[0]+1 {
+		t.Fatalf("prefix length increased allocations: short=%g long=%g", allocs[0], allocs[1])
 	}
 }
 

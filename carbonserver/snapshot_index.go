@@ -55,25 +55,26 @@ func (ti *trieIndex) metricPath(metric string, dirs []*trieNode) ([]*trieNode, b
 	}
 	defer runtime.KeepAlive(ti.snapshot)
 	dirs = append(dirs, ti.root)
-	// Walk shared prefixes once. Namespace ranges enumerate ordered FST state
-	// twice per ancestor, although quota admission needs only prefix existence.
-	root := ti.snapshot.index.Accept(ti.snapshot.index.Start(), 0)
+	// Walk shared prefixes with the scanner cursor. Vellum's Accept allocates
+	// a decoded state per byte; quota admission needs only prefix existence.
+	cursor := ti.snapshot.keys
+	root := cursor.accept(cursor.start(), 0)
 	state := root
 	for end := 0; end < len(metric); end++ {
 		c := metric[end]
 		if c == '.' {
 			c = 0
 		}
-		if ti.snapshot.index.CanMatch(state) {
-			state = ti.snapshot.index.Accept(state, c)
+		if state.ok {
+			state = cursor.accept(state, c)
 		}
 		if metric[end] != '.' {
 			continue
 		}
 		name := metric[:end]
-		exists := ti.snapshot.index.CanMatch(state)
+		exists := state.ok
 		if name == "" || name == "/" {
-			exists = ti.snapshot.index.CanMatch(root)
+			exists = root.ok
 		}
 		if !exists {
 			exists = ti.mutableDirectory(name) != nil
