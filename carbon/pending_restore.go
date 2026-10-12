@@ -96,12 +96,22 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	// points still reach disk no later than newer live points of that metric.
 	stop, done := make(chan struct{}), make(chan struct{})
 	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
+	inputReady := make(chan struct{})
+	app.pendingInputReady = inputReady
 	go func() {
 		defer close(done)
 		defer openGate()
 		defer stopGateLimit()
 		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
 			logger.Warn("pending recovery stopped", zap.Error(err))
+			return
+		}
+		// A handoff tail may still be written by the old process. Do not
+		// retire its source or finish confirmation tracking until it has
+		// been replayed, including metrics absent from the checkpoint.
+		select {
+		case <-inputReady:
+		case <-stop:
 			return
 		}
 		loaded := time.Now()

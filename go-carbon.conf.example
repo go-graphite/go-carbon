@@ -606,6 +606,10 @@ restore-per-second = 0
 # time; with a service manager that only tracks the main process (for systemd,
 # KillMode=process) the next instance starts while that memory is reclaimed.
 # The host needs room for both processes briefly. Not supported with -daemon.
+# When both binaries support input handoff, a store with only the built-in
+# uncompressed, unbuffered TCP receiver also transfers its existing ingestion
+# connections. Input received after the checkpoint is replayed before reading
+# the transferred connections. Other receiver configurations use stop/rebind.
 handoff-supervisor = false
 
 [pprof]

@@ -2,6 +2,7 @@ package tcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -97,6 +98,7 @@ type TCP struct {
 	buffer              chan *points.Points
 	logger              *zap.Logger
 	decompressor        decompressor
+	handoff             handoffState
 }
 
 // Addr returns binded socket address. For bind port 0 in tests
@@ -128,6 +130,7 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	}
 
 	r.decompressor = newDecompressor(options.Compression)
+	r.handoff.enabled = options.BufferSize == 0 && options.Compression == ""
 
 	err = r.Listen(addr)
 	if err != nil {
@@ -177,12 +180,30 @@ func newFraming(parser string, name string, options *FramingOptions, store func(
 }
 
 func (rcv *TCP) HandleConnection(conn net.Conn) {
+	rcv.handlePlain(conn, nil, nil)
+}
+
+// handlePlain reads newline-separated points. leftover holds bytes a previous
+// owner read from conn but did not parse; they come first. A tracked
+// connection can be detached (see Detach) instead of closed.
+func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn) {
 	atomic.AddInt32(&rcv.active, 1)
 	defer atomic.AddInt32(&rcv.active, -1)
 
-	defer conn.Close()
+	detached := false
+	defer func() {
+		if !detached {
+			conn.Close()
+		}
+	}()
 
-	bconn, err := rcv.decompressor(conn)
+	var src io.Reader = conn
+	var rest *bytes.Reader
+	if len(leftover) > 0 {
+		rest = bytes.NewReader(leftover)
+		src = io.MultiReader(rest, conn)
+	}
+	bconn, err := rcv.decompressor(src)
 	if err != nil {
 		rcv.logger.Error("failed init decompressor", zap.Error(err))
 		return
@@ -204,18 +225,26 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 
 	lastDeadline := time.Now()
 	readTimeout := 2 * time.Minute
-	conn.SetReadDeadline(lastDeadline.Add(readTimeout))
+	tracked.setReadDeadline(conn, lastDeadline.Add(readTimeout))
 
 	for {
+		if tracked.detaching() {
+			detached = rcv.detach(tracked, reader, rest, nil)
+			return
+		}
 		now := time.Now()
 		if now.Sub(lastDeadline) > (readTimeout / 4) {
-			conn.SetReadDeadline(now.Add(readTimeout))
+			tracked.setReadDeadline(conn, now.Add(readTimeout))
 			lastDeadline = now
 		}
 
 		line, err := readPlainLine(reader)
 
 		if err != nil {
+			if tracked.detaching() {
+				detached = rcv.detach(tracked, reader, rest, line)
+				return
+			}
 			if err == io.EOF { //nolint:errorlint // Preserve legacy direct EOF classification; wrapped transport errors are read errors.
 				if len(line) > 0 {
 					rcv.logger.Warn("unfinished line", zap.String("line", string(line)))
@@ -343,9 +372,14 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
+	return rcv.listen(func() (*net.TCPListener, error) { return net.ListenTCP("tcp", addr) }, nil)
+}
+
+// listen serves the listener open returns, after the inherited connections.
+func (rcv *TCP) listen(open func() (*net.TCPListener, error), inherited []Conn) error {
 	return rcv.StartFunc(func() error {
 
-		tcpListener, err := net.ListenTCP("tcp", addr)
+		tcpListener, err := open()
 		if err != nil {
 			return err
 		}
@@ -379,7 +413,26 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 			}
 		}
 
+		serve := func(conn net.Conn, leftover []byte) {
+			if !rcv.handoff.enabled {
+				rcv.Go(func(exit chan bool) { handler(conn) })
+				return
+			}
+			// Count the handler before it starts, so Detach waits for it.
+			tracked := rcv.handoff.track(conn)
+			rcv.Go(func(exit chan bool) {
+				defer rcv.handoff.untrack(tracked)
+				rcv.handlePlain(conn, leftover, tracked)
+			})
+		}
+		for _, c := range inherited {
+			serve(c.conn, c.Leftover)
+		}
+
+		acceptDone := make(chan struct{})
+		rcv.handoff.acceptDone = acceptDone
 		rcv.Go(func(exit chan bool) {
+			defer close(acceptDone)
 			defer tcpListener.Close()
 
 			for {
@@ -395,9 +448,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 					continue
 				}
 
-				rcv.Go(func(exit chan bool) {
-					handler(conn)
-				})
+				serve(conn, nil)
 			}
 
 		})
@@ -408,20 +459,20 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 	})
 }
 
-type decompressor func(net.Conn) (io.Reader, error)
+type decompressor func(io.Reader) (io.Reader, error)
 
 func newDecompressor(typ string) decompressor {
 	switch typ {
 	case "snappy":
-		return func(c net.Conn) (io.Reader, error) {
+		return func(c io.Reader) (io.Reader, error) {
 			return snappy.NewReader(c), nil
 		}
 	case "gzip":
-		return func(c net.Conn) (io.Reader, error) {
+		return func(c io.Reader) (io.Reader, error) {
 			return gzip.NewReader(c)
 		}
 	default:
-		return func(c net.Conn) (io.Reader, error) {
+		return func(c io.Reader) (io.Reader, error) {
 			return c, nil
 		}
 	}

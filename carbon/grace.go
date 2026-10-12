@@ -103,7 +103,8 @@ func (app *App) DumpStop() error {
 		return err
 	}
 	defer xlog.Close()
-	app.Cache.DivertToPointWriter(xlog.WritePoints)
+	divert := &switchWriter{write: xlog.WritePoints}
+	app.Cache.DivertToPointWriter(divert.Write)
 
 	// Checkpoint work overlaps the dump: the read-index overlay belongs to the
 	// frozen read generation (diverted input cannot add names to it), and the
@@ -188,20 +189,36 @@ func (app *App) DumpStop() error {
 		builder.Prepare()
 	}
 
+	// A successor that takes over reads and input lets input continue into a
+	// tail log until it reads the sockets itself, so senders never see input
+	// closed. Otherwise input stops here, before the WAL is completed.
+	readsHandoff := app.readHandoffPossible() && handoff.SuccessorSupported(app.readSuccessor)
+	var handover *inputHandover
+	if readsHandoff && builder != nil && app.inputHandoffPossible() && handoff.InputSupported(app.readSuccessor) {
+		handover, err = app.startInputHandover(path.Join(app.Config.Dump.Path, recovery.TailName(path.Base(xlogFilename))), divert, logger)
+		if err != nil {
+			logger.Warn("input handoff unavailable", zap.Error(err))
+		}
+	}
 	inputStopped := time.Now()
-	stopped := make(chan struct{})
-	go func() { defer close(stopped); app.stopInputListeners() }()
-	select {
-	case <-time.After(5 * time.Second):
-		logger.Info("waiting for input cleanup with read listeners available")
-		<-stopped
-	case <-stopped:
+	if handover == nil {
+		stopped := make(chan struct{})
+		go func() { defer close(stopped); app.stopInputListeners() }()
+		select {
+		case <-time.After(5 * time.Second):
+			logger.Info("waiting for input cleanup with read listeners available")
+			<-stopped
+		case <-stopped:
+		}
 	}
 	walFile, err := xlog.Close()
 	if err != nil {
+		if handover != nil {
+			handover.stop("dump failed")
+		}
 		return err
 	}
-	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+syncWait), zap.Duration("cache_sync_wait", syncWait))
+	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+syncWait), zap.Duration("cache_sync_wait", syncWait), zap.Bool("input_handoff", handover != nil))
 	// The new dump holds every saved point not yet on disk, so a pending
 	// generation from the previous restart is now redundant.
 	if err = app.Cache.RetirePendingSources(); err != nil {
@@ -221,13 +238,24 @@ func (app *App) DumpStop() error {
 				checkpointErr = recovery.Publish(app.Config.Dump.Path, app.Config.Whisper.DataDir, cacheFile, walFile, index, readID)
 			}
 		}
-		if checkpointErr != nil {
+		switch {
+		case checkpointErr != nil:
 			logger.Warn("pending read checkpoint unavailable; saved legacy dump", zap.Error(checkpointErr))
-		} else {
+			if handover != nil {
+				// The successor restores in order, which takes far longer
+				// than input may stay in the tail.
+				handover.stop("checkpoint unavailable")
+			}
+		case handover != nil:
+			logger.Info("pending read checkpoint saved", zap.Duration("finalize_runtime", time.Since(finalizeStart)), zap.Duration("index_write_runtime", indexWritten.Sub(finalizeStart)))
+		default:
 			logger.Info("pending read checkpoint saved", zap.Duration("finalize_runtime", time.Since(finalizeStart)), zap.Duration("index_write_runtime", indexWritten.Sub(finalizeStart)), zap.Duration("input_closed_for", time.Since(inputStopped)))
 		}
 	}
-	app.handOffReads(logger)
+	app.handOffReads(logger, readsHandoff, handover)
+	if handover != nil {
+		handover.stop("successor did not take input")
+	}
 	logger.Info("stop read listeners")
 	<-app.stopReadListeners()
 	logger.Info("listeners stopped")
@@ -263,17 +291,25 @@ func (app *App) SetReadHandoff(successor string, release func()) {
 	app.Unlock()
 }
 
-// handOffReads runs after input stopped and the dump and checkpoint are
-// durable. Data this instance serves is then frozen and equals what the next
-// instance serves once ready, so both may accept on the same socket until the
-// successor reports it serves. The successor opens intake only after this
-// instance stopped accepting. On any failure reads stop normally.
-func (app *App) handOffReads(logger *zap.Logger) {
+// readHandoffPossible reports whether this instance can hand reads over.
+// Assumes we are holding app.Lock().
+func (app *App) readHandoffPossible() bool {
 	cs := app.Carbonserver
-	if app.readRelease == nil || cs == nil || cs.HTTPListener() == nil || app.MetricStore != nil || app.Tags != nil {
+	return app.readRelease != nil && cs != nil && cs.HTTPListener() != nil && app.MetricStore == nil && app.Tags == nil
+}
+
+// handOffReads runs after the dump and checkpoint are durable. Data this
+// instance serves is then frozen and equals what the next instance serves once
+// ready, so both may accept on the same socket until the successor reports it
+// serves. The successor opens intake only after this instance stopped
+// accepting: input is stopped by then, or handover hands it over. On any
+// failure reads stop normally. supported is whether the successor can take
+// reads over.
+func (app *App) handOffReads(logger *zap.Logger, supported bool, handover *inputHandover) {
+	if !app.readHandoffPossible() {
 		return
 	}
-	if !handoff.SuccessorSupported(app.readSuccessor) {
+	if !supported {
 		logger.Info("next binary does not support read handoff", zap.String("binary", app.readSuccessor))
 		return
 	}
@@ -285,7 +321,11 @@ func (app *App) handOffReads(logger *zap.Logger) {
 	logger.Info("serving reads until successor takes over")
 	app.readRelease()
 	started := time.Now()
-	taken, err := offer.Serve(readHandoffTimeout, cs.HTTPListener(), cs.StopAccepting)
+	var input handoff.InputSource
+	if handover != nil {
+		input = handover
+	}
+	taken, err := offer.Serve(readHandoffTimeout, app.Carbonserver.HTTPListener(), app.Carbonserver.StopAccepting, input, inputHandoffTimeout)
 	if taken {
 		logger.Info("read listener handed off", zap.Duration("wait", time.Since(started)), zap.Error(err))
 	} else {
@@ -384,6 +424,11 @@ FilesLoop:
 		case "cache":
 			fileWithSortPrefix = fmt.Sprintf("%s_%s:%s", r[2], "1", file.Name())
 		case "input":
+			// A stopping instance still appends to its tail; input opens only
+			// after the tail is complete and replayed (see loadInputTails).
+			if recovery.IsTail(file.Name()) && handoff.Locked(path.Join(dumpDir, file.Name())) {
+				continue FilesLoop
+			}
 			fileWithSortPrefix = fmt.Sprintf("%s_%s:%s", r[2], "2", file.Name())
 		default:
 			continue FilesLoop

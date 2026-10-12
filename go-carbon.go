@@ -74,11 +74,16 @@ func main() {
 	cat := flag.String("cat", "", "Print cache dump file")
 	printFLC := flag.String("print-file-list-cache", "", "Print file list cache. (format: $path_to_cache. example: /var/lib/carbon/carbonserver-file-list-cache.bin)")
 	handoffProtocol := flag.Bool("handoff-protocol", false, "Print the supported read handoff protocol and exit")
+	inputHandoffProtocol := flag.Bool("input-handoff-protocol", false, "Print the supported input handoff protocol and exit")
 
 	flag.Parse()
 
 	if *handoffProtocol {
 		fmt.Println(handoff.Protocol)
+		return
+	}
+	if *inputHandoffProtocol {
+		fmt.Println(handoff.InputProtocol)
 		return
 	}
 
@@ -246,8 +251,9 @@ func main() {
 	}
 
 	// A supervisor may let the next instance start once this one holds no
-	// listener, lock, or unsynchronized file other than the read socket it
-	// hands over. DumpStop returns early with listeners open on failure.
+	// listener, lock, or unsynchronized file other than the sockets it hands
+	// over: reads, and input with its locked tail log when the next instance
+	// takes input too. DumpStop returns early with listeners open on failure.
 	var released bool
 	releaseToSupervisor := func() {
 		httpStop()

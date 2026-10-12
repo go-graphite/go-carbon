@@ -88,6 +88,16 @@ func validManifest(m *Manifest) bool {
 	return m.Version == 1 && validFile(m.Cache, "cache.", ".bin") && validFile(m.WAL, "input.", ".bin") && validFile(m.Index, ".pending-index-", ".bin")
 }
 
+// TailName names the input log a stopping instance appends to after its
+// checkpoint while it hands input over to its successor. It sorts right after
+// wal, so an ordered replay, by older binaries too, applies it after wal.
+func TailName(wal string) string { return strings.TrimSuffix(wal, ".bin") + ".tail.bin" }
+
+// IsTail reports whether name is such an input log.
+func IsTail(name string) bool {
+	return strings.HasPrefix(name, "input.") && strings.HasSuffix(name, ".tail.bin")
+}
+
 // Publish must run after both legacy files and the index have been synchronized.
 // If publishing the accelerator fails, callers retain the ordinary dump files.
 func Publish(dir, root string, cache, wal, index File, readIndexID string) error {
@@ -220,9 +230,11 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 	}
 	// An extra generation or live journal requires ordered legacy replay. A crash
 	// during background recovery therefore cannot reuse an incomplete checkpoint.
+	// This generation's tail is input that arrived after the checkpoint; the
+	// caller replays it before opening input.
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || name == manifest.Cache.Name || name == manifest.WAL.Name {
+		if entry.IsDir() || name == manifest.Cache.Name || name == manifest.WAL.Name || name == TailName(manifest.WAL.Name) {
 			continue
 		}
 		if strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, "input.") {
@@ -294,7 +306,7 @@ func (b *Bundle) Close() error {
 // The caller keeps input receivers gated until this directory sync succeeds.
 // Mappings held by readers remain valid after unlink.
 func (b *Bundle) Retire() error {
-	for _, file := range []File{b.manifest.Cache, b.manifest.WAL, b.manifest.Index} {
+	for _, file := range []File{b.manifest.Cache, b.manifest.WAL, b.manifest.Index, {Name: TailName(b.manifest.WAL.Name)}} {
 		if err := os.Remove(filepath.Join(b.dir, file.Name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
