@@ -372,3 +372,52 @@ func TestDumpPendingRangesCoverEachMetricOnce(t *testing.T) {
 		}
 	}
 }
+
+// Replayed tail records were already admitted by the old receiver. They must
+// survive quota pressure and failed writes, including metrics absent from the
+// checkpoint, and keep that generation alive until all are confirmed.
+func TestRecoveredInputWaitsForPersistence(t *testing.T) {
+	c := New()
+	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	c.SetMaxSize(1)
+	c.SetThrottle(func(*points.Points, bool) bool { return true })
+	c.AddRecovered(points.OnePoint("metric", 9, 1))
+	c.AddRecovered(points.OnePoint("tail.only", 10, 3))
+	if got := c.Get("metric"); len(got) != 4 || got[3].Value != 9 {
+		t.Fatalf("tail did not follow checkpoint history: %v", got)
+	}
+	if got := c.Get("tail.only"); len(got) != 1 || got[0].Value != 10 {
+		t.Fatalf("previously admitted input was dropped: %v", got)
+	}
+	if c.PendingOutstanding() != 3 {
+		t.Fatalf("tail-only metric was not tracked: %d", c.PendingOutstanding())
+	}
+	for _, name := range []string{"metric", "tail.only"} {
+		p, ok := c.PopNotConfirmed(name)
+		if !ok {
+			t.Fatal("missing replay", name)
+		}
+		c.Requeue(p)
+		if err := c.FinishPendingRecovery(); err == nil {
+			t.Fatal("retired source after failed persistence")
+		}
+		p, ok = c.PopNotConfirmed(name)
+		if !ok {
+			t.Fatal("missing retry", name)
+		}
+		c.Confirm(p)
+	}
+	if err := c.RecoverPending(nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	p, ok := c.PopNotConfirmed("other")
+	if !ok {
+		t.Fatal("missing checkpoint metric")
+	}
+	c.Confirm(p)
+	if err := c.FinishPendingRecovery(); err != nil {
+		t.Fatal(err)
+	}
+}

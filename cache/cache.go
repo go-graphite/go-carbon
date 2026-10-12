@@ -405,15 +405,22 @@ func sendMetricToNewMetricChan(c *Cache, metric string) bool {
 
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
-	c.add(p, false)
+	c.add(p, false, false)
 }
 
 // AddRestored adds dump data without starting a new buffering deadline.
 func (c *Cache) AddRestored(p *points.Points) {
-	c.add(p, true)
+	c.add(p, true, false)
 }
 
-func (c *Cache) add(p *points.Points, restored bool) {
+// AddRecovered admits previously accepted handoff input without live quotas.
+// The caller provides backpressure. Pending recovery tracks the cache item
+// until persistence confirms it, so its source remains available after a crash.
+func (c *Cache) AddRecovered(p *points.Points) {
+	c.add(p, true, true)
+}
+
+func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
@@ -452,12 +459,12 @@ func (c *Cache) add(p *points.Points, restored bool) {
 	}
 
 	values, exists := shard.items[p.Metric]
-	if c.throttle != nil && c.throttle(p, exists) {
+	if !recovered && c.throttle != nil && c.throttle(p, exists) {
 		return
 	}
 
 	count := len(p.Data)
-	if s.maxSize > 0 && c.Size() > s.maxSize {
+	if !recovered && s.maxSize > 0 && c.Size() > s.maxSize {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
 		return
 	}
@@ -481,6 +488,12 @@ func (c *Cache) add(p *points.Points, restored bool) {
 		// if missed in cache, as it was before
 		if c.newMetricsChan != nil && c.newMetricCf == nil {
 			sendMetricToNewMetricChan(c, p.Metric)
+		}
+	}
+
+	if recovered {
+		if r := c.pending.Load(); r != nil {
+			r.track(values)
 		}
 	}
 

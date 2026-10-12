@@ -79,6 +79,10 @@ type App struct {
 	pendingDone   chan struct{}
 	readSuccessor string
 	handoffClaim  *handoff.Claim
+	// inputClaim takes the stopping instance's input once reads are taken
+	// over, if it offers input (see startReceivers).
+	inputClaim        *handoff.Claim
+	pendingInputReady chan struct{}
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	quotaReloader       *quotaReloader
@@ -404,6 +408,15 @@ func (app *App) stopReadListeners() <-chan struct{} {
 }
 
 func (app *App) stopAll() {
+	app.stopPendingRecovery()
+	if app.inputClaim != nil {
+		_ = app.inputClaim.Close()
+		app.inputClaim = nil
+	}
+	if app.handoffClaim != nil {
+		_ = app.handoffClaim.Close()
+		app.handoffClaim = nil
+	}
 	if app.Cache != nil {
 		_ = app.Cache.SetWriteoutBatching(0, 0)
 	}
@@ -681,6 +694,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 		// A stopping instance offered its listener: take it, or, if that
 		// fails, wait while it closes its copy instead of failing to bind.
 		app.handoffClaim = nil
+		app.inputClaim = claim
 		carbonserver.SetListenerInheritor(func(addr *net.TCPAddr) (net.Listener, func() error, error) {
 			return claim.Take(addr)
 		})
@@ -901,6 +915,30 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	var rcv receiver.Receiver
 	var rcvOptions map[string]interface{}
 
+	// A stopping instance that handed reads over may also hand over its input
+	// sockets. It completes the tail of input it took meanwhile first, and
+	// that tail is replayed before any socket is read.
+	var inherited *handoff.Input
+	if claim := app.inputClaim; claim != nil {
+		app.inputClaim = nil
+		if inherited, err = claim.TakeInput(); err != nil {
+			zapwriter.Logger("app").Warn("input handoff failed", zap.Error(err))
+			inherited, err = nil, nil
+		}
+	}
+	defer func() {
+		if inherited != nil {
+			inherited.Close()
+		}
+	}()
+	if err = app.loadInputTails(core); err != nil {
+		return err
+	}
+	if app.pendingInputReady != nil {
+		close(app.pendingInputReady)
+		app.pendingInputReady = nil
+	}
+
 	/* UDP start */
 	if conf.Udp.Enabled {
 		if rcvOptions, err = receiver.WithProtocol(conf.Udp, "udp"); err != nil {
@@ -924,7 +962,14 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			return
 		}
 
-		if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
+		if h := takeInputReceiver(inherited, "tcp"); h != nil {
+			var inheritedTCP *tcp_receiver.TCP
+			if inheritedTCP, err = tcp_receiver.NewInherited("tcp", conf.Tcp, core.Add, h); err != nil {
+				return
+			}
+			rcv = inheritedTCP
+			zapwriter.Logger("app").Info("took over input from stopping instance", zap.String("receiver", "tcp"), zap.Int("connections", len(h.Conns)))
+		} else if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
 			return
 		}
 

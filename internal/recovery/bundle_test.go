@@ -209,3 +209,26 @@ func TestLargeManifestRoundtripAndPublishLimit(t *testing.T) {
 		t.Fatal("failed publication replaced the usable manifest", err)
 	}
 }
+
+// TestBundleAcceptsItsTail opens a checkpoint next to the input that arrived
+// after it, but not next to another generation's tail.
+func TestBundleAcceptsItsTail(t *testing.T) {
+	dir, root := bundleFixture(t)
+	if got := TailName("input.123.1234.bin"); got != "input.123.1234.tail.bin" || !IsTail(got) || IsTail("input.123.1234.bin") {
+		t.Fatal("tail name", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "input.123.1234.tail.bin"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := OpenBundle(dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = b.Close()
+	if err = os.WriteFile(filepath.Join(dir, "input.123.999.tail.bin"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = OpenBundle(dir, root); err == nil || !strings.Contains(err.Error(), "unindexed") {
+		t.Fatal("opened next to another generation's tail", err)
+	}
+}

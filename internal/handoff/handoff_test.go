@@ -5,6 +5,7 @@ package handoff
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -50,7 +51,7 @@ func TestHandoffKeepsSocketAccepting(t *testing.T) {
 			oldSrv.SetKeepAlivesEnabled(false)
 			_ = old.Close()
 			stopped.Store(true)
-		})
+		}, nil, 0)
 		if err != nil {
 			t.Error(err)
 		}
@@ -137,7 +138,7 @@ func TestUnclaimedAndAbandonedOffers(t *testing.T) {
 			t.Fatal(err)
 		}
 		go func() {
-			taken, _ := o.Serve(5*time.Second, old, func() { t.Error("stopped without commit") })
+			taken, _ := o.Serve(5*time.Second, old, func() { t.Error("stopped without commit") }, nil, 0)
 			result <- taken
 		}()
 	}
@@ -197,5 +198,178 @@ func TestSuccessorSupported(t *testing.T) {
 	}
 	if SuccessorSupported(filepath.Join(dir, "missing")) {
 		t.Fatal("missing successor accepted")
+	}
+}
+
+type inputFunc func() (*Input, error)
+
+func (f inputFunc) Detach() (*Input, error) { return f() }
+
+// TestInputHandoff hands over more connections than fit in one message, each
+// with its own unparsed bytes, after the read listener.
+func TestInputHandoff(t *testing.T) {
+	path := socketPath(t)
+	reads, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reads.Close()
+	input, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+
+	const conns = 450
+	var writers []*os.File
+	detach := func() (*Input, error) {
+		listener, err := input.File()
+		if err != nil {
+			return nil, err
+		}
+		in := &Input{Receivers: []InputReceiver{{Name: "tcp", Listener: listener}}}
+		for i := range conns {
+			r, w, err := os.Pipe()
+			if err != nil {
+				return nil, err
+			}
+			writers = append(writers, w)
+			in.Receivers[0].Conns = append(in.Receivers[0].Conns, InputConn{File: r, Leftover: []byte(fmt.Sprintf("left %d", i))})
+		}
+		return in, nil
+	}
+	offer, err := NewOffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		taken, err := offer.Serve(5*time.Second, reads, func() {}, inputFunc(detach), 5*time.Second)
+		if !taken {
+			err = errors.Join(err, errors.New("reads not taken"))
+		}
+		result <- err
+	}()
+
+	claim := Register(path)
+	if claim == nil {
+		t.Fatal("register")
+	}
+	ln, commit, err := claim.Take(reads.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err = commit(); err != nil || !claim.InputOffered() {
+		t.Fatal("commit", err, claim.InputOffered())
+	}
+	in, err := claim.TakeInput()
+	if err != nil || in == nil {
+		t.Fatal("take input", err, <-result)
+	}
+	defer in.Close()
+	if err = <-result; err != nil {
+		t.Fatal(err)
+	}
+	if len(in.Receivers) != 1 || in.Receivers[0].Name != "tcp" || len(in.Receivers[0].Conns) != conns {
+		t.Fatalf("received %+v", in.Receivers)
+	}
+	got, err := net.FileListener(in.Receivers[0].Listener)
+	if err != nil || got.Addr().String() != input.Addr().String() {
+		t.Fatal("listener", err)
+	}
+	got.Close()
+	for i, c := range in.Receivers[0].Conns {
+		if string(c.Leftover) != fmt.Sprintf("left %d", i) {
+			t.Fatalf("conn %d leftover %q", i, c.Leftover)
+		}
+		// Each file is the matching socket, not just any descriptor.
+		if _, err = fmt.Fprintf(writers[i], "%d", i); err != nil {
+			t.Fatal(err)
+		}
+		buf := make([]byte, 8)
+		n, err := c.File.Read(buf)
+		if err != nil || string(buf[:n]) != fmt.Sprint(i) {
+			t.Fatalf("conn %d read %q %v", i, buf[:n], err)
+		}
+	}
+	for _, w := range writers {
+		w.Close()
+	}
+}
+
+// TestInputAlreadyStopped answers a late request without files.
+func TestInputAlreadyStopped(t *testing.T) {
+	path := socketPath(t)
+	reads, _ := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer reads.Close()
+	offer, err := NewOffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := offer.Serve(5*time.Second, reads, func() {}, inputFunc(func() (*Input, error) { return nil, nil }), 5*time.Second)
+		result <- err
+	}()
+	claim := Register(path)
+	ln, commit, err := claim.Take(reads.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err = commit(); err != nil {
+		t.Fatal(err)
+	}
+	if in, err := claim.TakeInput(); in != nil || err != nil {
+		t.Fatal("took stopped input", in, err)
+	}
+	if err = <-result; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A successor can die after it accepts reads but before it requests input.
+// The offer must return promptly without detaching the still-owned input.
+func TestInputRequestAbandoned(t *testing.T) {
+	path := socketPath(t)
+	reads, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reads.Close()
+	offer, err := NewOffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var detached atomic.Bool
+	done := make(chan error, 1)
+	go func() {
+		_, err := offer.Serve(time.Second, reads, func() {}, inputFunc(func() (*Input, error) {
+			detached.Store(true)
+			return nil, nil
+		}), time.Second)
+		done <- err
+	}()
+	claim := Register(path)
+	if claim == nil {
+		t.Fatal("register")
+	}
+	ln, commit, err := claim.Take(reads.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	if err = commit(); err != nil {
+		t.Fatal(err)
+	}
+	_ = claim.Close()
+	select {
+	case err = <-done:
+		if err == nil || detached.Load() {
+			t.Fatalf("abandoned input request: error=%v detached=%v", err, detached.Load())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("offer hung after successor disconnected")
 	}
 }
