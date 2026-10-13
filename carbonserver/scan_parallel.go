@@ -506,9 +506,14 @@ func (s *parallelScan) abortOutput() {
 }
 
 func (s *parallelScan) stopped() bool {
+	// Single-channel checks avoid selectgo locking both shared channels on
+	// every file. Both channels only close, so either closure stops the scan.
 	select {
 	case <-s.stop:
 		return true
+	default:
+	}
+	select {
 	case <-s.u.listener.exitChan:
 		return true
 	default:
