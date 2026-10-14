@@ -470,8 +470,6 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	var multiv3 protov3.MultiFetchResponse
 	var multiv2 protov2.MultiFetchResponse
 
-	// TODO: should chan buffer size be configurable?
-	responseChan := make(chan response, 1000)
 	metricNames := getUniqueMetricNames(targets)
 	// TODO: pipeline?
 	expansionT0 := time.Now()
@@ -482,6 +480,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 	}
 	metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
+	responseChan := make(chan response, renderResponseBufferSize(targets, metricGlobMap))
 	go func() {
 		prepareT0 := time.Now()
 		listener.prepareDataStream(ctx, format, targets, metricGlobMap, responseChan)
@@ -584,6 +583,23 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
 	}
 	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics}, nil
+}
+
+// Small renders do not need the buffer reserved for a large glob. Count files
+// rather than fetching them here; directories and failed reads only overestimate
+// the number of responses. Keep the existing upper bound for large requests.
+func renderResponseBufferSize(targets map[timeRange][]target, metricGlobMap map[string]globs) int {
+	const limit = 1000
+	var size int
+	for _, ts := range targets {
+		for _, metric := range ts {
+			size += min(len(metricGlobMap[metric.Name].Files), limit-size)
+			if size == limit {
+				return size
+			}
+		}
+	}
+	return size
 }
 
 // nolint:unparam // FIXME - this always returns a nil error
