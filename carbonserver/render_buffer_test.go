@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,54 +16,19 @@ import (
 	"go.uber.org/zap"
 )
 
-// Drive the real producer with its original buffer and the bounded buffer. The
-// serialized responses must agree even when the consumer starts after a send,
-// the same target occurs in several ranges, or no response can be produced.
+type renderBufferTestCase struct {
+	name    string
+	targets map[timeRange][]target
+	buffer  int
+	count   int
+	cancel  bool
+}
+
+// Compare serialized output from the real producer with its original buffer
+// and the bounded buffer, including requests larger than either queue.
 func TestRenderResponseBufferPreservesStream(t *testing.T) {
-	root := t.TempDir()
-	retentions, err := whisper.ParseRetentionDefs("1s:1h")
-	if err != nil {
-		t.Fatal(err)
-	}
-	w, err := whisper.Create(filepath.Join(root, "metric.wsp"), retentions, whisper.Last, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := int(time.Now().Unix())
-	if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: now - 5, Value: -0.0}, {Time: now - 3, Value: 42.5}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
-	for i := range 1001 {
-		if err := os.Link(filepath.Join(root, "metric.wsp"), filepath.Join(root, fmt.Sprintf("wide%d.wsp", i))); err != nil {
-			t.Fatal(err)
-		}
-	}
-	listener := NewCarbonserverListener(cache.New().Get)
-	listener.logger, listener.accessLogger = zap.NewNop(), zap.NewNop()
-	listener.SetWhisperData(root)
-	listener.SetMaxMetricsRendered(2000)
-	tr := timeRange{from: int32(now - 10), until: int32(now)}
-	wide := globs{}
-	for i := range 1001 {
-		wide.Files = append(wide.Files, fmt.Sprintf("wide%d", i))
-		wide.Leafs = append(wide.Leafs, true)
-	}
-	expanded := map[string]globs{
-		"metric":  {Files: []string{"metric"}, Leafs: []bool{true}},
-		"branch":  {Files: []string{"directory"}, Leafs: []bool{false}},
-		"missing": {Files: []string{"missing"}, Leafs: []bool{true}},
-		"wide.*":  wide,
-	}
-	for _, tc := range []struct {
-		name    string
-		targets map[timeRange][]target
-		buffer  int
-		count   int
-		cancel  bool
-	}{
+	listener, tr, expanded := renderBufferFixture(t)
+	for _, tc := range []renderBufferTestCase{
 		{name: "empty", buffer: 0},
 		{name: "unknown", targets: map[timeRange][]target{tr: {{Name: "unknown"}}}, buffer: 0},
 		{name: "single", targets: map[timeRange][]target{tr: {{Name: "metric"}}}, buffer: 1, count: 1},
@@ -81,45 +47,98 @@ func TestRenderResponseBufferPreservesStream(t *testing.T) {
 				t.Fatalf("buffer = %d, want %d", capacity, tc.buffer)
 			}
 			for _, format := range []responseFormat{jsonFormat, protoV2Format, protoV3Format, pickleFormat} {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				if tc.cancel {
-					cancel()
-				}
-				collect := func(buffer int) [][]byte {
-					ch := make(chan response, buffer)
-					go listener.prepareDataStream(ctx, format, tc.targets, expanded, ch)
-					var output [][]byte
-					timeout := time.NewTimer(10 * time.Second)
-					defer timeout.Stop()
-					for {
-						select {
-						case r, ok := <-ch:
-							if !ok {
-								slices.SortFunc(output, bytes.Compare)
-								return output
-							}
-							var wire []byte
-							var err error
-							if format == protoV2Format || format == jsonFormat {
-								wire, err = r.proto2().MarshalVT()
-							} else {
-								wire, err = r.proto3().MarshalVT()
-							}
-							if err != nil {
-								t.Fatal(err)
-							}
-							output = append(output, wire)
-						case <-timeout.C:
-							t.Fatal("render stream did not finish")
-						}
+				t.Run(fmt.Sprint(format), func(t *testing.T) {
+					want := collectRenderBuffer(t, listener, format, tc, expanded, 1000)
+					got := collectRenderBuffer(t, listener, format, tc, expanded, capacity)
+					if len(got) != tc.count || !slices.EqualFunc(got, want, bytes.Equal) {
+						t.Fatalf("bounded buffer returned %d responses, original returned %d, expected %d; serialized responses differ", len(got), len(want), tc.count)
 					}
-				}
-				want, got := collect(1000), collect(capacity)
-				if len(got) != tc.count || !slices.EqualFunc(got, want, bytes.Equal) {
-					t.Fatalf("format %v: bounded buffer returned %d responses, original returned %d, expected %d; serialized responses differ", format, len(got), len(want), tc.count)
-				}
+				})
 			}
 		})
 	}
+}
+
+func renderBufferFixture(t *testing.T) (*CarbonserverListener, timeRange, map[string]globs) {
+	t.Helper()
+	root := t.TempDir()
+	retentions, err := whisper.ParseRetentionDefs("1s:1h")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := whisper.Create(filepath.Join(root, "metric.wsp"), retentions, whisper.Last, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := w.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	now := int(time.Now().Unix())
+	if err := w.UpdateMany([]*whisper.TimeSeriesPoint{{Time: now - 5, Value: math.Copysign(0, -1)}, {Time: now - 3, Value: 42.5}}); err != nil {
+		t.Fatal(err)
+	}
+	wide := globs{}
+	for i := range 1001 {
+		name := fmt.Sprintf("wide%d", i)
+		if err := os.Link(filepath.Join(root, "metric.wsp"), filepath.Join(root, name+".wsp")); err != nil {
+			t.Fatal(err)
+		}
+		wide.Files = append(wide.Files, name)
+		wide.Leafs = append(wide.Leafs, true)
+	}
+	listener := NewCarbonserverListener(cache.New().Get)
+	listener.logger, listener.accessLogger = zap.NewNop(), zap.NewNop()
+	listener.SetWhisperData(root)
+	listener.SetMaxMetricsRendered(2000)
+	tr := timeRange{from: int32(now - 10), until: int32(now)}
+	return listener, tr, map[string]globs{
+		"metric":  {Files: []string{"metric"}, Leafs: []bool{true}},
+		"branch":  {Files: []string{"directory"}, Leafs: []bool{false}},
+		"missing": {Files: []string{"missing"}, Leafs: []bool{true}},
+		"wide.*":  wide,
+	}
+}
+
+func collectRenderBuffer(t *testing.T, listener *CarbonserverListener, format responseFormat, tc renderBufferTestCase, expanded map[string]globs, buffer int) [][]byte {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if tc.cancel {
+		cancel()
+	}
+	ch := make(chan response, buffer)
+	go listener.prepareDataStream(ctx, format, tc.targets, expanded, ch)
+	var output [][]byte
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case r, ok := <-ch:
+			if !ok {
+				slices.SortFunc(output, bytes.Compare)
+				return output
+			}
+			wire := renderBufferWire(t, r, format)
+			output = append(output, wire)
+		case <-timeout.C:
+			t.Fatal("render stream did not finish")
+		}
+	}
+}
+
+func renderBufferWire(t *testing.T, r response, format responseFormat) []byte {
+	t.Helper()
+	var wire []byte
+	var err error
+	if format == protoV2Format || format == jsonFormat {
+		wire, err = r.proto2().MarshalVT()
+	} else {
+		wire, err = r.proto3().MarshalVT()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return wire
 }
