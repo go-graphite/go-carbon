@@ -954,6 +954,10 @@ func (whisper *Whisper) OutOfOrderPath() string { return whisper.oooPath }
 // hashed filename in the same directory.
 func OutOfOrderSidecarPath(path string) string { return auxiliaryPath(path, oooSuffix) }
 
+// PathLockPath returns the persistent lock file that FLock uses for the whisper
+// file at path. External tools must lock it to coordinate across rewrites.
+func PathLockPath(path string) string { return auxiliaryPath(path, lockSuffix) }
+
 // RemoveOutOfOrderSidecar deletes the sidecar belonging to the whisper file at
 // path, and reports whether there was one. A missing sidecar is not an error.
 //

@@ -381,7 +381,7 @@ func (whisper *Whisper) fileReadAt(b []byte, off int64) error {
 func acquirePathLock(path string, lockType int) (*os.File, error) {
 	// Keep this file after unlocking: unlike the database inode, its identity
 	// must survive compressed rewrites that rename a replacement into place.
-	lockPath := auxiliaryPath(path, lockSuffix)
+	lockPath := PathLockPath(path)
 	lockFile, err := os.OpenFile(lockPath, os.O_RDWR, 0666) // skipcq: GSC-G302
 	if errors.Is(err, os.ErrNotExist) {
 		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0666) // skipcq: GSC-G302

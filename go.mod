@@ -12,7 +12,7 @@ require (
 	github.com/dgryski/go-trigram v0.0.0-20160407183937-79ec494e1ad0
 	github.com/dgryski/httputil v0.0.0-20160116060654-189c2918cd08
 	github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed
-	github.com/go-graphite/go-whisper v0.0.0-20261007104122-398cef1c3450
+	github.com/go-graphite/go-whisper v0.0.0-20261014114435-6a46c2e38c39
 	github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee
 	github.com/gogo/protobuf v1.3.2
 	github.com/golang/snappy v1.0.0
@@ -93,7 +93,7 @@ require (
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/onsi/gomega v1.10.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.31 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
+	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect

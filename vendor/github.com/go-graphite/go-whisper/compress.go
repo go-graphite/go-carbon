@@ -564,10 +564,37 @@ func (whisper *Whisper) filterCompressedSlotsWithSnapshot(archive *archiveInfo, 
 			return nil, err
 		}
 	}
+	return filterCompressedSlotOwners(archive, points, newer), nil
+}
+
+func filterCompressedSlotOwners(archive *archiveInfo, points, newer []dataPoint) []dataPoint {
 	// Aliases share a slot, so the hint must not grow with retained history.
 	capacity := archive.numberOfPoints
 	if len(points) < capacity && len(newer) < capacity-len(points) {
 		capacity = len(points) + len(newer)
+	}
+	// For dense rings, direct slot indexing avoids allocating and scanning a
+	// large hash table for every replay or read. Sparse and very large rings
+	// retain the map path so scratch does not grow with a mostly empty archive.
+	if archive.numberOfPoints >= minCompressedSlotOwners && archive.numberOfPoints <= maxCompressedSlotOwners && capacity >= (archive.numberOfPoints+1)/2 {
+		owners := acquireCompressedSlotOwners(archive.numberOfPoints)
+		defer releaseCompressedSlotOwners(owners)
+		latest := owners.intervals
+		for _, ps := range [][]dataPoint{points, newer} {
+			for _, p := range ps {
+				slot := mod(p.interval/archive.secondsPerPoint, archive.numberOfPoints)
+				if p.interval > latest[slot] {
+					latest[slot] = p.interval
+				}
+			}
+		}
+		kept := points[:0]
+		for _, p := range points {
+			if latest[mod(p.interval/archive.secondsPerPoint, archive.numberOfPoints)] == p.interval {
+				kept = append(kept, p)
+			}
+		}
+		return kept
 	}
 	latest := make(map[int]int, capacity)
 	for _, ps := range [][]dataPoint{points, newer} {
@@ -584,7 +611,7 @@ func (whisper *Whisper) filterCompressedSlotsWithSnapshot(archive *archiveInfo, 
 			kept = append(kept, p)
 		}
 	}
-	return kept, nil
+	return kept
 }
 
 // splitOutOfOrder separates out the points that the block encoder cannot
@@ -2219,9 +2246,14 @@ func (dstw *Whisper) FillCompressed(srcw *Whisper) error {
 		return err
 	}
 
-	f := dstw.file
+	// Replacing the receiver must not lose its sidecar or persistent path lock.
+	if err := dstw.closeOOO(); err != nil {
+		return err
+	}
+	f, lockFile := dstw.file, dstw.lockFile
 	*dstw = *newDst
 	dstw.file = f
+	dstw.lockFile = lockFile
 
 	return nil
 }
