@@ -165,6 +165,8 @@ type carbonserverConfig struct {
 	Percentiles                []int      `toml:"stats-percentiles"`
 	CacheScan                  bool       `toml:"cache-scan"`
 
+	DiscoveryCacheTTL map[string]*Duration `toml:"discovery-cache-ttl"`
+
 	MaxMetricsGlobbed      int `toml:"max-metrics-globbed"`
 	MaxMetricsRendered     int `toml:"max-metrics-rendered"`
 	MaxFetchDataGoroutines int `toml:"max-fetch-data-goroutines"`

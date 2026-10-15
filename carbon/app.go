@@ -721,6 +721,16 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetFindCacheSizeMB(conf.Carbonserver.FindCacheSizeMB)
 	carbonserver.SetGlobCacheEnabled(conf.Carbonserver.GlobCacheEnabled)
 	carbonserver.SetGlobCacheSizeMB(conf.Carbonserver.GlobCacheSizeMB)
+	discoveryCacheTTLs := make(map[string]time.Duration, len(conf.Carbonserver.DiscoveryCacheTTL))
+	for prefix, ttl := range conf.Carbonserver.DiscoveryCacheTTL {
+		if ttl == nil {
+			return nil, fmt.Errorf("discovery-cache-ttl for %q is missing", prefix)
+		}
+		discoveryCacheTTLs[prefix] = ttl.Value()
+	}
+	if err := carbonserver.SetDiscoveryCacheTTLs(discoveryCacheTTLs); err != nil {
+		return nil, err
+	}
 	carbonserver.SetTrigramIndex(conf.Carbonserver.TrigramIndex)
 	carbonserver.SetTrieIndex(conf.Carbonserver.TrieIndex)
 	carbonserver.SetConcurrentIndex(conf.Carbonserver.ConcurrentIndex)
