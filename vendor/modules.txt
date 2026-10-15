@@ -188,7 +188,7 @@ github.com/go-faster/city
 # github.com/go-graphite/carbonzipper v0.0.0-20191211140943-b9a9d1881aed
 ## explicit
 github.com/go-graphite/carbonzipper/zipper/httpHeaders
-# github.com/go-graphite/go-whisper v0.0.0-20261015121022-a7ba5a46f44b
+# github.com/go-graphite/go-whisper v0.0.0-20261015144539-7282ab6234ef
 ## explicit; go 1.18
 github.com/go-graphite/go-whisper
 # github.com/go-graphite/protocol v1.0.1-0.20220718132526-4b842ba389ee

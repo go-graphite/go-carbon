@@ -915,15 +915,39 @@ func readArchivePointsInRange(w *Whisper, index, from, until int) ([]dataPoint, 
 	if remaining < bufferSize {
 		bufferSize = remaining
 	}
-	buf := make([]byte, bufferSize)
+	extents := newArchiveExtentReader(w.file, archive.End(), remaining)
+	var buf []byte
 	var points []dataPoint
 	for remaining > 0 {
+		end := offset + int64(remaining)
+		if end > archive.End() {
+			end = archive.End()
+		}
+		start, dataEnd, err := extents.next(offset, end, archive.Offset())
+		if err != nil {
+			return nil, fmt.Errorf("read archive %d: %w", index, err)
+		}
+		remaining -= int(start - offset)
+		offset = start
+		if offset == archive.End() {
+			offset = archive.Offset()
+			continue
+		}
+		if remaining == 0 {
+			break
+		}
+		if buf == nil {
+			buf = make([]byte, bufferSize)
+		}
 		size := len(buf)
 		if size > remaining {
 			size = remaining
 		}
 		if int64(size) > archive.End()-offset {
 			size = int(archive.End() - offset)
+		}
+		if int64(size) > dataEnd-offset {
+			size = int(dataEnd - offset)
 		}
 		chunk := buf[:size]
 		if err := w.fileReadAt(chunk, offset); err != nil {
