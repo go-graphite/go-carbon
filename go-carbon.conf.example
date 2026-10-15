@@ -578,6 +578,17 @@ stats-percentiles = [99, 98, 95, 75, 50]
 # max-inflight-requests = 10
 # request-timeout = "40s"
 
+# Optional find/glob cache TTL overrides for small, frequently changing namespaces.
+# Unmatched queries keep the five-minute TTL. Prefixes are literal metric paths;
+# matching includes the prefix itself and its dot-separated descendants. The
+# longest matching prefix wins. A batch uses its longest per-query TTL, so an
+# unrelated query in the same batch keeps its normal cache lifetime. Wildcards
+# before the configured prefix do not match an override. Whole seconds only;
+# applied at startup. Upstream caches can add their own discovery delay.
+#
+# [carbonserver.discovery-cache-ttl]
+# "aggregations.secondly._meta" = "15s"
+
 # carbonserver.grpc is the configuration for listening for grpc clients.
 # Note: currently, only CarbonV2 Render rpc is implemented.
 # [carbonserver.grpc]

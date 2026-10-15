@@ -278,6 +278,7 @@ type CarbonserverListener struct {
 	globCacheEnabled           bool
 	globCacheSizeMB            int
 	globCache                  expireCache
+	discoveryCacheTTLs         []discoveryCacheTTLRule
 	trigramIndex               bool
 	trieIndex                  bool
 	concurrentIndex            bool
@@ -432,7 +433,7 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	}
 
 	c.prometheus.cacheRequest = func(kind string, hit bool) {
-		c.prometheus.cacheRequests.WithLabelValues(kind, strconv.FormatBool(hit))
+		c.prometheus.cacheRequests.WithLabelValues(kind, strconv.FormatBool(hit)).Inc()
 	}
 
 	c.prometheus.duration = func(t time.Duration) {

@@ -172,7 +172,7 @@ func (listener *CarbonserverListener) findResponse(ctx context.Context, logger *
 		return listener.findMetricsOrNotFound(ctx, logger, t0, formatCode, query)
 	}
 	key := strings.Join(query, ",") + "&" + format
-	result, fromCache, err := getWithCache(logger, listener.findCache, key, 100*1024*1024, 300, func() (interface{}, error) {
+	result, fromCache, err := getWithCache(logger, listener.findCache, key, 100*1024*1024, listener.discoveryCacheTTL(query), func() (interface{}, error) {
 		return listener.findMetrics(ctx, logger, t0, formatCode, query)
 	})
 	if err != nil {
@@ -391,7 +391,7 @@ func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Cont
 	var err error
 	isCacheHit := false
 	if listener.globCacheEnabled && listener.getMetricStore() == nil {
-		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, size, 300,
+		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, size, listener.discoveryCacheTTL(queries),
 			func() (interface{}, error) {
 				return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
 			})
@@ -465,7 +465,7 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 		key := query + "&" + format + "grpc"
 		size := uint64(100 * 1024 * 1024)
 		var result interface{}
-		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, 300,
+		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, listener.discoveryCacheTTL([]string{query}),
 			func() (interface{}, error) {
 				expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", []string{query})
 				if err != nil {
