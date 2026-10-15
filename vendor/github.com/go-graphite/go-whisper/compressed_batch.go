@@ -315,22 +315,47 @@ func (whisper *Whisper) seedReplayArchive(index int, points []dataPoint) {
 	}
 }
 
+type replayPointsByInterval []extraPoint
+
+func (p replayPointsByInterval) Len() int           { return len(p) }
+func (p replayPointsByInterval) Less(i, j int) bool { return p[i].interval < p[j].interval }
+func (p replayPointsByInterval) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+
 func (whisper *Whisper) replayArchivePoints(index int) []extraPoint {
 	archive := whisper.archives[index]
 	data := whisper.file.(*memFile).data[archive.Offset():archive.End()]
 	count := 0
+	first := 0
+	oldest := maxInt
 	for offset := 0; offset < len(data); offset += PointSize {
-		if unpackInt(data[offset:]) > 0 {
+		if interval := unpackInt(data[offset:]); interval > 0 {
 			count++
+			if interval < oldest {
+				oldest = interval
+				first = offset
+			}
 		}
 	}
 	points := make([]extraPoint, 0, count)
-	for offset := 0; offset < len(data); offset += PointSize {
-		point := unpackDataPoint(data[offset:])
-		if point.interval > 0 {
-			points = append(points, extraPoint{dataPoint: point, replace: true})
+	ordered := true
+	// A classic ring normally contains a rotated, ascending time window. Start
+	// at its oldest occupied slot to read it in order without a full sort.
+	// Sparse rings can retain older generations in unwritten slots, so verify
+	// the order rather than assuming every snapshot fits one retention window.
+	for _, part := range [][]byte{data[first:], data[:first]} {
+		for offset := 0; offset < len(part); offset += PointSize {
+			point := unpackDataPoint(part[offset:])
+			if point.interval > 0 {
+				if len(points) > 0 && points[len(points)-1].interval > point.interval {
+					ordered = false
+				}
+				points = append(points, extraPoint{dataPoint: point, replace: true})
+			}
 		}
 	}
-	sort.Slice(points, func(i, j int) bool { return points[i].interval < points[j].interval })
+	if !ordered {
+		// Typed swaps avoid sort.Slice's reflection overhead for extraPoint.
+		sort.Sort(replayPointsByInterval(points))
+	}
 	return points
 }
