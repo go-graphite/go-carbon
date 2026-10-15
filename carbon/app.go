@@ -490,6 +490,7 @@ func (app *App) startPersister() {
 			app.Cache.Pop,
 		)
 		p.SetRequeue(app.Cache.Requeue)
+		p.SetBacklogged(app.Cache.Backlogged)
 		p.SetWriteoutReady(app.Cache.WriteoutReady)
 		if app.MetricStore != nil {
 			p.SetMetricStore(app.MetricStore)
