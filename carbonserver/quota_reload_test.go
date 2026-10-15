@@ -109,17 +109,17 @@ func TestUnlimitedThroughputQuotaStillAccounts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			q := newThroughputUsagePerNamespace(0, &Quota{Throughput: tt.limit}, &QuotaUsage{})
-			q.increase(2)
+			q.increase(2, 0)
 			if !q.withinQuota(1, time.Hour) {
 				t.Fatal("unlimited throughput quota rejected a point")
 			}
 
 			previous := q.offset()
-			if got := atomic.LoadInt64(&previous.dataPoints); got != 2 {
+			if got := previous.total(); got != 2 {
 				t.Fatalf("previous-window throughput = %d, want 2", got)
 			}
-			q.increase(1)
-			if got := atomic.LoadInt64(&q.dpRecorder().dataPoints); got != 1 {
+			q.increase(1, 7)
+			if got := q.dpRecorder().total(); got != 1 {
 				t.Fatalf("new-window throughput = %d, want 1", got)
 			}
 		})

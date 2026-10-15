@@ -274,3 +274,38 @@ func TestIndexSnapshotRejectsUnvalidatedGeneration(t *testing.T) {
 		})
 	}
 }
+
+func TestIndexSnapshotContainsMetricMatchesLookup(t *testing.T) {
+	cache, root, entries := snapshotFixture(t)
+	s, err := openIndexSnapshot(cache, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	names := []string{"absent", "absent.child", "", strings.Repeat("long.", 80) + "metric"}
+	for _, entry := range entries {
+		name := strings.ReplaceAll(strings.TrimSuffix(entry.Path[1:], ".wsp"), "/", ".")
+		names = append(names, name, name+".child", name[:len(name)-1])
+	}
+	var wg sync.WaitGroup
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, name := range names {
+				_, want, wantErr := s.lookup("/" + strings.ReplaceAll(name, ".", "/") + ".wsp")
+				got, err := s.containsMetric(name, ".wsp")
+				if got != want || (err == nil) != (wantErr == nil) {
+					t.Errorf("containsMetric(%q) = %v/%v, lookup = %v/%v", name, got, err, want, wantErr)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if _, err := s.containsMetric("bad\x00name", ".wsp"); err == nil {
+		t.Fatal("NUL accepted")
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _, _ = s.containsMetric(names[4], ".wsp") }); allocs != 0 {
+		t.Fatalf("containsMetric allocated %v times", allocs)
+	}
+}

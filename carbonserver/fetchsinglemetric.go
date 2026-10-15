@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/go-graphite/go-carbon/points"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
@@ -106,17 +107,23 @@ func (r response) proto3() *protov3.FetchResponse {
 }
 
 func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpression string, fromTime, untilTime int32) (response, error) {
-	logger := listener.logger.With(
-		zap.String("metric", metric),
-		zap.Int("fromTime", int(fromTime)),
-		zap.Int("untilTime", int(untilTime)),
-	)
+	// Encode the request fields only for messages that are logged: a With
+	// logger per fetched series is a measurable share of render allocations.
+	log := func(level zapcore.Level, msg string, fields ...zap.Field) {
+		if ce := listener.logger.Check(level, msg); ce != nil {
+			ce.Write(append([]zap.Field{
+				zap.String("metric", metric),
+				zap.Int("fromTime", int(fromTime)),
+				zap.Int("untilTime", int(untilTime)),
+			}, fields...)...)
+		}
+	}
 	m, err := listener.fetchFromDisk(metric, fromTime, untilTime)
 	switch {
 	case err == nil:
 		// Should never happen, because we have a check for proper archive now
 		if m.Timeseries == nil {
-			logger.Warn("metric time range not found")
+			log(zap.WarnLevel, "metric time range not found")
 			return response{}, errors.New("time range not found")
 		}
 
@@ -140,9 +147,9 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 
 		resp.enrichFromCache(listener, m.CacheData)
 
-		logger.Debug("fetched",
-			zap.Any("response", resp),
-		)
+		if listener.logger.Core().Enabled(zap.DebugLevel) {
+			log(zap.DebugLevel, "fetched", zap.Any("response", resp))
+		}
 
 		return resp, nil
 	case os.IsNotExist(err) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
@@ -153,18 +160,18 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		}
 		cacheData, cerr := listener.fetchFromCache(metric, fromTime, untilTime, &resp)
 		if cerr != nil {
-			logger.Warn("metric not found even in Cache", zap.Error(err))
+			log(zap.WarnLevel, "metric not found even in Cache", zap.Error(err))
 			// Metric has no Whisper file and/or has no datapoints in Cache
 			return response{}, cerr
 		}
 		resp.enrichFromCache(listener, cacheData)
-		logger.Debug("fetched cache-only",
-			zap.Any("response", resp),
-		)
+		if listener.logger.Core().Enabled(zap.DebugLevel) {
+			log(zap.DebugLevel, "fetched cache-only", zap.Any("response", resp))
+		}
 
 		return resp, nil
 	default:
-		logger.Warn("failed to fetch points", zap.Error(err))
+		log(zap.WarnLevel, "failed to fetch points", zap.Error(err))
 		return response{}, err
 	}
 }

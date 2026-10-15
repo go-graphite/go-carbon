@@ -45,17 +45,18 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 
 	var response *findResponse
 
-	logger := TraceContextToZap(ctx, listener.logger.With(
+	url := req.URL.RequestURI()
+	logger := newRequestLogger(ctx, listener.logger,
 		zap.String("handler", "find"),
-		zap.String("url", req.URL.RequestURI()),
+		zap.String("url", url),
 		zap.String("peer", req.RemoteAddr),
-	))
+	)
 
-	accessLogger := TraceContextToZap(ctx, listener.accessLogger.With(
+	accessLogger := newRequestLogger(ctx, listener.accessLogger,
 		zap.String("handler", "find"),
-		zap.String("url", req.URL.RequestURI()),
+		zap.String("url", url),
 		zap.String("peer", req.RemoteAddr),
-	))
+	)
 
 	formatCode, ok := knownFormats[format]
 	if !ok {
@@ -86,12 +87,12 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		query = pv3Request.Metrics
 	}
 
-	logger = logger.With(
+	logger.with(
 		zap.Strings("query", query),
 		zap.String("format", format),
 	)
 
-	accessLogger = accessLogger.With(
+	accessLogger.with(
 		zap.Strings("query", query),
 		zap.String("format", format),
 	)
@@ -106,7 +107,7 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		return
 	}
 
-	response, fromCache, err := listener.findResponse(ctx, logger, t0, formatCode, format, query)
+	response, fromCache, err := listener.findResponse(ctx, logger.zap(), t0, formatCode, format, query)
 
 	if err != nil || response == nil {
 		var code int
@@ -141,15 +142,16 @@ func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *h
 		atomic.AddUint64(&listener.metrics.FindZero, 1)
 	}
 
-	accessLogger.Info("find success",
-		zap.Duration("runtime_seconds", time.Since(t0)),
-		zap.Int("Files", response.files),
-		zap.Bool("find_cache_enabled", listener.findCacheEnabled),
-		zap.Bool("from_cache", fromCache),
-		zap.Int("http_code", http.StatusOK),
-		zap.Uint32("lookups", response.lookups),
-	)
-
+	if ce := accessLogger.check(zap.InfoLevel, "find success"); ce != nil {
+		accessLogger.write(ce,
+			zap.Duration("runtime_seconds", time.Since(t0)),
+			zap.Int("Files", response.files),
+			zap.Bool("find_cache_enabled", listener.findCacheEnabled),
+			zap.Bool("from_cache", fromCache),
+			zap.Int("http_code", http.StatusOK),
+			zap.Uint32("lookups", response.lookups),
+		)
+	}
 }
 
 func findRequestFormat(req *http.Request) string {
@@ -259,9 +261,9 @@ func (listener *CarbonserverListener) findMetrics(ctx context.Context, logger *z
 			result.contentType = httpHeaders.ContentTypeCarbonAPIv3PB
 			result.data, err = multiResponse.MarshalVT()
 		}
-		logger.Debug("will send out response",
-			zap.Any("response", json.RawMessage(result.data)),
-		)
+		if ce := logger.Check(zap.DebugLevel, "will send out response"); ce != nil {
+			ce.Write(zap.Any("response", json.RawMessage(result.data)))
+		}
 		if err != nil {
 			logger.Error("find failed",
 				zap.Duration("runtime_seconds", time.Since(t0)),

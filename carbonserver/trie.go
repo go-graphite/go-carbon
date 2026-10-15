@@ -1546,10 +1546,41 @@ type throughputUsagePerNamespaceQuotaInfo struct {
 	usage *QuotaUsage
 }
 
+// throughputStripes spreads the accounting of unlimited namespaces: every
+// point ingested below such a namespace, including all points for the root,
+// would otherwise increment one shared counter. A point's stripe is its cache
+// shard, so each stripe is written under one shard lock and its cache line
+// moves between CPUs only with that lock.
+const throughputStripes = 1024
+
+type paddedCounter struct {
+	n int64
+	_ [120]byte // keep stripes on separate cache lines
+}
+
 // check comment in *throughputUsageDataPointsRecoder.offset.
 type throughputUsageDataPointsRecoder struct {
-	dataPoints int64
+	dataPoints int64 // enforced usage of limited namespaces
 	resetAt    time.Time
+	unlimited  [throughputStripes]paddedCounter
+}
+
+// foldUnlimited moves unlimited accounting into the enforced usage.
+func (r *throughputUsageDataPointsRecoder) foldUnlimited() {
+	for i := range r.unlimited {
+		if n := atomic.SwapInt64(&r.unlimited[i].n, 0); n != 0 {
+			atomic.AddInt64(&r.dataPoints, n)
+		}
+	}
+}
+
+// total returns all points accounted by the recorder.
+func (r *throughputUsageDataPointsRecoder) total() int64 {
+	n := atomic.LoadInt64(&r.dataPoints)
+	for i := range r.unlimited {
+		n += atomic.LoadInt64(&r.unlimited[i].n)
+	}
+	return n
 }
 
 func newThroughputUsageDataPointsRecorder() *throughputUsageDataPointsRecoder {
@@ -1584,8 +1615,17 @@ func (q *throughputUsagePerNamespace) dpRecorder() *throughputUsageDataPointsRec
 	return q.dpRecorderv.Load().(*throughputUsageDataPointsRecoder)
 }
 
-func (q *throughputUsagePerNamespace) increase(x int64) {
-	atomic.AddInt64(&q.dpRecorder().dataPoints, x)
+// increase accounts x accepted points; stripe selects the counter for an
+// unlimited namespace (see throughputStripes).
+func (q *throughputUsagePerNamespace) increase(x int64, stripe uint64) {
+	recorder := q.dpRecorder()
+	// withinQuota never reads the usage of an unlimited namespace, so only
+	// reports need its exact sum.
+	if quota := q.quota().Throughput; quota <= 0 || quota == math.MaxInt64 {
+		atomic.AddInt64(&recorder.unlimited[stripe%throughputStripes].n, x)
+		return
+	}
+	atomic.AddInt64(&recorder.dataPoints, x)
 }
 
 // offset tries to avoid a potential over-enforcement due to a race condition by
@@ -1696,7 +1736,10 @@ func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerName
 		return
 	}
 
-	v.(*throughputUsagePerNamespace).quotaInfosv.Store(tuq.quotaInfos())
+	existing := v.(*throughputUsagePerNamespace)
+	existing.quotaInfosv.Store(tuq.quotaInfos())
+	// A namespace made finite must enforce usage accepted while unlimited.
+	existing.dpRecorder().foldUnlimited()
 }
 
 func (tu *throughputQuotaManager) getDepth() int { return int(atomic.LoadInt64(&tu.depth)) }
@@ -1919,7 +1962,7 @@ func (ti *trieIndex) refreshUsageMutable(throughputs *throughputQuotaManager) (f
 					}
 					var throughput int64
 					if te := throughputs.load(tname); te != nil {
-						throughput = atomic.LoadInt64(&te.offset().dataPoints)
+						throughput = te.offset().total()
 					}
 
 					throttled := atomic.LoadInt64(&usage.Throttled)
@@ -2263,8 +2306,9 @@ func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
 		// batch increasing the counter to avoid potential
 		// over-throttling/accounting in parent nodes as the data is
 		// later on dropped due to lower child quotas.
+		stripe := helper.HashString(ps.Metric) // the cache shard, see throughputStripes
 		for _, tu := range tus {
-			tu.increase(dataLen)
+			tu.increase(dataLen, stripe)
 		}
 	}
 	return false
@@ -2285,6 +2329,10 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		return false
 	}
 
+	// Metrics re-enter the cache after every write; most exist already.
+	if _, isNew := ti.metricPath(ps.Metric, nil); !isNew {
+		return false
+	}
 	dirs, isNew := ti.metricDirs(ps)
 	if !isNew {
 		return false

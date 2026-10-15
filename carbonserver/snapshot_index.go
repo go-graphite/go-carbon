@@ -44,7 +44,7 @@ func (ti *trieIndex) metricPath(metric string, dirs []*trieNode) ([]*trieNode, b
 	if ti.snapshot == nil {
 		return ti.metricPathMutable(metric, dirs)
 	}
-	if _, found, err := ti.snapshot.lookup("/" + strings.ReplaceAll(metric, ".", "/") + ti.fileExt); err == nil && found {
+	if found, err := ti.snapshot.containsMetric(metric, ti.fileExt); err == nil && found {
 		return dirs, false
 	}
 	if _, isNew := ti.metricPathMutable(metric, nil); !isNew {
@@ -543,7 +543,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) uint64 {
 		var throughput int64
 		if throughputs != nil {
 			if te := throughputs.load(name); te != nil {
-				throughput = atomic.LoadInt64(&te.offset().dataPoints)
+				throughput = te.offset().total()
 			}
 		}
 		throttled := atomic.SwapInt64(&u.Throttled, 0)

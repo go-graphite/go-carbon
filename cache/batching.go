@@ -26,7 +26,7 @@ func (c *Cache) SetWriteoutBatching(minPoints int, maxDelay time.Duration) error
 }
 
 func (c *Cache) batchWrites(s *cacheSettings) bool {
-	return s.batching() && !s.underPressure(c.Size())
+	return s.batching() && !s.underPressure(c.approxSize())
 }
 
 func (s *cacheSettings) underPressure(size int64) bool {

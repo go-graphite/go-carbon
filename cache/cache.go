@@ -15,6 +15,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/greatroar/blobloom"
+	"github.com/zeebo/xxh3"
 )
 
 type WriteStrategy int
@@ -29,6 +30,7 @@ const shardCount = 1 << 10 // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
 	maxSize           int64
+	sizeSlack         int64 // see sizeSlackFor
 	xlog              func(*points.Points) error
 	tagsEnabled       bool
 	writeoutMinPoints int
@@ -55,7 +57,7 @@ type Cache struct {
 	_        [128]byte
 
 	stat struct {
-		size                int64  // changing via atomic
+		size                int64  // published part of the size, changing via atomic; see Shard.sizeDelta
 		queueBuildCnt       uint32 // number of times writeout queue was built
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTime   uint32 // in milliseconds
@@ -83,6 +85,13 @@ type Shard struct {
 	adds             map[string]struct{} // map to maintain all the new metric names
 	// Keyed by batch so in-flight writes retain their arrival time on retry.
 	firstArrival map[*points.Points]time.Time
+	// Points added (or removed, if negative) but not yet published to
+	// Cache.stat.size. Publishing in batches keeps ingestion from serializing
+	// on one shared counter.
+	sizeDelta int64
+	// scratch passes AddPoint's point to the throttle under mu.
+	scratch     points.Points
+	scratchData [1]points.Point
 }
 
 // Creates a new cache instance
@@ -101,6 +110,7 @@ func New() *Cache {
 
 	settings := cacheSettings{
 		maxSize:     1000000,
+		sizeSlack:   sizeSlackFor(1000000),
 		tagsEnabled: false,
 		xlog:        nil,
 	}
@@ -141,6 +151,7 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 	s := c.settings.Load().(*cacheSettings)
 	newSettings := *s
 	newSettings.maxSize = int64(maxSize)
+	newSettings.sizeSlack = sizeSlackFor(newSettings.maxSize)
 	c.settings.Store(&newSettings)
 	c.writeoutQueue.notifyAt(time.Now())
 }
@@ -320,7 +331,7 @@ func (c *Cache) Requeue(p *points.Points) {
 		delete(shard.firstArrival, current)
 	}
 	shard.items[p.Metric] = p
-	atomic.AddInt64(&c.stat.size, int64(count))
+	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
 	c.writeoutQueue.notifyAt(time.Now())
 }
 
@@ -362,8 +373,46 @@ func (c *Cache) IsEmpty() bool {
 	return true
 }
 
+// Size returns the number of cached points. It visits every shard; hot paths
+// use approxSize instead.
 func (c *Cache) Size() int64 {
+	size := atomic.LoadInt64(&c.stat.size)
+	for _, shard := range c.data {
+		shard.mu.RLock()
+		size += shard.sizeDelta
+		shard.mu.RUnlock()
+	}
+	return size
+}
+
+// approxSize differs from Size by at most shardCount*sizeSlack points.
+func (c *Cache) approxSize() int64 {
 	return atomic.LoadInt64(&c.stat.size)
+}
+
+// sizeSlackFor bounds the unpublished part of the size to 1/64 of maxSize,
+// and to 4096 points per shard. Small caches publish every change.
+func sizeSlackFor(maxSize int64) int64 {
+	const maxSlack = 4096
+	if maxSize <= 0 {
+		return maxSlack
+	}
+	return min(maxSize/(shardCount*64), maxSlack)
+}
+
+// addSizeLocked records n points added to (or removed from) the locked shard.
+// It returns the approximate cache size before and after this change, which
+// differ only when the shard publishes its accumulated delta.
+func (c *Cache) addSizeLocked(shard *Shard, n, slack int64) (before, after int64) {
+	shard.sizeDelta += n
+	if shard.sizeDelta >= -slack && shard.sizeDelta <= slack {
+		size := atomic.LoadInt64(&c.stat.size)
+		return size, size
+	}
+	delta := shard.sizeDelta
+	shard.sizeDelta = 0
+	after = atomic.AddInt64(&c.stat.size, delta)
+	return after - delta, after
 }
 
 func (c *Cache) DivertToXlog(w io.Writer) {
@@ -406,6 +455,45 @@ func sendMetricToNewMetricChan(c *Cache, metric string) bool {
 // Sets the given value under the specified key.
 func (c *Cache) Add(p *points.Points) {
 	c.add(p, false, false)
+}
+
+// AddPoint adds one point. name may alias a buffer the caller reuses: unlike
+// Add, appending to a cached metric copies and allocates nothing.
+func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
+	s := c.settings.Load().(*cacheSettings)
+	// add claims pending recovered history before live points.
+	if s.xlog != nil || s.tagsEnabled || c.pending.Load() != nil {
+		c.add(points.OnePoint(string(name), value, timestamp), false, false)
+		return
+	}
+
+	shard := c.data[xxh3.Hash(name)&(shardCount-1)] // as GetShard
+	shard.mu.Lock()
+	values, exists := shard.items[string(name)]
+	// Like add, recheck diversion under the lock.
+	if !exists || c.settings.Load().(*cacheSettings).xlog != nil {
+		shard.mu.Unlock()
+		c.add(points.OnePoint(string(name), value, timestamp), false, false)
+		return
+	}
+	defer shard.mu.Unlock()
+
+	point := points.Point{Value: value, Timestamp: timestamp}
+	if c.throttle != nil {
+		// The throttle does not retain the points of a cached metric.
+		shard.scratchData[0] = point
+		shard.scratch.Metric, shard.scratch.Data = values.Metric, shard.scratchData[:]
+		throttled := c.throttle(&shard.scratch, true)
+		shard.scratch.Metric = ""
+		if throttled {
+			return
+		}
+	}
+	if c.overflows(s, 1) {
+		return
+	}
+	values.Data = append(values.Data, point)
+	c.addedLocked(shard, s, values, 1, true, false)
 }
 
 // AddRestored adds dump data without starting a new buffering deadline.
@@ -464,8 +552,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	}
 
 	count := len(p.Data)
-	if !recovered && s.maxSize > 0 && c.Size() > s.maxSize {
-		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
+	if !recovered && c.overflows(s, count) {
 		return
 	}
 
@@ -497,26 +584,40 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 		}
 	}
 
+	c.addedLocked(shard, s, values, count, exists, restored)
+}
+
+func (c *Cache) overflows(s *cacheSettings, count int) bool {
+	if s.maxSize > 0 && c.approxSize() > s.maxSize {
+		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
+		return true
+	}
+	return false
+}
+
+// addedLocked finishes adding count points to values, which the locked shard
+// holds under values.Metric.
+func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *points.Points, count int, exists, restored bool) {
 	// if we have both new metric channel and bloom filter
 	if c.newMetricsChan != nil && c.newMetricCf != nil {
 		// add metric to new metric channel if missed in bloom
 		// despite what we have it in cache (new behaviour)
-		if hash := helper.HashString(p.Metric); !c.newMetricCf.Has(hash) {
+		if hash := helper.HashString(values.Metric); !c.newMetricCf.Has(hash) {
 			// Suppress notifications only for an indexed metric or a successful
 			// enqueue. A full queue must allow unknown metrics to retry.
-			if (c.metricExists != nil && c.metricExists(p.Metric)) || sendMetricToNewMetricChan(c, p.Metric) {
+			if (c.metricExists != nil && c.metricExists(values.Metric)) || sendMetricToNewMetricChan(c, values.Metric) {
 				c.newMetricCf.Add(hash)
 			}
 		}
 
 	}
-	size := atomic.AddInt64(&c.stat.size, int64(count))
+	before, size := c.addSizeLocked(shard, int64(count), s.sizeSlack)
 	if restored {
 		delete(shard.firstArrival, values)
 	}
 	if s.batching() {
 		crossedThreshold := len(values.Data) >= s.writeoutMinPoints && len(values.Data)-count < s.writeoutMinPoints
-		if restored || crossedThreshold || (s.underPressure(size) && !s.underPressure(size-int64(count))) {
+		if restored || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
 			c.writeoutQueue.notifyAt(time.Now())
 		} else if !exists {
 			c.writeoutQueue.notifyAt(shard.firstArrival[values].Add(s.writeoutMaxDelay))
@@ -532,10 +633,11 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	p, exists = shard.items[key]
 	delete(shard.items, key)
 	delete(shard.firstArrival, p)
-	shard.mu.Unlock()
-
 	if exists {
-		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
+		c.addSizeLocked(shard, -int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
+	}
+	shard.mu.Unlock()
+	if exists {
 		// The persister pops a metric it will never write, such as one whose
 		// path is too long. Saved points it held are settled as well, or
 		// pending recovery, and the first scan behind it, would wait forever.
@@ -561,12 +663,9 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
+		c.addSizeLocked(shard, -int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
 	}
 	shard.mu.Unlock()
-
-	if exists {
-		atomic.AddInt64(&c.stat.size, -int64(len(p.Data)))
-	}
 
 	return p, exists
 }
@@ -603,7 +702,7 @@ func (c *Cache) GetInfo() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"size":  c.stat.size,
+		"size":  c.Size(),
 		"limit": s.maxSize,
 	}
 }
