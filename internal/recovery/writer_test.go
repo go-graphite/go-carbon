@@ -174,7 +174,7 @@ func TestSinkMatchesSerialDigest(t *testing.T) {
 	defer f.Close()
 	s := newSink(f, 4096)
 	var want []byte
-	released := 0
+	var released atomic.Int32
 	rng := rand.New(rand.NewSource(1))
 	for len(want) < 3*checksumChunkSize+12345 {
 		data := make([]byte, 1+rng.Intn(3<<20))
@@ -184,7 +184,7 @@ func TestSinkMatchesSerialDigest(t *testing.T) {
 			if _, err = s.Write(data); err != nil {
 				t.Fatal(err)
 			}
-		} else if err = s.Submit(data, func([]byte) { released++ }); err != nil {
+		} else if err = s.Submit(data, func([]byte) { released.Add(1) }); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -205,7 +205,7 @@ func TestSinkMatchesSerialDigest(t *testing.T) {
 	if !verifyFileChecksum(got, desc) {
 		t.Fatal("sink descriptor does not verify")
 	}
-	if released == 0 {
+	if released.Load() == 0 {
 		t.Fatal("submitted buffers not released")
 	}
 }
