@@ -89,6 +89,11 @@ are not delayed by a caller's background compaction rate limit.
 
 Previously discarded corrections must be replayed.
 
+On Linux, large reads of very sparse sidecars skip filesystem holes using
+`SEEK_DATA`/`SEEK_HOLE`. Records crossing allocation boundaries are still read in
+full. Small windows, dense files, in-memory files and unsupported filesystems
+use the ordinary bounded reader. No configuration or format change is needed.
+
 ### Suitable Application
 
 * cwhisper is most suitable for metrics that are mostly regular and less likely needed to backfill/rewrite old data, like system metrics. cwhisper also works nicely for sparse metrics.
