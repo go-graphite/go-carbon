@@ -2,6 +2,7 @@ package whisper
 
 import (
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -89,6 +90,8 @@ func (whisper *Whisper) materializeCompressedRollups() error {
 
 // compressedBatchOverlaps reports circular-slot collisions whose write order
 // cannot be preserved by deferred propagation or sidecar timestamp precedence.
+//
+// skipcq: GO-R1005
 func (whisper *Whisper) compressedBatchOverlaps(points []*TimeSeriesPoint, now int) (bool, error) {
 	if !whisper.compressed || whisper.aggregationMethod == Mix {
 		return false, nil
@@ -151,25 +154,8 @@ func (whisper *Whisper) compressedBatchOverlaps(points []*TimeSeriesPoint, now i
 			}
 		}
 		if sidecar != nil {
-			sa := sidecar.archives[index]
-			base := sidecar.getBaseInterval(sa)
-			if base != 0 {
-				var raw [PointSize]byte
-				for _, interval := range intervals {
-					if err := sidecar.fileReadAt(raw[:], sa.PointOffset(base, interval)); err != nil {
-						return false, err
-					}
-					previous := unpackInt(raw[:])
-					if previous != 0 && previous != interval {
-						// With no coarse archives, an expired sidecar alias has
-						// no remaining observable value to materialize. Multi-
-						// archive files must preserve its retained rollups first.
-						if len(whisper.archives) == 1 && previous < now-archive.MaxRetention() && previous < interval {
-							continue
-						}
-						return true, nil
-					}
-				}
+			if collides, err := whisper.sidecarSlotsCollide(sidecar, index, intervals, now); err != nil || collides {
+				return collides, err
 			}
 		}
 		if future || (whisper.oooEnabled() && latest >= oldest+archive.MaxRetention()) {
@@ -190,6 +176,78 @@ func (whisper *Whisper) compressedBatchOverlaps(points []*TimeSeriesPoint, now i
 		}
 	}
 	return false, nil
+}
+
+// sidecarSlotsCollide reports whether the sidecar archive at index holds a
+// different timestamp in the slot of any of intervals, keyed by slot.
+func (whisper *Whisper) sidecarSlotsCollide(sidecar *Whisper, index int, intervals map[int]int, now int) (bool, error) {
+	sa := sidecar.archives[index]
+	base := sidecar.getBaseInterval(sa)
+	if base == 0 {
+		return false, nil
+	}
+	batch := make([]int, 0, len(intervals))
+	for _, interval := range intervals {
+		batch = append(batch, interval)
+	}
+	stored, err := sidecar.readSlotIntervals(sa, base, batch)
+	if err != nil {
+		return false, err
+	}
+	retention := whisper.archives[index].MaxRetention()
+	for i, interval := range batch {
+		previous := stored[i]
+		if previous == 0 || previous == interval {
+			continue
+		}
+		// With no coarse archives, an expired sidecar alias has no remaining
+		// observable value to materialize. Multi-archive files must preserve
+		// its retained rollups first.
+		if len(whisper.archives) == 1 && previous < now-retention && previous < interval {
+			continue
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// maxSlotRangeRead bounds the span readSlotIntervals reads with one call.
+const maxSlotRangeRead = 64 << 10
+
+// readSlotIntervals returns the timestamp stored in the slot of each interval
+// of an uncompressed archive. A batch maps to a narrow range of slots, so read
+// that range at once instead of making one system call per point.
+func (whisper *Whisper) readSlotIntervals(archive *archiveInfo, base int, intervals []int) ([]int, error) {
+	offsets := make([]int64, len(intervals))
+	lo, hi := int64(math.MaxInt64), int64(math.MinInt64)
+	for i, interval := range intervals {
+		offsets[i] = archive.PointOffset(base, interval)
+		if offsets[i] < lo {
+			lo = offsets[i]
+		}
+		if offsets[i] > hi {
+			hi = offsets[i]
+		}
+	}
+	stored := make([]int, len(intervals))
+	if span := hi - lo + PointSize; len(intervals) > 1 && span <= maxSlotRangeRead {
+		buf := make([]byte, span)
+		if err := whisper.fileReadAt(buf, lo); err != nil {
+			return nil, err
+		}
+		for i, offset := range offsets {
+			stored[i] = unpackInt(buf[offset-lo:])
+		}
+		return stored, nil
+	}
+	var raw [PointSize]byte
+	for i, offset := range offsets {
+		if err := whisper.fileReadAt(raw[:], offset); err != nil {
+			return nil, err
+		}
+		stored[i] = unpackInt(raw[:])
+	}
+	return stored, nil
 }
 
 // updateCompressedOverlappingBatch uses the classic circular write/propagation
