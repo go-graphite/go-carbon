@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -22,11 +23,21 @@ import (
 // until the persister confirms them; the sources are retired only when none
 // remain.
 type pendingRecovery struct {
-	bundle      *recovery.Bundle
-	claimed     []atomic.Uint64
-	remaining   atomic.Uint64
+	bundle    *recovery.Bundle
+	claimed   []atomic.Uint64
+	remaining atomic.Uint64
+	// Retries and confirmations of one metric stay in the same tracking
+	// shard, without serializing every recovery writer on a global lock.
+	writes [64]pendingWrites
+}
+
+type pendingWrites struct {
 	mu          sync.Mutex
 	unpersisted map[*points.Points]int
+}
+
+func (r *pendingRecovery) writesFor(p *points.Points) *pendingWrites {
+	return &r.writes[helper.HashString(p.Metric)&(uint64(len(r.writes))-1)]
 }
 
 // pendingWriteAttempts bounds how often a saved metric may fail to write
@@ -36,47 +47,59 @@ type pendingRecovery struct {
 const pendingWriteAttempts = 3
 
 func (r *pendingRecovery) track(p *points.Points) {
-	r.mu.Lock()
-	r.unpersisted[p] = 0
-	r.mu.Unlock()
+	w := r.writesFor(p)
+	w.mu.Lock()
+	if w.unpersisted == nil {
+		w.unpersisted = make(map[*points.Points]int)
+	}
+	w.unpersisted[p] = 0
+	w.mu.Unlock()
 }
 
 // failed counts a write the persister handed back and settles the metric once
 // it has failed pendingWriteAttempts times.
 func (r *pendingRecovery) failed(p *points.Points) {
-	r.mu.Lock()
-	if n, ok := r.unpersisted[p]; ok {
+	w := r.writesFor(p)
+	w.mu.Lock()
+	if n, ok := w.unpersisted[p]; ok {
 		if n+1 >= pendingWriteAttempts {
-			delete(r.unpersisted, p)
+			delete(w.unpersisted, p)
 		} else {
-			r.unpersisted[p] = n + 1
+			w.unpersisted[p] = n + 1
 		}
 	}
-	r.mu.Unlock()
+	w.mu.Unlock()
 }
 
 // persisted reports a confirmed write. Requeue keeps tracking by moving it.
 func (r *pendingRecovery) persisted(p *points.Points) {
-	r.mu.Lock()
-	delete(r.unpersisted, p)
-	r.mu.Unlock()
+	w := r.writesFor(p)
+	w.mu.Lock()
+	delete(w.unpersisted, p)
+	w.mu.Unlock()
 }
 
 func (r *pendingRecovery) moved(from, to *points.Points) {
-	r.mu.Lock()
-	if n, ok := r.unpersisted[from]; ok {
-		delete(r.unpersisted, from)
-		r.unpersisted[to] = max(n, r.unpersisted[to])
+	w := r.writesFor(from)
+	w.mu.Lock()
+	if n, ok := w.unpersisted[from]; ok {
+		delete(w.unpersisted, from)
+		w.unpersisted[to] = max(n, w.unpersisted[to])
 	}
-	r.mu.Unlock()
+	w.mu.Unlock()
 }
 
 // Outstanding counts saved metrics not yet claimed plus claimed cache items
 // whose saved points have not been confirmed on disk.
 func (r *pendingRecovery) outstanding() uint64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.remaining.Load() + uint64(len(r.unpersisted))
+	n := r.remaining.Load()
+	for i := range r.writes {
+		w := &r.writes[i]
+		w.mu.Lock()
+		n += uint64(len(w.unpersisted))
+		w.mu.Unlock()
+	}
+	return n
 }
 
 func (r *pendingRecovery) isClaimed(slot uint64) bool {
@@ -93,12 +116,32 @@ func (c *Cache) AttachPendingRecovery(bundle *recovery.Bundle) error {
 	if !c.IsEmpty() {
 		return errors.New("cannot attach recovery to a nonempty cache")
 	}
-	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64), unpersisted: make(map[*points.Points]int)}
+	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64)}
 	r.remaining.Store(bundle.Metrics())
 	if !c.pending.CompareAndSwap(nil, r) {
 		return errors.New("pending recovery already attached")
 	}
 	return nil
+}
+
+// HasRecoveryCapacity reserves half the cache for live and in-flight work.
+// Below that boundary, the published size plus its bounded unpublished slack
+// avoids locking every shard for each input record. Only the pressure boundary
+// needs an exact count. An empty cache can admit one oversized record so that
+// recovery always has a way to make progress.
+func (c *Cache) HasRecoveryCapacity(count int) bool {
+	s := c.settings.Load().(*cacheSettings)
+	if s.maxSize <= 0 {
+		return true
+	}
+	// A shard may retain a delta accumulated under a larger or unlimited
+	// cache setting. The maximum slack stays valid across limit changes.
+	upper := c.approxSize() + shardCount*sizeSlackFor(0)
+	if upper+int64(count) <= s.maxSize/2 {
+		return true
+	}
+	size := c.Size()
+	return size == 0 || size+int64(count) <= s.maxSize/2
 }
 
 // pendingPoints is called with the metric's cache shard locked. Returned points
@@ -147,10 +190,9 @@ func (c *Cache) RecoverPending(stop <-chan struct{}, pointsPerSecond int) error 
 				return errors.New("pending recovery stopped")
 			default:
 			}
-			settings := c.settings.Load().(*cacheSettings)
 			// Reserve half the configured cache for in-flight work. One large metric
 			// can always progress once the cache has drained.
-			if settings.maxSize <= 0 || c.approxSize()+int64(count) <= settings.maxSize/2 || c.Size() == 0 {
+			if c.HasRecoveryCapacity(int(count)) {
 				break
 			}
 			select {

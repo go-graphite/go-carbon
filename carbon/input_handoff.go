@@ -223,8 +223,7 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 			// live quotas again or discard them because recovery filled cache.
 			// Reserve space before admitting another record; a single metric
 			// and its checkpoint history may exceed the configured limit.
-			limit := app.Config.Cache.MaxSize / 2
-			for limit > 0 && core.Size() > 0 && uint64(core.Size())+uint64(len(p.Data)) > limit {
+			for !core.HasRecoveryCapacity(len(p.Data)) {
 				time.Sleep(time.Millisecond)
 			}
 			core.AddRecovered(p)
