@@ -38,13 +38,8 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 			return nil
 		}
 		prepareStart := time.Now()
-		prepareErr = bundle.VisitNewNames(func(name []byte) error {
-			preparedNames++
-			if !cs.PendingMetricStorableBytes(name) {
-				return nil
-			}
-			return visit(string(name))
-		})
+		preparedNames = int(bundle.NewNameCount())
+		prepareErr = bundle.FilterNewNames(cs.PendingMetricStorableBytes, visit)
 		prepareTime = time.Since(prepareStart)
 		prepared = prepareErr == nil
 		return prepareErr

@@ -300,9 +300,17 @@ func (b *Bundle) VisitNewNames(visit func([]byte) error) error {
 	defer runtime.KeepAlive(b)
 	return b.index.VisitNewNames(visit)
 }
-func (b *Bundle) Slots() uint64   { return b.index.Slots() }
-func (b *Bundle) Points() uint64  { return b.index.Points() }
-func (b *Bundle) Metrics() uint64 { return b.index.Metrics() }
+
+// FilterNewNames keeps mappings alive until all predicate workers and serial
+// visitors finish; see Index.FilterNewNames for ownership and ordering.
+func (b *Bundle) FilterNewNames(keep func([]byte) bool, visit func(string) error) error {
+	defer runtime.KeepAlive(b)
+	return b.index.FilterNewNames(keep, visit)
+}
+func (b *Bundle) NewNameCount() uint64 { return b.index.NewNameCount() }
+func (b *Bundle) Slots() uint64        { return b.index.Slots() }
+func (b *Bundle) Points() uint64       { return b.index.Points() }
+func (b *Bundle) Metrics() uint64      { return b.index.Metrics() }
 
 // Close is for an unpublished bundle or an owner which has drained every reader.
 func (b *Bundle) Close() error {
