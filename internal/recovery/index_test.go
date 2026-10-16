@@ -131,6 +131,117 @@ func TestRecoveryIndexMatchesLegacyOrder(t *testing.T) {
 	wg.Wait()
 }
 
+func TestRecoveryReadForWriteMatchesHistory(t *testing.T) {
+	data, source, want := fixture(t)
+	index, err := Open(data, source[0], source[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, expected := range want {
+		slot, found, err := index.Find(name)
+		if err != nil || !found {
+			t.Fatal(name, found, err)
+		}
+		for _, extra := range []int{0, 1, 17} {
+			p, err := index.ReadForWrite(slot, extra)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cap(p.Data) < len(expected)+extra || cap(p.Data) > len(expected)+extra+64 || (extra == 0 && cap(p.Data) != len(expected)) || !bytes.Equal(p.AppendBinary(nil), (&points.Points{Metric: name, Data: expected}).AppendBinary(nil)) {
+				t.Fatal("history or capacity differs", name, extra)
+			}
+			// Mutating the detached claim, including its append capacity, must
+			// never change another reader's immutable history.
+			p.Data = append(p.Data, make([]points.Point, extra)...)
+			clear(p.Data)
+			again, err := index.Read(slot)
+			if err != nil || !bytes.Equal(again.AppendBinary(nil), (&points.Points{Metric: name, Data: expected}).AppendBinary(nil)) {
+				t.Fatal("claim changed the source", name, err)
+			}
+		}
+		for _, extra := range []int{-1, math.MaxInt} {
+			if _, err := index.ReadForWrite(slot, extra); err == nil {
+				t.Fatal("accepted invalid capacity", extra)
+			}
+		}
+	}
+}
+
+func TestRecoveryWarmNamesAreOnlyHints(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		b := NewConcurrentBuilder(func() func(string) bool {
+			return func(name string) bool { return name == "cached" }
+		}, 4)
+		for _, name := range []string{"cached", "evicted", "never.dumped"} {
+			if _, err := b.ID(name); err != nil {
+				t.Fatal(err)
+			}
+		}
+		b.Prepare()
+		var source [2][]byte
+		want := map[string][]points.Point{}
+		if !empty {
+			for file, batches := range [][]*points.Points{
+				{points.OnePoint("cached", 1, 1)},
+				{points.OnePoint("cached", 2, 1), points.OnePoint("arrived.later", 3, 2)},
+			} {
+				for _, p := range batches {
+					raw := p.AppendBinary(nil)
+					source[file] = append(source[file], raw...)
+					if err := b.Add(file, p, len(raw)); err != nil {
+						t.Fatal(err)
+					}
+					want[p.Metric] = append(want[p.Metric], p.Data...)
+				}
+			}
+		}
+		var raw bytes.Buffer
+		if err := b.Write(&raw); err != nil {
+			t.Fatal(err)
+		}
+		index, err := Open(raw.Bytes(), source[0], source[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index.Metrics() != uint64(len(want)) {
+			t.Fatal("warm-only name counted as a saved metric", index.Metrics())
+		}
+		for _, absent := range []string{"evicted", "never.dumped"} {
+			if _, found, err := index.Find(absent); found || err != nil {
+				t.Fatal("warm-only name present", absent, found, err)
+			}
+		}
+		for name, expected := range want {
+			slot, found, err := index.Find(name)
+			if err != nil || !found {
+				t.Fatal(name, found, err)
+			}
+			p, err := index.Read(slot)
+			if err != nil || !reflect.DeepEqual(p.Data, expected) {
+				t.Fatal("source history changed", name, err)
+			}
+		}
+		var owned []string
+		if err := index.NewNames(func(name string) error { owned = append(owned, name); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		var copied []string
+		if err := index.VisitNewNames(func(name []byte) error { copied = append(copied, string(name)); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(owned, copied) || (!empty && !reflect.DeepEqual(owned, []string{"arrived.later"})) || (empty && len(owned) != 0) {
+			t.Fatal("pending name enumeration differs", owned, copied)
+		}
+		// Legacy string enumeration and copied borrowed names remain detached.
+		for _, data := range source {
+			clear(data)
+		}
+		if !empty && (owned[0] != "arrived.later" || copied[0] != "arrived.later") {
+			t.Fatal("retained name aliases source memory")
+		}
+	}
+}
+
 func TestRecoveryHashCollisionChecksMetric(t *testing.T) {
 	b := NewBuilder(nil)
 	names := []string{"target"}

@@ -40,13 +40,10 @@ func (s *SyncWriter) Flush() error {
 	return s.w.Flush()
 }
 
-// DumpStop implements gracefully stop:
-// * Start writing all new data to xlogs
-// * Stop cache worker
-// * Dump all cache to file
-// * Stop listeners
-// * Close xlogs
-// * Exit application
+// DumpStop warms checkpoint names while input and persistence run, then stops
+// persistence, diverts input into a WAL and writes a durable cache checkpoint.
+// Compatible successors inherit reads and input; other configurations stop
+// listeners and restore the same binary files in order.
 func (app *App) DumpStop() error {
 	app.Lock()
 	defer app.Unlock()
@@ -66,12 +63,35 @@ func (app *App) DumpStop() error {
 		app.Carbonserver.PauseIndexUpdates()
 	}
 	app.stopPendingRecovery()
+	logger := zapwriter.Logger("dump")
+	// Freeze the read generation first, then warm its name classifications
+	// while normal input and persistence still run. The later dump supplies
+	// authoritative record counts; names evicted meanwhile need no recovery.
+	var builder *recovery.Builder
+	if cs := app.Carbonserver; cs != nil && cs.HasMappedIndex() && app.pendingReadsCompatible() {
+		lookups, finishWarm := cs.WarmCheckpointMetricLookups()
+		builder = recovery.NewConcurrentBuilder(lookups, checkpointWorkers())
+		builder.Reserve(int(app.Cache.Len()) + int(app.Cache.NotConfirmedLength()))
+		warmStart := time.Now()
+		visited := 0
+		warmErr := app.Cache.VisitMetricNames(func(name string) error {
+			visited++
+			_, err := builder.ID(name)
+			return err
+		})
+		if warmErr != nil {
+			logger.Warn("pending checkpoint warmup unavailable; using legacy dump", zap.Error(warmErr))
+			builder = nil
+		} else {
+			builder.Prepare()
+			logger.Info("pending checkpoint names warmed with input active", zap.Int("names_visited", visited), zap.Duration("runtime", time.Since(warmStart)))
+		}
+		finishWarm()
+	}
 	if app.Persister != nil {
 		app.Persister.Stop()
 		app.Persister = nil
 	}
-
-	logger := zapwriter.Logger("dump")
 
 	logger.Info("grace stop with dump inited")
 
@@ -86,13 +106,6 @@ func (app *App) DumpStop() error {
 	// The read generation is frozen and listeners remain available. Checkpoint
 	// that exact overlay alongside the dump; later input names are indexed by the
 	// pending checkpoint because the stopped worker cannot add them to the overlay.
-	var builder *recovery.Builder
-	if cs := app.Carbonserver; cs != nil {
-		if cs.HasMappedIndex() && app.pendingReadsCompatible() {
-			builder = recovery.NewConcurrentBuilder(cs.SavedMetricLookups(), checkpointWorkers())
-			builder.Reserve(int(app.Cache.Len()) + int(app.Cache.NotConfirmedLength()))
-		}
-	}
 	dump, err := recovery.NewWriter(dumpFilename, 0, 1<<20, builder)
 	if err != nil {
 		return err

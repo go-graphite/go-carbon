@@ -77,6 +77,14 @@ func (c *Cache) DumpBinary(w io.Writer) error {
 // ShardCount is the number of independent cache shards for DumpShards.
 const ShardCount = shardCount
 
+// VisitMetricNames visits currently cached and in-flight names while input and
+// persistence may continue. Names can repeat or disappear after the visit; this
+// is a warmup hint, not an authoritative snapshot. visit runs under a shard's
+// read lock and must not write to the cache.
+func (c *Cache) VisitMetricNames(visit func(string) error) error {
+	return c.DumpShards(0, shardCount, func(p *points.Points) error { return visit(p.Metric) })
+}
+
 // DumpShards visits shards [lo, hi) like DumpPoints, without pending metrics.
 // Each metric lives in exactly one shard, so disjoint ranges share no metric.
 func (c *Cache) DumpShards(lo, hi int, write func(*points.Points) error) error {

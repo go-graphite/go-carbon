@@ -3,7 +3,6 @@ package carbon
 import (
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
@@ -298,7 +298,9 @@ func replayInputTail(path string, workers int, add func(*points.Points)) (int, e
 	}
 	err := points.ReadFromFile(path, func(p *points.Points) {
 		count += len(p.Data)
-		queues[uint64(crc32.ChecksumIEEE([]byte(p.Metric)))%uint64(workers)] <- p
+		// Hash the owned string directly. With a power-of-two worker count,
+		// this also keeps each cache/confirmation shard on a single worker.
+		queues[helper.HashString(p.Metric)%uint64(workers)] <- p
 	})
 	for _, queue := range queues {
 		close(queue)

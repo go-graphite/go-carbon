@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -16,8 +17,9 @@ import (
 // Include the real capacity check: BenchmarkReplayInputTail bypasses it.
 // This synthetic fixture matches the incident's single-point tail records;
 // it is not a captured production tail.
-func intakeTailFixture(b testing.TB, records, metrics int, checkpoint bool) (*App, string) {
+func intakeTailFixture(b testing.TB, records, metrics int, checkpoint bool, history, padding int) (*App, string) {
 	b.Helper()
+	suffix := strings.Repeat("x", padding)
 	dir := b.TempDir()
 	path := filepath.Join(dir, "input.1.2.tail.bin")
 	f, err := os.Create(path)
@@ -27,7 +29,7 @@ func intakeTailFixture(b testing.TB, records, metrics int, checkpoint bool) (*Ap
 	w := bufio.NewWriterSize(f, 1<<20)
 	var raw []byte
 	for i := range records {
-		name := fmt.Sprintf("servers.host%05d.application.component.requests.by_region.region%02d.by_status.success.total", i%metrics, i%3)
+		name := fmt.Sprintf("servers.host%05d.application.component.requests.by_region.region%02d.by_status.success.total%s", i%metrics, i%3, suffix)
 		raw = points.OnePoint(name, float64(i), 1700000000+int64(i/metrics)).AppendBinary(raw[:0])
 		if _, err := w.Write(raw); err != nil {
 			b.Fatal(err)
@@ -55,9 +57,9 @@ func intakeTailFixture(b testing.TB, records, metrics int, checkpoint bool) (*Ap
 			b.Fatal(err)
 		}
 		for i := range metrics {
-			name := fmt.Sprintf("servers.host%05d.application.component.requests.by_region.region%02d.by_status.success.total", i, i%3)
+			name := fmt.Sprintf("servers.host%05d.application.component.requests.by_region.region%02d.by_status.success.total%s", i, i%3, suffix)
 			p := points.OnePoint(name, -1, 1699999999)
-			for j := 1; j < 11; j++ {
+			for j := 1; j < history; j++ {
 				p.Add(float64(-j), 1699999999-int64(j))
 			}
 			if err := writer.WritePoints(p); err != nil {
@@ -105,7 +107,23 @@ func BenchmarkIntakeTail(b *testing.B) {
 		}
 	}
 	checkpoint := os.Getenv("GO_CARBON_TAIL_CHECKPOINT") == "1"
-	app, path := intakeTailFixture(b, records, metrics, checkpoint)
+	history := 11
+	if v := os.Getenv("GO_CARBON_CHECKPOINT_POINTS"); v != "" {
+		var err error
+		history, err = strconv.Atoi(v)
+		if err != nil || history <= 0 {
+			b.Fatal("invalid GO_CARBON_CHECKPOINT_POINTS")
+		}
+	}
+	padding := 0
+	if v := os.Getenv("GO_CARBON_TAIL_METRIC_PADDING"); v != "" {
+		var err error
+		padding, err = strconv.Atoi(v)
+		if err != nil || padding < 0 || padding > 10000 {
+			b.Fatal("invalid GO_CARBON_TAIL_METRIC_PADDING")
+		}
+	}
+	app, path := intakeTailFixture(b, records, metrics, checkpoint, history, padding)
 	dir := filepath.Dir(path)
 	for _, guarded := range []bool{true, false} {
 		name := "unguarded"
@@ -141,7 +159,7 @@ func BenchmarkIntakeTail(b *testing.B) {
 				if checkpoint {
 					// All saved names with the matching region are claimed by their
 					// first tail write; the two other region variants have no history.
-					want += int64(metrics * 11)
+					want += int64(metrics * history)
 				}
 				if got := core.Size(); got != want {
 					b.Fatalf("points %d != %d", got, want)

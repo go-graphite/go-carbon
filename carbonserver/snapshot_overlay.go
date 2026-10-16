@@ -12,7 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"unsafe"
+
+	"github.com/go-graphite/go-carbon/helper"
 )
 
 type snapshotOverlayManifest struct {
@@ -247,6 +251,34 @@ func (l *CarbonserverListener) SavedMetricLookups() func() func(string) bool {
 	return func() func(string) bool { return savedMetricLookup(index) }
 }
 
+// WarmCheckpointMetricLookups also registers storable names absent from the
+// paused catalog. A name may reach disk and leave cache while warmup runs; it
+// must still be included in the later read-index checkpoint. finish switches
+// later lookups to read-only mode before checkpoint serialization starts.
+func (l *CarbonserverListener) WarmCheckpointMetricLookups() (func() func(string) bool, func()) {
+	index := l.CurrentFileIndex()
+	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
+		return l.SavedMetricLookups(), func() {}
+	}
+	var warming atomic.Bool
+	warming.Store(true)
+	var insertMu sync.Mutex
+	return func() func(string) bool {
+		known := savedMetricLookup(index)
+		return func(name string) bool {
+			if known(name) {
+				return true
+			}
+			if !warming.Load() || !l.pendingMetricStorable(name) {
+				return false
+			}
+			insertMu.Lock()
+			defer insertMu.Unlock()
+			return l.insertRealtimeMetric(index.trieIdx, name) != nil
+		}
+	}, func() { warming.Store(false) }
+}
+
 func savedMetricLookup(index *fileIndex) func(string) bool {
 	snapshot := index.trieIdx.snapshot
 	reader, err := snapshot.index.Reader()
@@ -286,10 +318,43 @@ func (l *CarbonserverListener) RecoveryIndexID() string {
 }
 
 func (u *fileListUpdate) insertPendingMetric(name string) error {
-	if _, ok := u.listener.storableMetricPath(name); !ok {
+	if !u.listener.pendingMetricStorable(name) {
 		return nil
 	}
 	return u.trieIdx.insertPendingMetric(name)
+}
+
+// PendingMetricStorableBytes checks a borrowed name without copying it. The
+// read-only predicate does not retain the buffer or its string view.
+func (l *CarbonserverListener) PendingMetricStorableBytes(name []byte) bool {
+	return l.pendingMetricStorable(unsafe.String(unsafe.SliceData(name), len(name))) // skipcq: GSC-G103
+}
+
+// pendingMetricStorable checks canonical names from the validated recovery
+// index without constructing the path. Long rejected names can dominate this
+// startup pass; only admitted names need a path for insertion. Preserve the
+// ordinary path check for aliases and platform-specific path spellings.
+func (l *CarbonserverListener) pendingMetricStorable(name string) bool {
+	if strings.IndexByte(name, ';') >= 0 {
+		return true
+	}
+	if filepath.Separator != '/' || name == "" || name[0] == '.' || name[len(name)-1] == '.' || strings.Contains(name, "..") || strings.IndexByte(name, '/') >= 0 {
+		_, ok := l.storableMetricPath(name)
+		return ok
+	}
+	if len(l.whisperData)+1+len(name)+len(".wsp") > helper.MaxWhisperPathLength || !helper.WhisperPathFits(l.whisperData) {
+		return false
+	}
+	for {
+		i := strings.IndexByte(name, '.')
+		if i < 0 {
+			return len(name)+len(".wsp") <= helper.MaxWhisperFilenameLength
+		}
+		if i > helper.MaxWhisperFilenameLength {
+			return false
+		}
+		name = name[i+1:]
+	}
 }
 
 // insertPendingMetric adds a name the checkpoint classified as absent from this

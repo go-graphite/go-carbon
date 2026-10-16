@@ -128,7 +128,8 @@ func (b *Builder) entry(id uint32) *entry {
 }
 
 // ID returns the id of metric, allocating one on first use. It is safe for
-// concurrent use.
+// concurrent use. Names can be warmed before any records exist; serialization
+// omits identifiers that never acquire source records.
 func (b *Builder) ID(metric string) (uint32, error) {
 	shard := uint32(xxhash.Sum64String(metric) & (idShards - 1))
 	s := &b.shards[shard]
@@ -259,7 +260,18 @@ func (b *Builder) Write(w io.Writer) error {
 		b.src[i].mu.Lock()
 		defer b.src[i].mu.Unlock()
 	}
-	metrics := uint64(len(b.order))
+	getHeads := func(k uint32) heads {
+		m := b.entry(b.order[k])
+		return heads{cache: m.cache, wal: m.wal, count: m.cacheCount + m.walCount}
+	}
+	// Warmed names may have left cache before the dump. Only actual source
+	// records define membership, point counts and pending-name discovery.
+	metrics := uint64(0)
+	for k := range b.order {
+		if getHeads(uint32(k)).count != 0 {
+			metrics++
+		}
+	}
 	for i := range b.shards {
 		if b.shards[i].count != b.classified[i] {
 			return fmt.Errorf("recovery metrics added during index write")
@@ -269,10 +281,7 @@ func (b *Builder) Write(w io.Writer) error {
 	for metrics*4 > slots*3 {
 		slots *= 2
 	}
-	table, newSlots := buildTable(slots, b.hashes, func(k uint32) heads {
-		m := b.entry(b.order[k])
-		return heads{cache: m.cache, wal: m.wal, count: m.cacheCount + m.walCount}
-	}, b.isNew, b.workers)
+	table, newSlots := buildTable(slots, b.hashes, getHeads, b.isNew, b.workers)
 	header := make([]byte, headerSize)
 	copy(header, magic)
 	put64(header[8:], uint64(len(b.src[0].records)), uint64(len(b.src[1].records)), slots, metrics, b.src[0].points+b.src[1].points, b.src[0].size, b.src[1].size, uint64(len(newSlots)))
@@ -311,7 +320,7 @@ func (b *Builder) Write(w io.Writer) error {
 	return flush(true)
 }
 
-// buildTable places every metric by linear probing. Workers own disjoint slot
+// buildTable places recorded metrics by linear probing. Workers own disjoint slot
 // regions and probe only within them; entries that would cross a region end are
 // placed afterwards by a serial pass. Any insertion order yields valid probe
 // chains, so the result answers lookups exactly like a serial build.
@@ -324,6 +333,9 @@ func buildTable(slots uint64, hashes []uint64, get func(uint32) heads, isNew []b
 	width := slots / regions
 	byRegion := make([][]uint32, regions)
 	for id, h := range hashes {
+		if get(uint32(id)).count == 0 {
+			continue
+		}
 		r := (h & (slots - 1)) / width
 		byRegion[r] = append(byRegion[r], uint32(id))
 	}
@@ -451,23 +463,8 @@ func Open(index, cache, wal []byte) (*Index, error) {
 		return nil, err
 	}
 
-	var metrics, total uint64
-	for slot := uint64(0); slot < in.slots; slot++ {
-		_, h := in.slot(slot)
-		if h.cache == 0 && h.wal == 0 {
-			if h.count != 0 {
-				return nil, fmt.Errorf("empty recovery slot has points")
-			}
-			continue
-		}
-		if h.cache > in.recordCounts[0] || h.wal > in.recordCounts[1] || h.count == 0 || h.count > in.points-total {
-			return nil, fmt.Errorf("invalid recovery slot")
-		}
-		metrics++
-		total += h.count
-	}
-	if metrics != in.metrics || total != in.points {
-		return nil, fmt.Errorf("recovery index totals differ")
+	if err := in.validateSlots(); err != nil {
+		return nil, err
 	}
 	var previous uint64
 	for i := uint64(0); i < in.newCount; i++ {
@@ -505,7 +502,7 @@ func (in *Index) validateRecords() error {
 	if len(ranges) == 0 {
 		return nil
 	}
-	workers := min(8, runtime.GOMAXPROCS(0), len(ranges))
+	workers := min(32, runtime.GOMAXPROCS(0), len(ranges))
 	if workers == 1 {
 		for _, r := range ranges {
 			if err := in.validateRecordRange(r.file, r.first, r.last); err != nil {
@@ -529,6 +526,63 @@ func (in *Index) validateRecords() error {
 	}
 	wg.Wait()
 	return errors.Join(checks...)
+}
+
+// validateSlots reduces independent table ranges, checking the final sum before
+// adding it so a corrupt table cannot hide overflow between workers.
+func (in *Index) validateSlots() error {
+	const slotsPerWorker = 1 << 20
+	workers := min(32, runtime.GOMAXPROCS(0), int((in.slots+slotsPerWorker-1)/slotsPerWorker))
+	type totals struct {
+		metrics, points uint64
+		err             error
+	}
+	parts := make([]totals, workers)
+	check := func(worker int) {
+		part := &parts[worker]
+		first := in.slots * uint64(worker) / uint64(workers)
+		last := in.slots * uint64(worker+1) / uint64(workers)
+		for slot := first; slot < last; slot++ {
+			_, h := in.slot(slot)
+			if h.cache == 0 && h.wal == 0 {
+				if h.count != 0 {
+					part.err = fmt.Errorf("empty recovery slot has points")
+					return
+				}
+				continue
+			}
+			if h.cache > in.recordCounts[0] || h.wal > in.recordCounts[1] || h.count == 0 || h.count > in.points-part.points {
+				part.err = fmt.Errorf("invalid recovery slot")
+				return
+			}
+			part.metrics++
+			part.points += h.count
+		}
+	}
+	if workers == 1 {
+		check(0)
+	} else {
+		var wg sync.WaitGroup
+		for worker := range workers {
+			wg.Go(func() { check(worker) })
+		}
+		wg.Wait()
+	}
+	var metrics, total uint64
+	for _, part := range parts {
+		if part.err != nil {
+			return part.err
+		}
+		if part.points > in.points-total {
+			return fmt.Errorf("recovery index totals differ")
+		}
+		metrics += part.metrics
+		total += part.points
+	}
+	if metrics != in.metrics || total != in.points {
+		return fmt.Errorf("recovery index totals differ")
+	}
+	return nil
 }
 
 func (in *Index) validateRecordRange(file int, first, last uint64) error {
@@ -649,6 +703,17 @@ func (in *Index) RawRecords(slot uint64, visit func(raw []byte, count int) error
 }
 
 func (in *Index) Read(slot uint64) (*points.Points, error) {
+	return in.read(slot, 0)
+}
+
+// ReadForWrite returns detached history with room for the incoming points and
+// bounded spare capacity for following writes. A short tail burst must not
+// repeatedly copy the entire saved history.
+func (in *Index) ReadForWrite(slot uint64, extra int) (*points.Points, error) {
+	return in.read(slot, extra)
+}
+
+func (in *Index) read(slot uint64, extra int) (*points.Points, error) {
 	if slot >= in.slots {
 		return nil, fmt.Errorf("invalid recovery slot number")
 	}
@@ -659,11 +724,18 @@ func (in *Index) Read(slot uint64) (*points.Points, error) {
 	if h.count > uint64(math.MaxInt)/16 {
 		return nil, fmt.Errorf("recovery metric is too large")
 	}
+	if extra < 0 || uint64(extra) > uint64(math.MaxInt)/16-h.count {
+		return nil, fmt.Errorf("invalid recovery append capacity")
+	}
 	name, err := in.name(h)
 	if err != nil {
 		return nil, err
 	}
-	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, int(h.count))}
+	capacity := int(h.count) + extra
+	if extra > 0 {
+		capacity += min(int(h.count)/8, 64, math.MaxInt/16-capacity)
+	}
+	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, capacity)}
 	for file, head := range []uint64{h.cache, h.wal} {
 		var chain []uint64
 		for id := head; id != 0; id = in.record(file, id).previous {
@@ -672,15 +744,14 @@ func (in *Index) Read(slot uint64) (*points.Points, error) {
 		for i := len(chain) - 1; i >= 0; i-- {
 			r := in.record(file, chain[i])
 			raw := in.source[file][r.offset : r.offset+r.length]
-			metric, err := recordMetric(raw)
-			if err != nil || !bytes.Equal(metric, name) {
-				return nil, fmt.Errorf("recovery chain contains another metric")
-			}
-			var batch points.Points
-			if err := batch.UnmarshalBinary(raw); err != nil {
+			metric, values, err := points.AppendBinaryPoints(result.Data, raw)
+			if err != nil {
 				return nil, err
 			}
-			result.Data = append(result.Data, batch.Data...)
+			if !bytes.Equal(metric, name) {
+				return nil, fmt.Errorf("recovery chain contains another metric")
+			}
+			result.Data = values
 		}
 	}
 	if uint64(len(result.Data)) != h.count {
@@ -707,8 +778,20 @@ func (in *Index) Name(slot uint64) (string, bool, error) {
 // NewNames enumerates only metrics absent from the saved read index when this
 // dump was written. Startup need not search the entire pending metric set.
 func (in *Index) NewNames(visit func(string) error) error {
-	for i := uint64(0); i < in.newCount; i++ {
-		name, _, err := in.Name(get64(in.data, in.newOffset+i*8))
+	return in.VisitNewNames(func(name []byte) error { return visit(string(name)) })
+}
+
+// VisitNewNames borrows names for the duration of each callback. A visitor can
+// reject an unstorable name without copying it; retained names must be copied.
+// The visitor must not modify the immutable bytes.
+func (in *Index) VisitNewNames(visit func([]byte) error) error {
+	return in.visitNewNamesRange(0, in.newCount, visit)
+}
+
+func (in *Index) visitNewNamesRange(first, last uint64, visit func([]byte) error) error {
+	for i := first; i < last; i++ {
+		_, h := in.slot(get64(in.data, in.newOffset+i*8))
+		name, err := in.name(h)
 		if err != nil {
 			return err
 		}
@@ -718,6 +801,60 @@ func (in *Index) NewNames(visit func(string) error) error {
 	}
 	return nil
 }
+
+// FilterNewNames evaluates a pure, concurrency-safe predicate over borrowed
+// names. It must not mutate or retain the bytes. Admitted names are copied,
+// then visited serially in the same
+// order as NewNames. Bounded waves keep at most 32 batches of names in flight;
+// each wave joins every worker before visiting results or returning an error.
+func (in *Index) FilterNewNames(keep func([]byte) bool, visit func(string) error) error {
+	const batchSize = 512
+	workers := min(32, runtime.GOMAXPROCS(0), int((in.newCount+batchSize-1)/batchSize))
+	if workers <= 1 {
+		return in.VisitNewNames(func(name []byte) error {
+			if keep(name) {
+				return visit(string(name))
+			}
+			return nil
+		})
+	}
+	type batch struct {
+		names []string
+		err   error
+	}
+	results := make([]batch, workers)
+	for first := uint64(0); first < in.newCount; first += uint64(workers * batchSize) {
+		var wg sync.WaitGroup
+		count := min(workers, int((in.newCount-first+batchSize-1)/batchSize))
+		for worker := range count {
+			wg.Go(func() {
+				r := &results[worker]
+				r.names = r.names[:0]
+				lo := first + uint64(worker*batchSize)
+				r.err = in.visitNewNamesRange(lo, min(in.newCount, lo+batchSize), func(name []byte) error {
+					if keep(name) {
+						r.names = append(r.names, string(name))
+					}
+					return nil
+				})
+			})
+		}
+		wg.Wait()
+		for _, r := range results[:count] {
+			for _, name := range r.names {
+				if err := visit(name); err != nil {
+					return err
+				}
+			}
+			if r.err != nil {
+				return r.err
+			}
+		}
+	}
+	return nil
+}
+
+func (in *Index) NewNameCount() uint64 { return in.newCount }
 
 func (in *Index) Count(slot uint64) uint64 {
 	if slot >= in.slots {
