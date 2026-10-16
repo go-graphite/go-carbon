@@ -12,7 +12,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -200,6 +199,8 @@ func TestHandleConnectionPlainTextMatchesReference(t *testing.T) {
 	oversizedMetric := strings.Repeat("oversized.metric.", 320)
 	payload := firstMetric + " 1.5 10\n" +
 		"not a graphite line\n" +
+		"metric.nan.value NaN 11\n" +
+		"metric.nan.timestamp 1 NaN\n" +
 		oversizedMetric + " 2.5 20\n" +
 		"metric.after.oversized 3.5 30\n" +
 		"metric.unterminated 4.5 40"
@@ -214,8 +215,8 @@ func TestHandleConnectionPlainTextMatchesReference(t *testing.T) {
 			if got.points[0].Metric != firstMetric {
 				t.Fatalf("first metric mutated after reader refill: %q", got.points[0].Metric)
 			}
-			if got.metricsReceived != uint32(len(want)) || got.errors != 1 || got.active != 0 {
-				t.Fatalf("counters = received:%d errors:%d active:%d", got.metricsReceived, got.errors, got.active)
+			if got.metricsReceived != uint32(len(want)) || got.errors != 0 || got.parseErrors != 3 || got.active != 0 {
+				t.Fatalf("counters = received:%d errors:%d parseErrors:%d active:%d", got.metricsReceived, got.errors, got.parseErrors, got.active)
 			}
 		})
 	}
@@ -320,6 +321,7 @@ type handledPlainConnection struct {
 	points          []*points.Points
 	metricsReceived uint32
 	errors          uint32
+	parseErrors     uint32
 	active          int32
 }
 
@@ -375,11 +377,19 @@ func handlePlainConnection(t *testing.T, compression string, payload []byte) han
 	case <-time.After(time.Second):
 		t.Fatal("HandleConnection did not finish")
 	}
+	stats := make(map[string]float64)
+	rcv.Stat(func(name string, value float64) { stats[name] = value })
+	rcv.Stat(func(name string, value float64) {
+		if value != 0 {
+			t.Errorf("stat %s = %v after flush, want 0", name, value)
+		}
+	})
 	return handledPlainConnection{
 		points:          result,
-		metricsReceived: atomic.LoadUint32(&rcv.metricsReceived),
-		errors:          atomic.LoadUint32(&rcv.errors),
-		active:          atomic.LoadInt32(&rcv.active),
+		metricsReceived: uint32(stats["metricsReceived"]),
+		errors:          uint32(stats["errors"]),
+		parseErrors:     uint32(stats["parseErrors"]),
+		active:          int32(stats["active"]),
 	}
 }
 
