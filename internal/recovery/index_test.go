@@ -131,6 +131,42 @@ func TestRecoveryIndexMatchesLegacyOrder(t *testing.T) {
 	wg.Wait()
 }
 
+func TestRecoveryReadForWriteMatchesHistory(t *testing.T) {
+	data, source, want := fixture(t)
+	index, err := Open(data, source[0], source[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, expected := range want {
+		slot, found, err := index.Find(name)
+		if err != nil || !found {
+			t.Fatal(name, found, err)
+		}
+		for _, extra := range []int{0, 1, 17} {
+			p, err := index.ReadForWrite(slot, extra)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cap(p.Data) != len(expected)+extra || !bytes.Equal(p.AppendBinary(nil), (&points.Points{Metric: name, Data: expected}).AppendBinary(nil)) {
+				t.Fatal("history or capacity differs", name, extra)
+			}
+			// Mutating the detached claim, including its append capacity, must
+			// never change another reader's immutable history.
+			p.Data = append(p.Data, make([]points.Point, extra)...)
+			clear(p.Data)
+			again, err := index.Read(slot)
+			if err != nil || !bytes.Equal(again.AppendBinary(nil), (&points.Points{Metric: name, Data: expected}).AppendBinary(nil)) {
+				t.Fatal("claim changed the source", name, err)
+			}
+		}
+		for _, extra := range []int{-1, math.MaxInt} {
+			if _, err := index.ReadForWrite(slot, extra); err == nil {
+				t.Fatal("accepted invalid capacity", extra)
+			}
+		}
+	}
+}
+
 func TestRecoveryHashCollisionChecksMetric(t *testing.T) {
 	b := NewBuilder(nil)
 	names := []string{"target"}

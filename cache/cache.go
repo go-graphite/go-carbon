@@ -539,7 +539,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	}
 
 	if r := c.pending.Load(); r != nil {
-		if err := c.claimForWrite(r, shard, p.Metric); err != nil {
+		if err := c.claimForWrite(r, shard, p.Metric, len(p.Data)); err != nil {
 			// A validated immutable record must decode; dropping its history
 			// silently would lose already accepted points.
 			panic(fmt.Errorf("claim validated recovery source: %w", err))

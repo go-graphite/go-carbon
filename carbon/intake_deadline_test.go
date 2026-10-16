@@ -16,11 +16,22 @@ import (
 // TCP parsing, and visibility through the same cache the read API uses. Saved
 // read-index warmup and dump creation precede this boundary and are not timed.
 func TestLargeTailIntakeWithinTenSeconds(t *testing.T) {
+	testTailIntakeWithinTenSeconds(t, 16000000, 1000000, 11, 0)
+}
+
+// Use longer names and more saved history per active metric as well as the
+// original high-record-count case. Both fixtures are synthetic, not production
+// captures, and leave checkpoint/index warmup outside the measured interval.
+func TestPopulatedTailIntakeWithinTenSeconds(t *testing.T) {
+	testTailIntakeWithinTenSeconds(t, 9000000, 3000000, 32, 100)
+}
+
+func testTailIntakeWithinTenSeconds(t *testing.T, records, metrics, history, padding int) {
+	t.Helper()
 	if os.Getenv("GO_CARBON_INTAKE_DEADLINE") != "1" {
-		t.Skip("opt-in 16M-record scale test")
+		t.Skip("opt-in large-tail scale test")
 	}
-	const records, metrics = 16000000, 1000000
-	app, path := intakeTailFixture(t, records, metrics, true)
+	app, path := intakeTailFixture(t, records, metrics, true, history, padding)
 	dir := filepath.Dir(path)
 	bundle, err := recovery.OpenBundle(dir, dir)
 	if err != nil {
@@ -79,7 +90,7 @@ func TestLargeTailIntakeWithinTenSeconds(t *testing.T) {
 	if elapsed >= 10*time.Second {
 		t.Fatalf("intake deadline exceeded: %s", elapsed)
 	}
-	if got := core.Size(); got != records+metrics*11+2 {
+	if got := core.Size(); got != int64(records+metrics*history+2) {
 		t.Fatalf("recovery point count = %d", got)
 	}
 }

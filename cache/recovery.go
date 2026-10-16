@@ -225,20 +225,20 @@ func (c *Cache) claimPendingMetric(r *pendingRecovery, name string, slot uint64)
 	shard := c.GetShard(name)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	return c.claimLocked(r, shard, name, slot)
+	return c.claimLocked(r, shard, name, slot, 0)
 }
 
 // claimForWrite runs under the shard lock before a live write to name. It moves
 // the metric's saved history into cache first, if it is still unclaimed.
-func (c *Cache) claimForWrite(r *pendingRecovery, shard *Shard, name string) error {
+func (c *Cache) claimForWrite(r *pendingRecovery, shard *Shard, name string, count int) error {
 	slot, found, err := r.bundle.Find(name)
 	if err != nil || !found || r.isClaimed(slot) {
 		return err
 	}
-	return c.claimLocked(r, shard, name, slot)
+	return c.claimLocked(r, shard, name, slot, count)
 }
 
-func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot uint64) error {
+func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot uint64, extra int) error {
 	if r.isClaimed(slot) {
 		return nil
 	}
@@ -247,7 +247,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	if _, exists := shard.items[name]; exists {
 		return fmt.Errorf("metric %q was written before pending recovery", name)
 	}
-	p, err := r.bundle.Read(slot)
+	p, err := r.bundle.ReadForWrite(slot, extra)
 	if err != nil {
 		return err
 	}

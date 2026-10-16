@@ -3,7 +3,6 @@ package carbon
 import (
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -50,7 +50,7 @@ func TestReplayInputTailMatchesSerial(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for _, workers := range []int{1, 2, 8, 32} {
+	for _, workers := range []int{1, 2, 3, 7, 8, 32} {
 		t.Run(fmt.Sprint(workers), func(t *testing.T) {
 			core := cache.New()
 			// Recovered input must still bypass live admission limits.
@@ -74,7 +74,7 @@ func TestReplayInputTailMatchesSerial(t *testing.T) {
 func TestReplayInputTailDrainsWorkersOnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "input.1.2.tail.bin")
 	first, second := "first", "second"
-	for crc32.ChecksumIEEE([]byte(first))%2 == crc32.ChecksumIEEE([]byte(second))%2 {
+	for helper.HashString(first)%2 == helper.HashString(second)%2 {
 		second += "x"
 	}
 	raw := points.OnePoint(first, 1, 1).AppendBinary(nil)

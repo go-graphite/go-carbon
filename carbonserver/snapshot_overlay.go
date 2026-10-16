@@ -13,6 +13,8 @@ import (
 	"runtime"
 	"strings"
 	"sync/atomic"
+
+	"github.com/go-graphite/go-carbon/helper"
 )
 
 type snapshotOverlayManifest struct {
@@ -286,10 +288,37 @@ func (l *CarbonserverListener) RecoveryIndexID() string {
 }
 
 func (u *fileListUpdate) insertPendingMetric(name string) error {
-	if _, ok := u.listener.storableMetricPath(name); !ok {
+	if !u.listener.pendingMetricStorable(name) {
 		return nil
 	}
 	return u.trieIdx.insertPendingMetric(name)
+}
+
+// pendingMetricStorable checks canonical names from the validated recovery
+// index without constructing the path. Long rejected names can dominate this
+// startup pass; only admitted names need a path for insertion. Preserve the
+// ordinary path check for aliases and platform-specific path spellings.
+func (l *CarbonserverListener) pendingMetricStorable(name string) bool {
+	if strings.IndexByte(name, ';') >= 0 {
+		return true
+	}
+	if filepath.Separator != '/' || name == "" || name[0] == '.' || name[len(name)-1] == '.' || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\:") {
+		_, ok := l.storableMetricPath(name)
+		return ok
+	}
+	if len(l.whisperData)+1+len(name)+len(".wsp") > helper.MaxWhisperPathLength || !helper.WhisperPathFits(l.whisperData) {
+		return false
+	}
+	for {
+		i := strings.IndexByte(name, '.')
+		if i < 0 {
+			return len(name)+len(".wsp") <= helper.MaxWhisperFilenameLength
+		}
+		if i > helper.MaxWhisperFilenameLength {
+			return false
+		}
+		name = name[i+1:]
+	}
 }
 
 // insertPendingMetric adds a name the checkpoint classified as absent from this

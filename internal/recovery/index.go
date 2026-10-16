@@ -649,6 +649,16 @@ func (in *Index) RawRecords(slot uint64, visit func(raw []byte, count int) error
 }
 
 func (in *Index) Read(slot uint64) (*points.Points, error) {
+	return in.read(slot, 0)
+}
+
+// ReadForWrite returns detached history with room for the incoming points that
+// triggered the claim. Appending that record need not copy the history again.
+func (in *Index) ReadForWrite(slot uint64, extra int) (*points.Points, error) {
+	return in.read(slot, extra)
+}
+
+func (in *Index) read(slot uint64, extra int) (*points.Points, error) {
 	if slot >= in.slots {
 		return nil, fmt.Errorf("invalid recovery slot number")
 	}
@@ -659,11 +669,14 @@ func (in *Index) Read(slot uint64) (*points.Points, error) {
 	if h.count > uint64(math.MaxInt)/16 {
 		return nil, fmt.Errorf("recovery metric is too large")
 	}
+	if extra < 0 || uint64(extra) > uint64(math.MaxInt)/16-h.count {
+		return nil, fmt.Errorf("invalid recovery append capacity")
+	}
 	name, err := in.name(h)
 	if err != nil {
 		return nil, err
 	}
-	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, int(h.count))}
+	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, int(h.count)+extra)}
 	for file, head := range []uint64{h.cache, h.wal} {
 		var chain []uint64
 		for id := head; id != 0; id = in.record(file, id).previous {
@@ -672,15 +685,14 @@ func (in *Index) Read(slot uint64) (*points.Points, error) {
 		for i := len(chain) - 1; i >= 0; i-- {
 			r := in.record(file, chain[i])
 			raw := in.source[file][r.offset : r.offset+r.length]
-			metric, err := recordMetric(raw)
-			if err != nil || !bytes.Equal(metric, name) {
-				return nil, fmt.Errorf("recovery chain contains another metric")
-			}
-			var batch points.Points
-			if err := batch.UnmarshalBinary(raw); err != nil {
+			metric, values, err := points.AppendBinaryPoints(result.Data, raw)
+			if err != nil {
 				return nil, err
 			}
-			result.Data = append(result.Data, batch.Data...)
+			if !bytes.Equal(metric, name) {
+				return nil, fmt.Errorf("recovery chain contains another metric")
+			}
+			result.Data = values
 		}
 	}
 	if uint64(len(result.Data)) != h.count {

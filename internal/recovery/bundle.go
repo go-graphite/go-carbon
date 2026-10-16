@@ -276,6 +276,11 @@ func (b *Bundle) Read(slot uint64) (*points.Points, error) {
 	return b.index.Read(slot)
 }
 
+func (b *Bundle) ReadForWrite(slot uint64, extra int) (*points.Points, error) {
+	defer runtime.KeepAlive(b)
+	return b.index.ReadForWrite(slot, extra)
+}
+
 // RawRecords visits slot's encoded records in replay order; see Index.RawRecords.
 func (b *Bundle) RawRecords(slot uint64, visit func(raw []byte, count int) error) error {
 	defer runtime.KeepAlive(b)
