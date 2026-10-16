@@ -26,6 +26,9 @@ type pendingRecovery struct {
 	bundle    *recovery.Bundle
 	claimed   []atomic.Uint64
 	remaining atomic.Uint64
+	// The owner matched the saved read-index generation and prepared every
+	// pending name with the ordinary storable-name policy before input opens.
+	namesPrepared bool
 	// Retries and confirmations of one metric stay in the same tracking
 	// shard, without serializing every recovery writer on a global lock.
 	writes [64]pendingWrites
@@ -113,10 +116,22 @@ func (r *pendingRecovery) claim(slot uint64) {
 // AttachPendingRecovery requires an empty cache and closed input receivers.
 // Receivers may open once reads serve the bundle: see pendingRecovery.
 func (c *Cache) AttachPendingRecovery(bundle *recovery.Bundle) error {
+	return c.attachPendingRecovery(bundle, false)
+}
+
+// AttachPendingRecoveryWithPreparedNames also attests that the owner matched
+// the saved read-index generation and prepared every pending name, including
+// rejecting unstorable names. First-write claims then need no repeated index
+// lookup or realtime notification for names already handled by that pass.
+func (c *Cache) AttachPendingRecoveryWithPreparedNames(bundle *recovery.Bundle) error {
+	return c.attachPendingRecovery(bundle, true)
+}
+
+func (c *Cache) attachPendingRecovery(bundle *recovery.Bundle, namesPrepared bool) error {
 	if !c.IsEmpty() {
 		return errors.New("cannot attach recovery to a nonempty cache")
 	}
-	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64)}
+	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64), namesPrepared: namesPrepared}
 	r.remaining.Store(bundle.Metrics())
 	if !c.pending.CompareAndSwap(nil, r) {
 		return errors.New("pending recovery already attached")
@@ -258,6 +273,9 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	c.addSizeLocked(shard, int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
 	r.track(p)
 	r.claim(slot)
+	if extra > 0 && r.namesPrepared && c.newMetricCf != nil {
+		c.newMetricCf.Add(helper.HashString(name))
+	}
 	c.writeoutQueue.notifyAt(time.Now())
 	return nil
 }

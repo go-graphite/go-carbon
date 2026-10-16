@@ -146,6 +146,56 @@ func TestPendingReadHandoffAndPersistence(t *testing.T) {
 	}
 }
 
+func TestPendingPreparedNamesAvoidRepeatedDiscovery(t *testing.T) {
+	for _, prepared := range []bool{false, true} {
+		name := "unprepared"
+		if prepared {
+			name = "prepared"
+		}
+		t.Run(name, func(t *testing.T) {
+			c := New()
+			c.SetBloomSize(10000)
+			names := make(chan string, 4)
+			c.SetNewMetricsChan(names)
+			lookups := 0
+			c.SetMetricExists(func(string) bool {
+				lookups++
+				return false
+			})
+			attach := c.AttachPendingRecovery
+			if prepared {
+				attach = c.AttachPendingRecoveryWithPreparedNames
+			}
+			if err := attach(pendingFixture(t)); err != nil {
+				t.Fatal(err)
+			}
+			c.AddRecovered(points.OnePoint("metric", 7, 3))
+			c.AddRecovered(points.OnePoint("metric", 8, 4))
+			c.Add(points.OnePoint("metric", 9, 5))
+			want := []points.Point{{Value: 1, Timestamp: 1}, {Value: 2, Timestamp: 2}, {Value: 3, Timestamp: 1}, {Value: 7, Timestamp: 3}, {Value: 8, Timestamp: 4}, {Value: 9, Timestamp: 5}}
+			if got := c.Get("metric"); !reflect.DeepEqual(got, want) {
+				t.Fatal("history/arrival order changed", got)
+			}
+			knownLookups := 1
+			if prepared {
+				knownLookups = 0
+			}
+			if lookups != knownLookups || len(names) != knownLookups {
+				t.Fatal("saved-name discovery", lookups, len(names))
+			}
+			if len(names) != 0 && <-names != "metric" {
+				t.Fatal("wrong saved-name notification")
+			}
+			// Tail-only names have not passed pending-name preparation and must
+			// still enter the normal discovery path.
+			c.AddRecovered(points.OnePoint("tail.only", 10, 6))
+			if lookups != knownLookups+1 || len(names) != 1 || <-names != "tail.only" {
+				t.Fatal("new tail metric was suppressed", lookups)
+			}
+		})
+	}
+}
+
 // The persister drops a metric it cannot store with Pop. A saved metric dropped
 // that way must not keep pending recovery from draining.
 func TestPendingRecoveryRetiresDroppedMetric(t *testing.T) {

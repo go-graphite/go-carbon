@@ -294,6 +294,12 @@ func (b *Bundle) NewNames(visit func(string) error) error {
 	defer runtime.KeepAlive(b)
 	return b.index.NewNames(visit)
 }
+
+// VisitNewNames borrows each name only during visit; see Index.VisitNewNames.
+func (b *Bundle) VisitNewNames(visit func([]byte) error) error {
+	defer runtime.KeepAlive(b)
+	return b.index.VisitNewNames(visit)
+}
 func (b *Bundle) Slots() uint64   { return b.index.Slots() }
 func (b *Bundle) Points() uint64  { return b.index.Points() }
 func (b *Bundle) Metrics() uint64 { return b.index.Metrics() }

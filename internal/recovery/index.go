@@ -128,7 +128,8 @@ func (b *Builder) entry(id uint32) *entry {
 }
 
 // ID returns the id of metric, allocating one on first use. It is safe for
-// concurrent use.
+// concurrent use. Names can be warmed before any records exist; serialization
+// omits identifiers that never acquire source records.
 func (b *Builder) ID(metric string) (uint32, error) {
 	shard := uint32(xxhash.Sum64String(metric) & (idShards - 1))
 	s := &b.shards[shard]
@@ -259,7 +260,18 @@ func (b *Builder) Write(w io.Writer) error {
 		b.src[i].mu.Lock()
 		defer b.src[i].mu.Unlock()
 	}
-	metrics := uint64(len(b.order))
+	getHeads := func(k uint32) heads {
+		m := b.entry(b.order[k])
+		return heads{cache: m.cache, wal: m.wal, count: m.cacheCount + m.walCount}
+	}
+	// Warmed names may have left cache before the dump. Only actual source
+	// records define membership, point counts and pending-name discovery.
+	metrics := uint64(0)
+	for k := range b.order {
+		if getHeads(uint32(k)).count != 0 {
+			metrics++
+		}
+	}
 	for i := range b.shards {
 		if b.shards[i].count != b.classified[i] {
 			return fmt.Errorf("recovery metrics added during index write")
@@ -269,10 +281,7 @@ func (b *Builder) Write(w io.Writer) error {
 	for metrics*4 > slots*3 {
 		slots *= 2
 	}
-	table, newSlots := buildTable(slots, b.hashes, func(k uint32) heads {
-		m := b.entry(b.order[k])
-		return heads{cache: m.cache, wal: m.wal, count: m.cacheCount + m.walCount}
-	}, b.isNew, b.workers)
+	table, newSlots := buildTable(slots, b.hashes, getHeads, b.isNew, b.workers)
 	header := make([]byte, headerSize)
 	copy(header, magic)
 	put64(header[8:], uint64(len(b.src[0].records)), uint64(len(b.src[1].records)), slots, metrics, b.src[0].points+b.src[1].points, b.src[0].size, b.src[1].size, uint64(len(newSlots)))
@@ -311,7 +320,7 @@ func (b *Builder) Write(w io.Writer) error {
 	return flush(true)
 }
 
-// buildTable places every metric by linear probing. Workers own disjoint slot
+// buildTable places recorded metrics by linear probing. Workers own disjoint slot
 // regions and probe only within them; entries that would cross a region end are
 // placed afterwards by a serial pass. Any insertion order yields valid probe
 // chains, so the result answers lookups exactly like a serial build.
@@ -324,6 +333,9 @@ func buildTable(slots uint64, hashes []uint64, get func(uint32) heads, isNew []b
 	width := slots / regions
 	byRegion := make([][]uint32, regions)
 	for id, h := range hashes {
+		if get(uint32(id)).count == 0 {
+			continue
+		}
 		r := (h & (slots - 1)) / width
 		byRegion[r] = append(byRegion[r], uint32(id))
 	}
@@ -652,8 +664,9 @@ func (in *Index) Read(slot uint64) (*points.Points, error) {
 	return in.read(slot, 0)
 }
 
-// ReadForWrite returns detached history with room for the incoming points that
-// triggered the claim. Appending that record need not copy the history again.
+// ReadForWrite returns detached history with room for the incoming points and
+// bounded spare capacity for following writes. A short tail burst must not
+// repeatedly copy the entire saved history.
 func (in *Index) ReadForWrite(slot uint64, extra int) (*points.Points, error) {
 	return in.read(slot, extra)
 }
@@ -676,7 +689,11 @@ func (in *Index) read(slot uint64, extra int) (*points.Points, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, int(h.count)+extra)}
+	capacity := int(h.count) + extra
+	if extra > 0 {
+		capacity += min(int(h.count)/8, 64, math.MaxInt/16-capacity)
+	}
+	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, capacity)}
 	for file, head := range []uint64{h.cache, h.wal} {
 		var chain []uint64
 		for id := head; id != 0; id = in.record(file, id).previous {
@@ -719,8 +736,16 @@ func (in *Index) Name(slot uint64) (string, bool, error) {
 // NewNames enumerates only metrics absent from the saved read index when this
 // dump was written. Startup need not search the entire pending metric set.
 func (in *Index) NewNames(visit func(string) error) error {
+	return in.VisitNewNames(func(name []byte) error { return visit(string(name)) })
+}
+
+// VisitNewNames borrows names for the duration of each callback. A visitor can
+// reject an unstorable name without copying it; retained names must be copied.
+// The visitor must not modify the immutable bytes.
+func (in *Index) VisitNewNames(visit func([]byte) error) error {
 	for i := uint64(0); i < in.newCount; i++ {
-		name, _, err := in.Name(get64(in.data, in.newOffset+i*8))
+		_, h := in.slot(get64(in.data, in.newOffset+i*8))
+		name, err := in.name(h)
 		if err != nil {
 			return err
 		}

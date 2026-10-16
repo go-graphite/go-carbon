@@ -122,6 +122,52 @@ func TestSnapshotOverlayCheckpoint(t *testing.T) {
 	}
 }
 
+func TestWarmCheckpointNamesSurviveWithoutPendingPoints(t *testing.T) {
+	cache, root, _ := snapshotFixture(t)
+	first := overlayListener(t, cache, root)
+	first.PauseIndexUpdates()
+	factory, finish := first.WarmCheckpointMetricLookups()
+	var wg sync.WaitGroup
+	for worker := range 4 {
+		wg.Go(func() {
+			known := factory()
+			for i := range 50 {
+				name := fmt.Sprintf("warmed.worker%d.metric%d", worker, i)
+				if !known(name) || !first.MetricExists(name) {
+					t.Errorf("warm name not registered: %s", name)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if factory()(strings.Repeat("x", 8000)) {
+		t.Fatal("unstorable warm name was indexed")
+	}
+	finish()
+	known := factory()
+	if known("arrived.after.warmup") || first.MetricExists("arrived.after.warmup") {
+		t.Fatal("read-only lookup mutated the checkpoint catalog")
+	}
+	id, err := first.CheckpointReadIndex()
+	if err != nil || id == "" {
+		t.Fatal(id, err)
+	}
+	// The name's points may already be on disk and absent from a pending-point
+	// bundle. Discovery must come from the checkpoint catalog in that case.
+	next := overlayListener(t, cache, root)
+	if next.RecoveryIndexID() != id {
+		t.Fatal("checkpoint generation changed")
+	}
+	for worker := range 4 {
+		for i := range 50 {
+			if !next.MetricExists(fmt.Sprintf("warmed.worker%d.metric%d", worker, i)) {
+				t.Fatal("warm-only name lost on restart", worker, i)
+			}
+		}
+	}
+}
+
 func TestSnapshotOverlayRejectsCorruptOrStaleCheckpoint(t *testing.T) {
 	for _, kind := range []string{"checksum", "count", "base", "version", "path"} {
 		t.Run(kind, func(t *testing.T) {

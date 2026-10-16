@@ -1,10 +1,14 @@
 package carbonserver
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
 	"strings"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/internal/recovery"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestPendingMetricStorableMatchesPath(t *testing.T) {
@@ -35,6 +39,9 @@ func TestPendingMetricStorableMatchesPath(t *testing.T) {
 			if got := l.pendingMetricStorable(name); got != want {
 				t.Fatalf("root %d bytes, metric %d bytes: got %t, want %t", len(root), len(name), got, want)
 			}
+			if got := l.PendingMetricStorableBytes([]byte(name)); got != want {
+				t.Fatalf("borrowed name: root %d bytes, metric %d bytes: got %t, want %t", len(root), len(name), got, want)
+			}
 		}
 	}
 }
@@ -48,6 +55,9 @@ func FuzzPendingMetricStorable(f *testing.F) {
 		_, want := l.storableMetricPath(name)
 		if got := l.pendingMetricStorable(name); got != want {
 			t.Fatalf("root %q, metric %q: got %t, want %t", root, name, got, want)
+		}
+		if got := l.PendingMetricStorableBytes([]byte(name)); got != want {
+			t.Fatalf("borrowed root %q, metric %q: got %t, want %t", root, name, got, want)
 		}
 	})
 }
@@ -84,4 +94,54 @@ func BenchmarkRejectPendingMetricWithUnixLiteral(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkPrepareRejectedPendingNames(b *testing.B) {
+	builder := recovery.NewBuilder(func(string) bool { return false })
+	var source []byte
+	suffix := strings.Repeat("x", 8000)
+	for i := range 10000 {
+		p := points.OnePoint(fmt.Sprintf("namespace:metric%05d.%s", i, suffix), 1, 1)
+		raw := p.AppendBinary(nil)
+		source = append(source, raw...)
+		if err := builder.Add(0, p, len(raw)); err != nil {
+			b.Fatal(err)
+		}
+	}
+	var raw bytes.Buffer
+	if err := builder.Write(&raw); err != nil {
+		b.Fatal(err)
+	}
+	index, err := recovery.Open(raw.Bytes(), source, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	l := NewCarbonserverListener(nil)
+	l.SetWhisperData("/var/lib/carbon/whisper")
+	b.Run("owned", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := index.NewNames(func(name string) error {
+				if l.pendingMetricStorable(name) {
+					b.Fatal("unstorable name admitted")
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("borrowed", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := index.VisitNewNames(func(name []byte) error {
+				if l.PendingMetricStorableBytes(name) {
+					b.Fatal("unstorable name admitted")
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }

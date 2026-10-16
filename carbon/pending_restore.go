@@ -38,9 +38,12 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 			return nil
 		}
 		prepareStart := time.Now()
-		prepareErr = bundle.NewNames(func(name string) error {
+		prepareErr = bundle.VisitNewNames(func(name []byte) error {
 			preparedNames++
-			return visit(name)
+			if !cs.PendingMetricStorableBytes(name) {
+				return nil
+			}
+			return visit(string(name))
 		})
 		prepareTime = time.Since(prepareStart)
 		prepared = prepareErr == nil
@@ -67,7 +70,7 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		logger.Info("pending read checkpoint does not match read index; using ordered restore")
 		return false, nil
 	}
-	if err = core.AttachPendingRecovery(bundle); err != nil {
+	if err = core.AttachPendingRecoveryWithPreparedNames(bundle); err != nil {
 		_ = bundle.Close()
 		return false, err
 	}
