@@ -91,9 +91,9 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		zap.Duration("checkpoint_open_time", opened.Sub(started)), zap.Duration("index_wait_time", indexReady.Sub(opened)),
 		zap.Duration("pending_names_time", prepareTime), zap.Int("pending_new_names", preparedNames),
 		zap.Uint64("points", bundle.Points()), zap.Uint64("metrics", bundle.Metrics()))
-	// Receivers open now: the first live write of a metric claims its saved
-	// history into the same cache item (see cache.pendingRecovery), so saved
-	// points still reach disk no later than newer live points of that metric.
+	// Tail and live writes claim their own saved history first. Leave unrelated
+	// checkpoint work until the tail has opened intake, so its decoding and
+	// persistence do not compete with the work keeping fresh input closed.
 	stop, done := make(chan struct{}), make(chan struct{})
 	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
 	inputReady := make(chan struct{})
@@ -102,16 +102,13 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		defer close(done)
 		defer openGate()
 		defer stopGateLimit()
-		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
-			logger.Warn("pending recovery stopped", zap.Error(err))
-			return
-		}
-		// A handoff tail may still be written by the old process. Do not
-		// retire its source or finish confirmation tracking until it has
-		// been replayed, including metrics absent from the checkpoint.
 		select {
 		case <-inputReady:
 		case <-stop:
+			return
+		}
+		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
+			logger.Warn("pending recovery stopped", zap.Error(err))
 			return
 		}
 		loaded := time.Now()

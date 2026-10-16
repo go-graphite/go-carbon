@@ -9,10 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
@@ -30,6 +33,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	}
 	cfg := first.Config
 	cfg.Whisper.Compressed = true
+	cfg.Whisper.OutOfOrder = true
 	cfg.Tags.Enabled = false
 	cfg.Dump.Enabled = true
 	cfg.Dump.Path = t.TempDir()
@@ -88,9 +92,23 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	first.FlushTraces = nil
-	if _, err := os.Stat(filepath.Join(cfg.Dump.Path, ".pending-points.json")); err != nil {
+	manifest, err := os.ReadFile(filepath.Join(cfg.Dump.Path, ".pending-points.json"))
+	if err != nil {
 		t.Fatal("missing checkpoint", err, zapwriter.TestString())
 	}
+	var saved recovery.Manifest
+	if err := json.Unmarshal(manifest, &saved); err != nil {
+		t.Fatal(err)
+	}
+	tail := filepath.Join(cfg.Dump.Path, recovery.TailName(saved.WAL.Name))
+	if err := os.WriteFile(tail, points.OnePoint("existing.metric", 9, stamp+2).AppendBinary(nil), 0600); err != nil {
+		t.Fatal(err)
+	}
+	unlockTail, err := handoff.LockExclusive(tail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseTail := sync.OnceFunc(func() { _ = unlockTail() })
 
 	next := New(config)
 	next.Config = cfg
@@ -101,6 +119,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- next.Start() }()
 	defer next.Stop()
+	defer releaseTail()
 	deadline = time.Now().Add(5 * time.Second)
 	for !strings.Contains(zapwriter.TestString(), "serving reads from pending checkpoint") {
 		select {
@@ -113,20 +132,19 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	check := func(extra map[string]float64) {
-		t.Helper()
-		url := fmt.Sprintf("http://%s/render/?target=existing.metric&target=cache.only&target=wal.only&from=%d&until=%d&format=json", cfg.Carbonserver.Listen, stamp-1, stamp+3)
+	read := func() (map[string]float64, []byte, error) {
+		url := fmt.Sprintf("http://%s/render/?target=existing.metric&target=cache.only&target=wal.only&target=live.only&from=%d&until=%d&format=json", cfg.Carbonserver.Listen, stamp-1, stamp+3)
 		resp, err := http.Get(url)
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
 		raw, err := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if err != nil {
-			t.Fatal(err)
+			return nil, raw, err
 		}
 		if resp.StatusCode != 200 {
-			t.Fatalf("read %d: %s", resp.StatusCode, raw)
+			return nil, raw, fmt.Errorf("read %d: %s", resp.StatusCode, raw)
 		}
 		var body struct {
 			Metrics []struct {
@@ -138,7 +156,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 			}
 		}
 		if err = json.Unmarshal(raw, &body); err != nil {
-			t.Fatal(err)
+			return nil, raw, err
 		}
 		values := map[string]float64{}
 		for _, m := range body.Metrics {
@@ -147,6 +165,14 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 					values[fmt.Sprintf("%s/%d", m.Name, m.StartTime+int64(i)*m.StepTime)] = v
 				}
 			}
+		}
+		return values, raw, nil
+	}
+	check := func(extra map[string]float64) {
+		t.Helper()
+		values, raw, err := read()
+		if err != nil {
+			t.Fatal(err)
 		}
 		want := map[string]float64{fmt.Sprintf("existing.metric/%d", stamp): 1, fmt.Sprintf("existing.metric/%d", stamp+1): 4, fmt.Sprintf("cache.only/%d", stamp+1): 3, fmt.Sprintf("wal.only/%d", stamp+1): 5}
 		for k, v := range extra {
@@ -159,6 +185,22 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		}
 	}
 	check(nil)
+	// The old worker still owns the tail lock. Unrelated checkpoint metrics
+	// must remain in the immutable source, without starting persistence while
+	// foreground intake waits. Reads continue to see their complete history.
+	gateDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(gateDeadline) {
+		if _, err := os.Stat(filepath.Join(cfg.Whisper.DataDir, "cache", "only.wsp")); !os.IsNotExist(err) {
+			t.Fatal("background persistence started before the input tail was ready", err)
+		}
+		select {
+		case err := <-done:
+			t.Fatal("startup passed the locked input tail", err)
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	releaseTail()
 	// Input opens with reads, while saved metrics are still outstanding.
 	select {
 	case err := <-done:
@@ -171,6 +213,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	if next.Cache.PendingOutstanding() == 0 {
 		t.Fatal("recovery finished before input could overlap it")
 	}
+	check(map[string]float64{fmt.Sprintf("existing.metric/%d", stamp+2): 9})
 	c, err := net.DialTimeout("tcp", cfg.Tcp.Listen, time.Second)
 	if err != nil {
 		t.Fatal("input did not open with pending reads", err)
@@ -181,11 +224,16 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.Close()
-	live := map[string]float64{fmt.Sprintf("existing.metric/%d", stamp+2): 6, fmt.Sprintf("wal.only/%d", stamp+2): 7}
+	liveKey := fmt.Sprintf("live.only/%d", stamp+2)
+	live := map[string]float64{fmt.Sprintf("existing.metric/%d", stamp+2): 6, fmt.Sprintf("wal.only/%d", stamp+2): 7, liveKey: 8}
 	deadline = time.Now().Add(5 * time.Second)
-	for next.Cache.Get("live.only") == nil {
+	for {
+		values, raw, err := read()
+		if err == nil && values[liveKey] == 8 {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("live input not received")
+			t.Fatalf("live input not readable: %v; %s", err, raw)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

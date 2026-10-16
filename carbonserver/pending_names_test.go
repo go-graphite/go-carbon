@@ -14,6 +14,7 @@ func TestPendingMetricStorableMatchesPath(t *testing.T) {
 		segment + ".value", segment + "x.value", segment[:251], segment[:252],
 		strings.Repeat("a.", 2100) + "value", strings.Repeat("long", 2000),
 		strings.Repeat("long", 2000) + ";tag=value",
+		"namespace:" + strings.Repeat("long", 2000), "namespace\\" + strings.Repeat("long", 2000),
 	}
 	random := rand.New(rand.NewSource(23))
 	for range 1000 {
@@ -58,6 +59,23 @@ func BenchmarkInsertPendingMetric(b *testing.B) {
 			l.SetWhisperData("/var/lib/carbon/whisper")
 			u := &fileListUpdate{listener: l, trieIdx: newTrie(".wsp", 0, nil)}
 			name := "application." + strings.Repeat("x", size) + ".value"
+			b.ReportAllocs()
+			for b.Loop() {
+				if err := u.insertPendingMetric(name); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkRejectPendingMetricWithUnixLiteral(b *testing.B) {
+	for _, separator := range []string{":", "\\"} {
+		b.Run(separator, func(b *testing.B) {
+			l := NewCarbonserverListener(nil)
+			l.SetWhisperData("/var/lib/carbon/whisper")
+			u := &fileListUpdate{listener: l, trieIdx: newTrie(".wsp", 0, nil)}
+			name := "application" + separator + strings.Repeat("x", 8000) + ".value"
 			b.ReportAllocs()
 			for b.Loop() {
 				if err := u.insertPendingMetric(name); err != nil {

@@ -302,7 +302,7 @@ func (l *CarbonserverListener) pendingMetricStorable(name string) bool {
 	if strings.IndexByte(name, ';') >= 0 {
 		return true
 	}
-	if filepath.Separator != '/' || name == "" || name[0] == '.' || name[len(name)-1] == '.' || strings.Contains(name, "..") || strings.ContainsAny(name, "/\\:") {
+	if filepath.Separator != '/' || name == "" || name[0] == '.' || name[len(name)-1] == '.' || strings.Contains(name, "..") || strings.IndexByte(name, '/') >= 0 {
 		_, ok := l.storableMetricPath(name)
 		return ok
 	}
