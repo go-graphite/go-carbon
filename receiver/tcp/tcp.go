@@ -90,8 +90,9 @@ type TCP struct {
 	maxMessageSize      uint32
 	metricsReceived     uint32
 	promMetricsReceived prometheus.Counter
-	errors              uint32
-	active              int32 // counter
+	errors              uint32 // read and framing failures
+	parseErrors         uint32 // rejected metric lines or framed messages
+	active              int32  // counter
 	listener            *net.TCPListener
 	isFraming           bool
 	frameParser         func(body []byte) ([]*points.Points, error)
@@ -287,7 +288,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 		if len(line) > 0 { // skip empty lines
 			name, value, timestamp, err := parse.PlainLine(line)
 			if err != nil {
-				atomic.AddUint32(&rcv.errors, 1)
+				atomic.AddUint32(&rcv.parseErrors, 1)
 				rcv.logger.Debug("parse failed",
 					zap.Error(err),
 					zap.String("peer", conn.RemoteAddr().String()),
@@ -367,7 +368,7 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 		msgs, err := rcv.frameParser(data)
 
 		if err != nil {
-			atomic.AddUint32(&rcv.errors, 1)
+			atomic.AddUint32(&rcv.parseErrors, 1)
 			rcv.logger.Info("can't parse message",
 				zap.String("data", string(data)),
 				zap.Error(err),
@@ -396,6 +397,10 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	errors := atomic.LoadUint32(&rcv.errors)
 	atomic.AddUint32(&rcv.errors, -errors)
 	send("errors", float64(errors))
+
+	parseErrors := atomic.LoadUint32(&rcv.parseErrors)
+	atomic.AddUint32(&rcv.parseErrors, -parseErrors)
+	send("parseErrors", float64(parseErrors))
 
 	if rcv.buffer != nil {
 		send("bufferLen", float64(len(rcv.buffer)))

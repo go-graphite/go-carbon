@@ -801,6 +801,13 @@ $ go-carbon -config /etc/go-carbon.conf -check-policies 600 -print-inconsistent-
 | persister.onlineMigration.logicalSizeChanges | Logical file size changes due to online config migration (gauge) |
 | runtime.GOMAXPROCS | Go runtime.GOMAXPROCS |
 | runtime.NumGoroutine | Go runtime.NumGoroutine |
+| tcp.errors | TCP read and framing failures since the previous stats flush |
+| tcp.parseErrors | Rejected plaintext metric lines, including NaN values or timestamps, since the previous stats flush |
+
+Pickle, protobuf, and custom TCP receivers report the same `errors` and
+`parseErrors` stats under their receiver name. For framed protocols,
+`parseErrors` counts rejected messages. Invalid metric data is excluded from
+`errors`; plaintext receivers continue processing subsequent valid lines.
 
 Note: metrics listed here is incomplete, please check the actual generated metrics through Graphite queries.
 
