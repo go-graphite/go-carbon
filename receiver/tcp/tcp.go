@@ -103,9 +103,9 @@ type TCP struct {
 	pointOut            atomic.Pointer[func(name []byte, value float64, timestamp int64)]
 }
 
-// SetPointOut makes plain-text connections accepted afterwards pass each
-// point to out instead of allocating it for the store. out must not retain
-// name. A buffered receiver keeps using its store.
+// SetPointOut configures the point callback for unbuffered plain-text input.
+// Connections already running before the initial callback is configured adopt
+// it too. out must not retain name. A buffered receiver keeps using its store.
 func (rcv *TCP) SetPointOut(out func(name []byte, value float64, timestamp int64)) {
 	if rcv.buffer == nil {
 		rcv.pointOut.Store(&out)
@@ -295,6 +295,14 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 				)
 			} else {
 				received++
+				// Inherited handlers start before the application sets pointOut.
+				// Adopt it even if it arrived while ReadLine was blocked, then
+				// retain the callback without an atomic load per subsequent point.
+				if pointOut == nil && rcv.buffer == nil {
+					if out := rcv.pointOut.Load(); out != nil {
+						pointOut = *out
+					}
+				}
 				if pointOut != nil {
 					pointOut(name, value, timestamp)
 				} else {

@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -438,5 +439,88 @@ func TestSetPointOutReceivesPlainPoints(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("point not received")
 		}
+	}
+}
+
+func TestSetPointOutUpdatesExistingConnections(t *testing.T) {
+	for _, inherited := range []bool{false, true} {
+		t.Run(fmt.Sprintf("inherited=%v", inherited), func(t *testing.T) {
+			type point struct {
+				name      string
+				value     float64
+				timestamp int64
+				fast      bool
+			}
+			got := make(chan point, 3)
+			release := make(chan struct{})
+			var unblock sync.Once
+			store := func(p *points.Points) {
+				got <- point{p.Metric, p.Data[0].Value, p.Data[0].Timestamp, false}
+				<-release // hold this handler until SetPointOut has completed
+			}
+			accepted := make(chan struct{}, 1)
+			initialStore := store
+			if inherited {
+				initialStore = func(*points.Points) { accepted <- struct{}{} }
+			}
+			options := &Options{Listen: "127.0.0.1:0", Enabled: true}
+			r, err := newTCP("tcp", options, initialStore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { unblock.Do(func() { close(release) }); r.Stop() }()
+			conn, err := net.Dial("tcp", r.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if inherited {
+				if _, err := conn.Write([]byte("initial 0 0\n")); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-accepted:
+				case <-time.After(5 * time.Second):
+					t.Fatal("original receiver did not accept the connection")
+				}
+				h, err := r.Detach()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(h.Conns) != 1 {
+					t.Fatalf("handoff has %d connections, want 1", len(h.Conns))
+				}
+				options.Listen = conn.RemoteAddr().String()
+				next, err := NewInherited("tcp", options, store, h)
+				if err != nil {
+					t.Fatal(err)
+				}
+				r = next
+			}
+			receive := func(want point) {
+				t.Helper()
+				select {
+				case p := <-got:
+					if p != want {
+						t.Fatalf("got %+v, want %+v", p, want)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("point not received")
+				}
+			}
+			if _, err := conn.Write([]byte("first 1 1\n")); err != nil {
+				t.Fatal(err)
+			}
+			receive(point{"first", 1, 1, false})
+			r.SetPointOut(func(name []byte, value float64, timestamp int64) {
+				got <- point{string(name), value, timestamp, true}
+			})
+			unblock.Do(func() { close(release) })
+			if _, err := conn.Write([]byte("second 2 2\nthird 3 3\n")); err != nil {
+				t.Fatal(err)
+			}
+			receive(point{"second", 2, 2, true})
+			receive(point{"third", 3, 3, true})
+		})
 	}
 }
