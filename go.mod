@@ -23,7 +23,7 @@ require (
 	github.com/lomik/og-rek v0.0.0-20170411191824-628eefeb8d80
 	github.com/lomik/stop v0.0.0-20161127103810-188e98d969bd
 	github.com/lomik/zapwriter v0.0.0-20210624082824-c1161d1eb463
-	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/client_golang v1.25.0
 	github.com/sevlyar/go-daemon v0.1.7
 	github.com/stretchr/testify v1.12.1
 	github.com/syndtr/goleveldb v1.0.0
@@ -93,9 +93,9 @@ require (
 	github.com/onsi/ginkgo v1.14.0 // indirect
 	github.com/onsi/gomega v1.10.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.31 // indirect
-	github.com/prometheus/client_model v0.6.2
-	github.com/prometheus/common v0.70.1 // indirect
-	github.com/prometheus/procfs v0.21.1 // indirect
+	github.com/prometheus/client_model v0.6.3
+	github.com/prometheus/common v0.72.0 // indirect
+	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.einride.tech/aip v0.83.0 // indirect
@@ -110,7 +110,7 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/oauth2 v0.36.0 // indirect
+	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
