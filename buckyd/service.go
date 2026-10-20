@@ -927,10 +927,7 @@ func (s *Service) hashring(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errors.New("bad request method"), 400)
 		return
 	}
-	if err := s.allowed("*", "read", r); err != nil {
-		writeError(w, err, 403)
-		return
-	}
+	// Keep discovery unauthenticated for compatibility with standalone buckyd.
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(struct {
 		Name     string
