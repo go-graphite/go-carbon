@@ -222,7 +222,7 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 		return nil, err
 	}
 	if manifest.Root != root || manifest.Device != device || manifest.Inode != inode {
-		return nil, fmt.Errorf("recovery data root changed")
+		return nil, fmt.Errorf("recovery data root changed: saved path=%q device=%d inode=%d; current path=%q device=%d inode=%d", manifest.Root, manifest.Device, manifest.Inode, root, device, inode)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {

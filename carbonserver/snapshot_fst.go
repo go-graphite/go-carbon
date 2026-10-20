@@ -443,7 +443,7 @@ func openIndexSnapshot(fileListCache, root string) (_ *indexSnapshot, err error)
 		return nil, err
 	}
 	if manifest.Root != root || manifest.Device != device || manifest.Inode != inode {
-		return nil, fmt.Errorf("snapshot data root changed")
+		return nil, fmt.Errorf("snapshot data root changed: saved path=%q device=%d inode=%d; current path=%q device=%d inode=%d", manifest.Root, manifest.Device, manifest.Inode, root, device, inode)
 	}
 	source, err := snapshotSourceIdentity(fileListCache)
 	if err != nil {
