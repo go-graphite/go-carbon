@@ -128,9 +128,7 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 
 			first := New(filepath.Join(root, "go-carbon.conf"))
 			first.Config = cfg
-			if err := first.Start(); err != nil {
-				t.Fatal(err)
-			}
+			cfg = startHandoffTestApp(t, first)
 			defer first.Stop()
 			if first.MetricStore == nil || first.Config.Whisper.StoreMirrorFiles {
 				t.Fatal("not a shared store")

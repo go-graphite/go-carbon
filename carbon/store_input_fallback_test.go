@@ -397,9 +397,7 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 
 			first := New(filepath.Join(root, "go-carbon.conf"))
 			first.Config = cfg
-			if err := first.Start(); err != nil {
-				t.Fatal(err)
-			}
+			cfg = startHandoffTestApp(t, first)
 			defer first.Stop()
 			deadline := time.Now().Add(5 * time.Second)
 			// Completed conversion uses the catalog index; input-only handoff
