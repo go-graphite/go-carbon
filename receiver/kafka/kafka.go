@@ -14,6 +14,7 @@ import (
 	"github.com/IBM/sarama"
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/atomicfiles"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
@@ -472,6 +473,9 @@ func (rcv *Kafka) saveState() {
 }
 
 func (rcv *Kafka) worker() {
+
+	phasecpu.Set(phasecpu.ReceiverKafka)
+	defer phasecpu.Set(phasecpu.Other)
 	saveTimer := time.NewTicker(rcv.stateSaveInterval)
 	fetchTimer := time.NewTicker(rcv.fetchInterval)
 	rcv.logger.Info("Worker started")
@@ -512,6 +516,7 @@ func (rcv *Kafka) worker() {
 				messageReceived := true
 				select {
 				case msg := <-msgChan:
+
 					payload, err = protocolParser(msg.Value)
 
 					if err != nil {

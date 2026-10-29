@@ -9,6 +9,7 @@ import (
 )
 
 func TestBorrowedTriePathsMatchOwnedAndRetainStorage(t *testing.T) {
+	t.Parallel()
 	paths := []string{"/shared/metric.wsp", "/shared/metrics.wsp", "/shared/metric/child.wsp", "/single.wsp", "/é/東京/longer/value.wsp", "/x//y.wsp", "/x/./z.wsp", "/x/../other.wsp", "", ".", "/", "relative/value.wsp", "/shared/met.wsp"}
 	for _, bulk := range []bool{false, true} {
 		borrowed, owned := newTrie(".wsp", 0, nil), newTrie(".wsp", 0, nil)

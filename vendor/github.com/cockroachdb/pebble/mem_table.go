@@ -82,7 +82,11 @@ type memTable struct {
 	// drops to zero.
 	writerRefs atomic.Int32
 	tombstones keySpanCache
-	rangeKeys  keySpanCache
+	// The largest exclusive range-deletion end, published before its skiplist
+	// entry. It only increases, including concurrent applications and entries
+	// newer than a reader's snapshot, so it is a conservative point-lookup bound.
+	rangeDelMaxEnd atomic.Pointer[[]byte]
+	rangeKeys      keySpanCache
 	// The current logSeqNum at the time the memtable was created. This is
 	// guaranteed to be less than or equal to any seqnum stored in the memtable.
 	logSeqNum                    uint64
@@ -221,6 +225,7 @@ func (m *memTable) apply(batch *Batch, seqNum uint64) error {
 		ikey := base.MakeInternalKey(ukey, seqNum, kind)
 		switch kind {
 		case InternalKeyKindRangeDelete:
+			m.extendRangeDelEnd(value)
 			err = m.rangeDelSkl.Add(ikey, value)
 			tombstoneCount++
 		case InternalKeyKindRangeKeySet, InternalKeyKindRangeKeyUnset, InternalKeyKindRangeKeyDelete:
@@ -271,6 +276,43 @@ func (m *memTable) newRangeDelIter(*IterOptions) keyspan.FragmentIterator {
 		return nil
 	}
 	return keyspan.NewIter(m.cmp, tombstones)
+}
+
+func (m *memTable) extendRangeDelEnd(end []byte) {
+	var owned *[]byte
+	for {
+		old := m.rangeDelMaxEnd.Load()
+		if old != nil && m.cmp(end, *old) <= 0 {
+			return
+		}
+		if owned == nil {
+			copy := append([]byte(nil), end...)
+			owned = &copy
+		}
+		if m.rangeDelMaxEnd.CompareAndSwap(old, owned) {
+			return
+		}
+	}
+}
+
+// A point lookup outside all range-deletion bounds cannot be covered.
+// Inspect the append-only skiplist before building its fragmented range cache:
+// sparse writes in a later keyspace must not force unrelated Get calls to
+// repeatedly fragment the whole memtable. A concurrent insertion not visible
+// here cannot be a tombstone committed before this lookup's snapshot sequence.
+func (m *memTable) newRangeDelIterForGet(key []byte) keyspan.FragmentIterator {
+	end := m.rangeDelMaxEnd.Load()
+	if end == nil || m.cmp(key, *end) >= 0 {
+		return nil
+	}
+	iter := m.rangeDelSkl.NewIter(nil, nil)
+	first, _ := iter.First()
+	before := first == nil || m.cmp(key, first.UserKey) < 0
+	_ = iter.Close()
+	if before {
+		return nil
+	}
+	return m.newRangeDelIter(nil)
 }
 
 // newRangeKeyIter is part of the flushable interface.

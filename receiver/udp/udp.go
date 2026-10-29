@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
@@ -105,6 +106,9 @@ func (rcv *UDP) Stat(send helper.StatCallback) {
 }
 
 func (rcv *UDP) receiveWorker(chan bool) {
+
+	phasecpu.Set(phasecpu.ReceiverUDP)
+	defer phasecpu.Set(phasecpu.Other)
 	defer rcv.conn.Close()
 
 	var buf [65535]byte
@@ -128,7 +132,9 @@ func (rcv *UDP) receiveWorker(chan bool) {
 			line, err := data.ReadBytes('\n')
 
 			if len(line) > 0 {
+
 				name, value, timestamp, err := parse.PlainLine(line)
+
 				if err != nil {
 					atomic.AddUint32(&rcv.errors, 1)
 					rcv.logger.Debug("parse failed",
@@ -166,6 +172,8 @@ func (rcv *UDP) Listen(addr *net.UDPAddr) error {
 			originalOut := rcv.out
 
 			rcv.Go(func(exit chan bool) {
+				phasecpu.Set(phasecpu.ReceiverUDP)
+				defer phasecpu.Set(phasecpu.Other)
 				for {
 					select {
 					case <-exit:

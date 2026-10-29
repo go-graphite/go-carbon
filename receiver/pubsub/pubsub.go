@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
@@ -151,6 +152,9 @@ func newPubSub(client *pubsub.Client, name string, options *Options, store func(
 }
 
 func (rcv *PubSub) handleMessage(m *pubsub.Message) {
+
+	phasecpu.Set(phasecpu.ReceiverPubSub)
+	defer phasecpu.Set(phasecpu.Other)
 	atomic.AddUint32(&rcv.messagesReceived, 1)
 
 	var data []byte
@@ -190,6 +194,7 @@ func (rcv *PubSub) handleMessage(m *pubsub.Message) {
 		atomic.AddUint32(&rcv.errors, 1)
 		rcv.logger.Error(err.Error())
 	}
+
 	if len(points) == 0 {
 		return
 	}

@@ -1,5 +1,8 @@
 # Pebble-chunk shared storage and embedded buckyd
 
+> Design overview, data layout, write and read paths, tuning and production
+> lessons: [Pebble store design notes](pebble-storage/README.md).
+
 `pebble-chunk` is an opt-in experimental backend owned by go-carbon. The classic
 file backend remains the default. One go-carbon process owns a Pebble database
 containing the metric catalog and compressed archive slots. Persistence,
@@ -121,8 +124,11 @@ Transfer mutations schedule a catalog refresh at most once every 30 seconds;
 the normal `scan-frequency` remains active. Imports complete after a store
 commit using the configured sync policy, and the transfer temporary file is
 then removed. New metrics may take up to the next batched scan to appear in
-find/glob results. Shared mode bypasses response caches so deletion and
-replacement cannot leave cached results from an earlier generation. This
+find/glob results. Shared mode honors configured HTTP and streaming response
+caches. Deletion, replacement, fill and archive mutations advance a process-local
+cache namespace, so subsequent requests cannot reuse an earlier generation's
+reply. Ordinary ingestion retains the configured response-cache TTL, as it does
+with file storage. This
 affects performance and should be measured on representative workloads before
 rollout.
 
@@ -178,6 +184,10 @@ pprof runs on its separate configured listener. Both listeners use a 10-second
 HTTP header-read timeout.
 
 ## Migration and client usage
+
+For experimental online CWhisper conversion with immediate per-metric source
+reclamation, see [incremental migration](incremental-storage-migration.md). It
+requires a new exact-format destination and a compatible binary for rollback.
 
 Use the updated **bucky client** with the existing standalone buckyd on file
 nodes and embedded buckyd on shared nodes. The standalone daemon is unchanged.
@@ -376,3 +386,76 @@ was reverted.
 The retained cache-budget change leaves room for actual cached blocks after
 Pebble's memtable reservations. These measurements used synchronous WAL
 commits; no durability relaxation was used to meet the gate.
+
+## Mirrored canary and compressed rollups
+
+`store-mirror-files = true` retains the original cwhisper/OOO files as a current
+rollback copy. Compressed cwhisper has buffered rollups whose visible values can
+change when a fine circular slot is replaced, even without a write into the old
+coarse window. Eager shared aggregation alone does not preserve that behavior.
+The mirrored path collects the affected input, overwritten-slot and before/after
+buffer windows from the original writer, reads their existing Fetch view, then
+commits the source values/absences in the same shared batch as the input update.
+Removing a virtual value materializes its chunk so older merge operands cannot
+restore it. Original OOO compaction or a failed partial mirror uses a complete
+coherent replacement instead. Confirmation still follows both successful writes.
+
+These corrections require the original writer and are scoped to mirrored
+canaries. Shared-only rollup compatibility across this wrap case remains
+unqualified; do not remove the original mirror on the strength of this test.
+The permanent regression drives six methods × three XFF settings across forty
+short-ring wraps and compares actual original/shared Fetch replies. A separate
+concurrent-reader test checks atomic correction publication and deletion after
+compaction/reopen. Native deployed-binary parity and matched write/read resource
+measurements are required before selecting a mirrored canary.
+
+## Verified catch-up and the first mirrored activation
+
+A completed live baseline remains guarded. A fully verified conversion now
+publishes `VERIFIED-CAPTURES.json` after closing the destination. With that
+receipt, `store-convert -source-live -refresh-live -fast-catchup` can refresh a
+complete canonical tree while retaining `NEEDS-CATCHUP`. On XFS it skips an
+unchanged retained reflink only after synchronized extent comparison of both
+main and OOO files and a matching destination generation proof. Other mappings
+fall back to full capture, replacement and timestamp/Float64-bit verification.
+A synced pending record precedes capture replacement, so interruption between
+capture and database commit cannot authorize an incorrect skip on resume.
+
+For a baseline produced by an older converter, `-trust-verified-baseline` is an
+explicit operator assertion: audit successful verified completion, matching
+source/copy identity and unchanged retained captures first. It refuses a partial
+or previously served/mirrored destination. It never substitutes for the original
+verification. Final `-reconcile -source-quiesced -fast-catchup` still requires an
+actual writer fence and a complete inventory, including deletion reconciliation.
+
+During mirroring, carbonserver keeps the original file index, mapped FLC and
+physical-file quotas, while render and info continue to read the shared store.
+It does not rebuild the catalog index in this mode. This preserves the existing
+pending-read checkpoint and input-tail handoff for the first full-node canary.
+Shared-only operation still uses its catalog and retains its physical-quota
+restrictions.
+
+The first activation can run an explicit root-owned executable through
+`go-carbon -prepare-shared-store /absolute/path/finalize-before-start -config ...`.
+The process registers its predecessor handoff before invoking it. The option
+requires exact mirrored storage, compatible dumps, untagged input and a claimed
+predecessor; it fails without that fence. The executable receives
+`GO_CARBON_PREPARE_SOURCE` and `GO_CARBON_PREPARE_STORE` and should validate its
+pinned conversion identity, then `exec` the verified quiesced finalizer. It has a
+20-minute preparation budget inside the predecessor's 30-minute handoff wait.
+The process refuses startup if any serving guard remains afterward. Do not use
+this option to assert quiescence on an ordinary running writer. Qualify the real
+handoff and retained intake, finalization time, rollback and resource use before
+selecting it in the service manager.
+
+
+For final reconciliation of a quiesced source, the converter records successful
+visits by destination metric ID in a process-local sparse bitmap (one bit per ID
+for dense catalogs). The deletion pass skips filesystem checks only for those
+successfully visited IDs; all unseen catalog entries retain the full existence
+and alias checks. Live refreshes do not use this shortcut because expiration can
+continue after a visit. The bitmap is discarded on interruption or exit.
+On Linux, a kernel no-symlink path proof avoids repeated component-by-component
+resolution for ordinary canonical paths; unsupported kernels and symlink paths
+use the existing bounded resolution check. Timestamp/float-bit verification,
+source identities, reflink checks and serving guards are unchanged.

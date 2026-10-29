@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
@@ -13,6 +14,7 @@ import (
 )
 
 func TestDiscoveryCacheTTL(t *testing.T) {
+	t.Parallel()
 	listener := NewCarbonserverListener(nil)
 	if err := listener.SetDiscoveryCacheTTLs(map[string]time.Duration{
 		"aggregations.secondly._meta.":      15 * time.Second,
@@ -58,92 +60,95 @@ func TestDiscoveryCacheTTL(t *testing.T) {
 }
 
 func TestDiscoveryCacheTTLRefreshesNewMetrics(t *testing.T) {
+	t.Parallel()
 	for _, protocol := range []string{"http-json", "http-v2", "http-v3", "grpc", "render-globs"} {
 		for _, empty := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/empty=%t", protocol, empty), func(t *testing.T) {
 				t.Parallel()
-				listener := newDiscoveryCacheTestListener(t)
-				if err := listener.SetDiscoveryCacheTTLs(map[string]time.Duration{"aggregations.secondly._meta": time.Second}); err != nil {
-					t.Fatal(err)
-				}
-				const normalQuery = "ordinary.*"
-				if listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "ordinary.old") == nil {
-					t.Fatal("insert failed")
-				}
-				ctx, logger := context.Background(), zap.NewNop()
-				initialNormal, _, err := listener.findResponse(ctx, logger, time.Now(), jsonFormat, "json", []string{normalQuery})
-				if err != nil {
-					t.Fatal(err)
-				}
-				query := "aggregations.secondly._meta.by_queue_and_host.*.*.build_sha.*"
-				initialCount := 40
-				if empty {
-					query = "aggregations.secondly._meta.new_host.build_sha.*"
-					initialCount = 0
-				}
-				format := jsonFormat
-				if protocol == "http-v2" {
-					format = protoV2Format
-				}
-				if protocol == "http-v3" {
-					format = protoV3Format
-				}
-				fetch := func() (int, []byte, error) {
-					switch protocol {
-					case "grpc":
-						r, err := listener.Find(ctx, &protov2.GlobRequest{Query: query})
-						if r == nil {
-							return 0, nil, err
-						}
-						return len(r.Matches), nil, err
-					case "render-globs":
-						r, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "render", []string{query})
-						if len(r) == 0 {
-							return 0, nil, err
-						}
-						return len(r[0].Files), nil, err
-					default:
-						r, _, err := listener.findResponse(ctx, logger, time.Now(), format, format.String(), []string{query})
-						if r == nil {
-							return 0, nil, err
-						}
-						return r.files, r.data, err
+				synctest.Test(t, func(t *testing.T) {
+					listener := newDiscoveryCacheTestListener(t)
+					if err := listener.SetDiscoveryCacheTTLs(map[string]time.Duration{"aggregations.secondly._meta": time.Second}); err != nil {
+						t.Fatal(err)
 					}
-				}
-				if got, _, _ := fetch(); got != initialCount {
-					t.Fatalf("initial count=%d; want %d", got, initialCount)
-				}
-				name := "aggregations.secondly._meta.by_queue_and_host.region.worker-00.build_sha.fedcba"
-				if empty {
-					name = "aggregations.secondly._meta.new_host.build_sha.fedcba"
-				}
-				if listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, name) == nil {
-					t.Fatal("insert failed")
-				}
-				if listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "ordinary.new") == nil {
-					t.Fatal("insert failed")
-				}
-				if got, _, _ := fetch(); got != initialCount {
-					t.Fatalf("cache did not retain results within its TTL: %d", got)
-				}
-				time.Sleep(1100 * time.Millisecond)
-				got, data, err := fetch()
-				if err != nil || got != initialCount+1 {
-					t.Fatalf("after expiry: count=%d, error=%v; want %d", got, err, initialCount+1)
-				}
-				// Compare serialized HTTP responses with the uncached implementation.
-				if protocol != "grpc" && protocol != "render-globs" {
-					listener.globCacheEnabled = false
-					oracle, err := listener.findMetrics(ctx, logger, time.Now(), format, []string{query})
-					listener.globCacheEnabled = true
-					if err != nil || !bytes.Equal(data, oracle.data) {
-						t.Fatalf("cached result differs from uncached result: %v", err)
+					const normalQuery = "ordinary.*"
+					if listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "ordinary.old") == nil {
+						t.Fatal("insert failed")
 					}
-				}
-				normal, hit, err := listener.findResponse(ctx, logger, time.Now(), jsonFormat, "json", []string{normalQuery})
-				if err != nil || !hit || !bytes.Equal(normal.data, initialNormal.data) {
-					t.Fatalf("unrelated cached query changed: hit=%t error=%v", hit, err)
-				}
+					ctx, logger := context.Background(), zap.NewNop()
+					initialNormal, _, err := listener.findResponse(ctx, logger, time.Now(), jsonFormat, "json", []string{normalQuery})
+					if err != nil {
+						t.Fatal(err)
+					}
+					query := "aggregations.secondly._meta.by_queue_and_host.*.*.build_sha.*"
+					initialCount := 40
+					if empty {
+						query = "aggregations.secondly._meta.new_host.build_sha.*"
+						initialCount = 0
+					}
+					format := jsonFormat
+					if protocol == "http-v2" {
+						format = protoV2Format
+					}
+					if protocol == "http-v3" {
+						format = protoV3Format
+					}
+					fetch := func() (int, []byte, error) {
+						switch protocol {
+						case "grpc":
+							r, err := listener.Find(ctx, &protov2.GlobRequest{Query: query})
+							if r == nil {
+								return 0, nil, err
+							}
+							return len(r.Matches), nil, err
+						case "render-globs":
+							r, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "render", []string{query})
+							if len(r) == 0 {
+								return 0, nil, err
+							}
+							return len(r[0].Files), nil, err
+						default:
+							r, _, err := listener.findResponse(ctx, logger, time.Now(), format, format.String(), []string{query})
+							if r == nil {
+								return 0, nil, err
+							}
+							return r.files, r.data, err
+						}
+					}
+					if got, _, _ := fetch(); got != initialCount {
+						t.Fatalf("initial count=%d; want %d", got, initialCount)
+					}
+					name := "aggregations.secondly._meta.by_queue_and_host.region.worker-00.build_sha.fedcba"
+					if empty {
+						name = "aggregations.secondly._meta.new_host.build_sha.fedcba"
+					}
+					if listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, name) == nil {
+						t.Fatal("insert failed")
+					}
+					if listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "ordinary.new") == nil {
+						t.Fatal("insert failed")
+					}
+					if got, _, _ := fetch(); got != initialCount {
+						t.Fatalf("cache did not retain results within its TTL: %d", got)
+					}
+					time.Sleep(1100 * time.Millisecond)
+					got, data, err := fetch()
+					if err != nil || got != initialCount+1 {
+						t.Fatalf("after expiry: count=%d, error=%v; want %d", got, err, initialCount+1)
+					}
+					// Compare serialized HTTP responses with the uncached implementation.
+					if protocol != "grpc" && protocol != "render-globs" {
+						listener.globCacheEnabled = false
+						oracle, err := listener.findMetrics(ctx, logger, time.Now(), format, []string{query})
+						listener.globCacheEnabled = true
+						if err != nil || !bytes.Equal(data, oracle.data) {
+							t.Fatalf("cached result differs from uncached result: %v", err)
+						}
+					}
+					normal, hit, err := listener.findResponse(ctx, logger, time.Now(), jsonFormat, "json", []string{normalQuery})
+					if err != nil || !hit || !bytes.Equal(normal.data, initialNormal.data) {
+						t.Fatalf("unrelated cached query changed: hit=%t error=%v", hit, err)
+					}
+				})
 			})
 		}
 	}

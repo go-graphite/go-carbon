@@ -2,7 +2,6 @@ package tcp
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -16,14 +15,7 @@ func TestPickle(t *testing.T) {
 
 	test.Send("\x00\x00\x00#\x80\x02]q\x00U\x0bhello.worldq\x01J\xf8\xd3\x8eVK*\x86q\x02\x86q\x03a.")
 
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42, 1452200952))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.Eq(test.Receive(), points.OnePoint("hello.world", 42, 1452200952))
 }
 
 func TestBadPickle(t *testing.T) {
@@ -34,7 +26,7 @@ func TestBadPickle(t *testing.T) {
 	defer test.Finish()
 
 	test.Send("\x00\x00\x00#\x80\x02]q\x00q\x0bhello.worldq\x01Rixf8\xd3\x8eVK*\x86q\x02\x86q\x03a.")
-	time.Sleep(10 * time.Millisecond)
+	test.WaitClosed()
 	assert.Contains(zapwriter.TestString(), "can't parse message")
 }
 
@@ -47,7 +39,7 @@ func TestPickleMemoryError(t *testing.T) {
 	defer test.Finish()
 
 	test.Send("\x80\x00\x00\x01") // 2Gb message length
-	time.Sleep(10 * time.Millisecond)
+	test.WaitClosed()
 
 	assert.Contains(zapwriter.TestString(), "bad message size")
 }

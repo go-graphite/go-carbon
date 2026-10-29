@@ -41,7 +41,7 @@ func intakeTailFixture(b testing.TB, records, metrics int, checkpoint bool, hist
 	if err := f.Close(); err != nil {
 		b.Fatal(err)
 	}
-	app := New(TestConfig(b.TempDir()))
+	app := New(testConfig(b, b.TempDir()))
 	if err := app.ParseConfig(); err != nil {
 		b.Fatal(err)
 	}

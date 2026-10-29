@@ -16,7 +16,7 @@ import (
 
 // Exercise the App lifecycle: testing CarbonserverListener.Stop alone misses
 // the SIGUSR2 path which exits the process as soon as DumpStop returns.
-func TestShutdownWaitsForActiveRead(t *testing.T) {
+func testShutdownWaitsForActiveRead(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		dump      bool
@@ -30,6 +30,7 @@ func TestShutdownWaitsForActiveRead(t *testing.T) {
 		{name: "DumpStopSlowInput", dump: true, hold: 5500 * time.Millisecond, slowInput: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			app, started, unblock, readDone := startBlockedShutdownRead(t)
 			releaseInputCleanup := func() {}
 			if tc.slowInput {

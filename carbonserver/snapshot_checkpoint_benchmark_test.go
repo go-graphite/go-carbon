@@ -91,7 +91,7 @@ func TestCapturedPendingCheckpoint(t *testing.T) {
 		}
 		name := strings.ReplaceAll(strings.TrimSuffix(strings.TrimPrefix(e.Path, "/"), ".wsp"), "/", ".")
 		if n%1000 == 0 {
-			name += ".codex_checkpoint_unseen"
+			name += ".checkpoint_unseen"
 		}
 		p := points.Points{Metric: name, Data: []points.Point{{Timestamp: 1700000000, Value: float64(n)}, {Timestamp: 1700000001, Value: float64(n) + 0.5}}}
 		if n%3 == 0 {
@@ -152,7 +152,7 @@ func TestCapturedPendingCheckpoint(t *testing.T) {
 	newNames := 0
 	if err = bundle.NewNames(func(name string) error {
 		newNames++
-		if !strings.HasSuffix(name, ".codex_checkpoint_unseen") {
+		if !strings.HasSuffix(name, ".checkpoint_unseen") {
 			return fmt.Errorf("unexpected new metric: %q", name)
 		}
 		return nil

@@ -1,0 +1,12 @@
+--- a/vendor/github.com/go-graphite/go-whisper/storage_files.go
++++ b/vendor/github.com/go-graphite/go-whisper/storage_files.go
+@@ -19,6 +19,9 @@
+ 	Fd() uintptr
+ 	Truncate(int64) error
+ }
++
++// StorageFile returns the underlying storage without requiring an OS file.
++func (w *Whisper) StorageFile() StorageFile { return w.file }
+ 
+ // StorageFileSystem scopes names, main-file rewrites and OOO sidecars to an
+ // externally owned transaction. This lets another storage engine preserve the

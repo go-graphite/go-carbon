@@ -57,6 +57,7 @@ func overlayUsageReference(ti *trieIndex) (map[string]QuotaUsage, map[string][2]
 // snapshotQuotaUsage counts only the affected mutable subtree and reads saved
 // totals from the packed prefix sums. It leaves throughput/read counters intact.
 func TestSnapshotOverlayUsageMatchesReference(t *testing.T) {
+	t.Parallel()
 	for _, populated := range []bool{false, true} {
 		t.Run(fmt.Sprint(populated), func(t *testing.T) {
 			fast, _, _, _ := snapshotTrieFixture(t)

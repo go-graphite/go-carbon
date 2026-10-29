@@ -43,6 +43,9 @@ func tailFixture(t testing.TB, metrics, rounds int) string {
 }
 
 func TestReplayInputTailMatchesSerial(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path := tailFixture(t, 257, 19)
 	want := make(map[string][]points.Point)
 	if err := points.ReadFromFile(path, func(p *points.Points) {

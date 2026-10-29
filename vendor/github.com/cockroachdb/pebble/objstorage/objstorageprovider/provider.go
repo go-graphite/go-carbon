@@ -101,6 +101,10 @@ type Settings struct {
 		// mode. This function is run whenever a local object is open for reading.
 		// If it is nil, DefaultReadaheadConfig is used.
 		ReadaheadConfigFn func() ReadaheadConfig
+
+		// AlwaysSyncDir makes every Sync sync FSDirName, even when no local
+		// object was created or removed since the previous Sync.
+		AlwaysSyncDir bool
 	}
 
 	// Fields here are set only if the provider is to support remote objects

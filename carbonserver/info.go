@@ -2,14 +2,19 @@ package carbonserver
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	_ "net/http/pprof" // skipcq: GO-S2108
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-whisper"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
@@ -34,26 +39,32 @@ type retentionInfo struct {
 }
 
 func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, error) {
-	if metricStore := listener.getMetricStore(); metricStore != nil {
+	metricStore := listener.getMetricStore()
+	if metricStore != nil {
+		if metricStore.IncrementalSource() != "" {
+			release := metricStore.OriginalReadGuard(metric)
+			defer release()
+		}
 		metadata, err := metricStore.Metadata(context.Background(), metric)
-		if err != nil {
+		if err == nil {
+			return metricInfoFromShared(metadata), nil
+		}
+		if metricStore.IncrementalSource() == "" || !errors.Is(err, store.ErrNotFound) {
 			return metricInfo{}, err
 		}
-		info := metricInfo{
-			aggregationMethod: titleizeAggrMethod(metadata.AggregationMethod.String()),
-			xFilesFactor:      metadata.XFilesFactor,
-		}
-		for _, retention := range metadata.Retentions {
-			info.retentions = append(info.retentions, retentionInfo{retention.SecondsPerPoint(), retention.NumberOfPoints()})
-			if retention.MaxRetention() > int(info.maxRetention) {
-				info.maxRetention = int64(retention.MaxRetention())
-			}
-		}
-		return info, nil
 	}
 
 	path := listener.whisperData + "/" + strings.ReplaceAll(metric, ".", "/") + ".wsp"
 	w, err := whisper.Open(path)
+	if err != nil && metricStore != nil && metricStore.IncrementalSource() != "" && errors.Is(err, os.ErrNotExist) {
+		metadata, retryErr := metricStore.Metadata(context.Background(), metric)
+		if retryErr == nil {
+			return metricInfoFromShared(metadata), nil
+		}
+		if !errors.Is(retryErr, store.ErrNotFound) {
+			return metricInfo{}, retryErr
+		}
+	}
 	if err != nil {
 		return metricInfo{}, err
 	}
@@ -69,7 +80,23 @@ func (listener *CarbonserverListener) getMetricInfo(metric string) (metricInfo, 
 	return info, nil
 }
 
+func metricInfoFromShared(metadata store.Metadata) metricInfo {
+	info := metricInfo{
+		aggregationMethod: titleizeAggrMethod(metadata.AggregationMethod.String()),
+		xFilesFactor:      metadata.XFilesFactor,
+	}
+	for _, retention := range metadata.Retentions {
+		info.retentions = append(info.retentions, retentionInfo{retention.SecondsPerPoint(), retention.NumberOfPoints()})
+		if retention.MaxRetention() > int(info.maxRetention) {
+			info.maxRetention = int64(retention.MaxRetention())
+		}
+	}
+	return info
+}
+
 func (listener *CarbonserverListener) infoHandler(wr http.ResponseWriter, req *http.Request) {
+	phasecpu.Set(phasecpu.Info)
+	defer phasecpu.Set(phasecpu.Other)
 	// URL: /info/?target=the.metric.Name&format=json
 	t0 := time.Now()
 	ctx := req.Context()
@@ -234,6 +261,8 @@ func titleizeAggrMethod(aggr string) string {
 }
 
 func (listener *CarbonserverListener) Info(ctx context.Context, req *protov2.InfoRequest) (*protov2.InfoResponse, error) {
+	phasecpu.Set(phasecpu.Info)
+	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()
 	atomic.AddUint64(&listener.metrics.InfoRequests, 1)
 

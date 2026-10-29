@@ -713,6 +713,17 @@ func New(size int64) *Cache {
 	return newShards(size, m)
 }
 
+// NewWithShards creates a cache with an explicit shard count. Its capacity and
+// reference ownership are the same as New. Fewer, larger shards can cache blocks
+// that would exceed the default per-shard capacity on high-core machines, at the
+// expense of increased contention. shards must be positive.
+func NewWithShards(size int64, shards int) *Cache {
+	if shards < 1 {
+		panic("pebble: cache shard count must be positive")
+	}
+	return newShards(size, shards)
+}
+
 func newShards(size int64, shards int) *Cache {
 	c := &Cache{
 		maxSize: size,

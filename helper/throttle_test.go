@@ -3,6 +3,7 @@ package helper
 import (
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -36,18 +37,13 @@ func TestThrottleChan(t *testing.T) {
 	perSecondTable := []int{100, 1000, 10000, 100000, 200000}
 
 	for _, perSecond := range perSecondTable {
-		bw := doTestThrottleTicker(perSecond, time.Second, false)
-		max := float64(perSecond) * 1.10
-		min := float64(perSecond) * 0.90
-		if raceDetector {
-			// The soft throttle sends on time.Ticker ticks, which are dropped
-			// when its goroutine is late. Under the race detector on a shared
-			// CI runner that loses more than a tenth of 1ms ticks; the rate
-			// must still never exceed the limit.
-			min = float64(perSecond) * 0.75
-		}
-		assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
-		assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+		synctest.Test(t, func(t *testing.T) {
+			bw := doTestThrottleTicker(perSecond, time.Second, false)
+			max := float64(perSecond) * 1.10
+			min := float64(perSecond) * 0.90
+			assert.True(t, float64(bw) >= min, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+			assert.True(t, float64(bw) <= max, fmt.Sprintf("perSecond: %d, bw: %d", perSecond, bw))
+		})
 	}
 }
 
@@ -55,12 +51,14 @@ func TestHardThrottleChan(t *testing.T) {
 	perSecondTable := []int{100, 1000, 10000, 100000, 200000}
 
 	for _, perSecond := range perSecondTable {
-		// A little less than a second, as the hard throttle front-loads
-		// its payloads
-		kept := doTestThrottleTicker(perSecond, 900*time.Millisecond, true)
-		max := float64(perSecond) * 1.05
-		min := float64(perSecond) * 0.95
-		assert.True(t, float64(kept) >= min, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
-		assert.True(t, float64(kept) <= max, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
+		synctest.Test(t, func(t *testing.T) {
+			// A little less than a second, as the hard throttle front-loads
+			// its payloads
+			kept := doTestThrottleTicker(perSecond, 900*time.Millisecond, true)
+			max := float64(perSecond) * 1.05
+			min := float64(perSecond) * 0.95
+			assert.True(t, float64(kept) >= min, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
+			assert.True(t, float64(kept) <= max, fmt.Sprintf("perSecond: %d, kept: %d", perSecond, kept))
+		})
 	}
 }

@@ -111,6 +111,12 @@ type ReaderOptions struct {
 	//
 	// The default cache size is a zero-size cache.
 	Cache *cache.Cache
+	// RangeDelCache optionally holds range-deletion blocks separately. A
+	// Reader retains a reference until Close. Nil uses Cache for all blocks.
+	RangeDelCache *cache.Cache
+	// RangeDelCacheID is allocated by RangeDelCache.NewID for a shared reader
+	// namespace. Zero gives this reader a fresh namespace.
+	RangeDelCacheID uint64
 
 	// LoadBlockSema, if set, is used to limit the number of blocks that can be
 	// loaded (i.e. read from the filesystem) in parallel. Each load acquires one

@@ -22,6 +22,7 @@ type Schema struct {
 	Retentions   whisper.Retentions
 	Priority     int64
 	Compressed   *bool
+	matcher      metricPattern
 
 	// If not specified, migration flag is controlled by the global
 	// migration flag set in persister.Whisper
@@ -50,7 +51,7 @@ func (s WhisperSchemas) AnyCompressed() bool {
 // Match finds the schema for metric or returns false if none found
 func (s WhisperSchemas) Match(metric string) (Schema, bool) {
 	for _, schema := range s {
-		if schema.Pattern.MatchString(metric) {
+		if schema.matcher.match(schema.Pattern, metric) {
 			return schema, true
 		}
 	}
@@ -110,6 +111,7 @@ func ReadWhisperSchemas(filename string) (WhisperSchemas, error) {
 			return nil, fmt.Errorf("[persister] Failed to parse pattern %q for [%s]: %w",
 				section["pattern"], schema.Name, err)
 		}
+		schema.matcher = compileMetricPattern(schema.Pattern)
 		schema.RetentionStr = section["retentions"]
 		schema.Retentions, err = ParseRetentionDefs(schema.RetentionStr)
 

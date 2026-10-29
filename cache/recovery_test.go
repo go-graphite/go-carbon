@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bytes"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,11 +15,19 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
-func pendingFixture(t *testing.T) *recovery.Bundle {
-	t.Helper()
-	dir, root := t.TempDir(), t.TempDir()
-	builder := recovery.NewBuilder(nil)
-	var source [2][]byte
+// Only the immutable record and index bytes are shared. Every caller still
+// publishes and opens its own files, so claims and retirement stay isolated.
+var pendingFixtureData = sync.OnceValues(func() ([3][]byte, error) {
+	return encodePendingFixture(nil)
+})
+
+var knownPendingFixtureData = sync.OnceValues(func() ([3][]byte, error) {
+	return encodePendingFixture(func(name string) bool { return name == "metric" })
+})
+
+func encodePendingFixture(known func(string) bool) ([3][]byte, error) {
+	builder := recovery.NewBuilder(known)
+	var source [3][]byte
 	for file, values := range [][]*points.Points{
 		{points.OnePoint("metric", 1, 1), points.OnePoint("other", 5, 1), points.OnePoint("metric", 2, 2)},
 		{points.OnePoint("metric", 3, 1), points.OnePoint("other", 6, 2)},
@@ -27,22 +36,38 @@ func pendingFixture(t *testing.T) *recovery.Bundle {
 			raw := p.AppendBinary(nil)
 			source[file] = append(source[file], raw...)
 			if err := builder.Add(file, p, len(raw)); err != nil {
-				t.Fatal(err)
+				return source, err
 			}
 		}
 	}
 	var index bytes.Buffer
 	if err := builder.Write(&index); err != nil {
+		return source, err
+	}
+	source[2] = index.Bytes()
+	return source, nil
+}
+
+func pendingFixture(t testing.TB) *recovery.Bundle {
+	t.Helper()
+	return pendingFixtureWithKnown(t, false)
+}
+
+func pendingFixtureWithKnown(t testing.TB, known bool) *recovery.Bundle {
+	t.Helper()
+	load := pendingFixtureData
+	if known {
+		load = knownPendingFixtureData
+	}
+	source, err := load()
+	if err != nil {
 		t.Fatal(err)
 	}
+	dir, root := t.TempDir(), t.TempDir()
 	var files []recovery.File
 	for i, name := range []string{"cache.1.2.bin", "input.1.2.bin", ".pending-index-2.bin"} {
-		raw := index.Bytes()
-		if i < 2 {
-			raw = source[i]
-		}
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, raw, 0600); err != nil {
+		if err := os.WriteFile(path, source[i], 0600); err != nil {
 			t.Fatal(err)
 		}
 		info, err := recovery.Describe(path)
@@ -60,6 +85,74 @@ func pendingFixture(t *testing.T) *recovery.Bundle {
 	}
 	t.Cleanup(func() { _ = bundle.Close() })
 	return bundle
+}
+
+// One saved metric stays unclaimed while an active metric receives normal
+// single-point traffic and repeated persistence batches. Source retirement and
+// byte ordering remain covered by the recovery oracle tests below.
+func BenchmarkPendingRecoveryRepeatedLivePoints(b *testing.B) {
+	c := New()
+	if err := c.AttachPendingRecovery(pendingFixture(b)); err != nil {
+		b.Fatal(err)
+	}
+	metric := []byte("metric")
+	c.AddPoint(metric, 7, 7)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.AddPoint(metric, float64(i), int64(i))
+		if i%128 == 127 {
+			batch, ok := c.PopNotConfirmed("metric")
+			if !ok {
+				b.Fatal("missing live batch")
+			}
+			c.Confirm(batch)
+		}
+	}
+}
+
+func TestLivePointWithPendingRecoveryKeepsBitsAndRetryOrder(t *testing.T) {
+	t.Parallel()
+	c := New()
+	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	name := []byte("metric")
+	want := []points.Point{{Value: 1, Timestamp: 1}, {Value: 2, Timestamp: 2}, {Value: 3, Timestamp: 1}}
+	check := func() {
+		t.Helper()
+		got := c.Get("metric")
+		if len(got) != len(want) {
+			t.Fatalf("history length %d, want %d", len(got), len(want))
+		}
+		for i := range want {
+			if got[i].Timestamp != want[i].Timestamp || math.Float64bits(got[i].Value) != math.Float64bits(want[i].Value) {
+				t.Fatalf("history point %d differs", i)
+			}
+		}
+	}
+	for i, bits := range []uint64{0x8000000000000000, 0x3ff0000000000001, 0x7ff8000000000012, 1} {
+		point := points.Point{Timestamp: int64(20 - i), Value: math.Float64frombits(bits)}
+		c.AddPoint(name, point.Value, point.Timestamp)
+		want = append(want, point)
+		check()
+	}
+	// The input buffer can be reused; cached names must own their bytes.
+	name[0] = 'x'
+	c.AddPoint(name, 123, 1)
+	name[0] = 'm'
+	check()
+	batch, ok := c.PopNotConfirmed("metric")
+	if !ok {
+		t.Fatal("missing history batch")
+	}
+	c.AddPoint(name, 99, 1)
+	want = append(want, points.Point{Value: 99, Timestamp: 1})
+	c.Requeue(batch)
+	check()
+	if err := c.FinishPendingRecovery(); err == nil {
+		t.Fatal("source retired before pending history persisted")
+	}
 }
 
 func TestPendingReadHandoffAndPersistence(t *testing.T) {
@@ -147,6 +240,7 @@ func TestPendingReadHandoffAndPersistence(t *testing.T) {
 }
 
 func TestPendingPreparedNamesAvoidRepeatedDiscovery(t *testing.T) {
+	t.Parallel()
 	for _, prepared := range []bool{false, true} {
 		name := "unprepared"
 		if prepared {
@@ -199,6 +293,7 @@ func TestPendingPreparedNamesAvoidRepeatedDiscovery(t *testing.T) {
 // The persister drops a metric it cannot store with Pop. A saved metric dropped
 // that way must not keep pending recovery from draining.
 func TestPendingRecoveryRetiresDroppedMetric(t *testing.T) {
+	t.Parallel()
 	c := New()
 	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
 		t.Fatal(err)
@@ -226,6 +321,7 @@ func TestPendingRecoveryRetiresDroppedMetric(t *testing.T) {
 // pendingWriteAttempts failed writes recovery stops waiting for it, while its
 // points stay in the cache for further retries.
 func TestPendingRecoverySettlesRepeatedlyFailingMetric(t *testing.T) {
+	t.Parallel()
 	c := New()
 	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
 		t.Fatal(err)
@@ -297,6 +393,7 @@ func TestPendingRecoveryCapacityAndCancellation(t *testing.T) {
 }
 
 func TestPendingRecoveryRejectsInvalidAttach(t *testing.T) {
+	t.Parallel()
 	c := New()
 	c.Add(points.OnePoint("existing", 1, 1))
 	bundle := pendingFixture(t)
@@ -316,6 +413,7 @@ func TestPendingRecoveryRejectsInvalidAttach(t *testing.T) {
 // history must enter the same item first, and the sources may retire only after
 // that item (not merely the claim) is confirmed on disk.
 func TestLiveWriteClaimsSavedHistoryFirst(t *testing.T) {
+	t.Parallel()
 	bundle := pendingFixture(t)
 	c := New()
 	if err := c.AttachPendingRecovery(bundle); err != nil {
@@ -366,6 +464,7 @@ func TestLiveWriteClaimsSavedHistoryFirst(t *testing.T) {
 // A dump taken mid-recovery must hold unclaimed saved metrics as well as
 // claimed ones still in cache, each exactly once and in replay order.
 func TestDumpDuringPendingRecovery(t *testing.T) {
+	t.Parallel()
 	bundle := pendingFixture(t)
 	c := New()
 	if err := c.AttachPendingRecovery(bundle); err != nil {
@@ -391,6 +490,7 @@ func TestDumpDuringPendingRecovery(t *testing.T) {
 // Raw-copied unclaimed records must restore exactly like the decoded ones,
 // each metric once, across any number of parts.
 func TestDumpPendingRangesCoverEachMetricOnce(t *testing.T) {
+	t.Parallel()
 	bundle := pendingFixture(t)
 	c := New()
 	if err := c.AttachPendingRecovery(bundle); err != nil {

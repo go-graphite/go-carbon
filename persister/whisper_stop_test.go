@@ -53,11 +53,16 @@ func TestGracefullyStop(t *testing.T) {
 			p.SetWorkers(workers)
 
 			storeWait := make(chan bool)
+			storeStarted := make(chan struct{}, workers)
 			var storeCount uint32
 
 			p.mockStore = func() (StoreFunc, func()) {
 				return func(metric string) {
 					pop(metric)
+					select {
+					case storeStarted <- struct{}{}:
+					default:
+					}
 					<-storeWait
 					atomic.AddUint32(&storeCount, 1)
 				}, nil
@@ -77,7 +82,9 @@ func TestGracefullyStop(t *testing.T) {
 				}
 			}
 
-			time.Sleep(10 * time.Millisecond)
+			for range workers {
+				<-storeStarted
+			}
 			close(storeWait)
 
 			p.Stop()
@@ -111,7 +118,12 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 
 				ch := make(chan *points.Points, 10)
 				recv, pop := makeRecvPopFromChan(ch)
-				p := NewWhisper(root, nil, nil, recv, pop, nil, nil)
+				var started sync.WaitGroup
+				started.Add(workers)
+				p := NewWhisper(root, nil, nil, func(abort chan bool) string {
+					started.Done()
+					return recv(abort)
+				}, pop, nil, nil)
 				p.SetWorkers(workers)
 
 				p.mockStore = func() (StoreFunc, func()) {
@@ -119,7 +131,7 @@ func TestStopEmptyThrottledPersister(t *testing.T) {
 				}
 
 				p.Start()
-				time.Sleep(10 * time.Millisecond)
+				started.Wait()
 
 				start := time.Now()
 				p.Stop()
@@ -143,10 +155,13 @@ func TestBackloggedLiftsUpdateRateLimit(t *testing.T) {
 			lifted.Store(backlogged)
 			p.SetBacklogged(lifted.Load)
 			var stored atomic.Int32
+			completed := make(chan struct{})
 			p.mockStore = func() (StoreFunc, func()) {
 				return func(metric string) {
 					pop(metric)
-					stored.Add(1)
+					if stored.Add(1) == 50 {
+						close(completed)
+					}
 				}, nil
 			}
 			for i := 0; i < 50; i++ {
@@ -155,10 +170,12 @@ func TestBackloggedLiftsUpdateRateLimit(t *testing.T) {
 			if err := p.Start(); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(2 * time.Second)
-			for stored.Load() < 50 && time.Now().Before(deadline) {
-				time.Sleep(5 * time.Millisecond)
+			timer := time.NewTimer(2 * time.Second)
+			select {
+			case <-completed:
+			case <-timer.C:
 			}
+			timer.Stop()
 			p.Stop() // must not hang while backlogged
 			got := stored.Load()
 			if backlogged && got != 50 {

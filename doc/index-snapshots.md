@@ -56,6 +56,27 @@ are logged; the legacy cache still provides the recovery fallback. The first
 complete background generation also replaces the live heap trie, so future
 restarts do not need to release the original large node graph at exit.
 
+## Shared-store catalog checkpoints
+
+Completed incremental migrations and ordinary shared stores discover names from
+the committed store catalog. They do not resume filesystem scans to prepare a
+restart. With the existing version-2 file-list cache configuration, graceful
+shutdown freezes both periodic and externally requested catalog refreshes and
+prepares an empty immutable base for the checkpoint. The catalog's current names
+and names warmed from the cache are saved in its overlay. The live query index
+keeps its heap trie throughout this preparation.
+
+Startup may load that saved generation while validating a pending-point
+checkpoint. It publishes the saved names only when the checkpoint identity
+matches, and returns to the authoritative store catalog after recovery. A missing
+or invalid checkpoint retains ordered restore and catalog discovery. This path
+does not walk the original Whisper tree or add periodic catalog rebuilds.
+
+The shared-store overlay contains the catalog, so its shutdown serialization and
+temporary memory scale with the number of metric names. An ordinary mapped
+filesystem index usually has a much smaller overlay. No additional option is
+required; the existing dump and input-handoff settings still control recovery.
+
 ## Reads during compressed-history recovery
 
 For compressed Whisper with untagged input, graceful shutdown saves a small

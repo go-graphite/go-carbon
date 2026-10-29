@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,17 +54,19 @@ func TestStorageFetchEdges(t *testing.T) {
 }
 
 func TestStorageRandomizedParity(t *testing.T) {
-	now := storageTestClock(t)
-	for _, kind := range []string{"cwhisper-ooo", "pebble-chunk"} {
+	t.Parallel()
+	for _, kind := range []string{"cwhisper-ooo", "pebble-chunk", "pebble-exact"} {
 		for _, seed := range []int64{1, 4271, 82597} {
 			for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Last, whisper.Max, whisper.Min, whisper.First} {
 				t.Run(fmt.Sprintf("%s/seed=%d/%s", kind, seed, method), func(t *testing.T) {
+					parallelStorageCase(t)
+					now := new(atomic.Int64)
 					now.Store(storageEpoch)
 					// A fixed seed lets failures replay the same write order and timestamps.
 					// skipcq: GSC-G404
 					rng := rand.New(rand.NewSource(seed))
-					oracle := newStorageBackend(t, "classic", now)
-					candidate := newStorageBackend(t, kind, now)
+					oracle := newStorageMemoryBackend(t, "classic", now)
+					candidate := newStorageMemoryBackend(t, kind, now)
 					c := storageConfig("metric", "1s:1m,10s:10m,60s:1h", method, 0.5)
 					storageMust(t, oracle.create(c))
 					storageMust(t, candidate.create(c))
@@ -171,14 +174,17 @@ func TestStorageCrashWriter(t *testing.T) {
 }
 
 func TestStorageCrashRecovery(t *testing.T) {
-	now := storageTestClock(t)
+	t.Parallel()
+	now := new(atomic.Int64)
+	now.Store(storageEpoch)
 	for _, kind := range storageBackends {
 		modes := []string{"unclosed"}
-		if kind == "pebble-chunk" {
+		if kind == "pebble-chunk" || kind == "pebble-exact" {
 			modes = append(modes, "sst-and-wal")
 		}
 		for _, mode := range modes {
 			t.Run(kind+"/"+mode, func(t *testing.T) {
+				t.Parallel()
 				dir := t.TempDir()
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()

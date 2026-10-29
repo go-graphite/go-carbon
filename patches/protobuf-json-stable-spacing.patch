@@ -1,0 +1,18 @@
+--- a/vendor/google.golang.org/protobuf/internal/encoding/json/encode.go
++++ b/vendor/google.golang.org/protobuf/internal/encoding/json/encode.go
+@@ -235,12 +235,9 @@
+ 		// Need to add comma on the following condition.
+ 		if e.lastKind&(scalar|objectClose|arrayClose) != 0 &&
+ 			next&(name|scalar|objectOpen|arrayOpen) != 0 {
+-			e.out = append(e.out, ',')
+-			// For single-line output, add a random extra space after each
+-			// comma to make output unstable.
+-			if detrand.Bool() {
+-				e.out = append(e.out, ' ')
+-			}
++			// Keep the deployed JSON wire format stable across binary builds.
++			// Field escaping and number formatting remain unchanged.
++			e.out = append(e.out, ',', ' ')
+ 		}
+ 		return
+ 	}

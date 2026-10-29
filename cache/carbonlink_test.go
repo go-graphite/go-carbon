@@ -316,28 +316,28 @@ func TestCarbonlinkErrors(t *testing.T) {
 	}
 
 	table := []*struct {
-		waitAfterWrite time.Duration
-		msg            []byte
+		waitForClose bool
+		msg          []byte
 	}{
 		{ // connect and disconnect
-			time.Millisecond * 0,
+			false,
 			[]byte{},
 		},
 		{ // connect, send msg length and disconnect
-			time.Millisecond * 0,
+			false,
 			[]byte(sampleCacheQuery2[:4]),
 		},
 		{ // connect and wait timeout
-			listenerTimeout * 2,
+			true,
 			[]byte{},
 		},
 		{ // connect, send msg length and wait timeout
-			listenerTimeout * 2,
+			true,
 			[]byte(sampleCacheQuery2[:4]),
 		},
 		{ // send broken pickle
-			listenerTimeout * 2,
-			[]byte(sampleCacheQuery2[:len(sampleCacheQuery2)-1] + "a"),
+			true,
+			[]byte(sampleCacheQuery2[:4] + "a" + sampleCacheQuery2[5:]),
 		},
 	}
 
@@ -352,12 +352,14 @@ func TestCarbonlinkErrors(t *testing.T) {
 				t.Errorf("Received %q when attempting to write to CarbonlinkListener", err)
 			}
 		}
-		time.Sleep(test.waitAfterWrite)
-		if test.waitAfterWrite > listenerTimeout {
-			conn.SetWriteBuffer(0)
-			n, err := conn.Write([]byte("x"))
+		if test.waitForClose {
+			assert.NoError(conn.SetReadDeadline(time.Now().Add(time.Second)))
+			var data [1]byte
+			n, err := conn.Read(data[:])
 			if err == nil || n > 0 {
 				t.Errorf("CarbonlinkListener did not close connection as expected")
+			} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+				t.Errorf("CarbonlinkListener did not close connection before deadline: %v", err)
 			}
 		}
 		conn.Close()

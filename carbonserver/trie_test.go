@@ -12,7 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/dgryski/go-trigram"
@@ -80,6 +82,7 @@ func newTrigramServer(files []string, l logf) *CarbonserverListener {
 }
 
 func TestTrieIndex(t *testing.T) {
+	t.Parallel()
 	commonFiles := []string{
 		"/something/else/server.wsp",
 		"/service-00/server-000/metric-namespace-000/43081e003a315b88.wsp",
@@ -739,6 +742,7 @@ func TestTrieIndex(t *testing.T) {
 }
 
 func TestTrieEdgeCases(t *testing.T) {
+	t.Parallel()
 	var trie = newTrie(".wsp", 0, nil)
 
 	_, _, _, _, err := trie.query("[\xff\xff-\xff", 1000, func([]string) ([]string, error) { return nil, nil })
@@ -752,6 +756,7 @@ func TestTrieEdgeCases(t *testing.T) {
 }
 
 func TestTrieQueryOpts(t *testing.T) {
+	t.Parallel()
 	var trieIndex = newTrie(".wsp", 0, nil)
 
 	trieIndex.insert("/sys/app/host-01.wsp", 0, 0, 0, 0)
@@ -793,60 +798,87 @@ func TestTrieQueryOpts(t *testing.T) {
 }
 
 func TestTrieConcurrentReadWrite(t *testing.T) {
+	t.Parallel()
 	trieIndex := newTrie(".wsp", 0, nil)
-
-	rand.Seed(time.Now().Unix())
-
-	var donec = make(chan bool)
-	// var filec = make(chan string)
-	var filem sync.Map
-	var factor = 100
+	random := rand.New(rand.NewSource(1))
+	firstSeenAt := time.Now().Unix()
+	const factor = 100
+	var suffixes [factor]string
+	for k := range suffixes {
+		suffixes[k] = strconv.Itoa(k) + ".wsp"
+	}
+	paths := make([]string, factor*factor*factor)
+	// All names live for the full test; keep their bytes in one immutable
+	// allocation instead of a million separate allocations under the race detector.
+	var names strings.Builder
+	names.Grow(len(paths) * len("/level-0-99/level-1-99/level-2-99.wsp"))
+	for i := range factor {
+		for j := range factor {
+			prefix := "/level-0-" + strconv.Itoa(i) + "/level-1-" + strconv.Itoa(j) + "/level-2-"
+			for k := range factor {
+				start := names.Len()
+				names.WriteString(prefix)
+				names.WriteString(suffixes[k])
+				paths[(i*factor+j)*factor+k] = names.String()[start:]
+			}
+		}
+	}
+	// The writer inserts in ordinal order. This watermark is the same
+	// membership oracle as a map, without retaining another million names.
+	var inserted atomic.Int64
+	checks := make(chan struct{})
 	go func() {
+		defer close(checks)
 		for run := 0; run < 3; run++ {
 			for i := 0; i < factor; i++ {
 				for j := 0; j < factor; j++ {
+					// Start a reader alongside each row, then let it wait for
+					// the next row instead of querying in a busy loop.
+					checks <- struct{}{}
 					for k := 0; k < factor; k++ {
-						filem.Store(fmt.Sprintf("level-0-%d.level-1-%d.level-2-%d", i, j, k), true)
-						trieIndex.insert(fmt.Sprintf("/level-0-%d/level-1-%d/level-2-%d.wsp", i, j, k), 0, 0, 0, 0)
-						// if (i+j+k)%5 == 0 {
-						// 	time.Sleep(time.Millisecond * time.Duration(rand.Intn(10)))
-						// }
+						if run == 0 {
+							inserted.Store(int64((i*factor+j)*factor + k + 1))
+						}
+						trieIndex.insert(paths[(i*factor+j)*factor+k], 0, 0, 0, firstSeenAt)
 					}
 				}
 			}
-
+			checks <- struct{}{}
 			trieIndex.prune()
 			trieIndex.root.gen++
 		}
-
-		donec <- true
 	}()
 
-	// time.Sleep(time.Second)
-
 	var zero int
-	for {
-		select {
-		case <-donec:
-			t.Logf("total zero result: %d/%d", zero, factor*factor*factor)
-			return
-		// case <-filec:
-		default:
-			// skipcq: GSC-G404
-			files, _, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", rand.Intn(factor), rand.Intn(factor), rand.Intn(factor)), math.MaxInt, nil)
-			if err != nil {
-				panic(err)
-			}
-			if len(files) > 0 {
-				for _, f := range files {
-					if _, ok := filem.Load(f); !ok {
-						t.Errorf("trie index returned an unknown file: %s", f)
-					}
+	for range checks {
+		files, _, _, _, err := trieIndex.query(fmt.Sprintf("level-0-%d/level-1-%d/level-2-%d*", random.Intn(factor), random.Intn(factor), random.Intn(factor)), math.MaxInt, nil)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		for _, file := range files {
+			parts := strings.Split(file, ".")
+			ordinal := 0
+			known := len(parts) == 3
+			for level, part := range parts {
+				prefix := fmt.Sprintf("level-%d-", level)
+				n, err := strconv.Atoi(strings.TrimPrefix(part, prefix))
+				if err != nil || n < 0 || n >= factor || part != prefix+strconv.Itoa(n) {
+					known = false
 				}
-			} else {
-				zero++
+				ordinal = ordinal*factor + n
+			}
+			if !known || int64(ordinal) >= inserted.Load() {
+				t.Errorf("trie index returned an unknown file: %s", file)
 			}
 		}
+		if len(files) == 0 {
+			zero++
+		}
+	}
+	t.Logf("total zero result: %d/%d", zero, factor*factor*factor)
+	if got := len(trieIndex.allMetrics('.')); got != factor*factor*factor {
+		t.Fatalf("indexed %d metrics, want %d", got, factor*factor*factor)
 	}
 }
 
@@ -854,6 +886,7 @@ func TestTrieConcurrentReadWrite(t *testing.T) {
 var _ = (&trieIndex{}).dump
 
 func TestTriePrune(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		files1 []string
 		files2 []string
@@ -1047,6 +1080,7 @@ func BenchmarkGlobIndex(b *testing.B) {
 }
 
 func TestDumpAllMetrics(t *testing.T) {
+	t.Parallel()
 	files := []string{
 		"/bobo.wsp",
 		"/bobododo/xxx.wsp",
@@ -1099,94 +1133,102 @@ func TestDumpAllMetrics(t *testing.T) {
 	}
 }
 func TestTrieCreateThrottleOff(t *testing.T) {
+	t.Parallel()
 
 }
 func TestTrieCreateThrottle(t *testing.T) {
-	// create index
-	tindex := newTrie(
-		".wsp",
-		15,
-		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
-			return 0, 0, 0
-		},
-	)
-	time.Sleep(100 * time.Millisecond) // wait till ticker is on
-	var input1 []string
-	var input2 []string
-	for i := 0; i < 5; i++ {
-		input1 = append(
-			input1,
-			fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i),
-			fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i),
-			fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i),
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		// create index
+		tindex := newTrie(
+			".wsp",
+			15,
+			func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+				return 0, 0, 0
+			},
 		)
-		input2 = append(
-			input2,
-			fmt.Sprintf("/sys/app/server-%02d/new-cpu.wsp", i),
-			fmt.Sprintf("/sys/app/server-%02d/new-memory.wsp", i),
-			fmt.Sprintf("/sys/app/server-%02d/new-iostat.wsp", i),
-		)
-	}
-	insertAndThrottle := func(index *trieIndex, m string, shouldBeThrottled bool) {
-		throttleMetric := strings.ReplaceAll(m, "/", ".")
-		throttleMetric = throttleMetric[1 : len(throttleMetric)-4]
-		throttle := index.throttle(&points.Points{Metric: throttleMetric, Data: nil}, false)
-		if throttle != shouldBeThrottled {
-			t.Errorf("throttle(%q) = %t, wants %t", m, throttle, shouldBeThrottled)
+		defer tindex.maxCreatesTicker.Stop()
+		synctest.Wait()
+		var input1 []string
+		var input2 []string
+		for i := 0; i < 5; i++ {
+			input1 = append(
+				input1,
+				fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i),
+				fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i),
+				fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i),
+			)
+			input2 = append(
+				input2,
+				fmt.Sprintf("/sys/app/server-%02d/new-cpu.wsp", i),
+				fmt.Sprintf("/sys/app/server-%02d/new-memory.wsp", i),
+				fmt.Sprintf("/sys/app/server-%02d/new-iostat.wsp", i),
+			)
 		}
-		if !throttle {
-			index.insert(m, 0, 0, 0, 0)
+		insertAndThrottle := func(index *trieIndex, m string, shouldBeThrottled bool) {
+			throttleMetric := strings.ReplaceAll(m, "/", ".")
+			throttleMetric = throttleMetric[1 : len(throttleMetric)-4]
+			throttle := index.throttle(&points.Points{Metric: throttleMetric, Data: nil}, false)
+			if throttle != shouldBeThrottled {
+				t.Errorf("throttle(%q) = %t, wants %t", m, throttle, shouldBeThrottled)
+			}
+			if !throttle {
+				index.insert(m, 0, 0, 0, 0)
+			}
 		}
-	}
-	for _, m := range input1 {
-		insertAndThrottle(tindex, m, false)
-	}
-	// check if existing metrics don't trigger hard throttle
-	for _, m := range input1 {
-		insertAndThrottle(tindex, m, false)
-	}
-	if tindex.throttledCreates > 0 {
-		t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, 0)
-	}
-	for _, m := range input2 {
-		insertAndThrottle(tindex, m, true)
-	}
-	if tindex.throttledCreates != uint64(len(input2)) {
-		t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, len(input2))
-	}
-	time.Sleep(time.Second)
-	// should not be throttled
-	for _, m := range input2 {
-		insertAndThrottle(tindex, m, false)
-	}
-	// throttle is switched off
-	// create index
-	tindexNoThrottling := newTrie(
-		".wsp",
-		0,
-		func(metric string) (logicalSize, physicalSize, dataPoints int64) {
-			return 0, 0, 0
-		},
-	)
-	var input3 []string
-
-	for i := 0; i < 1000; i++ {
-		input3 = append(
-			input3,
-			fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i),
-			fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i),
-			fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i),
+		for _, m := range input1 {
+			insertAndThrottle(tindex, m, false)
+		}
+		// check if existing metrics don't trigger hard throttle
+		for _, m := range input1 {
+			insertAndThrottle(tindex, m, false)
+		}
+		if tindex.throttledCreates > 0 {
+			t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, 0)
+		}
+		for _, m := range input2 {
+			insertAndThrottle(tindex, m, true)
+		}
+		if tindex.throttledCreates != uint64(len(input2)) {
+			t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, len(input2))
+		}
+		time.Sleep(time.Second)
+		synctest.Wait()
+		// should not be throttled
+		for _, m := range input2 {
+			insertAndThrottle(tindex, m, false)
+		}
+		// throttle is switched off
+		// create index
+		tindexNoThrottling := newTrie(
+			".wsp",
+			0,
+			func(metric string) (logicalSize, physicalSize, dataPoints int64) {
+				return 0, 0, 0
+			},
 		)
-	}
-	for _, m := range input3 {
-		insertAndThrottle(tindexNoThrottling, m, false)
-	}
-	if tindexNoThrottling.throttledCreates != 0 {
-		t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, 0)
-	}
+		var input3 []string
 
+		for i := 0; i < 1000; i++ {
+			input3 = append(
+				input3,
+				fmt.Sprintf("/sys/app/server-%02d/cpu.wsp", i),
+				fmt.Sprintf("/sys/app/server-%02d/memory.wsp", i),
+				fmt.Sprintf("/sys/app/server-%02d/iostat.wsp", i),
+			)
+		}
+		for _, m := range input3 {
+			insertAndThrottle(tindexNoThrottling, m, false)
+		}
+		if tindexNoThrottling.throttledCreates != 0 {
+			t.Errorf("throttledCreates metrics counter is %d, wants %d", tindex.throttledCreates, 0)
+		}
+
+	})
 }
+
 func TestTrieQuotaGeneral(t *testing.T) {
+	t.Parallel()
 	type metric struct {
 		name         string
 		logicalSize  int64
@@ -1428,6 +1470,7 @@ func stringifyQuotaPoints(ps []points.Points) string {
 }
 
 func TestTrieQuotaCacheHitStillChecksThroughput(t *testing.T) {
+	t.Parallel()
 	index := newTrie(".wsp", 0, nil)
 	if _, err := index.applyQuotas(time.Minute, &Quota{
 		Pattern: "/", Throughput: 1, DroppingPolicy: QDPNew,
@@ -1484,6 +1527,7 @@ func BenchmarkTrieQuotaEarlyReturn(b *testing.B) {
 }
 
 func TestTrieQuotaThroughput(t *testing.T) {
+	t.Parallel()
 	tindex := newTrie(
 		".wsp",
 		0,
@@ -1547,6 +1591,7 @@ func TestTrieQuotaThroughput(t *testing.T) {
 }
 
 func TestTrieReadMetric(t *testing.T) {
+	t.Parallel()
 	input := []string{
 		"/sys/app/server-001/cpu.wsp",
 		"/sys/app/server-002/cpu.wsp",
@@ -1624,6 +1669,7 @@ func TestTrieReadMetric(t *testing.T) {
 }
 
 func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
+	t.Parallel()
 	tindex := newTrie(
 		".wsp",
 		0,
@@ -1718,6 +1764,7 @@ func TestTrieQuotaThroughputWithDelayedReset(t *testing.T) {
 }
 
 func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
+	t.Parallel()
 	tindex := newTrie(
 		".wsp",
 		0,
@@ -1773,6 +1820,7 @@ func TestTrieQuotaConcurrentApplyAndEnforce(t *testing.T) {
 }
 
 func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
+	t.Parallel()
 	tindex := newTrie(
 		".wsp",
 		0,
@@ -1830,5 +1878,26 @@ func TestTrieQuotaWithProperHierarchicalThroughputEnforcement(t *testing.T) {
 		{Metric: "read_bytes.root", Data: []points.Point{{Value: 0}}},
 	}; !reflect.DeepEqual(tindex.qauMetrics, wants) {
 		t.Errorf("qauMetrics:\n%swants:\n%s", stringifyQuotaPoints(tindex.qauMetrics), stringifyQuotaPoints(wants))
+	}
+}
+
+var benchmarkTrieFileNode *trieNode
+
+func BenchmarkTrieFileNode(b *testing.B) {
+	b.ReportAllocs()
+	for range b.N {
+		benchmarkTrieFileNode = newFileNode(7, 11, 13, 17, 19)
+	}
+}
+
+var benchmarkTrieChildren *[]*trieNode
+
+func BenchmarkTrieSingleChild(b *testing.B) {
+	child := &trieNode{childrens: emptyTrieNodes}
+	b.ReportAllocs()
+	for range b.N {
+		n := trieNode{childrens: emptyTrieNodes}
+		n.addChild(child)
+		benchmarkTrieChildren = n.childrens
 	}
 }

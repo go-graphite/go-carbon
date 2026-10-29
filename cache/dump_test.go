@@ -2,7 +2,10 @@ package cache
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,5 +83,36 @@ func TestVisitMetricNamesIncludesInFlightAndCached(t *testing.T) {
 	}
 	if got := c.Get("one"); len(got) != 2 || got[0].Value != 1 || got[1].Value != 3 {
 		t.Fatal("in-flight/current history changed", got)
+	}
+}
+
+func TestVisitMetricNamesParallelMatchesSerial(t *testing.T) {
+	c := New()
+	for i := range 5000 {
+		c.Add(points.OnePoint(fmt.Sprintf("m.%d", i), 1, 1))
+	}
+	if p, ok := c.PopNotConfirmed("m.7"); !ok || p == nil {
+		t.Fatal("pop")
+	}
+	var serial []string
+	_ = c.VisitMetricNames(func(name string) error { serial = append(serial, name); return nil })
+	var mu sync.Mutex
+	var parallel []string
+	if err := c.VisitMetricNamesParallel(8, func(name string) error {
+		mu.Lock()
+		parallel = append(parallel, name)
+		mu.Unlock()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(serial)
+	slices.Sort(parallel)
+	if !slices.Equal(serial, parallel) || len(serial) != 5000 {
+		t.Fatal("parallel visit differs", len(serial), len(parallel))
+	}
+	stop := errors.New("stop")
+	if err := c.VisitMetricNamesParallel(4, func(string) error { return stop }); !errors.Is(err, stop) {
+		t.Fatal(err)
 	}
 }

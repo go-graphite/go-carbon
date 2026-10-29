@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	pickle "github.com/lomik/og-rek"
@@ -33,6 +34,8 @@ type findResponse struct {
 }
 
 func (listener *CarbonserverListener) findHandler(wr http.ResponseWriter, req *http.Request) {
+	phasecpu.Set(phasecpu.Find)
+	defer phasecpu.Set(phasecpu.Other)
 	// URL: /metrics/find/?local=1&format=pickle&query=the.metric.path.with.glob
 
 	t0 := time.Now()
@@ -168,11 +171,11 @@ func findRequestFormat(req *http.Request) string {
 }
 
 func (listener *CarbonserverListener) findResponse(ctx context.Context, logger *zap.Logger, t0 time.Time, formatCode responseFormat, format string, query []string) (*findResponse, bool, error) {
-	if !listener.findCacheEnabled || listener.getMetricStore() != nil {
+	if !listener.findCacheEnabled || listener.usesSharedCatalogCachePolicy() {
 		return listener.findMetricsOrNotFound(ctx, logger, t0, formatCode, query)
 	}
 	key := strings.Join(query, ",") + "&" + format
-	result, fromCache, err := getWithCache(logger, listener.findCache, key, 100*1024*1024, listener.discoveryCacheTTL(query), func() (interface{}, error) {
+	result, fromCache, err := getWithCache(logger, listener.findCache, key, listener.discoveryCacheTTL(query), findResponseSize, func() (interface{}, error) {
 		return listener.findMetrics(ctx, logger, t0, formatCode, query)
 	})
 	if err != nil {
@@ -212,6 +215,34 @@ type globs struct {
 	Leafs     []bool
 	TrieNodes []*trieNode
 	Lookups   uint32
+}
+
+// Sizes of cached find and glob results, in bytes.
+
+func findResponseSize(v interface{}) int {
+	if r, _ := v.(*findResponse); r != nil {
+		return len(r.data)
+	}
+	return 0
+}
+
+func globResponseSize(v interface{}) int {
+	if r, _ := v.(*protov2.GlobResponse); r != nil {
+		return r.SizeVT()
+	}
+	return 0
+}
+
+func globsSize(v interface{}) int {
+	expanded, _ := v.([]globs)
+	var size int
+	for _, g := range expanded {
+		size += len(g.Name) + len(g.Leafs) + 8*len(g.TrieNodes)
+		for _, f := range g.Files {
+			size += 16 + len(f)
+		}
+	}
+	return size
 }
 
 func getProtoV2FindResponse(expandedGlob globs, query string) *protov2.GlobResponse {
@@ -386,12 +417,11 @@ GATHER:
 
 func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Context, logger *zap.Logger, handler string, queries []string) ([]globs, bool, error) {
 	key := strings.Join(queries, "&")
-	size := uint64(100 * 1024 * 1024)
 	var expandedGlobs interface{}
 	var err error
 	isCacheHit := false
-	if listener.globCacheEnabled && listener.getMetricStore() == nil {
-		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, size, listener.discoveryCacheTTL(queries),
+	if listener.globCacheEnabled && !listener.usesSharedCatalogCachePolicy() {
+		expandedGlobs, isCacheHit, err = getWithCache(logger, listener.globCache, key, listener.discoveryCacheTTL(queries), globsSize,
 			func() (interface{}, error) {
 				return listener.getExpandedGlobs(ctx, logger, time.Now(), queries)
 			})
@@ -423,6 +453,8 @@ func (listener *CarbonserverListener) getExpandedGlobsWithCache(ctx context.Cont
 }
 
 func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.GlobRequest) (*protov2.GlobResponse, error) {
+	phasecpu.Set(phasecpu.Find)
+	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()
 
 	atomic.AddUint64(&listener.metrics.FindRequests, 1)
@@ -461,11 +493,10 @@ func (listener *CarbonserverListener) Find(ctx context.Context, req *protov2.Glo
 	var finalRes *protov2.GlobResponse
 	var lookups uint32
 
-	if listener.findCacheEnabled && listener.getMetricStore() == nil {
+	if listener.findCacheEnabled && !listener.usesSharedCatalogCachePolicy() {
 		key := query + "&" + format + "grpc"
-		size := uint64(100 * 1024 * 1024)
 		var result interface{}
-		result, fromCache, err = getWithCache(logger, listener.findCache, key, size, listener.discoveryCacheTTL([]string{query}),
+		result, fromCache, err = getWithCache(logger, listener.findCache, key, listener.discoveryCacheTTL([]string{query}), globResponseSize,
 			func() (interface{}, error) {
 				expandedGlobs, _, err := listener.getExpandedGlobsWithCache(ctx, logger, "find", []string{query})
 				if err != nil {

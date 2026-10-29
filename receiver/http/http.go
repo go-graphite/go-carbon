@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
@@ -117,6 +118,9 @@ func (rcv *HTTP) Stat(send helper.StatCallback) {
 }
 
 func (rcv *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+
+	phasecpu.Set(phasecpu.ReceiverHTTP)
+	defer phasecpu.Set(phasecpu.Other)
 	if r.Method == "GET" {
 		http.Error(w, "OK", http.StatusOK)
 		return

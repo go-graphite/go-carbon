@@ -1,4 +1,10 @@
 [common]
+# Opt-in estimated CPU by subsystem: default 1s sample every 60s when enabled.
+# Duration must be positive and at most 1/60 of the interval (duty below 2%
+# including jitter). Aggregation runs outside the sampling window.
+# Off by default; requires restart. Competes with on-demand/Pyroscope CPU profiles.
+# phase-cpu-profile-interval = "60s"
+# phase-cpu-profile-duration = "1s"
 # Run as user. Works only in daemon mode
 user = "carbon"
 # Prefix for store all internal go-carbon graphs. Supported macroses: {host}
@@ -9,12 +15,28 @@ metric-endpoint = "local"
 metric-interval = "1m0s"
 # Increase for configuration with multi persister workers
 max-cpu = 4
+# Optional heartbeat file, rewritten every heartbeat-interval. A start that finds
+# no clean (dump) stop in it logs and records the window of possibly lost cached
+# points, for tool/replica-backfill --since-unclean-start. Empty disables it.
+heartbeat-file = ""
+heartbeat-interval = "10s"
+# Return freed C heap memory to the system this often ("0s" disables). Only
+# cgo builds on Linux allocate from it: the shared store's block cache and
+# memtables. glibc keeps freed chunks in per-thread arenas, so without trims
+# resident memory can grow to about twice what the store uses. Each call is
+# malloc_trim(0), which walks every arena: seconds on a large fragmented heap,
+# so keep the interval at minutes. SIGHUP applies a change.
+malloc-trim-interval = "0s"
+# Export malloc_system_bytes, malloc_inuse_bytes and malloc_free_bytes (glibc
+# 2.33 or later), read after each trim. Reading them walks the arenas too.
+malloc-stats = false
 
 [whisper]
 data-dir = "/var/lib/graphite/whisper"
 # Storage backend: files (default) or experimental pebble-chunk shared storage.
 # Shared mode stores metric names in a catalog; it creates no per-metric files.
-# See doc/shared-storage.md for migration, quotas and transfer configuration.
+# See doc/pebble-storage/README.md for the design and tuning, and
+# doc/shared-storage.md for migration, quotas and transfer configuration.
 storage-backend = "files"
 # Pebble chunk store directory defaults to data-dir + "/.store-chunks" when empty.
 store-dir = ""
@@ -22,24 +44,246 @@ store-dir = ""
 # memtables for block-cache reads. It is not an RSS limit.
 store-cache-size = 268435456
 store-memtable-size = 67108864
+# Background compaction budget. Zero preserves Pebble's default of one worker.
+# L0 concurrency adds a compactor for each multiple of this sublevel count,
+# capped by the worker budget; zero preserves Pebble's default of ten.
+# Tune against sustained queue/debt growth. The worker budget reloads on SIGHUP
+# (running compactions finish first); L0 concurrency requires a restart. Neither
+# changes the L0 stop-writes threshold. When compactions saturate the device,
+# flushes wait behind them and writes stall: fewer workers can raise write
+# throughput at the cost of slower debt reduction.
+store-compaction-workers = 0
+# Aggregate compaction SST output bytes per second: 0 off (default), positive
+# fixed budget, -1 automatic. Reloads on SIGHUP, including waiting writes.
+# Auto learns unpaced for one hour, then targets 2x the one-hour EWMA of local
+# SST ingress times measured write amplification (floor 8 MiB/s). Recent output
+# and debt growth supply catch-up headroom for lagging compactions/delete waves.
+# Auto bypasses on excess debt (>2x normal and >4 GiB), L0 sublevels >=6 (or half
+# the stop threshold), memtable pressure, stalls (plus 5 min), and active/recent
+# conversion (5 min since the last activity; an idle migration does not bypass).
+# Flushes, WALs and ingest tables stay unpaced. Shutdown bypasses every mode.
+# Watch target, bypass reasons, debt and stalls before enabling auto fleetwide.
+store-compaction-rate = 0
+store-l0-compaction-concurrency = 0
+# L0 read amplification that starts an L0 compaction, and that stops writes.
+# Hot blocks are rewritten in every flush; a higher compaction threshold drops
+# more overwritten versions per byte rewritten, at more L0 read amplification.
+# Keep the stop threshold well above it. Zero keeps Pebble's 4 and 12.
+# store-l0-compaction-threshold = 0
+# store-l0-stop-writes-threshold = 0
+# Base level size in bytes; zero keeps Pebble's 64 MiB.
+# store-lbase-max-bytes = 0
+# Sync new tables that many at a time just before the manifest records them,
+# instead of one after another as Pebble finishes each. A flush of 2 MiB L0
+# tables otherwise waits for one sync per table in turn, which on a busy device
+# is most of the flush time. Durability at each manifest commit is unchanged.
+# Zero keeps Pebble's per-table syncs. Requires restart.
+# store-parallel-table-syncs = 0
+# Flush output table size only (deeper levels keep their sizes). Fewer, larger
+# L0 tables need fewer syncs but overlap more of the other L0 sublevels and of
+# the base level; 64 MiB once stalled writes on the L0 limit. Zero keeps 2 MiB.
+# store-l0-target-file-size = 0
+# Bloom filter bits per key in new tables (10 gives about 1% false positives).
+# Point reads then skip tables that cannot hold the key instead of searching
+# every level. Tables gain filters as compactions rewrite them. Requires
+# restart; zero writes no filters.
+# store-bloom-filter-bits = 0
+# Keep Pebble's write-ahead logs in another directory, usually on another
+# device, so WAL writes do not share the store device's write budget. The
+# directory must already exist (a missing mount fails startup instead of
+# writing the WAL to the root filesystem). Changing it flushes the logs from the
+# old location at the next start. Empty keeps them in the store directory.
+# Requires restart.
+# store-wal-dir = ""
+# Block cache shards; zero keeps four per CPU. Raise when readers queue on
+# cache shard locks behind the inserts that misses cause. Requires restart.
+# store-cache-shards = 0
+# Table cache shards; zero keeps Pebble's one per CPU. Requires restart.
+# store-table-cache-shards = 0
+# Compact the whole store once in the background when this token differs from
+# the last finished run (recorded in the store's COMPACTED file), for example to
+# drop range tombstones written by older binaries. Requires restart.
+# store-compact-once = ""
+# Let a block rewritten under the same keys (v6 layout, or the same v7 time
+# bucket) overwrite its old groups instead of deleting them first. Reads stop at
+# the block's point count, so leftover groups past it are never read; they are
+# overwritten as the block refills. Saves a tombstone per old group, which
+# compaction otherwise carries down to the bottom level. Requires restart.
+# store-reuse-block-keys = false
+# Store late points (behind an archive's encoded watermark) in the blocks
+# covering their intervals, recomputing the coarse windows they change in place,
+# instead of leaving an out-of-order sidecar. Existing sidecars and fallback
+# late/coarse points are folded before the update commits, using a full rewrite
+# when in-place folding is impossible. Conversion always folds source sidecars;
+# a failed fold fails that conversion and retains its source. Direct-write
+# conversion also requires a ready, zero sidecar inventory before completion.
+# See doc/store-ooo-fold.md for inventory gauges and the resumable admin tool.
+# Requires the incremental continuation store. Restart required.
+# store-ooo-direct-writes = false
+# Serve a fetch's prefix walks and reads of rarely rewritten keys through one
+# iterator over the metric's keys instead of one lookup per read. Those reads
+# consult bloom filters; prefix walks, like any iterator's, cannot. Requires
+# restart.
+# store-fetch-shared-iterator = false
+# Keep up to this many bytes of recently written or read metrics' committed
+# metadata in memory: catalog entries plus each metric's file names, manifests
+# and header pages, which every update and fetch otherwise reads back from the
+# LSM, opening a table or iterator in each level. An update writes its new
+# state through; mutations other than updates drop it. States are kept as
+# records in memory the garbage collector does not scan, about 0.5-2 KiB per
+# metric; records replaced but not yet compacted add up to an eighth
+# (store_metadata_cache_arena_bytes reports the total). 0 (default) disables.
+# Requires restart.
+# store-metadata-cache-size = 0
+# At start, load the metadata cache in the background with the state of the
+# metrics the restored cache holds (a pending checkpoint, else the restored
+# dump), which the persister writes within one writeout cycle; until each has
+# been written once, its first update otherwise reads that state from the LSM.
+# It takes the names in the order the persister writes them (the checkpoint's
+# claim order, else cache order), reading each batch of 32 in key order
+# through one read view, on store-metadata-cache-prewarm-workers workers
+# (0: 4) at up to store-metadata-cache-prewarm-rate metrics per second
+# (0: unpaced). It skips metrics already cached or being written, never
+# evicts, stops when the cache is nearly full, and stops with the store. Needs
+# store-metadata-cache-size. Read at start only. Logged as "metadata cache
+# prewarmed"; counted by store_metadata_cache_prewarmed_total,
+# _prewarm_skipped_total and _prewarm_failed_total.
+# store-metadata-cache-prewarm = false
+# store-metadata-cache-prewarm-workers = 0
+# store-metadata-cache-prewarm-rate = 0
+# Give each read of a continuation update its own LSM lookup or iterator again,
+# which opens a table in every level it reaches. By default an update's prefix
+# walks and reads of rarely rewritten keys share one iterator over the metric's
+# keys and the update's batch, which opens each level's table once. SIGHUP
+# switches updates that start afterwards; /admin/info reports the current
+# choice as engine UpdatePointLookups.
+# store-update-point-lookups = false
+# Metric names longer than 4000 bytes, or with a node over 255 bytes, are
+# refused: no Whisper file could hold them, and their catalog keys bloat the
+# index of every table that stores them. This deletes, once in the background
+# after start, metrics stored under such names before the limit existed.
+# store-purge-invalid-names = false
+# Bound on queued (unflushed) memtables. Deeper absorbs write bursts instead of
+# stalling writers; a crash replays up to this much WAL. Zero means 8 GiB.
+# store-memtable-max-unflushed-bytes = 0
+# Soft table-reader file budget; zero preserves Pebble's default of 1,000.
+# Large stores may need a higher budget to avoid reopening SSTables. Measure
+# CPU, allocations, RSS and descriptor use together. Requires restart.
+store-max-open-files = 0
 # Pebble WAL sync interval for all mutations, including buckyd transfers/deletes.
 # "0s" syncs each committed batch. With periodic sync, a crash can lose mutations
 # since the last successful sync; sync delays can extend the interval.
 # Requires restart. Ignored by the files backend.
 store-sync-interval = "1s"
+# Ready metrics to combine in a shared-store commit (1..8). One retains the
+# normal path. Eight amortizes synchronous WAL commits; benchmark interval-
+# synced workloads before enabling it, as per-key work still dominates.
+store-update-batch-size = 1
+# Adaptive exact integer deltas / Float64 byte-stream split + Zstd in a separate
+# shared format. Empty or "legacy" preserves the existing chunk encoding.
+# Requires storage-backend = "pebble-chunk" and a separate store-dir. Late and
+# corrected points follow the same atomic archive/WAL path as ordered writes.
+store-encoding = "legacy"
+
+# Bounded exact-store canary: write each batch to the original data-dir before
+# acknowledging it in the shared store, keeping stock cwhisper rollback current.
+# Requires exact encoding, an explicit physically disjoint store-dir, and buckyd
+# and shared expiration disabled. This temporarily retains file write overhead.
+# A durable MIRROR-RECONCILE-REQUIRED guard prevents reusing the shared store after
+# this session until it is reconciled against the current original tree.
+# store-mirror-files = false
+# Reconcile online while the API reads the current originals, then switch reads
+# in-process after full verification. Requires the exact rollback mirror above.
+# See doc/shared-exact-live-migration.md.
+# store-live-migration = false
+# Conversion workers: 0..65536; zero selects four. Incremental conversion I/O
+# slots and bytes-in-flight are separate bounds: waiting for an ingest group
+# releases the I/O slot but retains its byte reservation. Worker stacks and
+# queued metric names use additional memory.
+# store-migration-workers = 0
+# Optional local JSON lease file for changing active workers without restarting
+# the scan. When configured, store-migration-workers is the maximum. Missing,
+# invalid or expired leases use one worker; a valid zero-worker lease pauses.
+# See doc/shared-exact-live-migration.md for the versioned lease fields.
+# store-migration-control-file = ""
+# Optional OPERATOR-TRUSTED COMPLETED fully verified original capture tree.
+# Requires matching conversion/capture identities and verified-capture receipt;
+# never point this at a partial copy. Empty disables unchanged-image skips.
+# store-migration-baseline-copy = ""
+
+# Online conversion with immediate per-metric reclamation, for subsequent nodes.
+# Uses a NEW empty, physically disjoint store-dir and exact encoding. Each
+# verified metric switches reads/writes to shared storage before unlinking its
+# CWhisper main/OOO files. Completed work survives restart and worker changes.
+# Requires enabled flocked persister, trie carbonserver, file-list-cache-version
+# 2, and tags/rollback-mirror/whole-store live migration disabled. Embedded
+# buckyd can manage reclaimed shared metrics; pending source cleanup blocks deletes.
+# After reclamation rollback requires a compatible binary or replica/backup.
+# See doc/incremental-storage-migration.md before enabling this experimental mode.
+# store-incremental-migration = false
+# Optional same-filesystem archive outside data-dir and store-dir. Originals
+# are durably linked here before removal from the active source. Empty reclaims
+# them normally. Select before conversion; retain this setting on restarts.
+# Archived files are snapshots at each metric's cutover, not a live write mirror.
+# store-migration-archive-dir = ""
+# Bounds concurrent capture/decode/verification workspace, not total process RSS.
+# A single larger metric runs alone and must fit the free-space reserve too.
+# store-migration-bytes-in-flight = 268435456
+# Reserve for normal writes, index spooling, WAL and compaction; choose per node.
+# store-migration-min-free-bytes = 8589934592
+# Uses store-migration-workers and store-migration-control-file above. A valid
+# zero-worker lease pauses new admission; durable pending cleanup still runs.
+# Unlink converted originals at least this long after publication, batched by
+# directory, instead of inside each conversion. Freeing inodes next to files
+# still being converted makes XFS force its log on those opens. "0s" disables.
+# store-migration-reclaim-delay = "0s"
+# Deferred reclaim uses store-migration-io-slots directory workers (64 minimum,
+# 512 maximum), or 4 per CPU when slots are disabled. Each directory batches up
+# to 8192 due originals per sync, independently of other directories. The queue
+# holds up to 8388608 jobs including active batches before reclaiming inline.
+# Each job is 56 bytes plus its metric name and original path, with additional
+# slice capacity and per-directory bookkeeping. Ownership is durable before
+# queueing; cleanup completes only after the directory sync.
+# Keep newly written compressed blocks in a key space partitioned by the hour
+# they are written (store format v7), so compactions of recent writes stop
+# rewriting each metric's cold history. Upgrades a v6 store in place: existing
+# blocks stay readable and move as they rotate. Older binaries then refuse the
+# store, and disabling this later keeps writing v7 blocks.
+# store-time-buckets = false
+# With time buckets on, move blocks written before the upgrade into the
+# history bucket in the background, at about this many bytes per second
+# (0 disables). Each metric's newest blocks stay until they rotate. Progress
+# survives restarts and is reported as Relayout in the store statistics.
+# Changing a positive rate reloads on SIGHUP; enabling or disabling requires a
+# restart, so pause a running relayout with a tiny rate such as 1.
+# store-time-buckets-relayout-rate = 0
+
 # Automatically remove idle metrics from pebble-chunk storage. "0s" disables
 # the global policy. Matching entries in store-expiration-file override this
 # value; a matching "0s" explicitly keeps a metric.
 # Activity is the last successful storage write, not the sample timestamp.
 # Tracking is always on, including while expiration is disabled.
+# File conversion preserves the source main-file mtime.
 store-expiration = "0s"
 # Optional ordered INI file. Each section needs pattern and expiration. The
 # first regex match wins, so put keep exceptions before broader namespaces.
 # store-expiration-file = "/etc/go-carbon/storage-expiration.conf"
 # Cleanup starts immediately when enabled and then runs after each completed
-# sweep. It examines this many catalog entries per second in pages of 256.
+# sweep. It examines this many catalog entries per second in pages of 1024.
+# INI rules optionally accept grace (find rounding), exclude (regex) and until
+# (RFC3339). A keep rule whose exclusion matches falls through to later rules.
+# Defaults are zero grace, no exclusion and no deadline.
 store-expiration-check-interval = "1h"
-store-expiration-scan-rate = 1000
+store-expiration-scan-rate = 100000
+# Report candidates and logical Whisper-equivalent bytes without any mutation,
+# including activity initialization. Start fleet policies in this mode.
+store-expiration-dry-run = false
+# Deletes use conditional batches of at most 128; scanning has its own budget.
+store-expiration-delete-rate = 100
+store-expiration-max-deletes = 10000
+# Pause deletes for the rest of the sweep on pressure, continuing the report.
+store-expiration-max-l0-sublevels = 6
+store-expiration-max-compaction-debt = 1073741824
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-schemas-conf. Required
 schemas-file = "/etc/go-carbon/storage-schemas.conf"
 # http://graphite.readthedocs.org/en/latest/config-carbon.html#storage-aggregation-conf. Optional
@@ -140,11 +384,13 @@ remove-empty-file = false
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000
 # Capacity of queue between receivers and cache
-# Strategy to persist metrics. Values: "max","sorted","noop"
+# Strategy to persist metrics. Values: "max","sorted","noop","lexical"
 #   "max" - write metrics with most unwritten datapoints first
 #   "sorted" - sort by timestamp of first unwritten datapoint.
 #   "noop" - pick metrics to write in unspecified order,
 #            requires least CPU and improves cache responsiveness
+#   "lexical" - sort eligible metric names to improve shared catalog/block
+#               locality. Point order and batching eligibility are unchanged.
 write-strategy = "max"
 
 # Opt-in batching before opening Whisper files. Both zero disables batching.
@@ -155,6 +401,49 @@ write-strategy = "max"
 # Reloadable; enabling batching leaves already cached data immediately eligible.
 writeout-min-points = 0
 writeout-max-delay = "0s"
+# Metrics that start batching together (after a restart, say) otherwise reach
+# writeout-min-points or their deadline together every cycle, in one
+# synchronized write wave. A spread of 0.25 gives each metric a stable
+# threshold and max delay between 0.75 and 1 times the configured ones, so the
+# waves flatten within a few cycles. Never exceeds the configured values.
+# 0 (default) disables. Reloadable.
+writeout-max-delay-spread = 0.0
+# Place the first batching deadlines across each metric's usual spread period
+# from a shared startup epoch, using an independent stable hash. This flattens
+# restart write waves from the first cycle; later windows keep the usual
+# threshold and delay. No recurring short windows or metric history table.
+# The epoch starts at the first batchable arrival, after any urgent replay.
+# Arrivals whose startup slot has passed keep their usual window. For startup
+# arrivals within a minute, use rate windows of a few minutes to assess spread.
+# Opt-in: the initial batch waits for its phase even if it already meets the
+# point threshold. Max delay and the cache pressure bypass still apply. Cold
+# empty caches ramp up persisted points as their initial batches fill; evenly
+# phased writes cannot produce steady points/s immediately from an empty cache.
+# Does not defer urgent recovery, or make an unsafe restore batchable. Combine
+# with writeout-restore-spread for durable restored batches. With batching off
+# it has no effect. Reloadable for later arrivals; the epoch is not restarted.
+writeout-startup-spread = false
+# After a restart, restored points are otherwise written at once, then each
+# metric again with its first live points a cycle later: a burst of small
+# writes and compaction. With this on (and batching enabled), restored points
+# that stay durable meanwhile wait for a deadline spread over the first
+# writeout-max-delay instead: dump points the input log records, and saved
+# checkpoint metrics the store already has. New metrics, recovered input-log
+# or handoff points, and restores without an input log are still written at
+# once. Reloadable for later restores.
+writeout-restore-spread = false
+# Metrics reporting less often than writeout-max-delay (hourly rollups, say)
+# hold one point per window, and those that report at the same minute all
+# reach their deadline within its last writeout-max-delay-spread share: an
+# hourly burst of updates. With this on (and batching enabled), a metric whose
+# new point is at least writeout-max-delay newer than its last written one
+# gets a deadline spread, by name, over the whole window instead; it is still
+# written once per point. It returns to the usual deadline if more points
+# arrive in the window. Metrics are recognized from their second write after
+# enabling or a restart; the cache keeps the last written timestamp per hash
+# slot, about 16 bytes per cached metric. Independent of
+# writeout-max-delay-spread. Reloadable.
+writeout-sparse-spread = false
 # If > 0 use bloom filter to detect new metrics instead of cache (EXPERIMENTAL)
 # works better for multi-million metrics installations
 bloom-size = 0
@@ -315,6 +604,17 @@ bind = "0.0.0.0:4242"
 # Empty tmpdir uses the operating system temporary directory.
 tmpdir = ""
 auth-jwt-secret-file = ""
+# Whole-store checkpoint/copy API: /admin/store-copy on this listener, protected
+# by the same JWT header with namespaces=["*"] and ops=["admin"] (or root "*").
+# Requires input-log.enabled; refuses incomplete conversion, tags, expiration
+# and rollback mirrors. Pins input history and SSTs for at most six hours.
+# POST creates, POST /capture advances log prefixes, POST /seal drains receivers,
+# GET /file streams checksummed ranges, DELETE releases the checkpoint.
+# See tool/downsize/copy/README.md for relay fencing, resumption and readiness.
+# Source disk reserve for whole-store copy (zero selects 32 GiB). The local
+# watchdog aborts/releases a copy on low disk or input-log errors, even if its
+# external controller has died. Raise this for production compaction/ingest.
+copy-min-free-bytes = 34359738368
 # Empty node uses the hostname. Nodes describe the ingestion hashring using
 # HOST[:PORT][=INSTANCE]; offload sources do not need to be ring members.
 node = ""
@@ -360,15 +660,20 @@ request-timeout = "60s"
 query-cache-enabled = true
 # Enable carbonV2 gRPC streaming render cache, it will cache the result for 1 minute
 streaming-query-cache-enabled = false
-# 0 for unlimited
+# Maximum size in megabytes, 0 for unlimited
 query-cache-size-mb = 0
+# Store /render cache entries in this encoding: "gzip" or "none".
+# gzip entries take several times less memory and count their compressed size
+# against query-cache-size-mb. They are served as is to clients that accept
+# gzip and decoded for the others.
+query-cache-compression = "gzip"
 # Enable /metrics/find cache, it will cache the result for 5 minutes
 find-cache-enabled = true
-# 0 for unlimited
+# Maximum size in megabytes, 0 for unlimited
 find-cache-size-mb = 0
 # Enable expanded globs cache, it will cache the glob expansion result for 5 minutes
 glob-cache-enabled = true
-# 0 for unlimited
+# Maximum size in megabytes, 0 for unlimited
 glob-cache-size-mb = 0
 # Control trigram index
 #  This index is used to speed-up /find requests
@@ -622,10 +927,111 @@ restore-per-second = 0
 # connections. Input received after the checkpoint is replayed before reading
 # the transferred connections. Other receiver configurations use stop/rebind.
 handoff-supervisor = false
+# A shared store (whisper.storage-backend = "pebble-chunk" without mirrored
+# files) cannot hand its reads over: their data is in a database only one
+# process opens. With this enabled, and the same receiver and successor
+# requirements as above, the stopping instance still keeps reading input into
+# its tail log, closes the database, releases the supervisor and hands the
+# input sockets to the next instance once that has opened the database, so
+# senders never see input closed; reads restart as before. The worker outlives
+# the supervisor for that time, so the service manager must track only the main
+# process (systemd KillMode=process). Without a capable successor, or if it
+# does not take input within 20 s of its release, input stops as without
+# handoff. The successor is the binary systemd's ExecStart names (so a rollback
+# through a drop-in pointing at an older binary gets a plain stop), and the
+# process that registers is checked again: one that cannot take input makes
+# input stop at once. Input received after the checkpoint is replayed before
+# the successor reads input, which on large stores runs at ~0.5M points/s.
+store-input-handoff = false
+# Record format of the dump a stop writes: "legacy", "compact", or "blocks".
+# "compact" writes each metric's points in the cache's in-memory encoding,
+# copied without decoding, with a third of the dump CPU of "legacy", and
+# restore copies the bytes back into the cache (cache-compact.*.bin).
+# "blocks" additionally names each block of records once, sorted and front coded under
+# zstd: where metrics hold few points each, names were most of a dump's
+# bytes. On cache shards sampled from production stores: 557 -> 72 bytes per
+# metric with 19 points and 495-byte names per metric, 699 -> 529 with 176
+# points and 195-byte names. Name compression uses more CPU: keep "compact"
+# on dense workloads when stop time matters more than dump size; use "blocks"
+# for workloads dominated by metric names.
+# With a pending read checkpoint, the input
+# received during the dump goes to a compact input file too (about 13
+# instead of 157 bytes per point), whose checkpoint index is written before
+# input closes. For "blocks", it lists no records: about 25 instead of 100
+# bytes per metric. Restore and pending checkpoint reads accept every format,
+# whatever this setting.
+# Releases without this setting ignore compact files (cache-compact.*.bin,
+# cache-blocks.*.bin, input-compact.*.bin), and releases that write
+# cache-compact.*.bin ignore cache-blocks.*.bin: after a rollback to one, the
+# points they hold are not restored (the files stay in place); a later start
+# of a release that reads them restores such files, oldest first. Before
+# rolling back, set format = "legacy" and reload with SIGHUP: the stop then
+# writes legacy files, also of points restored from compact ones.
+format = "legacy"
+
+[input-log]
+# Continuous log of the points accepted into the cache, so that an unclean
+# exit (kill -9, OOM kill, power loss) loses only about sync-interval of input
+# instead of every point not yet persisted, which with writeout batching can
+# be minutes. On start the log is replayed before any receiver opens, after a
+# pending dump checkpoint and before legacy dump files.
+#
+# Points are recorded in per-shard buffers under the cache shard lock, then
+# written once per sync-interval as zstd-compressed frames: one large write
+# and one fdatasync per interval, into preallocated segment files that are
+# recycled once every point in them has been persisted. Each segment records
+# a metric name once and refers to it by a small id afterwards, and encodes
+# each point against the metric's previous point in that segment.
+#
+# A graceful dump stop (USR2 with [dump] enabled, which is also what
+# systemctl stop sends with KillSignal=USR2) deletes the log after the dump
+# and its input file are durable, so their points are restored once, from the
+# dump. If the dump fails or the stop is killed before that, the log stays and
+# the next start replays it. With [dump] disabled, USR2 stops input and syncs
+# the log; the next start replays it. SIGTERM and SIGKILL end the process at
+# once: the next start replays the log, losing at most one sync-interval.
+#
+# Restart only: SIGHUP refuses a configuration that changes this section, or
+# that raises cache.writeout-max-delay to the running log's max-age.
+enabled = false
+# Directory of the log segments. It must not be dump.path; a subdirectory is
+# fine. Disk use is the log's write rate times the age of the oldest
+# unpersisted point (up to cache.writeout-max-delay) plus truncate-lag. Metrics
+# sending every few seconds cost about 5 bytes per point, about 20 MB/s at
+# 4.5M points/s; metrics sending less often than a segment lasts cost about
+# 30 bytes per point, since every segment records their names again.
+path = "/var/lib/graphite/input-log/"
+# Group commit period: the most input an unclean exit loses.
+sync-interval = "1s"
+# Preallocated size of each segment file, in bytes (at least 16MB). Each
+# segment records every name it uses once, about 30 bytes per active metric,
+# so it should hold much more than that: at least a minute of input. Larger
+# segments record names less often: with 29M active metrics at 1M points/s,
+# 1 GiB segments wrote 8.8 MB/s and 4 GiB segments 2.2 MB/s. The log keeps
+# up to about six segments preallocated, so budget about 6 x segment-size of
+# disk (24 GiB at the default); lower it on small disks.
+segment-size = 4294967296
+# Points still unpersisted after max-age (a write that keeps failing, or a
+# persister that is far behind) are recorded again at the head of the log,
+# so they no longer keep older segments. Bounds the log to about max-age of
+# input. "0s" (default) uses twice cache.writeout-max-delay, at least 30m.
+# It must exceed cache.writeout-max-delay, or points waiting for their
+# writeout are logged twice, and be at least two sync intervals.
+max-age = "0s"
+# Segments are reused only this long after their points are confirmed, so a
+# confirmed write still in the page cache or an unsynced store WAL survives a
+# power loss. "0s" protects against process crashes only.
+truncate-lag = "1m"
 
 [pprof]
 listen = "localhost:7007"
 enabled = false
+# Process-wide sampling, applied at start and on SIGHUP (also with pprof disabled).
+# Mutex: sample one in N contention events; 0 disables. Start with 100.
+mutex-profile-fraction = 0
+# Block: average nanoseconds of blocking per sample; 0 disables.
+# Start with 1000000 (1ms); this is a duration in ns, not a sampling fraction.
+block-profile-rate = 0
 
 #[prometheus]
 #enabled = true

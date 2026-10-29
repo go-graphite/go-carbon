@@ -1,0 +1,159 @@
+package chunkstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"testing"
+	"time"
+
+	"github.com/cockroachdb/pebble/vfs"
+)
+
+func TestExpirationBatchMatchesAdministrativeDelete(t *testing.T) {
+	s := openFileMigrationStore(t, vfs.NewMem())
+	defer closeTestStore(t, s)
+	ctx := context.Background()
+	s.now = func() time.Time { return time.Unix(1790000100, 0) }
+	var records []Metadata
+	for _, name := range []string{"remove.a", "remove.b", "updated", "recreated", "pending"} {
+		snapshot := fileMigrationSnapshot()
+		snapshot.Metadata.Name = name
+		m, err := s.StageFileSnapshot(ctx, snapshot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err = s.PublishFileOwnership(ctx, snapshot, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != "pending" {
+			if err := s.CompleteFileCleanup(ctx, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		m, err = s.Metadata(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, m)
+	}
+	if err := s.UpdateMany(ctx, "updated", []Point{{Timestamp: 1790000001, Value: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Delete(ctx, "recreated"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create(ctx, records[3].MetricConfig); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.DeleteBatchIfUnchanged(ctx, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, outcome := range result {
+		if i < 2 && outcome != nil || i >= 2 && !errors.Is(outcome, ErrConflict) {
+			t.Fatalf("%d outcome %v", i, outcome)
+		}
+		_, err := s.Metadata(ctx, records[i].Name)
+		if (i < 2 && !errors.Is(err, ErrNotFound)) || (i >= 2 && err != nil) {
+			t.Fatalf("%s: %v", records[i].Name, err)
+		}
+	}
+	// The same-name/cache identity must be invalidated after a batch delete.
+	m, err := s.Create(ctx, records[0].MetricConfig)
+	if err != nil || m.ID == records[0].ID {
+		t.Fatalf("recreated %+v: %v", m, err)
+	}
+	if _, err := s.DeleteBatchIfUnchanged(ctx, []Metadata{m, m}); err == nil {
+		t.Fatal("duplicate accepted")
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.DeleteBatchIfUnchanged(cancelled, []Metadata{m}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+
+func convertedActivity(t *testing.T, s *Store, name string, activity time.Time, points []Point) ActivityBaseline {
+	t.Helper()
+	snapshot := fileMigrationSnapshot()
+	snapshot.Metadata.Name = name
+	snapshot.Metadata.LastUpdate = activity
+	snapshot.Archives[0].Points = points
+	m, err := s.StageFileSnapshot(context.Background(), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err = s.PublishFileOwnership(context.Background(), snapshot, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteFileCleanup(context.Background(), m); err != nil {
+		t.Fatal(err)
+	}
+	m, err = s.Metadata(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ActivityBaseline{Name: name, ID: m.ID, Generation: m.Generation, Revision: m.Revision, LastUpdate: m.LastUpdate}
+}
+func TestActivityBackfillOnlyLowersUnchangedConversion(t *testing.T) {
+	s := openFileMigrationStore(t, vfs.NewMem())
+	defer closeTestStore(t, s)
+	ctx := context.Background()
+	conversion := time.Unix(1790000100, 0)
+	s.now = func() time.Time { return conversion }
+	start, end := conversion.Add(-time.Minute), conversion.Add(time.Minute)
+	for i, tc := range []struct {
+		name   string
+		points []Point
+		want   int64
+	}{
+		{"old", []Point{{Timestamp: 1790000001, Value: 42}, {Timestamp: 1790000003, Value: math.NaN()}}, 1790000001},
+		{"empty", nil, 0},
+		{"future", []Point{{Timestamp: 1790000200, Value: 1}}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			baseline := convertedActivity(t, s, fmt.Sprintf("metric.%d", i), conversion, tc.points)
+			got, err := s.BackfillActivity(ctx, baseline, start, end, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == 0 && !got.IsZero() || tc.want != 0 && got.Unix() != tc.want {
+				t.Fatalf("newest %s want %d", got, tc.want)
+			}
+			before, _ := s.Metadata(ctx, baseline.Name)
+			if !baseline.matches(before) {
+				t.Fatal("dry-run mutated activity")
+			}
+			applied, err := s.BackfillActivity(ctx, baseline, start, end, true)
+			if err != nil || !applied.Equal(got) {
+				t.Fatalf("apply %s %v", applied, err)
+			}
+			after, _ := s.Metadata(ctx, baseline.Name)
+			if !got.IsZero() {
+				if after.Revision != baseline.Revision+1 || !after.LastUpdate.Equal(got) {
+					t.Fatalf("after %+v", after)
+				}
+				if _, err := s.BackfillActivity(ctx, baseline, start, end, true); !errors.Is(err, ErrConflict) {
+					t.Fatalf("repeat %v", err)
+				}
+			}
+		})
+	}
+	baseline := convertedActivity(t, s, "written", conversion, []Point{{Timestamp: 1790000001, Value: 1}})
+	if _, err := s.BackfillActivity(ctx, baseline, start, end, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMany(ctx, baseline.Name, []Point{{Timestamp: 1790000004, Value: 2}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.BackfillActivity(ctx, baseline, start, end, true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("overwrote a new write: %v", err)
+	}
+	if _, err := s.BackfillActivity(ctx, baseline, end, end.Add(time.Hour), true); err == nil {
+		t.Fatal("outside window accepted")
+	}
+}

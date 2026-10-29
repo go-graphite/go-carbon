@@ -11,6 +11,7 @@ import (
 )
 
 func TestDiscoveryCacheTTLConfig(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name, prefix, ttl string
 		invalid           bool

@@ -236,6 +236,9 @@ type Reader struct {
 // Close implements DB.Close, as documented in the pebble package.
 func (r *Reader) Close() error {
 	r.opts.Cache.Unref()
+	if r.opts.RangeDelCache != nil {
+		r.opts.RangeDelCache.Unref()
+	}
 
 	if r.readable != nil {
 		r.err = firstError(r.err, r.readable.Close())
@@ -456,7 +459,13 @@ func (r *Reader) readFilter(
 
 func (r *Reader) readRangeDel(stats *base.InternalIteratorStats) (bufferHandle, error) {
 	ctx := objiotracing.WithBlockType(context.Background(), objiotracing.MetadataBlock)
-	return r.readBlock(ctx, r.rangeDelBH, r.rangeDelTransform, nil /* readHandle */, stats, nil /* buffer pool */)
+	c := r.opts.RangeDelCache
+	id := r.opts.RangeDelCacheID
+	if c == nil {
+		c = r.opts.Cache
+		id = r.cacheID
+	}
+	return r.readBlockWithCache(ctx, r.rangeDelBH, r.rangeDelTransform, nil /* readHandle */, stats, nil /* buffer pool */, c, id)
 }
 
 func (r *Reader) readRangeKey(stats *base.InternalIteratorStats) (bufferHandle, error) {
@@ -524,7 +533,20 @@ func (r *Reader) readBlock(
 	stats *base.InternalIteratorStats,
 	bufferPool *BufferPool,
 ) (handle bufferHandle, _ error) {
-	if h := r.opts.Cache.Get(r.cacheID, r.fileNum, bh.Offset); h.Get() != nil {
+	return r.readBlockWithCache(ctx, bh, transform, readHandle, stats, bufferPool, r.opts.Cache, r.cacheID)
+}
+
+func (r *Reader) readBlockWithCache(
+	ctx context.Context,
+	bh BlockHandle,
+	transform blockTransform,
+	readHandle objstorage.ReadHandle,
+	stats *base.InternalIteratorStats,
+	bufferPool *BufferPool,
+	blockCache *cache.Cache,
+	cacheID uint64,
+) (handle bufferHandle, _ error) {
+	if h := blockCache.Get(cacheID, r.fileNum, bh.Offset); h.Get() != nil {
 		// Cache hit.
 		if readHandle != nil {
 			readHandle.RecordCacheHit(ctx, int64(bh.Offset), int64(bh.Length+blockTrailerLen))
@@ -641,7 +663,7 @@ func (r *Reader) readBlock(
 	if decompressed.buf.Valid() {
 		return bufferHandle{b: decompressed.buf}, nil
 	}
-	h := r.opts.Cache.Set(r.cacheID, r.fileNum, bh.Offset, decompressed.v)
+	h := blockCache.Set(cacheID, r.fileNum, bh.Offset, decompressed.v)
 	return bufferHandle{h: h}, nil
 }
 
@@ -1113,6 +1135,12 @@ func NewReader(f objstorage.Readable, o ReaderOptions, extraOpts ...ReaderOption
 		r.opts.Cache = cache.New(0)
 	} else {
 		r.opts.Cache.Ref()
+	}
+	if r.opts.RangeDelCache != nil {
+		r.opts.RangeDelCache.Ref()
+		if r.opts.RangeDelCacheID == 0 {
+			r.opts.RangeDelCacheID = r.opts.RangeDelCache.NewID()
+		}
 	}
 
 	if f == nil {

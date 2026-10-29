@@ -49,8 +49,14 @@ func (s metricStoreSeries) Values() []float64 {
 }
 
 func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
-	if metricStore := listener.getMetricStore(); metricStore != nil {
-		return listener.fetchFromMetricStore(metricStore, metric, fromTime, untilTime)
+	metricStore := listener.getMetricStore()
+	if metricStore != nil {
+		release := metricStore.OriginalReadGuard(metric)
+		defer release()
+		result, err := listener.fetchFromMetricStore(metricStore, metric, fromTime, untilTime)
+		if metricStore.IncrementalSource() == "" || !errors.Is(err, store.ErrNotFound) {
+			return result, err
+		}
 	}
 	var step int32
 
@@ -59,6 +65,13 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 	w, err := whisper.OpenWithOptions(path, &whisper.Options{
 		FLock: listener.flock, FlockType: syscall.LOCK_SH,
 	})
+	if err != nil && metricStore != nil && metricStore.IncrementalSource() != "" && errors.Is(err, os.ErrNotExist) {
+		// A new shared-only metric may have been created since the first lookup.
+		result, retryErr := listener.fetchFromMetricStore(metricStore, metric, fromTime, untilTime)
+		if !errors.Is(retryErr, store.ErrNotFound) {
+			return result, retryErr
+		}
+	}
 	if err != nil {
 		// the FE/carbonzipper often requests metrics we don't have
 		// We shouldn't really see this anymore -- expandGlobs() should filter them out
@@ -158,7 +171,12 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 func (listener *CarbonserverListener) fetchFromMetricStore(metricStore *store.Store, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
 	started := time.Now()
 	series, err := metricStore.Fetch(context.Background(), metric, int(fromTime), int(untilTime))
+	// Cache waits have their own metric, as in the CWhisper path above.
+	diskWait := time.Since(started)
 	if errors.Is(err, store.ErrNotFound) {
+		if metricStore.IncrementalSource() != "" {
+			return nil, err // Original-file fallback is part of normal routing.
+		}
 		atomic.AddUint64(&listener.metrics.NotFound, 1)
 		return nil, fmt.Errorf("open shared metric %q: %w", metric, os.ErrNotExist)
 	}
@@ -187,11 +205,10 @@ func (listener *CarbonserverListener) fetchFromMetricStore(metricStore *store.St
 	}
 	atomic.AddUint64(&listener.metrics.DiskRequests, 1)
 	listener.prometheus.diskRequest()
-	wait := time.Since(started)
 	atomic.AddUint64(&listener.metrics.MetricsReturned, 1)
 	listener.prometheus.returnedMetric()
-	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, uint64(wait.Nanoseconds()))
-	listener.prometheus.diskWaitDuration(wait)
+	atomic.AddUint64(&listener.metrics.DiskWaitTimeNS, uint64(diskWait.Nanoseconds()))
+	listener.prometheus.diskWaitDuration(diskWait)
 	atomic.AddUint64(&listener.metrics.PointsReturned, uint64(len(series.Values)))
 	listener.prometheus.returnedPoint(len(series.Values))
 	return res, nil

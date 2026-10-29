@@ -15,9 +15,12 @@ import (
 )
 
 func TestIndexWarmupOverlapsRestoreWithoutOpeningReceivers(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	root := t.TempDir()
-	app := New(TestConfig(root))
+	app := New(testConfig(t, root))
 	if err := app.ParseConfig(); err != nil {
 		t.Fatal(err)
 	}

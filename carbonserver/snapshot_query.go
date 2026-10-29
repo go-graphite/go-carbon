@@ -203,8 +203,13 @@ func (s *indexSnapshot) query(expr string, limit int, expand func([]string) ([]s
 	if err != nil {
 		return nil, nil, nil, 0, err
 	}
+	if parent, prefix, ok := s.literalChildren(a); ok {
+		return s.queryChildren(parent, prefix, limit)
+	}
 	iterator, err := s.index.Search(a, nil, nil)
 	pairedFiles := make(map[string]bool)
+	counterpart := snapshotCounterpart{s: s}
+	var next []byte
 	if iterator != nil {
 		defer iterator.Close()
 	}
@@ -242,9 +247,7 @@ func (s *indexSnapshot) query(expr string, limit int, expand func([]string) ([]s
 			node = s.directoryNode(name)
 			// The trie emits a metric and same-named namespace together, with
 			// the metric first, even when that pair crosses the result limit.
-			counterpart := append([]byte(nil), key[:boundary+1]...)
-			counterpart = append(counterpart, ".wsp"...)
-			metricRow, found, getErr := s.index.Get(counterpart)
+			metricRow, found, getErr := counterpart.lookup(key[:boundary+1])
 			if getErr != nil {
 				return nil, nil, nil, lookups, getErr
 			}
@@ -270,7 +273,9 @@ func (s *indexSnapshot) query(expr string, limit int, expand func([]string) ([]s
 		} else {
 			// NUL is the final byte of the matching namespace prefix. Its
 			// successor skips descendants without skipping a sibling metric.
-			next := append([]byte(nil), key[:boundary+2]...)
+			// Seek only reads the key; Current's key is the iterator's own
+			// buffer, so the successor is built in a separate scratch slice.
+			next = append(next[:0], key[:boundary+2]...)
 			next[len(next)-1] = 1
 			err = iterator.Seek(next)
 		}
@@ -279,6 +284,34 @@ func (s *indexSnapshot) query(expr string, limit int, expand func([]string) ([]s
 		err = nil
 	}
 	return names, leaves, nodes, lookups, err
+}
+
+// snapshotCounterpart looks up the metric named like a matched namespace,
+// "<namespace>.wsp". The namespace matches of one query usually share their
+// parent prefix, so the cursor walks that prefix once and then only the last
+// component and the extension, instead of a full Get from the root per match.
+// It reads the same key in the same index, so results equal index.Get.
+type snapshotCounterpart struct {
+	s      *indexSnapshot
+	parent []byte
+	state  fstState
+	key    []byte
+}
+
+// lookup takes the namespace key without a trailing separator.
+func (c *snapshotCounterpart) lookup(namespace []byte) (uint64, bool, error) {
+	if c.s.keys == nil {
+		c.key = append(append(c.key[:0], namespace...), ".wsp"...)
+		return c.s.index.Get(c.key)
+	}
+	cut := bytes.LastIndexByte(namespace, 0) + 1
+	if c.parent == nil || !bytes.Equal(c.parent, namespace[:cut]) {
+		c.parent = append(c.parent[:0], namespace[:cut]...)
+		c.state = c.s.keys.acceptBytes(c.s.keys.start(), c.parent)
+	}
+	state := c.s.keys.acceptBytes(c.state, namespace[cut:])
+	found, row := c.s.keys.final(c.s.keys.acceptString(state, ".wsp"))
+	return row, found, nil
 }
 
 // namespaceExists follows the prefix itself, without seeking a successor key.

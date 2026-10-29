@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/go-graphite/go-carbon/receiver/udp"
@@ -47,37 +48,91 @@ func (d *Duration) Value() time.Duration {
 }
 
 type commonConfig struct {
-	User           string    `toml:"user"`
-	Logfile        *string   `toml:"logfile"`
-	LogLevel       *string   `toml:"log-level"`
-	GraphPrefix    string    `toml:"graph-prefix"`
-	MetricInterval *Duration `toml:"metric-interval"`
-	MetricEndpoint string    `toml:"metric-endpoint"`
-	MaxCPU         int       `toml:"max-cpu"`
+	PhaseCPUProfileInterval *Duration `toml:"phase-cpu-profile-interval"`
+	PhaseCPUProfileDuration *Duration `toml:"phase-cpu-profile-duration"`
+	User                    string    `toml:"user"`
+	Logfile                 *string   `toml:"logfile"`
+	LogLevel                *string   `toml:"log-level"`
+	GraphPrefix             string    `toml:"graph-prefix"`
+	MetricInterval          *Duration `toml:"metric-interval"`
+	MetricEndpoint          string    `toml:"metric-endpoint"`
+	MaxCPU                  int       `toml:"max-cpu"`
+	// HeartbeatFile, when set, is rewritten every HeartbeatInterval so a start
+	// after an unclean stop can report the window of possibly lost points.
+	HeartbeatFile     string    `toml:"heartbeat-file"`
+	HeartbeatInterval *Duration `toml:"heartbeat-interval"`
+	// MallocTrimInterval, when positive, returns freed C heap memory to the
+	// system that often (cgo builds on Linux; see helper/malloc).
+	MallocTrimInterval *Duration `toml:"malloc-trim-interval"`
+	// MallocStats exports the C heap's size, read after each trim.
+	MallocStats bool `toml:"malloc-stats"`
 }
 
 type whisperConfig struct {
-	StorageBackend      string    `toml:"storage-backend"`
-	StoreDir            string    `toml:"store-dir"`
-	StoreCacheSize      int64     `toml:"store-cache-size"`
-	StoreMemTableSize   uint64    `toml:"store-memtable-size"`
-	StoreSyncInterval   *Duration `toml:"store-sync-interval"`
-	DataDir             string    `toml:"data-dir"`
-	SchemasFilename     string    `toml:"schemas-file"`
-	AggregationFilename string    `toml:"aggregation-file"`
-	QuotasFilename      string    `toml:"quotas-file"`
-	Workers             int       `toml:"workers"`
-	MaxUpdatesPerSecond int       `toml:"max-updates-per-second"`
-	Sparse              bool      `toml:"sparse-create"`
-	PhysicalSizeFactor  float32   `toml:"physical-size-factor"`
-	FLock               bool      `toml:"flock"`
-	Compressed          bool      `toml:"compressed"`
-	Enabled             bool      `toml:"enabled"`
-	HashFilenames       bool      `toml:"hash-filenames"`
-	Schemas             persister.WhisperSchemas
-	Aggregation         *persister.WhisperAggregation
-	Quotas              persister.WhisperQuotas
-	RemoveEmptyFile     bool `toml:"remove-empty-file"`
+	StorageBackend               string    `toml:"storage-backend"`
+	StoreDir                     string    `toml:"store-dir"`
+	StoreCacheSize               int64     `toml:"store-cache-size"`
+	StoreMemTableSize            uint64    `toml:"store-memtable-size"`
+	StoreCompactionRate          int64     `toml:"store-compaction-rate"`
+	StoreCompactionWorkers       int       `toml:"store-compaction-workers"`
+	StoreL0CompactionConcurrency int       `toml:"store-l0-compaction-concurrency"`
+	StoreL0CompactionThreshold   int       `toml:"store-l0-compaction-threshold"`
+	StoreL0StopWritesThreshold   int       `toml:"store-l0-stop-writes-threshold"`
+	StoreLBaseMaxBytes           int64     `toml:"store-lbase-max-bytes"`
+	StoreMemTableMaxUnflushed    uint64    `toml:"store-memtable-max-unflushed-bytes"`
+	StoreMaxOpenFiles            int       `toml:"store-max-open-files"`
+	StoreSyncInterval            *Duration `toml:"store-sync-interval"`
+	StoreUpdateBatchSize         int       `toml:"store-update-batch-size"`
+	StoreEncoding                string    `toml:"store-encoding"`
+	StoreMirrorFiles             bool      `toml:"store-mirror-files"`
+	StoreIncrementalMigration    bool      `toml:"store-incremental-migration"`
+	StoreMigrationIngest         bool      `toml:"store-migration-ingest"`
+	StoreTimeBuckets             bool      `toml:"store-time-buckets"`
+	StoreTimeBucketsRelayoutRate int64     `toml:"store-time-buckets-relayout-rate"`
+	StoreMigrationIOSlots        int       `toml:"store-migration-io-slots"`
+	StoreMigrationReclaimDelay   *Duration `toml:"store-migration-reclaim-delay"`
+	StoreMigrationIngestLinger   *Duration `toml:"store-migration-ingest-linger"`
+	StoreMigrationIngestGroup    int       `toml:"store-migration-ingest-group-bytes"`
+	StoreMigrationIngestParallel int       `toml:"store-migration-ingest-parallel"`
+	StoreTargetFileSize          int64     `toml:"store-target-file-size"`
+	StoreL0TargetFileSize        int64     `toml:"store-l0-target-file-size"`
+	StoreParallelTableSyncs      int       `toml:"store-parallel-table-syncs"`
+	StoreBloomFilterBits         int       `toml:"store-bloom-filter-bits"`
+	StoreWALDir                  string    `toml:"store-wal-dir"`
+	StoreCacheShards             int       `toml:"store-cache-shards"`
+	StoreTableCacheShards        int       `toml:"store-table-cache-shards"`
+	StoreCompactOnce             string    `toml:"store-compact-once"`
+	StoreReuseBlockKeys          bool      `toml:"store-reuse-block-keys"`
+	StoreOOODirectWrites         bool      `toml:"store-ooo-direct-writes"`
+	StoreFetchSharedIterator     bool      `toml:"store-fetch-shared-iterator"`
+	StoreMetadataCacheSize       int64     `toml:"store-metadata-cache-size"`
+	StoreUpdatePointLookups      bool      `toml:"store-update-point-lookups"`
+	StorePurgeInvalidNames       bool      `toml:"store-purge-invalid-names"`
+	StoreBytesPerSync            int       `toml:"store-bytes-per-sync"`
+	StoreMigrationHintBurst      *int      `toml:"store-migration-hint-burst"`
+	StoreMigrationArchiveDir     string    `toml:"store-migration-archive-dir"`
+	StoreMigrationBytesInFlight  int64     `toml:"store-migration-bytes-in-flight"`
+	StoreMigrationMinFreeBytes   int64     `toml:"store-migration-min-free-bytes"`
+	StoreLiveMigration           bool      `toml:"store-live-migration"`
+	StoreMigrationWorkers        int       `toml:"store-migration-workers"`
+	StoreMigrationControlFile    string    `toml:"store-migration-control-file"`
+	StoreMigrationBaselineCopy   string    `toml:"store-migration-baseline-copy"`
+	DataDir                      string    `toml:"data-dir"`
+	SchemasFilename              string    `toml:"schemas-file"`
+	AggregationFilename          string    `toml:"aggregation-file"`
+	QuotasFilename               string    `toml:"quotas-file"`
+	Workers                      int       `toml:"workers"`
+	MaxUpdatesPerSecond          int       `toml:"max-updates-per-second"`
+	Sparse                       bool      `toml:"sparse-create"`
+	PhysicalSizeFactor           float32   `toml:"physical-size-factor"`
+	FLock                        bool      `toml:"flock"`
+	Compressed                   bool      `toml:"compressed"`
+	Enabled                      bool      `toml:"enabled"`
+	HashFilenames                bool      `toml:"hash-filenames"`
+	Schemas                      persister.WhisperSchemas
+	Aggregation                  *persister.WhisperAggregation
+	Quotas                       persister.WhisperQuotas
+	RemoveEmptyFile              bool `toml:"remove-empty-file"`
 
 	QuotasReloadInterval            Duration `toml:"quotas-reload-interval"`
 	PebbleChunkIgnorePhysicalQuotas bool     `toml:"pebble-chunk-ignore-physical-quotas"`
@@ -86,6 +141,11 @@ type whisperConfig struct {
 	StoreExpirationFilename      string                           `toml:"store-expiration-file"`
 	StoreExpirationCheckInterval *Duration                        `toml:"store-expiration-check-interval"`
 	StoreExpirationScanRate      int                              `toml:"store-expiration-scan-rate"`
+	StoreExpirationDryRun        bool                             `toml:"store-expiration-dry-run"`
+	StoreExpirationDeleteRate    int                              `toml:"store-expiration-delete-rate"`
+	StoreExpirationMaxDeletes    int                              `toml:"store-expiration-max-deletes"`
+	StoreExpirationMaxL0         int                              `toml:"store-expiration-max-l0-sublevels"`
+	StoreExpirationMaxDebt       int64                            `toml:"store-expiration-max-compaction-debt"`
 	ExpirationRules              persister.WhisperExpirationRules `toml:"-"`
 
 	OnlineMigration            bool   `toml:"online-migration"`
@@ -108,6 +168,13 @@ type whisperConfig struct {
 	OutOfOrderCompactMinPoints       int      `toml:"out-of-order-compact-min-points"`
 	OutOfOrderCompactMaxPointAge     Duration `toml:"out-of-order-compact-max-point-age"`
 	OutOfOrderCompactRetentionMargin Duration `toml:"out-of-order-compact-retention-margin"`
+	// StoreMetadataCachePrewarm loads the store's metadata cache at start
+	// with the state of the metrics the restored cache holds, on that many
+	// workers (0: the store's default) and at up to that many metrics per
+	// second (0: unpaced). See App.startMetadataPrewarm.
+	StoreMetadataCachePrewarm        bool `toml:"store-metadata-cache-prewarm"`
+	StoreMetadataCachePrewarmWorkers int  `toml:"store-metadata-cache-prewarm-workers"`
+	StoreMetadataCachePrewarmRate    int  `toml:"store-metadata-cache-prewarm-rate"`
 }
 
 type cacheConfig struct {
@@ -116,6 +183,20 @@ type cacheConfig struct {
 	BloomSize         uint64   `toml:"bloom-size"`
 	WriteoutMinPoints int      `toml:"writeout-min-points"`
 	WriteoutMaxDelay  Duration `toml:"writeout-max-delay"`
+	// WriteoutSpread shortens each metric's min points and max delay by a
+	// stable fraction up to this value; see Cache.SetWriteoutSpread.
+	WriteoutSpread float64 `toml:"writeout-max-delay-spread"`
+	// WriteoutRestoreSpread spreads restored points' writes over the first
+	// max delay instead of writing them at once; see
+	// Cache.SetWriteoutRestoreSpread.
+	WriteoutRestoreSpread bool `toml:"writeout-restore-spread"`
+	// WriteoutSparseSpread spreads writes of metrics that hold one point per
+	// writeout window over the whole window; see
+	// Cache.SetWriteoutSparseSpread.
+	WriteoutSparseSpread bool `toml:"writeout-sparse-spread"`
+	// WriteoutStartupSpread holds initial batches to independent phases;
+	// see Cache.SetWriteoutStartupSpread.
+	WriteoutStartupSpread bool `toml:"writeout-startup-spread"`
 }
 
 type carbonlinkConfig struct {
@@ -150,6 +231,7 @@ type carbonserverConfig struct {
 	QueryCacheEnabled          bool       `toml:"query-cache-enabled"`
 	StreamingQueryCacheEnabled bool       `toml:"streaming-query-cache-enabled"`
 	QueryCacheSizeMB           int        `toml:"query-cache-size-mb"`
+	QueryCacheCompression      string     `toml:"query-cache-compression"`
 	FindCacheEnabled           bool       `toml:"find-cache-enabled"`
 	FindCacheSizeMB            int        `toml:"find-cache-size-mb"`
 	GlobCacheEnabled           bool       `toml:"glob-cache-enabled"`
@@ -205,8 +287,10 @@ type carbonserverConfig struct {
 }
 
 type pprofConfig struct {
-	Listen  string `toml:"listen"`
-	Enabled bool   `toml:"enabled"`
+	MutexProfileFraction int    `toml:"mutex-profile-fraction"`
+	BlockProfileRate     int    `toml:"block-profile-rate"`
+	Listen               string `toml:"listen"`
+	Enabled              bool   `toml:"enabled"`
 }
 
 type dumpConfig struct {
@@ -214,6 +298,28 @@ type dumpConfig struct {
 	Path              string `toml:"path"`
 	RestorePerSecond  int    `toml:"restore-per-second"`
 	HandoffSupervisor bool   `toml:"handoff-supervisor"`
+	// StoreInputHandoff lets a shared-store instance (no mirrored files) hand
+	// its input sockets to a capable successor although reads cannot move;
+	// see go-carbon.conf.example.
+	StoreInputHandoff bool `toml:"store-input-handoff"`
+	// Format of the cache dump a stop writes: "legacy" (the default),
+	// "compact", or "blocks" (compact points with compressed names).
+	// Restore reads every format. Releases without a format ignore its dump; see
+	// go-carbon.conf.example.
+	Format string `toml:"format"`
+}
+
+// cacheFormat parses Format.
+func (c dumpConfig) cacheFormat() (recovery.Format, error) {
+	switch c.Format {
+	case "", "legacy":
+		return recovery.FormatLegacy, nil
+	case "compact":
+		return recovery.FormatCompact, nil
+	case "blocks":
+		return recovery.FormatBlocks, nil
+	}
+	return recovery.FormatLegacy, fmt.Errorf("dump.format must be \"legacy\", \"compact\", or \"blocks\", not %q", c.Format)
 }
 
 type prometheusConfig struct {
@@ -244,6 +350,7 @@ type Config struct {
 	Tags         tagsConfig                          `toml:"tags"`
 	Carbonserver carbonserverConfig                  `toml:"carbonserver"`
 	Dump         dumpConfig                          `toml:"dump"`
+	InputLog     inputLogConfig                      `toml:"input-log"`
 	Pprof        pprofConfig                         `toml:"pprof"`
 	Logging      []zapwriter.Config                  `toml:"logging"`
 	Prometheus   prometheusConfig                    `toml:"prometheus"`
@@ -277,25 +384,37 @@ func NewConfig() *Config {
 			MetricEndpoint: MetricEndpointLocal,
 			MaxCPU:         1,
 			User:           "carbon",
+			HeartbeatInterval: &Duration{
+				Duration: 10 * time.Second,
+			},
 		},
 		Whisper: whisperConfig{
-			StorageBackend:      "files",
-			StoreCacheSize:      256 << 20,
-			StoreMemTableSize:   64 << 20,
-			StoreSyncInterval:   &Duration{time.Second},
-			DataDir:             "/var/lib/graphite/whisper/",
-			SchemasFilename:     "/etc/go-carbon/storage-schemas.conf",
-			AggregationFilename: "",
-			Enabled:             true,
-			Workers:             1,
-			Sparse:              false,
-			PhysicalSizeFactor:  0.75,
-			FLock:               false,
-			HashFilenames:       true,
+			StorageBackend:              "files",
+			StoreCacheSize:              256 << 20,
+			StoreMemTableSize:           64 << 20,
+			StoreSyncInterval:           &Duration{time.Second},
+			StoreUpdateBatchSize:        1,
+			StoreMigrationIngestLinger:  &Duration{Duration: time.Second},
+			StoreEncoding:               "legacy",
+			StoreMigrationBytesInFlight: 256 << 20,
+			StoreMigrationMinFreeBytes:  8 << 30,
+			DataDir:                     "/var/lib/graphite/whisper/",
+			SchemasFilename:             "/etc/go-carbon/storage-schemas.conf",
+			AggregationFilename:         "",
+			Enabled:                     true,
+			Workers:                     1,
+			Sparse:                      false,
+			PhysicalSizeFactor:          0.75,
+			FLock:                       false,
+			HashFilenames:               true,
 
 			StoreExpiration:              &Duration{0},
 			StoreExpirationCheckInterval: &Duration{time.Hour},
-			StoreExpirationScanRate:      1000,
+			StoreExpirationScanRate:      100_000,
+			StoreExpirationDeleteRate:    100,
+			StoreExpirationMaxDeletes:    10_000,
+			StoreExpirationMaxL0:         6,
+			StoreExpirationMaxDebt:       1 << 30,
 
 			OnlineMigration:            false,
 			OnlineMigrationRate:        5,
@@ -336,17 +455,18 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
-			QueryCacheEnabled:    true,
-			QueryCacheSizeMB:     0,
-			FindCacheEnabled:     true,
-			FindCacheSizeMB:      0,
-			GlobCacheEnabled:     true,
-			GlobCacheSizeMB:      0,
-			TrigramIndex:         true,
-			CacheScan:            false,
-			MaxMetricsGlobbed:    10_000_000,
-			MaxMetricsRendered:   1_000_000,
-			FileListCacheVersion: 1, // see carbonserver/flc.go
+			QueryCacheEnabled:     true,
+			QueryCacheSizeMB:      0,
+			QueryCacheCompression: "gzip",
+			FindCacheEnabled:      true,
+			FindCacheSizeMB:       0,
+			GlobCacheEnabled:      true,
+			GlobCacheSizeMB:       0,
+			TrigramIndex:          true,
+			CacheScan:             false,
+			MaxMetricsGlobbed:     10_000_000,
+			MaxMetricsRendered:    1_000_000,
+			FileListCacheVersion:  1, // see carbonserver/flc.go
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
@@ -376,6 +496,7 @@ func NewConfig() *Config {
 		Dump: dumpConfig{
 			Path: "/var/lib/graphite/dump/",
 		},
+		InputLog: newInputLogConfig(),
 		Prometheus: prometheusConfig{
 			Enabled:  false,
 			Endpoint: "/metrics",
@@ -498,7 +619,7 @@ retentions = 60:43200,3600:43800`), 0600)
 func (c *Config) getCarbonserverQuotas(reportFrequency time.Duration) (quotas []*carbonserver.Quota) {
 	minutes := int64(reportFrequency / time.Minute)
 	for _, q := range c.Whisper.Quotas {
-		if c.Whisper.StorageBackend == "pebble-chunk" && c.Whisper.PebbleChunkIgnorePhysicalQuotas {
+		if c.Whisper.StorageBackend == "pebble-chunk" && c.Whisper.PebbleChunkIgnorePhysicalQuotas && !c.Whisper.StoreMirrorFiles {
 			q.PhysicalSize = 0
 		}
 		quotas = append(quotas, &carbonserver.Quota{

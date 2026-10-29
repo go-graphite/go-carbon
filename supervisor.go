@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 )
 
 // supervisedEnv marks the worker started by runSupervisor. Its first extra file
@@ -90,12 +94,80 @@ func exitStatus(state *os.ProcessState) int {
 	return state.ExitCode()
 }
 
-// successorBinary is the path the service manager starts, as invoked.
+// successorBinary is the path the service manager starts, as invoked. A
+// deployment that replaces the binary there is checked at stop; one that
+// points the service at another binary is not (see serviceManagerBinary).
 func successorBinary() string {
 	if path, err := exec.LookPath(os.Args[0]); err == nil {
 		return path
 	}
 	return os.Args[0]
+}
+
+// serviceManagerBinary returns the executable systemd starts next for the
+// service this process runs in, or "" when that cannot be told. A rollback or
+// canary through a unit override (a drop-in with another ExecStart) starts a
+// different binary than this process was invoked as, so checking the invoked
+// path for handoff support at stop answers for the wrong binary. systemd
+// reports the ExecStart it will run: the loaded one, which a daemon-reload
+// before the restart has already replaced.
+func serviceManagerBinary() string {
+	if os.Getenv("INVOCATION_ID") == "" {
+		return "" // not started by systemd
+	}
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return ""
+	}
+	unit := cgroupUnit(string(data))
+	if unit == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "--property=ExecStart", "--value", "--", unit).Output()
+	if err != nil {
+		return ""
+	}
+	return execStartPath(string(out))
+}
+
+// cgroupUnit returns the systemd service named in /proc/self/cgroup content
+// (cgroup v2, or v1's name=systemd hierarchy).
+func cgroupUnit(cgroup string) string {
+	for _, line := range strings.Split(cgroup, "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), ":", 3)
+		if len(fields) != 3 || (fields[1] != "" && fields[1] != "name=systemd") {
+			continue
+		}
+		elems := strings.Split(fields[2], "/")
+		for i := len(elems) - 1; i >= 0; i-- {
+			if strings.HasSuffix(elems[i], ".service") {
+				return elems[i]
+			}
+		}
+	}
+	return ""
+}
+
+// execStartPath returns the executable of the first command in a systemd
+// ExecStart property value such as
+// "{ path=/usr/bin/go-carbon ; argv[]=/usr/bin/go-carbon -config ... ; ... }".
+func execStartPath(value string) string {
+	const key = "path="
+	i := strings.Index(value, key)
+	if i < 0 {
+		return ""
+	}
+	path := value[i+len(key):]
+	if j := strings.Index(path, " ;"); j >= 0 {
+		path = path[:j]
+	}
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) {
+		return ""
+	}
+	return path
 }
 
 // supervisedRelease returns the worker's release notification, or nil when the

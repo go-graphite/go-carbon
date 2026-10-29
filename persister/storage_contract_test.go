@@ -14,13 +14,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
 )
 
 const storageEpoch = 1700006400 // Divisible by every step used by these tests.
 
-var storageBackends = []string{"classic", "cwhisper", "cwhisper-ooo", "pebble-chunk"}
+var storageBackends = []string{"classic", "cwhisper", "cwhisper-ooo", "pebble-chunk", "pebble-exact"}
 
 // Whisper exposes a process-wide clock. Keep these tests and benchmarks serial;
 // the atomic clock also permits concurrent storage operations at a fixed epoch.
@@ -36,28 +37,35 @@ func storageTestClock(tb testing.TB) *atomic.Int64 {
 
 // Files follow the persister's open/update/close lifecycle. Pebble has one shared
 // handle and synchronizes its WAL on every commit. Neither path adds a test-only
-// fsync, so benchmark names and documentation must retain this durability caveat.
+// fsync. Benchmarks keep these sync semantics; logical tests keep Pebble files
+// in memory across reopen. Crash writers open the real filesystem directly.
 type storageBackend struct {
-	kind string
-	dir  string
-	now  *atomic.Int64
-	db   *chunkstore.Store
+	kind  string
+	dir   string
+	now   *atomic.Int64
+	db    *chunkstore.Store
+	fs    vfs.FS
+	files whisper.StorageFileSystem
 }
 
 func newStorageBackend(tb testing.TB, kind string, now *atomic.Int64) *storageBackend {
 	tb.Helper()
 	s := &storageBackend{kind: kind, dir: tb.TempDir(), now: now}
+	if _, ok := tb.(*testing.T); ok {
+		s.fs = vfs.NewMem()
+	}
 	storageMust(tb, s.open())
 	tb.Cleanup(func() { storageMust(tb, s.close()) })
 	return s
 }
 
 func (s *storageBackend) open() (err error) {
-	if s.kind == "pebble-chunk" {
+	if s.kind == "pebble-chunk" || s.kind == "pebble-exact" {
 		s.db, err = chunkstore.Open(filepath.Join(s.dir, "db"), chunkstore.Options{
-			CacheSize: 8 << 20, MemTableSize: 4 << 20,
+			ExactBlocks: s.kind == "pebble-exact",
+			CacheSize:   8 << 20, MemTableSize: 4 << 20,
 			Now: func() time.Time { return time.Unix(s.now.Load(), 0) },
-		})
+		}.WithFS(s.fs))
 		return err
 	}
 	return err
@@ -80,8 +88,10 @@ func (s *storageBackend) reopen() error {
 }
 
 func (s *storageBackend) options() *whisper.Options {
-	return &whisper.Options{Sparse: true, FLock: true,
-		Compressed: s.kind != "classic", OutOfOrder: s.kind == "cwhisper-ooo"}
+	return &whisper.Options{Sparse: true, FLock: s.files == nil,
+		FileSystem: s.files,
+		Compressed: s.kind != "classic", OutOfOrder: s.kind == "cwhisper-ooo",
+		Now: func() time.Time { return time.Unix(s.now.Load(), 0) }}
 }
 
 func (s *storageBackend) path(name string) string {
@@ -372,20 +382,24 @@ func storageTraces() []storageTrace {
 // TestStorageParity is deliberately strict for OOO and Pebble. A difference is
 // a regression to investigate, not an automatically accepted engine exception.
 func TestStorageParity(t *testing.T) {
-	now := storageTestClock(t)
+	t.Parallel()
 	for _, kind := range storageBackends[1:] {
 		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
 			for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Last, whisper.Max, whisper.Min, whisper.First} {
 				for _, xff := range []float32{0, 0.5, 1} {
 					t.Run(fmt.Sprintf("%s/xff=%g", method, xff), func(t *testing.T) {
+						parallelStorageCase(t)
+						now := new(atomic.Int64)
+						now.Store(storageEpoch)
 						for _, trace := range storageTraces() {
 							t.Run(trace.name, func(t *testing.T) {
 								if kind == "cwhisper" && trace.late {
 									t.Skip("plain cwhisper does not support late writes; covered by TestStorageCWhisperLateLimitation")
 								}
 								now.Store(storageEpoch)
-								oracle := newStorageBackend(t, "classic", now)
-								candidate := newStorageBackend(t, kind, now)
+								oracle := newStorageMemoryBackend(t, "classic", now)
+								candidate := newStorageMemoryBackend(t, kind, now)
 								c := storageConfig("metric", trace.retentions, method, xff)
 								storageMust(t, oracle.create(c))
 								storageMust(t, candidate.create(c))

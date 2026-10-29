@@ -482,6 +482,10 @@ type Options struct {
 	//
 	// The default cache size is 8 MB.
 	Cache *cache.Cache
+	// RangeDelCache optionally isolates range-deletion blocks from ordinary
+	// data/index blocks. Open retains a reference until DB.Close.
+	RangeDelCache   *cache.Cache
+	rangeDelCacheID uint64
 
 	// LoadBlockSema, if set, is used to limit the number of blocks that can be
 	// loaded (i.e. read from the filesystem) in parallel. Each load acquires one
@@ -498,6 +502,14 @@ type Options struct {
 		// ReadaheadConfigFn is a function used to retrieve the current readahead
 		// mode. This function is consulted when a table enters the table cache.
 		ReadaheadConfigFn func() ReadaheadConfig
+
+		// AlwaysSyncDir makes every object provider Sync, which precedes each
+		// manifest commit of new tables, sync the store directory, even when no
+		// local object was created or removed since the previous Sync. A
+		// filesystem that defers table syncs to the directory sync needs it:
+		// another job's Sync can clear the change flag this job's table set
+		// before the table was finished.
+		AlwaysSyncDir bool
 
 		// TODO(radu): move BytesPerSync, LoadBlockSema, Cleaner here.
 	}
@@ -520,6 +532,13 @@ type Options struct {
 	//
 	// TODO(peter): untested
 	DisableWAL bool
+
+	// WALRotationAsync buffers writes to the next WAL while the previous WAL
+	// is sealed in the background. The next file is not created until the old
+	// EOF is durable, preserving the normal strict WAL recovery rules. At most
+	// one handoff is outstanding; memtable limits still bound buffered writes.
+	// Sync writes, Flush and Close wait for the handoff. This is opt-in.
+	WALRotationAsync bool
 
 	// ErrorIfExists causes an error on Open if the database already exists.
 	// The error can be checked with errors.Is(err, ErrDBAlreadyExists).
@@ -1732,6 +1751,8 @@ func (o *Options) MakeReaderOptions() sstable.ReaderOptions {
 	var readerOpts sstable.ReaderOptions
 	if o != nil {
 		readerOpts.Cache = o.Cache
+		readerOpts.RangeDelCache = o.RangeDelCache
+		readerOpts.RangeDelCacheID = o.rangeDelCacheID
 		readerOpts.LoadBlockSema = o.LoadBlockSema
 		readerOpts.Comparer = o.Comparer
 		readerOpts.Filters = o.Filters

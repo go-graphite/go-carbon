@@ -56,6 +56,10 @@ func TestReadWhisperExpirationRejectsInvalidRules(t *testing.T) {
 		{name: "invalid pattern", body: "[rule]\npattern = [\nexpiration = 1h"},
 		{name: "invalid duration", body: "[rule]\npattern = .*\nexpiration = tomorrow"},
 		{name: "negative duration", body: "[rule]\npattern = .*\nexpiration = -1h"},
+		{name: "negative grace", body: "[rule]\npattern = .*\nexpiration = 1h\ngrace = -1m"},
+		{name: "overflow grace", body: "[rule]\npattern = .*\nexpiration = 2562047h\ngrace = 2562047h"},
+		{name: "invalid exclusion", body: "[rule]\npattern = .*\nexpiration = 1h\nexclude = ["},
+		{name: "invalid deadline", body: "[rule]\npattern = .*\nexpiration = 1h\nuntil = tomorrow"},
 		{name: "unknown setting", body: "[rule]\npattern = .*\nexpiration = 1h\npriority = 1"},
 	}
 
