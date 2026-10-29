@@ -383,6 +383,12 @@ remove-empty-file = false
 [cache]
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000
+# Optional additional byte budget, using cache_estimated_bytes (0 disables).
+# Includes metric names, compact buffer capacity and input-log tracking. This is
+# an estimate, not an RSS limit; leave room for Go GC, Pebble and native memory.
+# Batching bypasses its delay above 75% of either limit. Reloadable.
+# For example, max-bytes = 34359738368 gives a 32 GiB write-cache budget.
+max-bytes = 0
 # Capacity of queue between receivers and cache
 # Strategy to persist metrics. Values: "max","sorted","noop","lexical"
 #   "max" - write metrics with most unwritten datapoints first

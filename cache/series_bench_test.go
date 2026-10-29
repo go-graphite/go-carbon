@@ -126,6 +126,7 @@ func TestCacheMemoryPerPoint(t *testing.T) {
 		t.Skip("set CACHE_MEMORY_REPORT=1")
 	}
 	metrics := envInts(t, "CACHE_MEMORY_METRICS", "1000000")[0]
+	nameBytes := envInts(t, "CACHE_MEMORY_NAME_BYTES", "0")[0]
 	for _, perMetric := range envInts(t, "CACHE_MEMORY_POINTS", "50,160,480,960") {
 		for _, steady := range envInts(t, "CACHE_MEMORY_STEADY", "0,1") {
 			names := make([][]byte, metrics)
@@ -133,7 +134,7 @@ func TestCacheMemoryPerPoint(t *testing.T) {
 			lengths := make([]int, metrics)
 			rng := rand.New(rand.NewPCG(uint64(perMetric), 1))
 			for i := range names {
-				names[i] = []byte(seriesName(i))
+				names[i] = []byte(seriesName(i) + strings.Repeat("x", nameBytes))
 				gens[i] = newSeries(uint64(i))
 				switch lengths[i] = perMetric; steady {
 				case 1:
@@ -145,6 +146,9 @@ func TestCacheMemoryPerPoint(t *testing.T) {
 			before := heapInUse()
 			c := New()
 			c.SetMaxSize(0)
+			if os.Getenv("CACHE_MEMORY_LOG") != "" {
+				c.EnableInputLog()
+			}
 			total := 0
 			for round := 0; round < perMetric; round++ {
 				for i, name := range names {
@@ -160,8 +164,8 @@ func TestCacheMemoryPerPoint(t *testing.T) {
 				t.Fatalf("size %d, want %d", got, total)
 			}
 			used := float64(after - before)
-			t.Logf("metrics=%d points/metric=%d steady=%d points=%d heap=%.2f GB bytes/point=%.2f bytes/metric=%.0f",
-				metrics, perMetric, steady, total, used/1e9, used/float64(total), used/float64(metrics))
+			t.Logf("metrics=%d points/metric=%d steady=%d points=%d heap=%.2f GB bytes/point=%.2f bytes/metric=%.0f estimated-B/metric=%.0f",
+				metrics, perMetric, steady, total, used/1e9, used/float64(total), used/float64(metrics), float64(c.EstimatedBytes())/float64(metrics))
 			runtime.KeepAlive(c)
 			// The inputs were live before the fill, so they stay live after.
 			runtime.KeepAlive(names)

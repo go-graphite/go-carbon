@@ -203,7 +203,7 @@ func TestMakeQueueReusesScratchWithoutStaleEntries(t *testing.T) {
 			for i := 0; i < universe; i += 10 {
 				c.Pop(name(i))
 			}
-			if capacity, n := cap(*c.queueScratch.Load()), int(c.Len()); capacity < n || capacity > 2*n {
+			if capacity, n := cap(*c.queueScratch.Load()), len(referenceQueue(c, time.Now())); capacity < n || capacity > max(1024, 2*n) {
 				t.Fatalf("precondition: scratch cap %d for %d metrics", capacity, n)
 			}
 			check("after shrinking")

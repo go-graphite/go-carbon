@@ -206,6 +206,11 @@ func (c *Cache) attachPendingRecovery(bundle *recovery.Bundle, namesPrepared boo
 // recovery always has a way to make progress.
 func (c *Cache) HasRecoveryCapacity(count int) bool {
 	s := c.settings.Load().(*cacheSettings)
+	if s.maxBytes > 0 && c.stat.bytes.Load()+shardCount*byteSlackFor(0)+c.queueMemory() > s.maxBytes/2 {
+		if (c.Size() > 0 || c.NotConfirmedLength() > 0) && c.EstimatedBytes() > s.maxBytes/2 {
+			return false
+		}
+	}
 	if s.maxSize <= 0 {
 		return true
 	}
@@ -346,6 +351,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	r.trackAs(&values.Points, deferred)
 	shard.log.track(&values.Points)
 	r.claim(slot)
+	c.syncMemoryLocked(shard)
 	if filter := c.newMetricCf.Load(); extra > 0 && r.namesPrepared && filter != nil {
 		filter.Add(helper.HashString(name))
 	}
