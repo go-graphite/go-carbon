@@ -26,8 +26,8 @@ type options struct {
 	root, admin, metrics, stopFile, devices, exclude    string
 	dry, auto                                           bool
 	dirsPerSecond, maxRate, maxUtil, maxAwait, maxWrite float64
-	workers                                             int
-	interval                                            time.Duration
+	workers, maxTimeouts                                int
+	interval, endpointTimeout                           time.Duration
 }
 
 func main() {
@@ -48,6 +48,8 @@ func main() {
 	flag.Float64Var(&o.maxAwait, "max-await-ms", 5, "auto mode disk await ceiling, milliseconds")
 	flag.Float64Var(&o.maxWrite, "max-write-ms", 20, "auto mode mean successful Pebble write latency ceiling, milliseconds")
 	flag.DurationVar(&o.interval, "progress-interval", 5*time.Second, "progress and health sample interval")
+	flag.DurationVar(&o.endpointTimeout, "endpoint-timeout", 3*time.Second, "timeout for each local status or metrics request")
+	flag.IntVar(&o.maxTimeouts, "max-endpoint-timeouts", 6, "consecutive endpoint timeouts tolerated while paused before stopping")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	err := run(ctx, o, os.Stdout)
@@ -69,6 +71,12 @@ func run(ctx context.Context, o options, out io.Writer) error {
 	}
 	if o.workers < 1 || o.workers > 1024 {
 		return errors.New("workers must be between 1 and 1024")
+	}
+	if o.endpointTimeout == 0 {
+		o.endpointTimeout = 3 * time.Second
+	}
+	if o.endpointTimeout < 0 || o.maxTimeouts < 0 {
+		return errors.New("endpoint timeout and tolerated timeouts must not be negative")
 	}
 	if o.auto && o.dirsPerSecond == 0 {
 		return errors.New("auto mode requires an explicit positive rate")
@@ -96,7 +104,7 @@ func run(ctx context.Context, o options, out io.Writer) error {
 			return err
 		}
 	}
-	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
+	client := &http.Client{Timeout: o.endpointTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
 	if err := sharedStatus(ctx, client, o.admin); err != nil {
 		return err
 	}
@@ -172,8 +180,10 @@ func run(ctx context.Context, o options, out io.Writer) error {
 	workCtx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	report(false)
+	var paused pause
 	go func() {
 		defer close(done)
+		timeouts := 0
 		progress := time.NewTicker(o.interval)
 		defer progress.Stop()
 		stop := time.NewTicker(200 * time.Millisecond)
@@ -188,24 +198,41 @@ func run(ctx context.Context, o options, out io.Writer) error {
 					return
 				}
 			case <-progress.C:
-				if err := sharedStatus(workCtx, client, o.admin); err != nil {
+				err := sharedStatus(workCtx, client, o.admin)
+				if err == nil && o.auto {
+					err = health.sample(workCtx)
+				}
+				// A slow local endpoint leaves the gate unconfirmed: hold removal
+				// until a later check passes instead of abandoning the walk.
+				if isTimeout(err) && timeouts < o.maxTimeouts {
+					timeouts++
+					paused.set(true)
+					if o.auto {
+						health.adjust(true, true)
+						limiter.SetLimit(rate.Limit(health.rate))
+					}
+					health.status = fmt.Sprintf("paused=%d/%d err=%q", timeouts, o.maxTimeouts, err)
+					report(false)
+					continue
+				}
+				if err != nil {
 					cancel(err)
 					return
 				}
+				timeouts = 0
+				paused.set(false)
 				if o.auto {
-					if err := health.sample(workCtx); err != nil {
-						cancel(err)
-						return
-					}
 					limiter.SetLimit(rate.Limit(health.rate))
 				}
 				report(false)
 			}
 		}
 	}()
-	var before func() error
-	if limiter != nil {
-		before = func() error { return limiter.Wait(workCtx) }
+	before := func() error {
+		if err := paused.wait(workCtx); err != nil || limiter == nil {
+			return err
+		}
+		return limiter.Wait(workCtx)
 	}
 	err = w.walk(workCtx, o.root, before)
 	if workCtx.Err() != nil {

@@ -17,6 +17,10 @@ GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go build -o store-prune-empty-dirs ./to
 The local `http://127.0.0.1:8080/admin/info?scopes=storage` response must report
 `storage.migration.phase = "shared"`, `in_flight = 0`, no skipped sources and no
 error. Missing status, redirects and failed HTTP checks refuse or stop the run.
+A request that times out during the walk (`-endpoint-timeout`, default 3s) pauses
+directory operations instead: the walk resumes after the next passing check and
+stops after `-max-endpoint-timeouts` consecutive timeouts (default 6; 0 stops on
+the first). go-carbon's metrics endpoint can take several seconds under load.
 There is no override. Both status and metrics URLs must be local HTTP endpoints.
 The tool does not open the Pebble database.
 
@@ -76,7 +80,7 @@ A stop file or SIGTERM interrupts the run. Remove the stop file and rerun the
 same command to resume: deleted directory entries are the checkpoint, so deleted
 branches cost no work. No cursor file is needed. Repeating passes also handles
 entries skipped by the tool's own directory mutations. Keep the stop file outside
-the tree. Stop checks run every 200ms; a pending HTTP request (3s timeout), pacing
+the tree. Stop checks run every 200ms; a pending HTTP request (`-endpoint-timeout`), pacing
 or filesystem I/O can add delay. Progress/status checks default to every 5s.
 A crash may leave empty parents because pruning adds no fsync per rmdir.
 
@@ -118,7 +122,8 @@ Pebble write latency from deltas of `persister_pebble_write_seconds_total` and
 `persister_pebble_updates_total`. The default ceilings are 60% util, 5ms await and
 20ms write mean. Three healthy 5s windows raise the rate 25%; a breached ceiling
 or increased write failures halves it. Idle writes do not authorize increases.
-Missing metrics/devices, counter resets and failed health reads stop the run.
+Missing metrics/devices, counter resets and failed health reads stop the run; a
+timed-out health read pauses the walk and halves the rate as described above.
 The default metrics URL is `http://127.0.0.1:7007/metrics`, served on
 `[pprof].listen` when `[prometheus].enabled` is true. Override `-metrics-url` for
 the actual endpoint. Continue watching tail latency independently of the means.

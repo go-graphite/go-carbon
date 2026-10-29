@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,45 @@ func get(ctx context.Context, client *http.Client, endpoint string) (*http.Respo
 		return nil, fmt.Errorf("%s returned %s", endpoint, response.Status)
 	}
 	return response, nil
+}
+
+// isTimeout reports whether a local endpoint request ran out of time, as
+// opposed to answering with a refusal, an error status or a malformed body.
+func isTimeout(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+// pause holds directory operations while the local gate is unconfirmed.
+type pause struct {
+	mu      sync.Mutex
+	resumed chan struct{} // nil while running
+}
+
+func (p *pause) set(paused bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if paused && p.resumed == nil {
+		p.resumed = make(chan struct{})
+	} else if !paused && p.resumed != nil {
+		close(p.resumed)
+		p.resumed = nil
+	}
+}
+
+func (p *pause) wait(ctx context.Context) error {
+	p.mu.Lock()
+	resumed := p.resumed
+	p.mu.Unlock()
+	if resumed == nil {
+		return nil
+	}
+	select {
+	case <-resumed:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
 func sharedStatus(ctx context.Context, client *http.Client, endpoint string) error {
