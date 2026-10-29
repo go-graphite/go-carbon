@@ -399,7 +399,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	return proofs, nil
 }
 
-func (s *Store) lockTransfer(names []string) func() {
+func (s *Store) lockTransfer(names []string, states []*metricState) func() {
 	stripes := make([]uint64, 0, len(names))
 	for _, name := range names {
 		stripes = append(stripes, s.metricStripe(name))
@@ -408,6 +408,16 @@ func (s *Store) lockTransfer(names []string) func() {
 	stripes = slices.Compact(stripes)
 	for _, stripe := range stripes {
 		s.metricMu[stripe].Lock()
+	}
+	// Capture committed target state before mutation invalidates the cache.
+	// Writer stripes keep it consistent with the snapshot used by the merge.
+	if states != nil && s.stateCache != nil {
+		for i, name := range names {
+			if s.catalogMembership.mayContain(name) {
+				stripe := s.metricStripe(name)
+				states[i] = s.stateCache.get(stripe, name, s.stateCache.epoch(stripe))
+			}
+		}
 	}
 	for _, name := range names {
 		s.beginStateMutation(name)
@@ -439,21 +449,32 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 	for i, r := range records {
 		names[i] = r.Config.Name
 	}
-	unlock := s.lockTransfer(names)
+	var states []*metricState
+	if s.stateCache != nil {
+		states = make([]*metricState, len(records))
+	}
+	unlock := s.lockTransfer(names, states)
 	defer unlock()
 	b := s.db.NewIndexedBatch()
 	defer b.Close()
 	walk := &transferReader{reader: s.db}
 	defer walk.close()
 	proofs := make([]TransferProof, len(records))
+	var receiptEncoder transferProofEncoder
 	var sidecars []SidecarRecord
 	for i, r := range records {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		m := metas[i]
+		var state *metricState
+		if states != nil {
+			state = states[i]
+		}
 		old, err := Metadata{}, ErrNotFound
-		if s.catalogMembership.mayContain(m.Name) {
+		if state != nil {
+			old, err = state.meta, nil
+		} else if s.catalogMembership.mayContain(m.Name) {
 			old, err = walk.metadata(m.Name)
 		}
 		merged := err == nil
@@ -509,7 +530,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			if err != nil {
 				return nil, err
 			}
-			target, err := s.transferSnapshot(ctx, s.db, old)
+			target, err := s.transferSnapshotCached(ctx, s.db, old, state)
 			if err != nil {
 				return nil, err
 			}
@@ -598,14 +619,14 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		if err = b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 			return nil, err
 		}
-		receipt, err := transferProofDigest(p)
+		proofs[i] = p
+		receipt, err := receiptEncoder.digest(&proofs[i])
 		if err != nil {
 			return nil, err
 		}
-		if err := b.Set(transferReceiptKey(m), receipt, nil); err != nil {
+		if err := b.Set(transferReceiptKey(m), receipt[:], nil); err != nil {
 			return nil, err
 		}
-		proofs[i] = p
 	}
 	walk.close()
 	// ImportTransfer performs the durability barrier after every group has
@@ -680,13 +701,24 @@ func transferReceiptKey(m Metadata) []byte {
 	key[0] = 'a'
 	return key
 }
-func transferProofDigest(p TransferProof) ([]byte, error) {
-	data, err := json.Marshal(p)
-	if err != nil {
-		return nil, err
+
+type transferProofEncoder struct {
+	buffer  bytes.Buffer
+	encoder *json.Encoder
+}
+
+func (e *transferProofEncoder) digest(p *TransferProof) ([sha256.Size]byte, error) {
+	if e.encoder == nil {
+		e.encoder = json.NewEncoder(&e.buffer)
 	}
-	digest := sha256.Sum256(data)
-	return digest[:], nil
+	e.buffer.Reset()
+	if err := e.encoder.Encode(p); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	// Encoder reuses its scratch and adds one newline. Hash the same JSON
+	// bytes as the original Marshal receipt so old journals still verify.
+	data := e.buffer.Bytes()
+	return sha256.Sum256(data[:len(data)-1]), nil
 }
 
 // VerifyTransfer checks the durable result of the staged full-byte/point
@@ -699,7 +731,9 @@ func (s *Store) VerifyTransfer(ctx context.Context, proofs []TransferProof) erro
 	defer view.Close()
 	walk := &transferReader{reader: view}
 	defer walk.close()
-	for _, p := range proofs {
+	var receiptEncoder transferProofEncoder
+	for i := range proofs {
+		p := &proofs[i]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -714,8 +748,8 @@ func (s *Store) VerifyTransfer(ctx context.Context, proofs []TransferProof) erro
 		if err != nil {
 			return err
 		}
-		want, hashErr := transferProofDigest(p)
-		equal := bytes.Equal(want, receipt)
+		want, hashErr := receiptEncoder.digest(p)
+		equal := bytes.Equal(want[:], receipt)
 		if hashErr != nil {
 			return hashErr
 		}
@@ -739,7 +773,7 @@ func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) 
 	for i, v := range versions {
 		names[i] = v.Name
 	}
-	unlock := s.lockTransfer(names)
+	unlock := s.lockTransfer(names, nil)
 	defer unlock()
 	ranges := &transferRanges{}
 	var sidecars []SidecarRecord
