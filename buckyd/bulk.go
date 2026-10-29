@@ -143,6 +143,12 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			}
 			budget = min(budget, n)
 		}
+		if s.flushTransfer != nil {
+			if err := s.flushTransfer(r.Context(), names); err != nil {
+				fail(err)
+				return
+			}
+		}
 		records, err := s.store.ExportTransferLimit(r.Context(), names, budget)
 		if err != nil {
 			fail(err)
@@ -151,14 +157,23 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		// Bound the encoded response as well as imports; a dense batch must be
 		// split by the caller before it can consume arbitrary server memory.
 		size, err := chunkstore.TransferWireSize(records)
+		write := chunkstore.WriteTransfer
+		wire2 := r.URL.Query().Get("wire") == "2"
+		if wire2 {
+			size, err = chunkstore.TransferWireSize2(records), nil
+			write = chunkstore.WriteTransfer2
+		}
 		if err != nil || size > budget {
 			writeError(w, chunkstore.ErrTransferLimit, 413)
 			return
 		}
 		w.Header().Set("Content-Type", "application/vnd.go-carbon.transfer-v1")
+		if wire2 {
+			w.Header().Set("Content-Type", "application/vnd.go-carbon.transfer-v2")
+		}
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		out := bufio.NewWriterSize(w, 256<<10)
-		if err := chunkstore.WriteTransfer(out, records); err != nil {
+		if err := write(out, records); err != nil {
 			return
 		}
 		_ = out.Flush()
@@ -278,16 +293,6 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type transferCounter struct{ n, limit int64 }
-
-func (c *transferCounter) Write(p []byte) (int, error) {
-	c.n += int64(len(p))
-	if c.n > c.limit {
-		return 0, errors.New("transfer exceeds max_body_bytes; reduce batch size")
-	}
-	return len(p), nil
-}
-
 // allowedTransferSource reports whether host is a ring node or a configured
 // transfer source. Pulls send a signed read token, so they never go to an
 // arbitrary caller-chosen host.
@@ -326,6 +331,7 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	}
 	query := u.Query()
 	query.Set("max_bytes", strconv.FormatInt(maxBytes, 10))
+	query.Set("wire", "2")
 	u.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -347,18 +353,12 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	if response.StatusCode != 200 {
 		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s", response.Status)}
 	}
-	records, err := chunkstore.ReadTransferSize(response.Body, maxBytes, response.ContentLength)
+	input := &transferCountReader{Reader: response.Body}
+	records, err := chunkstore.ReadTransferSize(input, maxBytes, response.ContentLength)
 	if err != nil {
 		return nil, 0, err
 	}
-	n := response.ContentLength
-	if n < 0 {
-		n, err = chunkstore.TransferWireSize(records)
-		if err != nil || n > maxBytes {
-			return nil, 0, chunkstore.ErrTransferLimit
-		}
-	}
-	return records, n, nil
+	return records, input.n, nil
 }
 
 type transferUpstreamError struct {
@@ -369,3 +369,14 @@ type transferUpstreamError struct {
 func (e *transferUpstreamError) Error() string { return e.message }
 
 var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 90 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+type transferCountReader struct {
+	io.Reader
+	n int64
+}
+
+func (r *transferCountReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.n += int64(n)
+	return n, err
+}

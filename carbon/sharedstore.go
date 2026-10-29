@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
@@ -378,4 +379,29 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 	send("tableCacheHits", float64(stats.TableCacheHits-s.prev.TableCacheHits))
 	send("tableCacheMisses", float64(stats.TableCacheMisses-s.prev.TableCacheMisses))
 	s.prev = stats
+}
+
+func (app *App) configureTransferCache() {
+	core := app.Cache
+	app.MetricStore.SetTransferPending(core.Has, func() bool { return !core.IsEmpty() })
+	app.Buckyd.SetTransferFlush(func(ctx context.Context, names []string) error {
+		// Stop can hold App's lock while waiting for Buckyd handlers.
+		if !app.TryRLock() {
+			return fmt.Errorf("application lifecycle is busy: %w", store.ErrConflict)
+		}
+		defer app.RUnlock()
+		var pending []string
+		for _, name := range names {
+			if core.Has(name) {
+				pending = append(pending, name)
+			}
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		if app.Persister == nil {
+			return errors.New("pending points have no persister")
+		}
+		return app.Persister.FlushForTransfer(ctx, pending)
+	})
 }

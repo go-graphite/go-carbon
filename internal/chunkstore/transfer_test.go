@@ -166,3 +166,39 @@ func TestTransferRetirementMarkersAreOperationScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTransferCachedMetadataAndUnorderedIDsMatchReference(t *testing.T) {
+	ctx := context.Background()
+	s, now := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, MetadataCacheSize: 4 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	defer closeTestStore(t, s)
+	names := []string{"order.z", "order.a", "order.q", "order.b"}
+	for i, name := range names {
+		createTestMetric(t, s, name)
+		if err := s.UpdateMany(ctx, name, []Point{{Timestamp: int64(now - 60), Value: float64(i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requested := []string{names[2], names[0], names[3], names[1]}
+	got, err := s.ExportTransfer(ctx, requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := s.db.NewSnapshot()
+	defer view.Close()
+	for i, name := range requested {
+		m, err := metadataFrom(view, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := s.transferFrom(ctx, view, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[i].Version != want.Version || transferDigest(got[i]) != transferDigest(want) {
+			t.Fatal("ordered export changed bytes", name)
+		}
+	}
+	if s.Stats().TransferExport.MetadataHits != uint64(len(names)) {
+		t.Fatal("existing metadata cache not used")
+	}
+}

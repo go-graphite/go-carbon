@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -65,15 +67,63 @@ func (s *Store) ExportTransferLimit(ctx context.Context, names []string, budget 
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return nil, err
 	}
-	view := s.db.NewSnapshot()
+	var epochs [metricStripes]uint64
+	if s.stateCache != nil {
+		for i := range epochs {
+			epochs[i] = s.stateCache.epoch(uint64(i))
+		}
+	}
+	view := s.db.NewReadView()
 	defer view.Close()
-	walk := &transferReader{reader: view}
+	walk := &transferReader{reader: view, ordered: true, export: &s.transferExport}
 	defer walk.close()
-	result := make([]TransferMetric, 0, len(names))
-	for _, name := range names {
-		m, err := walk.metadata(name)
-		if err != nil {
-			return nil, fmt.Errorf("export %s: %w", name, err)
+	s.transferExport.requests.Add(1)
+	s.transferExport.metrics.Add(uint64(len(names)))
+	metas := make([]Metadata, len(names))
+	states := make([]*metricState, len(names))
+	order := make([]int, len(names))
+	for i := range order {
+		order[i] = i
+	}
+	slices.SortFunc(order, func(a, b int) int { return strings.Compare(names[a], names[b]) })
+	for j, i := range order {
+		name := names[i]
+		if j > 0 && name == names[order[j-1]] {
+			return nil, errors.New("duplicate transfer name")
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if cache := s.stateCache; cache != nil {
+			stripe := s.metricStripe(name)
+			states[i] = cache.get(stripe, name, epochs[stripe])
+		}
+		if states[i] != nil {
+			s.transferExport.metadataHits.Add(1)
+			metas[i] = states[i].meta
+			metas[i].MetricConfig = cloneConfig(metas[i].MetricConfig)
+		} else {
+			value, err := walk.lookup(&walk.catalog, catalogLower, catalogUpper, catalogKey(name))
+			if err != nil {
+				return nil, fmt.Errorf("export %s: %w", name, err)
+			}
+			metas[i], err = decodeCatalog(name, value)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	// Catalog keys are names; revisions and raw histories are ordered by ID.
+	slices.SortFunc(order, func(a, b int) int { return cmp.Compare(metas[a].ID, metas[b].ID) })
+	result := make([]TransferMetric, len(names))
+	for _, i := range order {
+		m := metas[i]
+		if states[i] == nil {
+			var err error
+			m, err = walk.revision(m)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if err := s.checkFileOwnership(m); err != nil {
 			return nil, err
@@ -81,12 +131,13 @@ func (s *Store) ExportTransferLimit(ctx context.Context, names []string, budget 
 		if m.FileMigration == FileCleanupPending {
 			return nil, ErrConflict
 		}
+		walk.state = states[i]
 		record, err := s.transferFromLimit(ctx, view, m, budget, walk)
 		if err != nil {
 			return nil, err
 		}
 		budget -= transferSize(record)
-		result = append(result, record)
+		result[i] = record
 	}
 	return result, nil
 }
@@ -168,7 +219,7 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 				if len(shared) > 0 {
 					visit = func() error {
 						start := kv.key(prefix)
-						return shared[0].visit(ctx, &shared[0].buckets, []byte{'t'}, []byte{'u'}, start, func(key, value []byte) error { return add(kv.suffix(key), value) })
+						return shared[0].visitBucket(ctx, start, func(key, value []byte) error { return add(kv.suffix(key), value) })
 					}
 				}
 				if err := visit(); err != nil {
@@ -202,7 +253,11 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 	}
 	slices.SortFunc(record.Keys, func(a, b RelayoutKV) int { return bytes.Compare(a.Key, b.Key) })
 	if crc32.ChecksumIEEE([]byte(m.Name))%64 == 0 {
-		snapshot, err := s.transferSnapshot(ctx, reader, m)
+		var state *metricState
+		if len(shared) > 0 {
+			state = shared[0].state
+		}
+		snapshot, err := s.transferSnapshotCached(ctx, reader, m, state)
 		if err != nil {
 			return TransferMetric{}, err
 		}
@@ -243,8 +298,12 @@ func snapshotDigest(snapshot Snapshot) (string, []int) {
 }
 
 func (s *Store) transferSnapshot(ctx context.Context, reader pebble.Reader, m Metadata) (Snapshot, error) {
+	return s.transferSnapshotCached(ctx, reader, m, nil)
+}
+func (s *Store) transferSnapshotCached(ctx context.Context, reader pebble.Reader, m Metadata, state *metricState) (Snapshot, error) {
 	if m.Continuation {
 		kv := s.newContinuationIO(ctx, reader, nil, m).withIterator()
+		kv.state = s.newStateView(state, m)
 		defer kv.Close()
 		return s.continuation.Snapshot(ctx, kv, m, s.now)
 	}
@@ -412,7 +471,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 			return nil, err
 		}
-		if r.PointDigest != "" {
+		if r.PointDigest != "" && !r.Continuation {
 			snapshot, err := s.transferSnapshot(ctx, b, m)
 			if err != nil {
 				return nil, err
@@ -698,7 +757,7 @@ func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) 
 		if err != nil {
 			return err
 		}
-		if transferVersion(m) != v || m.FileMigration == FileCleanupPending {
+		if transferVersion(m) != v || m.FileMigration == FileCleanupPending || s.pendingTransfer(m.Name) {
 			return ErrConflict
 		}
 		if err := s.checkFileOwnership(m); err != nil {
@@ -843,7 +902,7 @@ func ReadTransferSize(r io.Reader, maxBytes, size int64) ([]TransferMetric, erro
 	if int64(len(data)) > maxBytes {
 		return nil, ErrTransferLimit
 	}
-	if len(data) < 44 || string(data[:8]) != "BKTFR001" {
+	if len(data) < 44 || string(data[:8]) != "BKTFR001" && string(data[:8]) != "BKTFR002" {
 		return nil, ErrFormat
 	}
 	body, actual := data[:len(data)-sha256.Size], data[len(data)-sha256.Size:]
@@ -856,6 +915,9 @@ func ReadTransferSize(r io.Reader, maxBytes, size int64) ([]TransferMetric, erro
 		return nil, errors.New("invalid metric count")
 	}
 	body = body[12:]
+	if string(data[:8]) == "BKTFR002" {
+		return readTransfer2(body, count)
+	}
 	readBytes := func(capacity uint32) ([]byte, error) {
 		if len(body) < 4 {
 			return nil, io.ErrUnexpectedEOF
@@ -990,7 +1052,7 @@ func (s *Store) PendingTransferDelete(ctx context.Context, operation string, lim
 		if err != nil {
 			return nil, err
 		}
-		if !staged {
+		if !staged || s.pendingTransfer(m.Name) {
 			result = append(result, m.Name)
 		}
 	}
@@ -1018,6 +1080,9 @@ func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (i
 	if err := s.fileOwnershipError(); err != nil {
 		return 0, err
 	}
+	if s.transferPendingAny != nil && s.transferPendingAny() {
+		return 0, fmt.Errorf("source write cache is not empty: %w", ErrConflict)
+	}
 	walk := &transferReader{reader: s.db}
 	defer walk.close()
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("m/"), UpperBound: []byte("m0")})
@@ -1043,7 +1108,7 @@ func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (i
 			it.Close()
 			return 0, err
 		}
-		if !staged || m.FileMigration == FileCleanupPending {
+		if !staged || m.FileMigration == FileCleanupPending || s.pendingTransfer(m.Name) {
 			it.Close()
 			return 0, fmt.Errorf("unstaged or changed source %s: %w", m.Name, ErrConflict)
 		}
@@ -1117,4 +1182,16 @@ func (s *Store) TransferL0StopWrites() int64 {
 		return int64(s.pebbleOptions.L0StopWritesThreshold)
 	}
 	return 12
+}
+
+// SetTransferPending installs the app write-cache fence before admin handlers
+// start. A durable store version cannot authorize dropping its queued points.
+func (s *Store) SetTransferPending(pending func(string) bool, anyPending ...func() bool) {
+	s.transferPending = pending
+	if len(anyPending) > 0 {
+		s.transferPendingAny = anyPending[0]
+	}
+}
+func (s *Store) pendingTransfer(name string) bool {
+	return s.transferPending != nil && s.transferPending(name)
 }

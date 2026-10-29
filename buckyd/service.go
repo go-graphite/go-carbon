@@ -107,6 +107,7 @@ type Service struct {
 	serveErr      chan error
 	nodes         []Node
 	onChange      func()
+	flushTransfer func(context.Context, []string) error
 	pyroscope     *pyroscope.Profiler
 	pprofServer   *http.Server
 	pprofListener net.Listener
@@ -183,7 +184,7 @@ func normalizeConfig(config *Config) {
 		config.MaxBodyBytes = 160 << 20
 	}
 	if config.MaxTransfers <= 0 {
-		config.MaxTransfers = 4
+		config.MaxTransfers = min(64, max(1, runtime.NumCPU()-max(2, runtime.NumCPU()/12)))
 	}
 }
 
@@ -1020,4 +1021,10 @@ func (s *Service) hashring(w http.ResponseWriter, r *http.Request) {
 		Algo     string
 		Replicas int
 	}{s.config.Node, s.nodes, s.config.Hash, s.config.Replicas})
+}
+
+// SetTransferFlush is installed before Start; it persists only queued names
+// through the app's existing persister before exporting committed raw bytes.
+func (s *Service) SetTransferFlush(flush func(context.Context, []string) error) {
+	s.flushTransfer = flush
 }
