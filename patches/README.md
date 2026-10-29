@@ -110,7 +110,8 @@ the existing dependency regression/oracle tests by copying them from the same
 pinned module cache, then applying `whisper-oracle-fixtures.patch`. The test-only
 patch bounds the retention windows while preserving resolution ratios, complete
 emitter streams, wrapped history and every per-update oracle comparison. It also
-splits the differential matrices into smaller test groups. Large real retention
+splits the differential matrices into smaller test groups, retaining the original
+suite-wide replay witness in the first group in normal and short mode. Large real retention
 windows remain covered by the continuation integrity and import tests. Review or
 remove this patch when the pinned upstream tests use equivalent bounded fixtures.
 `make test` continues to include the Whisper package explicitly. The list preserves

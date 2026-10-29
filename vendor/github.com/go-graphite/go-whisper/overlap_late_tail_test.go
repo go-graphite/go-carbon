@@ -157,7 +157,9 @@ func testOverlapLateTailDifferential(t *testing.T, selectedGroup int) {
 			}
 		})
 	}
-	if avoided == 0 {
+	// Keep the suite-wide path witness in the first group. A short group can
+	// contain only streams that need no correction, while still checking parity.
+	if selectedGroup == 0 && avoided == 0 {
 		t.Fatal("no update avoided a replay: the scenarios do not exercise the late tail correction")
 	}
 	t.Logf("replays avoided %d; values off classic summed over updates %d, previous rules %d", avoided, newOff, oldOff)
