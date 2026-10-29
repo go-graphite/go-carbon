@@ -77,7 +77,7 @@ func localStore(t *testing.T) *store.Store {
 }
 func localService(t *testing.T, s *store.Store) http.Handler {
 	t.Helper()
-	service, err := buckyd.New(buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 8, MaxBodyBytes: 1 << 20}, s)
+	service, err := buckyd.New(buckyd.Config{TmpDir: t.TempDir(), MaxTransfers: 8, MaxBodyBytes: 1 << 20, TransferSources: []string{"127.0.0.1"}}, s)
 	if err != nil {
 		t.Fatal(err)
 	}

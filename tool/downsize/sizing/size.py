@@ -300,7 +300,7 @@ def calculate(snapshot, shapes, policy=None, plans=(), estimate_whisper=False, i
         source_data = defaultdict(list)
         execution_blockers, warnings, unverified = [], [], []
         if snapshot.get("graphite_sustained_consolidation") != "average":
-            warnings.append("Legacy Graphite max-consolidated points: sustained percentiles remain upper bounds; averages cannot be recovered. Recollect after r24.")
+            warnings.append("Legacy Graphite max-consolidated points: sustained percentiles remain upper bounds; averages cannot be recovered. Recollect with average consolidation.")
         for host in hosts:
             m = host["metrics"]
             source_shape = shape_map.get(host.get("shape"))

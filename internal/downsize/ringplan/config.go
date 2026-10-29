@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	hashing "github.com/go-graphite/go-carbon/internal/downsize/buckyhash"
 )
@@ -54,6 +56,22 @@ func generateConfig(s specification, old, next *ring, id string, opt options, ou
 	}
 	files["carbonzipper-during.yaml"] = backends(union)
 	files["carbonzipper-final.yaml"] = backends(s.New.Nodes)
+	var sources []string
+	seenSources := make(map[string]bool)
+	for _, member := range s.Old.Nodes {
+		node, _ := hashing.NewNodeParser(member.Node)
+		origin, err := url.Parse(member.Endpoint)
+		if err != nil {
+			return fmt.Errorf("source endpoint: %w", err)
+		}
+		for _, host := range []string{node.Server, origin.Hostname()} {
+			key := strings.ToLower(host)
+			if host != "" && !seenSources[key] {
+				seenSources[key] = true
+				sources = append(sources, host)
+			}
+		}
+	}
 	for i, m := range union {
 		var b bytes.Buffer
 		parsed, _ := hashing.NewNodeParser(m.Node)
@@ -64,9 +82,8 @@ func generateConfig(s specification, old, next *ring, id string, opt options, ou
 			fmt.Fprintf(&b, "  %q,\n", fmt.Sprintf("%s:%d=%03d", parsed.Server, ingestionPort(parsed.Port), j))
 		}
 		b.WriteString("]\ntransfer-sources = [\n")
-		for _, source := range s.Old.Nodes {
-			parsed, _ := hashing.NewNodeParser(source.Node)
-			fmt.Fprintf(&b, "  %q,\n", parsed.Server)
+		for _, source := range sources {
+			fmt.Fprintf(&b, "  %q,\n", source)
 		}
 		b.WriteString("]\n")
 		files[fmt.Sprintf("buckyd-%03d.toml", i)] = b.Bytes()

@@ -48,6 +48,7 @@ func replacementConfig(t *testing.T) (string, *carbon.Config) {
 	cfg.Cache.WriteoutMaxDelay = carbon.Duration{Duration: time.Hour}
 	cfg.Buckyd.Enabled, cfg.Buckyd.Bind = true, "127.0.0.1:0"
 	cfg.Buckyd.CopyMinFreeBytes = 1
+	cfg.Buckyd.TransferSources = []string{"127.0.0.1"}
 	cfg.InputLog.Enabled = true
 	cfg.InputLog.Path = filepath.Join(root, "input-log")
 	cfg.InputLog.SyncInterval = carbon.Duration{Duration: 10 * time.Millisecond}

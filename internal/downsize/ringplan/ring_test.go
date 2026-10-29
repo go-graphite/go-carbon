@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -448,6 +449,7 @@ func TestCompareAndConfig(t *testing.T) {
 	if _, err := compare(context.Background(), s, old, 3, 100, 3, time.Second); err == nil {
 		t.Fatal("unbounded candidate search")
 	}
+	s.Old.Nodes[0].Endpoint = "http://control-a.example.net:4242"
 	out := filepath.Join(t.TempDir(), "config")
 	if err := generateConfig(s, old, next, "test", testOptions(out), io.Discard); err != nil {
 		t.Fatal(err)
@@ -479,18 +481,13 @@ func TestCompareAndConfig(t *testing.T) {
 	if bc.Buckyd.Hash != "jump_fnv1a" || len(bc.Buckyd.Nodes) != 3 {
 		t.Fatal(bc)
 	}
-	var transfer struct {
-		Buckyd struct {
-			Sources []string `toml:"transfer-sources"`
-		}
+	if len(bc.Buckyd.TransferSources) != len(s.Old.Nodes)+1 || !slices.Contains(bc.Buckyd.TransferSources, "control-a.example.net") {
+		t.Fatal("transfer endpoint alias missing from generated configuration", bc)
 	}
-	if _, err := toml.Decode(string(data), &transfer); err != nil {
-		t.Fatal(err)
-	}
-	for i, source := range s.Old.Nodes {
+	for _, source := range s.Old.Nodes {
 		parsed, _ := hashing.NewNodeParser(source.Node)
-		if len(transfer.Buckyd.Sources) != len(s.Old.Nodes) || transfer.Buckyd.Sources[i] != parsed.Server {
-			t.Fatal("transfer source missing from generated configuration", transfer)
+		if !slices.Contains(bc.Buckyd.TransferSources, parsed.Server) {
+			t.Fatal("transfer source missing from generated configuration", bc)
 		}
 	}
 }

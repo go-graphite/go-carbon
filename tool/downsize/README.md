@@ -250,3 +250,7 @@ sparse CPU gap. Hardware bandwidth figures are ceilings, not guaranteed resize r
 Batch proof responses negotiate a compact binary encoding. Verification falls
 back to JSON if a peer does not advertise support or is downgraded after
 negotiation. The proof contents and durable verification rules are unchanged.
+
+Generated `transfer-sources` lists include old-ring node names and their explicit
+HTTP endpoint hostnames, including management aliases. Apply these drafts before
+metric pulls so the source token is sent only to configured old-ring origins.
