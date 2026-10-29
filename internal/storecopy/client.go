@@ -335,10 +335,19 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 	checkpointAt := time.Now()
 	for range opts.Workers {
 		wg.Go(func() {
+			var buffer *[]byte
+			defer func() {
+				if buffer != nil {
+					copyBuffers.Put(buffer)
+				}
+			}()
 			for job := range jobs {
 				var err error
 				if !reuse[job.file.Name] {
-					err = c.copyChunk(ctx, root, job, &state, &stateMu, pace, admission, opts)
+					if buffer == nil {
+						buffer = copyBuffers.Get().(*[]byte)
+					}
+					err = c.copyChunk(ctx, root, job, &state, &stateMu, pace, admission, opts, *buffer)
 				}
 				if err == nil {
 					if opts.Progress != nil {
@@ -435,7 +444,23 @@ func saveProgress(root *os.Root, state *Progress) error {
 
 func mustJSON(value any) []byte { b, _ := json.MarshalIndent(value, "", "  "); return b }
 
-func (c *Client) copyChunk(ctx context.Context, root *os.Root, job chunk, state *Progress, mu *sync.Mutex, pace *pacer, admission *copyAdmission, opts PullOptions) error {
+// Network reads can return a few KiB even with a large buffer. Fill the buffer
+// before writing so socket fragmentation does not become small disk writes.
+type fullReader struct{ io.Reader }
+
+func (r fullReader) Read(buffer []byte) (int, error) {
+	n := 0
+	for n < len(buffer) {
+		read, err := r.Reader.Read(buffer[n:])
+		n += read
+		if err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func (c *Client) copyChunk(ctx context.Context, root *os.Root, job chunk, state *Progress, mu *sync.Mutex, pace *pacer, admission *copyAdmission, opts PullOptions, buffer []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -452,7 +477,7 @@ func (c *Client) copyChunk(ctx context.Context, root *os.Root, job chunk, state 
 	defer f.Close()
 	if digest != "" {
 		h := sha256.New()
-		if n, err := io.Copy(h, io.NewSectionReader(f, job.offset, job.length)); err == nil && n == job.length && hex.EncodeToString(h.Sum(nil)) == digest {
+		if n, err := io.CopyBuffer(h, io.NewSectionReader(f, job.offset, job.length), buffer); err == nil && n == job.length && hex.EncodeToString(h.Sum(nil)) == digest {
 			return nil
 		}
 	}
@@ -471,7 +496,7 @@ func (c *Client) copyChunk(ctx context.Context, root *os.Root, job chunk, state 
 	defer r.Body.Close()
 	hash := sha256.New()
 	writer := io.NewOffsetWriter(f, job.offset)
-	n, err := io.CopyBuffer(io.MultiWriter(writer, hash), io.LimitReader(r.Body, job.length+1), make([]byte, 256<<10))
+	n, err := io.CopyBuffer(io.MultiWriter(writer, hash), fullReader{io.LimitReader(r.Body, job.length+1)}, buffer)
 	if err != nil {
 		return err
 	}

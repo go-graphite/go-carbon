@@ -159,6 +159,45 @@ func TestPullRejectsTransportCorruption(t *testing.T) {
 	}
 }
 
+type wrongLengthWriter struct {
+	http.ResponseWriter
+	extra bool
+}
+
+func (w wrongLengthWriter) Write(data []byte) (int, error) {
+	n := len(data)
+	if w.extra {
+		data = append(append([]byte(nil), data...), 0)
+	} else if n > 0 {
+		data = data[:n-1]
+	}
+	_, err := w.ResponseWriter.Write(data)
+	return n, err
+}
+
+func TestPullRejectsInvalidRangeLength(t *testing.T) {
+	handler, manifest := offlineFixture(t)
+	for _, extra := range []bool{false, true} {
+		t.Run(map[bool]string{false: "truncated", true: "extra"}[extra], func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == Endpoint+"/file" {
+					handler.ServeHTTP(wrongLengthWriter{w, extra}, r)
+				} else {
+					handler.ServeHTTP(w, r)
+				}
+			}))
+			defer server.Close()
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := (&Client{URL: server.URL}).Pull(context.Background(), filepath.Join(root, "copy"), manifest.ID, PullOptions{Workers: 1, Chunk: 1 << 20, Apply: true}); err == nil {
+				t.Fatal("invalid range length accepted")
+			}
+		})
+	}
+}
+
 func TestExpiredLeaseCancelsRateWait(t *testing.T) {
 	handler, manifest := offlineFixture(t)
 	server := httptest.NewServer(handler)
