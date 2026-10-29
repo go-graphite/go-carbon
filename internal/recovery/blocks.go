@@ -585,7 +585,7 @@ func (in *Index) loadBlock(dec *zstd.Decoder, cache []byte, h blockHeader, at in
 			return fmt.Errorf("pending reads require canonical metric names")
 		}
 		if i%nameRestart == 0 {
-			if len(data) > math.MaxUint32 {
+			if uint64(len(data)) > math.MaxUint32 {
 				return errBlock
 			}
 			b.group = append(b.group, uint32(len(data)))
