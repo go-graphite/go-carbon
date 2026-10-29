@@ -879,13 +879,26 @@ func ReadTransfer(r io.Reader, maxBytes int64) ([]TransferMetric, error) {
 // A known HTTP content length avoids growing/copying the batch buffer. Unknown
 // lengths retain the bounded reader and all paths require an exact final EOF.
 func ReadTransferSize(r io.Reader, maxBytes, size int64) ([]TransferMetric, error) {
+	var buffer TransferBuffer
+	return buffer.Read(r, maxBytes, size)
+}
+
+// TransferBuffer reuses the wire storage between batches. Returned keys and
+// values borrow it until the next Read; callers must finish importing first.
+// A buffer belongs to one reader at a time.
+type TransferBuffer struct{ data []byte }
+
+func (b *TransferBuffer) Read(r io.Reader, maxBytes, size int64) ([]TransferMetric, error) {
 	if maxBytes < 44 || maxBytes == math.MaxInt64 || size > maxBytes {
 		return nil, ErrTransferLimit
 	}
 	var data []byte
 	var err error
 	if size > 0 {
-		data = make([]byte, size)
+		if int64(cap(b.data)) < size {
+			b.data = make([]byte, size)
+		}
+		data = b.data[:size]
 		_, err = io.ReadFull(r, data)
 		if err == nil {
 			var extra [1]byte
@@ -895,6 +908,7 @@ func ReadTransferSize(r io.Reader, maxBytes, size int64) ([]TransferMetric, erro
 		}
 	} else {
 		data, err = io.ReadAll(io.LimitReader(r, maxBytes+1))
+		b.data = data
 	}
 	if err != nil {
 		return nil, err

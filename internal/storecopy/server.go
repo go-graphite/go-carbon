@@ -38,6 +38,7 @@ type fileSource struct {
 }
 
 type Manifest struct {
+	Operation       string             `json:"operation,omitempty"`
 	Version         int                `json:"version"`
 	ID              string             `json:"id"`
 	Created         time.Time          `json:"created"`
@@ -188,7 +189,18 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.URL.Path == Endpoint && r.Method == http.MethodPost:
-		err = m.create()
+		operation := r.URL.Query().Get("operation")
+		if operation != "" {
+			value, decodeErr := hex.DecodeString(operation)
+			if decodeErr != nil || len(value) != 32 {
+				http.Error(w, "invalid checkpoint operation", 400)
+				return
+			}
+		}
+		if operation != "" && m.manifest != nil && m.manifest.Operation == operation {
+			break
+		}
+		err = m.create(operation)
 	case m.manifest == nil:
 		http.Error(w, "no active copy; create a new checkpoint", http.StatusGone)
 		return
@@ -227,7 +239,7 @@ func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(m.manifest)
 }
 
-func (m *Manager) create() (err error) {
+func (m *Manager) create(operations ...string) (err error) {
 	if m.manifest != nil {
 		return errors.New("a checkpoint already owns input-log retention")
 	}
@@ -277,6 +289,9 @@ func (m *Manager) create() (err error) {
 	}
 	m.paths = make(map[string]fileSource)
 	manifest := &Manifest{Version: 1, ID: name, Created: time.Now().UTC(), Metadata: m.metadata, CheckpointInput: state}
+	if len(operations) > 0 {
+		manifest.Operation = operations[0]
+	}
 	manifest.Expires = manifest.Created.Add(6 * time.Hour)
 	entries, err := os.ReadDir(filepath.Join(m.dir, "store"))
 	if err != nil {

@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "cluster": "metrics",
+  "site": "region-a",
+  "old": {
+    "hash": "jump_fnv1a",
+    "replicas": 1,
+    "nodes": [
+      {
+        "id": "metrics-000",
+        "node": "store-metrics-1201.region-a.example.net:2003=000",
+        "endpoint": "http://store-metrics-1201.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-001",
+        "node": "store-metrics-1202.region-a.example.net:2003=001",
+        "endpoint": "http://store-metrics-1202.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-002",
+        "node": "store-metrics-1203.region-a.example.net:2003=002",
+        "endpoint": "http://store-metrics-1203.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-003",
+        "node": "store-metrics-1204.region-a.example.net:2003=003",
+        "endpoint": "http://store-metrics-1204.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-004",
+        "node": "store-metrics-1205.region-a.example.net:2003=004",
+        "endpoint": "http://store-metrics-1205.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-005",
+        "node": "store-metrics-1206.region-a.example.net:2003=005",
+        "endpoint": "http://store-metrics-1206.region-a.example.net:4242",
+        "mtcp": 5
+      }
+    ]
+  },
+  "new": {
+    "hash": "jump_fnv1a",
+    "replicas": 1,
+    "nodes": [
+      {
+        "id": "metrics-000",
+        "node": "store-metrics-1201.region-a.example.net:2003=000",
+        "endpoint": "http://store-metrics-1201.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-001",
+        "node": "store-metrics-1202.region-a.example.net:2003=001",
+        "endpoint": "http://store-metrics-1202.region-a.example.net:4242",
+        "mtcp": 5
+      },
+      {
+        "id": "metrics-002",
+        "node": "store-metrics-1203.region-a.example.net:2003=002",
+        "endpoint": "http://store-metrics-1203.region-a.example.net:4242",
+        "mtcp": 5
+      }
+    ]
+  },
+  "inputs": [
+    {
+      "source": "metrics-000",
+      "path": "metrics-000.txt",
+      "format": "lines",
+      "estimated_bytes": 600
+    },
+    {
+      "source": "metrics-001",
+      "path": "metrics-001.txt",
+      "format": "lines",
+      "estimated_bytes": 600
+    },
+    {
+      "source": "metrics-002",
+      "path": "metrics-002.txt",
+      "format": "lines",
+      "estimated_bytes": 600
+    },
+    {
+      "source": "metrics-003",
+      "path": "metrics-003.txt",
+      "format": "lines",
+      "estimated_bytes": 600
+    },
+    {
+      "source": "metrics-004",
+      "path": "metrics-004.txt",
+      "format": "lines",
+      "estimated_bytes": 600
+    },
+    {
+      "source": "metrics-005",
+      "path": "metrics-005.txt",
+      "format": "lines",
+      "estimated_bytes": 600
+    }
+  ]
+}

@@ -102,6 +102,7 @@ type Service struct {
 	server        *http.Server
 	listener      net.Listener
 	transfers     chan struct{}
+	transferPool  sync.Pool
 	mu            sync.Mutex
 	handlers      sync.WaitGroup
 	serveErr      chan error

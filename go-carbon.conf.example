@@ -610,7 +610,7 @@ auth-jwt-secret-file = ""
 # and rollback mirrors. Pins input history and SSTs for at most six hours.
 # POST creates, POST /capture advances log prefixes, POST /seal drains receivers,
 # GET /file streams checksummed ranges, DELETE releases the checkpoint.
-# See tool/downsize/copy/README.md for relay fencing, resumption and readiness.
+# See tool/downsize/README.md for relay fencing, resumption and readiness.
 # Source disk reserve for whole-store copy (zero selects 32 GiB). The local
 # watchdog aborts/releases a copy on low disk or input-log errors, even if its
 # external controller has died. Raise this for production compaction/ingest.
@@ -629,7 +629,7 @@ replicas = 1
 pprof = ""
 pyroscope = ""
 # Bounds concurrent exports/imports and encoded/decoded import size.
-max_transfers = 4
+max_transfers = 0 # auto: available CPU concurrency, capped at 64; explicit positive values remain ceilings
 max_body_bytes = 167772160
 # Legacy catalog-cache TTL in seconds; shared catalog reads have no TTL cache.
 timeout = 3600

@@ -63,6 +63,7 @@ vendor:
 	patch --batch --fuzz=0 -p1 < patches/go-whisper-off-grid-blocks.patch
 	patch --batch --fuzz=0 -p1 < patches/go-whisper-in-place-scratch.patch
 	patch --batch --fuzz=0 -p1 < patches/go-whisper-atomic-sidecar-fold.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-sparse-archive-snapshots.patch
 	patch --batch --fuzz=0 -p1 < patches/go-whisper-late-tail-test-groups.patch
 	patch --batch --fuzz=0 -p1 < patches/go-whisper-storage-file-accessor.patch
 

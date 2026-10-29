@@ -1,0 +1,3408 @@
+[
+  {
+    "metric": "a",
+    "fnv64": 12638187200555641996,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 31,
+      "666": 163
+    }
+  },
+  {
+    "metric": "foobar",
+    "fnv64": 9625390261332436968,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 33,
+      "666": 635
+    }
+  },
+  {
+    "metric": "aggregations.minutely.a",
+    "fnv64": 15112238844871798434,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 42,
+      "666": 505
+    }
+  },
+  {
+    "metric": "unicode.日本語",
+    "fnv64": 13222566734982721626,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 7,
+      "64": 14,
+      "666": 14
+    }
+  },
+  {
+    "metric": "metric.with\"quote",
+    "fnv64": 9416015491954325603,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 57,
+      "666": 147
+    }
+  },
+  {
+    "metric": "metric.with\\slash",
+    "fnv64": 7138182995189564712,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 17,
+      "666": 236
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_0.metric_0",
+    "fnv64": 8924299012333033714,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 5,
+      "64": 34,
+      "666": 377
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_1.metric_1",
+    "fnv64": 2617147386138339359,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 20,
+      "666": 512
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_2.metric_2",
+    "fnv64": 18042254452411731616,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 50,
+      "666": 559
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_3.metric_3",
+    "fnv64": 16722225612702182733,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 50,
+      "666": 320
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_4.metric_4",
+    "fnv64": 4474231385960018294,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 6,
+      "64": 6,
+      "666": 586
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_5.metric_5",
+    "fnv64": 5024351017522055931,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 58,
+      "666": 563
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_6.metric_6",
+    "fnv64": 14663453873215926404,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 19,
+      "666": 367
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_7.metric_7",
+    "fnv64": 10062981546255646281,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 34,
+      "666": 299
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_8.metric_8",
+    "fnv64": 3500603722060190874,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 4,
+      "666": 341
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_9.metric_9",
+    "fnv64": 1390545689684565703,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 18,
+      "666": 200
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_10.metric_10",
+    "fnv64": 2978850057342976909,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 50,
+      "666": 280
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_11.metric_11",
+    "fnv64": 9180631476427425370,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 33,
+      "666": 459
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_12.metric_12",
+    "fnv64": 2693302255101917927,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 61,
+      "666": 291
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_13.metric_13",
+    "fnv64": 2066371659543972292,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 50,
+      "666": 160
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_14.metric_14",
+    "fnv64": 11589444160125256481,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 29,
+      "666": 268
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_15.metric_15",
+    "fnv64": 6867155356794611230,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 7,
+      "64": 7,
+      "666": 591
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_16.metric_16",
+    "fnv64": 5234148193755891163,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 14,
+      "666": 413
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_17.metric_17",
+    "fnv64": 12583891677246901636,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 61,
+      "666": 660
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_18.metric_18",
+    "fnv64": 13806504046614469387,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 58,
+      "666": 264
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_19.metric_19",
+    "fnv64": 10083679971741186842,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 53,
+      "666": 350
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_20.metric_20",
+    "fnv64": 7619171160435869225,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 6,
+      "64": 28,
+      "666": 165
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_21.metric_21",
+    "fnv64": 5714468836001640520,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 7,
+      "64": 42,
+      "666": 289
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_22.metric_22",
+    "fnv64": 14301552101374559795,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 53,
+      "666": 633
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_23.metric_23",
+    "fnv64": 4446985711275051146,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 32,
+      "666": 71
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_24.metric_24",
+    "fnv64": 17083111849991456213,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 44,
+      "666": 426
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_25.metric_25",
+    "fnv64": 13044856525315364772,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 12,
+      "666": 464
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_26.metric_26",
+    "fnv64": 3180886181657330415,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 63,
+      "666": 436
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_27.metric_27",
+    "fnv64": 6657245334886323577,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 55,
+      "666": 642
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_28.metric_28",
+    "fnv64": 13286144833218221998,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 60,
+      "666": 526
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_29.metric_29",
+    "fnv64": 2512603207869077239,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 46,
+      "666": 492
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_30.metric_30",
+    "fnv64": 3728351579692868164,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 14,
+      "666": 301
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_31.metric_31",
+    "fnv64": 11253388375449534225,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 3,
+      "64": 29,
+      "666": 505
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_32.metric_32",
+    "fnv64": 1003975547664077142,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 21,
+      "666": 569
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_33.metric_33",
+    "fnv64": 8656136806285340091,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 31,
+      "666": 276
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_34.metric_34",
+    "fnv64": 2897863230935579340,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 53,
+      "666": 439
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_35.metric_35",
+    "fnv64": 13748952113642463691,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 5,
+      "64": 32,
+      "666": 434
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_36.metric_36",
+    "fnv64": 18144241961857406234,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 35,
+      "666": 196
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_37.metric_37",
+    "fnv64": 16809689611247086337,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 2,
+      "666": 533
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_38.metric_38",
+    "fnv64": 4742472848483299128,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 42,
+      "666": 145
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_39.metric_39",
+    "fnv64": 6639159963821066471,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 21,
+      "666": 166
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_40.metric_40",
+    "fnv64": 4470722597231290542,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 39,
+      "666": 423
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_41.metric_41",
+    "fnv64": 13016189293726334357,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 59,
+      "666": 276
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_42.metric_42",
+    "fnv64": 11790541614653020304,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 62,
+      "666": 138
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_43.metric_43",
+    "fnv64": 3544035169932728415,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 7,
+      "64": 13,
+      "666": 326
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_44.metric_44",
+    "fnv64": 1446979499586759165,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 13,
+      "666": 332
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_45.metric_45",
+    "fnv64": 1778765677018481878,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 7,
+      "64": 7,
+      "666": 66
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_46.metric_46",
+    "fnv64": 2198172891755762755,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 30,
+      "666": 206
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_47.metric_47",
+    "fnv64": 14879501515728984356,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 4,
+      "666": 635
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_48.metric_48",
+    "fnv64": 6310222748538625945,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 55,
+      "666": 417
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_49.metric_49",
+    "fnv64": 3818812004090832002,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 7,
+      "64": 61,
+      "666": 479
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_50.metric_50",
+    "fnv64": 15596240552930913623,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 5,
+      "64": 22,
+      "666": 498
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_51.metric_51",
+    "fnv64": 17279666068333666872,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 37,
+      "666": 452
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_52.metric_52",
+    "fnv64": 12447515490634409303,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 7,
+      "64": 20,
+      "666": 461
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_53.metric_53",
+    "fnv64": 13539990828718841270,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 42,
+      "666": 42
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_54.metric_54",
+    "fnv64": 4955350060417031149,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 49,
+      "666": 346
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_55.metric_55",
+    "fnv64": 5349974384655960964,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 8,
+      "666": 300
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_56.metric_56",
+    "fnv64": 13536859487353595035,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 41,
+      "666": 323
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_57.metric_57",
+    "fnv64": 2789968437016506978,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 60,
+      "666": 248
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_58.metric_58",
+    "fnv64": 8785388658561582817,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 55,
+      "666": 459
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_59.metric_59",
+    "fnv64": 7486603609386410176,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 43,
+      "666": 212
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_60.metric_60",
+    "fnv64": 774476758830497991,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 7,
+      "64": 14,
+      "666": 348
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_61.metric_61",
+    "fnv64": 6977582947497733585,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 54,
+      "666": 234
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_62.metric_62",
+    "fnv64": 17153116082491925558,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 6,
+      "64": 52,
+      "666": 78
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_63.metric_63",
+    "fnv64": 2333123247815773567,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 58,
+      "666": 264
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_64.metric_64",
+    "fnv64": 582054286051550348,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 6,
+      "64": 61,
+      "666": 380
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_65.metric_65",
+    "fnv64": 6716412106628372685,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 2,
+      "666": 70
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_66.metric_66",
+    "fnv64": 17946648637504544354,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 5,
+      "666": 5
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_67.metric_67",
+    "fnv64": 2216078711759728843,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 31,
+      "666": 174
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_68.metric_68",
+    "fnv64": 4363247833549307748,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 33,
+      "666": 309
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_69.metric_69",
+    "fnv64": 13450292077282153415,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 23,
+      "666": 235
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_70.metric_70",
+    "fnv64": 16231952374526938790,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 7,
+      "64": 48,
+      "666": 612
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_71.metric_71",
+    "fnv64": 3254244361575560229,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 23,
+      "666": 70
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_72.metric_72",
+    "fnv64": 13009156931127926260,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 17,
+      "666": 627
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_73.metric_73",
+    "fnv64": 5877348560829305091,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 46,
+      "666": 213
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_74.metric_74",
+    "fnv64": 5323499217034582234,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 6,
+      "64": 56,
+      "666": 324
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_75.metric_75",
+    "fnv64": 6256430976646234121,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 17,
+      "666": 445
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_76.metric_76",
+    "fnv64": 9205122435395376712,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 34,
+      "666": 128
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_77.metric_77",
+    "fnv64": 5437326273588317927,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 14,
+      "666": 537
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_78.metric_78",
+    "fnv64": 8870675222916846697,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 35,
+      "666": 35
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_79.metric_79",
+    "fnv64": 4240519750126470970,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 12,
+      "666": 607
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_80.metric_80",
+    "fnv64": 14543133764785064115,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 46,
+      "666": 174
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_81.metric_81",
+    "fnv64": 4096112819165641780,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 42,
+      "666": 299
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_82.metric_82",
+    "fnv64": 11221295764335795001,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 35,
+      "666": 389
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_83.metric_83",
+    "fnv64": 14317177404048552682,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 63,
+      "666": 489
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_84.metric_84",
+    "fnv64": 17417943269543403343,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 31,
+      "666": 251
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_85.metric_85",
+    "fnv64": 3265624470408352956,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 60,
+      "666": 150
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_86.metric_86",
+    "fnv64": 7841018446844825883,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 44,
+      "666": 107
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_87.metric_87",
+    "fnv64": 13464126696292836926,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 53,
+      "666": 451
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_88.metric_88",
+    "fnv64": 496693728484218325,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 38,
+      "666": 410
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_89.metric_89",
+    "fnv64": 5110234087956072744,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 7,
+      "64": 7,
+      "666": 555
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_90.metric_90",
+    "fnv64": 2710035654374075247,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 40,
+      "666": 548
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_91.metric_91",
+    "fnv64": 8224020864069830926,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 53,
+      "666": 522
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_92.metric_92",
+    "fnv64": 842388016921415013,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 7,
+      "64": 30,
+      "666": 364
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_93.metric_93",
+    "fnv64": 10651083711702046428,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 56,
+      "666": 105
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_94.metric_94",
+    "fnv64": 3199227335205946235,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 53,
+      "666": 363
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_95.metric_95",
+    "fnv64": 694663750871831309,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 7,
+      "64": 15,
+      "666": 99
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_96.metric_96",
+    "fnv64": 13307457397388364142,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 40,
+      "666": 264
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_0.metric_97",
+    "fnv64": 1955730254882319299,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 59,
+      "666": 189
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_1.metric_98",
+    "fnv64": 6846287019348825764,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 3,
+      "64": 21,
+      "666": 514
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_2.metric_99",
+    "fnv64": 2415679699334122209,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 7,
+      "64": 21,
+      "666": 305
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_3.metric_100",
+    "fnv64": 3608292063766067732,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 6,
+      "64": 11,
+      "666": 488
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_4.metric_101",
+    "fnv64": 17725413218856352201,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 36,
+      "666": 652
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_5.metric_102",
+    "fnv64": 6463490101851685590,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 27,
+      "666": 115
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_6.metric_103",
+    "fnv64": 6838535407261638565,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 27,
+      "666": 311
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_7.metric_104",
+    "fnv64": 735968122884704528,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 14,
+      "666": 157
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_8.metric_105",
+    "fnv64": 16721912845901350191,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 33,
+      "666": 586
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_9.metric_106",
+    "fnv64": 15863885089780697738,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 6,
+      "64": 8,
+      "666": 8
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_10.metric_107",
+    "fnv64": 742058606891012712,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 45,
+      "666": 45
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_11.metric_108",
+    "fnv64": 8481572984284286763,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 1,
+      "666": 97
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_12.metric_109",
+    "fnv64": 12529872859456712802,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 18,
+      "666": 425
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_13.metric_110",
+    "fnv64": 11744919451658776166,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 4,
+      "666": 408
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_14.metric_111",
+    "fnv64": 16741854983117875951,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 7,
+      "64": 59,
+      "666": 634
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_15.metric_112",
+    "fnv64": 15359697772610438457,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 20,
+      "666": 484
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_16.metric_113",
+    "fnv64": 4347880099318970092,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 41,
+      "666": 226
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_17.metric_114",
+    "fnv64": 3356635896301759199,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 23,
+      "666": 449
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_18.metric_115",
+    "fnv64": 3577796842056366298,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 3,
+      "8": 3,
+      "64": 3,
+      "666": 280
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_19.metric_116",
+    "fnv64": 17275965003763208477,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 5,
+      "64": 27,
+      "666": 269
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_20.metric_117",
+    "fnv64": 15879938903016248995,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 51,
+      "666": 217
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_21.metric_118",
+    "fnv64": 7455590950169177256,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 57,
+      "666": 510
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_22.metric_119",
+    "fnv64": 6775088803064311869,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 27,
+      "666": 565
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_23.metric_120",
+    "fnv64": 129691935088519073,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 1,
+      "666": 300
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_24.metric_121",
+    "fnv64": 4258514949584574422,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 22,
+      "666": 646
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_25.metric_122",
+    "fnv64": 13991489941577429459,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 25,
+      "666": 553
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_26.metric_123",
+    "fnv64": 16662036237681148504,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 11,
+      "666": 221
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_27.metric_124",
+    "fnv64": 17337061254796852789,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 7,
+      "64": 59,
+      "666": 356
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_28.metric_125",
+    "fnv64": 14274762491140758106,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 7,
+      "64": 50,
+      "666": 302
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_29.metric_126",
+    "fnv64": 15717139323830423143,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 57,
+      "666": 446
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_30.metric_127",
+    "fnv64": 4627181071594931165,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 55,
+      "666": 238
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_31.metric_128",
+    "fnv64": 957469028359708004,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 24,
+      "666": 516
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_32.metric_129",
+    "fnv64": 3291223119391362082,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 12,
+      "666": 12
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_33.metric_130",
+    "fnv64": 8325693809039570920,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 38,
+      "666": 400
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_34.metric_131",
+    "fnv64": 13989491203513297891,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 29,
+      "666": 449
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_35.metric_132",
+    "fnv64": 16685036828510664602,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 62,
+      "666": 646
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_36.metric_133",
+    "fnv64": 8566330323213034461,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 7,
+      "64": 15,
+      "666": 15
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_37.metric_134",
+    "fnv64": 13582865944948201868,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 8,
+      "666": 368
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_38.metric_135",
+    "fnv64": 12616772407584455639,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 12,
+      "666": 626
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_39.metric_136",
+    "fnv64": 17589659162402610986,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 7,
+      "64": 26,
+      "666": 219
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_40.metric_137",
+    "fnv64": 11093508800504021644,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 52,
+      "666": 632
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_41.metric_138",
+    "fnv64": 17074910559135155591,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 43,
+      "666": 277
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_42.metric_139",
+    "fnv64": 7676218462066002242,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 7,
+      "64": 7,
+      "666": 7
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_43.metric_140",
+    "fnv64": 12747937039943041704,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 3,
+      "8": 7,
+      "64": 7,
+      "666": 410
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_44.metric_141",
+    "fnv64": 14414492138620568105,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 33,
+      "666": 642
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_45.metric_142",
+    "fnv64": 4577972764936364374,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 3,
+      "64": 3,
+      "666": 232
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_46.metric_143",
+    "fnv64": 10777809056690719367,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 8,
+      "666": 366
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_47.metric_144",
+    "fnv64": 3153846407791142548,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 17,
+      "666": 399
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_48.metric_145",
+    "fnv64": 1889981395258502805,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 46,
+      "666": 152
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_49.metric_146",
+    "fnv64": 2045064747357052819,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 3,
+      "64": 61,
+      "666": 174
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_50.metric_147",
+    "fnv64": 16538667684878647055,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 27,
+      "666": 585
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_51.metric_148",
+    "fnv64": 11310912648540900184,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 51,
+      "666": 73
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_52.metric_149",
+    "fnv64": 9574863088447397481,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 50,
+      "666": 351
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_53.metric_150",
+    "fnv64": 17098765572849357077,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 5,
+      "8": 6,
+      "64": 26,
+      "666": 533
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_54.metric_151",
+    "fnv64": 1202572784498261932,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 54,
+      "666": 535
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_55.metric_152",
+    "fnv64": 15504720647511277363,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 6,
+      "64": 39,
+      "666": 81
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_56.metric_153",
+    "fnv64": 12652275030844462230,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 32,
+      "666": 123
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_57.metric_154",
+    "fnv64": 13319332704877626583,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 40,
+      "666": 427
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_58.metric_155",
+    "fnv64": 1727529782531961064,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 3,
+      "666": 308
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_59.metric_156",
+    "fnv64": 2818676679109077121,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 38,
+      "666": 212
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_60.metric_157",
+    "fnv64": 13751010640439306765,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 6,
+      "64": 43,
+      "666": 312
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_61.metric_158",
+    "fnv64": 3291326095353644944,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 44,
+      "666": 350
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_62.metric_159",
+    "fnv64": 13215706079532175463,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 46,
+      "666": 193
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_63.metric_160",
+    "fnv64": 3876297817273351415,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 38,
+      "666": 351
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_64.metric_161",
+    "fnv64": 6121384551229412816,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 18,
+      "666": 591
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_65.metric_162",
+    "fnv64": 12487856606403818393,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 3,
+      "64": 3,
+      "666": 429
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_66.metric_163",
+    "fnv64": 2997117391653014787,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 50,
+      "666": 594
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_67.metric_164",
+    "fnv64": 16435678155473181842,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 28,
+      "666": 94
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_68.metric_165",
+    "fnv64": 9130005881607748029,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 3,
+      "8": 3,
+      "64": 30,
+      "666": 396
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_69.metric_166",
+    "fnv64": 7835586334863738484,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 6,
+      "64": 6,
+      "666": 492
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_70.metric_167",
+    "fnv64": 9222773703007775726,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 18,
+      "666": 393
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_71.metric_168",
+    "fnv64": 12053128157515436507,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 7,
+      "64": 23,
+      "666": 382
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_72.metric_169",
+    "fnv64": 316066317687247116,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 1,
+      "666": 110
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_73.metric_170",
+    "fnv64": 5748813257799026414,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 5,
+      "64": 18,
+      "666": 124
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_74.metric_171",
+    "fnv64": 15493435704732938315,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 33,
+      "666": 99
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_75.metric_172",
+    "fnv64": 13328459160458072412,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 31,
+      "666": 31
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_76.metric_173",
+    "fnv64": 9635201490896550593,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 7,
+      "64": 60,
+      "666": 460
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_77.metric_174",
+    "fnv64": 7932233162347514226,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 55,
+      "666": 130
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_78.metric_175",
+    "fnv64": 15444333055157432959,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 2,
+      "666": 556
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_79.metric_176",
+    "fnv64": 11635072532075119472,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 5,
+      "666": 376
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_80.metric_177",
+    "fnv64": 10805897106445716942,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 41,
+      "666": 379
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_81.metric_178",
+    "fnv64": 12729776101475824301,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 12,
+      "666": 361
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_82.metric_179",
+    "fnv64": 16291832602752822164,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 9,
+      "666": 138
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_83.metric_180",
+    "fnv64": 15260460048913810203,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 3,
+      "8": 3,
+      "64": 63,
+      "666": 63
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_84.metric_181",
+    "fnv64": 10977678561869312906,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 13,
+      "666": 611
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_85.metric_182",
+    "fnv64": 2394830909517357289,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 38,
+      "666": 38
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_86.metric_183",
+    "fnv64": 8649272795469097432,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 6,
+      "64": 63,
+      "666": 102
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_87.metric_184",
+    "fnv64": 289686705823085807,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 55,
+      "666": 398
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_88.metric_185",
+    "fnv64": 3555256500399113494,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 54,
+      "666": 54
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_89.metric_186",
+    "fnv64": 8358982914777083453,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 58,
+      "666": 177
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_90.metric_187",
+    "fnv64": 12665031490458713221,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 5,
+      "8": 5,
+      "64": 36,
+      "666": 319
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_91.metric_188",
+    "fnv64": 14106173390255686760,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 30,
+      "666": 540
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_92.metric_189",
+    "fnv64": 5441264469119177563,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 7,
+      "64": 26,
+      "666": 551
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_93.metric_190",
+    "fnv64": 3710156057013163369,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 46,
+      "666": 481
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_94.metric_191",
+    "fnv64": 614255784081959318,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 10,
+      "666": 10
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_95.metric_192",
+    "fnv64": 12973216554801264771,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 16,
+      "666": 16
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_96.metric_193",
+    "fnv64": 5268153604257706400,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 44,
+      "666": 547
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_0.metric_194",
+    "fnv64": 1964638037119243729,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 7,
+      "64": 31,
+      "666": 31
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_1.metric_195",
+    "fnv64": 12635033719602423670,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 6,
+      "64": 43,
+      "666": 180
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_2.metric_196",
+    "fnv64": 13204622247620794319,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 28,
+      "666": 521
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_3.metric_197",
+    "fnv64": 1289983773474206551,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 6,
+      "666": 6
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_4.metric_198",
+    "fnv64": 12780739192439415338,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 14,
+      "666": 116
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_5.metric_199",
+    "fnv64": 5198942573970349453,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 47,
+      "666": 427
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_6.metric_200",
+    "fnv64": 10121910336881060114,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 55,
+      "666": 129
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_7.metric_201",
+    "fnv64": 4678223154097097029,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 1,
+      "666": 492
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_8.metric_202",
+    "fnv64": 13963300088865423240,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 37,
+      "666": 459
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_9.metric_203",
+    "fnv64": 16462380825273177243,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 7,
+      "64": 47,
+      "666": 543
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_10.metric_204",
+    "fnv64": 9341112019411501869,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 0,
+      "666": 461
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_11.metric_205",
+    "fnv64": 9106300157598035690,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 37,
+      "666": 381
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_12.metric_206",
+    "fnv64": 8103522271315398007,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 62,
+      "666": 412
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_13.metric_207",
+    "fnv64": 9194664769846001220,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 54,
+      "666": 250
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_14.metric_208",
+    "fnv64": 10078047976988198505,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 52,
+      "666": 79
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_15.metric_209",
+    "fnv64": 10972397831525318,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 57,
+      "666": 338
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_16.metric_210",
+    "fnv64": 16062187258452322840,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 32,
+      "666": 586
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_17.metric_211",
+    "fnv64": 17904126240345381787,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 5,
+      "666": 196
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_18.metric_212",
+    "fnv64": 14712647688901916126,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 7,
+      "64": 59,
+      "666": 362
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_19.metric_213",
+    "fnv64": 9406889829499474753,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 29,
+      "666": 187
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_20.metric_214",
+    "fnv64": 4184279260188260838,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 12,
+      "666": 413
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_21.metric_215",
+    "fnv64": 10318833775698507497,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 7,
+      "64": 49,
+      "666": 653
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_22.metric_216",
+    "fnv64": 8101482619057685836,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 32,
+      "666": 331
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_23.metric_217",
+    "fnv64": 12114115061457982535,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 2,
+      "8": 6,
+      "64": 55,
+      "666": 528
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_24.metric_218",
+    "fnv64": 8269273063503749034,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 55,
+      "666": 305
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_25.metric_219",
+    "fnv64": 13224055729525291933,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 62,
+      "666": 334
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_26.metric_220",
+    "fnv64": 4291803120708937765,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 35,
+      "666": 416
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_27.metric_221",
+    "fnv64": 15678551546785767142,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 6,
+      "64": 39,
+      "666": 166
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_28.metric_222",
+    "fnv64": 4779721620235518045,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 13,
+      "666": 344
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_29.metric_223",
+    "fnv64": 7954136869255026664,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 7,
+      "64": 18,
+      "666": 209
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_30.metric_224",
+    "fnv64": 6153029586237625854,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 6,
+      "64": 37,
+      "666": 188
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_31.metric_225",
+    "fnv64": 13649932969254823151,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 24,
+      "666": 89
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_32.metric_226",
+    "fnv64": 15649848902467805676,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 5,
+      "8": 5,
+      "64": 16,
+      "666": 299
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_33.metric_227",
+    "fnv64": 5734861328144440829,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 21,
+      "666": 443
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_34.metric_228",
+    "fnv64": 15862621835875410962,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 3,
+      "8": 3,
+      "64": 3,
+      "666": 244
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_35.metric_229",
+    "fnv64": 6234889185375680203,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 3,
+      "8": 3,
+      "64": 13,
+      "666": 137
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_36.metric_230",
+    "fnv64": 4514726133050849415,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 38,
+      "666": 253
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_37.metric_231",
+    "fnv64": 10852037241421629423,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 6,
+      "64": 54,
+      "666": 653
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_38.metric_232",
+    "fnv64": 471063186763026392,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 4,
+      "666": 633
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_39.metric_233",
+    "fnv64": 2910258994396143297,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 62,
+      "666": 387
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_40.metric_234",
+    "fnv64": 3501573130779715437,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 32,
+      "666": 555
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_41.metric_235",
+    "fnv64": 7451984516806798056,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 3,
+      "64": 36,
+      "666": 584
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_42.metric_236",
+    "fnv64": 8372913178033983559,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 3,
+      "8": 6,
+      "64": 39,
+      "666": 628
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_43.metric_237",
+    "fnv64": 17458756477387025282,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 4,
+      "8": 6,
+      "64": 12,
+      "666": 430
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_44.metric_238",
+    "fnv64": 127843421347538821,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 4,
+      "8": 4,
+      "64": 24,
+      "666": 557
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_1.by_host.host_45.metric_239",
+    "fnv64": 3562383691452841750,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 62,
+      "666": 180
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_2.by_host.host_46.metric_240",
+    "fnv64": 17336799496295171342,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 4,
+      "64": 59,
+      "666": 59
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_3.by_host.host_47.metric_241",
+    "fnv64": 6002593632264951797,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 12,
+      "666": 602
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_4.by_host.host_48.metric_242",
+    "fnv64": 6209181987293406252,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 34,
+      "666": 191
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_5.by_host.host_49.metric_243",
+    "fnv64": 8840088751711111155,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 27,
+      "666": 92
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_6.by_host.host_50.metric_244",
+    "fnv64": 9634098283517691507,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 2,
+      "6": 3,
+      "8": 3,
+      "64": 54,
+      "666": 624
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_7.by_host.host_51.metric_245",
+    "fnv64": 9956841290689663056,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 5,
+      "8": 5,
+      "64": 27,
+      "666": 519
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_8.by_host.host_52.metric_246",
+    "fnv64": 11422368760808103109,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 6,
+      "64": 6,
+      "666": 316
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_9.by_host.host_53.metric_247",
+    "fnv64": 15258266667228308538,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 0,
+      "8": 0,
+      "64": 0,
+      "666": 376
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_10.by_host.host_54.metric_248",
+    "fnv64": 1632384627353331366,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 6,
+      "64": 61,
+      "666": 215
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_11.by_host.host_55.metric_249",
+    "fnv64": 8886572968381271513,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 4,
+      "8": 4,
+      "64": 11,
+      "666": 11
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_12.by_host.host_56.metric_250",
+    "fnv64": 2239884608185672455,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 2,
+      "6": 2,
+      "8": 2,
+      "64": 27,
+      "666": 273
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_13.by_host.host_57.metric_251",
+    "fnv64": 11183567359763116460,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 3,
+      "8": 3,
+      "64": 37,
+      "666": 511
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_14.by_host.host_58.metric_252",
+    "fnv64": 5195802811195181957,
+    "buckets": {
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "6": 4,
+      "8": 6,
+      "64": 56,
+      "666": 327
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_15.by_host.host_59.metric_253",
+    "fnv64": 3430092513989198402,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 57,
+      "666": 521
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_16.by_host.host_60.metric_254",
+    "fnv64": 3903865457629143204,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 49,
+      "666": 318
+    }
+  },
+  {
+    "metric": "aggregations.minutely.by_service.service_0.by_host.host_61.metric_255",
+    "fnv64": 13597052133660601603,
+    "buckets": {
+      "1": 0,
+      "2": 1,
+      "3": 1,
+      "6": 1,
+      "8": 1,
+      "64": 50,
+      "666": 261
+    }
+  }
+]

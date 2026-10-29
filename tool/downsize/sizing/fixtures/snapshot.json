@@ -1,0 +1,710 @@
+{
+  "schema_version": 1,
+  "fixture": true,
+  "window": {"start": 1792540800, "end": 1793145600, "step_seconds": 300},
+  "hosts": [
+    {
+      "host": "store-metrics-1201.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 6.5625, "p95": 5.25, "last": 5.90625, "first": 5.578125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 50331648000.0, "p95": 40265318400.0, "last": 45298483200.0, "first": 42781900800.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 609375000000.0, "p95": 487500000000.0, "last": 548437500000.0, "first": 517968750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2812500000.0},
+        "write_mbps": {"peak": 60.9375, "p95": 48.75, "last": 54.84375, "first": 51.796875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 20.625, "p95": 16.5, "last": 18.5625, "first": 17.53125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 6562.5, "p95": 5250.0, "last": 5906.25, "first": 5578.125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1125000.0, "p95": 900000.0, "last": 1012500.0, "first": 956250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 93750000.0, "p95": 75000000.0, "last": 84375000.0, "first": 79687500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 56.25, "p95": 45.0, "last": 50.625, "first": 47.8125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.234375, "p95": 0.1875, "last": 0.2109375, "first": 0.19921875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 60.9375, "p95": 48.75, "last": 54.84375, "first": 51.796875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 20.625, "p95": 16.5, "last": 18.5625, "first": 17.53125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 6562.5, "p95": 5250.0, "last": 5906.25, "first": 5578.125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-1202.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 6.7375, "p95": 5.390000000000001, "last": 6.06375, "first": 5.726875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 51673825280.0, "p95": 41339060224.0, "last": 46506442752.0, "first": 43922751488.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 625625000000.0, "p95": 500500000000.0, "last": 563062500000.0, "first": 531781250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2887500000.0},
+        "write_mbps": {"peak": 62.5625, "p95": 50.050000000000004, "last": 56.30625, "first": 53.178125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 21.175, "p95": 16.94, "last": 19.0575, "first": 17.99875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 6737.5, "p95": 5390.0, "last": 6063.75, "first": 5726.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1155000.0, "p95": 924000.0, "last": 1039500.0, "first": 981750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 96250000.0, "p95": 77000000.0, "last": 86625000.0, "first": 81812500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 57.75, "p95": 46.2, "last": 51.975, "first": 49.0875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.240625, "p95": 0.1925, "last": 0.21656250000000002, "first": 0.20453125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 62.5625, "p95": 50.050000000000004, "last": 56.30625, "first": 53.178125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 21.175, "p95": 16.94, "last": 19.0575, "first": 17.99875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 6737.5, "p95": 5390.0, "last": 6063.75, "first": 5726.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-1203.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 6.9125000000000005, "p95": 5.530000000000001, "last": 6.22125, "first": 5.875625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 53016002560.0, "p95": 42412802048.0, "last": 47714402304.0, "first": 45063602176.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 641875000000.0, "p95": 513500000000.0, "last": 577687500000.0, "first": 545593750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2962500000.0},
+        "write_mbps": {"peak": 64.1875, "p95": 51.35, "last": 57.768750000000004, "first": 54.559374999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 21.725, "p95": 17.380000000000003, "last": 19.552500000000002, "first": 18.466250000000002, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 6912.5, "p95": 5530.0, "last": 6221.25, "first": 5875.625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1185000.0, "p95": 948000.0, "last": 1066500.0, "first": 1007250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 98750000.0, "p95": 79000000.0, "last": 88875000.0, "first": 83937500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 59.25, "p95": 47.400000000000006, "last": 53.325, "first": 50.3625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.246875, "p95": 0.1975, "last": 0.2221875, "first": 0.20984375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 64.1875, "p95": 51.35, "last": 57.768750000000004, "first": 54.559374999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 21.725, "p95": 17.380000000000003, "last": 19.552500000000002, "first": 18.466250000000002, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 6912.5, "p95": 5530.0, "last": 6221.25, "first": 5875.625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-1204.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 7.0874999999999995, "p95": 5.67, "last": 6.378749999999999, "first": 6.024374999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 54358179840.0, "p95": 43486543872.0, "last": 48922361856.0, "first": 46204452864.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 658125000000.0, "p95": 526500000000.0, "last": 592312500000.0, "first": 559406250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3037500000.0},
+        "write_mbps": {"peak": 65.8125, "p95": 52.650000000000006, "last": 59.23125, "first": 55.940625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.275, "p95": 17.82, "last": 20.0475, "first": 18.93375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 7087.5, "p95": 5670.0, "last": 6378.75, "first": 6024.375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1215000.0, "p95": 972000.0, "last": 1093500.0, "first": 1032750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 101250000.0, "p95": 81000000.0, "last": 91125000.0, "first": 86062500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 60.75, "p95": 48.6, "last": 54.675000000000004, "first": 51.637499999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.253125, "p95": 0.2025, "last": 0.2278125, "first": 0.21515625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 65.8125, "p95": 52.650000000000006, "last": 59.23125, "first": 55.940625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 22.275, "p95": 17.82, "last": 20.0475, "first": 18.93375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 7087.5, "p95": 5670.0, "last": 6378.75, "first": 6024.375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-1205.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 7.262500000000001, "p95": 5.810000000000001, "last": 6.536250000000001, "first": 6.173125000000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 55700357120.00001, "p95": 44560285696.00001, "last": 50130321408.00001, "first": 47345303552.00001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 674375000000.0, "p95": 539500000000.0, "last": 606937500000.0, "first": 573218750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3112500000.0000005},
+        "write_mbps": {"peak": 67.4375, "p95": 53.95, "last": 60.69375, "first": 57.321875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.825000000000003, "p95": 18.26, "last": 20.542500000000004, "first": 19.40125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 7262.500000000001, "p95": 5810.000000000001, "last": 6536.250000000001, "first": 6173.125000000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1245000.0, "p95": 996000.0, "last": 1120500.0, "first": 1058250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 103750000.00000001, "p95": 83000000.00000001, "last": 93375000.00000001, "first": 88187500.00000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 62.25000000000001, "p95": 49.80000000000001, "last": 56.025000000000006, "first": 52.9125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.259375, "p95": 0.20750000000000002, "last": 0.23343750000000002, "first": 0.22046875000000002, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 67.4375, "p95": 53.95, "last": 60.69375, "first": 57.321875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 22.825000000000003, "p95": 18.26, "last": 20.542500000000004, "first": 19.40125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 7262.500000000001, "p95": 5810.000000000001, "last": 6536.250000000001, "first": 6173.125000000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-1206.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 7.4375, "p95": 5.95, "last": 6.6937500000000005, "first": 6.3218749999999995, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 57042534400.0, "p95": 45634027520.0, "last": 51338280960.0, "first": 48486154240.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 690625000000.0, "p95": 552500000000.0, "last": 621562500000.0, "first": 587031250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3187500000.0},
+        "write_mbps": {"peak": 69.0625, "p95": 55.25, "last": 62.15625, "first": 58.703125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 23.375, "p95": 18.7, "last": 21.0375, "first": 19.86875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 7437.5, "p95": 5950.0, "last": 6693.75, "first": 6321.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1275000.0, "p95": 1020000.0, "last": 1147500.0, "first": 1083750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 106250000.0, "p95": 85000000.0, "last": 95625000.0, "first": 90312500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 63.75, "p95": 51.0, "last": 57.375, "first": 54.1875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.265625, "p95": 0.21250000000000002, "last": 0.2390625, "first": 0.22578125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 69.0625, "p95": 55.25, "last": 62.15625, "first": 58.703125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 23.375, "p95": 18.7, "last": 21.0375, "first": 19.86875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 7437.5, "p95": 5950.0, "last": 6693.75, "first": 6321.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-2101.region-b.example.net",
+      "cluster": "metrics",
+      "site": "region-b",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "dm-7"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 6.5625, "p95": 5.25, "last": 5.90625, "first": 5.578125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 50331648000.0, "p95": 40265318400.0, "last": 45298483200.0, "first": 42781900800.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 609375000000.0, "p95": 487500000000.0, "last": 548437500000.0, "first": 517968750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2812500000.0},
+        "write_mbps": {"peak": 60.9375, "p95": 48.75, "last": 54.84375, "first": 51.796875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 20.625, "p95": 16.5, "last": 18.5625, "first": 17.53125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 6562.5, "p95": 5250.0, "last": 5906.25, "first": 5578.125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1125000.0, "p95": 900000.0, "last": 1012500.0, "first": 956250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 93750000.0, "p95": 75000000.0, "last": 84375000.0, "first": 79687500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 56.25, "p95": 45.0, "last": 50.625, "first": 47.8125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.234375, "p95": 0.1875, "last": 0.2109375, "first": 0.19921875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "dm-7": {
+          "write_mbps": {"peak": 60.9375, "p95": 48.75, "last": 54.84375, "first": 51.796875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 20.625, "p95": 16.5, "last": 18.5625, "first": 17.53125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 6562.5, "p95": 5250.0, "last": 5906.25, "first": 5578.125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-2102.region-b.example.net",
+      "cluster": "metrics",
+      "site": "region-b",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "dm-7"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 6.7375, "p95": 5.390000000000001, "last": 6.06375, "first": 5.726875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 51673825280.0, "p95": 41339060224.0, "last": 46506442752.0, "first": 43922751488.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 625625000000.0, "p95": 500500000000.0, "last": 563062500000.0, "first": 531781250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2887500000.0},
+        "write_mbps": {"peak": 62.5625, "p95": 50.050000000000004, "last": 56.30625, "first": 53.178125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 21.175, "p95": 16.94, "last": 19.0575, "first": 17.99875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 6737.5, "p95": 5390.0, "last": 6063.75, "first": 5726.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1155000.0, "p95": 924000.0, "last": 1039500.0, "first": 981750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 96250000.0, "p95": 77000000.0, "last": 86625000.0, "first": 81812500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 57.75, "p95": 46.2, "last": 51.975, "first": 49.0875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.240625, "p95": 0.1925, "last": 0.21656250000000002, "first": 0.20453125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "dm-7": {
+          "write_mbps": {"peak": 62.5625, "p95": 50.050000000000004, "last": 56.30625, "first": 53.178125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 21.175, "p95": 16.94, "last": 19.0575, "first": 17.99875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 6737.5, "p95": 5390.0, "last": 6063.75, "first": 5726.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-2103.region-b.example.net",
+      "cluster": "metrics",
+      "site": "region-b",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "dm-7"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 6.9125000000000005, "p95": 5.530000000000001, "last": 6.22125, "first": 5.875625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 53016002560.0, "p95": 42412802048.0, "last": 47714402304.0, "first": 45063602176.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 641875000000.0, "p95": 513500000000.0, "last": 577687500000.0, "first": 545593750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2962500000.0},
+        "write_mbps": {"peak": 64.1875, "p95": 51.35, "last": 57.768750000000004, "first": 54.559374999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 21.725, "p95": 17.380000000000003, "last": 19.552500000000002, "first": 18.466250000000002, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 6912.5, "p95": 5530.0, "last": 6221.25, "first": 5875.625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1185000.0, "p95": 948000.0, "last": 1066500.0, "first": 1007250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 98750000.0, "p95": 79000000.0, "last": 88875000.0, "first": 83937500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 59.25, "p95": 47.400000000000006, "last": 53.325, "first": 50.3625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.246875, "p95": 0.1975, "last": 0.2221875, "first": 0.20984375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "dm-7": {
+          "write_mbps": {"peak": 64.1875, "p95": 51.35, "last": 57.768750000000004, "first": 54.559374999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 21.725, "p95": 17.380000000000003, "last": 19.552500000000002, "first": 18.466250000000002, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 6912.5, "p95": 5530.0, "last": 6221.25, "first": 5875.625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-2104.region-b.example.net",
+      "cluster": "metrics",
+      "site": "region-b",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "dm-7"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 7.0874999999999995, "p95": 5.67, "last": 6.378749999999999, "first": 6.024374999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 54358179840.0, "p95": 43486543872.0, "last": 48922361856.0, "first": 46204452864.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 658125000000.0, "p95": 526500000000.0, "last": 592312500000.0, "first": 559406250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3037500000.0},
+        "write_mbps": {"peak": 65.8125, "p95": 52.650000000000006, "last": 59.23125, "first": 55.940625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.275, "p95": 17.82, "last": 20.0475, "first": 18.93375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 7087.5, "p95": 5670.0, "last": 6378.75, "first": 6024.375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1215000.0, "p95": 972000.0, "last": 1093500.0, "first": 1032750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 101250000.0, "p95": 81000000.0, "last": 91125000.0, "first": 86062500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 60.75, "p95": 48.6, "last": 54.675000000000004, "first": 51.637499999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.253125, "p95": 0.2025, "last": 0.2278125, "first": 0.21515625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "dm-7": {
+          "write_mbps": {"peak": 65.8125, "p95": 52.650000000000006, "last": 59.23125, "first": 55.940625, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 22.275, "p95": 17.82, "last": 20.0475, "first": 18.93375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 7087.5, "p95": 5670.0, "last": 6378.75, "first": 6024.375, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-2105.region-b.example.net",
+      "cluster": "metrics",
+      "site": "region-b",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "dm-7"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 7.262500000000001, "p95": 5.810000000000001, "last": 6.536250000000001, "first": 6.173125000000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 55700357120.00001, "p95": 44560285696.00001, "last": 50130321408.00001, "first": 47345303552.00001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 674375000000.0, "p95": 539500000000.0, "last": 606937500000.0, "first": 573218750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3112500000.0000005},
+        "write_mbps": {"peak": 67.4375, "p95": 53.95, "last": 60.69375, "first": 57.321875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.825000000000003, "p95": 18.26, "last": 20.542500000000004, "first": 19.40125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 7262.500000000001, "p95": 5810.000000000001, "last": 6536.250000000001, "first": 6173.125000000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1245000.0, "p95": 996000.0, "last": 1120500.0, "first": 1058250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 103750000.00000001, "p95": 83000000.00000001, "last": 93375000.00000001, "first": 88187500.00000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 62.25000000000001, "p95": 49.80000000000001, "last": 56.025000000000006, "first": 52.9125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.259375, "p95": 0.20750000000000002, "last": 0.23343750000000002, "first": 0.22046875000000002, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "dm-7": {
+          "write_mbps": {"peak": 67.4375, "p95": 53.95, "last": 60.69375, "first": 57.321875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 22.825000000000003, "p95": 18.26, "last": 20.542500000000004, "first": 19.40125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 7262.500000000001, "p95": 5810.000000000001, "last": 6536.250000000001, "first": 6173.125000000001, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-2106.region-b.example.net",
+      "cluster": "metrics",
+      "site": "region-b",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "dm-7"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 7.4375, "p95": 5.95, "last": 6.6937500000000005, "first": 6.3218749999999995, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 57042534400.0, "p95": 45634027520.0, "last": 51338280960.0, "first": 48486154240.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 690625000000.0, "p95": 552500000000.0, "last": 621562500000.0, "first": 587031250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3187500000.0},
+        "write_mbps": {"peak": 69.0625, "p95": 55.25, "last": 62.15625, "first": 58.703125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 23.375, "p95": 18.7, "last": 21.0375, "first": 19.86875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 7437.5, "p95": 5950.0, "last": 6693.75, "first": 6321.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1275000.0, "p95": 1020000.0, "last": 1147500.0, "first": 1083750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 106250000.0, "p95": 85000000.0, "last": 95625000.0, "first": 90312500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 63.75, "p95": 51.0, "last": 57.375, "first": 54.1875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.265625, "p95": 0.21250000000000002, "last": 0.2390625, "first": 0.22578125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "dm-7": {
+          "write_mbps": {"peak": 69.0625, "p95": 55.25, "last": 62.15625, "first": 58.703125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 23.375, "p95": 18.7, "last": 21.0375, "first": 19.86875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 7437.5, "p95": 5950.0, "last": 6693.75, "first": 6321.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-secondary-1201.region-a.example.net",
+      "cluster": "misc",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 8.775, "p95": 7.0200000000000005, "last": 7.897500000000001, "first": 7.45875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 88986353664.0, "p95": 71189082931.2, "last": 80087718297.6, "first": 75638400614.4, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 3900000000000.0, "p95": 3120000000000.0, "last": 3510000000000.0, "first": 3315000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 1950000000.0},
+        "write_mbps": {"peak": 175.5, "p95": 140.4, "last": 157.95000000000002, "first": 149.17499999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 21.45, "p95": 17.16, "last": 19.305, "first": 18.232499999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 17550.0, "p95": 14040.0, "last": 15795.0, "first": 14917.5, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1950000.0, "p95": 1560000.0, "last": 1755000.0, "first": 1657500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 34125000.0, "p95": 27300000.0, "last": 30712500.0, "first": 29006250.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 136.5, "p95": 109.2, "last": 122.85000000000001, "first": 116.02499999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.24375, "p95": 0.195, "last": 0.219375, "first": 0.2071875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 175.5, "p95": 140.4, "last": 157.95000000000002, "first": 149.17499999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 21.45, "p95": 17.16, "last": 19.305, "first": 18.232499999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 17550.0, "p95": 14040.0, "last": 15795.0, "first": 14917.5, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-secondary-1202.region-a.example.net",
+      "cluster": "misc",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 9.0, "p95": 7.2, "last": 8.1, "first": 7.6499999999999995, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 91268055040.0, "p95": 73014444032.0, "last": 82141249536.0, "first": 77577846784.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 4000000000000.0, "p95": 3200000000000.0, "last": 3600000000000.0, "first": 3400000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2000000000.0},
+        "write_mbps": {"peak": 180.0, "p95": 144.0, "last": 162.0, "first": 153.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.0, "p95": 17.6, "last": 19.8, "first": 18.7, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 18000.0, "p95": 14400.0, "last": 16200.0, "first": 15300.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 2000000.0, "p95": 1600000.0, "last": 1800000.0, "first": 1700000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 35000000.0, "p95": 28000000.0, "last": 31500000.0, "first": 29750000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 140.0, "p95": 112.0, "last": 126.0, "first": 119.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.25, "p95": 0.2, "last": 0.225, "first": 0.2125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 180.0, "p95": 144.0, "last": 162.0, "first": 153.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 22.0, "p95": 17.6, "last": 19.8, "first": 18.7, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 18000.0, "p95": 14400.0, "last": 16200.0, "first": 15300.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-secondary-1203.region-a.example.net",
+      "cluster": "misc",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 9.225, "p95": 7.38, "last": 8.3025, "first": 7.84125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 93549756415.99998, "p95": 74839805132.79999, "last": 84194780774.4, "first": 79517292953.59999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 4099999999999.9995, "p95": 3280000000000.0, "last": 3689999999999.9995, "first": 3484999999999.9995, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2049999999.9999998},
+        "write_mbps": {"peak": 184.49999999999997, "p95": 147.6, "last": 166.04999999999998, "first": 156.82499999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.549999999999997, "p95": 18.04, "last": 20.294999999999998, "first": 19.167499999999997, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 18450.0, "p95": 14760.0, "last": 16605.0, "first": 15682.5, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 2049999.9999999998, "p95": 1640000.0, "last": 1844999.9999999998, "first": 1742499.9999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 35875000.0, "p95": 28700000.0, "last": 32287500.0, "first": 30493750.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 143.5, "p95": 114.80000000000001, "last": 129.15, "first": 121.975, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.25625, "p95": 0.205, "last": 0.230625, "first": 0.21781249999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 184.49999999999997, "p95": 147.6, "last": 166.04999999999998, "first": 156.82499999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 22.549999999999997, "p95": 18.04, "last": 20.294999999999998, "first": 19.167499999999997, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 18450.0, "p95": 14760.0, "last": 16605.0, "first": 15682.5, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      }
+    },
+    {
+      "host": "store-metrics-6101.region-c.example.net",
+      "cluster": "metrics",
+      "site": "region-c",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "whisper",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 10.725, "p95": 8.58, "last": 9.6525, "first": 9.116249999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 83751862272.0, "p95": 67001489817.600006, "last": 75376676044.8, "first": 71189082931.2, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 1950000000000.0, "p95": 1560000000000.0, "last": 1755000000000.0, "first": 1657500000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 2925000000.0},
+        "write_mbps": {"peak": 97.5, "p95": 78.0, "last": 87.75, "first": 82.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 27.3, "p95": 21.840000000000003, "last": 24.57, "first": 23.205, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 11700.0, "p95": 9360.0, "last": 10530.0, "first": 9945.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1170000.0, "p95": 936000.0, "last": 1053000.0, "first": 994500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 97500000.0, "p95": 78000000.0, "last": 87750000.0, "first": 82875000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 58.5, "p95": 46.800000000000004, "last": 52.65, "first": 49.725, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.24375, "p95": 0.195, "last": 0.219375, "first": 0.2071875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 97.5, "p95": 78.0, "last": 87.75, "first": 82.875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 27.3, "p95": 21.840000000000003, "last": 24.57, "first": 23.205, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 11700.0, "p95": 9360.0, "last": 10530.0, "first": 9945.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      },
+      "store_bytes_target": "example.replace_with_verified_store_usage_bytes.store-metrics-6101"
+    },
+    {
+      "host": "store-metrics-6102.region-c.example.net",
+      "cluster": "metrics",
+      "site": "region-c",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "whisper",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 11.0, "p95": 8.8, "last": 9.9, "first": 9.35, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 85899345920.0, "p95": 68719476736.0, "last": 77309411328.0, "first": 73014444032.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 2000000000000.0, "p95": 1600000000000.0, "last": 1800000000000.0, "first": 1700000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3000000000.0},
+        "write_mbps": {"peak": 100.0, "p95": 80.0, "last": 90.0, "first": 85.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 28.0, "p95": 22.400000000000002, "last": 25.2, "first": 23.8, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 12000.0, "p95": 9600.0, "last": 10800.0, "first": 10200.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1200000.0, "p95": 960000.0, "last": 1080000.0, "first": 1020000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 100000000.0, "p95": 80000000.0, "last": 90000000.0, "first": 85000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 60.0, "p95": 48.0, "last": 54.0, "first": 51.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.25, "p95": 0.2, "last": 0.225, "first": 0.2125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 100.0, "p95": 80.0, "last": 90.0, "first": 85.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 28.0, "p95": 22.400000000000002, "last": 25.2, "first": 23.8, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 12000.0, "p95": 9600.0, "last": 10800.0, "first": 10200.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      },
+      "store_bytes_target": "example.replace_with_verified_store_usage_bytes.store-metrics-6102"
+    },
+    {
+      "host": "store-metrics-6103.region-c.example.net",
+      "cluster": "metrics",
+      "site": "region-c",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "whisper",
+      "store_devices": [
+        "nvme1n1"
+      ],
+      "metrics": {
+        "cpu_cores": {"peak": 11.274999999999999, "p95": 9.02, "last": 10.147499999999999, "first": 9.583749999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 88046829568.0, "p95": 70437463654.40001, "last": 79242146611.2, "first": 74839805132.8, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 2049999999999.9998, "p95": 1640000000000.0, "last": 1844999999999.9998, "first": 1742499999999.9998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 3074999999.9999995},
+        "write_mbps": {"peak": 102.49999999999999, "p95": 82.0, "last": 92.24999999999999, "first": 87.12499999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 28.699999999999996, "p95": 22.959999999999997, "last": 25.83, "first": 24.394999999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 12299.999999999998, "p95": 9840.0, "last": 11069.999999999998, "first": 10454.999999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 1230000.0, "p95": 984000.0, "last": 1107000.0, "first": 1045500.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 102499999.99999999, "p95": 82000000.0, "last": 92249999.99999999, "first": 87124999.99999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 61.49999999999999, "p95": 49.199999999999996, "last": 55.349999999999994, "first": 52.27499999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.25625, "p95": 0.205, "last": 0.230625, "first": 0.21781249999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      },
+      "devices": {
+        "nvme1n1": {
+          "write_mbps": {"peak": 102.49999999999999, "p95": 82.0, "last": 92.24999999999999, "first": 87.12499999999999, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "device_util_percent": {"peak": 28.699999999999996, "p95": 22.959999999999997, "last": 25.83, "first": 24.394999999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+          "iops": {"peak": 12299.999999999998, "p95": 9840.0, "last": 11069.999999999998, "first": 10454.999999999998, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+        }
+      },
+      "store_bytes_target": "example.replace_with_verified_store_usage_bytes.store-metrics-6103"
+    }
+  ],
+  "clusters": [
+    {
+      "cluster": "metrics",
+      "site": "region-a",
+      "host_count": 6,
+      "metrics": {
+        "cpu_cores": {"peak": 42.0, "p95": 33.6, "last": 37.8, "first": 35.7, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 322122547200.0, "p95": 257698037760.0, "last": 289910292480.0, "first": 273804165120.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 3900000000000.0, "p95": 3120000000000.0, "last": 3510000000000.0, "first": 3315000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 18000000000.0},
+        "write_mbps": {"peak": 390.0, "p95": 312.0, "last": 351.0, "first": 331.5, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 23.375, "p95": 18.7, "last": 21.0375, "first": 19.86875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 42000.0, "p95": 33600.0, "last": 37800.0, "first": 35700.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 7200000.0, "p95": 5760000.0, "last": 6480000.0, "first": 6120000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 600000000.0, "p95": 480000000.0, "last": 540000000.0, "first": 510000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 360.0, "p95": 288.0, "last": 324.0, "first": 306.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.265625, "p95": 0.21250000000000002, "last": 0.2390625, "first": 0.22578125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      }
+    },
+    {
+      "cluster": "metrics",
+      "site": "region-c",
+      "host_count": 3,
+      "metrics": {
+        "cpu_cores": {"peak": 33.0, "p95": 26.4, "last": 29.7, "first": 28.049999999999997, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 257698037760.0, "p95": 206158430208.0, "last": 231928233984.0, "first": 219043332096.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 6000000000000.0, "p95": 4800000000000.0, "last": 5400000000000.0, "first": 5100000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 9000000000.0},
+        "write_mbps": {"peak": 300.0, "p95": 240.0, "last": 270.0, "first": 255.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 28.699999999999996, "p95": 22.959999999999997, "last": 25.83, "first": 24.394999999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 36000.0, "p95": 28800.0, "last": 32400.0, "first": 30600.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 3600000.0, "p95": 2880000.0, "last": 3240000.0, "first": 3060000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 300000000.0, "p95": 240000000.0, "last": 270000000.0, "first": 255000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 180.0, "p95": 144.0, "last": 162.0, "first": 153.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.25625, "p95": 0.205, "last": 0.230625, "first": 0.21781249999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      }
+    },
+    {
+      "cluster": "metrics",
+      "site": "region-b",
+      "host_count": 6,
+      "metrics": {
+        "cpu_cores": {"peak": 42.0, "p95": 33.6, "last": 37.8, "first": 35.7, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 322122547200.0, "p95": 257698037760.0, "last": 289910292480.0, "first": 273804165120.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 3900000000000.0, "p95": 3120000000000.0, "last": 3510000000000.0, "first": 3315000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 18000000000.0},
+        "write_mbps": {"peak": 390.0, "p95": 312.0, "last": 351.0, "first": 331.5, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 23.375, "p95": 18.7, "last": 21.0375, "first": 19.86875, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 42000.0, "p95": 33600.0, "last": 37800.0, "first": 35700.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 7200000.0, "p95": 5760000.0, "last": 6480000.0, "first": 6120000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 600000000.0, "p95": 480000000.0, "last": 540000000.0, "first": 510000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 360.0, "p95": 288.0, "last": 324.0, "first": 306.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.265625, "p95": 0.21250000000000002, "last": 0.2390625, "first": 0.22578125, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      }
+    },
+    {
+      "cluster": "misc",
+      "site": "region-a",
+      "host_count": 3,
+      "metrics": {
+        "cpu_cores": {"peak": 27.0, "p95": 21.6, "last": 24.3, "first": 22.95, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "working_set_bytes": {"peak": 273804165120.0, "p95": 219043332096.0, "last": 246423748608.0, "first": 232733540352.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "store_bytes": {"peak": 12000000000000.0, "p95": 9600000000000.0, "last": 10800000000000.0, "first": 10200000000000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600, "growth_per_day": 6000000000.0},
+        "write_mbps": {"peak": 540.0, "p95": 432.0, "last": 486.0, "first": 458.99999999999994, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "device_util_percent": {"peak": 22.549999999999997, "p95": 18.04, "last": 20.294999999999998, "first": 19.167499999999997, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "iops": {"peak": 54000.0, "p95": 43200.0, "last": 48600.0, "first": 45900.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_points_per_second": {"peak": 6000000.0, "p95": 4800000.0, "last": 5400000.0, "first": 5100000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "metric_count": {"peak": 105000000.0, "p95": 84000000.0, "last": 94500000.0, "first": 89250000.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_requests_per_second": {"peak": 420.0, "p95": 336.0, "last": 378.0, "first": 357.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "read_p99_seconds": {"peak": 0.25625, "p95": 0.205, "last": 0.230625, "first": 0.21781249999999996, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "write_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "stall_seconds_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "unlogged_points_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600},
+        "input_log_errors_per_second": {"peak": 0, "p95": 0.0, "last": 0.0, "first": 0.0, "samples": 2017, "expected_samples": 2017, "coverage": 1, "first_at": 1792540800, "last_at": 1793145600}
+      }
+    }
+  ],
+  "queries": [],
+  "semantics": "Synthetic planning example, not production evidence. Sum of host peaks for sizing."
+}

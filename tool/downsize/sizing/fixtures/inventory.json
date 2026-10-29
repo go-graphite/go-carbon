@@ -1,0 +1,71 @@
+{
+  "hosts": [
+    {
+      "host": "store-metrics-1201.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ]
+    },
+    {
+      "host": "store-metrics-1202.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ]
+    },
+    {
+      "host": "store-metrics-1203.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ]
+    },
+    {
+      "host": "store-metrics-1204.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ]
+    },
+    {
+      "host": "store-metrics-1205.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ]
+    },
+    {
+      "host": "store-metrics-1206.region-a.example.net",
+      "cluster": "metrics",
+      "site": "region-a",
+      "cores": 96,
+      "shape": "bare-metal-96",
+      "backend": "pebble-chunk",
+      "store_devices": [
+        "nvme1n1"
+      ]
+    }
+  ],
+  "query_overrides": {}
+}
