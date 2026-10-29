@@ -3,8 +3,11 @@ package http
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"os"
+	"sync"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/points"
@@ -14,6 +17,7 @@ import (
 
 func TestMain(m *testing.M) {
 	Register()
+	os.Exit(m.Run())
 }
 
 func TestHttp(t *testing.T) {
@@ -23,12 +27,15 @@ func TestHttp(t *testing.T) {
 	}
 
 	received := make([]*points.Points, 0)
+	var mu sync.Mutex
 
 	r, err := receiver.New("http", map[string]interface{}{
 		"protocol": "http",
 		"listen":   addr.String(),
 	},
 		func(p *points.Points) {
+			mu.Lock()
+			defer mu.Unlock()
 			received = append(received, p)
 		},
 	)
@@ -82,16 +89,24 @@ func TestHttp(t *testing.T) {
 	url := fmt.Sprintf("http://%s/", r.(*HTTP).Addr())
 
 	for index, tc := range table {
+		mu.Lock()
 		received = make([]*points.Points, 0)
+		mu.Unlock()
 		resp, err := http.Post(url, tc.ContentType, bytes.NewReader([]byte(tc.Body)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
 		if !tc.Error {
 			assert.Nil(t, err, fmt.Sprintf("test #%d", index))
-			defer resp.Body.Close()
 			assert.Equal(t, 200, resp.StatusCode, fmt.Sprintf("test #%d", index))
 			assert.Equal(t, tc.Expected, received, fmt.Sprintf("test #%d", index))
 		} else {
 			assert.NotEqual(t, 200, resp.StatusCode, fmt.Sprintf("test #%d", index))
 			assert.Equal(t, 0, len(received), fmt.Sprintf("test #%d", index))
 		}
+		mu.Unlock()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
 	}
 }

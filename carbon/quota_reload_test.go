@@ -17,6 +17,9 @@ import (
 )
 
 func TestReloadConfigUpdatesQuotasWithoutRestart(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	app, quota := newQuotaReloadApp(t)
 	defer app.Stop()
@@ -65,7 +68,7 @@ func TestReloadConfigUpdatesQuotasWithoutRestart(t *testing.T) {
 func newQuotaReloadApp(t *testing.T, configure ...func(*Config)) (*App, func(string)) {
 	t.Helper()
 	root := t.TempDir()
-	path := TestConfig(root)
+	path := testConfig(t, root)
 	cfg, err := ReadConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -132,12 +135,13 @@ func checkQuotaConcurrently(server *carbonserver.CarbonserverListener) func() {
 }
 
 func TestQuotaReloadIntervalConfig(t *testing.T) {
+	t.Parallel()
 	if got := NewConfig().Whisper.QuotasReloadInterval.Value(); got != 0 {
 		t.Fatalf("default interval = %v; want disabled", got)
 	}
 	for _, interval := range []time.Duration{0, time.Minute, -time.Second} {
 		t.Run(interval.String(), func(t *testing.T) {
-			path := TestConfig(t.TempDir())
+			path := testConfig(t, t.TempDir())
 			cfg, err := ReadConfig(path)
 			if err != nil {
 				t.Fatal(err)
@@ -186,6 +190,9 @@ func addQuotaExistingMetric(t *testing.T, app *App) {
 }
 
 func TestQuotaReloadIntervalUpdatesOnlyQuotas(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
 		cfg.Whisper.QuotasReloadInterval = Duration{10 * time.Millisecond}
@@ -229,6 +236,9 @@ func TestQuotaReloadIntervalUpdatesOnlyQuotas(t *testing.T) {
 }
 
 func TestQuotaReloadIntervalReconfigurationAndStop(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
 		cfg.Whisper.QuotasReloadInterval = Duration{time.Hour}
@@ -313,6 +323,9 @@ func TestQuotaReloadIntervalReconfigurationAndStop(t *testing.T) {
 }
 
 func TestQuotaReloadRetainsSharedStorageValidation(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
 		cfg.Whisper.StorageBackend = "pebble-chunk"
@@ -326,6 +339,9 @@ func TestQuotaReloadRetainsSharedStorageValidation(t *testing.T) {
 }
 
 func TestPebbleChunkIgnorePhysicalQuotasStartupAndReload(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	for _, backend := range []string{"files", "pebble-chunk"} {
 		t.Run(backend, func(t *testing.T) {

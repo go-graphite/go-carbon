@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/cockroachdb/pebble"
+
+	"github.com/go-graphite/go-carbon/internal/stagetime"
 )
 
 func (s *Store) UpdateMany(ctx context.Context, name string, input []Point) error {
@@ -21,22 +24,64 @@ func (s *Store) UpdateManyForArchive(ctx context.Context, name string, input []P
 }
 
 func (s *Store) updateByName(ctx context.Context, name string, input []Point, targetRetention int) error {
-	unlock := s.lockMetric(name)
-	defer unlock()
-	m, err := metadataFrom(s.db, name)
-	if err != nil {
+	return s.updateByNameMaintained(ctx, name, input, targetRetention, nil)
+}
+
+func (s *Store) UpdateManyMaintained(ctx context.Context, name string, input []Point, maintenance ContinuationMaintenance) error {
+	return s.updateByNameMaintained(ctx, name, input, -1, &maintenance)
+}
+
+func (s *Store) updateByNameMaintained(ctx context.Context, name string, input []Point, targetRetention int, maintenance *ContinuationMaintenance) error {
+	if err := s.fileOwnershipError(); err != nil {
 		return err
 	}
-	return s.update(ctx, m, input, targetRetention)
+	timer := stagetime.FromContext(ctx)
+	if !s.catalogMembership.mayContain(name) {
+		timer.Enter(stagetime.Route)
+		if err := validateName(name); err != nil {
+			return err
+		}
+		return ErrNotFound
+	}
+	timer.Enter(stagetime.LockWait)
+	unlock := s.lockMetricMutation(name)
+	defer unlock()
+	timer.Enter(stagetime.Route)
+	// The metadata cache holds the state the previous mutation committed,
+	// including the continuation keys this update starts by reading.
+	state, m := s.lockedState(name)
+	var err error
+	if state == nil {
+		if m, err = s.metadataLockedOrAbsent(name); err != nil {
+			return err
+		}
+	}
+	if err := s.checkFileOwnership(m); err != nil {
+		return err
+	}
+	defer timer.Leave()
+	if m.Continuation {
+		err = s.updateContinuationFrom(ctx, m, state, true, input, targetRetention, maintenance)
+	} else {
+		err = s.update(ctx, m, input, targetRetention)
+	}
+	if err == nil && targetRetention >= 0 {
+		s.invalidateReadCache()
+	}
+	return err
 }
 
 func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRetention int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if m.Continuation {
+		return s.updateContinuation(ctx, m, input, targetRetention, nil)
+	}
 	b := s.db.NewBatch()
 	defer b.Close()
 	w := newChunkWriter(s, m)
+	defer w.release()
 	now, err := storageTimestamp(s.now().Unix())
 	if err != nil {
 		return fmt.Errorf("clock timestamp: %w", err)
@@ -51,6 +96,7 @@ func (s *Store) update(ctx context.Context, m Metadata, input []Point, targetRet
 		}
 	}
 	if !w.changed() {
+		s.installState(nil, m)
 		return nil
 	}
 	return s.commitUpdate(b, w, m)
@@ -119,6 +165,11 @@ func updateRetention(w *chunkWriter, m Metadata, archive int, current []Point) e
 }
 
 func (s *Store) commitUpdate(b *pebble.Batch, w *chunkWriter, m Metadata) error {
+	s.canonicalRun(m.ID).Clear(m.ID)
+	return s.commitUpdateAt(b, w, m, s.nextActivity(m.LastUpdate))
+}
+
+func (s *Store) commitUpdateAt(b *pebble.Batch, w *chunkWriter, m Metadata, activity time.Time) error {
 	if m.Revision == math.MaxUint64 {
 		return errors.New("metric revision exhausted")
 	}
@@ -126,13 +177,14 @@ func (s *Store) commitUpdate(b *pebble.Batch, w *chunkWriter, m Metadata) error 
 		return err
 	}
 	m.Revision++
-	m.LastUpdate = s.nextActivity(m.LastUpdate)
+	m.LastUpdate = activity
 	if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 		return err
 	}
 	if err := s.commit(b); err != nil {
 		return fmt.Errorf("commit update %s: %w", m.Name, err)
 	}
+	s.installState(nil, m)
 	s.materializations.Add(w.materialized)
 	s.operands.Add(w.operands)
 	return nil

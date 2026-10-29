@@ -12,6 +12,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var addMetrics = [...]string{
@@ -37,12 +38,12 @@ var removeFiles = [...]string{
 }
 
 type testInfo struct {
-	forceChan     chan struct{}
-	exitChan      chan struct{}
-	testCache     *cache.Cache
-	csListener    *CarbonserverListener
-	scanFrequency <-chan time.Time
-	whisperDir    string
+	forceChan  chan struct{}
+	exitChan   chan struct{}
+	testCache  *cache.Cache
+	csListener *CarbonserverListener
+	whisperDir string
+	scans      <-chan struct{}
 }
 
 func addFileToSys(file string, tmpDir string) error {
@@ -54,7 +55,7 @@ func addFileToSys(file string, tmpDir string) error {
 		nfile.Close()
 		return nil
 	} else {
-		return nil
+		return err
 	}
 }
 
@@ -71,29 +72,27 @@ func removeFileFromDir(filePath string, tmpDir string) error {
 }
 
 func getTestInfo(t *testing.T) *testInfo {
-	tmpDir, err := os.MkdirTemp("", "")
-	if err != nil {
-		fmt.Printf("unable to create test dir tree: %v\n", err)
-		t.Fatal(err)
-	}
+	tmpDir := t.TempDir()
 
 	c := cache.New()
 	c.InitCacheScanAdds()
 	carbonserver := NewCarbonserverListener(c.Get)
 	carbonserver.whisperData = tmpDir
-	carbonserver.logger = zap.NewNop()
+	log := &scanLog{}
+	carbonserver.logger = zap.New(zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), log, zap.InfoLevel))
+	scans := watchListenerLog(carbonserver, "file list updated")
 	carbonserver.cacheGetRecentMetrics = c.GetRecentNewMetrics
 	carbonserver.metrics = &metricStruct{}
 	carbonserver.exitChan = make(chan struct{})
 	carbonserver.SetMaxFetchDataGoroutines(2)
 
 	return &testInfo{
-		forceChan:     make(chan struct{}),
-		exitChan:      make(chan struct{}),
-		scanFrequency: time.Tick(3 * time.Second),
-		testCache:     c,
-		csListener:    carbonserver,
-		whisperDir:    tmpDir,
+		forceChan:  make(chan struct{}),
+		exitChan:   make(chan struct{}),
+		testCache:  c,
+		csListener: carbonserver,
+		whisperDir: tmpDir,
+		scans:      scans,
 	}
 }
 
@@ -135,8 +134,6 @@ func (f *testInfo) checkExpandGlobs(t *testing.T, query string, shdExist bool) {
 }
 
 func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
-	defer os.RemoveAll(f.whisperDir)
-
 	// force "sorted" strategy to ensure determinism in tests
 	f.testCache.SetWriteStrategy("sorted")
 
@@ -147,9 +144,16 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	}
 
 	// trigger filescan
-	go f.csListener.fileListUpdater(f.whisperDir, f.scanFrequency, f.forceChan, f.exitChan)
-	f.forceChan <- struct{}{}
-	time.Sleep(2 * time.Second)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.csListener.fileListUpdater(f.whisperDir, nil, f.forceChan, f.exitChan)
+	}()
+	t.Cleanup(func() {
+		close(f.exitChan)
+		<-done
+	})
+	f.scan(t)
 
 	// add metrics to cache with distinct timestamps
 	timestamps := []int64{20, 30, 40, 50, 10}
@@ -178,7 +182,7 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 		}
 	}
 
-	time.Sleep(5 * time.Second)
+	f.scan(t)
 	f.checkExpandGlobs(t, "path.to.file.name1", true)
 	f.checkExpandGlobs(t, addMetrics[3], true)
 	f.checkExpandGlobs(t, addMetrics[0], true)
@@ -196,16 +200,28 @@ func (f *testInfo) commonCacheIdxTestHelper(t *testing.T) {
 	}
 	f.checkExpandGlobs(t, addMetrics[0], true)
 
-	// wait for next filewalk and check the metric again
-	fmt.Println("wait for next filewalk and check the metric again")
-	time.Sleep(4 * time.Second)
-	// f.checkExpandGlobs(t, addMetrics[0], false)
+	f.scan(t)
+	f.checkExpandGlobs(t, addMetrics[0], true)
+}
 
-	close(f.forceChan)
-	close(f.exitChan)
+func (f *testInfo) scan(t *testing.T) {
+	t.Helper()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	select {
+	case f.forceChan <- struct{}{}:
+	case <-timeout.C:
+		t.Fatal("file scan did not start")
+	}
+	select {
+	case <-f.scans:
+	case <-timeout.C:
+		t.Fatal("file scan did not publish an index")
+	}
 }
 
 func TestCacheIdxTrie(t *testing.T) {
+	t.Parallel()
 	// get test info
 	f := getTestInfo(t)
 	f.setTrieOnly()
@@ -213,6 +229,7 @@ func TestCacheIdxTrie(t *testing.T) {
 }
 
 func TestCacheIdxTrigram(t *testing.T) {
+	t.Parallel()
 	// get test info
 	f := getTestInfo(t)
 	f.setTrigramOnly()

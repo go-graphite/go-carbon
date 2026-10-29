@@ -11,6 +11,9 @@ type WhisperExpirationRule struct {
 	Name       string
 	Pattern    *regexp.Regexp
 	Expiration time.Duration
+	Grace      time.Duration
+	Exclude    *regexp.Regexp
+	Until      time.Time
 }
 
 // WhisperExpirationRules contains metric expiration overrides in file order.
@@ -29,7 +32,7 @@ func ReadWhisperExpiration(filename string) (WhisperExpirationRules, error) {
 	for _, section := range config {
 		for key := range section {
 			switch key {
-			case "name", "pattern", "expiration":
+			case "name", "pattern", "expiration", "grace", "exclude", "until":
 			default:
 				return nil, fmt.Errorf("[persister] unknown expiration setting %q for [%s]", key, section["name"])
 			}
@@ -55,8 +58,30 @@ func ReadWhisperExpiration(filename string) (WhisperExpirationRules, error) {
 			return nil, fmt.Errorf("[persister] expiration for [%s] must not be negative", section["name"])
 		}
 
+		var exclude *regexp.Regexp
+		if text := section["exclude"]; text != "" {
+			exclude, err = regexp.Compile(text)
+			if err != nil {
+				return nil, fmt.Errorf("compile expiration exclusion: %w", err)
+			}
+		}
+		var grace time.Duration
+		if text := section["grace"]; text != "" {
+			grace, err = time.ParseDuration(text)
+			if err != nil || grace < 0 || expiration > time.Duration(1<<63-1)-grace {
+				return nil, fmt.Errorf("invalid expiration grace for [%s]", section["name"])
+			}
+		}
+		var until time.Time
+		if text := section["until"]; text != "" {
+			until, err = time.Parse(time.RFC3339, text)
+			if err != nil {
+				return nil, fmt.Errorf("parse expiration until: %w", err)
+			}
+		}
 		rules = append(rules, WhisperExpirationRule{
-			Name:       section["name"],
+			Name:  section["name"],
+			Grace: grace, Exclude: exclude, Until: until,
 			Pattern:    pattern,
 			Expiration: expiration,
 		})
@@ -68,12 +93,31 @@ func ReadWhisperExpiration(filename string) (WhisperExpirationRules, error) {
 // Match returns the expiration of the first matching rule, or fallback when
 // none matches. An expiration of zero explicitly exempts a metric.
 func (r WhisperExpirationRules) Match(metric string, fallback time.Duration) time.Duration {
-	for _, rule := range r {
-		if rule.Pattern.MatchString(metric) {
-			return rule.Expiration
+	i := r.MatchIndex(metric, time.Now())
+	if i < 0 {
+		return fallback
+	}
+	return r[i].TTL()
+}
+
+func (r WhisperExpirationRule) TTL() time.Duration {
+	if r.Expiration == 0 {
+		return 0
+	}
+	return r.Expiration + r.Grace
+}
+
+// MatchIndex returns the first active rule, or -1 for the default policy.
+func (r WhisperExpirationRules) MatchIndex(metric string, now time.Time) int {
+	for i, rule := range r {
+		if !rule.Until.IsZero() && !now.Before(rule.Until) {
+			continue
+		}
+		if rule.Pattern.MatchString(metric) && (rule.Exclude == nil || !rule.Exclude.MatchString(metric)) {
+			return i
 		}
 	}
-	return fallback
+	return -1
 }
 
 // Enabled reports whether at least one override enables expiration.

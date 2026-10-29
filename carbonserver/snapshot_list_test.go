@@ -191,6 +191,7 @@ func BenchmarkSnapshotMetricListHTTP(b *testing.B) {
 }
 
 func TestSnapshotMetricListParallel(t *testing.T) {
+	t.Parallel()
 	for _, count := range []int{0, 1, 5000} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			keys := make([]string, 0, count)
@@ -255,6 +256,7 @@ func TestSnapshotMetricListParallel(t *testing.T) {
 }
 
 func TestSnapshotMetricListParity(t *testing.T) {
+	t.Parallel()
 	hybrid, oracle, _, _ := snapshotTrieFixture(t)
 	for _, sep := range []byte{'.', '/'} {
 		if got, want := hybrid.allMetrics(sep), oracle.allMetrics(sep); !reflect.DeepEqual(got, want) {

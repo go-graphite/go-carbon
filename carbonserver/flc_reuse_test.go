@@ -15,6 +15,7 @@ import (
 
 // TestFileListCacheV2ReusePreservesRecords pins the disk format and path ownership.
 func TestFileListCacheV2ReusePreservesRecords(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "files.gz")
 	want := []FLCEntry{
 		{Path: "/a/b.wsp", LogicalSize: 10, PhysicalSize: 20, DataPoints: 30, FirstSeenAt: 40},
@@ -78,6 +79,7 @@ func TestFileListCacheV2ReusePreservesRecords(t *testing.T) {
 
 // TestFileListCacheV2RejectsIncompleteRecord rejects partial and malformed entries.
 func TestFileListCacheV2RejectsIncompleteRecord(t *testing.T) {
+	t.Parallel()
 	var record bytes.Buffer
 	_ = binary.Write(&record, binary.BigEndian, uint64(5))
 	record.WriteString("a.wsp")

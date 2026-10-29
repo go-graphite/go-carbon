@@ -1,11 +1,14 @@
 package cache
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -29,6 +32,11 @@ type pendingRecovery struct {
 	// The owner matched the saved read-index generation and prepared every
 	// pending name with the ordinary storable-name policy before input opens.
 	namesPrepared bool
+	// newSlots marks slots whose metric was absent from the saved read index;
+	// set only with namesPrepared. Other claimed metrics may wait for a spread
+	// deadline (see SetWriteoutRestoreSpread): the store already has them,
+	// so the first scan need not wait for their writes.
+	newSlots []uint64
 	// Retries and confirmations of one metric stay in the same tracking
 	// shard, without serializing every recovery writer on a global lock.
 	writes [64]pendingWrites
@@ -37,6 +45,8 @@ type pendingRecovery struct {
 type pendingWrites struct {
 	mu          sync.Mutex
 	unpersisted map[*points.Points]int
+	// deferred holds the unpersisted items claimed with a spread deadline.
+	deferred map[*points.Points]struct{}
 }
 
 func (r *pendingRecovery) writesFor(p *points.Points) *pendingWrites {
@@ -50,13 +60,35 @@ func (r *pendingRecovery) writesFor(p *points.Points) *pendingWrites {
 const pendingWriteAttempts = 3
 
 func (r *pendingRecovery) track(p *points.Points) {
+	r.trackAs(p, false)
+}
+
+// trackAs tracks p, deferred if it waits for a spread writeout deadline.
+func (r *pendingRecovery) trackAs(p *points.Points, deferred bool) {
 	w := r.writesFor(p)
 	w.mu.Lock()
 	if w.unpersisted == nil {
 		w.unpersisted = make(map[*points.Points]int)
 	}
 	w.unpersisted[p] = 0
+	if deferred {
+		if w.deferred == nil {
+			w.deferred = make(map[*points.Points]struct{})
+		}
+		w.deferred[p] = struct{}{}
+	} else {
+		delete(w.deferred, p)
+	}
 	w.mu.Unlock()
+}
+
+// isNewSlot reports whether slot's metric was absent from the saved read
+// index; without prepared names every slot counts as new.
+func (r *pendingRecovery) isNewSlot(slot uint64) bool {
+	if !r.namesPrepared || r.newSlots == nil {
+		return true
+	}
+	return r.newSlots[slot/64]&(uint64(1)<<(slot%64)) != 0
 }
 
 // failed counts a write the persister handed back and settles the metric once
@@ -67,6 +99,7 @@ func (r *pendingRecovery) failed(p *points.Points) {
 	if n, ok := w.unpersisted[p]; ok {
 		if n+1 >= pendingWriteAttempts {
 			delete(w.unpersisted, p)
+			delete(w.deferred, p)
 		} else {
 			w.unpersisted[p] = n + 1
 		}
@@ -79,6 +112,7 @@ func (r *pendingRecovery) persisted(p *points.Points) {
 	w := r.writesFor(p)
 	w.mu.Lock()
 	delete(w.unpersisted, p)
+	delete(w.deferred, p)
 	w.mu.Unlock()
 }
 
@@ -86,8 +120,18 @@ func (r *pendingRecovery) moved(from, to *points.Points) {
 	w := r.writesFor(from)
 	w.mu.Lock()
 	if n, ok := w.unpersisted[from]; ok {
+		_, fromDeferred := w.deferred[from]
 		delete(w.unpersisted, from)
+		delete(w.deferred, from)
+		_, toTracked := w.unpersisted[to]
+		_, toDeferred := w.deferred[to]
 		w.unpersisted[to] = max(n, w.unpersisted[to])
+		// The merged item may defer only if both sides could.
+		if !fromDeferred || toTracked && !toDeferred {
+			delete(w.deferred, to)
+		} else {
+			w.deferred[to] = struct{}{}
+		}
 	}
 	w.mu.Unlock()
 }
@@ -95,11 +139,19 @@ func (r *pendingRecovery) moved(from, to *points.Points) {
 // Outstanding counts saved metrics not yet claimed plus claimed cache items
 // whose saved points have not been confirmed on disk.
 func (r *pendingRecovery) outstanding() uint64 {
+	return r.count(false)
+}
+
+// count is outstanding, without the deferred items when urgent is set.
+func (r *pendingRecovery) count(urgent bool) uint64 {
 	n := r.remaining.Load()
 	for i := range r.writes {
 		w := &r.writes[i]
 		w.mu.Lock()
 		n += uint64(len(w.unpersisted))
+		if urgent {
+			n -= uint64(len(w.deferred))
+		}
 		w.mu.Unlock()
 	}
 	return n
@@ -132,6 +184,14 @@ func (c *Cache) attachPendingRecovery(bundle *recovery.Bundle, namesPrepared boo
 		return errors.New("cannot attach recovery to a nonempty cache")
 	}
 	r := &pendingRecovery{bundle: bundle, claimed: make([]atomic.Uint64, (bundle.Slots()+63)/64), namesPrepared: namesPrepared}
+	if namesPrepared {
+		r.newSlots = make([]uint64, (bundle.Slots()+63)/64)
+		bundle.VisitNewSlots(func(slot uint64) {
+			if slot < bundle.Slots() {
+				r.newSlots[slot/64] |= uint64(1) << (slot % 64)
+			}
+		})
+	}
 	r.remaining.Store(bundle.Metrics())
 	if !c.pending.CompareAndSwap(nil, r) {
 		return errors.New("pending recovery already attached")
@@ -184,20 +244,16 @@ func (c *Cache) pendingPoints(key string) ([]points.Point, error) {
 // because these points were already accepted before the restart. Receivers stay
 // closed until the returned work and all in-flight persistence have drained.
 func (c *Cache) RecoverPending(stop <-chan struct{}, pointsPerSecond int) error {
+	phasecpu.Set(phasecpu.Restore)
+	defer phasecpu.Set(phasecpu.Other)
 	r := c.pending.Load()
 	if r == nil {
 		return nil
 	}
 	started := time.Now()
 	var restored int64
-	for slot := uint64(0); slot < r.bundle.Slots(); slot++ {
-		name, found, err := r.bundle.Name(slot)
-		if err != nil {
-			return err
-		}
-		if !found {
-			continue
-		}
+	// Metrics come in the order the bundle reads fastest.
+	return r.bundle.VisitMetrics(func(slot uint64, name string) error {
 		count := r.bundle.Count(slot)
 		for {
 			select {
@@ -229,61 +285,100 @@ func (c *Cache) RecoverPending(stop <-chan struct{}, pointsPerSecond int) error 
 				}
 			}
 		}
-		if err = c.claimPendingMetric(r, name, slot); err != nil {
-			return err
-		}
-	}
-	return nil
+		return c.claimPendingMetric(r, name, slot)
+	})
 }
 
 func (c *Cache) claimPendingMetric(r *pendingRecovery, name string, slot uint64) error {
 	shard := c.GetShard(name)
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	return c.claimLocked(r, shard, name, slot, 0)
+	return c.claimLocked(r, shard, name, slot, 0, true)
 }
 
 // claimForWrite runs under the shard lock before a live write to name. It moves
 // the metric's saved history into cache first, if it is still unclaimed.
-func (c *Cache) claimForWrite(r *pendingRecovery, shard *Shard, name string, count int) error {
+func (c *Cache) claimForWrite(r *pendingRecovery, shard *Shard, name string, count int, startup bool) error {
 	slot, found, err := r.bundle.Find(name)
 	if err != nil || !found || r.isClaimed(slot) {
 		return err
 	}
-	return c.claimLocked(r, shard, name, slot, count)
+	return c.claimLocked(r, shard, name, slot, count, startup)
 }
 
-func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot uint64, extra int) error {
+func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot uint64, extra int, startup bool) error {
 	if r.isClaimed(slot) {
 		return nil
 	}
 	// Every live write claims first, so an item cannot precede its history.
 	// Refuse an invalid orchestration instead of silently changing precedence.
-	if _, exists := shard.items[name]; exists {
+	if shard.items.get(name) != nil {
 		return fmt.Errorf("metric %q was written before pending recovery", name)
 	}
-	p, err := r.bundle.ReadForWrite(slot, extra)
+	// A compact dump's first record is the item's encoding already: copy
+	// it instead of decoding and encoding again. Other records' points are
+	// decoded into the shard's scratch and appended. The slot was found by
+	// name, or name was read from it, so it need not be compared again;
+	// the bundle still checks that every record of the slot is named alike.
+	var head recovery.CompactRecord
+	tail, err := r.bundle.ReadCompactAs(slot, name, shard.claimData[:0], func(rec recovery.CompactRecord) { head = rec })
+	shard.claimData = tail[:0]
 	if err != nil {
 		return err
 	}
-	if p == nil || p.Metric != name {
-		return errors.New("pending recovery metric identity differs")
+	values := newItem(name, 0)
+	if head.N > 0 {
+		values.compact = compactPoints{buf: bytes.Clone(head.Data), n: head.N,
+			ts: head.State.Timestamp, delta: head.State.Delta, bits: head.State.Bits}
 	}
-	shard.items[name] = p
-	c.addSizeLocked(shard, int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
-	r.track(p)
+	values.compact.appendPoints(tail)
+	if cap(shard.claimData) > maxClaimScratch {
+		shard.claimData = nil
+	}
+	shard.items.set(name, values)
+	s := c.settings.Load().(*cacheSettings)
+	c.addSizeLocked(shard, int64(values.count()), s.sizeSlack)
+	// A metric the store already has keeps its saved points durable here
+	// until written (the source retires only then), so it may wait for a
+	// spread deadline and be written once with its first live points. A new
+	// one is written at once: the first scan waits for it.
+	deferred := s.writeoutRestoreSpread && s.batching() && !r.isNewSlot(slot)
+	r.trackAs(&values.Points, deferred)
+	shard.log.track(&values.Points)
 	r.claim(slot)
-	if extra > 0 && r.namesPrepared && c.newMetricCf != nil {
-		c.newMetricCf.Add(helper.HashString(name))
+	if filter := c.newMetricCf.Load(); extra > 0 && r.namesPrepared && filter != nil {
+		filter.Add(helper.HashString(name))
+	}
+	if deferred {
+		now := time.Now()
+		values.firstArrival = s.restoreArrival(values, now)
+		if startup {
+			c.spreadStartup(values, s, now)
+		}
+		c.writeoutQueue.notifyAt(values.firstArrival.Add(s.delayFor(values)))
+		return nil
 	}
 	c.writeoutQueue.notifyAt(time.Now())
 	return nil
 }
 
+// maxClaimScratch bounds the decode buffer a shard keeps between claims.
+const maxClaimScratch = 4096
+
 // PendingOutstanding reports saved metrics not yet confirmed on disk.
 func (c *Cache) PendingOutstanding() uint64 {
 	if r := c.pending.Load(); r != nil {
 		return r.outstanding()
+	}
+	return 0
+}
+
+// PendingUrgentOutstanding is PendingOutstanding without claimed metrics that
+// wait for a spread deadline: those the saved read index already held, which
+// the first scan need not wait for.
+func (c *Cache) PendingUrgentOutstanding() uint64 {
+	if r := c.pending.Load(); r != nil {
+		return r.count(true)
 	}
 	return 0
 }
@@ -317,15 +412,18 @@ func (c *Cache) dumpPending(write func(*points.Points) error) error {
 	return nil
 }
 
-// DumpPendingRange copies the unclaimed saved metrics of part seg of parts as
-// their original encoded records, without decoding them. Parts are disjoint
-// slot ranges, and unclaimed metrics have no cache data, so parts may be
-// written concurrently with each other and with DumpShards.
+// DumpPendingRange copies the unclaimed saved metrics of part seg of parts.
+// Into a legacy dump of a legacy checkpoint they go as their original
+// encoded records, without decoding them; otherwise each metric's saved
+// points are read and written as one record of out's format. Parts are
+// disjoint slot ranges, and unclaimed metrics have no cache data, so parts
+// may be written concurrently with each other and with DumpShards.
 func (c *Cache) DumpPendingRange(seg, parts int, out *recovery.Segment) error {
 	r := c.pending.Load()
 	if r == nil {
 		return nil
 	}
+	raw := out.Format() == recovery.FormatLegacy && r.bundle.CacheFormat() == recovery.FormatLegacy
 	slots := r.bundle.Slots()
 	for slot := slots * uint64(seg) / uint64(parts); slot < slots*uint64(seg+1)/uint64(parts); slot++ {
 		if r.isClaimed(slot) {
@@ -338,7 +436,15 @@ func (c *Cache) DumpPendingRange(seg, parts int, out *recovery.Segment) error {
 		if !found {
 			continue
 		}
-		if err = r.bundle.RawRecords(slot, func(raw []byte, count int) error { return out.WriteRaw(name, raw, count) }); err != nil {
+		if raw {
+			err = r.bundle.RawRecords(slot, func(raw []byte, count int) error { return out.WriteRaw(name, raw, count) })
+		} else {
+			var p *points.Points
+			if p, err = r.bundle.Read(slot); err == nil {
+				err = out.WritePoints(p)
+			}
+		}
+		if err != nil {
 			return err
 		}
 	}

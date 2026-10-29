@@ -90,11 +90,11 @@ func TestWarmupBeforeListenAndScanAfterRestore(t *testing.T) {
 	if l.MetricExists("namespace.restored") {
 		t.Fatal("warmup unexpectedly scanned disk")
 	}
+	scanned := watchListenerLog(l, "file list updated")
 	if err := l.Listen("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
 	url := "http://" + l.tcpListener.Addr().String() + "/metrics/find/?query=namespace.*&format=json"
-	deadline := time.Now().Add(5 * time.Second)
 	for {
 		res, err := http.Get(url)
 		if err != nil {
@@ -108,14 +108,15 @@ func TestWarmupBeforeListenAndScanAfterRestore(t *testing.T) {
 		if strings.Contains(string(body), "namespace.restored") {
 			break
 		}
-		if time.Now().After(deadline) {
+		waitListenerEvent(t, scanned)
+		if !l.MetricExists("namespace.restored") {
 			t.Fatalf("post-restore scan did not find restored file: %s", body)
 		}
-		time.Sleep(time.Millisecond)
 	}
 }
 
 func TestWarmupInvalidCacheDefersDiskScan(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"missing", "corrupt", "partial-record"} {
 		t.Run(kind, func(t *testing.T) {
 			l := savedIndex(t, "on.disk")
@@ -152,21 +153,20 @@ func TestWarmupInvalidCacheDefersDiskScan(t *testing.T) {
 			if l.CurrentFileIndex() != nil {
 				t.Fatal("invalid cache must leave disk scanning until restore finishes")
 			}
+			scanned := watchListenerLog(l, "file list updated")
 			if err := l.Listen("127.0.0.1:0"); err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(5 * time.Second)
-			for !l.MetricExists("on.disk") {
-				if time.Now().After(deadline) {
-					t.Fatal("fallback scan stalled")
-				}
-				time.Sleep(time.Millisecond)
+			waitListenerEvent(t, scanned)
+			if !l.MetricExists("on.disk") {
+				t.Fatal("fallback scan did not find disk metric")
 			}
 		})
 	}
 }
 
 func TestStopDuringWarmup(t *testing.T) {
+	t.Parallel()
 	l := savedIndex(t, "existing.metric")
 	// Stop must work even before sockets exist, and be safe to repeat.
 	l.WarmupIndex()
@@ -215,6 +215,7 @@ func TestMetricExistsMatchesExactIndexedNames(t *testing.T) {
 }
 
 func TestMetricExistsConcurrentInsert(t *testing.T) {
+	t.Parallel()
 	l := NewCarbonserverListener(nil)
 	l.SetTrieIndex(true)
 	l.SetConcurrentIndex(true)
@@ -242,6 +243,7 @@ func TestMetricExistsConcurrentInsert(t *testing.T) {
 }
 
 func TestAbortedCachePreservesPreviousSnapshot(t *testing.T) {
+	t.Parallel()
 	l := savedIndex(t, "previous.metric")
 	before, err := os.ReadFile(l.fileListCache)
 	if err != nil {

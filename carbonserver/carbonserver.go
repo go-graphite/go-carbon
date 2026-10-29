@@ -30,8 +30,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +56,8 @@ import (
 	"github.com/go-graphite/go-carbon/helper/grpcutil"
 	"github.com/go-graphite/go-carbon/helper/stat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/go-graphite/go-carbon/internal/whisperpath"
 	"github.com/go-graphite/go-carbon/points"
 	whisper "github.com/go-graphite/go-whisper"
 	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
@@ -97,6 +99,8 @@ type metricStruct struct {
 	ThrottledCreates                     uint64
 	MaxCreatesPerSecond                  uint64
 	FetchSize                            uint64
+	QueryCacheRawBytes                   uint64
+	QueryCacheStoredBytes                uint64
 	QueryCacheHit                        uint64
 	QueryCacheMiss                       uint64
 	FindCacheHit                         uint64
@@ -181,6 +185,10 @@ func (w *responseWriterWithStatus) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+func (w *responseWriterWithStatus) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
 func (q *QueryItem) FetchOrLock() (interface{}, bool) {
 	d := q.Data.Load()
 	if d != nil {
@@ -217,6 +225,37 @@ func (q *QueryItem) StoreAndUnlock(data interface{}) {
 
 type expireCache struct {
 	ec *expirecache.Cache
+	// sizes sizes new entries: they are added before their value exists.
+	sizes *cacheEntrySizes
+}
+
+// newExpireCache returns a cache holding up to sizeMB megabytes, or any amount
+// when sizeMB is 0.
+func newExpireCache(sizeMB int) expireCache {
+	return expireCache{ec: expirecache.New(uint64(max(sizeMB, 0)) << 20), sizes: &cacheEntrySizes{}}
+}
+
+// cacheEntrySizes averages the sizes of the entries a cache stored.
+type cacheEntrySizes struct {
+	bytes   atomic.Uint64
+	entries atomic.Uint64
+}
+
+func (s *cacheEntrySizes) add(size int) {
+	if s != nil {
+		s.bytes.Add(uint64(size))
+		s.entries.Add(1)
+	}
+}
+
+func (s *cacheEntrySizes) average() uint64 {
+	if s == nil {
+		return 0
+	}
+	if n := s.entries.Load(); n > 0 {
+		return s.bytes.Load() / n
+	}
+	return 0
 }
 
 func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryItem {
@@ -226,6 +265,7 @@ func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryIt
 
 type CarbonserverListener struct {
 	indexStopOnce   sync.Once
+	indexPaused     atomic.Bool
 	startupScanGate <-chan struct{}
 	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
@@ -271,6 +311,7 @@ type CarbonserverListener struct {
 	queryCacheEnabled          bool
 	streamingQueryCacheEnabled bool
 	queryCacheSizeMB           int
+	queryCacheGzip             bool
 	queryCache                 expireCache
 	findCacheEnabled           bool
 	findCacheSizeMB            int
@@ -293,6 +334,10 @@ type CarbonserverListener struct {
 	fileIdx            atomic.Value
 	fileIdxMutex       sync.Mutex
 	metricStoreIndexMu sync.Mutex
+	metricStoreIndex   *store.Store
+	metricStoreCursor  uint64
+	checkpointMu       sync.Mutex
+	checkpointIndex    *fileIndex
 	sharedRequestMu    sync.RWMutex
 	sharedStoreStopped bool
 
@@ -308,6 +353,8 @@ type CarbonserverListener struct {
 	whisperGetConfig      configRetriever
 	metricStoreMu         sync.RWMutex
 	metricStore           *store.Store
+	metricStoreFileIndex  bool
+	incrementalIndexDir   string
 
 	prometheus prometheus
 
@@ -513,8 +560,8 @@ func NewCarbonserverListener(cacheGetFunc func(key string) []points.Point) *Carb
 		cacheGet:          cacheGetFunc,
 		logger:            zapwriter.Logger("carbonserver"),
 		accessLogger:      zapwriter.Logger("access"),
-		findCache:         expireCache{ec: expirecache.New(0)},
-		globCache:         expireCache{ec: expirecache.New(0)},
+		findCache:         newExpireCache(0),
+		globCache:         newExpireCache(0),
 		trigramIndex:      true,
 		percentiles:       []int{100, 99, 98, 95, 75, 50},
 		prometheus: prometheus{
@@ -557,6 +604,40 @@ func (listener *CarbonserverListener) getMetricStore() *store.Store {
 	return listener.metricStore
 }
 
+// SetMetricStoreFileIndex preserves the original file index while an exact
+// canary mirrors originals or conversion still has unowned source files.
+// Metric values and metadata continue to use the shared store.
+func (listener *CarbonserverListener) SetMetricStoreFileIndex(enabled bool) {
+	listener.metricStoreMu.Lock()
+	listener.metricStoreFileIndex = enabled
+	listener.metricStoreMu.Unlock()
+}
+
+// UseMirroredFilesForHandoff drains shared-store requests before switching
+// subsequent requests to the continuously updated original files. The caller
+// must stop persistence first and retain the original file index and cache.
+// The shared database can then close while reads and diverted input stay live.
+func (listener *CarbonserverListener) UseMirroredFilesForHandoff() error {
+	listener.sharedRequestMu.Lock()
+	defer listener.sharedRequestMu.Unlock()
+	listener.metricStoreMu.Lock()
+	defer listener.metricStoreMu.Unlock()
+	if !listener.metricStoreFileIndex || listener.metricStore != nil && listener.metricStore.IncrementalSource() != "" {
+		return errors.New("shared-store handoff requires a continuously updated rollback mirror")
+	}
+	listener.metricStore = nil
+	return nil
+}
+
+func (listener *CarbonserverListener) getMetricIndexStore() *store.Store {
+	listener.metricStoreMu.RLock()
+	defer listener.metricStoreMu.RUnlock()
+	if listener.metricStoreFileIndex {
+		return nil
+	}
+	return listener.metricStore
+}
+
 // beginSharedStoreRequest keeps a shared-store request alive through its
 // storage read, or rejects one that races listener shutdown.
 func (listener *CarbonserverListener) beginSharedStoreRequest() (accepted, locked bool) {
@@ -596,10 +677,10 @@ func (listener *CarbonserverListener) endSharedStoreRequest(locked bool) {
 	}
 }
 
-// RefreshMetricStoreIndex rebuilds the in-memory index from the shared store
-// catalog. Existing indexes stay live if catalog traversal fails.
+// RefreshMetricStoreIndex refreshes discovery from the committed store catalog.
+// Existing indexes stay live if catalog traversal fails.
 func (listener *CarbonserverListener) RefreshMetricStoreIndex() error {
-	metricStore := listener.getMetricStore()
+	metricStore := listener.getMetricIndexStore()
 	if metricStore == nil {
 		return nil
 	}
@@ -718,6 +799,20 @@ func (listener *CarbonserverListener) SetQueryCacheEnabled(enabled bool) {
 func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 	listener.queryCacheSizeMB = size
 }
+
+// SetQueryCacheCompression selects how /render cache entries are stored:
+// "gzip" or "none".
+func (listener *CarbonserverListener) SetQueryCacheCompression(compression string) error {
+	switch compression {
+	case "gzip":
+		listener.queryCacheGzip = true
+	case "none":
+		listener.queryCacheGzip = false
+	default:
+		return fmt.Errorf("unknown query-cache-compression %q, want \"gzip\" or \"none\"", compression)
+	}
+	return nil
+}
 func (listener *CarbonserverListener) SetStreamingQueryCacheEnabled(enabled bool) {
 	listener.streamingQueryCacheEnabled = enabled
 }
@@ -822,7 +917,7 @@ func (listener *CarbonserverListener) WarmupIndexWithPending(prepare func(string
 }
 
 func (listener *CarbonserverListener) warmupIndex(prepare func(string, func(string) error) error) {
-	if listener.getMetricStore() != nil || !listener.trieIndex || listener.scanFrequency == 0 || listener.fileListCache == "" {
+	if listener.getMetricIndexStore() != nil && prepare == nil || !listener.trieIndex || listener.scanFrequency == 0 || listener.fileListCache == "" {
 		return
 	}
 	listener.indexWarmupOnce.Do(func() {
@@ -967,6 +1062,8 @@ func (listener *CarbonserverListener) fileListStatTickers() (known, quotas <-cha
 }
 
 func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency <-chan time.Time, force <-chan struct{}, exit <-chan struct{}) {
+	phasecpu.Set(phasecpu.Index)
+	defer phasecpu.Set(phasecpu.Other)
 	if !listener.waitForInitialIndex(exit) {
 		return
 	}
@@ -983,6 +1080,7 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency 
 
 uloop:
 	for {
+		phasecpu.Set(phasecpu.Index)
 		fidx := listener.CurrentFileIndex()
 		var newMetricsChan <-chan string
 		if listener.trieIndex && listener.concurrentIndex && fidx != nil && fidx.trieIdx != nil {
@@ -1014,7 +1112,10 @@ uloop:
 			// in theory, there should be no starvation on other channels:
 			// https://groups.google.com/g/golang-nuts/c/4BR2Sdb6Zzk (2015)
 
+			listener.metricStoreIndexMu.Lock()
+			fidx = listener.CurrentFileIndex()
 			listener.insertRealtimeMetric(fidx.trieIdx, m)
+			listener.metricStoreIndexMu.Unlock()
 
 			continue uloop
 		}
@@ -1074,6 +1175,8 @@ func (listener *CarbonserverListener) startFileListUpdater(dir string, scanFrequ
 }
 
 func (listener *CarbonserverListener) statKnownMetrics(knownMetricsStatTicker <-chan time.Time) {
+	listener.metricStoreIndexMu.Lock()
+	defer listener.metricStoreIndexMu.Unlock()
 	defer func() {
 		// drain remaining blocked tickers
 		for {
@@ -1118,6 +1221,8 @@ func (listener *CarbonserverListener) refreshQuotaAndUsage(quotaAndUsageStatTick
 }
 
 func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex, quotaAndUsageStatTicker <-chan time.Time) {
+	phasecpu.Set(phasecpu.Quota)
+	defer phasecpu.Set(phasecpu.Index)
 	defer func() {
 		// Loading the initial index may take longer than the quota interval.
 		// This refresh also satisfies ticks queued while initialization ran.
@@ -1130,7 +1235,7 @@ func (listener *CarbonserverListener) refreshIndexQuotaAndUsage(fidx *fileIndex,
 		}
 	}()
 
-	sharedStore := listener.getMetricStore() != nil
+	sharedStore := listener.getMetricIndexStore() != nil
 	if sharedStore {
 		listener.metricStoreIndexMu.Lock()
 		defer listener.metricStoreIndexMu.Unlock()
@@ -1208,6 +1313,8 @@ func metricFileSizes(path string, info os.FileInfo) (logical, physical int64, er
 }
 
 type fileListUpdate struct {
+	incrementalSpool      FileListCache
+	incrementalSpoolErr   error
 	listener              *CarbonserverListener
 	logger                *zap.Logger
 	started               time.Time
@@ -1230,6 +1337,7 @@ type fileListUpdate struct {
 	fileListCache         FileListCache
 	snapshotWriter        *indexSnapshotWriter
 	snapshotReady         bool
+	catalogRecovery       bool
 	snapshotNotifications map[string]*trieNode
 	scanCancelled         bool
 	scanFailed            bool
@@ -1279,7 +1387,8 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 }
 
 func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error) error) (readFromCache bool) {
-	if metricStore := listener.getMetricStore(); metricStore != nil {
+	metricStore := listener.getMetricIndexStore()
+	if metricStore != nil && !(cacheOnly && prepare != nil) {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
 			listener.logger.Error("failed to update shared metric-store index", zap.Error(err))
 		}
@@ -1295,9 +1404,13 @@ func (listener *CarbonserverListener) updateFileListWithPending(dir string, cach
 		}
 	}()
 	u := newFileListUpdate(listener, cacheMetricNames)
+	u.catalogRecovery = metricStore != nil && cacheOnly && prepare != nil
 	defer func() { readFromCache = u.readFromCache }()
 	defer u.closeFileListCaches()
 	if !u.loadFileListCache(cacheOnly) {
+		return false
+	}
+	if u.catalogRecovery && (u.trieIdx == nil || u.trieIdx.snapshot == nil) {
 		return false
 	}
 	if !u.readFromCache && !u.scanFiles(dir, quotaAndUsageStatTicker) {
@@ -1308,7 +1421,7 @@ func (listener *CarbonserverListener) updateFileListWithPending(dir string, cach
 			logger.Warn("saved metric names unavailable", zap.Error(err))
 			return false
 		}
-		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.getFileCount())
 	}
 	u.pruneRealtimeMetrics()
 	u.closeFileListCaches()
@@ -1353,7 +1466,7 @@ func (u *fileListUpdate) loadFileListCache(cacheOnly bool) bool {
 			}
 			u.metricsKnown = 0
 			u.populateCacheMetrics(u.cacheMetricNames)
-			u.metricsKnown = snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+			u.metricsKnown = snapshot.manifest.Records + uint64(u.trieIdx.getFileCount())
 			u.readFromCache = true
 			u.infos = append(u.infos, zap.Duration("snapshot_load_time", time.Since(started)))
 			return true
@@ -1427,6 +1540,12 @@ func (u *fileListUpdate) resetTrie() {
 }
 
 func (u *fileListUpdate) scanFiles(dir string, quotaAndUsageStatTicker <-chan time.Time) bool {
+	if u.incrementalSpool != nil {
+		return u.scanFilesSequential(dir, quotaAndUsageStatTicker)
+	}
+	if db := u.listener.getMetricStore(); db != nil && db.IncrementalSource() != "" {
+		return u.scanIncrementalFiles(dir, quotaAndUsageStatTicker)
+	}
 	if workers := u.scanWorkers(dir); workers > 1 {
 		return u.scanFilesParallel(dir, quotaAndUsageStatTicker, workers)
 	}
@@ -1450,6 +1569,9 @@ func (u *fileListUpdate) scanFilesSequential(dir string, quotaAndUsageStatTicker
 }
 
 func (u *fileListUpdate) newFileListCacheWriter() FileListCache {
+	if u.incrementalSpool != nil {
+		return nil
+	}
 	if u.listener.fileListCache == "" {
 		return nil
 	}
@@ -1514,6 +1636,9 @@ func (u *fileListUpdate) logWhisperDataDir(dir string) {
 }
 
 func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, quotaAndUsageStatTicker <-chan time.Time) error {
+	if u.incrementalSpoolErr != nil {
+		return u.incrementalSpoolErr
+	}
 	if u.cancelled() {
 		return filepath.SkipAll
 	}
@@ -1526,6 +1651,9 @@ func (u *fileListUpdate) walkFile(path string, info os.FileInfo, walkErr error, 
 		u.scanFailed = true
 		u.logger.Info("error processing", zap.String("path", path), zap.Error(walkErr))
 		return nil
+	}
+	if info.IsDir() && info.Name() == whisperpath.Quarantine {
+		return filepath.SkipDir
 	}
 	u.refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker)
 	if info.Mode().IsRegular() && strings.HasSuffix(info.Name(), ".lock") {
@@ -1554,6 +1682,9 @@ func (u *fileListUpdate) cancelled() bool {
 }
 
 func (u *fileListUpdate) stopped() bool {
+	if !u.catalogRecovery && u.listener.getMetricIndexStore() != nil {
+		return true
+	}
 	select {
 	case <-u.listener.exitChan:
 		return true
@@ -1583,6 +1714,14 @@ func (u *fileListUpdate) refreshQuotaAndRealtimeMetrics(quotaAndUsageStatTicker 
 func (u *fileListUpdate) addFile(path string, info os.FileInfo) {
 	trimmedName := strings.TrimPrefix(path, u.listener.whisperData)
 	isFullMetric := strings.HasSuffix(info.Name(), ".wsp")
+	if u.incrementalSpool != nil {
+		if isFullMetric {
+			points, logical, physical := u.metricSizes(path, info, trimmedName, true)
+			u.incrementalSpoolErr = u.incrementalSpool.Write(&FLCEntry{Path: trimmedName, LogicalSize: logical, PhysicalSize: physical, DataPoints: points})
+			u.addMetricDetails(info, trimmedName, true, logical, physical)
+		}
+		return
+	}
 	u.filesLen++
 	dataPoints, logicalSize, physicalSize := u.metricSizes(path, info, trimmedName, isFullMetric)
 	firstSeenAt := u.indexFile(trimmedName, isFullMetric, logicalSize, physicalSize, dataPoints)
@@ -1699,7 +1838,7 @@ func (u *fileListUpdate) publish(dir string, quotaAndUsageStatTicker <-chan time
 	}
 	fileScanRuntime := time.Since(u.started)
 	if u.trieIdx != nil && u.trieIdx.snapshot != nil {
-		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.fileCount)
+		u.metricsKnown = u.trieIdx.snapshot.manifest.Records + uint64(u.trieIdx.getFileCount())
 	}
 	atomic.StoreUint64(&u.listener.metrics.MetricsKnown, u.metricsKnown)
 	atomic.AddUint64(&u.listener.metrics.FileScanTimeNS, uint64(fileScanRuntime.Nanoseconds()))
@@ -1771,7 +1910,7 @@ func (u *fileListUpdate) addTrieStats(index *fileIndex) int {
 	started := time.Now()
 	var count, files, dirs int
 	if b := index.trieIdx.builder; b != nil {
-		count, files, dirs = b.nodes, index.trieIdx.fileCount, b.dirs
+		count, files, dirs = b.nodes, int(index.trieIdx.getFileCount()), b.dirs
 		if index.trieIdx.snapshot != nil {
 			files += int(index.trieIdx.snapshot.manifest.Records)
 		}
@@ -1994,7 +2133,7 @@ func (listener *CarbonserverListener) logSlowGlobExpansion(logger *zap.Logger, q
 
 func (listener *CarbonserverListener) shouldUseFilesystemGlob(query string) bool {
 	star := strings.IndexByte(query, '*')
-	return listener.getMetricStore() == nil && listener.cacheGetRecentMetrics == nil && strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1)
+	return listener.getMetricIndexStore() == nil && listener.cacheGetRecentMetrics == nil && strings.IndexByte(query, '[') == -1 && strings.IndexByte(query, '?') == -1 && (star == -1 || star == len(query)-1)
 }
 
 // TODO(dgryski): add tests
@@ -2043,18 +2182,25 @@ func (listener *CarbonserverListener) expandGlobBraces(globs []string) ([]string
 	return globs, nil
 }
 
+// runtimeStats returns the heap and GC figures Stat reports without
+// runtime.ReadMemStats: it stops the world, which on a large heap takes
+// milliseconds that every request in flight waits out, and Stat runs every
+// metric interval.
+func runtimeStats() (alloc, totalAlloc, numGC, pauseNS uint64) {
+	samples := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}, {Name: "/gc/heap/allocs:bytes"}}
+	metrics.Read(samples)
+	var gc debug.GCStats
+	debug.ReadGCStats(&gc)
+	return samples[0].Value.Uint64(), samples[1].Value.Uint64(), uint64(gc.NumGC), uint64(gc.PauseTotal)
+}
+
 func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	senderRaw := helper.SendUint64
 	sender := helper.SendAndSubstractUint64
 	if listener.metricsAsCounters {
 		sender = helper.SendUint64
 	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	pauseNS := m.PauseTotalNs
-	alloc := m.Alloc
-	totalAlloc := m.TotalAlloc
-	numGC := uint64(m.NumGC)
+	alloc, totalAlloc, numGC, pauseNS := runtimeStats()
 
 	sender("render_requests", &listener.metrics.RenderRequests, send)
 	sender("notfound", &listener.metrics.NotFound, send)
@@ -2076,6 +2222,8 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	sender("throttled_creates", &listener.metrics.ThrottledCreates, send)
 	sender("max_creates_per_second", &listener.metrics.MaxCreatesPerSecond, send)
 	sender("fetch_size_bytes", &listener.metrics.FetchSize, send)
+	sender("query_cache_raw_bytes", &listener.metrics.QueryCacheRawBytes, send)
+	sender("query_cache_stored_bytes", &listener.metrics.QueryCacheStoredBytes, send)
 
 	senderRaw("metrics_known", &listener.metrics.MetricsKnown, send)
 	senderRaw("oooFiles", &listener.metrics.OOOFiles, send)
@@ -2540,7 +2688,7 @@ func (listener *CarbonserverListener) startIndexUpdater() {
 	if !listener.trigramIndex && !listener.trieIndex {
 		return
 	}
-	if listener.getMetricStore() == nil && listener.scanFrequency == 0 {
+	if listener.getMetricIndexStore() == nil && listener.scanFrequency == 0 {
 		return
 	}
 	listener.forceScanChan = make(chan struct{}, 1)
@@ -2569,8 +2717,18 @@ func (listener *CarbonserverListener) newHTTPMux() *http.ServeMux {
 	mux.HandleFunc("/forcescan", listener.forceScanHandler)
 	mux.HandleFunc("/admin/quota", listener.quotaHandler)
 	mux.HandleFunc("/admin/info", listener.adminInfoHandler)
+	mux.HandleFunc("/admin/store/sidecars", listener.sidecarsHandler)
 	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "User-agent: *\nDisallow: /") })
 	return mux
+}
+
+// RequestFileScan queues a normal file/catalog union scan without waiting.
+// A full queue already records a scan after the current one completes.
+func (listener *CarbonserverListener) RequestFileScan() {
+	select {
+	case listener.forceScanChan <- struct{}{}:
+	default:
+	}
 }
 
 func (listener *CarbonserverListener) forceScanHandler(w http.ResponseWriter, _ *http.Request) {
@@ -2616,12 +2774,12 @@ func parseAdminInfoScopes(value string) map[string]bool {
 }
 
 func (listener *CarbonserverListener) initializeCaches() {
-	listener.queryCache = expireCache{ec: expirecache.New(uint64(listener.queryCacheSizeMB))}
+	listener.queryCache = newExpireCache(listener.queryCacheSizeMB)
 	if listener.findCacheEnabled {
-		listener.findCache = expireCache{ec: expirecache.New(uint64(listener.findCacheSizeMB))}
+		listener.findCache = newExpireCache(listener.findCacheSizeMB)
 	}
 	if listener.globCacheEnabled {
-		listener.globCache = expireCache{ec: expirecache.New(uint64(listener.globCacheSizeMB))}
+		listener.globCache = newExpireCache(listener.globCacheSizeMB)
 	}
 	listener.timeBuckets = make([]uint64, listener.buckets+1)
 }
@@ -2933,8 +3091,11 @@ func (listener *CarbonserverListener) grpcServerRatelimitHandler(ctx context.Con
 	return nil
 }
 
-func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64, expire int32, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
-	item := cache.getQueryItem(key, size, expire)
+// getWithCache returns the cached value of key or stores the one f computes.
+// The entry is sized by the average entry before f runs; sizeOf measures the
+// value for later entries.
+func getWithCache(logger *zap.Logger, cache expireCache, key string, expire int32, sizeOf func(interface{}) int, f func() (interface{}, error)) (result interface{}, fromCache bool, err error) {
+	item := cache.getQueryItem(key, cache.sizes.average(), expire)
 	res, ok := item.FetchOrLock()
 	switch {
 	case !ok:
@@ -2943,6 +3104,7 @@ func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64
 		if err != nil {
 			item.StoreAbort()
 		} else {
+			cache.sizes.add(len(key) + sizeOf(result))
 			item.StoreAndUnlock(result)
 		}
 	case res != nil:
@@ -2960,6 +3122,7 @@ func getWithCache(logger *zap.Logger, cache expireCache, key string, size uint64
 // PauseIndexUpdates preserves live read listeners while freezing their catalog
 // for graceful shutdown checkpoints. It is a terminal lifecycle operation.
 func (listener *CarbonserverListener) PauseIndexUpdates() {
+	listener.indexPaused.Store(true)
 	listener.indexStopOnce.Do(func() {
 		if listener.scanTicker != nil {
 			listener.scanTicker.Stop()

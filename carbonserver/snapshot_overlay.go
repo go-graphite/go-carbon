@@ -148,7 +148,7 @@ func (ti *trieIndex) installSnapshotOverlay(pending *trieIndex, base string) err
 // read listeners. Index workers are stopped first; in-flight reads remain live.
 func (l *CarbonserverListener) CheckpointReadIndex() (string, error) {
 	l.PauseIndexUpdates()
-	index := l.CurrentFileIndex()
+	index := l.readCheckpointIndex()
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
 		return "", nil
 	}
@@ -244,7 +244,7 @@ func (l *CarbonserverListener) SavedMetricLookup() func(string) bool {
 // SavedMetricLookups captures the frozen generation once and returns a factory
 // of independent SavedMetricLookup functions, one per checkpoint worker.
 func (l *CarbonserverListener) SavedMetricLookups() func() func(string) bool {
-	index := l.CurrentFileIndex()
+	index := l.readCheckpointIndex()
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
 		return func() func(string) bool { return func(string) bool { return false } }
 	}
@@ -256,7 +256,7 @@ func (l *CarbonserverListener) SavedMetricLookups() func() func(string) bool {
 // must still be included in the later read-index checkpoint. finish switches
 // later lookups to read-only mode before checkpoint serialization starts.
 func (l *CarbonserverListener) WarmCheckpointMetricLookups() (func() func(string) bool, func()) {
-	index := l.CurrentFileIndex()
+	index := l.readCheckpointIndex()
 	if index == nil || index.trieIdx == nil || index.trieIdx.snapshot == nil {
 		return l.SavedMetricLookups(), func() {}
 	}

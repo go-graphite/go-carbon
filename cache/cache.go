@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/greatroar/blobloom"
@@ -24,9 +25,11 @@ const (
 	MaximumLength WriteStrategy = iota
 	TimestampOrder
 	Noop
+	MetricNameOrder
 )
 
-const shardCount = 1 << 10 // 1024 - an arbitrary sized power of 2
+const shardBits = 10
+const shardCount = 1 << shardBits // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
 	maxSize           int64
@@ -35,15 +38,25 @@ type cacheSettings struct {
 	tagsEnabled       bool
 	writeoutMinPoints int
 	writeoutMaxDelay  time.Duration
+	writeoutSpread    float64
+	// writeoutRestoreSpread: see SetWriteoutRestoreSpread.
+	writeoutRestoreSpread bool
+	// writeoutSparseSpread: see SetWriteoutSparseSpread.
+	writeoutSparseSpread bool
+	// writeoutStartupSpread: see SetWriteoutStartupSpread.
+	writeoutStartupSpread bool
 }
 
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
-	mu      sync.Mutex
-	pending atomic.Pointer[pendingRecovery]
+	mu        sync.Mutex
+	pending   atomic.Pointer[pendingRecovery]
+	startupAt atomic.Pointer[time.Time]
 
 	queueLastBuild time.Time
+	// queueScratch keeps the last rebuild's sort buffer; see takeQueue.
+	queueScratch atomic.Pointer[queue]
 
 	data []*Shard
 
@@ -68,22 +81,73 @@ type Cache struct {
 		droppedRealtimeIndex uint32 // new metrics failed to be indexed in realtime
 	}
 
-	newMetricsChan      chan string
-	newMetricCf         *blobloom.SyncFilter
-	newMetricCfCapacity uint64
-	metricExists        func(string) bool
+	newMetricsChan   chan string
+	newMetricCf      atomic.Pointer[indexFilter]
+	filterGeneration atomic.Uint64
+	metricExists     func(string) bool
 
-	throttle func(ps *points.Points, inCache bool) bool
+	throttle          func(ps *points.Points, inCache bool) bool
+	throttleWithState func(ps *points.Points, inCache bool, state *any) bool
+}
+
+type indexFilter struct {
+	*blobloom.SyncFilter
+	generation uint64
+	capacity   uint64
+}
+
+// item holds a metric's queued points. While in Shard.items they are
+// compact and Data is nil; popping decodes them into Data. &item.Points
+// identifies the batch to notConfirmed, firstArrival and pending recovery,
+// from insertion until it is confirmed.
+type item struct {
+	points.Points
+	compact compactPoints
+	// log names the item for the input log, which keeps its stream id
+	// there; the cache does not touch it after creation.
+	log inputlog.StreamRef
+	// spread is the metric's share of the writeout spread (see
+	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
+	spread uint16
+	// sparse marks an item whose metric last wrote a point at least
+	// writeout-max-delay before this item's first (see
+	// SetWriteoutSparseSpread).
+	sparse bool
+	// startup holds the first batching window to its phase even at the point
+	// threshold. It uses existing padding; ordinary arrivals do no extra work.
+	startup bool
+	// slot locates the metric in its shard's sparseLast table.
+	slot            uint32
+	firstArrival    time.Time
+	throttleState   any
+	indexGeneration uint64
+}
+
+func newItem(metric string, capacity int) *item {
+	h := writeoutHash(metric)
+	it := &item{Points: points.Points{Metric: metric}, compact: compactPoints{buf: make([]byte, 0, capacity)}, spread: uint16(h >> 48), slot: sparseSlot(h)}
+	it.log.Metric = metric
+	return it
+}
+
+func (it *item) count() int { return it.compact.n }
+
+// decode moves the queued points into Data, which callers may then own.
+// Called with the item unreachable from the shard, or with its shard locked.
+func (it *item) decode() *points.Points {
+	it.Data = appendDecoded(nil, it.compact.buf, it.compact.n)
+	it.compact = compactPoints{}
+	return &it.Points
 }
 
 // A "thread" safe string to anything map.
 type Shard struct {
 	mu               sync.RWMutex // Read Write mutex, guards access to internal map.
-	items            map[string]*points.Points
+	items            itemMap
 	notConfirmed     []*points.Points    // linear search for value/slot
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
 	adds             map[string]struct{} // map to maintain all the new metric names
-	// Keyed by batch so in-flight writes retain their arrival time on retry.
+	// Only in-flight batches need a map; queued items hold their arrival.
 	firstArrival map[*points.Points]time.Time
 	// Points added (or removed, if negative) but not yet published to
 	// Cache.stat.size. Publishing in batches keeps ingestion from serializing
@@ -92,6 +156,42 @@ type Shard struct {
 	// scratch passes AddPoint's point to the throttle under mu.
 	scratch     points.Points
 	scratchData [1]points.Point
+	// log records accepted points for the input log, when it is enabled.
+	log shardLog
+	// claimData decodes saved points a claim appends, under mu.
+	claimData []points.Point
+	// bytesQuarters tracks the lower quartile of popped items' compact
+	// lengths, in quarter bytes. A new item starts with that capacity:
+	// popping deletes the item, so every writeout would otherwise regrow its
+	// successor 8, 16, 32, ... bytes. At most a quarter of items reserve
+	// unused bytes. Size counts points, not bytes.
+	bytesQuarters int
+	// sparseLast holds, by item slot, the latest timestamp of points written
+	// from this shard, when sparse spreading is enabled (see
+	// SetWriteoutSparseSpread). Metrics sharing a slot keep the newest.
+	sparseLast []uint32
+}
+
+// maxBytesHint bounds the capacity reserved for a new item.
+const maxBytesHint = 256
+
+// minBytesHint holds a first point with a full timestamp and value.
+const minBytesHint = 16
+
+// Called with the shard locked. A longer item raises the estimate a quarter
+// byte and a shorter one lowers it three, which balances at the quartile.
+func (shard *Shard) notePopped(n int) {
+	switch hint := shard.bytesQuarters >> 2; {
+	case n > hint && hint < maxBytesHint:
+		shard.bytesQuarters++
+	case n < hint:
+		shard.bytesQuarters = max(shard.bytesQuarters-3, 0)
+	}
+}
+
+// Called with the shard locked.
+func (shard *Shard) bytesHint() int {
+	return max(shard.bytesQuarters>>2, minBytesHint)
 }
 
 // Creates a new cache instance
@@ -103,7 +203,6 @@ func New() *Cache {
 
 	for i := 0; i < shardCount; i++ {
 		c.data[i] = &Shard{
-			items:        make(map[string]*points.Points),
 			notConfirmed: make([]*points.Points, 4),
 		}
 	}
@@ -118,7 +217,6 @@ func New() *Cache {
 	c.settings.Store(&settings)
 
 	c.writeoutQueue = NewWriteoutQueue(c)
-	c.newMetricCf = nil
 	return c
 }
 
@@ -140,8 +238,10 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 		c.writeStrategy = TimestampOrder
 	case "noop":
 		c.writeStrategy = Noop
+	case "lexical":
+		c.writeStrategy = MetricNameOrder
 	default:
-		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sorted, noop", s)
+		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sorted, noop, lexical", s)
 	}
 	return nil
 }
@@ -159,11 +259,11 @@ func (c *Cache) SetMaxSize(maxSize uint64) {
 // SetBloomSize of bloom filter
 func (c *Cache) SetBloomSize(bloomSize uint64) {
 	if bloomSize > 0 {
-		c.newMetricCf = blobloom.NewSyncOptimized(blobloom.Config{
+		filter := blobloom.NewSyncOptimized(blobloom.Config{
 			Capacity: bloomSize, // Expected number of keys.
 			FPRate:   1e-4,      // Accept one false positive per 10,000 lookups.
 		})
-		c.newMetricCfCapacity = bloomSize
+		c.newMetricCf.Store(&indexFilter{SyncFilter: filter, generation: c.filterGeneration.Add(1), capacity: bloomSize})
 	}
 }
 
@@ -191,11 +291,11 @@ func (c *Cache) Stat(send helper.StatCallback) {
 	send("maxSize", float64(s.maxSize))
 	send("notConfirmed", float64(c.NotConfirmedLength()))
 	// report elements in bloom filter
-	if c.newMetricCf != nil {
-		cfCount := c.newMetricCf.Cardinality()
-		if uint64(cfCount) > c.newMetricCfCapacity {
+	if filter := c.newMetricCf.Load(); filter != nil {
+		cfCount := filter.Cardinality()
+		if uint64(cfCount) > filter.capacity {
 			// full filter report +Inf cardinality
-			cfCount = float64(c.newMetricCfCapacity)
+			cfCount = float64(filter.capacity)
 		}
 		send("cfCount", cfCount)
 	}
@@ -236,22 +336,25 @@ func (c *Cache) Get(key string) []points.Point {
 	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 		if p != nil && p.Metric == key {
 			if data == nil {
-				data = p.Data
+				// Limit capacity: appending below must not write into an
+				// in-flight batch that an earlier reader may still alias.
+				data = p.Data[:len(p.Data):len(p.Data)]
 			} else {
 				data = append(data, p.Data...)
 			}
 		}
 	}
 
-	if p, exists := shard.items[key]; exists {
-		if data == nil {
-			data = p.Data
-		} else {
-			data = append(data, p.Data...)
-		}
+	// Appended bytes never change, so the queued points decode unlocked.
+	var queued compactPoints
+	if values := shard.items.get(key); values != nil {
+		queued = values.compact
 	}
 	shard.mu.Unlock()
-	return data
+	if queued.n == 0 {
+		return data
+	}
+	return appendDecoded(data, queued.buf, queued.n)
 }
 
 // Has reports whether key has unwritten points. Unlike Get it takes a read
@@ -260,7 +363,7 @@ func (c *Cache) Has(key string) bool {
 	shard := c.GetShard(key)
 	shard.mu.RLock()
 	defer shard.mu.RUnlock()
-	if _, exists := shard.items[key]; exists {
+	if shard.items.get(key) != nil {
 		return true
 	}
 	if r := c.pending.Load(); r != nil {
@@ -282,6 +385,7 @@ func (c *Cache) Confirm(p *points.Points) {
 	shard.mu.Lock()
 	removeNotConfirmed(shard, p)
 	delete(shard.firstArrival, p)
+	shard.log.untrack(p)
 	shard.mu.Unlock()
 	if r := c.pending.Load(); r != nil {
 		r.persisted(p)
@@ -312,25 +416,36 @@ func (c *Cache) Requeue(p *points.Points) {
 		return
 	}
 
-	if r := c.pending.Load(); r != nil {
+	r := c.pending.Load()
+	if r != nil {
 		r.failed(p)
 	}
 	count := len(p.Data)
-	if current, exists := shard.items[p.Metric]; exists {
-		if r := c.pending.Load(); r != nil {
-			r.moved(current, p)
+	// The failed batch precedes any points queued since, and replaces them as
+	// one new item that inherits both batches' tracking.
+	values := newItem(p.Metric, 0)
+	values.compact.appendPoints(p.Data)
+	first := shard.firstArrival[p]
+	delete(shard.firstArrival, p)
+	if current := shard.items.get(p.Metric); current != nil {
+		if r != nil {
+			r.moved(&current.Points, &values.Points)
 		}
-		p.Data = append(p.Data, current.Data...)
+		values.compact.appendPoints(appendDecoded(nil, current.compact.buf, current.compact.n))
 		// A missing arrival marks restored or previously unbatched data ready.
-		first, other := shard.firstArrival[p], shard.firstArrival[current]
+		other := current.firstArrival
 		if other.IsZero() || (!first.IsZero() && other.Before(first)) {
-			if shard.firstArrival != nil {
-				shard.firstArrival[p] = other
-			}
+			first = other
 		}
-		delete(shard.firstArrival, current)
+		shard.log.merge(&values.Points, &current.Points)
 	}
-	shard.items[p.Metric] = p
+	if r != nil {
+		r.moved(p, &values.Points)
+	}
+	values.firstArrival = first
+	shard.log.merge(&values.Points, p)
+	shard.log.track(&values.Points)
+	shard.items.set(p.Metric, values)
 	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
 	c.writeoutQueue.notifyAt(time.Now())
 }
@@ -340,7 +455,7 @@ func (c *Cache) Len() int32 {
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
 		shard.mu.RLock()
-		l += len(shard.items)
+		l += shard.items.len()
 		shard.mu.RUnlock()
 	}
 	return int32(l)
@@ -364,7 +479,7 @@ func (c *Cache) IsEmpty() bool {
 	}
 	for _, shard := range c.data {
 		shard.mu.RLock()
-		empty := len(shard.items) == 0 && shard.notConfirmedUsed == 0
+		empty := shard.items.len() == 0 && shard.notConfirmedUsed == 0
 		shard.mu.RUnlock()
 		if !empty {
 			return false
@@ -461,29 +576,45 @@ func (c *Cache) Add(p *points.Points) {
 // Add, appending to a cached metric copies and allocates nothing.
 func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
 	s := c.settings.Load().(*cacheSettings)
-	// add claims pending recovered history before live points.
-	if s.xlog != nil || s.tagsEnabled || c.pending.Load() != nil {
+	// A miss goes through add, which claims saved history before insertion.
+	// Existing items are already reconciled, including during pending recovery.
+	if s.xlog != nil || s.tagsEnabled {
 		c.add(points.OnePoint(string(name), value, timestamp), false, false)
 		return
 	}
 
-	shard := c.data[xxh3.Hash(name)&(shardCount-1)] // as GetShard
+	hash := xxh3.Hash(name)
+	shard := c.data[hash&(shardCount-1)] // as GetShard
 	shard.mu.Lock()
-	values, exists := shard.items[string(name)]
+	values := shard.items.getBytesHashed(hash, name)
+	exists := values != nil
 	// Like add, recheck diversion under the lock.
-	if !exists || c.settings.Load().(*cacheSettings).xlog != nil {
+	if c.settings.Load().(*cacheSettings).xlog != nil {
+		shard.mu.Unlock()
+		c.add(points.OnePoint(string(name), value, timestamp), false, false)
+		return
+	}
+	if !exists {
 		shard.mu.Unlock()
 		c.add(points.OnePoint(string(name), value, timestamp), false, false)
 		return
 	}
 	defer shard.mu.Unlock()
 
-	point := points.Point{Value: value, Timestamp: timestamp}
-	if c.throttle != nil {
+	c.addPointLocked(shard, s, values, value, timestamp)
+}
+
+func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, value float64, timestamp int64) {
+	if c.throttle != nil || c.throttleWithState != nil {
 		// The throttle does not retain the points of a cached metric.
-		shard.scratchData[0] = point
+		shard.scratchData[0] = points.Point{Value: value, Timestamp: timestamp}
 		shard.scratch.Metric, shard.scratch.Data = values.Metric, shard.scratchData[:]
-		throttled := c.throttle(&shard.scratch, true)
+		var throttled bool
+		if c.throttleWithState != nil {
+			throttled = c.throttleWithState(&shard.scratch, true, &values.throttleState)
+		} else {
+			throttled = c.throttle(&shard.scratch, true)
+		}
 		shard.scratch.Metric = ""
 		if throttled {
 			return
@@ -492,13 +623,28 @@ func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
 	if c.overflows(s, 1) {
 		return
 	}
-	values.Data = append(values.Data, point)
+	values.compact.append(value, timestamp)
+	if shard.log.first != nil {
+		shard.log.record(&values.log, value, timestamp)
+	}
 	c.addedLocked(shard, s, values, 1, true, false)
 }
 
-// AddRestored adds dump data without starting a new buffering deadline.
+// AddRestored adds dump data without starting a new buffering deadline. Unlike
+// live input it waits for input-log space: the dump may be removed after Sync,
+// so its points must never overflow the log's bounded admission buffer.
 func (c *Cache) AddRestored(p *points.Points) {
-	c.add(p, true, false)
+	if len(p.Data) > maxShardRestoredLogEntries {
+		batch := *p
+		for start := 0; start < len(p.Data); start += maxShardRestoredLogEntries {
+			batch.Data = p.Data[start:min(start+maxShardRestoredLogEntries, len(p.Data))]
+			c.AddRestored(&batch)
+		}
+		return
+	}
+	for wait := c.add(p, true, false); wait != nil; wait = c.add(p, true, false) {
+		<-wait
+	}
 }
 
 // AddRecovered admits previously accepted handoff input without live quotas.
@@ -508,12 +654,12 @@ func (c *Cache) AddRecovered(p *points.Points) {
 	c.add(p, true, true)
 }
 
-func (c *Cache) add(p *points.Points, restored, recovered bool) {
+func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
 		s.xlog(p)
-		return
+		return nil
 	}
 
 	if s.tagsEnabled {
@@ -521,7 +667,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 		p.Metric, err = tags.Normalize(p.Metric)
 		if err != nil {
 			atomic.AddUint32(&c.stat.tagsNormalizeErrors, 1)
-			return
+			return nil
 		}
 	}
 
@@ -535,37 +681,71 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	// the dump and the input log.
 	if current := c.settings.Load().(*cacheSettings); current.xlog != nil {
 		current.xlog(p)
-		return
+		return nil
 	}
-
-	if r := c.pending.Load(); r != nil {
-		if err := c.claimForWrite(r, shard, p.Metric, len(p.Data)); err != nil {
-			// A validated immutable record must decode; dropping its history
-			// silently would lose already accepted points.
-			panic(fmt.Errorf("claim validated recovery source: %w", err))
+	if restored && !recovered {
+		if wait := shard.log.restoreSpace(len(p.Data)); wait != nil {
+			return wait
 		}
 	}
+	// Dump points the input log records stay durable until persisted, so
+	// they may wait for a spread deadline (see SetWriteoutRestoreSpread).
+	// Without the log the dump file goes after restore, leaving them only
+	// here: they are written at once, as are recovered points, whose source
+	// readers may wait for the cache to drain.
+	spreadRestore := restored && !recovered && s.writeoutRestoreSpread && s.batching() && shard.log.first != nil
 
-	values, exists := shard.items[p.Metric]
-	if !recovered && c.throttle != nil && c.throttle(p, exists) {
-		return
+	values := shard.items.get(p.Metric)
+	exists := values != nil
+	if !exists {
+		if r := c.pending.Load(); r != nil {
+			if err := c.claimForWrite(r, shard, p.Metric, len(p.Data), !restored || spreadRestore); err != nil {
+				// A validated immutable record must decode; dropping its history
+				// silently would lose already accepted points.
+				panic(fmt.Errorf("claim validated recovery source: %w", err))
+			}
+			values = shard.items.get(p.Metric)
+			exists = values != nil
+		}
+	}
+	// Recovery attaches only to an empty cache with receivers closed. Every
+	// insertion claims saved history first, so an existing item is reconciled
+	// already; repeated live points need no mapped-index lookup under this lock.
+	var throttleState any
+	if !recovered {
+		if c.throttleWithState != nil {
+			if exists {
+				throttleState = values.throttleState
+			}
+			if c.throttleWithState(p, exists, &throttleState) {
+				return nil
+			}
+		} else if c.throttle != nil && c.throttle(p, exists) {
+			return nil
+		}
 	}
 
 	count := len(p.Data)
 	if !recovered && c.overflows(s, count) {
-		return
+		return nil
 	}
 
-	if exists {
-		values.Data = append(values.Data, p.Data...)
-	} else {
-		shard.items[p.Metric] = p
-		values = p
-		if s.batching() && !restored {
-			if shard.firstArrival == nil {
-				shard.firstArrival = make(map[*points.Points]time.Time)
+	if !exists {
+		values = newItem(p.Metric, shard.bytesHint())
+		shard.items.set(p.Metric, values)
+		if s.batching() && (!restored || spreadRestore) {
+			now := time.Now()
+			if spreadRestore {
+				values.firstArrival = s.restoreArrival(values, now)
+			} else {
+				values.firstArrival = now
+				// Reloaded under the lock, so a table disabling just released
+				// is not allocated again.
+				if cur := c.settings.Load().(*cacheSettings); cur.writeoutSparseSpread && count > 0 {
+					values.sparse = shard.sparseSince(values, p.Data[0].Timestamp, cur.writeoutMaxDelay, shard.items.len())
+				}
 			}
-			shard.firstArrival[p] = time.Now()
+			c.spreadStartup(values, s, now)
 		}
 
 		if shard.adds != nil {
@@ -573,18 +753,30 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 		}
 		// if no bloom filter - just add metric to new channel
 		// if missed in cache, as it was before
-		if c.newMetricsChan != nil && c.newMetricCf == nil {
+		if c.newMetricsChan != nil && c.newMetricCf.Load() == nil {
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
 	}
+	values.throttleState = throttleState
+	values.compact.appendPoints(p.Data)
 
 	if recovered {
 		if r := c.pending.Load(); r != nil {
-			r.track(values)
+			r.track(&values.Points)
+		}
+	}
+	if shard.log.first != nil {
+		if !exists {
+			shard.log.track(&values.Points)
+		}
+		// Recovered points keep their own durable source until persisted.
+		if !recovered {
+			shard.log.recordPoints(&values.log, p.Data)
 		}
 	}
 
-	c.addedLocked(shard, s, values, count, exists, restored)
+	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
+	return nil
 }
 
 func (c *Cache) overflows(s *cacheSettings, count int) bool {
@@ -596,31 +788,31 @@ func (c *Cache) overflows(s *cacheSettings, count int) bool {
 }
 
 // addedLocked finishes adding count points to values, which the locked shard
-// holds under values.Metric.
-func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *points.Points, count int, exists, restored bool) {
-	// if we have both new metric channel and bloom filter
-	if c.newMetricsChan != nil && c.newMetricCf != nil {
-		// add metric to new metric channel if missed in bloom
-		// despite what we have it in cache (new behaviour)
-		if hash := helper.HashString(values.Metric); !c.newMetricCf.Has(hash) {
-			// Suppress notifications only for an indexed metric or a successful
-			// enqueue. A full queue must allow unknown metrics to retry.
-			if (c.metricExists != nil && c.metricExists(values.Metric)) || sendMetricToNewMetricChan(c, values.Metric) {
-				c.newMetricCf.Add(hash)
-			}
+// holds under values.Metric. immediate makes the item eligible at once, as for
+// restored points that must not wait.
+func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count int, exists, immediate bool) {
+	if filter := c.newMetricCf.Load(); c.newMetricsChan != nil && filter != nil && values.indexGeneration != filter.generation {
+		hash := helper.HashString(values.Metric)
+		if filter.Has(hash) {
+			values.indexGeneration = filter.generation
+		} else if (c.metricExists != nil && c.metricExists(values.Metric)) || sendMetricToNewMetricChan(c, values.Metric) {
+			// A full notification queue leaves the item retryable.
+			filter.Add(hash)
+			values.indexGeneration = filter.generation
 		}
-
 	}
 	before, size := c.addSizeLocked(shard, int64(count), s.sizeSlack)
-	if restored {
-		delete(shard.firstArrival, values)
+	if immediate {
+		values.firstArrival = time.Time{}
 	}
 	if s.batching() {
-		crossedThreshold := len(values.Data) >= s.writeoutMinPoints && len(values.Data)-count < s.writeoutMinPoints
-		if restored || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
+		n := values.count()
+		minPoints := s.minPointsFor(values)
+		crossedThreshold := n >= minPoints && n-count < minPoints
+		if immediate || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
 			c.writeoutQueue.notifyAt(time.Now())
 		} else if !exists {
-			c.writeoutQueue.notifyAt(shard.firstArrival[values].Add(s.writeoutMaxDelay))
+			c.writeoutQueue.notifyAt(values.firstArrival.Add(s.delayFor(values)))
 		}
 	}
 }
@@ -630,14 +822,21 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
 	shard := c.GetShard(key)
 	shard.mu.Lock()
-	p, exists = shard.items[key]
-	delete(shard.items, key)
-	delete(shard.firstArrival, p)
+	values := shard.items.get(key)
+	exists = values != nil
 	if exists {
-		c.addSizeLocked(shard, -int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
+		shard.items.remove(key)
+		values.firstArrival = time.Time{}
+		shard.log.untrack(&values.Points)
+		shard.notePopped(len(values.compact.buf))
+		s := c.settings.Load().(*cacheSettings)
+		shard.noteWritten(values, s)
+		c.addSizeLocked(shard, -int64(values.count()), s.sizeSlack)
 	}
 	shard.mu.Unlock()
 	if exists {
+		// Unreachable from the shard, the item decodes unlocked.
+		p = values.decode()
 		// The persister pops a metric it will never write, such as one whose
 		// path is too long. Saved points it held are settled as well, or
 		// pending recovery, and the first scan behind it, would wait forever.
@@ -653,17 +852,28 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
 	shard := c.GetShard(key)
 	shard.mu.Lock()
-	p, exists = shard.items[key]
-	delete(shard.items, key)
-
+	values := shard.items.get(key)
+	exists = values != nil
 	if exists {
+		shard.items.remove(key)
+		shard.notePopped(len(values.compact.buf))
+		s := c.settings.Load().(*cacheSettings)
+		shard.noteWritten(values, s)
+		c.addSizeLocked(shard, -int64(values.count()), s.sizeSlack)
+		// Get reads in-flight Data under this lock.
+		p = values.decode()
+		if !values.firstArrival.IsZero() {
+			if shard.firstArrival == nil {
+				shard.firstArrival = make(map[*points.Points]time.Time)
+			}
+			shard.firstArrival[p] = values.firstArrival
+		}
 		if shard.notConfirmedUsed < len(shard.notConfirmed) {
 			shard.notConfirmed[shard.notConfirmedUsed] = p
 		} else {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
-		c.addSizeLocked(shard, -int64(len(p.Data)), c.settings.Load().(*cacheSettings).sizeSlack)
 	}
 	shard.mu.Unlock()
 
@@ -693,6 +903,15 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 
 func (c *Cache) SetThrottle(throttle func(ps *points.Points, inCache bool) bool) {
 	c.throttle = throttle
+	c.throttleWithState = nil
+}
+
+// SetThrottleWithState lets a throttle retain metric-specific lookup state.
+// The shard lock guards state; the hook must invalidate it when rules change.
+// Configure before starting ingestion, as with SetThrottle.
+func (c *Cache) SetThrottleWithState(throttle func(ps *points.Points, inCache bool, state *any) bool) {
+	c.throttleWithState = throttle
+	c.throttle = nil
 }
 
 func (c *Cache) GetInfo() map[string]interface{} {

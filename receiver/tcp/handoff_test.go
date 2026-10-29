@@ -18,6 +18,7 @@ type sequenceStore struct {
 	mu   sync.Mutex
 	seqs map[string][]int
 	n    int
+	wake chan struct{}
 }
 
 func (s *sequenceStore) add(p *points.Points) {
@@ -31,6 +32,10 @@ func (s *sequenceStore) add(p *points.Points) {
 		s.seqs[client] = append(s.seqs[client], int(d.Value))
 		s.n++
 	}
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 func (s *sequenceStore) count() int {
@@ -42,9 +47,12 @@ func (s *sequenceStore) count() int {
 // TestDetachKeepsEveryPoint moves a receiver's connections to a new receiver
 // while clients keep writing lines split at arbitrary byte boundaries. Each
 // point must arrive exactly once and in order, across both receivers.
-func TestDetachKeepsEveryPoint(t *testing.T) {
+func TestDetachKeepsEveryPoint(t *testing.T)        { testDetachKeepsEveryPoint(t, false) }
+func TestDetachBatchedKeepsEveryPoint(t *testing.T) { testDetachKeepsEveryPoint(t, true) }
+func testDetachKeepsEveryPoint(t *testing.T, batched bool) {
 	options := &Options{Listen: "127.0.0.1:0", Enabled: true}
-	var before, after sequenceStore
+	wake := make(chan struct{}, 1)
+	before, after := sequenceStore{wake: wake}, sequenceStore{wake: wake}
 	old, err := newTCP("tcp", options, before.add)
 	if err != nil {
 		t.Fatal(err)
@@ -52,16 +60,39 @@ func TestDetachKeepsEveryPoint(t *testing.T) {
 	if !old.Handoffable() {
 		t.Fatal("plaintext receiver must be handoffable")
 	}
+	if batched {
+		old.SetPointsOut(func(name []byte, data []points.Point) { before.add(&points.Points{Metric: string(name), Data: data}) })
+	}
+	defer old.Stop()
 	addr := old.Addr().String()
 
 	const clients, perClient = 24, 3000
 	// One client's metric name is longer than the read buffer, so a detach
 	// can split it across the partial line and the buffer.
-	long := strings.Repeat("x", 6000)
+	long := strings.Repeat("x", plainReadBufferSize+100)
 	var wg sync.WaitGroup
-	start := func(i int, delay time.Duration) {
+	around, inherited := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-around:
+		default:
+			close(around)
+		}
+		select {
+		case <-inherited:
+		default:
+			close(inherited)
+		}
+		wg.Wait()
+	}()
+	start := func(i int) {
 		wg.Go(func() {
-			time.Sleep(delay)
+			switch i % 6 {
+			case 3, 4:
+				<-around
+			case 5:
+				<-inherited
+			}
 			conn, err := net.Dial("tcp", addr)
 			if err != nil {
 				t.Error(err)
@@ -74,28 +105,58 @@ func TestDetachKeepsEveryPoint(t *testing.T) {
 				name = "c0." + long
 			}
 			var pending []byte
+			var fragments [64][]byte
 			for seq := range perClient {
-				pending = append(pending, name+" "+strconv.Itoa(seq)+" 1700000000\n"...)
-				for len(pending) > 0 && (rng.Intn(4) == 0 || seq == perClient-1) {
-					n := min(len(pending), 1+rng.Intn(64))
-					if _, err := conn.Write(pending[:n]); err != nil {
-						t.Error(err)
-						return
-					}
-					pending = pending[n:]
+				if seq == perClient/2 {
+					<-inherited
 				}
-				if rng.Intn(50) == 0 {
-					time.Sleep(time.Millisecond)
+				pending = append(pending, name...)
+				pending = append(pending, ' ')
+				pending = strconv.AppendInt(pending, int64(seq), 10)
+				pending = append(pending, " 1700000000\n"...)
+				if rng.Intn(4) == 0 || seq == perClient-1 {
+					for rest := pending; len(rest) > 0; {
+						// TCP can coalesce writes; batch the same short fragments in writev.
+						var n int
+						for n < len(fragments) && len(rest) > 0 {
+							size := min(len(rest), 1+rng.Intn(64))
+							fragments[n] = rest[:size]
+							n++
+							rest = rest[size:]
+						}
+						batch := net.Buffers(fragments[:n])
+						if _, err := batch.WriteTo(conn); err != nil {
+							t.Error(err)
+							return
+						}
+					}
+					pending = pending[:0]
 				}
 			}
 		})
 	}
 	for i := range clients {
-		// Some clients connect around the detach.
-		start(i, time.Duration(i%6)*20*time.Millisecond)
+		start(i)
 	}
 
-	time.Sleep(60 * time.Millisecond)
+	wait := func(ready func() bool) {
+		t.Helper()
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		for !ready() {
+			select {
+			case <-wake:
+			case <-timer.C:
+				t.Fatal("timed out waiting for points")
+			}
+		}
+	}
+	wait(func() bool {
+		before.mu.Lock()
+		defer before.mu.Unlock()
+		return len(before.seqs) == clients/2
+	})
+	close(around)
 	h, err := old.Detach()
 	if err != nil {
 		t.Fatal(err)
@@ -104,16 +165,17 @@ func TestDetachKeepsEveryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if batched {
+		next.SetPointsOut(func(name []byte, data []points.Point) { after.add(&points.Points{Metric: string(name), Data: data}) })
+	}
 	defer next.Stop()
+	close(inherited)
 	if next.Addr().String() != addr {
 		t.Fatalf("inherited %s, want %s", next.Addr(), addr)
 	}
 	wg.Wait()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for before.count()+after.count() < clients*perClient && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	wait(func() bool { return before.count()+after.count() == clients*perClient })
 	if before.count() == 0 || after.count() == 0 {
 		t.Fatalf("detach did not split the stream: %d before, %d after", before.count(), after.count())
 	}

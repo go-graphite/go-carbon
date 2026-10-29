@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/points"
@@ -92,7 +93,15 @@ func encodeChunk(c *chunk) []byte {
 
 // decodeChunk validates the whole input before publishing it into dst.
 func decodeChunk(data []byte, dst *chunk) error {
-	payload, err := chunkPayload(data)
+	var payload []byte
+	var err error
+	if len(data) >= 2 && data[0] == exactChunkVersion {
+		scratch := exactReadBuffers.Get().(*[maxExactPayload + 2]byte)
+		defer exactReadBuffers.Put(scratch)
+		payload, err = exactChunkPayloadInto(data, scratch[:])
+	} else {
+		payload, err = chunkPayload(data)
+	}
 	if err != nil {
 		return err
 	}
@@ -108,6 +117,9 @@ func decodeChunk(data []byte, dst *chunk) error {
 }
 
 func chunkPayload(data []byte) ([]byte, error) {
+	if len(data) >= 2 && data[0] == exactChunkVersion {
+		return exactChunkPayload(data)
+	}
 	if len(data) < 2 || data[0] != chunkVersion || data[1]&^byte(chunkCompressed) != 0 {
 		return nil, errInvalidChunk
 	}
@@ -149,6 +161,9 @@ func decodeChunkHeader(payload []byte) (chunk, int, error) {
 }
 
 func decodeChunkPoints(payload []byte, offset int, parsed *chunk) error {
+	if payload[0] == exactChunkVersion {
+		return decodeExactChunkPoints(payload, offset, parsed)
+	}
 	var previousTimestamp int64
 	for slot := 0; slot < chunkSlots; slot++ {
 		if !parsed.has(slot) {
@@ -177,19 +192,33 @@ func decodeChunkPoints(payload []byte, offset int, parsed *chunk) error {
 
 // chunkMerger is deliberately pure: it copies operands while decoding them and
 // makes no assumptions about the time represented by a slot.
-var chunkMerger = &pebble.Merger{
-	Name: "go-carbon.chunks.v1",
-	Merge: func(_ []byte, value []byte) (pebble.ValueMerger, error) {
-		var c chunk
-		if err := decodeChunk(value, &c); err != nil {
+var chunkMerger = newChunkMerger(false)
+var exactChunkMerger = newChunkMerger(true)
+
+// Workspaces belong to active merges, never to metric/catalog entries. Finish
+// returns independently owned bytes and is the last ValueMerger call, so the
+// decoded workspace can be reused as soon as serialization finishes.
+var chunkValueMergers = sync.Pool{New: func() any { return new(chunkValueMerger) }}
+
+func newChunkMerger(exact bool) *pebble.Merger {
+	name := "go-carbon.chunks.v1"
+	if exact {
+		name = "go-carbon.chunks.exact.v1"
+	}
+	return &pebble.Merger{Name: name, Merge: func(_ []byte, value []byte) (pebble.ValueMerger, error) {
+		m := chunkValueMergers.Get().(*chunkValueMerger)
+		m.exact = exact
+		if err := decodeChunk(value, &m.chunk); err != nil {
+			chunkValueMergers.Put(m)
 			return nil, err
 		}
-		return &chunkValueMerger{chunk: c}, nil
-	},
+		return m, nil
+	}}
 }
 
 type chunkValueMerger struct {
 	chunk chunk
+	exact bool
 }
 
 func (m *chunkValueMerger) MergeNewer(value []byte) error {
@@ -225,8 +254,12 @@ func (m *chunkValueMerger) combine(other *chunk, otherIsNewer bool) error {
 }
 
 func (m *chunkValueMerger) Finish(_ bool) ([]byte, io.Closer, error) {
+	defer chunkValueMergers.Put(m)
 	if m.chunk.Deltas >= materializeAt {
 		return nil, nil, fmt.Errorf("%w: %d", errTooManyDeltas, m.chunk.Deltas)
+	}
+	if m.exact {
+		return encodeExactChunk(&m.chunk), nil, nil
 	}
 	return encodeChunk(&m.chunk), nil, nil
 }

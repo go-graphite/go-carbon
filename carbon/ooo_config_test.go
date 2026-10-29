@@ -9,6 +9,7 @@ import (
 )
 
 func TestOutOfOrderPolicyConfig(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct {
 		name        string
 		points      int
@@ -25,7 +26,7 @@ func TestOutOfOrderPolicyConfig(t *testing.T) {
 		{"invalid legacy threshold", 0, time.Minute, time.Minute, 0, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			path := TestConfig(t.TempDir())
+			path := testConfig(t, t.TempDir())
 			cfg, err := ReadConfig(path)
 			if err != nil {
 				t.Fatal(err)

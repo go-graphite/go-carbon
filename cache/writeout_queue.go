@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 )
 
 type WriteoutQueue struct {
@@ -116,6 +118,8 @@ func (q *WriteoutQueue) waitForRebuild(next, notBefore time.Time, abort chan boo
 }
 
 func (q *WriteoutQueue) update() {
+	phasecpu.Set(phasecpu.WriteoutQueue)
+	defer phasecpu.Set(phasecpu.Other)
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
 	queue, next := q.cache.makeQueueAt(time.Now())
@@ -167,4 +171,22 @@ QueueLoop:
 
 func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
 	return q.get(abort)
+}
+
+// TryGet takes an already queued, ready metric without waiting for a rebuild.
+// Persister workers use it to fill a commit from work that is available now.
+func (q *WriteoutQueue) TryGet() string {
+	q.RLock()
+	queue := q.queue
+	q.RUnlock()
+	for {
+		select {
+		case metric := <-queue:
+			if q.cache.WriteoutReady(metric) {
+				return metric
+			}
+		default:
+			return ""
+		}
+	}
 }

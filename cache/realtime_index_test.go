@@ -48,7 +48,7 @@ func TestRealtimeIndexConcurrentBloom(t *testing.T) {
 			defer workers.Done()
 			for i := 0; i < 100; i++ {
 				c.Add(points.OnePoint(fmt.Sprintf("metric.%d.%d", worker, i), 1, 1))
-				c.newMetricCf.Cardinality()
+				c.newMetricCf.Load().Cardinality()
 			}
 		}(worker)
 	}
@@ -98,5 +98,45 @@ func BenchmarkRealtimeIndexAdd(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestRealtimeIndexItemRemembersFilterGeneration(t *testing.T) {
+	c := New()
+	c.SetBloomSize(100)
+	ch := make(chan string, 1)
+	c.SetNewMetricsChan(ch)
+	c.AddPoint([]byte("metric"), 1, 1)
+	<-ch
+	before := c.GetShard("metric").items.get("metric").indexGeneration
+	c.AddPoint([]byte("metric"), 2, 2)
+	if len(ch) != 0 {
+		t.Fatal("an indexed item notified twice")
+	}
+	c.SetBloomSize(100)
+	c.AddPoint([]byte("metric"), 3, 3)
+	if len(ch) != 1 || c.GetShard("metric").items.get("metric").indexGeneration == before {
+		t.Fatal("a replacement filter did not invalidate the item's notification")
+	}
+}
+
+func TestRealtimeIndexConcurrentFilterReplacement(t *testing.T) {
+	c := New()
+	c.SetBloomSize(100)
+	c.SetNewMetricsChan(make(chan string, 1))
+	c.SetMetricExists(func(string) bool { return true })
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for range 1000 {
+			c.AddPoint([]byte("metric"), 1, 1)
+		}
+	})
+	for range 20 {
+		c.SetBloomSize(100)
+		c.Stat(func(string, float64) {})
+	}
+	wg.Wait()
+	if c.Size() != 1000 {
+		t.Fatal("filter replacement lost points")
 	}
 }

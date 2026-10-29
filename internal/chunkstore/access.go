@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
+	"sync"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -41,9 +43,26 @@ type chunkAddress struct{ archive, index int }
 const deltasBeforeSet = 4
 
 type writeChunk struct {
-	current, delta chunk
+	current        chunk
+	changed        [2]uint64
 	missing, dirty bool
+	forceSet       bool
 }
+
+// Keep one copy of the values while a write is pending. The merge operand owns
+// only the slots written by this batch, including their last duplicate value.
+func (c *writeChunk) mergeDelta() chunk {
+	delta := chunk{Deltas: 1, Present: c.changed}
+	for word, changed := range c.changed {
+		for changed != 0 {
+			slot := word*64 + bits.TrailingZeros64(changed)
+			delta.Points[slot] = c.current.Points[slot]
+			changed &= changed - 1
+		}
+	}
+	return delta
+}
+
 type chunkWriter struct {
 	store                  *Store
 	metadata               Metadata
@@ -52,15 +71,41 @@ type chunkWriter struct {
 	dirty                  bool
 }
 
+var chunkWriters = sync.Pool{New: func() any { return new(chunkWriter) }}
+var writeChunks = sync.Pool{New: func() any { return new(writeChunk) }}
+
 func newChunkWriter(s *Store, m Metadata) *chunkWriter {
-	return &chunkWriter{store: s, metadata: m, chunks: make(map[chunkAddress]*writeChunk)}
+	w := chunkWriters.Get().(*chunkWriter)
+	w.store, w.metadata = s, m
+	if w.chunks == nil {
+		w.chunks = make(map[chunkAddress]*writeChunk)
+	}
+	return w
+}
+
+func (w *chunkWriter) release() {
+	for _, c := range w.chunks {
+		writeChunks.Put(c)
+	}
+	// Discard an unusually large batch's map instead of keeping its capacity
+	// behind an otherwise small, inactive writer. Drop catalog/store references.
+	if len(w.chunks) > 64 {
+		w.chunks = nil
+	} else {
+		clear(w.chunks)
+	}
+	w.store, w.metadata = nil, Metadata{}
+	w.materialized, w.operands, w.dirty = 0, 0, false
+	chunkWriters.Put(w)
 }
 func (w *chunkWriter) load(archive, slot int) (*writeChunk, error) {
 	a := chunkAddress{archive, slot / chunkSlots}
 	if c := w.chunks[a]; c != nil {
 		return c, nil
 	}
-	c := new(writeChunk)
+	c := writeChunks.Get().(*writeChunk)
+	*c = writeChunk{}
+	w.chunks[a] = c
 	v, closer, err := w.store.db.Get(chunkKey(w.metadata, archive, a.index))
 	switch {
 	case errors.Is(err, pebble.ErrNotFound):
@@ -74,7 +119,6 @@ func (w *chunkWriter) load(archive, slot int) (*writeChunk, error) {
 			return nil, err
 		}
 	}
-	w.chunks[a] = c
 	return c, nil
 }
 func (w *chunkWriter) setPoint(archive, timestamp int, value float64) error {
@@ -88,8 +132,9 @@ func (w *chunkWriter) setPoint(archive, timestamp int, value float64) error {
 		return err
 	}
 	p := Point{Timestamp: int64(timestamp), Value: value}
-	c.current.set(slot%chunkSlots, p)
-	c.delta.set(slot%chunkSlots, p)
+	chunkSlot := slot % chunkSlots
+	c.current.set(chunkSlot, p)
+	c.changed[chunkSlot/64] |= uint64(1) << uint(chunkSlot%64)
 	c.dirty = true
 	w.dirty = true
 	return nil
@@ -113,16 +158,16 @@ func (w *chunkWriter) commit(b *pebble.Batch) error {
 			continue
 		}
 		k := chunkKey(w.metadata, a.archive, a.index)
-		if c.missing || c.current.Deltas+1 >= deltasBeforeSet {
+		if c.missing || c.forceSet || c.current.Deltas+1 >= deltasBeforeSet {
 			c.current.Deltas = 0
 			w.materialized++
-			if err := b.Set(k, encodeChunk(&c.current), nil); err != nil {
+			if err := b.Set(k, w.store.encodeChunk(&c.current), nil); err != nil {
 				return err
 			}
 		} else {
-			c.delta.Deltas = 1
+			delta := c.mergeDelta()
 			w.operands++
-			if err := b.Merge(k, encodeChunk(&c.delta), nil); err != nil {
+			if err := b.Merge(k, w.store.encodeChunk(&delta), nil); err != nil {
 				return err
 			}
 		}

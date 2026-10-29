@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/dgryski/go-trigram"
@@ -28,6 +29,7 @@ type point struct {
 }
 
 func TestMetricFileSizesIncludesOutOfOrderSidecar(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "metric.wsp")
 	if err := os.WriteFile(path, make([]byte, 4096), 0o600); err != nil {
@@ -101,6 +103,7 @@ type FetchTest struct {
 }
 
 func TestExtractTrigrams(t *testing.T) {
+	t.Parallel()
 
 	tests := []struct {
 		query string
@@ -231,33 +234,36 @@ func testFetchSingleMetricHelper(testData *FetchTest, cache *cache.Cache, carbon
 }
 
 func TestFetchDataReadBytesMetricIncrement(t *testing.T) {
-	test := getSingleMetricTest("data-file")
-	cache := cache.New()
-	carbonserver, err := initCarbonserverListener(cache)
-	carbonserver.SetTrieIndex(true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	test.path = carbonserver.whisperData
-	defer os.RemoveAll(test.path)
-	err = generalFetchSingleMetricInit(test, cache, carbonserver) // insert metrics in the file
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer generalFetchSingleMetricRemove(test) // remove metrics later
-	var trieNodes []*trieNode
-	trieNodes = append(trieNodes, newFileNode(0, 0, 0, 0, 0)) // readBytes update will go here
-	metrics, err := carbonserver.fetchData(test.name, "", []string{test.name}, []bool{true}, trieNodes, int32(test.from), int32(test.until))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(metrics) != 1 || len(metrics[0].Values) != 5 {
-		t.Errorf("wrong number of metrics returned: should be 1 metric with 5 data points")
-	}
-	fm := trieNodes[0].meta.Load().(*fileMeta)
-	if fm.readBytes != 5*12 { // 5 points * 12 bytes for each point
-		t.Errorf("Wrong number of read bytes, %d instead of 5*12 bytes", fm.readBytes)
-	}
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("data-file")
+		cache := cache.New()
+		carbonserver, err := initCarbonserverListener(cache)
+		carbonserver.SetTrieIndex(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		test.path = carbonserver.whisperData
+		defer os.RemoveAll(test.path)
+		err = generalFetchSingleMetricInit(test, cache, carbonserver) // insert metrics in the file
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer generalFetchSingleMetricRemove(test) // remove metrics later
+		var trieNodes []*trieNode
+		trieNodes = append(trieNodes, newFileNode(0, 0, 0, 0, 0)) // readBytes update will go here
+		metrics, err := carbonserver.fetchData(test.name, "", []string{test.name}, []bool{true}, trieNodes, int32(test.from), int32(test.until))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(metrics) != 1 || len(metrics[0].Values) != 5 {
+			t.Errorf("wrong number of metrics returned: should be 1 metric with 5 data points")
+		}
+		fm := trieNodes[0].meta.Load().(*fileMeta)
+		if fm.readBytes != 5*12 { // 5 points * 12 bytes for each point
+			t.Errorf("Wrong number of read bytes, %d instead of 5*12 bytes", fm.readBytes)
+		}
+	})
 }
 
 var day = 60 * 60 * 24
@@ -391,11 +397,21 @@ var singleMetricTests = []FetchTest{
 func getSingleMetricTest(name string) *FetchTest {
 	for _, test := range singleMetricTests {
 		if test.name == name {
+			if test.now != 0 {
+				current := int(time.Now().Unix()) / 120 * 120
+				delta := current - test.now
+				test.now, test.from, test.until = current, test.from+delta, test.until+delta
+				test.cachePoints = append([]point(nil), test.cachePoints...)
+				for i := range test.cachePoints {
+					test.cachePoints[i].Timestamp += delta
+				}
+			}
 			return &test
 		}
 	}
 	return nil
 }
+
 func initCarbonserverListener(cache *cache.Cache) (*CarbonserverListener, error) {
 	path, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -461,13 +477,19 @@ func testFetchSingleMetricCommon(t *testing.T, test *FetchTest) {
 }
 
 func TestFetchSingleMetricNonExisting(t *testing.T) {
-	test := getSingleMetricTest("non-existing")
-	testFetchSingleMetricCommon(t, test)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("non-existing")
+		testFetchSingleMetricCommon(t, test)
+	})
 }
 
 func TestFetchSingleMetricNonProperArchive(t *testing.T) {
-	test := getSingleMetricTest("no-proper-archive")
-	testFetchSingleMetricCommon(t, test)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("no-proper-archive")
+		testFetchSingleMetricCommon(t, test)
+	})
 }
 
 /*
@@ -479,8 +501,11 @@ func TestFetchSingleMetricCrossRetention(t *testing.T) {
 */
 
 func TestFetchSingleMetricDataFile(t *testing.T) {
-	test := getSingleMetricTest("data-file")
-	testFetchSingleMetricCommon(t, test)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("data-file")
+		testFetchSingleMetricCommon(t, test)
+	})
 }
 
 /*
@@ -492,21 +517,31 @@ func TestFetchSingleMetricDataFileNotEven(t *testing.T) {
 */
 
 func TestFetchSingleMetricDataFileCache(t *testing.T) {
-	test := getSingleMetricTest("data-file-cache")
-	testFetchSingleMetricCommon(t, test)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("data-file-cache")
+		testFetchSingleMetricCommon(t, test)
+	})
 }
 
 func TestFetchSingleMetricDataCache(t *testing.T) {
-	test := getSingleMetricTest("data-cache")
-	testFetchSingleMetricCommon(t, test)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("data-cache")
+		testFetchSingleMetricCommon(t, test)
+	})
 }
 
 func TestFetchSingleMetricDataCacheOnly(t *testing.T) {
-	test := getSingleMetricTest("data-cache-only")
-	testFetchSingleMetricCommon(t, test)
+	t.Parallel()
+	synctest.Test(t, func(t *testing.T) {
+		test := getSingleMetricTest("data-cache-only")
+		testFetchSingleMetricCommon(t, test)
+	})
 }
 
 func TestGetMetricsListEmpty(t *testing.T) {
+	t.Parallel()
 	cache := cache.New()
 	path, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -530,6 +565,7 @@ func TestGetMetricsListEmpty(t *testing.T) {
 }
 
 func TestGetMetricsListWithData(t *testing.T) {
+	t.Parallel()
 	cache := cache.New()
 	path, err := os.MkdirTemp("", "")
 	if err != nil {
@@ -627,7 +663,7 @@ func BenchmarkFetchSingleMetricDataCacheLong(b *testing.B) {
 	l := 1 * day / int(test.expectedStep)
 	test.cachePoints = make([]point, 0, l)
 	val := float64(70)
-	for t := now - l*int(test.expectedStep); t < now; t += int(test.expectedStep) {
+	for t := test.now - l*int(test.expectedStep); t < test.now; t += int(test.expectedStep) {
 		test.cachePoints = append(test.cachePoints, point{t, val})
 		val += 10
 	}

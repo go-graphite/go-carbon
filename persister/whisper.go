@@ -20,6 +20,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/go-graphite/go-carbon/internal/stagetime"
+	"github.com/go-graphite/go-carbon/internal/whisperpath"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/lomik/zapwriter"
@@ -34,14 +37,26 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
-	recv                func(chan bool) string
-	pop                 func(string) (*points.Points, bool)
-	confirm             func(*points.Points)
-	popConfirm          func(string) (*points.Points, bool)
-	requeue             func(*points.Points)
-	backlogged          func() bool
-	writeoutReady       func(string) bool
-	metricStore         MetricStore
+	recv                 func(chan bool) string
+	tryRecv              func() string
+	storeUpdateBatchSize int
+	pop                  func(string) (*points.Points, bool)
+	confirm              func(*points.Points)
+	popConfirm           func(string) (*points.Points, bool)
+	requeue              func(*points.Points)
+	backlogged           func() bool
+	writeoutReady        func(string) bool
+	metricStore          MetricStore
+	incrementalStore     IncrementalMetricStore
+	incrementalScratch   string
+	incrementalArchive   string
+	incrementalPriority  atomic.Pointer[func(string)]
+	// incrementalComplete routes writes to the store without an ownership
+	// check once the migration has left no originals.
+	incrementalComplete atomic.Bool
+	mirrorImportMissing bool
+	mirrorFiles         bool
+	mirrorState         *MirrorState
 	tagsEnabled         bool
 	taggedFn            func(string, bool)
 	schemas             WhisperSchemas
@@ -49,6 +64,8 @@ type Whisper struct {
 	workersCount        int
 	rootPath            string
 	created             uint32 // counter
+	nameTooLong         uint32 // counter: points dropped for metric names the store refuses
+	nameTooLongLogged   atomic.Int64
 	updateOperations    uint32 // counter
 	committedPoints     uint32 // counter
 	oooDiscardedPoints  uint32 // counter
@@ -64,12 +81,24 @@ type Whisper struct {
 	maxUpdatesPerSecond int
 	updateTicker        *helper.ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
-	mockStore           func() (StoreFunc, func())
-	logger              *zap.Logger
-	createLogger        *zap.Logger
+	// converting names metrics whose original is being imported. Their
+	// writeouts are deferred instead of holding a store stripe for the import.
+	converting sync.Map
+	// reclaimedDirectories coalesces directory syncs after unlinking originals.
+	reclaimedDirectories directorySyncs
+	// reclaim, when set, unlinks converted originals later in batches.
+	reclaim      *deferredReclaim
+	conversionIO chan struct{}
+	writeStats   persisterWriteStats
+	mockStore    func() (StoreFunc, func())
+	logger       *zap.Logger
+	createLogger *zap.Logger
 
 	oooCompactionChecks   uint32 // counter
 	oooCompactionDeferred uint32 // counter
+	// overlapSeen holds the go-whisper replay counts already reported.
+	overlapMu   sync.Mutex
+	overlapSeen map[whisper.OverlapKind]uint64
 
 	// outOfOrder diverts points the compressed format rejects into a sidecar
 	// file and folds them back in periodically. See go-whisper's ooo.go.
@@ -123,16 +152,19 @@ func NewWhisper(
 	popConfirm func(string) (*points.Points, bool)) *Whisper {
 
 	return &Whisper{
-		recv:         recv,
-		pop:          pop,
-		confirm:      confirm,
-		popConfirm:   popConfirm,
-		schemas:      schemas,
-		aggregation:  aggregation,
-		workersCount: 1,
-		rootPath:     rootPath,
-		logger:       zapwriter.Logger("persister"),
-		createLogger: zapwriter.Logger("whisper:new"),
+		recv:                 recv,
+		pop:                  pop,
+		confirm:              confirm,
+		popConfirm:           popConfirm,
+		schemas:              schemas,
+		aggregation:          aggregation,
+		workersCount:         1,
+		storeUpdateBatchSize: 1,
+		rootPath:             rootPath,
+		logger:               zapwriter.Logger("persister"),
+		createLogger:         zapwriter.Logger("whisper:new"),
+		// A reloaded persister reports only replays since it started.
+		overlapSeen: overlapUpdateCounts(),
 	}
 }
 
@@ -154,6 +186,12 @@ func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
 			panic(err)
 		}
 		p.prometheus.outOfOrderWriteLags = existing
+	}
+	if err := reg.Register(newOverlapUpdatesCollector()); err != nil {
+		var registered prometheus.AlreadyRegisteredError
+		if !errors.As(err, &registered) {
+			panic(err)
+		}
 	}
 }
 
@@ -331,9 +369,22 @@ func (p *Whisper) updateMany(w *whisper.Whisper, path string, points []*whisper.
 // synchronous. It returns the handle to carry on with, or nil when a failed
 // merge cannot be followed by a reopen.
 func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *whisper.Whisper {
+	result, _, _ := p.compactOutOfOrderResult(w, metric, path)
+	return result
+}
+
+// The bool requests full mirror repair after an uncertain merge; successful
+// mirrored compaction returns its dirty archive windows instead.
+func (p *Whisper) compactOutOfOrderResult(w *whisper.Whisper, metric, path string) (*whisper.Whisper, bool, []whisper.ArchiveWindow) {
 	sidecar := w.OutOfOrderPath()
 	if sidecar == "" {
-		return w
+		return w, false, nil
+	}
+	// Without a buffered token the receive below cannot succeed, so skip the
+	// stat. This only peeks: tokens are consumed exactly as before. A closed
+	// (zero-rate) ticker is empty and never merges either way.
+	if len(p.outOfOrder.ticker.C) == 0 {
+		return w, false, nil
 	}
 
 	fi, err := os.Stat(sidecar)
@@ -342,7 +393,7 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 			p.logger.Error("failed to stat out-of-order sidecar",
 				zap.String("path", sidecar), zap.Error(p.simplifyPathError(err)))
 		}
-		return w
+		return w, false, nil
 	}
 
 	// physical, not logical: sidecars are sparse, so their logical size is the
@@ -352,36 +403,42 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 		size = stat.Blocks * 512
 	}
 	if p.outOfOrder.policy.MinPoints <= 0 && size < p.outOfOrder.threshold {
-		return w
+		return w, false, nil
 	}
 
 	select {
 	case hasCapacity := <-p.outOfOrder.ticker.C:
 		if !hasCapacity {
-			return w
+			return w, false, nil
 		}
 	default:
 		// makes sure that it's a non-blocking process
-		return w
+		return w, false, nil
 	}
 
 	merged := true
+	var windows []whisper.ArchiveWindow
 	if p.outOfOrder.policy.MinPoints > 0 {
 		atomic.AddUint32(&p.oooCompactionChecks, 1)
+	}
+	switch {
+	case p.mirrorFiles:
+		merged, windows, err = w.MergeOutOfOrderWithArchiveWindows(p.outOfOrder.policy)
+	case p.outOfOrder.policy.MinPoints > 0:
 		merged, err = w.MergeOutOfOrderWithOptions(p.outOfOrder.policy)
-	} else {
+	default:
 		err = w.MergeOutOfOrder()
 	}
 	if err == nil {
 		if !merged {
 			atomic.AddUint32(&p.oooCompactionDeferred, 1)
-			return w
+			return w, false, nil
 		}
 		atomic.AddUint32(&p.oooCompactions, 1)
 		p.logger.Debug("merged out-of-order sidecar into cwhisper file",
 			zap.String("path", path), zap.Int64("sidecarBytes", size))
 
-		return w
+		return w, false, windows
 	}
 	atomic.AddUint32(&p.oooCompactErrors, 1)
 	p.logger.Error("failed to merge out-of-order sidecar",
@@ -399,10 +456,10 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 	if err != nil {
 		p.logger.Error("failed to reopen whisper file after out-of-order merge failure",
 			zap.String("path", path), zap.Error(p.simplifyPathError(err)))
-		return nil
+		return nil, true, nil
 	}
 
-	return nw
+	return nw, true, nil
 }
 
 func storeMutexIndex(metric string) uint64 {
@@ -412,27 +469,57 @@ func storeMutexIndex(metric string) uint64 {
 }
 
 func (p *Whisper) store(metric string) {
+	// Every writeout's total time is recorded; one in stagetime.SampleEvery
+	// also times its stages and labels its goroutine for CPU profiles.
+	start := time.Now()
+	ctx, timer := stagetime.Start(phasecpu.Context(phasecpu.Persister))
+	defer func() {
+		timer.Finish()
+		stagetime.ObserveUpdate(time.Since(start))
+	}()
+	timer.Enter(stagetime.LockWait)
 	// avoid concurrent store same metric
 	// @TODO: may be flock?
-	// start := time.Now()
 	mutexIndex := storeMutexIndex(metric)
 	p.storeMutex[mutexIndex].Lock()
-	// atomic.AddUint64(&p.blockAvoidConcurrentNs, uint64(time.Since(start).Nanoseconds()))
 	defer p.storeMutex[mutexIndex].Unlock()
+	if _, converting := p.converting.Load(metric); converting {
+		// The points stay cached; a later writeout routes them to the new owner.
+		return
+	}
 	if p.writeoutReady != nil && !p.writeoutReady(metric) {
 		return
 	}
 
+	var w *whisper.Whisper
+	var path string
 	if p.metricStore != nil {
-		p.storeShared(metric)
-		return
+		timer.Enter(stagetime.Route)
+		shared, original, originalPath, err := p.incrementalWriteRoute(metric)
+		if err != nil {
+			if !errors.Is(err, errOriginalMetricPathRejected) {
+				p.logger.Error("route incremental metric", zap.String("metric", metric), zap.Error(err))
+			}
+			return
+		}
+		if shared {
+			p.storeShared(ctx, metric)
+			return
+		}
+		w, path = original, originalPath
 	}
+	timer.Enter(stagetime.OriginalWrite)
 
-	path, ok := p.whisperPath(metric)
-	if !ok {
-		return
+	if w == nil {
+		var ok bool
+		if path, ok = p.whisperPath(metric); !ok {
+			return
+		}
 	}
-	w, newFile := p.openOrCreateWhisper(metric, path)
+	var newFile bool
+	if w == nil {
+		w, newFile = p.openOrCreateWhisper(metric, path)
+	}
 	if w == nil {
 		return
 	}
@@ -474,13 +561,18 @@ func (p *Whisper) whisperPath(metric string) (string, bool) {
 	return path, true
 }
 
-func (p *Whisper) openOrCreateWhisper(metric, path string) (*whisper.Whisper, bool) {
-	w, err := whisper.OpenWithOptions(path, &whisper.Options{
-		Sparse:     p.sparse,
-		FLock:      p.flock,
-		Compressed: p.compressed,
-		OutOfOrder: p.outOfOrder.enabled,
+func (p *Whisper) openWhisper(path string, existingOnly bool) (*whisper.Whisper, error) {
+	return whisper.OpenWithOptions(path, &whisper.Options{
+		Sparse:       p.sparse,
+		FLock:        p.flock,
+		Compressed:   p.compressed,
+		OutOfOrder:   p.outOfOrder.enabled,
+		ExistingOnly: existingOnly,
 	})
+}
+
+func (p *Whisper) openOrCreateWhisper(metric, path string) (*whisper.Whisper, bool) {
+	w, err := p.openWhisper(path, false)
 	if err == nil {
 		return w, false
 	}
@@ -532,24 +624,17 @@ func (p *Whisper) createWhisper(metric, path string) *whisper.Whisper {
 		return nil
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), os.ModeDir|os.ModePerm); err != nil {
-		p.logger.Error("mkdir failed",
-			zap.String("dir", filepath.Dir(path)),
-			zap.Error(p.simplifyPathError(err)),
-			zap.String("path", path),
-		)
-		return nil
-	}
-
 	compressed := p.compressed
 	if schema.Compressed != nil {
 		compressed = *schema.Compressed
 	}
-	w, err := whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
-		Sparse:     p.sparse,
-		FLock:      p.flock,
-		Compressed: compressed,
-		OutOfOrder: p.outOfOrder.enabled,
+	w, err := whisperpath.Create(filepath.Dir(path), os.ModePerm, func() (*whisper.Whisper, error) {
+		return whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
+			Sparse:     p.sparse,
+			FLock:      p.flock,
+			Compressed: compressed,
+			OutOfOrder: p.outOfOrder.enabled,
+		})
 	})
 	if err != nil {
 		p.logger.Error("create new whisper file failed",
@@ -621,13 +706,18 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 		return
 	}
 
+	// One backing array instead of one allocation per point.
+	backing := make([]whisper.TimeSeriesPoint, len(values.Data))
 	points := make([]*whisper.TimeSeriesPoint, len(values.Data))
 	for i, r := range values.Data {
-		points[i] = &whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
+		backing[i] = whisper.TimeSeriesPoint{Time: int(r.Timestamp), Value: r.Value}
+		points[i] = &backing[i]
 	}
 
-	// start = time.Now()
-	if err := p.updateMany(w, path, points); err != nil {
+	start := time.Now()
+	err := p.updateMany(w, path, points)
+	p.writeStats.original.observe(len(values.Data), time.Since(start), err)
+	if err != nil {
 		if p.requeue != nil {
 			p.requeue(values)
 		}
@@ -653,9 +743,14 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 	if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
 		p.taggedFn(metric, false)
 	}
+	if hint := p.incrementalPriority.Load(); hint != nil {
+		(*hint)(metric)
+	}
 }
 
 func (p *Whisper) worker(exit chan bool) {
+	phasecpu.Set(phasecpu.Persister)
+	defer phasecpu.Set(phasecpu.Other)
 	storeFunc := p.store
 	var doneCb func()
 	if p.mockStore != nil {
@@ -677,7 +772,23 @@ LOOP:
 			// exit closed
 			break LOOP
 		}
-		storeFunc(metric)
+		if p.mockStore == nil && p.canBatchShared() {
+			metrics := []string{metric}
+			for len(metrics) < p.storeUpdateBatchSize && p.takeBatchToken() {
+				next := p.tryRecv()
+				if next == "" {
+					break
+				}
+				metrics = append(metrics, next)
+			}
+			if len(metrics) > 1 {
+				p.storeSharedBatch(metrics)
+			} else {
+				storeFunc(metric)
+			}
+		} else {
+			storeFunc(metric)
+		}
 		if doneCb != nil {
 			doneCb()
 		}
@@ -693,6 +804,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 	created := atomic.LoadUint32(&p.created)
 	atomic.AddUint32(&p.created, -created)
+	nameTooLong := atomic.SwapUint32(&p.nameTooLong, 0)
 
 	extended := atomic.LoadUint32(&p.extended)
 	atomic.AddUint32(&p.extended, -extended)
@@ -720,6 +832,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	}
 
 	send("created", float64(created))
+	send("nameTooLongDroppedPoints", float64(nameTooLong))
 	send("oooDiscardedPoints", float64(oooDiscardedPoints))
 	if p.outOfOrder.enabled {
 		// oooDiverted tracks how many of the oooDiscardedPoints above were
@@ -732,6 +845,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 			send("oooCompactionDeferred", float64(oooCompactionDeferred))
 		}
 	}
+	p.sendOverlapUpdates(send)
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
 	send("workers", float64(p.workersCount))
 	send("extended", float64(extended))
@@ -790,6 +904,7 @@ func (p *Whisper) Start() error {
 }
 
 func (p *Whisper) Stop() {
+	p.StopDeferredReclaim()
 	p.StopFunc(func() {
 		p.updateTicker.Stop()
 

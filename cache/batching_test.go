@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
@@ -34,7 +35,7 @@ func requireMetric(t *testing.T, queue chan string, want string) {
 }
 
 func TestBatchingThresholdAndArrivalDeadline(t *testing.T) {
-	for _, strategy := range []string{"max", "sorted", "noop"} {
+	for _, strategy := range []string{"max", "sorted", "noop", "lexical"} {
 		t.Run(strategy, func(t *testing.T) {
 			c := batchingCache(t, 8, 2*time.Second)
 			if err := c.SetWriteStrategy(strategy); err != nil {
@@ -42,7 +43,7 @@ func TestBatchingThresholdAndArrivalDeadline(t *testing.T) {
 			}
 			c.Add(points.OnePoint("sparse", 1, 1)) // Historical sample timestamp is not arrival time.
 			shard := c.GetShard("sparse")
-			first := shard.firstArrival[shard.items["sparse"]]
+			first := shard.items.get("sparse").firstArrival
 			q, deadline := c.makeQueueAt(first.Add(time.Second))
 			if q != nil || !deadline.Equal(first.Add(2*time.Second)) {
 				t.Fatalf("premature queue/deadline: %v %v", q, deadline)
@@ -65,11 +66,14 @@ func TestBatchingRequeueRetainsDeadline(t *testing.T) {
 	c := batchingCache(t, 8, 2*time.Second)
 	c.Add(points.OnePoint("metric", 1, 1))
 	shard := c.GetShard("metric")
-	first := shard.firstArrival[shard.items["metric"]]
+	first := shard.items.get("metric").firstArrival
 	p, _ := c.PopNotConfirmed("metric")
+	if !shard.firstArrival[p].Equal(first) {
+		t.Fatal("in-flight batch lost its arrival")
+	}
 	c.Add(points.OnePoint("metric", 2, 1))
 	c.Requeue(p)
-	if got := shard.firstArrival[p]; !got.Equal(first) {
+	if got := shard.items.get("metric").firstArrival; !got.Equal(first) || len(shard.firstArrival) != 0 {
 		t.Fatalf("retry changed arrival from %v to %v", first, got)
 	}
 	if got := c.Get("metric"); len(got) != 2 || got[0].Value != 1 || got[1].Value != 2 {
@@ -128,12 +132,9 @@ func TestBatchingBypasses(t *testing.T) {
 
 func waitBuild(t *testing.T, c *Cache) {
 	t.Helper()
-	until := time.Now().Add(time.Second)
-	for atomic.LoadUint32(&c.stat.queueBuildCnt) == 0 {
-		if time.Now().After(until) {
-			t.Fatal("queue did not build")
-		}
-		time.Sleep(time.Millisecond)
+	synctest.Wait()
+	if atomic.LoadUint32(&c.stat.queueBuildCnt) == 0 {
+		t.Fatal("queue did not build")
 	}
 }
 
@@ -150,91 +151,99 @@ func queuedMetric(t *testing.T, got <-chan string, want string) {
 }
 
 func TestBatchingWaitDoesNotRescanSparseArrivals(t *testing.T) {
-	c := batchingCache(t, 8, time.Hour)
-	abort := make(chan bool)
-	defer close(abort)
-	got := make(chan string, 1)
-	go func() { got <- c.WriteoutQueue().Get(abort) }()
-	waitBuild(t, c)
-	builds := atomic.LoadUint32(&c.stat.queueBuildCnt)
-	for i := 0; i < 100; i++ {
-		c.Add(points.OnePoint(fmt.Sprintf("sparse.%d", i), 1, 1))
-	}
-	time.Sleep(150 * time.Millisecond)
-	if n := atomic.LoadUint32(&c.stat.queueBuildCnt); n != builds {
-		t.Fatalf("rescanned deferred data: %d -> %d", builds, n)
-	}
-	for i := 0; i < 7; i++ {
-		c.Add(points.OnePoint("sparse.0", 2, 2))
-	}
-	queuedMetric(t, got, "sparse.0")
+	synctest.Test(t, func(t *testing.T) {
+		c := batchingCache(t, 8, time.Hour)
+		abort := make(chan bool)
+		defer close(abort)
+		got := make(chan string, 1)
+		go func() { got <- c.WriteoutQueue().Get(abort) }()
+		waitBuild(t, c)
+		builds := atomic.LoadUint32(&c.stat.queueBuildCnt)
+		for i := 0; i < 100; i++ {
+			c.Add(points.OnePoint(fmt.Sprintf("sparse.%d", i), 1, 1))
+		}
+		time.Sleep(150 * time.Millisecond)
+		if n := atomic.LoadUint32(&c.stat.queueBuildCnt); n != builds {
+			t.Fatalf("rescanned deferred data: %d -> %d", builds, n)
+		}
+		for i := 0; i < 7; i++ {
+			c.Add(points.OnePoint("sparse.0", 2, 2))
+		}
+		queuedMetric(t, got, "sparse.0")
+	})
 }
 
 func TestBatchingQueueWakeups(t *testing.T) {
 	for _, event := range []string{"deadline", "pressure", "restore", "disable", "shorter delay", "retry"} {
 		t.Run(event, func(t *testing.T) {
-			delay := time.Hour
-			if event == "deadline" {
-				delay = 150 * time.Millisecond
-			}
-			c := batchingCache(t, 8, delay)
-			c.SetMaxSize(100)
-			abort := make(chan bool)
-			defer close(abort)
-			got := make(chan string, 1)
-			go func() { got <- c.WriteoutQueue().Get(abort) }()
-			waitBuild(t, c)
-			c.Add(points.OnePoint("metric", 1, 1))
-			switch event {
-			case "pressure":
-				c.SetMaxSize(1)
-			case "restore":
-				c.AddRestored(points.OnePoint("metric", 2, 2))
-			case "disable":
-				if err := c.SetWriteoutBatching(0, 0); err != nil {
-					t.Fatal(err)
+			synctest.Test(t, func(t *testing.T) {
+				delay := time.Hour
+				if event == "deadline" {
+					delay = 150 * time.Millisecond
 				}
-			case "shorter delay":
-				if err := c.SetWriteoutBatching(8, time.Nanosecond); err != nil {
-					t.Fatal(err)
+				c := batchingCache(t, 8, delay)
+				c.SetMaxSize(100)
+				abort := make(chan bool)
+				defer close(abort)
+				got := make(chan string, 1)
+				go func() { got <- c.WriteoutQueue().Get(abort) }()
+				waitBuild(t, c)
+				c.Add(points.OnePoint("metric", 1, 1))
+				switch event {
+				case "pressure":
+					c.SetMaxSize(1)
+				case "restore":
+					c.AddRestored(points.OnePoint("metric", 2, 2))
+				case "disable":
+					if err := c.SetWriteoutBatching(0, 0); err != nil {
+						t.Fatal(err)
+					}
+				case "shorter delay":
+					if err := c.SetWriteoutBatching(8, time.Nanosecond); err != nil {
+						t.Fatal(err)
+					}
+				case "retry":
+					c.AddRestored(points.OnePoint("metric", 2, 2))
+					p, _ := c.PopNotConfirmed("metric")
+					c.Requeue(p)
 				}
-			case "retry":
-				c.AddRestored(points.OnePoint("metric", 2, 2))
-				p, _ := c.PopNotConfirmed("metric")
-				c.Requeue(p)
-			}
-			queuedMetric(t, got, "metric")
+				queuedMetric(t, got, "metric")
+			})
 		})
 	}
 }
 
 func TestBatchingAbortAndResume(t *testing.T) {
-	c := batchingCache(t, 8, time.Hour)
-	abort := make(chan bool)
-	got := make(chan string, 1)
-	go func() { got <- c.WriteoutQueue().Get(abort) }()
-	waitBuild(t, c)
-	close(abort)
-	queuedMetric(t, got, "")
-	c.AddRestored(points.OnePoint("metric", 1, 1))
-	go func() { got <- c.WriteoutQueue().Get(nil) }()
-	queuedMetric(t, got, "metric")
+	synctest.Test(t, func(t *testing.T) {
+		c := batchingCache(t, 8, time.Hour)
+		abort := make(chan bool)
+		got := make(chan string, 1)
+		go func() { got <- c.WriteoutQueue().Get(abort) }()
+		waitBuild(t, c)
+		close(abort)
+		queuedMetric(t, got, "")
+		c.AddRestored(points.OnePoint("metric", 1, 1))
+		go func() { got <- c.WriteoutQueue().Get(nil) }()
+		queuedMetric(t, got, "metric")
+	})
 }
 
 func TestBatchingIndependentAbort(t *testing.T) {
-	c := batchingCache(t, 8, time.Hour)
-	firstAbort := make(chan bool)
-	defer close(firstAbort)
-	first := make(chan string, 1)
-	go func() { first <- c.WriteoutQueue().Get(firstAbort) }()
-	waitBuild(t, c)
-	secondAbort := make(chan bool)
-	second := make(chan string, 1)
-	go func() { second <- c.WriteoutQueue().Get(secondAbort) }()
-	close(secondAbort)
-	queuedMetric(t, second, "")
-	c.AddRestored(points.OnePoint("metric", 1, 1))
-	queuedMetric(t, first, "metric")
+	synctest.Test(t, func(t *testing.T) {
+		c := batchingCache(t, 8, time.Hour)
+		firstAbort := make(chan bool)
+		defer close(firstAbort)
+		first := make(chan string, 1)
+		go func() { first <- c.WriteoutQueue().Get(firstAbort) }()
+		waitBuild(t, c)
+		secondAbort := make(chan bool)
+		second := make(chan string, 1)
+		go func() { second <- c.WriteoutQueue().Get(secondAbort) }()
+		close(secondAbort)
+		queuedMetric(t, second, "")
+		c.AddRestored(points.OnePoint("metric", 1, 1))
+		queuedMetric(t, first, "metric")
+	})
 }
 
 func TestBatchingDumpRestore(t *testing.T) {
@@ -265,54 +274,59 @@ func TestBatchingDumpRestore(t *testing.T) {
 }
 
 func TestBatchingConcurrentIngestReadRetry(t *testing.T) {
-	c := batchingCache(t, 8, 10*time.Millisecond)
-	const count = 200
-	abort := make(chan bool)
-	var producers, consumers sync.WaitGroup
-	var persisted atomic.Int64
-	for worker := 0; worker < 4; worker++ {
-		consumers.Add(1)
-		go func() {
-			defer consumers.Done()
-			retried := false
-			for {
-				metric := c.WriteoutQueue().Get(abort)
-				if metric == "" {
-					return
+	synctest.Test(t, func(t *testing.T) {
+		c := batchingCache(t, 8, 10*time.Millisecond)
+		const count = 200
+		abort := make(chan bool)
+		var producers, consumers sync.WaitGroup
+		var persisted atomic.Int64
+		done := make(chan struct{})
+		for worker := 0; worker < 4; worker++ {
+			consumers.Add(1)
+			go func() {
+				defer consumers.Done()
+				retried := false
+				for {
+					metric := c.WriteoutQueue().Get(abort)
+					if metric == "" {
+						return
+					}
+					p, ok := c.PopNotConfirmed(metric)
+					if !ok {
+						continue
+					}
+					if !retried {
+						c.Requeue(p)
+						retried = true
+						continue
+					}
+					c.Confirm(p)
+					if persisted.Add(int64(len(p.Data))) == 4*count {
+						close(done)
+					}
 				}
-				p, ok := c.PopNotConfirmed(metric)
-				if !ok {
-					continue
+			}()
+			producers.Add(1)
+			go func(worker int) {
+				defer producers.Done()
+				for i := 0; i < count; i++ {
+					metric := fmt.Sprintf("metric.%d.%d", worker, i%10)
+					c.Add(points.OnePoint(metric, float64(i), int64(i)))
+					_ = len(c.Get(metric))
 				}
-				if !retried {
-					c.Requeue(p)
-					retried = true
-					continue
-				}
-				persisted.Add(int64(len(p.Data)))
-				c.Confirm(p)
-			}
-		}()
-		producers.Add(1)
-		go func(worker int) {
-			defer producers.Done()
-			for i := 0; i < count; i++ {
-				metric := fmt.Sprintf("metric.%d.%d", worker, i%10)
-				c.Add(points.OnePoint(metric, float64(i), int64(i)))
-				_ = len(c.Get(metric))
-			}
-		}(worker)
-	}
-	producers.Wait()
-	until := time.Now().Add(3 * time.Second)
-	for !c.IsEmpty() && time.Now().Before(until) {
-		time.Sleep(time.Millisecond)
-	}
-	close(abort)
-	consumers.Wait()
-	if !c.IsEmpty() || persisted.Load() != 4*count {
-		t.Fatalf("persisted %d/%d; cache empty=%v", persisted.Load(), 4*count, c.IsEmpty())
-	}
+			}(worker)
+		}
+		producers.Wait()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+		}
+		close(abort)
+		consumers.Wait()
+		if !c.IsEmpty() || persisted.Load() != 4*count {
+			t.Fatalf("persisted %d/%d; cache empty=%v", persisted.Load(), 4*count, c.IsEmpty())
+		}
+	})
 }
 
 func BenchmarkBatchingCacheCycle(b *testing.B) {

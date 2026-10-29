@@ -12,6 +12,7 @@ import (
 )
 
 func TestPendingMetricStorableMatchesPath(t *testing.T) {
+	t.Parallel()
 	segment := strings.Repeat("x", 255)
 	names := []string{
 		"", "a.value", "空间.値", ".a", "a.", "a..b", "a/b", "a\\b", "C:a", "/a/../b",

@@ -8,6 +8,7 @@ import (
 )
 
 func TestFileScanLockFiles(t *testing.T) {
+	t.Parallel()
 	for _, trie := range []bool{false, true} {
 		t.Run(fmt.Sprintf("trie=%t", trie), func(t *testing.T) {
 			dir := t.TempDir()

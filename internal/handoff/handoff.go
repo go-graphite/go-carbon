@@ -38,6 +38,9 @@ const (
 	msgFiles        = 'F'
 	msgFilesTaken   = 'f'
 	msgInputTaken   = 'A'
+	// Shared-store input handoff: the stopping instance stopped its reads
+	// (their data is in a database only one process opens) and offers input.
+	msgInputOnly = 'O'
 )
 
 // Protocol is printed by a binary that can take over a listener, so a
@@ -47,6 +50,17 @@ const Protocol = "go-carbon-read-handoff/1"
 // InputProtocol is printed by a binary that can also take over input sockets.
 // Older binaries reject the flag, and are offered only the read listener.
 const InputProtocol = "go-carbon-input-handoff/1"
+
+// SharedStoreProtocol confirms that mirrored migration can take both sockets
+// before opening a predecessor-owned database. Older successors keep the
+// existing database-release order.
+const SharedStoreProtocol = "go-carbon-shared-store-handoff/1"
+
+// StoreInputProtocol is printed by a binary that can take input from a
+// stopping instance that keeps no read listener: a shared store's reads need
+// its database, which only one process opens, so they restart while input
+// moves. Older binaries reject the flag and get the stop/rebind path.
+const StoreInputProtocol = "go-carbon-store-input-handoff/1"
 
 // maxFilesPerMessage stays well below Linux's SCM_MAX_FD (253); other
 // kernels may refuse even fewer, and a refused batch is halved.
@@ -110,10 +124,17 @@ type InputSource interface {
 
 // InputSupported reports whether binary also takes over input sockets.
 func InputSupported(binary string) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, "-input-handoff-protocol").Output()
-	return err == nil && strings.TrimSpace(string(out)) == InputProtocol
+	return protocolSupported(binary, "-input-handoff-protocol", InputProtocol)
+}
+
+// StoreInputSupported reports whether binary takes input without the read
+// listener (see StoreInputProtocol).
+func StoreInputSupported(binary string) bool {
+	return protocolSupported(binary, "-store-input-handoff-protocol", StoreInputProtocol)
+}
+
+func SharedStoreSupported(binary, config string) bool {
+	return protocolSupported(binary, "-shared-store-handoff-protocol", SharedStoreProtocol, "-config", config)
 }
 
 // RegisterTimeout bounds how long a stopping instance waits for a capable
@@ -124,10 +145,27 @@ var RegisterTimeout = 10 * time.Second
 // reports whether it supports handoff. Binaries without support reject the
 // flag, so the stopping instance closes its listener for them as before.
 func SuccessorSupported(binary string) bool {
+	return protocolSupported(binary, "-handoff-protocol", Protocol)
+}
+
+func protocolSupported(binary, flag, protocol string, extra ...string) bool {
+	supported, _ := protocolSupport(binary, flag, protocol, extra...)
+	return supported
+}
+
+// protocolSupport also reports whether binary answered at all: known is false
+// when it could not be run or did not exit in time, which says nothing about
+// its support. A binary without the flag rejects it and exits non-zero.
+func protocolSupport(binary, flag, protocol string, extra ...string) (supported, known bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binary, "-handoff-protocol").Output()
-	return err == nil && strings.TrimSpace(string(out)) == Protocol
+	args := append([]string{flag}, extra...)
+	out, err := exec.CommandContext(ctx, binary, args...).Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)) == protocol, true
+	}
+	var exit *exec.ExitError
+	return false, errors.As(err, &exit) && ctx.Err() == nil
 }
 
 // Offer is the stopping side of one handoff.
@@ -209,22 +247,98 @@ func (o *Offer) Serve(timeout time.Duration, tcp *net.TCPListener, stopAccepting
 	if _, err = conn.Write([]byte{msgStoppedInput}); err != nil {
 		return true, err
 	}
-	return true, serveInput(conn, input, inputTimeout)
+	_, err = serveInput(conn, input, inputTimeout)
+	return true, err
 }
 
-// serveInput waits for the successor's input request and hands input over.
-func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) error {
+// ErrSuccessorCannotTakeInput reports that the process that registered for a
+// store input handoff runs a binary without support for it.
+var ErrSuccessorCannotTakeInput = errors.New("successor binary cannot take input")
+
+// PeerExecutable returns a path executing the binary of the process that
+// registered on conn; tests replace it. It fails where the platform cannot
+// tell.
+var PeerExecutable = peerExecutable
+
+// ServeInputStats describes a ServeInput call for the stopping side's log.
+type ServeInputStats struct {
+	// Registered is when the successor registered, or zero.
+	Registered time.Time
+	// Peer is the binary of the registered successor, if known.
+	Peer string
+	// PeerSupported is whether Peer takes store input; PeerKnown whether
+	// that could be determined.
+	PeerSupported, PeerKnown bool
+}
+
+// ServeInput is the stopping side of a shared-store input handoff, for an
+// instance that already stopped its reads. It waits RegisterTimeout for the
+// successor to register and up to timeout for its listener request, answers
+// that no listener is offered but input is, so the successor binds reads
+// itself, then hands input over as Serve does. input.Detach runs only on the
+// successor's input request. It reports whether the successor took input; on
+// any failure the caller still owns input and stops it normally.
+//
+// The successor registers right after parsing its config but asks only once
+// its storage is open and its checkpoint serves. A binary without store input
+// handoff (a rollback through a service override starts a different binary
+// than the one checked before the dump) never takes input and replays all the
+// input received meanwhile from the tail before it reads input itself, so the
+// binary of the registered process is checked first: if it certainly cannot
+// take input, ServeInput returns ErrSuccessorCannotTakeInput at once.
+func (o *Offer) ServeInput(input InputSource, timeout time.Duration) (bool, error) {
+	_, taken, err := o.ServeInputStats(input, timeout)
+	return taken, err
+}
+
+// ServeInputStats is ServeInput, also describing the successor.
+func (o *Offer) ServeInputStats(input InputSource, timeout time.Duration) (ServeInputStats, bool, error) {
+	var stats ServeInputStats
+	defer o.Close()
+	if err := o.ln.SetDeadline(time.Now().Add(RegisterTimeout)); err != nil {
+		return stats, false, err
+	}
+	conn, err := o.ln.AcceptUnix()
+	if err != nil {
+		return stats, false, err
+	}
+	defer conn.Close()
+	stats.Registered = time.Now()
+	if exe, perr := PeerExecutable(conn); perr == nil {
+		stats.Peer = exe
+		stats.PeerSupported, stats.PeerKnown = protocolSupport(exe, "-store-input-handoff-protocol", StoreInputProtocol)
+		if stats.PeerKnown && !stats.PeerSupported {
+			return stats, false, fmt.Errorf("%w: %s", ErrSuccessorCannotTakeInput, exe)
+		}
+	}
+	if err = conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return stats, false, err
+	}
+	var b [1]byte
+	if _, err = conn.Read(b[:]); err != nil || b[0] != msgRequest {
+		return stats, false, fmt.Errorf("successor did not request the listener: %w", err)
+	}
+	if _, err = conn.Write([]byte{msgInputOnly}); err != nil {
+		return stats, false, err
+	}
+	taken, err := serveInput(conn, input, timeout)
+	return stats, taken, err
+}
+
+// serveInput waits for the successor's input request and hands input over. It
+// reports whether the successor confirmed it holds the input.
+func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) (bool, error) {
 	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
-		return err
+		return false, err
 	}
 	var b [1]byte
 	if _, err := conn.Read(b[:]); err != nil || b[0] != msgInputRequest {
-		return fmt.Errorf("successor did not request input: %w", err)
+		return false, fmt.Errorf("successor did not request input: %w", err)
 	}
 	in, err := input.Detach()
 	if err != nil || in == nil {
 		_, werr := conn.Write([]byte{msgInputNone})
-		return errors.Join(err, werr)
+		return false, errors.Join(err, werr)
 	}
 	// The successor holds its own copies once they are sent.
 	defer in.Close()
@@ -241,11 +355,11 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) er
 	}
 	raw, err := json.Marshal(header)
 	if err != nil {
-		return err
+		return false, err
 	}
 	msg := binary.BigEndian.AppendUint32([]byte{msgInput}, uint32(len(raw)))
 	if _, err = conn.Write(append(msg, raw...)); err != nil {
-		return err
+		return false, err
 	}
 	files, size := in.files(), maxFilesPerMessage
 	for len(files) > 0 {
@@ -260,24 +374,24 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) er
 			continue
 		}
 		if err != nil {
-			return err
+			return false, err
 		}
 		files = files[len(batch):]
 		// Some kernels refuse descriptors while earlier ones are unread.
 		if err = conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
-			return err
+			return false, err
 		}
 		if _, err = conn.Read(b[:]); err != nil || b[0] != msgFilesTaken {
-			return fmt.Errorf("successor did not receive input files: %w", err)
+			return false, fmt.Errorf("successor did not receive input files: %w", err)
 		}
 	}
 	if err = conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		return err
+		return false, err
 	}
 	if _, err = conn.Read(b[:]); err != nil || b[0] != msgInputTaken {
-		return fmt.Errorf("successor did not confirm input: %w", err)
+		return false, fmt.Errorf("successor did not confirm input: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // Claim is a successor's registration with a stopping instance.
@@ -314,6 +428,12 @@ func (c *Claim) Take(want *net.TCPAddr) (net.Listener, func() error, error) {
 	}
 	buf, oob := make([]byte, 1), make([]byte, syscall.CmsgSpace(4))
 	n, oobn, _, _, err := uc.ReadMsgUnix(buf, oob)
+	if err == nil && n == 1 && buf[0] == msgInputOnly && oobn == 0 {
+		// A shared-store instance stopped its reads but offers input: bind
+		// reads normally and take input when receivers start (TakeInput).
+		c.inputOffered = true
+		return nil, nil, nil
+	}
 	if err == nil && (n != 1 || buf[0] != msgListener) {
 		err = errors.New("unexpected handoff message")
 	}

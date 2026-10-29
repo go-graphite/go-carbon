@@ -137,6 +137,7 @@ func requestNamespaceHashes(t testing.TB, server *httptest.Server, prefix string
 }
 
 func TestNamespaceHashesMatchesMetricList(t *testing.T) {
+	t.Parallel()
 	defer func(v uint64) { namespaceHashesSplitMin = v }(namespaceHashesSplitMin)
 	namespaceHashesSplitMin = 1
 
@@ -212,6 +213,7 @@ func TestNamespaceHashesMatchesMetricList(t *testing.T) {
 }
 
 func TestNamespaceHashesDottedNamespaces(t *testing.T) {
+	t.Parallel()
 	names := []string{
 		"p.a.x", "p.a.y.z", "p.a.b.c", "p.a.b.d.e", "p.a.b.d.f", "p.a.bc.x",
 		"p.a.b", "p.c.d.e", "p.c.x", "p.e.f.g", "q.a.b.c",
@@ -258,6 +260,7 @@ func TestNamespaceHashesDottedNamespaces(t *testing.T) {
 }
 
 func TestNamespaceHashesCachedPrefixLimit(t *testing.T) {
+	t.Parallel()
 	ti := newTrie(".wsp", 0, nil)
 	ti.snapshot = namespaceHashesSnapshot(t, []string{"a.x.y", "b.x.y", "c.x.y", "d.x.y", "e.x.y", "f.x.y"})
 	listener, server := namespaceHashesServer(t, ti)
@@ -298,6 +301,7 @@ func TestNamespaceHashesCachedPrefixLimit(t *testing.T) {
 }
 
 func TestNamespaceHashesWithoutSnapshot(t *testing.T) {
+	t.Parallel()
 	ti := newTrie(".wsp", 0, nil)
 	for _, name := range []string{"p.a.b", "p.a.c", "p.b.c", "p.leaf", "q.a.b"} {
 		if _, err := ti.insertMutable("/"+strings.ReplaceAll(name, ".", "/")+".wsp", 0, 0, 0, 0); err != nil {

@@ -4,8 +4,6 @@ import (
 	"sort"
 	"sync/atomic"
 	"time"
-
-	"github.com/go-graphite/go-carbon/points"
 )
 
 type queueItem struct {
@@ -49,35 +47,39 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		c.mu.Unlock()
 	}()
 
-	orderKey := func(_ *points.Points) int64 {
+	orderKey := func(_ *item) int64 {
 		return 0
 	}
 
 	switch writeStrategy {
 	case MaximumLength:
-		orderKey = func(p *points.Points) int64 {
-			return int64(len(p.Data))
+		orderKey = func(values *item) int64 {
+			return int64(values.count())
 		}
 	case TimestampOrder:
-		orderKey = func(p *points.Points) int64 {
-			return p.Data[0].Timestamp
+		orderKey = func(values *item) int64 {
+			return firstTimestamp(values.compact.buf)
 		}
 	}
 
-	size := c.Len() * 2
-	q := make(queue, size)
+	// This is a reservation, not a bound: arrivals during the shard scan use
+	// append below. Reserving twice the snapshot retained unused queue entries.
+	size := c.Len()
+	q, scratch := c.takeQueue(int(size))
 	index := int32(0)
 	s := c.settings.Load().(*cacheSettings)
 	batch := c.batchWrites(s)
 	var next time.Time
+	var shardRanges [shardCount]struct{ next, end int32 }
 
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
+		shardRanges[i].next = index
 		shard.mu.Lock()
 
-		for _, p := range shard.items {
+		for _, p := range shard.items.all {
 			if batch {
-				deadline := writeoutDeadline(shard, p, s)
+				deadline := writeoutDeadline(p, s)
 				if now.Before(deadline) {
 					if next.IsZero() || deadline.Before(next) {
 						next = deadline
@@ -95,6 +97,7 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		}
 
 		shard.mu.Unlock()
+		shardRanges[i].end = index
 	}
 
 	q = q[:index]
@@ -104,17 +107,84 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		sort.Sort(sort.Reverse(byOrderKey(q)))
 	case TimestampOrder:
 		sort.Sort(byOrderKey(q))
+	case MetricNameOrder:
+		// Shared catalog and block keys benefit from nearby metric names.
+		// All shard locks are released before this optional ordering work.
+		sort.Slice(q, func(i, j int) bool { return q[i].metric < q[j].metric })
 	}
 
 	l := len(q)
 	if l == 0 {
+		c.releaseQueue(scratch, q)
 		return nil, next
 	}
 
 	ch := make(chan string, l)
+	if writeStrategy == Noop {
+		// Adjacent entries used to share one cache lock, concentrating the
+		// entire persister pool on it. Noop has no cross-metric ordering
+		// contract: alternate nonempty shards without another per-entry copy.
+		var active [shardCount]int
+		n := 0
+		for shard, bounds := range shardRanges {
+			if bounds.next < bounds.end {
+				active[n] = shard
+				n++
+			}
+		}
+		for n > 0 {
+			for i := 0; i < n; {
+				bounds := &shardRanges[active[i]]
+				ch <- q[bounds.next].metric
+				bounds.next++
+				if bounds.next == bounds.end {
+					n--
+					active[i] = active[n]
+				} else {
+					i++
+				}
+			}
+		}
+		c.releaseQueue(scratch, q)
+		return ch, next
+	}
 	for _, i := range q {
 		ch <- i.metric
 	}
 
+	c.releaseQueue(scratch, q)
 	return ch, next
+}
+
+// takeQueue returns a queue of length n, reusing the previous rebuild's buffer
+// unless it is too small or more than twice the size needed. Only the channel
+// outlives a rebuild, so the buffer can be reused. A concurrent rebuild finds
+// no buffer and allocates its own.
+func (c *Cache) takeQueue(n int) (queue, *queue) {
+	if n == 0 {
+		// Leave the buffer for the next nonempty cache.
+		return nil, nil
+	}
+	if scratch := c.queueScratch.Swap(nil); scratch != nil {
+		if q := *scratch; cap(q) >= n && cap(q) <= 2*n {
+			return q[:n], scratch
+		}
+		return make(queue, n), scratch
+	}
+	return make(queue, n), nil
+}
+
+// releaseQueue keeps q's buffer for the next rebuild. Clearing it releases
+// metric names that may since have left the cache. Entries beyond len(q) are
+// zero: they were cleared by earlier releases or never written.
+func (c *Cache) releaseQueue(scratch *queue, q queue) {
+	if cap(q) == 0 {
+		return
+	}
+	clear(q)
+	if scratch == nil {
+		scratch = new(queue)
+	}
+	*scratch = q[:0]
+	c.queueScratch.Store(scratch)
 }

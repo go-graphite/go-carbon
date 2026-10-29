@@ -10,6 +10,7 @@ import (
 )
 
 func TestConcurrentSnapshotImportsAllocateUniqueIDs(t *testing.T) {
+	t.Parallel()
 	s, now := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	const imports = 32
@@ -62,6 +63,7 @@ func assertImportedSnapshot(t *testing.T, s *Store, imported importedSnapshot) {
 }
 
 func TestSnapshotReplaceDeleteAndList(t *testing.T) {
+	t.Parallel()
 	s, now := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	config := MetricConfig{Name: "admin.metric", Retentions: []Retention{{Step: 60, Count: 256}}, AggregationMethod: Average}
@@ -125,6 +127,7 @@ func assertSnapshotAndPage(t *testing.T, s *Store, snap Snapshot) {
 }
 
 func TestFillPreservesDestinationAndRejectsPolicyChange(t *testing.T) {
+	t.Parallel()
 	s, now := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	config := MetricConfig{Name: "fill.metric", Retentions: []Retention{{Step: 60, Count: 256}}, AggregationMethod: Average}
@@ -153,6 +156,7 @@ func TestFillPreservesDestinationAndRejectsPolicyChange(t *testing.T) {
 }
 
 func TestConditionalDeleteConflictsAfterUpdateAndRecreate(t *testing.T) {
+	t.Parallel()
 	s, now := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	config := MetricConfig{Name: "lifecycle.metric", Retentions: []Retention{{Step: 60, Count: 256}}, AggregationMethod: Average}
@@ -187,6 +191,7 @@ func TestConditionalDeleteConflictsAfterUpdateAndRecreate(t *testing.T) {
 }
 
 func TestConcurrentReplaceSnapshotIsOneCompleteGeneration(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s, now := openTestStore(t, dir, Options{})
 	name := "generation.metric"

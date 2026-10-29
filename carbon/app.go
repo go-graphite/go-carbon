@@ -1,12 +1,14 @@
 package carbon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -21,14 +23,20 @@ import (
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/helper/heartbeat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"github.com/go-graphite/go-carbon/persister"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/lomik/zapwriter"
 
 	// receivers
+	"github.com/go-graphite/go-carbon/helper/malloc"
 	http_receiver "github.com/go-graphite/go-carbon/receiver/http"
 	kafka_receiver "github.com/go-graphite/go-carbon/receiver/kafka"
 	pubsub_receiver "github.com/go-graphite/go-carbon/receiver/pubsub"
@@ -42,54 +50,103 @@ type NamedReceiver struct {
 }
 
 type wspConfigRetriever struct {
-	getRetentionFunc func(string) (int, bool)
-	getAggrNameFunc  func(string) (string, float64, bool)
+	config *atomic.Pointer[Config]
 }
 
 func (r *wspConfigRetriever) MetricRetentionPeriod(metric string) (int, bool) {
-	return r.getRetentionFunc(metric)
+	schema, ok := r.config.Load().Whisper.Schemas.Match(metric)
+	if !ok {
+		return 0, false
+	}
+	return schema.Retentions[0].SecondsPerPoint(), true
 }
 
 func (r *wspConfigRetriever) MetricAggrConf(metric string) (string, float64, bool) {
-	return r.getAggrNameFunc(metric)
+	aggr := r.config.Load().Whisper.Aggregation.Match(metric)
+	if aggr == nil {
+		return "", 0, false
+	}
+	return aggr.Name(), aggr.XFilesFactor(), true
 }
 
 type App struct {
 	sync.RWMutex
-	ConfigFilename string
-	Config         *Config
-	Api            *api.Api
-	Cache          *cache.Cache
-	Receivers      []*NamedReceiver
-	CarbonLink     *cache.CarbonlinkListener
-	Persister      *persister.Whisper
-	Carbonserver   *carbonserver.CarbonserverListener
-	MetricStore    *store.Store
-	Buckyd         *buckyd.Service
-	Tags           *tags.Tags
-	Collector      *Collector // (!!!) Should be re-created on every change config/modules
-	PromRegisterer prometheus.Registerer
-	PromRegistry   *prometheus.Registry
-	exit           chan bool
-	FlushTraces    func()
+	ConfigFilename         string
+	Config                 *Config
+	Api                    *api.Api
+	Cache                  *cache.Cache
+	Receivers              []*NamedReceiver
+	CarbonLink             *cache.CarbonlinkListener
+	Persister              *persister.Whisper
+	Carbonserver           *carbonserver.CarbonserverListener
+	MetricStore            *store.Store
+	mirrorState            *persister.MirrorState
+	migrationLifecycle     sync.Mutex
+	migrationCollectorOnce sync.Once
+	liveStoreMigration     atomic.Pointer[liveStoreMigration]
+	incrementalMigration   atomic.Pointer[incrementalStoreMigration]
+	sharedStoreReads       atomic.Bool
+	Buckyd                 *buckyd.Service
+	Tags                   *tags.Tags
+	Collector              *Collector // (!!!) Should be re-created on every change config/modules
+	PromRegisterer         prometheus.Registerer
+	PromRegistry           *prometheus.Registry
+	mallocCollector        *malloc.Collector
+	mallocTrimmer          *malloc.Trimmer
+	mallocTrimEvery        time.Duration
+	mallocStats            bool
+	phaseProfiler          *phasecpu.Profiler
+	exit                   chan bool
+	FlushTraces            func()
+	heartbeat              *heartbeat.Heartbeat
+	heartbeatCacheMax      atomic.Int64
+	heartbeatMetrics       atomic.Pointer[heartbeat.Heartbeat] // kept after stop for scrapes
+	heartbeatUncleanStarts atomic.Int64
+	heartbeatCollectorOnce sync.Once
 	// readRelease, when set, lets the next instance start while this one keeps
 	// serving reads after a dump stop (see SetReadHandoff).
 	readRelease   func()
 	pendingStop   chan struct{}
 	pendingDone   chan struct{}
 	readSuccessor string
-	handoffClaim  *handoff.Claim
+	// successorResolver, if set, tells DumpStop the binary the service
+	// manager starts next when it differs from readSuccessor.
+	successorResolver func() string
+	handoffClaim      *handoff.Claim
 	// inputClaim takes the stopping instance's input once reads are taken
 	// over, if it offers input (see startReceivers).
 	inputClaim        *handoff.Claim
 	pendingInputReady chan struct{}
+	// checkpointOpen opens the pending checkpoint while the start opens
+	// storage; restoreWithPendingReads takes it.
+	checkpointOpen *checkpointOpen
+	// A legacy mirrored predecessor may retain its store until the socket
+	// handoff completes. These fields retain the early read/input takeover
+	// until ordinary startup can attach the now-open store and persister.
+	storeHandoffReady        bool
+	storeHandoffMetrics      chan string
+	storeHandoffInputStarted bool
+	inheritedInput           *handoff.Input
+	storeInfoMu              sync.RWMutex
+	storeInfoDB              *store.Store
+	// metadataPrewarmDone holds the channel that closes when the start's
+	// metadata cache prewarm ends (see startMetadataPrewarm); nil if none
+	// started.
+	metadataPrewarmDone atomic.Pointer[chan struct{}]
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
+	readPolicyConfig    atomic.Pointer[Config]
 	quotaReloader       *quotaReloader
 	metricStoreIndex    *metricIndexRefresher
 	expirer             *metricExpirer
 	expirationStats     *expirationStats
 	storeRestoreDone    <-chan struct{}
+	inputLog            atomic.Pointer[inputlog.Log]
+	copyInputSealed     bool
+	restart             restartState
+	restartMetrics      *restartMetrics
+	inputLogMetricsOnce sync.Once
+	inputLogCollector   *inputLogCollector
 }
 
 var registerPluginsOnce sync.Once
@@ -101,6 +158,7 @@ func New(configFilename string) *App {
 		Config:         NewConfig(),
 		PromRegistry:   prometheus.NewPedanticRegistry(),
 		exit:           make(chan bool),
+		restartMetrics: newRestartMetrics(),
 	}
 
 	// Register all receivers explicitly
@@ -121,8 +179,22 @@ func (app *App) configure() error {
 	if err != nil {
 		return err
 	}
+	if app.Cache != nil && (phaseCPUInterval(app.Config) != phaseCPUInterval(cfg) || phaseCPUWindow(app.Config) != phaseCPUWindow(cfg)) {
+		return errors.New("changing phase CPU profile interval or duration requires a restart")
+	}
+	if err := validateRuntimeProfiling(cfg); err != nil {
+		return err
+	}
+	if err := validatePhaseCPU(cfg); err != nil {
+		return err
+	}
 	if app.Cache != nil && storageSettingsChanged(app.Config, cfg) {
 		return errors.New("storage and buckyd settings require a restart")
+	}
+	if app.Cache != nil {
+		if err = inputLogReloadError(app.Config, cfg); err != nil {
+			return err
+		}
 	}
 	// Serialize publication with the file poller, which never takes app.Lock.
 	if app.quotaReloader != nil {
@@ -143,6 +215,7 @@ func (app *App) configure() error {
 	// running under an obsolete rule. ReloadConfig restarts it below.
 	app.stopExpiration()
 	app.Config = cfg
+	app.readPolicyConfig.Store(cfg)
 	if app.quotaReloader != nil {
 		app.quotaReloader.configureLocked(cfg)
 	}
@@ -159,6 +232,9 @@ func loadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateQuotaReloadConfig(cfg); err != nil {
+		return nil, err
+	}
+	if _, err := cfg.Dump.cacheFormat(); err != nil {
 		return nil, err
 	}
 
@@ -183,6 +259,9 @@ func loadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 	if err := validateStorageConfig(cfg); err != nil {
+		return nil, err
+	}
+	if err := validateInputLogConfig(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -212,7 +291,7 @@ func loadWhisperConfig(cfg *Config) error {
 			cfg.Whisper.Aggregation = persister.NewWhisperAggregation()
 		}
 
-		if cfg.Whisper.OutOfOrder && cfg.Whisper.StorageBackend == "files" {
+		if cfg.Whisper.OutOfOrder && (cfg.Whisper.StorageBackend == "files" || cfg.Whisper.StoreMirrorFiles) {
 			return validateOutOfOrderConfig(cfg)
 		}
 	}
@@ -243,13 +322,17 @@ func validateOutOfOrderConfig(cfg *Config) error {
 func validateCacheConfig(cfg *Config) error {
 	if !(cfg.Cache.WriteStrategy == "max" ||
 		cfg.Cache.WriteStrategy == "sorted" ||
-		cfg.Cache.WriteStrategy == "noop") {
-		return fmt.Errorf("go-carbon support only \"max\", \"sorted\"  or \"noop\" write-strategy")
+		cfg.Cache.WriteStrategy == "noop" ||
+		cfg.Cache.WriteStrategy == "lexical") {
+		return fmt.Errorf("go-carbon supports only \"max\", \"sorted\", \"noop\" or \"lexical\" write-strategy")
 	}
 
 	if cfg.Cache.WriteoutMinPoints < 0 || cfg.Cache.WriteoutMaxDelay.Value() < 0 ||
 		(cfg.Cache.WriteoutMinPoints == 0) != (cfg.Cache.WriteoutMaxDelay.Value() == 0) {
 		return fmt.Errorf("cache.writeout-min-points and cache.writeout-max-delay must both be positive or both zero")
+	}
+	if !(cfg.Cache.WriteoutSpread >= 0 && cfg.Cache.WriteoutSpread <= 0.5) {
+		return fmt.Errorf("cache.writeout-max-delay-spread must be within [0, 0.5]")
 	}
 
 	return nil
@@ -294,8 +377,15 @@ func (app *App) ParseConfig() error {
 
 // ReloadConfig reloads some settings from config
 func (app *App) ReloadConfig() error {
+	app.migrationLifecycle.Lock()
+	defer app.migrationLifecycle.Unlock()
+	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	defer app.startLiveStoreMigration()
+	if app.copyInputSealed || app.Buckyd != nil && app.Buckyd.StoreCopyActive() {
+		return errors.New("configuration reload is fenced by whole-store copy; sealed input requires a restart")
+	}
 
 	var err error
 	if err = app.configure(); err != nil {
@@ -303,14 +393,42 @@ func (app *App) ReloadConfig() error {
 	}
 
 	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
+	app.applyRuntimeProfiling()
+	app.applyMallocTrim()
+
+	if app.MetricStore != nil {
+		// Compaction concurrency and pacing trade background store work
+		// against foreground flushes, so they are tuned on a live host.
+		if err = app.MetricStore.SetCompactionWorkers(max(1, app.Config.Whisper.StoreCompactionWorkers)); err != nil {
+			return err
+		}
+		if err = app.MetricStore.SetCompactionRate(app.Config.Whisper.StoreCompactionRate); err != nil {
+			return err
+		}
+		if rate := app.Config.Whisper.StoreTimeBucketsRelayoutRate; rate > 0 {
+			if err = app.MetricStore.SetRelayoutRate(rate); err != nil {
+				return err
+			}
+		}
+		// The update read path switches for subsequent updates, so the two
+		// paths can be compared on a live host without a restart.
+		app.MetricStore.SetUpdatePointLookups(app.Config.Whisper.StoreUpdatePointLookups)
+	}
 
 	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
+	app.heartbeatCacheMax.Store(int64(app.Config.Cache.MaxSize))
 	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
 	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
 	app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
 	if err := app.Cache.SetWriteoutBatching(app.Config.Cache.WriteoutMinPoints, app.Config.Cache.WriteoutMaxDelay.Value()); err != nil {
 		return err
 	}
+	if err := app.Cache.SetWriteoutSpread(app.Config.Cache.WriteoutSpread); err != nil {
+		return err
+	}
+	app.Cache.SetWriteoutRestoreSpread(app.Config.Cache.WriteoutRestoreSpread)
+	app.Cache.SetWriteoutSparseSpread(app.Config.Cache.WriteoutSparseSpread)
+	app.Cache.SetWriteoutStartupSpread(app.Config.Cache.WriteoutStartupSpread)
 
 	if app.Persister != nil {
 		app.Persister.Stop()
@@ -322,7 +440,9 @@ func (app *App) ReloadConfig() error {
 		app.Tags = nil
 	}
 
-	app.startPersister()
+	if err = app.startPersister(); err != nil {
+		return err
+	}
 	app.startExpiration()
 
 	if app.Collector != nil {
@@ -408,7 +528,17 @@ func (app *App) stopReadListeners() <-chan struct{} {
 }
 
 func (app *App) stopAll() {
+	if app.MetricStore != nil {
+		app.MetricStore.StopCompactionPacing()
+	}
 	app.stopPendingRecovery()
+	app.stopHeartbeat()
+	app.stopMallocTrim()
+	app.stopPhaseCPU()
+	if app.inheritedInput != nil {
+		app.inheritedInput.Close()
+		app.inheritedInput = nil
+	}
 	if app.inputClaim != nil {
 		_ = app.inputClaim.Close()
 		app.inputClaim = nil
@@ -421,6 +551,7 @@ func (app *App) stopAll() {
 		_ = app.Cache.SetWriteoutBatching(0, 0)
 	}
 	<-app.stopListeners()
+	app.closeInputLog()
 
 	logger := zapwriter.Logger("app")
 
@@ -448,10 +579,10 @@ func (app *App) stopAll() {
 		logger.Debug("collector stopped")
 	}
 	if app.MetricStore != nil {
-		if err := app.MetricStore.Close(); err != nil {
+		if err := app.closeMetricStore(); err != nil {
 			logger.Error("close shared storage", zap.Error(err))
 		}
-		app.MetricStore = nil
+		app.mirrorState = nil
 	}
 
 	if app.exit != nil {
@@ -463,12 +594,15 @@ func (app *App) stopAll() {
 
 // Stop force stop all components
 func (app *App) Stop() {
+	app.migrationLifecycle.Lock()
+	defer app.migrationLifecycle.Unlock()
+	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
 	app.stopAll()
 }
 
-func (app *App) startPersister() {
+func (app *App) startPersister() error {
 	if app.Config.Tags.Enabled {
 		app.Tags = tags.New(&tags.Options{
 			LocalPath:           app.Config.Tags.LocalDir,
@@ -489,11 +623,37 @@ func (app *App) startPersister() {
 			app.Cache.Confirm,
 			app.Cache.Pop,
 		)
+		p.SetWriteoutBatchReceiver(app.Cache.WriteoutQueue().TryGet)
+		p.SetStoreUpdateBatchSize(app.Config.Whisper.StoreUpdateBatchSize)
 		p.SetRequeue(app.Cache.Requeue)
 		p.SetBacklogged(app.Cache.Backlogged)
 		p.SetWriteoutReady(app.Cache.WriteoutReady)
 		if app.MetricStore != nil {
 			p.SetMetricStore(app.MetricStore)
+			if app.Config.Whisper.StoreIncrementalMigration {
+				slots := app.Config.Whisper.StoreMigrationIOSlots
+				if slots == 0 {
+					slots = defaultConversionIOSlots
+				}
+				p.SetConversionIOSlots(slots)
+				if d := app.Config.Whisper.StoreMigrationReclaimDelay; d != nil {
+					p.SetDeferredReclaim(d.Value())
+				}
+				if err := p.SetIncrementalMigration(app.MetricStore, sharedStorePath(app.Config)); err != nil {
+					return err
+				}
+				if err := p.SetIncrementalMigrationArchive(app.Config.Whisper.StoreMigrationArchiveDir); err != nil {
+					return err
+				}
+			}
+			p.SetMirrorFiles(app.Config.Whisper.StoreMirrorFiles)
+			p.SetMirrorImportMissing(app.Config.Whisper.StoreLiveMigration && !app.sharedStoreReads.Load())
+			if app.Config.Whisper.StoreMirrorFiles {
+				if app.mirrorState == nil {
+					app.mirrorState = &persister.MirrorState{ScratchDir: sharedStorePath(app.Config)}
+				}
+				p.SetMirrorState(app.mirrorState)
+			}
 		}
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
 		p.SetSparse(app.Config.Whisper.Sparse)
@@ -524,10 +684,13 @@ func (app *App) startPersister() {
 		p.Start()
 		app.Persister = p
 	}
+	return nil
 }
 
 // Start starts
 func (app *App) Start() (err error) {
+	app.migrationLifecycle.Lock()
+	defer app.migrationLifecycle.Unlock()
 	app.Lock()
 	defer app.Unlock()
 
@@ -538,53 +701,109 @@ func (app *App) Start() (err error) {
 	}()
 
 	conf := app.Config
+	if err = validateRuntimeProfiling(conf); err != nil {
+		return err
+	}
+	if err = app.startPhaseCPU(); err != nil {
+		return err
+	}
 	if err = validateStorageConfig(conf); err != nil {
 		return err
 	}
 	if err = validateQuotaReloadConfig(conf); err != nil {
 		return err
 	}
+	if err = validateInputLogConfig(conf); err != nil {
+		return err
+	}
 
 	runtime.GOMAXPROCS(conf.Common.MaxCPU)
+	app.applyRuntimeProfiling()
+	app.applyMallocTrim()
+	app.beginRestart()
+	// Verifying a large checkpoint takes seconds; do it while storage opens.
+	app.startCheckpointOpen()
+	defer app.discardCheckpointOpen()
+	// Every phase of a start delays reads or input; log where it goes.
+	var phases []zap.Field
+	phaseStart := time.Now()
+	lap := func(name string) {
+		now := time.Now()
+		phases = append(phases, zap.Duration(name, now.Sub(phaseStart)))
+		phaseStart = now
+	}
 
 	core, err := app.startStorage()
 	if err != nil {
 		return err
 	}
+	app.startHeartbeat(core)
+	lap("storage")
 	if err = app.startAPI(core); err != nil {
 		return err
 	}
-	app.startPersister()
-	restoreBeforeReceivers := conf.Dump.Enabled && conf.Whisper.Enabled &&
-		(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed())
-	newMetricsChan, err := app.configureCarbonserver(core)
-	if err != nil {
+	if err = app.startPersister(); err != nil {
 		return err
 	}
-	// Live input cannot advance compressed block watermarks before old history
-	// drains. A validated checkpoint can serve reads throughout that drain.
-	readsStarted := false
-	if restoreBeforeReceivers {
-		readsStarted, err = app.restoreWithPendingReads(core, newMetricsChan)
+	lap("persister")
+	restoreBeforeReceivers := conf.Dump.Enabled && conf.Whisper.Enabled &&
+		(conf.Whisper.Compressed || conf.Whisper.Schemas.AnyCompressed())
+	newMetricsChan := app.storeHandoffMetrics
+	readsStarted := app.storeHandoffReady
+	if !readsStarted {
+		newMetricsChan, err = app.configureCarbonserver(core)
 		if err != nil {
 			return err
 		}
-		if !readsStarted {
-			app.restoreBeforeReceivers(core)
+	}
+	// Live input cannot advance compressed block watermarks before old history
+	// drains. A validated checkpoint can serve reads throughout that drain.
+	pendingReads := false
+	lap("carbonserver")
+	if restoreBeforeReceivers && !readsStarted {
+		if pendingReads, err = app.restoreWithPendingReads(core, newMetricsChan); err != nil {
+			return err
 		}
 	}
+	lap("pending_checkpoint")
+	if err = app.replayInputLog(core); err != nil {
+		return err
+	}
+	lap("input_log_replay")
+	if restoreBeforeReceivers && !readsStarted && !pendingReads {
+		app.restoreBeforeReceivers(core)
+	}
+	lap("ordered_restore")
+	readsStarted = readsStarted || pendingReads
 	if !readsStarted {
 		if err = app.listenCarbonserver(core, newMetricsChan); err != nil {
 			return err
 		}
 	}
-	if err = app.startReceivers(core); err != nil {
-		return err
+	lap("listen")
+	if !app.storeHandoffInputStarted {
+		if err = app.startReceivers(core); err != nil {
+			return err
+		}
+	}
+	lap("receivers")
+	// Early inherited input can update the validated cache while Pebble opens.
+	// Background checkpoint persistence must wait for the ordinary persister.
+	if app.pendingInputReady != nil {
+		close(app.pendingInputReady)
+		app.pendingInputReady = nil
 	}
 	if err = app.startCarbonlink(core); err != nil {
 		return err
 	}
-	return app.startBackgroundWorkers(core, restoreBeforeReceivers)
+	if err = app.startBackgroundWorkers(core, restoreBeforeReceivers); err != nil {
+		return err
+	}
+	app.heartbeatReady()
+	lap("background")
+	zapwriter.Logger("app").Info("start phases", append(phases, zap.Duration("since_process_start", time.Since(processStarted)))...)
+	app.finishRestart()
+	return nil
 }
 
 func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers bool) error {
@@ -592,28 +811,43 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
 		restored := make(chan struct{})
 		app.storeRestoreDone = restored
+		db := app.MetricStore
 		go func() {
 			defer close(restored)
 			app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+			if done := startMetadataPrewarm(db, conf.Whisper, "restored dump", core.MetricNames()); done != nil {
+				app.metadataPrewarmDone.Store(&done)
+			}
 		}()
 	}
-	if app.MetricStore != nil && app.Carbonserver != nil {
+	if app.MetricStore != nil && app.Carbonserver != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
 		app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
+	} else if app.MetricStore != nil && app.Carbonserver != nil && conf.Whisper.StoreIncrementalMigration && conf.Buckyd.Enabled {
+		// Management changes must refresh the union of remaining source files
+		// and the shared catalog, rather than hiding unconverted metrics.
+		app.metricStoreIndex = startFileIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
 	}
 	if err := app.startBuckyd(); err != nil {
 		return err
 	}
+	app.applyRuntimeProfiling()
 	app.startExpiration()
 	app.Collector = NewCollector(app)
 	if app.Carbonserver != nil {
 		app.quotaReloader = startQuotaReloader(app.Config, app.Carbonserver)
 	}
+	app.startLiveStoreMigration()
 	return nil
 }
 
 func (app *App) startStorage() (core *cache.Cache, err error) {
 	conf := app.Config
+	app.sharedStoreReads.Store(!conf.Whisper.StoreLiveMigration)
 	app.storeRestoreDone = nil
+	app.storeHandoffReady = false
+	app.storeHandoffMetrics = nil
+	app.storeHandoffInputStarted = false
+	app.metadataPrewarmDone.Store(nil)
 	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
@@ -622,19 +856,108 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	if err = core.SetWriteoutBatching(conf.Cache.WriteoutMinPoints, conf.Cache.WriteoutMaxDelay.Value()); err != nil {
 		return nil, err
 	}
+	if err = core.SetWriteoutSpread(conf.Cache.WriteoutSpread); err != nil {
+		return nil, err
+	}
+	core.SetWriteoutRestoreSpread(conf.Cache.WriteoutRestoreSpread)
+	core.SetWriteoutSparseSpread(conf.Cache.WriteoutSparseSpread)
+	core.SetWriteoutStartupSpread(conf.Cache.WriteoutStartupSpread)
 
 	app.Cache = core
+	if err = app.openInputLog(core); err != nil {
+		return nil, err
+	}
 	if conf.Whisper.StorageBackend == "pebble-chunk" {
-		app.MetricStore, err = store.Open(sharedStorePath(conf), store.Options{
-			CacheSize: conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
-			SyncInterval: conf.Whisper.StoreSyncInterval.Value(),
+		if err := checkStoreStartup(conf); err != nil {
+			return nil, err
+		}
+		incrementalSource := ""
+		var continuation store.ContinuationCodec
+		if conf.Whisper.StoreIncrementalMigration {
+			incrementalSource = conf.Whisper.DataDir
+			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites}
+		}
+		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
+			Continuation:      continuation,
+			TimeBuckets:       conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreTimeBuckets,
+			RelayoutRate:      conf.Whisper.StoreTimeBucketsRelayoutRate,
+			ExactBlocks:       conf.Whisper.StoreEncoding == "exact",
+			IncrementalSource: incrementalSource,
+			IngestFileStages:  conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
+			IngestLinger:      conf.Whisper.StoreMigrationIngestLinger.Value(),
+			IngestGroupBytes:  conf.Whisper.StoreMigrationIngestGroup,
+			IngestParallel:    conf.Whisper.StoreMigrationIngestParallel,
+			CacheSize:         conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
+			SyncInterval:              conf.Whisper.StoreSyncInterval.Value(),
+			CompactionWorkers:         conf.Whisper.StoreCompactionWorkers,
+			CompactionRate:            conf.Whisper.StoreCompactionRate,
+			L0CompactionConcurrency:   conf.Whisper.StoreL0CompactionConcurrency,
+			L0CompactionThreshold:     conf.Whisper.StoreL0CompactionThreshold,
+			L0StopWritesThreshold:     conf.Whisper.StoreL0StopWritesThreshold,
+			LBaseMaxBytes:             conf.Whisper.StoreLBaseMaxBytes,
+			MaxUnflushedMemTableBytes: conf.Whisper.StoreMemTableMaxUnflushed,
+			MaxOpenFiles:              conf.Whisper.StoreMaxOpenFiles,
+			TargetFileSize:            conf.Whisper.StoreTargetFileSize,
+			L0TargetFileSize:          conf.Whisper.StoreL0TargetFileSize,
+			ParallelTableSyncs:        conf.Whisper.StoreParallelTableSyncs,
+			BloomFilterBits:           conf.Whisper.StoreBloomFilterBits,
+			WALDir:                    conf.Whisper.StoreWALDir,
+			CacheShards:               conf.Whisper.StoreCacheShards,
+			TableCacheShards:          conf.Whisper.StoreTableCacheShards,
+			CompactOnce:               conf.Whisper.StoreCompactOnce,
+			FetchSharedIterator:       conf.Whisper.StoreFetchSharedIterator,
+			MetadataCacheSize:         conf.Whisper.StoreMetadataCacheSize,
+			UpdatePointLookups:        conf.Whisper.StoreUpdatePointLookups,
+			BytesPerSync:              conf.Whisper.StoreBytesPerSync,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("open shared storage: %w", err)
 		}
+		ot := app.MetricStore.OpenTimings()
+		zapwriter.Logger("storage").Info("shared store opened", zap.Duration("wal_move", ot.MoveWAL), zap.Duration("pebble", ot.Pebble),
+			zap.Duration("configure", ot.Configure))
+		if app.storeHandoffReady {
+			// The handoff attached the pending checkpoint before the store
+			// opened, too early for restoreWithPendingReads to prewarm it.
+			app.startMetadataPrewarm("pending checkpoint", core.PendingNames())
+		}
+		if conf.Whisper.StorePurgeInvalidNames {
+			db := app.MetricStore
+			go func() {
+				logger := zapwriter.Logger("storage")
+				logger.Info("purging metrics with names too long for the store")
+				n, err := db.PurgeInvalidNames(context.Background())
+				logger.Info("purged metrics with names too long for the store", zap.Int("deleted", n), zap.Error(err))
+			}()
+		}
+		if conf.Whisper.StoreMigrationBaselineCopy != "" {
+			receipt, err := validatedLiveBaseline(conf)
+			if err != nil {
+				return nil, err
+			}
+			limit, err := app.MetricStore.CatalogHighWatermark(context.Background())
+			if err != nil {
+				return nil, err
+			}
+			if receipt.BaselineMaxMetricID != 0 {
+				if receipt.BaselineMaxMetricID > limit {
+					return nil, errors.New("verified baseline catalog ID ceiling exceeds destination catalog")
+				}
+				limit = receipt.BaselineMaxMetricID
+			}
+			app.mirrorState = &persister.MirrorState{ScratchDir: sharedStorePath(conf), BaselineCopy: conf.Whisper.StoreMigrationBaselineCopy, BaselineIDLimit: limit}
+		}
+		if conf.Whisper.StoreMirrorFiles {
+			if err := armStoreSession(conf); err != nil {
+				return nil, err
+			}
+		}
 		app.expirationStats = &expirationStats{}
 	}
 
+	app.storeInfoMu.Lock()
+	app.storeInfoDB = app.MetricStore
+	app.storeInfoMu.Unlock()
 	return core, nil
 }
 
@@ -683,10 +1006,16 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	// TODO: refactor: do not use var name the same as pkg name
 	carbonserver := carbonserver.NewCarbonserverListener(core.Get)
 	carbonserver.SetWhisperData(conf.Whisper.DataDir)
-	if app.MetricStore != nil {
+	if app.MetricStore != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
 		carbonserver.SetWhisperData(sharedStorePath(conf))
 	}
-	carbonserver.SetMetricStore(app.MetricStore)
+	if !conf.Whisper.StoreLiveMigration || app.sharedStoreReads.Load() {
+		carbonserver.SetMetricStore(app.MetricStore)
+	}
+	carbonserver.SetMetricStoreFileIndex(conf.Whisper.StoreMirrorFiles || conf.Whisper.StoreIncrementalMigration && !completedIncrementalMigration(conf))
+	if conf.Whisper.StoreIncrementalMigration {
+		carbonserver.SetIncrementalIndexScratch(filepath.Join(sharedStorePath(conf), ".incremental-index"))
+	}
 	carbonserver.SetMaxGlobs(conf.Carbonserver.MaxGlobs)
 	carbonserver.SetEmptyResultOk(conf.Carbonserver.EmptyResultOk)
 	carbonserver.SetDoNotLog404s(conf.Carbonserver.DoNotLog404s)
@@ -716,6 +1045,9 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 	carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
 	carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
+	if err := carbonserver.SetQueryCacheCompression(conf.Carbonserver.QueryCacheCompression); err != nil {
+		return nil, err
+	}
 	carbonserver.SetStreamingQueryCacheEnabled(conf.Carbonserver.StreamingQueryCacheEnabled)
 	carbonserver.SetFindCacheEnabled(conf.Carbonserver.FindCacheEnabled)
 	carbonserver.SetFindCacheSizeMB(conf.Carbonserver.FindCacheSizeMB)
@@ -763,6 +1095,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 
 	if conf.Prometheus.Enabled {
 		carbonserver.InitPrometheus(app.PromRegisterer)
+		app.migrationCollectorOnce.Do(func() { app.PromRegisterer.MustRegister(&migrationCollector{app: app}) })
 	}
 	if conf.Tracing.Enabled {
 		log.Printf("Otel tracing is removed in current verion, ignoring tracing.enabled=true")
@@ -770,6 +1103,30 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 
 	carbonserver.RegisterInternalInfoHandler("cache", core.GetInfo)
 	carbonserver.RegisterInternalInfoHandler("config", app.configInfo)
+	if conf.Whisper.StorageBackend == "pebble-chunk" {
+		// Configure this callback before early handoff reads start. Its storage
+		// lease is installed only after Open validates the destination, and is
+		// cleared before Close waits for existing users of that lease.
+		carbonserver.RegisterInternalInfoHandler("storage", func() map[string]interface{} {
+			app.storeInfoMu.RLock()
+			defer app.storeInfoMu.RUnlock()
+			if db := app.storeInfoDB; db != nil {
+				result := map[string]interface{}{"engine": db.Stats()}
+				if migration := app.incrementalMigration.Load(); migration != nil {
+					result["migration"] = migration.receipt()
+				}
+				if migration := app.liveStoreMigration.Load(); migration != nil {
+					phase := "files"
+					if app.sharedStoreReads.Load() {
+						phase = "shared"
+					}
+					result["migration"] = migration.receipt(phase, nil)
+				}
+				return result
+			}
+			return nil
+		})
+	}
 
 	app.Carbonserver = carbonserver
 	return newMetricsChan, nil
@@ -805,7 +1162,7 @@ func (app *App) configureCarbonserverQuotas(listener *carbonserver.CarbonserverL
 		}
 
 		app.quotaEstimateConfig.Store(conf)
-		sharedStore := app.MetricStore != nil
+		sharedStore := app.MetricStore != nil && !conf.Whisper.StoreMirrorFiles
 		listener.SetEstimateSize(func(metric string) (logicalSize, physicalSize, dataPoints int64) {
 			cfg := app.quotaEstimateConfig.Load().(*Config)
 			schema, ok := cfg.Whisper.Schemas.Match(metric)
@@ -853,10 +1210,10 @@ func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonse
 		setConfigRetriever = true
 	}
 	if setConfigRetriever {
-		retriever := &wspConfigRetriever{
-			getRetentionFunc: app.Persister.GetRetentionPeriod,
-			getAggrNameFunc:  app.Persister.GetAggrConf,
-		}
+		// Pending reads may start before the persister exists. The parsed
+		// policy remains valid throughout startup and persister replacement.
+		app.readPolicyConfig.Store(conf)
+		retriever := &wspConfigRetriever{config: &app.readPolicyConfig}
 		listener.SetConfigRetriever(retriever)
 	}
 
@@ -879,6 +1236,8 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	}
 	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	restoreLoaded := time.Now()
+	// The persister already writes what is loaded; prewarm the rest.
+	app.startMetadataPrewarm("restored dump", core.MetricNames())
 	for !core.IsEmpty() {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -900,7 +1259,7 @@ func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string
 		// Restore bypasses live quotas and notifications, just as before warmup.
 		// Start the filesystem scan only after restored files have been written.
 		if app.Config.Whisper.Quotas != nil {
-			core.SetThrottle(cs.ShouldThrottleMetric)
+			core.SetThrottleWithState(cs.ShouldThrottleMetricWithState)
 		}
 		if conf.Carbonserver.CacheScan {
 			core.InitCacheScanAdds()
@@ -915,6 +1274,7 @@ func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string
 				return
 			}
 		}
+		app.restart.noteReadsServing()
 	}
 
 	return nil
@@ -929,7 +1289,8 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	// A stopping instance that handed reads over may also hand over its input
 	// sockets. It completes the tail of input it took meanwhile first, and
 	// that tail is replayed before any socket is read.
-	var inherited *handoff.Input
+	inherited := app.inheritedInput
+	app.inheritedInput = nil
 	if claim := app.inputClaim; claim != nil {
 		app.inputClaim = nil
 		if inherited, err = claim.TakeInput(); err != nil {
@@ -945,11 +1306,15 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	if err = app.loadInputTails(core); err != nil {
 		return err
 	}
-	if app.pendingInputReady != nil {
-		close(app.pendingInputReady)
-		app.pendingInputReady = nil
+	add, addPoint, addPoints := core.Add, core.AddPoint, core.AddPoints
+	if receiverStoreHook != nil {
+		add, addPoint = receiverStoreHook(add, addPoint)
+		addPoints = func(name []byte, data []points.Point) {
+			for _, p := range data {
+				addPoint(name, p.Value, p.Timestamp)
+			}
+		}
 	}
-
 	/* UDP start */
 	if conf.Udp.Enabled {
 		if rcvOptions, err = receiver.WithProtocol(conf.Udp, "udp"); err != nil {
@@ -975,18 +1340,24 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 
 		if h := takeInputReceiver(inherited, "tcp"); h != nil {
 			var inheritedTCP *tcp_receiver.TCP
-			if inheritedTCP, err = tcp_receiver.NewInherited("tcp", conf.Tcp, core.Add, h); err != nil {
+			if inheritedTCP, err = tcp_receiver.NewInherited("tcp", conf.Tcp, add, h); err != nil {
 				return
 			}
 			rcv = inheritedTCP
 			zapwriter.Logger("app").Info("took over input from stopping instance", zap.String("receiver", "tcp"), zap.Int("connections", len(h.Conns)))
-		} else if rcv, err = receiver.New("tcp", rcvOptions, core.Add); err != nil {
+		} else if rcv, err = receiver.New("tcp", rcvOptions, add); err != nil {
 			return
 		}
 		if r, ok := rcv.(interface {
 			SetPointOut(func(name []byte, value float64, timestamp int64))
 		}); ok {
-			r.SetPointOut(core.AddPoint)
+			r.SetPointOut(addPoint)
+		}
+
+		if r, ok := rcv.(interface {
+			SetPointsOut(func([]byte, []points.Point))
+		}); ok {
+			r.SetPointsOut(addPoints)
 		}
 
 		if conf.Prometheus.Enabled {
@@ -1030,6 +1401,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	}
 	/* CUSTOM RECEIVERS end */
 
+	app.restart.noteInputOpened()
 	return nil
 }
 
@@ -1067,6 +1439,9 @@ func (app *App) startBuckyd() (err error) {
 		}
 		if app.metricStoreIndex != nil {
 			app.Buckyd.SetOnChange(app.metricStoreIndex.notify)
+		}
+		if err := app.configureStoreCopy(); err != nil {
+			return fmt.Errorf("configure store copy: %w", err)
 		}
 		if err = app.Buckyd.Start(); err != nil {
 			return fmt.Errorf("start buckyd: %w", err)

@@ -43,6 +43,7 @@ func rewriteCacheVersion(t *testing.T, path string, version FLCVersion) {
 }
 
 func TestSnapshotBootstrapFromSavedCatalogue(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	old, err := os.ReadFile(cache)
 	if err != nil {
@@ -69,6 +70,7 @@ func TestSnapshotBootstrapFromSavedCatalogue(t *testing.T) {
 }
 
 func TestSnapshotBootstrapFallback(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"old-format", "unordered", "cancelled", "truncated"} {
 		t.Run(kind, func(t *testing.T) {
 			cache, root, _ := snapshotFixture(t)
@@ -118,6 +120,7 @@ func TestSnapshotBootstrapFallback(t *testing.T) {
 }
 
 func TestSnapshotBootstrapRejectsSourceReplacement(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	source, err := snapshotSourceIdentity(cache)
 	if err != nil {

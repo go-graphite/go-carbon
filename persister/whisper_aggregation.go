@@ -16,6 +16,7 @@ import (
 type WhisperAggregationItem struct {
 	name                 string
 	pattern              *regexp.Regexp
+	matcher              metricPattern
 	xFilesFactor         float64
 	aggregationMethodStr string
 	aggregationMethod    whisper.AggregationMethod
@@ -87,6 +88,7 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 				section["pattern"], item.name, err.Error())
 		}
 
+		item.matcher = compileMetricPattern(item.pattern)
 		item.xFilesFactor, err = strconv.ParseFloat(section["xfilesfactor"], 64)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse xFilesFactor %#v in %s: %s",
@@ -128,7 +130,7 @@ func ReadWhisperAggregation(filename string) (*WhisperAggregation, error) {
 // Match find schema for metric
 func (a *WhisperAggregation) Match(metric string) *WhisperAggregationItem {
 	for _, s := range a.Data {
-		if s.pattern.MatchString(metric) {
+		if s.matcher.match(s.pattern, metric) {
 			return s
 		}
 	}

@@ -16,6 +16,9 @@ import (
 )
 
 func TestExpirationReloadAndIndexWithoutBuckyd(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, trie := range []bool{false, true} {
 		name := "trigram"
 		if trie {
@@ -125,6 +128,9 @@ func TestExpirationConfigLoadsWithGlobalDisabled(t *testing.T) {
 }
 
 func TestExpirationStartupWaitsForPendingDump(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	path, cfg := sharedAppConfig(t)
 	cfg.Whisper.Enabled = false
 	cfg.Buckyd.Enabled, cfg.Carbonserver.Enabled = false, false

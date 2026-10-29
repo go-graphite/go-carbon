@@ -80,3 +80,30 @@ func BenchmarkAddPointCached(b *testing.B) {
 		}
 	}
 }
+
+func TestAddPointRetainsThrottleState(t *testing.T) {
+	c := New()
+	calls := 0
+	c.SetThrottleWithState(func(ps *points.Points, inCache bool, state *any) bool {
+		calls++
+		if inCache && *state != ps.Metric {
+			t.Fatalf("state for %s was not retained: %v", ps.Metric, *state)
+		}
+		*state = ps.Metric
+		return ps.Data[0].Value < 0
+	})
+	for _, name := range []string{"a.one", "b.two"} {
+		c.AddPoint([]byte(name), 1, 1)
+		c.AddPoint([]byte(name), -1, 2)
+		c.Add(points.OnePoint(name, 2, 3))
+		c.AddPoint([]byte(name), 3, 4)
+		if len(c.Get(name)) != 3 {
+			t.Fatal("stateful hook changed rejected points")
+		}
+		c.Pop(name)
+		c.AddPoint([]byte(name), 4, 5)
+	}
+	if calls != 10 {
+		t.Fatalf("got %d hook calls", calls)
+	}
+}

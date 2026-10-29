@@ -57,6 +57,9 @@ func expirationTestRules(t *testing.T, text string) persister.WhisperExpirationR
 }
 
 func TestExpirationSweepRulesAndPages(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	const count = 2*expirationPageSize + 7
@@ -96,6 +99,9 @@ func TestExpirationSweepRulesAndPages(t *testing.T) {
 }
 
 func TestExpirationBoundaryAndPendingWrites(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	m := createExpirationMetric(t, db, "metric")
@@ -151,6 +157,9 @@ func TestExpirationStaleCandidatePreservesNewWrite(t *testing.T) {
 }
 
 func TestExpirationCancelledSweepFlushesPartialDeletes(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	createExpirationMetric(t, db, "a")
@@ -172,6 +181,9 @@ func TestExpirationCancelledSweepFlushesPartialDeletes(t *testing.T) {
 }
 
 func TestExpirationSweepErrorIsReportedAndRetried(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	createExpirationMetric(t, db, "metric")
@@ -195,6 +207,9 @@ func TestExpirationSweepErrorIsReportedAndRetried(t *testing.T) {
 }
 
 func TestExpirationStopInterruptsRateLimit(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	createExpirationMetric(t, db, "metric")
@@ -212,6 +227,9 @@ func TestExpirationStopInterruptsRateLimit(t *testing.T) {
 }
 
 func TestExpirationWaitsForRestoreAndCanStopWhileWaiting(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	for _, stopEarly := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stopEarly=%v", stopEarly), func(t *testing.T) {
 			now := time.Unix(100_000, 0)
@@ -270,6 +288,9 @@ func TestDumpStopJoinsExpirationBeforeDumpSetup(t *testing.T) {
 }
 
 func TestExpirationNewArrivalAfterCandidateCheckStaysQueued(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	now := time.Unix(100_000, 0)
 	db := expirationTestDB(t, &now)
 	m := createExpirationMetric(t, db, "metric")

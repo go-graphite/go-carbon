@@ -12,6 +12,7 @@ import (
 )
 
 func TestFileScanOutOfOrderGauges(t *testing.T) {
+	t.Parallel()
 	for _, trie := range []bool{false, true} {
 		t.Run(fmt.Sprintf("trie=%t", trie), func(t *testing.T) {
 			dir := t.TempDir()
@@ -85,6 +86,7 @@ func scanOutOfOrderGauges(t *testing.T, listener *CarbonserverListener, wantSide
 }
 
 func TestSidecarGaugesPreserveLastScan(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"file-list cache", "cancelled scan", "scan error"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -130,6 +132,7 @@ func TestSidecarGaugesPreserveLastScan(t *testing.T) {
 }
 
 func TestFileScanGaugesAfterWalkError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		path         string

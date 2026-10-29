@@ -57,11 +57,15 @@ func TestParallelRecordValidationMatchesSerial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	indexData := make([]byte, len(data))
+	sourceData := make([]byte, len(source)+1)
 	for _, scenario := range []string{"valid", "previous offset", "previous length", "boundary gap", "zero length", "forward chain", "alias before boundary", "alias after boundary", "trailing bytes", "empty table"} {
 		t.Run(scenario, func(t *testing.T) {
 			in := *initial
-			in.data = append([]byte(nil), data...)
-			in.source[0] = append([]byte(nil), source...)
+			copy(indexData, data)
+			copy(sourceData, source)
+			in.data = indexData
+			in.source[0] = sourceData[:len(source)]
 			put := func(id, field, value uint64) {
 				binary.LittleEndian.PutUint64(in.data[in.recordOffsets[0]+(id-1)*recordSize+field:], value)
 			}

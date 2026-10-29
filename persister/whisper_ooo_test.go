@@ -115,7 +115,7 @@ func (c *fakeCache) confirmedPoints() int {
 	return c.confirmed
 }
 
-func newOOOTestPersister(t *testing.T, dataDir string, cache *fakeCache) *Whisper {
+func newOOOTestPersister(t testing.TB, dataDir string, cache *fakeCache) *Whisper {
 	t.Helper()
 
 	retentionStr := "1s:2h"

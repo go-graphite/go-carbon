@@ -171,6 +171,7 @@ func randomFSTKeys(rng *rand.Rand, n int) [][]byte {
 }
 
 func TestFSTJoinMatchesSerialBuild(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(1))
 	for iter := 0; iter < 300; iter++ {
 		keys := randomFSTKeys(rng, 1+rng.Intn(400))
@@ -191,6 +192,7 @@ func TestFSTJoinMatchesSerialBuild(t *testing.T) {
 }
 
 func TestFSTJoinEdgeCases(t *testing.T) {
+	t.Parallel()
 	prefix := "\x00aggregations\x00secondly\x00"
 	var paths [][]byte
 	for ns := 0; ns < 30; ns++ {
@@ -228,6 +230,7 @@ func TestFSTJoinEdgeCases(t *testing.T) {
 }
 
 func TestFSTJoinRejectsUnorderedShards(t *testing.T) {
+	t.Parallel()
 	j, err := newFSTJoiner(&bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
@@ -246,6 +249,7 @@ func TestFSTJoinRejectsUnorderedShards(t *testing.T) {
 }
 
 func TestFSTJoinKeepsValues(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(5))
 	for iter := 0; iter < 200; iter++ {
 		keys := randomFSTKeys(rng, 1+rng.Intn(300))

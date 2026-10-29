@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -105,6 +106,7 @@ func TestOpenUpgradesV1MarkerAfterOpeningDatabase(t *testing.T) {
 }
 
 func TestEpochClockDoesNotEncodeUnknownActivity(t *testing.T) {
+	t.Parallel()
 	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return time.Unix(0, 0) }})
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +123,7 @@ func TestEpochClockDoesNotEncodeUnknownActivity(t *testing.T) {
 }
 
 func TestActivityTracksSuccessfulMutationsOnly(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(100_000, 0)
 	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return now }})
 	if err != nil {
@@ -194,6 +197,7 @@ func assertBackwardClockDoesNotMoveActivity(t *testing.T, s *Store, name string)
 }
 
 func TestInitializeActivityUpgradesLegacyRevisionOnce(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(100_000, 0)
 	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return now }})
 	if err != nil {
@@ -228,6 +232,7 @@ func TestInitializeActivityUpgradesLegacyRevisionOnce(t *testing.T) {
 }
 
 func TestAdministrativeMutationsUseLocalActivityTime(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(100_000, 0)
 	s, err := Open(t.TempDir(), Options{Now: func() time.Time { return now }})
 	if err != nil {
@@ -369,6 +374,7 @@ func TestOpenLockFailureDoesNotUpgradeV1Marker(t *testing.T) {
 }
 
 func TestCreateMetadataUpdateAndExactFloatBits(t *testing.T) {
+	t.Parallel()
 	s, now := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	m := createTestMetric(t, s, "bits")
@@ -405,6 +411,7 @@ func TestCreateMetadataUpdateAndExactFloatBits(t *testing.T) {
 }
 
 func TestRejectsRetentionBeyondTransferFormat(t *testing.T) {
+	t.Parallel()
 	if strconv.IntSize < 64 {
 		t.Skip("the invalid fields do not fit in int")
 	}
@@ -450,6 +457,7 @@ func TestRejectsTimestampOverflowOn32Bit(t *testing.T) {
 }
 
 func TestRejectsNegativeDirectArchiveAndSnapshotTimestamps(t *testing.T) {
+	t.Parallel()
 	s, _ := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	m := createTestMetric(t, s, "negative-direct")
@@ -475,6 +483,7 @@ func TestRejectsNegativeDirectArchiveAndSnapshotTimestamps(t *testing.T) {
 }
 
 func TestNormalUpdateDropsExpiredNegativeTimestamp(t *testing.T) {
+	t.Parallel()
 	s, _ := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	m := createTestMetric(t, s, "expired-negative")
@@ -491,6 +500,7 @@ func TestNormalUpdateDropsExpiredNegativeTimestamp(t *testing.T) {
 }
 
 func TestWriteMaterializationAtFourSurvivesCompactionAndReopen(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s, now := openTestStore(t, dir, Options{})
 	m := createTestMetric(t, s, "materialize")
@@ -558,6 +568,7 @@ const (
 )
 
 func TestSyncFailureIsFailStopAndPreservesAcknowledgedWrite(t *testing.T) {
+	t.Parallel()
 	if os.Getenv(syncFailureChild) == "1" {
 		runSyncFailureChild(t, os.Getenv(syncFailureDir))
 		return
@@ -681,6 +692,7 @@ func storedChunkDeltas(t *testing.T, s *Store, m Metadata, timestamp int) uint32
 }
 
 func TestConcurrentUpdatesHaveConsistentFetchMetadata(t *testing.T) {
+	t.Parallel()
 	s, now := openTestStore(t, t.TempDir(), Options{})
 	defer closeTestStore(t, s)
 	createTestMetric(t, s, "concurrent")
@@ -720,6 +732,9 @@ func TestConcurrentUpdatesHaveConsistentFetchMetadata(t *testing.T) {
 
 func openTestStore(t *testing.T, dir string, opts Options) (*Store, int) {
 	t.Helper()
+	if opts.fs == nil {
+		opts.fs = noSyncFS{FS: vfs.Default}
+	}
 	const now = 100_000
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return time.Unix(now, 0) }
@@ -807,4 +822,94 @@ func (f syncFailFile) SyncTo(length int64) (bool, error) {
 		return false, errors.New("injected sync failure")
 	}
 	return f.File.SyncTo(length)
+}
+
+func TestTargetFileSizeOption(t *testing.T) {
+	t.Parallel()
+	if _, err := Open(t.TempDir(), Options{TargetFileSize: -1}); err == nil {
+		t.Fatal("accepted a negative target file size")
+	}
+	if _, err := Open(t.TempDir(), Options{BytesPerSync: -1}); err == nil {
+		t.Fatal("accepted negative bytes per sync")
+	}
+	s, _ := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, TargetFileSize: 64 << 20, BytesPerSync: 32 << 20})
+	defer closeTestStore(t, s)
+	if s.pebbleOptions.BytesPerSync != 32<<20 {
+		t.Fatalf("bytes per sync %d", s.pebbleOptions.BytesPerSync)
+	}
+	for level := 0; level < numLevels; level++ {
+		if got := s.pebbleOptions.Level(level).TargetFileSize; got != 64<<20 {
+			t.Fatalf("level %d target %d", level, got)
+		}
+	}
+}
+
+func TestFetchSnapshotsReleasedBeforeClose(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, now := openTestStore(t, dir, Options{ExactBlocks: true})
+	m, err := s.Create(ctx, MetricConfig{Name: "released", Retentions: []Retention{{Step: 1, Count: 600}}, AggregationMethod: Average, XFilesFactor: .5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMany(ctx, m.Name, []Point{{Timestamp: int64(now - 5), Value: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 500 {
+				if series, err := s.Fetch(ctx, m.Name, now-10, now); err != nil || series == nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	// Pebble refuses to close with unreleased snapshots.
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = openTestStore(t, dir, Options{ExactBlocks: true})
+	closeTestStore(t, s)
+}
+
+func TestWALSyncCoalescesConcurrentRequests(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	s, _ := openTestStore(t, dir, Options{ExactBlocks: true, SyncInterval: time.Hour})
+	var wg sync.WaitGroup
+	for i := range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 20 {
+				if _, err := s.Create(ctx, MetricConfig{Name: fmt.Sprintf("sync.%d.%d", i, j), Retentions: []Retention{{Step: 1, Count: 60}}, AggregationMethod: Average, XFilesFactor: .5}); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := s.syncWAL(); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.syncWAL(); err == nil {
+		t.Fatal("sync accepted after close")
+	}
+	s, _ = openTestStore(t, dir, Options{ExactBlocks: true})
+	defer closeTestStore(t, s)
+	if _, err := s.Metadata(ctx, "sync.63.19"); err != nil {
+		t.Fatalf("synced metric lost across reopen: %v", err)
+	}
 }

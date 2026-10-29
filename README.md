@@ -21,6 +21,7 @@ go-carbon [![Build Status](https://travis-ci.org/go-graphite/go-carbon.svg?branc
 
 Golang implementation of Graphite/Carbon server with classic architecture: Agent -> Cache -> Persister
 
+
 ![Architecture](doc/design.png)
 
 ## Features
@@ -112,6 +113,11 @@ metric-endpoint = "local"
 metric-interval = "1m0s"
 # Increase for configuration with multi persister workers
 max-cpu = 4
+# Optional heartbeat file, rewritten every heartbeat-interval. A start that finds
+# no clean (dump) stop in it logs and records the window of possibly lost cached
+# points, for tool/replica-backfill --since-unclean-start. Empty disables it.
+heartbeat-file = ""
+heartbeat-interval = "10s"
 
 [whisper]
 data-dir = "/var/lib/graphite/whisper"

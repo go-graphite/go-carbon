@@ -2,13 +2,18 @@ package recovery
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
+
+	"github.com/klauspost/compress/zstd"
 
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -21,21 +26,69 @@ type Writer struct {
 	buffer     *sink
 	builder    *Builder
 	source     int
+	format     Format
+	input      *compactInput // compact input files
+	inputDone  bool
 	scratch    []byte
+	encoded    []byte
 	closed     bool
 	err        error
+	points     int64 // accepted by WritePoints as records
 	descriptor File
 	syncOnce   sync.Once
 	syncErr    error
 }
 
+// InputFileBuffer sizes the buffers of input files: the WAL a dump stop
+// diverts input to and the handoff tail. Each buffer costs a dispatch to the
+// writers and hashers; with 4 KB ones, 8 receivers wrote one-point records at
+// about 1M points/s, with 64 KB ones at 2-2.5M.
+const InputFileBuffer = 64 << 10
+
 func NewWriter(path string, source, bufferSize int, builder *Builder) (*Writer, error) {
+	return NewWriterFormat(path, source, bufferSize, builder, FormatLegacy)
+}
+
+// NewWriterFormat writes records of format f. A compact input file (source
+// 1) needs the checkpoint's builder: its rows refer to builder ids.
+func NewWriterFormat(path string, source, bufferSize int, builder *Builder, f Format) (*Writer, error) {
+	if f == FormatCompact && source == 1 && builder == nil {
+		return nil, fmt.Errorf("a compact input file needs a checkpoint builder")
+	}
+	if f == FormatBlocks && source != 0 {
+		return nil, fmt.Errorf("input files have no %v format", f)
+	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, err
 	}
-	return &Writer{file: file, buffer: newSink(file, bufferSize), builder: builder, source: source}, nil
+	w := &Writer{file: file, buffer: newSink(file, bufferSize), builder: builder, source: source, format: f}
+	if f == FormatCompact && source == 1 {
+		w.input = newCompactInput(builder)
+	}
+	return w, nil
 }
+
+// appendFrame appends a complete compact input frame.
+func (w *Writer) appendFrame(frame []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.err != nil {
+		return w.err
+	}
+	if w.closed {
+		return os.ErrClosed
+	}
+	n, err := w.buffer.Write(frame)
+	if err == nil && n != len(frame) {
+		err = io.ErrShortWrite
+	}
+	w.err = err
+	return err
+}
+
+// Format reports the record format the writer writes.
+func (w *Writer) Format() Format { return w.format }
 
 // sink writes buffers at their file offsets on a pool of goroutines and hashes
 // each fixed checksum chunk on its own goroutine, so neither the file write nor
@@ -90,7 +143,7 @@ type sinkRegion struct {
 const sinkInflight = 256
 
 // sinkWriters is how many goroutines write buffers at their offsets. XFS
-// serializes buffered writes to one file: on graphitestore NVMe hosts 1, 2, 4
+// serializes buffered writes to one file: on a production NVMe store, 1, 2, 4
 // and 8 writers all reached ~1.9GB/s (TestSinkHostThroughput), while 8
 // writers spent ~31 CPU-seconds of a production dump spinning on the lock.
 var sinkWriters = 2
@@ -263,6 +316,12 @@ func (s *sink) descriptor(name string, size int64) File {
 }
 
 func (w *Writer) WritePoints(p *points.Points) error {
+	if w.input != nil {
+		if len(p.Data) == 0 {
+			return nil
+		}
+		return w.input.write(w, p)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.err != nil {
@@ -274,7 +333,15 @@ func (w *Writer) WritePoints(p *points.Points) error {
 	if len(p.Data) == 0 {
 		return nil
 	}
-	w.scratch = p.AppendBinary(w.scratch[:0])
+	if w.format == FormatBlocks {
+		return fmt.Errorf("a %v cache dump is written in segments", w.format)
+	}
+	if w.format == FormatCompact {
+		w.encoded = AppendCompactPoints(w.encoded[:0], p.Data)
+		w.scratch = AppendCompactRecord(w.scratch[:0], p.Metric, w.encoded, len(p.Data))
+	} else {
+		w.scratch = p.AppendBinary(w.scratch[:0])
+	}
 	n, err := w.buffer.Write(w.scratch)
 	if err == nil && n != len(w.scratch) {
 		err = io.ErrShortWrite
@@ -286,7 +353,18 @@ func (w *Writer) WritePoints(p *points.Points) error {
 	if w.builder != nil {
 		w.err = w.builder.Add(w.source, p, n)
 	}
+	if w.err == nil {
+		w.points += int64(len(p.Data))
+	}
 	return w.err
+}
+
+// Points reports how many points WritePoints accepted as records; compact
+// input files count none.
+func (w *Writer) Points() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.points
 }
 
 // segmentChunk bounds each encoded buffer; records never span two buffers.
@@ -312,21 +390,75 @@ type Segment struct {
 	s       *segment
 	cur     []byte
 	builder *Builder
+	format  Format
+	encoded []byte
+	blocks  *blockScratch // FormatBlocks: records waiting for their blocks
+	enc     *zstd.Encoder // FormatBlocks: names
 }
 
-// WritePoints encodes p as one legacy record.
+// Format reports the record format of the segment's file.
+func (g *Segment) Format() Format { return g.format }
+
+// WritePoints encodes p as one record of the file's format.
 func (g *Segment) WritePoints(p *points.Points) error {
 	if len(p.Data) == 0 {
 		return nil
+	}
+	if g.format.Compact() {
+		g.encoded = AppendCompactPoints(g.encoded[:0], p.Data)
+		return g.WriteCompact(p.Metric, g.encoded, len(p.Data))
 	}
 	start := len(g.cur)
 	g.cur = p.AppendBinary(g.cur)
 	return g.added(p.Metric, len(g.cur)-start, len(p.Data))
 }
 
+// WriteCompact appends a compact record of the n points encoded in data,
+// which must be a compact encoding (see FormatCompact). It is not validated.
+func (g *Segment) WriteCompact(metric string, data []byte, n int) error {
+	if !g.format.Compact() {
+		return fmt.Errorf("compact record in a %v recovery file", g.format)
+	}
+	if n <= 0 {
+		return nil
+	}
+	if g.blocks != nil {
+		if len(metric) == 0 || len(metric) > points.MB || len(data) < n {
+			return fmt.Errorf("invalid compact recovery record")
+		}
+		g.blocks.add(metric, data, n)
+		return nil
+	}
+	start := len(g.cur)
+	g.cur = AppendCompactRecord(g.cur, metric, data, n)
+	return g.added(metric, len(g.cur)-start, n)
+}
+
+// WriteCompactBorrowed writes a compact record whose point bytes remain
+// immutable until WriteSegments returns. Block dumps retain them while
+// sorting metric names, avoiding a second copy of the points. Other formats
+// write them immediately as WriteCompact does. Transient or reused scratch
+// must use WriteCompact instead.
+func (g *Segment) WriteCompactBorrowed(metric string, data []byte, n int) error {
+	if g.blocks == nil {
+		return g.WriteCompact(metric, data, n)
+	}
+	if n <= 0 {
+		return nil
+	}
+	if len(metric) == 0 || len(metric) > points.MB || len(data) < n {
+		return fmt.Errorf("invalid compact recovery record")
+	}
+	g.blocks.borrow(metric, data, n)
+	return nil
+}
+
 // WriteRaw appends one complete legacy record for metric holding count points,
 // already encoded (e.g. mapped from a previous dump). It is not validated.
 func (g *Segment) WriteRaw(metric string, raw []byte, count int) error {
+	if g.format != FormatLegacy {
+		return fmt.Errorf("legacy record in a %v recovery file", g.format)
+	}
 	if len(raw) == 0 || count <= 0 {
 		return fmt.Errorf("invalid raw recovery record")
 	}
@@ -350,6 +482,42 @@ func (g *Segment) added(metric string, size, count int) error {
 	return nil
 }
 
+// finishBlocks writes the segment's records as blocks: each block's header
+// and names, skipped by the index, then its records.
+func (g *Segment) finishBlocks() error {
+	return g.blocks.appendBlocks(g.enc, func(head []byte, records []blockRef) error {
+		first, offset := len(g.s.chunks), len(g.cur)
+		g.s.entries = slices.Grow(g.s.entries, len(records)+1)
+		g.s.entries = append(g.s.entries, BatchEntry{Size: len(head), gap: true})
+		g.cur = append(g.cur, head...)
+		for _, r := range records {
+			g.cur = r.appendTo(g.cur)
+			if err := g.added(r.name, r.size(), r.n); err != nil {
+				return err
+			}
+		}
+		// Records have reached their immutable output buffers. A block
+		// may span chunks, but its header is wholly in the first one.
+		var header []byte
+		var crc uint32
+		if first == len(g.s.chunks) {
+			header = g.cur[offset : offset+blockHeaderSize]
+			crc = crc32.Checksum(g.cur[offset+blockHeaderSize:], castagnoli)
+		} else {
+			chunk := g.s.chunks[first]
+			header = chunk[offset : offset+blockHeaderSize]
+			crc = crc32.Checksum(chunk[offset+blockHeaderSize:], castagnoli)
+			for _, chunk := range g.s.chunks[first+1:] {
+				crc = crc32.Update(crc, castagnoli, chunk)
+			}
+			crc = crc32.Update(crc, castagnoli, g.cur)
+		}
+		binary.LittleEndian.PutUint32(header[24:], crc)
+		binary.LittleEndian.PutUint32(header[28:], crc32.Checksum(header[:28], castagnoli))
+		return nil
+	})
+}
+
 // WriteSegments encodes n independent record sequences on up to parallel
 // goroutines and appends them to the file in segment order, as if written
 // serially. fill(i, seg) must write segment i's records in their required
@@ -359,9 +527,14 @@ func (g *Segment) added(metric string, size, count int) error {
 // encoded buffers are recycled instead of the whole file being held in memory.
 func (w *Writer) WriteSegments(n, parallel int, fill func(i int, seg *Segment) error) error {
 	w.mu.Lock()
-	builder := w.builder
+	builder, format := w.builder, w.format
 	w.mu.Unlock()
 	parallel = max(1, min(parallel, n))
+	var enc *zstd.Encoder
+	if format == FormatBlocks {
+		enc = newBlockEncoder(parallel)
+		defer enc.Close()
+	}
 	segs := make([]segment, n)
 	for i := range segs {
 		segs[i].done = make(chan struct{})
@@ -372,6 +545,11 @@ func (w *Writer) WriteSegments(n, parallel int, fill func(i int, seg *Segment) e
 	var workers sync.WaitGroup
 	for range parallel {
 		workers.Go(func() {
+			var blocks *blockScratch
+			if enc != nil {
+				blocks = blockScratchPool.Get().(*blockScratch)
+				defer blockScratchPool.Put(blocks)
+			}
 			for {
 				select {
 				case <-stop:
@@ -389,8 +567,14 @@ func (w *Writer) WriteSegments(n, parallel int, fill func(i int, seg *Segment) e
 					return
 				}
 				s := &segs[i]
-				g := &Segment{s: s, cur: chunkPool.Get().([]byte), builder: builder}
+				g := &Segment{s: s, cur: chunkPool.Get().([]byte), builder: builder, format: format, enc: enc, blocks: blocks}
 				s.err = fill(i, g)
+				if g.blocks != nil {
+					if s.err == nil {
+						s.err = g.finishBlocks()
+					}
+					g.blocks.reset()
+				}
 				if len(g.cur) > 0 {
 					s.chunks = append(s.chunks, g.cur)
 				} else {
@@ -457,7 +641,16 @@ func (w *Writer) Close() (File, error) {
 // for it to reach the disk; Sync completes durability. No records are accepted
 // afterwards.
 func (w *Writer) Flush() (File, error) {
+	var inputErr error
 	w.mu.Lock()
+	input := w.input != nil && !w.inputDone
+	w.inputDone = true
+	w.mu.Unlock()
+	if input {
+		inputErr = w.input.close(w)
+	}
+	w.mu.Lock()
+	w.err = errors.Join(w.err, inputErr)
 	defer w.mu.Unlock()
 	if w.closed {
 		return w.descriptor, w.err

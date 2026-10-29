@@ -20,10 +20,19 @@ import (
 	"github.com/lomik/zapwriter"
 )
 
-func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
+func testPendingReadFormats(t *testing.T) {
+	for _, format := range []string{"legacy", "compact", "blocks"} {
+		t.Run(format, func(t *testing.T) { testPendingReadsBeforePersistenceAndInput(t, format) })
+	}
+}
+
+func testPendingReadsBeforePersistenceAndInput(t *testing.T, format string) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	defer zapwriter.Test()()
 	root := t.TempDir()
-	config := TestConfig(root)
+	config := testConfig(t, root)
 	if err := os.WriteFile(filepath.Join(root, "schemas.conf"), []byte("[all]\npattern = .*\nretentions = 1s:1h\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -38,6 +47,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	cfg.Dump.Enabled = true
 	cfg.Dump.Path = t.TempDir()
 	cfg.Dump.RestorePerSecond = 0
+	cfg.Dump.Format = format
 	cfg.Udp.Enabled = false
 	cfg.Tcp.Enabled = false
 	cfg.Pickle.Enabled = false
@@ -57,7 +67,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	cfg.Carbonserver.TrieIndex = true
 	cfg.Carbonserver.ConcurrentIndex = true
 	cfg.Carbonserver.RealtimeIndex = 100
-	cfg.Carbonserver.ScanFrequency = &Duration{20 * time.Millisecond}
+	cfg.Carbonserver.ScanFrequency = &Duration{200 * time.Millisecond}
 	cfg.Carbonserver.FileListCache = filepath.Join(t.TempDir(), "flc")
 	cfg.Carbonserver.FileListCacheVersion = 2
 	cfg.Carbonserver.QueryCacheEnabled = false
@@ -99,6 +109,17 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	var saved recovery.Manifest
 	if err := json.Unmarshal(manifest, &saved); err != nil {
 		t.Fatal(err)
+	}
+	wantCache := format
+	if got := recovery.CacheFormat(saved.Cache.Name).String(); got != wantCache {
+		t.Fatal("checkpoint cache format", got, saved.Cache.Name)
+	}
+	wantInput := format
+	if format == "blocks" {
+		wantInput = "compact"
+	}
+	if got := recovery.InputFormat(saved.WAL.Name).String(); got != wantInput {
+		t.Fatal("checkpoint input format", got, saved.WAL.Name)
 	}
 	tail := filepath.Join(cfg.Dump.Path, recovery.TailName(saved.WAL.Name))
 	if err := os.WriteFile(tail, points.OnePoint("existing.metric", 9, stamp+2).AppendBinary(nil), 0600); err != nil {
@@ -229,11 +250,28 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 	deadline = time.Now().Add(5 * time.Second)
 	for {
 		values, raw, err := read()
-		if err == nil && values[liveKey] == 8 {
+		if err == nil && values[fmt.Sprintf("existing.metric/%d", stamp+2)] == 6 &&
+			values[fmt.Sprintf("wal.only/%d", stamp+2)] == 7 {
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("live input not readable: %v; %s", err, raw)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	check(map[string]float64{fmt.Sprintf("existing.metric/%d", stamp+2): 6, fmt.Sprintf("wal.only/%d", stamp+2): 7})
+	// Filesystem reconciliation also drains new metric names. Its startup
+	// gate opens after pending recovery, so wait for that event before checking
+	// discovery of the new live-only metric, rather than racing its 5 s drain.
+	select {
+	case <-next.pendingDone:
+	case <-time.After(20 * time.Second):
+		t.Fatal("pending recovery stalled", zapwriter.TestString())
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for !next.Carbonserver.MetricExists("live.only") {
+		if time.Now().After(deadline) {
+			t.Fatal("live metric was not indexed", zapwriter.TestString())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -250,7 +288,7 @@ func TestPendingReadsBeforePersistenceAndInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "cache.") || strings.HasPrefix(e.Name(), "input.") {
+		if strings.HasPrefix(e.Name(), "cache") || strings.HasPrefix(e.Name(), "input.") {
 			t.Fatal("recovery source not retired", e.Name())
 		}
 	}

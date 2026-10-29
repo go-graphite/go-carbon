@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -12,12 +12,10 @@ import (
 )
 
 func TestFileListCacheV1(t *testing.T) {
-	defer func() {
-		os.Remove("flc_v1_test.txt")
-		os.Remove("flc_v1_test.txt.tmp")
-	}()
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "flc_v1_test.txt")
 
-	flcv1w, err := NewFileListCache("flc_v1_test.txt", FLCVersion1, 'w')
+	flcv1w, err := NewFileListCache(path, FLCVersion1, 'w')
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +32,7 @@ func TestFileListCacheV1(t *testing.T) {
 	flcv1w.Close()
 
 	t.Run("v1_reader_with_v1_data", func(t *testing.T) {
-		flcv1r, err := NewFileListCache("flc_v1_test.txt", FLCVersion1, 'r')
+		flcv1r, err := NewFileListCache(path, FLCVersion1, 'r')
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,7 +57,7 @@ func TestFileListCacheV1(t *testing.T) {
 	})
 
 	t.Run("v2_reader_with_v1_data", func(t *testing.T) {
-		flcv2r, err := NewFileListCache("flc_v1_test.txt", FLCVersion2, 'r')
+		flcv2r, err := NewFileListCache(path, FLCVersion2, 'r')
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -85,34 +83,33 @@ func TestFileListCacheV1(t *testing.T) {
 }
 
 func TestFileListCacheV2(t *testing.T) {
-	defer func() {
-		os.Remove("flc_v2_test.txt")
-		os.Remove("flc_v2_test.txt.tmp")
-	}()
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "flc_v2_test.txt")
 
-	flcv2w, err := NewFileListCache("flc_v2_test.txt", FLCVersion2, 'w')
+	flcv2w, err := NewFileListCache(path, FLCVersion2, 'w')
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var testData []*FLCEntry
-	for i := int64(0); i < 409600; i++ {
-		entry := &FLCEntry{
+	const total = 409600
+	entryAt := func(i int64) FLCEntry {
+		return FLCEntry{
 			Path:         fmt.Sprintf("sys/app/cpu/core-%d/system.wsp", i),
 			DataPoints:   10240 + i,
 			LogicalSize:  40960 + i,
 			PhysicalSize: 20480 + i,
 			FirstSeenAt:  1652453112,
 		}
-		testData = append(testData, entry)
-
-		if err := flcv2w.Write(entry); err != nil {
+	}
+	for i := int64(0); i < total; i++ {
+		entry := entryAt(i)
+		if err := flcv2w.Write(&entry); err != nil {
 			t.Fatal(err)
 		}
 	}
 	flcv2w.Close()
 
-	flcv2r, err := NewFileListCache("flc_v2_test.txt", FLCVersion2, 'r')
+	flcv2r, err := NewFileListCache(path, FLCVersion2, 'r')
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +127,12 @@ func TestFileListCacheV2(t *testing.T) {
 	}
 	flcv2r.Close()
 
-	if got, want := v2data, testData; !cmp.Equal(got, want) {
-		t.Errorf("%s", cmp.Diff(got, want))
+	if len(v2data) != total {
+		t.Fatalf("read %d entries, want %d", len(v2data), total)
+	}
+	for i, entry := range v2data {
+		if want := entryAt(int64(i)); *entry != want {
+			t.Fatalf("entry %d differs: %s", i, cmp.Diff(want, *entry))
+		}
 	}
 }
