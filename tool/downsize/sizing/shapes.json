@@ -1,0 +1,161 @@
+[
+  {
+    "name": "example-base",
+    "cores": 32,
+    "ram_gib": 512,
+    "disk_tb": 4,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_iops": 50000,
+    "cpu_per_core_factor": 1.0,
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_write_mbps_assumed": true,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark."
+    },
+    "logical_cpus": 64
+  },
+  {
+    "name": "bare-metal-96",
+    "cores": 96,
+    "ram_gib": 1536,
+    "disk_tb": 15.36,
+    "nic_gbps": 25,
+    "disk_write_mbps": 1100,
+    "disk_iops": 100000,
+    "cpu_per_core_factor": 1.0,
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "assumptions": {
+      "disk_tb": "Verify actual usable store volume; 15.36 TB planning value.",
+      "disk_iops": "100000 planning value, not benchmark certified."
+    },
+    "logical_cpus": 192
+  },
+  {
+    "name": "example-vm-2",
+    "cores": 16,
+    "ram_gib": 256,
+    "disk_tb": 5,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_iops": 30000,
+    "logical_cpus": 32
+  },
+  {
+    "name": "example-vm-3",
+    "cores": 32,
+    "ram_gib": 512,
+    "disk_tb": 10,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_iops": 120000,
+    "logical_cpus": 64
+  },
+  {
+    "name": "example-vm-4",
+    "cores": 32,
+    "ram_gib": 512,
+    "disk_tb": 4,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_iops": 50000,
+    "logical_cpus": 64
+  },
+  {
+    "name": "example-vm-5",
+    "cores": 8,
+    "ram_gib": 128,
+    "disk_tb": 4,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_iops": 30000,
+    "logical_cpus": 16
+  },
+  {
+    "name": "example-vm-6",
+    "cores": 16,
+    "ram_gib": 256,
+    "disk_tb": 5,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_iops": 120000,
+    "logical_cpus": 32
+  },
+  {
+    "name": "example-vm-7",
+    "cores": 24,
+    "ram_gib": 192,
+    "disk_tb": 3,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "disk_iops": 120000,
+    "logical_cpus": 48
+  },
+  {
+    "name": "example-vm-8",
+    "cores": 4,
+    "ram_gib": 64,
+    "disk_tb": 1,
+    "nic_gbps": 10,
+    "disk_write_mbps": 250,
+    "disk_write_mbps_assumed": true,
+    "cpu_per_core_factor": 1.0,
+    "assumptions": {
+      "disk_write_mbps": "250 MB/s conservative unmeasured planning assumption; override with sustained device/VM benchmark.",
+      "nic_gbps": "Illustrative capacity; verify for the chosen hardware.",
+      "cpu_per_core_factor": "Equal physical-core throughput to the measured hosts; benchmark the VM.",
+      "disk_iops": "Not encoded in the supplied instance name; unconstrained until verified.",
+      "logical_cpus": "SMT2 inferred from the e1 family; verify this target topology."
+    },
+    "note": "Illustrative resource profile; verify all capacities and throughput assumptions for the target hardware.",
+    "logical_cpus": 8
+  }
+]

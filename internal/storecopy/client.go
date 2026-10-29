@@ -15,10 +15,19 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/cockroachdb/pebble/vfs"
 )
+
+type APIError struct {
+	Status  int
+	Message string
+}
+
+func (e *APIError) Error() string { return fmt.Sprintf("copy API: %d: %s", e.Status, e.Message) }
 
 type Client struct {
 	URL   string
@@ -48,7 +57,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 	if response.StatusCode != http.StatusOK {
 		defer response.Body.Close()
 		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return nil, fmt.Errorf("copy API: %s: %s", response.Status, strings.TrimSpace(string(message)))
+		return nil, &APIError{Status: response.StatusCode, Message: strings.TrimSpace(string(message))}
 	}
 	return response, nil
 }
@@ -84,7 +93,10 @@ type Limits struct {
 	Reason  string    `json:"reason,omitempty"`
 }
 
+type PullProgress struct{ Bytes, Total int64 }
+
 type PullOptions struct {
+	Progress      func(PullProgress)
 	Workers       int
 	Chunk         int64
 	Rate          int64
@@ -178,9 +190,6 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 		return err
 	}
 	defer root.Close()
-	if handoff.Locked(filepath.Join(dest, "store", "LOCK")) {
-		return errors.New("destination store is running")
-	}
 	if _, err := root.Stat("PREPARED"); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("prepared destination cannot be copied again")
 	}
@@ -193,8 +202,13 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 		}
 	case errors.Is(err, os.ErrNotExist):
 		entries, err := os.ReadDir(dest)
-		if err != nil || len(entries) != 0 {
-			return errors.New("new destination must be empty")
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.Name() != "copy.lock" {
+				return errors.New("new destination must be empty")
+			}
 		}
 	default:
 		return err
@@ -217,20 +231,41 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 			}
 		}
 	}
-	// One process owns the staging directory; a stale lock is removed only after
-	// verifying that its previous process is gone. Never target a serving store.
-	lock, err := root.OpenFile("copy.lock", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	// The kernel lock survives neither a crash nor a worker restart. A stale
+	// pathname is safe to reuse; a live owner always retains the inode lock.
+	lock, err := root.OpenFile("copy.lock", os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
-		return fmt.Errorf("acquire copy.lock: %w", err)
+		return err
 	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
+		return errors.New("copy.lock is held by another pull")
+	}
+	defer lock.Close()
 	defer root.Remove("copy.lock")
-	fmt.Fprintf(lock, "%d\n", os.Getpid())
-	_ = lock.Close()
+	if err := lock.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(lock, "%d\n", os.Getpid()); err != nil {
+		return err
+	}
+	if err := saveProgress(root, &state); err != nil {
+		return err
+	}
 	for _, dir := range []string{"store", "input-log", "config"} {
 		if err := root.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
 	}
+	storePath := filepath.Join(absolute, "store")
+	if resolved, err := filepath.EvalSymlinks(storePath); err != nil || resolved != storePath {
+		return errors.New("canonical staged store required")
+	}
+	storeLock, err := vfs.Default.Lock(filepath.Join(storePath, "LOCK"))
+	if err != nil {
+		return fmt.Errorf("destination store is running: %w", err)
+	}
+	defer storeLock.Close()
 	guard, err := root.OpenFile("store/NEEDS-CATCHUP", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
@@ -289,6 +324,7 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 			}
 		}()
 	}
+	var copied atomic.Int64
 	var stateMu sync.Mutex
 	var workerMu sync.Mutex
 	var workerErr error
@@ -305,6 +341,9 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 					err = c.copyChunk(ctx, root, job, &state, &stateMu, pace, admission, opts)
 				}
 				if err == nil {
+					if opts.Progress != nil {
+						opts.Progress(PullProgress{Bytes: copied.Add(job.length), Total: total})
+					}
 					stateMu.Lock()
 					if time.Since(checkpointAt) > 10*time.Second {
 						err = saveProgress(root, &state)
@@ -563,4 +602,25 @@ func waitFor(ctx context.Context, duration time.Duration) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// Begin is idempotent across a lost create response for this controller
+// operation. It never adopts another operation's retained checkpoint.
+func (c *Client) Begin(ctx context.Context, operation string) (*Manifest, error) {
+	if value, err := hex.DecodeString(operation); err != nil || len(value) != 32 {
+		return nil, errors.New("invalid checkpoint operation")
+	}
+	r, err := c.request(ctx, http.MethodPost, "", url.Values{"operation": {operation}})
+	if err != nil {
+		return nil, err
+	}
+	defer r.Body.Close()
+	var manifest Manifest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 32<<20)).Decode(&manifest); err != nil {
+		return nil, err
+	}
+	if manifest.Operation != operation {
+		return nil, errors.New("source lacks idempotent checkpoint operations")
+	}
+	return &manifest, nil
 }

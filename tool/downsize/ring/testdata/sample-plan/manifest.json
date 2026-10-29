@@ -1,0 +1,79 @@
+{
+  "format": "go-carbon-ring",
+  "version": 1,
+  "plan_id": "b45a32928058b2d9808f62926b822f9792391ea942f21c5d0fa63cbe17947b28",
+  "spec": {
+    "version": 1,
+    "cluster": "sample",
+    "site": "local",
+    "old": {
+      "hash": "jump_fnv1a",
+      "replicas": 1,
+      "virtual_nodes": 100,
+      "nodes": [
+        {
+          "id": "a",
+          "node": "a:2003=000",
+          "endpoint": "http://127.0.0.1:14242"
+        },
+        {
+          "id": "b",
+          "node": "b:2003=001",
+          "endpoint": "http://127.0.0.1:24242"
+        }
+      ]
+    },
+    "new": {
+      "hash": "jump_fnv1a",
+      "replicas": 1,
+      "virtual_nodes": 100,
+      "nodes": [
+        {
+          "id": "a",
+          "node": "a:2003=000",
+          "endpoint": "http://127.0.0.1:14242"
+        }
+      ]
+    },
+    "inputs": [
+      {
+        "source": "a",
+        "url": "http://127.0.0.1:14242/metrics",
+        "format": "buckyd",
+        "estimated_bytes": 600
+      },
+      {
+        "source": "b",
+        "url": "http://127.0.0.1:24242/metrics",
+        "format": "buckyd",
+        "estimated_bytes": 600
+      }
+    ]
+  },
+  "summary": {
+    "metrics": 1,
+    "moved_metrics": 1,
+    "copies": 1,
+    "estimated_bytes": 600,
+    "unowned": 0,
+    "moved_fraction": 1,
+    "pairs": [
+      {
+        "source": "b",
+        "destination": "a",
+        "metrics": 1,
+        "estimated_bytes": 600
+      }
+    ]
+  },
+  "streams": [
+    {
+      "path": "streams/0001-000000-0000.jsonl",
+      "source": "b",
+      "destination": "a",
+      "metrics": 1,
+      "estimated_bytes": 600,
+      "sha256": "7acc897402f5cd195e10c42aa1a3ee97e512aafcc318616b8974e1ce194c2ebd"
+    }
+  ]
+}

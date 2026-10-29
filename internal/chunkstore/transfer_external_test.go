@@ -189,3 +189,25 @@ func TestTransferWireRejectsDamageAndOversize(t *testing.T) {
 		t.Fatal("oversize accepted")
 	}
 }
+
+func TestTransferRejectsForgedPointSampleBeforePublication(t *testing.T) {
+	for _, continuation := range []bool{false, true} {
+		t.Run(fmt.Sprint(continuation), func(t *testing.T) {
+			ctx := context.Background()
+			source := transferStore(t, continuation, continuation)
+			target := transferStore(t, continuation, continuation)
+			putTransferPoints(t, source, "sample.forged", []store.Point{{Timestamp: 999990, Value: 42}})
+			records, err := source.ExportTransfer(ctx, []string{"sample.forged"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			records[0].PointDigest = "wrong"
+			if _, err := target.ImportTransfer(ctx, records); err == nil {
+				t.Fatal("forged point sample accepted")
+			}
+			if _, err := target.Metadata(ctx, "sample.forged"); !errors.Is(err, store.ErrNotFound) {
+				t.Fatal("failed sample became visible", err)
+			}
+		})
+	}
+}

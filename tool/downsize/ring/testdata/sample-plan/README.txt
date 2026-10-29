@@ -1,0 +1,1 @@
+Portable, committed JSONL v1 example: two old logical owners to one survivor; one metric on b, empty a. Endpoints are inert local placeholders, not running services. Consumers use spec members and committed streams, not the inventory URLs. Never execute a sample against real stores.

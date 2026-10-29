@@ -12,13 +12,29 @@ import (
 // One batch reuses table readers instead of reopening every LSM level for
 // every catalog, revision and continuation lookup. The caller owns its view.
 type transferReader struct {
+	bucketReaders                                                       map[uint32]*transferReader
+	export                                                              *transferExportCounters
+	ordered                                                             bool
+	state                                                               *metricState
+	arena                                                               transferArena
 	reader                                                              pebble.Reader
 	catalog, revisions, continuation, chunks, buckets, receipts, staged *pebble.Iterator
 }
 
 func (r *transferReader) close() {
+	for _, reader := range r.bucketReaders {
+		reader.close()
+	}
+	clear(r.bucketReaders)
 	for _, slot := range []**pebble.Iterator{&r.catalog, &r.revisions, &r.continuation, &r.chunks, &r.buckets, &r.receipts, &r.staged} {
 		if *slot != nil {
+			if r.export != nil {
+				stats := (*slot).Stats()
+				r.export.blockBytes.Add(stats.InternalStats.BlockBytes)
+				r.export.cachedBytes.Add(stats.InternalStats.BlockBytesInCache)
+				r.export.seeks.Add(uint64(stats.ForwardSeekCount[0]))
+				r.export.steps.Add(uint64(stats.ForwardStepCount[0]))
+			}
 			_ = (*slot).Close()
 			*slot = nil
 		}
@@ -39,7 +55,7 @@ func (r *transferReader) lookup(slot **pebble.Iterator, lower, upper, key []byte
 	if err != nil {
 		return nil, err
 	}
-	if !it.SeekGE(key) || !bytes.Equal(it.Key(), key) {
+	if !r.seek(it, key, r.ordered) || !bytes.Equal(it.Key(), key) {
 		if err := it.Error(); err != nil {
 			return nil, err
 		}
@@ -73,7 +89,8 @@ func (r *transferReader) visit(ctx context.Context, slot **pebble.Iterator, lowe
 	if err != nil {
 		return err
 	}
-	for valid := it.SeekGE(prefix); valid && bytes.HasPrefix(it.Key(), prefix); valid = it.Next() {
+	valid := r.seek(it, prefix, r.ordered && (slot == &r.continuation || slot == &r.chunks))
+	for ; valid && bytes.HasPrefix(it.Key(), prefix); valid = it.Next() {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -132,4 +149,48 @@ func (s *Store) ListTransferNames(ctx context.Context, prefix, after string, lim
 		names = append(names, name)
 	}
 	return names, it.Error()
+}
+
+// Returned slices cannot grow into adjacent fields. Batches own the slabs until
+// their records are released, avoiding one heap object per tiny raw key/value.
+type transferArena struct{ free []byte }
+
+func (a *transferArena) alloc(n int) []byte {
+	if len(a.free) < n {
+		a.free = make([]byte, max(64<<10, n))
+	}
+	value := a.free[:n:n]
+	a.free = a.free[n:]
+	return value
+}
+
+func (r *transferReader) seek(it *pebble.Iterator, key []byte, forward bool) bool {
+	if !forward || !it.Valid() {
+		return it.SeekGE(key)
+	}
+	for steps := 0; it.Valid() && bytes.Compare(it.Key(), key) < 0; steps++ {
+		if steps == 32 {
+			return it.SeekGE(key)
+		}
+		it.Next()
+	}
+	return it.Valid()
+}
+
+// Each time bucket has a forward cursor over its contiguous ID range. Reusing
+// one cursor across buckets would seek backwards for every next metric.
+func (r *transferReader) visitBucket(ctx context.Context, prefix []byte, visit func([]byte, []byte) error) error {
+	bucket := binary.BigEndian.Uint32(prefix[1:5])
+	reader := r.bucketReaders[bucket]
+	if reader == nil {
+		if len(r.bucketReaders) >= 64 {
+			return r.visit(ctx, &r.buckets, []byte{'t'}, []byte{'u'}, prefix, visit)
+		}
+		if r.bucketReaders == nil {
+			r.bucketReaders = make(map[uint32]*transferReader)
+		}
+		reader = &transferReader{reader: r.reader, ordered: true, export: r.export}
+		r.bucketReaders[bucket] = reader
+	}
+	return reader.visit(ctx, &reader.chunks, prefix[:5], prefixEnd(prefix[:5]), prefix, visit)
 }

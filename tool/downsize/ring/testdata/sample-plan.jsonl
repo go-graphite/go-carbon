@@ -1,0 +1,3 @@
+{"type":"header","format":"go-carbon-ring","version":1,"plan_id":"example","source":"metrics-003","destination":"metrics-000"}
+{"type":"move","metric":"example.metric","estimated_bytes":600}
+{"type":"end","metrics":1,"estimated_bytes":600}

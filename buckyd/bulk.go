@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -68,7 +69,8 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			MaxBodyBytes int64
 			Protocol     int
 			Hostname     string
-		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, 1, hostname})
+			CPULimit     int
+		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, 1, hostname, runtime.GOMAXPROCS(0)})
 		return
 	}
 	if !s.acquireTransfer() {
@@ -80,6 +82,19 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	reply := func(value any) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(value)
+	}
+	replyProofs := func(proofs []chunkstore.TransferProof) {
+		if r.Header.Get("Accept") != chunkstore.TransferProofContentType {
+			reply(proofs)
+			return
+		}
+		data, err := chunkstore.EncodeTransferProofs(proofs)
+		if err != nil {
+			writeError(w, err, 500)
+			return
+		}
+		w.Header().Set("Content-Type", chunkstore.TransferProofContentType)
+		_, _ = w.Write(data)
 	}
 	decode := func(value any) bool {
 		d := json.NewDecoder(r.Body)
@@ -141,6 +156,12 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			}
 			budget = min(budget, n)
 		}
+		if s.flushTransfer != nil {
+			if err := s.flushTransfer(r.Context(), names); err != nil {
+				fail(err)
+				return
+			}
+		}
 		records, err := s.store.ExportTransferLimit(r.Context(), names, budget)
 		if err != nil {
 			fail(err)
@@ -148,15 +169,26 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		// Bound the encoded response as well as imports; a dense batch must be
 		// split by the caller before it can consume arbitrary server memory.
-		counter := &transferCounter{limit: budget}
-		if err := chunkstore.WriteTransfer(counter, records); err != nil {
-			writeError(w, err, 413)
+		var size int64
+		write := chunkstore.WriteTransfer
+		wire2 := r.URL.Query().Get("wire") == "2"
+		if wire2 {
+			size = chunkstore.TransferWireSize2(records)
+			write = chunkstore.WriteTransfer2
+		} else {
+			size, err = chunkstore.TransferWireSize(records)
+		}
+		if err != nil || size > budget {
+			writeError(w, chunkstore.ErrTransferLimit, 413)
 			return
 		}
 		w.Header().Set("Content-Type", "application/vnd.go-carbon.transfer-v1")
-		w.Header().Set("Content-Length", strconv.FormatInt(counter.n, 10))
+		if wire2 {
+			w.Header().Set("Content-Type", "application/vnd.go-carbon.transfer-v2")
+		}
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		out := bufio.NewWriterSize(w, 256<<10)
-		if err := chunkstore.WriteTransfer(out, records); err != nil {
+		if err := write(out, records); err != nil {
 			return
 		}
 		_ = out.Flush()
@@ -169,7 +201,9 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		if !decode(&request) {
 			return
 		}
-		records, n, err := s.pullTransfer(r.Context(), request.Source, request.Names, request.MaxBytes)
+		buffer := s.transferBuffer()
+		defer s.transferPool.Put(buffer)
+		records, n, err := s.pullTransfer(r.Context(), request.Source, request.Names, request.MaxBytes, buffer)
 		if err != nil {
 			var upstream *transferUpstreamError
 			if errors.As(err, &upstream) {
@@ -186,9 +220,11 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		s.changed()
 		w.Header().Set("X-Transfer-Bytes", strconv.FormatInt(n, 10))
-		reply(proofs)
+		replyProofs(proofs)
 	case "/v1/transfer/import":
-		records, err := chunkstore.ReadTransfer(r.Body, s.config.MaxBodyBytes)
+		buffer := s.transferBuffer()
+		defer s.transferPool.Put(buffer)
+		records, err := buffer.Read(r.Body, s.config.MaxBodyBytes, r.ContentLength)
 		if err != nil {
 			writeError(w, err, 400)
 			return
@@ -199,10 +235,17 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.changed()
-		reply(proofs)
+		replyProofs(proofs)
 	case "/v1/transfer/verify":
 		var proofs []chunkstore.TransferProof
-		if !decode(&proofs) {
+		if r.Header.Get("Content-Type") == chunkstore.TransferProofContentType {
+			var err error
+			proofs, err = chunkstore.ReadTransferProofs(r.Body)
+			if err != nil {
+				writeError(w, err, 400)
+				return
+			}
+		} else if !decode(&proofs) {
 			return
 		}
 		if len(proofs) == 0 || len(proofs) > chunkstore.MaxTransferMetrics {
@@ -276,16 +319,6 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-type transferCounter struct{ n, limit int64 }
-
-func (c *transferCounter) Write(p []byte) (int, error) {
-	c.n += int64(len(p))
-	if c.n > c.limit {
-		return 0, errors.New("transfer exceeds max_body_bytes; reduce batch size")
-	}
-	return len(p), nil
-}
-
 // allowedTransferSource reports whether host is a ring node or a configured
 // transfer source. Pulls send a signed read token, so they never go to an
 // arbitrary caller-chosen host.
@@ -306,7 +339,14 @@ func (s *Service) allowedTransferSource(host string) bool {
 	return false
 }
 
-func (s *Service) pullTransfer(ctx context.Context, source string, names []string, maxBytes int64) ([]chunkstore.TransferMetric, int64, error) {
+func (s *Service) transferBuffer() *chunkstore.TransferBuffer {
+	if buffer := s.transferPool.Get(); buffer != nil {
+		return buffer.(*chunkstore.TransferBuffer)
+	}
+	return &chunkstore.TransferBuffer{}
+}
+
+func (s *Service) pullTransfer(ctx context.Context, source string, names []string, maxBytes int64, buffer *chunkstore.TransferBuffer) ([]chunkstore.TransferMetric, int64, error) {
 	u, err := url.Parse(source)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, 0, errors.New("invalid source origin")
@@ -324,6 +364,7 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	}
 	query := u.Query()
 	query.Set("max_bytes", strconv.FormatInt(maxBytes, 10))
+	query.Set("wire", "2")
 	u.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -345,19 +386,12 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	if response.StatusCode != 200 {
 		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s", response.Status)}
 	}
-	records, err := chunkstore.ReadTransfer(response.Body, maxBytes)
+	input := &transferCountReader{Reader: response.Body}
+	records, err := buffer.Read(input, maxBytes, response.ContentLength)
 	if err != nil {
 		return nil, 0, err
 	}
-	n := response.ContentLength
-	if n < 0 {
-		counter := &transferCounter{limit: maxBytes}
-		if err := chunkstore.WriteTransfer(counter, records); err != nil {
-			return nil, 0, err
-		}
-		n = counter.n
-	}
-	return records, n, nil
+	return records, input.n, nil
 }
 
 type transferUpstreamError struct {
@@ -367,4 +401,15 @@ type transferUpstreamError struct {
 
 func (e *transferUpstreamError) Error() string { return e.message }
 
-var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 90 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+type transferCountReader struct {
+	io.Reader
+	n int64
+}
+
+func (r *transferCountReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	r.n += int64(n)
+	return n, err
+}

@@ -10,9 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -154,7 +152,10 @@ func TestStoreCopyLiveIngestionReplayAndParity(t *testing.T) {
 			if err := client.Pull(context.Background(), destination, manifest.ID, options); err != nil {
 				t.Fatal(err)
 			}
-			prepareCopyFixture(t, destination, manifest, incremental)
+			if err := storecopy.Prepare(destination, incremental); err != nil {
+				t.Fatal("prepare:", err)
+			}
+
 			clonePath, cloneCfg := sharedAppConfig(t)
 			cloneCfg.Whisper.StoreEncoding = "exact"
 			cloneCfg.Whisper.StoreDir = filepath.Join(destination, "store")
@@ -262,44 +263,5 @@ func waitCopy(t *testing.T, check func() bool) {
 		case <-deadline.C:
 			t.Fatal("copy condition timed out")
 		}
-	}
-}
-
-// prepareCopyFixture installs startup guards on this sealed, verified fixture.
-func prepareCopyFixture(t *testing.T, directory string, manifest *storecopy.Manifest, incremental bool) {
-	t.Helper()
-	var logs []storecopy.File
-	for _, file := range manifest.Files {
-		if strings.HasPrefix(file.Name, "input-log/") {
-			logs = append(logs, storecopy.File{Name: filepath.Base(file.Name), Size: file.Size})
-		}
-	}
-	data, err := json.Marshal(struct {
-		ID    string           `json:"id"`
-		Files []storecopy.File `json:"files"`
-	}{manifest.ID, logs})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, "input-log", "REQUIRE-COMPLETE-REPLAY"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if incremental {
-		originals := filepath.Join(directory, "empty-originals")
-		if err := os.Mkdir(originals, 0700); err != nil {
-			t.Fatal(err)
-		}
-		info, err := os.Stat(originals)
-		if err != nil {
-			t.Fatal(err)
-		}
-		stat := info.Sys().(*syscall.Stat_t)
-		marker := fmt.Sprintf("go-carbon-incremental-v1\n%s\n%d:%d\n", originals, stat.Dev, stat.Ino)
-		if err := os.WriteFile(filepath.Join(directory, "store", "INCREMENTAL-FILE-MIGRATION"), []byte(marker), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Remove(filepath.Join(directory, "store", "NEEDS-CATCHUP")); err != nil {
-		t.Fatal(err)
 	}
 }

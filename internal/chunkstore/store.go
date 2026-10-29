@@ -165,6 +165,9 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
+	transferPendingAny   func() bool
+	transferPending      func(string) bool
+	transferExport       transferExportCounters
 	sidecars             sidecarCatalog
 	transferDeleteRanges atomic.Uint64
 	compactOnce          compactOnceState
@@ -934,6 +937,7 @@ type CompactionKinds struct {
 }
 
 type Stats struct {
+	TransferExport                                                                                     TransferExportStats
 	MirrorCanonicalBatches, MirrorBlindBatches                                                         uint64
 	DiskBytes, WALBytes, MemTableBytes, Materializations, Operands                                     uint64
 	CacheBytes, CacheHits, CacheMisses                                                                 uint64
@@ -1035,6 +1039,7 @@ func (s *Store) Stats() Stats {
 	}
 	stats.CacheShards = s.cacheShards
 	stats.StateCache = s.stateCache.stats()
+	stats.TransferExport = s.transferExport.stats()
 	stats.CompactOnceRunning = s.compactOnce.running.Load()
 	stats.UpdatePointLookups = s.updatePointLookups.Load()
 	if s.rangeDelCache != nil {

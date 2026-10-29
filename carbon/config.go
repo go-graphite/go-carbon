@@ -374,7 +374,7 @@ func NewConfig() *Config {
 		Buckyd: buckyd.Config{
 			Bind: "0.0.0.0:4242", Hash: "carbon", Replicas: 1,
 			TmpDir: os.TempDir(), Timeout: 3600,
-			MaxBodyBytes: 160 << 20, MaxTransfers: 4,
+			MaxBodyBytes: 160 << 20, MaxTransfers: 0,
 		},
 		Common: commonConfig{
 			GraphPrefix: "carbon.agents.{host}",
