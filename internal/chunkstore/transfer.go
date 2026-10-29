@@ -116,10 +116,15 @@ func transferSize(r TransferMetric) int64 {
 	return n
 }
 func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m Metadata, budget int64, shared ...*transferReader) (TransferMetric, error) {
-	record := TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation}
+	record := TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation, Keys: make([]RelayoutKV, 0, 16)}
 	used := int64(512 + len(m.Name)*2 + len(m.Retentions)*32)
 	if used > budget {
 		return TransferMetric{}, ErrTransferLimit
+	}
+	var arena transferArena
+	memory := &arena
+	if len(shared) > 0 {
+		memory = &shared[0].arena
 	}
 	add := func(k, v []byte) error {
 		used += int64(len(k) + len(v) + 8)
@@ -129,7 +134,10 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		record.Keys = append(record.Keys, RelayoutKV{bytes.Clone(k), bytes.Clone(v)})
+		data := memory.alloc(len(k) + len(v))
+		copy(data, k)
+		copy(data[len(k):], v)
+		record.Keys = append(record.Keys, RelayoutKV{data[:len(k):len(k)], data[len(k):]})
 		return nil
 	}
 	if m.Continuation {
@@ -142,11 +150,16 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 			kv.withBorrowedIterator(it)
 		}
 		defer kv.Close()
-		if err := kv.Visit(nil, add); err != nil {
+		if len(shared) > 0 {
+			prefix := continuationPrefix(m.ID, m.Generation)
+			if err := shared[0].visit(ctx, &shared[0].continuation, continuationLower, continuationUpper, prefix, func(key, value []byte) error { return add(key[len(prefix):], value) }); err != nil {
+				return TransferMetric{}, err
+			}
+		} else if err := kv.Visit(nil, add); err != nil {
 			return TransferMetric{}, err
 		}
 		if dropper, ok := s.continuation.(ContinuationDropper); ok {
-			b := &transferBuckets{ContinuationIO: kv}
+			b := &transferBuckets{ContinuationIO: transferRecordIO(record)}
 			if err := dropper.Drop(ctx, b); err != nil {
 				return TransferMetric{}, err
 			}
@@ -200,10 +213,13 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 
 func transferDigest(record TransferMetric) string {
 	h := sha256.New()
+	var size [4]byte
 	for _, kv := range record.Keys {
-		_ = binary.Write(h, binary.BigEndian, uint32(len(kv.Key)))
+		binary.BigEndian.PutUint32(size[:], uint32(len(kv.Key)))
+		_, _ = h.Write(size[:])
 		_, _ = h.Write(kv.Key)
-		_ = binary.Write(h, binary.BigEndian, uint32(len(kv.Value)))
+		binary.BigEndian.PutUint32(size[:], uint32(len(kv.Value)))
+		_, _ = h.Write(size[:])
 		_, _ = h.Write(kv.Value)
 	}
 	return hex.EncodeToString(h.Sum(nil))
@@ -212,12 +228,15 @@ func transferDigest(record TransferMetric) string {
 func snapshotDigest(snapshot Snapshot) (string, []int) {
 	h := sha256.New()
 	counts := make([]int, len(snapshot.Archives))
+	var data [16]byte
 	for i, a := range snapshot.Archives {
 		counts[i] = len(a.Points)
-		_ = binary.Write(h, binary.BigEndian, uint64(len(a.Points)))
+		binary.BigEndian.PutUint64(data[:8], uint64(len(a.Points)))
+		_, _ = h.Write(data[:8])
 		for _, p := range a.Points {
-			_ = binary.Write(h, binary.BigEndian, p.Timestamp)
-			_ = binary.Write(h, binary.BigEndian, math.Float64bits(p.Value))
+			binary.BigEndian.PutUint64(data[:8], uint64(p.Timestamp))
+			binary.BigEndian.PutUint64(data[8:], math.Float64bits(p.Value))
+			_, _ = h.Write(data[:])
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), counts
@@ -225,7 +244,9 @@ func snapshotDigest(snapshot Snapshot) (string, []int) {
 
 func (s *Store) transferSnapshot(ctx context.Context, reader pebble.Reader, m Metadata) (Snapshot, error) {
 	if m.Continuation {
-		return s.continuationSnapshot(ctx, reader, m)
+		kv := s.newContinuationIO(ctx, reader, nil, m).withIterator()
+		defer kv.Close()
+		return s.continuation.Snapshot(ctx, kv, m, s.now)
 	}
 	return snapshotFrom(reader, m.Name)
 }
@@ -275,7 +296,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			metas[i].FileMigration = FileReclaimed
 		}
 	}
-	paths, err := s.writeTransferTables(first, records, metas)
+	paths, err := s.writeTransferTables(ctx, first, records, metas)
 	defer func() {
 		for _, p := range paths {
 			_ = s.fs.Remove(p)
@@ -365,8 +386,6 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 	defer b.Close()
 	walk := &transferReader{reader: s.db}
 	defer walk.close()
-	stagedWalk := &transferReader{reader: b}
-	defer stagedWalk.close()
 	proofs := make([]TransferProof, len(records))
 	var sidecars []SidecarRecord
 	for i, r := range records {
@@ -374,7 +393,10 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			return nil, err
 		}
 		m := metas[i]
-		old, err := walk.metadata(m.Name)
+		old, err := Metadata{}, ErrNotFound
+		if s.catalogMembership.mayContain(m.Name) {
+			old, err = walk.metadata(m.Name)
+		}
 		merged := err == nil
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -400,15 +422,6 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 				return nil, fmt.Errorf("source point verification %s failed", m.Name)
 			}
 		}
-		if !merged {
-			staged, err := s.transferFromLimit(ctx, b, m, 160<<20, stagedWalk)
-			if err != nil {
-				return nil, err
-			}
-			if len(staged.Keys) != p.KeyCount || transferDigest(staged) != p.Digest {
-				return nil, fmt.Errorf("staged raw verification %s failed", m.Name)
-			}
-		}
 		if merged {
 			if !samePolicy(old.MetricConfig, m.MetricConfig) || old.Continuation != m.Continuation || old.FileMigration == FileCleanupPending {
 				return nil, ErrConflict
@@ -428,7 +441,12 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			if err = b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 				return nil, err
 			}
-			source, err := s.transferSnapshot(ctx, b, m)
+			var source Snapshot
+			if m.Continuation {
+				source, err = s.continuation.Snapshot(ctx, transferRecordIO(r), m, s.now)
+			} else {
+				source, err = s.transferSnapshot(ctx, b, m)
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -492,7 +510,21 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 				return nil, err
 			}
 		}
-		summary, err := s.transferSidecarSummary(ctx, b, m)
+		var summary SidecarSummary
+		if merged {
+			summary, err = s.transferSidecarSummary(ctx, b, m)
+		} else if m.Continuation {
+			io := transferRecordIO(r)
+			if value, lookupErr := io.Get(SidecarSummaryKey); lookupErr == nil {
+				summary, err = DecodeSidecarSummary(value)
+			} else if codec, ok := s.continuation.(ContinuationSidecars); ok {
+				summary, err = codec.InspectSidecar(io)
+				if errors.Is(err, errTransferReadOnly) {
+					// Legacy sidecars need their index persisted before publication.
+					summary, err = s.transferSidecarSummary(ctx, b, m)
+				}
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -516,7 +548,6 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		}
 		proofs[i] = p
 	}
-	stagedWalk.close()
 	walk.close()
 	// ImportTransfer performs the durability barrier after every group has
 	// committed and released its stripes. Failed requests never authorize delete.
@@ -705,38 +736,71 @@ func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) 
 }
 
 // Transfer wire v1: magic, metric count, then JSON headers and length-delimited
-// raw key/value pairs, followed by SHA256. All allocations are bounded by the
-// caller's decoded byte budget, including headers on truncated input.
+// raw key/value pairs, followed by SHA256. The reader owns one bounded wire
+// buffer; keys and values borrow it for the lifetime of the returned batch.
+type transferHeader struct {
+	Config       MetricConfig
+	Version      TransferVersion
+	Continuation bool
+	Keys         int
+	PointDigest  string
+	Counts       []int
+}
+
+func headerForTransfer(r TransferMetric) transferHeader {
+	return transferHeader{r.Config, r.Version, r.Continuation, len(r.Keys), r.PointDigest, r.Counts}
+}
+
+func TransferWireSize(records []TransferMetric) (int64, error) {
+	n := int64(12 + sha256.Size)
+	for _, r := range records {
+		header, err := json.Marshal(headerForTransfer(r))
+		if err != nil {
+			return 0, err
+		}
+		n += int64(4 + len(header))
+		for _, kv := range r.Keys {
+			n += int64(8 + len(kv.Key) + len(kv.Value))
+		}
+	}
+	return n, nil
+}
+
 func WriteTransfer(w io.Writer, records []TransferMetric) error {
 	h := sha256.New()
 	out := io.MultiWriter(w, h)
+	var size [4]byte
+	writeSize := func(n int) error {
+		binary.BigEndian.PutUint32(size[:], uint32(n))
+		_, err := out.Write(size[:])
+		return err
+	}
+	writeBytes := func(v []byte) error {
+		if err := writeSize(len(v)); err != nil {
+			return err
+		}
+		_, err := out.Write(v)
+		return err
+	}
 	if _, err := out.Write([]byte("BKTFR001")); err != nil {
 		return err
 	}
-	if err := binary.Write(out, binary.BigEndian, uint32(len(records))); err != nil {
+	if err := writeSize(len(records)); err != nil {
 		return err
 	}
 	for _, r := range records {
-		header := struct {
-			Config       MetricConfig
-			Version      TransferVersion
-			Continuation bool
-			Keys         int
-			PointDigest  string
-			Counts       []int
-		}{r.Config, r.Version, r.Continuation, len(r.Keys), r.PointDigest, r.Counts}
-		data, err := json.Marshal(header)
+		data, err := json.Marshal(headerForTransfer(r))
 		if err != nil {
 			return err
 		}
-		if err := writeTransferBytes(out, data); err != nil {
+		if err := writeBytes(data); err != nil {
 			return err
 		}
 		for _, kv := range r.Keys {
-			if err := writeTransferBytes(out, kv.Key); err != nil {
+			if err := writeBytes(kv.Key); err != nil {
 				return err
 			}
-			if err := writeTransferBytes(out, kv.Value); err != nil {
+			if err := writeBytes(kv.Value); err != nil {
 				return err
 			}
 		}
@@ -744,66 +808,82 @@ func WriteTransfer(w io.Writer, records []TransferMetric) error {
 	_, err := w.Write(h.Sum(nil))
 	return err
 }
-func writeTransferBytes(w io.Writer, v []byte) error {
-	if err := binary.Write(w, binary.BigEndian, uint32(len(v))); err != nil {
-		return err
-	}
-	_, err := w.Write(v)
-	return err
-}
 
 func ReadTransfer(r io.Reader, maxBytes int64) ([]TransferMetric, error) {
-	limited := &io.LimitedReader{R: r, N: maxBytes + 1}
-	h := sha256.New()
-	in := io.TeeReader(limited, h)
-	magic := make([]byte, 8)
-	if _, err := io.ReadFull(in, magic); err != nil {
+	size := int64(0)
+	if sized, ok := r.(interface{ Len() int }); ok {
+		size = int64(sized.Len())
+	}
+	return ReadTransferSize(r, maxBytes, size)
+}
+
+// A known HTTP content length avoids growing/copying the batch buffer. Unknown
+// lengths retain the bounded reader and all paths require an exact final EOF.
+func ReadTransferSize(r io.Reader, maxBytes, size int64) ([]TransferMetric, error) {
+	if maxBytes < 44 || maxBytes == math.MaxInt64 || size > maxBytes {
+		return nil, ErrTransferLimit
+	}
+	var data []byte
+	var err error
+	if size > 0 {
+		data = make([]byte, size)
+		_, err = io.ReadFull(r, data)
+		if err == nil {
+			var extra [1]byte
+			if n, end := io.ReadFull(r, extra[:]); n != 0 || end != io.EOF {
+				err = ErrFormat
+			}
+		}
+	} else {
+		data, err = io.ReadAll(io.LimitReader(r, maxBytes+1))
+	}
+	if err != nil {
 		return nil, err
 	}
-	if string(magic) != "BKTFR001" {
+	if int64(len(data)) > maxBytes {
+		return nil, ErrTransferLimit
+	}
+	if len(data) < 44 || string(data[:8]) != "BKTFR001" {
 		return nil, ErrFormat
 	}
-	var count uint32
-	if err := binary.Read(in, binary.BigEndian, &count); err != nil {
-		return nil, err
+	body, actual := data[:len(data)-sha256.Size], data[len(data)-sha256.Size:]
+	expected := sha256.Sum256(body)
+	if !bytes.Equal(expected[:], actual) {
+		return nil, errors.New("transfer checksum mismatch")
 	}
+	count := binary.BigEndian.Uint32(body[8:12])
 	if count == 0 || count > MaxTransferMetrics {
 		return nil, errors.New("invalid metric count")
 	}
+	body = body[12:]
 	readBytes := func(capacity uint32) ([]byte, error) {
-		var n uint32
-		if err := binary.Read(in, binary.BigEndian, &n); err != nil {
-			return nil, err
+		if len(body) < 4 {
+			return nil, io.ErrUnexpectedEOF
 		}
-		if n > capacity || int64(n) > limited.N || int64(n) > maxBytes {
-			return nil, errors.New("transfer exceeds limit")
+		n := binary.BigEndian.Uint32(body[:4])
+		body = body[4:]
+		if n > capacity || uint64(n) > uint64(len(body)) {
+			return nil, ErrTransferLimit
 		}
-		v := make([]byte, n)
-		_, err := io.ReadFull(in, v)
-		return v, err
+		v := body[:n:n]
+		body = body[n:]
+		return v, nil
 	}
-	records := make([]TransferMetric, 0, count)
-	for range count {
+	records := make([]TransferMetric, count)
+	for i := range records {
 		data, err := readBytes(65536)
 		if err != nil {
 			return nil, err
 		}
-		var head struct {
-			Config       MetricConfig
-			Version      TransferVersion
-			Continuation bool
-			Keys         int
-			PointDigest  string
-			Counts       []int
-		}
+		var head transferHeader
 		if err := json.Unmarshal(data, &head); err != nil {
 			return nil, err
 		}
-		if head.Keys < 0 || int64(head.Keys)*8 > limited.N {
+		if head.Keys < 0 || int64(head.Keys)*8 > int64(len(body)) {
 			return nil, errors.New("invalid key count")
 		}
-		record := TransferMetric{Config: head.Config, Version: head.Version, Continuation: head.Continuation, PointDigest: head.PointDigest, Counts: head.Counts}
-		for range head.Keys {
+		record := TransferMetric{Config: head.Config, Version: head.Version, Continuation: head.Continuation, PointDigest: head.PointDigest, Counts: head.Counts, Keys: make([]RelayoutKV, head.Keys)}
+		for j := range record.Keys {
 			k, err := readBytes(4096)
 			if err != nil {
 				return nil, err
@@ -812,22 +892,12 @@ func ReadTransfer(r io.Reader, maxBytes int64) ([]TransferMetric, error) {
 			if err != nil {
 				return nil, err
 			}
-			record.Keys = append(record.Keys, RelayoutKV{k, v})
+			record.Keys[j] = RelayoutKV{k, v}
 		}
-		records = append(records, record)
+		records[i] = record
 	}
-	expected := h.Sum(nil)
-	actual := make([]byte, 32)
-	if _, err := io.ReadFull(limited, actual); err != nil {
-		return nil, err
-	}
-	if !bytes.Equal(expected, actual) {
-		return nil, errors.New("transfer checksum mismatch")
-	}
-	var extra [1]byte
-	n, err := limited.Read(extra[:])
-	if n != 0 || err != io.EOF || limited.N <= 0 {
-		return nil, errors.New("trailing bytes or transfer exceeds limit")
+	if len(body) != 0 {
+		return nil, errors.New("trailing transfer bytes")
 	}
 	return records, nil
 }

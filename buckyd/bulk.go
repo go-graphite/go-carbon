@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -68,7 +69,8 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			MaxBodyBytes int64
 			Protocol     int
 			Hostname     string
-		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, 1, hostname})
+			CPULimit     int
+		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, 1, hostname, runtime.GOMAXPROCS(0)})
 		return
 	}
 	if !s.acquireTransfer() {
@@ -148,13 +150,13 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		// Bound the encoded response as well as imports; a dense batch must be
 		// split by the caller before it can consume arbitrary server memory.
-		counter := &transferCounter{limit: budget}
-		if err := chunkstore.WriteTransfer(counter, records); err != nil {
-			writeError(w, err, 413)
+		size, err := chunkstore.TransferWireSize(records)
+		if err != nil || size > budget {
+			writeError(w, chunkstore.ErrTransferLimit, 413)
 			return
 		}
 		w.Header().Set("Content-Type", "application/vnd.go-carbon.transfer-v1")
-		w.Header().Set("Content-Length", strconv.FormatInt(counter.n, 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		out := bufio.NewWriterSize(w, 256<<10)
 		if err := chunkstore.WriteTransfer(out, records); err != nil {
 			return
@@ -188,7 +190,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Transfer-Bytes", strconv.FormatInt(n, 10))
 		reply(proofs)
 	case "/v1/transfer/import":
-		records, err := chunkstore.ReadTransfer(r.Body, s.config.MaxBodyBytes)
+		records, err := chunkstore.ReadTransferSize(r.Body, s.config.MaxBodyBytes, r.ContentLength)
 		if err != nil {
 			writeError(w, err, 400)
 			return
@@ -345,17 +347,16 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	if response.StatusCode != 200 {
 		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s", response.Status)}
 	}
-	records, err := chunkstore.ReadTransfer(response.Body, maxBytes)
+	records, err := chunkstore.ReadTransferSize(response.Body, maxBytes, response.ContentLength)
 	if err != nil {
 		return nil, 0, err
 	}
 	n := response.ContentLength
 	if n < 0 {
-		counter := &transferCounter{limit: maxBytes}
-		if err := chunkstore.WriteTransfer(counter, records); err != nil {
-			return nil, 0, err
+		n, err = chunkstore.TransferWireSize(records)
+		if err != nil || n > maxBytes {
+			return nil, 0, chunkstore.ErrTransferLimit
 		}
-		n = counter.n
 	}
 	return records, n, nil
 }
@@ -367,4 +368,4 @@ type transferUpstreamError struct {
 
 func (e *transferUpstreamError) Error() string { return e.message }
 
-var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var bulkTransferClient = &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{MaxIdleConns: 256, MaxIdleConnsPerHost: 64, ResponseHeaderTimeout: 90 * time.Second}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

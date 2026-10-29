@@ -12,6 +12,7 @@ import (
 // One batch reuses table readers instead of reopening every LSM level for
 // every catalog, revision and continuation lookup. The caller owns its view.
 type transferReader struct {
+	arena                                                               transferArena
 	reader                                                              pebble.Reader
 	catalog, revisions, continuation, chunks, buckets, receipts, staged *pebble.Iterator
 }
@@ -132,4 +133,17 @@ func (s *Store) ListTransferNames(ctx context.Context, prefix, after string, lim
 		names = append(names, name)
 	}
 	return names, it.Error()
+}
+
+// Returned slices cannot grow into adjacent fields. Batches own the slabs until
+// their records are released, avoiding one heap object per tiny raw key/value.
+type transferArena struct{ free []byte }
+
+func (a *transferArena) alloc(n int) []byte {
+	if len(a.free) < n {
+		a.free = make([]byte, max(64<<10, n))
+	}
+	value := a.free[:n:n]
+	a.free = a.free[n:]
+	return value
 }
