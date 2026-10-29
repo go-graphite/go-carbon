@@ -227,7 +227,10 @@ Disjoint records become prepared SSTs with reserved target IDs. Full independent
 SST read-back compares every key/value before Pebble Ingest and grouped durable
 catalog/receipt publication. Independent source/target sampled point checks remain.
 Overlaps use the verified target-wins merge: target values win equal timestamps,
-source fills holes; policies and archival values are checked. Fresh source versions
+source fills holes; policies and archival values are checked. Committed target
+cache state is captured under writer locks before invalidation, with a database
+fallback when it is unavailable. Receipt encoding reuses scratch within each batch
+while preserving the existing JSON bytes and receipt hashes. Fresh source versions
 and target receipts are required before cleanup. Crash/damaged/repeated requests
 cannot turn a saved journal entry into deletion authority without re-verification.
 
