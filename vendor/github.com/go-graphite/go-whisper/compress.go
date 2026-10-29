@@ -1070,24 +1070,20 @@ func (whisper *Whisper) buildRewrite(rets []*Retention, op string, extra func(ar
 	}
 	nwhisper = created
 
-	// Every error return between here and the explicit close below abandons
-	// nwhisper, so without this its descriptor and temp file are leaked. A
-	// sustained disk error storm rewriting many metrics would otherwise walk the
-	// process into EMFILE. The explicit close sets nwhisperClosed, so the
-	// handed-off handle is never closed twice, and by the time nwhisper is
-	// reused for the reopen below this is already a no-op.
+	// Capture the path before an error return clears the named results.
+	// A successful build hands the open temporary file to publishRewrite.
 	built := false
-	defer func() {
+	defer func(path string) {
 		if built {
 			return
 		}
 		_ = created.file.Close()
 		if inMemory {
-			releaseMemFile(tmpname)
+			releaseMemFile(path)
 		} else {
-			_ = whisper.removeStorageFile(tmpname)
+			_ = whisper.removeStorageFile(path)
 		}
-	}()
+	}(tmpname)
 
 	for i := len(whisper.archives) - 1; i >= 0; i-- {
 		archive := whisper.archives[i]

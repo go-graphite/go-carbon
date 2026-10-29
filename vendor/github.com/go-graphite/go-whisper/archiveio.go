@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"time"
 )
 
@@ -157,19 +156,16 @@ func (whisper *Whisper) archivePoints(index int, includeRollups bool) ([]TimeSer
 		slices.SortFunc(result, func(a, b TimeSeriesPoint) int { return cmp.Compare(a.Time, b.Time) })
 		return result, nil
 	}
-	archive := whisper.archives[index]
-	buf := make([]byte, archive.Size())
-	if err := whisper.fileReadAt(buf, archive.Offset()); err != nil {
-		return nil, fmt.Errorf("read archive %d: %w", index, err)
+	// Reuse the bounded, extent-aware classic reader. Virtual sidecars can
+	// contain only a few points even with years of logical retention.
+	stored, err := readArchivePointsInRange(whisper, index, 0, maxInt)
+	if err != nil {
+		return nil, err
 	}
-	points := make([]TimeSeriesPoint, 0, archive.numberOfPoints)
-	for offset := 0; offset < len(buf); offset += PointSize {
-		point := unpackDataPoint(buf[offset : offset+PointSize])
-		if point.interval > 0 {
-			points = append(points, TimeSeriesPoint{Time: point.interval, Value: point.value})
-		}
+	points := make([]TimeSeriesPoint, len(stored))
+	for i, point := range stored {
+		points[i] = TimeSeriesPoint{Time: point.interval, Value: point.value}
 	}
-	sort.Slice(points, func(i, j int) bool { return points[i].Time < points[j].Time })
 	return points, nil
 }
 
