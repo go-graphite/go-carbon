@@ -123,10 +123,8 @@ func TestStoreCopyReadLoadBenchmark(t *testing.T) {
 						response.Body.Close()
 						if response.StatusCode != http.StatusOK {
 							failed.Add(1)
-						} else {
-							if count.Add(1) >= 100 {
-								once.Do(func() { close(ready) })
-							}
+						} else if count.Add(1) >= 100 {
+							once.Do(func() { close(ready) })
 						}
 					}
 				})

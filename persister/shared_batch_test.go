@@ -3,8 +3,6 @@ package persister
 import (
 	"context"
 	"errors"
-	"github.com/go-graphite/go-carbon/internal/whisperio"
-	whisper "github.com/go-graphite/go-whisper"
 	"math"
 	"reflect"
 	"regexp"
@@ -14,7 +12,9 @@ import (
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"github.com/go-graphite/go-carbon/points"
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 type gatedBatchStore struct {

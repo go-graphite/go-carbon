@@ -23,8 +23,9 @@ import (
 // residue seconds, which moves every delta-encoded point after it by the same
 // amount, and the header's block range and encoder state follow. CWhisper
 // reads and appends to such a file. It returns the base block's points.
-func unalignedCWhisper(t testing.TB, path string, now func() time.Time, start, minutes, residue int) []whisper.TimeSeriesPoint {
+func unalignedCWhisper(t testing.TB, path string, now func() time.Time) []whisper.TimeSeriesPoint {
 	t.Helper()
+	const start, minutes, residue = 1_792_400_400 + 7*60, 3 * 1440, 17
 	w, err := whisper.CreateWithOptions(path, whisper.MustParseRetentionDefs("1m:14d,30m:2y"), whisper.Sum, 0,
 		&whisper.Options{Compressed: true, OutOfOrder: true, Now: now})
 	if err != nil {
@@ -162,7 +163,7 @@ func TestUnalignedBlockSurvivesMerge(t *testing.T) {
 					t.Fatal(err)
 				}
 				path := filepath.Join(sourceDir, "m.wsp")
-				block := unalignedCWhisper(t, path, clock, start, minutes, residue)
+				block := unalignedCWhisper(t, path, clock)
 				// An aligned slot inside the off-grid block that the source's
 				// sidecar holds, as a late point the original file kept there.
 				sourceLate := block[len(block)/4].Time - residue
@@ -327,7 +328,7 @@ func TestMergeRepairsConvertedOffGridBlock(t *testing.T) {
 	clock := func() time.Time { return time.Unix(int64(now), 0) }
 	m := store.Metadata{MetricConfig: store.MetricConfig{Name: "m", Retentions: []store.Retention{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}}, AggregationMethod: store.Sum}}
 	path := filepath.Join(t.TempDir(), "m.wsp")
-	block := unalignedCWhisper(t, path, clock, start, minutes, residue)
+	block := unalignedCWhisper(t, path, clock)
 	codec := &ContinuationCodec{ReuseBlockKeys: true}
 	kv := mapContinuationIO{}
 	if err := codec.Import(ctx, kv, path, m, clock); err != nil {

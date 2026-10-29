@@ -38,8 +38,9 @@ func (bucketCodec) Drop(_ context.Context, io ContinuationIO) error {
 	return nil
 }
 
-func countStoreKeys(t *testing.T, s *Store, first byte) int {
+func countStoreKeys(t *testing.T, s *Store) int {
 	t.Helper()
+	const first = 't'
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte{first}, UpperBound: []byte{first + 1}})
 	if err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ func TestContinuationBucketKeysStayInTheirGeneration(t *testing.T) {
 	} else {
 		closer.Close()
 	}
-	if n := countStoreKeys(t, s, 't'); n != 3 {
+	if n := countStoreKeys(t, s); n != 3 {
 		t.Fatalf("time-partitioned keys = %d, want 3", n)
 	}
 	visit := func(io *continuationIO, prefix []byte) map[string]string {
@@ -171,19 +172,19 @@ func TestDeleteMetricDropsTimeBuckets(t *testing.T) {
 	defer closeTestStore(t, s)
 	createTestMetric(t, s, "a")
 	createTestMetric(t, s, "b")
-	if n := countStoreKeys(t, s, 't'); n != 4 {
+	if n := countStoreKeys(t, s); n != 4 {
 		t.Fatalf("time-partitioned keys = %d, want 4", n)
 	}
 	if err := s.Delete(ctx, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if n := countStoreKeys(t, s, 't'); n != 2 {
+	if n := countStoreKeys(t, s); n != 2 {
 		t.Fatalf("after deleting a: %d time-partitioned keys, want 2", n)
 	}
 	if err := s.Delete(ctx, "b"); err != nil {
 		t.Fatal(err)
 	}
-	if n := countStoreKeys(t, s, 't'); n != 0 {
+	if n := countStoreKeys(t, s); n != 0 {
 		t.Fatalf("after deleting both: %d time-partitioned keys", n)
 	}
 }

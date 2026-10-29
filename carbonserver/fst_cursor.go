@@ -202,9 +202,9 @@ func (c *fstCursor) names(s fstState, buf *[]byte, visit func(name []byte, final
 
 // namesUntil is names with early termination when visit returns false. A small
 // find limit must not walk every sibling of a wide directory.
-func (c *fstCursor) namesUntil(s fstState, buf *[]byte, visit func(name []byte, final bool, value uint64, child fstState) bool) bool {
+func (c *fstCursor) namesUntil(s fstState, buf *[]byte, visit func(name []byte, final bool, value uint64, child fstState) bool) {
 	if !s.ok {
-		return true
+		return
 	}
 	var walk func(s fstState, name []byte) bool
 	walk = func(s fstState, name []byte) bool {
@@ -235,7 +235,7 @@ func (c *fstCursor) namesUntil(s fstState, buf *[]byte, visit func(name []byte, 
 		}
 		return true
 	}
-	return walk(s, (*buf)[:0])
+	walk(s, (*buf)[:0])
 }
 
 func fstReadPacked(b []byte) uint64 {

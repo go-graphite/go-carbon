@@ -108,7 +108,7 @@ func (test *tcpTestCase) WaitClosed() {
 	}
 	var data [1]byte
 	n, err := test.conn.Read(data[:])
-	if n != 0 || (err != io.EOF && !errors.Is(err, syscall.ECONNRESET)) {
+	if n != 0 || (!errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET)) {
 		test.Fatalf("connection did not close: %v", err)
 	}
 }

@@ -111,7 +111,7 @@ func TestContinuationExtentsPreserveEveryNonzeroRecord(t *testing.T) {
 					if until == offset {
 						t.Fatal("extent did not advance")
 					}
-					if _, err := input.ReadAt(got[from:until], from); err != nil && err != io.EOF {
+					if _, err := input.ReadAt(got[from:until], from); err != nil && !errors.Is(err, io.EOF) {
 						t.Fatal(err)
 					}
 					offset = until

@@ -149,7 +149,7 @@ func testRandomInterleavingsKeepBlocksEncodable(t *testing.T, selectedSeed int) 
 								m.XFilesFactor = 0 // the source's
 								path := filepath.Join(t.TempDir(), "m.wsp")
 								now = start + 60*3*1440
-								unalignedCWhisper(t, path, clock, start, 3*1440, 17)
+								unalignedCWhisper(t, path, clock)
 								if err := codec.Import(ctx, kv, path, m, clock); err != nil {
 									t.Fatal(err)
 								}
@@ -259,7 +259,7 @@ func TestRandomInterleavingsThroughStore(t *testing.T) {
 						t.Fatal(err)
 					}
 					path := filepath.Join(sourceDir, "m.wsp")
-					unalignedCWhisper(t, path, clock, start, 3*1440, 17)
+					unalignedCWhisper(t, path, clock)
 					db, err := openMemoryTestStore(t, filepath.Join(root, "shared"), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{ReuseBlockKeys: true},
 						IncrementalSource: sourceDir, Now: clock, TimeBuckets: buckets, MetadataCacheSize: cache,
 						CacheSize: 8 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour})

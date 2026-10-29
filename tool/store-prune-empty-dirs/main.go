@@ -50,8 +50,9 @@ func main() {
 	flag.DurationVar(&o.interval, "progress-interval", 5*time.Second, "progress and health sample interval")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, o, os.Stdout); err != nil {
+	err := run(ctx, o, os.Stdout)
+	stop()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "store-prune-empty-dirs:", err)
 		os.Exit(1)
 	}

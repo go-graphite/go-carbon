@@ -314,11 +314,12 @@ func (p *Whisper) sharedMaintenance() store.ContinuationMaintenance {
 			if p.outOfOrder.policy.MinPoints > 0 {
 				atomic.AddUint32(&p.oooCompactionChecks, 1)
 			}
-			if err != nil {
+			switch {
+			case err != nil:
 				atomic.AddUint32(&p.oooCompactErrors, 1)
-			} else if merged {
+			case merged:
 				atomic.AddUint32(&p.oooCompactions, 1)
-			} else {
+			default:
 				atomic.AddUint32(&p.oooCompactionDeferred, 1)
 			}
 		},

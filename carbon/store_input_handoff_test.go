@@ -178,7 +178,7 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 							defer claim.Close()
 							if tc.successor == "abandon" {
 								if _, _, err := claim.Take(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}); err != nil || !claim.InputOffered() {
-									nextStarted <- fmt.Errorf("take: %v, offered %v", err, claim.InputOffered())
+									nextStarted <- fmt.Errorf("take: %w, offered %v", err, claim.InputOffered())
 									return
 								}
 								_ = claim.Close()

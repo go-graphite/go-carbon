@@ -370,11 +370,12 @@ func decode(data []byte) (out [numPhases]uint64, err error) {
 		if cpu >= valueCount || int64(sampleCPU) < 0 {
 			return out, errors.New("invalid phase CPU sample values")
 		}
-		if pebble != Other {
+		switch {
+		case pebble != Other:
 			phase = pebble
-		} else if stackPhase != Other {
+		case stackPhase != Other:
 			phase = stackPhase
-		} else if stage {
+		case stage:
 			phase = Persister
 		}
 		out[phase] += sampleCPU

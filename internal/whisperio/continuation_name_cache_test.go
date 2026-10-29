@@ -2,11 +2,12 @@ package whisperio
 
 import (
 	"errors"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	whisper "github.com/go-graphite/go-whisper"
 	"os"
 	"path/filepath"
 	"testing"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 type nameCountingKV struct {

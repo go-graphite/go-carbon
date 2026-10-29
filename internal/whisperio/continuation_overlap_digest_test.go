@@ -35,7 +35,8 @@ type digestArrival struct {
 	p  store.Point
 }
 
-func (e digestEmitter) batches(rng *rand.Rand, start, duration int) (flushAt []int, batches [][]store.Point) {
+func (e digestEmitter) batches(rng *rand.Rand, start int) (flushAt []int, batches [][]store.Point) {
+	const duration = 86400
 	var arrivals []digestArrival
 	for ts := start + rng.Intn(e.cadence); ts < start+duration; ts += e.cadence {
 		stamp := ts + e.skew
@@ -167,7 +168,7 @@ func TestContinuationOverlapDigest(t *testing.T) {
 				}
 				update(min(ts+chunk, start), pts)
 			}
-			flushAt, batches := e.batches(rng, start, 86400)
+			flushAt, batches := e.batches(rng, start)
 			h := sha256.New()
 			for i, b := range batches {
 				if digestBatchHook != nil {

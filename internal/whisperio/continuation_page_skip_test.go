@@ -237,7 +237,7 @@ func TestClassicGroupSkipMatchesProbing(t *testing.T) {
 					}
 					batches, at = append(batches, pts), append(at, min(ts+6*3600, start))
 				}
-				flushAt, stream := sc.e.batches(rand.New(rand.NewSource(int64(i))), start, 86400)
+				flushAt, stream := sc.e.batches(rand.New(rand.NewSource(int64(i))), start)
 				batches, at = append(batches, stream...), append(at, flushAt...)
 				for u, b := range batches {
 					oracleNow = at[u]

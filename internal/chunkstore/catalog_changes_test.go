@@ -2,10 +2,12 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/cockroachdb/pebble/vfs"
 	"testing"
 	"time"
+
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 func TestCatalogChangesFollowCommittedMutations(t *testing.T) {
@@ -34,7 +36,7 @@ func TestCatalogChangesFollowCommittedMutations(t *testing.T) {
 	if err != nil || reset || len(changes) != 0 || cursor != next {
 		t.Fatalf("point update entered journal: %v %v %v", changes, reset, err)
 	}
-	if _, err := db.Create(ctx, config); err != ErrExists {
+	if _, err := db.Create(ctx, config); !errors.Is(err, ErrExists) {
 		t.Fatal(err)
 	}
 	if err := db.Delete(ctx, config.Name); err != nil {

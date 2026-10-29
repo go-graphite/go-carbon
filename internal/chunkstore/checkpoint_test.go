@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,7 +74,7 @@ func TestCheckpointHardLinksAndIncludesWAL(t *testing.T) {
 					t.Fatal(name, err)
 				}
 			}
-			if _, err := clone.Metadata(context.Background(), "after"); err != ErrNotFound {
+			if _, err := clone.Metadata(context.Background(), "after"); !errors.Is(err, ErrNotFound) {
 				t.Fatal("checkpoint includes later write", err)
 			}
 		})

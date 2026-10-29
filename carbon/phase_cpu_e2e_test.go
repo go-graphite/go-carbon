@@ -3,6 +3,7 @@
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -75,7 +76,8 @@ func TestPhaseCPUEndToEnd(t *testing.T) {
 		n, writeErr := conn.Write(block)
 		count += uint64(n/len(block)) * 4096
 		if writeErr != nil {
-			if e, ok := writeErr.(net.Error); ok && e.Timeout() {
+			var e net.Error
+			if errors.As(writeErr, &e) && e.Timeout() {
 				break
 			}
 			t.Fatal(writeErr)

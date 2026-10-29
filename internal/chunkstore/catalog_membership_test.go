@@ -237,9 +237,9 @@ func TestCatalogMembershipFetchMatchesCatalogLookup(t *testing.T) {
 // iterators, with the scan paused as it opens each one. The returned channel
 // receives each pause; send on resume to continue, or set free to stop
 // pausing.
-func pausedCatalogStore(t *testing.T) (s *Store, fs vfs.FS, names []string, paused <-chan struct{}, resume chan<- struct{}, free *atomic.Bool) {
+func pausedCatalogStore(t *testing.T) (s *Store, names []string, paused <-chan struct{}, resume chan<- struct{}, free *atomic.Bool) {
 	t.Helper()
-	fs = vfs.NewMem()
+	fs := vfs.NewMem()
 	s = openFileMigrationStore(t, fs)
 	awaitCatalogMembership(t, s)
 	for i := range 4 * 1024 {
@@ -271,7 +271,7 @@ func pausedCatalogStore(t *testing.T) (s *Store, fs vfs.FS, names []string, paus
 		}
 	}
 	t.Cleanup(func() { catalogScanPause, membershipRefresh = nil, refresh })
-	return openFileMigrationStore(t, fs), fs, names, pauses, resumes, free
+	return openFileMigrationStore(t, fs), names, pauses, resumes, free
 }
 
 func writeFiller(t *testing.T, s *Store, version byte) {
@@ -306,7 +306,7 @@ func awaitPause(t *testing.T, paused <-chan struct{}) {
 // tables that compactions replace during a long scan are released as it
 // goes, not all at once when it ends or the store closes.
 func TestCatalogScanReleasesReplacedTables(t *testing.T) {
-	s, _, names, paused, resume, free := pausedCatalogStore(t)
+	s, names, paused, resume, free := pausedCatalogStore(t)
 	defer closeTestStore(t, s)
 	awaitPause(t, paused)
 	// Replace every table the scan's first iterator was opened on.
@@ -338,7 +338,7 @@ func TestCatalogScanReleasesReplacedTables(t *testing.T) {
 // StopBackground ends the scan before Close, which then has nothing to wait
 // for, and both may run at once.
 func TestStopBackgroundEndsCatalogScanBeforeClose(t *testing.T) {
-	s, _, _, paused, _, _ := pausedCatalogStore(t)
+	s, _, paused, _, _ := pausedCatalogStore(t)
 	awaitPause(t, paused)
 	if s.BackgroundStopped() {
 		t.Fatal("background reported stopped while the scan runs")

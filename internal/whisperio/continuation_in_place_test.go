@@ -52,7 +52,7 @@ func inPlaceBatches(sc oracleScenario, seed int64) (at []int, batches [][]store.
 		}
 		at, batches = append(at, min(ts+chunk, start)), append(batches, pts)
 	}
-	flushAt, stream := sc.e.batches(rand.New(rand.NewSource(seed)), start, 86400)
+	flushAt, stream := sc.e.batches(rand.New(rand.NewSource(seed)), start)
 	for i, b := range stream {
 		if i == 3 {
 			b = append(b, store.Point{Timestamp: int64(flushAt[i] + 30), Value: 5})
@@ -193,7 +193,7 @@ func testInPlaceMatchesRewrite(t *testing.T, selectedBuckets, selectedEarly bool
 										return db
 									}
 									inPlace, rewrite := open(), open()
-									var updates, rollups, merges, folds, closer, closerBefore int
+									var updates, rollups, merges, folds, closer int
 
 									name := fmt.Sprintf("inplace.%d", i)
 									for _, db := range []*store.Store{inPlace, rewrite} {
@@ -262,10 +262,9 @@ func testInPlaceMatchesRewrite(t *testing.T, selectedBuckets, selectedEarly bool
 											}
 										}
 									}
-									if closer > closerBefore {
-										t.Logf("%s (%s): %d slots differ from the rewrite, all matching classic whisper", name, sc.schema, closer-closerBefore)
+									if closer > 0 {
+										t.Logf("%s (%s): %d slots differ from the rewrite, all matching classic whisper", name, sc.schema, closer)
 									}
-									closerBefore = closer
 									a, err := inPlace.Snapshot(context.Background(), name)
 									if err != nil {
 										t.Fatal(err)

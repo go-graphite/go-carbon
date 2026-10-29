@@ -358,15 +358,16 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 						pointOut = *out
 					}
 				}
-				if pointsOut != nil {
+				switch {
+				case pointsOut != nil:
 					if len(batch) > 0 && (!bytes.Equal(batchName, name) || len(batch) == cap(batch)) {
 						flush()
 					}
 					batchName = name
 					batch = append(batch, points.Point{Value: value, Timestamp: timestamp})
-				} else if pointOut != nil {
+				case pointOut != nil:
 					pointOut(name, value, timestamp)
-				} else {
+				default:
 					rcv.out(points.OnePoint(string(name), value, timestamp))
 				}
 			}
