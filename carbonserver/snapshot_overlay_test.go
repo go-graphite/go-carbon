@@ -39,6 +39,7 @@ func unstartedOverlayListener(t *testing.T, cache, root string) *CarbonserverLis
 }
 
 func TestPendingNamesGateInitialPublicationAndQuota(t *testing.T) {
+	t.Parallel()
 	cache, root, _ := snapshotFixture(t)
 	first := overlayListener(t, cache, root)
 	id, err := first.CheckpointReadIndex()
@@ -78,6 +79,7 @@ func TestPendingNamesGateInitialPublicationAndQuota(t *testing.T) {
 }
 
 func TestSnapshotOverlayCheckpoint(t *testing.T) {
+	t.Parallel()
 	cache, root, _ := snapshotFixture(t)
 	first := overlayListener(t, cache, root)
 	first.insertRealtimeMetric(first.CurrentFileIndex().trieIdx, "new.persisted")
@@ -123,6 +125,7 @@ func TestSnapshotOverlayCheckpoint(t *testing.T) {
 }
 
 func TestWarmCheckpointNamesSurviveWithoutPendingPoints(t *testing.T) {
+	t.Parallel()
 	cache, root, _ := snapshotFixture(t)
 	first := overlayListener(t, cache, root)
 	first.PauseIndexUpdates()
@@ -169,6 +172,7 @@ func TestWarmCheckpointNamesSurviveWithoutPendingPoints(t *testing.T) {
 }
 
 func TestSnapshotOverlayRejectsCorruptOrStaleCheckpoint(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"checksum", "count", "base", "version", "path"} {
 		t.Run(kind, func(t *testing.T) {
 			cache, root, _ := snapshotFixture(t)
@@ -214,6 +218,7 @@ func TestSnapshotOverlayRejectsCorruptOrStaleCheckpoint(t *testing.T) {
 }
 
 func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
+	t.Parallel()
 	l := savedIndex(t, "existing.metric")
 	rewriteCacheVersion(t, l.fileListCache, FLCVersion1)
 	l.updateFileList(l.whisperData, nil, nil)
@@ -252,6 +257,7 @@ func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
 }
 
 func TestSavedMetricLookupUsesFrozenCatalogue(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	listener := overlayListener(t, cache, root)
 	listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "overlay.new")
@@ -276,6 +282,7 @@ func TestSavedMetricLookupUsesFrozenCatalogue(t *testing.T) {
 }
 
 func TestSavedMetricLookupsAreIndependent(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	listener := overlayListener(t, cache, root)
 	listener.insertRealtimeMetric(listener.CurrentFileIndex().trieIdx, "overlay.new")

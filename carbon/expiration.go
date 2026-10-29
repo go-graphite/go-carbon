@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -14,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const expirationPageSize = 256
+const expirationPageSize = 1024
 
 type expirationStore interface {
 	ListPage(context.Context, string, string, int) ([]store.Metadata, error)
@@ -26,6 +28,9 @@ type expirationStore interface {
 type expirationStats struct {
 	examined, initialized, deleted, conflicts, pending, errors atomic.Uint64
 	duration, lastSuccess                                      atomic.Int64
+	wouldExpire, wouldBytes, guarded, limited                  atomic.Uint64
+	mu                                                         sync.Mutex
+	rules                                                      map[string]*expirationRuleStats
 }
 
 func (s *expirationStats) Stat(send helper.StatCallback) {
@@ -37,23 +42,36 @@ func (s *expirationStats) Stat(send helper.StatCallback) {
 	send("errors", float64(s.errors.Swap(0)))
 	send("sweepDurationNs", float64(s.duration.Load()))
 	send("lastSuccessTime", float64(s.lastSuccess.Load()))
+	send("wouldExpire", float64(s.wouldExpire.Swap(0)))
+	send("wouldExpireLogicalBytes", float64(s.wouldBytes.Swap(0)))
+	send("guarded", float64(s.guarded.Swap(0)))
+	send("limited", float64(s.limited.Swap(0)))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for name, rule := range s.rules {
+		rule.Stat(func(key string, value float64) { send("rules."+name+"."+key, value) })
+	}
 }
 
 // An expirer owns one immutable policy. Reload and shutdown join its worker
 // before replacing the policy or closing the store and catalog refresher.
 type metricExpirer struct {
-	db         expirationStore
-	rules      persister.WhisperExpirationRules
-	expiration time.Duration
-	interval   time.Duration
-	rate       int
-	now        func() time.Time
-	pending    func(string) bool
-	notify     func()
-	stats      *expirationStats
-	cancel     context.CancelFunc
-	done       chan struct{}
-	restored   <-chan struct{}
+	db                            expirationStore
+	rules                         persister.WhisperExpirationRules
+	expiration                    time.Duration
+	interval                      time.Duration
+	rate                          int
+	now                           func() time.Time
+	pending                       func(string) bool
+	notify                        func()
+	stats                         *expirationStats
+	cancel                        context.CancelFunc
+	done                          chan struct{}
+	restored                      <-chan struct{}
+	dryRun                        bool
+	deleteRate, maxDeletes, maxL0 int
+	maxDebt                       uint64
+	ruleStats                     []*expirationRuleStats
 }
 
 func validateExpirationConfig(cfg *Config) error {
@@ -65,6 +83,9 @@ func validateExpirationConfig(cfg *Config) error {
 	}
 	if cfg.Whisper.StoreExpirationScanRate <= 0 {
 		return errors.New("whisper.store-expiration-scan-rate must be positive")
+	}
+	if cfg.Whisper.StoreExpirationDeleteRate <= 0 || cfg.Whisper.StoreExpirationMaxDeletes <= 0 || cfg.Whisper.StoreExpirationMaxL0 <= 0 || cfg.Whisper.StoreExpirationMaxDebt <= 0 {
+		return errors.New("store expiration requires positive delete-rate, max-deletes, max-l0-sublevels and max-compaction-debt")
 	}
 	return nil
 }
@@ -91,6 +112,8 @@ func (app *App) startExpiration() {
 		db: app.MetricStore, rules: cfg.ExpirationRules,
 		expiration: cfg.StoreExpiration.Value(), interval: cfg.StoreExpirationCheckInterval.Value(),
 		rate: cfg.StoreExpirationScanRate, now: time.Now,
+		dryRun: cfg.StoreExpirationDryRun, deleteRate: cfg.StoreExpirationDeleteRate,
+		maxDeletes: cfg.StoreExpirationMaxDeletes, maxL0: cfg.StoreExpirationMaxL0, maxDebt: uint64(cfg.StoreExpirationMaxDebt),
 		pending:  core.Has,
 		stats:    app.expirationStats,
 		restored: app.storeRestoreDone,
@@ -149,6 +172,7 @@ func (r *metricExpirer) close() {
 func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 	started := time.Now()
 	var examined, deleted uint64
+	var reports []expirationReport
 	defer func() {
 		// Flush tombstones even after a partial sweep so idle stores can
 		// reclaim data through compaction. Do not wait for the flush here.
@@ -162,6 +186,17 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 			}
 		}
 		r.stats.duration.Store(int64(time.Since(started)))
+		for i, stats := range r.ruleStats {
+			stats.duration.Store(int64(time.Since(started)))
+			if err == nil {
+				stats.end.Store(r.now().Unix())
+			}
+			name := "default"
+			if i > 0 {
+				name = r.rules[i-1].Name
+			}
+			zapwriter.Logger("storage").Info("shared metric expiration rule", zap.String("rule", name), zap.Bool("dryRun", r.dryRun), zap.Uint64("scanned", reports[i].scanned), zap.Uint64("expired", reports[i].expired), zap.Uint64("kept", reports[i].kept), zap.Uint64("wouldExpire", reports[i].would), zap.Uint64("wouldExpireLogicalBytes", reports[i].bytes), zap.Strings("samples", reports[i].samples))
+		}
 		if err == nil && flushErr == nil {
 			r.stats.lastSuccess.Store(r.now().Unix())
 		} else if err != nil && !errors.Is(err, context.Canceled) {
@@ -171,41 +206,240 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 			zap.Uint64("examined", examined), zap.Uint64("deleted", deleted),
 			zap.Duration("runtime", time.Since(started)), zap.Error(err))
 	}()
-	// One reusable ticker bounds both scans and deletes without keeping a
-	// database snapshot or a metric lock open while waiting for budget.
-	ticker := time.NewTicker(max(time.Nanosecond, time.Second/time.Duration(r.rate)))
-	defer ticker.Stop()
+	r.setupRuleStats()
+	reports = make([]expirationReport, len(r.ruleStats))
+	deletesPaused := false
+	scanBudget := expirationBudget{rate: r.rate}
+	deleteBudget := expirationBudget{rate: r.deleteRate}
+	now := r.now()
 	return store.EachPage(ctx, r.db.ListPage, "", expirationPageSize, func(page []store.Metadata) error {
-		for _, m := range page {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-ticker.C:
+		if err := scanBudget.wait(ctx, len(page)); err != nil {
+			return err
+		}
+		candidates := make([]store.Metadata, 0, 128)
+		indexes := make([]int, 0, 128)
+		flush := func() error {
+			if len(candidates) == 0 {
+				return nil
 			}
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if err := deleteBudget.wait(ctx, len(candidates)); err != nil {
+				return err
 			}
-			examined++
-			r.stats.examined.Add(1)
-			removed, metricErr := r.expire(ctx, m)
-			if metricErr != nil {
-				return fmt.Errorf("expire metric %q: %w", m.Name, metricErr)
+			// Check after pacing and immediately before acquiring writer locks.
+			if pressure, ok := r.db.(interface{ ExpirationPressure() (int64, uint64, bool) }); ok {
+				l0, debt, stalled := pressure.ExpirationPressure()
+				if stalled || (r.maxL0 > 0 && l0 >= int64(r.maxL0)) || (r.maxDebt > 0 && debt >= r.maxDebt) {
+					r.stats.guarded.Add(uint64(len(candidates)))
+					deletesPaused = true
+					candidates, indexes = candidates[:0], indexes[:0]
+					return nil
+				}
 			}
-			if removed {
+			// Cache state can change while a batch waits for its write budget.
+			n := 0
+			for i, m := range candidates {
+				if r.pending != nil && r.pending(m.Name) {
+					r.stats.pending.Add(1)
+					r.ruleStats[indexes[i]].kept.Add(1)
+					reports[indexes[i]].kept++
+					continue
+				}
+				candidates[n], indexes[n] = m, indexes[i]
+				n++
+			}
+			candidates, indexes = candidates[:n], indexes[:n]
+			var outcomes []error
+			if batch, ok := r.db.(interface {
+				DeleteBatchIfUnchanged(context.Context, []store.Metadata) ([]error, error)
+			}); ok {
+				var err error
+				outcomes, err = batch.DeleteBatchIfUnchanged(ctx, candidates)
+				if err != nil {
+					return err
+				}
+			} else {
+				outcomes = make([]error, len(candidates))
+				for i, m := range candidates {
+					outcomes[i] = r.db.DeleteIfUnchanged(ctx, m.Name, m)
+				}
+			}
+			for i, err := range outcomes {
+				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+					r.stats.conflicts.Add(1)
+					r.ruleStats[indexes[i]].kept.Add(1)
+					reports[indexes[i]].kept++
+					continue
+				}
+				if err != nil {
+					return err
+				}
 				deleted++
-				// The buffered refresher signal also covers cancellation or an
-				// error partway through a page; it never starts a scan inline.
+				r.stats.deleted.Add(1)
+				r.ruleStats[indexes[i]].expired.Add(1)
+				reports[indexes[i]].expired++
 				if r.notify != nil {
 					r.notify()
 				}
 			}
+			candidates, indexes = candidates[:0], indexes[:0]
+			return nil
 		}
-		return nil
+		for _, m := range page {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			examined++
+			r.stats.examined.Add(1)
+			idx := r.rules.MatchIndex(m.Name, now) + 1
+			stats := r.ruleStats[idx]
+			stats.scanned.Add(1)
+			reports[idx].scanned++
+			ttl := r.expiration
+			if idx > 0 {
+				ttl = r.rules[idx-1].TTL()
+			}
+			if m.LastUpdate.IsZero() {
+				stats.kept.Add(1)
+				reports[idx].kept++
+				if !r.dryRun {
+					if _, err := r.expire(ctx, m); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if ttl == 0 || now.Sub(m.LastUpdate) < ttl {
+				stats.kept.Add(1)
+				reports[idx].kept++
+				continue
+			}
+			if r.pending != nil && r.pending(m.Name) {
+				r.stats.pending.Add(1)
+				stats.kept.Add(1)
+				reports[idx].kept++
+				continue
+			}
+			size := uint64(16 + 12*len(m.Retentions))
+			for _, retention := range m.Retentions {
+				size += uint64(retention.Count) * 12
+			}
+			stats.would.Add(1)
+			stats.bytes.Add(size)
+			reports[idx].would++
+			if len(reports[idx].samples) < 10 {
+				reports[idx].samples = append(reports[idx].samples, m.Name)
+			}
+			reports[idx].bytes += size
+			r.stats.wouldExpire.Add(1)
+			r.stats.wouldBytes.Add(size)
+			if r.dryRun {
+				continue
+			}
+			if deletesPaused {
+				r.stats.guarded.Add(1)
+				continue
+			}
+			if r.maxDeletes > 0 && deleted+uint64(len(candidates)) >= uint64(r.maxDeletes) {
+				r.stats.limited.Add(1)
+				continue
+			}
+			candidates = append(candidates, m)
+			indexes = append(indexes, idx)
+			if len(candidates) == 128 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		return flush()
 	})
+}
+
+// Page-sized reservations amortize timer wakeups. Processing time pays down
+// the next reservation; an idle worker can never accumulate unbounded credit.
+type expirationBudget struct {
+	rate int
+	next time.Time
+}
+
+func (b *expirationBudget) wait(ctx context.Context, count int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b.rate <= 0 || count == 0 {
+		return nil
+	}
+	now := time.Now()
+	cost := time.Duration(float64(time.Second) * float64(count) / float64(b.rate))
+	if b.next.IsZero() {
+		b.next = now
+	} else if b.next.Before(now.Add(-cost)) {
+		b.next = now.Add(-cost)
+	}
+	b.next = b.next.Add(cost)
+	if !b.next.After(now) {
+		return nil
+	}
+	timer := time.NewTimer(time.Until(b.next))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+type expirationReport struct {
+	scanned, expired, kept, would, bytes uint64
+	samples                              []string
+}
+
+type expirationRuleStats struct {
+	scanned, expired, kept, would, bytes atomic.Uint64
+	duration, end                        atomic.Int64
+}
+
+func (s *expirationRuleStats) Stat(send helper.StatCallback) {
+	send("scanned", float64(s.scanned.Swap(0)))
+	send("expired", float64(s.expired.Swap(0)))
+	send("kept", float64(s.kept.Swap(0)))
+	send("wouldExpire", float64(s.would.Swap(0)))
+	send("wouldExpireLogicalBytes", float64(s.bytes.Swap(0)))
+	send("sweepDurationNs", float64(s.duration.Load()))
+	send("lastSweepEnd", float64(s.end.Load()))
+}
+func (r *metricExpirer) setupRuleStats() {
+	r.stats.mu.Lock()
+	defer r.stats.mu.Unlock()
+	if r.stats.rules == nil {
+		r.stats.rules = make(map[string]*expirationRuleStats)
+	}
+	r.ruleStats = make([]*expirationRuleStats, len(r.rules)+1)
+	for i := range r.ruleStats {
+		name := "default"
+		if i > 0 {
+			name = fmt.Sprintf("%d_%s", i, strings.Map(func(c rune) rune {
+				if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' {
+					return c
+				}
+				return '_'
+			}, r.rules[i-1].Name))
+		}
+		stats := r.stats.rules[name]
+		if stats == nil {
+			stats = &expirationRuleStats{}
+			r.stats.rules[name] = stats
+		}
+		r.ruleStats[i] = stats
+	}
 }
 
 func (r *metricExpirer) expire(ctx context.Context, m store.Metadata) (bool, error) {
 	if m.LastUpdate.IsZero() {
+		if r.dryRun {
+			return false, nil
+		}
 		err := r.db.InitializeActivity(ctx, m.Name, m)
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
 			r.stats.conflicts.Add(1)
@@ -216,12 +450,18 @@ func (r *metricExpirer) expire(ctx context.Context, m store.Metadata) (bool, err
 		}
 		return false, err
 	}
-	ttl := r.rules.Match(m.Name, r.expiration)
+	ttl := r.expiration
+	if idx := r.rules.MatchIndex(m.Name, r.now()); idx >= 0 {
+		ttl = r.rules[idx].TTL()
+	}
 	if ttl == 0 || r.now().Sub(m.LastUpdate) < ttl {
 		return false, nil
 	}
 	if r.pending != nil && r.pending(m.Name) {
 		r.stats.pending.Add(1)
+		return false, nil
+	}
+	if r.dryRun {
 		return false, nil
 	}
 	// New arrivals after the cache check may race this deletion. Store revision

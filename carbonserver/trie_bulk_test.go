@@ -11,6 +11,7 @@ import (
 )
 
 func TestTrieBulkPruningReclaimsNodes(t *testing.T) {
+	t.Parallel()
 	trie, removed := bulkTreeForReclamation(t)
 	// A private builder must not pin retired nodes through shared pointer-bearing
 	// allocation blocks. Queries may still hold a node during pruning; once those
@@ -50,6 +51,7 @@ func bulkTreeForReclamation(t *testing.T) (*trieIndex, weak.Pointer[trieNode]) {
 // TestTrieBulkMatchesIncremental checks insertion order, duplicate metadata,
 // radix splits, directory/file collisions, quotas and the subsequent live update.
 func TestTrieBulkMatchesIncremental(t *testing.T) {
+	t.Parallel()
 	paths := []string{"/abc/def.wsp", "/ab/def.wsp", "/abc.wsp", "/abc", "/abcdef/long.wsp", "/系统/核心/cpu.wsp", "/duplicate.wsp", "/duplicate.wsp"}
 	for i := 0; i < 2000; i++ {
 		paths = append(paths, fmt.Sprintf("/ns%d/host%04d/cpu%d.wsp", i%13, i%179, i%11))
@@ -68,7 +70,7 @@ func TestTrieBulkMatchesIncremental(t *testing.T) {
 			}
 			reference.prune()
 			count, files, dirs, _, _, _, _, _ := reference.countNodes()
-			if bulk.builder.nodes != count || bulk.builder.dirs != dirs || bulk.fileCount != files {
+			if bulk.builder.nodes != count || bulk.builder.dirs != dirs || bulk.getFileCount() != int64(files) {
 				t.Fatalf("bulk counts = %d/%d/%d, reference = %d/%d/%d", bulk.builder.nodes, bulk.fileCount, bulk.builder.dirs, count, files, dirs)
 			}
 			bulk.builder = nil // the publication boundary

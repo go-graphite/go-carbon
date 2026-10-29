@@ -22,8 +22,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
+
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/storecopy"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
+	"github.com/go-graphite/go-carbon/internal/whisperpath"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/golang/snappy"
 	"github.com/grafana/pyroscope-go"
@@ -34,25 +38,26 @@ const authHeader = "X-Buckyd-Authorization"
 const readHeaderTimeout = 10 * time.Second
 
 type Config struct {
-	Enabled       bool     `toml:"enabled"`
-	Bind          string   `toml:"bind"`
-	TmpDir        string   `toml:"tmpdir"`
-	MaxBodyBytes  int64    `toml:"max_body_bytes"`
-	MaxTransfers  int      `toml:"max_transfers"`
-	JWTSecretFile string   `toml:"auth-jwt-secret-file"`
-	Node          string   `toml:"node"`
-	Hash          string   `toml:"hash"`
-	Replicas      int      `toml:"replicas"`
-	Nodes         []string `toml:"nodes"`
-	ReadMTime     bool     `toml:"mtime"`
-	Sparse        bool     `toml:"sparse"`
-	Compressed    bool     `toml:"compressed"`
-	Backend       string   `toml:"backend"`
-	CachePath     string   `toml:"cache_path"`
-	Prefix        string   `toml:"prefix"`
-	Timeout       int64    `toml:"timeout"`
-	Pprof         string   `toml:"pprof"`
-	Pyroscope     string   `toml:"pyroscope"`
+	Enabled          bool     `toml:"enabled"`
+	Bind             string   `toml:"bind"`
+	TmpDir           string   `toml:"tmpdir"`
+	MaxBodyBytes     int64    `toml:"max_body_bytes"`
+	MaxTransfers     int      `toml:"max_transfers"`
+	CopyMinFreeBytes int64    `toml:"copy-min-free-bytes"`
+	JWTSecretFile    string   `toml:"auth-jwt-secret-file"`
+	Node             string   `toml:"node"`
+	Hash             string   `toml:"hash"`
+	Replicas         int      `toml:"replicas"`
+	Nodes            []string `toml:"nodes"`
+	ReadMTime        bool     `toml:"mtime"`
+	Sparse           bool     `toml:"sparse"`
+	Compressed       bool     `toml:"compressed"`
+	Backend          string   `toml:"backend"`
+	CachePath        string   `toml:"cache_path"`
+	Prefix           string   `toml:"prefix"`
+	Timeout          int64    `toml:"timeout"`
+	Pprof            string   `toml:"pprof"`
+	Pyroscope        string   `toml:"pyroscope"`
 }
 
 // Node uses buckytools' wire field names and represents HOST[:PORT][=INSTANCE].
@@ -104,6 +109,8 @@ type Service struct {
 	pprofListener net.Listener
 	pprofErr      chan error
 	stopped       bool
+	copyMu        sync.RWMutex
+	storeCopy     *storecopy.Manager
 }
 
 func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
@@ -129,6 +136,9 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 }
 
 func validateConfig(config Config) error {
+	if config.CopyMinFreeBytes < 0 {
+		return errors.New("copy-min-free-bytes must not be negative")
+	}
 	if config.Backend != "" && config.Backend != "shared" {
 		return fmt.Errorf("unsupported buckyd backend %q", config.Backend)
 	}
@@ -148,6 +158,9 @@ func validateConfig(config Config) error {
 }
 
 func normalizeConfig(config *Config) {
+	if config.CopyMinFreeBytes == 0 {
+		config.CopyMinFreeBytes = 32 << 30
+	}
 	if config.Hash == "" {
 		config.Hash = "carbon"
 	}
@@ -314,6 +327,15 @@ func (s *Service) SetOnChange(callback func()) {
 	defer s.mu.Unlock()
 	s.onChange = callback
 }
+
+// SetStoreCopy attaches the App-owned checkpoint input boundary before Start.
+func (s *Service) SetStoreCopy(manager *storecopy.Manager) {
+	manager.SetMinimumFreeBytes(s.config.CopyMinFreeBytes)
+	manager.SetRingIdentity(s.config.Node, s.config.Hash, s.config.Replicas, s.config.Nodes)
+	s.storeCopy = manager
+}
+
+func (s *Service) StoreCopyActive() bool { return s.storeCopy != nil && s.storeCopy.Active() }
 func (s *Service) changed() {
 	s.mu.Lock()
 	callback := s.onChange
@@ -330,6 +352,9 @@ func (s *Service) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := shutdownServer(ctx, resources.server, &s.handlers)
+	if s.storeCopy != nil {
+		err = firstError(err, s.storeCopy.Close())
+	}
 	if resources.listener != nil {
 		_ = resources.listener.Close()
 	}
@@ -415,7 +440,13 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/metrics", s.list)
 	mux.HandleFunc("/metrics/", s.metric)
 	mux.HandleFunc("/hashring", s.hashring)
+	mux.HandleFunc(storecopy.Endpoint, s.copyHandler)
+	mux.HandleFunc(storecopy.Endpoint+"/", s.copyHandler)
+	mux.HandleFunc("/v1/transfer/", s.bulk)
+	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		phasecpu.Set(phasecpu.Buckyd)
+		defer phasecpu.Set(phasecpu.Other)
 		s.mu.Lock()
 		if s.stopped {
 			s.mu.Unlock()
@@ -433,18 +464,9 @@ func (s *Service) allowed(metric, op string, r *http.Request) error {
 	if len(s.secret) == 0 {
 		return nil
 	}
-	token, err := jwt.ParseWithClaims(r.Header.Get(authHeader), &ACL{}, func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, errors.New("unexpected JWT signing method")
-		}
-		return s.secret, nil
-	})
+	claims, err := s.authorizationClaims(r)
 	if err != nil {
 		return err
-	}
-	claims, ok := token.Claims.(*ACL)
-	if !ok || !token.Valid {
-		return errors.New("token not valid")
 	}
 	ns := false
 	for _, pattern := range claims.Namespaces {
@@ -467,6 +489,48 @@ func (s *Service) allowed(metric, op string, r *http.Request) error {
 	}
 	return fmt.Errorf("token lacks %s permission", op)
 }
+func (s *Service) authorizationClaims(r *http.Request) (*ACL, error) {
+	token, err := jwt.ParseWithClaims(r.Header.Get(authHeader), &ACL{}, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, errors.New("unexpected JWT signing method")
+		}
+		return s.secret, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	claims, ok := token.Claims.(*ACL)
+	if !ok || !token.Valid {
+		return nil, errors.New("token not valid")
+	}
+	return claims, nil
+}
+
+func (s *Service) allowedRoot(op string, r *http.Request) error {
+	if len(s.secret) == 0 {
+		return nil
+	}
+	claims, err := s.authorizationClaims(r)
+	if err != nil {
+		return err
+	}
+	root := false
+	for _, namespace := range claims.Namespaces {
+		if namespace == "*" {
+			root = true
+		}
+	}
+	if !root {
+		return errors.New("bulk operation requires the explicit root namespace")
+	}
+	for _, grant := range claims.Ops {
+		if grant == "*" || grant == op {
+			return nil
+		}
+	}
+	return fmt.Errorf("token lacks %s permission", op)
+}
+
 func version(m chunkstore.Metadata) string {
 	return fmt.Sprintf("%d:%d:%d", m.ID, m.Generation, m.Revision)
 }
@@ -484,7 +548,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errors.New("bad request method"), 400)
 		return
 	}
-	if err := s.allowed("*", "read", r); err != nil {
+	if err := s.allowedRoot("read", r); err != nil {
 		writeError(w, err, 403)
 		return
 	}
@@ -532,19 +596,19 @@ func listFilter(r *http.Request) (metricFilter, error) {
 func (s *Service) listNames(ctx context.Context, prefix, after string, filter metricFilter) ([]string, error) {
 	names := make([]string, 0)
 	for {
-		page, err := s.store.ListPage(ctx, prefix, after, 10000)
+		page, err := s.store.ListTransferNames(ctx, prefix, after, 10000)
 		if err != nil {
 			return nil, err
 		}
-		for _, metadata := range page {
-			if filter.matches(metadata.Name) {
-				names = append(names, metadata.Name)
+		for _, name := range page {
+			if filter.matches(name) {
+				names = append(names, name)
 			}
 		}
 		if len(page) < 10000 {
 			return names, nil
 		}
-		after = page[len(page)-1].Name
+		after = page[len(page)-1]
 	}
 }
 
@@ -560,6 +624,12 @@ func (f metricFilter) matches(name string) bool {
 }
 
 func (s *Service) metric(w http.ResponseWriter, r *http.Request) {
+	s.copyMu.RLock()
+	defer s.copyMu.RUnlock()
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && s.storeCopy != nil && s.storeCopy.Active() {
+		writeError(w, errors.New("administrative metric mutations are fenced by whole-store copy"), http.StatusConflict)
+		return
+	}
 	name := strings.TrimPrefix(r.URL.Path, "/metrics/")
 	if name == "" || strings.Contains(name, "/") {
 		writeError(w, errors.New("metric name missing"), 400)
@@ -572,6 +642,12 @@ func (s *Service) metric(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.allowed(name, op, r); err != nil {
 		writeError(w, err, 403)
+		return
+	}
+	if (r.Method == http.MethodPost || r.Method == http.MethodPut) && s.store.IncrementalSource() != "" {
+		// Continuation state cannot be replaced by flattened Whisper imports.
+		// Reject before receiving a body; the store retains the same fence.
+		writeError(w, errors.New("flattened transfers are unsupported during incremental migration"), http.StatusConflict)
 		return
 	}
 	switch r.Method {
@@ -611,7 +687,7 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request, name string) {
 		writeError(w, err, 404)
 		return
 	}
-	file, err := os.CreateTemp(s.config.TmpDir, "buckyd-export-*.wsp")
+	file, err := s.createTemp("buckyd-export-*.wsp")
 	if err != nil {
 		writeError(w, err, 500)
 		return
@@ -640,7 +716,7 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request, name string) {
 	servePath := path
 	if strings.Contains(r.Header.Get("Accept-Encoding"), "snappy") {
 		w.Header().Set("Content-Encoding", "snappy")
-		compressed, err := os.CreateTemp(s.config.TmpDir, "buckyd-snappy-*.wsp")
+		compressed, err := s.createTemp("buckyd-snappy-*.wsp")
 		if err != nil {
 			writeError(w, err, 500)
 			return
@@ -703,9 +779,15 @@ func (s *Service) acquireTransfer() bool {
 
 func (s *Service) releaseTransfer() { <-s.transfers }
 
+func (s *Service) createTemp(pattern string) (*os.File, error) {
+	return whisperpath.Create(s.config.TmpDir, 0750, func() (*os.File, error) {
+		return os.CreateTemp(s.config.TmpDir, pattern)
+	})
+}
+
 func (s *Service) receiveFile(w http.ResponseWriter, r *http.Request) (string, func(), bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.config.MaxBodyBytes)
-	file, err := os.CreateTemp(s.config.TmpDir, "buckyd-import-*.wsp")
+	file, err := s.createTemp("buckyd-import-*.wsp")
 	if err != nil {
 		writeError(w, err, 500)
 		return "", nil, false
@@ -859,7 +941,7 @@ func (s *Service) offloadFile(w http.ResponseWriter, response *http.Response, re
 	if !ok {
 		return "", nil, false
 	}
-	file, err := os.CreateTemp(s.config.TmpDir, "buckyd-offload-*.wsp")
+	file, err := s.createTemp("buckyd-offload-*.wsp")
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return "", nil, false

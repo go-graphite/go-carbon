@@ -29,6 +29,7 @@ func cursorKeys(c *fstCursor, s fstState, prefix []byte, out *[][2]any) {
 }
 
 func TestFSTCursorMatchesVellum(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(3))
 	for iter := 0; iter < 200; iter++ {
 		keys := randomFSTKeys(rng, 1+rng.Intn(300))
@@ -99,6 +100,7 @@ func TestFSTCursorMatchesVellum(t *testing.T) {
 }
 
 func TestFSTCursorWideNodes(t *testing.T) {
+	t.Parallel()
 	var keys [][]byte
 	for c := 1; c < 256; c++ {
 		keys = append(keys, []byte{'d', 0, byte(c)}, []byte{'d', 0, byte(c), 'x'})

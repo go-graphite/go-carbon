@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-graphite/carbonzipper/zipper/httpHeaders"
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-whisper"
 	grpcv2 "github.com/go-graphite/protocol/carbonapi_v2_grpc"
 	protov2 "github.com/go-graphite/protocol/carbonapi_v2_pb"
@@ -38,6 +39,8 @@ type fetchResponse struct {
 	valuesFetched  int
 	memoryUsed     int
 	metrics        []string
+	// gzipped data is the gzip encoding of the response, see gzipFetchResponse.
+	gzipped bool
 }
 
 type target struct {
@@ -160,6 +163,8 @@ func getTargets(req *http.Request, format responseFormat) (map[timeRange][]targe
 }
 
 func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req *http.Request) {
+	phasecpu.Set(phasecpu.Render)
+	defer phasecpu.Set(phasecpu.Other)
 	// URL: /render/?target=the.metric.Name&format=pickle&from=1396008021&until=1396022421
 	t0 := time.Now()
 	ctx := req.Context()
@@ -269,7 +274,9 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 		listener.UpdateMetricsAccessTimesByRequest(response.metrics)
 	}
 
-	wr.Write(response.data)
+	if err := writeRenderResponse(wr, req, response); err != nil {
+		logger.Error("failed to write decoded cached response", zap.Error(err))
+	}
 
 	atomic.AddUint64(&listener.metrics.FetchSize, uint64(response.memoryUsed))
 	if ce := logger.check(zap.InfoLevel, "fetch served"); ce != nil {
@@ -286,6 +293,9 @@ func (listener *CarbonserverListener) renderHandler(wr http.ResponseWriter, req 
 }
 
 func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeRange][]target, format string) (string, uint64) {
+	if metricStore := listener.getMetricStore(); metricStore != nil {
+		format += "&store=" + strconv.FormatUint(metricStore.ReadCacheEpoch(), 16)
+	}
 	targetKeys := make([]string, 0, len(targets))
 	for tr, ts := range targets {
 		names := make([]string, 0, len(ts))
@@ -327,13 +337,17 @@ func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger
 	var err error
 
 	var response fetchResponse
-	if listener.queryCacheEnabled && listener.getMetricStore() == nil {
-		key, size := listener.getRenderCacheKeyAndSize(targets, format.String())
+	if listener.queryCacheEnabled {
+		key, _ := listener.getRenderCacheKeyAndSize(targets, format.String())
 		var res interface{}
 		cacheT0 := time.Now()
-		res, fromCache, err = getWithCache(logger, listener.queryCache, key, size, 60,
+		res, fromCache, err = getWithCache(logger, listener.queryCache, key, 60, fetchResponseSize,
 			func() (interface{}, error) {
-				return listener.prepareDataProto(ctx, logger, format, targets, tle)
+				response, err := listener.prepareDataProto(ctx, logger, format, targets, tle)
+				if err != nil || !listener.queryCacheGzip {
+					return response, err
+				}
+				return listener.gzipFetchResponse(response), nil
 			})
 		tle.CacheDuration = float64(time.Since(cacheT0)) / float64(time.Second)
 		if err == nil {
@@ -483,7 +497,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	tle.GlobExpansionDuration = float64(time.Since(expansionT0)) / float64(time.Second)
 	tle.FindFromCache = isExpandCacheHit
 	if expandedGlobs == nil {
-		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+		return fetchResponse{nil, contentType, 0, 0, 0, nil, false}, err
 	}
 	metricGlobMap := getMetricGlobMapFromExpandedGlobs(expandedGlobs)
 	// Collect directly: a buffered channel and goroutine per request cost more
@@ -502,12 +516,12 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 
 	if listener.checkRequestCtx(ctx) != nil {
 		err := fmt.Errorf("time out while preparing data proto")
-		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+		return fetchResponse{nil, contentType, 0, 0, 0, nil, false}, err
 	}
 
 	if format == protoV2Format || format == jsonFormat {
 		if len(multiv2.Metrics) == 0 && format == protoV2Format {
-			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+			return fetchResponse{nil, contentType, 0, 0, 0, nil, false}, err
 		}
 
 		metricsFetched = len(multiv2.Metrics)
@@ -518,7 +532,7 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 		}
 	} else {
 		if len(multiv3.Metrics) == 0 && format == protoV3Format {
-			return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+			return fetchResponse{nil, contentType, 0, 0, 0, nil, false}, err
 		}
 
 		metricsFetched = len(multiv3.Metrics)
@@ -582,9 +596,9 @@ func (listener *CarbonserverListener) prepareDataProto(ctx context.Context, logg
 	tle.MarshalDuration = float64(time.Since(marshalT0)) / float64(time.Second)
 
 	if err != nil {
-		return fetchResponse{nil, contentType, 0, 0, 0, nil}, err
+		return fetchResponse{nil, contentType, 0, 0, 0, nil, false}, err
 	}
-	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics}, nil
+	return fetchResponse{b, contentType, metricsFetched, valuesFetched, memoryUsed, metrics, false}, nil
 }
 
 // Small renders do not need the buffer reserved for a large glob. Count files
@@ -687,6 +701,8 @@ func (listener *CarbonserverListener) streamMetrics(stream grpcv2.CarbonV2_Rende
 
 // Render implements Render rpc of CarbonV2 gRPC service
 func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, stream grpcv2.CarbonV2_RenderServer) (rpcErr error) {
+	phasecpu.Set(phasecpu.Render)
+	defer phasecpu.Set(phasecpu.Other)
 	t0 := time.Now()
 	ctx := stream.Context()
 
@@ -823,7 +839,7 @@ func (listener *CarbonserverListener) Render(req *protov2.MultiFetchRequest, str
 }
 
 func (listener *CarbonserverListener) renderResponseChannel(targets map[timeRange][]target, format responseFormat, tle *traceLogEntries, fetchMetrics func() (chan response, error)) (chan response, bool, error) {
-	if !listener.streamingQueryCacheEnabled || listener.getMetricStore() != nil {
+	if !listener.streamingQueryCacheEnabled {
 		responseChan, err := fetchMetrics()
 		return responseChan, false, err
 	}

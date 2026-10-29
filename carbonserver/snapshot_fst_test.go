@@ -12,9 +12,8 @@ import (
 	"testing"
 )
 
-func snapshotFixture(t *testing.T) (string, string, []FLCEntry) {
+func buildSnapshotFixture(t *testing.T, root, cache string) []FLCEntry {
 	t.Helper()
-	root, cache := t.TempDir(), filepath.Join(t.TempDir(), "files.gzip")
 	names := []string{"a/value.wsp", "a-sibling/value.wsp", "a.wsp", "a0/value.wsp", "b/child/deep.wsp", "b/child.wsp", "空间/值.wsp"}
 	for _, name := range names {
 		path := filepath.Join(root, name)
@@ -58,10 +57,11 @@ func snapshotFixture(t *testing.T) (string, string, []FLCEntry) {
 	if err := w.finish(); err != nil {
 		t.Fatal(err)
 	}
-	return cache, root, entries
+	return entries
 }
 
 func TestIndexSnapshotRoundTrip(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	s, err := openIndexSnapshot(cache, root)
 	if err != nil {
@@ -96,6 +96,7 @@ func TestIndexSnapshotRoundTrip(t *testing.T) {
 }
 
 func TestIndexSnapshotWrittenByCompleteReconciliation(t *testing.T) {
+	t.Parallel()
 	l := savedIndex(t, "a.value", "a-sibling.value", "a", "b.child.deep", "b.child")
 	if !l.updateFileList(l.whisperData, nil, nil) {
 		t.Fatal("expected the legacy cache to warm the index")
@@ -143,6 +144,7 @@ func TestIndexSnapshotWrittenByCompleteReconciliation(t *testing.T) {
 }
 
 func TestIndexSnapshotFailedBuildPreservesGeneration(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	path := snapshotManifestPath(cache)
 	before, err := os.ReadFile(path)
@@ -192,6 +194,7 @@ func TestIndexSnapshotFailedBuildPreservesGeneration(t *testing.T) {
 }
 
 func TestIndexSnapshotReplacementKeepsActiveMappings(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	old, err := openIndexSnapshot(cache, root)
 	if err != nil {
@@ -225,6 +228,7 @@ func TestIndexSnapshotReplacementKeepsActiveMappings(t *testing.T) {
 }
 
 func TestIndexSnapshotRejectsUnvalidatedGeneration(t *testing.T) {
+	t.Parallel()
 	for _, mutation := range []string{"checksum", "truncate", "source", "root", "version", "count", "path"} {
 		t.Run(mutation, func(t *testing.T) {
 			cache, root, _ := snapshotFixture(t)

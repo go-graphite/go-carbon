@@ -13,6 +13,7 @@ import (
 )
 
 func TestSnapshotQueryMatchesTrie(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	s, err := openIndexSnapshot(cache, root)
 	if err != nil {
@@ -59,6 +60,7 @@ func TestSnapshotQueryMatchesTrie(t *testing.T) {
 }
 
 func TestSnapshotQuotaPrefixSums(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	s, err := openIndexSnapshot(cache, root)
 	if err != nil {
@@ -95,6 +97,7 @@ func TestSnapshotQuotaPrefixSums(t *testing.T) {
 // Query against the unchanged trie with many component shapes and name/namespace
 // collisions, including the punctuation that differs from slash lexical order.
 func TestSnapshotGeneratedGlobParity(t *testing.T) {
+	t.Parallel()
 	random := rand.New(rand.NewSource(7))
 	paths := map[string]bool{}
 	segments := []string{"a", "a-1", "a0", "a_b", "b", "b1", "b2", "long-prefix", "long-prefix-other", "0", "空间", "x", "y", "z"}
@@ -168,6 +171,7 @@ func TestSnapshotGeneratedGlobParity(t *testing.T) {
 }
 
 func TestSnapshotNamespaceExistsMatchesFiles(t *testing.T) {
+	t.Parallel()
 	cache, root, entries := snapshotFixture(t)
 	s, err := openIndexSnapshot(cache, root)
 	if err != nil {

@@ -14,13 +14,16 @@ import (
 )
 
 func TestStartStop(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	assert := assert.New(t)
 
 	startGoroutineNum := runtime.NumGoroutine()
 
 	for i := 0; i < 10; i++ {
 		qa.Root(t, func(root string) {
-			configFile := TestConfig(root)
+			configFile := testConfig(t, root)
 
 			app := New(configFile)
 
@@ -42,6 +45,9 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestRestoreStartupOrdering(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	tests := []struct {
 		name             string
 		globalCompressed bool
@@ -55,7 +61,7 @@ func TestRestoreStartupOrdering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			qa.Root(t, func(root string) {
-				app := New(TestConfig(root))
+				app := New(testConfig(t, root))
 				assert.NoError(t, app.ParseConfig())
 
 				app.Config.Whisper.Compressed = tt.globalCompressed
@@ -107,31 +113,56 @@ func TestRestoreStartupOrdering(t *testing.T) {
 }
 
 func TestReloadAndCollectorDeadlock(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
 	// go func() {
 	//	http.ListenAndServe("localhost:6060", nil)
 	// }()
 
 	qa.Root(t, func(root string) {
-		configFile := TestConfig(root)
+		configFile := testConfig(t, root)
 		app := New(configFile)
 
 		assert.NoError(t, app.ParseConfig())
 
-		app.Config.Common.MetricInterval = &Duration{time.Microsecond}
-		assert.NoError(t, app.Start())
+		app.Config.Grpc.Listen = "127.0.0.1:0"
+		const N = 1024
+		app.Config.Common.MetricInterval = &Duration{time.Hour}
+		// Keep collector output in the cache: file creation adds unrelated I/O
+		// to a test of collection while reload holds the application lock.
+		app.Config.Cache.WriteoutMinPoints = N + 1
+		app.Config.Cache.WriteoutMaxDelay = Duration{time.Hour}
+		writeSharedConfig(t, configFile, app.Config)
+		if err := app.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer app.Stop()
 
-		reloadChan := make(chan struct{}, 1)
-		N := 1024
+		reloadChan := make(chan error, 1)
 
 		// start reload loop
 		go func() {
 			for i := N; i > 0; i-- {
-				app.ReloadConfig()
-				reloadChan <- struct{}{}
+				collector := app.Collector
+				collecting := make(chan struct{})
+				collector.Go(func(exit chan bool) {
+					close(collecting)
+					// Stop must join a real collection under the reload lock.
+					<-exit
+					collector.collect()
+				})
+				<-collecting
+				err := app.ReloadConfig()
+				reloadChan <- err
+				if err != nil {
+					return
+				}
 			}
 		}()
 
 		ticker := time.NewTimer(0)
+		defer ticker.Stop()
 
 		// goroutine doing reloadConfig should send N notifications if there were no deadlock
 		for rN := 0; rN < N; {
@@ -141,7 +172,10 @@ func TestReloadAndCollectorDeadlock(t *testing.T) {
 			ticker.Reset(1 * time.Second)
 
 			select {
-			case <-reloadChan:
+			case err := <-reloadChan:
+				if err != nil {
+					t.Fatal(err)
+				}
 				rN++
 			case <-ticker.C:
 				t.Fatalf("Collector and SIGHUP handers deadlocked")

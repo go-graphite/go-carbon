@@ -13,6 +13,7 @@ import (
 )
 
 func TestQuotaHandlerWithoutTrieIndex(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		index *fileIndex
@@ -35,6 +36,7 @@ func TestQuotaHandlerWithoutTrieIndex(t *testing.T) {
 }
 
 func TestInitialFileListCachePublishesNotificationsAndQuotas(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	flcPath := filepath.Join(dir, "file-list-cache")
 	flc, err := NewFileListCache(flcPath, FLCVersion2, 'w')
@@ -78,6 +80,7 @@ func TestInitialFileListCachePublishesNotificationsAndQuotas(t *testing.T) {
 }
 
 func TestInitialIndexQuotaBeforeFirstTick(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	listener := NewCarbonserverListener(nil)
 	listener.SetWhisperData(dir)
@@ -100,6 +103,7 @@ func TestInitialIndexQuotaBeforeFirstTick(t *testing.T) {
 }
 
 func TestFileScanCountsFreshDiskMetrics(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "namespace", "fresh.wsp")
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {

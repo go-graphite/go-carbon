@@ -23,9 +23,21 @@ import (
 )
 
 func TestMetricStoreCatalogAndReadPaths(t *testing.T) {
+	t.Parallel()
+	for _, exact := range []bool{false, true} {
+		name := "legacy"
+		if exact {
+			name = "exact"
+		}
+		t.Run(name, func(t *testing.T) { checkMetricStoreCatalogAndReadPaths(t, exact) })
+	}
+}
+
+func checkMetricStoreCatalogAndReadPaths(t *testing.T, exact bool) {
+	t.Helper()
 	const now = 1_700_000_000
 	ctx := context.Background()
-	metricStore, err := store.Open(t.TempDir(), store.Options{Now: func() time.Time { return time.Unix(now, 0) }})
+	metricStore, err := store.Open(t.TempDir(), store.Options{ExactBlocks: exact, Now: func() time.Time { return time.Unix(now, 0) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,6 +162,7 @@ func assertMetricStoreRestart(t *testing.T, metricCache *cache.Cache, metricStor
 }
 
 func TestMetricStoreListenerStopsCatalogScanner(t *testing.T) {
+	t.Parallel()
 	metricStore, err := store.Open(t.TempDir(), store.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -173,6 +186,7 @@ func TestMetricStoreListenerStopsCatalogScanner(t *testing.T) {
 }
 
 func TestMetricStoreFetchKeepsSchemaAndSeriesTogether(t *testing.T) {
+	t.Parallel()
 	const now = 1_700_000_000
 	ctx := context.Background()
 	metricStore, err := store.Open(t.TempDir(), store.Options{Now: func() time.Time { return time.Unix(now, 0) }})
@@ -234,6 +248,7 @@ func TestMetricStoreFetchKeepsSchemaAndSeriesTogether(t *testing.T) {
 }
 
 func TestMetricStoreConcurrentRefreshDoesNotResurrectDeletedMetric(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	metricStore, err := store.Open(t.TempDir(), store.Options{})
 	if err != nil {
@@ -275,6 +290,7 @@ func TestMetricStoreConcurrentRefreshDoesNotResurrectDeletedMetric(t *testing.T)
 }
 
 func TestMetricStoreRejectsLateRequests(t *testing.T) {
+	t.Parallel()
 	metricStore, err := store.Open(t.TempDir(), store.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -341,6 +357,7 @@ func assertMetricStoreHTTPMetadata(t *testing.T, listener *CarbonserverListener)
 }
 
 func TestMetricStoreStopDoesNotWaitForeverOnStuckRequest(t *testing.T) {
+	t.Parallel()
 	metricStore, err := store.Open(t.TempDir(), store.Options{})
 	if err != nil {
 		t.Fatal(err)

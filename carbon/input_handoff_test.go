@@ -3,26 +3,139 @@
 package carbon
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/go-graphite/go-carbon/internal/handoff"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
+
+func TestLegacySharedOwnerProcess(t *testing.T) {
+	dir := os.Getenv("GRAPHITE_TEST_LEGACY_SHARED_OWNER_DIR")
+	if dir == "" {
+		return
+	}
+	db, err := store.Open(dir, store.Options{ExactBlocks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("READY")
+	_, _ = io.Copy(io.Discard, os.Stdin)
+	if err = db.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startLegacySharedOwner(t *testing.T, dir string) (func() error, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestLegacySharedOwnerProcess$")
+	cmd.Env = append(os.Environ(), "GRAPHITE_TEST_LEGACY_SHARED_OWNER_DIR="+dir)
+	cmd.Stderr = os.Stderr
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = input.Close()
+		return nil, err
+	}
+	if err = cmd.Start(); err != nil {
+		_ = input.Close()
+		return nil, err
+	}
+	line, err := bufio.NewReader(output).ReadString('\n')
+	if err != nil || line != "READY\n" {
+		_ = input.Close()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("legacy shared owner did not open: %q: %w", line, err)
+	}
+	return func() error { _ = input.Close(); return cmd.Wait() }, nil
+}
+
+func TestEarlyHandoffInputFits(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		limit  uint64
+		saved  uint64
+		tail   []byte
+		expect bool
+	}{
+		{"room for input", 100, 20, make([]byte, 40), true},
+		{"tail can fill cache", 100, 80, make([]byte, 40), false},
+		{"odd tail rounds up", 100, 80, make([]byte, 39), false},
+		{"checkpoint fills cache", 100, 100, nil, false},
+		{"checkpoint exceeds cache", 100, 101, nil, false},
+		{"unbounded cache uses normal startup", 0, 20, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := New("")
+			app.Config = NewConfig()
+			app.Config.Cache.MaxSize = tc.limit
+			app.Config.Dump.Path = t.TempDir()
+			if tc.tail != nil {
+				if err := os.WriteFile(filepath.Join(app.Config.Dump.Path, "input.123.tail.bin"), tc.tail, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := app.earlyHandoffInputFits(tc.saved); got != tc.expect {
+				t.Fatalf("fits = %v, want %v", got, tc.expect)
+			}
+		})
+	}
+}
+
+func waitHandoffLatest(url string, target float64) bool {
+	client := &http.Client{Timeout: time.Second}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			var reply struct {
+				Metrics []struct {
+					Values   []float64
+					IsAbsent []bool
+				}
+			}
+			err = json.NewDecoder(resp.Body).Decode(&reply)
+			_ = resp.Body.Close()
+			if err == nil && resp.StatusCode == http.StatusOK {
+				for _, metric := range reply.Metrics {
+					for i, value := range metric.Values {
+						if !metric.IsAbsent[i] && value >= target {
+							return true
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+const handoffRecoveryCacheSize = 16 << 20
 
 // handoffTestConfig is a compressed, checkpointing store with plaintext input.
 func handoffTestConfig(t *testing.T, root string) *Config {
 	t.Helper()
-	config := TestConfig(root)
+	config := testConfig(t, root)
 	if err := os.WriteFile(filepath.Join(root, "schemas.conf"), []byte("[all]\npattern = .*\nretentions = 1s:1h\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +179,9 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	cfg.Carbonserver.TrieIndex = true
 	cfg.Carbonserver.ConcurrentIndex = true
 	cfg.Carbonserver.RealtimeIndex = 100
-	cfg.Carbonserver.ScanFrequency = &Duration{20 * time.Millisecond}
+	// Repeated full index snapshots are incidental to input handoff. Keep them
+	// active without letting snapshot I/O starve the paced TCP writers.
+	cfg.Carbonserver.ScanFrequency = &Duration{200 * time.Millisecond}
 	cfg.Carbonserver.FileListCache = filepath.Join(t.TempDir(), "flc")
 	cfg.Carbonserver.FileListCacheVersion = 2
 	cfg.Carbonserver.QueryCacheEnabled = false
@@ -75,33 +190,49 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	return cfg
 }
 
-// successorScript is a stand-in for the next binary's capability flags.
-func successorScript(t *testing.T, input bool) string {
+// handoffSuccessor selects capabilities for the shared successor stub.
+func handoffSuccessor(t *testing.T, input bool) string {
 	t.Helper()
-	body := "#!/bin/sh\ncase \"$1\" in\n-handoff-protocol) echo " + handoff.Protocol + ";;\n"
+	capabilities := "read,shared"
 	if input {
-		body += "-input-handoff-protocol) echo " + handoff.InputProtocol + ";;\n"
+		capabilities += ",input"
 	}
-	body += "*) exit 2;;\nesac\n"
-	path := filepath.Join(t.TempDir(), "next")
-	if err := os.WriteFile(path, []byte(body), 0700); err != nil {
-		t.Fatal(err)
-	}
-	return path
+	return filepath.Join(os.Getenv(testHandoffSuccessorDir), capabilities)
 }
 
 // TestRestartHandsInputOver restarts a store while clients keep writing on the
 // same connections. No write may fail, every point must survive, and points
 // that arrived after the checkpoint must not overtake older ones.
-func TestRestartHandsInputOver(t *testing.T) {
+func testRestartHandsInputOver(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		input bool
-	}{{"input handoff", true}, {"reads only", false}} {
+		name            string
+		input           bool
+		mirror          bool
+		sharedSuccessor bool
+		legacyOwner     bool
+	}{
+		{"input handoff", true, false, false, false},
+		{"reads only", false, false, false, false},
+		{"mirrored rollback input", true, true, false, false},
+		{"mirrored rollback reads only", false, true, false, false},
+		{"mirrored shared successor input", true, true, true, false},
+		{"mirrored shared successor reads only", false, true, true, false},
+		{"legacy shared owner input", true, true, true, true},
+		{"legacy shared owner reads only", false, true, true, true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if isolatedTestProcess(t) {
+				return
+			}
 			defer zapwriter.Test()()
 			root := t.TempDir()
 			cfg := handoffTestConfig(t, root)
+			if tc.mirror {
+				cfg.Whisper.StorageBackend = "pebble-chunk"
+				cfg.Whisper.StoreEncoding = "exact"
+				cfg.Whisper.StoreMirrorFiles = true
+				cfg.Whisper.StoreDir = t.TempDir()
+			}
 			first := New(filepath.Join(root, "go-carbon.conf"))
 			first.Config = cfg
 			if err := first.Start(); err != nil {
@@ -117,9 +248,44 @@ func TestRestartHandsInputOver(t *testing.T) {
 			}
 
 			next := New(filepath.Join(root, "go-carbon.conf"))
-			next.Config = cfg
+			nextConfig := *cfg
+			// This bounded stream never approaches the cache limit. Leave room
+			// for the conservative slack bound used by tail replay.
+			nextConfig.Cache.MaxSize = handoffRecoveryCacheSize
+			if tc.mirror && !tc.sharedSuccessor {
+				// Stock rollback opens the continuously updated original files.
+				nextConfig.Whisper.StorageBackend = "files"
+				nextConfig.Whisper.StoreEncoding = ""
+				nextConfig.Whisper.StoreMirrorFiles = false
+			}
+			if tc.sharedSuccessor {
+				// Reopening a mirrored store must retain the normal full
+				// reconciliation gate before publishing shared reads.
+				nextConfig.Whisper.StoreLiveMigration = true
+				// The checkpoint may be served before the store opens; the
+				// metadata prewarm must still start once it has.
+				nextConfig.Whisper.StoreMetadataCacheSize = 16 << 20
+				nextConfig.Whisper.StoreMetadataCachePrewarm = true
+			}
+			next.Config = &nextConfig
 			nextStarted := make(chan error, 1)
-			first.SetReadHandoff(successorScript(t, tc.input), func() {
+			var closeLegacyOwner func() error
+			first.SetReadHandoff(handoffSuccessor(t, tc.input), func() {
+				if tc.legacyOwner {
+					// Model the prior binary: the database lock stays held until
+					// socket handoff returns. Use a real second Pebble owner,
+					// rather than faking an open failure in the successor.
+					if err := first.closeMetricStore(); err != nil {
+						nextStarted <- err
+						return
+					}
+					var err error
+					closeLegacyOwner, err = startLegacySharedOwner(t, cfg.Whisper.StoreDir)
+					if err != nil {
+						nextStarted <- err
+						return
+					}
+				}
 				// The service manager starts the next instance now.
 				go func() {
 					next.RegisterReadHandoff()
@@ -137,6 +303,9 @@ func TestRestartHandsInputOver(t *testing.T) {
 			var failed sync.Map
 			var lastMu sync.Mutex
 			last := map[int]int{}
+			finishWriting := make(chan struct{})
+			finishClients := sync.OnceFunc(func() { close(finishWriting) })
+			t.Cleanup(finishClients)
 			for c := range clients {
 				conn, err := net.Dial("tcp", cfg.Tcp.Listen)
 				if err != nil {
@@ -145,6 +314,11 @@ func TestRestartHandsInputOver(t *testing.T) {
 				wg.Go(func() {
 					defer conn.Close()
 					for seq := range perClient {
+						// A slow stop must leave enough future writes for the
+						// freshness check while the database is still locked.
+						if seq == perClient-32 {
+							<-finishWriting
+						}
 						line := fmt.Sprintf("client%d.metric %d %d\nlatest.c%d %d %d\n", c, seq, base+int64(seq), c, seq, base)
 						if _, err := conn.Write([]byte(line)); err != nil {
 							failed.Store(c, err)
@@ -157,9 +331,61 @@ func TestRestartHandsInputOver(t *testing.T) {
 					}
 				})
 			}
-			time.Sleep(300 * time.Millisecond)
+			deadline = time.Now().Add(5 * time.Second)
+			created := 0.0
+			for {
+				// Realtime names can precede their Whisper headers. A restart
+				// must begin after initial creation, while updates still flow.
+				first.Persister.Stat(func(name string, value float64) {
+					if name == "created" {
+						created += value
+					}
+				})
+				indexed := true
+				for c := range clients {
+					indexed = indexed && first.Carbonserver.MetricExists(fmt.Sprintf("client%d.metric", c)) &&
+						first.Carbonserver.MetricExists(fmt.Sprintf("latest.c%d", c))
+				}
+				if indexed && created >= 2*clients {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("initial input metrics were not created and indexed", zapwriter.TestString())
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if tc.legacyOwner && tc.input {
+				// Pin one checkpoint-only metric: it must be discoverable and
+				// readable before the successor can start its persister.
+				first.Persister.Stop()
+				first.Cache.Add(points.OnePoint("pending_cache_only.value", 42, base))
+			}
 			stopped := make(chan error, 1)
-			go func() { stopped <- first.DumpStop() }()
+			go func() {
+				err := first.DumpStop()
+				lastMu.Lock()
+				target := float64(last[0] + 10)
+				lastMu.Unlock()
+				finishClients()
+				if closeLegacyOwner != nil {
+					if tc.input {
+						// Open is still blocked by the real external database lock.
+						// New input must already keep the successor's reads fresh.
+						url := fmt.Sprintf("http://%s/render/?target=latest.c0&from=%d&until=%d&format=json", cfg.Carbonserver.Listen, base-1, base+1)
+						if !waitHandoffLatest(url, target) && err == nil {
+							err = fmt.Errorf("inherited input did not keep reads fresh while database remained locked")
+						}
+						url = fmt.Sprintf("http://%s/render/?target=pending_cache_only.value&from=%d&until=%d&format=json", cfg.Carbonserver.Listen, base-1, base+1)
+						if !waitHandoffLatest(url, 42) && err == nil {
+							err = fmt.Errorf("cache-only metric could not read policy before storage opened")
+						}
+					}
+					if closeErr := closeLegacyOwner(); err == nil {
+						err = closeErr
+					}
+				}
+				stopped <- err
+			}()
 			select {
 			case err := <-nextStarted:
 				if err != nil {
@@ -171,9 +397,41 @@ func TestRestartHandsInputOver(t *testing.T) {
 			if err := <-stopped; err != nil {
 				t.Fatal("dump stop", err)
 			}
+			if tc.sharedSuccessor {
+				resp, err := http.Get("http://" + cfg.Carbonserver.Listen + "/admin/info?scopes=storage")
+				if err != nil {
+					t.Fatal(err)
+				}
+				var info struct {
+					Storage struct{ Engine map[string]interface{} }
+				}
+				err = json.NewDecoder(resp.Body).Decode(&info)
+				_ = resp.Body.Close()
+				if err != nil || len(info.Storage.Engine) == 0 {
+					t.Fatalf("handoff lost live storage statistics: %+v, %v", info, err)
+				}
+				done := next.metadataPrewarmDone.Load()
+				if done == nil {
+					t.Fatal("no metadata prewarm started", zapwriter.TestString())
+				}
+				select {
+				case <-*done:
+				case <-time.After(10 * time.Second):
+					t.Fatal("metadata prewarm did not finish")
+				}
+				if logs := zapwriter.TestString(); !logHas(logs, "source", `"pending checkpoint"`) {
+					t.Fatalf("prewarm log:\n%s", logs)
+				}
+			}
+			if tc.mirror && first.MetricStore != nil {
+				t.Fatal("mirrored predecessor retained its shared handle after reads stopped")
+			}
 			wg.Wait()
 
 			logs := zapwriter.TestString()
+			if tc.legacyOwner && !strings.Contains(logs, "taking mirrored sockets before reopening predecessor storage") {
+				t.Fatal("legacy owner did not exercise socket takeover before opening storage")
+			}
 			if tc.input {
 				failed.Range(func(c, err any) bool { t.Fatalf("client %v write failed: %v", c, err); return false })
 				for _, want := range []string{"input handed over", "took over input from stopping instance", "input tail loaded"} {
@@ -206,7 +464,7 @@ func TestRestartHandsInputOver(t *testing.T) {
 					t.Fatal(err)
 				}
 				if resp.StatusCode != http.StatusOK {
-					t.Fatalf("read status %d: %s", resp.StatusCode, raw)
+					t.Fatalf("read status %d: %s\n%s", resp.StatusCode, raw, zapwriter.TestString())
 				}
 				var body struct {
 					Metrics []struct {

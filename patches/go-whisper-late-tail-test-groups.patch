@@ -1,0 +1,38 @@
+--- a/vendor/github.com/go-graphite/go-whisper/overlap_late_tail_test.go
++++ b/vendor/github.com/go-graphite/go-whisper/overlap_late_tail_test.go
+@@ -118,16 +118,25 @@
+ 	}
+ 
+ 	var avoided, newOff, oldOff int
+-	for _, sc := range scenarios {
+-		f := &lockstepFile{t: t, name: sc.name, dir: t.TempDir(), start: 1_700_000_000}
+-		sc.run(f)
+-		f.compare("after sidecar merge", true)
+-		avoided += f.avoided
+-		newOff += f.newOff
+-		oldOff += f.oldOff
+-		if f.avoided > 0 || f.newOff > 0 || f.oldOff > 0 {
+-			t.Logf("%s: %d updates, %d replays avoided, values off classic summed over updates: %d, previous rules %d", sc.name, f.steps, f.avoided, f.newOff, f.oldOff)
+-		}
++	for group := 0; group < 4; group++ {
++		t.Run(fmt.Sprintf("group=%d", group), func(t *testing.T) {
++			for i, sc := range scenarios {
++				if i%4 != group {
++					continue
++				}
++				t.Run(fmt.Sprintf("scenario=%d", i), func(t *testing.T) {
++					f := &lockstepFile{t: t, name: sc.name, dir: t.TempDir(), start: 1_700_000_000}
++					sc.run(f)
++					f.compare("after sidecar merge", true)
++					avoided += f.avoided
++					newOff += f.newOff
++					oldOff += f.oldOff
++					if f.avoided > 0 || f.newOff > 0 || f.oldOff > 0 {
++						t.Logf("%s: %d updates, %d replays avoided, values off classic summed over updates: %d, previous rules %d", sc.name, f.steps, f.avoided, f.newOff, f.oldOff)
++					}
++				})
++			}
++		})
+ 	}
+ 	if avoided == 0 {
+ 		t.Fatal("no update avoided a replay: the scenarios do not exercise the late tail correction")

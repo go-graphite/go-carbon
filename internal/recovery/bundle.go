@@ -17,6 +17,9 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 )
 
+// ManifestName names a published checkpoint's manifest in its directory.
+const ManifestName = manifestName
+
 const (
 	manifestName = ".pending-points.json"
 	// Chunk digests grow with checkpoint size. Bound metadata independently of
@@ -84,14 +87,59 @@ func Describe(path string) (File, error) {
 func validFile(file File, prefix, suffix string) bool {
 	return file.Size >= 0 && validChecksumShape(file) && filepath.Base(file.Name) == file.Name && strings.HasPrefix(file.Name, prefix) && strings.HasSuffix(file.Name, suffix)
 }
+
+// validManifest accepts version 1, over a legacy cache dump, which every
+// release with checkpoints reads, and version 2, over a compact one, which
+// older releases reject and restore without, ignoring the compact dump.
+//
+// Version 3 goes with a compact cache dump, a compact input file and a
+// GCPOINT2 index; releases before it reject it and ignore both files.
+//
+// Version 4 goes with a cache dump of FormatBlocks, with a compact input file
+// and a GCPOINT3 (or GCPOINT2) index, or a legacy input file and a GCPOINT1
+// index. Releases before it reject it and ignore the dump.
 func validManifest(m *Manifest) bool {
-	return m.Version == 1 && validFile(m.Cache, "cache.", ".bin") && validFile(m.WAL, "input.", ".bin") && validFile(m.Index, ".pending-index-", ".bin")
+	cachePrefix, walPrefix := "cache.", "input."
+	switch m.Version {
+	case 1:
+	case 2:
+		cachePrefix = CompactPrefix
+	case 3:
+		cachePrefix, walPrefix = CompactPrefix, CompactInputPrefix
+	case 4:
+		cachePrefix = BlocksPrefix
+		if InputFormat(m.WAL.Name) == FormatCompact {
+			walPrefix = CompactInputPrefix
+		}
+	default:
+		return false
+	}
+	return validFile(m.Cache, cachePrefix, ".bin") && validFile(m.WAL, walPrefix, ".bin") && validFile(m.Index, ".pending-index-", ".bin")
+}
+
+func manifestVersion(cache, wal File) int {
+	switch {
+	case CacheFormat(cache.Name) == FormatBlocks:
+		return 4
+	case InputFormat(wal.Name) == FormatCompact:
+		return 3
+	case CacheFormat(cache.Name) == FormatCompact:
+		return 2
+	}
+	return 1
 }
 
 // TailName names the input log a stopping instance appends to after its
 // checkpoint while it hands input over to its successor. It sorts right after
 // wal, so an ordered replay, by older binaries too, applies it after wal.
-func TailName(wal string) string { return strings.TrimSuffix(wal, ".bin") + ".tail.bin" }
+// The tail holds legacy records, so a compact input file's tail drops the
+// compact prefix: input-compact.<x>.bin has tail input.<x>.tail.bin.
+func TailName(wal string) string {
+	if rest, ok := strings.CutPrefix(wal, CompactInputPrefix); ok {
+		wal = "input." + rest
+	}
+	return strings.TrimSuffix(wal, ".bin") + ".tail.bin"
+}
 
 // IsTail reports whether name is such an input log.
 func IsTail(name string) bool {
@@ -105,7 +153,7 @@ func Publish(dir, root string, cache, wal, index File, readIndexID string) error
 	if err != nil {
 		return err
 	}
-	manifest := Manifest{Version: 1, ReadIndexID: readIndexID, Root: identity, Device: device, Inode: inode, Cache: cache, WAL: wal, Index: index}
+	manifest := Manifest{Version: manifestVersion(cache, wal), ReadIndexID: readIndexID, Root: identity, Device: device, Inode: inode, Cache: cache, WAL: wal, Index: index}
 	if !validManifest(&manifest) {
 		return fmt.Errorf("invalid recovery manifest")
 	}
@@ -237,7 +285,7 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 		if entry.IsDir() || name == manifest.Cache.Name || name == manifest.WAL.Name || name == TailName(manifest.WAL.Name) {
 			continue
 		}
-		if strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, "input.") {
+		if isGeneration(name) {
 			return nil, fmt.Errorf("unindexed recovery generation exists")
 		}
 	}
@@ -259,7 +307,7 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 	if err = errors.Join(checks...); err != nil {
 		return nil, err
 	}
-	b.index, err = Open(b.maps[2], b.maps[0], b.maps[1])
+	b.index, err = OpenFormat(b.maps[2], b.maps[0], b.maps[1], CacheFormat(manifest.Cache.Name))
 	if err != nil {
 		return nil, err
 	}
@@ -286,6 +334,37 @@ func (b *Bundle) RawRecords(slot uint64, visit func(raw []byte, count int) error
 	defer runtime.KeepAlive(b)
 	return b.index.RawRecords(slot, visit)
 }
+
+// ReadCompact reads slot for a compact encoder; see Index.ReadCompact. The
+// borrowed name and head are valid only during the call that receives them
+// or while the caller keeps b reachable.
+func (b *Bundle) ReadCompact(slot uint64, tail []points.Point, head func(CompactRecord)) ([]byte, []points.Point, error) {
+	defer runtime.KeepAlive(b)
+	return b.index.ReadCompact(slot, tail, head)
+}
+
+// ReadCompactAs reads a slot known to hold metric name; see
+// Index.ReadCompactAs. The head's data is borrowed like ReadCompact's.
+func (b *Bundle) ReadCompactAs(slot uint64, name string, tail []points.Point, head func(CompactRecord)) ([]points.Point, error) {
+	defer runtime.KeepAlive(b)
+	return b.index.ReadCompactAs(slot, name, tail, head)
+}
+
+// VisitMetrics visits every saved metric once; see Index.VisitMetrics.
+func (b *Bundle) VisitMetrics(visit func(slot uint64, name string) error) error {
+	defer runtime.KeepAlive(b)
+	return b.index.VisitMetrics(visit)
+}
+
+// CacheFormat reports the record format of the checkpoint's cache dump.
+func (b *Bundle) CacheFormat() Format { return b.index.CacheFormat() }
+
+// Bytes reports the size of the checkpoint's cache dump and input file.
+func (b *Bundle) Bytes() int64 { return b.manifest.Cache.Size + b.manifest.WAL.Size }
+
+// CacheName reports the file name of the checkpoint's cache dump.
+func (b *Bundle) CacheName() string { return b.manifest.Cache.Name }
+
 func (b *Bundle) Name(slot uint64) (string, bool, error) {
 	defer runtime.KeepAlive(b)
 	return b.index.Name(slot)
@@ -308,9 +387,16 @@ func (b *Bundle) FilterNewNames(keep func([]byte) bool, visit func(string) error
 	return b.index.FilterNewNames(keep, visit)
 }
 func (b *Bundle) NewNameCount() uint64 { return b.index.NewNameCount() }
-func (b *Bundle) Slots() uint64        { return b.index.Slots() }
-func (b *Bundle) Points() uint64       { return b.index.Points() }
-func (b *Bundle) Metrics() uint64      { return b.index.Metrics() }
+
+// VisitNewSlots calls visit with the slot of every metric absent from the
+// saved read index when the dump was written.
+func (b *Bundle) VisitNewSlots(visit func(slot uint64)) {
+	defer runtime.KeepAlive(b)
+	b.index.VisitNewSlots(visit)
+}
+func (b *Bundle) Slots() uint64   { return b.index.Slots() }
+func (b *Bundle) Points() uint64  { return b.index.Points() }
+func (b *Bundle) Metrics() uint64 { return b.index.Metrics() }
 
 // Close is for an unpublished bundle or an owner which has drained every reader.
 func (b *Bundle) Close() error {

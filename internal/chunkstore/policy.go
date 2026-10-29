@@ -4,7 +4,35 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 )
+
+// ErrNameTooLong rejects creating a metric whose name no Whisper file could
+// hold (names already stored still decode, so they can be read and purged): over
+// maxMetricNameBytes, or a node over maxMetricNodeBytes (the filesystem's
+// path and file-name limits). Every name is also a catalog key, and tables of
+// such keys get one index partition per key and top-level indexes of tens of
+// MiB that each lookup touching the table must load.
+var ErrNameTooLong = errors.New("metric name too long")
+
+const (
+	maxMetricNameBytes = 4000
+	maxMetricNodeBytes = 255
+)
+
+// ValidateMetricName checks the name limits of newly created store metrics.
+func ValidateMetricName(name string) error {
+	if len(name) > maxMetricNameBytes {
+		return ErrNameTooLong
+	}
+	path, _, _ := strings.Cut(name, ";")
+	for node := range strings.SplitSeq(path, ".") {
+		if len(node) > maxMetricNodeBytes {
+			return ErrNameTooLong
+		}
+	}
+	return nil
+}
 
 func validate(c MetricConfig) error {
 	if c.Name == "" {
@@ -119,3 +147,5 @@ func aggregate(method AggregationMethod, values []float64) float64 {
 	}
 	panic("unsupported aggregation")
 }
+
+func validateName(name string) error { return ValidateMetricName(name) }

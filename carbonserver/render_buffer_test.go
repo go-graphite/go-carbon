@@ -27,6 +27,7 @@ type renderBufferTestCase struct {
 // Compare serialized output from the real producer with its original buffer
 // and the bounded buffer, including requests larger than either queue.
 func TestRenderResponseBufferPreservesStream(t *testing.T) {
+	t.Parallel()
 	listener, tr, expanded := renderBufferFixture(t)
 	for _, tc := range []renderBufferTestCase{
 		{name: "empty", buffer: 0},

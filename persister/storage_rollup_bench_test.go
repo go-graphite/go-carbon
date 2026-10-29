@@ -3,6 +3,7 @@ package persister
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	whisper "github.com/go-graphite/go-whisper"
@@ -119,21 +120,27 @@ func storageRollupRead(b *testing.B, s *storageBackend, name string, from, until
 }
 
 func TestStorageLateRollupRetentionWrap(t *testing.T) {
+	parallelStorageCase(t)
 	checkStorageLateRollupRetentionWrap(t, "cwhisper-ooo", whisper.Average, 0.5)
 }
 
 func TestStorageChunkLateRollupRetentionWrap(t *testing.T) {
+	t.Parallel()
 	for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.Last, whisper.Max, whisper.Min, whisper.First} {
 		for _, xff := range []float32{0, 0.5, 1} {
-			t.Run(fmt.Sprintf("%s/xff=%g", method, xff), func(t *testing.T) { checkStorageLateRollupRetentionWrap(t, "pebble-chunk", method, xff) })
+			t.Run(fmt.Sprintf("%s/xff=%g", method, xff), func(t *testing.T) {
+				parallelStorageCase(t)
+				checkStorageLateRollupRetentionWrap(t, "pebble-chunk", method, xff)
+			})
 		}
 	}
 }
 
 func checkStorageLateRollupRetentionWrap(t *testing.T, kind string, method whisper.AggregationMethod, xff float32) {
-	now := storageTestClock(t)
-	oracle := newStorageBackend(t, "classic", now)
-	s := newStorageBackend(t, kind, now)
+	now := new(atomic.Int64)
+	now.Store(storageEpoch)
+	oracle := newStorageMemoryBackend(t, "classic", now)
+	s := newStorageMemoryBackend(t, kind, now)
 	c := storageConfig("metric", "1s:10m,10s:1h,60s:6h", method, xff)
 	for _, engine := range []*storageBackend{oracle, s} {
 		storageMust(t, engine.create(c))

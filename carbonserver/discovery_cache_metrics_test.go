@@ -11,6 +11,7 @@ import (
 )
 
 func TestDiscoveryCachePrometheusRequests(t *testing.T) {
+	t.Parallel()
 	for _, protocol := range []string{"http", "grpc"} {
 		t.Run(protocol, func(t *testing.T) {
 			listener := newDiscoveryCacheTestListener(t)

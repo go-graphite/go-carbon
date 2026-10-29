@@ -15,6 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
@@ -82,6 +83,8 @@ func NewFramingOptions() *FramingOptions {
 	}
 }
 
+const plainReadBufferSize = 64 << 10
+
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
@@ -96,11 +99,13 @@ type TCP struct {
 	listener            *net.TCPListener
 	isFraming           bool
 	frameParser         func(body []byte) ([]*points.Points, error)
+	phase               phasecpu.Phase
 	buffer              chan *points.Points
 	logger              *zap.Logger
 	decompressor        decompressor
 	handoff             handoffState
 	pointOut            atomic.Pointer[func(name []byte, value float64, timestamp int64)]
+	pointsOut           atomic.Pointer[func(name []byte, data []points.Point)]
 }
 
 // SetPointOut configures the point callback for unbuffered plain-text input.
@@ -109,6 +114,14 @@ type TCP struct {
 func (rcv *TCP) SetPointOut(out func(name []byte, value float64, timestamp int64)) {
 	if rcv.buffer == nil {
 		rcv.pointOut.Store(&out)
+	}
+}
+
+// SetPointsOut batches consecutive points already in a connection's read
+// buffer. out must not retain name or data. Buffered receivers keep their store.
+func (rcv *TCP) SetPointsOut(out func(name []byte, data []points.Point)) {
+	if rcv.buffer == nil {
+		rcv.pointsOut.Store(&out)
 	}
 }
 
@@ -163,6 +176,7 @@ func newFraming(parser string, name string, options *FramingOptions, store func(
 
 	r := &TCP{
 		out:            store,
+		phase:          phasecpu.Receiver(parser),
 		name:           name,
 		logger:         zapwriter.Logger(name),
 		maxMessageSize: options.MaxMessageSize,
@@ -198,6 +212,8 @@ func (rcv *TCP) HandleConnection(conn net.Conn) {
 // owner read from conn but did not parse; they come first. A tracked
 // connection can be detached (see Detach) instead of closed.
 func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn) {
+	phasecpu.Set(phasecpu.ReceiverTCP)
+	defer phasecpu.Set(phasecpu.Other)
 	atomic.AddInt32(&rcv.active, 1)
 	defer atomic.AddInt32(&rcv.active, -1)
 
@@ -219,7 +235,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 		rcv.logger.Error("failed init decompressor", zap.Error(err))
 		return
 	}
-	reader := bufio.NewReader(bconn)
+	reader := bufio.NewReaderSize(bconn, plainReadBufferSize)
 
 	finished := make(chan bool)
 	defer close(finished)
@@ -248,12 +264,41 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 		pointOut = *out
 	}
 
+	var pointsOut func([]byte, []points.Point)
+	if out := rcv.pointsOut.Load(); out != nil {
+		pointsOut = *out
+	}
+	var batchName []byte
+	var batch []points.Point
+	if pointsOut != nil {
+		batch = make([]points.Point, 0, 64)
+	}
+	flush := func() {
+		if len(batch) > 0 {
+			pointsOut(batchName, batch)
+			batch, batchName = batch[:0], nil
+		}
+	}
+	defer flush()
+
 	for lines := 0; ; lines++ {
+		var bufferedLine []byte
+		if len(batch) > 0 {
+			buffered, _ := reader.Peek(reader.Buffered())
+			// ReadSlice may refill even with a partial next line buffered.
+			end := bytes.IndexByte(buffered, '\n')
+			if tracked.detaching() || received >= 1024 || end < 0 {
+				flush()
+			} else {
+				bufferedLine = buffered[:end+1]
+			}
+		}
 		if received != 0 && (reader.Buffered() == 0 || received >= 1024) {
 			atomic.AddUint32(&rcv.metricsReceived, received)
 			received = 0
 		}
 		if tracked.detaching() {
+			flush()
 			detached = rcv.detach(tracked, reader, rest, nil)
 			return
 		}
@@ -268,9 +313,16 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 			}
 		}
 
-		line, err := readPlainLine(reader)
+		line := bufferedLine
+		var err error
+		if line != nil {
+			_, err = reader.Discard(len(line))
+		} else {
+			line, err = readPlainLine(reader)
+		}
 
 		if err != nil {
+			flush()
 			if tracked.detaching() {
 				detached = rcv.detach(tracked, reader, rest, line)
 				return
@@ -286,8 +338,11 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 			break
 		}
 		if len(line) > 0 { // skip empty lines
+
 			name, value, timestamp, err := parse.PlainLine(line)
+
 			if err != nil {
+				flush()
 				atomic.AddUint32(&rcv.parseErrors, 1)
 				rcv.logger.Debug("parse failed",
 					zap.Error(err),
@@ -298,12 +353,18 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 				// Inherited handlers start before the application sets pointOut.
 				// Adopt it even if it arrived while ReadLine was blocked, then
 				// retain the callback without an atomic load per subsequent point.
-				if pointOut == nil && rcv.buffer == nil {
+				if pointOut == nil && pointsOut == nil && rcv.buffer == nil {
 					if out := rcv.pointOut.Load(); out != nil {
 						pointOut = *out
 					}
 				}
-				if pointOut != nil {
+				if pointsOut != nil {
+					if len(batch) > 0 && (!bytes.Equal(batchName, name) || len(batch) == cap(batch)) {
+						flush()
+					}
+					batchName = name
+					batch = append(batch, points.Point{Value: value, Timestamp: timestamp})
+				} else if pointOut != nil {
 					pointOut(name, value, timestamp)
 				} else {
 					rcv.out(points.OnePoint(string(name), value, timestamp))
@@ -330,6 +391,9 @@ func readPlainLine(reader *bufio.Reader) ([]byte, error) {
 }
 
 func (rcv *TCP) handleFraming(conn net.Conn) {
+	phasecpu.Set(rcv.phase)
+	defer phasecpu.Set(phasecpu.Other)
+
 	framedConn, _ := framing.NewConn(conn, byte(4), binary.BigEndian)
 	defer func() {
 		if r := recover(); r != nil {
@@ -444,6 +508,12 @@ func (rcv *TCP) listen(open func() (*net.TCPListener, error), inherited []Conn) 
 			originalOut := rcv.out
 
 			rcv.Go(func(exit chan bool) {
+				phase := phasecpu.ReceiverTCP
+				if rcv.isFraming {
+					phase = rcv.phase
+				}
+				phasecpu.Set(phase)
+				defer phasecpu.Set(phasecpu.Other)
 				for {
 					select {
 					case <-exit:

@@ -19,6 +19,17 @@ type metricIndexRefresher struct {
 }
 
 func startMetricIndexRefresher(listener *carbonserver.CarbonserverListener, interval time.Duration) *metricIndexRefresher {
+	return startIndexRefresher(listener.RefreshMetricStoreIndex, interval)
+}
+
+func startFileIndexRefresher(listener *carbonserver.CarbonserverListener, interval time.Duration) *metricIndexRefresher {
+	return startIndexRefresher(func() error {
+		listener.RequestFileScan()
+		return nil
+	}, interval)
+}
+
+func startIndexRefresher(refresh func() error, interval time.Duration) *metricIndexRefresher {
 	r := &metricIndexRefresher{
 		changes: make(chan struct{}, 1),
 		stop:    make(chan struct{}),
@@ -35,7 +46,7 @@ func startMetricIndexRefresher(listener *carbonserver.CarbonserverListener, inte
 			case <-ticker.C:
 				select {
 				case <-r.changes:
-					if err := listener.RefreshMetricStoreIndex(); err != nil {
+					if err := refresh(); err != nil {
 						zapwriter.Logger("storage").Error("refresh shared metric index", zap.Error(err))
 						r.notify()
 					}

@@ -13,12 +13,40 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-graphite/go-whisper"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+func watchListenerLog(l *CarbonserverListener, message string) <-chan struct{} {
+	updates := make(chan struct{}, 1)
+	hook := func(entry zapcore.Entry) error {
+		if entry.Message == message {
+			select {
+			case updates <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}
+	l.logger = l.logger.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+		events := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zap.InfoLevel)
+		return zapcore.NewTee(core, zapcore.RegisterHooks(events, hook))
+	}))
+	return updates
+}
+
+func waitListenerEvent(t *testing.T, event <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-event:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener event did not arrive")
+	}
+}
 
 // scanLog keeps the fields of each "file list updated" record.
 type scanLog struct {
@@ -83,6 +111,25 @@ func writeScanFile(t *testing.T, path string, size int) {
 // sidecars with plain and hashed names, lock files, symlinks and empty dirs.
 func writeScanTree(t *testing.T, root string, rng *rand.Rand) []string {
 	t.Helper()
+	dirs := map[string]bool{root: true}
+	var mkdir func(string)
+	mkdir = func(dir string) {
+		if dirs[dir] {
+			return
+		}
+		mkdir(filepath.Dir(dir))
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		dirs[dir] = true
+	}
+	var zeros [9100]byte
+	write := func(path string, size int) {
+		mkdir(filepath.Dir(path))
+		if err := os.WriteFile(path, zeros[:size], 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	var metrics []string
 	for ns := 0; ns < 12; ns++ {
 		n := 10 + rng.Intn(40)
@@ -96,27 +143,25 @@ func writeScanTree(t *testing.T, root string, rng *rand.Rand) []string {
 			}
 			parts = append(parts, fmt.Sprintf("m%03d.wsp", m))
 			rel := filepath.Join(parts...)
-			writeScanFile(t, filepath.Join(root, rel), 1+rng.Intn(5000))
+			write(filepath.Join(root, rel), 1+rng.Intn(5000))
 			metrics = append(metrics, rel)
 		}
 	}
 	long := filepath.Join(root, "ns01", strings.Repeat("x", 250)+".wsp")
-	writeScanFile(t, long, 10)
-	writeScanFile(t, whisper.OutOfOrderSidecarPath(long), 3000)
+	write(long, 10)
+	write(whisper.OutOfOrderSidecarPath(long), 3000)
 	for _, rel := range metrics[:40] {
-		writeScanFile(t, whisper.OutOfOrderSidecarPath(filepath.Join(root, rel)), 100+rng.Intn(9000))
+		write(whisper.OutOfOrderSidecarPath(filepath.Join(root, rel)), 100+rng.Intn(9000))
 	}
 	for _, rel := range metrics[40:60] {
-		writeScanFile(t, filepath.Join(root, rel)+".lock", 0)
+		write(filepath.Join(root, rel)+".lock", 0)
 	}
-	writeScanFile(t, filepath.Join(root, "ns02", "orphan.wsp.ooo"), 4096)
-	writeScanFile(t, filepath.Join(root, "ns02", "notes.txt"), 7)
-	writeScanFile(t, filepath.Join(root, "ns03", ".hidden.wsp"), 9)
-	writeScanFile(t, filepath.Join(root, "dir.wsp", "inner.wsp"), 11) // a directory named like a metric
+	write(filepath.Join(root, "ns02", "orphan.wsp.ooo"), 4096)
+	write(filepath.Join(root, "ns02", "notes.txt"), 7)
+	write(filepath.Join(root, "ns03", ".hidden.wsp"), 9)
+	write(filepath.Join(root, "dir.wsp", "inner.wsp"), 11) // a directory named like a metric
 	for _, dir := range []string{"empty", "ns04/empty/deeper"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		mkdir(filepath.Join(root, dir))
 	}
 	if err := os.Symlink(filepath.Join(root, metrics[0]), filepath.Join(root, "ns05", "link.wsp")); err != nil {
 		t.Fatal(err)
@@ -252,8 +297,10 @@ func ageScanGeneration(t *testing.T, cache, root string) map[string]int64 {
 }
 
 func TestParallelScanMatchesSequential(t *testing.T) {
+	t.Parallel()
 	for _, workers := range []int{2, 3, 8} {
 		t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
+			t.Parallel()
 			rng := rand.New(rand.NewSource(int64(workers)))
 			root := t.TempDir()
 			metrics := writeScanTree(t, root, rng)
@@ -274,27 +321,35 @@ func TestParallelScanMatchesSequential(t *testing.T) {
 				log    *scanLog
 				cached map[string]struct{}
 			}
-			results := map[int]*result{}
+			var results [2]*result
+			directories := [2]string{t.TempDir(), t.TempDir()}
 			from := time.Now().Unix()
-			for _, n := range []int{1, workers} {
-				cache := linkGeneration(t, baseCache, t.TempDir())
-				l, log := newScanTestListener(root, cache, n)
-				if !l.updateFileList(root, nil, nil) {
-					t.Fatal("saved generation not loaded")
+			if !t.Run("scans", func(t *testing.T) {
+				for i, n := range []int{1, workers} {
+					t.Run(fmt.Sprintf("workers=%d", n), func(t *testing.T) {
+						t.Parallel()
+						cache := linkGeneration(t, baseCache, directories[i])
+						l, log := newScanTestListener(root, cache, n)
+						if !l.updateFileList(root, nil, nil) {
+							t.Fatal("saved generation not loaded")
+						}
+						// Names reported by the cache scan, found on disk or not yet written.
+						cached := map[string]struct{}{"/" + filepath.ToSlash(metrics[0]): {}, "/ns00/pending/metric.wsp": {}}
+						l.newMetricsChan <- "ns00.realtime.only"
+						l.newMetricsChan <- strings.TrimSuffix(strings.ReplaceAll(metrics[1], "/", "."), ".wsp")
+						// A metric the realtime index saw before its file appeared.
+						if _, err := l.CurrentFileIndex().trieIdx.insert("/ns00/new0/n000.wsp", 0, 0, 0, 12345); err != nil {
+							t.Fatal(err)
+						}
+						l.updateFileList(root, cached, nil)
+						results[i] = &result{cache, l, log, cached}
+					})
 				}
-				// Names reported by the cache scan, found on disk or not yet written.
-				cached := map[string]struct{}{"/" + filepath.ToSlash(metrics[0]): {}, "/ns00/pending/metric.wsp": {}}
-				l.newMetricsChan <- "ns00.realtime.only"
-				l.newMetricsChan <- strings.TrimSuffix(strings.ReplaceAll(metrics[1], "/", "."), ".wsp")
-				// A metric the realtime index saw before its file appeared.
-				if _, err := l.CurrentFileIndex().trieIdx.insert("/ns00/new0/n000.wsp", 0, 0, 0, 12345); err != nil {
-					t.Fatal(err)
-				}
-				l.updateFileList(root, cached, nil)
-				results[n] = &result{cache, l, log, cached}
+			}) {
+				return
 			}
 			to := time.Now().Unix()
-			seq, par := results[1], results[workers]
+			seq, par := results[0], results[1]
 			if fields := par.log.last(t); fields["scan_workers"] != float64(workers) || fields["scan_ranges"].(float64) < 2 {
 				t.Fatalf("parallel scan not used: %v", fields)
 			}
@@ -342,16 +397,73 @@ func maps(a, b map[string]struct{}) bool {
 	return true
 }
 
+var scanFixtureTemplate struct {
+	sync.Once
+	root, cache string
+	dirs        []string
+	initial     map[string]any
+}
+
+var scanFixtureMutex sync.Mutex
+
 func parallelScanFixture(t *testing.T) (root, cache string, l *CarbonserverListener, log *scanLog) {
 	t.Helper()
-	root = t.TempDir()
-	writeScanTree(t, root, rand.New(rand.NewSource(7)))
+	scanFixtureMutex.Lock()
+	t.Cleanup(scanFixtureMutex.Unlock)
+	scanFixtureTemplate.Do(func() {
+		root := filepath.Join(fixtureDirectory, "scan-root")
+		cache := filepath.Join(fixtureDirectory, "scan-cache", "flc.bin")
+		for _, dir := range []string{root, filepath.Dir(cache)} {
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeScanTree(t, root, rand.New(rand.NewSource(7)))
+		listener, initial := newScanTestListener(root, cache, 4)
+		listener.updateFileList(root, nil, nil)
+		listener.updateFileList(root, nil, nil)
+		snapshot, err := openIndexSnapshot(cache, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.close(); err != nil {
+			t.Fatal(err)
+		}
+		var dirs []string
+		if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err == nil && entry.IsDir() {
+				dirs = append(dirs, path)
+			}
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		scanFixtureTemplate.root, scanFixtureTemplate.cache = root, cache
+		scanFixtureTemplate.dirs = dirs
+		scanFixtureTemplate.initial = initial.updates[0]
+	})
+	if scanFixtureTemplate.cache == "" {
+		t.Fatal("scan fixture initialization failed")
+	}
+	// Each scenario starts with fresh directory metadata, as a newly built
+	// tree would. Otherwise reusing an old tree could enable directory replay.
+	now := time.Now()
+	for _, dir := range scanFixtureTemplate.dirs {
+		if err := os.Chtimes(dir, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root = scanFixtureTemplate.root
 	cache = filepath.Join(t.TempDir(), "flc.bin")
+	copySnapshotFixture(t, scanFixtureTemplate.cache, cache, root)
 	l, log = newScanTestListener(root, cache, 4)
-	l.updateFileList(root, nil, nil)
-	l.updateFileList(root, nil, nil)
-	if _, err := openIndexSnapshot(cache, root); err != nil {
-		t.Fatal(err)
+	initial := make(map[string]any, len(scanFixtureTemplate.initial))
+	for field, value := range scanFixtureTemplate.initial {
+		initial[field] = value
+	}
+	log.updates = append(log.updates, initial)
+	if !l.updateFileListWithCache(root, nil, nil, true) {
+		t.Fatal("saved scan fixture was not loaded")
 	}
 	return root, cache, l, log
 }
@@ -387,6 +499,7 @@ func assertGenerationUnchanged(t *testing.T, cache string, before map[string][]b
 }
 
 func TestParallelScanCancelKeepsGeneration(t *testing.T) {
+	t.Parallel()
 	root, cache, l, _ := parallelScanFixture(t)
 	before := generationFiles(t, cache)
 	close(l.exitChan)
@@ -397,6 +510,7 @@ func TestParallelScanCancelKeepsGeneration(t *testing.T) {
 }
 
 func TestParallelScanFailureKeepsGeneration(t *testing.T) {
+	t.Parallel()
 	if os.Geteuid() == 0 {
 		t.Skip("permission checks do not apply to root")
 	}
@@ -425,6 +539,9 @@ func TestParallelScanFailureKeepsGeneration(t *testing.T) {
 // planned range forces all parallelism to come from splits; the default plan
 // with many workers splits ranges while they still descend to a deep start.
 func TestParallelScanSplitsRunningRanges(t *testing.T) {
+	if isolatedScanTest(t) {
+		return
+	}
 	root, cache, l, log := parallelScanFixture(t)
 	want := readScanCache(t, cache)
 	single := func(s *indexSnapshot, _ int) []snapshotMetricRange {
@@ -443,7 +560,51 @@ func TestParallelScanSplitsRunningRanges(t *testing.T) {
 			scanPlanOverride = plan
 			defer func() { scanPlanOverride = nil }()
 			previous := l.CurrentFileIndex().trieIdx.snapshot
-			l.updateFileList(root, nil, nil)
+			originalEstimate := l.estimateSize
+			defer l.SetEstimateSize(originalEstimate)
+			synctest.Test(t, func(t *testing.T) {
+				exit := l.exitChan
+				l.exitChan = make(chan struct{})
+				defer func() { l.exitChan = exit }()
+				planned := plan(previous, workers)
+				scanPlanOverride = func(*indexSnapshot, int) []snapshotMetricRange { return planned }
+				last := planned[len(planned)-1]
+				held := make(map[string]bool)
+				for _, entry := range want {
+					if !strings.HasSuffix(entry.Path, ".wsp") {
+						continue
+					}
+					key, err := encodeSnapshotPath(nil, entry.Path)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if bytes.Compare(key, last.start) >= 0 && bytes.Compare(key, last.end) < 0 {
+						held[scanMetricName([]byte(entry.Path))] = true
+					}
+				}
+				entered, release, done := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
+				l.SetEstimateSize(func(metric string) (int64, int64, int64) {
+					if held[metric] {
+						select {
+						case entered <- struct{}{}:
+						default:
+						}
+						<-release
+					}
+					return originalEstimate(metric)
+				})
+				go func() { l.updateFileList(root, nil, nil); close(done) }()
+				select {
+				case <-entered:
+				case <-done:
+					t.Fatal("scan did not enter the held range")
+				}
+				// Let the other workers finish and request a split before the
+				// held range resumes. Fast scans cannot outrun the idle worker.
+				synctest.Wait()
+				close(release)
+				<-done
+			})
 			fields := log.last(t)
 			if fields["scan_workers"] != float64(workers) || fields["scan_splits"].(float64) == 0 {
 				t.Fatalf("running ranges were not split: %v", fields)
@@ -514,6 +675,9 @@ func scanLogField(t *testing.T, log *scanLog, field string) float64 {
 }
 
 func TestParallelScanReplaysUnchangedDirectories(t *testing.T) {
+	if isolatedScanTest(t) {
+		return
+	}
 	defer func(margin time.Duration) { scanReplayMargin = margin }(scanReplayMargin)
 	scanReplayMargin = 0
 	rng := rand.New(rand.NewSource(11))
@@ -553,18 +717,26 @@ func TestParallelScanReplaysUnchangedDirectories(t *testing.T) {
 		l     *CarbonserverListener
 		log   *scanLog
 	}
-	results := map[int]*result{}
-	for _, workers := range []int{1, 4} {
-		cache := linkGeneration(t, baseCache, t.TempDir())
-		l, log := newScanTestListener(root, cache, workers)
-		if !l.updateFileList(root, nil, nil) {
-			t.Fatal("saved generation not loaded")
+	var results [2]*result
+	directories := [2]string{t.TempDir(), t.TempDir()}
+	if !t.Run("scans", func(t *testing.T) {
+		for i, workers := range []int{1, 4} {
+			t.Run(fmt.Sprintf("workers=%d", workers), func(t *testing.T) {
+				t.Parallel()
+				cache := linkGeneration(t, baseCache, directories[i])
+				l, log := newScanTestListener(root, cache, workers)
+				if !l.updateFileList(root, nil, nil) {
+					t.Fatal("saved generation not loaded")
+				}
+				l.updateFileList(root, nil, nil)
+				results[i] = &result{cache, l, log}
+			})
 		}
-		l.updateFileList(root, nil, nil)
-		results[workers] = &result{cache, l, log}
+	}) {
+		return
 	}
 	to := time.Now().Unix()
-	seq, par := results[1], results[4]
+	seq, par := results[0], results[1]
 	replayed, listed := scanLogField(t, par.log, "scan_replayed_dirs"), scanLogField(t, par.log, "scan_listed_dirs")
 	t.Logf("changed tree: replayed %v, listed %v, lock files %d, ooo %d", replayed, listed, par.l.metrics.LockFiles, par.l.metrics.OOOFiles)
 	if replayed == 0 || listed >= replayed {
@@ -602,6 +774,7 @@ func TestParallelScanReplaysUnchangedDirectories(t *testing.T) {
 // A clock stepped back, or a recent previous scan within the margin, lists
 // every directory.
 func TestParallelScanReplayCutoff(t *testing.T) {
+	t.Parallel()
 	snapshot := &indexSnapshot{dirs: &fstCursor{}}
 	now := time.Now()
 	snapshot.manifest.ScanStarted = now.Add(-time.Hour).UnixNano()
@@ -620,6 +793,7 @@ func TestParallelScanReplayCutoff(t *testing.T) {
 }
 
 func TestScanNamesKeepEarlierNames(t *testing.T) {
+	t.Parallel()
 	var names scanNames
 	for round := range 3 {
 		names.reset()

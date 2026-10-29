@@ -13,6 +13,7 @@ import (
 )
 
 func TestPebbleChunkIgnorePhysicalQuotasConfig(t *testing.T) {
+	t.Parallel()
 	if NewConfig().Whisper.PebbleChunkIgnorePhysicalQuotas {
 		t.Fatal("physical quotas ignored by default")
 	}

@@ -44,6 +44,7 @@ func canonicalIndexResult(names []string, leaves []bool) []string {
 }
 
 func TestSnapshotOverlayMatchesTrie(t *testing.T) {
+	t.Parallel()
 	hybrid, oracle, _, _ := snapshotTrieFixture(t)
 	for i, path := range []string{"/a/overlay.wsp", "/b/other.wsp", "/new/branch/value.wsp", "/new/branch.wsp", "/空间/new.wsp"} {
 		for _, index := range []*trieIndex{hybrid, oracle} {
@@ -97,6 +98,7 @@ func TestSnapshotOverlayMatchesTrie(t *testing.T) {
 }
 
 func TestSnapshotOverlayQuotaParity(t *testing.T) {
+	t.Parallel()
 	hybrid, oracle, _, _ := snapshotTrieFixture(t)
 	quota := []*Quota{{Pattern: "/", Metrics: 100, Namespaces: 100}, {Pattern: "*", Metrics: 100, Namespaces: 100}, {Pattern: "*.*", Metrics: 100, Namespaces: 100}}
 	for _, index := range []*trieIndex{hybrid, oracle} {
@@ -139,6 +141,7 @@ func TestSnapshotOverlayQuotaParity(t *testing.T) {
 }
 
 func TestSnapshotNewMetricAncestorsMatchTrie(t *testing.T) {
+	t.Parallel()
 	hybrid, oracle, _, _ := snapshotTrieFixture(t)
 	for _, index := range []*trieIndex{hybrid, oracle} {
 		for _, path := range []string{"/a/newdir/value.wsp", "/overlay/deep/value.wsp", "/空间/新/值.wsp"} {
@@ -161,6 +164,7 @@ func TestSnapshotNewMetricAncestorsMatchTrie(t *testing.T) {
 }
 
 func TestSnapshotAdmissionMatchesRangeChecks(t *testing.T) {
+	t.Parallel()
 	hybrid, _, _, _ := snapshotTrieFixture(t)
 	for _, metric := range []string{"", ".a", "a..value", "a/value.new", "/.new", "a.\x00.new", "a.missing.child", "空间.新.值"} {
 		got, gotNew := hybrid.metricPath(metric, make([]*trieNode, 0, 32))
@@ -213,6 +217,7 @@ func TestSnapshotAdmissionPrefixAllocations(t *testing.T) {
 }
 
 func TestSnapshotQuotaReloadSeedsExistingUsage(t *testing.T) {
+	t.Parallel()
 	hybrid, oracle, _, _ := snapshotTrieFixture(t)
 	for _, index := range []*trieIndex{hybrid, oracle} {
 		index.estimateSize = func(string) (int64, int64, int64) { return 7, 11, 13 }
@@ -254,6 +259,7 @@ func TestSnapshotQuotaReloadSeedsExistingUsage(t *testing.T) {
 }
 
 func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
+	t.Parallel()
 	_, _, cache, root := snapshotTrieFixture(t)
 	listener := NewCarbonserverListener(nil)
 	listener.SetWhisperData(root)
@@ -357,6 +363,7 @@ func TestSnapshotStartupReadinessAndReconciliation(t *testing.T) {
 }
 
 func TestRealtimeIndexSkipsUnstorableMetrics(t *testing.T) {
+	t.Parallel()
 	_, _, cache, root := snapshotTrieFixture(t)
 	long := "flink.tsk." + strings.Repeat("operator-", 40) + ".numRecordsIn"
 	l := NewCarbonserverListener(func(name string) []points.Point {
@@ -401,6 +408,7 @@ func TestRealtimeIndexSkipsUnstorableMetrics(t *testing.T) {
 }
 
 func TestSnapshotScanPreservesUnpersistedMetric(t *testing.T) {
+	t.Parallel()
 	_, _, cache, root := snapshotTrieFixture(t)
 	l := NewCarbonserverListener(func(name string) []points.Point {
 		if name == "pending.value" {

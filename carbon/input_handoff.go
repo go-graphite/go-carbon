@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -25,7 +26,11 @@ import (
 // input to its tail log for a successor that has not asked for input yet, for
 // example one restoring without a checkpoint. Input then stops as without
 // handoff, and the successor replays the tail before opening its own input.
-const inputHandoffTimeout = 20 * time.Second
+var inputHandoffTimeout = 20 * time.Second
+
+// receiverStoreHook, when set by a test, wraps what TCP receivers pass their
+// points to, so the test sees every point a receiver accepted.
+var receiverStoreHook func(add func(*points.Points), addPoint func(name []byte, value float64, timestamp int64)) (func(*points.Points), func(name []byte, value float64, timestamp int64))
 
 // switchWriter lets diverted input move from one log to another. When Switch
 // returns, no write to the previous log is in flight, so it can be closed.
@@ -77,19 +82,26 @@ type inputHandover struct {
 	logger      *zap.Logger
 	started     time.Time
 
-	mu     sync.Mutex
-	done   bool
-	tail   *recovery.Writer
-	path   string
-	unlock func() error
-	timer  *time.Timer
+	mu         sync.Mutex
+	done       bool
+	closed     time.Time // when input stopped being read here
+	releasedAt time.Time // when the successor was released, or zero
+	tail       *recovery.Writer
+	path       string
+	unlock     func() error
+	timer      *time.Timer
+
+	// lost counts points accepted while the tail could not take them; the
+	// first failure stops input.
+	lost   atomic.Int64
+	failed atomic.Bool
 }
 
 // startInputHandover moves diverted input from the checkpoint's WAL to a new
 // tail log at path. The tail stays exclusively locked until it is complete.
 // Assumes we are holding app.Lock(); the handover owns the receivers.
 func (app *App) startInputHandover(path string, divert *switchWriter, logger *zap.Logger) (*inputHandover, error) {
-	tail, err := recovery.NewWriter(path, 1, 4096, nil)
+	tail, err := recovery.NewWriter(path, 1, recovery.InputFileBuffer, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -101,9 +113,26 @@ func (app *App) startInputHandover(path string, divert *switchWriter, logger *za
 	}
 	h := &inputHandover{receivers: app.Receivers, flushTraces: app.FlushTraces, logger: logger, started: time.Now(), tail: tail, path: path, unlock: unlock}
 	app.Receivers = nil
-	divert.Switch(tail.WritePoints)
+	// Bounds the tail until the successor is released too (see released).
 	h.timer = time.AfterFunc(inputHandoffTimeout, func() { h.stop("successor did not take input in time") })
+	divert.Switch(h.write)
+	logger.Info("input tail started", zap.String("filename", path))
 	return h, nil
+}
+
+// write appends diverted input to the tail. A point the tail cannot take is
+// lost although a receiver accepted it, so the first failure stops input.
+func (h *inputHandover) write(p *points.Points) error {
+	err := h.tail.WritePoints(p)
+	if err != nil {
+		h.lost.Add(int64(len(p.Data)))
+		if h.failed.CompareAndSwap(false, true) {
+			h.logger.Error("input tail write failed; stopping input", zap.Error(err))
+			// Not here: stopping input waits for this receiver.
+			go h.stop("input tail write failed")
+		}
+	}
+	return err
 }
 
 // Detach stops reading input, completes the tail, and returns the sockets. It
@@ -115,6 +144,7 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		return nil, nil
 	}
 	h.done = true
+	h.closed = time.Now()
 	h.timer.Stop()
 	in := &handoff.Input{}
 	conns := 0
@@ -133,15 +163,27 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		in.Receivers = append(in.Receivers, ir)
 	}
 	// The successor replays the tail before reading any handed-over socket.
-	if err := h.completeTail(); err != nil {
+	tail, err := h.completeTail()
+	if err != nil {
 		in.Close()
 		return nil, err
 	}
-	h.logger.Info("input handed over", zap.Int("connections", conns), zap.Duration("tail_for", time.Since(h.started)))
+	h.logger.Info("input handed over", append(h.tailFields(tail), zap.Int("connections", conns))...)
 	if len(in.Receivers) == 0 {
 		return nil, nil
 	}
 	return in, nil
+}
+
+// released notes that the successor starts now and gives it the full
+// inputHandoffTimeout from here, if input is still open.
+func (h *inputHandover) released() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.releasedAt = time.Now()
+	if !h.done {
+		h.timer.Reset(inputHandoffTimeout)
+	}
 }
 
 // stop closes input as a stop without handoff would, if it is still open.
@@ -152,24 +194,50 @@ func (h *inputHandover) stop(reason string) {
 		return
 	}
 	h.done = true
+	h.closed = time.Now()
 	h.timer.Stop()
 	for _, r := range h.receivers {
 		r.Stop()
 	}
-	if err := h.completeTail(); err != nil {
+	tail, err := h.completeTail()
+	if err != nil {
 		h.logger.Error("input tail incomplete", zap.Error(err))
 	}
-	h.logger.Info("input stopped", zap.String("reason", reason), zap.Duration("tail_for", time.Since(h.started)))
+	h.logger.Info("input stopped", append(h.tailFields(tail), zap.String("reason", reason))...)
+}
+
+// tailFields describe the completed tail: the input accepted after the
+// checkpoint, which the successor replays before it reads input itself.
+// Assumes we are holding h.mu, after completeTail.
+func (h *inputHandover) tailFields(tail recovery.File) []zap.Field {
+	fields := []zap.Field{
+		zap.Duration("tail_for", time.Since(h.started)),
+		zap.Int64("tail_points", h.tail.Points()),
+		zap.Int64("tail_bytes", tail.Size),
+		zap.Int64("tail_lost_points", h.lost.Load()),
+	}
+	if !h.releasedAt.IsZero() {
+		fields = append(fields, zap.Duration("tail_before_release", h.releasedAt.Sub(h.started)),
+			zap.Duration("tail_after_release", time.Since(h.releasedAt)))
+	}
+	return fields
+}
+
+// closedAt reports when input stopped being read here, after Detach or stop.
+func (h *inputHandover) closedAt() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.closed
 }
 
 // completeTail runs once no receiver writes anymore.
-func (h *inputHandover) completeTail() error {
+func (h *inputHandover) completeTail() (recovery.File, error) {
 	if h.flushTraces != nil {
 		h.flushTraces()
 	}
-	_, err := h.tail.Close()
+	f, err := h.tail.Close()
 	err = errors.Join(err, syncDir(filepath.Dir(h.path)))
-	return errors.Join(err, h.unlock())
+	return f, errors.Join(err, h.unlock())
 }
 
 func syncDir(path string) error {

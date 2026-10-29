@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"expvar"
 	"flag"
 	"fmt"
@@ -15,8 +16,10 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/lomik/zapwriter"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	daemon "github.com/sevlyar/go-daemon"
@@ -74,7 +77,10 @@ func main() {
 	cat := flag.String("cat", "", "Print cache dump file")
 	printFLC := flag.String("print-file-list-cache", "", "Print file list cache. (format: $path_to_cache. example: /var/lib/carbon/carbonserver-file-list-cache.bin)")
 	handoffProtocol := flag.Bool("handoff-protocol", false, "Print the supported read handoff protocol and exit")
+	prepareStore := flag.String("prepare-shared-store", "", "absolute verified-finalizer executable; requires a claimed predecessor handoff and mirrored exact storage")
 	inputHandoffProtocol := flag.Bool("input-handoff-protocol", false, "Print the supported input handoff protocol and exit")
+	sharedStoreHandoffProtocol := flag.Bool("shared-store-handoff-protocol", false, "Print the supported mirrored storage handoff protocol and exit")
+	storeInputHandoffProtocol := flag.Bool("store-input-handoff-protocol", false, "Print the supported shared-store input handoff protocol and exit")
 
 	flag.Parse()
 
@@ -84,6 +90,20 @@ func main() {
 	}
 	if *inputHandoffProtocol {
 		fmt.Println(handoff.InputProtocol)
+		return
+	}
+	if *storeInputHandoffProtocol {
+		fmt.Println(handoff.StoreInputProtocol)
+		return
+	}
+	if *sharedStoreHandoffProtocol {
+		probe := carbon.New(*configFile)
+		if err := probe.ParseConfig(); err == nil {
+			cfg := probe.Config
+			if cfg.Whisper.StoreMirrorFiles && cfg.Whisper.StoreLiveMigration && cfg.Dump.Enabled && !cfg.Tags.Enabled {
+				fmt.Println(handoff.SharedStoreProtocol)
+			}
+		}
 		return
 	}
 
@@ -227,7 +247,18 @@ func main() {
 	}
 
 	if cfg.Prometheus.Enabled {
+		buildInfo := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "go_carbon_build_info",
+			Help: "Go-carbon release, binary build, and Go toolchain versions.",
+			ConstLabels: prometheus.Labels{
+				"version":       Version,
+				"build_version": BuildVersion,
+				"go_version":    runtime.Version(),
+			},
+		})
+		buildInfo.Set(1)
 		app.PromRegisterer.MustRegister(
+			buildInfo,
 			collectors.NewBuildInfoCollector(),
 			collectors.NewGoCollector(
 				collectors.WithGoCollectorRuntimeMetrics(collectors.GoRuntimeMetricsRule{Matcher: regexp.MustCompile("/.*")}),
@@ -244,6 +275,14 @@ func main() {
 	signal.Notify(reloadSignals, syscall.SIGHUP)
 	defer signal.Stop(stopSignals)
 	defer signal.Stop(reloadSignals)
+	if *prepareStore != "" {
+		prepareContext, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+		err = app.PrepareSharedStoreForHandoff(prepareContext, *prepareStore)
+		cancel()
+		if err != nil {
+			mainLogger.Fatal("shared storage preparation failed", zap.Error(err))
+		}
+	}
 	if err = app.Start(); err != nil {
 		mainLogger.Fatal(err.Error())
 	} else {
@@ -264,9 +303,10 @@ func main() {
 		released = true
 	}
 	if release != nil && cfg.Dump.Enabled {
-		// Runs inside DumpStop, which hands off only without tags or a
-		// shared store, so there is no other state to release first.
+		// DumpStop switches mirrored readers to the original files and closes
+		// the shared handle before releasing its exclusive lock to a successor.
 		app.SetReadHandoff(successorBinary(), releaseToSupervisor)
+		app.SetSuccessorResolver(serviceManagerBinary)
 	}
 	go func() {
 		for {
@@ -275,6 +315,7 @@ func main() {
 				app.ReleaseForHandoff()
 				releaseToSupervisor()
 			}
+			app.RecordStopExit()
 			os.Exit(0)
 		}
 	}()

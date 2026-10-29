@@ -294,7 +294,7 @@ type trieIndex struct {
 	builder       *trieBulkBuilder
 	root          *trieNode
 	fileExt       string
-	fileCount     int
+	fileCount     int64
 	depth         uint64
 	longestMetric string
 
@@ -404,17 +404,21 @@ var trieDirectorySeparator = []byte{'/'}
 
 // TODO: consider not initialize fileMeta if quota feature isn't enabled?
 func newFileNode(m uint8, logicalSize, physicalSize, dataPoints, firstSeenAt int64) *trieNode {
-	n := &trieNode{
-		childrens: emptyTrieNodes,
-		gen:       m,
+	// Keep metadata first so its 64-bit counters are aligned on 32-bit hosts.
+	n := &struct {
+		meta fileMeta
+		node trieNode
+	}{
+		meta: fileMeta{
+			logicalSize:  logicalSize,
+			physicalSize: physicalSize,
+			dataPoints:   dataPoints,
+			firstSeenAt:  firstSeenAt,
+		},
+		node: trieNode{childrens: emptyTrieNodes, gen: m},
 	}
-	n.meta.Store(&fileMeta{
-		logicalSize:  logicalSize,
-		physicalSize: physicalSize,
-		dataPoints:   dataPoints,
-		firstSeenAt:  firstSeenAt,
-	})
-	return n
+	n.node.meta.Store(&n.meta)
+	return &n.node
 }
 
 func (tn *trieNode) dir() bool  { return len(tn.c) == 1 && tn.c[0] == '/' }
@@ -436,6 +440,17 @@ func (tn *trieNode) setChildrens(cs []*trieNode) {
 }
 
 func (tn *trieNode) addChild(n *trieNode) {
+	if len(*tn.childrens) == 0 {
+		children := &struct {
+			header []*trieNode
+			first  [1]*trieNode
+		}{first: [1]*trieNode{n}}
+		children.header = children.first[:]
+		// Publish the header and its sole entry from one allocation.
+		// skipcq: GSC-G103
+		atomic.StorePointer((*unsafe.Pointer)(unsafe.Pointer(&tn.childrens)), unsafe.Pointer(&children.header))
+		return
+	}
 	tn.setChildrens(append(*tn.childrens, n))
 }
 
@@ -474,8 +489,12 @@ func newTrie(fileExt string, maxCreatesPerSecond int, estimateSize func(metric s
 	}
 }
 
-func (ti *trieIndex) getDepth() uint64  { return atomic.LoadUint64(&ti.depth) }
-func (ti *trieIndex) setDepth(d uint64) { atomic.StoreUint64(&ti.depth, d) }
+func (ti *trieIndex) getDepth() uint64 { return atomic.LoadUint64(&ti.depth) }
+
+// getFileCount is safe against concurrent realtime inserts, unlike reading
+// fileCount directly.
+func (ti *trieIndex) getFileCount() int64 { return atomic.LoadInt64(&ti.fileCount) }
+func (ti *trieIndex) setDepth(d uint64)   { atomic.StoreUint64(&ti.depth, d) }
 
 type nilFilenameError string
 
@@ -767,7 +786,7 @@ outer:
 		ti.appendChild(cur, child)
 		cur = child
 
-		ti.fileCount++
+		atomic.AddInt64(&ti.fileCount, 1)
 	}
 
 	return cur, nil
@@ -993,7 +1012,7 @@ func (tn *trieNode) fullPath(sep byte, parents []*trieNode) string {
 }
 
 func (ti *trieIndex) allMetricsMutable(sep byte) []string {
-	var files = make([]string, 0, ti.fileCount)
+	var files = make([]string, 0, ti.getFileCount())
 	var depth = ti.getDepth() + trieDepthBuffer
 	var nindex = make([]int, depth)
 	var ncindex int
@@ -1544,14 +1563,36 @@ type throughputUsagePerNamespaceQuotaInfo struct {
 	gen   uint8
 	quota *Quota
 	usage *QuotaUsage
+	// fold is how many points a stripe of a limited namespace collects
+	// before they are added to the enforced usage (see increase).
+	fold int64
 }
 
-// throughputStripes spreads the accounting of unlimited namespaces: every
-// point ingested below such a namespace, including all points for the root,
-// would otherwise increment one shared counter. A point's stripe is its cache
-// shard, so each stripe is written under one shard lock and its cache line
-// moves between CPUs only with that lock.
+// throughputStripes spreads throughput accounting: every point ingested below
+// a namespace, including all points for the root, would otherwise increment
+// one shared counter. A point's stripe is its cache shard, so each stripe is
+// written under one shard lock and its cache line moves between CPUs only with
+// that lock.
 const throughputStripes = 1024
+
+// A limited namespace's stripe folds into the enforced usage after collecting
+// up to throughputFoldMax points, and at most 1/throughputFoldShare of the
+// quota across all stripes. Usage that withinQuota reads, written by every
+// ingesting CPU on each point, was a contended cache line costing several
+// cores at ~3M points/s; withinQuota may now miss the unfolded points, which
+// under-enforces by at most 1% of the quota (under-enforcement is favored, see
+// offset).
+const (
+	throughputFoldMax   = 1024
+	throughputFoldShare = 100
+)
+
+func throughputFold(quota int64) int64 {
+	if quota <= 0 || quota == math.MaxInt64 {
+		return 0
+	}
+	return max(1, min(throughputFoldMax, quota/(throughputFoldShare*throughputStripes)))
+}
 
 type paddedCounter struct {
 	n int64
@@ -1562,13 +1603,13 @@ type paddedCounter struct {
 type throughputUsageDataPointsRecoder struct {
 	dataPoints int64 // enforced usage of limited namespaces
 	resetAt    time.Time
-	unlimited  [throughputStripes]paddedCounter
+	stripes    [throughputStripes]paddedCounter // accounting not yet in dataPoints
 }
 
-// foldUnlimited moves unlimited accounting into the enforced usage.
-func (r *throughputUsageDataPointsRecoder) foldUnlimited() {
-	for i := range r.unlimited {
-		if n := atomic.SwapInt64(&r.unlimited[i].n, 0); n != 0 {
+// foldStripes moves all striped accounting into the enforced usage.
+func (r *throughputUsageDataPointsRecoder) foldStripes() {
+	for i := range r.stripes {
+		if n := atomic.SwapInt64(&r.stripes[i].n, 0); n != 0 {
 			atomic.AddInt64(&r.dataPoints, n)
 		}
 	}
@@ -1577,8 +1618,8 @@ func (r *throughputUsageDataPointsRecoder) foldUnlimited() {
 // total returns all points accounted by the recorder.
 func (r *throughputUsageDataPointsRecoder) total() int64 {
 	n := atomic.LoadInt64(&r.dataPoints)
-	for i := range r.unlimited {
-		n += atomic.LoadInt64(&r.unlimited[i].n)
+	for i := range r.stripes {
+		n += atomic.LoadInt64(&r.stripes[i].n)
 	}
 	return n
 }
@@ -1589,11 +1630,15 @@ func newThroughputUsageDataPointsRecorder() *throughputUsageDataPointsRecoder {
 
 func newThroughputUsagePerNamespace(gen uint8, quota *Quota, quotaUsage *QuotaUsage) *throughputUsagePerNamespace {
 	var tp throughputUsagePerNamespace
-	tp.quotaInfosv.Store(&throughputUsagePerNamespaceQuotaInfo{
+	info := &throughputUsagePerNamespaceQuotaInfo{
 		gen:   gen,
 		quota: quota,
 		usage: quotaUsage,
-	})
+	}
+	if quota != nil {
+		info.fold = throughputFold(quota.Throughput)
+	}
+	tp.quotaInfosv.Store(info)
 	tp.dpRecorderv.Store(newThroughputUsageDataPointsRecorder())
 
 	return &tp
@@ -1615,17 +1660,19 @@ func (q *throughputUsagePerNamespace) dpRecorder() *throughputUsageDataPointsRec
 	return q.dpRecorderv.Load().(*throughputUsageDataPointsRecoder)
 }
 
-// increase accounts x accepted points; stripe selects the counter for an
-// unlimited namespace (see throughputStripes).
+// increase accounts x accepted points; stripe selects the counter (see
+// throughputStripes).
 func (q *throughputUsagePerNamespace) increase(x int64, stripe uint64) {
 	recorder := q.dpRecorder()
-	// withinQuota never reads the usage of an unlimited namespace, so only
-	// reports need its exact sum.
-	if quota := q.quota().Throughput; quota <= 0 || quota == math.MaxInt64 {
-		atomic.AddInt64(&recorder.unlimited[stripe%throughputStripes].n, x)
-		return
+	counter := &recorder.stripes[stripe%throughputStripes].n
+	n := atomic.AddInt64(counter, x)
+	// withinQuota never reads the usage of an unlimited namespace (fold 0),
+	// so only reports need its exact sum. A limited one folds in batches.
+	if fold := q.quotaInfos().fold; fold > 0 && n >= fold {
+		if n = atomic.SwapInt64(counter, 0); n != 0 {
+			atomic.AddInt64(&recorder.dataPoints, n)
+		}
 	}
-	atomic.AddInt64(&recorder.dataPoints, x)
 }
 
 // offset tries to avoid a potential over-enforcement due to a race condition by
@@ -1710,7 +1757,9 @@ func (q *throughputUsagePerNamespace) withinQuota(c int64, resetFrequency time.D
 }
 
 type throughputQuotaManager struct {
-	depth int64
+	depth      int64
+	generation atomic.Uint64
+	routes     atomic.Pointer[throughputRoutes]
 
 	// key:   materialized metric path of quota glob query specified in quota config
 	// value: *throughputUsagePerNamespace
@@ -1739,7 +1788,7 @@ func (tu *throughputQuotaManager) store(path string, tuq *throughputUsagePerName
 	existing := v.(*throughputUsagePerNamespace)
 	existing.quotaInfosv.Store(tuq.quotaInfos())
 	// A namespace made finite must enforce usage accepted while unlimited.
-	existing.dpRecorder().foldUnlimited()
+	existing.dpRecorder().foldStripes()
 }
 
 func (tu *throughputQuotaManager) getDepth() int { return int(atomic.LoadInt64(&tu.depth)) }
@@ -1829,6 +1878,7 @@ func (ti *trieIndex) applyQuotas(resetFrequency time.Duration, quotas ...*Quota)
 		return true
 	})
 	atomic.StoreInt64(&ti.throughputs.depth, int64(depth))
+	ti.throughputs.publishRoutes(depth)
 	return ti.throughputs, nil
 }
 
@@ -2329,6 +2379,10 @@ func (ti *trieIndex) throttle(ps *points.Points, inCache bool) bool {
 		return false
 	}
 
+	return ti.throttleMetric(ps)
+}
+
+func (ti *trieIndex) throttleMetric(ps *points.Points) bool {
 	// Metrics re-enter the cache after every write; most exist already.
 	if _, isNew := ti.metricPath(ps.Metric, nil); !isNew {
 		return false

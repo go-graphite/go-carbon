@@ -31,6 +31,7 @@ func (w *blockedAccessWriter) Write(p []byte) (int, error) {
 func (*blockedAccessWriter) Sync() error { return nil }
 
 func TestFindNotFoundLogging(t *testing.T) {
+	t.Parallel()
 	for _, protocol := range []string{"http", "grpc"} {
 		for _, cached := range []bool{false, true} {
 			for _, suppress := range []bool{false, true} {
@@ -98,6 +99,7 @@ func TestFindNotFoundLogging(t *testing.T) {
 }
 
 func TestFindBadRequestStillLogged(t *testing.T) {
+	t.Parallel()
 	listener := NewCarbonserverListener(nil)
 	listener.SetDoNotLog404s(true)
 	var logs bytes.Buffer

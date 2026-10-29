@@ -1,0 +1,13 @@
+#!/bin/sh
+case "$1" in
+-handoff-protocol) capability=read; protocol=$GRAPHITE_TEST_READ_PROTOCOL;;
+-input-handoff-protocol) capability=input; protocol=$GRAPHITE_TEST_INPUT_PROTOCOL;;
+-shared-store-handoff-protocol) capability=shared; protocol=$GRAPHITE_TEST_SHARED_PROTOCOL;;
+-store-input-handoff-protocol) capability=store-input; protocol=$GRAPHITE_TEST_STORE_INPUT_PROTOCOL;;
+*) exit 2;;
+esac
+capabilities=${0##*/}
+case ",$capabilities," in
+*,"$capability",*) echo "$protocol";;
+*) exit 2;;
+esac

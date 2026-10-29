@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -87,6 +88,31 @@ func (test *tcpTestCase) Send(text string) {
 	}
 }
 
+func (test *tcpTestCase) Receive() *points.Points {
+	test.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case msg := <-test.rcvChan:
+		return msg
+	case <-timer.C:
+		test.Fatal("message not received before deadline")
+		return nil
+	}
+}
+
+func (test *tcpTestCase) WaitClosed() {
+	test.Helper()
+	if err := test.conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		test.Fatal(err)
+	}
+	var data [1]byte
+	n, err := test.conn.Read(data[:])
+	if n != 0 || (err != io.EOF && !errors.Is(err, syscall.ECONNRESET)) {
+		test.Fatalf("connection did not close: %v", err)
+	}
+}
+
 func (test *tcpTestCase) Eq(a *points.Points, b *points.Points) {
 	if !a.Eq(b) {
 		test.Fatalf("%#v != %#v", a, b)
@@ -99,14 +125,7 @@ func TestTCP1(t *testing.T) {
 
 	test.Send("hello.world 42.15 1422698155\n")
 
-	time.Sleep(10 * time.Millisecond)
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.Eq(test.Receive(), points.OnePoint("hello.world", 42.15, 1422698155))
 }
 
 func TestTCP2(t *testing.T) {
@@ -115,21 +134,9 @@ func TestTCP2(t *testing.T) {
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
 
-	time.Sleep(10 * time.Millisecond)
+	test.Eq(test.Receive(), points.OnePoint("hello.world", 42.15, 1422698155))
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.Eq(test.Receive(), points.OnePoint("metric.name", -72.11, 1422698155))
 }
 
 func TestTCPIssue176(t *testing.T) {
@@ -138,21 +145,9 @@ func TestTCPIssue176(t *testing.T) {
 
 	test.Send("hello.world 1.096378e+06 1422698155\nmetric.name 1.096378e+06 1422698155\n")
 
-	time.Sleep(10 * time.Millisecond)
+	test.Eq(test.Receive(), points.OnePoint("hello.world", 1096378.0, 1422698155))
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 1096378.0, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
-
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", 1096378.0, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.Eq(test.Receive(), points.OnePoint("metric.name", 1096378.0, 1422698155))
 }
 
 func TestReadPlainLineMatchesReadBytes(t *testing.T) {
@@ -197,7 +192,7 @@ func TestReadPlainLineMatchesReadBytes(t *testing.T) {
 
 func TestHandleConnectionPlainTextMatchesReference(t *testing.T) {
 	firstMetric := "metric.retained.after.refill"
-	oversizedMetric := strings.Repeat("oversized.metric.", 320)
+	oversizedMetric := strings.Repeat("oversized.metric.", plainReadBufferSize/len("oversized.metric.")+1)
 	payload := firstMetric + " 1.5 10\n" +
 		"not a graphite line\n" +
 		"metric.nan.value NaN 11\n" +
@@ -327,6 +322,10 @@ type handledPlainConnection struct {
 }
 
 func handlePlainConnection(t *testing.T, compression string, payload []byte) handledPlainConnection {
+	return handlePlainConnectionConfigured(t, compression, payload, nil)
+}
+
+func handlePlainConnectionConfigured(t *testing.T, compression string, payload []byte, configure func(*TCP)) handledPlainConnection {
 	t.Helper()
 	server, client := net.Pipe()
 	defer server.Close()
@@ -336,6 +335,9 @@ func handlePlainConnection(t *testing.T, compression string, payload []byte) han
 		out:          func(p *points.Points) { result = append(result, p) },
 		logger:       zap.NewNop(),
 		decompressor: newDecompressor(compression),
+	}
+	if configure != nil {
+		configure(rcv)
 	}
 	rcv.Start()
 	defer rcv.Stop()
@@ -439,6 +441,68 @@ func TestSetPointOutReceivesPlainPoints(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("point not received")
 		}
+	}
+}
+
+func TestPointsOutMatchesPlainAcrossRefills(t *testing.T) {
+	payload := strings.Repeat("same.metric 1 2\n", 80) + "bad line\n" + strings.Repeat("x", plainReadBufferSize+100) + " 3 4\n" + strings.Repeat("after.metric 5 6\n", 80) + "unfinished 7 8"
+	want := referencePlainPoints([]byte(payload))
+	for _, compression := range []string{"", "gzip", "snappy"} {
+		t.Run(compressionOrIdentity(compression), func(t *testing.T) {
+			largest := 0
+			got := handlePlainConnectionConfigured(t, compression, []byte(payload), func(r *TCP) {
+				r.SetPointsOut(func(name []byte, data []points.Point) {
+					largest = max(largest, len(data))
+					for _, p := range data {
+						r.out(points.OnePoint(string(name), p.Value, p.Timestamp))
+					}
+				})
+			})
+			if !reflect.DeepEqual(got.points, want) || got.metricsReceived != uint32(len(want)) || got.parseErrors != 1 || largest <= 1 || largest > 64 {
+				t.Fatalf("batch changed results or bounds: stats=%+v largest=%d", got, largest)
+			}
+		})
+	}
+}
+
+func TestPointsOutFlushesBeforeBlockingRead(t *testing.T) {
+	r, err := receiver.New("tcp", map[string]interface{}{"protocol": "tcp", "listen": "127.0.0.1:0"}, func(*points.Points) { t.Error("unexpected store call") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Stop()
+	got := make(chan *points.Points, 4)
+	r.(*TCP).SetPointsOut(func(name []byte, data []points.Point) {
+		got <- &points.Points{Metric: string(name), Data: append([]points.Point(nil), data...)}
+	})
+	conn, err := net.Dial("tcp", r.(*TCP).Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// The next line is incomplete: ReadSlice must refill, without retaining
+	// either the pending callback or a name that aliases its read buffer.
+	if _, err := conn.Write([]byte("same.metric 1 2\nsame.metric 3 4\npartial")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case p := <-got:
+		if p.Metric != "same.metric" || len(p.Data) != 2 {
+			t.Fatalf("got %+v", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("batch waited for another read")
+	}
+	if _, err := conn.Write([]byte(".metric 5 6\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case p := <-got:
+		if p.Metric != "partial.metric" || len(p.Data) != 1 {
+			t.Fatalf("got %+v", p)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("single point waited for another read")
 	}
 }
 

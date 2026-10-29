@@ -16,6 +16,7 @@ import (
 )
 
 func TestAdministrativeMutationsFollowSyncPolicy(t *testing.T) {
+	t.Parallel()
 	for _, mutation := range administrativeMutations() {
 		t.Run(mutation.name, func(t *testing.T) {
 			for _, policy := range adminSyncPolicies() {
@@ -54,6 +55,7 @@ func administrativeMutations() []administrativeMutation {
 		{name: "create", setup: absentAndCreatedState, apply: createAdministrativeMetric},
 		{name: "snapshot import", setup: absentAndImportedState, apply: importAdministrativeSnapshot},
 		{name: "replace", setup: existingAndReplacedState, apply: replaceAdministrativeSnapshot},
+		{name: "reconcile", setup: existingAndReconciledState, apply: reconcileAdministrativeSnapshot},
 		{name: "fill existing", setup: existingAndFilledState, apply: fillExistingAdministrativeSnapshot},
 		{name: "fill new", setup: absentAndFilledState, apply: fillNewAdministrativeSnapshot},
 		{name: "delete", setup: existingAndDeletedState, apply: deleteAdministrativeMetric},
@@ -153,6 +155,19 @@ func existingAndReplacedState(t *testing.T, s *Store, now int) (adminState, admi
 func existingAndFilledState(t *testing.T, s *Store, now int) (adminState, adminState) {
 	createAdministrativeSnapshot(t, s, now, 1)
 	return adminState{exists: true, generation: 1, revision: 1, values: []float64{1}}, adminState{exists: true, generation: 2, revision: 2, values: []float64{2, 1}}
+}
+
+func existingAndReconciledState(t *testing.T, s *Store, now int) (adminState, adminState) {
+	before, after := existingAndReplacedState(t, s, now)
+	after.generation = before.generation
+	return before, after
+}
+
+func reconcileAdministrativeSnapshot(t *testing.T, s *Store, now int) {
+	t.Helper()
+	if _, err := s.ReconcileSnapshot(context.Background(), administrativeSnapshot(now, 2)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func existingAndDeletedState(t *testing.T, s *Store, now int) (adminState, adminState) {
@@ -312,6 +327,17 @@ func TestPeriodicSyncWithConcurrentUpdates(t *testing.T) {
 }
 
 func TestSyncPolicyCrashRecovery(t *testing.T) {
+	for _, exact := range []bool{false, true} {
+		name := "legacy"
+		if exact {
+			name = "exact"
+		}
+		t.Run(name, func(t *testing.T) { checkSyncPolicyCrashRecovery(t, exact) })
+	}
+}
+
+func checkSyncPolicyCrashRecovery(t *testing.T, exact bool) {
+	t.Helper()
 	for _, tt := range []struct {
 		name       string
 		interval   time.Duration
@@ -329,7 +355,7 @@ func TestSyncPolicyCrashRecovery(t *testing.T) {
 				strict := vfs.NewStrictMem()
 				fs := &walSyncFS{FS: strict}
 				const dir = "/store"
-				s, now := openTestStore(t, dir, Options{fs: fs, SyncInterval: tt.interval})
+				s, now := openTestStore(t, dir, Options{fs: fs, SyncInterval: tt.interval, ExactBlocks: exact})
 				closed := false
 				defer func() {
 					if !closed {
@@ -364,7 +390,7 @@ func TestSyncPolicyCrashRecovery(t *testing.T) {
 				closeTestStore(t, s)
 				strict.ResetToSyncedState()
 				strict.SetIgnoreSyncs(false)
-				reopened, _ := openTestStore(t, dir, Options{fs: strict})
+				reopened, _ := openTestStore(t, dir, Options{fs: strict, ExactBlocks: exact})
 				defer closeTestStore(t, reopened)
 				snapshot, err := reopened.Snapshot(context.Background(), "sync")
 				if err != nil {
@@ -408,6 +434,7 @@ func checkPeriodicSyncBoundary(t *testing.T, s *Store, fs *walSyncFS, before int
 }
 
 func TestPeriodicSyncFailureIsFailStop(t *testing.T) {
+	t.Parallel()
 	const childEnv = "GO_CARBON_CHUNKSTORE_PERIODIC_SYNC_FAILURE_CHILD"
 	if os.Getenv(childEnv) == "1" {
 		synctest.Test(t, func(t *testing.T) {

@@ -106,6 +106,24 @@ func (ti *trieIndex) query(expr string, limit int, expand func([]string) ([]stri
 	if err != nil {
 		return nil, nil, nil, lookups, err
 	}
+	if snapshotResultsOrdered(names, leaves) && snapshotResultsOrdered(extra, el) {
+		// Each source is already in result order: return the snapshot rows
+		// directly, or merge, instead of sorting a copy of every match.
+		if len(extra) == 0 {
+			n := len(names)
+			for i := 1; i < len(names); i++ {
+				if i >= limit && names[i] != names[i-1] {
+					n = i
+					break
+				}
+			}
+			return names[:n], leaves[:n], nodes[:n], lookups, nil
+		}
+		if rows, ok := ti.mergeSnapshotResults(names, leaves, nodes, extra, el, en); ok {
+			names, leaves, nodes = collectSnapshotResults(rows, limit)
+			return names, leaves, nodes, lookups, nil
+		}
+	}
 	rows := make([]snapshotResult, 0, len(names)+len(extra))
 	for i, name := range names {
 		rows = append(rows, snapshotResult{name, leaves[i], nodes[i]})
@@ -118,12 +136,64 @@ func (ti *trieIndex) query(expr string, limit int, expand func([]string) ([]stri
 		rows = append(rows, snapshotResult{name, el[i], node})
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].name == rows[j].name {
-			return rows[i].leaf && !rows[j].leaf
-		}
-		return rows[i].name < rows[j].name
+		return snapshotResultLess(rows[i].name, rows[i].leaf, rows[j].name, rows[j].leaf)
 	})
-	names, leaves, nodes = nil, nil, nil
+	names, leaves, nodes = collectSnapshotResults(rows, limit)
+	return names, leaves, nodes, lookups, nil
+}
+
+// snapshotResultLess orders query results by name, a metric before the
+// namespace of the same name.
+func snapshotResultLess(a string, aLeaf bool, b string, bLeaf bool) bool {
+	if a == b {
+		return aLeaf && !bLeaf
+	}
+	return a < b
+}
+
+// snapshotResultsOrdered reports whether rows are strictly increasing. Sorting
+// such rows is the identity, so callers may skip it; equal rows are rejected
+// because which duplicate the sort keeps is unspecified.
+func snapshotResultsOrdered(names []string, leaves []bool) bool {
+	for i := 1; i < len(names); i++ {
+		if !snapshotResultLess(names[i-1], leaves[i-1], names[i], leaves[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeSnapshotResults merges two strictly ordered sources. A row present in
+// both is kept only if both nodes are the same, which makes the sort's choice
+// irrelevant; otherwise it reports false and the caller sorts.
+func (ti *trieIndex) mergeSnapshotResults(names []string, leaves []bool, nodes []*trieNode, extra []string, el []bool, en []*trieNode) ([]snapshotResult, bool) {
+	rows := make([]snapshotResult, 0, len(names)+len(extra))
+	i, j := 0, 0
+	for i < len(names) || j < len(extra) {
+		if j == len(extra) || (i < len(names) && snapshotResultLess(names[i], leaves[i], extra[j], el[j])) {
+			rows = append(rows, snapshotResult{names[i], leaves[i], nodes[i]})
+			i++
+			continue
+		}
+		node := en[j]
+		if !el[j] {
+			node = ti.snapshot.directoryNode(extra[j])
+		}
+		if i < len(names) && names[i] == extra[j] && leaves[i] == el[j] {
+			if nodes[i] != node {
+				return nil, false
+			}
+			i++
+		}
+		rows = append(rows, snapshotResult{extra[j], el[j], node})
+		j++
+	}
+	return rows, true
+}
+
+// collectSnapshotResults drops duplicate rows of sorted results and applies
+// the limit.
+func collectSnapshotResults(rows []snapshotResult, limit int) (names []string, leaves []bool, nodes []*trieNode) {
 	for i, row := range rows {
 		if i > 0 && row.name == rows[i-1].name && row.leaf == rows[i-1].leaf {
 			continue
@@ -136,7 +206,7 @@ func (ti *trieIndex) query(expr string, limit int, expand func([]string) ([]stri
 		leaves = append(leaves, row.leaf)
 		nodes = append(nodes, row.node)
 	}
-	return names, leaves, nodes, lookups, nil
+	return names, leaves, nodes
 }
 
 func (s *indexSnapshot) walkNamespace(name string, visit func(string, uint64) bool) error {
@@ -560,7 +630,7 @@ func (ti *trieIndex) refreshUsage(throughputs *throughputQuotaManager) uint64 {
 			refresh(name, ti.snapshot.directoryNode(name))
 		}
 	}
-	return ti.snapshot.manifest.Records + uint64(ti.fileCount)
+	return ti.snapshot.manifest.Records + uint64(ti.getFileCount())
 }
 
 // Keep the existing trie diagnostics return shape.
@@ -581,7 +651,7 @@ func (ti *trieIndex) getQuotaTree(w io.Writer) {
 		ti.getQuotaTreeMutable(w)
 		return
 	}
-	fmt.Fprintf(w, "snapshot: %d metrics; mutable trie: %d metrics\n", ti.snapshot.manifest.Records, ti.fileCount)
+	fmt.Fprintf(w, "snapshot: %d metrics; mutable trie: %d metrics\n", ti.snapshot.manifest.Records, ti.getFileCount())
 	names := make([]string, 0, len(ti.quotaNodes))
 	for name := range ti.quotaNodes {
 		names = append(names, name)
@@ -629,19 +699,7 @@ func (u *fileListUpdate) replaceSnapshot() {
 		}
 	}
 	for name, node := range pending {
-		path := "/" + strings.ReplaceAll(name, ".", "/") + ".wsp"
-		if _, found, err := snapshot.lookup(path); err == nil && found {
-			continue
-		}
-		var m fileMeta
-		if node != nil {
-			source := node.meta.Load().(*fileMeta)
-			m.logicalSize = atomic.LoadInt64(&source.logicalSize)
-			m.physicalSize = atomic.LoadInt64(&source.physicalSize)
-			m.dataPoints = atomic.LoadInt64(&source.dataPoints)
-			m.firstSeenAt = atomic.LoadInt64(&source.firstSeenAt)
-		}
-		if _, err := next.insertMutable(path, m.logicalSize, m.physicalSize, m.dataPoints, m.firstSeenAt); err != nil {
+		if err := next.copyOverlayMetric(name, node); err != nil {
 			_ = snapshot.close()
 			u.logger.Warn("failed to transfer snapshot overlay", zap.Error(err))
 			return
@@ -650,7 +708,25 @@ func (u *fileListUpdate) replaceSnapshot() {
 	u.listener.drainRealtimeMetrics(next)
 	u.trieIdx = next
 	u.listener.prewarmNamespaceHashes(snapshot)
-	u.metricsKnown = snapshot.manifest.Records + uint64(next.fileCount)
+	u.metricsKnown = snapshot.manifest.Records + uint64(next.getFileCount())
+}
+
+func (ti *trieIndex) copyOverlayMetric(name string, node *trieNode) error {
+	path := "/" + strings.ReplaceAll(name, ".", "/") + ti.fileExt
+	found, err := ti.snapshot.containsMetric(name, ti.fileExt)
+	if err != nil || found {
+		return err
+	}
+	var m fileMeta
+	if node != nil {
+		source := node.meta.Load().(*fileMeta)
+		m.logicalSize = atomic.LoadInt64(&source.logicalSize)
+		m.physicalSize = atomic.LoadInt64(&source.physicalSize)
+		m.dataPoints = atomic.LoadInt64(&source.dataPoints)
+		m.firstSeenAt = atomic.LoadInt64(&source.firstSeenAt)
+	}
+	_, err = ti.insertMutable(path, m.logicalSize, m.physicalSize, m.dataPoints, m.firstSeenAt)
+	return err
 }
 
 // Follow literal metric bytes; namespace names returned by a query may themselves

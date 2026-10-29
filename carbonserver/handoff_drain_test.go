@@ -14,16 +14,24 @@ import (
 // StopAccepting may not have sent its request yet. Stop must still answer it:
 // http.Server drops requests it reads after Shutdown began.
 func TestStopAnswersConnectionAcceptedBeforeStopAccepting(t *testing.T) {
+	t.Parallel()
 	l := NewCarbonserverListener(nil)
 	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.tcpListener = ln
+	accepted := make(chan struct{})
 	l.httpServer = &http.Server{
-		Handler:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }),
-		ConnState: l.trackConnState,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok") }),
+		ConnState: func(conn net.Conn, state http.ConnState) {
+			l.trackConnState(conn, state)
+			if state == http.StateNew {
+				close(accepted)
+			}
+		},
 	}
+	t.Cleanup(func() { _ = l.httpServer.Close(); l.serverWG.Wait() })
 	l.serverWG.Add(1)
 	go func() { defer l.serverWG.Done(); _ = l.httpServer.Serve(ln) }()
 
@@ -32,19 +40,12 @@ func TestStopAnswersConnectionAcceptedBeforeStopAccepting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	deadline := time.Now().Add(5 * time.Second)
-	for accepted := false; !accepted; {
-		l.connStates.Range(func(_, _ any) bool { accepted = true; return false })
-		if time.Now().After(deadline) {
-			t.Fatal("connection not accepted")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waitListenerEvent(t, accepted)
 
 	l.StopAccepting()
 	stopped := make(chan struct{})
 	go func() { defer close(stopped); _ = l.Stop() }()
-	time.Sleep(50 * time.Millisecond)
+	waitListenerEvent(t, l.exitChan)
 	if _, err = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}

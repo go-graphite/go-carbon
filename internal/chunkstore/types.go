@@ -59,11 +59,22 @@ type MetricConfig struct {
 
 type Metadata struct {
 	MetricConfig
-	ID         uint64
-	Generation uint64
-	Revision   uint64    `json:"-"`
-	LastUpdate time.Time `json:"-"`
+	ID            uint64
+	Generation    uint64
+	Revision      uint64             `json:"-"`
+	LastUpdate    time.Time          `json:"-"`
+	FileMigration FileMigrationState `json:"-"`
+	Continuation  bool               `json:"-"`
 }
+
+// FileMigrationState is durable ownership, not a process-local conversion hint.
+type FileMigrationState uint8
+
+const (
+	FileUnowned FileMigrationState = iota
+	FileCleanupPending
+	FileReclaimed
+)
 
 type Series struct {
 	Metadata  Metadata

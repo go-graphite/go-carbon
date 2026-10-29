@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/blevesearch/vellum"
+	"github.com/go-graphite/go-carbon/internal/whisperpath"
 	"github.com/go-graphite/go-whisper"
 	"github.com/klauspost/compress/gzip"
 	"go.uber.org/zap"
@@ -262,6 +263,9 @@ func (w *scanWalker) walkDir(depth int) {
 			return
 		}
 		e := &entries[i]
+		if e.name == whisperpath.Quarantine {
+			continue
+		}
 		w.path = append(append(w.path[:pathLen], '/'), e.name...)
 		w.key = append(append(w.key[:keyLen], 0), e.name...)
 		if bytes.Compare(w.key, w.r.end) >= 0 {

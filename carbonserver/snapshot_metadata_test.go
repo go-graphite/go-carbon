@@ -11,6 +11,7 @@ import (
 )
 
 func TestSnapshotMetadataRoundTripAndUsage(t *testing.T) {
+	t.Parallel()
 	rng := rand.New(rand.NewSource(42))
 	for _, count := range []int{0, 1, 255, 256, 257, 2053} {
 		var data bytes.Buffer
@@ -64,6 +65,7 @@ func TestSnapshotMetadataRoundTripAndUsage(t *testing.T) {
 }
 
 func TestSnapshotMetadataRejectsTruncatedAndInvalidExtents(t *testing.T) {
+	t.Parallel()
 	var data bytes.Buffer
 	w := snapshotMetadataWriter{w: &data}
 	for i := 0; i < 257; i++ {
@@ -100,6 +102,7 @@ type snapshotFailWriter struct{ err error }
 func (w snapshotFailWriter) Write([]byte) (int, error) { return 0, w.err }
 
 func TestSnapshotMetadataWriteErrors(t *testing.T) {
+	t.Parallel()
 	for _, writeErr := range []error{nil, errors.New("disk full")} {
 		w := snapshotMetadataWriter{w: snapshotFailWriter{writeErr}}
 		if err := w.append([4]int64{1, 2, 3, 4}); err != nil {

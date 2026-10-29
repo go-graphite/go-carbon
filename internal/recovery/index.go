@@ -160,6 +160,7 @@ type BatchEntry struct {
 	ID    uint32
 	Size  int
 	Count int
+	gap   bool // Size bytes that are no record, such as a block's header
 }
 
 // Add must be called only after a complete record was successfully written.
@@ -183,6 +184,10 @@ func (b *Builder) AddBatch(file int, entries []BatchEntry) error {
 	src.mu.Lock()
 	defer src.mu.Unlock()
 	for _, e := range entries {
+		if e.gap && e.Size > 0 {
+			src.size += uint64(e.Size)
+			continue
+		}
 		if e.Size <= 0 || e.Count <= 0 {
 			return fmt.Errorf("invalid recovery record")
 		}
@@ -281,7 +286,14 @@ func (b *Builder) Write(w io.Writer) error {
 	for metrics*4 > slots*3 {
 		slots *= 2
 	}
-	table, newSlots := buildTable(slots, b.hashes, getHeads, b.isNew, b.workers)
+	table, newSlots := buildTable(slots, b.hashes, b.isNew, b.workers, tableLayout{
+		include: func(k uint32) bool { return getHeads(k).count != 0 },
+		fill: func(dst []byte, k uint32) {
+			h := getHeads(k)
+			put64(dst, b.hashes[k], h.cache, h.wal, h.count)
+		},
+		occupied: func(slot []byte) bool { return get64(slot, 8) != 0 || get64(slot, 16) != 0 },
+	})
 	header := make([]byte, headerSize)
 	copy(header, magic)
 	put64(header[8:], uint64(len(b.src[0].records)), uint64(len(b.src[1].records)), slots, metrics, b.src[0].points+b.src[1].points, b.src[0].size, b.src[1].size, uint64(len(newSlots)))
@@ -324,7 +336,17 @@ func (b *Builder) Write(w io.Writer) error {
 // regions and probe only within them; entries that would cross a region end are
 // placed afterwards by a serial pass. Any insertion order yields valid probe
 // chains, so the result answers lookups exactly like a serial build.
-func buildTable(slots uint64, hashes []uint64, get func(uint32) heads, isNew []bool, workers int) ([]byte, []uint64) {
+// tableLayout says which classified metrics a table holds and how a slot
+// is written; occupied tells a written slot from an empty one. placed, if
+// set, receives each placed metric's slot plus one.
+type tableLayout struct {
+	include  func(k uint32) bool
+	fill     func(dst []byte, k uint32)
+	occupied func(slot []byte) bool
+	placed   []uint32
+}
+
+func buildTable(slots uint64, hashes []uint64, isNew []bool, workers int, layout tableLayout) ([]byte, []uint64) {
 	table := make([]byte, slots*slotSize)
 	regions := uint64(1)
 	for int(regions) < workers && regions*2 <= slots/4096 {
@@ -333,18 +355,20 @@ func buildTable(slots uint64, hashes []uint64, get func(uint32) heads, isNew []b
 	width := slots / regions
 	byRegion := make([][]uint32, regions)
 	for id, h := range hashes {
-		if get(uint32(id)).count == 0 {
+		if !layout.include(uint32(id)) {
 			continue
 		}
 		r := (h & (slots - 1)) / width
 		byRegion[r] = append(byRegion[r], uint32(id))
 	}
 	empty := func(slot uint64) bool {
-		return get64(table, slot*slotSize+8) == 0 && get64(table, slot*slotSize+16) == 0
+		return !layout.occupied(table[slot*slotSize : (slot+1)*slotSize])
 	}
 	place := func(id uint32, slot uint64) uint64 {
-		h := get(id)
-		put64(table[slot*slotSize:], hashes[id], h.cache, h.wal, h.count)
+		layout.fill(table[slot*slotSize:(slot+1)*slotSize], id)
+		if layout.placed != nil {
+			layout.placed[id] = uint32(slot) + 1
+		}
 		return slot
 	}
 	deferred := make([][]uint32, regions)
@@ -425,22 +449,49 @@ func (b *Builder) classify(names []string) ([]uint64, []bool) {
 type Index struct {
 	data                        []byte
 	source                      [2][]byte
+	format                      Format     // of the cache source
+	names                       *nameTable // of a FormatBlocks cache source
+	v2                          bool       // GCPOINT2 or GCPOINT3: compact input in wal
+	v3                          bool       // GCPOINT3: no record table, 16-byte slots
+	cachePoints                 uint64
+	shardIDs                    [idShards + 1]uint64
+	idOffset                    uint64
+	wal                         *walOverlay
+	newList                     []uint64
 	slots, metrics, points      uint64
 	recordCounts, recordOffsets [2]uint64
 	newCount, newOffset         uint64
 }
 
 func Open(index, cache, wal []byte) (*Index, error) {
+	return OpenFormat(index, cache, wal, FormatLegacy)
+}
+
+// OpenFormat opens an index over a cache source of format f. GCPOINT2 and
+// GCPOINT3 indexes go with a compact input file in wal; GCPOINT3 requires
+// a blocks cache source.
+func OpenFormat(index, cache, wal []byte, f Format) (*Index, error) {
+	if len(index) >= headerSize && string(index[:8]) == magicV2 {
+		return openV2(index, cache, wal, f)
+	}
+	if len(index) >= headerSize && string(index[:8]) == magicV3 {
+		return openV3(index, cache, wal, f)
+	}
 	if len(index) < headerSize || string(index[:8]) != magic {
 		return nil, fmt.Errorf("invalid recovery index header")
 	}
-	in := &Index{data: index, source: [2][]byte{cache, wal}}
+	in := &Index{data: index, source: [2][]byte{cache, wal}, format: f}
 	in.recordCounts = [2]uint64{get64(index, 8), get64(index, 16)}
 	in.slots, in.metrics, in.points = get64(index, 24), get64(index, 32), get64(index, 40)
 	if in.slots < 2 || in.slots&(in.slots-1) != 0 || in.slots > uint64((len(index)-headerSize)/slotSize) || in.metrics > in.slots*3/4 {
 		return nil, fmt.Errorf("invalid recovery hash table size")
 	}
-	if get64(index, 48) != uint64(len(cache)) || get64(index, 56) != uint64(len(wal)) || in.points > uint64(len(cache))/2+uint64(len(wal))/2 {
+	// A legacy point takes at least two bytes, a compact one at least one.
+	cachePoints := uint64(len(cache)) / 2
+	if f.Compact() {
+		cachePoints = uint64(len(cache))
+	}
+	if get64(index, 48) != uint64(len(cache)) || get64(index, 56) != uint64(len(wal)) || in.points > cachePoints+uint64(len(wal))/2 {
 		return nil, fmt.Errorf("recovery source lengths differ")
 	}
 	offset := uint64(headerSize) + in.slots*slotSize
@@ -458,6 +509,11 @@ func Open(index, cache, wal []byte) (*Index, error) {
 	offset += in.newCount * 8
 	if offset != uint64(len(index)) {
 		return nil, fmt.Errorf("trailing recovery index bytes")
+	}
+	if f == FormatBlocks {
+		if err := in.loadBlocks(cache); err != nil {
+			return nil, err
+		}
 	}
 	if err := in.validateRecords(); err != nil {
 		return nil, err
@@ -492,6 +548,9 @@ func (in *Index) validateRecords() error {
 	}
 	var ranges []recordRange
 	for file, count := range in.recordCounts {
+		if file == 0 && in.names != nil {
+			continue // checked with the blocks' names
+		}
 		if count == 0 && len(in.source[file]) != 0 {
 			return fmt.Errorf("unindexed recovery source bytes")
 		}
@@ -617,12 +676,39 @@ func (in *Index) validateRecordRange(file int, first, last uint64) error {
 }
 
 func (in *Index) record(file int, id uint64) record {
+	if in.v3 {
+		return in.names.record(id)
+	}
 	offset := in.recordOffsets[file] + (id-1)*recordSize
 	return record{get64(in.data, offset), get64(in.data, offset+8), get64(in.data, offset+16)}
 }
 func (in *Index) slot(slot uint64) (uint64, heads) {
+	if in.v2 {
+		if slot >= in.slots {
+			return 0, heads{count: in.wal.count(slot)}
+		}
+		if in.v3 {
+			at := headerSize + slot*slotSizeV3
+			return uint64(binary.LittleEndian.Uint32(in.data[at:])), heads{cache: uint64(binary.LittleEndian.Uint32(in.data[at+4:])),
+				count: uint64(binary.LittleEndian.Uint32(in.data[at+8:])) + in.wal.count(slot)}
+		}
+		offset := headerSize + slot*slotSize
+		return get64(in.data, offset), heads{cache: get64(in.data, offset+8), count: get64(in.data, offset+16) + in.wal.count(slot)}
+	}
 	offset := headerSize + slot*slotSize
 	return get64(in.data, offset), heads{cache: get64(in.data, offset+8), wal: get64(in.data, offset+16), count: get64(in.data, offset+24)}
+}
+
+// occupied reports whether a table slot ends no probe chain.
+func (in *Index) occupied(slot uint64) bool {
+	if in.v3 {
+		return binary.LittleEndian.Uint32(in.data[headerSize+slot*slotSizeV3+12:]) != 0
+	}
+	offset := headerSize + slot*slotSize
+	if in.v2 {
+		return get64(in.data, offset+24) != 0
+	}
+	return get64(in.data, offset+8) != 0 || get64(in.data, offset+16) != 0
 }
 func recordMetric(data []byte) ([]byte, error) {
 	size, n := binary.Varint(data)
@@ -631,7 +717,29 @@ func recordMetric(data []byte) ([]byte, error) {
 	}
 	return data[n : n+int(size)], nil
 }
-func (in *Index) name(h heads) ([]byte, error) {
+func (in *Index) name(slot uint64, h heads) ([]byte, error) {
+	return in.appendName(nil, slot, h)
+}
+
+// decodes reports whether a slot's name is decoded from a FormatBlocks
+// cache dump's names, rather than borrowed from a source.
+func (in *Index) decodes(h heads) bool { return in.names != nil && h.cache != 0 }
+
+// appendName appends slot's name to dst if it is decoded (see decodes);
+// otherwise it returns the name borrowed from its source.
+func (in *Index) appendName(dst []byte, slot uint64, h heads) ([]byte, error) {
+	if in.decodes(h) {
+		return in.names.appendName(dst, h.cache), nil
+	}
+	if in.v2 && h.cache == 0 {
+		if slot >= in.slots {
+			return []byte(in.wal.late[slot-in.slots]), nil
+		}
+		if name, ok := in.wal.names[slot]; ok {
+			return []byte(name), nil
+		}
+		return nil, nil
+	}
 	file, id := 0, h.cache
 	if id == 0 {
 		file, id = 1, h.wal
@@ -645,22 +753,32 @@ func (in *Index) name(h heads) ([]byte, error) {
 
 func (in *Index) Find(metric string) (uint64, bool, error) {
 	hash := xxhash.Sum64String(metric)
-	slot := hash & (in.slots - 1)
+	slot, stored := hash&(in.slots-1), hash
+	if in.v3 {
+		slot, stored = homeV3(hash, in.slots), uint64(uint32(hash))
+	}
 	for attempts := uint64(0); attempts < in.slots; attempts++ {
-		stored, h := in.slot(slot)
-		if h.cache == 0 && h.wal == 0 {
+		if !in.occupied(slot) {
+			if in.v2 {
+				if late, ok := in.wal.lateAt[metric]; ok {
+					return late, true, nil
+				}
+			}
 			return 0, false, nil
 		}
-		if stored == hash {
-			name, err := in.name(h)
+		// A compact index also holds names without points: not found.
+		if got, h := in.slot(slot); got == stored && h.count != 0 {
+			same, err := in.nameIs(slot, h, metric)
 			if err != nil {
 				return 0, false, err
 			}
-			if string(name) == metric {
+			if same {
 				return slot, true, nil
 			}
 		}
-		slot = (slot + 1) & (in.slots - 1)
+		if slot++; slot == in.slots {
+			slot = 0
+		}
 	}
 	return 0, false, fmt.Errorf("recovery hash table has no empty slot")
 }
@@ -669,8 +787,11 @@ func (in *Index) Find(metric string) (uint64, bool, error) {
 // chain) as their exact encoded bytes, each with its point count. The bytes
 // borrow the mapped source.
 func (in *Index) RawRecords(slot uint64, visit func(raw []byte, count int) error) error {
-	if slot >= in.slots {
+	if slot >= in.Slots() {
 		return fmt.Errorf("invalid recovery slot number")
+	}
+	if in.format != FormatLegacy || in.v2 {
+		return fmt.Errorf("raw records of a %v recovery source", in.format)
 	}
 	_, h := in.slot(slot)
 	if h.count == 0 {
@@ -714,7 +835,7 @@ func (in *Index) ReadForWrite(slot uint64, extra int) (*points.Points, error) {
 }
 
 func (in *Index) read(slot uint64, extra int) (*points.Points, error) {
-	if slot >= in.slots {
+	if slot >= in.Slots() {
 		return nil, fmt.Errorf("invalid recovery slot number")
 	}
 	_, h := in.slot(slot)
@@ -727,7 +848,8 @@ func (in *Index) read(slot uint64, extra int) (*points.Points, error) {
 	if extra < 0 || uint64(extra) > uint64(math.MaxInt)/16-h.count {
 		return nil, fmt.Errorf("invalid recovery append capacity")
 	}
-	name, err := in.name(h)
+	var buf [1024]byte
+	name, err := in.appendName(buf[:0], slot, h)
 	if err != nil {
 		return nil, err
 	}
@@ -736,42 +858,150 @@ func (in *Index) read(slot uint64, extra int) (*points.Points, error) {
 		capacity += min(int(h.count)/8, 64, math.MaxInt/16-capacity)
 	}
 	result := &points.Points{Metric: string(name), Data: make([]points.Point, 0, capacity)}
-	for file, head := range []uint64{h.cache, h.wal} {
-		var chain []uint64
-		for id := head; id != 0; id = in.record(file, id).previous {
+	if result.Data, err = in.appendRecords(result.Data, result.Metric, slot, h, nil); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// appendRecords appends the points of h's records in replay order. With head
+// set, a first record in compact format is passed to head instead, still
+// encoded, and its points are not appended. Every record must be named
+// name; the slot's name is, which the caller checked or read.
+func (in *Index) appendRecords(dst []points.Point, name string, slot uint64, h heads, head func(CompactRecord)) ([]points.Point, error) {
+	start, total := len(dst), uint64(0)
+	var chain []uint64
+	for file, first := range []uint64{h.cache, h.wal} {
+		chain = chain[:0]
+		for id := first; id != 0; id = in.record(file, id).previous {
 			chain = append(chain, id)
 		}
 		for i := len(chain) - 1; i >= 0; i-- {
 			r := in.record(file, chain[i])
 			raw := in.source[file][r.offset : r.offset+r.length]
-			metric, values, err := points.AppendBinaryPoints(result.Data, raw)
+			var metric []byte
+			var err error
+			if file == 0 && in.format.Compact() {
+				var n int
+				var data []byte
+				if in.names != nil {
+					// Blocks name records apart from their bytes; the
+					// slot is named after its head record.
+					if n, data, err = blockBody(raw); err == nil && chain[i] != h.cache && !in.names.is(chain[i], name) {
+						err = fmt.Errorf("recovery chain contains another metric")
+					}
+				} else {
+					metric, n, data, err = compactBody(raw)
+				}
+				if err == nil {
+					if head != nil && total == 0 {
+						var st CompactState
+						if _, st, err = decodeCompact(nil, data, n, true); err == nil {
+							head(CompactRecord{Data: data, N: n, State: st})
+							total += uint64(n)
+						}
+					} else {
+						before := len(dst)
+						dst, _, err = decodeCompact(dst, data, n, false)
+						total += uint64(len(dst) - before)
+					}
+				}
+			} else {
+				before := len(dst)
+				metric, dst, err = points.AppendBinaryPoints(dst, raw)
+				total += uint64(len(dst) - before)
+			}
 			if err != nil {
-				return nil, err
+				return dst[:start], err
 			}
-			if !bytes.Equal(metric, name) {
-				return nil, fmt.Errorf("recovery chain contains another metric")
+			if metric != nil && string(metric) != name {
+				return dst[:start], fmt.Errorf("recovery chain contains another metric")
 			}
-			result.Data = values
 		}
 	}
-	if uint64(len(result.Data)) != h.count {
-		return nil, fmt.Errorf("recovery metric point count differs")
+	if in.v2 {
+		wal := in.wal.of(slot)
+		dst = append(dst, wal...)
+		total += uint64(len(wal))
 	}
-	return result, nil
+	if total != h.count {
+		return dst[:start], fmt.Errorf("recovery metric point count differs")
+	}
+	return dst, nil
 }
+
+// ReadCompact reads slot's saved points for an encoder of the compact format.
+// If its first record is compact, head receives it still encoded, borrowing
+// the mapped source; the points of every other record are appended to tail.
+// It returns the metric name, borrowed too, and the extended tail.
+func (in *Index) ReadCompact(slot uint64, tail []points.Point, head func(CompactRecord)) ([]byte, []points.Point, error) {
+	if slot >= in.Slots() {
+		return nil, tail, fmt.Errorf("invalid recovery slot number")
+	}
+	_, h := in.slot(slot)
+	if h.count == 0 {
+		return nil, tail, nil
+	}
+	if h.count > uint64(math.MaxInt)/16 {
+		return nil, tail, fmt.Errorf("recovery metric is too large")
+	}
+	name, err := in.name(slot, h)
+	if err != nil {
+		return nil, tail, err
+	}
+	tail, err = in.appendRecords(tail, string(name), slot, h, head)
+	return name, tail, err
+}
+
+// ReadCompactAs is ReadCompact of a slot known to hold metric name: found
+// by it, or named by Name. It does not read the slot's name again.
+func (in *Index) ReadCompactAs(slot uint64, name string, tail []points.Point, head func(CompactRecord)) ([]points.Point, error) {
+	if slot >= in.Slots() {
+		return tail, fmt.Errorf("invalid recovery slot number")
+	}
+	_, h := in.slot(slot)
+	if h.count == 0 {
+		return tail, fmt.Errorf("pending recovery metric has no points")
+	}
+	if h.count > uint64(math.MaxInt)/16 {
+		return tail, fmt.Errorf("recovery metric is too large")
+	}
+	return in.appendRecords(tail, name, slot, h, head)
+}
+
+// nameIs reports whether slot is named metric.
+func (in *Index) nameIs(slot uint64, h heads, metric string) (bool, error) {
+	if in.decodes(h) {
+		return in.names.is(h.cache, metric), nil
+	}
+	name, err := in.name(slot, h)
+	return err == nil && string(name) == metric, err
+}
+
+// CacheFormat reports the record format of the cache source.
+func (in *Index) CacheFormat() Format { return in.format }
 
 func (in *Index) Metrics() uint64 { return in.metrics }
 func (in *Index) Points() uint64  { return in.points }
-func (in *Index) Slots() uint64   { return in.slots }
+
+// Slots bounds slot numbers: the table's, then a compact checkpoint's late
+// metrics.
+func (in *Index) Slots() uint64 {
+	if in.v2 {
+		return uint64(len(in.wal.start) - 1)
+	}
+	return in.slots
+}
 func (in *Index) Name(slot uint64) (string, bool, error) {
-	if slot >= in.slots {
+	if slot >= in.Slots() {
 		return "", false, fmt.Errorf("invalid recovery slot number")
 	}
 	_, h := in.slot(slot)
 	if h.count == 0 {
 		return "", false, nil
 	}
-	name, err := in.name(h)
+	var buf [1024]byte
+	name, err := in.appendName(buf[:0], slot, h)
 	return string(name), err == nil, err
 }
 
@@ -789,11 +1019,16 @@ func (in *Index) VisitNewNames(visit func([]byte) error) error {
 }
 
 func (in *Index) visitNewNamesRange(first, last uint64, visit func([]byte) error) error {
+	var buf []byte
 	for i := first; i < last; i++ {
-		_, h := in.slot(get64(in.data, in.newOffset+i*8))
-		name, err := in.name(h)
+		slot := in.newSlot(i)
+		_, h := in.slot(slot)
+		name, err := in.appendName(buf[:0], slot, h)
 		if err != nil {
 			return err
+		}
+		if in.decodes(h) {
+			buf = name // decoded into buf, which may have grown
 		}
 		if err = visit(name); err != nil {
 			return err
@@ -856,8 +1091,23 @@ func (in *Index) FilterNewNames(keep func([]byte) bool, visit func(string) error
 
 func (in *Index) NewNameCount() uint64 { return in.newCount }
 
+// VisitNewSlots calls visit with the slot of every metric absent from the
+// saved read index when the dump was written.
+func (in *Index) VisitNewSlots(visit func(slot uint64)) {
+	for i := uint64(0); i < in.newCount; i++ {
+		visit(in.newSlot(i))
+	}
+}
+
+func (in *Index) newSlot(i uint64) uint64 {
+	if in.v2 {
+		return in.newList[i]
+	}
+	return get64(in.data, in.newOffset+i*8)
+}
+
 func (in *Index) Count(slot uint64) uint64 {
-	if slot >= in.slots {
+	if slot >= in.Slots() {
 		return 0
 	}
 	_, h := in.slot(slot)

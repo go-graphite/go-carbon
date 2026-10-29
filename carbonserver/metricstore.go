@@ -10,20 +10,90 @@ import (
 
 	"github.com/dgryski/go-trigram"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"go.uber.org/zap"
 )
 
+// Incremental conversion preserves the ordinary filesystem index contract and
+// exact values, so its discovery caches retain the existing TTL policy.
+func (listener *CarbonserverListener) usesSharedCatalogCachePolicy() bool {
+	db := listener.getMetricStore()
+	return db != nil && db.IncrementalSource() == ""
+}
+
 const metricStoreCatalogPageSize = 4096
+
+// UsesSharedCatalogIndex reports whether discovery uses only committed store metadata.
+func (listener *CarbonserverListener) UsesSharedCatalogIndex() bool {
+	return listener.getMetricIndexStore() != nil
+}
 
 // updateMetricStoreIndex creates the same virtual .wsp paths used by the
 // filesystem index. It deliberately does not consult the file-list cache: the
 // store catalog is authoritative across carbonserver restarts.
 func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.Store) error {
+	phasecpu.Set(phasecpu.Index)
+	defer phasecpu.Set(phasecpu.Other)
 	listener.metricStoreIndexMu.Lock()
 	defer listener.metricStoreIndexMu.Unlock()
+	if listener.indexPaused.Load() {
+		return nil
+	}
 
 	started := time.Now()
+	after := listener.metricStoreCursor
+	previous := listener.CurrentFileIndex()
+	if listener.metricStoreIndex != metricStore || previous == nil {
+		after = 0
+	}
+	changes, cursor, rebuild, err := metricStore.CatalogChanges(context.Background(), after)
+	if err != nil {
+		return err
+	}
+	if listener.trieIndex && listener.fileListCache != "" && listener.fileListCacheVersion == FLCVersion2 {
+		return listener.updateMappedMetricStoreIndex(metricStore, previous, changes, cursor, rebuild)
+	}
+	if !rebuild && len(changes) == 0 {
+		listener.metricStoreCursor = cursor
+		listener.refreshMetricStoreSpace(previous)
+		return nil
+	}
+	if !rebuild && listener.trieIndex && previous.trieIdx != nil {
+		// Existing policies and deletions still use a full rebuild. Ordinary
+		// writes never enter the journal; only new names extend the live trie.
+		listener.fileIdxMutex.Lock()
+		for _, m := range changes {
+			if previous.details[m.Name] != nil {
+				rebuild = true
+				break
+			}
+		}
+		listener.fileIdxMutex.Unlock()
+		if !rebuild {
+			for _, m := range changes {
+				logical, points := metricStoreLogicalSize(m)
+				if _, err := previous.trieIdx.insert(metricStoreVirtualPath(m.Name), logical, 0, points, 0); err != nil {
+					return err
+				}
+				listener.fileIdxMutex.Lock()
+				previous.details[m.Name] = &protov3.MetricDetails{Size: logical}
+				listener.fileIdxMutex.Unlock()
+			}
+			if listener.isQuotaEnabled() {
+				if err := listener.applySharedStoreQuotas(previous.trieIdx); err != nil {
+					return err
+				}
+			}
+			listener.metricStoreCursor = cursor
+			atomic.AddUint64(&listener.metrics.MetricsKnown, uint64(len(changes)))
+			atomic.AddUint64(&listener.metrics.TrieFiles, uint64(len(changes)))
+			atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(time.Since(started)))
+			atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(time.Since(started)))
+			listener.refreshMetricStoreSpace(previous)
+			return nil
+		}
+	}
 	files, details, trieIdx, metricsKnown, err := listener.loadMetricStoreCatalog(metricStore)
 	if err != nil {
 		return err
@@ -48,7 +118,8 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 			}
 		}
 		nfidx.trieIdx = trieIdx
-		count, files, dirs, _, _, _, _, _ := trieIdx.countNodes()
+		count, files, dirs := trieIdx.builder.nodes, int(trieIdx.getFileCount()), trieIdx.builder.dirs
+		trieIdx.builder = nil
 		atomic.StoreUint64(&listener.metrics.TrieNodes, uint64(count))
 		atomic.StoreUint64(&listener.metrics.TrieFiles, uint64(files))
 		atomic.StoreUint64(&listener.metrics.TrieDirs, uint64(dirs))
@@ -60,7 +131,6 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		indexSize = len(nfidx.idx)
 	}
 
-	previous := listener.CurrentFileIndex()
 	if previous != nil && listener.internalStatsDir != "" {
 		listener.fileIdxMutex.Lock()
 		for metric, accessTime := range previous.accessTimes {
@@ -74,6 +144,7 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		listener.fileIdxMutex.Unlock()
 	}
 	listener.UpdateFileIndex(nfidx)
+	listener.metricStoreIndex, listener.metricStoreCursor = metricStore, cursor
 	atomic.StoreUint64(&listener.metrics.MetricsKnown, metricsKnown)
 	atomic.AddUint64(&listener.metrics.FileScanTimeNS, uint64(time.Since(started)))
 	atomic.AddUint64(&listener.metrics.IndexBuildTimeNS, uint64(time.Since(started)))
@@ -85,6 +156,16 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 	return nil
 }
 
+func (listener *CarbonserverListener) refreshMetricStoreSpace(previous *fileIndex) {
+	var free, total uint64
+	if err := metricStoreFilesystemStats(listener.whisperData, &free, &total); err == nil && (free != previous.freeSpace || total != previous.totalSpace) {
+		// Readers retain their index; only the small space-stat wrapper changes.
+		next := *previous
+		next.freeSpace, next.totalSpace = free, total
+		listener.UpdateFileIndex(&next)
+	}
+}
+
 func (listener *CarbonserverListener) loadMetricStoreCatalog(metricStore *store.Store) ([]string, map[string]*protov3.MetricDetails, *trieIndex, uint64, error) {
 	var files []string
 	details := make(map[string]*protov3.MetricDetails)
@@ -92,6 +173,7 @@ func (listener *CarbonserverListener) loadMetricStoreCatalog(metricStore *store.
 	var trieIdx *trieIndex
 	if listener.trieIndex {
 		trieIdx = newTrie(".wsp", listener.maxCreatesPerSecond, listener.estimateSize)
+		trieIdx.builder = &trieBulkBuilder{}
 	}
 	return listener.loadMetricStoreCatalogPages(metricStore, files, details, trieIdx, seenPaths)
 }

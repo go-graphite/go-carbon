@@ -194,17 +194,26 @@ func (c *fstCursor) final(s fstState) (bool, uint64) {
 // after the following 0 byte if longer keys continue.
 // buf is scratch space for names, kept between calls.
 func (c *fstCursor) names(s fstState, buf *[]byte, visit func(name []byte, final bool, value uint64, child fstState)) {
+	c.namesUntil(s, buf, func(name []byte, final bool, value uint64, child fstState) bool {
+		visit(name, final, value, child)
+		return true
+	})
+}
+
+// namesUntil is names with early termination when visit returns false. A small
+// find limit must not walk every sibling of a wide directory.
+func (c *fstCursor) namesUntil(s fstState, buf *[]byte, visit func(name []byte, final bool, value uint64, child fstState) bool) bool {
 	if !s.ok {
-		return
+		return true
 	}
-	var walk func(s fstState, name []byte)
-	walk = func(s fstState, name []byte) {
+	var walk func(s fstState, name []byte) bool
+	walk = func(s fstState, name []byte) bool {
 		if cap(name) > cap(*buf) {
 			*buf = name[:0]
 		}
 		var n fstNodeView
 		if !c.node(s.addr, &n) {
-			return
+			return true
 		}
 		first := 0
 		var child fstState
@@ -214,14 +223,19 @@ func (c *fstCursor) names(s fstState, buf *[]byte, visit func(name []byte, final
 			}
 		}
 		if len(name) > 0 && (n.final || child.ok) {
-			visit(name, n.final, s.out+n.finalOut, child)
+			if !visit(name, n.final, s.out+n.finalOut, child) {
+				return false
+			}
 		}
 		for i := first; i < n.numTrans; i++ {
 			in, addr, out := n.transition(i)
-			walk(fstState{addr: addr, out: s.out + out, ok: true}, append(name, in))
+			if !walk(fstState{addr: addr, out: s.out + out, ok: true}, append(name, in)) {
+				return false
+			}
 		}
+		return true
 	}
-	walk(s, (*buf)[:0])
+	return walk(s, (*buf)[:0])
 }
 
 func fstReadPacked(b []byte) uint64 {

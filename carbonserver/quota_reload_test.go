@@ -22,6 +22,7 @@ func TestQuotaReloadWhileServing(t *testing.T) {
 	l.SetQuotas([]*Quota{{Pattern: "/", Metrics: 1}})
 	l.WarmupIndex()
 	waitWarmup(t, l)
+	reloaded := watchListenerLog(l, "quota rules reloaded")
 	if err := l.Listen("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
@@ -35,12 +36,9 @@ func TestQuotaReloadWhileServing(t *testing.T) {
 		if err := l.ReloadQuotas(rules); err != nil {
 			t.Fatal(err)
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for l.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) != (limit == 1) {
-			if time.Now().After(deadline) {
-				t.Fatalf("limit %d did not become effective", limit)
-			}
-			time.Sleep(time.Millisecond)
+		waitListenerEvent(t, reloaded)
+		if l.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) != (limit == 1) {
+			t.Fatalf("limit %d did not become effective", limit)
 		}
 		if !l.MetricExists("namespace.existing") {
 			t.Fatal("reload lost live index")
@@ -55,6 +53,7 @@ func TestQuotaReloadWhileServing(t *testing.T) {
 }
 
 func TestQuotaReloadPreservesUsageAndRemovesRules(t *testing.T) {
+	t.Parallel()
 	ti := newTrie(".wsp", 0, func(string) (int64, int64, int64) { return 1, 1, 1 })
 	if _, err := ti.insert("/namespace/existing.wsp", 1, 1, 1, 0); err != nil {
 		t.Fatal(err)
@@ -98,6 +97,7 @@ func TestQuotaReloadPreservesUsageAndRemovesRules(t *testing.T) {
 }
 
 func TestUnlimitedThroughputQuotaStillAccounts(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		limit int64
@@ -127,6 +127,7 @@ func TestUnlimitedThroughputQuotaStillAccounts(t *testing.T) {
 }
 
 func TestQuotaReloadFromUnlimitedThroughputPreservesUsage(t *testing.T) {
+	t.Parallel()
 	ti := newTrie(".wsp", 0, nil)
 	if _, err := ti.insert("/namespace/metric.wsp", 0, 0, 0, 0); err != nil {
 		t.Fatal(err)
@@ -162,6 +163,7 @@ func TestQuotaReloadFromUnlimitedThroughputPreservesUsage(t *testing.T) {
 }
 
 func TestQuotaReloadInitializesNewNamespaceUsage(t *testing.T) {
+	t.Parallel()
 	ti := newTrie(".wsp", 0, func(string) (int64, int64, int64) { return 10, 5, 2 })
 	for _, path := range []string{
 		"/namespace/one.wsp", "/namespace/two.wsp", "/namespace/a/one.wsp",
@@ -202,6 +204,7 @@ func TestQuotaReloadInitializesNewNamespaceUsage(t *testing.T) {
 }
 
 func TestQuotaReloadAddsNamespacesDuringIngestion(t *testing.T) {
+	t.Parallel()
 	ti := newTrie(".wsp", 0, func(string) (int64, int64, int64) { return 1, 1, 1 })
 	const namespaces = 50
 	for i := 0; i < namespaces; i++ {

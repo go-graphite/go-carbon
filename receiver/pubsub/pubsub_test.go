@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -23,24 +24,30 @@ var (
 
 func TestMain(m *testing.M) {
 	Register()
+	os.Exit(m.Run())
 }
 
-func newTestClient() (*pstest.Server, *pubsub.Topic, *pubsub.Client, error) {
+func newTestClient(t *testing.T) (*pstest.Server, *pubsub.Topic, *pubsub.Client, error) {
+	t.Helper()
 	ctx := context.Background()
 	srv := pstest.NewServer()
+	t.Cleanup(func() { srv.Close() })
 	srv.SetStreamTimeout(500 * time.Millisecond)
 	conn, err := grpc.Dial(srv.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	t.Cleanup(func() { conn.Close() })
 	client, err := pubsub.NewClient(ctx, testProject, option.WithGRPCConn(conn))
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	t.Cleanup(func() { client.Close() })
 	topic, err := client.CreateTopic(ctx, testTopic)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	t.Cleanup(topic.Stop)
 	_, err = client.CreateSubscription(ctx, testSub, pubsub.SubscriptionConfig{Topic: topic, AckDeadline: 10 * time.Second})
 	if err != nil {
 		return nil, nil, nil, err
@@ -49,7 +56,7 @@ func newTestClient() (*pstest.Server, *pubsub.Topic, *pubsub.Client, error) {
 }
 
 func Test_handleMessage(t *testing.T) {
-	_, _, client, err := newTestClient()
+	_, _, client, err := newTestClient(t)
 	if err != nil {
 		t.Fatal(err)
 	}

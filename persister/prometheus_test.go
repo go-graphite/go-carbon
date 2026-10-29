@@ -3,6 +3,7 @@ package persister
 import (
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ func TestPrometheusPersisterReplacement(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				families = withoutOverlapUpdates(families)
 				if len(families) != 1 || len(families[0].Metric) != 1 {
 					t.Fatalf("unexpected metric families: %v", families)
 				}
@@ -276,10 +278,27 @@ func gatherOneHistogram(t testing.TB, registry *prometheus.Registry) (*dto.Metri
 	if err != nil {
 		t.Fatal(err)
 	}
+	families = withoutOverlapUpdates(families)
 	if len(families) != 1 || len(families[0].Metric) != 1 || families[0].Metric[0].GetHistogram() == nil {
 		t.Fatalf("unexpected metric families: %v", families)
 	}
 	return families[0], families[0].Metric[0].GetHistogram()
+}
+
+// withoutOverlapUpdates drops the overlap replay, in-place correction and
+// rewrite fallback counters, which every persister registers next to its write
+// lag histogram.
+func withoutOverlapUpdates(families []*dto.MetricFamily) []*dto.MetricFamily {
+	kept := families[:0]
+	for _, family := range families {
+		name := family.GetName()
+		if !strings.HasSuffix(name, "persister_overlap_updates_total") && !strings.HasSuffix(name, "persister_rollup_corrections_total") &&
+			!strings.HasSuffix(name, "persister_sidecar_slot_merges_total") && !strings.HasSuffix(name, "persister_sidecar_folds_total") && !strings.Contains(name, "persister_ooo_direct_") &&
+			!strings.HasSuffix(name, "persister_rewrite_block_fallbacks_total") {
+			kept = append(kept, family)
+		}
+	}
+	return kept
 }
 
 func assertHistogramEqual(t testing.TB, got, want *dto.Histogram) {

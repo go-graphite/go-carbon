@@ -1,5 +1,8 @@
 # Storage correctness and performance
 
+> Design overview, data layout, write and read paths, tuning and production
+> lessons: [Pebble store design notes](pebble-storage/README.md).
+
 The `persister/storage_*_test.go` suite exercises the vendored Whisper libraries
 and go-carbon's `internal/chunkstore`. Classic Go Whisper is the behavioral oracle
 for cwhisper, cwhisper OOO and `pebble-chunk`. No external service or fixture

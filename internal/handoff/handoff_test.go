@@ -10,12 +10,27 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "-handoff-protocol" {
+		switch os.Getenv("GO_CARBON_HANDOFF_TEST_PROTOCOL") {
+		case "supported":
+			fmt.Println(Protocol)
+			os.Exit(0)
+		case "unsupported":
+			fmt.Fprintln(os.Stderr, "flag provided but not defined")
+			os.Exit(2)
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func TestHandoffKeepsSocketAccepting(t *testing.T) {
 	path := socketPath(t)
@@ -24,26 +39,32 @@ func TestHandoffKeepsSocketAccepting(t *testing.T) {
 		t.Fatal(err)
 	}
 	addr := old.Addr().(*net.TCPAddr)
-	serve := func(ln net.Listener, body string, state func(net.Conn, http.ConnState)) *http.Server {
+	serve := func(ln net.Listener, body string, state func(net.Conn, http.ConnState)) (*http.Server, <-chan struct{}) {
 		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, body) }), ConnState: state}
-		go func() { _ = srv.Serve(ln) }()
-		return srv
+		done := make(chan struct{})
+		go func() { defer close(done); _ = srv.Serve(ln) }()
+		t.Cleanup(func() { _ = srv.Close() })
+		return srv, done
 	}
-	// Like carbonserver, the old server must answer connections it accepted
-	// before it stopped accepting: http.Server drops requests read after
-	// Shutdown began, so wait until its connections are idle first.
-	var conns sync.Map
-	oldSrv := serve(old, "old", func(c net.Conn, s http.ConnState) {
+	// Drain connections accepted before the old listener closed. ConnState
+	// wakes the waiter after every transition, including the final close.
+	idle := sync.NewCond(new(sync.Mutex))
+	conns := make(map[net.Conn]http.ConnState)
+	oldSrv, oldDone := serve(old, "old", func(c net.Conn, s http.ConnState) {
+		idle.L.Lock()
+		defer idle.L.Unlock()
 		if s == http.StateClosed || s == http.StateHijacked {
-			conns.Delete(c)
+			delete(conns, c)
 		} else {
-			conns.Store(c, s)
+			conns[c] = s
 		}
+		idle.Broadcast()
 	})
 	offer, err := NewOffer(path)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer offer.Close()
 	var stopped atomic.Bool
 	result := make(chan bool, 1)
 	go func() {
@@ -58,57 +79,104 @@ func TestHandoffKeepsSocketAccepting(t *testing.T) {
 		result <- taken
 	}()
 
-	// Clients keep hitting the address throughout; no request may fail.
+	// Keep making requests across all three phases, and wait for completed
+	// requests instead of assuming the client ran during a fixed sleep.
+	type response struct {
+		phase int32
+		body  string
+	}
+	responses := make(chan response, 1)
+	var phase atomic.Int32
 	var failures, served atomic.Int32
-	done := make(chan struct{})
+	done, clientDone := make(chan struct{}), make(chan struct{})
 	go func() {
-		client := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}, Timeout: 2 * time.Second}
+		defer close(clientDone)
+		transport := &http.Transport{DisableKeepAlives: true}
+		defer transport.CloseIdleConnections()
+		client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
 		for {
 			select {
 			case <-done:
 				return
 			default:
 			}
+			current := phase.Load()
 			resp, err := client.Get("http://" + addr.String())
 			if err != nil {
 				failures.Add(1)
 				continue
 			}
-			_, _ = io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if err != nil {
+				failures.Add(1)
+				continue
+			}
 			served.Add(1)
+			select {
+			case responses <- response{current, string(body)}:
+			default:
+			}
 		}
 	}()
-	time.Sleep(50 * time.Millisecond)
+	var stopClient sync.Once
+	stop := func() { stopClient.Do(func() { close(done); <-clientDone }) }
+	defer stop()
+	waitResponse := func(wantPhase int32, wantBody string) {
+		t.Helper()
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case got := <-responses:
+				if got.phase == wantPhase && got.body == wantBody {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf("no %s response during handoff phase %d", wantBody, wantPhase)
+			}
+		}
+	}
+	waitResponse(0, "old")
 	claim := Register(path)
 	if claim == nil {
 		t.Fatal("register")
 	}
-	time.Sleep(50 * time.Millisecond) // registered successors may take a while to request
+	defer claim.Close()
+	phase.Store(1)
+	waitResponse(1, "old") // a registered successor can delay requesting
 	ln, commit, err := claim.Take(&net.TCPAddr{Port: addr.Port, IP: addr.IP})
 	if err != nil || ln == nil {
 		t.Fatal("take", err)
 	}
-	newSrv := serve(ln, "new", nil)
-	defer newSrv.Close()
+	_, _ = serve(ln, "new", nil)
 	if err = commit(); err != nil || !stopped.Load() {
 		t.Fatal("commit", err)
 	}
 	if !<-result {
 		t.Fatal("offer not taken")
 	}
-	for busy := true; busy; {
-		busy = false
-		conns.Range(func(_, s any) bool { busy = s.(http.ConnState) != http.StateIdle; return !busy })
-		time.Sleep(time.Millisecond)
+	<-oldDone // no more connections can enter conns
+	idle.L.Lock()
+	for {
+		busy := false
+		for _, s := range conns {
+			busy = busy || s != http.StateIdle
+		}
+		if !busy {
+			break
+		}
+		idle.Wait()
 	}
+	idle.L.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err = oldSrv.Shutdown(ctx); err != nil && !errors.Is(err, net.ErrClosed) {
 		t.Fatal(err)
 	}
-	time.Sleep(100 * time.Millisecond)
-	close(done)
+	phase.Store(2)
+	waitResponse(2, "new")
+	stop()
 	if failures.Load() != 0 || served.Load() == 0 {
 		t.Fatal("requests failed during handoff", failures.Load(), served.Load())
 	}
@@ -154,7 +222,6 @@ func TestUnclaimedAndAbandonedOffers(t *testing.T) {
 
 	// A successor that dies before requesting leaves the old instance in charge.
 	offer()
-	time.Sleep(20 * time.Millisecond)
 	Register(path).Close()
 	if <-result {
 		t.Fatal("abandoned offer reported taken")
@@ -162,7 +229,6 @@ func TestUnclaimedAndAbandonedOffers(t *testing.T) {
 
 	// A mismatched address is refused rather than served under the wrong name.
 	offer()
-	time.Sleep(20 * time.Millisecond)
 	if ln, _, err := Register(path).Take(&net.TCPAddr{Port: addr.Port + 1}); ln != nil || err == nil {
 		t.Fatal("mismatched listener accepted")
 	}
@@ -182,21 +248,19 @@ func socketPath(t *testing.T) string {
 }
 
 func TestSuccessorSupported(t *testing.T) {
-	dir := t.TempDir()
-	write := func(name, body string) string {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0700); err != nil {
-			t.Fatal(err)
-		}
-		return path
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !SuccessorSupported(write("new", "echo "+Protocol)) {
+	t.Setenv("GO_CARBON_HANDOFF_TEST_PROTOCOL", "supported")
+	if !SuccessorSupported(binary) {
 		t.Fatal("capable successor rejected")
 	}
-	if SuccessorSupported(write("old", "echo 'flag provided but not defined' >&2; exit 2")) {
+	t.Setenv("GO_CARBON_HANDOFF_TEST_PROTOCOL", "unsupported")
+	if SuccessorSupported(binary) {
 		t.Fatal("old successor accepted")
 	}
-	if SuccessorSupported(filepath.Join(dir, "missing")) {
+	if SuccessorSupported(filepath.Join(t.TempDir(), "missing")) {
 		t.Fatal("missing successor accepted")
 	}
 }
@@ -371,5 +435,211 @@ func TestInputRequestAbandoned(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("offer hung after successor disconnected")
+	}
+}
+
+// TestStoreInputHandoff hands input over without a read listener: the
+// successor's listener request is answered with "input only", it binds reads
+// itself and takes input afterwards.
+func TestStoreInputHandoff(t *testing.T) {
+	// The registered successor is this test binary, which knows no
+	// handoff flags: stand in a capable binary for it.
+	peerIs(t, protocolScript(t, StoreInputProtocol))
+	path := socketPath(t)
+	input, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	detached := false
+	detach := func() (*Input, error) {
+		detached = true
+		listener, err := input.File()
+		if err != nil {
+			return nil, err
+		}
+		return &Input{Receivers: []InputReceiver{{Name: "tcp", Listener: listener,
+			Conns: []InputConn{{File: r, Leftover: []byte("partial lin")}}}}}, nil
+	}
+	offer, err := NewOffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type served struct {
+		taken bool
+		err   error
+	}
+	result := make(chan served, 1)
+	go func() {
+		taken, err := offer.ServeInput(inputFunc(detach), 5*time.Second)
+		result <- served{taken, err}
+	}()
+
+	claim := Register(path)
+	if claim == nil {
+		t.Fatal("register")
+	}
+	ln, commit, err := claim.Take(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1})
+	if err != nil || ln != nil || commit != nil {
+		t.Fatal("input-only offer returned a listener", ln, err)
+	}
+	if !claim.InputOffered() {
+		t.Fatal("input not offered")
+	}
+	if detached {
+		t.Fatal("input detached before the successor asked for it")
+	}
+	in, err := claim.TakeInput()
+	if err != nil || in == nil {
+		t.Fatal("take input", err)
+	}
+	defer in.Close()
+	if got := <-result; !got.taken || got.err != nil {
+		t.Fatalf("serve input: %+v", got)
+	}
+	if len(in.Receivers) != 1 || len(in.Receivers[0].Conns) != 1 || string(in.Receivers[0].Conns[0].Leftover) != "partial lin" {
+		t.Fatalf("received %+v", in.Receivers)
+	}
+	got, err := net.FileListener(in.Receivers[0].Listener)
+	if err != nil || got.Addr().String() != input.Addr().String() {
+		t.Fatal("listener", err)
+	}
+	got.Close()
+	if _, err = w.WriteString("e 1 2\n"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	if n, err := in.Receivers[0].Conns[0].File.Read(buf); err != nil || string(buf[:n]) != "e 1 2\n" {
+		t.Fatalf("connection read %q %v", buf[:n], err)
+	}
+}
+
+// TestStoreInputAbandoned covers a successor that dies before taking input
+// and one that never asks: the stopping instance keeps its input either way.
+func TestStoreInputAbandoned(t *testing.T) {
+	peerIs(t, protocolScript(t, StoreInputProtocol))
+	for _, abandonAfterTake := range []bool{false, true} {
+		path := socketPath(t)
+		offer, err := NewOffer(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		detached := false
+		result := make(chan error, 1)
+		go func() {
+			taken, err := offer.ServeInput(inputFunc(func() (*Input, error) { detached = true; return nil, nil }), time.Second)
+			if taken {
+				err = errors.Join(err, errors.New("taken"))
+			}
+			result <- err
+		}()
+		claim := Register(path)
+		if claim == nil {
+			t.Fatal("register")
+		}
+		if abandonAfterTake {
+			if _, _, err := claim.Take(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = claim.Close()
+		if err := <-result; err == nil {
+			t.Fatal("abandoned handoff reported no error")
+		}
+		if detached {
+			t.Fatal("input detached for an abandoned claim")
+		}
+	}
+}
+
+// protocolScript is a binary printing protocol for any flag, or rejecting
+// every flag as a binary without it does when protocol is empty.
+func protocolScript(t *testing.T, protocol string) string {
+	t.Helper()
+	body := "#!/bin/sh\nexit 2\n"
+	if protocol != "" {
+		body = "#!/bin/sh\necho " + protocol + "\n"
+	}
+	path := filepath.Join(t.TempDir(), "next")
+	if err := os.WriteFile(path, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// The first run of a new executable can stall for seconds on macOS
+	// while it is assessed: run it once outside the timed checks.
+	_ = exec.Command(path, "-store-input-handoff-protocol").Run()
+	return path
+}
+
+// peerIs makes every registered successor run binary.
+func peerIs(t *testing.T, binary string) {
+	t.Helper()
+	saved := PeerExecutable
+	PeerExecutable = func(*net.UnixConn) (string, error) { return binary, nil }
+	t.Cleanup(func() { PeerExecutable = saved })
+}
+
+// TestStoreInputChecksRegisteredBinary covers a successor that registers but
+// runs a binary without store input handoff, as after a rollback through a
+// service override: the offer gives input up as soon as it registers, without
+// waiting for a request that never comes. A binary that cannot be run says
+// nothing about support, so the offer waits as before.
+func TestStoreInputChecksRegisteredBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		binary  string
+		refused bool
+	}{
+		{"binary without support", protocolScript(t, ""), true},
+		{"older protocol", protocolScript(t, InputProtocol), true},
+		{"capable binary", protocolScript(t, StoreInputProtocol), false},
+		{"binary not executable", filepath.Join(t.TempDir(), "missing"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			peerIs(t, tc.binary)
+			path := socketPath(t)
+			offer, err := NewOffer(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			detached := false
+			type served struct {
+				stats ServeInputStats
+				taken bool
+				err   error
+			}
+			result := make(chan served, 1)
+			go func() {
+				stats, taken, err := offer.ServeInputStats(inputFunc(func() (*Input, error) { detached = true; return nil, nil }), 2*time.Second)
+				result <- served{stats, taken, err}
+			}()
+			claim := Register(path)
+			if claim == nil {
+				t.Fatal("register")
+			}
+			defer claim.Close()
+			started := time.Now()
+			got := <-result
+			elapsed := time.Since(started)
+			if got.taken || detached {
+				t.Fatalf("input taken: %+v detached %v", got, detached)
+			}
+			if got.stats.Peer != tc.binary || got.stats.Registered.IsZero() {
+				t.Fatalf("stats %+v", got.stats)
+			}
+			if refused := errors.Is(got.err, ErrSuccessorCannotTakeInput); refused != tc.refused {
+				t.Fatalf("refused %v, want %v: %v", refused, tc.refused, got.err)
+			}
+			if tc.refused && elapsed > time.Second {
+				t.Fatalf("refusal waited %v for a request", elapsed)
+			}
+			if !tc.refused && elapsed < 2*time.Second {
+				t.Fatalf("gave input up after %v without a request: %v", elapsed, got.err)
+			}
+		})
 	}
 }

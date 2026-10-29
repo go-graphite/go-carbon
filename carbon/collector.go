@@ -87,6 +87,9 @@ func NewCollector(app *App) *Collector {
 	if app.Cache != nil {
 		c.stats = append(c.stats, moduleCallback("cache", app.Cache))
 	}
+	if l := app.inputLog.Load(); l != nil {
+		c.stats = append(c.stats, moduleCallback("inputLog", inputLogStats{l}))
+	}
 
 	if app.Carbonserver != nil {
 		c.stats = append(c.stats, moduleCallback("carbonserver", app.Carbonserver))
