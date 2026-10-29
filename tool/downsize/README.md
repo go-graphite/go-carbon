@@ -152,6 +152,13 @@ never infer complete reads from successful file copying.
 
 ## Recipe: replace a host with a smaller server
 
+Use this recipe for an emptied, reprovisioned host restored from its equivalent
+replica as well. The whole-store job streams immutable checkpoint files, including
+SSTs, without decoding metrics. The empty target opens the copied Pebble manifest
+and SSTs directly, then replays the input-log gap. The metric-move throughput
+figures do not describe this path. See the [whole-store measurements](copy/BENCHMARKS.md)
+for local results and a foreground-load benchmark.
+
 Keep node count/hash identity unchanged; replace physical `a` by `a-small` in
 `new`. For jump, use `new-host:2003=000`. Add:
 
@@ -216,7 +223,7 @@ prepare first; the same engine then performs incoming/outgoing metric moves.
 
 ## Data correctness and resume
 
-Exports use the live Pebble block cache, epoch-valid metadata/state/tails and
+Metric-range exports use the live Pebble block cache, epoch-valid metadata/state/tails and
 mapped catalog pages. Hot pending points are flushed through the existing
 persister/input-log confirmation path before snapshotting. Ordered catalog/ID
 cursors read stored exact/compressed key/value bytes into bounded arenas; binary
@@ -233,6 +240,14 @@ fallback when it is unavailable. Receipt encoding reuses scratch within each bat
 while preserving the existing JSON bytes and receipt hashes. Fresh source versions
 and target receipts are required before cleanup. Crash/damaged/repeated requests
 cannot turn a saved journal entry into deletion authority without re-verification.
+
+Whole-store jobs retain the checkpoint's original IDs and stored file bytes.
+They read file ranges through the operating system's page cache, without a
+per-entry Pebble cache lookup, point codec or per-metric WAL write. Each source
+stream and active target worker reuse a 1 MiB buffer; target writes coalesce
+fragmented HTTP reads. Every range still checks its length and SHA-256 trailer,
+and completion waits for file syncs. Input fencing, retained log replay and target
+readiness remain required after the baseline copy.
 
 Resume with the identical immutable plan, flags and state path. Journals and
 workers are locked. Lost checkpoint-begin responses reuse an operation ID; chunks
