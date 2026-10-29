@@ -81,3 +81,20 @@ Large renders (thousands of metrics per request) dominate the p99 on either
 backend. With exponential latency buckets, small shifts in the share of slow
 requests move the interpolated p99 a lot. Track the share of requests above
 a fixed threshold (for example 256 ms and 512 ms) as well as the p99.
+
+## Response cache coherence
+
+Expiration batches retain the existing HTTP and streaming render-cache entries.
+An expired metric has had no writes for its expiration window, so cached replies
+may continue to include it until the normal query-cache TTL expires (60 seconds)
+or the cache is cleared. Deleting an unread backlog does not invalidate unrelated
+cached renders or add work to cache hits. Ordinary ingestion also retains this TTL.
+
+Expiration still publishes catalog changes. Fully shared catalogs bypass find/glob
+response caches, so discovery drops deleted names when the index refresher processes
+the catalog journal. Existing index/discovery cache policies still apply during
+incremental migration; info reads current store metadata.
+
+Administrative mutations retain their existing global cache invalidation policy,
+including administrative deletes, replacements and archive writes. New store
+handles also receive distinct cache namespaces.

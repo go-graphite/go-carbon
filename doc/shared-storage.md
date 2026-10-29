@@ -77,8 +77,8 @@ metric even while all expiration policies are disabled.
 
 Cleanup begins immediately after expiration becomes enabled and starts its next
 sweep only after `store-expiration-check-interval` following the preceding
-sweep. It checks catalog pages of 256 metrics and limits examination to
-`store-expiration-scan-rate` metrics per second (defaults: `1h` and `1000`).
+sweep. It checks catalog pages of 1024 metrics and limits examination to
+`store-expiration-scan-rate` metrics per second (defaults: `1h` and `100000`).
 The schedule is approximate by design. A first sweep assigns legacy metrics an
 activity time and gives them a full grace period before considering deletion.
 Policy-file changes are reloadable through SIGHUP: a complete replacement must
@@ -89,6 +89,21 @@ dump begins. It skips metrics with queued or in-flight cache points at the
 candidate check. A new arrival can still race deletion: if it has committed,
 the revision check prevents deletion; otherwise the persister recreates the
 metric and retains the new points, with the expired history removed.
+
+Deletion uses up to `store-expiration-delete-workers` concurrent workers (default
+8), with conditional batches of at most 512 metrics. All workers share
+`store-expiration-delete-rate` and reserve against `store-expiration-max-deletes`;
+conflicts and pending points return their reservations. Pressure checks pause new
+deletes for the rest of the sweep; already started batches may finish.
+
+Expiration commits are atomic and unsynced even when normal writes are
+synchronous. A lost delete is retried on the next sweep. Catalog, revision, data
+and sidecar inventory recover together; a subsequent durable write also makes
+preceding deletes durable. Expiration retains HTTP and streaming render-cache
+entries for their normal 60-second TTL, or until the cache is cleared, as ordinary
+ingestion does. Catalog changes still remove expired names from discovery through
+the index refresher. Administrative mutations retain their existing cache
+invalidation policy.
 
 Catalog/index removal is coalesced for about 30 seconds, including installations
 without embedded buckyd. A sweep that deletes metrics asynchronously requests a
@@ -104,8 +119,9 @@ successful completion timestamp.
 Writes may arrive out of order; archive updates use the shared WAL and require
 no per-metric sidecars. `store-sync-interval` defaults to `"1s"`: mutations
 return before WAL sync, and a background worker syncs pending mutations once per
-interval. The same policy applies to point updates, metric creation/deletion,
-and buckyd imports, replacements and fills. A process or machine crash can lose
+interval. The same policy applies to point updates, metric creation/administrative deletion,
+and buckyd imports, replacements and fills. Expiration batches use the retryable
+NoSync policy described above. A process or machine crash can lose
 mutations since the last successful sync, including points already confirmed
 out of the cache and acknowledged transfers or deletions. Sync delays can
 extend that loss window. Idle stores do not issue periodic WAL syncs. Graceful

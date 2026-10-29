@@ -17,6 +17,7 @@ store-expiration-check-interval = "15m"
 store-expiration-scan-rate = 250
 store-expiration-dry-run = true
 store-expiration-delete-rate = 50
+store-expiration-delete-workers = 3
 store-expiration-max-deletes = 500
 store-expiration-max-l0-sublevels = 4
 store-expiration-max-compaction-debt = 10000000
@@ -36,7 +37,7 @@ store-expiration-max-compaction-debt = 10000000
 	if got := cfg.Whisper.StoreExpirationCheckInterval.Value(); got != 15*time.Minute {
 		t.Fatalf("check interval = %v, want 15m", got)
 	}
-	if !cfg.Whisper.StoreExpirationDryRun || cfg.Whisper.StoreExpirationDeleteRate != 50 || cfg.Whisper.StoreExpirationMaxDeletes != 500 || cfg.Whisper.StoreExpirationMaxL0 != 4 || cfg.Whisper.StoreExpirationMaxDebt != 10_000_000 {
+	if !cfg.Whisper.StoreExpirationDryRun || cfg.Whisper.StoreExpirationDeleteWorkers != 3 || cfg.Whisper.StoreExpirationDeleteRate != 50 || cfg.Whisper.StoreExpirationMaxDeletes != 500 || cfg.Whisper.StoreExpirationMaxL0 != 4 || cfg.Whisper.StoreExpirationMaxDebt != 10_000_000 {
 		t.Fatal("expiration safety overrides were not loaded")
 	}
 	if got := cfg.Whisper.StoreExpirationScanRate; got != 250 {
@@ -58,7 +59,7 @@ func TestStoreExpirationConfigDefaults(t *testing.T) {
 	if got := cfg.Whisper.StoreExpirationScanRate; got != 100_000 {
 		t.Fatalf("scan rate = %d, want 100000", got)
 	}
-	if cfg.Whisper.StoreExpirationDryRun || cfg.Whisper.StoreExpirationDeleteRate != 100 || cfg.Whisper.StoreExpirationMaxDeletes != 10_000 || cfg.Whisper.StoreExpirationMaxL0 != 6 || cfg.Whisper.StoreExpirationMaxDebt != 1<<30 {
+	if cfg.Whisper.StoreExpirationDryRun || cfg.Whisper.StoreExpirationDeleteWorkers != 8 || cfg.Whisper.StoreExpirationDeleteRate != 100 || cfg.Whisper.StoreExpirationMaxDeletes != 10_000 || cfg.Whisper.StoreExpirationMaxL0 != 6 || cfg.Whisper.StoreExpirationMaxDebt != 1<<30 {
 		t.Fatal("unexpected expiration safety defaults")
 	}
 }
@@ -83,6 +84,8 @@ func TestStoreExpirationConfigValidation(t *testing.T) {
 		{"negative expiration", func(c *Config) { c.Whisper.StoreExpiration = &Duration{-time.Second} }},
 		{"zero check interval", func(c *Config) { c.Whisper.StoreExpirationCheckInterval = &Duration{} }},
 		{"negative check interval", func(c *Config) { c.Whisper.StoreExpirationCheckInterval = &Duration{-time.Second} }},
+		{"zero delete workers", func(c *Config) { c.Whisper.StoreExpirationDeleteWorkers = 0 }},
+		{"negative delete workers", func(c *Config) { c.Whisper.StoreExpirationDeleteWorkers = -1 }},
 		{"zero delete rate", func(c *Config) { c.Whisper.StoreExpirationDeleteRate = 0 }},
 		{"negative delete limit", func(c *Config) { c.Whisper.StoreExpirationMaxDeletes = -1 }},
 		{"zero L0 limit", func(c *Config) { c.Whisper.StoreExpirationMaxL0 = 0 }},

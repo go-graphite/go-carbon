@@ -129,3 +129,40 @@ schedule related replicas in explicit separate maintenance windows. Afterward,
 compare the same I/O/latency counters and SMART write/error measurements. A trim's
 reported byte count may include already-discarded ranges and is not a direct
 measurement of recovered capacity or NAND wear reduction.
+
+## Metric expiration
+
+`store-expiration-delete-workers` defaults to 8. A scan feeds bounded batches of
+up to 512 candidates to these workers. The delete rate is shared by every worker;
+the successful-delete cap includes in-flight reservations, with slots returned
+for conflicts and pending cache writes. Raising workers alone does not raise the
+configured rate or per-sweep cap.
+
+Each worker checks pressure after pacing and queueing. L0, debt or a write stall
+pauses further deletes for the rest of that sweep; already started batches may
+finish. Pending points are checked again before a batch enters the store, and
+metadata identity/generation/revision are validated under writer stripes. New
+arrivals after that check stay queued for persistence and recreate the metric if
+deletion wins. Shutdown and reload join every worker before closing the store.
+
+Expiration uses atomic NoSync WAL batches. Catalog, revision, data tombstones and
+sidecar inventory recover together. A crash may lose an expiration; the next sweep
+retries it. A later durable write also syncs preceding deletes, and each sweep
+starts an asynchronous flush after joining its deletions, including partial or
+cancelled sweeps. Administrative single-metric deletes retain their sync policy.
+
+Expiration does not invalidate render caches. A cached reply may include an expired
+name for up to the normal 60-second query-cache TTL, or until the cache is cleared,
+as with ordinary ingestion. This keeps unrelated cached reads warm without extra
+work on cache hits. The catalog change journal and index refresher still remove
+expired names from discovery. Administrative mutations retain their base cache
+invalidation behavior.
+
+Local scale probes use `TestPrepareExpirationScaleStore` in bounded one-million
+name increments. Set `EXPIRATION_SCALE_DIR` and `EXPIRATION_SCALE_ADD`; preparation
+compacts the exact-format fixture. Run destructive benchmarks on independent
+copies with `-benchtime=1x`: `BenchmarkExpirationScaleDelete` accepts
+`EXPIRATION_SCALE_BATCH`, `EXPIRATION_SCALE_WORKERS`, `EXPIRATION_SCALE_DELETES`
+and `EXPIRATION_SCALE_SYNC=1`. `BenchmarkExpirationScaleSweep` measures the full
+scan and deletion path. Both report CPU per delete and settled compaction bytes;
+compaction settling is outside the deletion timer.

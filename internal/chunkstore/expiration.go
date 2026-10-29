@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"slices"
+
+	"github.com/cockroachdb/pebble"
 )
 
-// DeleteBatchIfUnchanged commits at most 128 expiration candidates together.
+// DeleteBatchIfUnchanged commits at most 512 expiration candidates together.
 // Results correspond to input order; a conflict leaves that metric untouched.
 func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata) ([]error, error) {
-	if len(expected) > 128 {
-		return nil, errors.New("delete batch exceeds 128 metrics")
+	if len(expected) > 512 {
+		return nil, errors.New("delete batch exceeds 512 metrics")
 	}
 	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
 		return nil, err
@@ -44,8 +46,12 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 	b := s.db.NewBatch()
 	defer b.Close()
 	removed := make([]Metadata, 0, len(expected))
+	view := s.db.NewReadView()
+	defer view.Close()
+	reader := transferReader{reader: view}
+	defer reader.close()
 	for i, want := range expected {
-		m, err := s.metadataLocked(want.Name)
+		m, err := reader.metadata(want.Name)
 		if errors.Is(err, ErrNotFound) {
 			results[i] = err
 			continue
@@ -72,13 +78,22 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 	for i, m := range removed {
 		records[i].Name = m.Name
 	}
-	if err := s.commitSidecarRecords(b, records, s.commit); err != nil {
+	if err := s.commitSidecarRecords(b, records, func(b *pebble.Batch) error {
+		// Catalog, revision, chunks and sidecars remain one atomic WAL record.
+		// A crash may lose an expiration; a later sweep retries it. Subsequent
+		// durable writes sync this delete too, so old data cannot reappear over
+		// a recreated metric. Discovery rebuilds from the recovered catalog.
+		if err := b.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		s.pendingSync.Store(true)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	for _, m := range removed {
 		s.catalogChanged(m.Name)
 	}
-	s.invalidateReadCache()
 	return results, nil
 }
 
