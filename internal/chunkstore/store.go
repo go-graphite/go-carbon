@@ -424,7 +424,8 @@ func Open(dir string, options Options) (*Store, error) {
 	opts.WALDir = walDirOption(dir, walDir)
 	opened := time.Now()
 	if err := moveWAL(fs, dir, walDir, opts); err != nil {
-		return nil, errors.Join(fmt.Errorf("move chunk store WAL: %w", err), unrefCaches(s))
+		unrefCaches(s)
+		return nil, fmt.Errorf("move chunk store WAL: %w", err)
 	}
 	s.openTimings.MoveWAL = time.Since(opened)
 	opened = time.Now()
@@ -443,7 +444,9 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	if upgradeMarker {
 		if err := replaceFormatMarker(fs, dir, formatMarkerTimeBuckets); err != nil {
-			return nil, errors.Join(err, db.Close(), unrefCaches(s))
+			closeErr := db.Close()
+			unrefCaches(s)
+			return nil, errors.Join(err, closeErr)
 		}
 	}
 	s.db, s.dir, s.fs, s.pebbleOptions = db, dir, fs, opts.Clone().EnsureDefaults()
@@ -548,14 +551,13 @@ func exactBlockCacheShards(size int64, procs int) int {
 func (s *Store) ReadCacheEpoch() uint64 { return s.readCacheEpoch.Load() }
 func (s *Store) invalidateReadCache()   { s.readCacheEpoch.Store(readCacheSequence.Add(1)) }
 
-func unrefCaches(s *Store) error {
+func unrefCaches(s *Store) {
 	if s.cache != nil {
 		s.cache.Unref()
 	}
 	if s.rangeDelCache != nil {
 		s.rangeDelCache.Unref()
 	}
-	return nil
 }
 
 func (s *Store) openFailure(db *pebble.DB, err error) error {

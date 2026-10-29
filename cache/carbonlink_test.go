@@ -2,6 +2,7 @@ package cache
 
 import (
 	"encoding/binary"
+	"errors"
 	"net"
 	"reflect"
 	"testing"
@@ -356,9 +357,10 @@ func TestCarbonlinkErrors(t *testing.T) {
 			assert.NoError(conn.SetReadDeadline(time.Now().Add(time.Second)))
 			var data [1]byte
 			n, err := conn.Read(data[:])
+			var timeout net.Error
 			if err == nil || n > 0 {
 				t.Errorf("CarbonlinkListener did not close connection as expected")
-			} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+			} else if errors.As(err, &timeout) && timeout.Timeout() {
 				t.Errorf("CarbonlinkListener did not close connection before deadline: %v", err)
 			}
 		}

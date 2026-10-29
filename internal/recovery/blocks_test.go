@@ -119,10 +119,10 @@ func (c *blocksCase) want(name string) []points.Point {
 }
 
 // writeBlocksCheckpoint writes c as a stop does with a compact input file
-// holding wal, and publishes it with a GCPOINT3 index. It returns the dump's
-// descriptor.
-func writeBlocksCheckpoint(t *testing.T, dir, root string, c *blocksCase, segments int, wal map[string][]points.Point) File {
-	return writeBlocksCheckpointIndex(t, dir, root, c, segments, wal, WriteBlocksIndex)
+// holding no pending points, and publishes it with a GCPOINT3 index. It returns
+// the dump's descriptor.
+func writeBlocksCheckpoint(t *testing.T, dir, root string, c *blocksCase, segments int) File {
+	return writeBlocksCheckpointIndex(t, dir, root, c, segments, nil, WriteBlocksIndex)
 }
 
 // writeBlocksCheckpointIndex is writeBlocksCheckpoint with the index writer
@@ -254,7 +254,7 @@ func TestBlocksRoundTripProperty(t *testing.T) {
 				if !samePoints(got, want) {
 					t.Fatal("compact head and tail", name)
 				}
-				if tail, err = bundle.ReadCompactAs(slot, name, nil, func(CompactRecord) {}); err != nil {
+				if _, err = bundle.ReadCompactAs(slot, name, nil, func(CompactRecord) {}); err != nil {
 					t.Fatal("compact read as", name, err)
 				}
 				// Near misses share all but the end, or extend the name.
@@ -275,7 +275,7 @@ func TestBlocksRoundTripProperty(t *testing.T) {
 			visited := map[uint64]bool{}
 			err = bundle.VisitMetrics(func(slot uint64, name string) error {
 				if got, found, err := bundle.Name(slot); err != nil || !found || got != name || visited[slot] {
-					return fmt.Errorf("visit %d %q: %q %v %v", slot, name, got, found, err)
+					return fmt.Errorf("visit %d %q: %q %v %w", slot, name, got, found, err)
 				}
 				visited[slot] = true
 				return nil
@@ -478,7 +478,7 @@ func TestBlocksCheckpointRejectsAlteredNames(t *testing.T) {
 				cc.records[bad] = [][]points.Point{randomSeries(r, 2)}
 				cc.segment[bad] = 0
 			}
-			cacheFile := writeBlocksCheckpoint(t, dir, root, cc, 2, nil)
+			cacheFile := writeBlocksCheckpoint(t, dir, root, cc, 2)
 			path := filepath.Join(dir, cacheFile.Name)
 			if alter != "canonical" {
 				data, err := os.ReadFile(path)
@@ -567,7 +567,7 @@ func republish(t *testing.T, dir, root, path string) {
 func TestBlocksManifestVersion(t *testing.T) {
 	dir, root := t.TempDir(), t.TempDir()
 	c := randomBlocksCase(rand.New(rand.NewPCG(1, 1)), 50, 2)
-	writeBlocksCheckpoint(t, dir, root, c, 2, nil)
+	writeBlocksCheckpoint(t, dir, root, c, 2)
 	raw, err := os.ReadFile(filepath.Join(dir, manifestName))
 	if err != nil {
 		t.Fatal(err)
@@ -730,7 +730,7 @@ func TestBlocksIndexRunsAcrossBlocks(t *testing.T) {
 		}
 	}
 	dir, root := t.TempDir(), t.TempDir()
-	writeBlocksCheckpoint(t, dir, root, c, 1, nil)
+	writeBlocksCheckpoint(t, dir, root, c, 1)
 	m := readManifest(t, dir)
 	index, err := os.ReadFile(filepath.Join(dir, m.Index.Name))
 	if err != nil || string(index[:8]) != magicV3 {
@@ -771,7 +771,7 @@ func TestBlocksIndexHashCollisionChecksMetric(t *testing.T) {
 		c.records[name] = [][]points.Point{{{Timestamp: 1, Value: float64(i)}}}
 	}
 	dir, root := t.TempDir(), t.TempDir()
-	writeBlocksCheckpoint(t, dir, root, c, 1, nil)
+	writeBlocksCheckpoint(t, dir, root, c, 1)
 	m := readManifest(t, dir)
 	index, _ := os.ReadFile(filepath.Join(dir, m.Index.Name))
 	cache, _ := os.ReadFile(filepath.Join(dir, m.Cache.Name))
@@ -867,7 +867,7 @@ func TestBlocksIndexRejectsAlteredSlots(t *testing.T) {
 	for what, change := range alter {
 		t.Run(what, func(t *testing.T) {
 			dir, root := t.TempDir(), t.TempDir()
-			writeBlocksCheckpoint(t, dir, root, c, 2, nil)
+			writeBlocksCheckpoint(t, dir, root, c, 2)
 			m := readManifest(t, dir)
 			path := filepath.Join(dir, m.Index.Name)
 			index, err := os.ReadFile(path)

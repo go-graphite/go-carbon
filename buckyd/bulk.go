@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -285,10 +286,33 @@ func (c *transferCounter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// allowedTransferSource reports whether host is a ring node or a configured
+// transfer source. Pulls send a signed read token, so they never go to an
+// arbitrary caller-chosen host.
+func (s *Service) allowedTransferSource(host string) bool {
+	for _, node := range s.nodes {
+		if strings.EqualFold(node.Server, host) {
+			return true
+		}
+	}
+	for _, source := range s.config.TransferSources {
+		if name, _, err := net.SplitHostPort(source); err == nil {
+			source = name
+		}
+		if strings.EqualFold(source, host) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) pullTransfer(ctx context.Context, source string, names []string, maxBytes int64) ([]chunkstore.TransferMetric, int64, error) {
 	u, err := url.Parse(source)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, 0, errors.New("invalid source origin")
+	}
+	if !s.allowedTransferSource(u.Hostname()) {
+		return nil, 0, &transferUpstreamError{403, fmt.Sprintf("source %s is neither a ring node nor a configured transfer source", u.Hostname())}
 	}
 	body, err := json.Marshal(names)
 	if err != nil {

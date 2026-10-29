@@ -49,15 +49,18 @@ type Config struct {
 	Hash             string   `toml:"hash"`
 	Replicas         int      `toml:"replicas"`
 	Nodes            []string `toml:"nodes"`
-	ReadMTime        bool     `toml:"mtime"`
-	Sparse           bool     `toml:"sparse"`
-	Compressed       bool     `toml:"compressed"`
-	Backend          string   `toml:"backend"`
-	CachePath        string   `toml:"cache_path"`
-	Prefix           string   `toml:"prefix"`
-	Timeout          int64    `toml:"timeout"`
-	Pprof            string   `toml:"pprof"`
-	Pyroscope        string   `toml:"pyroscope"`
+	// TransferSources lists hosts, besides the ring nodes, that /v1/transfer/pull
+	// may fetch from, e.g. the members of another ring during a resize.
+	TransferSources []string `toml:"transfer-sources"`
+	ReadMTime       bool     `toml:"mtime"`
+	Sparse          bool     `toml:"sparse"`
+	Compressed      bool     `toml:"compressed"`
+	Backend         string   `toml:"backend"`
+	CachePath       string   `toml:"cache_path"`
+	Prefix          string   `toml:"prefix"`
+	Timeout         int64    `toml:"timeout"`
+	Pprof           string   `toml:"pprof"`
+	Pyroscope       string   `toml:"pyroscope"`
 }
 
 // Node uses buckytools' wire field names and represents HOST[:PORT][=INSTANCE].

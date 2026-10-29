@@ -186,16 +186,17 @@ func (c *Client) Pull(ctx context.Context, dest, id string, opts PullOptions) er
 	}
 	state := Progress{Chunks: make(map[string]string)}
 	saved, err := root.ReadFile("copy-state.json")
-	if err == nil {
+	switch {
+	case err == nil:
 		if err := json.Unmarshal(saved, &state); err != nil || state.Manifest == nil || state.Manifest.ID != id {
 			return errors.New("destination belongs to another copy or has damaged state")
 		}
-	} else if errors.Is(err, os.ErrNotExist) {
+	case errors.Is(err, os.ErrNotExist):
 		entries, err := os.ReadDir(dest)
 		if err != nil || len(entries) != 0 {
 			return errors.New("new destination must be empty")
 		}
-	} else {
+	default:
 		return err
 	}
 	state.Manifest = m

@@ -44,8 +44,9 @@ func main() {
 	flag.Float64Var(&o.rate, "rate", 0, "folds per second; 0 runs as fast as possible")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, &http.Client{}, o); err != nil {
+	err := run(ctx, &http.Client{}, o)
+	stop()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "store-ooo-fold:", err)
 		os.Exit(1)
 	}

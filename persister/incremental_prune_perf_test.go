@@ -78,7 +78,6 @@ func TestConversionReclaimThroughputFixture(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			main, sidecar = nil, nil
 			wrapped := &reclaimFixtureStore{IncrementalMetricStore: db, total: metrics, done: make(chan struct{})}
 			p.incrementalStore = wrapped
 			p.SetConversionIOSlots(64)

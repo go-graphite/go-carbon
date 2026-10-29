@@ -2,11 +2,12 @@ package whisperio
 
 import (
 	"context"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"math"
 	"reflect"
 	"testing"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestPerCallPointBufferByteParity(t *testing.T) {

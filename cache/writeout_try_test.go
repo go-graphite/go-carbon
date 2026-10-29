@@ -1,8 +1,9 @@
 package cache
 
 import (
-	"github.com/go-graphite/go-carbon/points"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestWriteoutTryGetDoesNotRebuild(t *testing.T) {

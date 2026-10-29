@@ -208,13 +208,14 @@ func main() {
 	}
 	runtime.GOMAXPROCS(*procs)
 	var err error
-	if *ingress != "" {
+	switch {
+	case *ingress != "":
 		if *engine != "" || *unpaced || *root != "" {
 			err = errors.New("ingress preparation uses only plan, operations, prepare-ingress and procs")
 		} else {
 			err = prepareIngress(*planPath, *ingress, *operations)
 		}
-	} else if *engine != "" {
+	case *engine != "":
 		if *engine != "reference" && *engine != "candidate" {
 			err = errors.New("invalid child engine")
 		} else if err = childMarker(*root, *planPath, *operations); err == nil {
@@ -228,7 +229,7 @@ func main() {
 				}
 			}
 		}
-	} else {
+	default:
 		exe, e := os.Executable()
 		if e != nil {
 			err = e

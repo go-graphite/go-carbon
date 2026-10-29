@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"cmp"
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -52,7 +53,7 @@ func loadDumpSample(t *testing.T, path string) [][]sampleRecord {
 	byShard := map[uint64][]sampleRecord{}
 	for {
 		l, err := binary.ReadVarint(br)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

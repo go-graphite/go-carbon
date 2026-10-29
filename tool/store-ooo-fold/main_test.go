@@ -33,12 +33,13 @@ func TestFoldToolCheckpointAndDryRun(t *testing.T) {
 			scans++
 			json.NewEncoder(w).Encode(store.SidecarPage{Done: true, Sidecars: []store.SidecarRecord{{Name: "a", SidecarSummary: store.SidecarSummary{Present: true, Points: 3}}}})
 		case "fold":
-			if q.Get("after") == "" {
+			switch {
+			case q.Get("after") == "":
 				folds++
 				json.NewEncoder(w).Encode(store.SidecarFoldPage{After: "a", Count: 1, Folded: 1, Inventory: store.SidecarInventory{Count: 1, Ready: true}})
-			} else if fail {
+			case fail:
 				http.Error(w, "interrupted", 503)
-			} else {
+			default:
 				folds++
 				json.NewEncoder(w).Encode(store.SidecarFoldPage{After: "b", Done: true, Count: 1, Folded: 1, Inventory: store.SidecarInventory{Ready: true}})
 			}

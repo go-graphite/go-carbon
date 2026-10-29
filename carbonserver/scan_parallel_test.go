@@ -23,18 +23,17 @@ import (
 
 func watchListenerLog(l *CarbonserverListener, message string) <-chan struct{} {
 	updates := make(chan struct{}, 1)
-	hook := func(entry zapcore.Entry) error {
-		if entry.Message == message {
-			select {
-			case updates <- struct{}{}:
-			default:
-			}
-		}
-		return nil
-	}
 	l.logger = l.logger.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
 		events := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.AddSync(io.Discard), zap.InfoLevel)
-		return zapcore.NewTee(core, zapcore.RegisterHooks(events, hook))
+		return zapcore.NewTee(core, zapcore.RegisterHooks(events, func(entry zapcore.Entry) error {
+			if entry.Message == message {
+				select {
+				case updates <- struct{}{}:
+				default:
+				}
+			}
+			return nil
+		}))
 	}))
 	return updates
 }

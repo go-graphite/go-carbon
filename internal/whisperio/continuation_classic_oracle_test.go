@@ -192,7 +192,7 @@ func runOracleScenario(t testing.TB, db *store.Store, name string, sc oracleScen
 		}
 		o.update(min(ts+chunk, start), pts, maintenance)
 	}
-	flushAt, batches := sc.e.batches(rng, start, 86400)
+	flushAt, batches := sc.e.batches(rng, start)
 	for i, b := range batches {
 		if i == 3 && os.Getenv("OVERLAP_ORACLE_SEED") != "0" {
 			b = append(b, store.Point{Timestamp: int64(flushAt[i] + 30), Value: 5})
