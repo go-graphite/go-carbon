@@ -72,7 +72,7 @@ vendor:
 	patch --batch --fuzz=0 -p1 < patches/pebble-integration-delta.patch
 
 run-test:
-	$(GO) $(COMMAND) ./... github.com/go-graphite/go-whisper
+	./test/run-tests.sh $(GO) $(COMMAND)
 
 test:
 	make run-test COMMAND="test -timeout $(TEST_TIMEOUT)"
