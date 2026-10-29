@@ -477,8 +477,10 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 			handoff.PeerExecutable = func(*net.UnixConn) (string, error) { return registered, nil }
 			t.Cleanup(func() { handoff.PeerExecutable = savedPeer })
 
+			// Two clients with two metrics cover independent connections and
+			// corrections without making receiver throughput the restart gate.
 			// Each client buffers 2.5 s of its output.
-			const connections, perConnection, lag = 8, 8, 40
+			const connections, perConnection, lag = 2, 2, 40
 			const interval = 2 * time.Millisecond
 			base := time.Now().Unix() - 5*3600
 			var clients []*aggregatorClient
