@@ -202,12 +202,12 @@ func main() {
 		}
 
 		if runAsUser != nil {
-			uid, err := strconv.ParseInt(runAsUser.Uid, 10, 0)
+			uid, err := strconv.ParseUint(runAsUser.Uid, 10, 32)
 			if err != nil {
 				mainLogger.Fatal(err.Error())
 			}
 
-			gid, err := strconv.ParseInt(runAsUser.Gid, 10, 0)
+			gid, err := strconv.ParseUint(runAsUser.Gid, 10, 32)
 			if err != nil {
 				mainLogger.Fatal(err.Error())
 			}

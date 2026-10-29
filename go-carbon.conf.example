@@ -619,6 +619,10 @@ copy-min-free-bytes = 34359738368
 # HOST[:PORT][=INSTANCE]; offload sources do not need to be ring members.
 node = ""
 nodes = []
+# Hosts besides the ring nodes that /v1/transfer/pull may fetch from (host or
+# host:port), for example the members of another ring during a resize. Pulls
+# to any other host are refused.
+transfer-sources = []
 hash = "carbon"
 replicas = 1
 # Optional dedicated pprof listener and Pyroscope collector.

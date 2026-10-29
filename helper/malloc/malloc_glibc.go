@@ -5,7 +5,6 @@ package malloc
 /*
 #cgo LDFLAGS: -ldl
 #include <dlfcn.h>
-#include <malloc.h>
 #include <stddef.h>
 
 // mallinfo2 (glibc 2.33) has size_t fields; the older mallinfo's ints wrap
@@ -15,6 +14,20 @@ struct gc_mallinfo2 {
 	size_t arena, ordblks, smblks, hblks, hblkhd, usmblks, fsmblks, uordblks, fordblks, keepcost;
 };
 typedef struct gc_mallinfo2 (*gc_mallinfo2_fn)(void);
+
+// malloc_trim is glibc-only (musl has none), so it is looked up at run time
+// too; without it trim is a no-op.
+typedef int (*gc_malloc_trim_fn)(size_t);
+
+static gc_malloc_trim_fn gc_lookup_malloc_trim(void) {
+	return (gc_malloc_trim_fn)dlsym(RTLD_DEFAULT, "malloc_trim");
+}
+
+static void gc_malloc_trim(gc_malloc_trim_fn fn) {
+	if (fn != NULL) {
+		fn(0);
+	}
+}
 
 static gc_mallinfo2_fn gc_lookup_mallinfo2(void) {
 	return (gc_mallinfo2_fn)dlsym(RTLD_DEFAULT, "mallinfo2");
@@ -34,7 +47,9 @@ import "sync"
 
 const supported = true
 
-func trim() { C.malloc_trim(0) }
+var mallocTrim = sync.OnceValue(func() C.gc_malloc_trim_fn { return C.gc_lookup_malloc_trim() })
+
+func trim() { C.gc_malloc_trim(mallocTrim()) }
 
 var mallinfo2 = sync.OnceValue(func() C.gc_mallinfo2_fn { return C.gc_lookup_mallinfo2() })
 
