@@ -39,32 +39,36 @@ debug:
 	nfpm-deb nfpm-rpm packagecloud-push packagecloud-push-rpm packagecloud-push-deb \
 	packagecloud-autobuilds packagecloud-stable sum-files vendor
 
+# Retain dependency oracles; go mod vendor omits test files.
+WHISPER_VENDOR_TESTS := \
+	align_points_test.go \
+	compress_bits_test.go \
+	continuation_off_grid_test.go \
+	existing_open_test.go \
+	ooo_direct_test.go \
+	overlap_differential_test.go \
+	overlap_digest_test.go \
+	overlap_kinds_test.go \
+	overlap_late_tail_test.go \
+	overlap_mix_test.go \
+	overlap_shapes_test.go \
+	rollup_scratch_test.go
+
 # Regenerate dependencies and reapply the documented local dependency fixes.
 vendor:
 	$(GO) mod vendor
+	whisper_version=$$($(GO) list -m -f '{{.Version}}' github.com/go-graphite/go-whisper); \
+	whisper_source="$$($(GO) env GOMODCACHE)/github.com/go-graphite/go-whisper@$$whisper_version"; \
+	for whisper_test in $(WHISPER_VENDOR_TESTS); do \
+		cp "$$whisper_source/$$whisper_test" vendor/github.com/go-graphite/go-whisper/ || exit $$?; \
+	done
 	patch --batch --fuzz=0 -p1 < patches/vellum-builder-reuse.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-visible-snapshots.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-archive-windows.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-block-buffer-reuse.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-bit-reader.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-async-wal-rotation.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-explicit-cache-shards.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-range-delete-cache.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-provider-dir-sync.patch
 	patch --batch --fuzz=0 -p1 < patches/protobuf-json-stable-spacing.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-integration-delta.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-integration-delta.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-overlap-in-place.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-late-tail-correction.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-in-place-corrections.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-early-sidecar-folds.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-ooo-direct-writes.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-import-sidecar-folds.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-off-grid-blocks.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-in-place-scratch.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-atomic-sidecar-fold.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-late-tail-test-groups.patch
-	patch --batch --fuzz=0 -p1 < patches/go-whisper-storage-file-accessor.patch
 
 run-test:
 	$(GO) $(COMMAND) ./... github.com/go-graphite/go-whisper
