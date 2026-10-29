@@ -109,6 +109,9 @@ type metricState struct {
 	complete map[string]bool
 	// kenc encodes a sealed state's keys and complete prefixes.
 	kenc []byte
+	// packed is kenc's smaller, lossless representation in arena records.
+	// Decoded states keep kenc ready for reads without another store lookup.
+	packed []byte
 	// size is the cache memory of a sealed state: its record and slot.
 	size int64
 }
@@ -407,6 +410,7 @@ func (st *metricState) clone(meta Metadata) *metricState {
 	}
 	if st.keys == nil {
 		c.kenc = st.kenc
+		c.packed = st.packed
 		return c
 	}
 	c.keys = make(map[string][]byte, len(st.keys))
@@ -426,6 +430,9 @@ func (st *metricState) seal() *metricState {
 	if st.keys != nil {
 		st.kenc = encodeStateKeys(st.keys, st.complete)
 		st.keys, st.complete = nil, nil
+	}
+	if st.packed == nil && len(st.kenc) >= 256 {
+		st.packed = packStateKeys(st.kenc)
 	}
 	st.size = int64(stateRecordLen(st.meta.Name, st) + stateSlotOverhead)
 	return st
@@ -450,6 +457,7 @@ func (st *metricState) thaw() {
 		st.complete[unsafeString(prefix)] = true
 	}
 	st.kenc = nil
+	st.packed = nil
 }
 
 // lookup reports whether key's value is known: present with value, or absent.

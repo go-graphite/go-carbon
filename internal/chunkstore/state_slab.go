@@ -8,6 +8,8 @@ import (
 	"slices"
 	"time"
 	"unsafe"
+
+	"github.com/golang/snappy"
 )
 
 // A stateShard keeps its cached states in memory the garbage collector does
@@ -366,7 +368,7 @@ func (sh *stateShard) stateAt(s int32) (*metricState, []byte) {
 //	FileMigration, flags (stateRecordContinuation, stateRecordOwnName): 1 byte each
 //	with stateRecordOwnName: uvarint length and Metadata.Name, when it is not the cached name
 //	uvarint retention count, then each Step and Count as varints
-//	the state keys
+//	the state keys, optionally Snappy-packed (stateRecordPackedKeys)
 //
 // Integers are little endian. LastUpdate is kept as the store decodes it
 // (decodeRevision): nanoseconds, in the local zone, no monotonic reading.
@@ -374,6 +376,7 @@ const (
 	stateRecordFixed        = 42
 	stateRecordContinuation = 1
 	stateRecordOwnName      = 2
+	stateRecordPackedKeys   = 4
 )
 
 func uvarintLen(x uint64) int { return (bits.Len64(x|1) + 6) / 7 }
@@ -389,7 +392,7 @@ func varintLen(x int64) int {
 // stateRecordLen is the length of name's record of st.
 func stateRecordLen(name string, st *metricState) int {
 	m := &st.meta
-	n := uvarintLen(uint64(len(name))) + len(name) + stateRecordFixed + uvarintLen(uint64(len(m.Retentions))) + len(st.kenc)
+	n := uvarintLen(uint64(len(name))) + len(name) + stateRecordFixed + uvarintLen(uint64(len(m.Retentions))) + len(st.recordKeys())
 	if m.Name != name {
 		n += uvarintLen(uint64(len(m.Name))) + len(m.Name)
 	}
@@ -421,6 +424,9 @@ func appendStateRecord(dst []byte, name string, st *metricState) []byte {
 	if m.Name != name {
 		flags |= stateRecordOwnName
 	}
+	if st.packed != nil {
+		flags |= stateRecordPackedKeys
+	}
 	dst = append(dst, byte(m.FileMigration), flags)
 	if m.Name != name {
 		dst = binary.AppendUvarint(dst, uint64(len(m.Name)))
@@ -431,11 +437,37 @@ func appendStateRecord(dst []byte, name string, st *metricState) []byte {
 		dst = binary.AppendVarint(dst, int64(r.Step))
 		dst = binary.AppendVarint(dst, int64(r.Count))
 	}
-	return append(dst, st.kenc...)
+	return append(dst, st.recordKeys()...)
+}
+
+func (st *metricState) recordKeys() []byte {
+	if st.packed != nil {
+		return st.packed
+	}
+	return st.kenc
+}
+
+// Most states fit the stack buffer. Keep only the packed bytes, rather than
+// allocating Snappy's maximum output size on every mutation (even a refusal).
+func packStateKeys(keys []byte) []byte {
+	var scratch [4096]byte
+	if snappy.MaxEncodedLen(len(keys)) <= len(scratch) {
+		packed := snappy.Encode(scratch[:], keys)
+		if len(packed) < len(keys)-len(keys)/8 {
+			return bytes.Clone(packed)
+		}
+		return nil
+	}
+	packed := snappy.Encode(nil, keys)
+	if len(packed) < len(keys)-len(keys)/8 {
+		return packed
+	}
+	return nil
 }
 
 // decodeStateRecord returns the sealed state a record holds. Its state keys
-// stay in rec, which must never change; its metadata is the caller's.
+// stay in rec, which must never change, or in their own unpacked allocation;
+// its metadata is the caller's. This encoding is only used in RAM.
 func decodeStateRecord(rec []byte) *metricState {
 	key := recordKey(rec)
 	p := uvarintLen(uint64(len(key))) + len(key)
@@ -474,6 +506,14 @@ func decodeStateRecord(rec []byte) *metricState {
 		}
 	}
 	st.kenc = rec[p:len(rec):len(rec)]
+	if flags&stateRecordPackedKeys != 0 {
+		st.packed = st.kenc
+		var err error
+		st.kenc, err = snappy.Decode(nil, st.packed)
+		if err != nil {
+			panic("chunkstore: invalid packed state record")
+		}
+	}
 	return st
 }
 
