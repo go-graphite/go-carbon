@@ -2,6 +2,7 @@ package udp
 
 import (
 	"net"
+	"os"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type udpTestCase struct {
 
 func TestMain(m *testing.M) {
 	Register()
+	os.Exit(m.Run())
 }
 
 func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
@@ -52,7 +54,6 @@ func newUDPTestCaseWithOptions(t *testing.T, logIncomplete bool) *udpTestCase {
 		t.Fatal(err)
 	}
 	// defer conn.Close()
-	time.Sleep(5 * time.Millisecond)
 
 	return test
 }
@@ -76,12 +77,19 @@ func (test *udpTestCase) Send(text string) {
 	if _, err := test.conn.Write([]byte(text)); err != nil {
 		test.Fatal(err)
 	}
-	time.Sleep(5 * time.Millisecond)
 }
 
-func (test *udpTestCase) Eq(a *points.Points, b *points.Points) {
-	if !a.Eq(b) {
-		test.Fatalf("%#v != %#v", a, b)
+func (test *udpTestCase) Eq(want *points.Points) {
+	test.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case got := <-test.rcvChan:
+		if !got.Eq(want) {
+			test.Fatalf("%#v != %#v", got, want)
+		}
+	case <-timer.C:
+		test.Fatal("message not received before deadline")
 	}
 }
 
@@ -91,12 +99,7 @@ func TestUDP1(t *testing.T) {
 
 	test.Send("hello.world 42.15 1422698155\n")
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.Eq(points.OnePoint("hello.world", 42.15, 1422698155))
 }
 
 func TestUDP2(t *testing.T) {
@@ -105,19 +108,9 @@ func TestUDP2(t *testing.T) {
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -72.11 1422698155\n")
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.Eq(points.OnePoint("hello.world", 42.15, 1422698155))
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -72.11, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.Eq(points.OnePoint("metric.name", -72.11, 1422698155))
 }
 
 func TestUDPWithoutTrailingNewline(t *testing.T) {
@@ -126,17 +119,7 @@ func TestUDPWithoutTrailingNewline(t *testing.T) {
 
 	test.Send("hello.world 42.15 1422698155\nmetric.name -33.14 1422698155")
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("hello.world", 42.15, 1422698155))
-	default:
-		t.Fatalf("Message #0 not received")
-	}
+	test.Eq(points.OnePoint("hello.world", 42.15, 1422698155))
 
-	select {
-	case msg := <-test.rcvChan:
-		test.Eq(msg, points.OnePoint("metric.name", -33.14, 1422698155))
-	default:
-		t.Fatalf("Message #1 not received")
-	}
+	test.Eq(points.OnePoint("metric.name", -33.14, 1422698155))
 }
