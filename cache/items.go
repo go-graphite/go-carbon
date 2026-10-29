@@ -10,8 +10,9 @@ type itemSlot struct {
 // itemMap uses the shard hash directly. A nil item with a nonzero hash is a
 // deleted slot; a zero slot ends a probe. Full names disambiguate collisions.
 type itemMap struct {
-	slots   []itemSlot
-	n, used int
+	slots     []itemSlot
+	n, used   int
+	deadlines *queueDeadlines
 }
 
 func (m *itemMap) get(name string) *item {
@@ -57,6 +58,7 @@ func (m *itemMap) set(name string, it *item) { m.setHashed(xxh3.HashString(name)
 func (m *itemMap) setHashed(hash uint64, it *item) {
 	if len(m.slots) == 0 {
 		m.slots = make([]itemSlot, 8)
+		m.deadlines = nil
 	}
 	if (m.used+1)*2 > len(m.slots) {
 		n := len(m.slots)
@@ -64,6 +66,7 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 			n *= 2
 		}
 		old := m.slots
+		m.deadlines = nil
 		m.slots, m.n, m.used = make([]itemSlot, n), 0, 0
 		for _, slot := range old {
 			if slot.item != nil {
@@ -84,11 +87,13 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 					m.used++
 				}
 				m.slots[free] = itemSlot{hash: hash, item: it}
+				m.invalidateDeadline(free)
 				m.n++
 				return
 			}
 		} else if slot.hash == hash && slot.item.Metric == it.Metric {
 			slot.item = it
+			m.invalidateDeadline(i)
 			return
 		}
 	}
@@ -109,6 +114,7 @@ func (m *itemMap) removeHashed(hash uint64, name string) {
 			}
 		} else if slot.hash == hash && slot.item.Metric == name {
 			*slot = itemSlot{hash: 1}
+			m.invalidateDeadline(i)
 			m.n--
 			return
 		}

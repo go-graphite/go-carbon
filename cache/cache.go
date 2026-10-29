@@ -805,10 +805,18 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 	if immediate {
 		values.firstArrival = time.Time{}
 	}
+	// An arrival may have loaded settings before a reload and waited behind
+	// a scan using the new thresholds. Its count must invalidate that summary.
+	if d := shard.items.deadlines; d != nil && d.settings != s {
+		d.settings = nil
+	}
 	if s.batching() {
 		n := values.count()
 		minPoints := s.minPointsFor(values)
 		crossedThreshold := n >= minPoints && n-count < minPoints
+		if exists && (immediate || crossedThreshold || values.sparse && n > sparseMaxPoints && n-count <= sparseMaxPoints) {
+			shard.items.invalidateItemDeadline(values)
+		}
 		if immediate || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
 			c.writeoutQueue.notifyAt(time.Now())
 		} else if !exists {

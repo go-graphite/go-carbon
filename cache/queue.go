@@ -4,7 +4,79 @@ import (
 	"sort"
 	"sync/atomic"
 	"time"
+
+	"github.com/zeebo/xxh3"
 )
+
+const queueRegionBits = 8
+
+// Each region summarizes the earliest deadline of 256 hash-table slots. A
+// zero deadline needs a scan. The shard lock protects summaries and items.
+type queueDeadlines struct {
+	settings *cacheSettings
+	next     []time.Time
+}
+
+func (m *itemMap) invalidateDeadline(slot int) {
+	if m.deadlines != nil {
+		m.deadlines.next[slot>>queueRegionBits] = time.Time{}
+	}
+}
+
+// Invalidate a changed item at its probed slot, which may lie in the next
+// region. Inserts, replacements and table rebuilds invalidate in set.
+func (m *itemMap) invalidateItemDeadline(it *item) {
+	if m.deadlines == nil {
+		return
+	}
+	hash := xxh3.HashString(it.Metric)
+	mask := len(m.slots) - 1
+	for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
+		if m.slots[i].item == it {
+			m.invalidateDeadline(i)
+			return
+		}
+	}
+}
+
+func (m *itemMap) readyAt(now time.Time, s *cacheSettings, yield func(*item)) time.Time {
+	if m.deadlines == nil {
+		m.deadlines = &queueDeadlines{next: make([]time.Time, (len(m.slots)+(1<<queueRegionBits)-1)>>queueRegionBits)}
+	}
+	d := m.deadlines
+	if d.settings != s {
+		clear(d.next)
+		d.settings = s
+	}
+	var next time.Time
+	for region, deadline := range d.next {
+		if !now.Before(deadline) {
+			deadline = time.Time{}
+			ready := false
+			start := region << queueRegionBits
+			for _, slot := range m.slots[start:min(start+(1<<queueRegionBits), len(m.slots))] {
+				if slot.item == nil {
+					continue
+				}
+				at := writeoutDeadline(slot.item, s)
+				if !now.Before(at) {
+					ready = true
+					yield(slot.item)
+				} else if deadline.IsZero() || at.Before(deadline) {
+					deadline = at
+				}
+			}
+			d.next[region] = deadline
+			if ready {
+				d.next[region] = time.Time{}
+			}
+		}
+		if !deadline.IsZero() && (next.IsZero() || deadline.Before(next)) {
+			next = deadline
+		}
+	}
+	return next
+}
 
 type queueItem struct {
 	metric   string
@@ -77,16 +149,7 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		shardRanges[i].next = index
 		shard.mu.Lock()
 
-		for _, p := range shard.items.all {
-			if batch {
-				deadline := writeoutDeadline(p, s)
-				if now.Before(deadline) {
-					if next.IsZero() || deadline.Before(next) {
-						next = deadline
-					}
-					continue
-				}
-			}
+		add := func(p *item) {
 			if index < size {
 				q[index].metric = p.Metric
 				q[index].orderKey = orderKey(p)
@@ -94,6 +157,15 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 				q = append(q, queueItem{p.Metric, orderKey(p)})
 			}
 			index++
+		}
+		if batch {
+			if at := shard.items.readyAt(now, s, add); !at.IsZero() && (next.IsZero() || at.Before(next)) {
+				next = at
+			}
+		} else {
+			for _, p := range shard.items.all {
+				add(p)
+			}
 		}
 
 		shard.mu.Unlock()
