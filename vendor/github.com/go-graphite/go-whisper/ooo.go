@@ -109,7 +109,7 @@ func (whisper *Whisper) detectOOO() error {
 	}
 
 	path := whisper.oooSidecarPath()
-	if _, err := os.Stat(path); err == nil {
+	if _, err := statStorageFile(whisper.opts, path); err == nil {
 		whisper.oooPath = path
 	} else if os.IsNotExist(err) {
 		whisper.oooPath = ""
@@ -133,16 +133,18 @@ func (whisper *Whisper) discardOrphanedOOO() {
 	}
 
 	path := whisper.oooSidecarPath()
-	if _, err := os.Stat(path); err != nil {
+	if _, err := statStorageFile(whisper.opts, path); err != nil {
 		return
 	}
-	if err := os.Remove(path); err != nil {
+	if err := whisper.removeStorageFile(path); err != nil {
 		whisper.NonFatalErrors = append(whisper.NonFatalErrors, fmt.Errorf("remove orphaned out-of-order sidecar %s: %w", path, err))
 	}
 }
 
 func (whisper *Whisper) oooOptions() *Options {
 	return &Options{
+		FileSystem: whisper.opts.FileSystem,
+		Now:        whisper.opts.Now,
 		// A sidecar is nearly always near-empty, and a full classic whisper
 		// file is ~12 bytes per point of its whole retention. Sparse makes the
 		// on-disk cost proportional to the points actually written.
@@ -299,8 +301,17 @@ func (whisper *Whisper) divertOutOfOrder(dropped []oooPoint) error {
 		})
 	}
 
-	for retention, points := range byRetention {
-		if err := sidecar.UpdateManyForArchive(points, retention); err != nil {
+	// Write finer archives first, like UpdateManyForArchive. A base point
+	// propagates into the coarse sidecar archives, and a coarse point diverted
+	// in the same call must then overwrite that propagation. Map order would
+	// pick either outcome at random.
+	retentions := make([]int, 0, len(byRetention))
+	for retention := range byRetention {
+		retentions = append(retentions, retention)
+	}
+	sort.Ints(retentions)
+	for _, retention := range retentions {
+		if err := sidecar.UpdateManyForArchive(byRetention[retention], retention); err != nil {
 			return fmt.Errorf("divert out-of-order points: %w", err)
 		}
 	}
@@ -451,7 +462,7 @@ func (whisper *Whisper) MergeOutOfOrderWithOptions(options OutOfOrderMergeOption
 }
 
 func (whisper *Whisper) mergeOutOfOrder(options *OutOfOrderMergeOptions) (bool, error) {
-	return whisper.mergeOutOfOrderAt(options, Now())
+	return whisper.mergeOutOfOrderAt(options, whisper.now())
 }
 
 // mergeOutOfOrderAt is used by offline snapshotting to choose an explicit
@@ -461,30 +472,54 @@ func (whisper *Whisper) mergeOutOfOrderAt(options *OutOfOrderMergeOptions, now t
 }
 
 func (whisper *Whisper) mergeOutOfOrderWithCorrections(options *OutOfOrderMergeOptions, now time.Time, corrections [][]dataPoint) (bool, error) {
+	merge, err := whisper.prepareOutOfOrderMerge(options, now, corrections)
+	if err != nil || merge == nil {
+		return false, err
+	}
+	if err := whisper.rewrite(merge.rets, merge.op, merge.extra); err != nil {
+		return false, fmt.Errorf("merge out-of-order points: %w", err)
+	}
+	whisper.finishOutOfOrderMerge(merge.sidecarPath)
+	return true, nil
+}
+
+// outOfOrderMerge is a merge rewrite prepared by prepareOutOfOrderMerge.
+type outOfOrderMerge struct {
+	rets        []*Retention
+	op          string
+	pending     [][]extraPoint
+	sidecarPath string
+}
+
+func (m *outOfOrderMerge) extra(i int) []extraPoint { return m.pending[i] }
+
+// prepareOutOfOrderMerge reads the sidecar and computes the rewrite that folds
+// it into the main file. It returns nil when there is nothing to merge.
+func (whisper *Whisper) prepareOutOfOrderMerge(options *OutOfOrderMergeOptions, now time.Time, corrections [][]dataPoint) (*outOfOrderMerge, error) {
 	if !whisper.compressed {
-		return false, errors.New("out-of-order merge is only supported for the compressed format")
+		return nil, errors.New("out-of-order merge is only supported for the compressed format")
 	}
 	if whisper.aggregationMethod == Mix {
 		// oooEnabled refuses to create one under Mix, and classic whisper
 		// refuses the duplicated retentions Mix reports, so a Mix sidecar
 		// should not exist; say so rather than take an untested path.
-		return false, errors.New("out-of-order merge is not supported for mix aggregation")
+		return nil, errors.New("out-of-order merge is not supported for mix aggregation")
 	}
 
 	sidecar, err := whisper.oooSidecar(false)
 	if err != nil {
-		return false, fmt.Errorf("merge out-of-order points: %w", err)
+		return nil, fmt.Errorf("merge out-of-order points: %w", err)
 	}
 	if sidecar == nil {
 		if whisper.oooBroken {
 			whisper.oooPath = whisper.oooSidecarPath()
-			return false, fmt.Errorf("merge out-of-order points: %w", errOOOIncompatible)
+			return nil, fmt.Errorf("merge out-of-order points: %w", errOOOIncompatible)
 		}
 		// nothing usable to merge
 		whisper.oooPath = ""
 		whisper.OutOfOrderPoints = 0
 		if corrections == nil {
-			return false, nil
+			return nil, nil
 		}
 	}
 
@@ -495,11 +530,11 @@ func (whisper *Whisper) mergeOutOfOrderWithCorrections(options *OutOfOrderMergeO
 		}
 		if extras[i], err = readArchivePointsAt(sidecar, i, now); err != nil {
 			whisper.closeOOO()
-			return false, fmt.Errorf("merge out-of-order points: %w", err)
+			return nil, fmt.Errorf("merge out-of-order points: %w", err)
 		}
 	}
 	if options != nil && !whisper.shouldMergeOutOfOrder(extras, *options, now) {
-		return false, nil
+		return nil, nil
 	}
 
 	var sidecarPath string
@@ -507,12 +542,12 @@ func (whisper *Whisper) mergeOutOfOrderWithCorrections(options *OutOfOrderMergeO
 		sidecarPath = sidecar.file.Name()
 	}
 	if err := whisper.closeOOO(); err != nil {
-		return false, fmt.Errorf("merge out-of-order points: %w", err)
+		return nil, fmt.Errorf("merge out-of-order points: %w", err)
 	}
 
 	recomputed, err := whisper.recomputeArchiveAggregates(extras, corrections)
 	if err != nil {
-		return false, fmt.Errorf("merge out-of-order points: %w", err)
+		return nil, fmt.Errorf("merge out-of-order points: %w", err)
 	}
 	pending := make([][]extraPoint, len(extras))
 	for i := range extras {
@@ -526,10 +561,11 @@ func (whisper *Whisper) mergeOutOfOrderWithCorrections(options *OutOfOrderMergeO
 	if corrections != nil {
 		op = "correct"
 	}
-	if err := whisper.rewrite(rets, op, func(i int) []extraPoint { return pending[i] }); err != nil {
-		return false, fmt.Errorf("merge out-of-order points: %w", err)
-	}
+	return &outOfOrderMerge{rets: rets, op: op, pending: pending, sidecarPath: sidecarPath}, nil
+}
 
+// finishOutOfOrderMerge removes a sidecar whose points the main file now holds.
+func (whisper *Whisper) finishOutOfOrderMerge(sidecarPath string) {
 	// The merge itself is done here: the points are in the main file and the
 	// rewrite has been renamed into place. A sidecar that will not delete is
 	// therefore stale rather than pending, so latch it unusable and report it
@@ -540,23 +576,63 @@ func (whisper *Whisper) mergeOutOfOrderWithCorrections(options *OutOfOrderMergeO
 	// Reopening the file does pick the leftover up again and merge it once more,
 	// harmlessly (base values match and coarse main-file values win), so the
 	// waste is bounded per open rather than per write.
-	if err := removeSidecar(sidecarPath); err != nil {
+	if err := whisper.removeSidecar(sidecarPath); err != nil {
 		whisper.markOOOBroken(fmt.Errorf("remove out-of-order sidecar %s: %w", sidecarPath, err))
 		whisper.OutOfOrderPoints = 0
-
-		return true, nil
+		return
 	}
 	whisper.oooPath = ""
 	whisper.OutOfOrderPoints = 0
-
-	return true, nil
 }
 
-func removeSidecar(path string) error {
+// AtomicStorageFileSystem is implemented by an Options.FileSystem that makes
+// every change of one update durable together or not at all.
+type AtomicStorageFileSystem interface {
+	StorageFileSystem
+	AtomicStorageCommit() bool
+}
+
+func (whisper *Whisper) atomicStorage() bool {
+	fs, ok := whisper.opts.FileSystem.(AtomicStorageFileSystem)
+	return ok && fs.AtomicStorageCommit()
+}
+
+// mergeOutOfOrderInMemory is MergeOutOfOrder for a caller that rewrites the
+// file again before returning. It encodes the merged file in memory and
+// returns it opened there, together with the sidecar to remove once the
+// caller has published its own rewrite, which it must base on merged (see
+// updateCompressedOverlappingBatch). whisper and its sidecar are unchanged on
+// disk. merged is nil when there is no sidecar to merge.
+//
+// Publishing the final file before removing the sidecar is safe only when
+// both changes commit atomically. Otherwise a crash between them would leave a
+// stale sidecar whose base points replace newer values when merged again.
+func (whisper *Whisper) mergeOutOfOrderInMemory(now time.Time) (merged *Whisper, sidecarPath string, err error) {
+	merge, err := whisper.prepareOutOfOrderMerge(nil, now, nil)
+	if err != nil || merge == nil {
+		return nil, "", err
+	}
+	nwhisper, tmpname, nferrs, err := whisper.buildRewrite(merge.rets, merge.op, merge.extra, true)
+	if err != nil {
+		return nil, "", fmt.Errorf("merge out-of-order points: %w", err)
+	}
+	whisper.NonFatalErrors = append(whisper.NonFatalErrors, nferrs...)
+	data := nwhisper.file.(*memFile).data
+	_ = nwhisper.file.Close()
+	releaseMemFile(tmpname)
+	// Reopen from the encoded bytes, as rewrite reopens the published file.
+	merged, err = openWithOptions(tmpname, &Options{InMemory: true, InMemoryContent: data, Now: whisper.opts.Now}, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("merge out-of-order points: reopen: %w", err)
+	}
+	return merged, merge.sidecarPath, nil
+}
+
+func (whisper *Whisper) removeSidecar(path string) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+	if err := whisper.removeStorageFile(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -610,7 +686,7 @@ func (whisper *Whisper) recomputeAggregates(extras [][]dataPoint) ([][]dataPoint
 // format-compatible result; ordinary late base samples still use the sidecar.
 func (whisper *Whisper) rewriteArchiveCorrections(corrections [][]dataPoint) error {
 	// Fold sidecar gap fills and the corrections into the same rewrite.
-	_, err := whisper.mergeOutOfOrderWithCorrections(nil, Now(), corrections)
+	_, err := whisper.mergeOutOfOrderWithCorrections(nil, whisper.now(), corrections)
 	return err
 }
 
@@ -806,8 +882,25 @@ func (whisper *Whisper) storedPoints(archive *archiveInfo, from, until int) ([]d
 		if block.start == 0 || block.end < from || until < block.start {
 			continue
 		}
+		if input, ok := whisper.file.(StorageBlockReader); ok {
+			descriptor := ContinuationBlock{Archive: whisper.archiveIndexOf(archive), Index: block.index,
+				Offset: archive.blockOffset(block.index), Size: archive.blockSize, Step: archive.secondsPerPoint,
+				First: block.start, Last: block.end, Count: block.count + 1}
+			points, err := input.ReadStorageBlock(descriptor)
+			if err != nil {
+				return nil, err
+			}
+			for _, p := range points {
+				if from <= p.Time && p.Time <= until {
+					dst = append(dst, dataPoint{interval: p.Time, value: p.Value})
+				}
+			}
+			continue
+		}
 		if buf == nil {
-			buf = make([]byte, archive.blockSize)
+			scratch := acquireBlockReadScratch(archive.blockSize)
+			defer scratch.release()
+			buf = scratch.data[:archive.blockSize]
 		}
 		if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
 			return nil, fmt.Errorf("read block %d: %w", block.index, err)

@@ -146,7 +146,11 @@ func (g *getIter) Next() (*InternalKey, base.LazyValue) {
 		if n := len(g.mem); n > 0 {
 			m := g.mem[n-1]
 			g.iter = m.newIter(nil)
-			g.rangeDelIter = m.newRangeDelIter(nil)
+			if table, ok := m.flushable.(*memTable); ok {
+				g.rangeDelIter = table.newRangeDelIterForGet(g.key)
+			} else {
+				g.rangeDelIter = m.newRangeDelIter(nil)
+			}
 			g.mem = g.mem[:n-1]
 			g.iterKey, g.iterValue = g.iter.SeekGE(g.key, base.SeekGEFlagsNone)
 			continue

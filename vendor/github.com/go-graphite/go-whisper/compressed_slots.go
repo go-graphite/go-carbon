@@ -5,6 +5,8 @@ package whisper
 const (
 	minCompressedSlotOwners = 64
 	maxCompressedSlotOwners = 128 * 1024
+	// Larger dense rings use bounded scratch without increasing the idle pool.
+	maxDirectCompressedSlotOwners = 256 * 1024
 )
 
 type compressedSlotOwners struct {

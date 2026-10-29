@@ -110,6 +110,9 @@ type Options struct {
 	FLock      bool
 	FlockType  int
 	Compressed bool
+	// ExistingOnly avoids creating an auxiliary path lock for a missing
+	// database. Existing databases without a path lock remain supported.
+	ExistingOnly bool
 	// It's a hint, used if the retention is big enough, more in
 	// Retention.calculateSuitablePointsPerBlock
 	PointsPerBlock  int
@@ -117,6 +120,8 @@ type Options struct {
 	InMemory        bool
 	InMemoryContent []byte
 	OpenFileFlag    *int
+	FileSystem      StorageFileSystem
+	Now             func() time.Time
 
 	MixAggregationSpecs        []MixAggregationSpec
 	MixAvgCompressedPointSizes map[int][]float32
@@ -132,6 +137,13 @@ type Options struct {
 	// This flag gates writing only. A sidecar that already exists is always
 	// merged on read, so turning the flag back off does not hide data.
 	OutOfOrder bool
+
+	// OutOfOrderDirect, with OutOfOrder, stores late base points in the blocks
+	// covering their intervals instead of a sidecar when the storage can patch
+	// blocks (StorageBlockPatcher), recomputing the coarse windows they change
+	// in place, and first folds an existing sidecar in place. Points it cannot
+	// store that way still go to the sidecar. See writeLateInPlace.
+	OutOfOrderDirect bool
 }
 
 type MixAggregationSpec struct {
@@ -156,6 +168,7 @@ type file interface {
 Represents a Whisper database file.
 */
 type Whisper struct {
+	rewriteRevision uint64
 	// file *os.File
 	file     file
 	lockFile *os.File
@@ -378,12 +391,17 @@ func (whisper *Whisper) fileReadAt(b []byte, off int64) error {
 	return err
 }
 
-func acquirePathLock(path string, lockType int) (*os.File, error) {
+func acquirePathLock(path string, lockType int, existingOnly bool) (*os.File, error) {
 	// Keep this file after unlocking: unlike the database inode, its identity
 	// must survive compressed rewrites that rename a replacement into place.
 	lockPath := PathLockPath(path)
 	lockFile, err := os.OpenFile(lockPath, os.O_RDWR, 0666) // skipcq: GSC-G302
 	if errors.Is(err, os.ErrNotExist) {
+		if existingOnly {
+			if _, err := os.Stat(path); err != nil {
+				return nil, err
+			}
+		}
 		lockFile, err = os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0666) // skipcq: GSC-G302
 	}
 	if err != nil {
@@ -415,6 +433,9 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 	if options == nil {
 		options = &Options{}
 	}
+	if options.FileSystem != nil && (options.FLock || options.InMemory) {
+		return nil, errors.New("external storage requires its own locking and cannot use InMemory")
+	}
 	if aggregationMethod == Mix && !options.Compressed {
 		return nil, errors.New("mix aggregation method is currently supported only for compressed format")
 	}
@@ -424,7 +445,7 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 	}
 	var lockFile *os.File
 	if options.FLock && !options.InMemory {
-		lockFile, err = acquirePathLock(path, syscall.LOCK_EX)
+		lockFile, err = acquirePathLock(path, syscall.LOCK_EX, false)
 		if err != nil {
 			return nil, err
 		}
@@ -434,7 +455,7 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 			}
 		}()
 	}
-	_, err = os.Stat(path)
+	_, err = statStorageFile(options, path)
 	if err == nil {
 		return nil, os.ErrExist
 	}
@@ -443,7 +464,7 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 		file = newMemFile(path)
 		err = nil
 	} else {
-		file, err = os.Create(path)
+		file, err = openStorageFile(options, path, os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0666)
 	}
 	if err != nil {
 		return nil, err
@@ -559,6 +580,11 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 
 	if whisper.compressed {
 		whisper.initMetaInfo()
+	}
+	if err := whisper.configureStorageFile(); err != nil {
+		return nil, err
+	}
+	if whisper.compressed {
 		err = whisper.WriteHeaderCompressed()
 	} else {
 		err = whisper.writeHeader()
@@ -570,7 +596,11 @@ func CreateWithOptions(path string, retentions Retentions, aggregationMethod Agg
 	// pre-allocate file size, fallocate proved slower
 	//
 	// compressed format ignores sparse flag
-	if options.Sparse && !options.Compressed {
+	if options.FileSystem != nil {
+		if err := whisper.file.Truncate(int64(whisper.Size())); err != nil {
+			return nil, err
+		}
+	} else if options.Sparse && !options.Compressed {
 		if _, err = whisper.file.Seek(int64(whisper.Size()-1), 0); err != nil {
 			return nil, err
 		}
@@ -661,13 +691,17 @@ func openWithOptions(path string, options *Options, lockFile *os.File) (whisper 
 	if options == nil {
 		options = &Options{}
 	}
+	if options.FileSystem != nil && (options.FLock || options.InMemory) {
+		return nil, errors.New("external storage requires its own locking and cannot use InMemory")
+	}
 	ownedLock := false
 	if options.FLock && !options.InMemory {
-		if options.FlockType != syscall.LOCK_SH {
-			options.FlockType = syscall.LOCK_EX
+		// Preserve explicit nonblocking requests for cancellable snapshot capture.
+		if options.FlockType & ^syscall.LOCK_NB != syscall.LOCK_SH {
+			options.FlockType = syscall.LOCK_EX | (options.FlockType & syscall.LOCK_NB)
 		}
 		if lockFile == nil {
-			lockFile, err = acquirePathLock(path, options.FlockType)
+			lockFile, err = acquirePathLock(path, options.FlockType, options.ExistingOnly)
 			if err != nil {
 				return nil, err
 			}
@@ -691,7 +725,7 @@ func openWithOptions(path string, options *Options, lockFile *os.File) (whisper 
 		if options.OpenFileFlag != nil {
 			flag = *options.OpenFileFlag
 		}
-		file, err = os.OpenFile(path, flag, 0666) // skipcq: GSC-G302
+		file, err = openStorageFile(options, path, flag, 0666)
 	}
 	if err != nil {
 		if ownedLock {
@@ -939,7 +973,7 @@ func (whisper *Whisper) Update(value float64, timestamp int) (err error) {
 		}
 	}()
 
-	diff := int(Now().Unix()) - timestamp
+	diff := int(whisper.now().Unix()) - timestamp
 	if !(diff < whisper.maxRetention && diff >= 0) {
 		return fmt.Errorf("timestamp not covered by any archives in this database")
 	}
@@ -987,6 +1021,13 @@ func reversePoints(points []*TimeSeriesPoint) {
 
 var Now = time.Now
 
+func (whisper *Whisper) now() time.Time {
+	if whisper.opts != nil && whisper.opts.Now != nil {
+		return whisper.opts.Now()
+	}
+	return Now()
+}
+
 func (whisper *Whisper) UpdateMany(points []*TimeSeriesPoint) (err error) {
 	return whisper.UpdateManyForArchive(points, -1)
 }
@@ -1026,21 +1067,45 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 	reversePoints(points)
 	sort.Stable(timeSeriesPointsNewestFirst{points})
 
-	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
+	now := int(whisper.now().Unix()) // TODO: danger of 2030 something overflow
 
 	// points the compressed encoder rejects as too old, collected so they can
 	// be diverted to the out-of-order sidecar below instead of being lost
 	var dropped []oooPoint
 	var corrections [][]dataPoint
+	var rollups [][]dataPoint
+	// Direct late writes need a file without a sidecar whose older values
+	// reads would let win; fold one first, before any check reads the file.
+	sidecarFree := false
+	if whisper.directLateWrites() {
+		if sidecarFree, err = whisper.foldSidecarForDirect(); err != nil {
+			return err
+		}
+	}
 	if targetRetention == -1 && !whisper.opts.IgnoreNowOnWrite {
 		if err := whisper.materializeBufferedContinuation(points, now); err != nil {
 			return err
 		}
-		overlaps, err := whisper.compressedBatchOverlaps(points, now)
+		kind, err := whisper.compressedBatchOverlapKind(points, now)
 		if err != nil {
 			return err
 		}
-		if overlaps {
+		if kind == OverlapSidecarSlot {
+			// The replay would first fold the sidecar, the only source of
+			// this collision. Folded in place, the batch is checked again
+			// against the file the replay would have started from.
+			merged, err := whisper.mergeSidecarForBatchInPlace(points)
+			if err != nil {
+				return err
+			}
+			if merged {
+				if kind, err = whisper.compressedBatchOverlapKind(points, now); err != nil {
+					return err
+				}
+			}
+		}
+		if kind != OverlapNone {
+			overlapUpdates[kind].Add(1)
 			return whisper.updateCompressedOverlappingBatch(points)
 		}
 	}
@@ -1073,19 +1138,35 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 			// properly: ChunkUpdateSize
 			var archiveDropped []oooPoint
 			archiveDropped, err = whisper.archiveUpdateManyCompressed(archive, currentPoints)
-			if i > 0 && whisper.oooEnabled() {
-				// Explicit historical samples are authoritative coarse writes,
-				// unlike partial aggregates propagated from a finer archive. The
-				// sidecar format cannot distinguish them, so rewrite corrections
-				// under the existing path lock instead of losing that distinction.
+			if whisper.oooEnabled() {
 				kept := archiveDropped[:0]
 				for _, point := range archiveDropped {
-					if point.retention == archive.MaxRetention() {
+					switch {
+					case point.retention == archive.MaxRetention() && i > 0:
+						// Explicit historical samples are authoritative coarse
+						// writes, unlike partial aggregates propagated from a finer
+						// archive. The sidecar format cannot distinguish them, so
+						// rewrite corrections under the existing path lock instead
+						// of losing that distinction.
 						if corrections == nil {
 							corrections = make([][]dataPoint, len(whisper.archives))
 						}
 						corrections[i] = append(corrections[i], point.point)
-					} else {
+					case point.retention != archive.MaxRetention() && lateTailCorrection:
+						// A rollup propagated within this file aggregates the
+						// whole stored window, so it supersedes the value already
+						// encoded there: an unfinished window a replay or
+						// compaction encoded. Diverted, it would only fill holes
+						// in the sidecar and the stale partial would stay visible.
+						if j := whisper.archiveIndexByRetention(point.retention); j > 0 {
+							if rollups == nil {
+								rollups = make([][]dataPoint, len(whisper.archives))
+							}
+							rollups[j] = append(rollups[j], point.point)
+							continue
+						}
+						kept = append(kept, point)
+					default:
 						kept = append(kept, point)
 					}
 				}
@@ -1118,7 +1199,15 @@ func (whisper *Whisper) UpdateManyForArchive(points []*TimeSeriesPoint, targetRe
 		// that is idempotent for the main file and deduped per slot in the
 		// sidecar, so a retry is safe.
 		if whisper.oooEnabled() {
+			if dropped, err = whisper.writeLateInPlace(dropped, sidecarFree, rollups); err != nil {
+				return err
+			}
 			if err := whisper.divertOutOfOrder(dropped); err != nil {
+				return err
+			}
+		}
+		if hasPoints(rollups) {
+			if err := whisper.rewriteBufferedRollups(rollups); err != nil {
 				return err
 			}
 		}
@@ -1210,9 +1299,40 @@ func extractPoints(points []*TimeSeriesPoint, now, maxRetention int) (currentPoi
 	return points, remainingPoints
 }
 
+// alignPoints aligns points to archive intervals. It keeps one point per
+// interval, in order of first appearance, holding the value of the last point
+// seen for that interval.
+//
+// UpdateManyForArchive passes points in non-decreasing time order, so the
+// aligned intervals are non-decreasing too. While they are, a point either
+// starts a new interval or repeats the last one, which needs no lookup map.
+// The first interval below the last one switches to the map-based path.
 func alignPoints(archive *archiveInfo, points []*TimeSeriesPoint) []dataPoint {
 	alignedPoints := make([]dataPoint, 0, len(points))
-	positions := make(map[int]int)
+	for i, point := range points {
+		dPoint := dataPoint{point.Time - mod(point.Time, archive.secondsPerPoint), point.Value}
+		if n := len(alignedPoints); n > 0 {
+			last := alignedPoints[n-1].interval
+			if dPoint.interval == last {
+				alignedPoints[n-1] = dPoint
+				continue
+			}
+			if dPoint.interval < last {
+				return alignPointsUnordered(archive, alignedPoints, points[i:])
+			}
+		}
+		alignedPoints = append(alignedPoints, dPoint)
+	}
+	return alignedPoints
+}
+
+// alignPointsUnordered finishes alignPoints once intervals stop increasing.
+// alignedPoints holds distinct intervals in order of first appearance.
+func alignPointsUnordered(archive *archiveInfo, alignedPoints []dataPoint, points []*TimeSeriesPoint) []dataPoint {
+	positions := make(map[int]int, len(alignedPoints)+len(points))
+	for i, p := range alignedPoints {
+		positions[p.interval] = i
+	}
 	for _, point := range points {
 		dPoint := dataPoint{point.Time - mod(point.Time, archive.secondsPerPoint), point.Value}
 		if p, ok := positions[dPoint.interval]; ok {
@@ -1391,7 +1511,7 @@ func (whisper *Whisper) checkSeriesEmptyAt(start, length int64, fromTime, untilT
 Calculate the starting time for a whisper db.
 */
 func (whisper *Whisper) StartTime() int {
-	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
+	now := int(whisper.now().Unix()) // TODO: danger of 2030 something overflow
 	return now - whisper.maxRetention
 }
 
@@ -1403,7 +1523,7 @@ func (whisper *Whisper) Fetch(fromTime, untilTime int) (timeSeries *TimeSeries, 
 }
 
 func (whisper *Whisper) FetchByAggregation(fromTime, untilTime int, spec *MixAggregationSpec) (timeSeries *TimeSeries, err error) {
-	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
+	now := int(whisper.now().Unix()) // TODO: danger of 2030 something overflow
 	if fromTime > untilTime {
 		return nil, fmt.Errorf("invalid time interval: from time '%d' is after until time '%d'", fromTime, untilTime)
 	}
@@ -1547,7 +1667,7 @@ func (whisper *Whisper) fetchFromArchive(archive *archiveInfo, fromTime, untilTi
 Check a TimeSeries has a points for a given time span from the file.
 */
 func (whisper *Whisper) CheckEmpty(fromTime, untilTime int) (exist bool, err error) {
-	now := int(Now().Unix()) // TODO: danger of 2030 something overflow
+	now := int(whisper.now().Unix()) // TODO: danger of 2030 something overflow
 	if fromTime > untilTime {
 		return true, fmt.Errorf("invalid time interval: from time '%d' is after until time '%d'", fromTime, untilTime)
 	}
@@ -1953,6 +2073,9 @@ func (whisper *Whisper) HasMatchingConfigs(rets Retentions, aggr AggregationMeth
 }
 
 func (whisper *Whisper) UpdateConfig(rets Retentions, aggr AggregationMethod, xff float32, options *Options) (err error) {
+	if whisper.opts.FileSystem != nil {
+		return errors.New("external storage does not support policy migration")
+	}
 	filename := whisper.file.Name()
 	newFilename := filename + ".migrate"
 	os.Remove(newFilename) // in case there are broken/corrupted migrate files not being cleaned up properly
@@ -2106,7 +2229,7 @@ func (dstw *Whisper) retrieveAndMerge(srcw *Whisper) (pointsByArchives [][]dataP
 	pointsByArchives = make([][]dataPoint, len(dstw.archives))
 	for i, dstArc := range dstw.archives {
 		// TODO: fix needed. should limit from/until to the smaller retentions, in src or in dst.
-		until := int(Now().Unix())
+		until := int(dstw.now().Unix())
 		from := until - dstArc.MaxRetention()
 
 		var srcArc *archiveInfo

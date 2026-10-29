@@ -162,6 +162,10 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
 	} else {
 		opts.Cache.Ref()
 	}
+	if opts.RangeDelCache != nil {
+		opts.RangeDelCache.Ref()
+		opts.rangeDelCacheID = opts.RangeDelCache.NewID()
+	}
 
 	d := &DB{
 		cacheID:             opts.Cache.NewID(),
@@ -195,6 +199,9 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
 			// the tableCache, then the tableCache will also release its
 			// reference to the cache.
 			opts.Cache.Unref()
+			if opts.RangeDelCache != nil {
+				opts.RangeDelCache.Unref()
+			}
 
 			if d.tableCache != nil {
 				_ = d.tableCache.close()
@@ -311,6 +318,7 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
 		BytesPerSync:        opts.BytesPerSync,
 	}
 	providerSettings.Local.ReadaheadConfigFn = opts.Local.ReadaheadConfigFn
+	providerSettings.Local.AlwaysSyncDir = opts.Local.AlwaysSyncDir
 	providerSettings.Remote.StorageFactory = opts.Experimental.RemoteStorage
 	providerSettings.Remote.CreateOnShared = opts.Experimental.CreateOnShared
 	providerSettings.Remote.CreateOnSharedLocator = opts.Experimental.CreateOnSharedLocator

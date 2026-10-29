@@ -1,0 +1,111 @@
+diff --git a/vendor/github.com/go-graphite/go-whisper/ooo_direct.go b/vendor/github.com/go-graphite/go-whisper/ooo_direct.go
+index bfe2780f..5ae8124c 100644
+--- a/vendor/github.com/go-graphite/go-whisper/ooo_direct.go
++++ b/vendor/github.com/go-graphite/go-whisper/ooo_direct.go
+@@ -3,6 +3,7 @@ package whisper
+ import (
+ 	"sort"
+ 	"sync/atomic"
++	"time"
+ )
+ 
+ // Direct late writes.
+@@ -131,6 +132,37 @@ func (whisper *Whisper) foldSidecarForDirect() (bool, error) {
+ 	return folded || whisper.oooPath == "", nil
+ }
+ 
++// FoldOutOfOrderInPlaceAt folds the file's sidecar into its blocks in place
++// as an update with direct late writes does first (foldSidecarForDirect),
++// reading the sidecar as of now, and reports the decision and whether the
++// file is now free of a sidecar. It counts nothing; the caller does.
++//
++// Folding applies whenever the storage can place the merge in the existing
++// blocks, whatever the sidecar's size or age. Otherwise (a result other than
++// InPlaced: storage that cannot patch blocks, an unusable sidecar, a merge
++// that would extend the file, overflow a block or append past an archive's
++// encoded range) nothing changes and the sidecar stays. When err is set after
++// an InPlaced decision, applying it failed part way and the file must be
++// discarded.
++func (whisper *Whisper) FoldOutOfOrderInPlaceAt(now time.Time) (InPlaceResult, bool, error) {
++	if whisper.oooPath == "" {
++		if err := whisper.detectOOO(); err != nil {
++			return InPlaceUnsupported, false, err
++		}
++		if whisper.oooPath == "" {
++			return InPlaced, true, nil
++		}
++	}
++	if whisper.oooBroken {
++		return InPlaceUnsupported, false, nil
++	}
++	result, _, folded, err := whisper.foldOutOfOrderInPlaceResult(now)
++	if err != nil {
++		return result, false, err
++	}
++	return result, folded || whisper.oooPath == "", nil
++}
++
+ // writeLateInPlace stores the late base points the encoder rejected in the
+ // blocks covering their intervals and recomputes, in place, the coarse windows
+ // they change. It returns the points left for the sidecar. sidecarFree is
+diff --git a/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go b/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go
+index 716c1910..40be4198 100644
+--- a/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go
++++ b/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go
+@@ -460,21 +460,33 @@ func (whisper *Whisper) mergeOutOfOrderInPlace(now time.Time) (bool, error) {
+ // foldOutOfOrderInPlace is mergeOutOfOrderInPlace counting its decision, if
+ // it reaches one, in counts.
+ func (whisper *Whisper) foldOutOfOrderInPlace(now time.Time, counts *[inPlaceResults]atomic.Uint64) (bool, error) {
++	result, decided, folded, err := whisper.foldOutOfOrderInPlaceResult(now)
++	if decided {
++		counts[result].Add(1)
++	}
++	return folded, err
++}
++
++// foldOutOfOrderInPlaceResult is foldOutOfOrderInPlace without counting. It
++// returns the decision and whether it reached one (not when reading the
++// sidecar fails or there is nothing to merge), and whether it changed the
++// file: only an InPlaced decision does, and when applying it fails, err says
++// so and the file must be discarded.
++func (whisper *Whisper) foldOutOfOrderInPlaceResult(now time.Time) (result InPlaceResult, decided, folded bool, err error) {
+ 	patcher, reader, result := whisper.inPlaceSupport()
+ 	if result == InPlaced && whisper.extensionNeeded() {
+ 		result = InPlaceExtend
+ 	}
+ 	if result != InPlaced {
+-		counts[result].Add(1)
+-		return false, nil
++		return result, true, false, nil
+ 	}
+ 	merge, err := whisper.prepareOutOfOrderMerge(nil, now, nil)
+ 	if err != nil || merge == nil {
+-		return false, err
++		return result, false, false, err
+ 	}
+ 	plan, result, err := whisper.planInPlace(reader, merge.pending)
+ 	if err != nil {
+-		return false, err
++		return result, false, false, err
+ 	}
+ 	if result == InPlaced {
+ 		for _, appends := range plan.appends {
+@@ -484,15 +496,14 @@ func (whisper *Whisper) foldOutOfOrderInPlace(now time.Time, counts *[inPlaceRes
+ 			}
+ 		}
+ 	}
+-	counts[result].Add(1)
+ 	if result != InPlaced {
+-		return false, nil
++		return result, true, false, nil
+ 	}
+ 	if err := whisper.applyInPlace(patcher, plan, merge.pending, merge.op); err != nil {
+-		return true, err
++		return result, true, true, err
+ 	}
+ 	whisper.finishOutOfOrderMerge(merge.sidecarPath)
+-	return true, nil
++	return result, true, true, nil
+ }
+ 
+ // extensionNeeded is computeExtendedRetentions' decision without its side

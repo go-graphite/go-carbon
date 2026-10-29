@@ -9,7 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -314,6 +313,10 @@ type DB struct {
 
 	closed   *atomic.Value
 	closedCh chan struct{}
+	// closeSteps records how long each Close step took (go-carbon restart timing).
+	closeSteps []string
+	// skipTableCacheClose leaves table readers to process exit (CloseForExit).
+	skipTableCacheClose bool
 
 	cleanupManager *cleanupManager
 
@@ -370,6 +373,9 @@ type DB struct {
 		versions *versionSet
 
 		log struct {
+			// Protected by DB.mu. Closed after an asynchronous WAL handoff,
+			// including publication of the next WAL and release of its flush gate.
+			rotationDone chan struct{}
 			// The queue of logs, containing both flushed and unflushed logs. The
 			// flushed logs will be a prefix, the unflushed logs a suffix. The
 			// delimeter between flushed and unflushed logs is
@@ -1000,6 +1006,9 @@ var iterAllocPool = sync.Pool{
 type snapshotIterOpts struct {
 	seqNum uint64
 	vers   *version
+	// readState, when set, is read instead of the current read state
+	// (go-carbon: see ReadView).
+	readState *readState
 }
 
 // newIter constructs a new iterator, merging in batch iterators as an extra
@@ -1033,7 +1042,10 @@ func (d *DB) newIter(
 	// files in the associated version from being deleted if there is a current
 	// compaction. The readState is unref'd by Iterator.Close().
 	var readState *readState
-	if sOpts.vers == nil {
+	if sOpts.readState != nil {
+		readState = sOpts.readState
+		readState.ref()
+	} else if sOpts.vers == nil {
 		// NB: loadReadState() calls readState.ref().
 		readState = d.loadReadState()
 	} else {
@@ -1572,6 +1584,13 @@ func (d *DB) Close() error {
 	if err := d.closed.Load(); err != nil {
 		panic(err)
 	}
+	closeStep, closeSteps := time.Now(), make([]string, 0, 16)
+	lap := func(name string) {
+		now := time.Now()
+		closeSteps = append(closeSteps, fmt.Sprintf("%s=%s", name, now.Sub(closeStep).Round(time.Millisecond)))
+		closeStep = now
+	}
+	defer func() { d.closeSteps = closeSteps }()
 
 	// Clear the finalizer that is used to check that an unreferenced DB has been
 	// closed. We're closing the DB here, so the check performed by that
@@ -1581,43 +1600,75 @@ func (d *DB) Close() error {
 	invariants.SetFinalizer(d.closed, nil)
 
 	d.closed.Store(errors.WithStack(ErrClosed))
+	// Finish handoffs before closing directories or releasing memtables. Drop
+	// DB.mu while waiting: the handoff needs it to release the flush gate.
+	d.waitWALRotationLocked()
 	close(d.closedCh)
+	lap("wal_rotation")
 
 	defer d.opts.Cache.Unref()
+	if d.opts.RangeDelCache != nil {
+		defer d.opts.RangeDelCache.Unref()
+	}
 
+	// Cancel running compactions instead of waiting for them: each checks the
+	// flag at its next output table and returns ErrCancelledCompaction, so a
+	// long compaction no longer holds Close (and a restart) for tens of seconds.
+	// Their partial outputs are obsolete and removed at the next open, as for
+	// any cancelled compaction.
+	for c := range d.mu.compact.inProgress {
+		c.cancel.Store(true)
+	}
 	for d.mu.compact.compactingCount > 0 || d.mu.compact.flushing {
 		d.mu.compact.cond.Wait()
 	}
+	lap("compactions")
 	for d.mu.tableStats.loading {
 		d.mu.tableStats.cond.Wait()
 	}
 	for d.mu.tableValidation.validating {
 		d.mu.tableValidation.cond.Wait()
 	}
+	lap("table_stats")
 
 	var err error
 	if n := len(d.mu.compact.inProgress); n > 0 {
 		err = errors.Errorf("pebble: %d unexpected in-progress compactions", errors.Safe(n))
 	}
 	err = firstError(err, d.mu.formatVers.marker.Close())
-	err = firstError(err, d.tableCache.close())
+	if !d.skipTableCacheClose {
+		err = firstError(err, d.tableCache.close())
+	}
+	lap("table_cache")
 	if !d.opts.ReadOnly {
 		err = firstError(err, d.mu.log.Close())
 	} else if d.mu.log.LogWriter != nil {
 		panic("pebble: log-writer should be nil in read-only mode")
 	}
 	err = firstError(err, d.fileLock.Close())
+	lap("wal_close")
 
 	// Note that versionSet.close() only closes the MANIFEST. The versions list
 	// is still valid for the checks below.
 	err = firstError(err, d.mu.versions.close())
+	lap("manifest")
 
 	err = firstError(err, d.dataDir.Close())
 	if d.dataDir != d.walDir {
 		err = firstError(err, d.walDir.Close())
 	}
+	lap("dirs")
+	if d.skipTableCacheClose {
+		// The process exits next. The WAL and MANIFEST are closed and the
+		// lock released, so the store is complete on disk; what remains
+		// only releases memory and deletes obsolete files, which the next
+		// open finds and deletes again. On go-carbon hosts it took about
+		// 0.5 s while the next instance waited to start.
+		return err
+	}
 
 	d.readState.val.unrefLocked()
+	lap("read_state")
 
 	current := d.mu.versions.currentVersion()
 	for v := d.mu.versions.versions.Front(); true; v = v.Next() {
@@ -1633,6 +1684,7 @@ func (d *DB) Close() error {
 		}
 	}
 
+	lap("versions")
 	for _, mem := range d.mu.mem.queue {
 		// Usually, we'd want to delete the files returned by readerUnref. But
 		// in this case, even if we're unreferencing the flushables, the
@@ -1648,17 +1700,21 @@ func (d *DB) Close() error {
 		err = firstError(err, errors.Errorf("leaked memtable reservation: %d", errors.Safe(reserved)))
 	}
 
+	lap("memtables")
 	// Since we called d.readState.val.unrefLocked() above, we are expected to
 	// manually schedule deletion of obsolete files.
 	if len(d.mu.versions.obsoleteTables) > 0 {
 		d.deleteObsoleteFiles(d.mu.nextJobID)
 	}
+	lap("obsolete")
 
 	d.mu.Unlock()
 	d.compactionSchedulers.Wait()
+	lap("schedulers")
 
 	// Wait for all cleaning jobs to finish.
 	d.cleanupManager.Close()
+	lap("cleanup")
 
 	// Sanity check metrics.
 	if invariants.Enabled {
@@ -1693,6 +1749,19 @@ func (d *DB) Close() error {
 }
 
 // Compact the specified range of keys in the database.
+// CloseForExit closes the DB like Close but leaves cached table readers,
+// memory and obsolete file deletion for process exit and the next open.
+// Closing thousands of readers one by one took most of Close on go-carbon
+// hosts, while the next instance waited to open the store. Use it only when
+// the process exits right after.
+func (d *DB) CloseForExit() error {
+	d.skipTableCacheClose = true
+	return d.Close()
+}
+
+// CloseSteps reports the duration of each step of the completed Close.
+func (d *DB) CloseSteps() []string { return d.closeSteps }
+
 func (d *DB) Compact(start, end []byte, parallelize bool) error {
 	if err := d.closed.Load(); err != nil {
 		panic(err)
@@ -2569,6 +2638,9 @@ func (d *DB) rotateWAL() (newLogNum FileNum, prevLogSize uint64) {
 	if d.opts.DisableWAL {
 		panic("pebble: invalid function call")
 	}
+	if d.opts.WALRotationAsync {
+		return d.rotateWALAsync()
+	}
 
 	jobID := d.mu.nextJobID
 	d.mu.nextJobID++
@@ -2598,73 +2670,10 @@ func (d *DB) rotateWAL() (newLogNum FileNum, prevLogSize uint64) {
 	}
 	d.mu.Unlock()
 
-	newLogName := base.MakeFilepath(d.opts.FS, d.walDirname, fileTypeLog, newLogNum.DiskFileNum())
-
-	// Try to use a recycled log file. Recycling log files is an important
-	// performance optimization as it is faster to sync a file that has
-	// already been written, than one which is being written for the first
-	// time. This is due to the need to sync file metadata when a file is
-	// being written for the first time. Note this is true even if file
-	// preallocation is performed (e.g. fallocate).
-	var recycleLog fileInfo
-	var recycleOK bool
-	var newLogFile vfs.File
-	if err == nil {
-		recycleLog, recycleOK = d.logRecycler.peek()
-		if recycleOK {
-			recycleLogName := base.MakeFilepath(d.opts.FS, d.walDirname, fileTypeLog, recycleLog.fileNum)
-			newLogFile, err = d.opts.FS.ReuseForWrite(recycleLogName, newLogName)
-			base.MustExist(d.opts.FS, newLogName, d.opts.Logger, err)
-		} else {
-			newLogFile, err = d.opts.FS.Create(newLogName)
-			base.MustExist(d.opts.FS, newLogName, d.opts.Logger, err)
-		}
+	if err != nil {
+		panic(err)
 	}
-
-	var newLogSize uint64
-	if err == nil && recycleOK {
-		// Figure out the recycled WAL size. This Stat is necessary
-		// because ReuseForWrite's contract allows for removing the
-		// old file and creating a new one. We don't know whether the
-		// WAL was actually recycled.
-		// TODO(jackson): Adding a boolean to the ReuseForWrite return
-		// value indicating whether or not the file was actually
-		// reused would allow us to skip the stat and use
-		// recycleLog.fileSize.
-		var finfo os.FileInfo
-		finfo, err = newLogFile.Stat()
-		if err == nil {
-			newLogSize = uint64(finfo.Size())
-		}
-	}
-
-	if err == nil {
-		// TODO(peter): RocksDB delays sync of the parent directory until the
-		// first time the log is synced. Is that worthwhile?
-		err = d.walDir.Sync()
-	}
-
-	if err != nil && newLogFile != nil {
-		newLogFile.Close()
-	} else if err == nil {
-		newLogFile = vfs.NewSyncingFile(newLogFile, vfs.SyncingFileOptions{
-			NoSyncOnClose:   d.opts.NoSyncOnClose,
-			BytesPerSync:    d.opts.WALBytesPerSync,
-			PreallocateSize: d.walPreallocateSize(),
-		})
-	}
-
-	if recycleOK {
-		err = firstError(err, d.logRecycler.pop(recycleLog.fileNum.FileNum()))
-	}
-
-	d.opts.EventListener.WALCreated(WALCreateInfo{
-		JobID:           jobID,
-		Path:            newLogName,
-		FileNum:         newLogNum,
-		RecycledFileNum: recycleLog.fileNum.FileNum(),
-		Err:             err,
-	})
+	newLogFile, newLogSize, err := d.createWALFile(newLogNum, jobID, d.walPreallocateSize())
 
 	d.mu.Lock()
 

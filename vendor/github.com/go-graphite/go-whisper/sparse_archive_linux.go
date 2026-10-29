@@ -6,6 +6,9 @@ import (
 )
 
 func newArchiveExtentReader(source file, archiveEnd int64, readBytes int) *archiveExtentReader {
+	if source, ok := source.(StorageExtentReader); ok {
+		return &archiveExtentReader{nextExtent: source.NextStorageExtent}
+	}
 	// Small windows and ordinary dense files do not justify extent queries.
 	if readBytes < 256<<10 {
 		return nil
