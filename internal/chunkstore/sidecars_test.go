@@ -34,6 +34,20 @@ func TestLegacySidecarInventoryReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	checkReady := func(want bool) {
+		t.Helper()
+		select {
+		case <-db.SidecarsReady():
+			if !want {
+				t.Fatal("sidecar readiness signaled before a full applied scan")
+			}
+		default:
+			if want {
+				t.Fatal("sidecar readiness not signaled")
+			}
+		}
+	}
+	checkReady(true)
 	for _, name := range []string{"a", "b"} {
 		if _, err := db.Create(ctx, MetricConfig{Name: name, Retentions: []Retention{{Step: 1, Count: 60}}, AggregationMethod: Average}); err != nil {
 			t.Fatal(err)
@@ -53,18 +67,29 @@ func TestLegacySidecarInventoryReadiness(t *testing.T) {
 	if db.Sidecars().Ready || db.CheckNoSidecars() == nil {
 		t.Fatal("legacy inventory incorrectly reported complete")
 	}
+	checkReady(false)
 	dry, err := db.ScanSidecars(ctx, "", 10, false)
 	if err != nil || len(dry.Sidecars) != 2 || db.Sidecars().Count != 0 || db.Sidecars().Ready {
 		t.Fatalf("dry scan: %+v %v", dry, err)
 	}
+	checkReady(false)
 	first, err := db.ScanSidecars(ctx, "", 1, true)
 	if err != nil || first.Done || db.Sidecars().Ready || db.Sidecars().Count != 1 {
 		t.Fatalf("first page: %+v %v", first, err)
 	}
+	checkReady(false)
 	last, err := db.ScanSidecars(ctx, first.After, 10, true)
 	if err != nil || !last.Done || !db.Sidecars().Ready || db.Sidecars().Count != 2 || db.Sidecars().Points != 6 || db.Sidecars().Oldest != 100 {
 		t.Fatalf("final page: %+v %v", last, err)
 	}
+	checkReady(true)
+	if db.CheckNoSidecars() == nil {
+		t.Fatal("ready inventory accepted nonempty sidecars")
+	}
+	if _, err := db.ScanSidecars(ctx, "", 10, true); err != nil {
+		t.Fatal(err)
+	}
+	checkReady(true)
 	// A completed inventory survives reopening without scanning metric values.
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -76,4 +101,5 @@ func TestLegacySidecarInventoryReadiness(t *testing.T) {
 	if !db.Sidecars().Ready || db.Sidecars().Count != 2 {
 		t.Fatal(db.Sidecars())
 	}
+	checkReady(true)
 }
