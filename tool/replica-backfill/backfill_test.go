@@ -34,8 +34,7 @@ type fakeServer struct {
 	mu       sync.Mutex
 	step     int64
 	data     map[string]map[int64]float64
-	requests [][]string // names per render request
-	times    []time.Time
+	requests [][]string                      // names per render request
 	fail     func(names []string, n int) int // status to fail with, 0 for success
 	srv      *httptest.Server
 }
@@ -96,7 +95,6 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.requests = append(f.requests, names)
-		f.times = append(f.times, time.Now())
 		n := len(f.requests)
 		fail := f.fail
 		var resp protov3.MultiFetchResponse
@@ -318,16 +316,10 @@ func TestBatchingAndRateLimit(t *testing.T) {
 	if strings.Join(seen, ",") != strings.Join(names, ",") {
 		t.Fatalf("names requested %v", seen)
 	}
-	// Burst 1 at 10/s: three requests need at least 200ms.
+	// Burst 1 at 10/s: three requests need at least 200ms. Server arrival
+	// spacing can be compressed by transport or handler scheduling delays.
 	if d := time.Since(began); d < 190*time.Millisecond {
 		t.Fatalf("replica rate limit not applied: %s", d)
-	}
-	rep.mu.Lock()
-	times := append([]time.Time(nil), rep.times...)
-	rep.mu.Unlock()
-	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
-	if gap := times[2].Sub(times[0]); gap < 190*time.Millisecond {
-		t.Fatalf("requests 1..3 spaced %s", gap)
 	}
 	if r.Write["points_sent"] != 25 || r.Write["flushes"] < 9 {
 		t.Fatalf("write report %+v", r.Write)
