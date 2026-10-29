@@ -628,27 +628,56 @@ func TestSelectNames(t *testing.T) {
 	}
 }
 
-func TestWriterFailureStopsRun(t *testing.T) {
+func writerFailureOptions(t *testing.T) (*fakeServer, *options) {
+	t.Helper()
 	local, rep := newFake(t), newFake(t)
 	for i := range 40 {
 		n := "w." + strconv.Itoa(10+i)
 		local.fill(n, base-5*step, func(int64) float64 { return 1 }, func(ts int64) bool { return ts == base+step })
 		rep.fill(n, base, func(int64) float64 { return 2 }, nil)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close() // nothing listens: every connect fails
-	o := testOptions(local, addr, rep)
+	o := testOptions(local, "127.0.0.1:0", rep)
 	o.batch, o.workers, o.flushPt = 1, 1, 1
+	return rep, o
+}
+
+func TestWriterFailureStopsRun(t *testing.T) {
+	rep, o := writerFailureOptions(t)
 	began := time.Now()
-	_, err = run(context.Background(), o, time.Unix(base+3600, 0))
+	_, err := run(context.Background(), o, time.Unix(base+3600, 0))
 	if err == nil || !strings.Contains(err.Error(), "write to") {
 		t.Fatalf("want a write error, got %v", err)
 	}
 	if n := len(rep.renders()); n > 3 || time.Since(began) > 10*time.Second {
 		t.Fatalf("run kept fetching after the writer died: %d replica requests in %s", n, time.Since(began))
+	}
+}
+
+func TestWriterFailureStopsEngineWithoutSupervisor(t *testing.T) {
+	rep, o := writerFailureOptions(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	local := newClient(o.local, o, nil)
+	names, err := o.selectNames(ctx, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newWriter(o.ingest, o.writeRate, o.flushPt, nil, o.writeRetries, o.backoff, o.maxBack)
+	e := &engine{
+		cfg:   engineConfig{from: base, until: base + 10*step, lookback: int64(o.lookback / time.Second), batch: o.batch, workers: o.workers},
+		local: local, replicas: []*client{newClient(o.replicas[0], o, nil)}, out: w,
+	}
+	writerDone := make(chan error, 1)
+	// Leave ctx live after the writer exits: the engine must stop without
+	// waiting for the supervising goroutine to propagate cancellation.
+	go func() { writerDone <- w.run(ctx) }()
+	if err := e.run(ctx, names); err == nil {
+		t.Fatal("engine succeeded after its writer failed")
+	}
+	if err := <-writerDone; err == nil || !strings.Contains(err.Error(), "write to") {
+		t.Fatalf("want a write error, got %v", err)
+	}
+	if n := len(rep.renders()); n != 1 || ctx.Err() != nil {
+		t.Fatalf("engine fetched %d batches after writer failure; context: %v", n, ctx.Err())
 	}
 }
