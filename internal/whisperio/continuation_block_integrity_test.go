@@ -373,18 +373,24 @@ func TestRandomInterleavingsThroughStore(t *testing.T) {
 					}
 					aligned := whisper.RewriteBlockFallbackCount(whisper.RewriteBlockAligned)
 					at, batches := miscStream(rng, now, 18*86400, 20160*60, .02)
-					for u, b := range batches {
-						now = at[u]
-						maintenance := store.ContinuationMaintenance{MinBytes: 65536, MaxPointAge: 5 * time.Minute, RetentionMargin: time.Minute,
-							Allow: func() bool { return rng.Intn(3) == 0 }}
-						if err := db.UpdateManyMaintained(ctx, "m", b, maintenance); err != nil {
-							t.Fatalf("update %d at %d: %v", u, at[u], err)
-						}
-						if rng.Intn(4) == 0 {
-							if _, err := db.Fetch(ctx, "m", at[u]-20160*60, at[u]); err != nil {
-								t.Fatalf("fetch %d: %v", u, err)
+					const phaseUpdates = 32
+					for first := 0; first < len(batches); first += phaseUpdates {
+						end := min(first+phaseUpdates, len(batches))
+						t.Run(fmt.Sprintf("updates=%d-%d", first, end-1), func(t *testing.T) {
+							for u := first; u < end; u++ {
+								now = at[u]
+								maintenance := store.ContinuationMaintenance{MinBytes: 65536, MaxPointAge: 5 * time.Minute, RetentionMargin: time.Minute,
+									Allow: func() bool { return rng.Intn(3) == 0 }}
+								if err := db.UpdateManyMaintained(ctx, "m", batches[u], maintenance); err != nil {
+									t.Fatalf("update %d at %d: %v", u, at[u], err)
+								}
+								if rng.Intn(4) == 0 {
+									if _, err := db.Fetch(ctx, "m", at[u]-20160*60, at[u]); err != nil {
+										t.Fatalf("fetch %d: %v", u, err)
+									}
+								}
 							}
-						}
+						})
 					}
 					if _, err := db.Snapshot(ctx, "m"); err != nil {
 						t.Fatalf("snapshot: %v", err)
