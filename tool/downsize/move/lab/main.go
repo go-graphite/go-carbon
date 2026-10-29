@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -126,6 +127,7 @@ func start(root, node string, nodes []string, continuation bool, cacheMB, memtab
 	cfg.Buckyd.Bind = address()
 	cfg.Buckyd.Node = node
 	cfg.Buckyd.Nodes = nodes
+	cfg.Buckyd.TransferSources = []string{"127.0.0.1"}
 	cfg.Buckyd.Hash = "jump_fnv1a"
 	cfg.Buckyd.Replicas = 1
 	cfg.Buckyd.MaxTransfers = 32
@@ -160,7 +162,7 @@ func run() error {
 	count := flag.Int("metrics", 1000000, "total metric cardinality across three old owners")
 	points := flag.Int("points", 128, "points per metric")
 	continuation := flag.Bool("continuation", true, "v7 continuation store (legacy rebalance rejects it)")
-	mode := flag.String("mode", "bulk", "bulk, legacy, seed, or idle")
+	mode := flag.String("mode", "bulk", "bulk, legacy, seed, idle, source, or target")
 	unified := flag.Bool("unified", false, "mover uses the unified resize run command")
 	mover := flag.String("mover", "/tmp/resize", "mover binary")
 	bucky := flag.String("bucky", "/tmp/bucky", "buckytools binary")
@@ -168,19 +170,22 @@ func run() error {
 	streams := flag.Int("streams", 4, "bulk per-host stream cap")
 	readQPS := flag.Int("read-qps", 1000, "storage fetch requests/s per target when reads > 0")
 	idleDuration := flag.Duration("duration", 30*time.Second, "idle baseline duration")
-	reads := flag.Int("reads", 0, "concurrent direct target store reader workers")
+	reads := flag.Int("reads", 0, "concurrent direct store reader workers per loaded host")
+	readSource := flag.Bool("read-source", false, "include source reads in the per-host latency measurements")
 	ingest := flag.Int("ingest", 0, "updates/s per loaded host; zero disables load")
 	ingestSource := flag.Bool("ingest-source", false, "keep the source ingesting too; requires --delete=false")
 	auto := flag.Bool("auto", false, "use adaptive ramp rather than fixed ceiling")
+	measuredHealth := flag.Bool("measured-health", false, "governor uses live process CPU, per-App cache/write errors/read p99; other host fields are synthetic")
 	remove := flag.Bool("delete", true, "verify then remove source copies")
 	overlap := flag.Int("overlap", 100, "one in N moved metrics preexists on target; zero disables")
+	memprofile := flag.String("memprofile", "", "allocation profiles before/after the transfer phase")
 	profile := flag.String("cpuprofile", "", "CPU profile of transfer stage (apps and load only, excludes mover child)")
 	flag.Parse()
 	if *ingestSource && *remove {
 		panic("live source ingestion requires --delete=false")
 	}
 	loadHosts := 2
-	if *ingestSource {
+	if *ingestSource || *readSource {
 		loadHosts = 3
 	}
 	if *root == "" {
@@ -433,64 +438,127 @@ func run() error {
 			must(err)
 		}
 	}
+	readUntil := now
+	if *reads > 0 && len(names[0]) > 0 {
+		history, err := apps[2].MetricStore.Snapshot(ctx, names[0][0])
+		must(err)
+		readUntil = 0
+		for _, archive := range history.Archives {
+			for _, point := range archive.Points {
+				readUntil = max(readUntil, point.Timestamp+int64(archive.Retention.Step))
+			}
+		}
+		if readUntil == 0 {
+			panic("read workload needs a nonempty source history")
+		}
+	}
 	loadCtx, stopLoad := context.WithCancel(ctx)
 	var load sync.WaitGroup
 	var updates, readCount, loadErrors atomic.Int64
 	var readLatency [64]atomic.Uint64
+	var hostLatency [3][64]atomic.Uint64
+	var hostReads [3]atomic.Int64
+	var nonemptyReads [3]atomic.Int64
+	var hostSent [3]atomic.Int64
+	helpers := map[string]string{}
+	if *measuredHealth {
+		for i, app := range apps {
+			server := health(app, &hostLatency[i])
+			defer server.Close()
+			helpers["http://"+app.Config.Buckyd.Bind] = server.URL
+		}
+	}
 	for target := 0; target < loadHosts; target++ {
-		if *ingest > 0 {
+		role := fmt.Sprintf("target%d", target)
+		if target == 2 {
+			role = "source"
+		}
+		profileCtx := pprof.WithLabels(ctx, pprof.Labels("host", role))
+		if *ingest > 0 && (target != 2 || *ingestSource) {
 			// A fixed hot set exercises the real receiver/cache/persister while transfer
 			// merges other metrics. Disjoint names keep write verification deterministic.
 			conn, err := net.Dial("tcp", apps[target].Config.Tcp.Listen)
 			must(err)
 			load.Add(1)
 			go func() {
+				pprof.SetGoroutineLabels(profileCtx)
 				defer load.Done()
 				defer conn.Close()
 				ticker := time.NewTicker(10 * time.Millisecond)
 				defer ticker.Stop()
+				started := time.Now()
+				var sent int64
+				var b bytes.Buffer
 				for {
 					select {
 					case <-loadCtx.Done():
 						return
 					case <-ticker.C:
-						var b bytes.Buffer
-						for j := 0; j < max(1, *ingest/100); j++ {
-							fmt.Fprintf(&b, "concurrent.target.%03d %f %d\n", j%1000, float64(j), time.Now().Unix())
+						// Catch up missed ticks without spinning or allocating an
+						// unbounded burst. Keep the same hot set as the 10ms batch.
+						due := int64(float64(*ingest)*time.Since(started).Seconds()) - sent
+						n := min(due, int64(max(1, *ingest/10)))
+						if n <= 0 {
+							continue
+						}
+						b.Reset()
+						for j := int64(0); j < n; j++ {
+							fmt.Fprintf(&b, "concurrent.target.%03d %f %d\n", j%int64(min(1000, max(1, *ingest/100))), float64(j), time.Now().Unix())
 						}
 						if _, err := conn.Write(b.Bytes()); err != nil {
 							loadErrors.Add(1)
 							return
 						}
-						updates.Add(int64(max(1, *ingest/100)))
+						sent += n
+						updates.Add(n)
+						hostSent[target].Add(n)
 					}
 				}
 			}()
 		}
-		if target == 2 {
+		if target == 2 && !*readSource {
 			continue
 		}
 		for reader := 0; reader < *reads; reader++ {
 			reader := reader
 			load.Add(1)
 			go func() {
+				pprof.SetGoroutineLabels(profileCtx)
 				defer load.Done()
-				ticker := time.NewTicker(time.Second * time.Duration(*reads) / time.Duration(max(1, *readQPS)))
-				defer ticker.Stop()
+				interval := time.Second * time.Duration(*reads) / time.Duration(max(1, *readQPS))
+				timer := time.NewTimer(0)
+				defer timer.Stop()
+				next := time.Now()
 				for i := reader * 104729; ; i++ {
 					select {
 					case <-loadCtx.Done():
 						return
-					case <-ticker.C:
+					case <-timer.C:
 					}
+					next = next.Add(interval)
+					timer.Reset(max(0, time.Until(next)))
 					name := fmt.Sprintf("synthetic.metric.%09d", i%*count)
 					for jump(name, 3) != target {
 						i++
 						name = fmt.Sprintf("synthetic.metric.%09d", i%*count)
 					}
 					start := time.Now()
-					_, err := apps[target].MetricStore.Fetch(loadCtx, name, int(now-3600), int(now))
-					readLatency[min(63, bits.Len64(uint64(max(1, time.Since(start).Microseconds()))))].Add(1)
+					series, err := apps[target].MetricStore.Fetch(loadCtx, name, int(readUntil-3600), int(readUntil))
+					if err != nil && loadCtx.Err() != nil {
+						return
+					}
+					bucket := min(63, bits.Len64(uint64(max(1, time.Since(start).Microseconds()))))
+					readLatency[bucket].Add(1)
+					hostLatency[target][bucket].Add(1)
+					hostReads[target].Add(1)
+					if err == nil && series != nil {
+						for _, value := range series.Values {
+							if !math.IsNaN(value) {
+								nonemptyReads[target].Add(1)
+								break
+							}
+						}
+					}
 					if err != nil && loadCtx.Err() == nil {
 						loadErrors.Add(1)
 					}
@@ -500,14 +568,56 @@ func run() error {
 		}
 	}
 	time.Sleep(2 * time.Second)
+	type wireInput struct {
+		path   string
+		target int
+	}
+	var inputs []wireInput
+	if *mode == "target" {
+		for target, list := range names {
+			for start := 0; start < len(list); start += *batch {
+				records, err := apps[2].MetricStore.ExportTransfer(ctx, list[start:min(start+*batch, len(list))])
+				must(err)
+				path := filepath.Join(*root, fmt.Sprintf("wire-%d-%d", target, start))
+				file, err := os.Create(path)
+				must(err)
+				out := bufio.NewWriterSize(file, 256<<10)
+				must(store.WriteTransfer2(out, records))
+				must(out.Flush())
+				must(file.Close())
+				inputs = append(inputs, wireInput{path, target})
+			}
+		}
+		runtime.GC()
+	}
 	if *profile != "" {
 		f, err := os.Create(*profile)
 		must(err)
 		must(pprof.StartCPUProfile(f))
 		defer f.Close()
 	}
+	if *memprofile != "" {
+		f, err := os.Create(*memprofile + ".before")
+		must(err)
+		must(pprof.Lookup("allocs").WriteTo(f, 0))
+		must(f.Close())
+	}
+	var memBefore runtime.MemStats
+	runtime.ReadMemStats(&memBefore)
 	sentBefore, readBefore := updates.Load(), readCount.Load()
 	var readBucketsBefore [64]uint64
+	var hostBucketsBefore [3][64]uint64
+	var hostReadsBefore [3]int64
+	var nonemptyBefore [3]int64
+	var sentHostBefore [3]int64
+	for host := range hostLatency {
+		hostReadsBefore[host] = hostReads[host].Load()
+		nonemptyBefore[host] = nonemptyReads[host].Load()
+		sentHostBefore[host] = hostSent[host].Load()
+		for i := range hostLatency[host] {
+			hostBucketsBefore[host][i] = hostLatency[host][i].Load()
+		}
+	}
 	for i := range readLatency {
 		readBucketsBefore[i] = readLatency[i].Load()
 	}
@@ -516,15 +626,19 @@ func run() error {
 		cacheBefore[i] = apps[i].Cache.Size()
 	}
 	committedBefore := make([]uint64, loadHosts)
+	writesBefore := make([]uint64, loadHosts)
 	for i := range loadHosts {
 		p, _ := apps[i].Persister.WriteStats()
 		committedBefore[i] = p.Points
+		writesBefore[i] = p.Updates
 	}
 	before := []store.Stats{apps[0].MetricStore.Stats(), apps[1].MetricStore.Stats(), apps[2].MetricStore.Stats()}
 	started := time.Now()
 	cpuStart := cpu()
 	var command *exec.Cmd
 	switch *mode {
+	case "source", "target":
+		*remove = false
 	case "idle":
 		command = exec.Command("sleep", fmt.Sprint(idleDuration.Seconds()))
 		*remove = false
@@ -536,7 +650,16 @@ func run() error {
 		args = append(args, "127.0.0.1:"+port)
 		command = exec.Command(*bucky, args...)
 	default:
-		args := []string{"--plan", planDir, "--state", filepath.Join(*root, "state.jsonl"), "--apply", "--local-lab", "--streams", strconvInt(*streams), "--batch", strconvInt(*batch), fmt.Sprintf("--auto=%t", *auto), "--delete-rate", "100000", "--tick", "1s"}
+		args := []string{"--plan", planDir, "--state", filepath.Join(*root, "state.jsonl"), "--apply", "--streams", strconvInt(*streams), "--batch", strconvInt(*batch), fmt.Sprintf("--auto=%t", *auto), "--delete-rate", "100000", "--tick", "1s", "--max-mbps", "1000"}
+		if *measuredHealth {
+			path := filepath.Join(*root, "health.json")
+			data, err := json.Marshal(helpers)
+			must(err)
+			must(os.WriteFile(path, data, 0600))
+			args = append(args, "--health-map", path)
+		} else {
+			args = append(args, "--local-lab")
+		}
 		if *remove {
 			args = append(args, "--delete", "--barrier", barrierPath)
 		}
@@ -547,19 +670,68 @@ func run() error {
 	}
 	log, err := os.Create(filepath.Join(*root, "move.log"))
 	must(err)
-	command.Stdout = log
-	command.Stderr = log
-	runErr := command.Run()
-	duration := time.Since(started).Seconds()
-	cpuUsed := cpu() - cpuStart
-	if *profile != "" {
-		pprof.StopCPUProfile()
+	var runErr error
+	switch {
+	case command != nil:
+		command.Stdout = log
+		command.Stderr = log
+		runErr = command.Run()
+	case *mode == "source":
+		pprof.Do(ctx, pprof.Labels("host", "source"), func(ctx context.Context) {
+			for _, list := range names {
+				for start := 0; start < len(list); start += *batch {
+					records, err := apps[2].MetricStore.ExportTransfer(ctx, list[start:min(start+*batch, len(list))])
+					if err != nil {
+						runErr = err
+						return
+					}
+					if err := store.WriteTransfer2(io.Discard, records); err != nil {
+						runErr = err
+						return
+					}
+				}
+			}
+		})
+	default:
+		var buffer store.TransferBuffer
+		for _, input := range inputs {
+			pprof.Do(ctx, pprof.Labels("host", fmt.Sprintf("target%d", input.target)), func(ctx context.Context) {
+				file, err := os.Open(input.path)
+				if err != nil {
+					runErr = err
+					return
+				}
+				defer file.Close()
+				info, err := file.Stat()
+				if err != nil {
+					runErr = err
+					return
+				}
+				records, err := buffer.Read(file, 160<<20, info.Size())
+				if err != nil {
+					runErr = err
+					return
+				}
+				proofs, err := apps[input.target].MetricStore.ImportTransfer(ctx, records)
+				if err != nil {
+					runErr = err
+					return
+				}
+				runErr = apps[input.target].MetricStore.VerifyTransfer(ctx, proofs)
+			})
+			if runErr != nil {
+				break
+			}
+		}
 	}
-	must(log.Close())
 	stopLoad()
 	load.Wait()
+	duration := time.Since(started).Seconds()
+	cpuUsed := cpu() - cpuStart
+	var memAfter runtime.MemStats
+	runtime.ReadMemStats(&memAfter)
 	var childCPU float64
-	if command.ProcessState != nil {
+	if command != nil && command.ProcessState != nil {
 		childCPU = command.ProcessState.UserTime().Seconds() + command.ProcessState.SystemTime().Seconds()
 	}
 	cacheAfter := make([]int64, loadHosts)
@@ -567,9 +739,24 @@ func run() error {
 		cacheAfter[i] = apps[i].Cache.Size()
 	}
 	committed := make([]uint64, loadHosts)
+	writes := make([]uint64, loadHosts)
+	writeErrors := make([]uint64, loadHosts)
 	for i := range loadHosts {
 		p, _ := apps[i].Persister.WriteStats()
 		committed[i] = p.Points - committedBefore[i]
+		writes[i] = p.Updates - writesBefore[i]
+		writeErrors[i] = p.Failures
+	}
+	if *profile != "" {
+		pprof.StopCPUProfile()
+	}
+	must(log.Close())
+	if *memprofile != "" {
+		runtime.GC()
+		f, err := os.Create(*memprofile + ".after")
+		must(err)
+		must(pprof.Lookup("allocs").WriteTo(f, 0))
+		must(f.Close())
 	}
 	readP99US := uint64(0)
 	var cumulative, totalRead uint64
@@ -583,6 +770,23 @@ func run() error {
 			break
 		}
 	}
+	hostP99 := make([]uint64, 3)
+	hostRequests := make([]int64, 3)
+	hostNonempty := make([]int64, 3)
+	hostOffered := make([]int64, 3)
+	for host := range hostLatency {
+		hostRequests[host] = hostReads[host].Load() - hostReadsBefore[host]
+		hostNonempty[host] = nonemptyReads[host].Load() - nonemptyBefore[host]
+		hostOffered[host] = hostSent[host].Load() - sentHostBefore[host]
+		var n uint64
+		for i := range hostLatency[host] {
+			n += hostLatency[host][i].Load() - hostBucketsBefore[host][i]
+			if hostRequests[host] > 0 && n*100 >= uint64(hostRequests[host])*99 {
+				hostP99[host] = uint64(1) << i
+				break
+			}
+		}
+	}
 	after := []store.Stats{apps[0].MetricStore.Stats(), apps[1].MetricStore.Stats(), apps[2].MetricStore.Stats()}
 	reportedMoved := moved
 	reportedBytes := rawBytes
@@ -594,7 +798,7 @@ func run() error {
 	if reportedBytes > 0 {
 		cpuPerGB = (cpuUsed + childCPU) / (float64(reportedBytes) / 1e9)
 	}
-	report("transfer", map[string]any{"mode": *mode, "continuation": *continuation, "metrics": *count, "moved": moved, "seconds": duration, "metrics_per_second": float64(reportedMoved) / duration, "raw_MB_per_second": float64(reportedBytes) / 1e6 / duration, "cpu_seconds": cpuUsed, "mover_cpu_seconds": childCPU, "cpu_seconds_per_raw_GB": cpuPerGB, "streams": *streams, "batch": *batch, "backend_cpus": runtime.GOMAXPROCS(0), "cache_mb": *cacheMB, "metadata_cache_mb": *metadataMB, "warm_exports": *warmExport, "memtable_mb": *memtableMB, "reads": *reads, "read_requests": readCount.Load() - readBefore, "read_p99_us_upper": readP99US, "read_qps_per_host": *readQPS, "cache_points_before": cacheBefore, "cache_points_after": cacheAfter, "committed_points": committed, "ingest_sent_points": updates.Load() - sentBefore, "ingest_source": *ingestSource, "load_errors": loadErrors.Load(), "error": fmt.Sprint(runErr), "before": before, "after": after})
+	report("transfer", map[string]any{"mode": *mode, "continuation": *continuation, "metrics": *count, "moved": moved, "seconds": duration, "metrics_per_second": float64(reportedMoved) / duration, "raw_MB_per_second": float64(reportedBytes) / 1e6 / duration, "cpu_seconds": cpuUsed, "allocated_bytes": memAfter.TotalAlloc - memBefore.TotalAlloc, "allocations": memAfter.Mallocs - memBefore.Mallocs, "gc_cycles": memAfter.NumGC - memBefore.NumGC, "mover_cpu_seconds": childCPU, "cpu_seconds_per_raw_GB": cpuPerGB, "streams": *streams, "batch": *batch, "backend_cpus": runtime.GOMAXPROCS(0), "cache_mb": *cacheMB, "metadata_cache_mb": *metadataMB, "warm_exports": *warmExport, "memtable_mb": *memtableMB, "reads": *reads, "read_requests": readCount.Load() - readBefore, "host_read_requests": hostRequests, "host_nonempty_reads": hostNonempty, "read_until": readUntil, "host_read_p99_us_upper": hostP99, "read_source": *readSource, "read_p99_us_upper": readP99US, "read_qps_per_host": *readQPS, "cache_points_before": cacheBefore, "cache_points_after": cacheAfter, "committed_points": committed, "committed_updates": writes, "write_errors": writeErrors, "measured_health": *measuredHealth, "NIC_ceiling_MB_per_second": 1000, "ingest_sent_points": updates.Load() - sentBefore, "host_ingest_sent_points": hostOffered, "ingest_source": *ingestSource, "load_errors": loadErrors.Load(), "error": fmt.Sprint(runErr), "before": before, "after": after})
 	if runErr != nil {
 		data, _ := os.ReadFile(filepath.Join(*root, "move.log"))
 		lines := strings.Split(string(data), "\n")
@@ -604,7 +808,7 @@ func run() error {
 		fmt.Fprintln(os.Stderr, strings.Join(lines, "\n"))
 		return runErr
 	}
-	if *mode == "idle" {
+	if *mode == "idle" || *mode == "source" {
 		return nil
 	}
 	// Sample point-level public snapshots, and verify source catalogue removal.

@@ -15,13 +15,17 @@ import (
 )
 
 func transferStore(t *testing.T, continuation, buckets bool, direct ...bool) *store.Store {
+	return transferStoreCached(t, continuation, buckets, 0, direct...)
+}
+
+func transferStoreCached(t *testing.T, continuation, buckets bool, metadataBytes int64, direct ...bool) *store.Store {
 	t.Helper()
 	root := t.TempDir()
 	source := filepath.Join(root, "originals")
 	if err := os.MkdirAll(source, 0750); err != nil {
 		t.Fatal(err)
 	}
-	options := store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(1000000, 0) }}
+	options := store.Options{ExactBlocks: true, CacheSize: 1 << 20, MetadataCacheSize: metadataBytes, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(1000000, 0) }}
 	if continuation {
 		options.Continuation = &whisperio.ContinuationCodec{DirectLateWrites: len(direct) == 0 || direct[0]}
 		options.IncrementalSource = source
@@ -37,6 +41,59 @@ func transferStore(t *testing.T, continuation, buckets bool, direct ...bool) *st
 		}
 	})
 	return s
+}
+
+func TestTransferCachedTargetMergeMatchesUncached(t *testing.T) {
+	for _, mode := range []struct {
+		name                  string
+		continuation, buckets bool
+	}{{"exact", false, false}, {"v6", true, false}, {"v7", true, true}} {
+		t.Run(mode.name, func(t *testing.T) {
+			ctx := context.Background()
+			source := transferStore(t, mode.continuation, mode.buckets)
+			name := "transfer.target.cache"
+			putTransferPoints(t, source, name, []store.Point{{Timestamp: 999870, Value: 1}, {Timestamp: 999880, Value: 2}})
+			records, err := source.ExportTransfer(ctx, []string{name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want store.Snapshot
+			for _, cached := range []bool{false, true} {
+				var budget int64
+				if cached {
+					budget = 8 << 20
+				}
+				target := transferStoreCached(t, mode.continuation, mode.buckets, budget)
+				putTransferPoints(t, target, name, []store.Point{{Timestamp: 999880, Value: 3}, {Timestamp: 999910, Value: 4}})
+				putTransferPoints(t, target, name, []store.Point{{Timestamp: 999880, Value: 5}})
+				if cached && target.Stats().StateCache.Entries == 0 {
+					t.Fatal("target state was not cached", target.Stats().StateCache)
+				}
+				proofs, err := target.ImportTransfer(ctx, records)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := target.VerifyTransfer(ctx, proofs); err != nil {
+					t.Fatal(err)
+				}
+				got, err := target.Snapshot(ctx, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cached {
+					if err := store.EqualSnapshots(want, got); err != nil {
+						t.Fatal("cached target changed merge", err)
+					}
+				} else {
+					want = got
+				}
+				putTransferPoints(t, target, name, []store.Point{{Timestamp: 999920, Value: 6}})
+				if err := target.VerifyTransfer(ctx, proofs); err != nil {
+					t.Fatal("foreground write invalidated receipt", err)
+				}
+			}
+		})
+	}
 }
 func putTransferPoints(t *testing.T, s *store.Store, name string, points []store.Point) {
 	t.Helper()
