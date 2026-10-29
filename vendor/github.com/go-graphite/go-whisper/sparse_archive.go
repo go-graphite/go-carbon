@@ -11,11 +11,12 @@ import (
 const seekArchiveData, seekArchiveHole = 3, 4
 
 type archiveExtentReader struct {
-	seek     func(int64, int) (int64, error)
-	size     func() (int64, error)
-	dataFrom int64
-	dataTo   int64
-	disabled bool
+	nextExtent func(int64, int64, int64) (int64, int64, error)
+	seek       func(int64, int) (int64, error)
+	size       func() (int64, error)
+	dataFrom   int64
+	dataTo     int64
+	disabled   bool
 }
 
 // next returns complete records overlapping the next data extent. A record
@@ -25,6 +26,9 @@ func (r *archiveExtentReader) next(start, end, archiveStart int64) (from, until 
 	from, until = start, end
 	if r == nil || r.disabled {
 		return
+	}
+	if r.nextExtent != nil {
+		return r.nextExtent(start, end, archiveStart)
 	}
 	if start >= r.dataFrom && start < r.dataTo {
 		if until > r.dataTo {

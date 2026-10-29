@@ -21,3 +21,11 @@ type Cache = cache.Cache
 func NewCache(size int64) *cache.Cache {
 	return cache.New(size)
 }
+
+// NewCacheWithShards creates a cache with an explicit positive shard count.
+// Capacity and reference ownership are the same as NewCache. Larger shards can
+// retain blocks that exceed the default per-shard capacity on high-core hosts,
+// but reduce the concurrency available before cache-lock contention.
+func NewCacheWithShards(size int64, shards int) *cache.Cache {
+	return cache.NewWithShards(size, shards)
+}

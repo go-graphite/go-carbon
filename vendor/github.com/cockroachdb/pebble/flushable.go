@@ -35,6 +35,9 @@ type flushable interface {
 // functionality that is common to all flushables.
 type flushableEntry struct {
 	flushable
+	// An asynchronous WAL handoff must finish before this entry may flush and
+	// make its WAL eligible for recycling. Protected by DB.mu.
+	walReady <-chan struct{}
 	// Channel which is closed when the flushable has been flushed.
 	flushed chan struct{}
 	// flushForced indicates whether a flush was forced on this memtable (either
@@ -70,6 +73,17 @@ type flushableEntry struct {
 	deleteFnLocked func(obsolete []*fileBacking)
 	// deleteFn should be called if the caller is not holding DB.mu.
 	deleteFn func(obsolete []*fileBacking)
+}
+
+func (e *flushableEntry) readyForFlush() bool {
+	if e.walReady != nil {
+		select {
+		case <-e.walReady:
+		default:
+			return false
+		}
+	}
+	return e.flushable.readyForFlush()
 }
 
 func (e *flushableEntry) readerRef() {

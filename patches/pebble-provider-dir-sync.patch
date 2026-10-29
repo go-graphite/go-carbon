@@ -1,0 +1,59 @@
+diff --git a/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/provider.go b/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/provider.go
+index 1652b7b6..fc487b82 100644
+--- a/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/provider.go
++++ b/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/provider.go
+@@ -101,6 +101,10 @@ type Settings struct {
+ 		// mode. This function is run whenever a local object is open for reading.
+ 		// If it is nil, DefaultReadaheadConfig is used.
+ 		ReadaheadConfigFn func() ReadaheadConfig
++
++		// AlwaysSyncDir makes every Sync sync FSDirName, even when no local
++		// object was created or removed since the previous Sync.
++		AlwaysSyncDir bool
+ 	}
+ 
+ 	// Fields here are set only if the provider is to support remote objects
+diff --git a/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/vfs.go b/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/vfs.go
+index 9e23815a..50fc35d6 100644
+--- a/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/vfs.go
++++ b/vendor/github.com/cockroachdb/pebble/objstorage/objstorageprovider/vfs.go
+@@ -87,7 +87,7 @@ func (p *provider) vfsInit() error {
+ 
+ func (p *provider) vfsSync() error {
+ 	p.mu.Lock()
+-	shouldSync := p.mu.localObjectsChanged
++	shouldSync := p.mu.localObjectsChanged || p.st.Local.AlwaysSyncDir
+ 	p.mu.localObjectsChanged = false
+ 	p.mu.Unlock()
+ 
+diff --git a/vendor/github.com/cockroachdb/pebble/open.go b/vendor/github.com/cockroachdb/pebble/open.go
+index 5bc863a1..0001a22c 100644
+--- a/vendor/github.com/cockroachdb/pebble/open.go
++++ b/vendor/github.com/cockroachdb/pebble/open.go
+@@ -318,6 +318,7 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
+ 		BytesPerSync:        opts.BytesPerSync,
+ 	}
+ 	providerSettings.Local.ReadaheadConfigFn = opts.Local.ReadaheadConfigFn
++	providerSettings.Local.AlwaysSyncDir = opts.Local.AlwaysSyncDir
+ 	providerSettings.Remote.StorageFactory = opts.Experimental.RemoteStorage
+ 	providerSettings.Remote.CreateOnShared = opts.Experimental.CreateOnShared
+ 	providerSettings.Remote.CreateOnSharedLocator = opts.Experimental.CreateOnSharedLocator
+diff --git a/vendor/github.com/cockroachdb/pebble/options.go b/vendor/github.com/cockroachdb/pebble/options.go
+index 2e7ee3d9..4c12003b 100644
+--- a/vendor/github.com/cockroachdb/pebble/options.go
++++ b/vendor/github.com/cockroachdb/pebble/options.go
+@@ -503,6 +503,14 @@ type Options struct {
+ 		// mode. This function is consulted when a table enters the table cache.
+ 		ReadaheadConfigFn func() ReadaheadConfig
+ 
++		// AlwaysSyncDir makes every object provider Sync, which precedes each
++		// manifest commit of new tables, sync the store directory, even when no
++		// local object was created or removed since the previous Sync. A
++		// filesystem that defers table syncs to the directory sync needs it:
++		// another job's Sync can clear the change flag this job's table set
++		// before the table was finished.
++		AlwaysSyncDir bool
++
+ 		// TODO(radu): move BytesPerSync, LoadBlockSema, Cleaner here.
+ 	}
+ 

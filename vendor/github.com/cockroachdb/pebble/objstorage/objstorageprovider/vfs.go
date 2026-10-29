@@ -87,7 +87,7 @@ func (p *provider) vfsInit() error {
 
 func (p *provider) vfsSync() error {
 	p.mu.Lock()
-	shouldSync := p.mu.localObjectsChanged
+	shouldSync := p.mu.localObjectsChanged || p.st.Local.AlwaysSyncDir
 	p.mu.localObjectsChanged = false
 	p.mu.Unlock()
 

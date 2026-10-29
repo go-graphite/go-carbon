@@ -576,7 +576,7 @@ func filterCompressedSlotOwners(archive *archiveInfo, points, newer []dataPoint)
 	// For dense rings, direct slot indexing avoids allocating and scanning a
 	// large hash table for every replay or read. Sparse and very large rings
 	// retain the map path so scratch does not grow with a mostly empty archive.
-	if archive.numberOfPoints >= minCompressedSlotOwners && archive.numberOfPoints <= maxCompressedSlotOwners && capacity >= (archive.numberOfPoints+1)/2 {
+	if archive.numberOfPoints >= minCompressedSlotOwners && archive.numberOfPoints <= maxDirectCompressedSlotOwners && capacity >= (archive.numberOfPoints+1)/2 {
 		owners := acquireCompressedSlotOwners(archive.numberOfPoints)
 		defer releaseCompressedSlotOwners(owners)
 		latest := owners.intervals
@@ -873,6 +873,10 @@ func (archive *archiveInfo) appendToBlockAndRotateWithBuffer(dps []dataPoint, bl
 
 	for {
 		offset := archive.cblock.lastByteOffset // lastByteOffset is updated in AppendPointsToBlock
+		previousCount, previousEnd := 0, archive.cblock.pn1.interval
+		if archive.cblock.p0.interval != 0 {
+			previousCount = archive.cblock.count + 1
+		}
 		size, left, rotate := archive.AppendPointsToBlock(blockBuffer, dps)
 
 		// flush block
@@ -880,8 +884,27 @@ func (archive *archiveInfo) appendToBlockAndRotateWithBuffer(dps []dataPoint, bl
 			// TODO: panic?
 			size = len(blockBuffer)
 		}
-		if err := whisper.fileWriteAt(blockBuffer[:size], int64(offset)); err != nil {
-			return rotated, blockBuffer, err
+		if output, ok := whisper.file.(StorageBlockAppender); ok {
+			accepted := make([]TimeSeriesPoint, 0, len(dps)-len(left))
+			for _, p := range dps[:len(dps)-len(left)] {
+				if p.interval > previousEnd {
+					accepted = append(accepted, TimeSeriesPoint{Time: p.interval, Value: p.value})
+					previousEnd = p.interval
+				}
+			}
+			if len(accepted) != 0 {
+				block := archive.blockRanges[archive.cblock.index]
+				descriptor := ContinuationBlock{Archive: whisper.archiveIndexOf(archive), Index: block.index,
+					Offset: archive.blockOffset(block.index), Size: archive.blockSize, Step: archive.secondsPerPoint,
+					First: block.start, Last: block.end, Count: block.count + 1}
+				if err := output.AppendStorageBlock(descriptor, previousCount, accepted); err != nil {
+					return rotated, blockBuffer, err
+				}
+			}
+		} else {
+			if err := whisper.fileWriteAt(blockBuffer[:size], int64(offset)); err != nil {
+				return rotated, blockBuffer, err
+			}
 		}
 
 		if len(left) == 0 {
@@ -995,14 +1018,28 @@ func (whisper *Whisper) computeExtendedRetentions() (rets []*Retention, extend b
 // marked replace. This is how the out-of-order sidecar is folded back in; pass
 // nil for a plain rewrite.
 func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archiveIndex int) []extraPoint) error {
-	oldArchives := whisper.archives
+	nwhisper, tmpname, nferrs, err := whisper.buildRewrite(rets, op, extra, whisper.opts.InMemory)
+	if err != nil {
+		return err
+	}
+	return whisper.publishRewrite(nwhisper, tmpname, op, nferrs)
+}
+
+// buildRewrite encodes the replacement file of rewrite, header included, and
+// hands back its still open handle. inMemory builds it as an unregistered
+// memory file whatever whisper's own storage is, which mergeOutOfOrderInMemory
+// uses to keep an intermediate file out of external storage. On error the
+// temporary file is already released.
+func (whisper *Whisper) buildRewrite(rets []*Retention, op string, extra func(archiveIndex int) []extraPoint, inMemory bool) (nwhisper *Whisper, tmpname string, nferrs []error, err error) {
 	var mixSpecs []MixAggregationSpec
 	var mixSizes = make(map[int][]float32)
-	var nferrs []error
 
 	filename := whisper.file.Name()
-	tmpname := auxiliaryPath(filename, "."+op)
-	if err := os.Remove(tmpname); err != nil && !os.IsNotExist(err) {
+	tmpname = auxiliaryPath(filename, "."+op)
+	fileSystem := whisper.opts.FileSystem
+	if inMemory && !whisper.opts.InMemory {
+		fileSystem = nil
+	} else if err := whisper.removeStorageFile(tmpname); err != nil && !os.IsNotExist(err) {
 		nferrs = append(nferrs, err)
 	}
 
@@ -1015,20 +1052,23 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		// Preserve compaction's block geometry when no extension is needed.
 		pointsPerBlock = whisper.pointsPerBlock
 	}
-	nwhisper, err := CreateWithOptions(
+	created, err := CreateWithOptions(
 		tmpname, rets,
 		whisper.aggregationMethod, whisper.xFilesFactor,
 		&Options{
 			Compressed:                 true,
 			PointsPerBlock:             pointsPerBlock,
-			InMemory:                   whisper.opts.InMemory,
+			InMemory:                   inMemory,
+			FileSystem:                 fileSystem,
+			Now:                        whisper.opts.Now,
 			MixAggregationSpecs:        mixSpecs,
 			MixAvgCompressedPointSizes: mixSizes,
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("%s: %s", op, err)
+		return nil, "", nil, fmt.Errorf("%s: %s", op, err)
 	}
+	nwhisper = created
 
 	// Every error return between here and the explicit close below abandons
 	// nwhisper, so without this its descriptor and temp file are leaked. A
@@ -1036,16 +1076,16 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 	// process into EMFILE. The explicit close sets nwhisperClosed, so the
 	// handed-off handle is never closed twice, and by the time nwhisper is
 	// reused for the reopen below this is already a no-op.
-	nwhisperClosed := false
+	built := false
 	defer func() {
-		if nwhisperClosed {
+		if built {
 			return
 		}
-		_ = nwhisper.file.Close()
-		if whisper.opts.InMemory {
+		_ = created.file.Close()
+		if inMemory {
 			releaseMemFile(tmpname)
 		} else {
-			_ = os.Remove(tmpname)
+			_ = whisper.removeStorageFile(tmpname)
 		}
 	}()
 
@@ -1062,25 +1102,7 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 			// Buffered values are served after encoded blocks. Apply the same
 			// replacement precedence there or an old buffer would hide the
 			// corrected value just written into a block during compaction.
-			buffer := nwhisper.archives[i].buffer
-			for _, point := range pending {
-				if !point.replace {
-					continue
-				}
-				for offset := 0; offset < len(buffer); offset += PointSize {
-					if unpackDataPoint(buffer[offset:offset+PointSize]).interval == point.interval {
-						if op == "rollup" && archive.bufferedBehindWatermark(point.interval) {
-							// This replacement and its downstream rollups are now
-							// encoded. A later flush must not divert it as a gap fill.
-							for j := offset; j < offset+PointSize; j++ {
-								buffer[j] = 0
-							}
-						} else {
-							copy(buffer[offset:offset+PointSize], point.dataPoint.Bytes())
-						}
-					}
-				}
-			}
+			applyExtraToBuffer(nwhisper.archives[i].buffer, pending, op, archive)
 		}
 
 		// Blocks come back ascending by start and each block's points are
@@ -1093,6 +1115,12 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 		target := nwhisper.archives[i]
 		copyPrefix := (op == "compact" || op == "rollup") && whisper.compVersion == nwhisper.compVersion &&
 			archive.blockSize == target.blockSize && archive.blockCount <= target.blockCount
+		// A copied current block carries the header's encoder state, which
+		// describes the bytes the writer appended. Typed storage serves its
+		// blocks re-encoded from exact points, which can differ from those
+		// bytes (an off-grid point appended by an older encoder), and appends
+		// resuming at the header's bit position would corrupt them. Stream it.
+		_, typed := whisper.file.(StorageBlockReader)
 		for _, block := range archive.getSortedBlockRanges() {
 			if op == "batch" {
 				break
@@ -1103,53 +1131,135 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 			if block.start == 0 {
 				continue
 			}
+			exact := false
 			if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
-				return fmt.Errorf("archives[%d].blocks[%d].file.read: %s", i, block.index, err)
+				// Typed storage keeps each block's exact points, and its
+				// virtual bytes are an encoding of them. When those bytes
+				// cannot be produced, stream the exact points instead of
+				// failing this and every later rewrite of the file.
+				if dst, err = whisper.rewriteFallbackPoints(i, archive, block, dst[:0], err); err != nil {
+					return nil, "", nil, err
+				}
+				exact = true
 			}
-			if copyPrefix && (len(pending) == 0 || pending[0].interval > block.end) {
+			if typed && block.index == archive.cblock.index {
+				copyPrefix = false
+			}
+			if !exact && copyPrefix && (len(pending) == 0 || pending[0].interval > block.end) {
 				if err := target.copyCompressedBlock(archive, block, buf); err != nil {
-					return fmt.Errorf("archives[%d].blocks[%d].copy: %w", i, block.index, err)
+					return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].copy: %w", i, block.index, err)
 				}
 				continue
 			}
 			// Extra points can shift all later block boundaries. Only copy the
 			// unchanged prefix; stream the remainder through the usual encoder.
 			copyPrefix = false
-			// count is the last point's index, not its length. Treat disk
-			// metadata as a hint bounded by the two-bit minimum encoding.
-			if block.count >= 0 && block.count < maxInt && block.count/4 < len(buf) && cap(dst) < block.count+1 {
-				dst = make([]dataPoint, 0, block.count+1)
+			if !exact {
+				// count is the last point's index, not its length. Treat disk
+				// metadata as a hint bounded by the two-bit minimum encoding.
+				if block.count >= 0 && block.count < maxInt && block.count/4 < len(buf) && cap(dst) < block.count+1 {
+					dst = make([]dataPoint, 0, block.count+1)
+				}
+				dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
+				if err != nil {
+					return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
+				}
 			}
-			dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
-			if err != nil {
-				return fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
+			start := block.start
+			if aligned, moved := alignBlockPoints(dst, archive.secondsPerPoint); moved {
+				// Store what reads serve, so a merged late point at an
+				// interval is not shadowed by a stored point off its grid.
+				dst, start = aligned, aligned[0].interval
+				rewriteBlockFallbackCounts[RewriteBlockAligned].Add(1)
 			}
 
 			var before []extraPoint
-			before, pending = splitBefore(pending, block.start)
+			before, pending = splitBefore(pending, start)
 			if len(before) > 0 {
 				if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dataPointsOf(before), blockBuffer); err != nil {
-					return fmt.Errorf("archives[%d].extra.write: %s", i, err)
+					return nil, "", nil, fmt.Errorf("archives[%d].extra.write: %s", i, err)
 				}
 			}
 			var merged []dataPoint
 			merged, pending = mergeExtraWithBuffer(dst, pending, block.end, &mergeBuffer)
 
 			if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(merged, blockBuffer); err != nil {
-				return fmt.Errorf("archives[%d].blocks[%d].write: %s", i, block.index, err)
+				return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].write: %s", i, block.index, err)
 			}
 		}
 
 		if len(pending) > 0 {
 			if _, _, err := nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dataPointsOf(pending), blockBuffer); err != nil {
-				return fmt.Errorf("archives[%d].extra.write: %s", i, err)
+				return nil, "", nil, fmt.Errorf("archives[%d].extra.write: %s", i, err)
 			}
 		}
 
 	}
 	if err := nwhisper.WriteHeaderCompressed(); err != nil {
-		return fmt.Errorf("%s: failed to write header: %w", op, err)
+		return nil, "", nil, fmt.Errorf("%s: failed to write header: %w", op, err)
 	}
+	built = true
+	return nwhisper, tmpname, nferrs, nil
+}
+
+// applyExtraToBuffer applies rewrite's replacement precedence to buffer, a
+// copy of archive's buffer: a replace point overwrites the buffered slots of
+// its interval, except that a "rollup" clears those behind archive's encoded
+// watermark, where the replacement is now encoded.
+func applyExtraToBuffer(buffer []byte, pending []extraPoint, op string, archive *archiveInfo) {
+	// Index the occupied buffer slots once rather than scanning the
+	// whole buffer for every pending point. A "batch" rewrite starts
+	// from empty buffers, so it skips this entirely.
+	var slots map[int][]int
+	for offset := 0; offset < len(buffer); offset += PointSize {
+		if interval := unpackInt(buffer[offset:]); interval != 0 {
+			if slots == nil {
+				slots = make(map[int][]int)
+			}
+			slots[interval] = append(slots[interval], offset)
+		}
+	}
+	for _, point := range pending {
+		if !point.replace || (slots == nil && point.interval != 0) {
+			continue
+		}
+		offsets := slots[point.interval]
+		if point.interval == 0 {
+			// Empty slots match a zero interval too.
+			offsets = nil
+			for offset := 0; offset < len(buffer); offset += PointSize {
+				if unpackInt(buffer[offset:]) == 0 {
+					offsets = append(offsets, offset)
+				}
+			}
+		}
+		for _, offset := range offsets {
+			if op == "rollup" && archive.bufferedBehindWatermark(point.interval) {
+				// This replacement and its downstream rollups are now
+				// encoded. A later flush must not divert it as a gap fill.
+				for j := offset; j < offset+PointSize; j++ {
+					buffer[j] = 0
+				}
+			} else {
+				copy(buffer[offset:offset+PointSize], point.dataPoint.Bytes())
+			}
+		}
+		if len(offsets) > 0 {
+			// Copies keep the interval; cleared slots match it no longer
+			// and now match a zero interval instead.
+			if unpackInt(buffer[offsets[0]:]) != point.interval {
+				delete(slots, point.interval)
+			}
+		}
+	}
+}
+
+// publishRewrite replaces whisper's file with the one buildRewrite encoded and
+// reopens whisper on it.
+func (whisper *Whisper) publishRewrite(nwhisper *Whisper, tmpname, op string, nferrs []error) (err error) {
+	rewriteRevision := whisper.rewriteRevision
+	oldArchives := whisper.archives
+	filename := whisper.file.Name()
 
 	lockFile := whisper.lockFile
 	whisper.lockFile = nil
@@ -1166,12 +1276,11 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 	if err := nwhisper.file.Close(); err != nil {
 		nferrs = append(nferrs, err)
 	}
-	nwhisperClosed = true
 
 	if whisper.opts.InMemory {
 		whisper.file.(*memFile).data = nwhisper.file.(*memFile).data
 		releaseMemFile(tmpname)
-	} else if err = os.Rename(tmpname, filename); err != nil {
+	} else if err = whisper.renameStorageFile(tmpname, filename); err != nil {
 		return fmt.Errorf("%s/rename: %s", op, err)
 	}
 
@@ -1186,6 +1295,7 @@ func (whisper *Whisper) rewrite(rets []*Retention, op string, extra func(archive
 	}
 	lockTransferred = true
 	*whisper = *nwhisper
+	whisper.rewriteRevision = rewriteRevision + 1
 	for _, arc := range whisper.archives {
 		arc.whisper = whisper
 	}
@@ -1481,20 +1591,27 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
 		delta1 = p.interval - a.cblock.pn1.interval
 		delta2 = a.cblock.pn1.interval - a.cblock.pn2.interval
 		delta := (delta1 - delta2) / a.secondsPerPoint
+		// The delta forms count whole steps. A point off the archive's grid
+		// relative to the two before it, such as a corrupt source point or
+		// the aligned point after one, leaves a remainder they cannot hold:
+		// truncating it moved the decoded point, and every later one in the
+		// block. The full-interval form below stores such a point exactly,
+		// as it stores a change too large for a delta.
+		exact := (delta1-delta2)%a.secondsPerPoint == 0
 
 		if debugCompress {
 			fmt.Printf("%d %d: %v\n", i, p.interval, p.value)
 		}
 
 		// TODO: use two's complement instead to extend delta range?
-		if delta == 0 {
+		if exact && delta == 0 {
 			if debugCompress {
 				fmt.Printf("\tbuf.index = %d/%d delta = %d: %0s\n", bw.bitPos, bw.index, delta, dumpBits(1, 0))
 			}
 
 			bw.Write(1, 0)
 			a.stats.interval.len1++
-		} else if -63 < delta && delta < 64 {
+		} else if exact && -63 < delta && delta < 64 {
 			if delta < 0 {
 				delta *= -1
 				delta |= 64
@@ -1507,7 +1624,7 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
 			bw.Write(2, 2)
 			bw.Write(7, uint64(delta))
 			a.stats.interval.len9++
-		} else if -255 < delta && delta < 256 {
+		} else if exact && -255 < delta && delta < 256 {
 			if delta < 0 {
 				delta *= -1
 				delta |= 256
@@ -1519,7 +1636,7 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
 			bw.Write(3, 6)
 			bw.Write(9, uint64(delta))
 			a.stats.interval.len12++
-		} else if -2047 < delta && delta < 2048 {
+		} else if exact && -2047 < delta && delta < 2048 {
 			if delta < 0 {
 				delta *= -1
 				delta |= 2048
@@ -1934,37 +2051,50 @@ func (br *bitsReader) Read(c int) uint64 {
 
 	var data uint64
 	oldc := c
-	for {
-		if br.badRead = br.current >= len(br.buf); br.badRead || c <= 0 {
-			// TODO: should reset data?
-			// data = 0
-			break
-		}
+	if c > 16 && len(br.buf)-br.current >= 9 {
+		// Decode an interior field from a wide word. Keep the original
+		// cursor/partial-read loop for the final bytes and short fields.
+		used := uint(7 - br.bitPos)
+		data = binary.BigEndian.Uint64(br.buf[br.current:]) << used
+		data |= uint64(br.buf[br.current+8]) >> (8 - used)
+		data >>= uint(64 - c)
+		consumed := int(used) + c
+		br.current += consumed / 8
+		br.bitPos = 7 - consumed%8
+		br.badRead = false
+	} else {
+		for {
+			if br.badRead = br.current >= len(br.buf); br.badRead || c <= 0 {
+				// TODO: should reset data?
+				// data = 0
+				break
+			}
 
-		if c < br.bitPos+1 {
-			data <<= uint(c)
-			data |= (uint64(br.buf[br.current]>>uint(br.bitPos+1-c)) & ((1 << uint(c)) - 1))
-			br.bitPos -= c
-			break
-		}
+			if c < br.bitPos+1 {
+				data <<= uint(c)
+				data |= (uint64(br.buf[br.current]>>uint(br.bitPos+1-c)) & ((1 << uint(c)) - 1))
+				br.bitPos -= c
+				break
+			}
 
-		data <<= uint(br.bitPos + 1)
-		data |= (uint64(br.buf[br.current] & ((1 << uint(br.bitPos+1)) - 1)))
-		c -= br.bitPos + 1
-		br.current++
-		br.bitPos = 7
-		continue
+			data <<= uint(br.bitPos + 1)
+			data |= (uint64(br.buf[br.current] & ((1 << uint(br.bitPos+1)) - 1)))
+			c -= br.bitPos + 1
+			br.current++
+			br.bitPos = 7
+			continue
+		}
 	}
 
-	var result uint64
-	for i := 8; i <= 64; i += 8 {
-		if oldc-i < 0 {
-			result |= (data & (1<<uint(oldc%8) - 1)) << uint(i-8)
-			break
-		}
-		result |= ((data >> uint(oldc-i)) & 0xFF) << uint(i-8)
+	// Sub-byte reads need no endian conversion. Larger fields contain
+	// little-endian byte groups followed by a low-bit partial final byte.
+	if oldc <= 8 {
+		return data
 	}
-	return result
+	whole := uint(oldc &^ 7)
+	partial := uint(oldc & 7)
+	result := bits.ReverseBytes64(data>>partial) >> (64 - whole)
+	return result | (data & ((uint64(1) << partial) - 1) << whole)
 }
 
 func dumpBits(data ...uint64) string {
@@ -2147,12 +2277,12 @@ func (mf *memFile) ReadAt(b []byte, off int64) (n int, err error) {
 	return
 }
 func (mf *memFile) WriteAt(b []byte, off int64) (n int, err error) {
-	if l := int64(len(mf.data)); l <= off {
-		mf.data = append(mf.data, make([]byte, off-l+1)...)
+	// A write extends the file to cover at least one byte at off.
+	end := off + int64(len(b))
+	if end <= off {
+		end = off + 1
 	}
-	for l, i := len(mf.data[off:]), 0; i < len(b)-l; i++ {
-		mf.data = append(mf.data, 0)
-	}
+	mf.data = growMemFile(mf.data, end)
 	n = copy(mf.data[off:], b)
 	if n < len(b) {
 		err = io.EOF
@@ -2178,9 +2308,27 @@ func (mf *memFile) Truncate(size int64) error {
 	if int64(len(mf.data)) >= size {
 		mf.data = mf.data[:size]
 	} else {
-		mf.data = append(mf.data, make([]byte, size-int64(len(mf.data)))...)
+		mf.data = growMemFile(mf.data, size)
 	}
 	return nil
+}
+
+// growMemFile extends data to size with zero bytes, reusing spare capacity,
+// which may hold stale bytes from a shrink or a pooled buffer.
+func growMemFile(data []byte, size int64) []byte {
+	if size <= int64(len(data)) {
+		return data
+	}
+	if size > int64(cap(data)) {
+		return append(data, make([]byte, size-int64(len(data)))...)
+	}
+	old := len(data)
+	data = data[:size]
+	tail := data[old:]
+	for i := range tail {
+		tail[i] = 0
+	}
+	return data
 }
 
 func (mf *memFile) dumpOnDisk(fpath string) error { return os.WriteFile(fpath, mf.data, 0644) }

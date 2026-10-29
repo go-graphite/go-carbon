@@ -37,10 +37,37 @@ debug:
 # the test/ directory, and run nothing.
 .PHONY: all build-linux debug run-test test clean image package-tree gox-build \
 	nfpm-deb nfpm-rpm packagecloud-push packagecloud-push-rpm packagecloud-push-deb \
-	packagecloud-autobuilds packagecloud-stable sum-files
+	packagecloud-autobuilds packagecloud-stable sum-files vendor
+
+# Regenerate dependencies and reapply the documented local dependency fixes.
+vendor:
+	$(GO) mod vendor
+	patch --batch --fuzz=0 -p1 < patches/vellum-builder-reuse.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-visible-snapshots.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-archive-windows.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-block-buffer-reuse.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-bit-reader.patch
+	patch --batch --fuzz=0 -p1 < patches/pebble-async-wal-rotation.patch
+	patch --batch --fuzz=0 -p1 < patches/pebble-explicit-cache-shards.patch
+	patch --batch --fuzz=0 -p1 < patches/pebble-range-delete-cache.patch
+	patch --batch --fuzz=0 -p1 < patches/pebble-provider-dir-sync.patch
+	patch --batch --fuzz=0 -p1 < patches/protobuf-json-stable-spacing.patch
+	patch --batch --fuzz=0 -p1 < patches/pebble-integration-delta.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-integration-delta.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-overlap-in-place.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-late-tail-correction.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-in-place-corrections.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-early-sidecar-folds.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-ooo-direct-writes.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-import-sidecar-folds.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-off-grid-blocks.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-in-place-scratch.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-atomic-sidecar-fold.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-late-tail-test-groups.patch
+	patch --batch --fuzz=0 -p1 < patches/go-whisper-storage-file-accessor.patch
 
 run-test:
-	$(GO) $(COMMAND) ./...
+	$(GO) $(COMMAND) ./... github.com/go-graphite/go-whisper
 
 test:
 	make run-test COMMAND="test -timeout $(TEST_TIMEOUT)"

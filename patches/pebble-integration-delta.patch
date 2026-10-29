@@ -1,0 +1,710 @@
+diff --git b/vendor/github.com/cockroachdb/pebble/db.go a/vendor/github.com/cockroachdb/pebble/db.go
+index 58c1a9b1..490bf2cc 100644
+--- b/vendor/github.com/cockroachdb/pebble/db.go
++++ a/vendor/github.com/cockroachdb/pebble/db.go
+@@ -313,6 +313,10 @@ type DB struct {
+ 
+ 	closed   *atomic.Value
+ 	closedCh chan struct{}
++	// closeSteps records how long each Close step took (go-carbon restart timing).
++	closeSteps []string
++	// skipTableCacheClose leaves table readers to process exit (CloseForExit).
++	skipTableCacheClose bool
+ 
+ 	cleanupManager *cleanupManager
+ 
+@@ -1002,6 +1006,9 @@ var iterAllocPool = sync.Pool{
+ type snapshotIterOpts struct {
+ 	seqNum uint64
+ 	vers   *version
++	// readState, when set, is read instead of the current read state
++	// (go-carbon: see ReadView).
++	readState *readState
+ }
+ 
+ // newIter constructs a new iterator, merging in batch iterators as an extra
+@@ -1035,7 +1042,10 @@ func (d *DB) newIter(
+ 	// files in the associated version from being deleted if there is a current
+ 	// compaction. The readState is unref'd by Iterator.Close().
+ 	var readState *readState
+-	if sOpts.vers == nil {
++	if sOpts.readState != nil {
++		readState = sOpts.readState
++		readState.ref()
++	} else if sOpts.vers == nil {
+ 		// NB: loadReadState() calls readState.ref().
+ 		readState = d.loadReadState()
+ 	} else {
+@@ -1574,6 +1584,13 @@ func (d *DB) Close() error {
+ 	if err := d.closed.Load(); err != nil {
+ 		panic(err)
+ 	}
++	closeStep, closeSteps := time.Now(), make([]string, 0, 16)
++	lap := func(name string) {
++		now := time.Now()
++		closeSteps = append(closeSteps, fmt.Sprintf("%s=%s", name, now.Sub(closeStep).Round(time.Millisecond)))
++		closeStep = now
++	}
++	defer func() { d.closeSteps = closeSteps }()
+ 
+ 	// Clear the finalizer that is used to check that an unreferenced DB has been
+ 	// closed. We're closing the DB here, so the check performed by that
+@@ -1587,45 +1604,71 @@ func (d *DB) Close() error {
+ 	// DB.mu while waiting: the handoff needs it to release the flush gate.
+ 	d.waitWALRotationLocked()
+ 	close(d.closedCh)
++	lap("wal_rotation")
+ 
+ 	defer d.opts.Cache.Unref()
+ 	if d.opts.RangeDelCache != nil {
+ 		defer d.opts.RangeDelCache.Unref()
+ 	}
+ 
++	// Cancel running compactions instead of waiting for them: each checks the
++	// flag at its next output table and returns ErrCancelledCompaction, so a
++	// long compaction no longer holds Close (and a restart) for tens of seconds.
++	// Their partial outputs are obsolete and removed at the next open, as for
++	// any cancelled compaction.
++	for c := range d.mu.compact.inProgress {
++		c.cancel.Store(true)
++	}
+ 	for d.mu.compact.compactingCount > 0 || d.mu.compact.flushing {
+ 		d.mu.compact.cond.Wait()
+ 	}
++	lap("compactions")
+ 	for d.mu.tableStats.loading {
+ 		d.mu.tableStats.cond.Wait()
+ 	}
+ 	for d.mu.tableValidation.validating {
+ 		d.mu.tableValidation.cond.Wait()
+ 	}
++	lap("table_stats")
+ 
+ 	var err error
+ 	if n := len(d.mu.compact.inProgress); n > 0 {
+ 		err = errors.Errorf("pebble: %d unexpected in-progress compactions", errors.Safe(n))
+ 	}
+ 	err = firstError(err, d.mu.formatVers.marker.Close())
+-	err = firstError(err, d.tableCache.close())
++	if !d.skipTableCacheClose {
++		err = firstError(err, d.tableCache.close())
++	}
++	lap("table_cache")
+ 	if !d.opts.ReadOnly {
+ 		err = firstError(err, d.mu.log.Close())
+ 	} else if d.mu.log.LogWriter != nil {
+ 		panic("pebble: log-writer should be nil in read-only mode")
+ 	}
+ 	err = firstError(err, d.fileLock.Close())
++	lap("wal_close")
+ 
+ 	// Note that versionSet.close() only closes the MANIFEST. The versions list
+ 	// is still valid for the checks below.
+ 	err = firstError(err, d.mu.versions.close())
++	lap("manifest")
+ 
+ 	err = firstError(err, d.dataDir.Close())
+ 	if d.dataDir != d.walDir {
+ 		err = firstError(err, d.walDir.Close())
+ 	}
++	lap("dirs")
++	if d.skipTableCacheClose {
++		// The process exits next. The WAL and MANIFEST are closed and the
++		// lock released, so the store is complete on disk; what remains
++		// only releases memory and deletes obsolete files, which the next
++		// open finds and deletes again. On go-carbon hosts it took about
++		// 0.5 s while the next instance waited to start.
++		return err
++	}
+ 
+ 	d.readState.val.unrefLocked()
++	lap("read_state")
+ 
+ 	current := d.mu.versions.currentVersion()
+ 	for v := d.mu.versions.versions.Front(); true; v = v.Next() {
+@@ -1641,6 +1684,7 @@ func (d *DB) Close() error {
+ 		}
+ 	}
+ 
++	lap("versions")
+ 	for _, mem := range d.mu.mem.queue {
+ 		// Usually, we'd want to delete the files returned by readerUnref. But
+ 		// in this case, even if we're unreferencing the flushables, the
+@@ -1656,17 +1700,21 @@ func (d *DB) Close() error {
+ 		err = firstError(err, errors.Errorf("leaked memtable reservation: %d", errors.Safe(reserved)))
+ 	}
+ 
++	lap("memtables")
+ 	// Since we called d.readState.val.unrefLocked() above, we are expected to
+ 	// manually schedule deletion of obsolete files.
+ 	if len(d.mu.versions.obsoleteTables) > 0 {
+ 		d.deleteObsoleteFiles(d.mu.nextJobID)
+ 	}
++	lap("obsolete")
+ 
+ 	d.mu.Unlock()
+ 	d.compactionSchedulers.Wait()
++	lap("schedulers")
+ 
+ 	// Wait for all cleaning jobs to finish.
+ 	d.cleanupManager.Close()
++	lap("cleanup")
+ 
+ 	// Sanity check metrics.
+ 	if invariants.Enabled {
+@@ -1701,6 +1749,19 @@ func (d *DB) Close() error {
+ }
+ 
+ // Compact the specified range of keys in the database.
++// CloseForExit closes the DB like Close but leaves cached table readers,
++// memory and obsolete file deletion for process exit and the next open.
++// Closing thousands of readers one by one took most of Close on go-carbon
++// hosts, while the next instance waited to open the store. Use it only when
++// the process exits right after.
++func (d *DB) CloseForExit() error {
++	d.skipTableCacheClose = true
++	return d.Close()
++}
++
++// CloseSteps reports the duration of each step of the completed Close.
++func (d *DB) CloseSteps() []string { return d.closeSteps }
++
+ func (d *DB) Compact(start, end []byte, parallelize bool) error {
+ 	if err := d.closed.Load(); err != nil {
+ 		panic(err)
+diff --git b/vendor/github.com/cockroachdb/pebble/get_iter.go a/vendor/github.com/cockroachdb/pebble/get_iter.go
+index 99c5d7c5..0056348f 100644
+--- b/vendor/github.com/cockroachdb/pebble/get_iter.go
++++ a/vendor/github.com/cockroachdb/pebble/get_iter.go
+@@ -146,7 +146,11 @@ func (g *getIter) Next() (*InternalKey, base.LazyValue) {
+ 		if n := len(g.mem); n > 0 {
+ 			m := g.mem[n-1]
+ 			g.iter = m.newIter(nil)
+-			g.rangeDelIter = m.newRangeDelIter(nil)
++			if table, ok := m.flushable.(*memTable); ok {
++				g.rangeDelIter = table.newRangeDelIterForGet(g.key)
++			} else {
++				g.rangeDelIter = m.newRangeDelIter(nil)
++			}
+ 			g.mem = g.mem[:n-1]
+ 			g.iterKey, g.iterValue = g.iter.SeekGE(g.key, base.SeekGEFlagsNone)
+ 			continue
+diff --git b/vendor/github.com/cockroachdb/pebble/get_range_bound_test.go a/vendor/github.com/cockroachdb/pebble/get_range_bound_test.go
+new file mode 100644
+index 00000000..189442d6
+--- /dev/null
++++ a/vendor/github.com/cockroachdb/pebble/get_range_bound_test.go
+@@ -0,0 +1,225 @@
++package pebble
++
++import (
++	"bytes"
++	"errors"
++	"fmt"
++	"sync"
++	"testing"
++
++	"github.com/cockroachdb/pebble/vfs"
++)
++
++// The ordinary iterator keeps the original range-fragmentation path and is
++// the independent oracle for point lookups, including retained snapshots.
++func checkPointGetAgainstIterator(t *testing.T, snapshot *Snapshot, keys []string) {
++	t.Helper()
++	for _, key := range keys {
++		iter, err := snapshot.NewIter(nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		found := iter.SeekGE([]byte(key)) && bytes.Equal(iter.Key(), []byte(key))
++		value, closer, err := snapshot.Get([]byte(key))
++		if found {
++			if err != nil || !bytes.Equal(value, iter.Value()) {
++				t.Fatalf("Get(%q) = %q, %v; iterator = %q", key, value, err, iter.Value())
++			}
++		} else if !errors.Is(err, ErrNotFound) {
++			t.Fatalf("Get(%q) = %q, %v; iterator is absent", key, value, err)
++		}
++		if closer != nil {
++			if err := closer.Close(); err != nil {
++				t.Fatal(err)
++			}
++		}
++		if err := iter.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++}
++
++func TestGetBeforeMemTableRangeDeletionMatchesIterator(t *testing.T) {
++	db, err := Open("db", &Options{FS: vfs.NewMem(), MemTableSize: 1 << 20})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer db.Close()
++	keys := []string{"a/a", "m/metric", "u/a", "u/m", "u/n", "u/z", "z/z", "zz/", "zzz/", "missing"}
++	for _, key := range keys[:len(keys)-1] {
++		if err := db.Set([]byte(key), []byte(key), NoSync); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if err := db.Flush(); err != nil {
++		t.Fatal(err)
++	}
++	old := db.NewSnapshot()
++	defer old.Close()
++	for _, span := range [][2]string{{"u/a", "u/n"}, {"u/m", "u/z"}, {"m/metric", "u/a"}, {"a/", "zz/"}, {"z/", "z/a"}} {
++		if err := db.DeleteRange([]byte(span[0]), []byte(span[1]), NoSync); err != nil {
++			t.Fatal(err)
++		}
++		current := db.NewSnapshot()
++		checkPointGetAgainstIterator(t, current, keys)
++		current.Close()
++		checkPointGetAgainstIterator(t, old, keys)
++		if err := db.Set([]byte(span[0]), []byte("replacement"), NoSync); err != nil {
++			t.Fatal(err)
++		}
++		current = db.NewSnapshot()
++		checkPointGetAgainstIterator(t, current, keys)
++		current.Close()
++	}
++}
++
++func TestGetRangeBoundWithConcurrentPublication(t *testing.T) {
++	db, err := Open("db", &Options{FS: vfs.NewMem(), MemTableSize: 1 << 20})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer db.Close()
++	keys := []string{"a/a", "m/metric", "u/a", "u/m", "u/n", "z/z"}
++	var wg sync.WaitGroup
++	errorsFound := make(chan error, 1)
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		for i := 0; i < 200; i++ {
++			batch := db.NewBatch()
++			err := batch.Set([]byte("m/metric"), []byte(fmt.Sprint(i)), nil)
++			if err == nil {
++				if i%2 == 0 {
++					err = batch.DeleteRange([]byte("u/a"), []byte("u/z"), nil)
++				} else {
++					err = batch.DeleteRange([]byte("a/"), []byte("z/"), nil)
++				}
++			}
++			if err == nil {
++				err = batch.Commit(NoSync)
++			}
++			batch.Close()
++			if err != nil {
++				errorsFound <- err
++				return
++			}
++			if i%20 == 19 {
++				if err := db.Flush(); err != nil {
++					errorsFound <- err
++					return
++				}
++			}
++		}
++	}()
++	defer wg.Wait()
++	for i := 0; i < 200; i++ {
++		snapshot := db.NewSnapshot()
++		checkPointGetAgainstIterator(t, snapshot, keys)
++		snapshot.Close()
++	}
++	wg.Wait()
++	select {
++	case err := <-errorsFound:
++		t.Fatal(err)
++	default:
++	}
++}
++
++func TestGetRangeUpperBoundConcurrentExtensions(t *testing.T) {
++	db, err := Open("db", &Options{FS: vfs.NewMem(), MemTableSize: 1 << 20})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer db.Close()
++	var keys []string
++	for i := 0; i < 100; i++ {
++		key := fmt.Sprintf("u/%03d", i)
++		keys = append(keys, key)
++		if err := db.Set([]byte(key), []byte(key), NoSync); err != nil {
++			t.Fatal(err)
++		}
++	}
++	old := db.NewSnapshot()
++	defer old.Close()
++	var wg sync.WaitGroup
++	errorsFound := make(chan error, 8)
++	for worker := 0; worker < 8; worker++ {
++		wg.Add(1)
++		go func(worker int) {
++			defer wg.Done()
++			for i := 0; i < 64; i++ {
++				start := []byte(fmt.Sprintf("u/%03d", (i*17+worker)%100))
++				end := []byte(fmt.Sprintf("u/%03d", (i*17+worker)%100+1+worker))
++				err := db.DeleteRange(start, end, NoSync)
++				// Mutating the input also checks the bound owns its bytes.
++				for i := range end {
++					end[i] = 0
++				}
++				if err != nil {
++					errorsFound <- err
++					return
++				}
++			}
++		}(worker)
++	}
++	for i := 0; i < 40; i++ {
++		snapshot := db.NewSnapshot()
++		checkPointGetAgainstIterator(t, snapshot, keys)
++		snapshot.Close()
++		checkPointGetAgainstIterator(t, old, keys)
++	}
++	wg.Wait()
++	close(errorsFound)
++	for err := range errorsFound {
++		t.Fatal(err)
++	}
++	if err := db.Flush(); err != nil {
++		t.Fatal(err)
++	}
++	snapshot := db.NewSnapshot()
++	defer snapshot.Close()
++	checkPointGetAgainstIterator(t, snapshot, keys)
++}
++
++func BenchmarkNewGenerationGetWithSparseRangeDeletes(b *testing.B) {
++	benchmarkPointGetWithSparseRangeDeletes(b, "u/zzzz-new-generation")
++}
++
++func BenchmarkMetadataGetWithSparseRangeDeletes(b *testing.B) {
++	benchmarkPointGetWithSparseRangeDeletes(b, "m/metric")
++}
++
++func benchmarkPointGetWithSparseRangeDeletes(b *testing.B, name string) {
++	db, err := Open("db", &Options{FS: vfs.NewMem(), MemTableSize: 64 << 20})
++	if err != nil {
++		b.Fatal(err)
++	}
++	defer db.Close()
++	key := []byte(name)
++	if err := db.Set(key, []byte("metadata"), NoSync); err != nil {
++		b.Fatal(err)
++	}
++	for i := 0; i < 2048; i++ {
++		start := []byte(fmt.Sprintf("u/%08d/a", i))
++		end := []byte(fmt.Sprintf("u/%08d/z", i))
++		if err := db.DeleteRange(start, end, NoSync); err != nil {
++			b.Fatal(err)
++		}
++	}
++	b.ReportAllocs()
++	b.ResetTimer()
++	for i := 0; i < b.N; i++ {
++		if i%128 == 0 {
++			if err := db.DeleteRange([]byte("u/recent/a"), []byte("u/recent/z"), NoSync); err != nil {
++				b.Fatal(err)
++			}
++		}
++		_, closer, err := db.Get(key)
++		if err != nil {
++			b.Fatal(err)
++		}
++		if err := closer.Close(); err != nil {
++			b.Fatal(err)
++		}
++	}
++}
+diff --git b/vendor/github.com/cockroachdb/pebble/mem_table.go a/vendor/github.com/cockroachdb/pebble/mem_table.go
+index e728e94c..f336a8a9 100644
+--- b/vendor/github.com/cockroachdb/pebble/mem_table.go
++++ a/vendor/github.com/cockroachdb/pebble/mem_table.go
+@@ -82,7 +82,11 @@ type memTable struct {
+ 	// drops to zero.
+ 	writerRefs atomic.Int32
+ 	tombstones keySpanCache
+-	rangeKeys  keySpanCache
++	// The largest exclusive range-deletion end, published before its skiplist
++	// entry. It only increases, including concurrent applications and entries
++	// newer than a reader's snapshot, so it is a conservative point-lookup bound.
++	rangeDelMaxEnd atomic.Pointer[[]byte]
++	rangeKeys      keySpanCache
+ 	// The current logSeqNum at the time the memtable was created. This is
+ 	// guaranteed to be less than or equal to any seqnum stored in the memtable.
+ 	logSeqNum                    uint64
+@@ -221,6 +225,7 @@ func (m *memTable) apply(batch *Batch, seqNum uint64) error {
+ 		ikey := base.MakeInternalKey(ukey, seqNum, kind)
+ 		switch kind {
+ 		case InternalKeyKindRangeDelete:
++			m.extendRangeDelEnd(value)
+ 			err = m.rangeDelSkl.Add(ikey, value)
+ 			tombstoneCount++
+ 		case InternalKeyKindRangeKeySet, InternalKeyKindRangeKeyUnset, InternalKeyKindRangeKeyDelete:
+@@ -273,6 +278,43 @@ func (m *memTable) newRangeDelIter(*IterOptions) keyspan.FragmentIterator {
+ 	return keyspan.NewIter(m.cmp, tombstones)
+ }
+ 
++func (m *memTable) extendRangeDelEnd(end []byte) {
++	var owned *[]byte
++	for {
++		old := m.rangeDelMaxEnd.Load()
++		if old != nil && m.cmp(end, *old) <= 0 {
++			return
++		}
++		if owned == nil {
++			copy := append([]byte(nil), end...)
++			owned = &copy
++		}
++		if m.rangeDelMaxEnd.CompareAndSwap(old, owned) {
++			return
++		}
++	}
++}
++
++// A point lookup outside all range-deletion bounds cannot be covered.
++// Inspect the append-only skiplist before building its fragmented range cache:
++// sparse writes in a later keyspace must not force unrelated Get calls to
++// repeatedly fragment the whole memtable. A concurrent insertion not visible
++// here cannot be a tombstone committed before this lookup's snapshot sequence.
++func (m *memTable) newRangeDelIterForGet(key []byte) keyspan.FragmentIterator {
++	end := m.rangeDelMaxEnd.Load()
++	if end == nil || m.cmp(key, *end) >= 0 {
++		return nil
++	}
++	iter := m.rangeDelSkl.NewIter(nil, nil)
++	first, _ := iter.First()
++	before := first == nil || m.cmp(key, first.UserKey) < 0
++	_ = iter.Close()
++	if before {
++		return nil
++	}
++	return m.newRangeDelIter(nil)
++}
++
+ // newRangeKeyIter is part of the flushable interface.
+ func (m *memTable) newRangeKeyIter(*IterOptions) keyspan.FragmentIterator {
+ 	rangeKeys := m.rangeKeys.get()
+diff --git b/vendor/github.com/cockroachdb/pebble/read_view.go a/vendor/github.com/cockroachdb/pebble/read_view.go
+new file mode 100644
+index 00000000..649170de
+--- /dev/null
++++ a/vendor/github.com/cockroachdb/pebble/read_view.go
+@@ -0,0 +1,110 @@
++// Copyright 2026 The go-carbon Authors. This file is a go-carbon patch to the
++// vendored Pebble and is not part of upstream Pebble.
++
++package pebble
++
++import (
++	"context"
++	"io"
++)
++
++// ReadView is a consistent read-only view of the DB, like a Snapshot, for a
++// short series of reads. It holds the read state (memtables and version) and
++// the visible sequence number current when it was opened, as an Iterator
++// does. Unlike a Snapshot it is not registered with the DB, so opening and
++// closing it do not take DB.mu, which flushes, compactions and version
++// changes hold for milliseconds; like an Iterator it keeps its memtables and
++// sstables until it is closed, so it must not be held for long.
++//
++// Get and NewIter read at the view; Close must be called once its reads and
++// their iterators and value closers are done.
++type ReadView struct {
++	db        *DB
++	readState *readState
++	seqNum    uint64
++}
++
++var _ Reader = (*ReadView)(nil)
++
++// NewReadView opens a ReadView of the DB's current state.
++func (d *DB) NewReadView() *ReadView {
++	if err := d.closed.Load(); err != nil {
++		panic(err)
++	}
++	// As in getInternal and newIter, the sequence number is read after the
++	// read state.
++	readState := d.loadReadState()
++	return &ReadView{db: d, readState: readState, seqNum: d.mu.versions.visibleSeqNum.Load()}
++}
++
++// Get is DB.Get at the view. The value is valid until the closer is closed.
++func (v *ReadView) Get(key []byte) ([]byte, io.Closer, error) {
++	d := v.db
++	if err := d.closed.Load(); err != nil {
++		panic(err)
++	}
++	readState := v.readState
++	readState.ref()
++	seqNum := v.seqNum
++
++	buf := getIterAllocPool.Get().(*getIterAlloc)
++
++	get := &buf.get
++	*get = getIter{
++		logger:   d.opts.Logger,
++		comparer: d.opts.Comparer,
++		newIters: d.newIters,
++		snapshot: seqNum,
++		key:      key,
++		mem:      readState.memtables,
++		l0:       readState.current.L0SublevelFiles,
++		version:  readState.current,
++	}
++
++	// Strip off memtables which cannot possibly contain the seqNum being read
++	// at.
++	for len(get.mem) > 0 {
++		n := len(get.mem)
++		if logSeqNum := get.mem[n-1].logSeqNum; logSeqNum < seqNum {
++			break
++		}
++		get.mem = get.mem[:n-1]
++	}
++
++	i := &buf.dbi
++	pointIter := get
++	*i = Iterator{
++		ctx:          context.Background(),
++		getIterAlloc: buf,
++		iter:         pointIter,
++		pointIter:    pointIter,
++		merge:        d.merge,
++		comparer:     *d.opts.Comparer,
++		readState:    readState,
++		keyBuf:       buf.keyBuf,
++	}
++
++	if !i.First() {
++		err := i.Close()
++		if err != nil {
++			return nil, nil, err
++		}
++		return nil, nil, ErrNotFound
++	}
++	return i.Value(), i, nil
++}
++
++// NewIter returns an iterator over the view.
++func (v *ReadView) NewIter(o *IterOptions) (*Iterator, error) {
++	return v.db.newIter(context.Background(), nil /* batch */, snapshotIterOpts{seqNum: v.seqNum, readState: v.readState}, o), nil
++}
++
++// Close releases the view's read state.
++func (v *ReadView) Close() error {
++	if v.readState == nil {
++		panic(ErrClosed)
++	}
++	v.readState.unref()
++	v.readState = nil
++	return nil
++}
+diff --git b/vendor/github.com/cockroachdb/pebble/table_cache.go a/vendor/github.com/cockroachdb/pebble/table_cache.go
+index e8adcbc8..1a10626b 100644
+--- b/vendor/github.com/cockroachdb/pebble/table_cache.go
++++ a/vendor/github.com/cockroachdb/pebble/table_cache.go
+@@ -220,12 +220,7 @@ func (c *tableCacheContainer) withCommonReader(
+ 	if v.err != nil {
+ 		return v.err
+ 	}
+-	provider := c.dbOpts.objProvider
+-	objMeta, err := provider.Lookup(fileTypeTable, meta.FileBacking.DiskFileNum)
+-	if err != nil {
+-		return err
+-	}
+-	return fn(createCommonReader(v, meta, provider.IsSharedForeign(objMeta)))
++	return fn(createCommonReader(v, meta, v.isSharedForeign))
+ }
+ 
+ func (c *tableCacheContainer) withReader(meta physicalMeta, fn func(*sstable.Reader) error) error {
+@@ -248,12 +243,7 @@ func (c *tableCacheContainer) withVirtualReader(
+ 	if v.err != nil {
+ 		return v.err
+ 	}
+-	provider := c.dbOpts.objProvider
+-	objMeta, err := provider.Lookup(fileTypeTable, meta.FileBacking.DiskFileNum)
+-	if err != nil {
+-		return err
+-	}
+-	return fn(sstable.MakeVirtualReader(v.reader, meta, provider.IsSharedForeign(objMeta)))
++	return fn(sstable.MakeVirtualReader(v.reader, meta, v.isSharedForeign))
+ }
+ 
+ func (c *tableCacheContainer) iterCount() int64 {
+@@ -471,15 +461,8 @@ func (c *tableCacheShard) newIters(
+ 		return nil, nil, err
+ 	}
+ 
+-	provider := dbOpts.objProvider
+-	// Check if this file is a foreign file.
+-	objMeta, err := provider.Lookup(fileTypeTable, file.FileBacking.DiskFileNum)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+ 	// Note: This suffers an allocation for virtual sstables.
+-	cr := createCommonReader(v, file, provider.IsSharedForeign(objMeta))
++	cr := createCommonReader(v, file, v.isSharedForeign)
+ 
+ 	// NB: range-del iterator does not maintain a reference to the table, nor
+ 	// does it need to read from it after creation.
+@@ -520,7 +503,7 @@ func (c *tableCacheShard) newIters(
+ 		rp = &tableCacheShardReaderProvider{c: c, file: file, dbOpts: dbOpts}
+ 	}
+ 
+-	if provider.IsSharedForeign(objMeta) {
++	if v.isSharedForeign {
+ 		if tableFormat < sstable.TableFormatPebblev4 {
+ 			return nil, nil, errors.New("pebble: shared foreign sstable has a lower table format than expected")
+ 		}
+@@ -590,15 +573,10 @@ func (c *tableCacheShard) newRangeKeyIter(
+ 
+ 	var iter keyspan.FragmentIterator
+ 	if file.Virtual {
+-		provider := dbOpts.objProvider
+-		var objMeta objstorage.ObjectMetadata
+-		objMeta, err = provider.Lookup(fileTypeTable, file.FileBacking.DiskFileNum)
+-		if err == nil {
+-			virtualReader := sstable.MakeVirtualReader(
+-				v.reader, file.VirtualMeta(), provider.IsSharedForeign(objMeta),
+-			)
+-			iter, err = virtualReader.NewRawRangeKeyIter()
+-		}
++		virtualReader := sstable.MakeVirtualReader(
++			v.reader, file.VirtualMeta(), v.isSharedForeign,
++		)
++		iter, err = virtualReader.NewRawRangeKeyIter()
+ 	} else {
+ 		iter, err = v.reader.NewRawRangeKeyIter()
+ 	}
+@@ -1076,6 +1054,11 @@ type tableCacheValue struct {
+ 	reader    *sstable.Reader
+ 	err       error
+ 	loaded    chan struct{}
++	// isSharedForeign is looked up once when the table loads. Looking it up
++	// per iterator took the provider-wide read lock on every table read, and
++	// compactions take that lock exclusively to add and remove tables, so
++	// reads queued behind compactions.
++	isSharedForeign bool
+ 	// Reference count for the value. The reader is closed when the reference
+ 	// count drops to zero.
+ 	refCount atomic.Int32
+@@ -1098,6 +1081,12 @@ func (v *tableCacheValue) load(loadInfo loadInfo, c *tableCacheShard, dbOpts *ta
+ 		cacheOpts := private.SSTableCacheOpts(dbOpts.cacheID, loadInfo.backingFileNum).(sstable.ReaderOption)
+ 		v.reader, err = sstable.NewReader(f, dbOpts.opts, cacheOpts, dbOpts.filterMetrics)
+ 	}
++	if err == nil {
++		var objMeta objstorage.ObjectMetadata
++		if objMeta, err = dbOpts.objProvider.Lookup(fileTypeTable, loadInfo.backingFileNum); err == nil {
++			v.isSharedForeign = dbOpts.objProvider.IsSharedForeign(objMeta)
++		}
++	}
+ 	if err != nil {
+ 		v.err = errors.Wrapf(
+ 			err, "pebble: backing file %s error", errors.Safe(loadInfo.backingFileNum.FileNum()))

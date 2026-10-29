@@ -220,12 +220,7 @@ func (c *tableCacheContainer) withCommonReader(
 	if v.err != nil {
 		return v.err
 	}
-	provider := c.dbOpts.objProvider
-	objMeta, err := provider.Lookup(fileTypeTable, meta.FileBacking.DiskFileNum)
-	if err != nil {
-		return err
-	}
-	return fn(createCommonReader(v, meta, provider.IsSharedForeign(objMeta)))
+	return fn(createCommonReader(v, meta, v.isSharedForeign))
 }
 
 func (c *tableCacheContainer) withReader(meta physicalMeta, fn func(*sstable.Reader) error) error {
@@ -248,12 +243,7 @@ func (c *tableCacheContainer) withVirtualReader(
 	if v.err != nil {
 		return v.err
 	}
-	provider := c.dbOpts.objProvider
-	objMeta, err := provider.Lookup(fileTypeTable, meta.FileBacking.DiskFileNum)
-	if err != nil {
-		return err
-	}
-	return fn(sstable.MakeVirtualReader(v.reader, meta, provider.IsSharedForeign(objMeta)))
+	return fn(sstable.MakeVirtualReader(v.reader, meta, v.isSharedForeign))
 }
 
 func (c *tableCacheContainer) iterCount() int64 {
@@ -471,15 +461,8 @@ func (c *tableCacheShard) newIters(
 		return nil, nil, err
 	}
 
-	provider := dbOpts.objProvider
-	// Check if this file is a foreign file.
-	objMeta, err := provider.Lookup(fileTypeTable, file.FileBacking.DiskFileNum)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// Note: This suffers an allocation for virtual sstables.
-	cr := createCommonReader(v, file, provider.IsSharedForeign(objMeta))
+	cr := createCommonReader(v, file, v.isSharedForeign)
 
 	// NB: range-del iterator does not maintain a reference to the table, nor
 	// does it need to read from it after creation.
@@ -520,7 +503,7 @@ func (c *tableCacheShard) newIters(
 		rp = &tableCacheShardReaderProvider{c: c, file: file, dbOpts: dbOpts}
 	}
 
-	if provider.IsSharedForeign(objMeta) {
+	if v.isSharedForeign {
 		if tableFormat < sstable.TableFormatPebblev4 {
 			return nil, nil, errors.New("pebble: shared foreign sstable has a lower table format than expected")
 		}
@@ -590,15 +573,10 @@ func (c *tableCacheShard) newRangeKeyIter(
 
 	var iter keyspan.FragmentIterator
 	if file.Virtual {
-		provider := dbOpts.objProvider
-		var objMeta objstorage.ObjectMetadata
-		objMeta, err = provider.Lookup(fileTypeTable, file.FileBacking.DiskFileNum)
-		if err == nil {
-			virtualReader := sstable.MakeVirtualReader(
-				v.reader, file.VirtualMeta(), provider.IsSharedForeign(objMeta),
-			)
-			iter, err = virtualReader.NewRawRangeKeyIter()
-		}
+		virtualReader := sstable.MakeVirtualReader(
+			v.reader, file.VirtualMeta(), v.isSharedForeign,
+		)
+		iter, err = virtualReader.NewRawRangeKeyIter()
 	} else {
 		iter, err = v.reader.NewRawRangeKeyIter()
 	}
@@ -985,6 +963,9 @@ func (c *tableCacheShard) evict(fileNum base.DiskFileNum, dbOpts *tableCacheOpts
 	}
 
 	dbOpts.opts.Cache.EvictFile(dbOpts.cacheID, fileNum)
+	if dbOpts.opts.RangeDelCache != nil {
+		dbOpts.opts.RangeDelCache.EvictFile(dbOpts.opts.RangeDelCacheID, fileNum)
+	}
 }
 
 // removeDB evicts any nodes which have a reference to the DB
@@ -1073,6 +1054,11 @@ type tableCacheValue struct {
 	reader    *sstable.Reader
 	err       error
 	loaded    chan struct{}
+	// isSharedForeign is looked up once when the table loads. Looking it up
+	// per iterator took the provider-wide read lock on every table read, and
+	// compactions take that lock exclusively to add and remove tables, so
+	// reads queued behind compactions.
+	isSharedForeign bool
 	// Reference count for the value. The reader is closed when the reference
 	// count drops to zero.
 	refCount atomic.Int32
@@ -1094,6 +1080,12 @@ func (v *tableCacheValue) load(loadInfo loadInfo, c *tableCacheShard, dbOpts *ta
 	if err == nil {
 		cacheOpts := private.SSTableCacheOpts(dbOpts.cacheID, loadInfo.backingFileNum).(sstable.ReaderOption)
 		v.reader, err = sstable.NewReader(f, dbOpts.opts, cacheOpts, dbOpts.filterMetrics)
+	}
+	if err == nil {
+		var objMeta objstorage.ObjectMetadata
+		if objMeta, err = dbOpts.objProvider.Lookup(fileTypeTable, loadInfo.backingFileNum); err == nil {
+			v.isSharedForeign = dbOpts.objProvider.IsSharedForeign(objMeta)
+		}
 	}
 	if err != nil {
 		v.err = errors.Wrapf(

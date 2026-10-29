@@ -177,6 +177,9 @@ func (d *DB) Checkpoint(
 	// we read, otherwise we might copy a versionEdit not reflected in the
 	// sstables we copy/link.
 	d.mu.versions.logLock()
+	// A buffered asynchronous WAL must exist before the checkpoint pins and
+	// copies its log files. Recheck after logLock, which may drop DB.mu.
+	d.waitWALRotationLocked()
 	// Get the unflushed log files, the current version, and the current manifest
 	// file number.
 	memQueue := d.mu.mem.queue

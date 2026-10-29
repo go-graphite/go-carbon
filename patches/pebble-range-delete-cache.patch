@@ -1,0 +1,167 @@
+diff --git a/vendor/github.com/cockroachdb/pebble/db.go b/vendor/github.com/cockroachdb/pebble/db.go
+index da6d9141..58c1a9b1 100644
+--- a/vendor/github.com/cockroachdb/pebble/db.go
++++ b/vendor/github.com/cockroachdb/pebble/db.go
+@@ -1589,6 +1589,9 @@ func (d *DB) Close() error {
+ 	close(d.closedCh)
+ 
+ 	defer d.opts.Cache.Unref()
++	if d.opts.RangeDelCache != nil {
++		defer d.opts.RangeDelCache.Unref()
++	}
+ 
+ 	for d.mu.compact.compactingCount > 0 || d.mu.compact.flushing {
+ 		d.mu.compact.cond.Wait()
+diff --git a/vendor/github.com/cockroachdb/pebble/open.go b/vendor/github.com/cockroachdb/pebble/open.go
+index 3963d9cc..5bc863a1 100644
+--- a/vendor/github.com/cockroachdb/pebble/open.go
++++ b/vendor/github.com/cockroachdb/pebble/open.go
+@@ -162,6 +162,10 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
+ 	} else {
+ 		opts.Cache.Ref()
+ 	}
++	if opts.RangeDelCache != nil {
++		opts.RangeDelCache.Ref()
++		opts.rangeDelCacheID = opts.RangeDelCache.NewID()
++	}
+ 
+ 	d := &DB{
+ 		cacheID:             opts.Cache.NewID(),
+@@ -195,6 +199,9 @@ func Open(dirname string, opts *Options) (db *DB, _ error) {
+ 			// the tableCache, then the tableCache will also release its
+ 			// reference to the cache.
+ 			opts.Cache.Unref()
++			if opts.RangeDelCache != nil {
++				opts.RangeDelCache.Unref()
++			}
+ 
+ 			if d.tableCache != nil {
+ 				_ = d.tableCache.close()
+diff --git a/vendor/github.com/cockroachdb/pebble/options.go b/vendor/github.com/cockroachdb/pebble/options.go
+index d0d12357..2e7ee3d9 100644
+--- a/vendor/github.com/cockroachdb/pebble/options.go
++++ b/vendor/github.com/cockroachdb/pebble/options.go
+@@ -482,6 +482,10 @@ type Options struct {
+ 	//
+ 	// The default cache size is 8 MB.
+ 	Cache *cache.Cache
++	// RangeDelCache optionally isolates range-deletion blocks from ordinary
++	// data/index blocks. Open retains a reference until DB.Close.
++	RangeDelCache   *cache.Cache
++	rangeDelCacheID uint64
+ 
+ 	// LoadBlockSema, if set, is used to limit the number of blocks that can be
+ 	// loaded (i.e. read from the filesystem) in parallel. Each load acquires one
+@@ -1739,6 +1743,8 @@ func (o *Options) MakeReaderOptions() sstable.ReaderOptions {
+ 	var readerOpts sstable.ReaderOptions
+ 	if o != nil {
+ 		readerOpts.Cache = o.Cache
++		readerOpts.RangeDelCache = o.RangeDelCache
++		readerOpts.RangeDelCacheID = o.rangeDelCacheID
+ 		readerOpts.LoadBlockSema = o.LoadBlockSema
+ 		readerOpts.Comparer = o.Comparer
+ 		readerOpts.Filters = o.Filters
+diff --git a/vendor/github.com/cockroachdb/pebble/sstable/options.go b/vendor/github.com/cockroachdb/pebble/sstable/options.go
+index 2654f70b..2986b484 100644
+--- a/vendor/github.com/cockroachdb/pebble/sstable/options.go
++++ b/vendor/github.com/cockroachdb/pebble/sstable/options.go
+@@ -111,6 +111,12 @@ type ReaderOptions struct {
+ 	//
+ 	// The default cache size is a zero-size cache.
+ 	Cache *cache.Cache
++	// RangeDelCache optionally holds range-deletion blocks separately. A
++	// Reader retains a reference until Close. Nil uses Cache for all blocks.
++	RangeDelCache *cache.Cache
++	// RangeDelCacheID is allocated by RangeDelCache.NewID for a shared reader
++	// namespace. Zero gives this reader a fresh namespace.
++	RangeDelCacheID uint64
+ 
+ 	// LoadBlockSema, if set, is used to limit the number of blocks that can be
+ 	// loaded (i.e. read from the filesystem) in parallel. Each load acquires one
+diff --git a/vendor/github.com/cockroachdb/pebble/sstable/reader.go b/vendor/github.com/cockroachdb/pebble/sstable/reader.go
+index 39c7a696..a9da2308 100644
+--- a/vendor/github.com/cockroachdb/pebble/sstable/reader.go
++++ b/vendor/github.com/cockroachdb/pebble/sstable/reader.go
+@@ -236,6 +236,9 @@ type Reader struct {
+ // Close implements DB.Close, as documented in the pebble package.
+ func (r *Reader) Close() error {
+ 	r.opts.Cache.Unref()
++	if r.opts.RangeDelCache != nil {
++		r.opts.RangeDelCache.Unref()
++	}
+ 
+ 	if r.readable != nil {
+ 		r.err = firstError(r.err, r.readable.Close())
+@@ -456,7 +459,13 @@ func (r *Reader) readFilter(
+ 
+ func (r *Reader) readRangeDel(stats *base.InternalIteratorStats) (bufferHandle, error) {
+ 	ctx := objiotracing.WithBlockType(context.Background(), objiotracing.MetadataBlock)
+-	return r.readBlock(ctx, r.rangeDelBH, r.rangeDelTransform, nil /* readHandle */, stats, nil /* buffer pool */)
++	c := r.opts.RangeDelCache
++	id := r.opts.RangeDelCacheID
++	if c == nil {
++		c = r.opts.Cache
++		id = r.cacheID
++	}
++	return r.readBlockWithCache(ctx, r.rangeDelBH, r.rangeDelTransform, nil /* readHandle */, stats, nil /* buffer pool */, c, id)
+ }
+ 
+ func (r *Reader) readRangeKey(stats *base.InternalIteratorStats) (bufferHandle, error) {
+@@ -524,7 +533,20 @@ func (r *Reader) readBlock(
+ 	stats *base.InternalIteratorStats,
+ 	bufferPool *BufferPool,
+ ) (handle bufferHandle, _ error) {
+-	if h := r.opts.Cache.Get(r.cacheID, r.fileNum, bh.Offset); h.Get() != nil {
++	return r.readBlockWithCache(ctx, bh, transform, readHandle, stats, bufferPool, r.opts.Cache, r.cacheID)
++}
++
++func (r *Reader) readBlockWithCache(
++	ctx context.Context,
++	bh BlockHandle,
++	transform blockTransform,
++	readHandle objstorage.ReadHandle,
++	stats *base.InternalIteratorStats,
++	bufferPool *BufferPool,
++	blockCache *cache.Cache,
++	cacheID uint64,
++) (handle bufferHandle, _ error) {
++	if h := blockCache.Get(cacheID, r.fileNum, bh.Offset); h.Get() != nil {
+ 		// Cache hit.
+ 		if readHandle != nil {
+ 			readHandle.RecordCacheHit(ctx, int64(bh.Offset), int64(bh.Length+blockTrailerLen))
+@@ -641,7 +663,7 @@ func (r *Reader) readBlock(
+ 	if decompressed.buf.Valid() {
+ 		return bufferHandle{b: decompressed.buf}, nil
+ 	}
+-	h := r.opts.Cache.Set(r.cacheID, r.fileNum, bh.Offset, decompressed.v)
++	h := blockCache.Set(cacheID, r.fileNum, bh.Offset, decompressed.v)
+ 	return bufferHandle{h: h}, nil
+ }
+ 
+@@ -1114,6 +1136,12 @@ func NewReader(f objstorage.Readable, o ReaderOptions, extraOpts ...ReaderOption
+ 	} else {
+ 		r.opts.Cache.Ref()
+ 	}
++	if r.opts.RangeDelCache != nil {
++		r.opts.RangeDelCache.Ref()
++		if r.opts.RangeDelCacheID == 0 {
++			r.opts.RangeDelCacheID = r.opts.RangeDelCache.NewID()
++		}
++	}
+ 
+ 	if f == nil {
+ 		r.err = errors.New("pebble/table: nil file")
+diff --git a/vendor/github.com/cockroachdb/pebble/table_cache.go b/vendor/github.com/cockroachdb/pebble/table_cache.go
+index 516e5e83..e8adcbc8 100644
+--- a/vendor/github.com/cockroachdb/pebble/table_cache.go
++++ b/vendor/github.com/cockroachdb/pebble/table_cache.go
+@@ -985,6 +985,9 @@ func (c *tableCacheShard) evict(fileNum base.DiskFileNum, dbOpts *tableCacheOpts
+ 	}
+ 
+ 	dbOpts.opts.Cache.EvictFile(dbOpts.cacheID, fileNum)
++	if dbOpts.opts.RangeDelCache != nil {
++		dbOpts.opts.RangeDelCache.EvictFile(dbOpts.opts.RangeDelCacheID, fileNum)
++	}
+ }
+ 
+ // removeDB evicts any nodes which have a reference to the DB

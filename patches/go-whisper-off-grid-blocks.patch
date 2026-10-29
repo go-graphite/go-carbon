@@ -1,0 +1,505 @@
+diff --git a/vendor/github.com/go-graphite/go-whisper/compress.go b/vendor/github.com/go-graphite/go-whisper/compress.go
+index dcb3c9ae..01458881 100644
+--- a/vendor/github.com/go-graphite/go-whisper/compress.go
++++ b/vendor/github.com/go-graphite/go-whisper/compress.go
+@@ -1115,6 +1115,12 @@ func (whisper *Whisper) buildRewrite(rets []*Retention, op string, extra func(ar
+ 		target := nwhisper.archives[i]
+ 		copyPrefix := (op == "compact" || op == "rollup") && whisper.compVersion == nwhisper.compVersion &&
+ 			archive.blockSize == target.blockSize && archive.blockCount <= target.blockCount
++		// A copied current block carries the header's encoder state, which
++		// describes the bytes the writer appended. Typed storage serves its
++		// blocks re-encoded from exact points, which can differ from those
++		// bytes (an off-grid point appended by an older encoder), and appends
++		// resuming at the header's bit position would corrupt them. Stream it.
++		_, typed := whisper.file.(StorageBlockReader)
+ 		for _, block := range archive.getSortedBlockRanges() {
+ 			if op == "batch" {
+ 				break
+@@ -1125,10 +1131,21 @@ func (whisper *Whisper) buildRewrite(rets []*Retention, op string, extra func(ar
+ 			if block.start == 0 {
+ 				continue
+ 			}
++			exact := false
+ 			if err := whisper.fileReadAt(buf, int64(archive.blockOffset(block.index))); err != nil {
+-				return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].file.read: %s", i, block.index, err)
++				// Typed storage keeps each block's exact points, and its
++				// virtual bytes are an encoding of them. When those bytes
++				// cannot be produced, stream the exact points instead of
++				// failing this and every later rewrite of the file.
++				if dst, err = whisper.rewriteFallbackPoints(i, archive, block, dst[:0], err); err != nil {
++					return nil, "", nil, err
++				}
++				exact = true
++			}
++			if typed && block.index == archive.cblock.index {
++				copyPrefix = false
+ 			}
+-			if copyPrefix && (len(pending) == 0 || pending[0].interval > block.end) {
++			if !exact && copyPrefix && (len(pending) == 0 || pending[0].interval > block.end) {
+ 				if err := target.copyCompressedBlock(archive, block, buf); err != nil {
+ 					return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].copy: %w", i, block.index, err)
+ 				}
+@@ -1137,18 +1154,27 @@ func (whisper *Whisper) buildRewrite(rets []*Retention, op string, extra func(ar
+ 			// Extra points can shift all later block boundaries. Only copy the
+ 			// unchanged prefix; stream the remainder through the usual encoder.
+ 			copyPrefix = false
+-			// count is the last point's index, not its length. Treat disk
+-			// metadata as a hint bounded by the two-bit minimum encoding.
+-			if block.count >= 0 && block.count < maxInt && block.count/4 < len(buf) && cap(dst) < block.count+1 {
+-				dst = make([]dataPoint, 0, block.count+1)
++			if !exact {
++				// count is the last point's index, not its length. Treat disk
++				// metadata as a hint bounded by the two-bit minimum encoding.
++				if block.count >= 0 && block.count < maxInt && block.count/4 < len(buf) && cap(dst) < block.count+1 {
++					dst = make([]dataPoint, 0, block.count+1)
++				}
++				dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
++				if err != nil {
++					return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
++				}
+ 			}
+-			dst, _, err = archive.ReadFromBlock(buf, dst[:0], 0, maxInt)
+-			if err != nil {
+-				return nil, "", nil, fmt.Errorf("archives[%d].blocks[%d].read: %s", i, block.index, err)
++			start := block.start
++			if aligned, moved := alignBlockPoints(dst, archive.secondsPerPoint); moved {
++				// Store what reads serve, so a merged late point at an
++				// interval is not shadowed by a stored point off its grid.
++				dst, start = aligned, aligned[0].interval
++				rewriteBlockFallbackCounts[RewriteBlockAligned].Add(1)
+ 			}
+ 
+ 			var before []extraPoint
+-			before, pending = splitBefore(pending, block.start)
++			before, pending = splitBefore(pending, start)
+ 			if len(before) > 0 {
+ 				if _, blockBuffer, err = nwhisper.archives[i].appendToBlockAndRotateWithBuffer(dataPointsOf(before), blockBuffer); err != nil {
+ 					return nil, "", nil, fmt.Errorf("archives[%d].extra.write: %s", i, err)
+@@ -1565,20 +1591,27 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
+ 		delta1 = p.interval - a.cblock.pn1.interval
+ 		delta2 = a.cblock.pn1.interval - a.cblock.pn2.interval
+ 		delta := (delta1 - delta2) / a.secondsPerPoint
++		// The delta forms count whole steps. A point off the archive's grid
++		// relative to the two before it, such as a corrupt source point or
++		// the aligned point after one, leaves a remainder they cannot hold:
++		// truncating it moved the decoded point, and every later one in the
++		// block. The full-interval form below stores such a point exactly,
++		// as it stores a change too large for a delta.
++		exact := (delta1-delta2)%a.secondsPerPoint == 0
+ 
+ 		if debugCompress {
+ 			fmt.Printf("%d %d: %v\n", i, p.interval, p.value)
+ 		}
+ 
+ 		// TODO: use two's complement instead to extend delta range?
+-		if delta == 0 {
++		if exact && delta == 0 {
+ 			if debugCompress {
+ 				fmt.Printf("\tbuf.index = %d/%d delta = %d: %0s\n", bw.bitPos, bw.index, delta, dumpBits(1, 0))
+ 			}
+ 
+ 			bw.Write(1, 0)
+ 			a.stats.interval.len1++
+-		} else if -63 < delta && delta < 64 {
++		} else if exact && -63 < delta && delta < 64 {
+ 			if delta < 0 {
+ 				delta *= -1
+ 				delta |= 64
+@@ -1591,7 +1624,7 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
+ 			bw.Write(2, 2)
+ 			bw.Write(7, uint64(delta))
+ 			a.stats.interval.len9++
+-		} else if -255 < delta && delta < 256 {
++		} else if exact && -255 < delta && delta < 256 {
+ 			if delta < 0 {
+ 				delta *= -1
+ 				delta |= 256
+@@ -1603,7 +1636,7 @@ func (a *archiveInfo) AppendPointsToBlock(buf []byte, ps []dataPoint) (written i
+ 			bw.Write(3, 6)
+ 			bw.Write(9, uint64(delta))
+ 			a.stats.interval.len12++
+-		} else if -2047 < delta && delta < 2048 {
++		} else if exact && -2047 < delta && delta < 2048 {
+ 			if delta < 0 {
+ 				delta *= -1
+ 				delta |= 2048
+diff --git a/vendor/github.com/go-graphite/go-whisper/continuation.go b/vendor/github.com/go-graphite/go-whisper/continuation.go
+index bd2cc58d..f1d1cd98 100644
+--- a/vendor/github.com/go-graphite/go-whisper/continuation.go
++++ b/vendor/github.com/go-graphite/go-whisper/continuation.go
+@@ -1,6 +1,9 @@
+ package whisper
+ 
+-import "fmt"
++import (
++	"fmt"
++	"math"
++)
+ 
+ // ContinuationBlock identifies a physical compressed block, before circular-slot
+ // filtering or virtual rollups. Its points and the original header are required
+@@ -126,22 +129,30 @@ func (w *Whisper) ContinuationBlockPointsBuffered(block ContinuationBlock, scrat
+ // EncodeContinuationBlock reconstructs a compressed block from exact typed
+ // points without changing source state. The ordinary codec supplies the same
+ // prefix bits for every append batch partition. Unused bytes after EOB are zero.
++//
++// Points must be positive and strictly increasing, which is what the format
++// holds; they need not lie on the archive's grid. Converted sources contain
++// off-grid points (corrupt CWhisper blocks), and the store keeps them exactly,
++// so every rewrite must be able to read such a block back. The encoder stores
++// an off-grid change of interval in full; a block holding one is decoded again
++// here to prove it reads back unchanged.
+ func EncodeContinuationBlock(block ContinuationBlock, points []TimeSeriesPoint) ([]byte, error) {
+ 	if block.Size < PointSize+endOfBlockSize || block.Step <= 0 || block.Offset < 0 ||
+ 		block.Count <= 0 || len(points) != block.Count || block.Size > maxInt-2*MaxCompressedPointSize-2*endOfBlockSize {
+-		return nil, fmt.Errorf("invalid continuation block encoding")
++		return nil, fmt.Errorf("invalid continuation block encoding: %s, size %d, %d points", block.describe(), block.Size, len(points))
+ 	}
+ 	input := make([]dataPoint, len(points))
+-	previous := 0
++	previous, offGrid := 0, false
+ 	for i, p := range points {
+-		if p.Time <= previous || p.Time%block.Step != 0 {
+-			return nil, fmt.Errorf("continuation points must increase on their archive grid")
++		if p.Time <= previous {
++			return nil, fmt.Errorf("continuation points must increase: %s: point %d at %d follows %d", block.describe(), i, p.Time, previous)
+ 		}
++		offGrid = offGrid || p.Time%block.Step != 0
+ 		input[i] = dataPoint{interval: p.Time, value: p.Value}
+ 		previous = p.Time
+ 	}
+ 	if points[0].Time != block.First || previous != block.Last {
+-		return nil, fmt.Errorf("continuation point bounds differ")
++		return nil, fmt.Errorf("continuation point bounds differ: %s: points span %d to %d", block.describe(), points[0].Time, previous)
+ 	}
+ 	// A single local block avoids allocating a source-sized block-range table.
+ 	archive := archiveInfo{
+@@ -152,11 +163,32 @@ func EncodeContinuationBlock(block ContinuationBlock, points []TimeSeriesPoint)
+ 	data := make([]byte, block.Size+2*MaxCompressedPointSize+2*endOfBlockSize)
+ 	_, left, _ := archive.AppendPointsToBlock(data, input)
+ 	if len(left) != 0 {
+-		return nil, fmt.Errorf("continuation points exceed their original block")
++		return nil, fmt.Errorf("continuation points exceed their original block: %s: %d of %d points fit in %d bytes",
++			block.describe(), len(points)-len(left), len(points), block.Size)
++	}
++	if offGrid {
++		decoded, _, err := archive.ReadFromBlock(data[:block.Size], make([]dataPoint, 0, len(input)), 0, maxInt)
++		if err == nil && len(decoded) != len(input) {
++			err = fmt.Errorf("%d points read back", len(decoded))
++		}
++		for i := 0; err == nil && i < len(decoded); i++ {
++			if decoded[i].interval != input[i].interval || math.Float64bits(decoded[i].value) != math.Float64bits(input[i].value) {
++				err = fmt.Errorf("point %d reads back as %d %v, written %d %v", i, decoded[i].interval, decoded[i].value, input[i].interval, input[i].value)
++			}
++		}
++		if err != nil {
++			return nil, fmt.Errorf("continuation block does not read back: %s: %w", block.describe(), err)
++		}
+ 	}
+ 	return data[:block.Size], nil
+ }
+ 
++// describe names a block and its descriptor for errors.
++func (block ContinuationBlock) describe() string {
++	return fmt.Sprintf("archive %d block %d (first %d, last %d, count %d, step %d)",
++		block.Archive, block.Index, block.First, block.Last, block.Count, block.Step)
++}
++
+ func DecodeContinuationBlock(block ContinuationBlock, data []byte) ([]TimeSeriesPoint, error) {
+ 	if block.Step <= 0 || block.Size < PointSize+endOfBlockSize || len(data) != block.Size {
+ 		return nil, fmt.Errorf("invalid continuation block decoding")
+@@ -171,7 +203,7 @@ func DecodeContinuationBlock(block ContinuationBlock, data []byte) ([]TimeSeries
+ 		return nil, err
+ 	}
+ 	if block.Count > 0 && len(points) != block.Count {
+-		return nil, fmt.Errorf("continuation block count differs")
++		return nil, fmt.Errorf("continuation block count differs: %s: %d points decoded", block.describe(), len(points))
+ 	}
+ 	result := make([]TimeSeriesPoint, len(points))
+ 	for i, p := range points {
+@@ -179,7 +211,7 @@ func DecodeContinuationBlock(block ContinuationBlock, data []byte) ([]TimeSeries
+ 	}
+ 	if len(result) != 0 && ((block.First != 0 && result[0].Time != block.First) ||
+ 		(block.Last != 0 && result[len(result)-1].Time != block.Last)) {
+-		return nil, fmt.Errorf("continuation block bounds differ")
++		return nil, fmt.Errorf("continuation block bounds differ: %s: decoded %d to %d", block.describe(), result[0].Time, result[len(result)-1].Time)
+ 	}
+ 	return result, nil
+ }
+diff --git a/vendor/github.com/go-graphite/go-whisper/continuation_off_grid_test.go b/vendor/github.com/go-graphite/go-whisper/continuation_off_grid_test.go
+new file mode 100644
+index 00000000..2f85937f
+--- /dev/null
++++ b/vendor/github.com/go-graphite/go-whisper/continuation_off_grid_test.go
+@@ -0,0 +1,128 @@
++package whisper
++
++import (
++	"math"
++	"strings"
++	"testing"
++)
++
++// A block may hold points off its archive's grid: converted CWhisper files
++// carry corrupt blocks, and continuation storage keeps their points exactly.
++// The interval encoder stored an off-grid change of interval truncated to
++// whole steps, so the block read back with that point, and every later one in
++// the block, moved; EncodeContinuationBlock refused such blocks outright, which
++// failed every rewrite reading them. Both must round-trip exactly.
++func TestContinuationBlockOffGridRoundTrip(t *testing.T) {
++	const step = 60
++	base := 1792400820
++	shapes := map[string][]TimeSeriesPoint{}
++	var run, mixed, tail []TimeSeriesPoint
++	for i := 0; i < 500; i++ {
++		v := 0.0
++		if i%37 == 0 {
++			v = 58
++		}
++		// A corrupt raw first point moves every delta-coded point after it.
++		run = append(run, TimeSeriesPoint{Time: base + 17 + step*i, Value: v})
++		// Aligned writes appended after an off-grid run, with gaps.
++		ts := base + step*i
++		if i < 200 {
++			ts += 17
++		} else if i%11 == 0 {
++			ts += step * 3
++		}
++		if len(mixed) == 0 || ts > mixed[len(mixed)-1].Time {
++			mixed = append(mixed, TimeSeriesPoint{Time: ts, Value: float64(i % 5)})
++		}
++		tail = append(tail, TimeSeriesPoint{Time: base + step*i, Value: v})
++	}
++	// A corrupt far-future tail, as some production files end a block.
++	tail = append(tail, TimeSeriesPoint{Time: 0xF0000000 + 7, Value: math.NaN()})
++	shapes["residue run"], shapes["aligned after off-grid"], shapes["far-future tail"] = run, mixed, tail
++	for name, points := range shapes {
++		block := ContinuationBlock{Archive: 0, Index: 0, Offset: 4096, Size: 4096, Step: step,
++			First: points[0].Time, Last: points[len(points)-1].Time, Count: len(points)}
++		data, err := EncodeContinuationBlock(block, points)
++		if err != nil {
++			t.Fatalf("%s: %v", name, err)
++		}
++		got, err := DecodeContinuationBlock(block, data)
++		if err != nil {
++			t.Fatalf("%s: %v", name, err)
++		}
++		for i := range points {
++			if got[i].Time != points[i].Time || math.Float64bits(got[i].Value) != math.Float64bits(points[i].Value) {
++				t.Fatalf("%s: point %d reads back as %+v, want %+v", name, i, got[i], points[i])
++			}
++		}
++	}
++
++	// Aligned blocks keep their exact bytes: the full-interval form is taken
++	// only for a remainder the delta forms cannot hold.
++	aligned := shapes["far-future tail"][:500]
++	block := ContinuationBlock{Offset: 4096, Size: 4096, Step: step, First: aligned[0].Time, Last: aligned[499].Time, Count: 500}
++	data, err := EncodeContinuationBlock(block, aligned)
++	if err != nil {
++		t.Fatal(err)
++	}
++	archive := archiveInfo{Retention: NewRetention(step, 500), offset: 4096, blockSize: 4096, blockRanges: make([]blockRange, 1),
++		cblock: blockInfo{lastByteOffset: 4096, lastByteBitPos: 7}}
++	input := make([]dataPoint, len(aligned))
++	for i, p := range aligned {
++		input[i] = dataPoint{interval: p.Time, value: p.Value}
++	}
++	archive.AppendPointsToBlock(make([]byte, 8192), input)
++	if archive.stats.interval.len36 != 0 {
++		t.Fatalf("aligned points took the full-interval form %d times", archive.stats.interval.len36)
++	}
++	if len(data) != 4096 {
++		t.Fatal("encoded block size changed")
++	}
++}
++
++// A rewrite stores off-grid points at their interval's start, as a fetch
++// serves them. Of several points in one interval an on-grid one is a later
++// write and wins; otherwise the latest does.
++func TestAlignBlockPoints(t *testing.T) {
++	for _, c := range []struct {
++		name      string
++		in, want  []dataPoint
++		wantMoved bool
++	}{
++		{"on grid", []dataPoint{{60, 1}, {120, 2}}, []dataPoint{{60, 1}, {120, 2}}, false},
++		{"residue run", []dataPoint{{77, 1}, {137, 2}, {197, 3}}, []dataPoint{{60, 1}, {120, 2}, {180, 3}}, true},
++		{"latest off-grid wins", []dataPoint{{61, 1}, {100, 2}, {130, 3}}, []dataPoint{{60, 2}, {120, 3}}, true},
++		{"on-grid wins", []dataPoint{{60, 1}, {77, 2}, {119, 3}, {137, 4}}, []dataPoint{{60, 1}, {120, 4}}, true},
++		{"far-future tail", []dataPoint{{60, 1}, {0xF0000000 + 7, 2}}, []dataPoint{{60, 1}, {0xF0000000, 2}}, true},
++	} {
++		got, moved := alignBlockPoints(append([]dataPoint(nil), c.in...), 60)
++		if moved != c.wantMoved || len(got) != len(c.want) {
++			t.Fatalf("%s: got %v moved %v, want %v moved %v", c.name, got, moved, c.want, c.wantMoved)
++		}
++		for i := range got {
++			if got[i] != c.want[i] {
++				t.Fatalf("%s: got %v, want %v", c.name, got, c.want)
++			}
++		}
++	}
++}
++
++// Rejections name the block and the first offending point, so a production
++// log identifies the cause.
++func TestContinuationBlockEncodeErrorsNameTheBlock(t *testing.T) {
++	points := []TimeSeriesPoint{{Time: 600, Value: 1}, {Time: 660, Value: 2}, {Time: 660, Value: 3}, {Time: 720, Value: 4}}
++	block := ContinuationBlock{Archive: 1, Index: 3, Offset: 4096, Size: 4096, Step: 60, First: 600, Last: 720, Count: 4}
++	_, err := EncodeContinuationBlock(block, points)
++	if err == nil {
++		t.Fatal("non-increasing points accepted")
++	}
++	for _, want := range []string{"archive 1 block 3", "first 600", "last 720", "count 4", "step 60", "point 2 at 660 follows 660"} {
++		if !strings.Contains(err.Error(), want) {
++			t.Fatalf("error %q lacks %q", err, want)
++		}
++	}
++	block.Size = 16
++	if _, err := EncodeContinuationBlock(block, points[:2]); err == nil || !strings.Contains(err.Error(), "archive 1 block 3") {
++		t.Fatalf("undersized block error %v", err)
++	}
++}
+diff --git a/vendor/github.com/go-graphite/go-whisper/rewrite_fallback.go b/vendor/github.com/go-graphite/go-whisper/rewrite_fallback.go
+new file mode 100644
+index 00000000..69a917a8
+--- /dev/null
++++ b/vendor/github.com/go-graphite/go-whisper/rewrite_fallback.go
+@@ -0,0 +1,118 @@
++package whisper
++
++import (
++	"fmt"
++	"sync/atomic"
++)
++
++// RewriteBlockFallback names how a rewrite read a compressed block that does
++// not decode as an ordinary one: its bytes could not be produced, or it holds
++// points off its archive's grid.
++type RewriteBlockFallback uint8
++
++const (
++	// RewriteBlockExact: the file could not produce the block's bytes, and
++	// typed storage served its exact points instead.
++	RewriteBlockExact RewriteBlockFallback = iota
++	// RewriteBlockAligned: the block held points off its archive's grid,
++	// which the rewrite stored on it (see alignBlockPoints).
++	RewriteBlockAligned
++
++	rewriteBlockFallbacks
++)
++
++var rewriteBlockFallbackNames = [rewriteBlockFallbacks]string{"exact", "aligned"}
++
++func (k RewriteBlockFallback) String() string {
++	if k < rewriteBlockFallbacks {
++		return rewriteBlockFallbackNames[k]
++	}
++	return "unknown"
++}
++
++// RewriteBlockFallbacks lists every fallback, for exporters that pre-register
++// one series each.
++func RewriteBlockFallbacks() []RewriteBlockFallback {
++	kinds := make([]RewriteBlockFallback, rewriteBlockFallbacks)
++	for k := range kinds {
++		kinds[k] = RewriteBlockFallback(k)
++	}
++	return kinds
++}
++
++var rewriteBlockFallbackCounts [rewriteBlockFallbacks]atomic.Uint64
++
++// RewriteBlockFallbackCount returns the process-wide, monotonic number of
++// blocks rewrites read through the given fallback.
++func RewriteBlockFallbackCount(kind RewriteBlockFallback) uint64 {
++	if kind >= rewriteBlockFallbacks {
++		return 0
++	}
++	return rewriteBlockFallbackCounts[kind].Load()
++}
++
++// rewriteFallbackPoints appends to dst the exact points of archive index's
++// block, which buildRewrite could not read as bytes (readErr), from typed
++// storage. Without typed storage, or when it refuses the block too, it
++// returns the read error, with the typed reader's reason.
++func (whisper *Whisper) rewriteFallbackPoints(index int, archive *archiveInfo, block blockRange, dst []dataPoint, readErr error) ([]dataPoint, error) {
++	failed := fmt.Errorf("archives[%d].blocks[%d].file.read: %s", index, block.index, readErr)
++	reader, ok := whisper.file.(StorageBlockReader)
++	if !ok {
++		return nil, failed
++	}
++	points, err := reader.ReadStorageBlock(archive.continuationBlock(index, block))
++	if err != nil {
++		if err.Error() == readErr.Error() {
++			return nil, failed // the stored points themselves are refused
++		}
++		return nil, fmt.Errorf("%w; exact read: %s", failed, err)
++	}
++	for _, p := range points {
++		dst = append(dst, dataPoint{interval: p.Time, value: p.Value})
++	}
++	rewriteBlockFallbackCounts[RewriteBlockExact].Add(1)
++	return dst, nil
++}
++
++// alignBlockPoints moves the points of a block off its archive's grid onto it,
++// as a fetch reads them: each to the start of its interval. points are
++// strictly increasing and are changed in place. It reports whether any point
++// moved.
++//
++// Such points come only from converted sources: corrupt CWhisper blocks, such
++// as one whose raw first point is off the grid, which moves every delta-coded
++// point after it. A rewrite keeping them would let a stored point shadow a
++// merged late point of the same interval, which reads did not show before.
++//
++// Of several points in one interval an on-grid one wins. Writers store only
++// on-grid points, so it is a later write than the converted points next to it:
++// a late point an in-place patch stored into the block before patches declined
++// such blocks, which reads then hid behind the off-grid point. Without one, the
++// latest wins, which is what a fetch serves.
++func alignBlockPoints(points []dataPoint, step int) ([]dataPoint, bool) {
++	moved := false
++	for _, p := range points {
++		if mod(p.interval, step) != 0 {
++			moved = true
++			break
++		}
++	}
++	if !moved {
++		return points, false
++	}
++	kept, onGrid := points[:0], false
++	for _, p := range points {
++		offset := mod(p.interval, step)
++		p.interval -= offset
++		if n := len(kept); n > 0 && kept[n-1].interval == p.interval {
++			// An interval's on-grid point is its first, so kept holds it.
++			if !onGrid {
++				kept[n-1] = p
++			}
++			continue
++		}
++		kept, onGrid = append(kept, p), offset == 0
++	}
++	return kept, true
++}
+diff --git a/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go b/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go
+index 40be4198..a78a4356 100644
+--- a/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go
++++ b/vendor/github.com/go-graphite/go-whisper/rollup_in_place.go
+@@ -253,6 +253,14 @@ func (whisper *Whisper) planBlock(reader StorageBlockReader, index int, archive
+ 	if err != nil {
+ 		return nil, nil, 0, err
+ 	}
++	for _, p := range stored {
++		if p.Time%archive.secondsPerPoint != 0 {
++			// Points off the grid (a converted corrupt block): the rewrite
++			// stores them as reads serve them (alignBlockPoints), which a
++			// patch keeping the stored points would not.
++			return nil, nil, InPlaceUnsupported, nil
++		}
++	}
+ 	merged := make([]TimeSeriesPoint, 0, len(carry)+len(before)+len(stored)+len(within))
+ 	merged = append(merged, carry...)
+ 	for _, p := range before {
