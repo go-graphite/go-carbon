@@ -31,12 +31,17 @@ func (m *itemMap) invalidateItemDeadline(it *item) {
 	}
 	hash := xxh3.HashString(it.Metric)
 	mask := len(m.slots) - 1
-	for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
-		if m.slots[i].item == it {
+	for i, n := int(hash>>shardBits)&mask, 0; n < len(m.slots); i, n = (i+1)&mask, n+1 {
+		if slot := &m.slots[i]; slot.item == it {
 			m.invalidateDeadline(i)
 			return
+		} else if slot.item == nil && slot.hash == 0 {
+			break
 		}
 	}
+	// Not found under the shard lock: drop every summary rather than risk a
+	// stale deadline hiding this item.
+	clear(m.deadlines.next)
 }
 
 func (m *itemMap) readyAt(now time.Time, s *cacheSettings, yield func(*item)) time.Time {
