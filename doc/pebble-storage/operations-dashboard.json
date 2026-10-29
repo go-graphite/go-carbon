@@ -1,0 +1,3110 @@
+{
+  "title": "go-carbon shared storage",
+  "uid": null,
+  "id": null,
+  "schemaVersion": 39,
+  "version": 1,
+  "tags": [
+    "go-carbon",
+    "pebble"
+  ],
+  "timezone": "browser",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "refresh": "1m",
+  "editable": true,
+  "templating": {
+    "list": [
+      {
+        "name": "dataSource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus"
+      },
+      {
+        "name": "host_label",
+        "label": "Target label",
+        "type": "textbox",
+        "query": "instance",
+        "current": {
+          "text": "instance",
+          "value": "instance"
+        }
+      },
+      {
+        "name": "job",
+        "label": "Job",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${dataSource}"
+        },
+        "query": "label_values(up, job)",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "target",
+        "label": "Target",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${dataSource}"
+        },
+        "query": "label_values(up{job=~\"${job:regex}\"}, ${host_label:raw})",
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Health",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "up",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (up{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "cpu cores",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(process_cpu_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "rss bytes",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (process_resident_memory_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "read p99 seconds",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le,${host_label:raw}) (rate(http_request_duration_seconds_exp_bucket{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "requests per second",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 7,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(http_request_duration_seconds_exp_count{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "write errors",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 7,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (increase(persister_pebble_write_failures_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "migration in flight",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_in_flight{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "migration failed",
+      "description": "Missing data is unknown. Read latency is per host; compare equivalent traffic and avoid converting peers.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 13,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_failed{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Migration",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "running",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_running{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "in flight",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 20,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_in_flight{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "workers",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 20,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_workers{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "failed",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_failed{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "reclaim queued",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 26,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_reclaim_queued{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "waiting for disk space",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 26,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_waiting_for_disk_space{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "converted per second",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(store_migration_converted_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "reclaimed bytes per second",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(store_migration_reclaimed_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "reclaim completed per second",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(store_migration_reclaim_completed_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "skipped",
+      "description": "U11 adds incremental migration; U12 adds deferred reclamation. Counters cover this process and may reset on restart; converted_total is not total durable ownership.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_migration_skipped_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 21,
+      "type": "row",
+      "title": "Cost",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "points per second",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 45,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 23,
+      "type": "timeseries",
+      "title": "updates per second",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 45,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(persister_pebble_updates_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "points per update",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 45,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_updates_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "process cpu seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 51,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(process_cpu_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "total seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 51,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"total\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "route seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 51,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"route\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "lock wait seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 57,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"lock_wait\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "load seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 57,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"load\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "tail read seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 57,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"tail_read\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "decode seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 63,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"decode\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "encode seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 63,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"encode\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "ooo merge seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 63,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"ooo_merge\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "timeseries",
+      "title": "commit seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 69,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"commit\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 35,
+      "type": "timeseries",
+      "title": "original write seconds per point",
+      "description": "U29 stage instrumentation. Process CPU includes reads, compaction, migration and GC. Stage seconds measure elapsed worker time and may exceed process CPU. Requires persisted point traffic; zero denominators produce gaps.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 69,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(persister_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"original_write\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(persister_pebble_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "row",
+      "title": "Gc",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 75,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 37,
+      "type": "timeseries",
+      "title": "gc busy cpu ratio",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 76,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(go_cpu_classes_gc_total_cpu_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))) / ((sum by (${host_label:raw}) (rate(go_cpu_classes_total_cpu_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))) - (sum by (${host_label:raw}) (rate(go_cpu_classes_idle_cpu_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 38,
+      "type": "timeseries",
+      "title": "allocated bytes per second",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 76,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(go_gc_heap_allocs_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 39,
+      "type": "timeseries",
+      "title": "go gc heap live bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 76,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (go_gc_heap_live_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "go gc heap goal bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 82,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (go_gc_heap_goal_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "go gc scan heap bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 82,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (go_gc_scan_heap_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "process resident memory bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 82,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (process_resident_memory_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "store metadata cache bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 88,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_metadata_cache_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 44,
+      "type": "timeseries",
+      "title": "store metadata cache arena bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 88,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (store_metadata_cache_arena_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "pebble block cache bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 88,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (pebble_block_cache_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 46,
+      "type": "timeseries",
+      "title": "cache estimated bytes",
+      "description": "Go runtime collector and U16 metadata cache. RSS includes mapped memory; the cache estimate omits some runtime overhead. GC CPU is divided by non-idle runtime CPU.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 94,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (cache_estimated_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "row",
+      "title": "Input Log",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 100,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 48,
+      "type": "timeseries",
+      "title": "unlogged points",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 101,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (increase(input_log_unlogged_points_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "timeseries",
+      "title": "logged points per second",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 101,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(input_log_points_written_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "write errors",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 101,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (increase(input_log_write_errors_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "bytes per second",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 107,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(input_log_bytes_written_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "sync p99 seconds",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 107,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.99, sum by (le,${host_label:raw}) (rate(input_log_sync_seconds_exp_bucket{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "oldest unpersisted seconds",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 107,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (input_log_oldest_unpersisted_age_seconds{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "collect seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 113,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"collect\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 55,
+      "type": "timeseries",
+      "title": "encode seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 113,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"encode\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 56,
+      "type": "timeseries",
+      "title": "compress seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 113,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"compress\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 57,
+      "type": "timeseries",
+      "title": "sync seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 119,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"sync\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 58,
+      "type": "timeseries",
+      "title": "relog seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 119,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"relog\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 59,
+      "type": "timeseries",
+      "title": "roll seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 119,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"roll\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 60,
+      "type": "timeseries",
+      "title": "write seconds per cycle",
+      "description": "U21 continuous input log. Unlogged points were accepted into cache without durable input-log coverage. A zero error count does not establish logging coverage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 125,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum by (${host_label:raw}) (rate(input_log_stage_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",stage=\"write\"}[$__rate_interval]))) / (sum by (${host_label:raw}) (rate(input_log_cycles_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval])))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 61,
+      "type": "row",
+      "title": "Io",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 131,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "compaction debt bytes",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 132,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (pebble_compaction_debt_bytes{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 63,
+      "type": "timeseries",
+      "title": "l0 sublevels",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 132,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (pebble_l0_sublevels{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 64,
+      "type": "timeseries",
+      "title": "stall seconds per second",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 132,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_write_stall_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 65,
+      "type": "timeseries",
+      "title": "pebble compaction write bytes total",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 138,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_compaction_write_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 66,
+      "type": "timeseries",
+      "title": "pebble compaction read bytes total",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 138,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_compaction_read_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 67,
+      "type": "timeseries",
+      "title": "pebble flush bytes total",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 138,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_flush_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 68,
+      "type": "timeseries",
+      "title": "pebble ingest bytes total",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 144,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_ingest_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 69,
+      "type": "timeseries",
+      "title": "pebble ingest entries total",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 144,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_ingest_entries_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "pebble ingest tables total",
+      "description": "U08 I/O metrics and U12 conversion ingestion. Filesystem operations measure application calls, not physical device IOPS. Compaction and ingestion share disk bandwidth.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 144,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_ingest_tables_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 71,
+      "type": "row",
+      "title": "Profiling, recovery and filesystem calls",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 150,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "Sampled CPU by phase",
+      "description": "U04 opt-in phase CPU sampler. Intermittent profiling extrapolates sample windows. Compare phases with process CPU, and inspect skipped windows; do not normalize them to an assumed total.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 151,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw},phase) (rate(go_carbon_phase_cpu_seconds_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}} {{phase}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cores",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 73,
+      "type": "timeseries",
+      "title": "Last restart input gap",
+      "description": "U05 restart telemetry. Receiver gap for the last restart; not a measurement of client-side loss.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 151,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (restart_input_unavailable_seconds{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 74,
+      "type": "timeseries",
+      "title": "Last restart read gap",
+      "description": "U05 restart telemetry. Read availability gap for the last restart; handoff can make this zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 151,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (${host_label:raw}) (restart_reads_unavailable_seconds{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"})",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 75,
+      "type": "timeseries",
+      "title": "Unclean starts",
+      "description": "U05 heartbeat-file telemetry. Inspect input-log replay and replica backfill before interpreting a restart as loss.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 157,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (increase(heartbeat_unclean_starts_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 76,
+      "type": "timeseries",
+      "title": "Table read bytes",
+      "description": "U08 filesystem instrumentation. Table reads include compaction inputs and point/iterator cache misses.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 157,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_fs_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",op=\"read\",kind=\"table\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 77,
+      "type": "timeseries",
+      "title": "Table write bytes",
+      "description": "U08 filesystem instrumentation. Application table writes include flushes and compactions; physical SSD writes may differ.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${dataSource}"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 157,
+        "w": 8,
+        "h": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (${host_label:raw}) (rate(pebble_fs_bytes_total{job=~\"${job:regex}\",${host_label:raw}=~\"${target:regex}\",op=\"write\",kind=\"table\"}[$__rate_interval]))",
+          "legendFormat": "{{${host_label:raw}}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${dataSource}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    }
+  ],
+  "annotations": {
+    "list": []
+  }
+}
