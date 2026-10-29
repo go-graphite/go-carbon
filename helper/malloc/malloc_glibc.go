@@ -4,6 +4,8 @@ package malloc
 
 /*
 #cgo LDFLAGS: -ldl
+// RTLD_DEFAULT is a GNU extension: glibc declares it only with _GNU_SOURCE.
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <stddef.h>
 
