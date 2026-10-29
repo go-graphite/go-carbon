@@ -335,13 +335,3 @@ Makefile order. No separate dependency forks are required.
 
 Each patch is tied to the current module versions. Remove a patch only after
 pinning a dependency with equivalent behavior and verifying exact vendor parity.
-
-## Whisper sparse archive snapshots
-
-`go-whisper-sparse-archive-snapshots.patch` reuses the bounded extent-aware reader
-for classic `ArchivePoints` snapshots, with scratch sized to each stored extent.
-Sparse virtual archives otherwise allocate
-full-retention buffers during transfer verification. The oracle compares dense,
-sparse and empty histories, duplicate timestamps and exact floating point bits,
-and checks bounded reads and error propagation. Remove this patch once the pinned
-upstream implements the same snapshot behavior.

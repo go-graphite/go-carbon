@@ -1029,7 +1029,10 @@ func readArchivePointsInRange(w *Whisper, index, from, until int) ([]dataPoint, 
 		if remaining == 0 {
 			break
 		}
-		size := bufferSize
+		if buf == nil {
+			buf = make([]byte, bufferSize)
+		}
+		size := len(buf)
 		if size > remaining {
 			size = remaining
 		}
@@ -1038,9 +1041,6 @@ func readArchivePointsInRange(w *Whisper, index, from, until int) ([]dataPoint, 
 		}
 		if int64(size) > dataEnd-offset {
 			size = int(dataEnd - offset)
-		}
-		if cap(buf) < size {
-			buf = make([]byte, size)
 		}
 		chunk := buf[:size]
 		if err := w.fileReadAt(chunk, offset); err != nil {
