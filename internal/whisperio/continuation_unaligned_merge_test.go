@@ -25,9 +25,14 @@ import (
 // reads and appends to such a file. It returns the base block's points.
 func unalignedCWhisper(t testing.TB, path string, now func() time.Time) []whisper.TimeSeriesPoint {
 	t.Helper()
+	return unalignedCWhisperWithBlockSize(t, path, now, 0)
+}
+
+func unalignedCWhisperWithBlockSize(t testing.TB, path string, now func() time.Time, pointsPerBlock int) []whisper.TimeSeriesPoint {
+	t.Helper()
 	const start, minutes, residue = 1_792_400_400 + 7*60, 3 * 1440, 17
 	w, err := whisper.CreateWithOptions(path, whisper.MustParseRetentionDefs("1m:14d,30m:2y"), whisper.Sum, 0,
-		&whisper.Options{Compressed: true, OutOfOrder: true, Now: now})
+		&whisper.Options{Compressed: true, OutOfOrder: true, Now: now, PointsPerBlock: pointsPerBlock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,21 +58,26 @@ func unalignedCWhisper(t testing.TB, path string, now func() time.Time) []whispe
 	if err != nil {
 		t.Fatal(err)
 	}
-	var block whisper.ContinuationBlock
-	var points []whisper.TimeSeriesPoint
+	type sourceBlock struct {
+		layout whisper.ContinuationBlock
+		points []whisper.TimeSeriesPoint
+	}
+	var blocks []sourceBlock
 	for _, b := range layout.Blocks {
-		if b.Archive == 0 && b.Index == 0 {
-			block = b
-			if points, err = source.ContinuationBlockPoints(b); err != nil {
-				t.Fatal(err)
-			}
+		if b.Archive != 0 || b.Count == 0 {
+			continue
 		}
+		points, err := source.ContinuationBlockPoints(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocks = append(blocks, sourceBlock{b, points})
 	}
 	if err := source.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if len(points) < 3 {
-		t.Fatalf("base block 0 holds %d points", len(points))
+	if len(blocks) == 0 {
+		t.Fatal("no populated base block")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -75,19 +85,25 @@ func unalignedCWhisper(t testing.TB, path string, now func() time.Time) []whispe
 	}
 	be := func(v int) []byte { return binary.BigEndian.AppendUint32(nil, uint32(v)) }
 	header := data[:len(layout.Header)]
-	// p0 is the encoder state's first point and the block range start; pn1
-	// and pn2 are the encoder state's last two points, pn1 also the range end.
-	for _, v := range []int{points[0].Time, points[len(points)-1].Time, points[len(points)-2].Time} {
-		if n := bytes.Count(header, be(v)); n == 0 || n > 2 {
-			t.Fatalf("interval %d appears %d times in the header", v, n)
+	for _, b := range blocks {
+		points := b.points
+		if len(points) < 3 {
+			t.Fatalf("base block %d holds %d points", b.layout.Index, len(points))
 		}
-		header = bytes.ReplaceAll(header, be(v), be(v+residue))
+		// Every block stores its range endpoints. The active block also
+		// stores its encoder's previous point; sealed blocks need no pn2.
+		for i, v := range []int{points[0].Time, points[len(points)-1].Time, points[len(points)-2].Time} {
+			if n := bytes.Count(header, be(v)); n > 2 || i < 2 && n == 0 {
+				t.Fatalf("interval %d appears %d times in the header", v, n)
+			}
+			header = bytes.ReplaceAll(header, be(v), be(v+residue))
+		}
+		if !bytes.Equal(data[b.layout.Offset:b.layout.Offset+4], be(points[0].Time)) {
+			t.Fatal("block does not start with its raw first point")
+		}
+		copy(data[b.layout.Offset:], be(points[0].Time+residue))
 	}
 	copy(data, header)
-	if !bytes.Equal(data[block.Offset:block.Offset+4], be(points[0].Time)) {
-		t.Fatal("block does not start with its raw first point")
-	}
-	copy(data[block.Offset:], be(points[0].Time+residue))
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -100,26 +116,82 @@ func unalignedCWhisper(t testing.TB, path string, now func() time.Time) []whispe
 	if err != nil {
 		t.Fatal(err)
 	}
+	byIndex := make(map[int]whisper.ContinuationBlock)
 	for _, b := range layout.Blocks {
-		if b.Archive != 0 || b.Index != 0 {
-			continue
+		if b.Archive == 0 {
+			byIndex[b.Index] = b
 		}
-		got, err := source.ContinuationBlockPoints(b)
+	}
+	var patched []whisper.TimeSeriesPoint
+	for _, b := range blocks {
+		got, err := source.ContinuationBlockPoints(byIndex[b.layout.Index])
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != len(points) {
-			t.Fatalf("patched block holds %d points, want %d", len(got), len(points))
+		if len(got) != len(b.points) {
+			t.Fatalf("patched block holds %d points, want %d", len(got), len(b.points))
 		}
 		for i := range got {
-			if got[i].Time != points[i].Time+residue || math.Float64bits(got[i].Value) != math.Float64bits(points[i].Value) {
-				t.Fatalf("patched point %d: %+v, want %d %v", i, got[i], points[i].Time+residue, points[i].Value)
+			if got[i].Time != b.points[i].Time+residue || math.Float64bits(got[i].Value) != math.Float64bits(b.points[i].Value) {
+				t.Fatalf("patched point %d: %+v, want %d %v", i, got[i], b.points[i].Time+residue, b.points[i].Value)
 			}
 		}
-		return got
+		patched = append(patched, got...)
 	}
-	t.Fatal("patched block 0 missing")
-	return nil
+	return patched
+}
+
+func TestUnalignedFixtureBlockSizePreservesPoints(t *testing.T) {
+	clock := func() time.Time { return time.Unix(1_792_400_400+7*60+60*3*1440, 0) }
+	var want []whisper.TimeSeriesPoint
+	var series []*whisper.TimeSeries
+	for _, size := range []int{0, 512} {
+		path := filepath.Join(t.TempDir(), "m.wsp")
+		points := unalignedCWhisperWithBlockSize(t, path, clock, size)
+		if want == nil {
+			want = points
+		} else if err := sameContinuationPoints(want, points); err != nil {
+			t.Fatal(err)
+		}
+		w, err := whisper.OpenWithOptions(path, &whisper.Options{Now: clock})
+		if err != nil {
+			t.Fatal(err)
+		}
+		layout, err := w.ContinuationLayout()
+		if err != nil {
+			t.Fatal(err)
+		}
+		multiGroup := false
+		for _, block := range layout.Blocks {
+			multiGroup = multiGroup || block.Archive == 0 && block.Count > 128
+		}
+		if !multiGroup {
+			t.Fatal("fixture lost multi-group block coverage")
+		}
+		for i, r := range w.Retentions() {
+			now := int(clock().Unix())
+			got, err := w.Fetch(now-r.MaxRetention()+r.SecondsPerPoint(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if size == 0 {
+				series = append(series, got)
+				continue
+			}
+			ref := series[i]
+			if got.FromTime() != ref.FromTime() || got.UntilTime() != ref.UntilTime() || got.Step() != ref.Step() || len(got.Values()) != len(ref.Values()) {
+				t.Fatal("fixture fetch shape changed")
+			}
+			for j, v := range got.Values() {
+				if !sameValue(v, ref.Values()[j]) {
+					t.Fatalf("archive %d slot %d: %v != %v", i, j, v, ref.Values()[j])
+				}
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 // TestUnalignedBlockSurvivesMerge converts a CWhisper file whose base block

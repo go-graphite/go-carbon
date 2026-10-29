@@ -3,14 +3,16 @@ package whisperio
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -52,23 +54,11 @@ func readWholeContinuationFileInto(kv store.ContinuationIO, now int, buf []byte)
 // Recheck changed inputs after every update; immutable unchanged inputs have
 // already passed the same encoding. Keep full-file byte parity checked below.
 type blockEncodingKey struct {
-	file    uint64
 	archive whisper.StorageArchiveLayout
 	index   int
 }
 
-type blockEncodingGroup struct {
-	key   string
-	first *byte
-	size  int
-}
-
-type blockEncodingState struct {
-	descriptor blockDescriptor
-	groups     []blockEncodingGroup
-}
-
-type blockEncodingValidation map[blockEncodingKey]blockEncodingState
+type blockEncodingValidation map[blockEncodingKey][sha256.Size]byte
 
 func (v blockEncodingValidation) check(kv *indexedIntegrityIO, now int) error {
 	fs := newContinuationFiles(kv, true).withClock(func() time.Time { return time.Unix(int64(now), 0) })
@@ -81,33 +71,36 @@ func (v blockEncodingValidation) check(kv *indexedIntegrityIO, now int) error {
 	var scratch []whisper.TimeSeriesPoint
 	for archive, a := range data.layout.Archives {
 		for index := 0; index < a.BlockCount; index++ {
-			key := blockEncodingKey{file: data.id, archive: a, index: index}
+			key := blockEncodingKey{archive: a, index: index}
 			live[key] = true
 			desc, err := f.descriptor(archive, index)
 			if err != nil {
 				return err
 			}
-			state := blockEncodingState{descriptor: desc}
-			// Set copies values and Visit borrows those immutable allocations.
-			// Retaining their identities detects replacements without hashing
-			// every point of every unchanged block after each update.
-			if err := kv.Visit(desc.groupPrefix(data.id, archive, index), func(key, value []byte) error {
-				var first *byte
-				if len(value) > 0 {
-					first = &value[0]
-				}
-				state.groups = append(state.groups, blockEncodingGroup{string(key), first, len(value)})
+			h := sha256.New()
+			h.Write(binary.BigEndian.AppendUint32(nil, uint32(desc.count)))
+			prefix := desc.groupPrefix(data.id, archive, index)
+			// File identities and time buckets locate the points, but do not
+			// affect their encoding. Hash ordered relative keys and values so
+			// unchanged blocks survive a file rewrite in the validation cache.
+			if err := kv.Visit(prefix, func(key, value []byte) error {
+				relative := key[len(prefix):]
+				h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(relative))))
+				h.Write(relative)
+				h.Write(binary.BigEndian.AppendUint32(nil, uint32(len(value))))
+				h.Write(value)
 				return nil
 			}); err != nil {
 				return err
 			}
-			if previous, ok := v[key]; ok && previous.descriptor == desc && slices.Equal(previous.groups, state.groups) {
+			digest := [sha256.Size]byte(h.Sum(nil))
+			if previous, ok := v[key]; ok && previous == digest {
 				continue
 			}
 			if _, err := f.readRawBlock(archive, index, a, &scratch); err != nil {
 				return err
 			}
-			v[key] = state
+			v[key] = digest
 		}
 	}
 	for key := range v {
@@ -132,6 +125,30 @@ func TestBlockEncodingValidationMatchesWholeFile(t *testing.T) {
 		}
 	}
 	check(false)
+	check(false)
+	previous := continuationFilePrefix(f.data.id)
+	nextID := f.data.id + 100
+	moved := mapContinuationIO{}
+	for key, value := range kv.mapContinuationIO {
+		if strings.HasPrefix(key, string(previous)) {
+			moved[string(append(continuationFilePrefix(nextID), key[len(previous):]...))] = value
+		}
+	}
+	for key, value := range moved {
+		if err := kv.Set([]byte(key), value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := kv.Set(continuationNameKey(filepath.Base(f.fs.main())), binary.BigEndian.AppendUint64(nil, nextID)); err != nil {
+		t.Fatal(err)
+	}
+	fs := newContinuationFiles(kv, true)
+	file, err := fs.OpenFile(fs.main(), os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	f = file.(*continuationFile)
 	check(false)
 	for archive, a := range f.data.layout.Archives {
 		for index := 0; index < a.BlockCount; index++ {
@@ -266,7 +283,9 @@ func testRandomInterleavingsKeepBlocksEncodable(t *testing.T, selectedSeed int) 
 								m.XFilesFactor = 0 // the source's
 								path := filepath.Join(t.TempDir(), "m.wsp")
 								now = start + 60*3*1440
-								unalignedCWhisper(t, path, clock)
+								// Size converted blocks for 512 points while retaining
+								// every off-grid source point and the full retention.
+								unalignedCWhisperWithBlockSize(t, path, clock, 512)
 								if err := codec.Import(ctx, kv, path, m, clock); err != nil {
 									t.Fatal(err)
 								}
