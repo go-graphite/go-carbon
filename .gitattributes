@@ -1,0 +1,2 @@
+# Unified-diff context prefixes are part of the stored patch format.
+patches/*.patch -whitespace
