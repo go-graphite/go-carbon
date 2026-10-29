@@ -78,6 +78,7 @@ type sidecarCatalog struct {
 	oldest    sidecarHeap
 	points    uint64
 	ready     bool
+	readyCh   chan struct{}
 	scan      sync.Mutex
 	scanAfter string
 	scanning  bool
@@ -114,6 +115,7 @@ var sidecarReadyKey = []byte("z/sidecars-ready")
 
 func (s *Store) loadSidecars() error {
 	c := &s.sidecars
+	c.readyCh = make(chan struct{})
 	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: []byte("o/"), UpperBound: []byte("o0")})
 	if err != nil {
 		return err
@@ -142,8 +144,15 @@ func (s *Store) loadSidecars() error {
 			return err
 		}
 	}
+	if c.ready {
+		close(c.readyCh)
+	}
 	return err
 }
+
+// SidecarsReady closes once the inventory is complete and its marker is committed.
+// Legacy stores need a full applied scan before callers can rely on its count.
+func (s *Store) SidecarsReady() <-chan struct{} { return s.sidecars.readyCh }
 
 // Sidecars is O(1), with no catalog or point reads on a scrape. Legacy stores
 // report Ready=false until an admin scan has indexed their existing sidecars.
@@ -326,7 +335,10 @@ func (s *Store) markSidecarsReady() error {
 	if err := s.commit(b); err != nil {
 		return err
 	}
-	c.ready = true
+	if !c.ready {
+		c.ready = true
+		close(c.readyCh)
+	}
 	return nil
 }
 

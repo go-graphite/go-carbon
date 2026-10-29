@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,12 +50,14 @@ type incrementalStoreMigration struct {
 	receiptMu                          sync.Mutex
 	mu                                 sync.Mutex
 	phase, failure                     string
+	skippedMetrics                     map[string]string
 	lastReceipt                        time.Time
 }
 
 func (m *incrementalStoreMigration) receipt() map[string]interface{} {
 	m.mu.Lock()
 	phase, failure := m.phase, m.failure
+	skippedMetrics := maps.Clone(m.skippedMetrics)
 	m.mu.Unlock()
 	workers, active, generation := m.maximum, int(m.active.Load()), uint64(0)
 	if m.budget != nil {
@@ -64,6 +67,7 @@ func (m *incrementalStoreMigration) receipt() map[string]interface{} {
 		"metrics": m.metrics.Load(), "points": m.points.Load(), "audited": uint64(0),
 		"resumed_cleanup": m.resumed.Load(), "unlinked_bytes": m.unlinked.Load(),
 		"archived_bytes": m.archived.Load(), "skipped": m.skipped.Load(),
+		"skipped_metrics": skippedMetrics,
 		"source_complete": m.sourceComplete.Load(),
 		"workers":         workers, "in_flight": active, "control_generation": generation,
 		"working_bytes_reserved": m.working.Load(), "largest_working_estimate": m.largest.Load(),
@@ -312,9 +316,45 @@ func (m *incrementalStoreMigration) run(ctx context.Context, p *persister.Whispe
 		return err
 	}
 	if conf.Whisper.StoreOOODirectWrites {
-		return db.CheckNoSidecars()
+		return m.checkNoSidecars(ctx, db, directory)
 	}
 	return nil
+}
+
+func (m *incrementalStoreMigration) checkNoSidecars(ctx context.Context, db *store.Store, directory string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !db.Sidecars().Ready {
+		m.mu.Lock()
+		m.phase = "sidecars"
+		m.mu.Unlock()
+		if err := m.progress(directory, true); err != nil {
+			return err
+		}
+		logger := zapwriter.Logger("storage")
+		started := time.Now()
+		progress := func() {
+			logger.Info("waiting for sidecar inventory scan before completing incremental migration",
+				zap.Duration("wait", time.Since(started)), zap.Any("sidecars", db.Sidecars()))
+		}
+		progress()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-db.SidecarsReady():
+				logger.Info("sidecar inventory ready; checking incremental migration completion",
+					zap.Duration("wait", time.Since(started)), zap.Any("sidecars", db.Sidecars()))
+				return db.CheckNoSidecars()
+			case <-ticker.C:
+				progress()
+			}
+		}
+	}
+	return db.CheckNoSidecars()
 }
 
 func (m *incrementalStoreMigration) convertAdmitted(ctx context.Context, p *persister.Whisper, conf *Config, bytes *semaphore.Weighted, name string) error {
@@ -364,6 +404,12 @@ func (m *incrementalStoreMigration) skip(ctx context.Context, name string, err e
 	if ctx.Err() != nil {
 		return err
 	}
+	m.mu.Lock()
+	if m.skippedMetrics == nil {
+		m.skippedMetrics = make(map[string]string)
+	}
+	m.skippedMetrics[name] = err.Error()
+	m.mu.Unlock()
 	skipped := m.skipped.Add(1)
 	zapwriter.Logger("storage").Warn("conversion skipped; original kept", zap.String("metric", name), zap.Uint64("skipped", skipped), zap.Error(err))
 	if skipped > maxSkippedConversions {

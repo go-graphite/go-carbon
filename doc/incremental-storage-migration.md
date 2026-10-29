@@ -120,6 +120,29 @@ space includes in-flight capture/staging, index sort runs, WAL and ordinary
 compaction. Byte reservations are not a total RSS cap; measure physical free
 space separately. Diagnostic reflinks retain old extents and must be cleaned up.
 
+With `store-ooo-direct-writes = true`, the final check waits in phase `sidecars`
+until the sidecar inventory is ready, logging its progress every ten seconds.
+An empty source tree does not prove that a legacy store has no sidecars. Complete
+an applied scan through `POST /admin/store/sidecars?action=scan&limit=1000`,
+passing each returned `after` value to the next request until `done` is true.
+The scan must start without `after`; a dry run cannot establish readiness.
+Migration then resumes automatically. Remaining sidecars still fail the check;
+inspect and fold them through the sidecar API before retrying. A migration that
+already failed the readiness check on an older build can be retried with a config
+reload (`SIGHUP`) after the scan completes; the store stays open and the source
+walk resumes from the remaining files. Installing this fix requires the usual
+binary restart, but recovery itself does not require one.
+
+`storage.migration.skipped_metrics` maps each rejected metric name to its last
+conversion error; the same map is saved in the migration receipt. Individual
+rejections also log the metric name and keep its original file authoritative.
+A run with any skipped sources leaves `source_complete` false, retaining mixed
+discovery and incremental writes. Repair those source files, then reload the
+configuration (`SIGHUP`) or restart to retry them. Each new run walks the remaining
+originals again and resets its skipped counters and names; durable completed
+owners are retained. Do not clear completion by editing the receipt or deleting
+authoritative source files.
+
 Both pilots now install `tool/store-migration-control/volume_binding.py` as a
 systemd `ExecStartPre`. A root-owned proof records the actual XFS UUID and all
 source/store/archive root inodes while bindings are valid. A later device-number

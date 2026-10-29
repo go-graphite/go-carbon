@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -370,9 +371,10 @@ func TestIncrementalMigrationSkipsRejectedSourceAndKeepsIt(t *testing.T) {
 		return
 	}
 	path, cfg := incrementalAppFixture(t)
-	broken := filepath.Join(cfg.Whisper.DataDir, "broken.wsp")
-	if err := os.WriteFile(broken, []byte("not a whisper file, but long enough to look like a header"), 0640); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"broken", "also-broken"} {
+		if err := os.WriteFile(filepath.Join(cfg.Whisper.DataDir, name+".wsp"), []byte("not a whisper file, but long enough to look like a header"), 0640); err != nil {
+			t.Fatal(err)
+		}
 	}
 	app := startIncrementalApp(t, path)
 	defer app.Stop()
@@ -388,13 +390,69 @@ func TestIncrementalMigrationSkipsRejectedSourceAndKeepsIt(t *testing.T) {
 			t.Fatalf("rejected source stopped conversion of %s: %+v %v", name, metadata, err)
 		}
 	}
-	if _, err := app.MetricStore.Metadata(ctx, "broken"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("rejected source was published: %v", err)
+	for _, name := range []string{"broken", "also-broken"} {
+		if _, err := app.MetricStore.Metadata(ctx, name); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("rejected source %s was published: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(cfg.Whisper.DataDir, name+".wsp")); err != nil {
+			t.Fatalf("rejected original %s was not kept: %v", name, err)
+		}
 	}
-	if _, err := os.Stat(broken); err != nil {
-		t.Fatalf("rejected original was not kept: %v", err)
-	}
-	if skipped := m.receipt()["skipped"]; skipped != uint64(1) {
+	if skipped := m.receipt()["skipped"]; skipped != uint64(2) {
 		t.Fatalf("skipped = %v", skipped)
+	}
+	<-m.done
+	if metrics := m.receipt()["skipped_metrics"].(map[string]string); len(metrics) != 2 || metrics["broken"] == "" || metrics["also-broken"] == "" {
+		t.Fatalf("skipped metric names and errors missing: %v", metrics)
+	}
+	data, err := os.ReadFile(filepath.Join(cfg.Whisper.StoreDir, incrementalReceiptName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		SkippedMetrics map[string]string `json:"skipped_metrics"`
+	}
+	if err := json.Unmarshal(data, &receipt); err != nil || len(receipt.SkippedMetrics) != 2 || receipt.SkippedMetrics["broken"] == "" || receipt.SkippedMetrics["also-broken"] == "" {
+		t.Fatalf("skipped metric names not saved in receipt: %s %v", data, err)
+	}
+	if completedIncrementalMigration(cfg) || m.sourceComplete.Load() {
+		t.Fatal("skipped source marked migration complete")
+	}
+	for _, name := range []string{"broken", "also-broken"} {
+		broken := filepath.Join(cfg.Whisper.DataDir, name+".wsp")
+		if err := os.Remove(broken); err != nil {
+			t.Fatal(err)
+		}
+		w, err := whisper.CreateWithOptions(broken, whisper.NewRetentionsNoPointer([]whisper.Retention{whisper.NewRetention(1, 60)}), whisper.Average, .5, &whisper.Options{Compressed: true, OutOfOrder: true, FLock: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db := app.MetricStore
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	m = app.incrementalMigration.Load()
+	select {
+	case <-m.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("repaired source was not retried on reload")
+	}
+	if r := m.receipt(); r["phase"] != "shared" || r["skipped"] != uint64(0) || r["source_complete"] != true || len(r["skipped_metrics"].(map[string]string)) != 0 {
+		t.Fatalf("retry did not clear repaired source: %v", r)
+	}
+	if app.MetricStore != db || !completedIncrementalMigration(cfg) {
+		t.Fatal("retry did not complete on the same open store")
+	}
+	for _, name := range []string{"broken", "also-broken"} {
+		if metadata, err := db.Metadata(ctx, name); err != nil || metadata.FileMigration != store.FileReclaimed {
+			t.Fatalf("repaired source %s was not converted: %+v %v", name, metadata, err)
+		}
+		if _, err := os.Stat(filepath.Join(cfg.Whisper.DataDir, name+".wsp")); !os.IsNotExist(err) {
+			t.Fatalf("repaired source %s was not reclaimed: %v", name, err)
+		}
 	}
 }
