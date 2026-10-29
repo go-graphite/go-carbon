@@ -132,6 +132,14 @@ type ContinuationStateKeys interface {
 // both ways.
 var metadataCacheTestSize, _ = strconv.ParseInt(os.Getenv("GO_CARBON_TEST_METADATA_CACHE"), 10, 64)
 
+// unpackedStates keeps newly sealed states' keys raw (see SetStatePacking).
+var unpackedStates atomic.Bool
+
+// SetStatePacking chooses whether states sealed from now on Snappy-pack their
+// keys in the metadata cache. Cached states keep their form until rewritten;
+// both decode, so it can change on a running store.
+func SetStatePacking(on bool) { unpackedStates.Store(!on) }
+
 func newStateCache(budget int64, keys ContinuationStateKeys) *stateCache {
 	if budget <= 0 {
 		return nil
@@ -431,7 +439,7 @@ func (st *metricState) seal() *metricState {
 		st.kenc = encodeStateKeys(st.keys, st.complete)
 		st.keys, st.complete = nil, nil
 	}
-	if st.packed == nil && len(st.kenc) >= 256 {
+	if st.packed == nil && len(st.kenc) >= 256 && !unpackedStates.Load() {
 		st.packed = packStateKeys(st.kenc)
 	}
 	st.size = int64(stateRecordLen(st.meta.Name, st) + stateSlotOverhead)

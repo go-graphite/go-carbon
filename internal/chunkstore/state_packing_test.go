@@ -35,3 +35,29 @@ func TestStateRecordPacking(t *testing.T) {
 		}
 	}
 }
+
+func TestStatePackingSwitch(t *testing.T) {
+	defer SetStatePacking(true)
+	seal := func() *metricState {
+		st := newMetricState(Metadata{MetricConfig: MetricConfig{Name: "packing.switch"}, ID: 1})
+		st.set([]byte("tail"), make([]byte, 4096))
+		return st.seal()
+	}
+	SetStatePacking(false)
+	raw := seal()
+	if raw.packed != nil {
+		t.Fatal("packed with packing off")
+	}
+	SetStatePacking(true)
+	packed := seal()
+	if packed.packed == nil {
+		t.Fatal("compressible keys not packed with packing on")
+	}
+	// Records sealed under either setting decode after it changes.
+	for _, st := range []*metricState{raw, packed} {
+		got := decodeStateRecord(appendStateRecord(nil, st.meta.Name, st))
+		if v, ok := got.lookup([]byte("tail")); !ok || len(v) != 4096 {
+			t.Fatalf("tail lost after decode: %d bytes, known %v", len(v), ok)
+		}
+	}
+}
