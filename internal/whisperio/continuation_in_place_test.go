@@ -123,7 +123,10 @@ func runInPlaceProcess(t *testing.T) *inPlaceCaseResult {
 	args := []string{"-test.run=" + strings.Join(parts, "/"), "-test.count=1", "-test.timeout=55s", "-test.v",
 		fmt.Sprintf("-test.short=%v", testing.Short())}
 	cmd := exec.CommandContext(ctx, os.Args[0], args...)
-	cmd.Env = append(os.Environ(), inPlaceResultFile+"="+resultFile)
+	// Cleanup closes both stores before exit; each child needs no extra
+	// race-detector exit delay after its test has finished.
+	cmd.Env = append(os.Environ(), inPlaceResultFile+"="+resultFile,
+		"GORACE="+os.Getenv("GORACE")+" atexit_sleep_ms=0")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("in-place case: %v\n%s", err, output)

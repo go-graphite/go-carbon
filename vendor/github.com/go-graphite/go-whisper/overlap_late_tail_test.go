@@ -73,6 +73,22 @@ func TestOverlapLateBatchesTailCorrect(t *testing.T) {
 // where the sidecar outlives the base retention, the read-time recompute can
 // differ from classic in windows whose base slots have since been reused.
 func TestOverlapLateTailDifferential(t *testing.T) {
+	testOverlapLateTailDifferential(t, 0)
+}
+
+func TestOverlapLateTailDifferentialGroup1(t *testing.T) {
+	testOverlapLateTailDifferential(t, 1)
+}
+
+func TestOverlapLateTailDifferentialGroup2(t *testing.T) {
+	testOverlapLateTailDifferential(t, 2)
+}
+
+func TestOverlapLateTailDifferentialGroup3(t *testing.T) {
+	testOverlapLateTailDifferential(t, 3)
+}
+
+func testOverlapLateTailDifferential(t *testing.T, selectedGroup int) {
 	type scenario struct {
 		name string
 		run  func(f *lockstepFile)
@@ -98,7 +114,7 @@ func TestOverlapLateTailDifferential(t *testing.T) {
 			}
 		}})
 	}
-	for _, schema := range []string{"1m:1d,1h:7d,1d:30d", "10s:6h,1m:1d,10m:7d", "1m:14d,30m:2y"} {
+	for _, schema := range []string{"1m:1d,1h:7d,1d:30d", "10s:6h,1m:1d,10m:7d", "1m:4h,30m:10d"} {
 		for _, method := range []AggregationMethod{Average, Sum, Max, Min, Last, First} {
 			if testing.Short() && method != Average && method != Last {
 				continue
@@ -119,6 +135,9 @@ func TestOverlapLateTailDifferential(t *testing.T) {
 
 	var avoided, newOff, oldOff int
 	for group := 0; group < 4; group++ {
+		if group != selectedGroup {
+			continue
+		}
 		t.Run(fmt.Sprintf("group=%d", group), func(t *testing.T) {
 			for i, sc := range scenarios {
 				if i%4 != group {

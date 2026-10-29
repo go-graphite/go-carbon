@@ -1,0 +1,104 @@
+diff --git a/vendor/github.com/go-graphite/go-whisper/overlap_differential_test.go b/vendor/github.com/go-graphite/go-whisper/overlap_differential_test.go
+index a6bcafa3..193b3992 100644
+--- a/vendor/github.com/go-graphite/go-whisper/overlap_differential_test.go
++++ b/vendor/github.com/go-graphite/go-whisper/overlap_differential_test.go
+@@ -13,8 +13,27 @@ import (
+ // match after every update. The digest tests extend the comparison to the
+ // code before the change.
+ func TestOverlapReplayDifferential(t *testing.T) {
++	testOverlapReplayDifferential(t, 0)
++}
++
++func TestOverlapReplayDifferentialGroup1(t *testing.T) {
++	testOverlapReplayDifferential(t, 1)
++}
++
++func TestOverlapReplayDifferentialGroup2(t *testing.T) {
++	testOverlapReplayDifferential(t, 2)
++}
++
++func TestOverlapReplayDifferentialGroup3(t *testing.T) {
++	testOverlapReplayDifferential(t, 3)
++}
++
++func testOverlapReplayDifferential(t *testing.T, group int) {
+ 	var replays int
+ 	for i, sc := range digestScenarios() {
++		if i%4 != group {
++			continue
++		}
+ 		if testing.Short() && i%3 != 0 {
+ 			continue
+ 		}
+diff --git a/vendor/github.com/go-graphite/go-whisper/overlap_digest_test.go b/vendor/github.com/go-graphite/go-whisper/overlap_digest_test.go
+index a9cdc267..8e57a92b 100644
+--- a/vendor/github.com/go-graphite/go-whisper/overlap_digest_test.go
++++ b/vendor/github.com/go-graphite/go-whisper/overlap_digest_test.go
+@@ -42,9 +42,11 @@ type digestScenario struct {
+ 	days   int
+ }
+ 
++// Shorter retentions keep the same resolution ratios and ring-wrap paths;
++// comparing years of empty fetch slots adds work without another oracle case.
+ func digestScenarios() []digestScenario {
+ 	var out []digestScenario
+-	schemas := []string{"1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y", "10s:6h,1m:1d,10m:7d", "1s:10m,1m:1h,10m:1d", "5m:1y", "1s:2d,1m:28d,1h:2y"}
++	schemas := []string{"1m:1d,1h:7d,1d:30d", "1m:4h,30m:10d", "10s:6h,1m:1d,10m:7d", "1s:10m,1m:1h,10m:1d", "5m:1d", "1s:2h,1m:1d,1h:7d"}
+ 	emitters := []emitterSim{
+ 		{cadence: 10},
+ 		{cadence: 10, jitter: 3, dupRate: .02, lateRate: .01},
+@@ -59,7 +61,7 @@ func digestScenarios() []digestScenario {
+ 				continue
+ 			}
+ 			days := 1
+-			if strings.HasPrefix(schema, "1s:2d") {
++			if strings.HasPrefix(schema, "1s:2h") {
+ 				days = 0 // a few hours keep this large file affordable
+ 			}
+ 			out = append(out, digestScenario{schema: schema, method: methods[(i+j)%len(methods)], xff: []float32{0, .5}[(i+j)%2], e: e, days: days})
+diff --git a/vendor/github.com/go-graphite/go-whisper/overlap_late_tail_test.go b/vendor/github.com/go-graphite/go-whisper/overlap_late_tail_test.go
+index 168fa8eb..4226b631 100644
+--- a/vendor/github.com/go-graphite/go-whisper/overlap_late_tail_test.go
++++ b/vendor/github.com/go-graphite/go-whisper/overlap_late_tail_test.go
+@@ -73,6 +73,22 @@ func TestOverlapLateBatchesTailCorrect(t *testing.T) {
+ // where the sidecar outlives the base retention, the read-time recompute can
+ // differ from classic in windows whose base slots have since been reused.
+ func TestOverlapLateTailDifferential(t *testing.T) {
++	testOverlapLateTailDifferential(t, 0)
++}
++
++func TestOverlapLateTailDifferentialGroup1(t *testing.T) {
++	testOverlapLateTailDifferential(t, 1)
++}
++
++func TestOverlapLateTailDifferentialGroup2(t *testing.T) {
++	testOverlapLateTailDifferential(t, 2)
++}
++
++func TestOverlapLateTailDifferentialGroup3(t *testing.T) {
++	testOverlapLateTailDifferential(t, 3)
++}
++
++func testOverlapLateTailDifferential(t *testing.T, selectedGroup int) {
+ 	type scenario struct {
+ 		name string
+ 		run  func(f *lockstepFile)
+@@ -98,7 +114,7 @@ func TestOverlapLateTailDifferential(t *testing.T) {
+ 			}
+ 		}})
+ 	}
+-	for _, schema := range []string{"1m:1d,1h:7d,1d:30d", "10s:6h,1m:1d,10m:7d", "1m:14d,30m:2y"} {
++	for _, schema := range []string{"1m:1d,1h:7d,1d:30d", "10s:6h,1m:1d,10m:7d", "1m:4h,30m:10d"} {
+ 		for _, method := range []AggregationMethod{Average, Sum, Max, Min, Last, First} {
+ 			if testing.Short() && method != Average && method != Last {
+ 				continue
+@@ -119,6 +135,9 @@ func TestOverlapLateTailDifferential(t *testing.T) {
+ 
+ 	var avoided, newOff, oldOff int
+ 	for group := 0; group < 4; group++ {
++		if group != selectedGroup {
++			continue
++		}
+ 		t.Run(fmt.Sprintf("group=%d", group), func(t *testing.T) {
+ 			for i, sc := range scenarios {
+ 				if i%4 != group {

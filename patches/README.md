@@ -106,12 +106,18 @@ folding changes are supplied by the pinned upstream module after
 source patch is applied by `make vendor`.
 
 Go's module vendor command omits dependency tests. `WHISPER_VENDOR_TESTS` retains
-the existing dependency regression/oracle tests by copying their exact bytes from
-the same pinned module cache. `make test` continues to include the Whisper package
-explicitly. The list preserves the previous vendored test surface without a
-separate fork, private patch or second source of truth.
+the existing dependency regression/oracle tests by copying them from the same
+pinned module cache, then applying `whisper-oracle-fixtures.patch`. The test-only
+patch bounds the retention windows while preserving resolution ratios, complete
+emitter streams, wrapped history and every per-update oracle comparison. It also
+splits the differential matrices into smaller test groups. Large real retention
+windows remain covered by the continuation integrity and import tests. Review or
+remove this patch when the pinned upstream tests use equivalent bounded fixtures.
+`make test` continues to include the Whisper package explicitly. The list preserves
+the previous vendored test surface; the explicit patch makes its local test-fixture
+delta reproducible.
 
 The upstream version also fixes failed-rewrite temporary cleanup and bounds
 sparse classic snapshots and read scratch. These are the intentional reviewed
-source changes accompanying patch retirement. All other vendored Whisper Go
-files and retained tests must match the pinned module byte for byte.
+source changes accompanying patch retirement. All vendored Whisper production Go
+files must match the pinned module byte for byte. Retained tests match after applying the documented test-fixture patch.

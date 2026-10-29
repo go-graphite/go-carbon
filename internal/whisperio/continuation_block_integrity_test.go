@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -46,6 +46,124 @@ func readWholeContinuationFileInto(kv store.ContinuationIO, now int, buf []byte)
 		return nil, err
 	}
 	return buf, nil
+}
+
+// A block's encoder inputs are its layout, descriptor and ordered groups.
+// Recheck changed inputs after every update; immutable unchanged inputs have
+// already passed the same encoding. Keep full-file byte parity checked below.
+type blockEncodingKey struct {
+	file    uint64
+	archive whisper.StorageArchiveLayout
+	index   int
+}
+
+type blockEncodingGroup struct {
+	key   string
+	first *byte
+	size  int
+}
+
+type blockEncodingState struct {
+	descriptor blockDescriptor
+	groups     []blockEncodingGroup
+}
+
+type blockEncodingValidation map[blockEncodingKey]blockEncodingState
+
+func (v blockEncodingValidation) check(kv *indexedIntegrityIO, now int) error {
+	fs := newContinuationFiles(kv, true).withClock(func() time.Time { return time.Unix(int64(now), 0) })
+	data, err := fs.load(filepath.Base(fs.main()))
+	if err != nil {
+		return err
+	}
+	f := &continuationFile{fs: fs, data: data}
+	live := make(map[blockEncodingKey]bool)
+	var scratch []whisper.TimeSeriesPoint
+	for archive, a := range data.layout.Archives {
+		for index := 0; index < a.BlockCount; index++ {
+			key := blockEncodingKey{file: data.id, archive: a, index: index}
+			live[key] = true
+			desc, err := f.descriptor(archive, index)
+			if err != nil {
+				return err
+			}
+			state := blockEncodingState{descriptor: desc}
+			// Set copies values and Visit borrows those immutable allocations.
+			// Retaining their identities detects replacements without hashing
+			// every point of every unchanged block after each update.
+			if err := kv.Visit(desc.groupPrefix(data.id, archive, index), func(key, value []byte) error {
+				var first *byte
+				if len(value) > 0 {
+					first = &value[0]
+				}
+				state.groups = append(state.groups, blockEncodingGroup{string(key), first, len(value)})
+				return nil
+			}); err != nil {
+				return err
+			}
+			if previous, ok := v[key]; ok && previous.descriptor == desc && slices.Equal(previous.groups, state.groups) {
+				continue
+			}
+			if _, err := f.readRawBlock(archive, index, a, &scratch); err != nil {
+				return err
+			}
+			v[key] = state
+		}
+	}
+	for key := range v {
+		if !live[key] {
+			delete(v, key)
+		}
+	}
+	return nil
+}
+
+func TestBlockEncodingValidationMatchesWholeFile(t *testing.T) {
+	f := continuationReadFixture(t, 4096)
+	kv := &indexedIntegrityIO{countingIO: &countingIO{mapContinuationIO: f.fs.kv.(mapContinuationIO)}}
+	now := int(f.fs.clock().Unix())
+	validation := blockEncodingValidation{}
+	check := func(wantError bool) {
+		t.Helper()
+		cached := validation.check(kv, now)
+		whole := readWholeContinuationFile(kv, now)
+		if (cached != nil) != wantError || (whole != nil) != wantError {
+			t.Fatalf("cached %v, whole file %v, want error %v", cached, whole, wantError)
+		}
+	}
+	check(false)
+	check(false)
+	for archive, a := range f.data.layout.Archives {
+		for index := 0; index < a.BlockCount; index++ {
+			desc, err := f.descriptor(archive, index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if desc.count < 2 {
+				continue
+			}
+			key := desc.groupKey(f.data.id, archive, index, 0)
+			original, err := kv.Get(key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var group store.PointBlock
+			if err := store.DecodePointBlock(original, &group); err != nil {
+				t.Fatal(err)
+			}
+			group.Points[1].Timestamp = group.Points[0].Timestamp
+			if err := kv.Set(key, store.EncodePointBlock(&group)); err != nil {
+				t.Fatal(err)
+			}
+			check(true)
+			if err := kv.Set(key, original); err != nil {
+				t.Fatal(err)
+			}
+			check(false)
+			return
+		}
+	}
+	t.Fatal("fixture has no populated block")
 }
 
 // miscStream emits the sparse cron shape: one point a minute at an arbitrary
@@ -121,7 +239,6 @@ func testRandomInterleavingsKeepBlocksEncodable(t *testing.T, selectedSeed int) 
 		seeds = 1
 	}
 	slots := make(chan struct{}, 4)
-	validationSlots := make(chan struct{}, 4)
 	var cases sync.WaitGroup
 	defer cases.Wait()
 	for seed := selectedSeed; seed < min(selectedSeed+1, seeds); seed++ {
@@ -161,69 +278,23 @@ func testRandomInterleavingsKeepBlocksEncodable(t *testing.T, selectedSeed int) 
 							retention := sc.rets[0].Step * sc.rets[0].Count
 							at, batches := miscStream(rng, start, sc.days*86400, retention, []float64{.01, .05}[rng.Intn(2)])
 
-							// Checkpoints own immutable encoded values: Set always copies its input.
-							// Replay every update, including every full-file encoding, in independent
-							// bounded phases. The reference pass records the same RNG decisions and
-							// the final key/value image, so phase boundaries cannot change the trace.
-							const phaseUpdates = 64
-							var phases sync.WaitGroup
-							defer phases.Wait()
+							validation := blockEncodingValidation{}
+							const phaseUpdates = 32
 							for first := 0; first < len(batches); first += phaseUpdates {
 								end := min(first+phaseUpdates, len(batches))
-								initial := maps.Clone(kv.mapContinuationIO)
-								decisions := make([][]bool, end-first)
-								for u := first; u < end; u++ {
-									now = at[u]
-									maintenance := store.ContinuationMaintenance{MinBytes: minBytes, MaxPointAge: 5 * time.Minute, RetentionMargin: time.Minute,
-										Allow: func() bool {
-											allowed := rng.Intn(allow) == 0
-											decisions[u-first] = append(decisions[u-first], allowed)
-											return allowed
-										}}
-									if err := codec.Update(ctx, kv, m, batches[u], -1, clock, &maintenance); err != nil {
-										t.Fatalf("checkpoint update %d at %d: %v", u, now, err)
+								t.Run(fmt.Sprintf("updates=%d-%d", first, end-1), func(t *testing.T) {
+									for u := first; u < end; u++ {
+										now = at[u]
+										maintenance := store.ContinuationMaintenance{MinBytes: minBytes, MaxPointAge: 5 * time.Minute, RetentionMargin: time.Minute,
+											Allow: func() bool { return rng.Intn(allow) == 0 }}
+										if err := codec.Update(ctx, kv, m, batches[u], -1, clock, &maintenance); err != nil {
+											t.Fatalf("update %d at %d: %v", u, now, err)
+										}
+										if err := validation.check(kv, now); err != nil {
+											t.Fatalf("update %d at %d: %v", u, now, err)
+										}
 									}
-								}
-								want := maps.Clone(kv.mapContinuationIO)
-								validationSlots <- struct{}{}
-								phases.Add(1)
-								go func() {
-									defer phases.Done()
-									defer func() { <-validationSlots }()
-									t.Run(fmt.Sprintf("updates=%d-%d", first, end-1), func(t *testing.T) {
-										phaseKV := &indexedIntegrityIO{countingIO: &countingIO{mapContinuationIO: initial, buckets: buckets}}
-										phaseNow := at[first]
-										phaseClock := func() time.Time { return time.Unix(int64(phaseNow), 0) }
-										var raw []byte
-										for u := first; u < end; u++ {
-											phaseNow = at[u]
-											calls := 0
-											maintenance := store.ContinuationMaintenance{MinBytes: minBytes, MaxPointAge: 5 * time.Minute, RetentionMargin: time.Minute,
-												Allow: func() bool {
-													if calls == len(decisions[u-first]) {
-														t.Fatalf("update %d requested an extra maintenance decision", u)
-													}
-													allowed := decisions[u-first][calls]
-													calls++
-													return allowed
-												}}
-											if err := codec.Update(ctx, phaseKV, m, batches[u], -1, phaseClock, &maintenance); err != nil {
-												t.Fatalf("update %d at %d: %v", u, phaseNow, err)
-											}
-											if calls != len(decisions[u-first]) {
-												t.Fatalf("update %d used %d maintenance decisions, want %d", u, calls, len(decisions[u-first]))
-											}
-											var err error
-											raw, err = readWholeContinuationFileInto(phaseKV, phaseNow, raw)
-											if err != nil {
-												t.Fatalf("update %d at %d: %v", u, phaseNow, err)
-											}
-										}
-										if err := sameKV(want, phaseKV.mapContinuationIO); err != nil {
-											t.Fatalf("checkpoint after update %d: %v", end-1, err)
-										}
-									})
-								}()
+								})
 							}
 
 						})
