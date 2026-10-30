@@ -48,6 +48,7 @@ func (d *Duration) Value() time.Duration {
 }
 
 type commonConfig struct {
+	MemoryBudget            string    `toml:"memory-budget"`
 	PhaseCPUProfileInterval *Duration `toml:"phase-cpu-profile-interval"`
 	PhaseCPUProfileDuration *Duration `toml:"phase-cpu-profile-duration"`
 	User                    string    `toml:"user"`
@@ -340,6 +341,10 @@ type tracingConfig struct {
 
 // Config ...
 type Config struct {
+	// memoryBudget and memoryLimit are resolved at config load; an explicit
+	// GOMEMLIMIT wins over memoryLimit.
+	memoryBudget int64
+	memoryLimit  int64
 	Buckyd       buckyd.Config                       `toml:"buckyd"`
 	Common       commonConfig                        `toml:"common"`
 	Whisper      whisperConfig                       `toml:"whisper"`
@@ -545,6 +550,7 @@ func PrintDefaultConfig() error {
 // ReadConfig ...
 func ReadConfig(filename string) (*Config, error) {
 	cfg := NewConfig()
+	var defined toml.MetaData
 	if filename != "" {
 		b, err := os.ReadFile(filename)
 		if err != nil {
@@ -556,9 +562,12 @@ func ReadConfig(filename string) (*Config, error) {
 		// @TODO: fix for config starts with [logging]
 		body = strings.ReplaceAll(body, "\n[logging]\n", "\n[[logging]]\n")
 
-		if _, err := toml.Decode(body, cfg); err != nil {
+		if defined, err = toml.Decode(body, cfg); err != nil {
 			return nil, err
 		}
+	}
+	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {
+		return nil, err
 	}
 
 	if cfg.Logging == nil {

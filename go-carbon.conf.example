@@ -1,4 +1,13 @@
 [common]
+# Optional startup defaults from one memory envelope: bytes with an optional
+# B/KiB/MiB/GiB/TiB suffix, or an integer percentage of the smaller of host RAM
+# and the Linux cgroup limit. Empty/"0" keeps existing settings. Changes require
+# a restart. Shares: store-cache-size 13%, store-metadata-cache-size 13%, Go soft
+# memory limit 70% (includes the metadata and write caches); the rest is for the
+# native block cache, memtables and mappings. Explicit TOML cache keys, including
+# zero, and the GOMEMLIMIT environment variable win; remove cache keys to derive
+# them. This is an approximate envelope, not an RSS cap. See doc/memory-budget.md.
+# memory-budget = "48%"
 # Opt-in estimated CPU by subsystem: default 1s sample every 60s when enabled.
 # Duration must be positive and at most 1/60 of the interval (duty below 2%
 # including jitter). Aggregation runs outside the sampling window.
