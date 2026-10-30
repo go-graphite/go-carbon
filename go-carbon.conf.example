@@ -135,6 +135,11 @@ store-l0-compaction-concurrency = 0
 # (store_metadata_cache_arena_bytes reports the total). 0 (default) disables.
 # Requires restart.
 # store-metadata-cache-size = 0
+# Snappy-pack each cached state's keys when that saves over an eighth of them
+# (30-50 % fewer metadata cache bytes per metric in benchmarks, for a decode on
+# each cache read). SIGHUP applies it to states sealed afterwards; cached
+# states keep their form until rewritten.
+# store-metadata-cache-pack = false
 # At start, load the metadata cache in the background with the state of the
 # metrics the restored cache holds (a pending checkpoint, else the restored
 # dump), which the persister writes within one writeout cycle; until each has

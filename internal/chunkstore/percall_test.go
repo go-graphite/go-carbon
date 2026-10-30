@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -91,7 +92,9 @@ func TestPerCallTailAdmissionPreservesMetadata(t *testing.T) {
 	c.fillLocked(stripe, "a", first)
 	c.fillLocked(stripe, "b", testState("b", 2))
 	withTail := first.clone(first.meta)
-	withTail.set([]byte{0, 't'}, make([]byte, 400))
+	tail := make([]byte, 400)
+	rand.New(rand.NewSource(1)).Read(tail)
+	withTail.set([]byte{0, 't'}, tail)
 	c.beginMutation(stripe, "a")
 	c.installMutation(stripe, "a", withTail.seal())
 	c.endMutation(stripe, "a")

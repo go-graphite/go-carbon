@@ -52,6 +52,8 @@ func randomMutableState(rng *rand.Rand, name string) *metricState {
 		case 0: // absent
 		case 1:
 			v = []byte{}
+		case 2:
+			v = bytes.Repeat([]byte{byte(rng.Intn(256))}, 512)
 		default:
 			v = make([]byte, rng.Intn(300))
 			rng.Read(v)
