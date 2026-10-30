@@ -261,13 +261,14 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 					notified := false
 					for j, outcome := range outcomes {
 						idx := batch.indexes[j]
-						if errors.Is(outcome, store.ErrConflict) || errors.Is(outcome, store.ErrNotFound) {
+						switch {
+						case errors.Is(outcome, store.ErrConflict) || errors.Is(outcome, store.ErrNotFound):
 							r.stats.conflicts.Add(1)
 							r.ruleStats[idx].kept.Add(1)
 							workerReports[i][idx].kept++
-						} else if outcome != nil {
+						case outcome != nil:
 							err = errors.Join(err, outcome)
-						} else {
+						default:
 							deleteCount.Add(1)
 							reserved.Add(1)
 							r.stats.deleted.Add(1)
