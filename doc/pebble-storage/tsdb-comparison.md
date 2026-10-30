@@ -18,20 +18,26 @@ The design motivation is a production store with roughly **20 M cached metrics o
 
 ## At a glance
 
-Full-rate replays of the three datasets (details, paced runs and method in [Measured on identical data](#measured-on-identical-data)). Each cell lists **misc · db · magg**. Read cells are warm native-API **p50 / p99 ms**; read CPU is server CPU per query. Response shapes differ, so reads compare serving cost, not isolated engines.
+Full-rate replays of the three datasets (details, paced runs and method in [Measured on identical data](#measured-on-identical-data)). Each cell lists **misc · db · magg**, rows grouped by kind. Read latency cells are warm native-API **p50 / p99 ms**; read CPU is server CPU per query. Response shapes differ, so reads compare serving cost, not isolated engines.
 
 | Angle | go-carbon | VictoriaMetrics | GreptimeDB | Best |
 | --- | --- | --- | --- | --- |
+| **Storage** | | | | |
 | Durable bytes / input point | 2.75 · 2.01 · 1.55 | **1.44 · 0.97 · 1.13** | 2.59 · 1.59 · 2.50 | VM (27–52 % below go-carbon) |
 | All files / input point (incl. index, discovery) | 2.79 · 2.07 · **1.61** | **1.86** · 1.82 · 2.17 | 4.98 · **1.79** · 3.53 | VM misc, GreptimeDB db, go-carbon magg |
+| **Ingest** | | | | |
 | Ingest CPU, µs / input point | 0.955 · 0.873 · 0.562 | **0.603 · 0.537 · 0.512** | 1.646 · 1.675 · 1.667 | VM (9–39 % below go-carbon) |
 | Persistence rate, M points/s (incl. settle) | 1.78 · 1.28 · 0.87 | **3.54 · 2.64 · 1.87** | 0.55 · 0.37 · 0.38 | VM |
+| **Memory** | | | | |
 | Peak / post-drain RSS, MiB | 470/470 · 401/401 · 465/165 | **420/403 · 342/333 · 374/287** | 936/583 · 746/507 · 2708/384 | VM peak; go-carbon magg post-drain |
-| Read 1 × 24 h | **0.39/1.60 · 0.39/0.71 · 2.45/3.05** | 6.01/11.48 · 5.63/6.08 · 6.30/12.60 | 5.51/6.70 · 3.25/4.19 · 18.38/21.39 | go-carbon (2.5–15× faster p50) |
-| Read 100 × 24 h | **10.7/23.7 · 11.0/12.3 · 257/758** | 534/632 · 532/548 · 533/554 | 71.6/76.7 · 41.8/48.9 · 1212/1663 | go-carbon (2–50× faster p50) |
-| Read 1,000 × 1 h | **54.0/105** · 57.3/62.2 · **145**/192 | 231/291 · 236/276 · 155/**168** | 157/164 · **50.5/54.0** · 270/370 | go-carbon misc, GreptimeDB db; magg split |
-| Read CPU, ms / query (100 × 24 h) | **22.5 · 26.5 · 321** | 579 · 565 · 580 | 269 · 150 · 3,841 | go-carbon |
-| Read CPU, ms / query (1,000 × 1 h) | **133** · 192 · 256 | 284 · 288 · **194** | 248 · **177** · 776 | mixed |
+| **Read latency (p50 / p99 ms)** | | | | |
+| 1 × 24 h | **0.39/1.60 · 0.39/0.71 · 2.45/3.05** | 6.01/11.48 · 5.63/6.08 · 6.30/12.60 | 5.51/6.70 · 3.25/4.19 · 18.38/21.39 | go-carbon (2.5–15× faster p50) |
+| 100 × 24 h | **10.7/23.7 · 11.0/12.3 · 257/758** | 534/632 · 532/548 · 533/554 | 71.6/76.7 · 41.8/48.9 · 1212/1663 | go-carbon (2–50× faster p50) |
+| 1,000 × 1 h | **54.0/105** · 57.3/62.2 · **145**/192 | 231/291 · 236/276 · 155/**168** | 157/164 · **50.5/54.0** · 270/370 | go-carbon misc, GreptimeDB db; magg split |
+| **Read CPU** | | | | |
+| 100 × 24 h, ms / query | **22.5 · 26.5 · 321** | 579 · 565 · 580 | 269 · 150 · 3,841 | go-carbon |
+| 1,000 × 1 h, ms / query | **133** · 192 · 256 | 284 · 288 · **194** | 248 · **177** · 776 | mixed |
+| **Correctness and semantics** | | | | |
 | Values changed (of sampled) | **0/400 · 0/400 · 0/332** | 16/400 · 24/400 · 0/332 (max relative error 6.5e-13) | **0/400 · 0/400 · 0/332** | go-carbon, GreptimeDB (exact) |
 | Coarse retention | Native Whisper archives and rollups, written at ingest | Raw samples only | Raw samples only | Different contracts |
 
