@@ -203,3 +203,23 @@ func TestColdPackCancellationRetainsCandidate(t *testing.T) {
 		t.Fatal("interrupted sweep authorized downgrade")
 	}
 }
+
+func TestColdPackNoopReloadKeepsPacingWait(t *testing.T) {
+	s := &Store{}
+	if err := s.ConfigureColdPack(ColdPackOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.coldPack.wake = make(chan struct{}, 1)
+	if err := s.ConfigureColdPack(ColdPackOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.coldPack.wake) != 0 {
+		t.Fatal("unrelated reload bypassed pacing wait")
+	}
+	if err := s.ConfigureColdPack(ColdPackOptions{BytesPerSecond: 2 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.coldPack.wake) != 1 {
+		t.Fatal("budget change did not wake worker")
+	}
+}

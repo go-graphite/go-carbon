@@ -136,6 +136,11 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.format.Store(true)
 	}
 	c.mu.Lock()
+	// An unrelated SIGHUP must not wake a paced worker and forgive its wait.
+	if c.options == o {
+		c.mu.Unlock()
+		return nil
+	}
 	if c.options.Mode != o.Mode {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
 		c.pending = nil
