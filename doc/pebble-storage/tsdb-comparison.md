@@ -2,7 +2,7 @@
 
 Mechanisms, semantics and local measurements, 2026-10-30.
 
-The design motivation is a production store with roughly **20 M cached metrics on 192 cores**. That context is separate from the benchmark: identical finite production-derived samples were replayed on one shared 16-core, 48 GiB arm64 machine. Dataset labels `misc`, `db` and `magg` identify the three anonymized exports.
+The design motivation is a production store with roughly **20 M cached metrics on 192 cores**. That context is separate from the benchmark: identical finite production-derived samples were replayed on one shared 16-core, 48 GiB arm64 machine. Dataset labels `D1`, `D2` and `D3` identify the three anonymized exports: D1 has many sparse series (11,475 series over 24 h), D2 fewer and denser ones (6,886 over 24 h), D3 a small, dense, aggregated set (2,473 over 6 h).
 
 **Current decision: bit-exact storage is no longer a requirement. A decimal value codec is under evaluation.** The measured go-carbon baseline still uses its exact codec. Precision, exceptional values and migration verification remain explicit design choices; the historical exactness explanation below describes the baseline rather than imposing a new acceptance gate.
 
@@ -18,22 +18,22 @@ The design motivation is a production store with roughly **20 M cached metrics o
 
 ## At a glance
 
-Full-rate replays of the three datasets (details, paced runs and method in [Measured on identical data](#measured-on-identical-data)). Each cell lists **misc · db · magg**, rows grouped by kind. Read latency cells are warm native-API **p50 / p99 ms**; read CPU is server CPU per query. Response shapes differ, so reads compare serving cost, not isolated engines.
+Full-rate replays of the three datasets (details, paced runs and method in [Measured on identical data](#measured-on-identical-data)). Each cell lists **D1 · D2 · D3**, rows grouped by kind. Read latency cells are warm native-API **p50 / p99 ms**; read CPU is server CPU per query. Response shapes differ, so reads compare serving cost, not isolated engines.
 
 | Angle | go-carbon | VictoriaMetrics | GreptimeDB | Best |
 | --- | --- | --- | --- | --- |
 | **Storage** | | | | |
 | Durable bytes / input point | 2.75 · 2.01 · 1.55 | **1.44 · 0.97 · 1.13** | 2.59 · 1.59 · 2.50 | VM (27–52 % below go-carbon) |
-| All files / input point (incl. index, discovery) | 2.79 · 2.07 · **1.61** | **1.86** · 1.82 · 2.17 | 4.98 · **1.79** · 3.53 | VM misc, GreptimeDB db, go-carbon magg |
+| All files / input point (incl. index, discovery) | 2.79 · 2.07 · **1.61** | **1.86** · 1.82 · 2.17 | 4.98 · **1.79** · 3.53 | VM D1, GreptimeDB D2, go-carbon D3 |
 | **Ingest** | | | | |
 | Ingest CPU, µs / input point | 0.955 · 0.873 · 0.562 | **0.603 · 0.537 · 0.512** | 1.646 · 1.675 · 1.667 | VM (9–39 % below go-carbon) |
 | Persistence rate, M points/s (incl. settle) | 1.78 · 1.28 · 0.87 | **3.54 · 2.64 · 1.87** | 0.55 · 0.37 · 0.38 | VM |
 | **Memory** | | | | |
-| Peak / post-drain RSS, MiB | 470/470 · 401/401 · 465/165 | **420/403 · 342/333 · 374/287** | 936/583 · 746/507 · 2708/384 | VM peak; go-carbon magg post-drain |
+| Peak / post-drain RSS, MiB | 470/470 · 401/401 · 465/165 | **420/403 · 342/333 · 374/287** | 936/583 · 746/507 · 2708/384 | VM peak; go-carbon D3 post-drain |
 | **Read latency (p50 / p99 ms)** | | | | |
 | 1 × 24 h | **0.39/1.60 · 0.39/0.71 · 2.45/3.05** | 6.01/11.48 · 5.63/6.08 · 6.30/12.60 | 5.51/6.70 · 3.25/4.19 · 18.38/21.39 | go-carbon (2.5–15× faster p50) |
 | 100 × 24 h | **10.7/23.7 · 11.0/12.3 · 257/758** | 534/632 · 532/548 · 533/554 | 71.6/76.7 · 41.8/48.9 · 1212/1663 | go-carbon (2–50× faster p50) |
-| 1,000 × 1 h | **54.0/105** · 57.3/62.2 · **145**/192 | 231/291 · 236/276 · 155/**168** | 157/164 · **50.5/54.0** · 270/370 | go-carbon misc, GreptimeDB db; magg split |
+| 1,000 × 1 h | **54.0/105** · 57.3/62.2 · **145**/192 | 231/291 · 236/276 · 155/**168** | 157/164 · **50.5/54.0** · 270/370 | go-carbon D1, GreptimeDB D2; D3 split |
 | **Read CPU** | | | | |
 | 100 × 24 h, ms / query | **22.5 · 26.5 · 321** | 579 · 565 · 580 | 269 · 150 · 3,841 | go-carbon |
 | 1,000 × 1 h, ms / query | **133** · 192 · 256 | 284 · 288 · **194** | 248 · **177** · 776 | mixed |
@@ -45,7 +45,7 @@ Full-rate replays of the three datasets (details, paced runs and method in [Meas
 
 Settled SST bytes per input point split by component, from a separate replay of the same data (the split apportions compressed blocks by their uncompressed sections, so components are allocations, not exact causal savings).
 
-| Component | misc | db | magg |
+| Component | D1 | D2 | D3 |
 | --- | ---: | ---: | ---: |
 | Base archive values | 1.271 | 0.799 | 0.732 |
 | Base timestamps and presence bitmaps | 0.416 | 0.259 | 0.518 |
@@ -62,7 +62,7 @@ Headers, manifests and catalog are per-series costs: with 6–24 h of history th
 
 Neither prototype is enabled by default or merged; both keep native rollups.
 
-| Durable bytes / input point | misc | db | magg |
+| Durable bytes / input point | D1 | D2 | D3 |
 | --- | ---: | ---: | ---: |
 | go-carbon today | 2.75 | 2.01 | 1.55 |
 | Cold history repacked into 4,096-point sealed blocks | 2.28 (−17 %) | 1.65 (−17 %) | **1.09 (−30 %)** |
@@ -78,7 +78,7 @@ Repacking applies only to history older than the write window; the short exports
 | Series identity & stable IDs | Dotted metric name in catalog; durable uint64 ID, generation and revision. Archive/policy belong to metadata. Hash collisions checked against full names; an FST ordinal is not a durable ID. [`internal/chunkstore/types.go`][C-identity] [`cache/items.go`][C-items] [`carbonserver/metricstore.go`][C-index] | Metric name + tags → TSID: 24 B (metric-group uint64, job/instance uint32 each, unique MetricID uint64). Group hashes provide locality; MetricID supplies identity. [V-tsid][V-tsid] [V-index][V-index] | Region schema + encoded primary key, time index, sequence and op. Arrow batch PK dictionaries use UInt32 indices; these are local dictionary positions, not durable global series IDs. [T-format][T-format] [T-flat][T-flat] [T-bulkpart][T-bulkpart] | not verified | One metric → one .wsp file, archive offsets inside its header; no shared-store ID needed. [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-whisper] |
 | Ingestion path & mutable structure | Sharded itemMap → compactPoints in arrival order → deadline queue → persister → indexed Pebble batch / continuation writer. Popped, unconfirmed points remain readable. [`cache/items.go`][C-items] [`cache/compact.go`][C-compact] [`cache/queue.go`][C-queue] [`internal/chunkstore/continuation_codec.go`][C-update] [`cache/cache.go`][C-cache] | AddRows in chunks ≤8,000 → partition rawRowsShards (round-robin CPU shards, ~8 MiB backing arrays) → sorted, decimal-converted compressed in-memory parts. No object/lock per series in rawRows. [V-ingest][V-ingest] [V-raw][V-raw] [V-partition][V-partition] [V-inmem][V-inmem] | Flat/sparse PK → BulkMemtable (ordinary new-region default because flat format defaults true); dense PK → TimeSeriesMemtable unless bulk selected. SeriesMap is `BTreeMap<PK, Arc<RwLock<Series>>>`, builders start at 4 rows, freeze around 512. [T-memselect][T-memselect] [T-config][T-config] [T-series][T-series] [T-bulk][T-bulk] | not verified | Same go-carbon front cache/persister; classic writer aligns points and writes fixed circular slots. CWhisper is a separate compressed file variant, also supported by this tree. [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-whisper-update] [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-align] |
 | Sample bytes in RAM (payload ≠ process RSS) | compactPoints: 1-byte header + optional 1–10 B zigzag delta-of-delta + 0–8 B byte-XOR payload: 1–19 B/point; regular repeats settle at 1 B. 64-bit compactPoints struct: 56 B plus backing capacity; names, items, queues, log and decoded scratch are extra. [`cache/compact.go`][C-compact] [`internal/inputlog/inputlog.go`][C-inputlog] | rawRow = 48 B on ordinary 64-bit layouts: 24 B TSID + 8 B timestamp + 8 B float + precision/alignment. Compressed in-memory parts have variable bytes/point; 48 B is only raw staging. [V-raw][V-raw] [V-inmem][V-inmem] | No verified single B/sample constant: PK dictionaries, Arrow columns, sequence/op and multi-field rows vary. TimeSeriesMemtable also pays per-series tree/key/Arc/lock/builders; bulk parts can hold encoded Parquet bytes. [T-series][T-series] [T-bulkpart][T-bulkpart] | not verified | Front-cache bytes as at left. Classic disk point = 12 B (uint32 seconds + Float64); this is not the RAM cost of a cached point or CWhisper's compressed bytes. [`cache/compact.go`][C-compact] [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-whisper] [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-floatbits] |
-| 960 s × 10M series × 240 points | 2.4B queued points. Supplied magg write-cache category ≈12 GiB → 5.37 B/queued point if the illustrative population were exact (includes overhead). This is a sizing model, not an identical-data benchmark. [buffer sizing](#buffer-sizing-and-memory-context) | 48 × 2.4B / 2³⁰ = 107.29 GiB raw rows, before indices/scratch. VM does not normally retain rawRows for 960 s. At 35 points/series: 15.65 GiB. [V-raw][V-raw] [buffer sizing](#buffer-sizing-and-memory-context) | Equivalent cardinality, multi-field schema and compressed memory: not verified. No inferred ratio from Parquet or Rust. | not verified | A hypothetical compact raw (ID, int64 timestamp, float) tuple is 24 B →53.64 GiB; classic disk's 12 B/slot is a different representation. |
+| 960 s × 10M series × 240 points | 2.4B queued points. Supplied D3 write-cache category ≈12 GiB → 5.37 B/queued point if the illustrative population were exact (includes overhead). This is a sizing model, not an identical-data benchmark. [buffer sizing](#buffer-sizing-and-memory-context) | 48 × 2.4B / 2³⁰ = 107.29 GiB raw rows, before indices/scratch. VM does not normally retain rawRows for 960 s. At 35 points/series: 15.65 GiB. [V-raw][V-raw] [buffer sizing](#buffer-sizing-and-memory-context) | Equivalent cardinality, multi-field schema and compressed memory: not verified. No inferred ratio from Parquet or Rust. | not verified | A hypothetical compact raw (ID, int64 timestamp, float) tuple is 24 B →53.64 GiB; classic disk's 12 B/slot is a different representation. |
 | Flush cadence & visibility | Reference production cadence: 960 s coalescing; deadline policy has startup/restore/sparse spread. Long batches amortize per-metric read/modify/commit. Cache overlay supplies immediate visibility; this interval is not a WAL sync period. [`cache/queue.go`][C-queue] [`cache/cache.go`][C-cache] [`internal/inputlog/inputlog.go`][C-inputlog] [`internal/chunkstore/store.go`][C-store] | Pending raw rows → searchable parts every 2 s; due in-memory parts → disk default 5 s (min 2 s). Pending rawRows are not searched. Parts are already encoded; final one-part flush may copy streams directly. [V-partition][V-partition] [V-inmem][V-inmem] | Periodic auto-flush default 10 min, plus pressure. Freeze lowers active bytes but total stays charged until owners release. Flush eligible large regions until pressure falls. [T-config][T-config] [T-flush][T-flush] [T-flush-worker][T-flush-worker] [T-allocation][T-allocation] | not verified | Same cache deadlines; writes go to the selected metric file rather than a shared LSM. Fixed-size classic archives avoid LSM memtable flush/compaction. [`cache/queue.go`][C-queue] [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-whisper-update] |
 | Persistent layout & seek unit | Shared Pebble SST/WAL; catalog + metric ID/generation keys. Continuation manifest, 128 B header pages, block descriptors, exact 128-slot point groups. v7 group keys start with hour bucket + ID/generation; header/descriptor keys stay metric-scoped. [`internal/chunkstore/types.go`][C-identity] [`internal/whisperio/continuation_blocks.go`][C-bucket] [`internal/whisperio/continuation_blocks.go`][C-append] [`doc/pebble-storage/data-layout.md`][C-layout-doc] | Calendar-month partitions; immutable in-memory/small/big parts. timestamps.bin, values.bin, index.bin, metaindex.bin + metadata. Series blocks ≤8,192 rows, sorted (TSID,timestamp); series span blocks. [V-partition][V-partition] [V-part][V-part] [V-header][V-header] [V-block][V-block] | Region SSTs are Parquet, ordered by PK/time with sequence/op fields; default row group 102,400 rows, query batch 8,192. Flat layout can retain tag columns; column projection and statistics prune reads. [T-format][T-format] [T-flat][T-flat] [T-writer][T-writer] [T-parquet][T-parquet] | not verified | One file per metric, header + one fixed circular area per retention. Classic 12 B slots; compressed CWhisper has variable blocks and writer buffers. [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-whisper] [`vendor/github.com/go-graphite/go-whisper/compress.go`][C-compress] |
 | Timestamp codec | Cache: lossless delta-of-delta + zigzag uvarint. Exact disk groups: signed timestamp deltas over present slots + 128-bit presence bitmap, optional Zstd; do not conflate the two codecs. [`cache/compact.go`][C-compact] [`internal/chunkstore/exact.go`][C-exact] | Detect constant arrays/steps, nearest-delta or nearest-delta-of-delta → zigzag/varint → optional Zstd. precisionBits=64 preserves the integer stream. Adjacent equal timestamp streams can share offsets. [V-encoding][V-encoding] [V-nearest][V-nearest] [V-int][V-int] [V-streamwriter][V-streamwriter] | Parquet timestamp/sequence: DELTA_BINARY_PACKED, dictionaries disabled. Event-time memtable partitions are half-open windows (initially one day when unspecified). [T-writer][T-writer] [T-parquet][T-parquet] [T-timeparts][T-timeparts] | not verified | Classic: literal big-endian uint32 seconds in every 12 B slot. CWhisper timestamp compression is separate from classic. [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-floatbits] [`vendor/github.com/go-graphite/go-whisper/whisper.go`][C-whisper] |
@@ -105,9 +105,9 @@ These are cost models and supplied memory categories, not measurements of equiva
 | Existing compact write-cache category | Approximately **12 GiB** for the corresponding supplied workload category | 5.37 B/queued point if the illustrative population were exact; includes overhead and is not a measured codec rate. |
 | Compact payload limits | Regular repeats approach 1 B/point; worst-case bound 19 B/point | 2.24–42.47 GiB for 2.4 billion points, excluding 56 B buffers, names/items, unused capacity, queues, log entries and in-flight decoding. |
 | 35 points × 10 M series | 15.65 GiB at 48 B/raw row; supplied compact-cache category approximately 9 GiB | The active count is illustrative, not a measured cardinality for the short-batch workload. |
-| Representative supplied RSS categories, misc / db / magg | 399 / 242 / 226 GiB | Different production populations, not the small replay fixtures. |
-| Metadata category, misc / db / magg | 72 / 26 / 19 GiB | Charged records, physical arenas and RSS are different quantities. |
-| Pebble block-cache category, misc / db / magg | 51 / 83 / 85 GiB | Pure-Go manual allocation uses byte slices; a heap total may already include this memory. |
+| Representative supplied RSS categories, D1 / D2 / D3 | 399 / 242 / 226 GiB | Different production populations, not the small replay fixtures. |
+| Metadata category, D1 / D2 / D3 | 72 / 26 / 19 GiB | Charged records, physical arenas and RSS are different quantities. |
+| Pebble block-cache category, D1 / D2 / D3 | 51 / 83 / 85 GiB | Pure-Go manual allocation uses byte slices; a heap total may already include this memory. |
 | Per-series arithmetic | Saving 100 B at A=10 M gives 0.93 GiB; 1 KiB at N=10 M gives 9.54 GiB | A small handle optimization cannot explain a multi-hundred-GiB process. |
 
 GiB uses 2³⁰ bytes. The catalog-membership filter is capped at 64 MiB and is not a plausible explanation for a very large residual heap. Do not add overlapping heap/cache categories or projected savings. Mapped files, retired reader-pinned arenas, stacks, unused allocator capacity and query scratch still contribute to resident memory. [G-manual][G-manual] [G-membership][G-membership]
@@ -163,24 +163,24 @@ The archive-chunk API is a separate existing path: `chunkWriter.commit` emits `B
 
 | Supplied production stage | Worker-s/s | Share / interpretation |
 | --- | ---: | --- |
-| magg: total | 5.7 | Busy-worker occupancy, not CPU consumption. |
-| magg: tail_read | 2.1 | 36.8%; storage lookup/decode path and waits, candidate append saving. |
-| magg: commit | 1.6 | 28.1%; append records still require commits. |
-| magg: decode | 0.8 | 14.0%; includes writer merge/rollup logic, not only decompression. |
-| magg: encode | 0.5 | 8.8%; appended payloads still need encoding. |
-| magg: route/load/lock | 0.6 | 10.5%; identity/state/coordination remain. |
-| magg: unassigned/rounding | 0.1 | 1.8%; named stages sum to 5.6. |
-| misc: total / commit | 14.5 / 12.0 | Commit is 82.8%; all other work is 2.5. |
-| misc: updates and points | 30,000 updates/s × 33 points | 990,000 points/s; mean total/commit worker time ≈483/400 µs per update. |
+| D3: total | 5.7 | Busy-worker occupancy, not CPU consumption. |
+| D3: tail_read | 2.1 | 36.8%; storage lookup/decode path and waits, candidate append saving. |
+| D3: commit | 1.6 | 28.1%; append records still require commits. |
+| D3: decode | 0.8 | 14.0%; includes writer merge/rollup logic, not only decompression. |
+| D3: encode | 0.5 | 8.8%; appended payloads still need encoding. |
+| D3: route/load/lock | 0.6 | 10.5%; identity/state/coordination remain. |
+| D3: unassigned/rounding | 0.1 | 1.8%; named stages sum to 5.6. |
+| D1: total / commit | 14.5 / 12.0 | Commit is 82.8%; all other work is 2.5. |
+| D1: updates and points | 30,000 updates/s × 33 points | 990,000 points/s; mean total/commit worker time ≈483/400 µs per update. |
 
 Stage counters sum worker wall time, including IO and locks. Total is recorded every update; other stages are sampled 1/8 and scaled. These production observations are separate from the short local engine replay. [Stage definitions][C-timings]
 
 | Zero-replacement-cost counterfactual | Arithmetic | Limit |
 | --- | --- | --- |
-| Remove all magg tail_read | 5.7 / (5.7 − 2.1) = **1.58×** | Ideal worker-capacity ceiling, not measured CPU/throughput. |
-| Remove all magg tail_read + decode + encode | 5.7 / (5.7 − 2.1 − 0.8 − 0.5) = **2.48×** | Unrealistic as a design promise: append and rollups still process samples. |
-| Remove every misc non-commit stage | 14.5 / 12 = **1.21×** | At most 17.2% occupancy reduction if commit is unchanged. |
-| Halve misc commit | 14.5 / (14.5 − 6) = **1.71×** | Hypothetical; commit includes WAL/memtable work, waits and synchronization. |
+| Remove all D3 tail_read | 5.7 / (5.7 − 2.1) = **1.58×** | Ideal worker-capacity ceiling, not measured CPU/throughput. |
+| Remove all D3 tail_read + decode + encode | 5.7 / (5.7 − 2.1 − 0.8 − 0.5) = **2.48×** | Unrealistic as a design promise: append and rollups still process samples. |
+| Remove every D1 non-commit stage | 14.5 / 12 = **1.21×** | At most 17.2% occupancy reduction if commit is unchanged. |
+| Halve D1 commit | 14.5 / (14.5 − 6) = **1.71×** | Hypothetical; commit includes WAL/memtable work, waits and synchronization. |
 
 ### Gains and costs of append/time windows
 
@@ -223,11 +223,11 @@ Historical Greptime partition-tree dictionaries/PkId (u32 shard + u16 local inde
 
 | Dataset | Raw lines | Finite replay points | Distinct finite paths | Export span | Excluded non-finite |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| misc | 13,224,474 | 13,224,445 | 11,475 | 24.00 h | 29 |
-| db | 6,350,894 | 6,350,894 | 6,886 | 24.00 h | 0 |
-| magg | 4,391,985 | 4,391,985 | 2,473 | 6.00 h | 0 |
+| D1 | 13,224,474 | 13,224,445 | 11,475 | 24.00 h | 29 |
+| D2 | 6,350,894 | 6,350,894 | 6,886 | 24.00 h | 0 |
+| D3 | 4,391,985 | 4,391,985 | 2,473 | 6.00 h | 0 |
 
-Original timestamps, gaps, names and finite values were retained. The 29 non-finite misc lines were excluded identically from all systems. The finite input contains no duplicate/conflicting `(path,timestamp)` pairs. Thus the replay checks neither exceptional floats nor duplicate/OOO policy exhaustively.
+Original timestamps, gaps, names and finite values were retained. The 29 non-finite D1 lines were excluded identically from all systems. The finite input contains no duplicate/conflicting `(path,timestamp)` pairs. Thus the replay checks neither exceptional floats nor duplicate/OOO policy exhaustively.
 
 | Measurement choice | Configuration / consequence |
 | --- | --- |
@@ -249,17 +249,17 @@ Original timestamps, gaps, names and finite values were retained. The 29 non-fin
 
 | Result | Meaning and scope |
 | --- | --- |
-| **go-carbon reads 10–50× faster on these shapes** | On misc/db **1×24 h and 100×24 h native-API p50 versus VM**, ratios are approximately 14–50×. This is not universal: 1000×1 h is around 4× there; magg gains are smaller, and Greptime is faster on the db 1000×1 h cell. Response sizes/grid/serialization differ, so these are serving comparisons, not isolated read-engine rankings. |
-| **VM uses ≈37% less ingest CPU** | Full-rate misc **36.9%** and db **38.5%** below go-carbon; magg only **8.9%** below. Paced magg VM is slightly higher. Do not read 37% as an aggregate or production-capacity forecast. |
-| **VM stores 27–52% fewer core bytes** | Full-rate durable B/input point: misc **2.75 → 1.44**, db **2.01 → 0.97**, magg **1.55 → 1.13**. VM does not produce go-carbon's production rollups and can change finite values; total-file accounting and retained archive0 samples differ. |
-| **Greptime result depends on the dataset/read shape** | Durable B/input point **2.59 / 1.59 / 2.50** for misc/db/magg. Ingest CPU is higher here; wide db SQL reads can trade more CPU for competitive latency. One table/region is not a tuning search. |
-| **Numeric differences are measured, not automatically disqualifying** | VM changes **16/400 misc values**, max relative error **6.52e−13**; db changes **24/400**, max **4.23e−13**; magg checks agree. Bit-exactness is no longer required; a decimal codec and its error/exception policy are under evaluation. |
+| **go-carbon reads 10–50× faster on these shapes** | On D1/D2 **1×24 h and 100×24 h native-API p50 versus VM**, ratios are approximately 14–50×. This is not universal: 1000×1 h is around 4× there; D3 gains are smaller, and Greptime is faster on the D2 1000×1 h cell. Response sizes/grid/serialization differ, so these are serving comparisons, not isolated read-engine rankings. |
+| **VM uses ≈37% less ingest CPU** | Full-rate D1 **36.9%** and D2 **38.5%** below go-carbon; D3 only **8.9%** below. Paced D3 VM is slightly higher. Do not read 37% as an aggregate or production-capacity forecast. |
+| **VM stores 27–52% fewer core bytes** | Full-rate durable B/input point: D1 **2.75 → 1.44**, D2 **2.01 → 0.97**, D3 **1.55 → 1.13**. VM does not produce go-carbon's production rollups and can change finite values; total-file accounting and retained archive0 samples differ. |
+| **Greptime result depends on the dataset/read shape** | Durable B/input point **2.59 / 1.59 / 2.50** for D1/D2/D3. Ingest CPU is higher here; wide D2 SQL reads can trade more CPU for competitive latency. One table/region is not a tuning search. |
+| **Numeric differences are measured, not automatically disqualifying** | VM changes **16/400 D1 values**, max relative error **6.52e−13**; D2 changes **24/400**, max **4.23e−13**; D3 checks agree. Bit-exactness is no longer required; a decimal codec and its error/exception policy are under evaluation. |
 
 | Dataset | go-carbon durable B/input point | VM | GreptimeDB | VM reduction vs go-carbon |
 | --- | ---: | ---: | ---: | ---: |
-| misc | 2.752 | 1.436 | 2.593 | 47.8% |
-| db | 2.007 | 0.967 | 1.589 | 51.8% |
-| magg | 1.554 | 1.134 | 2.503 | 27.0% |
+| D1 | 2.752 | 1.436 | 2.593 | 47.8% |
+| D2 | 2.007 | 0.967 | 1.589 | 51.8% |
+| D3 | 1.554 | 1.134 | 2.503 | 27.0% |
 
 ### All 24 runs
 
@@ -267,7 +267,7 @@ Original timestamps, gaps, names and finite values were retained. The 29 non-fin
 
 ¹ Persistence Mpt/s includes settle/control waits and go-carbon's offline flush/compaction; paced runs include pacing time. ² Ingest CPU includes server user+sys through settle and excludes client/read CPU. ³ The native coarse-window column uses different resolutions/aggregators and is not an equivalent-work ranking.
 
-#### misc
+#### D1
 
 **Storage, ingest and memory**
 
@@ -308,7 +308,7 @@ Original timestamps, gaps, names and finite values were retained. The 29 non-fin
 | VictoriaMetrics / 50000 | 384 | 0 | 16 | 16 | 6.52e-13 |
 | GreptimeDB / 50000 | 400 | 0 | 0 | 0 | 0 |
 
-#### db
+#### D2
 
 **Storage, ingest and memory**
 
@@ -349,7 +349,7 @@ Original timestamps, gaps, names and finite values were retained. The 29 non-fin
 | VictoriaMetrics / 50000 | 376 | 0 | 24 | 24 | 4.23e-13 |
 | GreptimeDB / 50000 | 400 | 0 | 0 | 0 | 0 |
 
-#### magg
+#### D3
 
 **Storage, ingest and memory**
 
@@ -397,31 +397,31 @@ Original timestamps, gaps, names and finite values were retained. The 29 non-fin
 
 | Dataset / rate / packing | Archive0 points | Rollup points | Archive0 encoded B/input pt (B/archive0 pt) | Rollup encoded B/input pt (B/rollup pt) | Shared/header/catalog B/input pt |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| db / full / off | 6,345,854 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
-| db / 50000 / off | 6,345,784 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
-| db / full / on | 6,345,644 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
-| db / 50000 / on | 6,345,644 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
-| magg / full / off | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
-| magg / 50000 / off | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
-| magg / full / on | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
-| magg / 50000 / on | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
-| misc / full / off | 13,214,305 | 1,087,881 | 2.191 (2.193) | 0.271954 (3.306) | 2.079 |
-| misc / 50000 / off | 13,213,663 | 1,087,881 | 2.191 (2.193) | 0.271590 (3.301) | 2.079 |
-| misc / full / on | 13,214,305 | 1,087,881 | 2.191 (2.193) | 0.271954 (3.306) | 2.079 |
-| misc / 50000 / on | 13,212,576 | 1,087,881 | 2.191 (2.193) | 0.271590 (3.301) | 2.079 |
+| D2 / full / off | 6,345,854 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
+| D2 / 50000 / off | 6,345,784 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
+| D2 / full / on | 6,345,644 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
+| D2 / 50000 / on | 6,345,644 | 903,697 | 1.629 (1.630) | 0.318301 (2.237) | 1.991 |
+| D3 / full / off | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
+| D3 / 50000 / off | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
+| D3 / full / on | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
+| D3 / 50000 / on | 4,391,985 | 2,210 | 1.737 (1.737) | 0.000473 (0.939) | 0.433 |
+| D1 / full / off | 13,214,305 | 1,087,881 | 2.191 (2.193) | 0.271954 (3.306) | 2.079 |
+| D1 / 50000 / off | 13,213,663 | 1,087,881 | 2.191 (2.193) | 0.271590 (3.301) | 2.079 |
+| D1 / full / on | 13,214,305 | 1,087,881 | 2.191 (2.193) | 0.271954 (3.306) | 2.079 |
+| D1 / 50000 / on | 13,212,576 | 1,087,881 | 2.191 (2.193) | 0.271590 (3.301) | 2.079 |
 
-Magg retains every input point in archive0. Misc/db archive0 counts are slightly lower because original timestamps age beyond the shortest production retention during replay; some samples route to coarser archives. This is not proof of a lossless point-for-point primary-data disk comparison. No synthetic seven-day history or duplicated data was added.
+D3 retains every input point in archive0. D1/D2 archive0 counts are slightly lower because original timestamps age beyond the shortest production retention during replay; some samples route to coarser archives. This is not proof of a lossless point-for-point primary-data disk comparison. No synthetic seven-day history or duplicated data was added.
 
 ### Metadata packing A/B
 
 | Dataset / rate | Charged metadata MiB off→on | Charged reduction | Arena MiB off→on | Ingest CPU change | Post-drain RSS MiB off→on |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| misc / full | 29.57→14.87 | 49.7% | 43.69→28.38 | +6.5% | 470→466 |
-| misc / 50000 | 29.57→14.93 | 49.5% | 44.06→31.60 | -2.6% | 426→436 |
-| db / full | 13.50→7.09 | 47.5% | 24.38→17.54 | +5.0% | 401→397 |
-| db / 50000 | 13.50→7.09 | 47.5% | 24.50→18.75 | +4.4% | 369→362 |
-| magg / full | 2.22→1.48 | 33.3% | 7.92→7.59 | +17.5% | 165→207 |
-| magg / 50000 | 2.22→1.48 | 33.3% | 8.19→7.96 | +3.6% | 161→175 |
+| D1 / full | 29.57→14.87 | 49.7% | 43.69→28.38 | +6.5% | 470→466 |
+| D1 / 50000 | 29.57→14.93 | 49.5% | 44.06→31.60 | -2.6% | 426→436 |
+| D2 / full | 13.50→7.09 | 47.5% | 24.38→17.54 | +5.0% | 401→397 |
+| D2 / 50000 | 13.50→7.09 | 47.5% | 24.50→18.75 | +4.4% | 369→362 |
+| D3 / full | 2.22→1.48 | 33.3% | 7.92→7.59 | +17.5% | 165→207 |
+| D3 / 50000 | 2.22→1.48 | 33.3% | 8.19→7.96 | +3.6% | 161→175 |
 
 One paired run per dataset/rate, without eviction pressure. Charged-byte reductions are consistent; RSS and CPU require repeated capacity-matched qualification. Thousands of stripes and minimum 4 KiB chunks mean compressing scattered records may not free a chunk. Arena chunks grow up to 64 KiB. The 33–50% charged saving is not a 33–50% RSS promise. [Packing threshold][C-snappy] [State cache][C-state] [Arena][C-slab]
 
@@ -431,18 +431,18 @@ Median/range in the final 20 s of the 50,000-points/s replay, before reads; a sh
 
 | Dataset / system | Median RSS MiB | Range MiB | Samples |
 | --- | ---: | ---: | ---: |
-| db / go-carbon | 337 | 303–341 | 38 |
-| db / go-carbon pack | 367 | 266–376 | 38 |
-| db / GreptimeDB | 334 | 298–359 | 37 |
-| db / VictoriaMetrics | 126 | 125–129 | 37 |
-| magg / go-carbon | 151 | 135–154 | 38 |
-| magg / go-carbon pack | 175 | 173–179 | 38 |
-| magg / GreptimeDB | 229 | 185–257 | 38 |
-| magg / VictoriaMetrics | 141 | 140–141 | 38 |
-| misc / go-carbon | 408 | 408–408 | 38 |
-| misc / go-carbon pack | 433 | 433–433 | 37 |
-| misc / GreptimeDB | 351 | 297–397 | 38 |
-| misc / VictoriaMetrics | 159 | 159–160 | 37 |
+| D2 / go-carbon | 337 | 303–341 | 38 |
+| D2 / go-carbon pack | 367 | 266–376 | 38 |
+| D2 / GreptimeDB | 334 | 298–359 | 37 |
+| D2 / VictoriaMetrics | 126 | 125–129 | 37 |
+| D3 / go-carbon | 151 | 135–154 | 38 |
+| D3 / go-carbon pack | 175 | 173–179 | 38 |
+| D3 / GreptimeDB | 229 | 185–257 | 38 |
+| D3 / VictoriaMetrics | 141 | 140–141 | 38 |
+| D1 / go-carbon | 408 | 408–408 | 38 |
+| D1 / go-carbon pack | 433 | 433–433 | 37 |
+| D1 / GreptimeDB | 351 | 297–397 | 38 |
+| D1 / VictoriaMetrics | 159 | 159–160 | 37 |
 
 ### Native read work explains part of the latency difference
 
@@ -450,15 +450,15 @@ These are full-rate, packing-off responses. Counts are non-null decoded points. 
 
 | Dataset / system | 100×24h points / response MiB | 1000×1h series / points / response MiB |
 | --- | ---: | ---: |
-| misc / go-carbon | 117,551 / 1.06 | 1,000 / 56,339 / 0.74 |
-| misc / VictoriaMetrics | 352,653 / 148.12 | 970 / 169,017 / 60.28 |
-| misc / GreptimeDB | 117,551 / 2.26 | 970 / 56,339 / 1.25 |
-| db / go-carbon | 133,568 / 1.20 | 1,000 / 58,419 / 0.91 |
-| db / VictoriaMetrics | 400,704 / 148.08 | 996 / 175,257 / 62.03 |
-| db / GreptimeDB | 133,568 / 2.64 | 996 / 58,419 / 1.39 |
-| magg / go-carbon | 1,680,114 / 21.09 | 1,000 / 305,611 / 3.44 |
-| magg / VictoriaMetrics | 1,924,077 / 145.25 | 664 / 380,569 / 40.62 |
-| magg / GreptimeDB | 1,680,114 / 31.08 | 664 / 305,611 / 5.74 |
+| D1 / go-carbon | 117,551 / 1.06 | 1,000 / 56,339 / 0.74 |
+| D1 / VictoriaMetrics | 352,653 / 148.12 | 970 / 169,017 / 60.28 |
+| D1 / GreptimeDB | 117,551 / 2.26 | 970 / 56,339 / 1.25 |
+| D2 / go-carbon | 133,568 / 1.20 | 1,000 / 58,419 / 0.91 |
+| D2 / VictoriaMetrics | 400,704 / 148.08 | 996 / 175,257 / 62.03 |
+| D2 / GreptimeDB | 133,568 / 2.64 | 996 / 58,419 / 1.39 |
+| D3 / go-carbon | 1,680,114 / 21.09 | 1,000 / 305,611 / 3.44 |
+| D3 / VictoriaMetrics | 1,924,077 / 145.25 | 664 / 380,569 / 40.62 |
+| D3 / GreptimeDB | 1,680,114 / 31.08 | 664 / 305,611 / 5.74 |
 
 ## Qualification and remaining questions
 
