@@ -17,7 +17,7 @@ import (
 )
 
 const expirationPageSize = 1024
-const expirationDeleteBatchSize = 512
+const expirationDeleteBatchSize = 32
 
 type expirationStore interface {
 	ListPage(context.Context, string, string, int) ([]store.Metadata, error)
@@ -226,11 +226,17 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 		workerCount = 0
 	}
 	workerReports := make([][]expirationReport, workerCount)
-	jobs := make(chan expirationBatch)
+	partitioner, partitioned := r.db.(interface{ ExpirationPartition(string) uint64 })
+	jobs := make([]chan expirationBatch, workerCount)
+	for i := range jobs {
+		// Absorb uneven IO latency without allowing one partition to starve
+		// the other workers. Pressure and pending writes are checked on dequeue.
+		jobs[i] = make(chan expirationBatch, 8)
+	}
 	for i := range workerCount {
 		workerReports[i] = make([]expirationReport, len(reports))
 		workers.Go(func() {
-			for batch := range jobs {
+			for batch := range jobs[i] {
 				func() {
 					defer work.Done()
 					// Reservations include queued candidates and successful deletes.
@@ -291,7 +297,9 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 	}
 	// Join before flushing, publishing rule reports, or closing the store.
 	defer func() {
-		close(jobs)
+		for _, queue := range jobs {
+			close(queue)
+		}
 		workers.Wait()
 		deleted = deleteCount.Load()
 		for _, local := range workerReports {
@@ -306,28 +314,45 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 	}()
 	scanBudget := expirationBudget{rate: r.rate}
 	deleteBudget := expirationBudget{rate: r.deleteRate}
-	now := r.now()
-	return store.EachPage(ctx, r.db.ListPage, "", expirationPageSize, func(page []store.Metadata) error {
-		if err := scanBudget.wait(ctx, len(page)); err != nil {
+	// Retain partial partitions across pages. The store bounds the number of
+	// partitions; each buffer holds fewer than expirationDeleteBatchSize names.
+	batches := make(map[uint64]expirationBatch)
+	nextWorker := 0
+	flush := func(partition uint64) error {
+		batch := batches[partition]
+		if len(batch.metrics) == 0 {
+			return nil
+		}
+		if err := deleteBudget.wait(ctx, len(batch.metrics)); err != nil {
 			return err
 		}
-		batch := expirationBatch{}
-		flush := func() error {
-			if len(batch.metrics) == 0 {
-				return nil
-			}
-			if err := deleteBudget.wait(ctx, len(batch.metrics)); err != nil {
+		worker := int(partition % uint64(workerCount))
+		if !partitioned {
+			worker = nextWorker
+			nextWorker = (nextWorker + 1) % workerCount
+		}
+		work.Add(1)
+		select {
+		case jobs[worker] <- batch:
+			delete(batches, partition)
+			return nil
+		case <-ctx.Done():
+			work.Done()
+			return ctx.Err()
+		}
+	}
+	flushAll := func() error {
+		for partition := range batches {
+			if err := flush(partition); err != nil {
 				return err
 			}
-			work.Add(1)
-			select {
-			case jobs <- batch:
-				batch = expirationBatch{}
-				return nil
-			case <-ctx.Done():
-				work.Done()
-				return ctx.Err()
-			}
+		}
+		return nil
+	}
+	now := r.now()
+	err = store.EachPage(ctx, r.db.ListPage, "", expirationPageSize, func(page []store.Metadata) error {
+		if err := scanBudget.wait(ctx, len(page)); err != nil {
+			return err
 		}
 		for _, m := range page {
 			if err := ctx.Err(); err != nil {
@@ -385,7 +410,7 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 				continue
 			}
 			if r.maxDeletes > 0 && reserved.Load() >= int64(r.maxDeletes) {
-				if err := flush(); err != nil {
+				if err := flushAll(); err != nil {
 					return err
 				}
 				work.Wait()
@@ -398,20 +423,30 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 				}
 			}
 			reserved.Add(1)
+			partition := uint64(0)
+			if partitioned {
+				partition = partitioner.ExpirationPartition(m.Name)
+			}
+			batch := batches[partition]
 			if batch.metrics == nil {
 				batch.metrics = make([]store.Metadata, 0, expirationDeleteBatchSize)
 				batch.indexes = make([]int, 0, expirationDeleteBatchSize)
 			}
 			batch.metrics = append(batch.metrics, m)
 			batch.indexes = append(batch.indexes, idx)
+			batches[partition] = batch
 			if len(batch.metrics) == expirationDeleteBatchSize {
-				if err := flush(); err != nil {
+				if err := flush(partition); err != nil {
 					return err
 				}
 			}
 		}
-		return flush()
+		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return flushAll()
 }
 
 type expirationBatch struct {

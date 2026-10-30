@@ -27,8 +27,9 @@ func TestExpirationPointDeletesMatchAdministrativeDelete(t *testing.T) {
 				defer closeTestStore(t, s)
 				old := createTestMetric(t, s, "expired")
 				keep := createTestMetric(t, s, "keep")
+				other := createTestMetric(t, s, "expired.second")
 				batch := s.db.NewBatch()
-				for _, m := range []Metadata{old, keep} {
+				for _, m := range []Metadata{old, keep, other} {
 					var c chunk
 					c.set(0, Point{Timestamp: int64(now), Value: 42})
 					// Include another generation and a sparse, non-first chunk.
@@ -50,8 +51,8 @@ func TestExpirationPointDeletesMatchAdministrativeDelete(t *testing.T) {
 				}
 				batch.Close()
 				if expiration {
-					outcomes, err := s.DeleteBatchIfUnchanged(context.Background(), []Metadata{old})
-					if err != nil || len(outcomes) != 1 || outcomes[0] != nil {
+					outcomes, err := s.DeleteBatchIfUnchanged(context.Background(), []Metadata{other, old})
+					if err != nil || len(outcomes) != 2 || outcomes[0] != nil || outcomes[1] != nil {
 						t.Fatalf("expiration: %v %v", outcomes, err)
 					}
 					if err := s.db.Flush(); err != nil {
@@ -68,8 +69,12 @@ func TestExpirationPointDeletesMatchAdministrativeDelete(t *testing.T) {
 							}
 						}
 					}
-				} else if err := s.Delete(context.Background(), old.Name); err != nil {
-					t.Fatal(err)
+				} else {
+					for _, m := range []Metadata{old, other} {
+						if err := s.Delete(context.Background(), m.Name); err != nil {
+							t.Fatal(err)
+						}
+					}
 				}
 				it, err := s.db.NewIter(nil)
 				if err != nil {

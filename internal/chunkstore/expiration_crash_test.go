@@ -25,13 +25,15 @@ func TestExpirationBatchCrashRecovery(t *testing.T) {
 				s, now := openTestStore(t, "/store", options)
 				old := createTestMetric(t, s, "expired")
 				keep := createTestMetric(t, s, "keep")
-				for _, m := range []Metadata{old, keep} {
+				second := createTestMetric(t, s, "also-expired")
+				for _, m := range []Metadata{old, keep, second} {
 					if err := s.UpdateMany(ctx, m.Name, []Point{{Timestamp: int64(now), Value: 42}}); err != nil {
 						t.Fatal(err)
 					}
 				}
 				old, _ = s.Metadata(ctx, old.Name)
 				keep, _ = s.Metadata(ctx, keep.Name)
+				second, _ = s.Metadata(ctx, second.Name)
 				retention := old.Retentions[0]
 				oldChunk := chunkKey(old, 0, (now/retention.Step%retention.Count)/chunkSlots)
 				_, closer, err := s.db.Get(oldChunk)
@@ -54,8 +56,8 @@ func TestExpirationBatchCrashRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				initialSyncs := fs.syncs.Load()
-				outcomes, err := s.DeleteBatchIfUnchanged(ctx, []Metadata{old})
-				if err != nil || len(outcomes) != 1 || outcomes[0] != nil {
+				outcomes, err := s.DeleteBatchIfUnchanged(ctx, []Metadata{old, second})
+				if err != nil || len(outcomes) != 2 || outcomes[0] != nil || outcomes[1] != nil {
 					t.Fatalf("outcomes=%v: %v", outcomes, err)
 				}
 				if fs.syncs.Load() != initialSyncs {
@@ -115,6 +117,9 @@ func TestExpirationBatchCrashRecovery(t *testing.T) {
 				if wantPresent {
 					expectedCount++
 				}
+				if action == "lost" {
+					expectedCount++
+				}
 				if err != nil || len(page) != expectedCount {
 					t.Fatalf("recovered catalog=%v %v", page, err)
 				}
@@ -127,6 +132,14 @@ func TestExpirationBatchCrashRecovery(t *testing.T) {
 				}
 				if _, err := reopened.Snapshot(ctx, keep.Name); err != nil {
 					t.Fatal(err)
+				}
+				secondSnapshot, secondErr := reopened.Snapshot(ctx, second.Name)
+				if action == "lost" {
+					if secondErr != nil || len(secondSnapshot.Archives[0].Points) != 1 || secondSnapshot.Archives[0].Points[0].Value != 42 {
+						t.Fatalf("batch partially survived: %+v %v", secondSnapshot, secondErr)
+					}
+				} else if !errors.Is(secondErr, ErrNotFound) {
+					t.Fatalf("batch partially deleted: %v", secondErr)
 				}
 				if action != "lost" {
 					for _, key := range [][]byte{revisionKey(old), oldChunk} {
