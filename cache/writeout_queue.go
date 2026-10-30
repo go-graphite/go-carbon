@@ -130,6 +130,7 @@ func (q *WriteoutQueue) update() {
 
 	q.Lock()
 	q.queue = queue
+	q.cache.queueChannelBytes.Store(int64(cap(queue)) * 16)
 	q.rebuild = q.makeRebuildCallback(next, notBefore)
 	q.Unlock()
 }

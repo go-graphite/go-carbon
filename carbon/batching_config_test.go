@@ -74,6 +74,7 @@ func TestWriteoutBatchingReload(t *testing.T) {
 	cfg.Grpc.Enabled, cfg.Carbonlink.Enabled = false, false
 	cfg.Common.MetricInterval = &Duration{time.Hour}
 	cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = 8, Duration{time.Hour}
+	cfg.Cache.MaxBytes = 32 << 30
 	writeBatchingConfig(t, path, cfg)
 	app := New(path)
 	if err := app.ParseConfig(); err != nil {
@@ -83,6 +84,9 @@ func TestWriteoutBatchingReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Stop()
+	if got := app.Cache.GetInfo()["byte_limit"]; got != int64(32<<30) {
+		t.Fatalf("startup byte limit = %v", got)
+	}
 	app.Cache.Add(points.OnePoint("reload.metric", 1, 1))
 	abort := make(chan bool)
 	defer close(abort)
@@ -94,9 +98,13 @@ func TestWriteoutBatchingReload(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 	}
 	cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = 0, Duration{}
+	cfg.Cache.MaxBytes = 64 << 30
 	writeBatchingConfig(t, path, cfg)
 	if err := app.ReloadConfig(); err != nil {
 		t.Fatal(err)
+	}
+	if got := app.Cache.GetInfo()["byte_limit"]; got != int64(64<<30) {
+		t.Fatalf("reloaded byte limit = %v", got)
 	}
 	select {
 	case metric := <-got:

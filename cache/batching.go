@@ -173,6 +173,7 @@ func (c *Cache) SetWriteoutSparseSpread(on bool) {
 		for _, shard := range c.data {
 			shard.mu.Lock()
 			shard.sparseLast = nil
+			c.syncMemoryLocked(shard)
 			shard.mu.Unlock()
 		}
 	}
@@ -273,7 +274,7 @@ func (c *Cache) Backlogged() bool {
 }
 
 func (c *Cache) batchWrites(s *cacheSettings) bool {
-	return s.batching() && !s.underPressure(c.approxSize())
+	return s.batching() && !s.underPressure(c.approxSize()) && !c.bytePressure(s)
 }
 
 func (s *cacheSettings) underPressure(size int64) bool {

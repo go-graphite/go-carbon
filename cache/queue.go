@@ -1,10 +1,88 @@
 package cache
 
 import (
+	"slices"
 	"sort"
 	"sync/atomic"
 	"time"
+
+	"github.com/zeebo/xxh3"
 )
+
+const queueRegionBits = 8
+
+// Each region summarizes the earliest deadline of 256 hash-table slots. A
+// zero deadline needs a scan. The shard lock protects summaries and items.
+type queueDeadlines struct {
+	settings *cacheSettings
+	next     []time.Time
+}
+
+func (m *itemMap) invalidateDeadline(slot int) {
+	if m.deadlines != nil {
+		m.deadlines.next[slot>>queueRegionBits] = time.Time{}
+	}
+}
+
+// Invalidate a changed item at its probed slot, which may lie in the next
+// region. Inserts, replacements and table rebuilds invalidate in set.
+func (m *itemMap) invalidateItemDeadline(it *item) {
+	if m.deadlines == nil {
+		return
+	}
+	hash := xxh3.HashString(it.Metric)
+	mask := len(m.slots) - 1
+	for i, n := int(hash>>shardBits)&mask, 0; n < len(m.slots); i, n = (i+1)&mask, n+1 {
+		if slot := &m.slots[i]; slot.item == it {
+			m.invalidateDeadline(i)
+			return
+		} else if slot.item == nil && slot.hash == 0 {
+			break
+		}
+	}
+	// Not found under the shard lock: drop every summary rather than risk a
+	// stale deadline hiding this item.
+	clear(m.deadlines.next)
+}
+
+func (m *itemMap) readyAt(now time.Time, s *cacheSettings, yield func(*item)) time.Time {
+	if m.deadlines == nil {
+		m.deadlines = &queueDeadlines{next: make([]time.Time, (len(m.slots)+(1<<queueRegionBits)-1)>>queueRegionBits)}
+	}
+	d := m.deadlines
+	if d.settings != s {
+		clear(d.next)
+		d.settings = s
+	}
+	var next time.Time
+	for region, deadline := range d.next {
+		if !now.Before(deadline) {
+			deadline = time.Time{}
+			ready := false
+			start := region << queueRegionBits
+			for _, slot := range m.slots[start:min(start+(1<<queueRegionBits), len(m.slots))] {
+				if slot.item == nil {
+					continue
+				}
+				at := writeoutDeadline(slot.item, s)
+				if !now.Before(at) {
+					ready = true
+					yield(slot.item)
+				} else if deadline.IsZero() || at.Before(deadline) {
+					deadline = at
+				}
+			}
+			d.next[region] = deadline
+			if ready {
+				d.next[region] = time.Time{}
+			}
+		}
+		if !deadline.IsZero() && (next.IsZero() || deadline.Before(next)) {
+			next = deadline
+		}
+	}
+	return next
+}
 
 type queueItem struct {
 	metric   string
@@ -62,13 +140,10 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		}
 	}
 
-	// This is a reservation, not a bound: arrivals during the shard scan use
-	// append below. Reserving twice the snapshot retained unused queue entries.
-	size := c.Len()
-	q, scratch := c.takeQueue(int(size))
-	index := int32(0)
 	s := c.settings.Load().(*cacheSettings)
 	batch := c.batchWrites(s)
+	q, scratch := c.takeQueue(int(c.Len()), batch)
+	index := int32(0)
 	var next time.Time
 	var shardRanges [shardCount]struct{ next, end int32 }
 
@@ -77,30 +152,31 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		shardRanges[i].next = index
 		shard.mu.Lock()
 
-		for _, p := range shard.items.all {
-			if batch {
-				deadline := writeoutDeadline(p, s)
-				if now.Before(deadline) {
-					if next.IsZero() || deadline.Before(next) {
-						next = deadline
-					}
-					continue
-				}
-			}
-			if index < size {
-				q[index].metric = p.Metric
-				q[index].orderKey = orderKey(p)
-			} else {
-				q = append(q, queueItem{p.Metric, orderKey(p)})
-			}
+		add := func(p *item) {
+			q = append(q, queueItem{p.Metric, orderKey(p)})
 			index++
+		}
+		if batch {
+			if at := shard.items.readyAt(now, s, add); !at.IsZero() && (next.IsZero() || at.Before(next)) {
+				next = at
+			}
+		} else {
+			for _, p := range shard.items.all {
+				add(p)
+			}
 		}
 
 		shard.mu.Unlock()
 		shardRanges[i].end = index
 	}
 
-	q = q[:index]
+	// A pressure wave may have made the whole cache eligible last time.
+	// Once it passes, keep scratch proportional to the ready population.
+	if batch && cap(q) > max(1024, 2*len(q)) {
+		smaller := slices.Clone(q)
+		clear(q)
+		q = smaller
+	}
 
 	switch writeStrategy {
 	case MaximumLength:
@@ -156,22 +232,26 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 	return ch, next
 }
 
-// takeQueue returns a queue of length n, reusing the previous rebuild's buffer
-// unless it is too small or more than twice the size needed. Only the channel
-// outlives a rebuild, so the buffer can be reused. A concurrent rebuild finds
-// no buffer and allocates its own.
-func (c *Cache) takeQueue(n int) (queue, *queue) {
+// takeQueue reuses the previous rebuild's buffer. Batched queues reserve only
+// a small starting capacity: most metrics may be waiting for their deadline.
+// Only the channel outlives a rebuild. Concurrent rebuilds take separate buffers.
+func (c *Cache) takeQueue(n int, batch bool) (queue, *queue) {
 	if n == 0 {
 		// Leave the buffer for the next nonempty cache.
 		return nil, nil
 	}
-	if scratch := c.queueScratch.Swap(nil); scratch != nil {
-		if q := *scratch; cap(q) >= n && cap(q) <= 2*n {
-			return q[:n], scratch
-		}
-		return make(queue, n), scratch
+	capacity := n
+	if batch {
+		capacity = min(n, 1024)
 	}
-	return make(queue, n), nil
+	if scratch := c.queueScratch.Swap(nil); scratch != nil {
+		c.queueScratchBytes.Store(0)
+		if q := *scratch; (batch || cap(q) >= n) && cap(q) <= 2*n {
+			return q[:0], scratch
+		}
+		return make(queue, 0, capacity), scratch
+	}
+	return make(queue, 0, capacity), nil
 }
 
 // releaseQueue keeps q's buffer for the next rebuild. Clearing it releases
@@ -187,4 +267,5 @@ func (c *Cache) releaseQueue(scratch *queue, q queue) {
 	}
 	*scratch = q[:0]
 	c.queueScratch.Store(scratch)
+	c.queueScratchBytes.Store(int64(cap(q)) * 24)
 }
