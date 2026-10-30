@@ -341,7 +341,9 @@ type tracingConfig struct {
 
 // Config ...
 type Config struct {
-	// memoryLimit is derived at config load; an explicit GOMEMLIMIT wins.
+	// memoryBudget and memoryLimit are resolved at config load; an explicit
+	// GOMEMLIMIT wins over memoryLimit.
+	memoryBudget int64
 	memoryLimit  int64
 	Buckyd       buckyd.Config                       `toml:"buckyd"`
 	Common       commonConfig                        `toml:"common"`

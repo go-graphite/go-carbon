@@ -19,6 +19,8 @@ func TestMemoryBudget(t *testing.T) {
 		{name: "disabled"},
 		{name: "zero", budget: "0"},
 		{name: "bytes", budget: "107374182400"},
+		{name: "unit", budget: "100GiB"},
+		{name: "small unit", budget: "102400MiB"},
 		{name: "percent", budget: "50%"},
 		{name: "all", budget: "100%"},
 		{name: "overrides", budget: "50%", overrides: "[whisper]\nstore-cache-size=1234\nstore-metadata-cache-size=0\n[cache]\nmax-bytes=0\n", gomemlimit: "off"},
@@ -28,7 +30,11 @@ func TestMemoryBudget(t *testing.T) {
 		{name: "above percent", budget: "101%", invalid: true},
 		{name: "negative", budget: "-1", invalid: true},
 		{name: "overflow", budget: "18446744073709551615", invalid: true},
-		{name: "unit", budget: "1GiB", invalid: true},
+		{name: "unit too small", budget: "63MiB", invalid: true},
+		{name: "unit overflow", budget: "8388608TiB", invalid: true},
+		{name: "unknown unit", budget: "1GB", invalid: true},
+		{name: "spaced unit", budget: "1 GiB", invalid: true},
+		{name: "bare unit", budget: "GiB", invalid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := NewConfig()
@@ -63,8 +69,11 @@ func TestMemoryBudget(t *testing.T) {
 				if tc.budget == "100%" {
 					budget = 200 << 30
 				}
-				if cfg.Whisper.StoreCacheSize != int64(budget/5) || cfg.Whisper.StoreMetadataCacheSize != int64(budget/5) || cfg.Cache.MaxBytes != budget/10 {
+				if cfg.Whisper.StoreCacheSize != int64(budget*13/100) || cfg.Whisper.StoreMetadataCacheSize != int64(budget*13/100) {
 					t.Fatalf("incorrect shares: %+v", cfg)
+				}
+				if cfg.Cache.MaxBytes != 0 {
+					t.Fatal("write-cache byte limit must not be derived")
 				}
 			}
 			if (cfg.memoryLimit == 0) != (tc.gomemlimit != "") {
@@ -84,7 +93,7 @@ func TestMemoryBudgetReadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Whisper.StoreCacheSize != 0 || cfg.Whisper.StoreMetadataCacheSize != 20<<30 || cfg.Cache.MaxBytes != 10<<30 || cfg.memoryLimit != 70<<30 {
+	if cfg.Whisper.StoreCacheSize != 0 || cfg.Whisper.StoreMetadataCacheSize != 13*(1<<30) || cfg.Cache.MaxBytes != 0 || cfg.memoryLimit != 70<<30 || cfg.memoryBudget != 100<<30 {
 		t.Fatal("ReadConfig lost budget or explicit zero")
 	}
 	old := NewConfig()
