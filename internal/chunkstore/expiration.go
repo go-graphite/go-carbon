@@ -39,6 +39,17 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 	if err != nil {
 		return nil, err
 	}
+	// Keep the fresh validation view through the atomic commit, but retire its
+	// iterators and read state after releasing mutation stripes. A retired view
+	// can wait on database cleanup even though it no longer protects a mutation.
+	var view *pebble.ReadView
+	reader := transferReader{}
+	defer func() {
+		reader.close()
+		if view != nil {
+			_ = view.Close()
+		}
+	}()
 	for _, stripe := range stripes {
 		s.metricMu[stripe].Lock()
 	}
@@ -55,10 +66,8 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 	}()
 	removed := make([]Metadata, 0, len(expected))
 	changed := false
-	view := s.db.NewReadView()
-	defer view.Close()
-	reader := transferReader{reader: view}
-	defer reader.close()
+	view = s.db.NewReadView()
+	reader.reader = view
 	for i, want := range expected {
 		if spans[i].end == 0 {
 			continue
