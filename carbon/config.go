@@ -142,6 +142,7 @@ type whisperConfig struct {
 	StoreExpirationCheckInterval *Duration                        `toml:"store-expiration-check-interval"`
 	StoreExpirationScanRate      int                              `toml:"store-expiration-scan-rate"`
 	StoreExpirationDryRun        bool                             `toml:"store-expiration-dry-run"`
+	StoreExpirationDeleteWorkers int                              `toml:"store-expiration-delete-workers"`
 	StoreExpirationDeleteRate    int                              `toml:"store-expiration-delete-rate"`
 	StoreExpirationMaxDeletes    int                              `toml:"store-expiration-max-deletes"`
 	StoreExpirationMaxL0         int                              `toml:"store-expiration-max-l0-sublevels"`
@@ -412,6 +413,7 @@ func NewConfig() *Config {
 			StoreExpirationCheckInterval: &Duration{time.Hour},
 			StoreExpirationScanRate:      100_000,
 			StoreExpirationDeleteRate:    100,
+			StoreExpirationDeleteWorkers: 8,
 			StoreExpirationMaxDeletes:    10_000,
 			StoreExpirationMaxL0:         6,
 			StoreExpirationMaxDebt:       1 << 30,

@@ -278,8 +278,16 @@ store-expiration-scan-rate = 100000
 # Report candidates and logical Whisper-equivalent bytes without any mutation,
 # including activity initialization. Start fleet policies in this mode.
 store-expiration-dry-run = false
-# Deletes use conditional batches of at most 128; scanning has its own budget.
+# Deletes use conditional batches of at most 512; scanning has its own budget.
+# One shared rate budget across all delete workers (names/second).
 store-expiration-delete-rate = 100
+# Bounded concurrent delete batches, up to 512 names per batch. Raise the
+# delete rate and per-sweep cap too when clearing a backlog. Pressure is checked
+# before every batch; batches already in progress finish when pressure rises.
+store-expiration-delete-workers = 8
+# Expiration batches use atomic unsynced WAL commits even when store writes
+# are synchronous. A crash may restore expired names; the next sweep retries.
+# Subsequent synced writes or completion of the end-of-sweep flush make deletes durable.
 store-expiration-max-deletes = 10000
 # Pause deletes for the rest of the sweep on pressure, continuing the report.
 store-expiration-max-l0-sublevels = 6

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -59,22 +60,22 @@ func BenchmarkExpirationScan(b *testing.B) {
 	}
 }
 
-// The fixture is a real 10M-name Pebble store prepared in bounded, opt-in steps
+// The fixture is a real million-name Pebble store prepared in bounded, opt-in steps
 // by TestPrepareExpirationScaleStore. Preparation is outside all sweep timers.
 func BenchmarkExpirationScaleScan(b *testing.B) {
 	dir := os.Getenv("EXPIRATION_SCALE_DIR")
 	if dir == "" {
-		b.Skip("set EXPIRATION_SCALE_DIR to a prepared >=10M-name store")
+		b.Skip("set EXPIRATION_SCALE_DIR to a prepared million-name store")
 	}
-	db, err := store.Open(dir, store.Options{CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: time.Hour, CompactionWorkers: 2})
+	db, err := store.Open(dir, store.Options{ExactBlocks: true, CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: time.Hour, CompactionWorkers: 2})
 	if err != nil {
 		b.Fatal(err)
 	}
 	defer db.Close()
 	var count uint64
 	err = store.EachPage(context.Background(), db.ListPage, "", 10000, func(page []store.Metadata) error { count += uint64(len(page)); return nil })
-	if err != nil || count < 10_000_000 {
-		b.Fatalf("need >=10M names: %d %v", count, err)
+	if err != nil || count < 1_000_000 {
+		b.Fatalf("need >=1M names: %d %v", count, err)
 	}
 	rate := 1_000_000_000
 	if os.Getenv("EXPIRATION_SCALE_PACED") == "1" {
@@ -105,4 +106,71 @@ func BenchmarkExpirationScaleScan(b *testing.B) {
 	if r.stats.examined.Load() != count*uint64(b.N) || r.stats.deleted.Load() != 0 {
 		b.Fatal("scan missed names or deleted data")
 	}
+}
+
+// Run on an independent copy of TestPrepareExpirationScaleStore's fixture.
+// Includes catalog scanning, policy matching, pacing, deletes and notification.
+func BenchmarkExpirationScaleSweep(b *testing.B) {
+	dir := os.Getenv("EXPIRATION_SCALE_DIR")
+	if dir == "" {
+		b.Skip("set EXPIRATION_SCALE_DIR to a prepared million-name store")
+	}
+	interval := time.Hour
+	if os.Getenv("EXPIRATION_SCALE_SYNC") == "1" {
+		interval = 0
+	}
+	db, err := store.Open(dir, store.Options{ExactBlocks: true, CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: interval, CompactionWorkers: 2})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer db.Close()
+	count, err := db.CatalogHighWatermark(context.Background())
+	if err != nil || count < 1_000_000 {
+		b.Fatalf("need >=1M names: %d %v", count, err)
+	}
+	workers, _ := strconv.Atoi(os.Getenv("EXPIRATION_SCALE_WORKERS"))
+	if workers == 0 {
+		workers = 8
+	}
+	limit, _ := strconv.Atoi(os.Getenv("EXPIRATION_SCALE_DELETES"))
+	if limit == 0 {
+		limit = 100_000
+	}
+	_, _, _, err = db.CatalogChanges(context.Background(), 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	var notifications uint64
+	r := &metricExpirer{db: db, now: func() time.Time { return time.Unix(1792000000, 0) }, expiration: time.Hour,
+		rate: 1_000_000_000, deleteRate: 1_000_000_000, deleteWorkers: workers, maxDeletes: limit, stats: &expirationStats{},
+		pending: func(string) bool { return false }, notify: func() { notifications++ },
+	}
+	var before, after syscall.Rusage
+	metrics := db.Stats()
+	b.ReportAllocs()
+	b.ResetTimer()
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &before)
+	for range b.N {
+		if err := r.sweep(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &after)
+	b.StopTimer()
+	if err := db.Compact(); err != nil {
+		b.Fatal(err)
+	}
+	end := db.Stats()
+	cpu := func(r syscall.Rusage) float64 {
+		return float64(r.Utime.Sec+r.Stime.Sec) + float64(r.Utime.Usec+r.Stime.Usec)/1e6
+	}
+	deleted := r.stats.deleted.Load()
+	if deleted != uint64(b.N*limit) {
+		b.Fatalf("deleted=%d want=%d", deleted, b.N*limit)
+	}
+	b.ReportMetric(float64(deleted)/b.Elapsed().Seconds(), "deletes/s")
+	b.ReportMetric(float64(r.stats.examined.Load())/b.Elapsed().Seconds(), "examined/s")
+	b.ReportMetric((cpu(after)-cpu(before))/float64(deleted), "cpu-s/delete")
+	b.ReportMetric(float64(end.CompactionWriteBytes-metrics.CompactionWriteBytes), "compaction-bytes")
+	b.ReportMetric(float64(notifications), "notifications")
 }

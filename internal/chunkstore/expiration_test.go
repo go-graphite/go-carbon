@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,6 +66,9 @@ func TestExpirationBatchMatchesAdministrativeDelete(t *testing.T) {
 	m, err := s.Create(ctx, records[0].MetricConfig)
 	if err != nil || m.ID == records[0].ID {
 		t.Fatalf("recreated %+v: %v", m, err)
+	}
+	if _, err := s.DeleteBatchIfUnchanged(ctx, make([]Metadata, 513)); err == nil {
+		t.Fatal("oversized delete batch accepted")
 	}
 	if _, err := s.DeleteBatchIfUnchanged(ctx, []Metadata{m, m}); err == nil {
 		t.Fatal("duplicate accepted")
@@ -155,5 +159,71 @@ func TestActivityBackfillOnlyLowersUnchangedConversion(t *testing.T) {
 	}
 	if _, err := s.BackfillActivity(ctx, baseline, end, end.Add(time.Hour), true); err == nil {
 		t.Fatal("outside window accepted")
+	}
+}
+
+func TestExpirationBatchesConcurrentWrites(t *testing.T) {
+	s, now := openTestStore(t, t.TempDir(), Options{SyncInterval: time.Hour, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	defer closeTestStore(t, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const count = 64
+	for round := range 8 {
+		expected := make([]Metadata, count)
+		for i := range expected {
+			expected[i] = createTestMetric(t, s, fmt.Sprintf("r%d.metric.%d", round, i))
+		}
+		start := make(chan struct{})
+		failures := make(chan error, count)
+		var workers sync.WaitGroup
+		for first := 0; first < count; first += 16 {
+			workers.Go(func() {
+				<-start
+				outcomes, err := s.DeleteBatchIfUnchanged(ctx, expected[first:first+16])
+				if err != nil {
+					failures <- err
+					return
+				}
+				for _, err := range outcomes {
+					if err != nil && !errors.Is(err, ErrConflict) {
+						failures <- err
+					}
+				}
+			})
+		}
+		for i := 0; i < count; i += 2 {
+			workers.Go(func() {
+				<-start
+				m := expected[i]
+				input := []Point{{Timestamp: int64(now), Value: 7}}
+				if err := s.UpdateMany(ctx, m.Name, input); errors.Is(err, ErrNotFound) {
+					if _, err := s.Create(ctx, m.MetricConfig); err != nil {
+						failures <- err
+						return
+					}
+					if err := s.UpdateMany(ctx, m.Name, input); err != nil {
+						failures <- err
+					}
+				} else if err != nil {
+					failures <- err
+				}
+			})
+		}
+		close(start)
+		workers.Wait()
+		close(failures)
+		for err := range failures {
+			t.Fatal(err)
+		}
+		for i, m := range expected {
+			snap, err := s.Snapshot(ctx, m.Name)
+			if i%2 != 0 {
+				if !errors.Is(err, ErrNotFound) {
+					t.Fatalf("undeleted metric %s: %v", m.Name, err)
+				}
+			} else if err != nil || len(snap.Archives[0].Points) != 1 || snap.Archives[0].Points[0].Value != 7 {
+				t.Fatalf("lost concurrent write %s: %+v %v", m.Name, snap, err)
+			}
+		}
 	}
 }

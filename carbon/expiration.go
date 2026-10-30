@@ -17,6 +17,7 @@ import (
 )
 
 const expirationPageSize = 1024
+const expirationDeleteBatchSize = 512
 
 type expirationStore interface {
 	ListPage(context.Context, string, string, int) ([]store.Metadata, error)
@@ -56,22 +57,22 @@ func (s *expirationStats) Stat(send helper.StatCallback) {
 // An expirer owns one immutable policy. Reload and shutdown join its worker
 // before replacing the policy or closing the store and catalog refresher.
 type metricExpirer struct {
-	db                            expirationStore
-	rules                         persister.WhisperExpirationRules
-	expiration                    time.Duration
-	interval                      time.Duration
-	rate                          int
-	now                           func() time.Time
-	pending                       func(string) bool
-	notify                        func()
-	stats                         *expirationStats
-	cancel                        context.CancelFunc
-	done                          chan struct{}
-	restored                      <-chan struct{}
-	dryRun                        bool
-	deleteRate, maxDeletes, maxL0 int
-	maxDebt                       uint64
-	ruleStats                     []*expirationRuleStats
+	db                                           expirationStore
+	rules                                        persister.WhisperExpirationRules
+	expiration                                   time.Duration
+	interval                                     time.Duration
+	rate                                         int
+	now                                          func() time.Time
+	pending                                      func(string) bool
+	notify                                       func()
+	stats                                        *expirationStats
+	cancel                                       context.CancelFunc
+	done                                         chan struct{}
+	restored                                     <-chan struct{}
+	dryRun                                       bool
+	deleteRate, deleteWorkers, maxDeletes, maxL0 int
+	maxDebt                                      uint64
+	ruleStats                                    []*expirationRuleStats
 }
 
 func validateExpirationConfig(cfg *Config) error {
@@ -83,6 +84,9 @@ func validateExpirationConfig(cfg *Config) error {
 	}
 	if cfg.Whisper.StoreExpirationScanRate <= 0 {
 		return errors.New("whisper.store-expiration-scan-rate must be positive")
+	}
+	if cfg.Whisper.StoreExpirationDeleteWorkers <= 0 {
+		return errors.New("whisper.store-expiration-delete-workers must be positive")
 	}
 	if cfg.Whisper.StoreExpirationDeleteRate <= 0 || cfg.Whisper.StoreExpirationMaxDeletes <= 0 || cfg.Whisper.StoreExpirationMaxL0 <= 0 || cfg.Whisper.StoreExpirationMaxDebt <= 0 {
 		return errors.New("store expiration requires positive delete-rate, max-deletes, max-l0-sublevels and max-compaction-debt")
@@ -112,7 +116,7 @@ func (app *App) startExpiration() {
 		db: app.MetricStore, rules: cfg.ExpirationRules,
 		expiration: cfg.StoreExpiration.Value(), interval: cfg.StoreExpirationCheckInterval.Value(),
 		rate: cfg.StoreExpirationScanRate, now: time.Now,
-		dryRun: cfg.StoreExpirationDryRun, deleteRate: cfg.StoreExpirationDeleteRate,
+		dryRun: cfg.StoreExpirationDryRun, deleteRate: cfg.StoreExpirationDeleteRate, deleteWorkers: cfg.StoreExpirationDeleteWorkers,
 		maxDeletes: cfg.StoreExpirationMaxDeletes, maxL0: cfg.StoreExpirationMaxL0, maxDebt: uint64(cfg.StoreExpirationMaxDebt),
 		pending:  core.Has,
 		stats:    app.expirationStats,
@@ -208,7 +212,97 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 	}()
 	r.setupRuleStats()
 	reports = make([]expirationReport, len(r.ruleStats))
-	deletesPaused := false
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var deletesPaused atomic.Bool
+	var reserved atomic.Int64
+	var deleteCount atomic.Uint64
+	var work, workers sync.WaitGroup
+	var failure error
+	var failureOnce sync.Once
+	var notifyMu sync.Mutex
+	workerCount := max(r.deleteWorkers, 1)
+	if r.dryRun {
+		workerCount = 0
+	}
+	workerReports := make([][]expirationReport, workerCount)
+	jobs := make(chan expirationBatch)
+	for i := range workerCount {
+		workerReports[i] = make([]expirationReport, len(reports))
+		workers.Go(func() {
+			for batch := range jobs {
+				func() {
+					defer work.Done()
+					// Reservations include queued candidates and successful deletes.
+					// Conflicts and pending writes return their slots to the scan.
+					defer func() { reserved.Add(-int64(len(batch.metrics))) }()
+					if ctx.Err() != nil {
+						return
+					}
+					if !deletesPaused.Load() && r.expirationPressure() {
+						deletesPaused.Store(true)
+					}
+					if deletesPaused.Load() {
+						r.stats.guarded.Add(uint64(len(batch.metrics)))
+						return
+					}
+					n := 0
+					for j, m := range batch.metrics {
+						if r.pending != nil && r.pending(m.Name) {
+							r.stats.pending.Add(1)
+							r.ruleStats[batch.indexes[j]].kept.Add(1)
+							workerReports[i][batch.indexes[j]].kept++
+							continue
+						}
+						batch.metrics[n], batch.indexes[n] = m, batch.indexes[j]
+						n++
+					}
+					outcomes, err := r.deleteBatch(ctx, batch.metrics[:n])
+					notified := false
+					for j, outcome := range outcomes {
+						idx := batch.indexes[j]
+						if errors.Is(outcome, store.ErrConflict) || errors.Is(outcome, store.ErrNotFound) {
+							r.stats.conflicts.Add(1)
+							r.ruleStats[idx].kept.Add(1)
+							workerReports[i][idx].kept++
+						} else if outcome != nil {
+							err = errors.Join(err, outcome)
+						} else {
+							deleteCount.Add(1)
+							reserved.Add(1)
+							r.stats.deleted.Add(1)
+							r.ruleStats[idx].expired.Add(1)
+							workerReports[i][idx].expired++
+							notified = true
+						}
+					}
+					if notified && r.notify != nil {
+						notifyMu.Lock()
+						r.notify()
+						notifyMu.Unlock()
+					}
+					if err != nil {
+						failureOnce.Do(func() { failure = err; cancel() })
+					}
+				}()
+			}
+		})
+	}
+	// Join before flushing, publishing rule reports, or closing the store.
+	defer func() {
+		close(jobs)
+		workers.Wait()
+		deleted = deleteCount.Load()
+		for _, local := range workerReports {
+			for i := range reports {
+				reports[i].kept += local[i].kept
+				reports[i].expired += local[i].expired
+			}
+		}
+		if failure != nil {
+			err = failure
+		}
+	}()
 	scanBudget := expirationBudget{rate: r.rate}
 	deleteBudget := expirationBudget{rate: r.deleteRate}
 	now := r.now()
@@ -216,73 +310,23 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 		if err := scanBudget.wait(ctx, len(page)); err != nil {
 			return err
 		}
-		candidates := make([]store.Metadata, 0, 128)
-		indexes := make([]int, 0, 128)
+		batch := expirationBatch{}
 		flush := func() error {
-			if len(candidates) == 0 {
+			if len(batch.metrics) == 0 {
 				return nil
 			}
-			if err := deleteBudget.wait(ctx, len(candidates)); err != nil {
+			if err := deleteBudget.wait(ctx, len(batch.metrics)); err != nil {
 				return err
 			}
-			// Check after pacing and immediately before acquiring writer locks.
-			if pressure, ok := r.db.(interface{ ExpirationPressure() (int64, uint64, bool) }); ok {
-				l0, debt, stalled := pressure.ExpirationPressure()
-				if stalled || (r.maxL0 > 0 && l0 >= int64(r.maxL0)) || (r.maxDebt > 0 && debt >= r.maxDebt) {
-					r.stats.guarded.Add(uint64(len(candidates)))
-					deletesPaused = true
-					candidates, indexes = candidates[:0], indexes[:0]
-					return nil
-				}
+			work.Add(1)
+			select {
+			case jobs <- batch:
+				batch = expirationBatch{}
+				return nil
+			case <-ctx.Done():
+				work.Done()
+				return ctx.Err()
 			}
-			// Cache state can change while a batch waits for its write budget.
-			n := 0
-			for i, m := range candidates {
-				if r.pending != nil && r.pending(m.Name) {
-					r.stats.pending.Add(1)
-					r.ruleStats[indexes[i]].kept.Add(1)
-					reports[indexes[i]].kept++
-					continue
-				}
-				candidates[n], indexes[n] = m, indexes[i]
-				n++
-			}
-			candidates, indexes = candidates[:n], indexes[:n]
-			var outcomes []error
-			if batch, ok := r.db.(interface {
-				DeleteBatchIfUnchanged(context.Context, []store.Metadata) ([]error, error)
-			}); ok {
-				var err error
-				outcomes, err = batch.DeleteBatchIfUnchanged(ctx, candidates)
-				if err != nil {
-					return err
-				}
-			} else {
-				outcomes = make([]error, len(candidates))
-				for i, m := range candidates {
-					outcomes[i] = r.db.DeleteIfUnchanged(ctx, m.Name, m)
-				}
-			}
-			for i, err := range outcomes {
-				if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
-					r.stats.conflicts.Add(1)
-					r.ruleStats[indexes[i]].kept.Add(1)
-					reports[indexes[i]].kept++
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				deleted++
-				r.stats.deleted.Add(1)
-				r.ruleStats[indexes[i]].expired.Add(1)
-				reports[indexes[i]].expired++
-				if r.notify != nil {
-					r.notify()
-				}
-			}
-			candidates, indexes = candidates[:0], indexes[:0]
-			return nil
 		}
 		for _, m := range page {
 			if err := ctx.Err(); err != nil {
@@ -335,17 +379,31 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 			if r.dryRun {
 				continue
 			}
-			if deletesPaused {
+			if deletesPaused.Load() {
 				r.stats.guarded.Add(1)
 				continue
 			}
-			if r.maxDeletes > 0 && deleted+uint64(len(candidates)) >= uint64(r.maxDeletes) {
-				r.stats.limited.Add(1)
-				continue
+			if r.maxDeletes > 0 && reserved.Load() >= int64(r.maxDeletes) {
+				if err := flush(); err != nil {
+					return err
+				}
+				work.Wait()
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if reserved.Load() >= int64(r.maxDeletes) {
+					r.stats.limited.Add(1)
+					continue
+				}
 			}
-			candidates = append(candidates, m)
-			indexes = append(indexes, idx)
-			if len(candidates) == 128 {
+			reserved.Add(1)
+			if batch.metrics == nil {
+				batch.metrics = make([]store.Metadata, 0, expirationDeleteBatchSize)
+				batch.indexes = make([]int, 0, expirationDeleteBatchSize)
+			}
+			batch.metrics = append(batch.metrics, m)
+			batch.indexes = append(batch.indexes, idx)
+			if len(batch.metrics) == expirationDeleteBatchSize {
 				if err := flush(); err != nil {
 					return err
 				}
@@ -353,6 +411,43 @@ func (r *metricExpirer) sweep(ctx context.Context) (err error) {
 		}
 		return flush()
 	})
+}
+
+type expirationBatch struct {
+	metrics []store.Metadata
+	indexes []int
+}
+
+func (r *metricExpirer) expirationPressure() bool {
+	pressure, ok := r.db.(interface{ ExpirationPressure() (int64, uint64, bool) })
+	if !ok {
+		return false
+	}
+	l0, debt, stalled := pressure.ExpirationPressure()
+	return stalled || r.maxL0 > 0 && l0 >= int64(r.maxL0) || r.maxDebt > 0 && debt >= r.maxDebt
+}
+
+func (r *metricExpirer) deleteBatch(ctx context.Context, candidates []store.Metadata) ([]error, error) {
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	if batch, ok := r.db.(interface {
+		DeleteBatchIfUnchanged(context.Context, []store.Metadata) ([]error, error)
+	}); ok {
+		return batch.DeleteBatchIfUnchanged(ctx, candidates)
+	}
+	outcomes := make([]error, 0, len(candidates))
+	for _, m := range candidates {
+		if err := ctx.Err(); err != nil {
+			return outcomes, err
+		}
+		outcome := r.db.DeleteIfUnchanged(ctx, m.Name, m)
+		outcomes = append(outcomes, outcome)
+		if outcome != nil && !errors.Is(outcome, store.ErrConflict) && !errors.Is(outcome, store.ErrNotFound) {
+			return outcomes, nil
+		}
+	}
+	return outcomes, nil
 }
 
 // Page-sized reservations amortize timer wakeups. Processing time pays down

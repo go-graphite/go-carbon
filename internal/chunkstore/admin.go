@@ -113,12 +113,18 @@ func (s *Store) ListPage(ctx context.Context, prefix, after string, limit int) (
 		return nil, fmt.Errorf("open catalog page: %w", err)
 	}
 	defer it.Close()
+	// Reuse the revision iterator while deletes change the live memtables.
+	reader := transferReader{reader: snap}
+	defer reader.close()
 	result := make([]Metadata, 0, limit)
 	for it.First(); it.Valid() && len(result) < limit; it.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		m, err := catalogMetadata(snap, string(it.Key()[2:]), it.Value())
+		m, err := decodeCatalog(string(it.Key()[2:]), it.Value())
+		if err == nil {
+			m, err = reader.revision(m)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -141,22 +147,6 @@ func catalogPageBounds(prefix, after string) ([]byte, []byte) {
 		lower = append(catalogKey(after), 0)
 	}
 	return lower, prefixEnd(catalogKey(prefix))
-}
-
-func catalogMetadata(reader pebble.Reader, name string, value []byte) (Metadata, error) {
-	m, err := decodeCatalog(name, value)
-	if err != nil {
-		return Metadata{}, fmt.Errorf("decode catalog: %w", err)
-	}
-	v, closer, err := reader.Get(revisionKey(m))
-	if err != nil {
-		return Metadata{}, fmt.Errorf("read revision: %w", err)
-	}
-	defer closer.Close()
-	if err := decodeRevision(v, &m); err != nil {
-		return Metadata{}, err
-	}
-	return m, nil
 }
 
 func (s *Store) Delete(ctx context.Context, name string) error { return s.deleteMetric(ctx, name, nil) }
