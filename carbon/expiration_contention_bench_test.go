@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -41,6 +43,28 @@ func BenchmarkExpirationContention(b *testing.B) {
 			if err := os.CopyFS(dir, os.DirFS(source)); err != nil {
 				b.Fatal(err)
 			}
+			warm := os.Getenv("EXPIRATION_CONTENTION_WARM") == "1"
+			if warm {
+				// Read file pages before opening the store. The active working
+				// set is warmed below, as for an already running persister.
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					b.Fatal(err)
+				}
+				for _, entry := range entries {
+					if !strings.HasSuffix(entry.Name(), ".sst") {
+						continue
+					}
+					file, err := os.Open(filepath.Join(dir, entry.Name()))
+					if err != nil {
+						b.Fatal(err)
+					}
+					_, readErr := io.Copy(io.Discard, file)
+					if err := errors.Join(readErr, file.Close()); err != nil {
+						b.Fatal(err)
+					}
+				}
+			}
 			const base = 1790000000
 			ctx := context.Background()
 			opened := time.Now()
@@ -58,11 +82,22 @@ func BenchmarkExpirationContention(b *testing.B) {
 			if err != nil || high < 4096 {
 				b.Fatalf("need >=4096 names: %d %v", high, err)
 			}
-			b.Logf("names=%d cache=%dMiB memtable=%dMiB compactors=%d l0-concurrency=%d", high, options.CacheSize>>20, options.MemTableSize>>20, options.CompactionWorkers, options.L0CompactionConcurrency)
+			b.Logf("names=%d warm=%v cache=%dMiB memtable=%dMiB compactors=%d l0-concurrency=%d", high, warm, options.CacheSize>>20, options.MemTableSize>>20, options.CompactionWorkers, options.L0CompactionConcurrency)
 			names := make([]string, min(high/4, 8192))
 			for i := range names {
 				id := uint64(i+1) * 4
 				names[i] = fmt.Sprintf("services.api.pods.pod%010d.requests", id*15485863%4294967296)
+			}
+			if warm {
+				for _, name := range names {
+					until := int(clock().Unix())
+					if err := db.UpdateMany(ctx, name, []store.Point{{Timestamp: int64(until) - 1, Value: 42}}); err != nil {
+						b.Fatal(err)
+					}
+					if _, err := db.Fetch(ctx, name, until-300, until); err != nil {
+						b.Fatal(err)
+					}
+				}
 			}
 			r := &metricExpirer{db: db, now: func() time.Time { return time.Unix(base, 0) }, expiration: 24 * time.Hour, rate: 1_000_000, deleteRate: 1_000_000, deleteWorkers: count, stats: &expirationStats{}}
 			type job struct {
@@ -84,7 +119,7 @@ func BenchmarkExpirationContention(b *testing.B) {
 							name := names[j.n%len(names)]
 							var err error
 							if write {
-								err = db.UpdateMany(ctx, name, []store.Point{{Timestamp: base + int64(j.n/len(names)), Value: float64(j.n)}})
+								err = db.UpdateMany(ctx, name, []store.Point{{Timestamp: base + int64(j.at.Sub(opened).Seconds()), Value: float64(j.n)}})
 								written.Add(1)
 							} else {
 								until := int(clock().Unix())
