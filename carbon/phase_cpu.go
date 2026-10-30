@@ -44,8 +44,21 @@ func (app *App) startPhaseCPU() error {
 		p.Stop()
 		return err
 	}
-	app.phaseProfiler = p
+	app.phaseProfiler, app.phaseInterval, app.phaseWindow = p, interval, phaseCPUWindow(app.Config)
 	return nil
+}
+
+// reloadPhaseCPU applies changed sampler settings on SIGHUP. Phase labels are
+// always set, so a sampler started by a reload attributes CPU from its first
+// window; its counters start again from zero.
+func (app *App) reloadPhaseCPU() error {
+	interval, window := phaseCPUInterval(app.Config), phaseCPUWindow(app.Config)
+	if app.phaseProfiler == nil && interval == 0 ||
+		app.phaseProfiler != nil && interval == app.phaseInterval && window == app.phaseWindow {
+		return nil
+	}
+	app.stopPhaseCPU()
+	return app.startPhaseCPU()
 }
 
 func (app *App) stopPhaseCPU() {
