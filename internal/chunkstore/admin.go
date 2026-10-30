@@ -93,6 +93,16 @@ func (s *Store) List(ctx context.Context, prefix string) ([]Metadata, error) {
 
 // ListPage returns a snapshot-consistent catalog page, exclusive of after.
 func (s *Store) ListPage(ctx context.Context, prefix, after string, limit int) ([]Metadata, error) {
+	return s.listPage(ctx, prefix, after, limit, true)
+}
+
+// ListCatalogPage lists names and policies for discovery, without loading
+// mutable revisions or activity times. Use ListPage for conditional mutations.
+func (s *Store) ListCatalogPage(ctx context.Context, prefix, after string, limit int) ([]Metadata, error) {
+	return s.listPage(ctx, prefix, after, limit, false)
+}
+
+func (s *Store) listPage(ctx context.Context, prefix, after string, limit int, revisions bool) ([]Metadata, error) {
 	if err := s.fileOwnershipError(); err != nil {
 		return nil, err
 	}
@@ -122,7 +132,7 @@ func (s *Store) ListPage(ctx context.Context, prefix, after string, limit int) (
 			return nil, err
 		}
 		m, err := decodeCatalog(string(it.Key()[2:]), it.Value())
-		if err == nil {
+		if err == nil && revisions {
 			m, err = reader.revision(m)
 		}
 		if err != nil {

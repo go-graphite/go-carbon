@@ -210,8 +210,8 @@ type Store struct {
 	pendingSync                    atomic.Bool
 	syncStop                       chan struct{}
 	syncDone                       chan struct{}
-	// mu serializes metric ID allocation from the catalog sequence. Everything
-	// else that touches one metric is covered by its metricMu stripe.
+	// mu serializes metric ID allocation from the catalog sequence. Mutations
+	// of one metric hold its metricMu stripe; readers use consistent read views.
 	mu                 sync.Mutex
 	metricMu           [metricStripes]sync.Mutex
 	metadataCache      [metricStripes]metadataRing
@@ -1270,17 +1270,28 @@ func (s *Store) Metadata(ctx context.Context, name string) (Metadata, error) {
 	if !s.catalogMembership.mayContain(name) {
 		return Metadata{}, ErrNotFound
 	}
-	unlock := s.lockMetric(name)
-	defer unlock()
-	// Holding the stripe excludes mutations, so a cached state is the latest
-	// committed one, and so is what metadataLocked reads.
-	if state, m := s.lockedState(name); state != nil {
-		return m, s.checkFileOwnership(m)
+	// Like Fetch, read at one committed view without waiting for a writer's
+	// stripe. The epoch prevents a cached state newer than that view from
+	// being used, and prevents a concurrent mutation from accepting a fill.
+	cache := s.stateCache
+	var stripe, epoch uint64
+	if cache != nil {
+		stripe = s.metricStripe(name)
+		epoch = cache.epoch(stripe)
 	}
-	m, err := s.metadataLocked(name)
+	view := s.db.NewReadView()
+	defer view.Close()
+	if cache != nil {
+		if state := cache.get(stripe, name, epoch); state != nil {
+			m := state.meta
+			m.MetricConfig = cloneConfig(m.MetricConfig)
+			return m, s.checkFileOwnership(m)
+		}
+	}
+	m, err := metadataFrom(view, name)
 	if err == nil {
-		if c := s.stateCache; c != nil {
-			c.fillLocked(s.metricStripe(name), name, newMetricState(m).seal())
+		if cache != nil {
+			cache.fill(stripe, name, epoch, newMetricState(m).seal())
 		}
 		err = s.checkFileOwnership(m)
 	}

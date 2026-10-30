@@ -11,6 +11,12 @@ conversion) and the file-list cache serve glob expansion. In incremental mode
 the index covers both converted and unconverted metrics; the scan walks the
 source tree and the catalog.
 
+Catalog discovery uses `ListCatalogPage`: names, ownership and retention policies
+come from catalog records, without reading each metric's mutable revision/activity
+record. `ListPage` retains those reads for expiration and administrative callers
+that need an exact conditional-mutation token. Rebuilds construct a private index
+and publish it atomically; queries keep using the previous generation meanwhile.
+
 ## Render
 
 `carbonserver.fetchFromDisk` (`carbonserver/fetchfromdisk.go`):
@@ -21,9 +27,10 @@ OriginalReadGuard(metric)                       shared stripe of fileReadMu
    ▼
 Store.Fetch(name, from, until)
    ├─ catalogMembership.mayContain(name)?      in-memory filter; "no" = not in store
-   ├─ NewSnapshot                               consistent view for the whole read
-   ├─ metadataFrom(snapshot)                    m/<name>, r|id|gen
-   └─ ContinuationCodec.Fetch(read-only continuationIO over the snapshot)
+   ├─ capture metadata-cache shard epoch
+   ├─ NewReadView                               consistent view for the whole read
+   ├─ cached state or metadataFrom(view)        m/<name>, r|id|gen
+   └─ ContinuationCodec.Fetch(read-only continuationIO over the view)
         ├─ whisper.OpenWithOptions(main file)   manifest + header pages
         └─ go-whisper Fetch(from, until)
              └─ ReadStorageBlock per block in range
@@ -41,9 +48,11 @@ Store.Fetch(name, from, until)
   originals, and a persister confirms popped points under the exclusive
   `SharedWriteGuard`. A reader never misses a batch that is between the cache
   and the store.
-- **Snapshots** are released by a background worker
-  (`startSnapshotRelease`), so request goroutines do not pay for Pebble's
-  snapshot list maintenance.
+- **Read views** retain Pebble's read state and visible sequence without
+  registering a snapshot under its DB mutex. Metadata-cache epochs prevent a
+  read from using state committed after its view or filling stale state after a
+  concurrent mutation. Fetch and info metadata reads do not take the metric
+  writer stripes; state-cache shard locks cover only in-memory bookkeeping.
 
 ## What a fetch reads
 
@@ -70,6 +79,9 @@ Store.Fetch(name, from, until)
 4. **Memtable range tombstones.** Every new range tombstone resets the
    memtable's fragment cache and serializes readers behind re-fragmentation.
    The write path avoids writing them ([write-path.md](write-path.md#deletes-inside-an-update)).
+   Expiration streams point deletes of existing chunk, continuation and bucket
+   keys into its atomic batch, so an expired backlog does not repeatedly reset
+   that shared cache. Conditional checks and commit still hold writer stripes.
 5. **Persister reads.** Most read traffic on a busy host comes from the
    persister itself (headers, descriptors, predecessor groups on every
    update). Render latency suffers through contention for the same caches and

@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/cockroachdb/pebble"
@@ -63,7 +64,7 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 			results[i] = ErrConflict
 			continue
 		}
-		if err := s.appendMetricDelete(ctx, b, m); err != nil {
+		if err := s.appendExpirationDelete(ctx, b, &reader, m); err != nil {
 			return nil, err
 		}
 		removed = append(removed, m)
@@ -95,6 +96,47 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 		s.catalogChanged(m.Name)
 	}
 	return results, nil
+}
+
+// Range tombstones invalidate Pebble's memtable-wide fragment cache on every
+// commit. Readers then wait for all of that memtable's tombstones to fragment,
+// even when they read unrelated metrics. Expiration visits the existing keys
+// instead; the stripes exclude writers until these point deletes commit.
+func (s *Store) appendExpirationDelete(ctx context.Context, b *pebble.Batch, reader *transferReader, m Metadata) error {
+	if err := b.Delete(catalogKey(m.Name), nil); err != nil {
+		return err
+	}
+	if err := b.Delete(revisionKey(m), nil); err != nil {
+		return err
+	}
+	s.canonicalRun(m.ID).Clear(m.ID)
+	remove := func(key, _ []byte) error { return b.Delete(key, nil) }
+	// Include older generations, as administrative deletion does.
+	if err := reader.visit(ctx, &reader.chunks, []byte{'c'}, []byte{'d'}, chunkPrefix(m.ID, 0)[:9], remove); err != nil {
+		return err
+	}
+	if !m.Continuation {
+		return nil
+	}
+	if s.timeBuckets {
+		dropper, ok := s.continuation.(ContinuationDropper)
+		if !ok {
+			return fmt.Errorf("%w: continuation codec cannot drop time-partitioned keys", ErrFormat)
+		}
+		io := expirationContinuationIO{s.newContinuationIO(ctx, reader.reader, b, m)}
+		if err := dropper.Drop(ctx, io); err != nil {
+			return err
+		}
+	}
+	return reader.visit(ctx, &reader.continuation, []byte{'u'}, []byte{'v'}, continuationPrefix(m.ID, 0)[:9], remove)
+}
+
+// Drop only reads committed keys: this delete batch creates no continuation
+// data. Visit can stream point deletes directly into the separate batch.
+type expirationContinuationIO struct{ *continuationIO }
+
+func (io expirationContinuationIO) DeletePrefix(prefix []byte) error {
+	return io.Visit(prefix, func(key, _ []byte) error { return io.Delete(key) })
 }
 
 // ExpirationPressure samples only the pressure needed by maintenance work.

@@ -181,7 +181,7 @@ func (listener *CarbonserverListener) loadMetricStoreCatalog(metricStore *store.
 func (listener *CarbonserverListener) loadMetricStoreCatalogPages(metricStore *store.Store, files []string, details map[string]*protov3.MetricDetails, trieIdx *trieIndex, seenPaths map[string]struct{}) ([]string, map[string]*protov3.MetricDetails, *trieIndex, uint64, error) {
 	var metricsKnown uint64
 	var indexErr error
-	err := store.EachPage(context.Background(), metricStore.ListPage, "", metricStoreCatalogPageSize, func(page []store.Metadata) error {
+	err := store.EachPage(context.Background(), metricStore.ListCatalogPage, "", metricStoreCatalogPageSize, func(page []store.Metadata) error {
 		for _, metadata := range page {
 			files, indexErr = listener.addMetricStoreCatalogEntry(metadata, files, details, trieIdx, seenPaths)
 			if indexErr != nil {
