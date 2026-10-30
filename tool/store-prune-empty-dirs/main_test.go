@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -247,6 +248,71 @@ func TestGateChangesAndEndpointFailuresStopBeforeMoreRemoval(t *testing.T) {
 				t.Fatal("invalid endpoint allowed removal")
 			}
 		})
+	}
+}
+
+func TestEndpointTimeoutsPauseRemovalUntilTheGateAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		maxTimeouts int
+		ok          bool
+	}{{"tolerated", 3, true}, {"exhausted", 1, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if n := requests.Add(1); n == 2 || n == 3 {
+					<-r.Context().Done()
+					return
+				}
+				fmt.Fprint(w, `{"storage":{"migration":{"phase":"shared","in_flight":0}}}`)
+			}))
+			defer server.Close()
+			root := t.TempDir()
+			for i := range 40 {
+				makeDir(t, filepath.Join(root, fmt.Sprint(i), "x"))
+			}
+			var out bytes.Buffer
+			err := run(context.Background(), options{root: root, admin: server.URL, metrics: server.URL, dirsPerSecond: 200,
+				interval: 100 * time.Millisecond, endpointTimeout: 50 * time.Millisecond, maxTimeouts: tc.maxTimeouts}, &out)
+			entries, readErr := os.ReadDir(root)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if tc.ok {
+				if err != nil || len(entries) != 0 || !strings.Contains(out.String(), "paused=1/3") {
+					t.Fatalf("err=%v left=%d output:\n%s", err, len(entries), out.String())
+				}
+				return
+			}
+			if !isTimeout(err) || len(entries) == 0 {
+				t.Fatalf("err=%v left=%d: timeouts beyond the limit must stop the walk", err, len(entries))
+			}
+		})
+	}
+}
+
+func TestPauseHoldsUntilResumedOrCancelled(t *testing.T) {
+	var p pause
+	if err := p.wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p.set(true)
+	done := make(chan error, 1)
+	go func() { done <- p.wait(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatal("paused wait returned", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	p.set(false)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	p.set(true)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(errStopFile)
+	if err := p.wait(ctx); !errors.Is(err, errStopFile) {
+		t.Fatal("cancel did not release a paused wait", err)
 	}
 }
 
