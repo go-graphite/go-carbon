@@ -81,6 +81,7 @@ type storeStatsView struct {
 	compactionKinds                                                         store.CompactionKinds
 	fs                                                                      store.FSStats
 	importFolds                                                             []importFoldCount
+	fetch                                                                   store.FetchTimings
 }
 
 // importFoldCount is one result of whisperio's import sidecar folds.
@@ -239,6 +240,8 @@ var (
 	pebbleCompactionBypassesDesc = prometheus.NewDesc("pebble_compaction_pacer_bypasses_total", "Compaction pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
 	pebbleFSOpsDesc              = prometheus.NewDesc("pebble_fs_ops_total", "Store filesystem operations by operation and file kind. Table writes cover flushes and compactions; table reads cover compactions and point reads, which Pebble does not tell apart.", []string{"op", "kind"}, nil)
 	pebbleFSBytesDesc            = prometheus.NewDesc("pebble_fs_bytes_total", "Store filesystem bytes read and written by file kind.", []string{"op", "kind"}, nil)
+	pebbleFetchStageSecondsDesc  = prometheus.NewDesc("pebble_fetch_stage_seconds_total", "Storage fetch wall time by stage; iterator_close covers the final shared continuation iterator and is included in body. Fetches without a read view are excluded.", []string{"stage"}, nil)
+	pebbleFetchStageCallsDesc    = prometheus.NewDesc("pebble_fetch_stage_calls_total", "Measured storage fetch stage calls; iterator_close counts only final shared continuation iterators.", []string{"stage"}, nil)
 )
 
 // storeMigrationSidecarFoldsDesc counts converted files with an out-of-order
@@ -292,6 +295,8 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pebbleCompactionBypassesDesc
 	ch <- pebbleFSOpsDesc
 	ch <- pebbleFSBytesDesc
+	ch <- pebbleFetchStageSecondsDesc
+	ch <- pebbleFetchStageCallsDesc
 	ch <- storeMigrationSidecarFoldsDesc
 	ch <- persisterStageSecondsDesc
 	ch <- persisterStageCallsDesc
@@ -351,7 +356,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			relayout: db.RelayoutStats(), rangeDeletes: st.ContinuationRangeDeletes, invalidPoints: whisperio.InvalidContinuationPoints(), skippedBlockDeletes: whisperio.SkippedBlockDeletes(), unallocatedGroupSkips: whisperio.UnallocatedGroupSkips(), compactOnceRunning: st.CompactOnceRunning,
 			purgeFound: st.PurgeFound, purgeRemoved: st.PurgeRemoved, purgeRunning: st.PurgeRunning,
 			blockCacheBytes: st.CacheBytes, tableCacheEntries: st.TableCacheEntries, stateCache: st.StateCache,
-			compactionKinds: st.CompactionKinds, fs: st.FS, importFolds: importSidecarFoldCounts(),
+			compactionKinds: st.CompactionKinds, fs: st.FS, importFolds: importSidecarFoldCounts(), fetch: db.FetchTimings(),
 		}
 	}
 	for _, spec := range migrationMetricSpecs {
@@ -371,6 +376,13 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(persisterUpdateMaxDesc, prometheus.GaugeValue, stagetime.TakeUpdateMax().Seconds())
 	}
 	if s.store {
+		for _, stage := range []struct {
+			name   string
+			timing store.FetchTiming
+		}{{"body", s.stats.fetch.Body}, {"read_view_close", s.stats.fetch.ReadViewClose}, {"iterator_close", s.stats.fetch.IteratorClose}} {
+			ch <- prometheus.MustNewConstMetric(pebbleFetchStageSecondsDesc, prometheus.CounterValue, float64(stage.timing.Nanoseconds)/1e9, stage.name)
+			ch <- prometheus.MustNewConstMetric(pebbleFetchStageCallsDesc, prometheus.CounterValue, float64(stage.timing.Calls), stage.name)
+		}
 		for reason, count := range s.stats.compactionPacerBypasses {
 			ch <- prometheus.MustNewConstMetric(pebbleCompactionBypassesDesc, prometheus.CounterValue, float64(count), reason)
 		}

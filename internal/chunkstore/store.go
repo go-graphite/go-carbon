@@ -173,6 +173,7 @@ type Store struct {
 	compactOnce          compactOnceState
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
+	fetchTimings        fetchTimingCounters
 	// updatePointLookups starts as the Options field; see SetUpdatePointLookups.
 	updatePointLookups atomic.Bool
 	// levelBase and levelMultiplier size the LSM levels; see levelTargets.
