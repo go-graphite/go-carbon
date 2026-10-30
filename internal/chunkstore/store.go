@@ -228,6 +228,7 @@ type Store struct {
 	stallDuration      time.Duration
 	stallSince         time.Time
 	stallReason        string
+	expirationPressure expirationPressureCache
 	reconcileCompared  atomic.Uint64
 	reconcileWritten   atomic.Uint64
 	reconcileDeleted   atomic.Uint64

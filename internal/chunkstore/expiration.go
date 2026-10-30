@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -261,12 +263,49 @@ func (io expirationContinuationIO) DeletePrefix(prefix []byte) error {
 	return io.walk.deleteExpirationPrefix(io.ctx, io.batch, slot, lower, upper, io.key(prefix))
 }
 
-// ExpirationPressure samples only the pressure needed by maintenance work.
-// Full Stats also gathers filesystem and continuation accounting.
-func (s *Store) ExpirationPressure() (l0 int64, debt uint64, stalled bool) {
-	m := s.db.Metrics()
+// expirationPressureCache shares the relatively expensive database metrics
+// sample across every expiration worker. Its period is fixed before use; zero
+// selects the default. Write stalls are checked separately on every call.
+type expirationPressureCache struct {
+	mu      sync.Mutex
+	period  time.Duration
+	sampled time.Time
+	l0      int64
+	debt    uint64
+}
+
+const expirationPressurePeriod = time.Second
+
+func (c *expirationPressureCache) load(now time.Time, sample func() (int64, uint64)) (int64, uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	period := c.period
+	if period <= 0 {
+		period = expirationPressurePeriod
+	}
+	if c.sampled.IsZero() || now.Sub(c.sampled) >= period {
+		c.l0, c.debt = sample()
+		c.sampled = now
+	}
+	return c.l0, c.debt
+}
+
+func (s *Store) expirationStalled() bool {
 	s.stallMu.Lock()
-	stalled = !s.stallSince.IsZero()
-	s.stallMu.Unlock()
-	return int64(m.Levels[0].Sublevels), m.Compact.EstimatedDebt, stalled
+	defer s.stallMu.Unlock()
+	return !s.stallSince.IsZero()
+}
+
+// ExpirationPressure shares L0/debt samples for at most one second. The active
+// write-stall signal is always live, even while another worker samples metrics.
+func (s *Store) ExpirationPressure() (l0 int64, debt uint64, stalled bool) {
+	if s.expirationStalled() {
+		return 0, 0, true
+	}
+	l0, debt = s.expirationPressure.load(time.Now(), func() (int64, uint64) {
+		m := s.db.Metrics()
+		return int64(m.Levels[0].Sublevels), m.Compact.EstimatedDebt
+	})
+	// A stall may have begun while this caller waited for the shared sample.
+	return l0, debt, s.expirationStalled()
 }
