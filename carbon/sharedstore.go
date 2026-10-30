@@ -160,6 +160,14 @@ func sharedStorePath(cfg *Config) string {
 }
 
 func validateStorageConfig(cfg *Config) error {
+	cold, err := store.NormalizeColdPack(coldPackOptions(cfg))
+	if err != nil {
+		return err
+	}
+	if cold.Mode != "off" && (cfg.Whisper.StorageBackend != "pebble-chunk" || cfg.Whisper.StoreEncoding != "exact" || !cfg.Whisper.StoreIncrementalMigration || !cfg.Whisper.StoreTimeBuckets) {
+		return errors.New("cold pack requires exact incremental time-bucketed storage")
+	}
+
 	if archive := cfg.Whisper.StoreMigrationArchiveDir; archive != "" {
 		if !cfg.Whisper.StoreIncrementalMigration {
 			return errors.New("store-migration-archive-dir requires incremental migration")

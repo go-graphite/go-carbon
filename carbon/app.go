@@ -209,6 +209,11 @@ func (app *App) configure() error {
 		}
 		app.quotaEstimateConfig.Store(cfg)
 	}
+	if app.MetricStore != nil {
+		if err := app.MetricStore.ConfigureColdPack(coldPackOptions(cfg)); err != nil {
+			return err
+		}
+	}
 	// All fallible policy validation is complete. Join the old expiration
 	// worker before publishing the new policy, so reload cannot leave deletes
 	// running under an obsolete rule. ReloadConfig restarts it below.
@@ -886,6 +891,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		}
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
 			Continuation:      continuation,
+			ColdPack:          coldPackOptions(conf),
 			TimeBuckets:       conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreTimeBuckets,
 			RelayoutRate:      conf.Whisper.StoreTimeBucketsRelayoutRate,
 			ExactBlocks:       conf.Whisper.StoreEncoding == "exact",

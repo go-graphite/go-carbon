@@ -35,11 +35,13 @@ const (
 	formatMarkerIncremental  = "go-carbon-chunks-v5\n"
 	formatMarkerContinuation = "go-carbon-chunks-v6\n"
 	formatMarkerTimeBuckets  = "go-carbon-chunks-v7\n"
+	formatMarkerColdPack     = "go-carbon-chunks-v9\n"
 	legacyRevisionSize       = 8
 	revisionSize             = 16
 )
 
 type Options struct {
+	ColdPack     ColdPackOptions
 	Continuation ContinuationCodec
 	// TimeBuckets writes new continuation blocks to a time-partitioned key
 	// space (format v7), so compactions of recent writes stop rewriting each
@@ -165,6 +167,7 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
+	coldPack             coldPackState
 	transferPendingAny   func() bool
 	transferPending      func(string) bool
 	transferExport       transferExportCounters
@@ -265,6 +268,13 @@ var storeComparer = func() *pebble.Comparer {
 // Open accepts only a new directory or an explicitly identified chunk store.
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
+	coldOptions, coldErr := NormalizeColdPack(options.ColdPack)
+	if coldErr != nil {
+		return nil, coldErr
+	}
+	if coldOptions.Mode != "off" && (!options.TimeBuckets || options.Continuation == nil || !options.ExactBlocks) {
+		return nil, errors.New("cold pack requires exact time-bucketed continuation storage")
+	}
 	if dir == "" {
 		return nil, errors.New("store directory is empty")
 	}
@@ -345,7 +355,8 @@ func Open(dir string, options Options) (*Store, error) {
 		s.stateCache = newStateCache(metadataCacheTestSize, stateKeys)
 	}
 	s.updatePointLookups.Store(options.UpdatePointLookups)
-	s.timeBuckets = format == 7
+	s.timeBuckets = format >= 7
+	s.coldPack.format.Store(format == 9)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
 		MaxConcurrentCompactions: func() int { return int(s.compactionWorkers.Load()) },
@@ -526,7 +537,13 @@ func Open(dir string, options Options) (*Store, error) {
 	if err := s.startCompactOnce(options.CompactOnce); err != nil {
 		return nil, s.openFailure(db, err)
 	}
+	if err := s.ConfigureColdPack(coldOptions); err != nil {
+		return nil, s.openFailure(db, err)
+	}
 	s.startCompactionController()
+	if s.continuation != nil {
+		s.startColdPack()
+	}
 	return s, nil
 }
 
@@ -658,7 +675,7 @@ func checkFormatForContinuation(fs vfs.FS, dir string, options Options) (int, bo
 	}
 	if len(names) != 0 {
 		format, err := checkFormatMarker(fs, dir)
-		if err != nil || format != 6 && format != 7 {
+		if err != nil || format != 6 && format != 7 && format != 9 {
 			return 0, false, false, fmt.Errorf("%w: continuation mode requires its own v6 or v7 destination", ErrFormat)
 		}
 		if format == 6 && options.TimeBuckets {
@@ -701,6 +718,8 @@ func checkFormatMarker(fs vfs.FS, dir string) (int, error) {
 		return 6, nil
 	case formatMarkerTimeBuckets:
 		return 7, nil
+	case formatMarkerColdPack:
+		return 9, nil
 	default:
 		return 0, ErrFormat
 	}
@@ -834,6 +853,7 @@ func (s *Store) StopBackground() {
 func (s *Store) BackgroundStopped() bool { return s.backgroundStopped.Load() }
 
 func (s *Store) stopRelayout() {
+	s.stopColdPack()
 	if s.relayoutStop != nil {
 		s.relayoutStop()
 		<-s.relayoutDone
@@ -939,6 +959,7 @@ type CompactionKinds struct {
 }
 
 type Stats struct {
+	ColdPack                                                                                           ColdPackStats
 	TransferExport                                                                                     TransferExportStats
 	MirrorCanonicalBatches, MirrorBlindBatches                                                         uint64
 	DiskBytes, WALBytes, MemTableBytes, Materializations, Operands                                     uint64
@@ -1017,7 +1038,7 @@ func (s *Store) Stats() Stats {
 		duration += time.Since(s.stallSince)
 	}
 	s.stallMu.Unlock()
-	stats := Stats{
+	stats := Stats{ColdPack: s.ColdPackStats(),
 		MirrorCanonicalBatches: s.mirrorCanonical.Load(), MirrorBlindBatches: s.mirrorBlind.Load(),
 		DiskBytes: uint64(m.DiskSpaceUsage()), WALBytes: m.WAL.Size, MemTableBytes: m.MemTable.Size,
 		Materializations: s.materializations.Load(), Operands: s.operands.Load(),

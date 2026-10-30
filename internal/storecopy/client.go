@@ -41,6 +41,7 @@ func (c *Client) request(ctx context.Context, method, path string, query url.Val
 		return nil, err
 	}
 	r.Header.Set("X-Buckyd-Authorization", c.Token)
+	r.Header.Set("X-Accept-Store-Format", "9")
 	h := c.HTTP
 	if h == nil {
 		h = &http.Client{Timeout: 2 * time.Minute}
@@ -122,7 +123,7 @@ type chunk struct {
 func (c chunk) key() string { return fmt.Sprintf("%s:%d:%d", c.file.Name, c.offset, c.length) }
 
 func validateManifest(m *Manifest) error {
-	if m == nil || m.Version != 1 || len(m.ID) != 32 || len(m.Files) == 0 || !time.Now().Before(m.Expires) {
+	if m == nil || (m.Version != 1 && m.Version != 2) || m != nil && (m.StoreFormat > 9 || m.StoreFormat < 0) || len(m.ID) != 32 || len(m.Files) == 0 || !time.Now().Before(m.Expires) {
 		return errors.New("invalid or expired copy manifest")
 	}
 	seen := make(map[string]bool)

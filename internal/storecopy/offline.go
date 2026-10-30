@@ -27,6 +27,14 @@ func OpenOffline(directory string) (http.Handler, *Manifest, error) {
 		return nil, nil, err
 	}
 	manifest := &Manifest{Version: 1, ID: hex.EncodeToString(id), Created: time.Now().UTC(), Expires: time.Now().UTC().Add(time.Hour)}
+	marker, e := os.ReadFile(filepath.Join(directory, "CHUNKSTORE"))
+	if e != nil {
+		return nil, nil, e
+	}
+	if string(marker) == "go-carbon-chunks-v9\n" {
+		manifest.Version = 2
+		manifest.StoreFormat = 9
+	}
 	m := &Manager{manifest: manifest, paths: make(map[string]fileSource), slots: make(chan struct{}, 64)}
 	for _, entry := range entries {
 		if entry.Name() == "LOCK" {

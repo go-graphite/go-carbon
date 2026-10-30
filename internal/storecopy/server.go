@@ -43,6 +43,7 @@ type fileSource struct {
 }
 
 type Manifest struct {
+	StoreFormat     int                `json:"store_format,omitempty"`
 	Operation       string             `json:"operation,omitempty"`
 	Version         int                `json:"version"`
 	ID              string             `json:"id"`
@@ -178,6 +179,20 @@ func (m *Manager) closeLocked() error {
 }
 
 func (m *Manager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	required := 7
+	if m.store != nil {
+		required = m.store.TransferFormat()
+	} else {
+		m.mu.RLock()
+		if m.manifest != nil {
+			required = m.manifest.StoreFormat
+		}
+		m.mu.RUnlock()
+	}
+	if accepted, _ := strconv.Atoi(r.Header.Get("X-Accept-Store-Format")); required > 7 && accepted < required {
+		http.Error(w, "copy requires a peer accepting store format 9", http.StatusConflict)
+		return
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	if r.URL.Path == Endpoint+"/file" {
 		m.file(w, r)
@@ -293,9 +308,12 @@ func (m *Manager) create(operations ...string) (err error) {
 		return err
 	}
 	m.paths = make(map[string]fileSource)
-	manifest := &Manifest{Version: 1, ID: name, Created: time.Now().UTC(), Metadata: m.metadata, CheckpointInput: state}
+	manifest := &Manifest{Version: 1, StoreFormat: m.store.TransferFormat(), ID: name, Created: time.Now().UTC(), Metadata: m.metadata, CheckpointInput: state}
 	if len(operations) > 0 {
 		manifest.Operation = operations[0]
+	}
+	if manifest.StoreFormat > 7 {
+		manifest.Version = 2
 	}
 	manifest.Expires = manifest.Created.Add(6 * time.Hour)
 	entries, err := os.ReadDir(filepath.Join(m.dir, "store"))

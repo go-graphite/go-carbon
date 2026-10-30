@@ -271,6 +271,17 @@ store-encoding = "legacy"
 # Changing a positive rate reloads on SIGHUP; enabling or disabling requires a
 # restart, so pause a running relayout with a tiny rate such as 1.
 # store-time-buckets-relayout-rate = 0
+# Cold continuation packing (exact incremental shared storage with time buckets).
+# Hot writes stay exact. Enabling upgrades the durable reader fence to v9;
+# upgrade readers, transfer peers and recovery tools first. All settings reload
+# on SIGHUP. See doc/cold-pack.md for numeric precision and downgrade procedure.
+# store-cold-pack = "off"              # off | exact | decimal | unpack
+# store-cold-pack-bytes-per-second = 1048576 # snapshot reads + WAL batch bytes
+# store-cold-pack-cpu-fraction = 0.02   # conservative fraction of one worker
+# store-cold-pack-write-window = "24h" # ranges with newer samples stay ordinary
+# store-cold-pack-interval = "1h"       # delay between completed catalog sweeps
+# store-cold-pack-min-free-bytes = 1073741824 # plus 8 MiB operation headroom
+
 
 # Automatically remove idle metrics from pebble-chunk storage. "0s" disables
 # the global policy. Matching entries in store-expiration-file override this
