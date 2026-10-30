@@ -4,11 +4,44 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
 )
+
+func TestCatalogPageDoesNotReadRevisions(t *testing.T) {
+	ctx := context.Background()
+	s, now := openTestStore(t, "/store", Options{fs: vfs.NewMem()})
+	defer closeTestStore(t, s)
+	for _, name := range []string{"page.a", "page.b", "other.c"} {
+		createTestMetric(t, s, name)
+		if err := s.UpdateMany(ctx, name, []Point{{Timestamp: int64(now), Value: 42}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	full, err := s.ListPage(ctx, "page.", "", 10)
+	if err != nil || len(full) != 2 {
+		t.Fatalf("full page: %v %v", full, err)
+	}
+	for i, after := range []string{"", "page.a"} {
+		page, err := s.ListCatalogPage(ctx, "page.", after, 1)
+		if err != nil || len(page) != 1 || !reflect.DeepEqual(page[0].MetricConfig, full[i].MetricConfig) || page[0].ID != full[i].ID || page[0].Generation != full[i].Generation {
+			t.Fatalf("catalog page after %q: %v %v", after, page, err)
+		}
+	}
+	// A discovery traversal must not consult mutable revision keys at all.
+	if err := s.db.Delete(revisionKey(full[0]), nil); err != nil {
+		t.Fatal(err)
+	}
+	if page, err := s.ListCatalogPage(ctx, "page.", "", 10); err != nil || len(page) != 2 {
+		t.Fatalf("catalog depends on revisions: %v %v", page, err)
+	}
+	if _, err := s.ListPage(ctx, "page.", "", 10); err == nil {
+		t.Fatal("conditional page ignored missing revision")
+	}
+}
 
 func TestCatalogChangesFollowCommittedMutations(t *testing.T) {
 	ctx := context.Background()

@@ -5,12 +5,136 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 )
+
+func TestExpirationPointDeletesMatchAdministrativeDelete(t *testing.T) {
+	for _, buckets := range []bool{false, true} {
+		t.Run(fmt.Sprint(buckets), func(t *testing.T) {
+			var states []map[string]string
+			for _, expiration := range []bool{false, true} {
+				opts := Options{fs: vfs.NewMem(), ExactBlocks: true, SyncInterval: time.Hour}
+				if buckets {
+					opts.Continuation, opts.TimeBuckets = bucketCodec{}, true
+				}
+				s, now := openTestStore(t, "/store", opts)
+				defer closeTestStore(t, s)
+				old := createTestMetric(t, s, "expired")
+				keep := createTestMetric(t, s, "keep")
+				batch := s.db.NewBatch()
+				for _, m := range []Metadata{old, keep} {
+					var c chunk
+					c.set(0, Point{Timestamp: int64(now), Value: 42})
+					// Include another generation and a sparse, non-first chunk.
+					for _, generation := range []uint64{m.Generation, m.Generation + 1} {
+						m.Generation = generation
+						if err := batch.Set(chunkKey(m, 0, 7), s.encodeChunk(&c), nil); err != nil {
+							t.Fatal(err)
+						}
+						if buckets {
+							key := append(continuationPrefix(m.ID, generation), "stale"...)
+							if err := batch.Set(key, []byte("state"), nil); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+				}
+				if err := batch.Commit(pebble.Sync); err != nil {
+					t.Fatal(err)
+				}
+				batch.Close()
+				if expiration {
+					outcomes, err := s.DeleteBatchIfUnchanged(context.Background(), []Metadata{old})
+					if err != nil || len(outcomes) != 1 || outcomes[0] != nil {
+						t.Fatalf("expiration: %v %v", outcomes, err)
+					}
+					if err := s.db.Flush(); err != nil {
+						t.Fatal(err)
+					}
+					tables, err := s.db.SSTables(pebble.WithProperties())
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, level := range tables {
+						for _, table := range level {
+							if table.Properties.NumRangeDeletions != 0 {
+								t.Fatal("expiration emitted range tombstones")
+							}
+						}
+					}
+				} else if err := s.Delete(context.Background(), old.Name); err != nil {
+					t.Fatal(err)
+				}
+				it, err := s.db.NewIter(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				state := make(map[string]string)
+				for it.First(); it.Valid(); it.Next() {
+					state[string(it.Key())] = string(it.Value())
+				}
+				if err := errors.Join(it.Error(), it.Close()); err != nil {
+					t.Fatal(err)
+				}
+				states = append(states, state)
+			}
+			if !reflect.DeepEqual(states[0], states[1]) {
+				t.Fatal("expiration and administrative deletion left different keys/values")
+			}
+		})
+	}
+}
+
+func TestMetadataDoesNotWaitForMutationStripe(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(fmt.Sprint(cached), func(t *testing.T) {
+			opts := Options{fs: vfs.NewMem()}
+			if cached {
+				opts.MetadataCacheSize = 4 << 20
+			}
+			s, _ := openTestStore(t, "/store", opts)
+			defer closeTestStore(t, s)
+			m := createTestMetric(t, s, "hot")
+			if _, err := s.Metadata(context.Background(), m.Name); err != nil {
+				t.Fatal(err)
+			}
+			// An in-flight mutation hides cached state. Metadata must read the
+			// committed view without waiting for that mutation to finish.
+			unlock := s.lockMetricMutation(m.Name)
+			done := make(chan error, 1)
+			go func() {
+				got, err := s.Metadata(context.Background(), m.Name)
+				if err == nil && !reflect.DeepEqual(got, m) {
+					err = fmt.Errorf("metadata changed: %+v", got)
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				unlock()
+				<-done
+				t.Fatal("metadata waited for a writer stripe")
+			}
+			if err := s.Delete(context.Background(), m.Name); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Metadata(context.Background(), m.Name); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("metadata survived deletion: %v", err)
+			}
+		})
+	}
+}
 
 func TestExpirationBatchMatchesAdministrativeDelete(t *testing.T) {
 	s := openFileMigrationStore(t, vfs.NewMem())

@@ -151,6 +151,12 @@ retries it. A later durable write also syncs preceding deletes, and each sweep
 starts an asynchronous flush after joining its deletions, including partial or
 cancelled sweeps. Administrative single-metric deletes retain their sync policy.
 
+Expiration enumerates existing data keys and uses point tombstones, including
+older chunk/continuation generations and the current generation's time buckets.
+It emits no range tombstones: those repeatedly rebuild Pebble's shared memtable
+fragment cache and block unrelated renders. Info metadata reads use a consistent
+read view rather than waiting for the delete workers' mutation stripes.
+
 Expiration does not invalidate render caches. A cached reply may include an expired
 name for up to the normal 60-second query-cache TTL, or until the cache is cleared,
 as with ordinary ingestion. This keeps unrelated cached reads warm without extra
@@ -166,3 +172,12 @@ copies with `-benchtime=1x`: `BenchmarkExpirationScaleDelete` accepts
 and `EXPIRATION_SCALE_SYNC=1`. `BenchmarkExpirationScaleSweep` measures the full
 scan and deletion path. Both report CPU per delete and settled compaction bytes;
 compaction settling is outside the deletion timer.
+
+`BenchmarkExpirationReadLatency` in carbonserver runs exact/wildcard HTTP render,
+find and info handlers at 600 requests/s against a disposable fixture copy named
+by `EXPIRATION_READ_DIR`. Most renders hit the query cache; cold requests retain a
+constant time range. It reports off/on/recovery latency percentiles and deletion
+throughput, with eight workers, 512-candidate batches and the 30-second discovery
+refresh. Deletion stops after 45 seconds or `EXPIRATION_READ_DELETES` successes.
+Use `-run '^$' -bench '^BenchmarkExpirationReadLatency$' -benchtime=1x` and optional
+`-mutexprofile`, `-blockprofile` and `-cpuprofile` to inspect contention.

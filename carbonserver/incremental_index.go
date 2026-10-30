@@ -190,7 +190,7 @@ func (u *fileListUpdate) incrementalCatalogRuns(db *store.Store, directory strin
 		entries, used = entries[:0], 0
 		return nil
 	}
-	err := store.EachPage(context.Background(), db.ListPage, "", metricStoreCatalogPageSize, func(page []store.Metadata) error {
+	err := store.EachPage(context.Background(), db.ListCatalogPage, "", metricStoreCatalogPageSize, func(page []store.Metadata) error {
 		if u.cancelled() {
 			return context.Canceled
 		}
