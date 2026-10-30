@@ -16,6 +16,55 @@ The design motivation is a production store with roughly **20 M cached metrics o
 | Measurements | 24 completed runs: three datasets × four configurations (go-carbon, packing-on go-carbon, VM, GreptimeDB) × full-rate/50,000-points/s replay. Separate metadata and append screens are labelled below. |
 | Unverified details | “not verified” means the available code/research or experiment does not establish that fact. Prometheus TSDB is a short reference column because its engine was not examined. |
 
+## At a glance
+
+Full-rate replays of the three datasets (details, paced runs and method in [Measured on identical data](#measured-on-identical-data)). Each cell lists **misc · db · magg**. Read cells are warm native-API **p50 / p99 ms**; read CPU is server CPU per query. Response shapes differ, so reads compare serving cost, not isolated engines.
+
+| Angle | go-carbon | VictoriaMetrics | GreptimeDB | Best |
+| --- | --- | --- | --- | --- |
+| Durable bytes / input point | 2.75 · 2.01 · 1.55 | **1.44 · 0.97 · 1.13** | 2.59 · 1.59 · 2.50 | VM (27–52 % below go-carbon) |
+| All files / input point (incl. index, discovery) | 2.79 · 2.07 · **1.61** | **1.86** · 1.82 · 2.17 | 4.98 · **1.79** · 3.53 | VM misc, GreptimeDB db, go-carbon magg |
+| Ingest CPU, µs / input point | 0.955 · 0.873 · 0.562 | **0.603 · 0.537 · 0.512** | 1.646 · 1.675 · 1.667 | VM (9–39 % below go-carbon) |
+| Persistence rate, M points/s (incl. settle) | 1.78 · 1.28 · 0.87 | **3.54 · 2.64 · 1.87** | 0.55 · 0.37 · 0.38 | VM |
+| Peak / post-drain RSS, MiB | 470/470 · 401/401 · 465/165 | **420/403 · 342/333 · 374/287** | 936/583 · 746/507 · 2708/384 | VM peak; go-carbon magg post-drain |
+| Read 1 × 24 h | **0.39/1.60 · 0.39/0.71 · 2.45/3.05** | 6.01/11.48 · 5.63/6.08 · 6.30/12.60 | 5.51/6.70 · 3.25/4.19 · 18.38/21.39 | go-carbon (2.5–15× faster p50) |
+| Read 100 × 24 h | **10.7/23.7 · 11.0/12.3 · 257/758** | 534/632 · 532/548 · 533/554 | 71.6/76.7 · 41.8/48.9 · 1212/1663 | go-carbon (2–50× faster p50) |
+| Read 1,000 × 1 h | **54.0/105** · 57.3/62.2 · **145**/192 | 231/291 · 236/276 · 155/**168** | 157/164 · **50.5/54.0** · 270/370 | go-carbon misc, GreptimeDB db; magg split |
+| Read CPU, ms / query (100 × 24 h) | **22.5 · 26.5 · 321** | 579 · 565 · 580 | 269 · 150 · 3,841 | go-carbon |
+| Read CPU, ms / query (1,000 × 1 h) | **133** · 192 · 256 | 284 · 288 · **194** | 248 · **177** · 776 | mixed |
+| Values changed (of sampled) | **0/400 · 0/400 · 0/332** | 16/400 · 24/400 · 0/332 (max relative error 6.5e-13) | **0/400 · 0/400 · 0/332** | go-carbon, GreptimeDB (exact) |
+| Coarse retention | Native Whisper archives and rollups, written at ingest | Raw samples only | Raw samples only | Different contracts |
+
+### Where go-carbon's bytes go
+
+Settled SST bytes per input point split by component, from a separate replay of the same data (the split apportions compressed blocks by their uncompressed sections, so components are allocations, not exact causal savings).
+
+| Component | misc | db | magg |
+| --- | ---: | ---: | ---: |
+| Base archive values | 1.271 | 0.799 | 0.732 |
+| Base timestamps and presence bitmaps | 0.416 | 0.259 | 0.518 |
+| Group envelope and CRC | 0.047 | 0.039 | 0.050 |
+| Keys, framing and index | 0.288 | 0.267 | 0.187 |
+| Continuation headers, manifests and catalog | 0.539 | 0.466 | 0.067 |
+| Rollup archive values | 0.186 | 0.172 | 0.000 |
+| **Total** | **2.748** | **2.003** | **1.553** |
+| VictoriaMetrics durable total | 1.436 | 0.967 | 1.134 |
+
+Headers, manifests and catalog are per-series costs: with 6–24 h of history they weigh far more per point than on stores holding months of data per series.
+
+### Closing the storage gap: local prototypes
+
+Neither prototype is enabled by default or merged; both keep native rollups.
+
+| Durable bytes / input point | misc | db | magg |
+| --- | ---: | ---: | ---: |
+| go-carbon today | 2.75 | 2.01 | 1.55 |
+| Cold history repacked into 4,096-point sealed blocks | 2.28 (−17 %) | 1.65 (−17 %) | **1.09 (−30 %)** |
+| Decimal value blocks, measured separately | −13 % | −15 % | −4 % |
+| VictoriaMetrics | 1.44 | 0.97 | 1.13 |
+
+Repacking applies only to history older than the write window; the short exports here are its full-sealing ceiling. Decimal blocks double value-encoding CPU. Their combined effect is not measured yet.
+
 ## Master mechanism table
 
 | Mechanism | go-carbon: shared Pebble / exact baseline | VictoriaMetrics: single node | GreptimeDB: Mito | Prometheus TSDB | Whisper: classic go-carbon |
