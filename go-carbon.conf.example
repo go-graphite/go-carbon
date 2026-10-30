@@ -303,6 +303,7 @@ store-expiration-delete-rate = 100
 # names/s, 100 deletes/s and 10000 deletes/sweep. For a backlog start with 8
 # workers and scan-rate 1000000; raise the delete rate and per-sweep cap too.
 # Try 16 workers only with CPU/IO headroom and stable read latency and writes.
+# See doc/expiration-performance.md for the concurrent store benchmark.
 # Pressure is checked before every batch; batches already in progress finish
 # when pressure rises. All workers still share storage and compaction capacity.
 store-expiration-delete-workers = 8
