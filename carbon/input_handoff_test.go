@@ -20,6 +20,7 @@ import (
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/lomik/zapwriter"
 )
 
@@ -143,14 +144,6 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	if err := app.ParseConfig(); err != nil {
 		t.Fatal(err)
 	}
-	reserve := func() string {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer l.Close()
-		return l.Addr().String()
-	}
 	cfg := app.Config
 	cfg.Whisper.Compressed = true
 	// Repeated corrections to an already persisted compressed point need
@@ -169,13 +162,13 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	cfg.Dump.RestorePerSecond = 0
 	cfg.Udp.Enabled = false
 	cfg.Tcp.Enabled = true
-	cfg.Tcp.Listen = reserve()
+	cfg.Tcp.Listen = "127.0.0.1:0"
 	cfg.Pickle.Enabled = false
 	cfg.Grpc.Enabled = false
 	cfg.Carbonlink.Enabled = false
 	cfg.Common.MetricInterval = &Duration{time.Hour}
 	cfg.Carbonserver.Enabled = true
-	cfg.Carbonserver.Listen = reserve()
+	cfg.Carbonserver.Listen = "127.0.0.1:0"
 	cfg.Carbonserver.TrieIndex = true
 	cfg.Carbonserver.ConcurrentIndex = true
 	cfg.Carbonserver.RealtimeIndex = 100
@@ -188,6 +181,21 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	cfg.Carbonserver.FindCacheEnabled = false
 	cfg.Carbonserver.GlobCacheEnabled = false
 	return cfg
+}
+
+func startHandoffTestApp(t *testing.T, app *App) *Config {
+	t.Helper()
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the first instance's config immutable while giving clients and the
+	// successor the ports that its live listeners own.
+	cfg := *app.Config
+	input := *cfg.Tcp
+	input.Listen = app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
+	cfg.Tcp = &input
+	cfg.Carbonserver.Listen = app.Carbonserver.HTTPListener().Addr().String()
+	return &cfg
 }
 
 // handoffSuccessor selects capabilities for the shared successor stub.
@@ -235,9 +243,7 @@ func testRestartHandsInputOver(t *testing.T) {
 			}
 			first := New(filepath.Join(root, "go-carbon.conf"))
 			first.Config = cfg
-			if err := first.Start(); err != nil {
-				t.Fatal(err)
-			}
+			cfg = startHandoffTestApp(t, first)
 			defer first.Stop()
 			deadline := time.Now().Add(5 * time.Second)
 			for !first.Carbonserver.HasMappedIndex() {

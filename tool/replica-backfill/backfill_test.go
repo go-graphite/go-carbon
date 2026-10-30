@@ -34,8 +34,7 @@ type fakeServer struct {
 	mu       sync.Mutex
 	step     int64
 	data     map[string]map[int64]float64
-	requests [][]string // names per render request
-	times    []time.Time
+	requests [][]string                      // names per render request
 	fail     func(names []string, n int) int // status to fail with, 0 for success
 	srv      *httptest.Server
 }
@@ -96,7 +95,6 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Lock()
 		f.requests = append(f.requests, names)
-		f.times = append(f.times, time.Now())
 		n := len(f.requests)
 		fail := f.fail
 		var resp protov3.MultiFetchResponse
@@ -318,16 +316,10 @@ func TestBatchingAndRateLimit(t *testing.T) {
 	if strings.Join(seen, ",") != strings.Join(names, ",") {
 		t.Fatalf("names requested %v", seen)
 	}
-	// Burst 1 at 10/s: three requests need at least 200ms.
+	// Burst 1 at 10/s: three requests need at least 200ms. Server arrival
+	// spacing can be compressed by transport or handler scheduling delays.
 	if d := time.Since(began); d < 190*time.Millisecond {
 		t.Fatalf("replica rate limit not applied: %s", d)
-	}
-	rep.mu.Lock()
-	times := append([]time.Time(nil), rep.times...)
-	rep.mu.Unlock()
-	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
-	if gap := times[2].Sub(times[0]); gap < 190*time.Millisecond {
-		t.Fatalf("requests 1..3 spaced %s", gap)
 	}
 	if r.Write["points_sent"] != 25 || r.Write["flushes"] < 9 {
 		t.Fatalf("write report %+v", r.Write)
@@ -636,27 +628,56 @@ func TestSelectNames(t *testing.T) {
 	}
 }
 
-func TestWriterFailureStopsRun(t *testing.T) {
+func writerFailureOptions(t *testing.T) (*fakeServer, *options) {
+	t.Helper()
 	local, rep := newFake(t), newFake(t)
 	for i := range 40 {
 		n := "w." + strconv.Itoa(10+i)
 		local.fill(n, base-5*step, func(int64) float64 { return 1 }, func(ts int64) bool { return ts == base+step })
 		rep.fill(n, base, func(int64) float64 { return 2 }, nil)
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	ln.Close() // nothing listens: every connect fails
-	o := testOptions(local, addr, rep)
+	o := testOptions(local, "127.0.0.1:0", rep)
 	o.batch, o.workers, o.flushPt = 1, 1, 1
+	return rep, o
+}
+
+func TestWriterFailureStopsRun(t *testing.T) {
+	rep, o := writerFailureOptions(t)
 	began := time.Now()
-	_, err = run(context.Background(), o, time.Unix(base+3600, 0))
+	_, err := run(context.Background(), o, time.Unix(base+3600, 0))
 	if err == nil || !strings.Contains(err.Error(), "write to") {
 		t.Fatalf("want a write error, got %v", err)
 	}
 	if n := len(rep.renders()); n > 3 || time.Since(began) > 10*time.Second {
 		t.Fatalf("run kept fetching after the writer died: %d replica requests in %s", n, time.Since(began))
+	}
+}
+
+func TestWriterFailureStopsEngineWithoutSupervisor(t *testing.T) {
+	rep, o := writerFailureOptions(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	local := newClient(o.local, o, nil)
+	names, err := o.selectNames(ctx, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newWriter(o.ingest, o.writeRate, o.flushPt, nil, o.writeRetries, o.backoff, o.maxBack)
+	e := &engine{
+		cfg:   engineConfig{from: base, until: base + 10*step, lookback: int64(o.lookback / time.Second), batch: o.batch, workers: o.workers},
+		local: local, replicas: []*client{newClient(o.replicas[0], o, nil)}, out: w,
+	}
+	writerDone := make(chan error, 1)
+	// Leave ctx live after the writer exits: the engine must stop without
+	// waiting for the supervising goroutine to propagate cancellation.
+	go func() { writerDone <- w.run(ctx) }()
+	if err := e.run(ctx, names); err == nil {
+		t.Fatal("engine succeeded after its writer failed")
+	}
+	if err := <-writerDone; err == nil || !strings.Contains(err.Error(), "write to") {
+		t.Fatalf("want a write error, got %v", err)
+	}
+	if n := len(rep.renders()); n != 1 || ctx.Err() != nil {
+		t.Fatalf("engine fetched %d batches after writer failure; context: %v", n, ctx.Err())
 	}
 }

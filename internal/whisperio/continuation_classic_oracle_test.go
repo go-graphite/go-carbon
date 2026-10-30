@@ -133,13 +133,16 @@ type oracleScenario struct {
 	e      digestEmitter
 }
 
+// Keep the resolution ratios and archive count, and wrap the base archive
+// before replaying each complete emitter stream. Years of empty coarse slots
+// add fetch work without exercising another propagation or overwrite path.
 func oracleScenarios(short bool) []oracleScenario {
 	schemas := []struct {
 		name string
 		rets []store.Retention
 	}{
-		{"1m:14d,30m:2y", []store.Retention{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}}},
-		{"1m:30d,1h:1y,1d:10y", []store.Retention{{Step: 60, Count: 43200}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}}},
+		{"1m:4h,30m:10d", []store.Retention{{Step: 60, Count: 240}, {Step: 1800, Count: 480}}},
+		{"1m:1d,1h:7d,1d:30d", []store.Retention{{Step: 60, Count: 1440}, {Step: 3600, Count: 168}, {Step: 86400, Count: 30}}},
 		{"10s:6h,1m:1d,10m:7d", []store.Retention{{Step: 10, Count: 2160}, {Step: 60, Count: 1440}, {Step: 600, Count: 1008}}},
 	}
 	emitters := []digestEmitter{

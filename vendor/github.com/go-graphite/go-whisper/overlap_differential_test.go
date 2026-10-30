@@ -13,8 +13,27 @@ import (
 // match after every update. The digest tests extend the comparison to the
 // code before the change.
 func TestOverlapReplayDifferential(t *testing.T) {
+	testOverlapReplayDifferential(t, 0)
+}
+
+func TestOverlapReplayDifferentialGroup1(t *testing.T) {
+	testOverlapReplayDifferential(t, 1)
+}
+
+func TestOverlapReplayDifferentialGroup2(t *testing.T) {
+	testOverlapReplayDifferential(t, 2)
+}
+
+func TestOverlapReplayDifferentialGroup3(t *testing.T) {
+	testOverlapReplayDifferential(t, 3)
+}
+
+func testOverlapReplayDifferential(t *testing.T, group int) {
 	var replays int
 	for i, sc := range digestScenarios() {
+		if i%4 != group {
+			continue
+		}
 		if testing.Short() && i%3 != 0 {
 			continue
 		}

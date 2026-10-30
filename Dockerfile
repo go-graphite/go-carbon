@@ -2,7 +2,7 @@ FROM golang:alpine AS build
 ARG TARGETARCH
 ARG GOCACHE=/tmp
 
-RUN apk add --update git make bash gcc musl-dev
+RUN apk add --update git make bash gcc musl-dev findutils
 
 USER nobody:nogroup
 WORKDIR /usr/local/src/go-carbon

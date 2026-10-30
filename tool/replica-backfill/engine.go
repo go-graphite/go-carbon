@@ -78,6 +78,10 @@ func (e *engine) run(ctx context.Context, names []string) error {
 	}
 
 	jobs := make(chan batch)
+	var writerStopped <-chan struct{}
+	if e.out != nil {
+		writerStopped = e.out.stopped
+	}
 	var batches []batch
 	for i := 0; i < len(names); i += e.cfg.batch {
 		batches = append(batches, batch{len(batches), names[i:min(i+e.cfg.batch, len(names))]})
@@ -94,6 +98,13 @@ func (e *engine) run(ctx context.Context, names []string) error {
 		go func() {
 			defer wg.Done()
 			for b := range jobs {
+				select {
+				case <-ctx.Done():
+					return
+				case <-writerStopped:
+					return
+				default:
+				}
 				err := e.process(ctx, b)
 				e.stats.batches.Add(1)
 				if err != nil {
@@ -114,6 +125,8 @@ feed:
 		select {
 		case jobs <- b:
 		case <-ctx.Done():
+			break feed
+		case <-writerStopped:
 			break feed
 		}
 	}

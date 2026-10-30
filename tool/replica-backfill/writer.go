@@ -90,7 +90,8 @@ func (w *writer) write(ctx context.Context, pts []point) error {
 // run serves write requests until ctx ends. A failed flush that exhausts its
 // retries is fatal: it fails every waiter and later writes.
 func (w *writer) run(ctx context.Context) error {
-	defer close(w.stopped)
+	stop := sync.OnceFunc(func() { close(w.stopped) })
+	defer stop()
 	defer func() {
 		if w.conn != nil {
 			_ = w.conn.Close()
@@ -99,6 +100,8 @@ func (w *writer) run(ctx context.Context) error {
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 	fail := func(err error) error {
+		// Stop new batches before failed writes release their workers.
+		stop()
 		for _, d := range w.waiters {
 			d <- err
 		}
@@ -120,7 +123,7 @@ func (w *writer) run(ctx context.Context) error {
 				w.bufPts++
 				if w.bufPts >= w.flushPts {
 					if err := w.flush(ctx); err != nil {
-						req.done <- err
+						w.waiters = append(w.waiters, req.done)
 						return fail(err)
 					}
 				}

@@ -42,9 +42,11 @@ type digestScenario struct {
 	days   int
 }
 
+// Shorter retentions keep the same resolution ratios and ring-wrap paths;
+// comparing years of empty fetch slots adds work without another oracle case.
 func digestScenarios() []digestScenario {
 	var out []digestScenario
-	schemas := []string{"1m:30d,1h:1y,1d:10y", "1m:14d,30m:2y", "10s:6h,1m:1d,10m:7d", "1s:10m,1m:1h,10m:1d", "5m:1y", "1s:2d,1m:28d,1h:2y"}
+	schemas := []string{"1m:1d,1h:7d,1d:30d", "1m:4h,30m:10d", "10s:6h,1m:1d,10m:7d", "1s:10m,1m:1h,10m:1d", "5m:1d", "1s:2h,1m:1d,1h:7d"}
 	emitters := []emitterSim{
 		{cadence: 10},
 		{cadence: 10, jitter: 3, dupRate: .02, lateRate: .01},
@@ -59,7 +61,7 @@ func digestScenarios() []digestScenario {
 				continue
 			}
 			days := 1
-			if strings.HasPrefix(schema, "1s:2d") {
+			if strings.HasPrefix(schema, "1s:2h") {
 				days = 0 // a few hours keep this large file affordable
 			}
 			out = append(out, digestScenario{schema: schema, method: methods[(i+j)%len(methods)], xff: []float32{0, .5}[(i+j)%2], e: e, days: days})

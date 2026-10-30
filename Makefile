@@ -62,6 +62,7 @@ vendor:
 	for whisper_test in $(WHISPER_VENDOR_TESTS); do \
 		cp "$$whisper_source/$$whisper_test" vendor/github.com/go-graphite/go-whisper/ || exit $$?; \
 	done
+	patch --batch --fuzz=0 -p1 < patches/whisper-oracle-fixtures.patch
 	patch --batch --fuzz=0 -p1 < patches/vellum-builder-reuse.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-async-wal-rotation.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-explicit-cache-shards.patch
@@ -71,7 +72,7 @@ vendor:
 	patch --batch --fuzz=0 -p1 < patches/pebble-integration-delta.patch
 
 run-test:
-	$(GO) $(COMMAND) ./... github.com/go-graphite/go-whisper
+	./test/run-tests.sh $(GO) $(COMMAND)
 
 test:
 	make run-test COMMAND="test -timeout $(TEST_TIMEOUT)"

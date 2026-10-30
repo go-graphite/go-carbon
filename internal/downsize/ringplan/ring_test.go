@@ -376,8 +376,10 @@ func TestHTTPInventoryAuthRedirectAndTruncation(t *testing.T) {
 			t.Fatal(name, err)
 		}
 	}
-	if _, _, err := inv.next(); !errors.Is(err, io.EOF) {
-		t.Fatal(err)
+	for range 2 {
+		if _, _, err := inv.next(); !errors.Is(err, io.EOF) {
+			t.Fatal(err)
+		}
 	}
 	inv.close()
 	in.URL = server.URL + "/redirect"
@@ -398,6 +400,31 @@ func TestHTTPInventoryAuthRedirectAndTruncation(t *testing.T) {
 	}
 	if _, _, err := inv.next(); err == nil || errors.Is(err, io.EOF) {
 		t.Fatal("truncated array accepted")
+	}
+}
+
+func TestHTTPInventoryArrayTermination(t *testing.T) {
+	for _, body := range []string{`[`, `["a"`, `["a",`, `["a", `, `["a", "b"`, `["a", "b" `} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer server.Close()
+			inv, err := openInventory(context.Background(), input{Format: "buckyd", URL: server.URL}, 0, "", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer inv.close()
+			for {
+				_, _, err := inv.next()
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						t.Fatalf("truncated inventory accepted: %v", err)
+					}
+					break
+				}
+			}
+		})
 	}
 }
 

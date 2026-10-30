@@ -200,18 +200,32 @@ func (v *inventory) next() (string, int64, error) {
 }
 
 func (v *inventory) nextHTTP() (string, int64, error) {
+	if v.done {
+		return "", 0, io.EOF
+	}
 	if !v.decoder.More() {
-		if _, err := v.decoder.Token(); err != nil {
+		token, err := v.decoder.Token()
+		if errors.Is(err, io.EOF) {
+			return "", 0, io.ErrUnexpectedEOF
+		}
+		if err != nil {
 			return "", 0, err
+		}
+		if token != json.Delim(']') {
+			return "", 0, errors.New("buckyd inventory must end with a JSON array delimiter")
 		}
 		var extra any
 		if err := v.decoder.Decode(&extra); err != io.EOF {
 			return "", 0, errors.New("trailing buckyd inventory data")
 		}
+		v.done = true
 		return "", 0, io.EOF
 	}
 	var name string
 	if err := v.decoder.Decode(&name); err != nil {
+		if errors.Is(err, io.EOF) {
+			err = io.ErrUnexpectedEOF
+		}
 		return "", 0, err
 	}
 	return v.check(name, v.defaultBytes)

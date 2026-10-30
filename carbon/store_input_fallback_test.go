@@ -397,9 +397,7 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 
 			first := New(filepath.Join(root, "go-carbon.conf"))
 			first.Config = cfg
-			if err := first.Start(); err != nil {
-				t.Fatal(err)
-			}
+			cfg = startHandoffTestApp(t, first)
 			defer first.Stop()
 			deadline := time.Now().Add(5 * time.Second)
 			// Completed conversion uses the catalog index; input-only handoff
@@ -477,8 +475,10 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 			handoff.PeerExecutable = func(*net.UnixConn) (string, error) { return registered, nil }
 			t.Cleanup(func() { handoff.PeerExecutable = savedPeer })
 
+			// Two clients with two metrics cover independent connections and
+			// corrections without making receiver throughput the restart gate.
 			// Each client buffers 2.5 s of its output.
-			const connections, perConnection, lag = 8, 8, 40
+			const connections, perConnection, lag = 2, 2, 40
 			const interval = 2 * time.Millisecond
 			base := time.Now().Unix() - 5*3600
 			var clients []*aggregatorClient

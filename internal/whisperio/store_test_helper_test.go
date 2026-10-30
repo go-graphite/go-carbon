@@ -20,5 +20,13 @@ func openMemoryTestStore(t testing.TB, dir string, opts store.Options) (*store.S
 	if _, ok := t.(*testing.B); ok {
 		return store.Open(dir, opts)
 	}
+	// Oracle fixtures need only a few MiB; parallel cases should not reserve
+	// production-sized caches and memtables for every store.
+	if opts.CacheSize <= 0 || opts.CacheSize > 4<<20 {
+		opts.CacheSize = 4 << 20
+	}
+	if opts.MemTableSize <= 0 || opts.MemTableSize > 4<<20 {
+		opts.MemTableSize = 4 << 20
+	}
 	return store.Open(dir, opts.WithFS(testutil.MemoryStoreFS(t, dir, opts.IncrementalSource)))
 }
