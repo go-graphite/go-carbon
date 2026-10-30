@@ -318,6 +318,17 @@ func (s *Store) inspectSidecar(ctx context.Context, name string, codec Continuat
 	if !apply {
 		return summary, nil
 	}
+	if io.changed {
+		// Summary repair can add a key absent from a prepared expiration.
+		// Advance its fence while preserving the metric's activity time.
+		if m.Revision == math.MaxUint64 {
+			return summary, errors.New("metric revision exhausted")
+		}
+		m.Revision++
+		if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
+			return summary, err
+		}
+	}
 	return summary, s.commitSidecars(b, name, &summary, s.commit)
 }
 
