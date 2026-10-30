@@ -48,7 +48,7 @@ func checkMetricStoreCatalogAndReadPaths(t *testing.T, exact bool) {
 	t.Run("trie", func(t *testing.T) { testMetricStoreCatalogPath(ctx, t, metricStore, now, true) })
 }
 
-func populateMetricStoreCatalog(ctx context.Context, t *testing.T, metricStore *store.Store, now int64) {
+func populateMetricStoreCatalog(ctx context.Context, t *testing.T, metricStore *store.Store, now int64) { //nolint:unparam // Callers share one fixed clock today.
 	t.Helper()
 	for _, metric := range []string{"servers.api.cpu.user", "servers.api.cpu.system"} {
 		config := store.MetricConfig{Name: metric, Retentions: []store.Retention{{Step: 1, Count: 120}, {Step: 60, Count: 120}}, AggregationMethod: store.Average}
