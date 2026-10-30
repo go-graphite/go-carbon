@@ -720,6 +720,7 @@ func (app *App) Start() (err error) {
 	}
 
 	runtime.GOMAXPROCS(conf.Common.MaxCPU)
+	conf.applyMemoryBudget()
 	app.applyRuntimeProfiling()
 	app.applyMallocTrim()
 	app.beginRestart()

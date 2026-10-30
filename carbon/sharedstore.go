@@ -280,6 +280,9 @@ func validateSharedStoragePolicies(cfg *Config) error {
 }
 
 func storageSettingsChanged(old, next *Config) bool {
+	if old.Common.MemoryBudget != next.Common.MemoryBudget || old.memoryLimit != next.memoryLimit {
+		return true
+	}
 	if old.Whisper.StorageBackend != next.Whisper.StorageBackend || !reflect.DeepEqual(old.Buckyd, next.Buckyd) {
 		return true
 	}
