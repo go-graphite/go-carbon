@@ -106,6 +106,7 @@ type whisperConfig struct {
 	StoreOOODirectWrites         bool      `toml:"store-ooo-direct-writes"`
 	StoreFetchSharedIterator     bool      `toml:"store-fetch-shared-iterator"`
 	StoreMetadataCacheSize       int64     `toml:"store-metadata-cache-size"`
+	StoreMetadataCachePack       bool      `toml:"store-metadata-cache-pack"`
 	StoreUpdatePointLookups      bool      `toml:"store-update-point-lookups"`
 	StorePurgeInvalidNames       bool      `toml:"store-purge-invalid-names"`
 	StoreBytesPerSync            int       `toml:"store-bytes-per-sync"`
