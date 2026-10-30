@@ -267,7 +267,7 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 		prefix := desc.groupPrefix(f.data.id, block.Archive, block.Index)
 		start := f.fs.timer.Nested(stagetime.TailRead)
 		defer f.fs.timer.Unnest(stagetime.TailRead, start)
-		err := f.fs.kv.Visit(prefix, func(key, value []byte) error {
+		visit := func(key, value []byte) error {
 			first := len(points)
 			if first >= count {
 				// Groups past the count are left over from an earlier
@@ -293,7 +293,21 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 				previous = point.Timestamp
 			}
 			return nil
-		})
+		}
+		if count <= 128 {
+			// A single group needs no iterator. Get also sees the existing
+			// descriptor/tail cache, which cannot answer a prefix walk.
+			key := desc.groupKey(f.data.id, block.Archive, block.Index, 0)
+			value, readErr := f.fs.kv.Get(key)
+			err = readErr
+			if errors.Is(err, store.ErrNotFound) {
+				err = nil // The count check below reports a missing group.
+			} else if err == nil {
+				err = visit(key, value)
+			}
+		} else {
+			err = f.fs.kv.Visit(prefix, visit)
+		}
 		if err != nil && !errors.Is(err, errStopGroupVisit) {
 			return nil, err
 		}

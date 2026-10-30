@@ -38,7 +38,12 @@ var exactDecoders = sync.Pool{New: func() any {
 }}
 
 // Reuse serialization scratch while keeping each encoded result independently owned.
-var exactBodyBuffers = sync.Pool{New: func() any { return new([maxExactPayload]byte) }}
+var exactBodyBuffers = sync.Pool{New: func() any { return new(exactBodyBuffer) }}
+
+type exactBodyBuffer struct {
+	body       [maxExactPayload]byte
+	compressed [maxExactPayload + 64]byte // Zstd's frame overhead for one small block.
+}
 
 // A decoder owns this scratch until all scalar fields have been copied into chunk.
 var exactReadBuffers = sync.Pool{New: func() any { return new([maxExactPayload + 2]byte) }}
@@ -51,9 +56,9 @@ func encodeExactChunk(c *chunk) []byte {
 	if exactIntegers(c) {
 		flags |= exactChunkInteger
 	}
-	scratch := exactBodyBuffers.Get().(*[maxExactPayload]byte)
+	scratch := exactBodyBuffers.Get().(*exactBodyBuffer)
 	defer exactBodyBuffers.Put(scratch)
-	body := scratch[:0]
+	body := scratch.body[:0]
 	body = binary.AppendUvarint(body, uint64(c.Deltas))
 	for _, word := range c.Present {
 		body = binary.LittleEndian.AppendUint64(body, word)
@@ -87,7 +92,7 @@ func encodeExactChunk(c *chunk) []byte {
 	checksum := exactChunkChecksum(flags, body)
 	if len(body) >= 128 {
 		z := exactEncoders.Get().(*zstd.Encoder)
-		compressed := z.EncodeAll(body, nil)
+		compressed := z.EncodeAll(body, scratch.compressed[:0])
 		exactEncoders.Put(z)
 		if len(compressed) < len(body) {
 			body = compressed
@@ -206,10 +211,9 @@ func decodeExactChunkPoints(payload []byte, offset int, parsed *chunk) error {
 			if !parsed.has(slot) {
 				continue
 			}
-			var value uint64
-			for plane := uint(0); plane < 8; plane++ {
-				value |= uint64(payload[offset+int(plane)*count+ordinal]) << (plane * 8)
-			}
+			p := payload[offset+ordinal:]
+			value := uint64(p[0]) | uint64(p[count])<<8 | uint64(p[2*count])<<16 | uint64(p[3*count])<<24 |
+				uint64(p[4*count])<<32 | uint64(p[5*count])<<40 | uint64(p[6*count])<<48 | uint64(p[7*count])<<56
 			parsed.Points[slot].Value = math.Float64frombits(value)
 			ordinal++
 		}
