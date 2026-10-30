@@ -96,6 +96,8 @@ type App struct {
 	mallocTrimEvery        time.Duration
 	mallocStats            bool
 	phaseProfiler          *phasecpu.Profiler
+	phaseInterval          time.Duration // the running profiler's settings
+	phaseWindow            time.Duration
 	exit                   chan bool
 	FlushTraces            func()
 	heartbeat              *heartbeat.Heartbeat
@@ -178,9 +180,6 @@ func (app *App) configure() error {
 	cfg, err := loadConfig(app.ConfigFilename)
 	if err != nil {
 		return err
-	}
-	if app.Cache != nil && (phaseCPUInterval(app.Config) != phaseCPUInterval(cfg) || phaseCPUWindow(app.Config) != phaseCPUWindow(cfg)) {
-		return errors.New("changing phase CPU profile interval or duration requires a restart")
 	}
 	if err := validateRuntimeProfiling(cfg); err != nil {
 		return err
@@ -395,6 +394,9 @@ func (app *App) ReloadConfig() error {
 	runtime.GOMAXPROCS(app.Config.Common.MaxCPU)
 	app.applyRuntimeProfiling()
 	app.applyMallocTrim()
+	if err = app.reloadPhaseCPU(); err != nil {
+		return err
+	}
 
 	if app.MetricStore != nil {
 		// Compaction concurrency and pacing trade background store work

@@ -61,11 +61,40 @@ func TestPhaseCPUConfigAndLifecycle(t *testing.T) {
 	}
 	cfg.Common.PhaseCPUProfileInterval = &Duration{0}
 	writeSharedConfig(t, path, cfg)
-	if err := app.ReloadConfig(); err == nil {
-		t.Fatal("reload changed profiler ownership")
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if app.phaseProfiler != nil || phaseCollectorRegistered(t, app) {
+		t.Fatal("reload did not stop the profiler")
+	}
+	cfg.Common.PhaseCPUProfileInterval = &Duration{2 * time.Minute}
+	writeSharedConfig(t, path, cfg)
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if app.phaseProfiler == nil || app.phaseInterval != 2*time.Minute || !phaseCollectorRegistered(t, app) {
+		t.Fatal("reload did not start the profiler")
+	}
+	running := app.phaseProfiler
+	if err := app.ReloadConfig(); err != nil || app.phaseProfiler != running {
+		t.Fatal("an unchanged reload replaced the profiler", err)
 	}
 	app.Stop()
 	if app.phaseProfiler != nil {
 		t.Fatal("profiler survived stop")
 	}
+}
+
+func phaseCollectorRegistered(t *testing.T, app *App) bool {
+	t.Helper()
+	families, err := app.PromRegistry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() == "go_carbon_phase_cpu_seconds_total" {
+			return true
+		}
+	}
+	return false
 }

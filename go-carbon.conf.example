@@ -2,7 +2,7 @@
 # Opt-in estimated CPU by subsystem: default 1s sample every 60s when enabled.
 # Duration must be positive and at most 1/60 of the interval (duty below 2%
 # including jitter). Aggregation runs outside the sampling window.
-# Off by default; requires restart. Competes with on-demand/Pyroscope CPU profiles.
+# Off by default; SIGHUP applies changes. Competes with on-demand/Pyroscope CPU profiles.
 # phase-cpu-profile-interval = "60s"
 # phase-cpu-profile-duration = "1s"
 # Run as user. Works only in daemon mode
