@@ -277,7 +277,7 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 
 			logs := zapwriter.TestString()
 			if tc.handedOver {
-				failed.Range(func(c, err any) bool { t.Fatalf("client %v write failed: %v", c, err); return false })
+				failed.Range(func(c, err any) bool { t.Fatalf("client %v write failed: %v\n%s", c, err, logs); return false })
 				for _, want := range []string{"input handed over", "input handed off to successor", "took over input from stopping instance", "input tail loaded", "persister stopped with input active"} {
 					if !strings.Contains(logs, want) {
 						t.Fatalf("missing %q: %s", want, logs)
