@@ -416,6 +416,7 @@ func (app *App) ReloadConfig() error {
 	}
 
 	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
+	app.Cache.SetMaxBytes(app.Config.Cache.MaxBytes)
 	app.heartbeatCacheMax.Store(int64(app.Config.Cache.MaxSize))
 	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
 	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
@@ -850,6 +851,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.metadataPrewarmDone.Store(nil)
 	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
+	core.SetMaxBytes(conf.Cache.MaxBytes)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
 	core.SetBloomSize(conf.Cache.BloomSize)

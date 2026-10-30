@@ -47,6 +47,7 @@ type migrationSnapshot struct {
 	cache                                 bool
 	cachePoints                           int64
 	cacheMetrics                          int32
+	cacheBytes                            int64
 }
 
 type storeStatsView struct {
@@ -226,8 +227,8 @@ var migrationMetricSpecs = func() []metricSpec {
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePoints) }},
 		metricSpec{desc: prometheus.NewDesc("cache_metrics", "Metrics with points in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheMetrics) }},
-		metricSpec{desc: prometheus.NewDesc("cache_estimated_bytes", "Estimated write-cache memory: 16 bytes per point plus about 160 bytes per cached metric (name, entry and slice).", nil, nil), kind: prometheus.GaugeValue, cache: true,
-			value: func(s *migrationSnapshot) float64 { return float64(16*s.cachePoints + 160*int64(s.cacheMetrics)) }},
+		metricSpec{desc: prometheus.NewDesc("cache_estimated_bytes", "Estimated owned write-cache memory: names, items, buffer capacities, indexes, in-flight points, input-log tracking and queue scratch. Excludes mapped recovery files and the input-log encoder.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 { return float64(s.cacheBytes) }},
 	)
 	return specs
 }()
@@ -330,6 +331,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	if cache != nil {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
+		s.cacheBytes = cache.EstimatedBytes()
 	}
 	if db != nil {
 		st := db.Stats()

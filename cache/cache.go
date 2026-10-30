@@ -33,6 +33,8 @@ const shardCount = 1 << shardBits // 1024 - an arbitrary sized power of 2
 
 type cacheSettings struct {
 	maxSize           int64
+	maxBytes          int64
+	byteSlack         int64
 	sizeSlack         int64 // see sizeSlackFor
 	xlog              func(*points.Points) error
 	tagsEnabled       bool
@@ -56,7 +58,9 @@ type Cache struct {
 
 	queueLastBuild time.Time
 	// queueScratch keeps the last rebuild's sort buffer; see takeQueue.
-	queueScratch atomic.Pointer[queue]
+	queueScratch      atomic.Pointer[queue]
+	queueScratchBytes atomic.Int64
+	queueChannelBytes atomic.Int64
 
 	data []*Shard
 
@@ -70,7 +74,8 @@ type Cache struct {
 	_        [128]byte
 
 	stat struct {
-		size                int64  // published part of the size, changing via atomic; see Shard.sizeDelta
+		size                int64 // published part of the size, changing via atomic; see Shard.sizeDelta
+		bytes               atomic.Int64
 		queueBuildCnt       uint32 // number of times writeout queue was built
 		queueBuildTimeMs    uint32 // time spent building writeout queue in milliseconds
 		queueWriteoutTime   uint32 // in milliseconds
@@ -152,7 +157,9 @@ type Shard struct {
 	// Points added (or removed, if negative) but not yet published to
 	// Cache.stat.size. Publishing in batches keeps ingestion from serializing
 	// on one shared counter.
-	sizeDelta int64
+	sizeDelta           int64
+	byteSize, byteDelta int64
+	inFlightBytes       int64
 	// scratch passes AddPoint's point to the throttle under mu.
 	scratch     points.Points
 	scratchData [1]points.Point
@@ -209,6 +216,7 @@ func New() *Cache {
 
 	settings := cacheSettings{
 		maxSize:     1000000,
+		byteSlack:   byteSlackFor(0),
 		sizeSlack:   sizeSlackFor(1000000),
 		tagsEnabled: false,
 		xlog:        nil,
@@ -217,6 +225,12 @@ func New() *Cache {
 	c.settings.Store(&settings)
 
 	c.writeoutQueue = NewWriteoutQueue(c)
+	var memory int64
+	for _, shard := range c.data {
+		shard.byteSize = shard.memoryBytes()
+		memory += shard.byteSize
+	}
+	c.stat.bytes.Store(memory)
 	return c
 }
 
@@ -386,6 +400,7 @@ func (c *Cache) Confirm(p *points.Points) {
 	removeNotConfirmed(shard, p)
 	delete(shard.firstArrival, p)
 	shard.log.untrack(p)
+	c.syncMemoryLocked(shard)
 	shard.mu.Unlock()
 	if r := c.pending.Load(); r != nil {
 		r.persisted(p)
@@ -400,6 +415,7 @@ func removeNotConfirmed(shard *Shard, p *points.Points) bool {
 
 		copy(shard.notConfirmed[i:], shard.notConfirmed[i+1:shard.notConfirmedUsed])
 		shard.notConfirmedUsed--
+		shard.inFlightBytes -= flightMemory(p)
 		shard.notConfirmed[shard.notConfirmedUsed] = nil
 		return true
 	}
@@ -446,6 +462,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	shard.log.merge(&values.Points, p)
 	shard.log.track(&values.Points)
 	shard.items.set(p.Metric, values)
+	c.syncMemoryLocked(shard)
 	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
 	c.writeoutQueue.notifyAt(time.Now())
 }
@@ -623,9 +640,14 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, val
 	if c.overflows(s, 1) {
 		return
 	}
+	capacity, logCapacity := cap(values.compact.buf), cap(shard.log.entries)
 	values.compact.append(value, timestamp)
+	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 	if shard.log.first != nil {
 		shard.log.record(&values.log, value, timestamp)
+	}
+	if cap(values.compact.buf) != capacity || cap(shard.log.entries) != logCapacity {
+		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, 1, true, false)
 }
@@ -758,7 +780,9 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} 
 		}
 	}
 	values.throttleState = throttleState
+	capacity, logCapacity := cap(values.compact.buf), cap(shard.log.entries)
 	values.compact.appendPoints(p.Data)
+	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 
 	if recovered {
 		if r := c.pending.Load(); r != nil {
@@ -775,12 +799,15 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} 
 		}
 	}
 
+	if !exists || cap(values.compact.buf) != capacity || cap(shard.log.entries) != logCapacity {
+		c.syncMemoryLocked(shard)
+	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
 	return nil
 }
 
 func (c *Cache) overflows(s *cacheSettings, count int) bool {
-	if s.maxSize > 0 && c.approxSize() > s.maxSize {
+	if s.maxSize > 0 && c.approxSize() > s.maxSize || s.maxBytes > 0 && c.stat.bytes.Load()+c.queueMemory() > s.maxBytes {
 		atomic.AddUint32(&c.stat.overflowCnt, uint32(count))
 		return true
 	}
@@ -840,6 +867,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 		s := c.settings.Load().(*cacheSettings)
 		shard.noteWritten(values, s)
 		c.addSizeLocked(shard, -int64(values.count()), s.sizeSlack)
+		c.syncMemoryLocked(shard)
 	}
 	shard.mu.Unlock()
 	if exists {
@@ -882,6 +910,8 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
+		shard.inFlightBytes += flightMemory(p)
+		c.syncMemoryLocked(shard)
 	}
 	shard.mu.Unlock()
 
@@ -903,6 +933,7 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 		shard.mu.Lock()
 		currNames := shard.adds
 		shard.adds = newAdds
+		c.syncMemoryLocked(shard)
 		shard.mu.Unlock()
 		metricNames[i] = currNames
 	}
@@ -929,8 +960,10 @@ func (c *Cache) GetInfo() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"size":  c.Size(),
-		"limit": s.maxSize,
+		"size":            c.Size(),
+		"limit":           s.maxSize,
+		"estimated_bytes": c.EstimatedBytes(),
+		"byte_limit":      s.maxBytes,
 	}
 }
 

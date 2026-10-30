@@ -151,6 +151,9 @@ func TestCollectorReportsPersisterTimingsAndMemory(t *testing.T) {
 	if got := found["cache_points"].GetMetric()[0].GetGauge().GetValue(); got != 1 {
 		t.Fatalf("cache_points %v, want 1", got)
 	}
+	if got := found["cache_estimated_bytes"].GetMetric()[0].GetGauge().GetValue(); got != float64(c.EstimatedBytes()) {
+		t.Fatalf("cache_estimated_bytes %v, want %d", got, c.EstimatedBytes())
+	}
 	if found["persister_update_duration_seconds"].GetMetric()[0].GetHistogram().GetSampleCount() == 0 {
 		t.Fatal("update histogram empty")
 	}

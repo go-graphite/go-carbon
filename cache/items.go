@@ -12,6 +12,7 @@ type itemSlot struct {
 type itemMap struct {
 	slots     []itemSlot
 	n, used   int
+	bytes     int64
 	deadlines *queueDeadlines
 }
 
@@ -67,7 +68,7 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 		}
 		old := m.slots
 		m.deadlines = nil
-		m.slots, m.n, m.used = make([]itemSlot, n), 0, 0
+		m.slots, m.n, m.used, m.bytes = make([]itemSlot, n), 0, 0, 0
 		for _, slot := range old {
 			if slot.item != nil {
 				m.setHashed(slot.hash, slot.item)
@@ -89,9 +90,11 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 				m.slots[free] = itemSlot{hash: hash, item: it}
 				m.invalidateDeadline(free)
 				m.n++
+				m.bytes += it.memoryBytes()
 				return
 			}
 		} else if slot.hash == hash && slot.item.Metric == it.Metric {
+			m.bytes += it.memoryBytes() - slot.item.memoryBytes()
 			slot.item = it
 			m.invalidateDeadline(i)
 			return
@@ -113,6 +116,7 @@ func (m *itemMap) removeHashed(hash uint64, name string) {
 				return
 			}
 		} else if slot.hash == hash && slot.item.Metric == name {
+			m.bytes -= slot.item.memoryBytes()
 			*slot = itemSlot{hash: 1}
 			m.invalidateDeadline(i)
 			m.n--

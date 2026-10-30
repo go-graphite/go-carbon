@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"slices"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -139,13 +140,10 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		}
 	}
 
-	// This is a reservation, not a bound: arrivals during the shard scan use
-	// append below. Reserving twice the snapshot retained unused queue entries.
-	size := c.Len()
-	q, scratch := c.takeQueue(int(size))
-	index := int32(0)
 	s := c.settings.Load().(*cacheSettings)
 	batch := c.batchWrites(s)
+	q, scratch := c.takeQueue(int(c.Len()), batch)
+	index := int32(0)
 	var next time.Time
 	var shardRanges [shardCount]struct{ next, end int32 }
 
@@ -155,12 +153,7 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		shard.mu.Lock()
 
 		add := func(p *item) {
-			if index < size {
-				q[index].metric = p.Metric
-				q[index].orderKey = orderKey(p)
-			} else {
-				q = append(q, queueItem{p.Metric, orderKey(p)})
-			}
+			q = append(q, queueItem{p.Metric, orderKey(p)})
 			index++
 		}
 		if batch {
@@ -177,7 +170,13 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		shardRanges[i].end = index
 	}
 
-	q = q[:index]
+	// A pressure wave may have made the whole cache eligible last time.
+	// Once it passes, keep scratch proportional to the ready population.
+	if batch && cap(q) > max(1024, 2*len(q)) {
+		smaller := slices.Clone(q)
+		clear(q)
+		q = smaller
+	}
 
 	switch writeStrategy {
 	case MaximumLength:
@@ -233,22 +232,26 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 	return ch, next
 }
 
-// takeQueue returns a queue of length n, reusing the previous rebuild's buffer
-// unless it is too small or more than twice the size needed. Only the channel
-// outlives a rebuild, so the buffer can be reused. A concurrent rebuild finds
-// no buffer and allocates its own.
-func (c *Cache) takeQueue(n int) (queue, *queue) {
+// takeQueue reuses the previous rebuild's buffer. Batched queues reserve only
+// a small starting capacity: most metrics may be waiting for their deadline.
+// Only the channel outlives a rebuild. Concurrent rebuilds take separate buffers.
+func (c *Cache) takeQueue(n int, batch bool) (queue, *queue) {
 	if n == 0 {
 		// Leave the buffer for the next nonempty cache.
 		return nil, nil
 	}
-	if scratch := c.queueScratch.Swap(nil); scratch != nil {
-		if q := *scratch; cap(q) >= n && cap(q) <= 2*n {
-			return q[:n], scratch
-		}
-		return make(queue, n), scratch
+	capacity := n
+	if batch {
+		capacity = min(n, 1024)
 	}
-	return make(queue, n), nil
+	if scratch := c.queueScratch.Swap(nil); scratch != nil {
+		c.queueScratchBytes.Store(0)
+		if q := *scratch; (batch || cap(q) >= n) && cap(q) <= 2*n {
+			return q[:0], scratch
+		}
+		return make(queue, 0, capacity), scratch
+	}
+	return make(queue, 0, capacity), nil
 }
 
 // releaseQueue keeps q's buffer for the next rebuild. Clearing it releases
@@ -264,4 +267,5 @@ func (c *Cache) releaseQueue(scratch *queue, q queue) {
 	}
 	*scratch = q[:0]
 	c.queueScratch.Store(scratch)
+	c.queueScratchBytes.Store(int64(cap(q)) * 24)
 }

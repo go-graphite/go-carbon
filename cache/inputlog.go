@@ -164,6 +164,7 @@ func (c *Cache) EnableInputLog() {
 				}
 			}
 		}
+		c.syncMemoryLocked(shard)
 		shard.mu.Unlock()
 	}
 }
@@ -174,6 +175,7 @@ func (c *Cache) DisableInputLog() {
 		shard.mu.Lock()
 		shard.log.wakeRestore()
 		shard.log = shardLog{}
+		c.syncMemoryLocked(shard)
 		shard.mu.Unlock()
 	}
 }
@@ -185,6 +187,7 @@ func (c *Cache) TakeLogEntries(shard int, gen uint64, spare []inputlog.Entry) []
 	taken := s.log.entries
 	s.log.entries, s.log.gen = spare[:0], gen
 	s.log.wakeRestore()
+	c.syncMemoryLocked(s)
 	s.mu.Unlock()
 	return taken
 }
@@ -220,6 +223,7 @@ func (c *Cache) RelogBefore(gen uint64, budget int) int {
 		}
 		shard.mu.Lock()
 		n += shard.log.relog(gen, budget-n, shard.loggedPoints)
+		c.syncMemoryLocked(shard)
 		shard.mu.Unlock()
 	}
 	return n
