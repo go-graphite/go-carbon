@@ -151,7 +151,13 @@ of settled ordinary corpus stores and writes a JSON receipt. Set
 `COLD_PACK_BENCH_DIR`, `COLD_PACK_BENCH_RESULT`, `COLD_PACK_BENCH_CLOCK` and
 `COLD_PACK_BENCH_MODE`. It includes a full archive oracle, a twenty-series native
 one-hour read mix before/during/after paced maintenance, an isolated CPU trial,
-and fresh tiny-block-cache reads. OS cache eviction is not simulated.
+and fresh tiny-block-cache reads. OS cache eviction is not simulated. For a time-matched
+control, `TestColdPackPairedReads` uses independent reader processes with separate
+GC heaps, identical requests and alternating request order throughout a full
+paced sweep. Set `COLD_PACK_PAIRED_DIR` to a private ordinary clone, plus the same
+clock, mode and result variables. Its `reference` directory and peer logs are
+created beside the clone. This optional qualification is separate from fast
+package tests; each process has a bounded benchmark deadline.
 
 Before a canary, validate the actual retained cold fraction and free-space
 headroom. Start exact mode on one representative host with ample disk and low
