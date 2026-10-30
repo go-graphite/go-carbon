@@ -25,6 +25,7 @@ Full-rate replays of the three datasets (details, paced runs and method in [Meas
 | **Storage** | | | | |
 | Durable bytes / input point | 2.75 · 2.01 · 1.55 | **1.44 · 0.97 · 1.13** | 2.59 · 1.59 · 2.50 | VM (27–52 % below go-carbon) |
 | All files / input point (incl. index, discovery) | 2.79 · 2.07 · **1.61** | **1.86** · 1.82 · 2.17 | 4.98 · **1.79** · 3.53 | VM D1, GreptimeDB D2, go-carbon D3 |
+| Durable bytes / input point, cold history packed ([#1034](https://github.com/go-graphite/go-carbon/pull/1034), fully sealed ceiling) | 1.99 · 1.41 · **1.09** | **1.44 · 0.97** · 1.13 | — | VM D1/D2, go-carbon D3 |
 | **Ingest** | | | | |
 | Ingest CPU, µs / input point | 0.955 · 0.873 · 0.562 | **0.603 · 0.537 · 0.512** | 1.646 · 1.675 · 1.667 | VM (9–39 % below go-carbon) |
 | Persistence rate, M points/s (incl. settle) | 1.78 · 1.28 · 0.87 | **3.54 · 2.64 · 1.87** | 0.55 · 0.37 · 0.38 | VM |
@@ -60,16 +61,17 @@ Headers, manifests and catalog are per-series costs: with 6–24 h of history th
 
 ### Closing the storage gap: local prototypes
 
-Neither prototype is enabled by default or merged; both keep native rollups.
+Both stay off by default and keep native rollups. Cold packing, with optional decimal blocks, is proposed in [#1034](https://github.com/go-graphite/go-carbon/pull/1034).
 
 | Durable bytes / input point | D1 | D2 | D3 |
 | --- | ---: | ---: | ---: |
 | go-carbon today | 2.75 | 2.01 | 1.55 |
 | Cold history repacked into 4,096-point sealed blocks | 2.28 (−17 %) | 1.65 (−17 %) | **1.09 (−30 %)** |
 | Decimal value blocks, measured separately | −13 % | −15 % | −4 % |
+| Cold packing, decimal blocks on D1/D2 and exact on D3 (#1034) | 1.99 (−27.5 %) | 1.41 (−29.8 %) | **1.09 (−29.8 %)** |
 | VictoriaMetrics | 1.44 | 0.97 | 1.13 |
 
-Repacking applies only to history older than the write window; the short exports here are its full-sealing ceiling. Decimal blocks double value-encoding CPU. Their combined effect is not measured yet.
+Repacking applies only to history older than the write window; the short exports here are its full-sealing ceiling. Decimal blocks double value-encoding CPU. Combined in #1034, decimal cold packing reaches −27.5 % on D1 and −29.8 % on D2, and exact packing −29.8 % on D3, which puts D3 below VictoriaMetrics. The paced background sweep costs 38–54 CPU-s per durable GB; reader p99 moved by at most +0.18 ms during packing.
 
 ## Master mechanism table
 
@@ -213,7 +215,7 @@ Statuses combine the completed replay with separate local representation/prototy
 | Shared memory-budget policy | VM Allowed; Greptime active/total accounting and memory permits [V-memory][V-memory] [T-flush][T-flush] [T-memory][T-memory] | Follow-up retains a startup policy that derives omitted settings; explicit component overrides remain authoritative | No default saving; bounds policy, not a hard RSS limit. Pressure CPU/p99 unqualified. | Double accounting, hidden pinned bytes, excess flushes/cache misses and admission deadlock | **Kept opt-in**, default off. |
 | Bounded append/fold | VM immutable parts and encoded pass-through [V-partition][V-partition] [V-merge][V-merge] | Test-only `fold8` prototype, separate from ordinary continuation `Set` | Foreground CPU **−56–68%**, logical WAL **−67–72%**; costlier uncached reads | Fold backlog, read replay/allocation, correction ordering, writer-state and format compatibility | **End-to-end comparison running**; isolated screen only. |
 | True sample-expiry windows | VM partition retirement; Greptime event-time/TWCS TTL [V-retention][V-retention] [T-twcs][T-twcs] | Existing v7 write-hour locality is not expiry ownership | Could replace many per-metric tombstones with safe cohort retirement; no production-wide speedup quantified | Different archive retentions, late data, snapshot/reference lifetime and catalog GC | **Recommended** for next design work. |
-| Decimal values / size-aware sealed blocks | VM decimal-scaled integers and adaptive blocks; Greptime field encodings [V-decimal][V-decimal] [V-encoding][V-encoding] [T-floatopt][T-floatopt] | Exact integer/BSS + selective Zstd already exists; decimal alternative under evaluation | VM's measured byte/CPU advantage motivates the experiment; no go-carbon decimal gain claimed yet | Define error and exceptional-value policy, migration/compatibility, cold reads and mutable-tail cost | **Being evaluated**; bit-exactness no longer mandatory. |
+| Decimal values / size-aware sealed blocks | VM decimal-scaled integers and adaptive blocks; Greptime field encodings [V-decimal][V-decimal] [V-encoding][V-encoding] [T-floatopt][T-floatopt] | Exact integer/BSS + selective Zstd already exists; decimal alternative under evaluation | Cold packing: −27.5 % D1 and −29.8 % D2 with decimal blocks, −29.8 % D3 exact ([#1034](https://github.com/go-graphite/go-carbon/pull/1034)) | Decimal error bound and exceptional values defined in #1034; production canary, rollup precision and one-way format upgrade remain | **Proposed** (off by default); bit-exactness no longer mandatory. |
 
 Historical Greptime partition-tree dictionaries/PkId (u32 shard + u16 local index) informed the arena idea, but were removed on 2026-05-15 and are not the current default. Current flat/sparse mode selects bulk memtables. [H-tree][H-tree] [H-dict][H-dict] [H-data][H-data] [T-memselect][T-memselect]
 
@@ -464,7 +466,7 @@ These are full-rate, packing-off responses. Counts are non-null decoded points. 
 
 | Area | Next evidence needed |
 | --- | --- |
-| Decimal codec | Error tolerance, exceptional-value and staleness policy, compression/CPU/read cost, migration/rollback and precision across rollups. It need not preserve arbitrary Float64 bits under the current decision. |
+| Decimal codec | #1034 keeps a decimal block only within 5.1e-12 relative error and leaves NaN, Inf, −0 and subnormals exact. Still needed: staleness policy, precision across rollups and production read/CPU cost. It need not preserve arbitrary Float64 bits under the current decision. |
 | Serving parity | Repeat with a common grid/serializer and output contract; isolate gap-fill, aggregation and storage work. Add concurrent requests/writes and more than one empirical p99. |
 | Sustained capacity | Quiet host, common OS CPU quota, realistic cardinality/churn and 960 s coalescing; repeat through compaction-debt recovery. These 2.5–11.5 K-series replays cannot forecast a ~20 M-series store. |
 | Correctness | Larger retained-value checks, actual seven-day history, duplicate/OOO/late corrections, retention boundaries and explicit XFF/staleness behavior. All Greptime finite-input counts match, but count equality alone is insufficient. |
