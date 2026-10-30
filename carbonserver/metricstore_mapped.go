@@ -43,6 +43,7 @@ func (l *CarbonserverListener) updateMappedMetricStoreIndex(db *store.Store, pre
 		}
 	}
 	if rebuild {
+		defer l.observeMetricStoreIndexRebuild()()
 		next, err := l.loadMappedMetricStoreCatalog(db)
 		if err != nil {
 			return err
