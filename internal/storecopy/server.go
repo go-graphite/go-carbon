@@ -27,6 +27,11 @@ import (
 const Endpoint = "/admin/store-copy"
 const MaxChunk = 64 << 20
 
+var copyBuffers = sync.Pool{New: func() any {
+	buffer := make([]byte, 1<<20)
+	return &buffer
+}}
+
 type File struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
@@ -408,7 +413,9 @@ func (m *Manager) file(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Trailer", "X-Content-SHA256")
 	w.Header().Set("Content-Type", "application/octet-stream")
 	hash := sha256.New()
-	n, err := io.CopyBuffer(io.MultiWriter(w, hash), io.NewSectionReader(f, offset, length), make([]byte, 256<<10))
+	buffer := copyBuffers.Get().(*[]byte)
+	defer copyBuffers.Put(buffer)
+	n, err := io.CopyBuffer(io.MultiWriter(w, hash), io.NewSectionReader(f, offset, length), *buffer)
 	if err == nil && n == length {
 		w.Header().Set("X-Content-SHA256", hex.EncodeToString(hash.Sum(nil)))
 	}
