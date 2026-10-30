@@ -26,6 +26,9 @@ type ColdPackOptions struct {
 	CPUFraction float64
 	WriteWindow time.Duration
 	Interval    time.Duration
+	// MaxCompactionDebt pauses maintenance while Pebble's estimated compaction
+	// debt is above this many bytes. Stores that normally carry debt need more.
+	MaxCompactionDebt uint64
 }
 
 func NormalizeColdPack(o ColdPackOptions) (ColdPackOptions, error) {
@@ -46,6 +49,9 @@ func NormalizeColdPack(o ColdPackOptions) (ColdPackOptions, error) {
 	}
 	if o.Interval == 0 {
 		o.Interval = time.Hour
+	}
+	if o.MaxCompactionDebt == 0 {
+		o.MaxCompactionDebt = 64 << 20
 	}
 	if o.Mode != "off" && o.Mode != "exact" && o.Mode != "decimal" && o.Mode != "unpack" {
 		return o, errors.New("cold pack mode must be off, exact, decimal or unpack")
@@ -147,7 +153,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.passFailed = false
 	}
 	if o.Mode != "off" || c.options.Mode != "" && c.options.Mode != "off" {
-		log.Printf("cold pack configured: mode=%s bytes_per_second=%d cpu_fraction=%g write_window=%s", o.Mode, o.BytesPerSecond, o.CPUFraction, o.WriteWindow)
+		log.Printf("cold pack configured: mode=%s bytes_per_second=%d cpu_fraction=%g write_window=%s max_compaction_debt=%d", o.Mode, o.BytesPerSecond, o.CPUFraction, o.WriteWindow, o.MaxCompactionDebt)
 	}
 	c.cleanUnpack = false
 	c.options = o
@@ -234,7 +240,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 		return false, nil
 	}
 	m := s.db.Metrics()
-	if m.Compact.EstimatedDebt > 64<<20 || int64(m.MemTable.Size) > int64(s.pebbleOptions.MemTableSize)*2 || m.Levels[0].Sublevels >= int32(max(2, s.pebbleOptions.L0StopWritesThreshold/2)) {
+	if m.Compact.EstimatedDebt > o.MaxCompactionDebt || int64(m.MemTable.Size) > int64(s.pebbleOptions.MemTableSize)*2 || m.Levels[0].Sublevels >= int32(max(2, s.pebbleOptions.L0StopWritesThreshold/2)) {
 		c.mu.Lock()
 		c.stats.PressurePauses++
 		c.mu.Unlock()

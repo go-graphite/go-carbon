@@ -281,6 +281,7 @@ store-encoding = "legacy"
 # store-cold-pack-write-window = "24h" # ranges with newer samples stay ordinary
 # store-cold-pack-interval = "1h"       # delay between completed catalog sweeps
 # store-cold-pack-min-free-bytes = 1073741824 # plus 8 MiB operation headroom
+# store-cold-pack-max-compaction-debt = 67108864 # pause above this Pebble debt
 
 
 # Automatically remove idle metrics from pebble-chunk storage. "0s" disables

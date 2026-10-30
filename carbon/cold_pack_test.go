@@ -7,8 +7,12 @@ import (
 
 func TestColdPackConfig(t *testing.T) {
 	cfg := NewConfig()
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.MaxCompactionDebt != 64<<20 {
 		t.Fatalf("default %+v %v", o, err)
+	}
+	cfg.Whisper.StoreColdPackMaxDebt = 8 << 30
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.MaxCompactionDebt != 8<<30 {
+		t.Fatalf("max compaction debt %+v %v", o, err)
 	}
 	cfg.Whisper.StoreColdPack = "decimal"
 	if err := validateStorageConfig(cfg); err == nil {
@@ -18,6 +22,7 @@ func TestColdPackConfig(t *testing.T) {
 	next := *cfg
 	next.Whisper.StoreColdPack = "exact"
 	next.Whisper.StoreColdPackRate = 12345
+	next.Whisper.StoreColdPackMaxDebt = 16 << 30
 	if storageSettingsChanged(cfg, &next) {
 		t.Fatal("maintenance policy requires restart")
 	}

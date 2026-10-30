@@ -31,6 +31,7 @@ func run() (err error) {
 	cpu := flag.Float64("cpu-fraction", .02, "conservative fraction of one worker")
 	window := flag.Duration("write-window", 24*time.Hour, "keep more recent ranges ordinary")
 	reserve := flag.Uint64("min-free-bytes", 1<<30, "minimum free disk reserve")
+	debt := flag.Uint64("max-compaction-debt", 64<<20, "pause while estimated compaction debt exceeds this")
 	flag.Parse()
 	if *dir == "" || (*mode != "exact" && *mode != "decimal" && *mode != "unpack") || (*downgrade && *mode != "unpack") {
 		return errors.New("set -store and a valid -mode; -downgrade requires unpack")
@@ -43,7 +44,7 @@ func run() (err error) {
 	}
 	defer func() { err = errors.Join(err, db.Close()) }()
 	db.StopBackground()
-	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve}); err != nil {
+	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve, MaxCompactionDebt: *debt}); err != nil {
 		return err
 	}
 	if err = db.RunColdPack(ctx); err != nil {

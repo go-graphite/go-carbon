@@ -23,6 +23,7 @@ store-cold-pack-cpu-fraction = 0.02
 store-cold-pack-write-window = "24h"
 store-cold-pack-interval = "1h"
 store-cold-pack-min-free-bytes = 1073741824
+store-cold-pack-max-compaction-debt = 67108864
 ```
 
 Enabling requires `storage-backend = "pebble-chunk"`, `store-encoding = "exact"`,
@@ -30,9 +31,14 @@ Enabling requires `storage-backend = "pebble-chunk"`, `store-encoding = "exact"`
 normal prerequisites. Zero or omitted budgets select the defaults above. CPU
 fraction must be between 0.001 and 1. Byte rate must be positive. The write window
 must be nonnegative and the sweep interval at least one second. Zero durations
-select defaults. All six settings reload on SIGHUP; invalid settings fail the
+select defaults. All seven settings reload on SIGHUP; invalid settings fail the
 reload. Turning off joins the current bounded operation and prevents subsequent
 packing. It retains the upgraded reader fence and existing sealed data.
+
+Only time-bucketed (v7 layout) blocks larger than one 128-point group are
+eligible. Blocks a store wrote before time buckets were enabled stay in the v6
+layout and are skipped until `store-time-buckets-relayout-rate` moves them into
+the history bucket.
 
 `unpack` restores ordinary 128-point groups. This is also paced, and leaves the
 reader fence in place during online use. Changing exact/decimal/unpack policy
@@ -64,10 +70,14 @@ sleeping worker. This is a conservative worker budget, not a process-wide CPU
 ceiling: asynchronous Pebble flushes, compactions and GC are additional work.
 Existing compaction pacing remains independently configurable.
 
-Maintenance pauses when compaction debt exceeds 64 MiB, two memtables are full,
+Maintenance pauses when Pebble's estimated compaction debt exceeds
+`store-cold-pack-max-compaction-debt` (64 MiB by default), two memtables are full,
 L0 reaches half the write-stop threshold (at least two sublevels), or the free
 disk reserve plus 8 MiB cannot be maintained. These are admission checks, not
-reservations against concurrent writers. WAL, flush and compaction output require
+reservations against concurrent writers. A busy store that normally carries
+several GiB of debt pauses on every step at the default; raise the threshold to
+just above its usual debt, and watch `store_cold_pack_pressure_pauses_total`.
+WAL, flush and compaction output require
 transient disk space before old tables are reclaimed. Bounded publication cannot
 place a hard deadline on filesystem syncs or a Pebble write stall that starts
 between admission and commit; monitor the maximum lock metric and read latency.

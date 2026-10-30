@@ -94,6 +94,7 @@ type whisperConfig struct {
 	StoreColdPackCPU             float64   `toml:"store-cold-pack-cpu-fraction"`
 	StoreColdPackWindow          *Duration `toml:"store-cold-pack-write-window"`
 	StoreColdPackInterval        *Duration `toml:"store-cold-pack-interval"`
+	StoreColdPackMaxDebt         uint64    `toml:"store-cold-pack-max-compaction-debt"`
 	StoreTimeBuckets             bool      `toml:"store-time-buckets"`
 	StoreTimeBucketsRelayoutRate int64     `toml:"store-time-buckets-relayout-rate"`
 	StoreMigrationIOSlots        int       `toml:"store-migration-io-slots"`
