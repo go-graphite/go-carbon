@@ -333,6 +333,10 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			return nil, ErrFormat
 		}
 		for i, kv := range r.Keys {
+			if r.Continuation && !s.coldPack.format.Load() && sealedTransferKey(kv) {
+				return nil, fmt.Errorf("%w: cold blocks require v9 destination", ErrFormat)
+			}
+
 			if len(kv.Key) == 0 || len(kv.Key) > 4096 || len(kv.Value) > 16<<20 || (i > 0 && bytes.Compare(r.Keys[i-1].Key, kv.Key) >= 0) {
 				return nil, errors.New("invalid transfer keys")
 			}

@@ -67,10 +67,11 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			MaxTransfers int
 			L0StopWrites int64
 			MaxBodyBytes int64
+			StoreFormat  int
 			Protocol     int
 			Hostname     string
 			CPULimit     int
-		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, 1, hostname, runtime.GOMAXPROCS(0)})
+		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0)})
 		return
 	}
 	if !s.acquireTransfer() {
@@ -143,6 +144,11 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(page)
 	case "/v1/transfer/export":
+		accepted, _ := strconv.Atoi(r.URL.Query().Get("store_format"))
+		if s.store.TransferFormat() > 7 && accepted < s.store.TransferFormat() {
+			writeError(w, errors.New("export requires a peer accepting store format 9"), http.StatusConflict)
+			return
+		}
 		var names []string
 		if !decode(&names) {
 			return
@@ -167,6 +173,15 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
+		// Reload may upgrade the source while flush/export runs. The immutable
+		// records precede this final capability check, so an old peer cannot receive
+		// new blocks through a request admitted before the marker upgrade.
+		if s.store.TransferFormat() > 7 && accepted < s.store.TransferFormat() {
+			writeError(w, errors.New("export requires a peer accepting store format 9"), http.StatusConflict)
+			return
+		}
+		w.Header().Set("X-Store-Format", strconv.Itoa(s.store.TransferFormat()))
+
 		// Bound the encoded response as well as imports; a dense batch must be
 		// split by the caller before it can consume arbitrary server memory.
 		var size int64
@@ -365,6 +380,7 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	query := u.Query()
 	query.Set("max_bytes", strconv.FormatInt(maxBytes, 10))
 	query.Set("wire", "2")
+	query.Set("store_format", strconv.Itoa(s.store.TransferFormat()))
 	u.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -385,6 +401,10 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	defer response.Body.Close()
 	if response.StatusCode != 200 {
 		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s", response.Status)}
+	}
+	required, _ := strconv.Atoi(response.Header.Get("X-Store-Format"))
+	if required > s.store.TransferFormat() {
+		return nil, 0, errors.New("source store format exceeds target capability")
 	}
 	input := &transferCountReader{Reader: response.Body}
 	records, err := buffer.Read(input, maxBytes, response.ContentLength)

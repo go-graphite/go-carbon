@@ -132,13 +132,21 @@ type blockDescriptor struct {
 	count    int
 	bucket   uint32
 	bucketed bool
+	packed   int
 }
 
 func decodeBlockDescriptor(data []byte) (blockDescriptor, error) {
 	switch len(data) {
 	case 4:
 		return blockDescriptor{count: int(binary.BigEndian.Uint32(data))}, nil
-	case 8:
+	case 8, 12:
+		if len(data) == 12 {
+			n := int(binary.BigEndian.Uint32(data[8:]))
+			if n < 128 || n > store.MaxSealedPoints || n%128 != 0 {
+				return blockDescriptor{}, errors.New("invalid sealed group size")
+			}
+			return blockDescriptor{count: int(binary.BigEndian.Uint32(data)), bucket: binary.BigEndian.Uint32(data[4:]), bucketed: true, packed: n}, nil
+		}
 		return blockDescriptor{count: int(binary.BigEndian.Uint32(data)), bucket: binary.BigEndian.Uint32(data[4:]), bucketed: true}, nil
 	}
 	return blockDescriptor{}, errors.New("invalid continuation block count")
@@ -149,7 +157,17 @@ func (d blockDescriptor) encode() []byte {
 	if d.bucketed {
 		value = binary.BigEndian.AppendUint32(value, d.bucket)
 	}
+	if d.packed > 0 {
+		value = binary.BigEndian.AppendUint32(value, uint32(d.packed))
+	}
 	return value
+}
+
+func (d blockDescriptor) groupSize() int {
+	if d.packed > 0 {
+		return d.packed
+	}
+	return 128
 }
 
 // groupPrefix returns the key prefix of the block's point groups.
@@ -274,27 +292,37 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 				// incarnation of this block whose keys the rewrite reuses.
 				return errStopGroupVisit
 			}
-			if len(key) != len(prefix)+4 || int(binary.BigEndian.Uint32(key[len(prefix):])) != first/128 {
+			if len(key) != len(prefix)+4 || int(binary.BigEndian.Uint32(key[len(prefix):])) != first/desc.groupSize() {
 				return fmt.Errorf("invalid continuation physical group order: file %d archive %d block %d: group key %x, want group %d",
-					f.data.id, block.Archive, block.Index, key[min(len(key), len(prefix)):], first/128)
+					f.data.id, block.Archive, block.Index, key[min(len(key), len(prefix)):], first/desc.groupSize())
 			}
 			var group store.PointBlock
-			if err := store.DecodePointBlock(value, &group); err != nil {
-				return err
+			var decoded []store.Point
+			if desc.packed > 0 {
+				var err error
+				decoded, err = store.DecodeSealedPoints(value)
+				if err != nil {
+					return err
+				}
+				if len(decoded) != min(desc.groupSize(), count-first) {
+					return errors.New("sealed group count differs")
+				}
+			} else {
+				if err := store.DecodePointBlock(value, &group); err != nil {
+					return err
+				}
+				decoded = group.Points[:min(128, count-first)]
 			}
-			for slot := 0; slot < min(128, count-first); slot++ {
-				point := group.Points[slot]
-				if group.Present[slot/64]&(uint64(1)<<uint(slot%64)) == 0 || point.Timestamp <= previous || point.Timestamp > math.MaxUint32 {
-					return fmt.Errorf("invalid continuation physical point: file %d archive %d block %d (count %d, step %d): point %d present %v at %d follows %d",
-						f.data.id, block.Archive, block.Index, count, block.Step, first+slot,
-						group.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0, point.Timestamp, previous)
+			for slot, point := range decoded {
+				if desc.packed == 0 && group.Present[slot/64]&(uint64(1)<<uint(slot%64)) == 0 || point.Timestamp <= previous || point.Timestamp > math.MaxUint32 {
+					return fmt.Errorf("invalid continuation physical point: file %d archive %d block %d (count %d, step %d): point %d present %v at %d follows %d", f.data.id, block.Archive, block.Index, count, block.Step, first+slot, desc.packed > 0 || group.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0, point.Timestamp, previous)
 				}
 				points = append(points, whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
 				previous = point.Timestamp
 			}
 			return nil
 		}
-		if count <= 128 {
+		if count <= desc.groupSize() {
 			// A single group needs no iterator. Get also sees the existing
 			// descriptor/tail cache, which cannot answer a prefix walk.
 			key := desc.groupKey(f.data.id, block.Archive, block.Index, 0)
@@ -366,6 +394,9 @@ func (f *continuationFile) appendStorageBlock(block whisper.ContinuationBlock, p
 		desc = fresh
 	} else if desc.count != previous {
 		return fmt.Errorf("continuation append predecessor differs: %d != %d", desc.count, previous)
+	}
+	if err := f.thawBlock(block, &desc); err != nil {
+		return err
 	}
 	previousTime := int64(0)
 	var predecessor *store.PointBlock
@@ -455,6 +486,9 @@ func (f *continuationFile) ReplaceStoragePoints(block whisper.ContinuationBlock,
 	if desc.count != block.Count {
 		return fmt.Errorf("continuation patched block count differs: %d != %d", desc.count, block.Count)
 	}
+	if err := f.thawBlock(block, &desc); err != nil {
+		return err
+	}
 	var group *store.PointBlock
 	current := -1
 	flush := func() error {
@@ -511,6 +545,9 @@ func (f *continuationFile) RewriteStorageBlock(block whisper.ContinuationBlock, 
 	}
 	if desc.count < from {
 		return fmt.Errorf("continuation rewrite starts past the stored points: %d > %d", from, desc.count)
+	}
+	if err := f.thawBlock(block, &desc); err != nil {
+		return err
 	}
 	for position := from; position < len(points); {
 		key := desc.groupKey(f.data.id, block.Archive, block.Index, position/128)

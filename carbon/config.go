@@ -88,6 +88,13 @@ type whisperConfig struct {
 	StoreMirrorFiles             bool      `toml:"store-mirror-files"`
 	StoreIncrementalMigration    bool      `toml:"store-incremental-migration"`
 	StoreMigrationIngest         bool      `toml:"store-migration-ingest"`
+	StoreColdPack                string    `toml:"store-cold-pack"`
+	StoreColdPackMinFree         uint64    `toml:"store-cold-pack-min-free-bytes"`
+	StoreColdPackRate            int64     `toml:"store-cold-pack-bytes-per-second"`
+	StoreColdPackCPU             float64   `toml:"store-cold-pack-cpu-fraction"`
+	StoreColdPackWindow          *Duration `toml:"store-cold-pack-write-window"`
+	StoreColdPackInterval        *Duration `toml:"store-cold-pack-interval"`
+	StoreColdPackMaxDebt         uint64    `toml:"store-cold-pack-max-compaction-debt"`
 	StoreTimeBuckets             bool      `toml:"store-time-buckets"`
 	StoreTimeBucketsRelayoutRate int64     `toml:"store-time-buckets-relayout-rate"`
 	StoreMigrationIOSlots        int       `toml:"store-migration-io-slots"`

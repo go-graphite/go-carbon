@@ -14,6 +14,8 @@ import (
 // Completed incremental stores retain their source binding; a clone must rebind
 // it to a new empty original directory before starting incremental mode.
 func (s *Store) Checkpoint(destination string) (err error) {
+	s.coldPack.run.Lock()
+	defer s.coldPack.run.Unlock()
 	if err := s.fileOwnershipError(); err != nil {
 		return err
 	}

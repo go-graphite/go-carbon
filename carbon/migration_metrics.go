@@ -51,6 +51,7 @@ type migrationSnapshot struct {
 }
 
 type storeStatsView struct {
+	coldPack                                                                store.ColdPackStats
 	ingestTables, ingestEntries, ingestBytes, ingestL0Bytes, ingestOverlaps uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
@@ -201,6 +202,24 @@ var migrationMetricSpecs = func() []metricSpec {
 		)
 	}
 	specs = append(specs,
+		counter("store_cold_pack_blocks_total", "Native ranges packed or unpacked.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Blocks) }),
+		counter("store_cold_pack_points_total", "Points rewritten by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Points) }),
+		counter("store_cold_pack_input_bytes_total", "Logical source bytes replaced by sealing.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.InputBytes) }),
+		counter("store_cold_pack_output_bytes_total", "Logical bytes after sealing.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.OutputBytes) }),
+		counter("store_cold_pack_read_bytes_total", "Snapshot bytes read by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ReadBytes) }),
+		counter("store_cold_pack_write_bytes_total", "WAL batch bytes published by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WriteBytes) }),
+		counter("store_cold_pack_errors_total", "Cold maintenance errors; inspect server logs.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Errors) }),
+		counter("store_cold_pack_skipped_total", "Oversized ranges skipped by bounded maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Skipped) }),
+		counter("store_cold_pack_conflicts_total", "Publication conflicts retried on later sweeps.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Conflicts) }),
+		counter("store_cold_pack_pages_total", "Bounded catalog pages examined.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Pages) }),
+		counter("store_cold_pack_passes_total", "Completed catalog sweeps.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Passes) }),
+		counter("store_cold_pack_pressure_pauses_total", "Steps paused for storage pressure.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.PressurePauses) }),
+		counter("store_cold_pack_worker_seconds_total", "Conservative worker time charged to the CPU budget.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WorkerNanos) / 1e9 }),
+		gauge("store_cold_pack_max_lock_seconds", "Maximum stripe publication lock duration in this process.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.MaxLockNanos) / 1e9 }),
+		gauge("store_cold_pack_failed", "Latched background failure; inspect logs.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Error != "") }),
+		gauge("store_cold_pack_pending_metrics", "Discovered catalog entries queued in the current bounded page; not a full-store backlog estimate.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.PendingMetrics) }),
+		gauge("store_cold_pack_active", "Worker currently executing a bounded step.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Active) }),
+
 		gauge("pebble_block_cache_bytes", "Bytes held by the Pebble block cache.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockCacheBytes) }),
 		gauge("pebble_table_cache_entries", "Open table readers in the Pebble table cache.", func(s *migrationSnapshot) float64 { return float64(s.stats.tableCacheEntries) }),
 		gauge("store_metadata_cache_bytes", "Bytes of committed metric metadata held by the store's metadata cache, records and slots, which store-metadata-cache-size bounds.", func(s *migrationSnapshot) float64 { return float64(s.stats.stateCache.Bytes) }),
@@ -342,7 +361,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		st := db.Stats()
 		s.store = true
 		s.sidecars = db.Sidecars()
-		s.stats = storeStatsView{
+		s.stats = storeStatsView{coldPack: st.ColdPack,
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,

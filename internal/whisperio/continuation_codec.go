@@ -847,7 +847,7 @@ func (c *ContinuationCodec) RelayoutPlan(ctx context.Context, kv store.Continuat
 	}
 	newest := make(map[archiveID]blockID)
 	for id, b := range blocks {
-		if b.raw == nil || b.desc.count == 0 {
+		if b.raw == nil || b.desc.count == 0 || b.desc.packed != 0 {
 			continue
 		}
 		key := b.desc.groupKey(id.file, id.archive, id.index, (b.desc.count-1)/128)
