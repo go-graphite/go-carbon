@@ -4,7 +4,7 @@
   "qualification_status": "not a native deployment qualification",
   "environments": {
     "dev-host-amazon-kvm-xfs": {
-      "host": "dzhdanov-devdockerbuilkutt-02.eu-west-2.dev.booking.com",
+      "host": "dev-builder-1",
       "os": "Linux 5.14.0-729.el9.x86_64",
       "architecture": "amd64",
       "cpu": "8 vCPU, AMD EPYC 7571 under Amazon KVM",
