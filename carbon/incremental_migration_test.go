@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -314,20 +313,9 @@ func TestIncrementalPendingCleanupRunsWithZeroWorkersAndNoAdmissionSpace(t *test
 }
 
 func TestIncrementalDiskReservationsDoNotOvercommitOrDeadlock(t *testing.T) {
-	if isolatedTestProcess(t) {
-		return
-	}
 	directory := t.TempDir()
-	var info syscall.Statfs_t
-	if err := syscall.Statfs(directory, &info); err != nil {
-		t.Fatal(err)
-	}
-	available := uint64(info.Bavail) * uint64(info.Bsize)
-	reservation := available / 3 * 2
-	if reservation == 0 {
-		t.Skip("no filesystem headroom")
-	}
-	m := &incrementalStoreMigration{}
+	const reservation = 600
+	m := &incrementalStoreMigration{diskFree: func(string) (uint64, error) { return 1000, nil }}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	first, err := m.waitDisk(ctx, directory, reservation, reservation)
@@ -361,9 +349,7 @@ func TestIncrementalDiskReservationsDoNotOvercommitOrDeadlock(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("headroom release did not allow another metric to progress")
 	}
-	if m.diskReserved != 0 || m.spaceWaiting.Load() != 0 {
-		t.Fatal("completed disk reservations leaked")
-	}
+	checkMigrationDiskReleased(t, m)
 }
 
 func TestIncrementalMigrationSkipsRejectedSourceAndKeepsIt(t *testing.T) {

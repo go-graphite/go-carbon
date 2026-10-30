@@ -32,6 +32,8 @@ const incrementalReceiptName = "INCREMENTAL-STORE-MIGRATION.json"
 // at about 16 to 24 threads.
 const migrationWalkWorkers = 16
 
+const migrationDiskRefresh = 100 * time.Millisecond
+
 type incrementalStoreMigration struct {
 	cancel                             context.CancelFunc
 	done                               chan struct{}
@@ -47,6 +49,11 @@ type incrementalStoreMigration struct {
 	sourceComplete                     atomic.Bool
 	diskMu                             sync.Mutex
 	diskReserved                       uint64
+	diskAvailable                      uint64
+	diskChecked                        time.Time
+	diskRefreshing                     chan struct{}
+	diskErr                            error
+	diskFree                           func(string) (uint64, error)
 	receiptMu                          sync.Mutex
 	mu                                 sync.Mutex
 	phase, failure                     string
@@ -418,9 +425,23 @@ func (m *incrementalStoreMigration) skip(ctx context.Context, name string, err e
 	return nil
 }
 
-// Reserve headroom atomically across workers: independent free-space checks can
-// all pass and then overcommit the same bytes. Only admitted work reserves disk;
-// waiters do not reserve it, so a fitting first metric can always make progress.
+func migrationDiskFree(directory string) (uint64, error) {
+	var info syscall.Statfs_t
+	if err := syscall.Statfs(directory, &info); err != nil {
+		return 0, err
+	}
+	if info.Bavail > 0 {
+		return uint64(info.Bavail) * uint64(info.Bsize), nil
+	}
+	return 0, nil
+}
+
+// Debit every admission from the sampled headroom, including completed work:
+// releasing a reservation cannot return bytes to a stale free-space sample.
+// A refresh pauses admissions, but never holds diskMu across statfs. Subtract
+// reservations present before the syscall, even if released during it, since
+// their output may not yet be reflected in the sample. Waiters reserve nothing.
+// required includes both the reservation and the configured free-space reserve.
 func (m *incrementalStoreMigration) waitDisk(ctx context.Context, directory string, required, reservation uint64) (func(), error) {
 	waiting := false
 	defer func() {
@@ -429,17 +450,43 @@ func (m *incrementalStoreMigration) waitDisk(ctx context.Context, directory stri
 		}
 	}()
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		m.diskMu.Lock()
-		var info syscall.Statfs_t
-		if err := syscall.Statfs(directory, &info); err != nil {
+		if done := m.diskRefreshing; done != nil {
+			m.diskMu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+				continue
+			}
+		}
+		if time.Since(m.diskChecked) >= migrationDiskRefresh {
+			done := make(chan struct{})
+			m.diskRefreshing = done
+			reserved := m.diskReserved
+			free := m.diskFree
+			if free == nil {
+				free = migrationDiskFree
+			}
+			m.diskMu.Unlock()
+			available, err := free(directory)
+			m.diskMu.Lock()
+			m.diskAvailable = available - min(available, reserved)
+			m.diskChecked, m.diskErr = time.Now(), err
+			m.diskRefreshing = nil
+			m.diskMu.Unlock()
+			close(done)
+			continue
+		}
+		if err := m.diskErr; err != nil {
 			m.diskMu.Unlock()
 			return nil, err
 		}
-		var available uint64
-		if info.Bavail > 0 {
-			available = uint64(info.Bavail) * uint64(info.Bsize)
-		}
-		if required <= available && m.diskReserved <= available-required {
+		if required <= m.diskAvailable {
+			m.diskAvailable -= reservation
 			m.diskReserved += reservation
 			m.diskMu.Unlock()
 			return func() {
