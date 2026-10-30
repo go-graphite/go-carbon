@@ -658,15 +658,19 @@ func (listener *CarbonserverListener) fetchData(metric, pathExpression string, f
 		// Most targets name one series; fetching it needs no fan-out.
 		fetch(0, files[0])
 	} else {
-		sem := make(chan struct{}, maxFetchDataGoroutines)
-		for i, fileName := range files {
+		// Reuse each worker's stack across metrics. Starting one goroutine
+		// per metric repeatedly grows and frees the deep storage read stack.
+		workers := min(len(files), maxFetchDataGoroutines)
+		var next atomic.Int64
+		next.Store(int64(workers))
+		for worker := range workers {
 			wg.Add(1)
-			sem <- struct{}{} // acquire a slot
-			go func(i int, fileName string) {
+			go func(i int) {
 				defer wg.Done()
-				defer func() { <-sem }() // release the slot
-				fetch(i, fileName)
-			}(i, fileName)
+				for ; i < len(files); i = int(next.Add(1) - 1) {
+					fetch(i, files[i])
+				}
+			}(worker)
 		}
 		wg.Wait()
 	}

@@ -105,7 +105,8 @@ func decodeChunk(data []byte, dst *chunk) error {
 	if err != nil {
 		return err
 	}
-	parsed, offset, err := decodeChunkHeader(payload)
+	var parsed chunk
+	offset, err := decodeChunkHeader(payload, &parsed)
 	if err != nil {
 		return err
 	}
@@ -141,23 +142,22 @@ func chunkPayload(data []byte) ([]byte, error) {
 	return payload, nil
 }
 
-func decodeChunkHeader(payload []byte) (chunk, int, error) {
-	var parsed chunk
+func decodeChunkHeader(payload []byte, parsed *chunk) (int, error) {
 	offset := 2
 	deltas, n := binary.Uvarint(payload[offset:])
 	if n <= 0 || deltas >= materializeAt {
-		return chunk{}, 0, errInvalidChunk
+		return 0, errInvalidChunk
 	}
 	offset += n
 	if len(payload)-offset < 16 {
-		return chunk{}, 0, errInvalidChunk
+		return 0, errInvalidChunk
 	}
 	parsed.Deltas = uint32(deltas)
 	for i := range parsed.Present {
 		parsed.Present[i] = binary.LittleEndian.Uint64(payload[offset : offset+8])
 		offset += 8
 	}
-	return parsed, offset, nil
+	return offset, nil
 }
 
 func decodeChunkPoints(payload []byte, offset int, parsed *chunk) error {
