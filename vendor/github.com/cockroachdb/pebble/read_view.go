@@ -11,10 +11,10 @@ import (
 // ReadView is a consistent read-only view of the DB, like a Snapshot, for a
 // short series of reads. It holds the read state (memtables and version) and
 // the visible sequence number current when it was opened, as an Iterator
-// does. Unlike a Snapshot it is not registered with the DB, so opening and
-// closing it do not take DB.mu, which flushes, compactions and version
-// changes hold for milliseconds; like an Iterator it keeps its memtables and
-// sstables until it is closed, so it must not be held for long.
+// does. Unlike a Snapshot it is not registered with the DB, so opening does
+// not take DB.mu. Closing the last reference to a retired read state can
+// acquire DB.mu to release its version or schedule obsolete-file cleanup.
+// Like an Iterator it retains memtables and sstables until it is closed.
 //
 // Get and NewIter read at the view; Close must be called once its reads and
 // their iterators and value closers are done.

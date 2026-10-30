@@ -393,14 +393,16 @@ type prometheus struct {
 	cacheDurations *prom.HistogramVec
 	cacheDuration  func(string, time.Duration)
 
-	diskRequests      prom.Counter
-	diskRequest       func()
-	cancelledRequests prom.Counter
-	cancelledRequest  func()
-	timeoutRequests   prom.Counter
-	timeoutRequest    func()
-	diskWaitDurations prom.Histogram
-	diskWaitDuration  func(time.Duration)
+	diskRequests                     prom.Counter
+	diskRequest                      func()
+	cancelledRequests                prom.Counter
+	cancelledRequest                 func()
+	timeoutRequests                  prom.Counter
+	timeoutRequest                   func()
+	diskWaitDurations                prom.Histogram
+	diskWaitDuration                 func(time.Duration)
+	metricStoreIndexRebuilds         prom.Counter
+	metricStoreIndexRebuildDurations prom.Histogram
 
 	returnedMetrics prom.Counter
 	returnedMetric  func()
@@ -473,6 +475,15 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 			Name: "returned_points_total",
 			Help: "Number of points returned",
 		}),
+		metricStoreIndexRebuilds: prom.NewCounter(prom.CounterOpts{
+			Name: "metric_store_index_rebuilds_total",
+			Help: "Full shared-store discovery index rebuild attempts, including failures; incremental updates are excluded.",
+		}),
+		metricStoreIndexRebuildDurations: prom.NewHistogram(prom.HistogramOpts{
+			Name:    "metric_store_index_rebuild_duration_seconds",
+			Help:    "Wall time of completed full shared-store discovery index rebuild attempts, including failures.",
+			Buckets: prom.ExponentialBuckets(0.001, 4, 12),
+		}),
 	}
 
 	c.prometheus.request = func(endpoint string, code int) {
@@ -524,6 +535,8 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	reg.MustRegister(c.prometheus.diskWaitDurations)
 	reg.MustRegister(c.prometheus.returnedMetrics)
 	reg.MustRegister(c.prometheus.returnedPoints)
+	reg.MustRegister(c.prometheus.metricStoreIndexRebuilds)
+	reg.MustRegister(c.prometheus.metricStoreIndexRebuildDurations)
 }
 
 type metricDetailsFlat struct {

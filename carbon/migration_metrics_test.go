@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -12,6 +13,51 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
+
+func TestMigrationCollectorExportsFetchStages(t *testing.T) {
+	now := time.Unix(100000, 0)
+	db := expirationTestDB(t, &now)
+	m := createExpirationMetric(t, db, "timed.fetch")
+	if _, err := db.Fetch(context.Background(), m.Name, int(now.Unix())-60, int(now.Unix())); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{MetricStore: db}})
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	timings := db.FetchTimings()
+	want := map[string]store.FetchTiming{"body": timings.Body, "read_view_close": timings.ReadViewClose, "iterator_close": timings.IteratorClose}
+	found := 0
+	for _, family := range families {
+		name := family.GetName()
+		if name != "pebble_fetch_stage_seconds_total" && name != "pebble_fetch_stage_calls_total" {
+			continue
+		}
+		found++
+		if len(family.Metric) != len(want) {
+			t.Fatalf("%s: wrong number of stages", name)
+		}
+		for _, metric := range family.Metric {
+			stage := metric.GetLabel()[0].GetValue()
+			timing, ok := want[stage]
+			if !ok {
+				t.Fatalf("unexpected stage %q", stage)
+			}
+			value := float64(timing.Calls)
+			if name == "pebble_fetch_stage_seconds_total" {
+				value = float64(timing.Nanoseconds) / 1e9
+			}
+			if metric.GetCounter().GetValue() != value {
+				t.Fatalf("%s{%s}: got %v, want %v", name, stage, metric.GetCounter().GetValue(), value)
+			}
+		}
+	}
+	if found != 2 || timings.Body.Calls != 1 || timings.ReadViewClose.Calls != 1 || timings.IteratorClose.Calls != 0 {
+		t.Fatalf("missing fetch counters: families=%d timings=%+v", found, timings)
+	}
+}
 
 func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 	if isolatedTestProcess(t) {

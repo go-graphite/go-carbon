@@ -151,9 +151,9 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	cfg.Whisper.OutOfOrder = true
 	cfg.Tags.Enabled = false
 	cfg.Dump.Enabled = true
-	// Unix socket paths must fit sockaddr_un, including on macOS where
-	// the default testing temporary directory is too long.
-	dumpDir, err := os.MkdirTemp("/tmp", "carbon-handoff-")
+	// Honor the configured temporary root, using a short prefix so the Unix
+	// socket path also fits sockaddr_un on macOS.
+	dumpDir, err := os.MkdirTemp("", "h-")
 	if err != nil {
 		t.Fatal(err)
 	}

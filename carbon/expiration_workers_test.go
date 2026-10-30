@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -20,6 +21,65 @@ type parallelExpirationStore struct {
 	release      <-chan struct{}
 	stalled      atomic.Bool
 	active, peak atomic.Int64
+}
+
+type partitionedExpirationStore struct {
+	*store.Store
+	mu     sync.Mutex
+	active map[uint64]bool
+}
+
+func (s *partitionedExpirationStore) DeleteBatchIfUnchanged(ctx context.Context, batch []store.Metadata) ([]error, error) {
+	if len(batch) == 0 || len(batch) > expirationDeleteBatchSize {
+		return nil, fmt.Errorf("unbounded batch: %d", len(batch))
+	}
+	key := s.ExpirationPartition(batch[0].Name)
+	for _, m := range batch {
+		if s.ExpirationPartition(m.Name) != key {
+			return nil, errors.New("batch mixes partitions")
+		}
+	}
+	s.mu.Lock()
+	if s.active[key] {
+		s.mu.Unlock()
+		return nil, errors.New("workers share a partition")
+	}
+	s.active[key] = true
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); delete(s.active, key); s.mu.Unlock() }()
+	return s.Store.DeleteBatchIfUnchanged(ctx, batch)
+}
+
+func TestExpirationPartitionedLimitsAndTails(t *testing.T) {
+	for _, workers := range []int{1, 8, 32} {
+		t.Run(fmt.Sprint(workers), func(t *testing.T) {
+			now := time.Unix(100000, 0)
+			db := expirationTestDB(t, &now)
+			const count = 2301
+			for i := range count {
+				createExpirationMetric(t, db, fmt.Sprintf("pods.%05d", i))
+			}
+			now = now.Add(2 * time.Hour)
+			hooks := &partitionedExpirationStore{Store: db, active: make(map[uint64]bool)}
+			r := &metricExpirer{db: hooks, now: func() time.Time { return now }, expiration: time.Hour, deleteWorkers: workers, maxDeletes: 1057, stats: &expirationStats{}}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := r.sweep(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if r.stats.examined.Load() != count || r.stats.deleted.Load() != 1057 || r.stats.limited.Load() != count-1057 {
+				t.Fatalf("examined=%d deleted=%d limited=%d", r.stats.examined.Load(), r.stats.deleted.Load(), r.stats.limited.Load())
+			}
+			r.maxDeletes = 0
+			if err := r.sweep(ctx); err != nil {
+				t.Fatal(err)
+			}
+			remaining, err := db.List(ctx, "")
+			if err != nil || len(remaining) != 0 || r.stats.deleted.Load() != count {
+				t.Fatalf("lost tail: %d %v", len(remaining), err)
+			}
+		})
+	}
 }
 
 func (s *parallelExpirationStore) ExpirationPressure() (int64, uint64, bool) {

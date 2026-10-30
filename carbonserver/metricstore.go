@@ -94,6 +94,7 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 			return nil
 		}
 	}
+	defer listener.observeMetricStoreIndexRebuild()()
 	files, details, trieIdx, metricsKnown, err := listener.loadMetricStoreCatalog(metricStore)
 	if err != nil {
 		return err
@@ -154,6 +155,20 @@ func (listener *CarbonserverListener) updateMetricStoreIndex(metricStore *store.
 		zap.Duration("runtime", time.Since(started)),
 	)
 	return nil
+}
+
+// observeMetricStoreIndexRebuild counts actual full rebuild attempts, including
+// failed attempts, in both mapped and in-memory discovery indexes. Start count
+// minus completed histogram count also exposes a rebuild still in progress.
+func (listener *CarbonserverListener) observeMetricStoreIndexRebuild() func() {
+	if !listener.prometheus.enabled {
+		return func() {}
+	}
+	started := time.Now()
+	listener.prometheus.metricStoreIndexRebuilds.Inc()
+	return func() {
+		listener.prometheus.metricStoreIndexRebuildDurations.Observe(time.Since(started).Seconds())
+	}
 }
 
 func (listener *CarbonserverListener) refreshMetricStoreSpace(previous *fileIndex) {

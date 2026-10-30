@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -316,6 +317,17 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem) error {
 			}
 		}
 		s.relayout.skipped.Add(1)
+	}
+	if moved > 0 {
+		// Physical moves must fence optimistic readers too. Maintenance does
+		// not refresh activity or keep an otherwise idle metric alive.
+		if current.Revision == math.MaxUint64 {
+			return errors.New("metric revision exhausted")
+		}
+		current.Revision++
+		if err := batch.Set(revisionKey(current), revisionBytes(current), nil); err != nil {
+			return err
+		}
 	}
 	if err := s.commit(batch); err != nil {
 		return err

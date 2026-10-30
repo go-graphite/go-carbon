@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -31,11 +32,17 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 		stripe = s.metricStripe(name)
 		epoch = cache.epoch(stripe)
 	}
-	// A read view rather than a snapshot: opening and closing a snapshot take
-	// Pebble's DB mutex, which flushes, compactions and version changes hold
-	// for milliseconds, and every concurrent fetch queued behind them.
+	// Opening a read view avoids the DB mutex used by registered snapshots.
+	// Its final release can still wait when it retires an old read state.
+	started := time.Now()
 	snapshot := s.db.NewReadView()
-	defer snapshot.Close()
+	defer func() {
+		closing := time.Now()
+		_ = snapshot.Close()
+		closed := time.Now()
+		s.fetchTimings.body.add(closing.Sub(started))
+		s.fetchTimings.readViewClose.add(closed.Sub(closing))
+	}()
 	var state *metricState
 	var m Metadata
 	var err error
@@ -61,7 +68,13 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 			io.withIterator()
 		}
 		series, err := s.continuation.Fetch(ctx, io, m, fromTime, untilTime, s.now)
-		err = errors.Join(err, io.Close())
+		if io.iter != nil {
+			closing := time.Now()
+			err = errors.Join(err, io.Close())
+			s.fetchTimings.iteratorClose.add(time.Since(closing))
+		} else {
+			err = errors.Join(err, io.Close())
+		}
 		if err == nil && state == nil && cache != nil {
 			if io.state != nil {
 				cache.fill(stripe, name, epoch, io.state.final(m))
