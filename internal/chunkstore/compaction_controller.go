@@ -17,6 +17,11 @@ const (
 	compactionWarmupMax       = 24 * time.Hour
 	compactionStallHold       = 5 * time.Minute
 	compactionConversionHold  = 5 * time.Minute
+	// Auto flush pacing writes a flush at this multiple of the modelled SST
+	// ingress, so a flush spans about a quarter of the average memtable fill
+	// time, but never slower than the floor.
+	flushPacingHeadroom = 4
+	flushPacingFloor    = 4 << 20
 )
 
 type compactionSample struct {
@@ -24,7 +29,9 @@ type compactionSample struct {
 	// when flushed, and keeps compression out of the amplification ratio.
 	ingress, output, debt uint64
 	l0                    int64
-	memtablePressure      bool
+	// memtables counts the queued memtables, including the mutable one.
+	memtables        int64
+	memtablePressure bool
 }
 
 type compactionPacingStats struct {
@@ -32,6 +39,14 @@ type compactionPacingStats struct {
 	auto         bool
 	headroom     float64
 	warmup       time.Duration
+	bypass       string
+	bypasses     map[string]uint64
+	flush        flushPacingStats
+}
+
+type flushPacingStats struct {
+	rate, target int64
+	auto         bool
 	bypass       string
 	bypasses     map[string]uint64
 }
@@ -59,12 +74,23 @@ type compactionController struct {
 	stopping                bool
 	bypass                  string
 	bypasses                map[string]uint64
+	// Flush pacing (see Options.FlushRate) shares the ingress model.
+	flushPacer             *compactionPacer
+	flushMode, flushTarget int64
+	flushBypass            string
+	flushBypasses          map[string]uint64
+	urgentFlushes          int
 }
 
 func newCompactionController(p *compactionPacer, mode int64, now time.Time) *compactionController {
-	c := &compactionController{pacer: p, mode: mode, l0Limit: 6, started: now, last: now,
+	return newPacingController(p, newCompactionPacer(0), mode, 0, now)
+}
+
+func newPacingController(compaction, flush *compactionPacer, mode, flushMode int64, now time.Time) *compactionController {
+	c := &compactionController{pacer: compaction, mode: mode, l0Limit: 6, started: now, last: now,
 		headroom: compactionHeadroomDefault, warmup: compactionWarmupDefault,
-		amplification: 1, bypasses: make(map[string]uint64)}
+		amplification: 1, bypasses: make(map[string]uint64),
+		flushPacer: flush, flushMode: flushMode, flushBypasses: make(map[string]uint64)}
 	c.apply(now)
 	return c
 }
@@ -120,6 +146,8 @@ func (c *compactionController) apply(now time.Time) {
 		}
 		c.converted = converted
 	}
+	converting := active > 0 || now.Before(c.conversionUntil)
+	c.applyFlush(now, converting)
 	rate, target, reason := c.mode, c.mode, ""
 	if c.mode == -1 {
 		budget := float64(compactionPacingFloor)
@@ -132,7 +160,7 @@ func (c *compactionController) apply(now time.Time) {
 		}
 		rate = target
 		switch {
-		case active > 0 || now.Before(c.conversionUntil):
+		case converting:
 			reason = "conversion"
 		case c.stallActive || now.Before(c.stallUntil):
 			reason = "stall"
@@ -160,6 +188,70 @@ func (c *compactionController) apply(now time.Time) {
 	if c.pacer.rateBytes() != rate {
 		c.pacer.setRate(rate)
 	}
+}
+
+// applyFlush sets the flush pacer. Until the next memtable fills, a flush
+// delays nothing but its own L0 sublevel, so it can spread its output over
+// part of the fill time instead of bursting at device speed. Anything that
+// could make writers wait for it releases it: a caller waiting on the flush,
+// a write stall, memtable pressure, a second queued memtable, conversion, or
+// shutdown. Auto waits for its first ingress observation. Called under mu.
+func (c *compactionController) applyFlush(now time.Time, converting bool) {
+	rate, target, reason := c.flushMode, c.flushMode, ""
+	if c.flushMode == -1 {
+		budget := float64(flushPacingFloor)
+		if c.weight > 0 {
+			budget = max(budget, flushPacingHeadroom*c.ingress/c.weight)
+		}
+		target = math.MaxInt64
+		if budget < float64(math.MaxInt64) {
+			target = int64(math.Ceil(budget))
+		}
+		rate = target
+	}
+	if c.flushMode != 0 {
+		switch {
+		case c.stopping:
+			reason = "shutdown"
+		case c.urgentFlushes > 0:
+			reason = "urgent"
+		case c.stallActive || now.Before(c.stallUntil):
+			reason = "stall"
+		case c.previous.memtablePressure:
+			reason = "memtable"
+		case c.previous.memtables > 2:
+			reason = "queue"
+		case converting:
+			reason = "conversion"
+		case c.flushMode == -1 && c.ingress <= 0:
+			reason = "warmup"
+		}
+	}
+	if reason != "" {
+		rate = 0
+		if reason != c.flushBypass {
+			c.flushBypasses[reason]++
+		}
+	}
+	c.flushTarget, c.flushBypass = target, reason
+	if c.flushPacer.rateBytes() != rate {
+		c.flushPacer.setRate(rate)
+	}
+}
+
+func (c *compactionController) setFlushMode(mode int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.flushMode = mode
+	c.apply(time.Now())
+}
+
+// urgentFlush marks a flush a caller waits for (delta 1) and its end (-1).
+func (c *compactionController) urgentFlush(delta int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.urgentFlushes += delta
+	c.apply(time.Now())
 }
 
 func (c *compactionController) setMode(mode int64) {
@@ -227,6 +319,11 @@ func (c *compactionController) stats() compactionPacingStats {
 	for reason, count := range c.bypasses {
 		s.bypasses[reason] = count
 	}
+	s.flush = flushPacingStats{rate: c.flushPacer.rateBytes(), target: c.flushTarget, auto: c.flushMode == -1,
+		bypass: c.flushBypass, bypasses: make(map[string]uint64, len(c.flushBypasses))}
+	for reason, count := range c.flushBypasses {
+		s.flush.bypasses[reason] = count
+	}
 	return s
 }
 
@@ -263,7 +360,8 @@ func (s *Store) compactionSample() compactionSample {
 	}
 	limit := uint64(s.pebbleOptions.MemTableStopWritesThreshold) * s.pebbleOptions.MemTableSize
 	return compactionSample{ingress: ingress, output: s.compactionPacing.output.Load(),
-		debt: m.Compact.EstimatedDebt, l0: int64(m.Levels[0].Sublevels), memtablePressure: m.MemTable.Size >= limit-limit/4}
+		debt: m.Compact.EstimatedDebt, l0: int64(m.Levels[0].Sublevels), memtables: m.MemTable.Count,
+		memtablePressure: m.MemTable.Size >= limit-limit/4}
 }
 
 // SetCompactionPacingConversionSource supplies in-flight and completed conversion

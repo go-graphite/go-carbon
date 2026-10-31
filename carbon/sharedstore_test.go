@@ -198,6 +198,7 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"missing compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = nil }},
 		{"negative compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{-time.Second} }},
 		{"long compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{25 * time.Hour} }},
+		{"invalid flush rate", func(c *Config) { c.Whisper.StoreFlushRate = -2 }},
 		{"negative compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = -1 }},
 		{"large compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = 65 }},
 		{"negative L0 concurrency", func(c *Config) { c.Whisper.StoreL0CompactionConcurrency = -1 }},
@@ -517,6 +518,40 @@ func TestReloadCompactionHeadroomAndWarmup(t *testing.T) {
 	}
 	if st := db.Stats(); st.CompactionPacerHeadroom != 1.5 {
 		t.Fatalf("rejected reload changed headroom: %+v", st)
+	}
+}
+
+func TestReloadFlushRate(t *testing.T) {
+	path, cfg := incrementalAppFixture(t)
+	cfg.Whisper.StoreFlushRate = 4 << 20
+	writeSharedConfig(t, path, cfg)
+	app := startIncrementalApp(t, path)
+	db := app.MetricStore
+	if st := db.Stats(); st.FlushRate != 4<<20 && st.FlushPacerBypass == "" {
+		t.Fatalf("configured flush rate not applied: %+v", st)
+	}
+	for _, rate := range []int64{1 << 20, -1, 0} {
+		next := *cfg
+		next.Whisper.StoreFlushRate = rate
+		if storageSettingsChanged(cfg, &next) {
+			t.Fatal("flush rate requires restart")
+		}
+		writeSharedConfig(t, path, &next)
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+		st := db.Stats()
+		if app.MetricStore != db || st.FlushPacerAuto != (rate == -1) {
+			t.Fatalf("flush rate %d reload: %+v", rate, st)
+		}
+		switch {
+		case rate == -1 && st.FlushPacerBypass == "":
+			t.Fatalf("auto flush pacing before observing ingress: %+v", st)
+		case rate > 0 && st.FlushPacerBypass == "" && st.FlushRate != rate:
+			t.Fatalf("flush rate %d not applied: %+v", rate, st)
+		case rate == 0 && (st.FlushRate != 0 || st.FlushPacerBypass != ""):
+			t.Fatalf("flush pacing not disabled: %+v", st)
+		}
 	}
 }
 

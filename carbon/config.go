@@ -77,6 +77,7 @@ type whisperConfig struct {
 	StoreCompactionRate          int64     `toml:"store-compaction-rate"`
 	StoreCompactionHeadroom      float64   `toml:"store-compaction-rate-headroom"`
 	StoreCompactionWarmup        *Duration `toml:"store-compaction-pacing-warmup"`
+	StoreFlushRate               int64     `toml:"store-flush-rate"`
 	StoreCompactionWorkers       int       `toml:"store-compaction-workers"`
 	StoreL0CompactionConcurrency int       `toml:"store-l0-compaction-concurrency"`
 	StoreL0CompactionThreshold   int       `toml:"store-l0-compaction-threshold"`

@@ -33,7 +33,7 @@ func (s *Store) DowngradeColdPack(ctx context.Context) error {
 	if c.options.Mode != "unpack" || !c.cleanUnpack || c.stats.Cursor != "" {
 		return errors.New("downgrade requires a complete clean unpack sweep")
 	}
-	if err := s.db.Flush(); err != nil {
+	if err := s.Flush(); err != nil {
 		return err
 	}
 	if err := replaceFormatMarker(s.fs, s.dir, formatMarkerTimeBuckets); err != nil {
