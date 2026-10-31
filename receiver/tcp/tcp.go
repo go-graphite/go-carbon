@@ -53,17 +53,19 @@ func Register() {
 }
 
 type Options struct {
-	Listen      string `toml:"listen"`
-	Enabled     bool   `toml:"enabled"`
-	BufferSize  int    `toml:"buffer-size"`
-	Compression string `toml:"compression"`
+	Listen           string `toml:"listen"`
+	Enabled          bool   `toml:"enabled"`
+	BufferSize       int    `toml:"buffer-size"`
+	Compression      string `toml:"compression"`
+	ZstdMaxFrameSize int    `toml:"zstd-max-frame-size"`
 }
 
 func NewOptions() *Options {
 	return &Options{
-		Listen:     ":2003",
-		Enabled:    true,
-		BufferSize: 0,
+		Listen:           ":2003",
+		Enabled:          true,
+		BufferSize:       0,
+		ZstdMaxFrameSize: defaultZstdMaxFrameSize,
 	}
 }
 
@@ -103,6 +105,9 @@ type TCP struct {
 	buffer              chan *points.Points
 	logger              *zap.Logger
 	decompressor        decompressor
+	compression         string
+	zstdMaxFrameSize    int
+	zstdStats           zstdStats
 	handoff             handoffState
 	pointOut            atomic.Pointer[func(name []byte, value float64, timestamp int64)]
 	pointsOut           atomic.Pointer[func(name []byte, data []points.Point)]
@@ -153,6 +158,11 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 		r.buffer = make(chan *points.Points, options.BufferSize)
 	}
 
+	if err := validateZstdLimit(options.ZstdMaxFrameSize); err != nil {
+		return nil, err
+	}
+	r.compression = options.Compression
+	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
 	r.decompressor = newDecompressor(options.Compression)
 	r.handoff.enabled = options.BufferSize == 0 && options.Compression == ""
 
@@ -253,6 +263,20 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	lastDeadline := time.Now()
 	readTimeout := 2 * time.Minute
 	tracked.setReadDeadline(conn, lastDeadline.Add(readTimeout))
+	// Only connection startup dispatches on the first bytes. The line loop
+	// below is shared with the existing plaintext and legacy compression paths.
+	var frames *zstdFrames
+	if rcv.compression == "" || rcv.compression == "zstd" {
+		frames, err = rcv.dispatchFirstBytes(reader)
+		if err != nil {
+			rcv.zstdFailure(err)
+			return
+		}
+		if frames != nil {
+			defer frames.decoder.Close()
+			reader = bufio.NewReaderSize(frames, plainReadBufferSize)
+		}
+	}
 
 	// Count locally and publish before any read that may block: every
 	// connection incrementing the shared counter per point serializes them.
@@ -299,7 +323,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 		}
 		if tracked.detaching() {
 			flush()
-			detached = rcv.detach(tracked, reader, rest, nil)
+			detached = rcv.detachInput(tracked, reader, rest, nil, frames)
 			return
 		}
 
@@ -324,7 +348,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 		if err != nil {
 			flush()
 			if tracked.detaching() {
-				detached = rcv.detach(tracked, reader, rest, line)
+				detached = rcv.detachInput(tracked, reader, rest, line, frames)
 				return
 			}
 			if err == io.EOF { //nolint:errorlint // Preserve legacy direct EOF classification; wrapped transport errors are read errors.
@@ -333,6 +357,9 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 				}
 			} else {
 				atomic.AddUint32(&rcv.errors, 1)
+				if frames != nil {
+					rcv.zstdFailure(err)
+				}
 				rcv.logger.Error("read error", zap.Error(err))
 			}
 			break
@@ -457,6 +484,7 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 }
 
 func (rcv *TCP) Stat(send helper.StatCallback) {
+	rcv.zstdStats.stat(send)
 	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
 	send("metricsReceived", float64(metricsReceived))
@@ -604,4 +632,5 @@ func (rcv *TCP) InitPrometheus(reg prometheus.Registerer) {
 	)
 
 	reg.MustRegister(rcv.promMetricsReceived)
+	rcv.zstdStats.initPrometheus(reg)
 }
