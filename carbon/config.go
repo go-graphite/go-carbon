@@ -16,6 +16,7 @@ import (
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/carbonserver"
 	"github.com/go-graphite/go-carbon/internal/recovery"
+	"github.com/go-graphite/go-carbon/internal/restartcpu"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/go-graphite/go-carbon/receiver/udp"
@@ -187,9 +188,10 @@ type whisperConfig struct {
 	// workers (0: GOMAXPROCS/12, 2..16) and at up to that many metrics per
 	// second (0: unlimited). ByteRate also caps logical key/value bytes read per
 	// second (0: unlimited). See App.startMetadataPrewarm.
-	// CPUCores paces optional warming against whole-process CPU (0: 1.05x saved
-	// steady median). Writeout has priority within it while warming is unfinished.
-	// The first rollout needs an explicit allowance until history exists.
+	// RestartCPUHeadroom multiplies fresh steady CPU history (1..4, default 1.05).
+	// CPUCores is only the no-history fallback (0: finite host-derived allowance).
+	// Both settings are read at startup; writeout has priority over optional warming.
+	StoreRestartCPUHeadroom           float64 `toml:"store-restart-cpu-headroom"`
 	StoreMetadataCachePrewarmCPUCores float64 `toml:"store-metadata-cache-prewarm-cpu-cores"`
 	// Checkpoint and warm-first default on with prewarm. Lazy is opt-in.
 	StoreMetadataCacheCheckpoint      *bool `toml:"store-metadata-cache-checkpoint"`
@@ -424,6 +426,7 @@ func NewConfig() *Config {
 			},
 		},
 		Whisper: whisperConfig{
+			StoreRestartCPUHeadroom:     restartcpu.DefaultHeadroom,
 			StorageBackend:              "files",
 			StoreCacheSize:              256 << 20,
 			StoreMemTableSize:           64 << 20,

@@ -24,7 +24,7 @@ func TestRecentSteadyHistoryAndShutdown(t *testing.T) {
 		if err := os.WriteFile(path, data, 0600); err != nil {
 			t.Fatal(err)
 		}
-		b := Start(context.Background(), path, 0)
+		b := Start(context.Background(), path, 0, DefaultHeadroom)
 		if age == time.Minute {
 			if math.Abs(b.Cores()-12.6) > 1e-9 || b.SteadyRate() != 14000 {
 				t.Fatal(b.Cores(), b.SteadyRate())
@@ -65,28 +65,30 @@ func TestHistoryWinsOverConfiguredFallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "cpu.json")
 			synctest.Test(t, func(t *testing.T) {
-				for _, configured := range []float64{0, 48} {
-					h := history{Host: tc.host, Steady: sample{time.Now().Add(-tc.age), tc.cores}, Updates: 14000}
-					data, err := json.Marshal(h)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(path, data, 0600); err != nil {
-						t.Fatal(err)
-					}
-					b := startHistory(context.Background(), path, configured, func() float64 { return 0 })
-					want, source, rate := configured, "fallback", 0.0
-					if want == 0 {
-						want = fallbackCores()
-					}
-					if tc.fresh {
-						want, source, rate = 12.6, "history", 14000
-					}
-					if math.Abs(b.Cores()-want) > 1e-9 || b.Source() != source || b.SteadyRate() != rate {
-						t.Errorf("configured=%g: got %g/%s/%g, want %g/%s/%g", configured, b.Cores(), b.Source(), b.SteadyRate(), want, source, rate)
-					}
-					if err := b.Stop(); err != nil {
-						t.Fatal(err)
+				for _, headroom := range []float64{1, DefaultHeadroom, 1.5, 4} {
+					for _, configured := range []float64{0, 48} {
+						h := history{Host: tc.host, Steady: sample{time.Now().Add(-tc.age), tc.cores}, Updates: 14000}
+						data, err := json.Marshal(h)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(path, data, 0600); err != nil {
+							t.Fatal(err)
+						}
+						b := startHistory(context.Background(), path, configured, headroom, func() float64 { return 0 })
+						want, source, rate := configured, "fallback", 0.0
+						if want == 0 {
+							want = fallbackCores()
+						}
+						if tc.fresh {
+							want, source, rate = 12*headroom, "history", 14000
+						}
+						if math.Abs(b.Cores()-want) > 1e-9 || b.Source() != source || b.SteadyRate() != rate {
+							t.Errorf("headroom=%g configured=%g: got %g/%s/%g, want %g/%s/%g", headroom, configured, b.Cores(), b.Source(), b.SteadyRate(), want, source, rate)
+						}
+						if err := b.Stop(); err != nil {
+							t.Fatal(err)
+						}
 					}
 				}
 			})
@@ -95,19 +97,27 @@ func TestHistoryWinsOverConfiguredFallback(t *testing.T) {
 }
 
 func TestConfiguredFallbackWithoutHistory(t *testing.T) {
-	for _, contents := range []string{"", "{", "{}"} {
-		path := filepath.Join(t.TempDir(), "cpu.json")
-		if contents != "" {
-			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
-				t.Fatal(err)
+	for _, headroom := range []float64{DefaultHeadroom, 2, 4} {
+		for _, configured := range []float64{0, 48} {
+			for _, contents := range []string{"", "{", "{}"} {
+				path := filepath.Join(t.TempDir(), "cpu.json")
+				if contents != "" {
+					if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				b := Start(context.Background(), path, configured, headroom)
+				want := configured
+				if want == 0 {
+					want = fallbackCores()
+				}
+				if b.Cores() != want || b.Source() != "fallback" || b.SteadyRate() != 0 {
+					t.Error("configured fallback not selected", b.Cores(), b.Source(), b.SteadyRate())
+				}
+				if err := b.Stop(); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-		b := Start(context.Background(), path, 48)
-		if b.Cores() != 48 || b.Source() != "fallback" || b.SteadyRate() != 0 {
-			t.Error("configured fallback not selected", b.Cores(), b.Source(), b.SteadyRate())
-		}
-		if err := b.Stop(); err != nil {
-			t.Fatal(err)
 		}
 	}
 }
@@ -139,7 +149,7 @@ func TestHistoryRecordsFirstCompleteSteadyMinute(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cpu.json")
 	synctest.Test(t, func(t *testing.T) {
 		began := time.Now()
-		b := startHistory(context.Background(), path, 0, func() float64 { return 12 * time.Since(began).Seconds() })
+		b := startHistory(context.Background(), path, 0, DefaultHeadroom, func() float64 { return 12 * time.Since(began).Seconds() })
 		time.Sleep(time.Minute)
 		synctest.Wait()
 		b.Warmed()
@@ -162,7 +172,7 @@ func TestHistoryRecordsFirstCompleteSteadyMinute(t *testing.T) {
 		if math.Abs(saved.Steady.Cores-12) > 1e-9 || math.Abs(saved.Updates-14000) > 1e-9 {
 			t.Fatal(saved)
 		}
-		next := startHistory(context.Background(), path, 48, func() float64 { return 0 })
+		next := startHistory(context.Background(), path, 48, DefaultHeadroom, func() float64 { return 0 })
 		defer next.Stop()
 		if math.Abs(next.Cores()-12.6) > 1e-9 || next.SteadyRate() != 14000 || next.Source() != "history" {
 			t.Fatal(next.Cores(), next.SteadyRate())
@@ -171,7 +181,7 @@ func TestHistoryRecordsFirstCompleteSteadyMinute(t *testing.T) {
 }
 
 func TestHistorySaveFailureIsReported(t *testing.T) {
-	b := Start(context.Background(), filepath.Join(t.TempDir(), "absent", "cpu.json"), 2)
+	b := Start(context.Background(), filepath.Join(t.TempDir(), "absent", "cpu.json"), 2, DefaultHeadroom)
 	if b.Stop() == nil {
 		t.Fatal("failed history save was hidden")
 	}
@@ -200,7 +210,7 @@ func TestHistoryExcludesThroughputShortfall(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cpu.json")
 	synctest.Test(t, func(t *testing.T) {
 		began := time.Now()
-		b := startHistory(context.Background(), path, 0, func() float64 { return 12 * time.Since(began).Seconds() })
+		b := startHistory(context.Background(), path, 0, DefaultHeadroom, func() float64 { return 12 * time.Since(began).Seconds() })
 		b.Warmed()
 		b.ObserveWriteout(100, 50)
 		time.Sleep(3 * time.Minute)
@@ -244,7 +254,7 @@ func TestHistoryRecordsBatchedSteadyCache(t *testing.T) {
 		core.Add(points.OnePoint("live", 1, time.Now().Unix()))
 		startupSize := core.Size()
 		began := time.Now()
-		b := startHistory(context.Background(), path, 48, func() float64 { return 12 * time.Since(began).Seconds() })
+		b := startHistory(context.Background(), path, 48, DefaultHeadroom, func() float64 { return 12 * time.Since(began).Seconds() })
 		defer b.Stop()
 		b.SetDrain(func() bool {
 			return core.PendingOutstanding() == 0 && core.Size() <= startupSize
@@ -280,7 +290,7 @@ func TestHistoryStateExcludesWarmingRestorationAndGrowth(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cpu.json")
 	synctest.Test(t, func(t *testing.T) {
 		began := time.Now()
-		b := startHistory(context.Background(), path, 48, func() float64 { return 12 * time.Since(began).Seconds() })
+		b := startHistory(context.Background(), path, 48, DefaultHeadroom, func() float64 { return 12 * time.Since(began).Seconds() })
 		defer b.Stop()
 		var queued atomic.Int64
 		var ready atomic.Bool
@@ -356,7 +366,7 @@ func TestQuietCPUHistoryPreservesCatchupThroughput(t *testing.T) {
 					}
 				}
 				began := time.Now()
-				b := startHistory(context.Background(), path, 48, func() float64 { return 12 * time.Since(began).Seconds() })
+				b := startHistory(context.Background(), path, 48, DefaultHeadroom, func() float64 { return 12 * time.Since(began).Seconds() })
 				defer b.Stop()
 				b.SetHistoryState(func() (int64, bool) { return 100, true })
 				b.Warmed()

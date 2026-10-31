@@ -84,26 +84,23 @@ func TestBudgetLoadsHostHistory(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	b := Start(context.Background(), path, 0)
-	if math.Abs(b.Cores()-14*1.05) > 1e-9 {
-		t.Fatal(b.Cores())
-	}
-	if err := b.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	b = Start(context.Background(), path, 12)
-	if math.Abs(b.Cores()-14*1.05) > 1e-9 || b.Source() != "history" {
-		t.Fatal("legacy history lost to configured fallback", b.Cores(), b.Source())
-	}
-	if err := b.Stop(); err != nil {
-		t.Fatal(err)
+	for _, headroom := range []float64{1, DefaultHeadroom, 1.5, 4} {
+		for _, configured := range []float64{0, 48} {
+			b := Start(context.Background(), path, configured, headroom)
+			if math.Abs(b.Cores()-14*headroom) > 1e-9 || b.Source() != "history" {
+				t.Errorf("headroom=%g configured=%g: legacy history got %g/%s", headroom, configured, b.Cores(), b.Source())
+			}
+			if err := b.Stop(); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	h.Host = "a-different-host"
 	data, _ = json.Marshal(h)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	b = Start(context.Background(), path, 0)
+	b := Start(context.Background(), path, 0, DefaultHeadroom)
 	defer b.Stop()
 	if b.Cores() != fallbackCores() || b.Source() != "fallback" {
 		t.Fatal("foreign baseline used")

@@ -11,6 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/recovery"
@@ -18,6 +19,50 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
+
+func TestRestartCPUHeadroomConfig(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value   string
+		want    float64
+		invalid bool
+	}{
+		{"", 1.05, false},
+		{"1.0", 1, false},
+		{"1.5", 1.5, false},
+		{"4.0", 4, false},
+		{"0.0", 0, true},
+		{"-1.0", 0, true},
+		{"0.999", 0, true},
+		{"4.001", 0, true},
+		{"nan", 0, true},
+		{"inf", 0, true},
+		{"-inf", 0, true},
+	} {
+		name := tc.value
+		if name == "" {
+			name = "default"
+		}
+		t.Run(name, func(t *testing.T) {
+			_, cfg := sharedAppConfig(t)
+			body := "[whisper]\n"
+			if tc.value != "" {
+				body += "store-restart-cpu-headroom = " + tc.value + "\n"
+			}
+			if _, err := toml.Decode(body, cfg); err != nil {
+				t.Fatal(err)
+			}
+			err := validateStorageConfig(cfg)
+			if tc.invalid {
+				if err == nil || !strings.Contains(err.Error(), "store-restart-cpu-headroom") {
+					t.Fatalf("invalid headroom accepted or wrong validation: %v", err)
+				}
+			} else if err != nil || cfg.Whisper.StoreRestartCPUHeadroom != tc.want {
+				t.Fatalf("headroom=%g want=%g validation=%v", cfg.Whisper.StoreRestartCPUHeadroom, tc.want, err)
+			}
+		})
+	}
+}
 
 func TestRestartCPUAllowanceLogging(t *testing.T) {
 	if isolatedTestProcess(t) {
@@ -30,6 +75,7 @@ func TestRestartCPUAllowanceLogging(t *testing.T) {
 			cfg.Whisper.StoreMetadataCachePrewarm = true
 			cfg.Whisper.StoreMetadataCacheSize = 1 << 20
 			cfg.Whisper.StoreMetadataCachePrewarmCPUCores = 48
+			cfg.Whisper.StoreRestartCPUHeadroom = 1.5
 			if fresh {
 				db, err := store.Open(cfg.Whisper.StoreDir, store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
 				if err != nil {
@@ -61,10 +107,10 @@ func TestRestartCPUAllowanceLogging(t *testing.T) {
 			}
 			source, cores := `"fallback"`, "48"
 			if fresh {
-				source, cores = `"history"`, "16.8"
+				source, cores = `"history"`, "24"
 			}
 			logs := zapwriter.TestString()
-			if !strings.Contains(logs, "restart CPU allowance") || !logHas(logs, "source", source) || !logHas(logs, "cores", cores) {
+			if !strings.Contains(logs, "restart CPU allowance") || !logHas(logs, "source", source) || !logHas(logs, "headroom", "1.5") || !logHas(logs, "cores", cores) {
 				t.Fatal("allowance log omitted selection", logs)
 			}
 			if strings.Contains(logs, "using conservative allowance") {

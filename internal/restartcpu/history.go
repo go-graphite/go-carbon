@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const DefaultHeadroom = 1.05
+
 type sample struct {
 	At    time.Time
 	Cores float64
@@ -56,14 +58,14 @@ func (b *Budget) Stop() error {
 	return b.historyErr
 }
 
-// Start restores 1.05 times a recent host-local steady EWMA, independent of the
-// executable build. Missing history selects cores as a fallback, or a finite
-// host-derived allowance when cores is zero.
-func Start(ctx context.Context, path string, cores float64) *Budget {
-	return startHistory(ctx, path, cores, CPU)
+// Start multiplies a recent host-local steady EWMA by headroom, independent of
+// the executable build. Missing history selects cores as a fallback, or a finite
+// host-derived allowance when cores is zero. The caller validates headroom in 1..4.
+func Start(ctx context.Context, path string, cores, headroom float64) *Budget {
+	return startHistory(ctx, path, cores, headroom, CPU)
 }
 
-func startHistory(ctx context.Context, path string, cores float64, read func() float64) *Budget {
+func startHistory(ctx context.Context, path string, cores, headroom float64, read func() float64) *Budget {
 	host, _ := os.Hostname()
 	h := history{Host: host}
 	if data, err := os.ReadFile(path); err == nil {
@@ -80,7 +82,7 @@ func startHistory(ctx context.Context, path string, cores float64, read func() f
 	}
 	source := "history"
 	if savedCores > 0 {
-		cores = 1.05 * savedCores
+		cores = headroom * savedCores
 	} else {
 		source = "fallback"
 		if cores == 0 {

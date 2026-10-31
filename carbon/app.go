@@ -926,7 +926,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.restartBudget = nil
 	if conf.Whisper.StoreMetadataCachePrewarm && conf.Whisper.StoreMetadataCacheSize > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
-		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores)
+		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores, conf.Whisper.StoreRestartCPUHeadroom)
 		budget := app.restartBudget
 		app.restartBudgetStop = func() {
 			cancel()
@@ -934,7 +934,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 				zapwriter.Logger("storage").Warn("restart CPU history save failed", zap.Error(err))
 			}
 		}
-		zapwriter.Logger("storage").Info("restart CPU allowance", zap.String("source", budget.Source()), zap.Float64("cores", budget.Cores()))
+		zapwriter.Logger("storage").Info("restart CPU allowance", zap.String("source", budget.Source()), zap.Float64("headroom", conf.Whisper.StoreRestartCPUHeadroom), zap.Float64("cores", budget.Cores()))
 		if budget.Source() == "fallback" && conf.Whisper.StoreMetadataCachePrewarmCPUCores == 0 {
 			zapwriter.Logger("storage").Warn("restart CPU history unavailable; using conservative allowance; configure store-metadata-cache-prewarm-cpu-cores for busy processes", zap.Float64("cores", app.restartBudget.Cores()))
 		}
