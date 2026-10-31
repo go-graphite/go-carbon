@@ -21,6 +21,7 @@ type Budget struct {
 	until                time.Time
 	warmed               atomic.Bool
 	drained              atomic.Pointer[func() bool]
+	historyState         atomic.Pointer[func() (int64, bool)]
 	drainDone            atomic.Bool
 	nextDrain            atomic.Int64
 	writers              atomic.Int64

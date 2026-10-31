@@ -30,6 +30,18 @@ func (b *Budget) SetSteadyRate(rate float64) {
 func (b *Budget) SteadyRate() float64 { return b.steadyRate }
 func (b *Budget) Source() string      { return b.source }
 
+// SetHistoryState supplies queued points and whether restoration is complete
+// and cache pressure is absent. Sampling requires a non-growing queue across a
+// complete minute; a quiet batching phase need not meet the writeout floor.
+// SetDrain independently controls how long restart admission stays active.
+func (b *Budget) SetHistoryState(state func() (int64, bool)) {
+	if state == nil {
+		b.historyState.Store(nil)
+	} else {
+		b.historyState.Store(&state)
+	}
+}
+
 // Stop joins the sampler and its final atomic save before the next process can
 // reuse the directory. It is safe to repeat. Failure only loses an accelerator.
 func (b *Budget) Stop() error {
@@ -38,13 +50,15 @@ func (b *Budget) Stop() error {
 	}
 	b.samplerStop()
 	<-b.samplerDone
+	b.historyState.Store(nil) // Release the cache captured by the sampler.
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.historyErr
 }
 
 // Start restores 1.05 times a recent host-local steady EWMA, independent of the
-// executable build. Missing history selects a finite conservative allowance.
+// executable build. Missing history selects cores as a fallback, or a finite
+// host-derived allowance when cores is zero.
 func Start(ctx context.Context, path string, cores float64) *Budget {
 	return startHistory(ctx, path, cores, CPU)
 }
@@ -60,16 +74,16 @@ func startHistory(ctx context.Context, path string, cores float64, read func() f
 	}
 	now := time.Now()
 	fresh := h.Steady.At.After(now.Add(-24*time.Hour)) && !h.Steady.At.After(now) && finitePositive(h.Steady.Cores)
-	source := "explicit"
-	if cores == 0 {
-		source = "history"
-		if fresh {
-			cores = 1.05 * h.Steady.Cores
-		} else {
-			cores = 1.05 * median(h.Samples, now)
-		}
+	savedCores := median(h.Samples, now)
+	if fresh {
+		savedCores = h.Steady.Cores
+	}
+	source := "history"
+	if savedCores > 0 {
+		cores = 1.05 * savedCores
+	} else {
+		source = "fallback"
 		if cores == 0 {
-			source = "fallback"
 			cores = fallbackCores()
 		}
 	}
@@ -96,33 +110,57 @@ func startHistory(ctx context.Context, path string, cores float64, read func() f
 		defer ticker.Stop()
 		last, used, written := time.Now(), read(), b.Updates()
 		eligible := false
+		var previousPoints int64
 		for {
 			select {
 			case at := <-ticker.C:
 				next, count := read(), b.Updates()
-				drained := b.drained.Load()
 				b.mu.Lock()
-				meetingFloor := b.floor <= 0 || b.rate >= .95*b.floor
+				floor, rate := b.floor, b.rate
 				b.mu.Unlock()
-				steady := b.warmed.Load() && meetingFloor && (drained == nil || (*drained)())
+				steady := b.warmed.Load()
+				points, growing := int64(0), false
+				if state := b.historyState.Load(); state != nil {
+					var ready bool
+					points, ready = (*state)()
+					steady = steady && ready
+					growing = points > previousPoints
+				} else {
+					// Callers without queue observations retain the conservative
+					// throughput and admission-drain checks.
+					meetingFloor := floor <= 0 || rate >= .95*floor
+					drained := b.drained.Load()
+					steady = steady && meetingFloor && (drained == nil || (*drained)())
+				}
 				// Both endpoints exclude warming and held restoration. One complete
-				// minute is sufficient; the previous implementation needed 31min.
-				if eligible && steady {
+				// minute is sufficient. Queue growth excludes a throughput shortfall
+				// without mistaking normal batching gaps for unfinished recovery.
+				if eligible && steady && !growing {
 					value := (next - used) / at.Sub(last).Seconds()
 					rate := float64(count-written) / at.Sub(last).Seconds()
 					if finitePositive(value) {
 						if fresh {
 							h.Steady.Cores += .2 * (value - h.Steady.Cores)
-							h.Updates += .2 * (rate - h.Updates)
 						} else {
-							h.Steady.Cores, h.Updates = value, rate
+							h.Steady.Cores, h.Updates = value, 0
 							fresh = true
+						}
+						// Quiet batching minutes can refresh CPU history without
+						// shrinking the next restart's throughput ceiling. Learn
+						// confirmed throughput only from a minute meeting the floor.
+						if finitePositive(rate) && rate >= .95*floor {
+							if finitePositive(h.Updates) {
+								h.Updates += .2 * (rate - h.Updates)
+							} else {
+								h.Updates = rate
+							}
 						}
 						h.Steady.At = at
 						save()
 					}
 				}
 				eligible = steady
+				previousPoints = points
 				last, used, written = at, next, count
 			case <-ctx.Done():
 				return

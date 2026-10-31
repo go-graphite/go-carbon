@@ -92,8 +92,8 @@ func TestBudgetLoadsHostHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	b = Start(context.Background(), path, 12)
-	if b.Cores() != 12 {
-		t.Fatal(b.Cores())
+	if math.Abs(b.Cores()-14*1.05) > 1e-9 || b.Source() != "history" {
+		t.Fatal("legacy history lost to configured fallback", b.Cores(), b.Source())
 	}
 	if err := b.Stop(); err != nil {
 		t.Fatal(err)
