@@ -61,6 +61,10 @@ type storeStatsView struct {
 	compactionPacerTargetRate                                               int64
 	compactionPacerAuto, compactionPacerBypass                              bool
 	compactionPacerBypasses                                                 map[string]uint64
+	flushRate, flushPacerTargetRate, flushPacerWaitNanos                    int64
+	flushPacerBytes                                                         uint64
+	flushPacerAuto, flushPacerBypass                                        bool
+	flushPacerBypasses                                                      map[string]uint64
 	writeStallSeconds                                                       float64
 	l0Files, l0Sublevels, compactionsInProgress                             int64
 	cacheHits, cacheMisses                                                  uint64
@@ -157,6 +161,12 @@ var migrationMetricSpecs = func() []metricSpec {
 		gauge("pebble_compaction_pacer_bypass", "1 while compaction pacing is bypassed.", func(s *migrationSnapshot) float64 { return b(s.stats.compactionPacerBypass) }),
 		counter("pebble_compaction_pacer_bytes_total", "Compaction output bytes written while pacing was enabled.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionPacerBytes) }),
 		counter("pebble_compaction_pacer_wait_seconds_total", "Seconds compaction writers waited for tokens, summed across workers.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionPacerWaitNanos) / 1e9 }),
+		gauge("pebble_flush_rate_bytes", "Memtable flush output budget in bytes per second; 0 while flushes are unpaced.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushRate) }),
+		gauge("pebble_flush_pacer_target_rate_bytes", "Memtable flush output target in bytes per second, including while bypassed.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushPacerTargetRate) }),
+		gauge("pebble_flush_pacer_auto", "1 when automatic flush pacing is configured.", func(s *migrationSnapshot) float64 { return b(s.stats.flushPacerAuto) }),
+		gauge("pebble_flush_pacer_bypass", "1 while flush pacing is bypassed.", func(s *migrationSnapshot) float64 { return b(s.stats.flushPacerBypass) }),
+		counter("pebble_flush_pacer_bytes_total", "Memtable flush output bytes written while pacing was enabled.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushPacerBytes) }),
+		counter("pebble_flush_pacer_wait_seconds_total", "Seconds memtable flushes waited for tokens.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushPacerWaitNanos) / 1e9 }),
 		counter("pebble_compaction_read_bytes_total", "Bytes read by compactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionReadBytes) }),
 		counter("pebble_write_stalls_total", "Write stalls.", func(s *migrationSnapshot) float64 { return float64(s.stats.writeStalls) }),
 		counter("pebble_write_stall_seconds_total", "Seconds writes were stalled.", func(s *migrationSnapshot) float64 { return s.stats.writeStallSeconds }),
@@ -260,6 +270,7 @@ var migrationMetricSpecs = func() []metricSpec {
 var (
 	pebbleCompactionsDesc        = prometheus.NewDesc("pebble_compactions_total", "Completed Pebble compactions by kind; multi_level is a subset of default.", []string{"kind"}, nil)
 	pebbleCompactionBypassesDesc = prometheus.NewDesc("pebble_compaction_pacer_bypasses_total", "Compaction pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
+	pebbleFlushBypassesDesc      = prometheus.NewDesc("pebble_flush_pacer_bypasses_total", "Flush pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
 	pebbleFSOpsDesc              = prometheus.NewDesc("pebble_fs_ops_total", "Store filesystem operations by operation and file kind. Table writes cover flushes and compactions; table reads cover compactions and point reads, which Pebble does not tell apart.", []string{"op", "kind"}, nil)
 	pebbleFSBytesDesc            = prometheus.NewDesc("pebble_fs_bytes_total", "Store filesystem bytes read and written by file kind.", []string{"op", "kind"}, nil)
 	pebbleFetchStageSecondsDesc  = prometheus.NewDesc("pebble_fetch_stage_seconds_total", "Storage fetch wall time by stage; iterator_close covers the final shared continuation iterator and is included in body. Fetches without a read view are excluded.", []string{"stage"}, nil)
@@ -315,6 +326,7 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pebbleLevelScoreDesc
 	ch <- pebbleCompactionsDesc
 	ch <- pebbleCompactionBypassesDesc
+	ch <- pebbleFlushBypassesDesc
 	ch <- pebbleFSOpsDesc
 	ch <- pebbleFSBytesDesc
 	ch <- pebbleFetchStageSecondsDesc
@@ -371,6 +383,8 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			diskBytes: st.DiskBytes, compactionDebt: st.CompactionDebt, memTableBytes: st.MemTableBytes, walBytes: st.WALBytes,
 			compactionRate: st.CompactionRate, compactionPacerBytes: st.CompactionPacerBytes, compactionPacerWaitNanos: st.CompactionPacerWaitNanos,
 			compactionPacerTargetRate: st.CompactionPacerTargetRate, compactionPacerAuto: st.CompactionPacerAuto, compactionPacerBypass: st.CompactionPacerBypass != "", compactionPacerBypasses: st.CompactionPacerBypasses,
+			flushRate: st.FlushRate, flushPacerTargetRate: st.FlushPacerTargetRate, flushPacerWaitNanos: st.FlushPacerWaitNanos, flushPacerBytes: st.FlushPacerBytes,
+			flushPacerAuto: st.FlushPacerAuto, flushPacerBypass: st.FlushPacerBypass != "", flushPacerBypasses: st.FlushPacerBypasses,
 			writeStalls: st.WriteStalls, writeStallSeconds: float64(st.WriteStallNanos) / 1e9,
 			l0Files: st.L0Files, l0Sublevels: st.L0Sublevels, compactionsInProgress: st.CompactionsInProgress,
 			cacheHits: st.CacheHits, cacheMisses: st.CacheMisses,
@@ -407,6 +421,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		for reason, count := range s.stats.compactionPacerBypasses {
 			ch <- prometheus.MustNewConstMetric(pebbleCompactionBypassesDesc, prometheus.CounterValue, float64(count), reason)
+		}
+		for reason, count := range s.stats.flushPacerBypasses {
+			ch <- prometheus.MustNewConstMetric(pebbleFlushBypassesDesc, prometheus.CounterValue, float64(count), reason)
 		}
 		k := s.stats.compactionKinds
 		for _, kind := range []struct {

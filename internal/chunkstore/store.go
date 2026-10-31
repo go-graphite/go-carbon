@@ -62,8 +62,28 @@ type Options struct {
 	L0CompactionConcurrency int
 	// CompactionRate limits aggregate compaction output bytes per second.
 	// -1 adapts to ingress, write amplification and backlog; zero disables
-	// pacing. Flushes, ingest tables and WAL writes are never paced.
+	// pacing. Ingest tables and WAL writes are never paced; see FlushRate.
 	CompactionRate int64
+	// CompactionHeadroom multiplies auto mode's modelled rate: 1..4, zero
+	// keeps the default 2.
+	CompactionHeadroom float64
+	// CompactionKeepPacingOnDebt keeps auto pacing active while compaction
+	// debt is high; stalls, L0 depth and memtable pressure still bypass it.
+	CompactionKeepPacingOnDebt bool
+	// CompactionWarmup is how long auto mode stays unpaced after start while
+	// it learns rates: 0..24h, nil keeps the default hour. Zero paces from the
+	// first sample.
+	CompactionWarmup *time.Duration
+	// FlushRate limits memtable flush output bytes per second. Pebble writes a
+	// flush at device speed, so a large memtable on a store with little
+	// ingress becomes a burst of a gigabyte in a few seconds once per fill.
+	// -1 paces each flush at four times the modelled SST ingress (at least
+	// 4 MiB/s), spreading it over about a quarter of the average fill time;
+	// zero disables pacing. A flush that a caller waits for (Flush, Compact),
+	// write stalls, memtable pressure, a second queued memtable, conversion
+	// and shutdown release it in every mode. Pacing applies to exact-block
+	// stores, whose memtable queue absorbs a slower flush.
+	FlushRate int64
 	// L0CompactionThreshold is the L0 read amplification that triggers an
 	// L0 compaction; L0StopWritesThreshold stops writes. Hot blocks are
 	// rewritten in every flush, so letting more sublevels accumulate drops more
@@ -199,6 +219,7 @@ type Store struct {
 	fsStats                        *countingFS
 	compactionPacing               *compactionPacingFS
 	compactionControl              *compactionController
+	flushPacing                    bool // FlushRate may pace this store's flushes
 	compactionStop, compactionDone chan struct{}
 	incrementalSource              string
 	ownershipFailure               atomic.Pointer[ownershipError]
@@ -320,6 +341,22 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.CompactionRate < -1 {
 		return nil, errors.New("compaction rate must be -1 (auto), 0 (off), or positive")
 	}
+	headroom, warmup := options.CompactionHeadroom, compactionWarmupDefault
+	if headroom == 0 {
+		headroom = compactionHeadroomDefault
+	}
+	if options.CompactionWarmup != nil {
+		warmup = *options.CompactionWarmup
+	}
+	if !validCompactionHeadroom(headroom) {
+		return nil, errCompactionHeadroom
+	}
+	if !validCompactionWarmup(warmup) {
+		return nil, errCompactionWarmup
+	}
+	if options.FlushRate < -1 {
+		return nil, errors.New("flush rate must be -1 (auto), 0 (off), or positive")
+	}
 	fs := options.fs
 	if fs == nil {
 		fs = vfs.Default
@@ -351,7 +388,13 @@ func Open(dir string, options Options) (*Store, error) {
 		options.MemTableSize = 64 << 20
 	}
 	s := &Store{now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
-	s.compactionControl = newCompactionController(pacing.pacer, options.CompactionRate, time.Now())
+	// Flush pacing starts once the store is open: WAL recovery and WAL moves
+	// flush at full speed.
+	s.flushPacing = options.ExactBlocks
+	s.compactionControl = newPacingController(pacing.pacer, pacing.flush, options.CompactionRate, 0, time.Now())
+	s.compactionControl.setHeadroom(headroom)
+	s.compactionControl.setDebtBypass(!options.CompactionKeepPacingOnDebt)
+	s.compactionControl.setWarmup(warmup)
 	s.continuation = options.Continuation
 	s.fetchSharedIterator = options.FetchSharedIterator
 	stateKeys, _ := options.Continuation.(ContinuationStateKeys)
@@ -553,6 +596,7 @@ func Open(dir string, options Options) (*Store, error) {
 		return nil, s.openFailure(db, err)
 	}
 	s.startCompactionController()
+	_ = s.SetFlushRate(options.FlushRate) // validated above
 	if s.continuation != nil {
 		s.startColdPack()
 	}
@@ -965,10 +1009,18 @@ func (s *Store) close(forExit bool) error {
 	}
 	return err
 }
-func (s *Store) Flush() error                         { return s.db.Flush() }
+
+// Flush writes the memtables at full speed: its caller waits for them.
+func (s *Store) Flush() error {
+	s.compactionControl.urgentFlush(1)
+	defer s.compactionControl.urgentFlush(-1)
+	return s.db.Flush()
+}
+
+// AsyncFlush starts a flush nobody waits for, which flush pacing may spread.
 func (s *Store) AsyncFlush() (<-chan struct{}, error) { return s.db.AsyncFlush() }
 func (s *Store) Compact() error {
-	if err := s.db.Flush(); err != nil {
+	if err := s.Flush(); err != nil {
 		return err
 	}
 	return s.db.Compact([]byte{0}, []byte{255}, true)
@@ -991,8 +1043,15 @@ type Stats struct {
 	CompactionPacerBytes                                                                               uint64
 	CompactionPacerTargetRate                                                                          int64
 	CompactionPacerAuto                                                                                bool
+	CompactionPacerHeadroom                                                                            float64
+	CompactionPacerWarmup                                                                              time.Duration
 	CompactionPacerBypass                                                                              string
 	CompactionPacerBypasses                                                                            map[string]uint64
+	FlushRate, FlushPacerTargetRate, FlushPacerWaitNanos                                               int64
+	FlushPacerBytes                                                                                    uint64
+	FlushPacerAuto                                                                                     bool
+	FlushPacerBypass                                                                                   string
+	FlushPacerBypasses                                                                                 map[string]uint64
 	CompactionsInProgress                                                                              int64
 	CompactionWorkers, L0Sublevels, L0Files, L0Bytes                                                   int64
 	CompactionReadBytes, CompactionWriteBytes, FlushWriteBytes                                         uint64
@@ -1066,7 +1125,9 @@ func (s *Store) Stats() Stats {
 		CacheBytes: uint64(m.BlockCache.Size), CacheHits: uint64(m.BlockCache.Hits), CacheMisses: uint64(m.BlockCache.Misses),
 		Flushes: uint64(m.Flush.Count), Compactions: uint64(m.Compact.Count), CompactionDebt: m.Compact.EstimatedDebt,
 		CompactionRate: pacing.rate, CompactionPacerBytes: s.compactionPacing.pacer.bytes.Load(), CompactionPacerWaitNanos: s.compactionPacing.pacer.wait.Load(),
-		CompactionPacerTargetRate: pacing.target, CompactionPacerAuto: pacing.auto, CompactionPacerBypass: pacing.bypass, CompactionPacerBypasses: pacing.bypasses,
+		CompactionPacerTargetRate: pacing.target, CompactionPacerAuto: pacing.auto, CompactionPacerHeadroom: pacing.headroom, CompactionPacerWarmup: pacing.warmup, CompactionPacerBypass: pacing.bypass, CompactionPacerBypasses: pacing.bypasses,
+		FlushRate: pacing.flush.rate, FlushPacerTargetRate: pacing.flush.target, FlushPacerAuto: pacing.flush.auto, FlushPacerBypass: pacing.flush.bypass,
+		FlushPacerBypasses: pacing.flush.bypasses, FlushPacerBytes: s.compactionPacing.flush.bytes.Load(), FlushPacerWaitNanos: s.compactionPacing.flush.wait.Load(),
 		CompactionsInProgress: m.Compact.NumInProgress,
 		CompactionWorkers:     s.compactionWorkers.Load(), L0Sublevels: int64(m.Levels[0].Sublevels), L0Files: m.Levels[0].NumFiles, L0Bytes: m.Levels[0].Size,
 		CompactionReadBytes: read, CompactionWriteBytes: written, FlushWriteBytes: flushed,
@@ -1122,6 +1183,51 @@ func (s *Store) SetCompactionRate(rate int64) error {
 		return errors.New("compaction rate must be -1 (auto), 0 (off), or positive")
 	}
 	s.compactionControl.setMode(rate)
+	return nil
+}
+
+var (
+	errCompactionHeadroom = errors.New("compaction rate headroom must be 1..4")
+	errCompactionWarmup   = errors.New("compaction pacing warmup must be 0..24h")
+)
+
+// SetCompactionHeadroom changes the multiplier auto mode applies to its
+// modelled compaction rate, immediately.
+func (s *Store) SetCompactionHeadroom(headroom float64) error {
+	if !validCompactionHeadroom(headroom) {
+		return errCompactionHeadroom
+	}
+	s.compactionControl.setHeadroom(headroom)
+	return nil
+}
+
+// SetCompactionDebtBypass chooses whether excess compaction debt alone makes
+// auto mode stop pacing, immediately.
+func (s *Store) SetCompactionDebtBypass(enabled bool) {
+	s.compactionControl.setDebtBypass(enabled)
+}
+
+// SetCompactionWarmup changes how long auto mode stays unpaced after the store
+// started. It never restarts the warm-up.
+func (s *Store) SetCompactionWarmup(warmup time.Duration) error {
+	if !validCompactionWarmup(warmup) {
+		return errCompactionWarmup
+	}
+	s.compactionControl.setWarmup(warmup)
+	return nil
+}
+
+// SetFlushRate changes memtable flush pacing (see Options.FlushRate),
+// including for a flush already writing. Stores without exact blocks keep
+// flushes unpaced.
+func (s *Store) SetFlushRate(rate int64) error {
+	if rate < -1 {
+		return errors.New("flush rate must be -1 (auto), 0 (off), or positive")
+	}
+	if !s.flushPacing {
+		rate = 0
+	}
+	s.compactionControl.setFlushMode(rate)
 	return nil
 }
 

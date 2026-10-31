@@ -419,6 +419,16 @@ func (app *App) ReloadConfig() error {
 		if err = app.MetricStore.SetCompactionRate(app.Config.Whisper.StoreCompactionRate); err != nil {
 			return err
 		}
+		if err = app.MetricStore.SetCompactionHeadroom(app.Config.Whisper.StoreCompactionHeadroom); err != nil {
+			return err
+		}
+		if err = app.MetricStore.SetCompactionWarmup(app.Config.Whisper.StoreCompactionWarmup.Value()); err != nil {
+			return err
+		}
+		app.MetricStore.SetCompactionDebtBypass(app.Config.Whisper.StoreCompactionDebtBypass)
+		if err = app.MetricStore.SetFlushRate(app.Config.Whisper.StoreFlushRate); err != nil {
+			return err
+		}
 		if rate := app.Config.Whisper.StoreTimeBucketsRelayoutRate; rate > 0 {
 			if err = app.MetricStore.SetRelayoutRate(rate); err != nil {
 				return err
@@ -947,6 +957,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			incrementalSource = conf.Whisper.DataDir
 			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites}
 		}
+		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
 			Continuation:      continuation,
 			ColdPack:          coldPackOptions(conf),
@@ -962,6 +973,10 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
 			CompactionWorkers:           conf.Whisper.StoreCompactionWorkers,
 			CompactionRate:              conf.Whisper.StoreCompactionRate,
+			CompactionHeadroom:          conf.Whisper.StoreCompactionHeadroom,
+			CompactionKeepPacingOnDebt:  !conf.Whisper.StoreCompactionDebtBypass,
+			CompactionWarmup:            &compactionWarmup,
+			FlushRate:                   conf.Whisper.StoreFlushRate,
 			L0CompactionConcurrency:     conf.Whisper.StoreL0CompactionConcurrency,
 			L0CompactionThreshold:       conf.Whisper.StoreL0CompactionThreshold,
 			L0StopWritesThreshold:       conf.Whisper.StoreL0StopWritesThreshold,

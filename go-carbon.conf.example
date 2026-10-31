@@ -64,15 +64,41 @@ store-memtable-size = 67108864
 store-compaction-workers = 0
 # Aggregate compaction SST output bytes per second: 0 off (default), positive
 # fixed budget, -1 automatic. Reloads on SIGHUP, including waiting writes.
-# Auto learns unpaced for one hour, then targets 2x the one-hour EWMA of local
-# SST ingress times measured write amplification (floor 8 MiB/s). Recent output
+# Auto learns unpaced for the warm-up (default one hour), then targets headroom
+# (default 2x) times the one-hour EWMA of local SST ingress times measured
+# write amplification (floor 8 MiB/s). Recent output
 # and debt growth supply catch-up headroom for lagging compactions/delete waves.
 # Auto bypasses on excess debt (>2x normal and >4 GiB), L0 sublevels >=6 (or half
 # the stop threshold), memtable pressure, stalls (plus 5 min), and active/recent
 # conversion (5 min since the last activity; an idle migration does not bypass).
-# Flushes, WALs and ingest tables stay unpaced. Shutdown bypasses every mode.
+# WALs and ingest tables stay unpaced (flushes: see store-flush-rate). Shutdown
+# bypasses every mode.
 # Watch target, bypass reasons, debt and stalls before enabling auto fleetwide.
 store-compaction-rate = 0
+# Auto mode only: multiplier on the modelled rate (1..4, default 2). Lower
+# values flatten compaction write waves at the cost of slower catch-up; debt
+# growth still adds its own headroom. Reloads on SIGHUP.
+store-compaction-rate-headroom = 2.0
+# Auto mode only: how long it stays unpaced after start while learning rates
+# (0..24h, default 1h; 0 paces from the first sample). The EWMA window stays
+# one hour. Reloads on SIGHUP, measured from start: a reload never restarts it.
+store-compaction-pacing-warmup = "1h"
+# Auto mode only: stop pacing while compaction debt exceeds 2x normal and 4 GiB
+# (default true). Pacing defers work, so debt grows under it; false keeps pacing
+# and lets debt growth raise the budget instead. Stalls, L0 depth and memtable
+# pressure always bypass. Reloads on SIGHUP.
+store-compaction-debt-bypass = true
+# Memtable flush SST output bytes per second: 0 off (default), positive fixed
+# budget, -1 automatic. Reloads on SIGHUP, including a flush already writing.
+# Pebble writes each flush at device speed: a large memtable on a store with
+# little ingress becomes a burst of a gigabyte in a few seconds once per fill.
+# Auto paces at 4x the one-hour EWMA of local SST ingress (floor 4 MiB/s), so a
+# flush spans about a quarter of the average fill time; it starts once the
+# first flush has been observed. Every mode releases a flush that a caller
+# waits for (manual flush/compaction), write stalls (plus 5 min), memtable
+# pressure, a second queued memtable, conversion and shutdown. Exact-block
+# stores only; their memtable queue absorbs the slower flush.
+# store-flush-rate = 0
 store-l0-compaction-concurrency = 0
 # L0 read amplification that starts an L0 compaction, and that stops writes.
 # Hot blocks are rewritten in every flush; a higher compaction threshold drops

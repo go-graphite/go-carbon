@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"time"
 
 	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -244,6 +245,15 @@ func validateStorageConfig(cfg *Config) error {
 	if cfg.Whisper.StoreCompactionRate < -1 {
 		return errors.New("shared storage compaction rate must be -1 (auto), 0 (off), or positive")
 	}
+	if h := cfg.Whisper.StoreCompactionHeadroom; !(h >= 1 && h <= 4) {
+		return errors.New("whisper.store-compaction-rate-headroom must be 1..4")
+	}
+	if w := cfg.Whisper.StoreCompactionWarmup; w == nil || w.Value() < 0 || w.Value() > 24*time.Hour {
+		return errors.New("whisper.store-compaction-pacing-warmup must be a duration of 0..24h")
+	}
+	if cfg.Whisper.StoreFlushRate < -1 {
+		return errors.New("shared storage flush rate must be -1 (auto), 0 (off), or positive")
+	}
 	if budget := cfg.Whisper.StoreMaxOpenFiles; budget < 0 || budget > 1<<20 || budget > 0 && budget < 64 {
 		return errors.New("shared storage table-reader budget must be zero or 64..1048576")
 	}
@@ -387,6 +397,9 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 	}
 	send("compactionPacerBytes", float64(stats.CompactionPacerBytes-s.prev.CompactionPacerBytes))
 	send("compactionPacerWaitSeconds", float64(stats.CompactionPacerWaitNanos-s.prev.CompactionPacerWaitNanos)/1e9)
+	send("flushRate", float64(stats.FlushRate))
+	send("flushPacerBytes", float64(stats.FlushPacerBytes-s.prev.FlushPacerBytes))
+	send("flushPacerWaitSeconds", float64(stats.FlushPacerWaitNanos-s.prev.FlushPacerWaitNanos)/1e9)
 	send("l0Sublevels", float64(stats.L0Sublevels))
 	send("l0Files", float64(stats.L0Files))
 	send("l0Bytes", float64(stats.L0Bytes))

@@ -267,7 +267,7 @@ func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
 
 // compactRange flushes the memtables and compacts [start, end) in parallel.
 func (s *Store) compactRange(start, end []byte) error {
-	if err := s.db.Flush(); err != nil {
+	if err := s.Flush(); err != nil {
 		return err
 	}
 	return s.db.Compact(start, end, true)

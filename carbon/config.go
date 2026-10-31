@@ -75,6 +75,10 @@ type whisperConfig struct {
 	StoreCacheSize               int64     `toml:"store-cache-size"`
 	StoreMemTableSize            uint64    `toml:"store-memtable-size"`
 	StoreCompactionRate          int64     `toml:"store-compaction-rate"`
+	StoreCompactionHeadroom      float64   `toml:"store-compaction-rate-headroom"`
+	StoreCompactionWarmup        *Duration `toml:"store-compaction-pacing-warmup"`
+	StoreCompactionDebtBypass    bool      `toml:"store-compaction-debt-bypass"`
+	StoreFlushRate               int64     `toml:"store-flush-rate"`
 	StoreCompactionWorkers       int       `toml:"store-compaction-workers"`
 	StoreL0CompactionConcurrency int       `toml:"store-l0-compaction-concurrency"`
 	StoreL0CompactionThreshold   int       `toml:"store-l0-compaction-threshold"`
@@ -423,6 +427,9 @@ func NewConfig() *Config {
 			StoreCacheSize:              256 << 20,
 			StoreMemTableSize:           64 << 20,
 			StoreSyncInterval:           &Duration{time.Second},
+			StoreCompactionHeadroom:     2,
+			StoreCompactionDebtBypass:   true,
+			StoreCompactionWarmup:       &Duration{Duration: time.Hour},
 			StoreUpdateBatchSize:        1,
 			StoreMigrationIngestLinger:  &Duration{Duration: time.Second},
 			StoreEncoding:               "legacy",

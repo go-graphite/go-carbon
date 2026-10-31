@@ -87,18 +87,22 @@ func (p *compactionPacer) take(size int) (n int, paced bool) {
 }
 
 // Pebble opens a table before TableCreated, but emits the event before any
-// writes. Keep the open handle until Close so the event can mark it. Flushes,
-// staged ingest tables, WALs and manifests never acquire compaction tokens.
+// writes. Keep the open handle until Close so the event can mark it. Flush
+// tables take tokens from a separate flush bucket, which is unpaced unless
+// flush pacing is enabled; staged ingest tables, WALs and manifests are never
+// paced.
 type compactionPacingFS struct {
 	vfs.FS
-	pacer  *compactionPacer
+	pacer *compactionPacer
+	// flush paces memtable flush output; see Options.FlushRate.
+	flush  *compactionPacer
 	output atomic.Uint64
 	mu     sync.Mutex
 	files  map[string]*compactionPacingFile
 }
 
 func newCompactionPacingFS(fs vfs.FS, rate int64) *compactionPacingFS {
-	return &compactionPacingFS{FS: fs, pacer: newCompactionPacer(max(0, rate)), files: make(map[string]*compactionPacingFile)}
+	return &compactionPacingFS{FS: fs, pacer: newCompactionPacer(max(0, rate)), flush: newCompactionPacer(0), files: make(map[string]*compactionPacingFile)}
 }
 
 func (fs *compactionPacingFS) Create(name string) (vfs.File, error) {
@@ -114,35 +118,47 @@ func (fs *compactionPacingFS) Create(name string) (vfs.File, error) {
 }
 
 func (fs *compactionPacingFS) tableCreated(info pebble.TableCreateInfo) {
-	if info.Reason != "compacting" {
+	if info.Reason != "compacting" && info.Reason != "flushing" {
 		return
 	}
 	fs.mu.Lock()
 	if f := fs.files[filepath.Clean(info.Path)]; f != nil {
-		f.compacting.Store(true)
+		if info.Reason == "compacting" {
+			f.compacting.Store(true)
+		} else {
+			f.flushing.Store(true)
+		}
 	}
 	fs.mu.Unlock()
 }
 
 type compactionPacingFile struct {
 	vfs.File
-	fs         *compactionPacingFS
-	name       string
-	compacting atomic.Bool
+	fs                   *compactionPacingFS
+	name                 string
+	compacting, flushing atomic.Bool
 }
 
 func (f *compactionPacingFile) Write(b []byte) (int, error) {
-	if !f.compacting.Load() {
-		return f.File.Write(b)
+	pacer := f.fs.pacer
+	compacting := f.compacting.Load()
+	if !compacting {
+		if !f.flushing.Load() {
+			return f.File.Write(b)
+		}
+		pacer = f.fs.flush
 	}
 	written := 0
 	for len(b) > 0 {
-		n, paced := f.fs.pacer.take(len(b))
+		n, paced := pacer.take(len(b))
 		count, err := f.File.Write(b[:n])
 		written += count
-		f.fs.output.Add(uint64(count))
+		// The compaction controller measures compaction output only.
+		if compacting {
+			f.fs.output.Add(uint64(count))
+		}
 		if paced {
-			f.fs.pacer.bytes.Add(uint64(count))
+			pacer.bytes.Add(uint64(count))
 		}
 		if err != nil {
 			return written, err
