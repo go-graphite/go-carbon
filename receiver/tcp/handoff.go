@@ -33,8 +33,8 @@ type Conn struct {
 }
 
 // handoffState tracks plaintext connections so Detach can stop each at a line
-// boundary. It is enabled only without compression or buffering: a
-// decompressor's state or buffered points cannot move to another process.
+// boundary. Autodetected zstd frames can also move, since each frame is
+// independent. Legacy compression and buffered points cannot move.
 type handoffState struct {
 	enabled    bool
 	mu         sync.Mutex
@@ -114,6 +114,10 @@ func (rcv *TCP) detach(c *handoffConn, reader *bufio.Reader, rest *bytes.Reader,
 		_, _ = rest.Read(tail)
 		leftover = append(leftover, tail...)
 	}
+	return rcv.detachBytes(c, leftover)
+}
+
+func (rcv *TCP) detachBytes(c *handoffConn, leftover []byte) bool {
 	tcpConn, ok := c.conn.(*net.TCPConn)
 	if !ok {
 		return false
@@ -132,7 +136,7 @@ func (rcv *TCP) detach(c *handoffConn, reader *bufio.Reader, rest *bytes.Reader,
 }
 
 // Handoffable reports whether Detach can move this receiver's connections:
-// plaintext input without compression or buffering.
+// plaintext or autodetected zstd input without buffering.
 func (rcv *TCP) Handoffable() bool { return rcv.handoff.enabled && rcv.listener != nil }
 
 // Detach stops the receiver but leaves its listening socket and accepted
@@ -181,12 +185,17 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		closeAll()
 		return nil, errors.New("inherited input requires plaintext without buffering")
 	}
+	if err := validateZstdLimit(options.ZstdMaxFrameSize); err != nil {
+		closeAll()
+		return nil, err
+	}
 	want, err := net.ResolveTCPAddr("tcp", options.Listen)
 	if err != nil {
 		closeAll()
 		return nil, err
 	}
 	r := &TCP{out: store, name: name, logger: zapwriter.Logger(name), decompressor: newDecompressor("")}
+	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
 	r.handoff.enabled = true
 	conns := make([]Conn, 0, len(h.Conns))
 	for _, c := range h.Conns {

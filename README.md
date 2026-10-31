@@ -214,6 +214,9 @@ buffer-size = 0
 [tcp]
 listen = ":2003"
 enabled = true
+# Autodetect plaintext or independent zstd frames. See doc/receiver-zstd.md.
+compression = ""
+zstd-max-frame-size = 16777216
 # Optional internal queue between receiver and cache
 buffer-size = 0
 

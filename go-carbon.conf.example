@@ -632,6 +632,12 @@ listen = ":2003"
 enabled = true
 # Optional internal queue between receiver and cache
 buffer-size = 0
+# Empty compression autodetects independent zstd frames or plaintext on this port.
+# Explicit "gzip", "snappy", or "zstd" selects that format without autodetection.
+compression = ""
+# Maximum decompressed frame size and advertised window, in bytes; zero uses
+# 16 MiB. Compressed frames are bounded by this + this/128 + 1024 bytes.
+zstd-max-frame-size = 16777216
 
 [pickle]
 listen = ":2004"
@@ -1092,7 +1098,7 @@ restore-per-second = 0
 # KillMode=process) the next instance starts while that memory is reclaimed.
 # The host needs room for both processes briefly. Not supported with -daemon.
 # When both binaries support input handoff, a store with only the built-in
-# uncompressed, unbuffered TCP receiver also transfers its existing ingestion
+# unbuffered TCP receiver with automatic plaintext/zstd detection also transfers its ingestion
 # connections. Input received after the checkpoint is replayed before reading
 # the transferred connections. Other receiver configurations use stop/rebind.
 handoff-supervisor = false
