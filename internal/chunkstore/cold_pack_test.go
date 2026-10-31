@@ -7,6 +7,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/cockroachdb/pebble/vfs"
 )
 
 type testColdCodec struct {
@@ -126,7 +128,8 @@ func TestColdPackPacerAndStop(t *testing.T) {
 		started := time.Now()
 		time.Sleep(100 * time.Millisecond)
 		s.coldPack.stats.ReadBytes = 1 << 20
-		if delay := s.coldPackDelay(ColdPackStats{}, started); delay != 900*time.Millisecond {
+		var pacer coldPackPacer
+		if delay := s.coldPackDelay(&pacer, ColdPackStats{}, started); delay != 900*time.Millisecond {
 			t.Fatalf("pacer delay %s", delay)
 		}
 		s.startColdPack()
@@ -135,6 +138,109 @@ func TestColdPackPacerAndStop(t *testing.T) {
 		s.stopColdPack()
 	})
 }
+
+func TestColdPackPacerAccumulatesShortSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cpu   float64
+		bytes uint64
+		debt  time.Duration
+	}{{"cpu", .25, 0, 300 * time.Microsecond}, {"bytes", 1, 1000, 900 * time.Microsecond}} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, err := NormalizeColdPack(ColdPackOptions{Mode: "exact", CPUFraction: tc.cpu, BytesPerSecond: 1000000})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var p coldPackPacer
+			var stats ColdPackStats
+			now := time.Unix(1700000000, 0)
+			for n := 1; ; n++ {
+				before, started := stats, now
+				stats.ReadBytes += tc.bytes
+				now = now.Add(100 * time.Microsecond)
+				delay := p.delay(o, before, stats, started, now)
+				debt := time.Duration(n) * tc.debt
+				if debt < coldPackPaceQuantum {
+					if delay != 0 {
+						t.Fatalf("step %d: premature timer %s", n, delay)
+					}
+					continue
+				}
+				if delay != debt {
+					t.Fatalf("step %d: delay %s, want accumulated %s", n, delay, debt)
+				}
+				// Oversleep repays all debt but cannot subsidize the next step.
+				started = now.Add(delay + time.Second)
+				now = started.Add(100 * time.Millisecond)
+				before = stats
+				stats.ReadBytes += 200000
+				want := max(time.Duration(float64(100*time.Millisecond)*(1/tc.cpu-1)), 100*time.Millisecond)
+				if got := p.delay(o, before, stats, started, now); got != want {
+					t.Fatalf("idle earned credit: delay %s, want %s", got, want)
+				}
+				break
+			}
+		})
+	}
+}
+
+func TestColdPackPacerRetainsIndependentBudgets(t *testing.T) {
+	o, _ := NormalizeColdPack(ColdPackOptions{Mode: "exact", CPUFraction: .1, BytesPerSecond: 1000000})
+	var p coldPackPacer
+	started := time.Unix(1700000000, 0)
+	now := started.Add(time.Millisecond)
+	stats := ColdPackStats{ReadBytes: 20000}
+	// The byte budget wins first, but the CPU debt still accumulates.
+	if delay := p.delay(o, ColdPackStats{}, stats, started, now); delay != 19*time.Millisecond {
+		t.Fatalf("byte delay: %s", delay)
+	}
+	started, now = now, now.Add(2*time.Millisecond)
+	if delay := p.delay(o, stats, stats, started, now); delay != 27*time.Millisecond {
+		t.Fatalf("CPU debt lost behind byte budget: %s", delay)
+	}
+	// An intentional budget change discards the previous policy's debt.
+	o.CPUFraction = 1
+	started, now = now, now.Add(time.Microsecond)
+	if delay := p.delay(o, stats, stats, started, now); delay != 0 {
+		t.Fatalf("reload retained old policy debt: %s", delay)
+	}
+	after := stats
+	after.PressurePauses++
+	if delay := p.delay(o, stats, after, now, now); delay != time.Second {
+		t.Fatalf("pressure pause: %s", delay)
+	}
+}
+
+func TestColdPackBackgroundShortStepsAndReload(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true, TimeBuckets: true, Continuation: testColdCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+		defer closeTestStore(t, s)
+		for i := range 130 {
+			createTestMetric(t, s, fmt.Sprintf("background.%03d", i))
+		}
+		// With no virtual worker time and negligible byte debt, several pages
+		// must finish before the driver needs its first timer wait.
+		o := ColdPackOptions{Mode: "exact", CPUFraction: 1, BytesPerSecond: 1 << 40}
+		if err := s.ConfigureColdPack(o); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if st := s.ColdPackStats(); st.Passes != 1 || st.Blocks != 130 {
+			t.Fatalf("short steps waited individually: %+v", st)
+		}
+		// Reload wakes the long between-sweep wait; shutdown must also join it.
+		o.Mode = "off"
+		if err := s.ConfigureColdPack(o); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if st := s.ColdPackStats(); st.Active || st.Mode != "off" || st.Passes != 1 {
+			t.Fatalf("reload did not stop maintenance: %+v", st)
+		}
+		s.stopColdPack()
+	})
+}
+
 func TestColdPackOptions(t *testing.T) {
 	for _, o := range []ColdPackOptions{{Mode: "unknown"}, {BytesPerSecond: -1}, {CPUFraction: -.1}, {CPUFraction: 2}, {WriteWindow: -1}, {Interval: time.Nanosecond}} {
 		if _, err := NormalizeColdPack(o); err == nil {

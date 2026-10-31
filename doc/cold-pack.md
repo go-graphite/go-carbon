@@ -65,7 +65,11 @@ native range before following the existing exact writer and rollup path.
 The byte pacer charges snapshot payload reads and committed WAL batch bytes.
 The CPU pacer charges worker elapsed time, including IO waits, against a fraction
 of one worker. It sleeps outside locks and snapshots; idle time does not earn a
-later burst. One bounded step is the allowed burst. Reload and shutdown wake a
+later burst. Short steps share accumulated pacing debt: waits below 10 ms are
+deferred until that debt reaches 10 ms, avoiding a timer wakeup for each empty
+metric or descriptor scan. The allowed burst is one bounded step plus less than
+10 ms of budget debt. CPU and byte debt are tracked independently and actual
+sleep time repays both, including timer overshoot. Reload and shutdown wake a
 sleeping worker. This is a conservative worker budget, not a process-wide CPU
 ceiling: asynchronous Pebble flushes, compactions and GC are additional work.
 Existing compaction pacing remains independently configurable.

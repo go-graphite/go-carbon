@@ -504,14 +504,24 @@ func (s *Store) startColdPack() {
 	c.wake = make(chan struct{}, 1)
 	go func() {
 		defer close(c.done)
+		var pacer coldPackPacer
 		timer := time.NewTimer(time.Second)
 		defer timer.Stop()
+		delay := time.Second
 		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-c.wake:
-			case <-timer.C:
+			if delay > 0 {
+				select {
+				case <-ctx.Done():
+					return
+				case <-c.wake:
+				case <-timer.C:
+				}
+			} else {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
 			}
 			before := s.ColdPackStats()
 			started := time.Now()
@@ -520,7 +530,7 @@ func (s *Store) startColdPack() {
 			o := c.options
 			c.mu.Unlock()
 			after := s.ColdPackStats()
-			delay := s.coldPackDelay(before, started)
+			delay = s.coldPackDelay(&pacer, before, started)
 			if err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("ERROR cold pack failed: %v", err)
 			}
@@ -533,7 +543,9 @@ func (s *Store) startColdPack() {
 			if after.PressurePauses > before.PressurePauses {
 				delay = max(delay, time.Second)
 			}
-			timer.Reset(max(delay, time.Millisecond))
+			if delay > 0 {
+				timer.Reset(delay)
+			}
 		}
 	}()
 }
@@ -548,6 +560,10 @@ func (s *Store) stopColdPack() {
 // RunColdPack completes one paced sweep. Offline tools use the same step and
 // pacing policy as the background worker; callers must stop that worker first.
 func (s *Store) RunColdPack(ctx context.Context) error {
+	var pacer coldPackPacer
+	timer := time.NewTimer(0)
+	timer.Stop()
+	defer timer.Stop()
 	for {
 		before := s.ColdPackStats()
 		started := time.Now()
@@ -555,28 +571,58 @@ func (s *Store) RunColdPack(ctx context.Context) error {
 		if err != nil || done {
 			return err
 		}
-		delay := s.coldPackDelay(before, started)
-		timer := time.NewTimer(delay)
+		delay := s.coldPackDelay(&pacer, before, started)
+		if delay == 0 {
+			continue
+		}
+		timer.Reset(delay)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}
 	}
 }
 
-func (s *Store) coldPackDelay(before ColdPackStats, started time.Time) time.Duration {
+// Short operations must share pacing debt: a timer per metric rounds cheap
+// scans up to the platform's timer resolution and leaves both budgets unused.
+// Defer waits below this quantum, allowing at most this much extra budget debt
+// plus one bounded step. Real sleeps repay debt; idle time never earns credit.
+const coldPackPaceQuantum = 10 * time.Millisecond
+
+type coldPackPacer struct {
+	options              ColdPackOptions
+	cpuAfter, bytesAfter time.Time
+}
+
+func (s *Store) coldPackDelay(p *coldPackPacer, before ColdPackStats, started time.Time) time.Duration {
 	c := &s.coldPack
 	c.mu.Lock()
 	o, after := c.options, c.stats
 	c.mu.Unlock()
-	elapsed := time.Since(started)
-	delay := time.Duration(float64(elapsed) * (1/o.CPUFraction - 1))
+	return p.delay(o, before, after, started, time.Now())
+}
+
+func (p *coldPackPacer) delay(o ColdPackOptions, before, after ColdPackStats, started, now time.Time) time.Duration {
+	if p.options != o {
+		*p = coldPackPacer{options: o}
+	}
+	if p.cpuAfter.Before(started) {
+		p.cpuAfter = started
+	}
+	if p.bytesAfter.Before(started) {
+		p.bytesAfter = started
+	}
+	elapsed := now.Sub(started)
+	p.cpuAfter = p.cpuAfter.Add(time.Duration(float64(elapsed) / o.CPUFraction))
 	bytes := after.ReadBytes - before.ReadBytes + after.WriteBytes - before.WriteBytes
-	delay = max(delay, time.Duration(float64(bytes)/float64(o.BytesPerSecond)*float64(time.Second))-elapsed)
+	p.bytesAfter = p.bytesAfter.Add(time.Duration(float64(bytes) / float64(o.BytesPerSecond) * float64(time.Second)))
+	delay := max(p.cpuAfter.Sub(now), p.bytesAfter.Sub(now))
 	if after.PressurePauses > before.PressurePauses {
 		delay = max(delay, time.Second)
 	}
-	return max(delay, time.Millisecond)
+	if delay < coldPackPaceQuantum {
+		return 0
+	}
+	return delay
 }
