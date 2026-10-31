@@ -65,7 +65,11 @@ native range before following the existing exact writer and rollup path.
 The byte pacer charges snapshot payload reads and committed WAL batch bytes.
 The CPU pacer charges worker elapsed time, including IO waits, against a fraction
 of one worker. It sleeps outside locks and snapshots; idle time does not earn a
-later burst. One bounded step is the allowed burst. Reload and shutdown wake a
+later burst. Short steps share accumulated pacing debt: waits below 10 ms are
+deferred until that debt reaches 10 ms, avoiding a timer wakeup for each empty
+metric or descriptor scan. The allowed burst is one bounded step plus less than
+10 ms of budget debt. CPU and byte debt are tracked independently and actual
+sleep time repays both, including timer overshoot. Reload and shutdown wake a
 sleeping worker. This is a conservative worker budget, not a process-wide CPU
 ceiling: asynchronous Pebble flushes, compactions and GC are additional work.
 Existing compaction pacing remains independently configurable.
@@ -168,6 +172,19 @@ paced sweep. Set `COLD_PACK_PAIRED_DIR` to a private ordinary clone, plus the sa
 clock, mode and result variables. Its `reference` directory and peer logs are
 created beside the clone. This optional qualification is separate from fast
 package tests; each process has a bounded benchmark deadline.
+
+`TestColdPackSyntheticSweep` builds a settled v7 store without a corpus. Set
+`COLD_PACK_SWEEP_METRICS=4096` to opt in: fifteen of every sixteen metrics have
+only 64 points, and the others have 1800 points, all outside the write window.
+Each trial starts from a fresh checkpoint, runs the real paced driver, then
+compares every archive bit-for-bit against the ordinary fixture. Receipts include
+points/s, process CPU, worker time, disk-reserve sampling and codec time.
+`COLD_PACK_SWEEP_RESULT` selects a JSON output path; `COLD_PACK_SWEEP_PROFILE`
+selects a prefix for per-trial CPU profiles and execution traces, excluding setup
+and the oracle. `COLD_PACK_SWEEP_TRIAL` selects `raised` (8 MiB/s, 0.25 CPU),
+`default` (1 MiB/s, 0.02 CPU), or `unlimited`; unset runs all three. Larger
+fixtures should run one trial per invocation to keep the 150-second test limit.
+Keep `TMPDIR` and `GOTMPDIR` in a private scratch directory.
 
 Before a canary, validate the actual retained cold fraction and free-space
 headroom. Start exact mode on one representative host with ample disk and low
