@@ -70,6 +70,7 @@ vendor:
 	patch --batch --fuzz=0 -p1 < patches/pebble-provider-dir-sync.patch
 	patch --batch --fuzz=0 -p1 < patches/protobuf-json-stable-spacing.patch
 	patch --batch --fuzz=0 -p1 < patches/pebble-integration-delta.patch
+	patch --batch --fuzz=0 -p1 < patches/pebble-visible-sequence.patch
 
 run-test:
 	./test/run-tests.sh $(GO) $(COMMAND)

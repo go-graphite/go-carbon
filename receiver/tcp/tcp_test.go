@@ -222,7 +222,7 @@ func BenchmarkPlainLineReadAndParse(b *testing.B) {
 	fixtures := [][]byte{
 		[]byte("service.api.requests.count 1 1700000000\n"),
 		[]byte("service.api.latency.p99 12.345 1700000001\n"),
-		[]byte("booking.graphite.receiver.tcp.metrics.received 42 1700000002\n"),
+		[]byte("example.graphite.receiver.tcp.metrics.received 42 1700000002\n"),
 	}
 	for _, reader := range []struct {
 		name string

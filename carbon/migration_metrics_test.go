@@ -119,7 +119,7 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 	if _, ok := values["pebble_disk_bytes"]; !ok {
 		t.Fatal("store metrics missing with an open store")
 	}
-	for _, name := range []string{"pebble_compaction_rate_bytes", "pebble_compaction_pacer_target_rate_bytes", "pebble_compaction_pacer_auto", "pebble_compaction_pacer_bypass", "pebble_compaction_pacer_bytes_total", "pebble_compaction_pacer_wait_seconds_total", "pebble_compactions_total", "pebble_fs_ops_total", "pebble_fs_bytes_total", "pebble_block_cache_bytes", "pebble_table_cache_entries", "pebble_level_compaction_write_bytes_total", "pebble_level_compaction_read_bytes_total", "pebble_level_bytes", "store_relayout_bytes_total", "store_relayout_progress_ratio", "store_relayout_rate_bytes", "store_migration_sidecar_folds_total"} {
+	for _, name := range []string{"pebble_compaction_rate_bytes", "pebble_compaction_pacer_target_rate_bytes", "pebble_compaction_pacer_auto", "pebble_compaction_pacer_bypass", "pebble_compaction_pacer_bytes_total", "pebble_compaction_pacer_wait_seconds_total", "pebble_compactions_total", "pebble_fs_ops_total", "pebble_fs_bytes_total", "pebble_block_cache_bytes", "pebble_table_cache_entries", "pebble_level_compaction_write_bytes_total", "pebble_level_compaction_read_bytes_total", "pebble_level_bytes", "store_metadata_cache_prewarmed_total", "store_metadata_cache_prewarm_bytes_total", "store_metadata_cache_prewarm_read_bytes_total", "store_metadata_cache_prewarm_duration_seconds_total", "store_relayout_bytes_total", "store_relayout_progress_ratio", "store_relayout_rate_bytes", "store_migration_sidecar_folds_total"} {
 		if _, ok := values[name]; !ok {
 			t.Fatalf("%s missing with an open store", name)
 		}

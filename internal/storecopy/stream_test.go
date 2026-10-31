@@ -38,7 +38,7 @@ func TestFragmentedCopyWritesAndErrors(t *testing.T) {
 			var output countedWriter
 			reader := &fragmentedReader{data: input, err: end}
 			n, err := io.CopyBuffer(&output, fullReader{reader}, make([]byte, 64))
-			if end != io.EOF && !errors.Is(err, end) || end == io.EOF && err != nil {
+			if !errors.Is(end, io.EOF) && !errors.Is(err, end) || errors.Is(end, io.EOF) && err != nil {
 				t.Fatalf("copy error = %v", err)
 			}
 			if n != int64(len(input)) || !bytes.Equal(input, output.buffer.Bytes()) {

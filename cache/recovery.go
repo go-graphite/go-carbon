@@ -356,12 +356,12 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 		filter.Add(helper.HashString(name))
 	}
 	if deferred {
-		now := time.Now()
+		now, held := s.writeoutTime(time.Now())
 		values.firstArrival = s.restoreArrival(values, now)
 		if startup {
-			c.spreadStartup(values, s, now)
+			c.spreadStartup(values, s, now, held)
 		}
-		c.writeoutQueue.notifyAt(values.firstArrival.Add(s.delayFor(values)))
+		c.writeoutQueue.notifyAt(writeoutDeadline(values, s))
 		return nil
 	}
 	c.writeoutQueue.notifyAt(time.Now())

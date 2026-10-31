@@ -18,7 +18,7 @@ type WriteoutQueue struct {
 	queue   chan string
 	rebuild func(abort chan bool) chan bool // return chan waiting for complete
 	wake    chan struct{}
-	// Monotonic nanoseconds relative to epoch, plus one (zero means unset).
+	// Nonnegative nanoseconds relative to epoch, plus one (zero means unset).
 	wakeAt atomic.Int64
 	epoch  time.Time
 }
@@ -37,7 +37,9 @@ func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 // notifyAt coalesces arrivals into one shared wake-up. Sparse arrivals only
 // advance the timer; they do not cause repeated full-cache scans.
 func (q *WriteoutQueue) notifyAt(deadline time.Time) {
-	next := deadline.Sub(q.epoch).Nanoseconds() + 1
+	// Paused startup deadlines saturate Sub at MaxInt64. Reserve the extra
+	// nanosecond before adding one; a wrapped hint suppresses future wake-ups.
+	next := max(0, min(deadline.Sub(q.epoch).Nanoseconds(), int64(1<<63-2))) + 1
 	for {
 		old := q.wakeAt.Load()
 		if old != 0 && old <= next {

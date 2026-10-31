@@ -21,6 +21,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/go-graphite/go-carbon/internal/restartcpu"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"github.com/go-graphite/go-carbon/internal/whisperpath"
 	"github.com/go-graphite/go-carbon/points"
@@ -37,20 +38,37 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
-	recv                 func(chan bool) string
-	tryRecv              func() string
-	storeUpdateBatchSize int
-	pop                  func(string) (*points.Points, bool)
-	confirm              func(*points.Points)
-	popConfirm           func(string) (*points.Points, bool)
-	requeue              func(*points.Points)
-	backlogged           func() bool
-	writeoutReady        func(string) bool
-	metricStore          MetricStore
-	incrementalStore     IncrementalMetricStore
-	incrementalScratch   string
-	incrementalArchive   string
-	incrementalPriority  atomic.Pointer[func(string)]
+	recv                     func(chan bool) string
+	tryRecv                  func() string
+	storeUpdateBatchSize     int
+	startupReady             <-chan struct{}
+	startupGate              <-chan struct{}
+	startupDone              <-chan struct{}
+	startupWait              time.Duration
+	startupFull              func() bool
+	startupProgress          func() (uint64, uint64)
+	startupCheckpointLoading func() bool
+	startupReleased          func(time.Time)
+	startupGrace             time.Duration
+	startupReleases          *prometheus.CounterVec
+	startupRegisterer        prometheus.Registerer
+	pop                      func(string) (*points.Points, bool)
+	confirm                  func(*points.Points)
+	popConfirm               func(string) (*points.Points, bool)
+	requeue                  func(*points.Points)
+	backlogged               func() bool
+	restartBudget            *restartcpu.Budget
+	restartFloor             func() float64
+	restartTicker            atomic.Pointer[helper.ThrottleTicker]
+	restartRateMu            sync.Mutex
+	restartRate              int
+	restartStopping          bool
+	writeoutReady            func(string) bool
+	metricStore              MetricStore
+	incrementalStore         IncrementalMetricStore
+	incrementalScratch       string
+	incrementalArchive       string
+	incrementalPriority      atomic.Pointer[func(string)]
 	// incrementalComplete routes writes to the store without an ownership
 	// check once the migration has left no originals.
 	incrementalComplete atomic.Bool
@@ -171,6 +189,11 @@ func NewWhisper(
 // InitPrometheus attaches persister observations to the registry's histogram.
 // Config reload replaces the persister but retains its registry and counts.
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
+	p.startupRegisterer = reg
+	p.initStartupGateMetrics()
+	if p.restartBudget != nil {
+		p.restartBudget.InitPrometheus(reg)
+	}
 	histogram := newWriteLagHistogram()
 	p.prometheus = whisperPrometheus{
 		enabled:             true,
@@ -250,6 +273,15 @@ func (p *Whisper) SetCompressed(compressed bool) {
 // reports true, so restored or accumulating points drain at full speed.
 func (p *Whisper) SetBacklogged(backlogged func() bool) {
 	p.backlogged = backlogged
+}
+
+// SetRestartBudget gives mandatory writes priority over optional restart work.
+// floor reports queued metrics / max delay. Set before Start.
+func (p *Whisper) SetRestartBudget(budget *restartcpu.Budget, floor func() float64) {
+	p.restartBudget, p.restartFloor = budget, floor
+	if p.startupRegisterer != nil && budget != nil {
+		budget.InitPrometheus(p.startupRegisterer)
+	}
 }
 
 // SetRequeue configures how failed writes are returned to the live cache.
@@ -726,7 +758,7 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 	}
 
 	atomic.AddUint32(&p.committedPoints, uint32(len(values.Data)))
-	atomic.AddUint32(&p.updateOperations, 1)
+	p.recordUpdate()
 	if p.confirm != nil {
 		defer p.confirm(values)
 	}
@@ -757,11 +789,12 @@ func (p *Whisper) worker(exit chan bool) {
 		storeFunc, doneCb = p.mockStore()
 	}
 
+	startupPassed := p.startupGate == nil
 LOOP:
 	for {
 		if p.backlogged == nil || !p.backlogged() {
 			select {
-			case <-p.updateTicker.C:
+			case <-p.updateTokens():
 			case <-exit:
 				return
 			}
@@ -772,9 +805,40 @@ LOOP:
 			// exit closed
 			break LOOP
 		}
+		if !startupPassed {
+			select {
+			case <-p.startupReady:
+				select {
+				case <-p.startupGate:
+				case <-exit:
+					return
+				}
+				startupPassed = true
+			default:
+				// Ordered restoration may need to drain before input opens.
+			}
+		}
+		if p.restartBudget != nil {
+			ready := true
+			if p.startupReady != nil {
+				select {
+				case <-p.startupReady:
+				default:
+					ready = false
+				}
+			}
+			if ready {
+				if !p.restartBudget.WaitWriteout(exit) {
+					return
+				}
+			} else {
+				p.restartBudget.BeginWriteout()
+			}
+		}
 		if p.mockStore == nil && p.canBatchShared() {
 			metrics := []string{metric}
-			for len(metrics) < p.storeUpdateBatchSize && p.takeBatchToken() {
+			batchSize := p.storeUpdateBatchSize
+			for len(metrics) < batchSize && p.takeBatchToken() {
 				next := p.tryRecv()
 				if next == "" {
 					break
@@ -788,6 +852,9 @@ LOOP:
 			}
 		} else {
 			storeFunc(metric)
+		}
+		if p.restartBudget != nil {
+			p.restartBudget.EndWriteout()
 		}
 		if doneCb != nil {
 			doneCb()
@@ -895,6 +962,9 @@ func (p *Whisper) Start() error {
 			p.outOfOrder.ticker = helper.NewHardThrottleTicker(p.outOfOrder.rate)
 		}
 
+		p.startStartupGate()
+		p.startRestartWriteout()
+
 		for i := 0; i < p.workersCount; i++ {
 			p.Go(p.worker)
 		}
@@ -906,6 +976,7 @@ func (p *Whisper) Start() error {
 func (p *Whisper) Stop() {
 	p.StopDeferredReclaim()
 	p.StopFunc(func() {
+		p.stopRestartTicker()
 		p.updateTicker.Stop()
 
 		if p.onlineMigration.ticker != nil {

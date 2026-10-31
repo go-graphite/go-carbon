@@ -15,6 +15,7 @@ const queueRegionBits = 8
 // zero deadline needs a scan. The shard lock protects summaries and items.
 type queueDeadlines struct {
 	settings *cacheSettings
+	released *time.Time
 	next     []time.Time
 }
 
@@ -50,9 +51,13 @@ func (m *itemMap) readyAt(now time.Time, s *cacheSettings, yield func(*item)) ti
 		m.deadlines = &queueDeadlines{next: make([]time.Time, (len(m.slots)+(1<<queueRegionBits)-1)>>queueRegionBits)}
 	}
 	d := m.deadlines
-	if d.settings != s {
+	var released *time.Time
+	if s.startupWriteout != nil {
+		released = s.startupWriteout.released.Load()
+	}
+	if d.settings != s || d.released != released {
 		clear(d.next)
-		d.settings = s
+		d.settings, d.released = s, released
 	}
 	var next time.Time
 	for region, deadline := range d.next {

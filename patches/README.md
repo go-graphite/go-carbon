@@ -84,6 +84,18 @@ lookup results, and allocation cost for long keys. The patch is local until an
 upstream Vellum release contains both recycling fixes and long-key cache reuse.
 Remove the patch and its application from `make vendor` when adopting that release.
 
+## Pebble visible sequence
+
+`pebble-visible-sequence.patch` adds `DB.VisibleSequence`, which returns the
+exclusive committed sequence number. The metadata-cache checkpoint saved on a
+clean stop records it with the store identity and a clean-close token; the next
+open trusts the checkpoint only if the sequence still matches, so writes made by
+another binary in between send the restart down the normal paced warming path.
+Pinned Pebble v1.1.5 does not expose this helper: plain `go mod vendor` drops
+`restart_sequence.go`, and `make vendor` reapplies this patch.
+The value identifies a checkpoint only after all writers have stopped. Remove
+the patch with the checkpoint, or when the pinned Pebble exposes the sequence.
+
 ## Integration deltas
 
 `pebble-integration-delta.patch` captures the remaining reviewed shared-store

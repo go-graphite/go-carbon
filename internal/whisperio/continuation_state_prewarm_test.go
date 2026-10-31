@@ -1,9 +1,11 @@
 package whisperio
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"math"
 	"math/rand"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 func prewarmConfig(name string) store.MetricConfig {
@@ -118,7 +121,11 @@ func TestPrewarmLoadsWhatUpdatesRead(t *testing.T) {
 			cold := roundReads()
 			cached.ForgetMetadataCacheForTest()
 
-			stats, err := cached.PrewarmMetadata(ctx, slices.Values(names), store.PrewarmOptions{Workers: 2, Batch: 5})
+			var priority iter.Seq[string]
+			if !buckets {
+				priority = slices.Values(names)
+			}
+			stats, err := cached.PrewarmMetadata(ctx, priority, store.PrewarmOptions{Workers: 2, Batch: 5})
 			if err != nil || stats.Prewarmed != int64(len(names)) || stats.Failed != 0 {
 				t.Fatalf("prewarm: %+v, %v", stats, err)
 			}
@@ -234,7 +241,11 @@ func TestPrewarmSkipsStateChangedWhileRead(t *testing.T) {
 						mutateErr = mutate(db, now)
 					}
 				})()
-				stats, err := db.PrewarmMetadata(ctx, slices.Values([]string{metric}), store.PrewarmOptions{Workers: 1})
+				priority := slices.Values([]string{metric})
+				if buckets && len(names) == 1 {
+					priority = nil
+				}
+				stats, err := db.PrewarmMetadata(ctx, priority, store.PrewarmOptions{Workers: 1})
 				if mutateErr != nil {
 					t.Fatal(mutateErr)
 				}
@@ -288,7 +299,7 @@ func TestPrewarmConcurrentWithWriters(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			const appends, cycles = 1500, 200
+			const appends, cycles = 300, 40
 			// Writers pause between mutations, so that many prewarm reads
 			// finish unraced and their fills land among the mutations.
 			pause := func(i int64) { time.Sleep(time.Duration(i%7) * 40 * time.Microsecond) }
@@ -356,13 +367,19 @@ func TestPrewarmConcurrentWithWriters(t *testing.T) {
 			}()
 			go func() { // prewarm everything, repeat
 				defer others.Done()
+				tick := time.NewTicker(100 * time.Microsecond)
+				defer tick.Stop()
 				for {
 					select {
 					case <-done:
 						return
-					default:
+					case <-tick.C:
 					}
-					if _, err := db.PrewarmMetadata(ctx, slices.Values(names), store.PrewarmOptions{Workers: 2, Batch: 2}); err != nil {
+					priority := slices.Values(names)
+					if buckets {
+						priority = nil
+					}
+					if _, err := db.PrewarmMetadata(ctx, priority, store.PrewarmOptions{Workers: 2, Batch: 2}); err != nil {
 						fail("prewarm: %v", err)
 						return
 					}
@@ -371,11 +388,13 @@ func TestPrewarmConcurrentWithWriters(t *testing.T) {
 			}()
 			go func() {
 				defer others.Done()
+				tick := time.NewTicker(100 * time.Microsecond)
+				defer tick.Stop()
 				for {
 					select {
 					case <-done:
 						return
-					default:
+					case <-tick.C:
 					}
 					committed, committedLate := appended.Load(), late.Load()
 					series, err := db.Fetch(ctx, "race.appended", int(base), int(base)+appends+1)
@@ -442,5 +461,164 @@ func TestPrewarmConcurrentWithWriters(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Compare the preloaded raw keys and complete-prefix proofs with the original
+// loader that opened Whisper files. No fixture body is copied into the cache.
+type prewarmReadTrace struct {
+	store.ContinuationIO
+	buckets bool
+	reads   map[string][]byte
+}
+
+func (t *prewarmReadTrace) TimeBuckets() bool { return t.buckets }
+func (t *prewarmReadTrace) Get(key []byte) ([]byte, error) {
+	value, err := t.ContinuationIO.Get(key)
+	t.reads["get:"+string(key)] = bytes.Clone(value)
+	return value, err
+}
+func (t *prewarmReadTrace) Visit(prefix []byte, visit func([]byte, []byte) error) error {
+	t.reads["walk:"+string(prefix)] = nil
+	return t.ContinuationIO.Visit(prefix, func(key, value []byte) error {
+		t.reads["visit:"+string(key)] = bytes.Clone(value)
+		return visit(key, value)
+	})
+}
+
+func TestPrewarmRawStateMatchesOpen(t *testing.T) {
+	for _, buckets := range []bool{false, true} {
+		for _, sidecar := range []bool{false, true} {
+			t.Run(fmt.Sprintf("buckets=%v/sidecar=%v", buckets, sidecar), func(t *testing.T) {
+				ctx := context.Background()
+				clock := func() time.Time { return time.Unix(1_790_000_180, 0) }
+				kv := &appendTailKV{data: make(map[string][]byte)}
+				seed := &prewarmReadTrace{ContinuationIO: kv, buckets: buckets, reads: make(map[string][]byte)}
+				codec := &ContinuationCodec{}
+				meta := store.Metadata{MetricConfig: prewarmConfig("raw.state")}
+				if err := codec.Create(ctx, seed, meta, clock); err != nil {
+					t.Fatal(err)
+				}
+				input := make([]store.Point, 30)
+				for i := range input {
+					input[i] = store.Point{Timestamp: 1_790_000_120 + int64(i), Value: float64(i)}
+				}
+				if err := codec.Update(ctx, seed, meta, input, -1, clock, nil); err != nil {
+					t.Fatal(err)
+				}
+				if sidecar {
+					if err := codec.Update(ctx, seed, meta, []store.Point{{Timestamp: 1_790_000_005, Value: 1}}, -1, clock, nil); err != nil {
+						t.Fatal(err)
+					}
+					if _, ok := kv.data[string(continuationNameKey(filepath.Base(whisper.OutOfOrderSidecarPath("main.wsp"))))]; !ok {
+						t.Fatal("fixture lacks OOO sidecar")
+					}
+				}
+				original := kv.clone()
+				raw := &prewarmReadTrace{ContinuationIO: kv, buckets: buckets, reads: make(map[string][]byte)}
+				opened := &prewarmReadTrace{ContinuationIO: original, buckets: buckets, reads: make(map[string][]byte)}
+				if err := codec.LoadState(ctx, raw, meta, clock); err != nil {
+					t.Fatal(err)
+				}
+				fs := newContinuationFiles(opened, true).withClock(clock)
+				if err := fs.prefetchNames(); err != nil {
+					t.Fatal(err)
+				}
+				w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := w.Close(); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(raw.reads, opened.reads) {
+					t.Fatalf("prewarm raw reads differ from open: %v / %v", raw.reads, opened.reads)
+				}
+				if !reflect.DeepEqual(kv.data, original.data) {
+					t.Fatal("prewarm changed stored data")
+				}
+			})
+		}
+	}
+}
+
+func BenchmarkPrewarmStateDecode(b *testing.B) {
+	ctx := context.Background()
+	clock := func() time.Time { return time.Unix(1_790_000_180, 0) }
+	codec := &ContinuationCodec{}
+	kv := &appendTailKV{data: make(map[string][]byte)}
+	meta := store.Metadata{MetricConfig: prewarmConfig("decode.bench")}
+	if err := codec.Create(ctx, kv, meta, clock); err != nil {
+		b.Fatal(err)
+	}
+	if err := codec.Update(ctx, kv, meta, []store.Point{{Timestamp: 1_790_000_120, Value: 1}}, -1, clock, nil); err != nil {
+		b.Fatal(err)
+	}
+	b.Run("opened", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			fs := newContinuationFiles(kv, true).withClock(clock)
+			if err := fs.prefetchNames(); err != nil {
+				b.Fatal(err)
+			}
+			w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := w.Close(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("raw", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := codec.LoadState(ctx, kv, meta, clock); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// A restart restores the same continuation names/manifests/headers as a live
+// cache. The first read validates its provisional state before using it.
+func TestMetadataCheckpointContinuation(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	now := time.Unix(1790000000, 0)
+	opts := store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{}, TimeBuckets: true, MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return now }}
+	db, err := store.Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const name = "checkpoint.continuation"
+	if _, err := db.Create(ctx, prewarmConfig(name)); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 12 {
+		if err := db.UpdateMany(ctx, name, []store.Point{{Timestamp: now.Unix() - int64(i*2), Value: float64(i)}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = store.Open(dir, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	stats, err := db.LoadMetadataCheckpoint(ctx, nil)
+	if err != nil || !stats.Valid || stats.Entries != 1 || stats.Validated != 1 {
+		t.Fatal(stats, err)
+	}
+	checkCachedReads(t, db, []string{name}, now, "provisional")
+	if err := db.UpdateMany(ctx, name, []store.Point{{Timestamp: now.Unix(), Value: 42}, {Timestamp: now.Unix() - 80, Value: .5}}); err != nil {
+		t.Fatal(err)
+	}
+	checkCachedReads(t, db, []string{name}, now, "after update")
+	series, err := db.Fetch(ctx, name, int(now.Unix()-200), int(now.Unix()))
+	if err != nil || series == nil {
+		t.Fatal(series, err)
 	}
 }

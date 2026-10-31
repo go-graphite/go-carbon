@@ -139,8 +139,8 @@ store-l0-compaction-concurrency = 0
 # and header pages, which every update and fetch otherwise reads back from the
 # LSM, opening a table or iterator in each level. An update writes its new
 # state through; mutations other than updates drop it. States are kept as
-# records in memory the garbage collector does not scan, about 0.5-2 KiB per
-# metric; records replaced but not yet compacted add up to an eighth
+# records in memory the garbage collector does not scan, about 0.5-3 KiB per
+# metric before optional tails, depending on retentions; records replaced but not yet compacted add up to an eighth
 # (store_metadata_cache_arena_bytes reports the total). 0 (default) disables.
 # Requires restart.
 # store-metadata-cache-size = 0
@@ -149,22 +149,99 @@ store-l0-compaction-concurrency = 0
 # each cache read). SIGHUP applies it to states sealed afterwards; cached
 # states keep their form until rewritten.
 # store-metadata-cache-pack = false
-# At start, load the metadata cache in the background with the state of the
-# metrics the restored cache holds (a pending checkpoint, else the restored
-# dump), which the persister writes within one writeout cycle; until each has
-# been written once, its first update otherwise reads that state from the LSM.
-# It takes the names in the order the persister writes them (the checkpoint's
-# claim order, else cache order), reading each batch of 32 in key order
-# through one read view, on store-metadata-cache-prewarm-workers workers
-# (0: 4) at up to store-metadata-cache-prewarm-rate metrics per second
-# (0: unpaced). It skips metrics already cached or being written, never
-# evicts, stops when the cache is nearly full, and stops with the store. Needs
-# store-metadata-cache-size. Read at start only. Logged as "metadata cache
-# prewarmed"; counted by store_metadata_cache_prewarmed_total,
-# _prewarm_skipped_total and _prewarm_failed_total.
+# At start, load committed metadata in the background without waiting before
+# input/handoff. Restored checkpoint metrics get first claim on the budget,
+# else the restored cache/input-log metrics. A bounded
+# membership filter (at most 64 MiB) selects them through the catalog walk,
+# avoiding a catalog seek per restored name. Then scan remaining catalog
+# metrics, including starts without a dump. The wait ends after pending
+# metrics; the remaining catalog pass continues alongside normal writeout.
+# The catalog uses sequential iteration; batches of 32 read revisions and
+# continuation name/header ranges in ID order with shared iterators. No second
+# full catalog is retained. Views close between batches before pacing, so a
+# slow scan does not pin obsolete tables during compactions.
+# Both passes use store-metadata-cache-prewarm-workers (0: GOMAXPROCS/12,
+# at least 2, at most 16). Catalog windows are disjoint and bounded; no view
+# stays open waiting for a paced worker. Rate bounds metrics per second and
+# byte-rate bounds logical key/value bytes/s, including refused fills.
+# Both rates default to 0; workers bound concurrency. cpu-cores is a shared
+# whole-process CPU allowance for warming and post-gate writeout, measured from
+# process user+system time. Reads, receivers and input logging never wait on it.
+# 0 uses 1.05x this host's saved previous 30-minute steady median. The first
+# rollout needs an explicit allowance (e.g. 14.7 for a 14-core steady process);
+# absent fresh history, a warning reports that CPU pacing is unavailable.
+# History starts after the first 30 minutes and stays in restart-cpu.json.
+# Pacing ends after 30 minutes, completed warming, and return to the intake-ready
+# point count (when nonzero), with restored records confirmed. It then resumes
+# normal policy without a timed catch-up burst.
+# The allowance cannot suppress CPU used by input/reads or work already running.
+# One batch per worker may burst. Prewarm never evicts, stops at the cache
+# budget or shutdown, and skips concurrent mutations instead of stale fills.
+# Requires store-metadata-cache-size. Active tails still need their first
+# data read; new/rotated blocks and rollup data are not preloaded.
+# After input opens, only persister workers wait for the entire prewarm,
+# including both pending names and the remaining catalog. The wait ends on
+# completion, half of cache.max-size points, or cache.max-bytes when set.
+# With an input log, the wait is also capped at 3/4 max-age minus the normal
+# writeout window (480s at max-age1920s/writeout960s). The default wait follows
+# scan progress within wait-cap (600s). Once total
+# work is known from the first catalog pass, it logs a projected finish.
+# For catalog scans it releases when that projection exceeds the cap, progress
+# stalls for 30s, or the cap expires. Checkpoint loads keep waiting until
+# completion, cache pressure, or the cap, even when their byte projection is slow.
+# Unknown total work keeps waiting while work progresses.
+# An explicit wait uses a fixed deadline instead; 0s disables the gate.
+# Input, handoff and ordered restoration before input readiness continue.
+# Cache capacity is sampled every 100ms; it is not a hard memory/RSS limit.
+# Startup/restore spread time starts at gate release. Pending recovery keeps
+# max-updates-per-second while this held backlog drains, except above 75% of
+# point capacity or under byte pressure. Input-log/checkpoint ownership stays
+# unchanged; unwritten points are still covered by their ordinary sources.
+# Logs "metadata prewarm writeout wait ended" with reason done/deadline/cache;
+# persister_metadata_prewarm_gate_releases_total counts each release by reason.
+# A clean stop saves serialized metadata slab records while input and reads
+# remain available. Saving stops after two minutes or half point capacity/the byte budget;
+# handoff close
+# never repeats it. Startup loads the checkpoint asynchronously under the CPU
+# allowance and existing metadata budget. UUID, clean token, committed sequence
+# and checksums reject foreign/divergent/crashed files. The exact clean sequence
+# establishes name/ID binding; each provisional entry
+# still checks Pebble's revision before use. The loader validates in bounded
+# parallel ID-sorted batches (1024 records per worker view by default); an earlier
+# reader validates on demand. Each view closes before CPU/byte pacing. Mutations
+# invalidate
+# that binding. A bounded (<=8 MiB) changed-name filter also rejects refills
+# after revision-neutral changes such as relayout. No manifest/header catalog
+# rescan is needed for a valid file.
+# Name/byte-rate caps also apply to checkpoint records and their validation reads.
+# Failed/missing checkpoints fall back to catalog warming. Active tail data,
+# Pebble block/table caches and allocator/queue state remain cold.
+# Checkpointing is an explicit opt-in, independent of prewarm. It remains off
+# by default pending validation on representative cold stores. Optional lazy
+# validation streams provisional records without revision reads; the first
+# reader/writer validates before use. This moves cold lookup cost into traffic,
+# so eager parallel validation is the default when checkpointing is enabled.
+# While warming remains unfinished, writeout also waits for shared process CPU
+# credit and has priority over optional loading. The throughput floor is a
+# target, not an exception to this allowance; shortfalls warn after 10s.
+# Unavoidable input/read CPU alone can exhaust the allowance: choose a limit
+# with headroom for writes. Ordered restore before input readiness remains urgent.
+# After warming finishes, ordinary writeout limits resume without waiting for
+# optional CPU debt. Grants are finite and share the allowance during warming.
+# Settings are read at start. Prewarm and checkpointing remain opt-in.
+# Logged as "metadata cache prewarmed"; counters store_metadata_cache_prewarmed_total,
+# _prewarm_bytes_total (installed), _prewarm_read_bytes_total (read),
+# _prewarm_duration_seconds_total (includes pacing),
+# _prewarm_skipped_total and _prewarm_failed_total report work and failures.
 # store-metadata-cache-prewarm = false
+# store-metadata-cache-checkpoint = false
+# store-metadata-cache-checkpoint-lazy = false
+# store-metadata-cache-prewarm-cpu-cores = 0
 # store-metadata-cache-prewarm-workers = 0
 # store-metadata-cache-prewarm-rate = 0
+# store-metadata-cache-prewarm-byte-rate = 0
+# store-metadata-cache-prewarm-wait-cap = "600s"
+# store-metadata-cache-prewarm-wait = "0s" # optional fixed override; disables
 # Give each read of a continuation update its own LSM lookup or iterator again,
 # which opens a table in every level it reaches. By default an update's prefix
 # walks and reads of rarely rewritten keys share one iterator over the metric's

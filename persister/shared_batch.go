@@ -37,7 +37,7 @@ func (p *Whisper) takeBatchToken() bool {
 		return true
 	}
 	select {
-	case <-p.updateTicker.C:
+	case <-p.updateTokens():
 		return true
 	default:
 		return false
@@ -112,7 +112,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 		}
 		for _, batch := range values {
 			atomic.AddUint32(&p.committedPoints, uint32(len(batch.Data)))
-			atomic.AddUint32(&p.updateOperations, 1)
+			p.recordUpdate()
 			if p.confirm != nil {
 				if guarded, ok := p.metricStore.(interface{ SharedWriteGuard(string) func() }); ok {
 					func() {

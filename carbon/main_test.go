@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,9 +36,16 @@ func TestMain(m *testing.M) {
 			os.Exit(1)
 		}
 		for _, capabilities := range []string{"read,shared", "read,shared,input", "read,input", "read,input,store-input"} {
-			if err := exec.Command(filepath.Join(dir, capabilities), "-handoff-protocol").Run(); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
+			for _, flag := range []string{"-handoff-protocol", "-input-handoff-protocol", "-shared-store-handoff-protocol", "-store-input-handoff-protocol"} {
+				// Warm the rejection paths too: macOS executable assessment
+				// must not consume a timed rollback handoff's input window.
+				if err := exec.Command(filepath.Join(dir, capabilities), flag).Run(); err != nil {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+						fmt.Fprintln(os.Stderr, err)
+						os.Exit(1)
+					}
+				}
 			}
 		}
 		_ = os.Setenv(testHandoffSuccessorDir, dir)

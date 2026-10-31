@@ -22,23 +22,23 @@ var percallSchemas = []struct {
 	{"default", []store.Retention{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}}},
 }
 
-var productionSchemas = []struct {
+var representativeSchemas = []struct {
 	name       string
 	retentions []store.Retention
 	points     int
 }{
-	{"db_kafka", []store.Retention{{Step: 60, Count: 20160}, {Step: 300, Count: 17280}, {Step: 3600, Count: 17520}}, 210},
-	{"db_kafka_single_archive", []store.Retention{{Step: 60, Count: 20160}}, 210},
-	{"db_kafka_single_archive_raw10s", []store.Retention{{Step: 60, Count: 20160}}, 210},
-	{"db_kafka_raw1s", []store.Retention{{Step: 60, Count: 20160}, {Step: 300, Count: 17280}, {Step: 3600, Count: 17520}}, 210},
-	{"db_kafka_raw10s", []store.Retention{{Step: 60, Count: 20160}, {Step: 300, Count: 17280}, {Step: 3600, Count: 17520}}, 210},
-	{"db_hourly", []store.Retention{{Step: 3600, Count: 2160}, {Step: 86400, Count: 730}}, 210},
-	{"misc_default", []store.Retention{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}}, 32},
-	{"misc_secondly", []store.Retention{{Step: 1, Count: 86400}, {Step: 60, Count: 43200}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}}, 32},
-	{"magg_secondly", []store.Retention{{Step: 1, Count: 172800}}, 210},
-	{"magg_minutely", []store.Retention{{Step: 60, Count: 50400}}, 210},
-	{"magg_hourly", []store.Retention{{Step: 3600, Count: 17520}}, 210},
-	{"magg_daily", []store.Retention{{Step: 86400, Count: 3650}}, 210},
+	{"D1_queue", []store.Retention{{Step: 60, Count: 20160}, {Step: 300, Count: 17280}, {Step: 3600, Count: 17520}}, 210},
+	{"D1_queue_single_archive", []store.Retention{{Step: 60, Count: 20160}}, 210},
+	{"D1_queue_single_archive_raw10s", []store.Retention{{Step: 60, Count: 20160}}, 210},
+	{"D1_queue_raw1s", []store.Retention{{Step: 60, Count: 20160}, {Step: 300, Count: 17280}, {Step: 3600, Count: 17520}}, 210},
+	{"D1_queue_raw10s", []store.Retention{{Step: 60, Count: 20160}, {Step: 300, Count: 17280}, {Step: 3600, Count: 17520}}, 210},
+	{"D1_hourly", []store.Retention{{Step: 3600, Count: 2160}, {Step: 86400, Count: 730}}, 210},
+	{"D2_default", []store.Retention{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}}, 32},
+	{"D2_secondly", []store.Retention{{Step: 1, Count: 86400}, {Step: 60, Count: 43200}, {Step: 3600, Count: 8760}, {Step: 86400, Count: 3650}}, 32},
+	{"D3_secondly", []store.Retention{{Step: 1, Count: 172800}}, 210},
+	{"D3_minutely", []store.Retention{{Step: 60, Count: 50400}}, 210},
+	{"D3_hourly", []store.Retention{{Step: 3600, Count: 17520}}, 210},
+	{"D3_daily", []store.Retention{{Step: 86400, Count: 3650}}, 210},
 }
 
 // Override only the tail-slot policy, keeping the same codec for paired A/B.
@@ -46,8 +46,8 @@ type noTailSlotCodec struct{ *ContinuationCodec }
 
 func (noTailSlotCodec) StateSlot([]byte) []byte { return nil }
 
-func BenchmarkPerCallProduction(b *testing.B) {
-	for _, schema := range productionSchemas {
+func BenchmarkPerCallRepresentative(b *testing.B) {
+	for _, schema := range representativeSchemas {
 		for _, mode := range []string{"baseline", "buffer", "tails"} {
 			b.Run(schema.name+"/"+mode, func(b *testing.B) {
 				previous := coalescePointWrites
@@ -75,10 +75,10 @@ func BenchmarkPerCallProduction(b *testing.B) {
 				}
 				input := make([]store.Point, schema.points)
 				step := int64(schema.retentions[0].Step)
-				if schema.name == "db_kafka_raw1s" {
+				if schema.name == "D1_queue_raw1s" {
 					step = 1
 				}
-				if schema.name == "db_kafka_raw10s" || schema.name == "db_kafka_single_archive_raw10s" {
+				if schema.name == "D1_queue_raw10s" || schema.name == "D1_queue_single_archive_raw10s" {
 					step = 10
 				}
 				base := now.Unix() / step * step

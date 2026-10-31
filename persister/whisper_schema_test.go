@@ -144,20 +144,20 @@ pattern = ^.*\.collector\.
 retentions = 5s:300s,300s:30d
 priority = 10
 
-[gitlab]
-pattern = ^gitlab\.
+[vcs]
+pattern = ^vcs\.
 retentions = 1s:7d
 priority = 100
 
-[jira]
+[tracker]
 pattern = ^server\.
 retentions = 1s:7d
 priority = 10
 	`,
 		[]testcase{
-			{"gitlab", "^gitlab\\.", "1s:7d"},
+			{"vcs", "^vcs\\.", "1s:7d"},
 			{"collector", "^.*\\.collector\\.", "5s:5m,5m:30d"},
-			{"jira", "^server\\.", "1s:7d"},
+			{"tracker", "^server\\.", "1s:7d"},
 			{"carbon", "^carbon\\.", "1m:90d"},
 			{"db", "^db\\.", "1m:30d,1h:5y"},
 		},

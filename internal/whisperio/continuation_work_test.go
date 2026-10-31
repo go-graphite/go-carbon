@@ -29,7 +29,7 @@ func (w *propagationWorkIO) Set(key, value []byte) error {
 func TestPerCallPropagationWork(t *testing.T) {
 	ctx := context.Background()
 	codec := &ContinuationCodec{ReuseBlockKeys: true}
-	m := store.Metadata{MetricConfig: store.MetricConfig{Name: "propagation", Retentions: productionSchemas[0].retentions, AggregationMethod: store.Average, XFilesFactor: .5}}
+	m := store.Metadata{MetricConfig: store.MetricConfig{Name: "propagation", Retentions: representativeSchemas[0].retentions, AggregationMethod: store.Average, XFilesFactor: .5}}
 	for _, spacing := range []int64{1, 10, 60} {
 		for _, buffered := range []bool{false, true} {
 			now := time.Unix(1790000000, 0)

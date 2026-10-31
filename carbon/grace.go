@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -156,6 +157,9 @@ func (app *App) DumpStop() (err error) {
 	<-persisterStopped
 	app.Persister = nil
 	<-backgroundStopped
+	// Save the advisory metadata accelerator with input and read listeners
+	// available. It must not extend the later storage/read handoff gap.
+	app.prepareMetadataCheckpoint(logger)
 	// Nothing writes to the store from here on: flush what persistence wrote
 	// since the stop began, alongside the dump.
 	flush.again()
@@ -967,4 +971,43 @@ func (app *App) Restore(storeFunc func(*points.Points), path string, rps int) {
 	} else {
 		app.RestoreFromDir(path, storeFunc)
 	}
+}
+
+// Save while input and reads remain available; stop before pending points put
+// admission under pressure. Closing the store never retries a timed-out save.
+func (app *App) prepareMetadataCheckpoint(logger *zap.Logger) {
+	if app.MetricStore == nil || !metadataCheckpointEnabled(app.Config.Whisper) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), preStopFlushTimeout)
+	defer cancel()
+	full := metadataPrewarmFull(app.Cache, app.Config.Cache.MaxSize, app.Config.Cache.MaxBytes)
+	stopped := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if full() {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	if full() {
+		cancel()
+	}
+	started := time.Now()
+	err := app.MetricStore.PrepareMetadataCheckpoint(ctx)
+	close(done)
+	<-stopped
+	logger.Info("metadata cache checkpoint prepared", zap.Duration("runtime", time.Since(started)), zap.Error(err))
 }

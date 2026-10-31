@@ -146,7 +146,7 @@ func TestPrewarmMetadataStopsWhenFull(t *testing.T) {
 		}
 	}
 	restore()
-	stats, err := db.PrewarmMetadata(ctx, prewarmNames("warm", 50), PrewarmOptions{})
+	stats, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{})
 	if err != nil || !stats.BudgetFull || stats.Names != 0 || stats.Prewarmed != 0 {
 		t.Fatalf("prewarm of a full cache: %+v, %v", stats, err)
 	}
@@ -174,7 +174,7 @@ func TestPrewarmMetadataSkipsFullShards(t *testing.T) {
 	}
 	restore()
 	db.ForgetMetadataCacheForTest()
-	stats, err := db.PrewarmMetadata(ctx, prewarmNames("warm", n), PrewarmOptions{Workers: 2})
+	stats, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{Workers: 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,5 +283,327 @@ func TestPrewarmMetadataNeedsCache(t *testing.T) {
 	}
 	if _, err := db.PrewarmMetadata(context.Background(), prewarmNames("x", 1), PrewarmOptions{}); !errors.Is(err, ErrMetadataCacheDisabled) {
 		t.Fatalf("prewarm without a cache: %v", err)
+	}
+}
+
+// A catalog walk must include names absent from a dump and must give earlier
+// priority fills first claim on a small cache without evicting them.
+func TestPrewarmCatalogAfterPriority(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir(), Options{ExactBlocks: true, MetadataCacheSize: 4 << 20, MemTableSize: 1 << 20, CacheSize: 1 << 20, SyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	names := slices.Collect(prewarmNames("catalog", 120))
+	for _, name := range names {
+		if _, err := db.Create(ctx, MetricConfig{Name: name, Retentions: []Retention{{Step: 60, Count: 100}}, AggregationMethod: Average}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.ForgetMetadataCacheForTest()
+	priority, err := db.PrewarmMetadata(ctx, slices.Values(names[:10]), PrewarmOptions{Workers: 1})
+	if err != nil || priority.Prewarmed != 10 {
+		t.Fatalf("priority %+v: %v", priority, err)
+	}
+	reads := CountStoreReadsForTest()
+	stats, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{Workers: 4, Batch: 7})
+	// Only revisions need a seek; catalog values came from the walk.
+	if got := reads(); got != 110 {
+		t.Fatalf("catalog scan performed %d logical reads, want 110 revisions", got)
+	}
+	if err != nil || stats.Prewarmed != 110 || stats.Cached != 10 || stats.Failed != 0 {
+		t.Fatalf("catalog %+v: %v", stats, err)
+	}
+	cs := db.Stats().StateCache
+	if cs.PrewarmBytes != uint64(stats.Bytes+priority.Bytes) || cs.PrewarmNanos == 0 || cs.Evictions != 0 || cs.Bytes > db.stateCache.budget() {
+		t.Fatalf("cache %+v", cs)
+	}
+	for _, name := range names {
+		got, err := db.Metadata(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := metadataFrom(db.db, name)
+		if err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: %+v != %+v: %v", name, got, want, err)
+		}
+	}
+	if got := db.Stats().StateCache; got.Misses != 0 {
+		t.Fatalf("catalog cache misses %+v", got)
+	}
+}
+
+func TestPrewarmCatalogStopsWhilePaced(t *testing.T) {
+	for _, how := range []string{"context", "StopBackground", "Close"} {
+		t.Run(how, func(t *testing.T) {
+			db, err := Open(t.TempDir(), Options{ExactBlocks: true, MetadataCacheSize: 1 << 20, MemTableSize: 1 << 20, CacheSize: 1 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := false
+			defer func() {
+				if !closed {
+					db.Close()
+				}
+			}()
+			if _, err := db.Create(context.Background(), MetricConfig{Name: "first", Retentions: []Retention{{Step: 60, Count: 100}}, AggregationMethod: Average}); err != nil {
+				t.Fatal(err)
+			}
+			db.ForgetMetadataCacheForTest()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			read := make(chan struct{})
+			defer SetPrewarmBeforeFillForTest(func(string) { close(read) })()
+			done := make(chan error, 1)
+			go func() { _, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{Batch: 1, ByteRate: 1}); done <- err }()
+			select {
+			case <-read:
+			case <-time.After(time.Second):
+				t.Fatal("scan did not read")
+			}
+			switch how {
+			case "context":
+				cancel()
+			case "StopBackground":
+				db.StopBackground()
+			case "Close":
+				closed = true
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("prewarm did not stop")
+			}
+		})
+	}
+}
+
+func TestPrewarmWaitsForInput(t *testing.T) {
+	db, err := Open(t.TempDir(), Options{MetadataCacheSize: 1 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ready := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stats, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{StartAfter: ready})
+	if !errors.Is(err, context.Canceled) || stats.Names != 0 {
+		t.Fatalf("waiting prewarm %+v: %v", stats, err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := db.PrewarmMetadata(context.Background(), nil, PrewarmOptions{StartAfter: ready})
+		done <- err
+	}()
+	db.StopBackground()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel readiness wait")
+	}
+}
+
+func TestPrewarmByteRate(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir(), Options{ExactBlocks: true, MetadataCacheSize: 1 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20, SyncInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	names := slices.Collect(prewarmNames("bytes", 4))
+	for _, name := range names {
+		if _, err := db.Create(ctx, MetricConfig{Name: name, Retentions: []Retention{{Step: 60, Count: 100}}, AggregationMethod: Average}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var total uint64
+	for _, catalog := range []bool{false, true} {
+		db.ForgetMetadataCacheForTest()
+		priority := slices.Values(names)
+		if catalog {
+			priority = nil
+		}
+		started := time.Now()
+		stats, err := db.PrewarmMetadata(ctx, priority, PrewarmOptions{Workers: 2, Batch: 1, ByteRate: 4000})
+		if err != nil || stats.Prewarmed != 4 || stats.ReadBytes == 0 {
+			t.Fatalf("prewarm bytes %+v: %v", stats, err)
+		}
+		if elapsed, want := time.Since(started), time.Duration(float64(stats.ReadBytes)/4000*float64(time.Second)); elapsed < want*9/10 {
+			t.Fatalf("read %d bytes in %s, want >=%s", stats.ReadBytes, elapsed, want)
+		}
+		total += uint64(stats.ReadBytes)
+		if got := db.Stats().StateCache.PrewarmReadBytes; got != total {
+			t.Fatalf("read bytes metric %d, want %d", got, total)
+		}
+	}
+}
+
+func TestPrewarmCatalogParallelWindows(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir(), Options{MetadataCacheSize: 1 << 20, MemTableSize: 1 << 20, CacheSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for name := range prewarmNames("same.prefix", 12) {
+		if _, err := db.Create(ctx, MetricConfig{Name: name, Retentions: []Retention{{Step: 60, Count: 10}}, AggregationMethod: Average}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.ForgetMetadataCacheForTest()
+	entered, release := make(chan string, 12), make(chan struct{})
+	defer SetPrewarmBeforeFillForTest(func(name string) { entered <- name; <-release })()
+	result := make(chan PrewarmStats, 1)
+	failure := make(chan error, 1)
+	go func() {
+		stats, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{Workers: 3, Batch: 1})
+		result <- stats
+		failure <- err
+	}()
+	// Three distinct windows must make progress together despite a shared
+	// name prefix. Splitting on just the first byte would serialize these.
+	names := map[string]bool{}
+	for range 3 {
+		select {
+		case name := <-entered:
+			names[name] = true
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("catalog workers did not overlap")
+		}
+	}
+	close(release)
+	stats := <-result
+	if err := <-failure; err != nil || len(names) != 3 || stats.Names != 12 || stats.Prewarmed != 12 || stats.Skipped() != 0 {
+		t.Fatalf("stats %+v names %v: %v", stats, names, err)
+	}
+}
+
+func TestPrewarmPendingCatalog(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(t.TempDir(), Options{MetadataCacheSize: 4 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	names := slices.Collect(prewarmNames("pending", 24))
+	for _, name := range names {
+		if _, err := db.Create(ctx, MetricConfig{Name: name, Retentions: []Retention{{Step: 60, Count: 10}}, AggregationMethod: Average}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.ForgetMetadataCacheForTest()
+	stop := CountStoreReadsForTest()
+	stats, err := db.PrewarmPendingMetadata(ctx, slices.Values(names[:8]), PrewarmOptions{Workers: 3, Batch: 3})
+	reads := stop()
+	if err != nil || stats.Names != 24 || stats.Prewarmed != 8 || stats.Filtered != 16 || reads != 8 {
+		t.Fatalf("stats %+v reads %d: %v", stats, reads, err)
+	}
+	for _, name := range names[:8] {
+		got, err := db.Metadata(ctx, name)
+		want, freshErr := metadataFrom(db.db, name)
+		if err != nil || freshErr != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: metadata differs", name)
+		}
+	}
+	rest, err := db.PrewarmMetadata(ctx, nil, PrewarmOptions{Workers: 3})
+	if err != nil || rest.Prewarmed != 16 || rest.Cached != 8 || db.Stats().StateCache.Evictions != 0 {
+		t.Fatalf("remaining %+v: %v", rest, err)
+	}
+}
+
+func TestPrewarmPendingCancelsBeforeInput(t *testing.T) {
+	db, err := Open(t.TempDir(), Options{MetadataCacheSize: 1 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ready := make(chan struct{})
+	started := make(chan error, 1)
+	go func() {
+		_, err := db.PrewarmPendingMetadata(context.Background(), nil, PrewarmOptions{StartAfter: ready})
+		started <- err
+	}()
+	db.StopBackground()
+	select {
+	case err := <-started:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending prewarm did not cancel")
+	}
+}
+
+func TestDefaultPrewarmWorkers(t *testing.T) {
+	for _, tc := range []struct{ procs, want int }{{1, 2}, {4, 2}, {24, 2}, {48, 4}, {96, 8}, {192, 16}, {384, 16}} {
+		if got := prewarmWorkers(tc.procs); got != tc.want {
+			t.Fatalf("procs %d: %d != %d", tc.procs, got, tc.want)
+		}
+	}
+}
+
+func TestPrewarmProgressIncludesRemainingCatalog(t *testing.T) {
+	db, err := Open(t.TempDir(), Options{MetadataCacheSize: 4 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, name := range []string{"pending", "remaining"} {
+		if _, err := db.Create(context.Background(), MetricConfig{Name: name, Retentions: []Retention{{Step: 60, Count: 10}}, AggregationMethod: Average}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.ForgetMetadataCacheForTest()
+	progress := new(PrewarmProgress)
+	opts := PrewarmOptions{Workers: 1, Batch: 1, Progress: progress}
+	_, err = db.PrewarmPendingMetadata(context.Background(), slices.Values([]string{"pending"}), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanned, total := progress.Snapshot(); scanned != 2 || total != 4 {
+		t.Fatal(scanned, total)
+	}
+	_, err = db.PrewarmMetadata(context.Background(), nil, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanned, total := progress.Snapshot(); scanned != 4 || total != 4 {
+		t.Fatal(scanned, total)
+	}
+}
+
+func TestPrewarmProgressWithNoRemainingPass(t *testing.T) {
+	for _, names := range [][]string{nil, {"only"}} {
+		db, err := Open(t.TempDir(), Options{MetadataCacheSize: 1 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Create(context.Background(), MetricConfig{Name: "only", Retentions: []Retention{{Step: 60, Count: 10}}, AggregationMethod: Average}); err != nil {
+			t.Fatal(err)
+		}
+		db.ForgetMetadataCacheForTest()
+		progress := new(PrewarmProgress)
+		_, err = db.PrewarmPendingMetadata(context.Background(), slices.Values(names), PrewarmOptions{Progress: progress, Workers: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if scanned, total := progress.Snapshot(); scanned != 1 || total != 1 {
+			t.Fatal(scanned, total)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
