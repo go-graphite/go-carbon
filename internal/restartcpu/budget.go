@@ -21,6 +21,7 @@ type Budget struct {
 	until                time.Time
 	warmed               atomic.Bool
 	drained              atomic.Pointer[func() bool]
+	historyState         atomic.Pointer[func() (int64, bool)]
 	drainDone            atomic.Bool
 	nextDrain            atomic.Int64
 	writers              atomic.Int64
@@ -128,9 +129,9 @@ func (b *Budget) admissionDelay(now time.Time, writeout bool) time.Duration {
 // Call before acquiring a database view or a metric lock.
 func (b *Budget) Wait(ctx context.Context) error { return b.waitCPU(ctx, false) }
 
-// WaitCheckpoint streams the saved accelerator alongside writes, within the
-// same process credit. Unlike an optional catalog scan, it must not starve
-// behind a continuously active writer pool. No view or shard lock may be held.
+// WaitCheckpoint streams the saved accelerator and the validation needed by
+// upcoming cold writes alongside writes, within the same process credit. It
+// must not starve behind the writes it accelerates. No view or shard lock may be held.
 func (b *Budget) WaitCheckpoint(ctx context.Context) error { return b.waitCPU(ctx, true) }
 
 func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {

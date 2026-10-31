@@ -884,6 +884,9 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 	if !conf.Dump.Enabled && app.metadataPrewarmDone.Load() == nil {
 		app.startMetadataPrewarm("catalog", core.MetricNames())
 	}
+	if app.restartBudget != nil {
+		app.restartBudget.SetHistoryState(restartHistoryState(core, app.storeRestoreDone))
+	}
 	if app.MetricStore != nil && app.Carbonserver != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
 		app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
 	} else if app.MetricStore != nil && app.Carbonserver != nil && conf.Whisper.StoreIncrementalMigration && conf.Buckyd.Enabled {
@@ -923,7 +926,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.restartBudget = nil
 	if conf.Whisper.StoreMetadataCachePrewarm && conf.Whisper.StoreMetadataCacheSize > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
-		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores)
+		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores, conf.Whisper.StoreRestartCPUHeadroom)
 		budget := app.restartBudget
 		app.restartBudgetStop = func() {
 			cancel()
@@ -931,10 +934,9 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 				zapwriter.Logger("storage").Warn("restart CPU history save failed", zap.Error(err))
 			}
 		}
-		if app.restartBudget.Source() == "fallback" {
+		zapwriter.Logger("storage").Info("restart CPU allowance", zap.String("source", budget.Source()), zap.Float64("headroom", conf.Whisper.StoreRestartCPUHeadroom), zap.Float64("cores", budget.Cores()))
+		if budget.Source() == "fallback" && conf.Whisper.StoreMetadataCachePrewarmCPUCores == 0 {
 			zapwriter.Logger("storage").Warn("restart CPU history unavailable; using conservative allowance; configure store-metadata-cache-prewarm-cpu-cores for busy processes", zap.Float64("cores", app.restartBudget.Cores()))
-		} else {
-			zapwriter.Logger("storage").Info("restart CPU allowance", zap.Float64("cores", app.restartBudget.Cores()))
 		}
 	}
 	core = cache.New()

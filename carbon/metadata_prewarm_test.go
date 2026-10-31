@@ -64,7 +64,8 @@ func TestMetadataPrewarmConfig(t *testing.T) {
 	next := *cfg
 	next.Whisper.StoreMetadataCachePrewarm = true
 	next.Whisper.StoreMetadataCachePrewarmWorkers = 8
-	// Read at start only: changing it needs no restart and fails no reload.
+	next.Whisper.StoreRestartCPUHeadroom = 1.5
+	// Read at start only: reload accepts changes for the next process start.
 	if storageSettingsChanged(cfg, &next) {
 		t.Fatal("prewarm settings require a restart")
 	}
