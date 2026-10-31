@@ -21,14 +21,24 @@ func NewThrottleTicker(ratePerSec int) *ThrottleTicker {
 	return newThrottleTicker(ratePerSec, false)
 }
 
+// NewThrottleTickerWithBurst bounds unused soft-rate credit to burst messages.
+// A stalled consumer can also resume the single chunk already being sent.
+func NewThrottleTickerWithBurst(ratePerSec, burst int) *ThrottleTicker {
+	return newThrottleTickerBurst(ratePerSec, false, burst)
+}
+
 // NewHardThrottleTicker returns a new hard throttle ticker.
 func NewHardThrottleTicker(ratePerSec int) *ThrottleTicker {
 	return newThrottleTicker(ratePerSec, true)
 }
 
 func newThrottleTicker(ratePerSec int, hard bool) *ThrottleTicker {
+	return newThrottleTickerBurst(ratePerSec, hard, ratePerSec)
+}
+
+func newThrottleTickerBurst(ratePerSec int, hard bool, burst int) *ThrottleTicker {
 	t := &ThrottleTicker{
-		C: make(chan bool, ratePerSec),
+		C: make(chan bool, min(ratePerSec, max(1, burst))),
 	}
 
 	t.Start()

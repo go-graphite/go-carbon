@@ -124,7 +124,8 @@ not perform an extra, unpaced checkpoint revision lookup.
 Use identical closed-store clones in fresh processes, with the store larger
 than `-block-bytes`. On systems where the filesystem page cache cannot be
 cleared, report that limit; fresh processes only guarantee cold Pebble caches.
-Checkpointing and lazy validation are both explicit opt-ins in the service.
+Prewarm is an explicit opt-in in the service. With prewarm, checkpointing and
+warm-first writeout default on; lazy validation stays opt-in.
 
 
 `-mode metadata` measures prewarm/load and an ensuing read of every metric in
@@ -166,3 +167,44 @@ metadata reads. Scaling CPU per entry and stream bytes can estimate a larger
 restart, but cannot establish its gate time or peak CPU. Verify those on one
 representative host with its full store and normal traffic. Retain JSON results
 outside the repository and remove private fixture copies after measurement.
+
+`-mode live -live-input-rate 14000 -updates-per-second 70000 -live-points 30 -live-duration 120s
+-gate 600s` drives sustained input through the real cache and persister, then
+waits for complete confirmation and verifies all generated points of sixteen
+series. This offers 420k points/s at 14k update batches/s. Use the measured batch
+size of the target workload; a 960-point batch offers 13.44M points/s. `live-backlog` rows
+sample point backlog once per second; `live-drained` reports peak sampled
+backlog, actual input duration, final drain time and confirmed updates. Source
+cardinality and input duration control repeated updates/coalescing. The normal
+write strategy is noop; the batching window is cardinality/input-rate (at least
+one second). The independent write ceiling exposes gate-induced catch-up. Steady
+coalescing age and the production metric population are not reproduced.
+
+Use `-floor -no-prewarm -warm-first` for the same workload with metadata primed
+before measurement and no gate. `-checkpoint -lazy-checkpoint` loads a clean
+checkpoint before releasing the gate. `-warm-first` bypasses the gate and, when
+the tested persister supports it, enables bounded writeout-order prefetch;
+checkpoint loading can overlap writes, while a missing checkpoint skips the
+catalog scan. The harness uses optional interfaces so the same source works
+against the preceding restart-series implementation. A CPU-limited live run
+seeds its known steady input update rate when the budget supports that API.
+`-cpu-profile path` records process CPU including open and checkpoint save.
+Run comparisons serially in fresh store clones, preserve the exact binary/source
+hashes and flags, and report one-second and rolling-minute CPU separately.
+
+For a true warm restart floor, create the closed source with `-mode steady
+-checkpoint`, which saves the predecessor's write-through descriptor/tail slots,
+then clone that identical source for every case. Use `-floor -checkpoint` to
+restore and validate that complete cached state before measurement. A catalog-only
+floor primes headers and still pays first-use tail reads; report it as such.
+`-live-start-offset 120` appends after this fixture's last point (119). The live
+clock is fixed just beyond the generated range, avoiding artificial one-day-old
+input while keeping every generated point in retention. Store history, timestamp
+offset, block budget and intake must match across compared runs.
+
+Live timestamps follow offered arrival time, including each metric's phase
+within the writeout cycle. Stamping every metric with one common timestamp
+range synchronizes block rotations into artificial CPU waves. Generate the
+predecessor with the same live workload and checkpoint enabled, then start
+successors one live duration later (`-live-start-offset 240` after a predecessor
+at 120 for 120s). This preserves cache and timestamp phase across restart.

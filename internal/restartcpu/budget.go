@@ -3,28 +3,14 @@ package restartcpu
 
 import (
 	"context"
-	"encoding/json"
-	"math"
-	"os"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-type sample struct {
-	At    time.Time
-	Cores float64
-}
-
-type history struct {
-	Host    string
-	Samples []sample
-}
-
 // Budget accounts for the entire process, including receivers, reads and GC.
 // Warming and unfinished restart writeout share admission. Credits expire after
-// 100ms so idle time cannot fund a catch-up burst. Work already admitted may overshoot briefly.
+// 40ms so idle time cannot fund a catch-up burst. Work already admitted may overshoot briefly.
 type Budget struct {
 	mu                   sync.Mutex
 	cores, credit, used  float64
@@ -39,6 +25,11 @@ type Budget struct {
 	written              atomic.Uint64
 	warmGrants           atomic.Uint64
 	writeGrants          atomic.Uint64
+	steadyRate           float64
+	source               string
+	samplerStop          context.CancelFunc
+	samplerDone          chan struct{}
+	historyErr           error
 	released             bool
 	floor, rate, process float64
 	belowAt, warnedAt    time.Time
@@ -108,7 +99,7 @@ func (b *Budget) admissionDelay(now time.Time, writeout bool) time.Duration {
 		b.process = (used - b.used) / now.Sub(b.at).Seconds()
 		// Mandatory work may exceed the allowance indefinitely. It must not
 		// leave optional work repaying an unbounded historical CPU debt.
-		b.credit = max(-b.cores*.1, min(b.cores*.1, b.credit+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
+		b.credit = max(-b.cores*.1, min(b.cores*.04, b.credit+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
 		b.at, b.used = now, used
 	}
 	if !writeout && (b.writers.Load() > 0 || !b.belowAt.IsZero()) {
@@ -122,7 +113,14 @@ func (b *Budget) admissionDelay(now time.Time, writeout bool) time.Duration {
 
 // Wait is only for optional warming/validation, never mandatory writeout.
 // Call before acquiring a database view or a metric lock.
-func (b *Budget) Wait(ctx context.Context) error {
+func (b *Budget) Wait(ctx context.Context) error { return b.waitCPU(ctx, false) }
+
+// WaitCheckpoint streams the saved accelerator alongside writes, within the
+// same process credit. Unlike an optional catalog scan, it must not starve
+// behind a continuously active writer pool. No view or shard lock may be held.
+func (b *Budget) WaitCheckpoint(ctx context.Context) error { return b.waitCPU(ctx, true) }
+
+func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
 	if !b.Active() {
 		return ctx.Err()
 	}
@@ -133,7 +131,7 @@ func (b *Budget) Wait(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		delay := b.delay(time.Now())
+		delay := b.admissionDelay(time.Now(), checkpoint)
 		if delay == 0 {
 			b.warmGrants.Add(1)
 			return nil
@@ -146,61 +144,4 @@ func (b *Budget) Wait(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-}
-
-// Start uses an explicit allowance, or 1.05 times the previous steady median.
-// Missing history leaves pacing disabled; the first rollout needs an explicit
-// allowance. Steady samples exclude the first 30 minutes of this process.
-func Start(ctx context.Context, path string, cores float64) *Budget {
-	host, _ := os.Hostname()
-	h := history{Host: host}
-	if data, err := os.ReadFile(path); err == nil {
-		var previous history
-		if json.Unmarshal(data, &previous) == nil && previous.Host == host {
-			h = previous
-		}
-	}
-	if cores == 0 {
-		cores = median(h.Samples, time.Now()) * 1.05
-	}
-	b := New(cores)
-	go func() {
-		started, last, used := time.Now(), time.Now(), CPU()
-		ticker := time.NewTicker(time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case at := <-ticker.C:
-				next := CPU()
-				if at.Sub(started) >= 31*time.Minute && b.warmed.Load() && !b.Active() {
-					h.Samples = append(h.Samples, sample{at, (next - used) / at.Sub(last).Seconds()})
-					if len(h.Samples) > 30 {
-						h.Samples = h.Samples[len(h.Samples)-30:]
-					}
-					data, _ := json.Marshal(h)
-					if err := os.WriteFile(path+".tmp", data, 0600); err == nil {
-						_ = os.Rename(path+".tmp", path)
-					}
-				}
-				last, used = at, next
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return b
-}
-
-func median(samples []sample, now time.Time) float64 {
-	values := make([]float64, 0, 30)
-	for _, s := range samples {
-		if s.At.After(now.Add(-31*time.Minute)) && !s.At.After(now) && s.Cores > 0 && !math.IsInf(s.Cores, 0) && !math.IsNaN(s.Cores) {
-			values = append(values, s.Cores)
-		}
-	}
-	if len(values) < 30 {
-		return 0
-	}
-	sort.Float64s(values)
-	return (values[14] + values[15]) / 2
 }

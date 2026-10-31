@@ -88,6 +88,7 @@ func TestMetadataPrewarmAfterDumpRestart(t *testing.T) {
 	}
 	cfg.Whisper.StoreMetadataCacheSize = 16 << 20
 	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	cfg.Whisper.StoreMetadataCachePrewarmWorkers = 2
 	// Scans map the read index a pending checkpoint is written against.
 	cfg.Carbonserver.ScanFrequency = &Duration{20 * time.Millisecond}
@@ -169,6 +170,7 @@ func TestMetadataPrewarmWithoutDump(t *testing.T) {
 	cfg.InputLog.SegmentSize = 16 << 20
 	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
 	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
@@ -311,7 +313,7 @@ func TestMetadataPrewarmWaitsForFullCatalog(t *testing.T) {
 	ready, gate := make(chan struct{}), make(chan struct{})
 	close(ready)
 	names := func(yield func(string) bool) { yield("pending") }
-	done := startMetadataPrewarm(db, whisperConfig{StoreMetadataCachePrewarm: true, StoreMetadataCachePrewarmWorkers: 1}, "test", names, ready, nil, func() { close(gate) }, nil)
+	done := startMetadataPrewarm(db, whisperConfig{StoreMetadataCachePrewarm: true, StoreMetadataCacheWarmFirst: new(bool), StoreMetadataCachePrewarmWorkers: 1}, "test", names, ready, nil, func() { close(gate) }, nil)
 	defer func() { once.Do(func() { close(release) }); <-done }()
 	select {
 	case <-entered:
@@ -344,6 +346,7 @@ func TestMetadataPrewarmStopWhileGated(t *testing.T) {
 	cfg.Dump.Enabled = false
 	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
 	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	// Hold the scan in its cancellable pacer rather than a blocking test hook.
 	cfg.Whisper.StoreMetadataCachePrewarmByteRate = 1
 	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
@@ -390,6 +393,7 @@ func TestMetadataPrewarmStopWhileGated(t *testing.T) {
 
 func TestMetadataPrewarmInputLogSafety(t *testing.T) {
 	_, cfg := sharedAppConfig(t)
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	cfg.InputLog.Enabled = true
 	cfg.InputLog.MaxAge = Duration{}
 	cfg.Cache.WriteoutMaxDelay = Duration{960 * time.Second}
@@ -423,6 +427,7 @@ func TestMetadataPrewarmCPUAllowsInput(t *testing.T) {
 	cfg.InputLog.SegmentSize = 16 << 20
 	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
 	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	cfg.Whisper.StoreMetadataCachePrewarmCPUCores = .000001
 	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
@@ -499,9 +504,10 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 	cfg.Dump.Enabled = false
 	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
 	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	checkpoint := true
 	cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
-	cfg.Whisper.StoreMetadataCacheCheckpointLazy = legacy
+	cfg.Whisper.StoreMetadataCacheCheckpointLazy = &legacy
 	cfg.Whisper.StoreMetadataCachePrewarmCPUCores = 1
 	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
@@ -565,6 +571,7 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
 	_, cfg := sharedAppConfig(t)
 	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCacheWarmFirst = new(bool)
 	checkpoint := true
 	cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
 	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
@@ -592,12 +599,17 @@ func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
 	}
 }
 
-func TestMetadataCheckpointRequiresOptIn(t *testing.T) {
+func TestMetadataCheckpointDefaults(t *testing.T) {
 	conf := whisperConfig{StoreMetadataCachePrewarm: true, StoreMetadataCacheSize: 1 << 20}
-	if metadataCheckpointEnabled(conf) {
-		t.Fatal("checkpoint enabled without explicit opt-in")
+	if !metadataCheckpointEnabled(conf) {
+		t.Fatal("default checkpoint disabled")
 	}
-	enabled := true
+	enabled := false
+	conf.StoreMetadataCacheCheckpoint = &enabled
+	if metadataCheckpointEnabled(conf) {
+		t.Fatal("checkpoint opt-out ignored")
+	}
+	enabled = true
 	conf.StoreMetadataCacheCheckpoint = &enabled
 	if !metadataCheckpointEnabled(conf) {
 		t.Fatal("explicit checkpoint ignored")
@@ -605,5 +617,39 @@ func TestMetadataCheckpointRequiresOptIn(t *testing.T) {
 	conf.StoreMetadataCachePrewarm = false
 	if metadataCheckpointEnabled(conf) {
 		t.Fatal("checkpoint enabled without prewarm")
+	}
+}
+
+func TestMetadataWarmFirstDefaultsKeepWriteoutRunning(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	path, cfg := sharedAppConfig(t)
+	cfg.Dump.Enabled = false
+	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
+	cfg.Whisper.StoreMetadataCachePrewarm = true
+	cfg.Whisper.StoreMetadataCachePrewarmCPUCores = 4
+	cfg.Cache.WriteoutMinPoints = 1
+	cfg.Cache.WriteoutMaxDelay = Duration{time.Second}
+	cfg.Cache.WriteoutStartupSpread = false
+	cfg.Cache.WriteoutRestoreSpread = false
+	writeSharedConfig(t, path, cfg)
+	app := New(path)
+	if err := app.ParseConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if !metadataCheckpointEnabled(app.Config.Whisper) || !metadataWarmFirst(app.Config.Whisper) || metadataPrewarmLimit(app.Config) != 0 {
+		t.Fatal("warm-first defaults not enabled")
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.Stop()
+	stamp := time.Now().Unix() - 2
+	app.Cache.Add(points.OnePoint("warm.first", 42, stamp))
+	waitMigration(t, func() bool { return app.Cache.IsEmpty() })
+	snapshot, err := app.MetricStore.Snapshot(context.Background(), "warm.first")
+	if err != nil || len(snapshot.Archives[0].Points) != 1 || snapshot.Archives[0].Points[0].Value != 42 {
+		t.Fatal("ungated default lost input", snapshot, err)
 	}
 }

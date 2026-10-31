@@ -109,10 +109,21 @@ func (c *Cache) makeQueue() chan string {
 
 // The next deadline lets an empty queue sleep without rescanning deferred data.
 func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
+	queue, next, _ := c.makeQueuePlan(now)
+	return queue, next
+}
+
+func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	c.mu.Lock()
 	writeStrategy := c.writeStrategy
 	prevBuild := c.queueLastBuild
+	restartOrder := c.restartOrder
+	warmReady := c.restartWarm
 	c.mu.Unlock()
+	oldest := restartOrder != nil && restartOrder()
+	if oldest {
+		writeStrategy = TimestampOrder
+	}
 
 	if !prevBuild.IsZero() {
 		// @TODO: may be max (with atomic cas)
@@ -183,11 +194,27 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 		q = smaller
 	}
 
+	hasCold := false
 	switch writeStrategy {
 	case MaximumLength:
 		sort.Sort(sort.Reverse(byOrderKey(q)))
 	case TimestampOrder:
-		sort.Sort(byOrderKey(q))
+		if oldest && warmReady != nil {
+			// Partition in place: do not retain another metric list or add per-item
+			// flags. Never call the store hint under a cache shard lock.
+			cut := 0
+			for i := range q {
+				if warmReady(q[i].metric) {
+					q[cut], q[i] = q[i], q[cut]
+					cut++
+				}
+			}
+			hasCold = cut < len(q)
+			sort.Sort(byOrderKey(q[:cut]))
+			sort.Sort(byOrderKey(q[cut:]))
+		} else {
+			sort.Sort(byOrderKey(q))
+		}
 	case MetricNameOrder:
 		// Shared catalog and block keys benefit from nearby metric names.
 		// All shard locks are released before this optional ordering work.
@@ -197,7 +224,7 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 	l := len(q)
 	if l == 0 {
 		c.releaseQueue(scratch, q)
-		return nil, next
+		return nil, next, false
 	}
 
 	ch := make(chan string, l)
@@ -227,14 +254,14 @@ func (c *Cache) makeQueueAt(now time.Time) (chan string, time.Time) {
 			}
 		}
 		c.releaseQueue(scratch, q)
-		return ch, next
+		return ch, next, hasCold
 	}
 	for _, i := range q {
 		ch <- i.metric
 	}
 
 	c.releaseQueue(scratch, q)
-	return ch, next
+	return ch, next, hasCold
 }
 
 // takeQueue reuses the previous rebuild's buffer. Batched queues reserve only

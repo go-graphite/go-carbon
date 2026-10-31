@@ -8,6 +8,7 @@ import (
 	"hash/crc32"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -851,5 +852,77 @@ func TestMetadataCheckpointConcurrentProgress(t *testing.T) {
 	}
 	if progress.CheckpointLoading() {
 		t.Fatal("checkpoint work remained active")
+	}
+}
+
+// Warm-first writeout offers a cold window to ValidateMetadataCheckpoint and
+// then prefetches it. Legacy provisional records count as cold until promoted;
+// first use then needs no revision lookup, and stale records are refused.
+func TestWriteoutWindowValidatesLegacyCheckpoint(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(fmt.Sprint(stale), func(t *testing.T) {
+			dir := t.TempDir()
+			seedCheckpoint(t, dir)
+			legacyCheckpoint(t, dir)
+			opts := checkpointOptions()
+			opts.MetadataCacheCheckpointLazy = true
+			db, err := Open(dir, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if stats, err := db.LoadMetadataCheckpoint(context.Background(), nil); err != nil || !stats.Valid || stats.Validated != 0 || stats.Fenced != 0 {
+				t.Fatal(stats, err)
+			}
+			if db.MetadataCached("a") {
+				t.Fatal("provisional record was scheduled as warm")
+			}
+			var authoritative Metadata
+			if stale {
+				// Bypass mutation invalidation to test revision validation alone.
+				if authoritative, err = metadataFrom(db.db, "a"); err != nil {
+					t.Fatal(err)
+				}
+				authoritative.Revision++
+				if err := db.db.Set(revisionKey(authoritative), revisionBytes(authoritative), pebble.Sync); err != nil {
+					t.Fatal(err)
+				}
+			}
+			window := []string{"a", "b", "c"}
+			stats, err := db.ValidateMetadataCheckpoint(context.Background(), slices.Values(window), PrewarmOptions{Batch: DefaultPrewarmBatch})
+			want := int64(3)
+			if stale {
+				want = 2
+			}
+			if err != nil || stats.Validated != want {
+				t.Fatal(stats, err)
+			}
+			db.PrewarmWriteout(context.Background(), window)
+			stop := CountStoreReadsForTest()
+			for _, name := range window {
+				if !db.MetadataCached(name) {
+					t.Fatal("window was not warmed", name)
+				}
+			}
+			if reads := stop(); reads != 0 {
+				t.Fatal("scheduling hint performed reads", reads)
+			}
+			if !stale {
+				stop = CountStoreReadsForTest()
+				for _, name := range window {
+					if _, err := db.Metadata(context.Background(), name); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if reads := stop(); reads != 0 {
+					t.Fatal("first use repeated checkpoint validation", reads)
+				}
+				return
+			}
+			got, err := db.Metadata(context.Background(), "a")
+			if err != nil || got.Revision != authoritative.Revision {
+				t.Fatal("stale checkpoint was promoted", got, err)
+			}
+		})
 	}
 }

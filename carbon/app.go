@@ -704,7 +704,12 @@ func (app *App) startPersister() error {
 				cfg.OutOfOrderCompactMaxPointAge.Value(), cfg.OutOfOrderCompactRetentionMargin.Value())
 		}
 
+		app.Cache.SetRestartOrder(nil)
 		app.setMetadataPrewarmGate(p)
+		app.Cache.SetRestartWarmFirst(nil, nil, nil)
+		if app.MetricStore != nil && app.restartBudget != nil && app.Config.Whisper.StoreMetadataCachePrewarm && app.Config.Whisper.StoreMetadataCacheSize > 0 && metadataWarmFirst(app.Config.Whisper) {
+			app.Cache.SetRestartWarmFirst(app.MetricStore.MetadataCached, app.restartBudget.WaitWriteout, app.restartBudget.EndWriteout)
+		}
 		p.Start()
 		app.Persister = p
 	}
@@ -896,10 +901,16 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.restartBudget = nil
 	if conf.Whisper.StoreMetadataCachePrewarm && conf.Whisper.StoreMetadataCacheSize > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
-		app.restartBudgetStop = cancel
 		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores)
-		if app.restartBudget.Cores() == 0 {
-			zapwriter.Logger("storage").Warn("restart CPU history unavailable; configure store-metadata-cache-prewarm-cpu-cores")
+		budget := app.restartBudget
+		app.restartBudgetStop = func() {
+			cancel()
+			if err := budget.Stop(); err != nil {
+				zapwriter.Logger("storage").Warn("restart CPU history save failed", zap.Error(err))
+			}
+		}
+		if app.restartBudget.Source() == "fallback" {
+			zapwriter.Logger("storage").Warn("restart CPU history unavailable; using conservative allowance; configure store-metadata-cache-prewarm-cpu-cores for busy processes", zap.Float64("cores", app.restartBudget.Cores()))
 		} else {
 			zapwriter.Logger("storage").Info("restart CPU allowance", zap.Float64("cores", app.restartBudget.Cores()))
 		}
@@ -968,7 +979,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			FetchSharedIterator:         conf.Whisper.StoreFetchSharedIterator,
 			MetadataCacheSize:           conf.Whisper.StoreMetadataCacheSize,
 			MetadataCacheCheckpoint:     metadataCheckpointEnabled(conf.Whisper),
-			MetadataCacheCheckpointLazy: conf.Whisper.StoreMetadataCacheCheckpointLazy,
+			MetadataCacheCheckpointLazy: conf.Whisper.StoreMetadataCacheCheckpointLazy != nil && *conf.Whisper.StoreMetadataCacheCheckpointLazy,
 			UpdatePointLookups:          conf.Whisper.StoreUpdatePointLookups,
 			BytesPerSync:                conf.Whisper.StoreBytesPerSync,
 		})

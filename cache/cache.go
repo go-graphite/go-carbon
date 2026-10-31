@@ -91,6 +91,10 @@ type Cache struct {
 	newMetricCf      atomic.Pointer[indexFilter]
 	filterGeneration atomic.Uint64
 	metricExists     func(string) bool
+	restartOrder     func() bool
+	restartWarm      func(string) bool
+	restartBegin     func(<-chan bool) bool
+	restartEnd       func()
 
 	throttle          func(ps *points.Points, inCache bool) bool
 	throttleWithState func(ps *points.Points, inCache bool, state *any) bool
@@ -988,4 +992,12 @@ func (c *Cache) DivertToPointWriter(write func(*points.Points) error) {
 	s := *c.settings.Load().(*cacheSettings)
 	s.xlog = write
 	c.settings.Store(&s)
+}
+
+// SetRestartOrder serves the oldest eligible queued points during restart.
+// The configured strategy resumes when active returns false.
+func (c *Cache) SetRestartOrder(active func() bool) {
+	c.mu.Lock()
+	c.restartOrder = active
+	c.mu.Unlock()
 }

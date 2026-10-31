@@ -40,7 +40,13 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 		if warmed != nil {
 			defer warmed()
 		}
-		checkpoint, loadErr := db.LoadMetadataCheckpointAfter(context.Background(), options)
+		// Stream the saved accelerator alongside writes within the shared
+		// credit; unlike optional validation it must not starve behind writers.
+		checkpointOptions := options
+		if budget != nil {
+			checkpointOptions.Wait = budget.WaitCheckpoint
+		}
+		checkpoint, loadErr := db.LoadMetadataCheckpointAfter(context.Background(), checkpointOptions)
 		// Legacy lazy checkpoints may contain provisional records. Validate
 		// upcoming writes first, then finish the remainder under the same
 		// allowance before reporting warming complete. v2's clean fence
@@ -61,7 +67,9 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 			}
 		}
 		logger.Info("metadata cache checkpoint loaded", zap.String("source", source), zap.Bool("valid", checkpoint.Valid), zap.Int64("entries", checkpoint.Entries), zap.Int64("validated", checkpoint.Validated), zap.Int64("fenced", checkpoint.Fenced), zap.Int64("bytes", checkpoint.Bytes), zap.Int64("read_bytes", checkpoint.ReadBytes), zap.Duration("runtime", checkpoint.Duration), zap.Error(loadErr))
-		if checkpoint.Valid {
+		// Warm-first writeout prefetches its own queue windows; a missing or
+		// invalid checkpoint does not need the catalog walk.
+		if checkpoint.Valid || metadataWarmFirst(conf) {
 			return
 		}
 		// The catalog walk avoids a catalog seek per restored name. The
@@ -125,8 +133,10 @@ func (app *App) setMetadataPrewarmGate(p *persister.Whisper) {
 		return
 	}
 	limit := metadataPrewarmLimit(app.Config)
+	p.SetWarmFirst(metadataWarmFirst(conf))
 	if app.restartBudget != nil && app.restartBudget.Cores() > 0 {
 		core, delay := app.Cache, app.Config.Cache.WriteoutMaxDelay.Value()
+		core.SetRestartOrder(app.restartBudget.Active)
 		p.SetRestartBudget(app.restartBudget, func() float64 {
 			if delay > 0 {
 				return float64(core.Len()) / delay.Seconds()
@@ -173,10 +183,17 @@ func (app *App) pauseMetadataPrewarmWriteout(core *cache.Cache) {
 }
 
 func metadataCheckpointEnabled(conf whisperConfig) bool {
-	return conf.StoreMetadataCachePrewarm && conf.StoreMetadataCacheSize > 0 && conf.StoreMetadataCacheCheckpoint != nil && *conf.StoreMetadataCacheCheckpoint
+	return conf.StoreMetadataCachePrewarm && conf.StoreMetadataCacheSize > 0 && (conf.StoreMetadataCacheCheckpoint == nil || *conf.StoreMetadataCacheCheckpoint)
+}
+
+func metadataWarmFirst(conf whisperConfig) bool {
+	return conf.StoreMetadataCacheWarmFirst == nil || *conf.StoreMetadataCacheWarmFirst
 }
 
 func metadataPrewarmLimit(cfg *Config) time.Duration {
+	if metadataWarmFirst(cfg.Whisper) {
+		return 0
+	}
 	limit := metadataPrewarmWait(cfg.Whisper)
 	// Leave a normal writeout window and a quarter of log age for draining.
 	if cfg.InputLog.Enabled {

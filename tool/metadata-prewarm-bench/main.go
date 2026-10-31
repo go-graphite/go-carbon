@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"runtime/pprof"
 	"slices"
 	"sort"
 	"sync"
@@ -52,6 +53,12 @@ func check(err error) {
 func emit(v any) { check(json.NewEncoder(os.Stdout).Encode(v)) }
 
 func main() {
+	profile := flag.String("cpu-profile", "", "optional process CPU profile path")
+	liveRate := flag.Int("live-input-rate", 14000, "offered update batches per second, independent of write ceiling")
+	liveDuration := flag.Duration("live-duration", 120*time.Second, "sustained input duration; full drain follows")
+	liveStart := flag.Int64("live-start-offset", 30, "first generated timestamp relative to fixture epoch")
+	livePoints := flag.Int("live-points", 30, "points per live input batch")
+	warmFirst := flag.Bool("warm-first", false, "bypass global gate and prefetch writeout windows when supported")
 	pendingRestore := flag.Bool("pending-restore", false, "restore real dump/checkpoint history and admit live points while gated")
 	savedPoints := flag.Int("restore-points", 92, "pending points per metric, including captured input")
 	gatePoints := flag.Int("gate-input-points", 90, "new points per metric during the gate; positive multiple of3")
@@ -90,6 +97,12 @@ func main() {
 	cache := flag.Int64("metadata-bytes", 4<<30, "metadata cache budget")
 	blocks := flag.Int64("block-bytes", 32<<20, "Pebble block cache budget")
 	flag.Parse()
+	if *profile != "" {
+		f, err := os.Create(*profile)
+		check(err)
+		check(pprof.StartCPUProfile(f))
+		defer func() { pprof.StopCPUProfile(); check(f.Close()) }()
+	}
 	if *dir == "" || *metrics <= 0 || *pendingEvery <= 0 || *writers <= 0 || *workers < 0 || *gate < 0 || *window < 0 || *rate < 0 || *byteRate < 0 || *cpuCores < 0 || *backlogMinPoints <= 0 || *updates < 0 || *backgroundCores < 0 || *warmTimeout < 0 || *stopAfter < 0 {
 		panic("positive -metrics and private -dir required")
 	}
@@ -105,6 +118,10 @@ func main() {
 	}
 	ctx := context.Background()
 	now := time.Unix(base+120, 0)
+	if *mode == "live" {
+		span := int64(math.Ceil(liveDuration.Seconds())) + int64(*livePoints)
+		now = time.Unix(base+max(int64(120), *liveStart+span+60), 0)
+	}
 	if *pendingRestore {
 		now = time.Unix(base+360, 0)
 	}
@@ -179,6 +196,9 @@ func main() {
 				points = append(points, store.Point{Timestamp: base - 40, Value: .5})
 			}
 			check(db.UpdateMany(ctx, name(i), points))
+			if j%100000 == 99999 {
+				fmt.Fprintf(os.Stderr, "aged %d metrics in %s\n", j+1, time.Since(started))
+			}
 		}
 		check(db.Flush())
 		emit(map[string]any{"mode": *mode, "wall": time.Since(started).Seconds(), "cpu": cpu() - used, "disk_bytes": db.Stats().DiskBytes})
@@ -223,12 +243,19 @@ func main() {
 		}
 		options := store.PrewarmOptions{Wait: budget.Wait, Progress: progress, Workers: *workers, Rate: *rate, ByteRate: *byteRate, Batch: *batch}
 		if *checkpoint && *mode != "checkpoint" {
-			stats, err := db.LoadMetadataCheckpointAfter(ctx, options)
+			checkpointOptions := options
+			if shared, ok := any(budget).(interface{ WaitCheckpoint(context.Context) error }); ok {
+				checkpointOptions.Wait = shared.WaitCheckpoint
+			}
+			stats, err := db.LoadMetadataCheckpointAfter(ctx, checkpointOptions)
 			check(err)
 			emit(map[string]any{"mode": "checkpoint-load", "stats": stats, "cpu": cpu() - used, "wall": time.Since(started).Seconds()})
 			if stats.Valid {
 				return store.PrewarmStats{}
 			}
+		}
+		if *mode == "live" && *warmFirst {
+			return store.PrewarmStats{}
 		}
 		if *mode == "checkpoint" {
 			names = func(yield func(string) bool) {
@@ -319,6 +346,14 @@ func main() {
 		return
 	}
 	if *floor {
+		if *checkpoint {
+			stats, err := db.LoadMetadataCheckpointAfter(ctx, store.PrewarmOptions{Workers: *workers, Batch: *batch})
+			check(err)
+			if !stats.Valid {
+				panic("checkpoint floor needs a valid predecessor snapshot")
+			}
+			emit(map[string]any{"mode": "floor-checkpoint", "stats": stats})
+		}
 		var names iter.Seq[string]
 		if *workingFloor {
 			names = func(yield func(string) bool) {
@@ -425,6 +460,12 @@ func main() {
 		}
 	}()
 	switch *mode {
+	case "live":
+		runLive(db, *metrics, *writers, *liveRate, *updates, *livePoints, *liveStart, *liveDuration, *gate, budget, func() {
+			if !*noPrewarm {
+				prewarm(ctx)
+			}
+		}, *warmFirst)
 	case "cold":
 		cycle("cold", base+60)
 	case "prewarm":

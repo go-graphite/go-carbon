@@ -33,7 +33,7 @@ func (p *Whisper) canBatchShared() bool {
 }
 
 func (p *Whisper) takeBatchToken() bool {
-	if p.backlogged != nil && p.backlogged() {
+	if !p.restartPaced() && p.backlogged != nil && p.backlogged() {
 		return true
 	}
 	select {

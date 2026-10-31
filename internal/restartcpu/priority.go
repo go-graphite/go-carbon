@@ -15,13 +15,12 @@ func (b *Budget) BeginWriteout() {
 	b.writeGrants.Add(1)
 }
 
-// WaitWriteout shares process CPU credit while warming is unfinished. Waiting
-// writers reserve priority over optional validation. After warming, ordinary
-// writeout limits take over, so optional CPU debt cannot stall a warm backlog.
+// WaitWriteout shares process CPU credit throughout restart and backlog drain.
+// Waiting writers reserve priority over optional catalog warming.
 // A successful admission must be paired with EndWriteout.
 func (b *Budget) WaitWriteout(exit <-chan bool) bool {
 	b.writers.Add(1)
-	for b.Active() && !b.warmed.Load() {
+	for b.Active() {
 		delay := b.admissionDelay(time.Now(), true)
 		if delay == 0 {
 			break
@@ -82,7 +81,7 @@ func (b *Budget) State() State {
 	s := State{Allowance: b.cores, Process: b.process, Floor: b.floor, Rate: b.rate,
 		WarmGrants: b.warmGrants.Load(), WriteGrants: b.writeGrants.Load()}
 	if b.released || b.writers.Load() > 0 {
-		if active && !b.warmed.Load() {
+		if active {
 			s.Writeout = max(0, b.cores-b.process)
 		} else {
 			s.Writeout = math.Inf(1)

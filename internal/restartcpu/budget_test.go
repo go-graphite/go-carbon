@@ -27,7 +27,7 @@ func TestBudgetAccountsForWholeProcess(t *testing.T) {
 		}
 		time.Sleep(time.Hour)
 		b.delay(time.Now())
-		if b.credit > .2 {
+		if b.credit > .08 {
 			t.Fatal("idle credits permit a restart burst")
 		}
 		used += 1
@@ -66,22 +66,31 @@ func TestBudgetLoadsHostHistory(t *testing.T) {
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if b := Start(ctx, path, 0); math.Abs(b.Cores()-14*1.05) > 1e-9 {
+	b := Start(context.Background(), path, 0)
+	if math.Abs(b.Cores()-14*1.05) > 1e-9 {
 		t.Fatal(b.Cores())
 	}
-	if b := Start(ctx, path, 12); b.Cores() != 12 {
+	if err := b.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	b = Start(context.Background(), path, 12)
+	if b.Cores() != 12 {
 		t.Fatal(b.Cores())
+	}
+	if err := b.Stop(); err != nil {
+		t.Fatal(err)
 	}
 	h.Host = "a-different-host"
 	data, _ = json.Marshal(h)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if b := Start(ctx, path, 0); b.Cores() != 0 {
+	b = Start(context.Background(), path, 0)
+	defer b.Stop()
+	if b.Cores() != fallbackCores() || b.Source() != "fallback" {
 		t.Fatal("foreign baseline used")
 	}
+
 }
 
 func TestBudgetStartupWindow(t *testing.T) {

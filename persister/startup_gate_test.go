@@ -354,7 +354,7 @@ func TestStartupWriteoutPriorityAtCPUAllowance(t *testing.T) {
 		}}
 		p.mockStore = func() (StoreFunc, func()) { return func(string) { writeCPU.Add(5000); p.recordUpdate() }, nil }
 		p.SetWorkers(4)
-		p.SetMaxUpdatesPerSecond(10) // deliberately below the required floor
+		p.SetMaxUpdatesPerSecond(100) // sufficient headroom for the measured floor
 		p.SetRestartBudget(budget, func() float64 { return 100 })
 		p.SetStartupGate(ready, done, time.Second, nil)
 		if err := p.Start(); err != nil {
@@ -393,7 +393,7 @@ func TestStartupWriteoutPriorityAtCPUAllowance(t *testing.T) {
 		if got := budget.Updates() - before; got < 2900 {
 			t.Fatal("completed warming left writeout starved", got)
 		}
-		if s := budget.State(); s.Warming != 0 || !math.IsInf(s.Writeout, 1) {
+		if s := budget.State(); s.Warming != 0 || math.IsInf(s.Writeout, 1) {
 			t.Fatal("priority grants", s)
 		}
 	})
@@ -442,7 +442,7 @@ func TestStartupWriteoutBelowFloorWarning(t *testing.T) {
 	})
 }
 
-func TestStartupWriteoutFloorChanges(t *testing.T) {
+func TestStartupWriteoutFloorCannotRaiseConfiguredCap(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var floor atomic.Int64
 		floor.Store(20)
@@ -464,15 +464,16 @@ func TestStartupWriteoutFloorChanges(t *testing.T) {
 		}
 		time.Sleep(time.Second)
 		synctest.Wait()
-		if budget.Updates() < 15 {
-			t.Fatal("initial floor was not granted")
+		defer p.Stop()
+		if budget.Updates() < 8 || budget.Updates() > 12 {
+			t.Fatal("configured cap was not preserved", budget.Updates())
 		}
 		floor.Store(100)
 		before := budget.Updates()
 		time.Sleep(3 * time.Second)
 		synctest.Wait()
-		if budget.Updates()-before < 190 {
-			t.Fatal("increased floor was not granted")
+		if delta := budget.Updates() - before; delta < 28 || delta > 32 {
+			t.Fatal("backlog increased its own cap", delta)
 		}
 		floor.Store(200)
 		stopped := make(chan struct{})

@@ -187,9 +187,10 @@ type whisperConfig struct {
 	// steady median). Writeout has priority within it while warming is unfinished.
 	// The first rollout needs an explicit allowance until history exists.
 	StoreMetadataCachePrewarmCPUCores float64 `toml:"store-metadata-cache-prewarm-cpu-cores"`
-	// Checkpoint is opt-in. Lazy leaves revision validation to first use.
+	// Checkpoint and warm-first default on with prewarm. Lazy is opt-in.
 	StoreMetadataCacheCheckpoint      *bool `toml:"store-metadata-cache-checkpoint"`
-	StoreMetadataCacheCheckpointLazy  bool  `toml:"store-metadata-cache-checkpoint-lazy"`
+	StoreMetadataCacheWarmFirst       *bool `toml:"store-metadata-cache-warm-first"`
+	StoreMetadataCacheCheckpointLazy  *bool `toml:"store-metadata-cache-checkpoint-lazy"`
 	StoreMetadataCachePrewarm         bool  `toml:"store-metadata-cache-prewarm"`
 	StoreMetadataCachePrewarmWorkers  int   `toml:"store-metadata-cache-prewarm-workers"`
 	StoreMetadataCachePrewarmRate     int   `toml:"store-metadata-cache-prewarm-rate"`

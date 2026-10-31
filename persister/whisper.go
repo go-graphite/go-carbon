@@ -39,6 +39,10 @@ type StoreFunc func(metric string)
 type Whisper struct {
 	helper.Stoppable
 	recv                     func(chan bool) string
+	warmFirst                bool
+	warmPending              *warmReservations
+	warmOriginalRecv         func(chan bool) string
+	warmOriginalTryRecv      func() string
 	tryRecv                  func() string
 	storeUpdateBatchSize     int
 	startupReady             <-chan struct{}
@@ -792,7 +796,7 @@ func (p *Whisper) worker(exit chan bool) {
 	startupPassed := p.startupGate == nil
 LOOP:
 	for {
-		if p.backlogged == nil || !p.backlogged() {
+		if p.restartPaced() || p.backlogged == nil || !p.backlogged() {
 			select {
 			case <-p.updateTokens():
 			case <-exit:
@@ -835,6 +839,7 @@ LOOP:
 				p.restartBudget.BeginWriteout()
 			}
 		}
+		var additional []string
 		if p.mockStore == nil && p.canBatchShared() {
 			metrics := []string{metric}
 			batchSize := p.storeUpdateBatchSize
@@ -845,6 +850,7 @@ LOOP:
 				}
 				metrics = append(metrics, next)
 			}
+			additional = metrics[1:]
 			if len(metrics) > 1 {
 				p.storeSharedBatch(metrics)
 			} else {
@@ -855,6 +861,10 @@ LOOP:
 		}
 		if p.restartBudget != nil {
 			p.restartBudget.EndWriteout()
+		}
+		p.finishWarmName(metric)
+		for _, name := range additional {
+			p.finishWarmName(name)
 		}
 		if doneCb != nil {
 			doneCb()
@@ -962,6 +972,7 @@ func (p *Whisper) Start() error {
 			p.outOfOrder.ticker = helper.NewHardThrottleTicker(p.outOfOrder.rate)
 		}
 
+		p.startWarmFirst()
 		p.startStartupGate()
 		p.startRestartWriteout()
 
