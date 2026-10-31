@@ -67,6 +67,9 @@ type Options struct {
 	// CompactionHeadroom multiplies auto mode's modelled rate: 1..4, zero
 	// keeps the default 2.
 	CompactionHeadroom float64
+	// CompactionKeepPacingOnDebt keeps auto pacing active while compaction
+	// debt is high; stalls, L0 depth and memtable pressure still bypass it.
+	CompactionKeepPacingOnDebt bool
 	// CompactionWarmup is how long auto mode stays unpaced after start while
 	// it learns rates: 0..24h, nil keeps the default hour. Zero paces from the
 	// first sample.
@@ -390,6 +393,7 @@ func Open(dir string, options Options) (*Store, error) {
 	s.flushPacing = options.ExactBlocks
 	s.compactionControl = newPacingController(pacing.pacer, pacing.flush, options.CompactionRate, 0, time.Now())
 	s.compactionControl.setHeadroom(headroom)
+	s.compactionControl.setDebtBypass(!options.CompactionKeepPacingOnDebt)
 	s.compactionControl.setWarmup(warmup)
 	s.continuation = options.Continuation
 	s.fetchSharedIterator = options.FetchSharedIterator
@@ -1195,6 +1199,12 @@ func (s *Store) SetCompactionHeadroom(headroom float64) error {
 	}
 	s.compactionControl.setHeadroom(headroom)
 	return nil
+}
+
+// SetCompactionDebtBypass chooses whether excess compaction debt alone makes
+// auto mode stop pacing, immediately.
+func (s *Store) SetCompactionDebtBypass(enabled bool) {
+	s.compactionControl.setDebtBypass(enabled)
 }
 
 // SetCompactionWarmup changes how long auto mode stays unpaced after the store

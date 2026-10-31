@@ -58,6 +58,26 @@ func TestCompactionControllerLearnsIngress(t *testing.T) {
 	})
 }
 
+func TestCompactionControllerKeepsPacingOnDebt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := learnedCompactionController()
+		c.setDebtBypass(false)
+		sampleCompactionRates(c, time.Minute, 0, 60<<20, 3<<30)
+		paced := c.stats().rate
+		sampleCompactionRates(c, time.Minute, 0, 60<<20, 10<<30)
+		if st := c.stats(); st.rate == 0 || st.bypass != "" || st.bypasses["debt"] != 0 {
+			t.Fatalf("debt stopped pacing with the bypass off: %+v", st)
+		}
+		if st := c.stats(); st.rate <= paced {
+			t.Fatalf("debt growth did not raise the budget: %d <= %d", st.rate, paced)
+		}
+		c.setDebtBypass(true)
+		if st := c.stats(); st.rate != 0 || st.bypass != "debt" {
+			t.Fatalf("re-enabled bypass did not apply at once: %+v", st)
+		}
+	})
+}
+
 func TestCompactionControllerDebtWave(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		c := learnedCompactionController()

@@ -66,6 +66,7 @@ type compactionController struct {
 	amplification, debtMean float64
 	debtWeight, debtTrend   float64
 	debtAlarm               bool
+	debtBypass              bool
 	stallActive             bool
 	stallUntil              time.Time
 	conversion              func() (int64, uint64)
@@ -88,7 +89,7 @@ func newCompactionController(p *compactionPacer, mode int64, now time.Time) *com
 
 func newPacingController(compaction, flush *compactionPacer, mode, flushMode int64, now time.Time) *compactionController {
 	c := &compactionController{pacer: compaction, mode: mode, l0Limit: 6, started: now, last: now,
-		headroom: compactionHeadroomDefault, warmup: compactionWarmupDefault,
+		headroom: compactionHeadroomDefault, warmup: compactionWarmupDefault, debtBypass: true,
 		amplification: 1, bypasses: make(map[string]uint64),
 		flushPacer: flush, flushMode: flushMode, flushBypasses: make(map[string]uint64)}
 	c.apply(now)
@@ -168,7 +169,7 @@ func (c *compactionController) apply(now time.Time) {
 			reason = "l0"
 		case c.previous.memtablePressure:
 			reason = "memtable"
-		case c.debtAlarm:
+		case c.debtAlarm && c.debtBypass:
 			reason = "debt"
 		case c.weight == 0 || now.Sub(c.started) < c.warmup:
 			// Even a zero warm-up waits for a first sample of the rates.
@@ -265,6 +266,16 @@ func (c *compactionController) setHeadroom(headroom float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.headroom = headroom
+	c.apply(time.Now())
+}
+
+// setDebtBypass chooses whether excess compaction debt alone stops pacing.
+// Without it debt growth still raises the budget through the debt trend, and
+// stalls, L0 depth and memtable pressure still bypass pacing.
+func (c *compactionController) setDebtBypass(enabled bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.debtBypass = enabled
 	c.apply(time.Now())
 }
 

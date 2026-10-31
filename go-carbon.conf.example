@@ -83,6 +83,11 @@ store-compaction-rate-headroom = 2.0
 # (0..24h, default 1h; 0 paces from the first sample). The EWMA window stays
 # one hour. Reloads on SIGHUP, measured from start: a reload never restarts it.
 store-compaction-pacing-warmup = "1h"
+# Auto mode only: stop pacing while compaction debt exceeds 2x normal and 4 GiB
+# (default true). Pacing defers work, so debt grows under it; false keeps pacing
+# and lets debt growth raise the budget instead. Stalls, L0 depth and memtable
+# pressure always bypass. Reloads on SIGHUP.
+store-compaction-debt-bypass = true
 # Memtable flush SST output bytes per second: 0 off (default), positive fixed
 # budget, -1 automatic. Reloads on SIGHUP, including a flush already writing.
 # Pebble writes each flush at device speed: a large memtable on a store with

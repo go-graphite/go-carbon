@@ -425,6 +425,7 @@ func (app *App) ReloadConfig() error {
 		if err = app.MetricStore.SetCompactionWarmup(app.Config.Whisper.StoreCompactionWarmup.Value()); err != nil {
 			return err
 		}
+		app.MetricStore.SetCompactionDebtBypass(app.Config.Whisper.StoreCompactionDebtBypass)
 		if err = app.MetricStore.SetFlushRate(app.Config.Whisper.StoreFlushRate); err != nil {
 			return err
 		}
@@ -973,6 +974,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			CompactionWorkers:           conf.Whisper.StoreCompactionWorkers,
 			CompactionRate:              conf.Whisper.StoreCompactionRate,
 			CompactionHeadroom:          conf.Whisper.StoreCompactionHeadroom,
+			CompactionKeepPacingOnDebt:  !conf.Whisper.StoreCompactionDebtBypass,
 			CompactionWarmup:            &compactionWarmup,
 			FlushRate:                   conf.Whisper.StoreFlushRate,
 			L0CompactionConcurrency:     conf.Whisper.StoreL0CompactionConcurrency,
