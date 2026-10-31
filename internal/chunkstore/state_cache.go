@@ -27,6 +27,10 @@ import (
 // endMutation either installs the state the mutation committed (an update's
 // write-through, see installMutation) or forgets the name.
 //
+// Checkpoint fills additionally exclude every name mutated since open,
+// including revision-neutral relayout. Restored records stay provisional
+// until their revision is validated by the loader or first use.
+//
 // A writer holding the stripe may use the entry's state as the latest
 // committed state: no other mutation can commit meanwhile.
 //
@@ -44,8 +48,10 @@ import (
 // keys in place. Optional state slots retain one exact descriptor and tail
 // group per file/archive, using the same epochs and byte budget.
 type stateCache struct {
-	shardBudget int64
-	keys        ContinuationStateKeys
+	validate          func(string, *metricState) bool
+	checkpointChanges *catalogMembership
+	shardBudget       int64
+	keys              ContinuationStateKeys
 	// hash keys the shards' indexes (helper.HashString; tests collide it).
 	hash func(string) uint64
 	// chunk is the size of the shards' arena chunks.
@@ -58,7 +64,8 @@ type stateCache struct {
 	invalidations, oversized, slotRefusals                   atomic.Uint64
 	// prewarmed, prewarmSkipped and prewarmFailed count the names
 	// PrewarmMetadata filled, passed over and could not read.
-	prewarmed, prewarmSkipped, prewarmFailed atomic.Uint64
+	prewarmed, prewarmSkipped, prewarmFailed     atomic.Uint64
+	prewarmBytes, prewarmReadBytes, prewarmNanos atomic.Uint64
 }
 
 type stateShard struct {
@@ -166,9 +173,11 @@ func (c *stateCache) get(stripe uint64, name string, epoch uint64) *metricState 
 	hash := c.hash(name)
 	var st *metricState
 	var rec []byte
+	var recordEpoch uint64
 	sh.mu.Lock()
 	if len(sh.entries) == 0 || sh.entries[name] == nil {
-		if _, s := sh.find(hash, name); s >= 0 && sh.slots[s].epoch <= epoch {
+		if _, s := sh.find(hash, name); s >= 0 && sh.slots[s].epoch&^provisionalState <= epoch {
+			recordEpoch = sh.slots[s].epoch
 			st, rec = sh.stateAt(s)
 			sh.touch(s)
 		} else if s >= 0 {
@@ -181,7 +190,11 @@ func (c *stateCache) get(stripe uint64, name string, epoch uint64) *metricState 
 	if st == nil && rec == nil {
 		c.readerMisses.Add(1)
 	}
-	return c.hit(st, rec)
+	st = c.hit(st, rec)
+	if st != nil && recordEpoch&provisionalState != 0 {
+		return c.validateCheckpoint(stripe, name, st, recordEpoch)
+	}
+	return st
 }
 
 // locked returns name's latest committed state for a writer holding the
@@ -191,8 +204,10 @@ func (c *stateCache) locked(stripe uint64, name string) *metricState {
 	hash := c.hash(name)
 	var st *metricState
 	var rec []byte
+	var recordEpoch uint64
 	sh.mu.Lock()
 	if _, s := sh.find(hash, name); s >= 0 {
+		recordEpoch = sh.slots[s].epoch
 		st, rec = sh.stateAt(s)
 		sh.touch(s)
 	}
@@ -200,7 +215,11 @@ func (c *stateCache) locked(stripe uint64, name string) *metricState {
 	if st == nil && rec == nil {
 		c.lockedMisses.Add(1)
 	}
-	return c.hit(st, rec)
+	st = c.hit(st, rec)
+	if st != nil && recordEpoch&provisionalState != 0 {
+		return c.validateCheckpoint(stripe, name, st, recordEpoch)
+	}
+	return st
 }
 
 // hit counts a lookup and decodes a record it found, outside the shard lock.
@@ -219,6 +238,9 @@ func (c *stateCache) hit(st *metricState, rec []byte) *metricState {
 // beginMutation marks name pending; call it after taking the name's stripe and
 // before anything commits.
 func (c *stateCache) beginMutation(stripe uint64, name string) {
+	if c.checkpointChanges != nil {
+		c.checkpointChanges.add(name)
+	}
 	sh := &c.shards[stripe]
 	hash := c.hash(name)
 	sh.mu.Lock()
@@ -637,6 +659,9 @@ type StateCacheStats struct {
 	// it passed over (cached or pending already, not in the catalog, raced by
 	// a mutation, or no room left); PrewarmFailed names it could not read.
 	Prewarmed, PrewarmSkipped, PrewarmFailed uint64
+	// PrewarmBytes counts installed state bytes; PrewarmReadBytes counts
+	// logical key/value reads, even refused fills; PrewarmNanos includes pacing.
+	PrewarmBytes, PrewarmReadBytes, PrewarmNanos uint64
 }
 
 func (c *stateCache) stats() StateCacheStats {
@@ -647,5 +672,6 @@ func (c *stateCache) stats() StateCacheStats {
 		ReaderMisses: c.readerMisses.Load(), LockedMisses: c.lockedMisses.Load(), PendingMisses: c.pendingMisses.Load(), StaleMisses: c.staleMisses.Load(),
 		Invalidations: c.invalidations.Load(), Oversized: c.oversized.Load(), SlotRefusals: c.slotRefusals.Load(),
 		Fills: c.fills.Load(), Installs: c.installs.Load(), Evictions: c.evictions.Load(), CompactedBytes: c.compactedBytes.Load(),
+		PrewarmBytes: c.prewarmBytes.Load(), PrewarmReadBytes: c.prewarmReadBytes.Load(), PrewarmNanos: c.prewarmNanos.Load(),
 		Prewarmed: c.prewarmed.Load(), PrewarmSkipped: c.prewarmSkipped.Load(), PrewarmFailed: c.prewarmFailed.Load()}
 }

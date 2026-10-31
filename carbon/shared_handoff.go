@@ -122,6 +122,10 @@ func (app *App) closeMetricStore() error { return app.closeMetricStoreFor(false)
 func (app *App) closeMetricStoreForExit() error { return app.closeMetricStoreFor(true) }
 
 func (app *App) closeMetricStoreFor(forExit bool) error {
+	if app.restartBudgetStop != nil {
+		app.restartBudgetStop()
+		app.restartBudgetStop = nil
+	}
 	app.storeInfoMu.Lock()
 	app.storeInfoDB = nil
 	app.storeInfoMu.Unlock()
@@ -133,6 +137,9 @@ func (app *App) closeMetricStoreFor(forExit bool) error {
 		err = app.MetricStore.CloseForExit()
 	} else {
 		err = app.MetricStore.Close()
+	}
+	if checkpointErr := app.MetricStore.MetadataCheckpointError(); checkpointErr != nil {
+		zapwriter.Logger("storage").Warn("metadata checkpoint save failed", zap.Error(checkpointErr))
 	}
 	ct := app.MetricStore.LastCloseTimings()
 	zapwriter.Logger("dump").Info("shared store closed", zap.Duration("ingest", ct.Ingest), zap.Duration("membership", ct.Membership),

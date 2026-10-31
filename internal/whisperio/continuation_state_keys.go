@@ -3,6 +3,9 @@ package whisperio
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -56,11 +59,17 @@ func (c *ContinuationCodec) LoadState(ctx context.Context, kv store.Continuation
 	if err := fs.prefetchNames(); err != nil {
 		return err
 	}
-	w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
-	if err != nil {
+	// Cache the raw state keys; ordinary opens still validate/decode their
+	// headers. Decoding them here would be repeated by the first update.
+	main := fs.main()
+	if _, err := fs.load(filepath.Base(main)); err != nil {
 		return err
 	}
-	return w.Close()
+	_, err := fs.load(filepath.Base(whisper.OutOfOrderSidecarPath(main)))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 var (

@@ -63,7 +63,19 @@ func (c *Cache) SetWriteoutStartupSpread(on bool) {
 // lazily: urgent log replay or handoff may run long before live input opens.
 // The mixed sparse share is independent of the ordinary period's spread;
 // using that spread for both phase and period makes the waves converge again.
-func (c *Cache) spreadStartup(values *item, s *cacheSettings, now time.Time) {
+func (c *Cache) spreadStartup(values *item, s *cacheSettings, now time.Time, held bool) {
+	if clock := s.startupWriteout; clock != nil {
+		if held {
+			// Held work starts draining at release over the full window,
+			// independently of the ordinary spread and point threshold.
+			values.sparse = false
+			deadline := clock.at.Add(time.Duration(float64(s.writeoutMaxDelay) * float64(values.sparseShare()) / (1 << 16)))
+			values.firstArrival = deadline.Add(-s.delayFor(values))
+			values.startup = true
+		}
+		// Post-release arrivals keep their normal batching deadlines.
+		return
+	}
 	if !s.writeoutStartupSpread || values.sparse {
 		return
 	}
@@ -266,11 +278,16 @@ func (s *cacheSettings) delayFor(values *item) time.Duration {
 	return s.writeoutMaxDelay - time.Duration(float64(s.writeoutMaxDelay)*s.spreadShare(values))
 }
 
-// Backlogged reports whether writes should not be rate-limited: restored
-// points are still pending, or the cache holds over three quarters of
-// max-size, where writeout batching is released too.
+// Backlogged lifts the writeout rate for pressure, or ordinary recovery.
+// Urgent restoration keeps its lift before input readiness; once the gate
+// releases, held recovery keeps the normal rate unless pressure needs it.
 func (c *Cache) Backlogged() bool {
-	return c.pending.Load() != nil || c.settings.Load().(*cacheSettings).underPressure(c.approxSize())
+	s := c.settings.Load().(*cacheSettings)
+	recovery := c.pending.Load() != nil
+	if recovery && s.startupWriteout != nil && s.startupWriteout.released.Load() != nil {
+		recovery = false
+	}
+	return recovery || s.underPressure(c.approxSize()) || c.bytePressure(s)
 }
 
 func (c *Cache) batchWrites(s *cacheSettings) bool {
@@ -285,13 +302,13 @@ func (s *cacheSettings) underPressure(size int64) bool {
 // Called with the shard locked. Zero means immediately eligible.
 func writeoutDeadline(values *item, s *cacheSettings) time.Time {
 	first := values.firstArrival
-	if values.startup && s.writeoutStartupSpread && !first.IsZero() {
-		return first.Add(s.delayFor(values))
+	if values.startup && (s.writeoutStartupSpread || s.startupWriteout != nil) && !first.IsZero() {
+		return s.writeoutWall(first.Add(s.delayFor(values)))
 	}
 	if values.count() >= s.minPointsFor(values) || first.IsZero() {
 		return time.Time{}
 	}
-	return first.Add(s.delayFor(values))
+	return s.writeoutWall(first.Add(s.delayFor(values)))
 }
 
 // WriteoutReady must also be checked by the persister under its per-metric

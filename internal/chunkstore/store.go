@@ -124,6 +124,11 @@ type Options struct {
 	// stateCache), which every update and fetch otherwise reads back from the
 	// LSM. Zero disables it.
 	MetadataCacheSize int64
+	// MetadataCacheCheckpoint saves advisory slab records on clean close.
+	MetadataCacheCheckpoint bool
+	// MetadataCacheCheckpointLazy leaves revision validation to first use.
+	// Normally load validates bounded parallel batches ahead of writeout.
+	MetadataCacheCheckpointLazy bool
 	// UpdatePointLookups gives each read of a continuation update its own LSM
 	// lookup or iterator, which opens a table in every level it reaches. By
 	// default an update's prefix walks and probes share one iterator over the
@@ -185,6 +190,7 @@ type Store struct {
 	continuation    ContinuationCodec
 	// stateCache, when enabled, holds metrics' committed metadata.
 	stateCache                     *stateCache
+	checkpoint                     metadataCheckpoint
 	timeBuckets                    bool
 	relayout                       relayoutState
 	relayoutStop                   context.CancelFunc
@@ -466,6 +472,12 @@ func Open(dir string, options Options) (*Store, error) {
 		}
 	}
 	s.db, s.dir, s.fs, s.pebbleOptions = db, dir, fs, opts.Clone().EnsureDefaults()
+	if options.MetadataCacheCheckpoint && s.stateCache != nil {
+		s.checkpoint.lazy = options.MetadataCacheCheckpointLazy
+		if err := s.openMetadataCheckpoint(); err != nil {
+			return nil, s.openFailure(db, err)
+		}
+	}
 	s.startSnapshotRelease()
 	s.startWALSyncer()
 	if err := s.configureIncrementalSource(fs, dir, options.IncrementalSource); err != nil {
@@ -922,6 +934,15 @@ func (s *Store) close(forExit bool) error {
 	lap(&t.SnapshotRelease)
 	s.stopWALSyncer()
 	lap(&t.WALSyncer)
+	// Checkpoints are optional accelerators; a failed save never changes durability.
+	if s.checkpoint.enabled {
+		if !s.checkpoint.prepared && !forExit {
+			_ = s.PrepareMetadataCheckpoint(context.Background())
+		}
+		if s.checkpoint.prepared && s.db.VisibleSequence() != s.checkpoint.sequence {
+			s.checkpoint.saveErr = errors.New("store changed after metadata checkpoint")
+		}
+	}
 	// Writers must be stopped before Close. Pebble flushes and syncs the WAL
 	// on close, including mutations made after the final periodic sync.
 	var err error

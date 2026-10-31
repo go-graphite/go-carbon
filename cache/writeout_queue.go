@@ -15,10 +15,11 @@ type WriteoutQueue struct {
 	// Writeout queue. Usage:
 	// q := <- queue
 	// p := cache.Pop(q.Metric)
-	queue   chan string
-	rebuild func(abort chan bool) chan bool // return chan waiting for complete
-	wake    chan struct{}
-	// Monotonic nanoseconds relative to epoch, plus one (zero means unset).
+	queue     chan string
+	refreshAt time.Time
+	rebuild   func(abort chan bool) chan bool // return chan waiting for complete
+	wake      chan struct{}
+	// Nonnegative nanoseconds relative to epoch, plus one (zero means unset).
 	wakeAt atomic.Int64
 	epoch  time.Time
 }
@@ -37,7 +38,9 @@ func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 // notifyAt coalesces arrivals into one shared wake-up. Sparse arrivals only
 // advance the timer; they do not cause repeated full-cache scans.
 func (q *WriteoutQueue) notifyAt(deadline time.Time) {
-	next := deadline.Sub(q.epoch).Nanoseconds() + 1
+	// Paused startup deadlines saturate Sub at MaxInt64. Reserve the extra
+	// nanosecond before adding one; a wrapped hint suppresses future wake-ups.
+	next := max(0, min(deadline.Sub(q.epoch).Nanoseconds(), int64(1<<63-2))) + 1
 	for {
 		old := q.wakeAt.Load()
 		if old != 0 && old <= next {
@@ -62,7 +65,15 @@ func (q *WriteoutQueue) makeRebuildCallback(nextRebuildTime, notBefore time.Time
 		nextRebuildOnce.Do(func() {
 			go func() {
 				q.waitForRebuild(nextRebuildTime, notBefore, abort)
-				q.update()
+				if !q.updateAdmitted(abort) {
+					// A stopped consumer must not leave a completed callback
+					// installed: the same cache can serve a new persister.
+					now := time.Now()
+					q.Lock()
+					q.refreshAt = now
+					q.rebuild = q.makeRebuildCallback(now, now)
+					q.Unlock()
+				}
 				close(nextRebuildComplete)
 			}()
 		})
@@ -122,7 +133,7 @@ func (q *WriteoutQueue) update() {
 	defer phasecpu.Set(phasecpu.Other)
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
-	queue, next := q.cache.makeQueueAt(time.Now())
+	queue, next, hasCold := q.cache.makeQueuePlan(time.Now())
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
 		next = notBefore
@@ -130,6 +141,10 @@ func (q *WriteoutQueue) update() {
 
 	q.Lock()
 	q.queue = queue
+	q.refreshAt = time.Time{}
+	if hasCold && queue != nil {
+		q.refreshAt = time.Now().Add(time.Second)
+	}
 	q.cache.queueChannelBytes.Store(int64(cap(queue)) * 16)
 	q.rebuild = q.makeRebuildCallback(next, notBefore)
 	q.Unlock()
@@ -146,7 +161,17 @@ QueueLoop:
 		q.RLock()
 		queue := q.queue
 		rebuild := q.rebuild
+		refreshAt := q.refreshAt
 		q.RUnlock()
+		if !refreshAt.IsZero() && !time.Now().Before(refreshAt) {
+			select {
+			case <-rebuild(abort):
+				continue QueueLoop
+			default:
+				// Rebuild in parallel while consuming the old eligible names.
+				// A slow catalog-sized scan must not empty the writer pool.
+			}
+		}
 
 		select {
 		case metric := <-queue:
@@ -190,4 +215,31 @@ func (q *WriteoutQueue) TryGet() string {
 			return ""
 		}
 	}
+}
+
+// A long cold snapshot must not hide newly warm work until it empties. Refresh
+// it once a second during warm-first startup. Unconsumed names still belong to
+// the cache and are selected again; the consumer reserves names across rebuilds.
+func (q *WriteoutQueue) updateAdmitted(abort chan bool) bool {
+	select {
+	case <-abort:
+		return false
+	default:
+	}
+	active, begin, end := q.cache.restartScheduling()
+	if active && begin != nil {
+		if !begin(abort) {
+			return false
+		}
+		if end != nil {
+			defer end()
+		}
+	}
+	select {
+	case <-abort:
+		return false
+	default:
+	}
+	q.update()
+	return true
 }

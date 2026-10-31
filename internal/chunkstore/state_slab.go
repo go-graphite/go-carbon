@@ -467,7 +467,8 @@ func packStateKeys(keys []byte) []byte {
 
 // decodeStateRecord returns the sealed state a record holds. Its state keys
 // stay in rec, which must never change, or in their own unpacked allocation;
-// its metadata is the caller's. This encoding is only used in RAM.
+// its metadata is the caller's. Metadata checkpoints version this encoding
+// with checkpointMagic; change that version when the record layout changes.
 func decodeStateRecord(rec []byte) *metricState {
 	key := recordKey(rec)
 	p := uvarintLen(uint64(len(key))) + len(key)

@@ -250,8 +250,17 @@ func validateStorageConfig(cfg *Config) error {
 	if cfg.Whisper.StoreSyncInterval == nil || cfg.Whisper.StoreSyncInterval.Value() < 0 {
 		return errors.New("whisper.store-sync-interval must be a non-negative duration")
 	}
-	if cfg.Whisper.StoreMetadataCachePrewarmWorkers < 0 || cfg.Whisper.StoreMetadataCachePrewarmWorkers > 256 || cfg.Whisper.StoreMetadataCachePrewarmRate < 0 {
-		return errors.New("whisper.store-metadata-cache-prewarm-workers must be 0..256 and store-metadata-cache-prewarm-rate nonnegative")
+	if cores := cfg.Whisper.StoreMetadataCachePrewarmCPUCores; cores < 0 || math.IsNaN(cores) || math.IsInf(cores, 0) {
+		return errors.New("store-metadata-cache-prewarm-cpu-cores must be finite and nonnegative")
+	}
+	if cfg.Whisper.StoreMetadataCachePrewarmWorkers < 0 || cfg.Whisper.StoreMetadataCachePrewarmWorkers > 256 || cfg.Whisper.StoreMetadataCachePrewarmRate < 0 || cfg.Whisper.StoreMetadataCachePrewarmByteRate < 0 {
+		return errors.New("whisper.store-metadata-cache-prewarm-workers must be 0..256 and prewarm rate/byte-rate nonnegative")
+	}
+	if cfg.Whisper.StoreMetadataCachePrewarmWait != nil && cfg.Whisper.StoreMetadataCachePrewarmWait.Value() < 0 {
+		return errors.New("metadata prewarm wait must be nonnegative")
+	}
+	if cap := cfg.Whisper.StoreMetadataCachePrewarmWaitCap; cap != nil && cap.Value() <= 0 {
+		return errors.New("metadata prewarm wait cap must be positive")
 	}
 	if err := validateExpirationConfig(cfg); err != nil {
 		return err

@@ -17,7 +17,7 @@ func TestPerCallPointBufferByteParity(t *testing.T) {
 		name       string
 		retentions []store.Retention
 	}(nil), percallSchemas...)
-	for _, schema := range productionSchemas {
+	for _, schema := range representativeSchemas {
 		schemas = append(schemas, struct {
 			name       string
 			retentions []store.Retention

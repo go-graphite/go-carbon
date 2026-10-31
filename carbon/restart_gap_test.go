@@ -309,11 +309,26 @@ func pendingCheckpointConfig(t *testing.T) (string, *Config) {
 // A start verifies the checkpoint while storage opens; a damaged index found
 // there still sends it to the ordered restore, which serves the same points.
 func TestEarlyCheckpointOpenFallsBackOnCorruptIndex(t *testing.T) {
+	testEarlyCheckpointOpenFallsBackOnCorruptIndex(t, false)
+}
+
+func TestStartupGateOrderedRestoreFallback(t *testing.T) {
+	testEarlyCheckpointOpenFallsBackOnCorruptIndex(t, true)
+}
+
+func testEarlyCheckpointOpenFallsBackOnCorruptIndex(t *testing.T, gated bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
 	defer zapwriter.Test()()
 	path, cfg := pendingCheckpointConfig(t)
+	if gated {
+		cfg.Whisper.StorageBackend, cfg.Whisper.StoreDir = "pebble-chunk", t.TempDir()
+		cfg.Whisper.StoreMirrorFiles = true
+		cfg.Whisper.StoreEncoding = "exact"
+		cfg.Whisper.StoreMetadataCacheSize = 4 << 20
+		cfg.Whisper.StoreMetadataCachePrewarm = true
+	}
 	first := New(path)
 	first.Config = cfg
 	if err := first.Start(); err != nil {
@@ -359,6 +374,18 @@ func TestEarlyCheckpointOpenFallsBackOnCorruptIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if gated {
+		cfg.Whisper.StoreLiveMigration = true // reopen the mirrored predecessor normally
+		// The ordered fallback must drain even with an armed startup clock;
+		// restored dump points still pass through the durable input log.
+		cfg.InputLog.Enabled, cfg.InputLog.Path = true, filepath.Join(t.TempDir(), "input-log")
+		cfg.InputLog.SegmentSize = 16 << 20
+		cfg.Cache.WriteoutMinPoints = 1
+		cfg.Cache.WriteoutMaxDelay = Duration{time.Hour}
+		cfg.Cache.WriteoutRestoreSpread, cfg.Cache.WriteoutStartupSpread = true, true
+		cfg.Whisper.StoreMetadataCacheSize = 4 << 20
+		cfg.Whisper.StoreMetadataCachePrewarm = true
+	}
 	next := New(path)
 	next.Config = cfg
 	cfg.Whisper.MaxUpdatesPerSecond = 1 // keep restored points in the cache
@@ -366,6 +393,9 @@ func TestEarlyCheckpointOpenFallsBackOnCorruptIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer next.Stop()
+	if gated && (next.MetricStore == nil || next.inputLog.Load() == nil || next.metadataPrewarmDone.Load() == nil) {
+		t.Fatal("gated shared/input-log restore path was not exercised")
+	}
 	logs := zapwriter.TestString()
 	if !strings.Contains(logs, "pending read checkpoint unavailable; using ordered restore") || strings.Contains(logs, "serving reads from pending checkpoint") {
 		t.Fatalf("damaged checkpoint index was not refused:\n%s", logs)

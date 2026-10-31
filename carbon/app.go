@@ -28,6 +28,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
+	"github.com/go-graphite/go-carbon/internal/restartcpu"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
@@ -134,7 +135,13 @@ type App struct {
 	// metadataPrewarmDone holds the channel that closes when the start's
 	// metadata cache prewarm ends (see startMetadataPrewarm); nil if none
 	// started.
-	metadataPrewarmDone atomic.Pointer[chan struct{}]
+	metadataPrewarmDone     atomic.Pointer[chan struct{}]
+	metadataPrewarmReady    chan struct{}
+	metadataPrewarmGate     chan struct{}
+	metadataPrewarmGateOnce *sync.Once
+	metadataPrewarmProgress *store.PrewarmProgress
+	restartBudget           *restartcpu.Budget
+	restartBudgetStop       context.CancelFunc
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	readPolicyConfig    atomic.Pointer[Config]
@@ -537,6 +544,10 @@ func (app *App) stopReadListeners() <-chan struct{} {
 }
 
 func (app *App) stopAll() {
+	if app.restartBudgetStop != nil {
+		app.restartBudgetStop()
+		app.restartBudgetStop = nil
+	}
 	if app.MetricStore != nil {
 		app.MetricStore.StopCompactionPacing()
 	}
@@ -576,6 +587,9 @@ func (app *App) stopAll() {
 		logger.Debug("tags stopped")
 	}
 
+	if app.restartBudget != nil {
+		app.restartBudget.SetDrain(nil)
+	}
 	if app.Cache != nil {
 		app.Cache.Stop()
 		app.Cache = nil
@@ -690,6 +704,12 @@ func (app *App) startPersister() error {
 				cfg.OutOfOrderCompactMaxPointAge.Value(), cfg.OutOfOrderCompactRetentionMargin.Value())
 		}
 
+		app.Cache.SetRestartOrder(nil)
+		app.setMetadataPrewarmGate(p)
+		app.Cache.SetRestartWarmFirst(nil, nil, nil)
+		if app.MetricStore != nil && app.restartBudget != nil && app.Config.Whisper.StoreMetadataCachePrewarm && app.Config.Whisper.StoreMetadataCacheSize > 0 && metadataWarmFirst(app.Config.Whisper) {
+			app.Cache.SetRestartWarmFirst(app.MetricStore.MetadataCached, app.restartBudget.WaitPrefetch, app.restartBudget.EndPrefetch)
+		}
 		p.Start()
 		app.Persister = p
 	}
@@ -817,18 +837,30 @@ func (app *App) Start() (err error) {
 }
 
 func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers bool) error {
+	// Receivers and inherited input are ready before metadata scanning runs.
+	if app.restartBudget != nil {
+		floor := core.Size()
+		app.restartBudget.SetDrain(func() bool {
+			return core.PendingOutstanding() == 0 && (floor == 0 || core.Size() <= floor)
+		})
+	}
+	close(app.metadataPrewarmReady)
 	conf := app.Config
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
 		restored := make(chan struct{})
 		app.storeRestoreDone = restored
 		db := app.MetricStore
+		ready, warmed, progress, budget := app.metadataPrewarmReady, app.metadataPrewarmComplete(), app.metadataPrewarmProgress, app.restartBudget
 		go func() {
 			defer close(restored)
 			app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
-			if done := startMetadataPrewarm(db, conf.Whisper, "restored dump", core.MetricNames()); done != nil {
+			if done := startMetadataPrewarm(db, conf.Whisper, "restored dump", core.MetricNames(), ready, progress, warmed, budget); done != nil {
 				app.metadataPrewarmDone.Store(&done)
 			}
 		}()
+	}
+	if !conf.Dump.Enabled && app.metadataPrewarmDone.Load() == nil {
+		app.startMetadataPrewarm("catalog", core.MetricNames())
 	}
 	if app.MetricStore != nil && app.Carbonserver != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
 		app.metricStoreIndex = startMetricIndexRefresher(app.Carbonserver, metricStoreIndexRefreshInterval)
@@ -858,6 +890,31 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.storeHandoffMetrics = nil
 	app.storeHandoffInputStarted = false
 	app.metadataPrewarmDone.Store(nil)
+	app.metadataPrewarmReady = make(chan struct{})
+	app.metadataPrewarmGate = make(chan struct{})
+	app.metadataPrewarmGateOnce = new(sync.Once)
+	app.metadataPrewarmProgress = new(store.PrewarmProgress)
+	if app.restartBudgetStop != nil {
+		app.restartBudgetStop()
+		app.restartBudgetStop = nil
+	}
+	app.restartBudget = nil
+	if conf.Whisper.StoreMetadataCachePrewarm && conf.Whisper.StoreMetadataCacheSize > 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores)
+		budget := app.restartBudget
+		app.restartBudgetStop = func() {
+			cancel()
+			if err := budget.Stop(); err != nil {
+				zapwriter.Logger("storage").Warn("restart CPU history save failed", zap.Error(err))
+			}
+		}
+		if app.restartBudget.Source() == "fallback" {
+			zapwriter.Logger("storage").Warn("restart CPU history unavailable; using conservative allowance; configure store-metadata-cache-prewarm-cpu-cores for busy processes", zap.Float64("cores", app.restartBudget.Cores()))
+		} else {
+			zapwriter.Logger("storage").Info("restart CPU allowance", zap.Float64("cores", app.restartBudget.Cores()))
+		}
+	}
 	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetMaxBytes(conf.Cache.MaxBytes)
@@ -874,6 +931,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	core.SetWriteoutRestoreSpread(conf.Cache.WriteoutRestoreSpread)
 	core.SetWriteoutSparseSpread(conf.Cache.WriteoutSparseSpread)
 	core.SetWriteoutStartupSpread(conf.Cache.WriteoutStartupSpread)
+	app.pauseMetadataPrewarmWriteout(core)
 
 	app.Cache = core
 	if err = app.openInputLog(core); err != nil {
@@ -901,27 +959,29 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			IngestGroupBytes:  conf.Whisper.StoreMigrationIngestGroup,
 			IngestParallel:    conf.Whisper.StoreMigrationIngestParallel,
 			CacheSize:         conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
-			SyncInterval:              conf.Whisper.StoreSyncInterval.Value(),
-			CompactionWorkers:         conf.Whisper.StoreCompactionWorkers,
-			CompactionRate:            conf.Whisper.StoreCompactionRate,
-			L0CompactionConcurrency:   conf.Whisper.StoreL0CompactionConcurrency,
-			L0CompactionThreshold:     conf.Whisper.StoreL0CompactionThreshold,
-			L0StopWritesThreshold:     conf.Whisper.StoreL0StopWritesThreshold,
-			LBaseMaxBytes:             conf.Whisper.StoreLBaseMaxBytes,
-			MaxUnflushedMemTableBytes: conf.Whisper.StoreMemTableMaxUnflushed,
-			MaxOpenFiles:              conf.Whisper.StoreMaxOpenFiles,
-			TargetFileSize:            conf.Whisper.StoreTargetFileSize,
-			L0TargetFileSize:          conf.Whisper.StoreL0TargetFileSize,
-			ParallelTableSyncs:        conf.Whisper.StoreParallelTableSyncs,
-			BloomFilterBits:           conf.Whisper.StoreBloomFilterBits,
-			WALDir:                    conf.Whisper.StoreWALDir,
-			CacheShards:               conf.Whisper.StoreCacheShards,
-			TableCacheShards:          conf.Whisper.StoreTableCacheShards,
-			CompactOnce:               conf.Whisper.StoreCompactOnce,
-			FetchSharedIterator:       conf.Whisper.StoreFetchSharedIterator,
-			MetadataCacheSize:         conf.Whisper.StoreMetadataCacheSize,
-			UpdatePointLookups:        conf.Whisper.StoreUpdatePointLookups,
-			BytesPerSync:              conf.Whisper.StoreBytesPerSync,
+			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
+			CompactionWorkers:           conf.Whisper.StoreCompactionWorkers,
+			CompactionRate:              conf.Whisper.StoreCompactionRate,
+			L0CompactionConcurrency:     conf.Whisper.StoreL0CompactionConcurrency,
+			L0CompactionThreshold:       conf.Whisper.StoreL0CompactionThreshold,
+			L0StopWritesThreshold:       conf.Whisper.StoreL0StopWritesThreshold,
+			LBaseMaxBytes:               conf.Whisper.StoreLBaseMaxBytes,
+			MaxUnflushedMemTableBytes:   conf.Whisper.StoreMemTableMaxUnflushed,
+			MaxOpenFiles:                conf.Whisper.StoreMaxOpenFiles,
+			TargetFileSize:              conf.Whisper.StoreTargetFileSize,
+			L0TargetFileSize:            conf.Whisper.StoreL0TargetFileSize,
+			ParallelTableSyncs:          conf.Whisper.StoreParallelTableSyncs,
+			BloomFilterBits:             conf.Whisper.StoreBloomFilterBits,
+			WALDir:                      conf.Whisper.StoreWALDir,
+			CacheShards:                 conf.Whisper.StoreCacheShards,
+			TableCacheShards:            conf.Whisper.StoreTableCacheShards,
+			CompactOnce:                 conf.Whisper.StoreCompactOnce,
+			FetchSharedIterator:         conf.Whisper.StoreFetchSharedIterator,
+			MetadataCacheSize:           conf.Whisper.StoreMetadataCacheSize,
+			MetadataCacheCheckpoint:     metadataCheckpointEnabled(conf.Whisper),
+			MetadataCacheCheckpointLazy: conf.Whisper.StoreMetadataCacheCheckpointLazy != nil && *conf.Whisper.StoreMetadataCacheCheckpointLazy,
+			UpdatePointLookups:          conf.Whisper.StoreUpdatePointLookups,
+			BytesPerSync:                conf.Whisper.StoreBytesPerSync,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("open shared storage: %w", err)
@@ -1247,7 +1307,7 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	if app.Carbonserver != nil {
 		app.Carbonserver.WarmupIndex()
 	}
-	app.Restore(core.AddRestored, conf.Dump.Path, conf.Dump.RestorePerSecond)
+	app.Restore(core.AddRestoredBeforeInput, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	restoreLoaded := time.Now()
 	// The persister already writes what is loaded; prewarm the rest.
 	app.startMetadataPrewarm("restored dump", core.MetricNames())

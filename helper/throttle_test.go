@@ -62,3 +62,26 @@ func TestHardThrottleChan(t *testing.T) {
 		})
 	}
 }
+
+func TestSoftThrottleDoesNotBankASecondAcrossConsumerStall(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ticker := NewThrottleTickerWithBurst(1000, 40)
+		defer ticker.Stop()
+		time.Sleep(time.Second)
+		deadline := time.After(100 * time.Millisecond)
+		count := 0
+		for {
+			select {
+			case <-ticker.C:
+				count++
+			case <-deadline:
+				// 100 newly due permits, 40 saved ones and at most one
+				// chunk already blocked on the stalled consumer.
+				if count < 100 || count > 142 {
+					t.Fatalf("stall changed the rate or banked excess credit: %d", count)
+				}
+				return
+			}
+		}
+	})
+}

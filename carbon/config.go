@@ -179,12 +179,27 @@ type whisperConfig struct {
 	OutOfOrderCompactMaxPointAge     Duration `toml:"out-of-order-compact-max-point-age"`
 	OutOfOrderCompactRetentionMargin Duration `toml:"out-of-order-compact-retention-margin"`
 	// StoreMetadataCachePrewarm loads the store's metadata cache at start
-	// with the state of the metrics the restored cache holds, on that many
-	// workers (0: the store's default) and at up to that many metrics per
-	// second (0: unpaced). See App.startMetadataPrewarm.
-	StoreMetadataCachePrewarm        bool `toml:"store-metadata-cache-prewarm"`
-	StoreMetadataCachePrewarmWorkers int  `toml:"store-metadata-cache-prewarm-workers"`
-	StoreMetadataCachePrewarmRate    int  `toml:"store-metadata-cache-prewarm-rate"`
+	// with restored metrics first, then the catalog, on that many
+	// workers (0: GOMAXPROCS/12, 2..16) and at up to that many metrics per
+	// second (0: unlimited). ByteRate also caps logical key/value bytes read per
+	// second (0: unlimited). See App.startMetadataPrewarm.
+	// CPUCores paces optional warming against whole-process CPU (0: 1.05x saved
+	// steady median). Writeout has priority within it while warming is unfinished.
+	// The first rollout needs an explicit allowance until history exists.
+	StoreMetadataCachePrewarmCPUCores float64 `toml:"store-metadata-cache-prewarm-cpu-cores"`
+	// Checkpoint and warm-first default on with prewarm. Lazy is opt-in.
+	StoreMetadataCacheCheckpoint      *bool `toml:"store-metadata-cache-checkpoint"`
+	StoreMetadataCacheWarmFirst       *bool `toml:"store-metadata-cache-warm-first"`
+	StoreMetadataCacheCheckpointLazy  *bool `toml:"store-metadata-cache-checkpoint-lazy"`
+	StoreMetadataCachePrewarm         bool  `toml:"store-metadata-cache-prewarm"`
+	StoreMetadataCachePrewarmWorkers  int   `toml:"store-metadata-cache-prewarm-workers"`
+	StoreMetadataCachePrewarmRate     int   `toml:"store-metadata-cache-prewarm-rate"`
+	StoreMetadataCachePrewarmByteRate int   `toml:"store-metadata-cache-prewarm-byte-rate"`
+	// Wait defers persister workers after intake opens until prewarm ends,
+	// cache capacity is reached, or this fixed deadline. Nil adapts to scan
+	// progress within WaitCap (default 600s); explicit zero disables the gate.
+	StoreMetadataCachePrewarmWait    *Duration `toml:"store-metadata-cache-prewarm-wait"`
+	StoreMetadataCachePrewarmWaitCap *Duration `toml:"store-metadata-cache-prewarm-wait-cap"`
 }
 
 type cacheConfig struct {

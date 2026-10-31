@@ -109,7 +109,7 @@ func TestWriteoutStartupSpreadConcurrent(t *testing.T) {
 		c.startupAt.Store(&later)
 		it := newItem("startup.earlier", 0)
 		it.firstArrival = now
-		c.spreadStartup(it, c.settings.Load().(*cacheSettings), now)
+		c.spreadStartup(it, c.settings.Load().(*cacheSettings), now, false)
 		if it.startup || !it.firstArrival.Equal(now) {
 			t.Fatal("arrival older than the startup epoch changed its window")
 		}
@@ -288,7 +288,7 @@ func TestWriteoutStartupSpreadSimulation(t *testing.T) {
 				if saved > 0 {
 					it.firstArrival = s.restoreArrival(it, now)
 				}
-				c.spreadStartup(it, s, now)
+				c.spreadStartup(it, s, now, false)
 				if it.startup {
 					startupWindows++
 					if startupWindows > 1 {

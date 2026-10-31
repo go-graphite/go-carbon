@@ -47,6 +47,7 @@ type cacheSettings struct {
 	writeoutSparseSpread bool
 	// writeoutStartupSpread: see SetWriteoutStartupSpread.
 	writeoutStartupSpread bool
+	startupWriteout       *startupWriteout
 }
 
 // A "thread" safe map of type string:Anything.
@@ -90,6 +91,10 @@ type Cache struct {
 	newMetricCf      atomic.Pointer[indexFilter]
 	filterGeneration atomic.Uint64
 	metricExists     func(string) bool
+	restartOrder     func() bool
+	restartWarm      func(string) bool
+	restartBegin     func(<-chan bool) bool
+	restartEnd       func()
 
 	throttle          func(ps *points.Points, inCache bool) bool
 	throttleWithState func(ps *points.Points, inCache bool, state *any) bool
@@ -656,15 +661,25 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, val
 // live input it waits for input-log space: the dump may be removed after Sync,
 // so its points must never overflow the log's bounded admission buffer.
 func (c *Cache) AddRestored(p *points.Points) {
+	c.addRestored(p, false)
+}
+
+// AddRestoredBeforeInput keeps dump points durably logged but immediately
+// eligible when startup must drain old history before opening receivers.
+func (c *Cache) AddRestoredBeforeInput(p *points.Points) {
+	c.addRestored(p, true)
+}
+
+func (c *Cache) addRestored(p *points.Points, immediate bool) {
 	if len(p.Data) > maxShardRestoredLogEntries {
 		batch := *p
 		for start := 0; start < len(p.Data); start += maxShardRestoredLogEntries {
 			batch.Data = p.Data[start:min(start+maxShardRestoredLogEntries, len(p.Data))]
-			c.AddRestored(&batch)
+			c.addRestored(&batch, immediate)
 		}
 		return
 	}
-	for wait := c.add(p, true, false); wait != nil; wait = c.add(p, true, false) {
+	for wait := c.addWithRestore(p, true, false, immediate); wait != nil; wait = c.addWithRestore(p, true, false, immediate) {
 		<-wait
 	}
 }
@@ -676,7 +691,11 @@ func (c *Cache) AddRecovered(p *points.Points) {
 	c.add(p, true, true)
 }
 
-func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} {
+func (c *Cache) add(p *points.Points, restored, recovered bool) {
+	c.addWithRestore(p, restored, recovered, false)
+}
+
+func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool) <-chan struct{} {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
@@ -715,7 +734,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} 
 	// Without the log the dump file goes after restore, leaving them only
 	// here: they are written at once, as are recovered points, whose source
 	// readers may wait for the cache to drain.
-	spreadRestore := restored && !recovered && s.writeoutRestoreSpread && s.batching() && shard.log.first != nil
+	spreadRestore := restored && !recovered && !immediate && s.writeoutRestoreSpread && s.batching() && shard.log.first != nil
 
 	values := shard.items.get(p.Metric)
 	exists := values != nil
@@ -756,7 +775,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} 
 		values = newItem(p.Metric, shard.bytesHint())
 		shard.items.set(p.Metric, values)
 		if s.batching() && (!restored || spreadRestore) {
-			now := time.Now()
+			now, held := s.writeoutTime(time.Now())
 			if spreadRestore {
 				values.firstArrival = s.restoreArrival(values, now)
 			} else {
@@ -767,7 +786,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) <-chan struct{} 
 					values.sparse = shard.sparseSince(values, p.Data[0].Timestamp, cur.writeoutMaxDelay, shard.items.len())
 				}
 			}
-			c.spreadStartup(values, s, now)
+			c.spreadStartup(values, s, now, held)
 		}
 
 		if shard.adds != nil {
@@ -847,7 +866,7 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 		if immediate || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
 			c.writeoutQueue.notifyAt(time.Now())
 		} else if !exists {
-			c.writeoutQueue.notifyAt(values.firstArrival.Add(s.delayFor(values)))
+			c.writeoutQueue.notifyAt(writeoutDeadline(values, s))
 		}
 	}
 }
@@ -973,4 +992,12 @@ func (c *Cache) DivertToPointWriter(write func(*points.Points) error) {
 	s := *c.settings.Load().(*cacheSettings)
 	s.xlog = write
 	c.settings.Store(&s)
+}
+
+// SetRestartOrder serves the oldest eligible queued points during restart.
+// The configured strategy resumes when active returns false.
+func (c *Cache) SetRestartOrder(active func() bool) {
+	c.mu.Lock()
+	c.restartOrder = active
+	c.mu.Unlock()
 }
