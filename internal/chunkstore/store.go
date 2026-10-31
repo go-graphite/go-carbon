@@ -64,6 +64,13 @@ type Options struct {
 	// -1 adapts to ingress, write amplification and backlog; zero disables
 	// pacing. Flushes, ingest tables and WAL writes are never paced.
 	CompactionRate int64
+	// CompactionHeadroom multiplies auto mode's modelled rate: 1..4, zero
+	// keeps the default 2.
+	CompactionHeadroom float64
+	// CompactionWarmup is how long auto mode stays unpaced after start while
+	// it learns rates: 0..24h, nil keeps the default hour. Zero paces from the
+	// first sample.
+	CompactionWarmup *time.Duration
 	// L0CompactionThreshold is the L0 read amplification that triggers an
 	// L0 compaction; L0StopWritesThreshold stops writes. Hot blocks are
 	// rewritten in every flush, so letting more sublevels accumulate drops more
@@ -320,6 +327,19 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.CompactionRate < -1 {
 		return nil, errors.New("compaction rate must be -1 (auto), 0 (off), or positive")
 	}
+	headroom, warmup := options.CompactionHeadroom, compactionWarmupDefault
+	if headroom == 0 {
+		headroom = compactionHeadroomDefault
+	}
+	if options.CompactionWarmup != nil {
+		warmup = *options.CompactionWarmup
+	}
+	if !validCompactionHeadroom(headroom) {
+		return nil, errCompactionHeadroom
+	}
+	if !validCompactionWarmup(warmup) {
+		return nil, errCompactionWarmup
+	}
 	fs := options.fs
 	if fs == nil {
 		fs = vfs.Default
@@ -352,6 +372,8 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	s := &Store{now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
 	s.compactionControl = newCompactionController(pacing.pacer, options.CompactionRate, time.Now())
+	s.compactionControl.setHeadroom(headroom)
+	s.compactionControl.setWarmup(warmup)
 	s.continuation = options.Continuation
 	s.fetchSharedIterator = options.FetchSharedIterator
 	stateKeys, _ := options.Continuation.(ContinuationStateKeys)
@@ -991,6 +1013,8 @@ type Stats struct {
 	CompactionPacerBytes                                                                               uint64
 	CompactionPacerTargetRate                                                                          int64
 	CompactionPacerAuto                                                                                bool
+	CompactionPacerHeadroom                                                                            float64
+	CompactionPacerWarmup                                                                              time.Duration
 	CompactionPacerBypass                                                                              string
 	CompactionPacerBypasses                                                                            map[string]uint64
 	CompactionsInProgress                                                                              int64
@@ -1066,7 +1090,7 @@ func (s *Store) Stats() Stats {
 		CacheBytes: uint64(m.BlockCache.Size), CacheHits: uint64(m.BlockCache.Hits), CacheMisses: uint64(m.BlockCache.Misses),
 		Flushes: uint64(m.Flush.Count), Compactions: uint64(m.Compact.Count), CompactionDebt: m.Compact.EstimatedDebt,
 		CompactionRate: pacing.rate, CompactionPacerBytes: s.compactionPacing.pacer.bytes.Load(), CompactionPacerWaitNanos: s.compactionPacing.pacer.wait.Load(),
-		CompactionPacerTargetRate: pacing.target, CompactionPacerAuto: pacing.auto, CompactionPacerBypass: pacing.bypass, CompactionPacerBypasses: pacing.bypasses,
+		CompactionPacerTargetRate: pacing.target, CompactionPacerAuto: pacing.auto, CompactionPacerHeadroom: pacing.headroom, CompactionPacerWarmup: pacing.warmup, CompactionPacerBypass: pacing.bypass, CompactionPacerBypasses: pacing.bypasses,
 		CompactionsInProgress: m.Compact.NumInProgress,
 		CompactionWorkers:     s.compactionWorkers.Load(), L0Sublevels: int64(m.Levels[0].Sublevels), L0Files: m.Levels[0].NumFiles, L0Bytes: m.Levels[0].Size,
 		CompactionReadBytes: read, CompactionWriteBytes: written, FlushWriteBytes: flushed,
@@ -1122,6 +1146,31 @@ func (s *Store) SetCompactionRate(rate int64) error {
 		return errors.New("compaction rate must be -1 (auto), 0 (off), or positive")
 	}
 	s.compactionControl.setMode(rate)
+	return nil
+}
+
+var (
+	errCompactionHeadroom = errors.New("compaction rate headroom must be 1..4")
+	errCompactionWarmup   = errors.New("compaction pacing warmup must be 0..24h")
+)
+
+// SetCompactionHeadroom changes the multiplier auto mode applies to its
+// modelled compaction rate, immediately.
+func (s *Store) SetCompactionHeadroom(headroom float64) error {
+	if !validCompactionHeadroom(headroom) {
+		return errCompactionHeadroom
+	}
+	s.compactionControl.setHeadroom(headroom)
+	return nil
+}
+
+// SetCompactionWarmup changes how long auto mode stays unpaced after the store
+// started. It never restarts the warm-up.
+func (s *Store) SetCompactionWarmup(warmup time.Duration) error {
+	if !validCompactionWarmup(warmup) {
+		return errCompactionWarmup
+	}
+	s.compactionControl.setWarmup(warmup)
 	return nil
 }
 

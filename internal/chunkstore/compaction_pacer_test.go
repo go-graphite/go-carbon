@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -177,6 +178,61 @@ func TestCompactionRateRejectsInvalid(t *testing.T) {
 	defer db.Close()
 	if err := db.SetCompactionRate(-2); err == nil || db.Stats().CompactionRate != 0 {
 		t.Fatal("negative reload changed the rate")
+	}
+}
+
+func TestCompactionHeadroomAndWarmupValidation(t *testing.T) {
+	t.Parallel()
+	d := func(v time.Duration) *time.Duration { return &v }
+	for name, options := range map[string]Options{
+		"low headroom":  {CompactionHeadroom: 0.5},
+		"high headroom": {CompactionHeadroom: 4.5},
+		"NaN headroom":  {CompactionHeadroom: math.NaN()},
+		"negative warm": {CompactionWarmup: d(-time.Second)},
+		"too long warm": {CompactionWarmup: d(25 * time.Hour)},
+	} {
+		if db, err := Open(t.TempDir(), options); err == nil {
+			_ = db.Close()
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	db, err := Open(t.TempDir(), Options{CompactionRate: -1, CompactionHeadroom: 1.5, CompactionWarmup: d(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if st := db.Stats(); st.CompactionPacerHeadroom != 1.5 || st.CompactionPacerWarmup != 0 {
+		t.Fatalf("open options not applied: %+v", st)
+	}
+	for _, h := range []float64{0, 0.99, 4.01, math.NaN(), math.Inf(1)} {
+		if err := db.SetCompactionHeadroom(h); err == nil {
+			t.Fatalf("headroom %v accepted", h)
+		}
+	}
+	for _, w := range []time.Duration{-1, 24*time.Hour + 1} {
+		if err := db.SetCompactionWarmup(w); err == nil {
+			t.Fatalf("warmup %v accepted", w)
+		}
+	}
+	if st := db.Stats(); st.CompactionPacerHeadroom != 1.5 || st.CompactionPacerWarmup != 0 {
+		t.Fatalf("rejected values changed tuning: %+v", st)
+	}
+	if err := db.SetCompactionHeadroom(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetCompactionWarmup(24 * time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if st := db.Stats(); st.CompactionPacerHeadroom != 1 || st.CompactionPacerWarmup != 24*time.Hour || st.CompactionPacerBypass != "warmup" {
+		t.Fatalf("valid reload not applied: %+v", st)
+	}
+	def, err := Open(t.TempDir(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer def.Close()
+	if st := def.Stats(); st.CompactionPacerHeadroom != 2 || st.CompactionPacerWarmup != time.Hour {
+		t.Fatalf("defaults changed: %+v", st)
 	}
 }
 

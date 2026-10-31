@@ -345,3 +345,72 @@ func TestCompactionControllerSamplesStoreIngress(t *testing.T) {
 		t.Fatalf("unpaced output lost or counted as ingress: before=%+v after=%+v compacted=%d paced=%d", ingested, after, st.CompactionWriteBytes, st.CompactionPacerBytes)
 	}
 }
+
+func TestCompactionControllerHeadroomScalesBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := learnedCompactionController()
+		// 60 MiB/s learned output dominates 20 MiB/s ingress at the smoothed
+		// amplification, and constant debt adds no trend.
+		for _, tc := range []struct {
+			headroom float64
+			want     int64
+		}{{2, 120 << 20}, {1.5, 90 << 20}, {1, 60 << 20}, {4, 240 << 20}} {
+			c.setHeadroom(tc.headroom)
+			st := c.stats()
+			if st.bypass != "" || st.headroom != tc.headroom || st.rate < tc.want || st.rate > tc.want+1<<20 {
+				t.Fatalf("headroom %v: want rate ~%d: %+v", tc.headroom, tc.want, st)
+			}
+		}
+		// Fixed budgets ignore the headroom.
+		c.setMode(12345)
+		if st := c.stats(); st.rate != 12345 {
+			t.Fatalf("headroom changed a fixed budget: %+v", st)
+		}
+	})
+}
+
+func TestCompactionControllerZeroWarmup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newCompactionController(newCompactionPacer(0), -1, time.Now())
+		c.setWarmup(0)
+		if st := c.stats(); st.rate != 0 || st.bypass != "warmup" || st.warmup != 0 {
+			t.Fatalf("zero warmup paced before any sample: %+v", st)
+		}
+		sampleCompactionRates(c, time.Second, 20<<20, 60<<20, 1<<30)
+		// The bias-corrected EWMA reflects the first second at once.
+		if st := c.stats(); st.bypass != "" || st.rate < 120<<20 || st.rate > 125<<20 {
+			t.Fatalf("zero warmup did not pace after the first sample: %+v", st)
+		}
+	})
+}
+
+func TestCompactionControllerWarmupReloadKeepsStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		c := newCompactionController(newCompactionPacer(0), -1, started)
+		for range 10 {
+			sampleCompactionRates(c, time.Minute, 20<<20, 60<<20, 1<<30)
+		}
+		if st := c.stats(); st.bypass != "warmup" || st.warmup != time.Hour {
+			t.Fatalf("default warmup: %+v", st)
+		}
+		// Ten minutes in, a five-minute warm-up has already elapsed.
+		c.setWarmup(5 * time.Minute)
+		if st := c.stats(); st.bypass != "" || st.rate <= compactionPacingFloor || !c.started.Equal(started) {
+			t.Fatalf("shortened warmup did not pace at once: %+v", st)
+		}
+		c.setWarmup(time.Hour)
+		if st := c.stats(); st.bypass != "warmup" || !c.started.Equal(started) {
+			t.Fatalf("lengthened warmup did not resume the bypass: %+v", st)
+		}
+		c.setWarmup(20 * time.Minute)
+		sampleCompactionRates(c, 10*time.Minute-time.Second, 20<<20, 60<<20, 1<<30)
+		if c.stats().bypass != "warmup" {
+			t.Fatal("warmup ended early")
+		}
+		sampleCompactionRates(c, time.Second, 20<<20, 60<<20, 1<<30)
+		if st := c.stats(); st.bypass != "" || !c.started.Equal(started) {
+			t.Fatalf("warmup measured from reload, not start: %+v", st)
+		}
+	})
+}

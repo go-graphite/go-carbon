@@ -193,6 +193,11 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"physical quota", func(c *Config) { c.Whisper.Quotas = persister.WhisperQuotas{{PhysicalSize: 1}} }},
 		{"small memtable", func(c *Config) { c.Whisper.StoreMemTableSize = 1 }},
 		{"invalid compaction rate", func(c *Config) { c.Whisper.StoreCompactionRate = -2 }},
+		{"low compaction headroom", func(c *Config) { c.Whisper.StoreCompactionHeadroom = 0.5 }},
+		{"high compaction headroom", func(c *Config) { c.Whisper.StoreCompactionHeadroom = 4.5 }},
+		{"missing compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = nil }},
+		{"negative compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{-time.Second} }},
+		{"long compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{25 * time.Hour} }},
 		{"negative compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = -1 }},
 		{"large compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = 65 }},
 		{"negative L0 concurrency", func(c *Config) { c.Whisper.StoreL0CompactionConcurrency = -1 }},
@@ -478,6 +483,40 @@ func TestReloadCompactionRate(t *testing.T) {
 		if app.MetricStore != db || st.CompactionRate != rate {
 			t.Fatalf("rate reload did not preserve store and set rate %d", rate)
 		}
+	}
+}
+
+func TestReloadCompactionHeadroomAndWarmup(t *testing.T) {
+	path, cfg := incrementalAppFixture(t)
+	cfg.Whisper.StoreCompactionRate = -1
+	cfg.Whisper.StoreCompactionHeadroom = 1.25
+	writeSharedConfig(t, path, cfg)
+	app := startIncrementalApp(t, path)
+	db := app.MetricStore
+	if st := db.Stats(); st.CompactionPacerHeadroom != 1.25 || st.CompactionPacerWarmup != time.Hour || st.CompactionPacerBypass != "warmup" {
+		t.Fatalf("startup tuning: %+v", st)
+	}
+	next := *cfg
+	next.Whisper.StoreCompactionHeadroom = 1.5
+	next.Whisper.StoreCompactionWarmup = &Duration{0}
+	if storageSettingsChanged(cfg, &next) {
+		t.Fatal("compaction headroom and warmup require restart")
+	}
+	writeSharedConfig(t, path, &next)
+	if err := app.ReloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if st := db.Stats(); app.MetricStore != db || st.CompactionPacerHeadroom != 1.5 || st.CompactionPacerWarmup != 0 {
+		t.Fatalf("reloaded tuning: %+v", st)
+	}
+	bad := next
+	bad.Whisper.StoreCompactionHeadroom = 5
+	writeSharedConfig(t, path, &bad)
+	if err := app.ReloadConfig(); err == nil {
+		t.Fatal("invalid headroom reloaded")
+	}
+	if st := db.Stats(); st.CompactionPacerHeadroom != 1.5 {
+		t.Fatalf("rejected reload changed headroom: %+v", st)
 	}
 }
 

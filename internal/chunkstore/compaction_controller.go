@@ -7,10 +7,16 @@ import (
 )
 
 const (
-	compactionPacingWindow   = time.Hour
-	compactionPacingFloor    = 8 << 20
-	compactionStallHold      = 5 * time.Minute
-	compactionConversionHold = 5 * time.Minute
+	compactionPacingWindow = time.Hour
+	compactionPacingFloor  = 8 << 20
+	// Auto mode's defaults: twice the modelled rate after one unpaced hour.
+	compactionHeadroomDefault = 2.0
+	compactionWarmupDefault   = time.Hour
+	compactionHeadroomMin     = 1.0
+	compactionHeadroomMax     = 4.0
+	compactionWarmupMax       = 24 * time.Hour
+	compactionStallHold       = 5 * time.Minute
+	compactionConversionHold  = 5 * time.Minute
 )
 
 type compactionSample struct {
@@ -24,6 +30,8 @@ type compactionSample struct {
 type compactionPacingStats struct {
 	rate, target int64
 	auto         bool
+	headroom     float64
+	warmup       time.Duration
 	bypass       string
 	bypasses     map[string]uint64
 }
@@ -35,6 +43,8 @@ type compactionController struct {
 	mu                      sync.Mutex
 	pacer                   *compactionPacer
 	mode, target, l0Limit   int64
+	headroom                float64
+	warmup                  time.Duration
 	started, last           time.Time
 	previous                compactionSample
 	weight, ingress, output float64
@@ -53,6 +63,7 @@ type compactionController struct {
 
 func newCompactionController(p *compactionPacer, mode int64, now time.Time) *compactionController {
 	c := &compactionController{pacer: p, mode: mode, l0Limit: 6, started: now, last: now,
+		headroom: compactionHeadroomDefault, warmup: compactionWarmupDefault,
 		amplification: 1, bypasses: make(map[string]uint64)}
 	c.apply(now)
 	return c
@@ -90,7 +101,7 @@ func (c *compactionController) sample(now time.Time, s compactionSample) {
 	} else {
 		c.debtAlarm = debt > max(4<<30, 2*normal)
 	}
-	if !c.debtAlarm || now.Sub(c.started) < compactionPacingWindow {
+	if !c.debtAlarm || now.Sub(c.started) < c.warmup {
 		c.debtMean += a * (debt - c.debtMean)
 		c.debtWeight += a * (1 - c.debtWeight)
 	}
@@ -113,7 +124,7 @@ func (c *compactionController) apply(now time.Time) {
 	if c.mode == -1 {
 		budget := float64(compactionPacingFloor)
 		if c.weight > 0 {
-			budget = max(budget, 2*max(c.ingress*c.amplification, c.output)/c.weight+max(0, c.debtTrend))
+			budget = max(budget, c.headroom*max(c.ingress*c.amplification, c.output)/c.weight+max(0, c.debtTrend))
 		}
 		target = math.MaxInt64
 		if budget < float64(math.MaxInt64) {
@@ -131,7 +142,8 @@ func (c *compactionController) apply(now time.Time) {
 			reason = "memtable"
 		case c.debtAlarm:
 			reason = "debt"
-		case now.Sub(c.started) < compactionPacingWindow:
+		case c.weight == 0 || now.Sub(c.started) < c.warmup:
+			// Even a zero warm-up waits for a first sample of the rates.
 			reason = "warmup"
 		}
 	}
@@ -155,6 +167,30 @@ func (c *compactionController) setMode(mode int64) {
 	defer c.mu.Unlock()
 	c.mode = mode
 	c.apply(time.Now())
+}
+
+func (c *compactionController) setHeadroom(headroom float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.headroom = headroom
+	c.apply(time.Now())
+}
+
+// setWarmup is measured from the controller's start, which a reload never
+// resets: shortening it on a host up for longer starts pacing at once.
+func (c *compactionController) setWarmup(warmup time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warmup = warmup
+	c.apply(time.Now())
+}
+
+func validCompactionHeadroom(headroom float64) bool {
+	return headroom >= compactionHeadroomMin && headroom <= compactionHeadroomMax
+}
+
+func validCompactionWarmup(warmup time.Duration) bool {
+	return warmup >= 0 && warmup <= compactionWarmupMax
 }
 
 func (c *compactionController) stall(active bool) {
@@ -187,7 +223,7 @@ func (c *compactionController) stats() compactionPacingStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := compactionPacingStats{rate: c.pacer.rateBytes(), target: c.target, auto: c.mode == -1,
-		bypass: c.bypass, bypasses: make(map[string]uint64, len(c.bypasses))}
+		headroom: c.headroom, warmup: c.warmup, bypass: c.bypass, bypasses: make(map[string]uint64, len(c.bypasses))}
 	for reason, count := range c.bypasses {
 		s.bypasses[reason] = count
 	}
