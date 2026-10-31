@@ -367,6 +367,7 @@ type Config struct {
 	// GOMEMLIMIT wins over memoryLimit.
 	memoryBudget int64
 	memoryLimit  int64
+	unknownKeys  []toml.Key
 	Buckyd       buckyd.Config                       `toml:"buckyd"`
 	Common       commonConfig                        `toml:"common"`
 	Whisper      whisperConfig                       `toml:"whisper"`
@@ -586,6 +587,16 @@ func ReadConfig(filename string) (*Config, error) {
 
 		if defined, err = toml.Decode(body, cfg); err != nil {
 			return nil, err
+		}
+		cfg.unknownKeys = unknownConfigKeys(defined)
+		for _, key := range cfg.unknownKeys {
+			message := fmt.Sprintf("[WARN] unknown config key %q", key.String())
+			if suggestion := suggestConfigKey(key); suggestion != "" {
+				message += fmt.Sprintf("; did you mean %q?", suggestion)
+			}
+			// Logging is configured only after startup parsing. Like the
+			// deprecation warnings below, use stderr so these cannot be lost.
+			log.Print(message)
 		}
 	}
 	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {

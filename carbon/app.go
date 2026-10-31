@@ -92,6 +92,7 @@ type App struct {
 	Collector              *Collector // (!!!) Should be re-created on every change config/modules
 	PromRegisterer         prometheus.Registerer
 	PromRegistry           *prometheus.Registry
+	configUnknownKeys      prometheus.Gauge
 	mallocCollector        *malloc.Collector
 	mallocTrimmer          *malloc.Trimmer
 	mallocTrimEvery        time.Duration
@@ -226,6 +227,9 @@ func (app *App) configure() error {
 	// running under an obsolete rule. ReloadConfig restarts it below.
 	app.stopExpiration()
 	app.Config = cfg
+	if app.configUnknownKeys != nil {
+		app.configUnknownKeys.Set(float64(len(cfg.unknownKeys)))
+	}
 	app.readPolicyConfig.Store(cfg)
 	if app.quotaReloader != nil {
 		app.quotaReloader.configureLocked(cfg)
@@ -382,6 +386,14 @@ func (app *App) ParseConfig() error {
 			app.PromRegistry,
 		)
 	}
+	if app.configUnknownKeys == nil {
+		app.configUnknownKeys = prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "config_unknown_keys",
+			Help: "Unknown TOML keys in the currently loaded configuration.",
+		})
+		app.PromRegisterer.MustRegister(app.configUnknownKeys)
+	}
+	app.configUnknownKeys.Set(float64(len(app.Config.unknownKeys)))
 
 	return err
 }
