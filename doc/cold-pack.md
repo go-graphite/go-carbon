@@ -169,6 +169,19 @@ clock, mode and result variables. Its `reference` directory and peer logs are
 created beside the clone. This optional qualification is separate from fast
 package tests; each process has a bounded benchmark deadline.
 
+`TestColdPackSyntheticSweep` builds a settled v7 store without a corpus. Set
+`COLD_PACK_SWEEP_METRICS=4096` to opt in: fifteen of every sixteen metrics have
+only 64 points, and the others have 1800 points, all outside the write window.
+Each trial starts from a fresh checkpoint, runs the real paced driver, then
+compares every archive bit-for-bit against the ordinary fixture. Receipts include
+points/s, process CPU, worker time, disk-reserve sampling and codec time.
+`COLD_PACK_SWEEP_RESULT` selects a JSON output path; `COLD_PACK_SWEEP_PROFILE`
+selects a prefix for per-trial CPU profiles and execution traces, excluding setup
+and the oracle. `COLD_PACK_SWEEP_TRIAL` selects `raised` (8 MiB/s, 0.25 CPU),
+`default` (1 MiB/s, 0.02 CPU), or `unlimited`; unset runs all three. Larger
+fixtures should run one trial per invocation to keep the 150-second test limit.
+Keep `TMPDIR` and `GOTMPDIR` in a private scratch directory.
+
 Before a canary, validate the actual retained cold fraction and free-space
 headroom. Start exact mode on one representative host with ample disk and low
 budgets; compare matched read p50/p99, accepted/persisted points, correction errors,
