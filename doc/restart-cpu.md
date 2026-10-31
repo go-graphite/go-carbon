@@ -33,6 +33,14 @@ reads and input logging proceed independently; optional warming and post-gate
 writeout share the remaining allowance. A configured fallback should leave
 headroom above mandatory CPU consumption. Zero never means unlimited CPU.
 
+Optional catalog warming and validation yield to waiting writers, required
+cold-state prefetch, and any observed writeout-floor shortfall, even when CPU
+credit remains. Bulk checkpoint loading and validation needed by upcoming cold
+writes share CPU credit alongside catch-up writeout. Deferring the checkpoint
+behind below-floor writeout can starve the writes it accelerates, because cold
+metadata itself keeps writeout below the floor. Already admitted bounded batches
+can briefly overlap writes; admission does not preempt running work.
+
 Increasing headroom trades extra CPU for faster recovery; it does not guarantee
 a recovery time or cache peak. A rough spend estimate at a fixed steady
 load is `(headroom - 1) × steady cores × recovery minutes` extra core-minutes

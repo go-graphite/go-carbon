@@ -187,12 +187,13 @@ func TestHistorySaveFailureIsReported(t *testing.T) {
 	}
 }
 
-func TestCheckpointLoadingSharesCPUWithActiveWriters(t *testing.T) {
+func TestRequiredCheckpointValidationSharesCPUWithActiveWriters(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		used := 0.0
 		b := NewWithCPU(2, func() float64 { return used })
 		b.BeginWriteout()
 		defer b.EndWriteout()
+		b.ObserveWriteout(100, 0)
 		if err := b.WaitCheckpoint(context.Background()); err != nil {
 			t.Fatal(err)
 		}

@@ -271,7 +271,8 @@ store-l0-compaction-concurrency = 0
 # the whole checkpoint. It offers each cold window's provisional records for
 # validation with a shared revision iterator before writeout admission; a record
 # still unfinished at first use is an ordinary cache miss. Checkpoint loading
-# shares CPU with writes and cannot starve behind a continuously active writer pool.
+# shares CPU with catch-up writes, including below-floor writeout, and cannot
+# starve behind the writes it accelerates. Optional catalog warming still yields.
 # UUID, clean token, exact committed sequence and record checksums reject
 # foreign/divergent/crashed/damaged files. Mutations invalidate old records; a
 # bounded changed-name filter excludes refills after revision-neutral relayout.

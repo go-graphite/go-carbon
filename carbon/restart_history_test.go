@@ -120,6 +120,61 @@ func TestRestartCPUAllowanceLogging(t *testing.T) {
 	}
 }
 
+func TestMetadataCheckpointLoadsAlongsideWriteout(t *testing.T) {
+	// The checkpoint accelerates the cold writes that keep writeout below its
+	// floor; deferring it behind them kept a production restart below the floor.
+	for _, pressure := range []string{"writer", "prefetch", "floor"} {
+		t.Run(pressure, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := store.Options{MetadataCacheSize: 1 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20}
+			db, err := store.Open(dir, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const name = "checkpoint.priority"
+			if _, err := db.Create(context.Background(), store.MetricConfig{Name: name, Retentions: []store.Retention{{Step: 1, Count: 100}}, AggregationMethod: store.Average}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Metadata(context.Background(), name); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.MetadataCheckpointError(); err != nil {
+				t.Fatal(err)
+			}
+			db, err = store.Open(dir, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			synctest.Test(t, func(t *testing.T) {
+				defer db.StopBackground()
+				budget := restartcpu.NewWithCPU(48, func() float64 { return 0 })
+				switch pressure {
+				case "writer":
+					budget.BeginWriteout()
+					defer budget.EndWriteout()
+				case "prefetch":
+					budget.BeginPrefetch()
+					defer budget.EndPrefetch()
+				default:
+					budget.ObserveWriteout(100, 0)
+				}
+				ready := make(chan struct{})
+				close(ready)
+				progress := new(store.PrewarmProgress)
+				done := startMetadataPrewarm(db, whisperConfig{StoreMetadataCachePrewarm: true}, "test", nil, ready, progress, nil, budget)
+				<-done
+				if !db.MetadataCached(name) {
+					t.Fatal("checkpoint did not load while writeout was under pressure")
+				}
+			})
+		})
+	}
+}
+
 func TestMetadataPrewarmCompletesRestartBudget(t *testing.T) {
 	db, err := store.Open(t.TempDir(), store.Options{MetadataCacheSize: 1 << 20, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {

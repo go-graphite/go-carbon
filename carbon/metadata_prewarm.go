@@ -41,7 +41,8 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 			defer warmed()
 		}
 		// Stream the saved accelerator alongside writes within the shared
-		// credit; unlike optional validation it must not starve behind writers.
+		// credit. Cold metadata can keep writeout below its floor, so loading
+		// must not wait behind the writes that the checkpoint accelerates.
 		checkpointOptions := options
 		if budget != nil {
 			checkpointOptions.Wait = budget.WaitCheckpoint
