@@ -167,8 +167,9 @@ QueueLoop:
 			select {
 			case <-rebuild(abort):
 				continue QueueLoop
-			case <-abort:
-				return ""
+			default:
+				// Rebuild in parallel while consuming the old eligible names.
+				// A slow catalog-sized scan must not empty the writer pool.
 			}
 		}
 
@@ -203,11 +204,7 @@ func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
 func (q *WriteoutQueue) TryGet() string {
 	q.RLock()
 	queue := q.queue
-	refreshAt := q.refreshAt
 	q.RUnlock()
-	if !refreshAt.IsZero() && !time.Now().Before(refreshAt) {
-		return ""
-	}
 	for {
 		select {
 		case metric := <-queue:

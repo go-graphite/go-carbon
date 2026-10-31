@@ -8,6 +8,8 @@ import (
 	"iter"
 	"reflect"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -25,7 +27,9 @@ func (*controlledWarmer) Create(context.Context, store.MetricConfig) (store.Meta
 	return store.Metadata{}, nil
 }
 func (*controlledWarmer) UpdateMany(context.Context, string, []points.Point) error { return nil }
-func (*controlledWarmer) MetadataCached(name string) bool                          { return name == "warm" }
+func (*controlledWarmer) MetadataCached(name string) bool {
+	return strings.HasPrefix(name, "warm")
+}
 func (w *controlledWarmer) PrewarmWriteout(ctx context.Context, names []string) {
 	select {
 	case w.entered <- append([]string(nil), names...):
@@ -58,24 +62,26 @@ func TestWarmFirstPassesWarmNamesAndJoinsPrefetch(t *testing.T) {
 	})
 	p.SetMetricStore(w)
 	p.SetWarmFirst(true)
-	p.SetWorkers(1)
+	p.workersCount = 0 // Start the prefetch window before its consumer deterministically.
 	p.SetRestartBudget(restartcpu.NewWithCPU(1, func() float64 { return 0 }), nil)
 	p.SetMockStore(func() (StoreFunc, func()) { return func(name string) { writes <- name }, nil })
 	for cycle := 0; cycle < 2; cycle++ {
-		source <- "cold-old"
+		w.entered = make(chan []string, 4)
 		source <- "warm"
+		source <- "cold-old"
 		source <- "cold-new"
 		if err := p.Start(); err != nil {
 			t.Fatal(err)
 		}
 		select {
 		case names := <-w.entered:
-			if !reflect.DeepEqual(names, []string{"cold-old", "cold-new"}) {
+			if len(names) == 0 || names[0] != "cold-old" {
 				t.Fatal(names)
 			}
 		case <-time.After(time.Second):
 			t.Fatal("cold window did not prefetch")
 		}
+		p.Go(p.worker)
 		select {
 		case name := <-writes:
 			if name != "warm" {
@@ -123,12 +129,60 @@ func TestRestartCatchupHonorsSteadyRateAndConfiguredCap(t *testing.T) {
 	p.stopRestartTicker()
 }
 
+func TestWarmFirstKeepsTheNameAfterAFullPrefetchWindow(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const count = store.DefaultPrewarmBatch + 1
+		source, writes := make(chan string, count), make(chan string, count)
+		for i := range count {
+			source <- "cold-" + strconv.Itoa(i)
+		}
+		warmer := &controlledWarmer{entered: make(chan []string, count), release: make(chan struct{})}
+		close(warmer.release)
+		p := &Whisper{recv: func(exit chan bool) string {
+			select {
+			case name := <-source:
+				return name
+			case <-exit:
+				return ""
+			}
+		}}
+		p.SetWriteoutBatchReceiver(func() string {
+			select {
+			case name := <-source:
+				return name
+			default:
+				return ""
+			}
+		})
+		p.SetMetricStore(warmer)
+		p.SetWarmFirst(true)
+		p.SetWorkers(2)
+		p.SetMockStore(func() (StoreFunc, func()) { return func(name string) { writes <- name }, nil })
+		if err := p.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer p.Stop()
+		seen := make(map[string]bool)
+		for range count {
+			select {
+			case name := <-writes:
+				if seen[name] {
+					t.Fatal("duplicate write", name)
+				}
+				seen[name] = true
+			case <-time.After(time.Second):
+				t.Fatalf("prefetch window lost queued work: wrote %d/%d", len(seen), count)
+			}
+		}
+	})
+}
+
 func TestWarmFirstReservationsDeduplicateRebuiltQueue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		source := make(chan string, 3)
 		source <- "warm"
 		source <- "warm"
-		source <- "cold-new"
+		source <- "warm-other"
 		calls := make(chan string, 4)
 		allowWarm := make(chan struct{})
 		warmer := &controlledWarmer{entered: make(chan []string, 1), release: make(chan struct{})}
@@ -166,17 +220,16 @@ func TestWarmFirstReservationsDeduplicateRebuiltQueue(t *testing.T) {
 		if err := p.Start(); err != nil {
 			t.Fatal(err)
 		}
-		<-warmer.entered
 		time.Sleep(200 * time.Millisecond)
 		synctest.Wait()
-		if len(calls) != 1 {
+		if len(calls) != 2 {
 			t.Fatal("rebuilt queue admitted a duplicate pending write", len(calls))
 		}
 		close(warmer.release)
 		time.Sleep(time.Second)
 		synctest.Wait()
 		if len(calls) != 2 {
-			t.Fatal("distinct cold write did not progress", len(calls))
+			t.Fatal("distinct warm write did not progress", len(calls))
 		}
 		close(allowWarm)
 		synctest.Wait()
@@ -226,17 +279,18 @@ func TestWarmFirstValidatesColdWindowBeforePrefetch(t *testing.T) {
 	})
 	p.SetMetricStore(w)
 	p.SetWarmFirst(true)
-	p.SetWorkers(1)
+	p.workersCount = 0
 	p.SetRestartBudget(restartcpu.NewWithCPU(1, func() float64 { return 0 }), nil)
 	p.SetMockStore(func() (StoreFunc, func()) { return func(name string) { writes <- name }, nil })
 	if err := p.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer p.Stop()
-	want := []string{"cold-old", "cold-new"}
+	var want []string
 	select {
 	case names := <-w.validated:
-		if !reflect.DeepEqual(names, want) {
+		want = names
+		if len(names) == 0 || names[0] != "cold-old" || slices.Contains(names, "warm") {
 			t.Fatal(names)
 		}
 	case <-time.After(time.Second):
@@ -250,6 +304,7 @@ func TestWarmFirstValidatesColdWindowBeforePrefetch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cold window did not prefetch after validation")
 	}
+	p.Go(p.worker)
 	close(w.release)
 	for range 3 {
 		select {

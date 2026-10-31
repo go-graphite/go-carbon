@@ -10,6 +10,21 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+func TestRequiredPrefetchGetsSharedCreditDuringWriteoutShortfall(t *testing.T) {
+	b := NewWithCPU(2, func() float64 { return 0 })
+	b.BeginWriteout()
+	defer b.EndWriteout()
+	b.ObserveWriteout(100, 0)
+	if !b.WaitPrefetch(make(chan bool)) {
+		t.Fatal("required prefetch did not acquire CPU")
+	}
+	defer b.EndPrefetch()
+	s := b.State()
+	if s.Warming <= 0 || s.Writeout <= 0 || s.Warming+s.Writeout > s.Allowance || s.WarmGrants == 0 {
+		t.Fatal("required warming was starved by dependent writeout", s)
+	}
+}
+
 func TestBudgetWriteoutPriority(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		b := NewWithCPU(2, func() float64 { return 0 })

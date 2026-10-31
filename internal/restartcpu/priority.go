@@ -19,7 +19,25 @@ func (b *Budget) BeginWriteout() {
 // Waiting writers reserve priority over optional catalog warming.
 // A successful admission must be paired with EndWriteout.
 func (b *Budget) WaitWriteout(exit <-chan bool) bool {
-	b.writers.Add(1)
+	return b.waitWork(exit, false)
+}
+
+// WaitPrefetch admits required queue preparation or cold-state prefetch from
+// the same process credit. It cannot wait behind the writes that need it.
+// Pair a successful admission with EndPrefetch.
+func (b *Budget) WaitPrefetch(exit <-chan bool) bool { return b.waitWork(exit, true) }
+func (b *Budget) BeginPrefetch() {
+	b.prefetchers.Add(1)
+	b.warmGrants.Add(1)
+}
+func (b *Budget) EndPrefetch() { b.prefetchers.Add(-1) }
+
+func (b *Budget) waitWork(exit <-chan bool, warming bool) bool {
+	pending, grants := &b.writers, &b.writeGrants
+	if warming {
+		pending, grants = &b.prefetchers, &b.warmGrants
+	}
+	pending.Add(1)
 	for b.Active() {
 		delay := b.admissionDelay(time.Now(), true)
 		if delay == 0 {
@@ -29,12 +47,12 @@ func (b *Budget) WaitWriteout(exit <-chan bool) bool {
 		select {
 		case <-exit:
 			timer.Stop()
-			b.writers.Add(-1)
+			pending.Add(-1)
 			return false
 		case <-timer.C:
 		}
 	}
-	b.writeGrants.Add(1)
+	grants.Add(1)
 	return true
 }
 
@@ -80,17 +98,27 @@ func (b *Budget) State() State {
 	defer b.mu.Unlock()
 	s := State{Allowance: b.cores, Process: b.process, Floor: b.floor, Rate: b.rate,
 		WarmGrants: b.warmGrants.Load(), WriteGrants: b.writeGrants.Load()}
-	if b.released || b.writers.Load() > 0 {
-		if active {
-			s.Writeout = max(0, b.cores-b.process)
-		} else {
-			s.Writeout = math.Inf(1)
-		}
-	}
+	writers, prefetchers := b.writers.Load(), b.prefetchers.Load()
 	if !active {
 		s.Warming = math.Inf(1)
-	} else if b.writers.Load() == 0 && b.belowAt.IsZero() && b.credit >= 0 {
-		s.Warming = max(0, b.cores-b.process-s.Writeout)
+		if b.released || writers > 0 {
+			s.Writeout = math.Inf(1)
+		}
+	} else {
+		available := max(0, b.cores-b.process)
+		if prefetchers > 0 {
+			// Report the available shared grant among registered required jobs.
+			// Receivers waiting for names hold no writeout reservation.
+			s.Warming = available
+			if writers > 0 {
+				s.Warming *= float64(prefetchers) / float64(prefetchers+writers)
+				s.Writeout = available - s.Warming
+			}
+		} else if b.released || writers > 0 {
+			s.Writeout = available
+		} else if b.belowAt.IsZero() && b.credit >= 0 {
+			s.Warming = available
+		}
 	}
 	if !b.belowAt.IsZero() {
 		s.BelowFor = time.Since(b.belowAt)

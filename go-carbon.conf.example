@@ -167,6 +167,8 @@ store-l0-compaction-concurrency = 0
 # Both rates default to 0; workers bound concurrency. cpu-cores is a shared
 # whole-process CPU allowance for warming and post-gate writeout, measured from
 # process user+system time. Reads, receivers and input logging never wait on it.
+# Linux reads the all-thread process CPU clock; the process-cores gauge reports
+# a full-second window, separately from the 20ms CPU-admission checks.
 # 0 uses 1.05x the previous host-local steady CPU EWMA, valid for 24 hours.
 # A complete minute with both endpoints after warming/restoration is enough;
 # the first sample is available after two eligible minute ticks. CPU and confirmed
@@ -188,13 +190,18 @@ store-l0-compaction-concurrency = 0
 # Parallel eager validation is the default; lazy validation stays opt-in.
 # Explicit false selects legacy behavior for checkpointing or warm-first.
 # Warm-first starts writeout immediately after input readiness. Cached names
-# pass through; only a bounded window of up to 32 cold names waits for prefetch.
-# Prefetch overlaps already admitted writes, uses queue order and shares the CPU
-# allowance as required writeout work. Failed/raced/refused fills fall back to
+# pass through; bounded cold prefetch overlaps ordinary writeout. If no
+# prefetched name is ready, workers read cold state on their CPU-admitted write
+# path instead of waiting for the prefetcher. A separate bounded source pump
+# keeps supplying names and triggering queue rebuilds during prefetch I/O.
+# Required prefetch/queue preparation shares CPU at writeout priority, appears
+# in the warming grant, and cannot be starved by a below-floor writeout rate.
+# Failed/raced/refused fills fall back to
 # ordinary cold reads. Point ownership and confirmation remain unchanged.
-# During restart, warm eligible metrics pass before cold ones; each group keeps
-# oldest-point order. A long snapshot containing cold work refreshes within one
-# second so later warm arrivals can pass. Queue rebuilds share the process CPU
+# During restart, warm eligible metrics get first admission; each group keeps
+# oldest-point order. A cold snapshot refreshes within one second so later warm
+# arrivals can pass. While a rebuild runs, old eligible names remain writable.
+# Queue rebuilds share the process CPU
 # allowance. Bounded reservations avoid duplicate grants across those rebuilds.
 # Point ownership stays in the cache until ordinary pop/confirmation. Normal
 # write strategy returns when the startup allowance ends.

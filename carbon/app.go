@@ -708,7 +708,7 @@ func (app *App) startPersister() error {
 		app.setMetadataPrewarmGate(p)
 		app.Cache.SetRestartWarmFirst(nil, nil, nil)
 		if app.MetricStore != nil && app.restartBudget != nil && app.Config.Whisper.StoreMetadataCachePrewarm && app.Config.Whisper.StoreMetadataCacheSize > 0 && metadataWarmFirst(app.Config.Whisper) {
-			app.Cache.SetRestartWarmFirst(app.MetricStore.MetadataCached, app.restartBudget.WaitWriteout, app.restartBudget.EndWriteout)
+			app.Cache.SetRestartWarmFirst(app.MetricStore.MetadataCached, app.restartBudget.WaitPrefetch, app.restartBudget.EndPrefetch)
 		}
 		p.Start()
 		app.Persister = p

@@ -49,7 +49,14 @@ func runLive(db *store.Store, metrics, writers, rate, maxUpdates, batchPoints in
 				SetRestartWarmFirst(func(string) bool, func(<-chan bool) bool, func())
 			}); ok {
 				if hint, ok := any(db).(interface{ MetadataCached(string) bool }); ok {
-					ordered.SetRestartWarmFirst(hint.MetadataCached, budget.WaitWriteout, budget.EndWriteout)
+					begin, end := budget.WaitWriteout, budget.EndWriteout
+					if prefetch, ok := any(budget).(interface {
+						WaitPrefetch(<-chan bool) bool
+						EndPrefetch()
+					}); ok {
+						begin, end = prefetch.WaitPrefetch, prefetch.EndPrefetch
+					}
+					ordered.SetRestartWarmFirst(hint.MetadataCached, begin, end)
 				}
 			}
 		}

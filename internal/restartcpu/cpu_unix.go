@@ -4,8 +4,8 @@ package restartcpu
 
 import "syscall"
 
-// CPU returns process user plus system seconds, independent of GOMAXPROCS.
-func CPU() float64 {
+// rusageCPU returns process user plus system seconds, independent of GOMAXPROCS.
+func rusageCPU() float64 {
 	var ru syscall.Rusage
 	if syscall.Getrusage(syscall.RUSAGE_SELF, &ru) != nil {
 		return 0

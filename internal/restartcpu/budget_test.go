@@ -12,6 +12,24 @@ import (
 	"time"
 )
 
+func TestProcessGaugeIncludesBusySlicesBeforeAQuietAdmission(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		read := func() float64 {
+			seconds := time.Since(started).Seconds()
+			return min(seconds, .9)*(10.6/.9) + max(0, seconds-.9)
+		}
+		b := NewWithCPU(16, read)
+		for range 50 {
+			time.Sleep(20 * time.Millisecond)
+			b.delay(time.Now())
+		}
+		if got := b.State().Process; math.Abs(got-10.7) > 1e-6 {
+			t.Fatalf("process gauge discarded busy CPU slices: got=%g want=10.7", got)
+		}
+	})
+}
+
 func TestBudgetAccountsForWholeProcess(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		used := 0.0

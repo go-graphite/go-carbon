@@ -40,9 +40,19 @@ func (p *Whisper) startWarmFirst() {
 	recv, tryRecv := p.recv, p.tryRecv
 	p.warmOriginalRecv, p.warmOriginalTryRecv = recv, tryRecv
 	ready := make(chan string, store.DefaultPrewarmBatch)
+	raw := make(chan string, store.DefaultPrewarmBatch)
 	p.recv = func(exit chan bool) string {
+		// Prefer prefetched names, but an empty prefetch window must not
+		// park the writer pool. Raw names use ordinary CPU-admitted reads.
 		select {
 		case name := <-ready:
+			return name
+		default:
+		}
+		select {
+		case name := <-ready:
+			return name
+		case name := <-raw:
 			return name
 		case <-exit:
 			return ""
@@ -53,11 +63,34 @@ func (p *Whisper) startWarmFirst() {
 		case name := <-ready:
 			return name
 		default:
+		}
+		select {
+		case name := <-raw:
+			return name
+		default:
 			return ""
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
+	// Keep fetching independent of prefetch I/O. One bounded source pump
+	// also drives queue rebuilds while the prefetcher prepares a cold batch.
+	p.Go(func(exit chan bool) {
+		for {
+			name := recv(exit)
+			if name == "" {
+				return
+			}
+			if !p.claimWarmName(name) {
+				continue
+			}
+			select {
+			case raw <- name:
+			case <-exit:
+				return
+			}
+		}
+	})
 	p.Go(func(exit chan bool) {
 		select {
 		case <-exit:
@@ -78,26 +111,30 @@ func (p *Whisper) startWarmFirst() {
 		}
 		cold := make([]string, 0, store.DefaultPrewarmBatch)
 		for {
-			first := recv(exit)
-			if first == "" {
+			var first string
+			select {
+			case first = <-raw:
+			case <-exit:
 				return
 			}
 			cold = cold[:0]
 			name := first
 			for i := 0; i < store.DefaultPrewarmBatch && name != ""; i++ {
-				if p.claimWarmName(name) {
-					if warmer.MetadataCached(name) {
-						if !send(name) {
-							return
-						}
-					} else {
-						cold = append(cold, name)
+				if warmer.MetadataCached(name) {
+					if !send(name) {
+						return
 					}
+				} else {
+					cold = append(cold, name)
 				}
-				if tryRecv == nil {
+				if i+1 == store.DefaultPrewarmBatch {
 					break
 				}
-				name = tryRecv()
+				select {
+				case name = <-raw:
+				default:
+					name = ""
+				}
 			}
 
 			if len(cold) == 0 {
@@ -121,16 +158,16 @@ func (p *Whisper) startWarmFirst() {
 			// compete as optional catalog work or wait while holding store locks.
 			if p.restartBudget != nil {
 				if p.restartPaced() {
-					if !p.restartBudget.WaitWriteout(exit) {
+					if !p.restartBudget.WaitPrefetch(exit) {
 						return
 					}
 				} else {
-					p.restartBudget.BeginWriteout()
+					p.restartBudget.BeginPrefetch()
 				}
 			}
 			warmer.PrewarmWriteout(ctx, cold)
 			if p.restartBudget != nil {
-				p.restartBudget.EndWriteout()
+				p.restartBudget.EndPrefetch()
 			}
 			for _, name := range cold {
 				if !send(name) {
@@ -141,8 +178,9 @@ func (p *Whisper) startWarmFirst() {
 	})
 }
 
-// Reservations are bounded by worker batch slots and two prefetch windows. They prevent a
-// refreshed queue from spending rate/CPU grants on names already in the pipeline.
+// Reservations are bounded by worker batch slots, the raw/ready/prefetch
+// windows and one source-pump name. They prevent refreshed snapshots from
+// spending rate/CPU grants on names already in the pipeline.
 type warmReservations struct {
 	mu    sync.Mutex
 	names map[string]struct{}

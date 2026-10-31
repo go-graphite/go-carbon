@@ -15,6 +15,8 @@ type Budget struct {
 	mu                   sync.Mutex
 	cores, credit, used  float64
 	at                   time.Time
+	observedAt           time.Time
+	observedCPU          float64
 	read                 func() float64
 	until                time.Time
 	warmed               atomic.Bool
@@ -22,6 +24,7 @@ type Budget struct {
 	drainDone            atomic.Bool
 	nextDrain            atomic.Int64
 	writers              atomic.Int64
+	prefetchers          atomic.Int64
 	written              atomic.Uint64
 	warmGrants           atomic.Uint64
 	writeGrants          atomic.Uint64
@@ -42,7 +45,8 @@ func New(cores float64) *Budget {
 // NewWithCPU supplies cumulative process CPU seconds, including mandatory work.
 // It also lets deterministic tests model saturated receivers without burning CPU.
 func NewWithCPU(cores float64, read func() float64) *Budget {
-	return &Budget{cores: cores, at: time.Now(), used: read(), read: read, until: time.Now().Add(30 * time.Minute)}
+	now, used := time.Now(), read()
+	return &Budget{cores: cores, at: now, used: used, observedAt: now, observedCPU: used, read: read, until: now.Add(30 * time.Minute)}
 }
 
 func (b *Budget) Cores() float64 { return b.cores }
@@ -96,13 +100,22 @@ func (b *Budget) admissionDelay(now time.Time, writeout bool) time.Duration {
 	defer b.mu.Unlock()
 	if now.Sub(b.at) >= 20*time.Millisecond {
 		used := b.read()
-		b.process = (used - b.used) / now.Sub(b.at).Seconds()
+		if b.observedAt.IsZero() {
+			b.observedAt, b.observedCPU = b.at, b.used
+		}
+		// Keep reporting separate from the short admission interval. A scrape
+		// after a quiet 20ms slice must not report one core for a process
+		// spending ten cores across the preceding second.
+		if elapsed := now.Sub(b.observedAt); elapsed >= time.Second {
+			b.process = (used - b.observedCPU) / elapsed.Seconds()
+			b.observedAt, b.observedCPU = now, used
+		}
 		// Mandatory work may exceed the allowance indefinitely. It must not
 		// leave optional work repaying an unbounded historical CPU debt.
 		b.credit = max(-b.cores*.1, min(b.cores*.04, b.credit+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
 		b.at, b.used = now, used
 	}
-	if !writeout && (b.writers.Load() > 0 || !b.belowAt.IsZero()) {
+	if !writeout && (b.writers.Load() > 0 || b.prefetchers.Load() > 0 || !b.belowAt.IsZero()) {
 		return 100 * time.Millisecond
 	}
 	if b.credit >= 0 {
