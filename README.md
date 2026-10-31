@@ -502,14 +502,6 @@ max-metrics-rendered = 1000
 # (Default: 2 * max-cpu)
 max-fetch-data-goroutines = 0
 
-# graphite-web-10-mode
-# Use Graphite-web 1.0 native structs for pickle response
-# This mode will break compatibility with graphite-web 0.9.x
-# If false, carbonserver won't send graphite-web 1.0 specific structs
-# That might degrade performance of the cluster
-# But will be compatible with both graphite-web 1.0 and 0.9.x
-graphite-web-10-strict-mode = true
-
 # Return a 404 instead of empty results. Set to true if you are serving requests to graphite-web
 empty-result-ok = false
 

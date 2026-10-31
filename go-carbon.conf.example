@@ -1,3 +1,9 @@
+# Unknown TOML keys log one WARN per dotted path at startup and on SIGHUP.
+# Close spellings include a "did you mean" hint. They do not prevent startup
+# or reload, so retired keys can remain during rolling upgrades. The Prometheus
+# gauge config_unknown_keys counts unknown paths in the loaded configuration;
+# correcting the file and reloading clears it. Custom [receiver.<name>] options
+# are interpreted by their protocol and excluded from this check.
 [common]
 # Optional startup defaults from one memory envelope: bytes with an optional
 # B/KiB/MiB/GiB/TiB suffix, or an integer percentage of the smaller of host RAM
@@ -966,14 +972,6 @@ max-metrics-rendered = 1000
 # Maximum number of goroutines (i.e. threads) to fetch data from disk/cache
 # (Default: 2 x max-cpu)
 max-fetch-data-goroutines = 0
-
-# graphite-web-10-mode
-# Use Graphite-web 1.0 native structs for pickle response
-# This mode will break compatibility with graphite-web 0.9.x
-# If false, carbonserver won't send graphite-web 1.0 specific structs
-# That might degrade performance of the cluster
-# But will be compatible with both graphite-web 1.0 and 0.9.x
-graphite-web-10-strict-mode = true
 
 # Return a 404 instead of empty results. Set to true if you are serving requests to graphite-web
 empty-result-ok = false
