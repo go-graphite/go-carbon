@@ -41,7 +41,26 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 			defer warmed()
 		}
 		checkpoint, loadErr := db.LoadMetadataCheckpointAfter(context.Background(), options)
-		logger.Info("metadata cache checkpoint loaded", zap.String("source", source), zap.Bool("valid", checkpoint.Valid), zap.Int64("entries", checkpoint.Entries), zap.Int64("validated", checkpoint.Validated), zap.Int64("bytes", checkpoint.Bytes), zap.Int64("read_bytes", checkpoint.ReadBytes), zap.Duration("runtime", checkpoint.Duration), zap.Error(loadErr))
+		// Legacy lazy checkpoints may contain provisional records. Validate
+		// upcoming writes first, then finish the remainder under the same
+		// allowance before reporting warming complete. v2's clean fence
+		// already certifies unchanged names without any revision I/O.
+		if checkpoint.Valid && checkpoint.Validated+checkpoint.Fenced < checkpoint.Entries {
+			for _, next := range []iter.Seq[string]{names, nil} {
+				validated, err := db.ValidateMetadataCheckpoint(context.Background(), next, options)
+				checkpoint.Validated += validated.Validated
+				checkpoint.ReadBytes += validated.ReadBytes
+				checkpoint.Duration += validated.Duration
+				if err != nil {
+					checkpoint.Valid, loadErr = false, err
+					break
+				}
+				if next == nil {
+					break
+				}
+			}
+		}
+		logger.Info("metadata cache checkpoint loaded", zap.String("source", source), zap.Bool("valid", checkpoint.Valid), zap.Int64("entries", checkpoint.Entries), zap.Int64("validated", checkpoint.Validated), zap.Int64("fenced", checkpoint.Fenced), zap.Int64("bytes", checkpoint.Bytes), zap.Int64("read_bytes", checkpoint.ReadBytes), zap.Duration("runtime", checkpoint.Duration), zap.Error(loadErr))
 		if checkpoint.Valid {
 			return
 		}

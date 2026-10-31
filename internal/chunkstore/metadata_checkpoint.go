@@ -9,6 +9,7 @@ import (
 	"errors"
 	"hash/crc32"
 	"io"
+	"iter"
 	"slices"
 	"time"
 
@@ -18,7 +19,11 @@ import (
 )
 
 const checkpointFile = "metadata-cache-v1"
-const checkpointMagic = "GCSTATE1"
+
+// v2 certifies that every saved record was authoritative at the clean fence.
+// v1 may contain provisional records and must still validate their revisions.
+const checkpointMagic = "GCSTATE2"
+const checkpointLegacyMagic = "GCSTATE1"
 const maxCheckpointRecordSize = 16 << 20
 const provisionalState = uint64(1) << 63
 
@@ -27,17 +32,23 @@ var checkpointCleanKey = []byte("z/metadata-cache-clean")
 
 type metadataCheckpoint struct {
 	enabled, valid, prepared, lazy bool
-	identity                       [16]byte
-	clean                          [16]byte
-	sequence                       uint64
-	saveErr                        error
+	fenced                         bool
+	// openHeader is immutable while preparation may refresh clean/sequence.
+	openHeader [52]byte
+	identity   [16]byte
+	clean      [16]byte
+	sequence   uint64
+	saveErr    error
 }
 
 // MetadataCheckpointStats describes the advisory checkpoint, not durable data.
 type MetadataCheckpointStats struct {
 	Entries, Bytes, ReadBytes, Validated int64
-	Duration                             time.Duration
-	Valid                                bool
+	// Fenced records need no revision read: the v2 clean fence and the
+	// mutation filter establish that their saved state is still current.
+	Fenced   int64
+	Duration time.Duration
+	Valid    bool
 }
 
 // openMetadataCheckpoint consumes the clean stamp before any store writer can
@@ -78,9 +89,9 @@ func (s *Store) openMetadataCheckpoint() error {
 		var header [52]byte
 		_, readErr := io.ReadFull(f, header[:])
 		f.Close()
-		c.valid = readErr == nil && string(header[:8]) == checkpointMagic && bytes.Equal(header[8:24], c.identity[:]) &&
-			bytes.Equal(header[24:40], c.clean[:]) && c.clean != [16]byte{} && binary.LittleEndian.Uint64(header[40:48]) == c.sequence &&
-			binary.LittleEndian.Uint32(header[48:]) == crc32.ChecksumIEEE(header[:48])
+		c.fenced = string(header[:8]) == checkpointMagic
+		c.valid = readErr == nil && c.matches(header[:])
+		c.openHeader = header
 	}
 	if err := s.db.Delete(checkpointCleanKey, pebble.Sync); err != nil {
 		return err
@@ -94,32 +105,21 @@ func (s *Store) openMetadataCheckpoint() error {
 		changed.ready.Store(true)
 		s.stateCache.checkpointChanges = changed
 	}
-	s.stateCache.validate = func(name string, st *metricState) bool {
-		// The exact clean sequence fence establishes name -> ID/generation
-		// at Open. Every subsequent store mutation invalidates that name
-		// under its stripe, including delete/recreate. Checking the revision
-		// here cannot accept an old binding from a divergent database: that
-		// database failed the global fence before any records were loaded.
-		if st.meta.Name != name {
-			return false
-		}
-		countStoreRead()
-		value, closer, err := s.db.Get(revisionKey(st.meta))
-		if err != nil {
-			return false
-		}
-		defer closer.Close()
-		m := st.meta
-		return decodeRevision(value, &m) == nil && m.Revision == st.meta.Revision && m.LastUpdate.Equal(st.meta.LastUpdate)
-	}
 
 	return nil
 }
 
+func (c *metadataCheckpoint) matches(header []byte) bool {
+	return (string(header[:8]) == checkpointMagic || string(header[:8]) == checkpointLegacyMagic) &&
+		bytes.Equal(header[8:24], c.identity[:]) && bytes.Equal(header[24:40], c.clean[:]) && c.clean != [16]byte{} &&
+		binary.LittleEndian.Uint64(header[40:48]) == c.sequence && binary.LittleEndian.Uint32(header[48:]) == crc32.ChecksumIEEE(header[:48])
+}
+
 // LoadMetadataCheckpoint streams raw slab records after input readiness. It
-// never evicts live entries and shares the existing metadata budget. Every
-// loaded record stays provisional until its window or first reader validates
-// its revision against an authoritative database view.
+// never evicts live entries and shares the existing metadata budget. A v2
+// record for an unchanged name is authoritative under the clean fence.
+// Legacy records stay provisional until a bounded validation window proves
+// their revision. First use treats a provisional record as a cache miss.
 func (s *Store) LoadMetadataCheckpoint(ctx context.Context, wait func(context.Context) error) (stats MetadataCheckpointStats, err error) {
 	return s.LoadMetadataCheckpointAfter(ctx, PrewarmOptions{Wait: wait})
 }
@@ -153,8 +153,8 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 		return stats, nil
 	}
 	if progress != nil {
-		progress.checkpointLoading.Store(true)
-		defer progress.checkpointLoading.Store(false)
+		progress.checkpointLoading.Add(1)
+		defer progress.checkpointLoading.Add(-1)
 	}
 	phasecpu.Set(phasecpu.MetadataCache)
 	defer phasecpu.Set(phasecpu.Other)
@@ -167,6 +167,11 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 	var header [52]byte
 	if _, err = io.ReadFull(reader, header[:]); err != nil {
 		return stats, err
+	}
+	// The path may have been replaced since Open; certify the very file we
+	// are about to stream, using the fence captured before writers started.
+	if !bytes.Equal(header[:], s.checkpoint.openHeader[:]) {
+		return stats, errors.New("metadata checkpoint fence changed since open")
 	}
 	var frame [8]byte
 	var records, readBytes uint64
@@ -187,6 +192,9 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 		workers = DefaultPrewarmWorkers()
 	}
 	workers = max(1, min(workers, 256))
+	if s.checkpoint.fenced || s.checkpoint.lazy {
+		workers = 0
+	}
 	batch := options.Batch
 	if batch <= 0 {
 		batch = 1024
@@ -316,20 +324,21 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 			slot = c.newSlot(sh)
 			chunk, off, dst := c.reserve(&sh.arena, int(n))
 			copy(dst[:n], record)
-			sh.slots[slot] = stateSlot{hash: hash, epoch: sh.epoch.Load() | provisionalState, chunk: chunk, off: off, n: n}
+			epoch := sh.epoch.Load()
+			if !s.checkpoint.fenced {
+				epoch |= provisionalState
+			}
+			sh.slots[slot] = stateSlot{hash: hash, epoch: epoch, chunk: chunk, off: off, n: n}
 			c.index(sh, slot)
 			sh.pushFront(slot)
 			c.account(sh, int64(n)+int64(stateSlotOverhead))
 			c.entries.Add(1)
 			stats.Entries++
 			stats.Bytes += int64(n)
-			if !s.checkpoint.lazy {
-				p := w + int(keyLen)
-				m := Metadata{MetricConfig: MetricConfig{Name: name}, ID: binary.LittleEndian.Uint64(record[p:]), Generation: binary.LittleEndian.Uint64(record[p+8:]), Revision: binary.LittleEndian.Uint64(record[p+16:])}
-				if nanos := int64(binary.LittleEndian.Uint64(record[p+24:])); nanos != 0 {
-					m.LastUpdate = time.Unix(0, nanos)
-				}
-				window = append(window, checkpointItem{meta: m, recordEpoch: sh.slots[slot].epoch})
+			if s.checkpoint.fenced {
+				stats.Fenced++
+			} else if !s.checkpoint.lazy {
+				window = append(window, checkpointItem{meta: checkpointRecordMetadata(record, name), recordEpoch: sh.slots[slot].epoch})
 			}
 		}
 		sh.mu.Unlock()
@@ -342,13 +351,138 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 	}
 }
 
+// ValidateMetadataCheckpoint validates the offered names next, in bounded
+// ID-sorted batches sharing one read view and revision iterator. A writeout
+// coordinator can offer its upcoming names before admitting their writes.
+// Nil names finishes all provisional records without retaining all cache names.
+// Already authoritative, missing and pending names need no work here.
+//
+// Wait uses the shared restart allowance. It runs before opening a view and
+// without metric or cache locks. First use never bypasses this admission with
+// a revision lookup; an unfinished record is an ordinary cache miss instead.
+// StopBackground cancels and joins this work before closing the database.
+func (s *Store) ValidateMetadataCheckpoint(ctx context.Context, names iter.Seq[string], options PrewarmOptions) (stats MetadataCheckpointStats, err error) {
+	started := time.Now()
+	defer func() { stats.Duration = time.Since(started) }()
+	ctx, end, ok := s.prewarm.begin(ctx)
+	if !ok {
+		return stats, context.Canceled
+	}
+	defer end()
+	if options.StartAfter != nil {
+		select {
+		case <-options.StartAfter:
+		case <-ctx.Done():
+			return stats, ctx.Err()
+		}
+	}
+	if s.stateCache == nil || !s.checkpoint.valid {
+		return stats, nil
+	}
+	if options.Progress != nil {
+		options.Progress.checkpointLoading.Add(1)
+		defer options.Progress.checkpointLoading.Add(-1)
+	}
+	phasecpu.Set(phasecpu.MetadataCache)
+	defer phasecpu.Set(phasecpu.Other)
+	batch := options.Batch
+	if batch <= 0 {
+		batch = 1024
+	}
+	batch = min(batch, 4096)
+	items := make([]checkpointItem, 0, batch)
+	pace := prewarmPacer{rate: options.Rate, byteRate: options.ByteRate}
+	flush := func() error {
+		if len(items) == 0 {
+			return ctx.Err()
+		}
+		if options.Wait != nil {
+			if err := options.Wait(ctx); err != nil {
+				return err
+			}
+		}
+		before := stats.ReadBytes
+		stats.Entries += int64(len(items))
+		if err := s.validateCheckpointWindow(ctx, items, &stats); err != nil {
+			return err
+		}
+		if !pace.waitBytes(ctx, len(items), int(stats.ReadBytes-before)) {
+			return ctx.Err()
+		}
+		items = items[:0]
+		return nil
+	}
+	c := s.stateCache
+	offer := func(sh *stateShard, slot int32) {
+		if slot < 0 || sh.slots[slot].n == 0 || sh.slots[slot].epoch&provisionalState == 0 {
+			return
+		}
+		record := sh.record(slot)
+		name := string(recordKey(record))
+		if sh.entries[name] == nil {
+			items = append(items, checkpointItem{meta: checkpointRecordMetadata(record, name), recordEpoch: sh.slots[slot].epoch})
+		}
+	}
+	if names != nil {
+		for name := range names {
+			if err := ctx.Err(); err != nil {
+				return stats, err
+			}
+			sh := &c.shards[s.metricStripe(name)]
+			sh.mu.Lock()
+			_, slot := sh.find(c.hash(name), name)
+			offer(sh, slot)
+			sh.mu.Unlock()
+			if len(items) == batch {
+				if err := flush(); err != nil {
+					return stats, err
+				}
+			}
+		}
+	} else {
+		for i := range c.shards {
+			sh := &c.shards[i]
+			sh.mu.Lock()
+			slots := len(sh.slots)
+			sh.mu.Unlock()
+			for slot := 0; slot < slots; slot++ {
+				if err := ctx.Err(); err != nil {
+					return stats, err
+				}
+				sh.mu.Lock()
+				offer(sh, int32(slot))
+				sh.mu.Unlock()
+				if len(items) == batch {
+					if err := flush(); err != nil {
+						return stats, err
+					}
+				}
+			}
+		}
+	}
+	err = flush()
+	stats.Valid = err == nil
+	return stats, err
+}
+
+// Decode only the fixed metadata needed for revision validation, leaving the
+// larger continuation state packed in its cache arena.
+func checkpointRecordMetadata(record []byte, name string) Metadata {
+	_, w := binary.Uvarint(record)
+	p := w + len(name)
+	m := Metadata{MetricConfig: MetricConfig{Name: name}, ID: binary.LittleEndian.Uint64(record[p:]), Generation: binary.LittleEndian.Uint64(record[p+8:]), Revision: binary.LittleEndian.Uint64(record[p+16:])}
+	if nanos := int64(binary.LittleEndian.Uint64(record[p+24:])); nanos != 0 {
+		m.LastUpdate = time.Unix(0, nanos)
+	}
+	return m
+}
+
 type checkpointItem struct {
 	meta               Metadata
 	recordEpoch, epoch uint64
 }
 
-// Readers can validate a provisional record immediately. The loader also
-// validates ahead in bounded ID-sorted windows, avoiding a cold point lookup
+// Validate ahead in bounded ID-sorted windows, avoiding a cold point lookup
 // per first update. Epochs exclude changes between the view and promotion.
 func (s *Store) validateCheckpointWindow(ctx context.Context, items []checkpointItem, stats *MetadataCheckpointStats) error {
 	if len(items) == 0 {
@@ -378,6 +512,9 @@ func (s *Store) validateCheckpointWindow(ctx context.Context, items []checkpoint
 		return 0
 	})
 	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		key := revisionKey(item.meta)
 		countStoreRead()
 		valid := it.SeekGE(key) && bytes.Equal(it.Key(), key)
@@ -462,7 +599,12 @@ func (s *Store) saveMetadataCheckpoint(ctx context.Context) error {
 				}
 			}
 			sh.mu.Lock()
-			live := sh.slots[slot].n != 0 && sh.slots[slot].n <= maxCheckpointRecordSize
+			live := sh.slots[slot].n != 0 && sh.slots[slot].n <= maxCheckpointRecordSize && sh.slots[slot].epoch&provisionalState == 0
+			if live {
+				// A v1 lazy load or a mutation in progress cannot be certified
+				// by the v2 fence. Omit it rather than laundering old state.
+				live = sh.entries[string(recordKey(sh.record(int32(slot))))] == nil
+			}
 			if live {
 				record = append(record[:0], sh.record(int32(slot))...)
 			}
@@ -506,26 +648,21 @@ func (s *Store) saveMetadataCheckpoint(ctx context.Context) error {
 // MetadataCheckpointError exposes a failed optional save without failing close.
 func (s *Store) MetadataCheckpointError() error { return s.checkpoint.saveErr }
 
-// validateCheckpoint promotes only the very record validated outside the shard
-// lock. A divergent write removes/replaces it through the normal mutation path.
-func (c *stateCache) validateCheckpoint(stripe uint64, name string, st *metricState, recordEpoch uint64) *metricState {
-	valid := c.validate != nil && c.validate(name, st)
+// First use must not perform optional revision I/O while holding a writer's
+// stripe or a reader's view. Such work cannot safely wait behind writeout's
+// CPU admission. Discard this provisional entry so the caller can refill it
+// through the ordinary authoritative cache-miss path. The normal reader epoch
+// and writer stripe protocols still protect that fill.
+func (c *stateCache) validateCheckpoint(stripe uint64, name string, _ *metricState, recordEpoch uint64) *metricState {
 	sh := &c.shards[stripe]
 	sh.mu.Lock()
 	pos, slot := sh.find(c.hash(name), name)
 	if slot >= 0 && sh.slots[slot].epoch == recordEpoch {
-		if valid {
-			sh.slots[slot].epoch &^= provisionalState
-		} else {
-			c.remove(sh, pos, slot)
-			if sh.entries[name] == nil {
-				c.entries.Add(-1)
-			}
+		c.remove(sh, pos, slot)
+		if sh.entries[name] == nil {
+			c.entries.Add(-1)
 		}
 	}
 	sh.mu.Unlock()
-	if !valid {
-		return nil
-	}
-	return st
+	return nil
 }

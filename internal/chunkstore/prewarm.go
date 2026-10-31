@@ -59,12 +59,12 @@ type PrewarmOptions struct {
 // reserves two passes, including the remaining catalog.
 type PrewarmProgress struct {
 	work, total, passes atomic.Uint64
-	checkpointLoading   atomic.Bool
+	checkpointLoading   atomic.Int64
 }
 
 // CheckpointLoading keeps byte projections from releasing a cold startup gate.
 func (p *PrewarmProgress) CheckpointLoading() bool {
-	return p != nil && p.checkpointLoading.Load()
+	return p != nil && p.checkpointLoading.Load() > 0
 }
 
 // Snapshot returns completed work and expected total (zero until known).

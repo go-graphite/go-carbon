@@ -82,7 +82,7 @@ func main() {
 	pendingEvery := flag.Int("pending-every", 1, "select one pending name in this many for the first catalog pass")
 	workingFloor := flag.Bool("working-set-floor", false, "prime only the metrics written, excluding inactive catalog names")
 	floor := flag.Bool("floor", false, "prime metadata without writes before measuring the identical first cycle")
-	mode := flag.String("mode", "cold", "build, age, cold, prewarm, background, backlog or steady")
+	mode := flag.String("mode", "cold", "build, age, cold, prewarm, metadata, background, backlog or steady")
 	metrics := flag.Int("metrics", 1_000_000, "metrics in fixture")
 	batch := flag.Int("batch", 0, "metrics per catalog read view; 0 uses store default")
 	byteRate := flag.Int("byte-rate", 0, "logical key/value read bytes/s; 0 unpaced")
@@ -430,6 +430,23 @@ func main() {
 	case "prewarm":
 		prewarm(ctx)
 		cycle("prewarmed", base+60)
+	case "metadata":
+		prewarm(ctx)
+		// Isolate deferred validation from point encoding, compaction and
+		// tail reads. The write-order permutation is identical to cycle.
+		at, used := time.Now(), cpu()
+		reads := store.CountStoreReadsForTest()
+		var wg sync.WaitGroup
+		for worker := range *writers {
+			wg.Go(func() {
+				for j := worker; j < *metrics; j += *writers {
+					_, err := db.Metadata(ctx, name(int(int64(j)*999983%int64(*metrics))))
+					check(err)
+				}
+			})
+		}
+		wg.Wait()
+		emit(map[string]any{"mode": "metadata-first-use", "metrics": *metrics, "wall": time.Since(at).Seconds(), "cpu": cpu() - used, "logical_reads": reads()})
 	case "steady":
 		cycle("fill", base+60)
 		cycle("steady", base+120)

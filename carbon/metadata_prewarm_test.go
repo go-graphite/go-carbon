@@ -2,8 +2,10 @@ package carbon
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"os"
 	"path/filepath"
@@ -481,6 +483,14 @@ func TestMetadataPrewarmCPUAllowsInput(t *testing.T) {
 }
 
 func TestMetadataPrewarmCheckpointMatchesReads(t *testing.T) {
+	testMetadataPrewarmCheckpointMatchesReads(t, false)
+}
+
+func TestMetadataPrewarmLegacyCheckpointMatchesReads(t *testing.T) {
+	testMetadataPrewarmCheckpointMatchesReads(t, true)
+}
+
+func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -491,6 +501,8 @@ func TestMetadataPrewarmCheckpointMatchesReads(t *testing.T) {
 	cfg.Whisper.StoreMetadataCachePrewarm = true
 	checkpoint := true
 	cfg.Whisper.StoreMetadataCacheCheckpoint = &checkpoint
+	cfg.Whisper.StoreMetadataCacheCheckpointLazy = legacy
+	cfg.Whisper.StoreMetadataCachePrewarmCPUCores = 1
 	db, err := store.Open(cfg.Whisper.StoreDir, store.Options{MetadataCacheSize: 4 << 20, MetadataCacheCheckpoint: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
@@ -505,6 +517,18 @@ func TestMetadataPrewarmCheckpointMatchesReads(t *testing.T) {
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if legacy {
+		checkpointPath := filepath.Join(cfg.Whisper.StoreDir, "metadata-cache-v1")
+		data, err := os.ReadFile(checkpointPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copy(data[:8], "GCSTATE1")
+		binary.LittleEndian.PutUint32(data[48:52], crc32.ChecksumIEEE(data[:48]))
+		if err := os.WriteFile(checkpointPath, data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	writeSharedConfig(t, path, cfg)
 	app := New(path)
@@ -525,7 +549,11 @@ func TestMetadataPrewarmCheckpointMatchesReads(t *testing.T) {
 		t.Fatal("checkpoint load blocked")
 	}
 	logs := zapwriter.TestString()
-	if !logHas(logs, "valid", "true") || !logHas(logs, "validated", "1") {
+	field := "fenced"
+	if legacy {
+		field = "validated"
+	}
+	if !logHas(logs, "valid", "true") || !logHas(logs, field, "1") {
 		t.Fatal("checkpoint did not validate", logs)
 	}
 	snap, err := app.MetricStore.Snapshot(context.Background(), name)

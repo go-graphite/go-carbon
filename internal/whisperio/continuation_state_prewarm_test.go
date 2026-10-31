@@ -580,8 +580,8 @@ func BenchmarkPrewarmStateDecode(b *testing.B) {
 	})
 }
 
-// A restart restores the same continuation names/manifests/headers as a live
-// cache. The first read validates its provisional state before using it.
+// A clean v2 checkpoint restores the same continuation names/manifests/headers
+// as a live cache under its authoritative fence, without revision validation.
 func TestMetadataCheckpointContinuation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -609,10 +609,10 @@ func TestMetadataCheckpointContinuation(t *testing.T) {
 	}
 	defer db.Close()
 	stats, err := db.LoadMetadataCheckpoint(ctx, nil)
-	if err != nil || !stats.Valid || stats.Entries != 1 || stats.Validated != 1 {
+	if err != nil || !stats.Valid || stats.Entries != 1 || stats.Fenced != 1 || stats.Validated != 0 {
 		t.Fatal(stats, err)
 	}
-	checkCachedReads(t, db, []string{name}, now, "provisional")
+	checkCachedReads(t, db, []string{name}, now, "fenced")
 	if err := db.UpdateMany(ctx, name, []store.Point{{Timestamp: now.Unix(), Value: 42}, {Timestamp: now.Unix() - 80, Value: .5}}); err != nil {
 		t.Fatal(err)
 	}

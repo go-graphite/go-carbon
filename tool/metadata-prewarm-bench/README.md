@@ -1,9 +1,12 @@
 Run only on private local stores, with vendored dependencies:
 
 ```sh
-GOFLAGS=-mod=vendor GOTOOLCHAIN=go1.27.0 GOPROXY=off go build -o /tmp/metadata-prewarm-bench ./tool/metadata-prewarm-bench
-GOMAXPROCS=4 /usr/bin/time -l /tmp/metadata-prewarm-bench -mode build -dir /tmp/prewarm-source
-GOMAXPROCS=4 /usr/bin/time -l /tmp/metadata-prewarm-bench -mode age -dir /tmp/prewarm-source
+bench_root="$HOME/.cache/go-carbon/prewarm-bench"
+mkdir -p "$bench_root/build"
+export TMPDIR="$bench_root/build"
+GOFLAGS=-mod=vendor GOTOOLCHAIN=go1.27.0 GOPROXY=off go build -o $bench_root/metadata-prewarm-bench ./tool/metadata-prewarm-bench
+GOMAXPROCS=4 /usr/bin/time -l $bench_root/metadata-prewarm-bench -mode build -dir $bench_root/prewarm-source
+GOMAXPROCS=4 /usr/bin/time -l $bench_root/metadata-prewarm-bench -mode age -dir $bench_root/prewarm-source
 ```
 
 The default fixture holds 1M metrics, `1s:2d,60s:28d` retentions (from
@@ -16,12 +19,12 @@ history, LSM depth, traffic mix, hardware, or filesystem cache misses.
 Make a fresh copy of the closed source for each mode (APFS example):
 
 ```sh
-cp -cR /tmp/prewarm-source /tmp/prewarm-cold
-GOMAXPROCS=4 /usr/bin/time -l /tmp/metadata-prewarm-bench -mode steady -metadata-bytes 4294967296 -dir /tmp/prewarm-cold
-cp -cR /tmp/prewarm-source /tmp/prewarm-on
-GOMAXPROCS=4 /usr/bin/time -l /tmp/metadata-prewarm-bench -mode prewarm -metadata-bytes 4294967296 -dir /tmp/prewarm-on
-cp -cR /tmp/prewarm-source /tmp/prewarm-background
-GOMAXPROCS=4 /usr/bin/time -l /tmp/metadata-prewarm-bench -mode background -metadata-bytes 4294967296 -dir /tmp/prewarm-background
+cp -cR $bench_root/prewarm-source $bench_root/prewarm-cold
+GOMAXPROCS=4 /usr/bin/time -l $bench_root/metadata-prewarm-bench -mode steady -metadata-bytes 4294967296 -dir $bench_root/prewarm-cold
+cp -cR $bench_root/prewarm-source $bench_root/prewarm-on
+GOMAXPROCS=4 /usr/bin/time -l $bench_root/metadata-prewarm-bench -mode prewarm -metadata-bytes 4294967296 -dir $bench_root/prewarm-on
+cp -cR $bench_root/prewarm-source $bench_root/prewarm-background
+GOMAXPROCS=4 /usr/bin/time -l $bench_root/metadata-prewarm-bench -mode background -metadata-bytes 4294967296 -dir $bench_root/prewarm-background
 ```
 
 `steady` reports a cold fill cycle, then a second cycle with write-through state.
@@ -112,9 +115,54 @@ retirement and every restored/live value for sixteen stored series.
 `-mode restore -checkpoint` measures checkpoint loading without an update cycle;
 `-mode restore` measures a fresh catalog walk. `-workers` and `-batch` also apply
 to eager checkpoint validation (default batch 1024, bounded at 4096), with one
-read view and revision iterator per batch. `-lazy-checkpoint` streams provisional
-records and defers validation to first use, so compare its first update too.
+read view and revision iterator per batch. `-lazy-checkpoint` leaves legacy v1 records provisional for an explicit
+`Store.ValidateMetadataCheckpoint` pass. In the service, upcoming names are
+validated first and the remaining provisional records finish under the shared
+restart allowance before warming completes. A first use that races validation
+refuses the provisional entry and follows the ordinary cache-miss path; it does
+not perform an extra, unpaced checkpoint revision lookup.
 Use identical closed-store clones in fresh processes, with the store larger
 than `-block-bytes`. On systems where the filesystem page cache cannot be
 cleared, report that limit; fresh processes only guarantee cold Pebble caches.
 Checkpointing and lazy validation are both explicit opt-ins in the service.
+
+
+`-mode metadata` measures prewarm/load and an ensuing read of every metric in
+write order, without point encoding, tail reads or update compaction. The
+`metadata-first-use` row includes process CPU, wall time and logical reads;
+`metadata-combined` includes the loader and first use. Use it alongside the
+ordinary `prewarm` first-write-cycle measurement so deferred validation is
+visible without confusing it with point-update costs. CPU per entry is
+`combined CPU seconds / metrics`; do not sum concurrent `sample` rows into it.
+
+New v2 checkpoints save only authoritative, non-pending records. At open, an
+exact database identity, one-use clean-shutdown stamp, committed sequence and
+header checksum must match. The loader checks that same header again and
+checks every record checksum. A bounded mutation filter excludes names changed
+since open, including delete/recreate and revision-neutral changes. Together
+these fences prove that eligible records are current, so they need no revision
+read. `Fenced` reports these records separately from `Validated`. Old v1 files
+still require validation. An older binary rejects v2 and falls back to its
+catalog walk; the checkpoint filename remains unchanged.
+
+For an isolated comparison, build and age a source, prime it with `-mode
+checkpoint -checkpoint`, then run each measurement on a fresh copy. Keep
+`-block-bytes` smaller than the store's reported `disk_bytes`. Record the
+checkpoint format, GOMAXPROCS, cache sizes, worker count and CPU allowance.
+For example, with a 500k-metric fixture and 8 MiB block cache:
+
+```sh
+GOMAXPROCS=8 "$bench_root/metadata-prewarm-bench" -mode build -metrics 500000 -block-bytes 8388608 -dir "$bench_root/source"
+GOMAXPROCS=8 "$bench_root/metadata-prewarm-bench" -mode age -metrics 500000 -block-bytes 8388608 -dir "$bench_root/source"
+GOMAXPROCS=8 "$bench_root/metadata-prewarm-bench" -mode checkpoint -checkpoint -metrics 500000 -block-bytes 8388608 -metadata-bytes 1073741824 -dir "$bench_root/source"
+# Make independent copies named catalog and checkpoint before these runs.
+GOMAXPROCS=8 "$bench_root/metadata-prewarm-bench" -mode metadata -metrics 500000 -workers 8 -block-bytes 8388608 -metadata-bytes 1073741824 -dir "$bench_root/catalog"
+GOMAXPROCS=8 "$bench_root/metadata-prewarm-bench" -mode metadata -checkpoint -metrics 500000 -workers 8 -block-bytes 8388608 -metadata-bytes 1073741824 -dir "$bench_root/checkpoint"
+```
+
+Measure `-mode restore -checkpoint -cpu-cores <spare cores>` separately to
+check the loading gate under a CPU allowance without the subsequent warm
+metadata reads. Scaling CPU per entry and stream bytes can estimate a larger
+restart, but cannot establish its gate time or peak CPU. Verify those on one
+representative host with its full store and normal traffic. Retain JSON results
+outside the repository and remove private fixture copies after measurement.
