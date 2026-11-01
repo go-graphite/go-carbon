@@ -44,17 +44,29 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 		// credit. Cold metadata can keep writeout below its floor, so loading
 		// must not wait behind the writes that the checkpoint accelerates.
 		checkpointOptions := options
+		var checkpointPacer *restartcpu.Checkpoint
 		if budget != nil {
 			checkpointOptions.Wait = budget.WaitCheckpoint
+			checkpointPacer = budget.NewCheckpoint(progress.Snapshot)
+			checkpointOptions.CheckpointWait = checkpointPacer.Wait
 		}
 		checkpoint, loadErr := db.LoadMetadataCheckpointAfter(context.Background(), checkpointOptions)
+		if checkpointPacer != nil {
+			checkpointPacer.Finish()
+		}
 		// Legacy lazy checkpoints may contain provisional records. Validate
 		// upcoming writes first, then finish the remainder under the same
-		// allowance before reporting warming complete. v2's clean fence
+		// allowance and remaining load deadline before reporting warming
+		// complete. v2's clean fence
 		// already certifies unchanged names without any revision I/O.
 		if checkpoint.Valid && checkpoint.Validated+checkpoint.Fenced < checkpoint.Entries {
+			ctx, cancel := context.WithTimeout(context.Background(), max(0, store.MetadataCheckpointLoadTimeout-checkpoint.Duration))
+			validationOptions := options
+			// These records are needed by dependent cold writes. Optional
+			// admission could wait behind the shortfall it is meant to cure.
+			validationOptions.Wait = checkpointOptions.Wait
 			for _, next := range []iter.Seq[string]{names, nil} {
-				validated, err := db.ValidateMetadataCheckpoint(context.Background(), next, options)
+				validated, err := db.ValidateMetadataCheckpoint(ctx, next, validationOptions)
 				checkpoint.Validated += validated.Validated
 				checkpoint.ReadBytes += validated.ReadBytes
 				checkpoint.Duration += validated.Duration
@@ -66,6 +78,7 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 					break
 				}
 			}
+			cancel()
 		}
 		logger.Info("metadata cache checkpoint loaded", zap.String("source", source), zap.Bool("valid", checkpoint.Valid), zap.Int64("entries", checkpoint.Entries), zap.Int64("validated", checkpoint.Validated), zap.Int64("fenced", checkpoint.Fenced), zap.Int64("bytes", checkpoint.Bytes), zap.Int64("read_bytes", checkpoint.ReadBytes), zap.Duration("runtime", checkpoint.Duration), zap.Error(loadErr))
 		// Warm-first writeout prefetches its own queue windows; a missing or

@@ -13,6 +13,8 @@ type overlapUpdatesCollector struct {
 	desc, rollups, sidecars, folds *prometheus.Desc
 	late, latePoints, directFolds  *prometheus.Desc
 	fallbacks                      *prometheus.Desc
+	blocks                         *prometheus.Desc
+	blockPoints                    *prometheus.Desc
 }
 
 func newOverlapUpdatesCollector() *overlapUpdatesCollector {
@@ -57,6 +59,8 @@ func newOverlapUpdatesCollector() *overlapUpdatesCollector {
 			"Compressed blocks a rewrite read through a fallback: exact (typed storage served points the file could not encode) or aligned (points off the archive grid, stored on it), by kind",
 			[]string{"kind"}, nil,
 		),
+		blocks:      prometheus.NewDesc("persister_in_place_blocks_total", "In-place block plans avoided by exact point equality or materialized for merge planning", []string{"result"}, nil),
+		blockPoints: prometheus.NewDesc("persister_in_place_block_points_total", "Physical points in blocks whose plans were avoided or materialized; a planning cost weight, not incoming point count", []string{"result"}, nil),
 	}
 }
 
@@ -69,9 +73,15 @@ func (c *overlapUpdatesCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.latePoints
 	ch <- c.directFolds
 	ch <- c.fallbacks
+	ch <- c.blocks
+	ch <- c.blockPoints
 }
 
 func (c *overlapUpdatesCollector) Collect(ch chan<- prometheus.Metric) {
+	ch <- prometheus.MustNewConstMetric(c.blocks, prometheus.CounterValue, float64(whisper.InPlaceBlocks(true)), "unchanged")
+	ch <- prometheus.MustNewConstMetric(c.blocks, prometheus.CounterValue, float64(whisper.InPlaceBlocks(false)), "planned")
+	ch <- prometheus.MustNewConstMetric(c.blockPoints, prometheus.CounterValue, float64(whisper.InPlaceBlockPoints(true)), "unchanged")
+	ch <- prometheus.MustNewConstMetric(c.blockPoints, prometheus.CounterValue, float64(whisper.InPlaceBlockPoints(false)), "planned")
 	for _, kind := range whisper.OverlapKinds() {
 		ch <- prometheus.MustNewConstMetric(c.desc, prometheus.CounterValue, float64(whisper.OverlapUpdates(kind)), kind.String())
 	}

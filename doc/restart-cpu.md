@@ -36,10 +36,52 @@ headroom above mandatory CPU consumption. Zero never means unlimited CPU.
 Optional catalog warming and validation yield to waiting writers, required
 cold-state prefetch, and any observed writeout-floor shortfall, even when CPU
 credit remains. Bulk checkpoint loading and validation needed by upcoming cold
-writes share CPU credit alongside catch-up writeout. Deferring the checkpoint
-behind below-floor writeout can starve the writes it accelerates, because cold
-metadata itself keeps writeout below the floor. Already admitted bounded batches
-can briefly overlap writes; admission does not preempt running work.
+writes share CPU credit alongside catch-up writeout. The serial checkpoint
+stream gets at most one core of duty time (or allowance / 8 on smaller processes).
+When process CPU leaves less room than that share and writeout is below 95%
+of its floor, the stream share reduces fourfold; spare CPU keeps the full
+share. The exact floor still controls warnings. One 5 ms sampling slice of the checkpoint share
+is reserved so writers cannot repeatedly consume every refill before the next
+checkpoint batch. Required validation keeps dependent-work priority. Batch wall
+time is a conservative CPU estimate, including I/O and lock waits. Tiny duty
+delays accumulate into 5 ms windows so timer rounding cannot multiply the load
+time. Already
+admitted bounded batches can briefly overlap writes; admission does not preempt
+running work. Estimated work costs are reserved immediately and reconciled
+against whole-process CPU every 5 ms, with at most 5 ms of saved CPU credit.
+
+The checkpoint accelerator attempt has a ten-minute deadline after input
+readiness, including admission waits. A timed-out partial load remains safe:
+missing metadata uses ordinary durable-store lookups and provisional legacy
+records still require validation. This bounds the attempt, not guaranteed full
+population under sustained CPU saturation, and cannot interrupt a blocked
+filesystem syscall. No writeout gate is added.
+
+During restart pacing, the rate-token ceiling is three times the greater of
+saved steady throughput and queued metrics divided by max delay, replacing
+`max-updates-per-second`. Without saved throughput, a finite configured cap
+is raised to at least three times the queue floor; zero stays unlimited.
+A growing queue can raise this rate ceiling; the CPU allowance stays fixed.
+Normal settings resume when pacing ends. The writeout floor is the greater of
+saved steady throughput and queued metrics divided by max delay. Rate tokens
+and between-sample cost reservations cannot hold writeout below
+a known predecessor floor; reaching it also requires ready work, enough workers
+and CPU capacity for those updates. CPU admission limits catch-up within the
+process allowance; mandatory intake and reads remain independent.
+
+`restart_cpu_granted_cores` and `restart_cpu_grants_total` include consumer
+`checkpoint_load` alongside `warming` and `writeout`. Grants describe admission
+headroom, not measured CPU attribution. A released writer retains a reported
+share while waiting for rate tokens or names. The shares add to no more than
+the available allowance. `restart_cpu_checkpoint_loading` shows a pending or
+running load, and `restart_cpu_checkpoint_load_bytes{kind="completed"|"total"}`
+shows its stream progress (total is zero until known; the last known progress
+is retained after failure). Compare `restart_cpu_process_cores` against
+`restart_cpu_allowance_cores`, and confirmed `restart_cpu_writeout_updates_per_second`
+against `restart_cpu_writeout_floor_updates_per_second` and
+`restart_cpu_writeout_ceiling_updates_per_second`. A zero ceiling means unlimited
+rate tokens, with CPU admission still active. The shortfall warning also logs
+the ceiling, worker count and each consumer's grant.
 
 Increasing headroom trades extra CPU for faster recovery; it does not guarantee
 a recovery time or cache peak. A rough spend estimate at a fixed steady

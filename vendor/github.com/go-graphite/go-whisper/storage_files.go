@@ -75,6 +75,14 @@ type StorageBlockReader interface {
 	ReadStorageBlock(ContinuationBlock) ([]TimeSeriesPoint, error)
 }
 
+// StorageBlockMatcher proves that replacing the requested points cannot change
+// their visible archive slots in the current transaction. Raw timestamp/value
+// equality is insufficient if off-grid neighbors alias a slot. A watermark
+// cannot prove presence or value equality either. False keeps ordinary planning.
+type StorageBlockMatcher interface {
+	MatchesStoragePoints(ContinuationBlock, []TimeSeriesPoint) (bool, error)
+}
+
 type StorageBlockAppender interface {
 	AppendStorageBlock(ContinuationBlock, int, []TimeSeriesPoint) error
 }

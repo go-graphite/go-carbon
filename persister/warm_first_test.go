@@ -113,7 +113,7 @@ func TestWarmFirstPassesWarmNamesAndJoinsPrefetch(t *testing.T) {
 	}
 }
 
-func TestRestartCatchupHonorsSteadyRateAndConfiguredCap(t *testing.T) {
+func TestRestartCatchupUsesHistoryInsteadOfNormalCap(t *testing.T) {
 	budget := restartcpu.NewWithCPU(2, func() float64 { return 0 })
 	budget.SetSteadyRate(100)
 	p := &Whisper{restartBudget: budget, maxUpdatesPerSecond: 1000}
@@ -123,8 +123,8 @@ func TestRestartCatchupHonorsSteadyRateAndConfiguredCap(t *testing.T) {
 	}
 	p.maxUpdatesPerSecond = 50
 	p.setRestartRate()
-	if p.restartRate != 50 {
-		t.Fatal("explicit rate cap ignored", p.restartRate)
+	if p.restartRate != 300 {
+		t.Fatal("normal cap prevented catch-up", p.restartRate)
 	}
 	p.stopRestartTicker()
 }

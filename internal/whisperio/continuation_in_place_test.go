@@ -145,10 +145,16 @@ func runInPlaceProcess(t *testing.T) *inPlaceCaseResult {
 	return &result
 }
 
+// All matrices share the process limit; each subprocess owns its mutable hooks.
+var inPlaceProcessSlots = make(chan struct{}, 4)
+
 func testInPlaceMatchesRewrite(t *testing.T, selectedBuckets, selectedEarly bool, selectedGroup int) {
+	if testing.CoverMode() == "" {
+		t.Parallel()
+	} // Each case owns its hooks in a subprocess.
 	var updateMu sync.Mutex
 	// Bound simultaneous instrumented runtimes; each case owns two stores.
-	slots := make(chan struct{}, 4)
+	slots := inPlaceProcessSlots
 	for _, mode := range []struct{ buckets, early bool }{{false, false}, {true, false}, {false, true}, {true, true}} {
 		if mode.buckets != selectedBuckets || mode.early != selectedEarly {
 			continue

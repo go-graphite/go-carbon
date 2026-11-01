@@ -822,6 +822,17 @@ LOOP:
 				// Ordered restoration may need to drain before input opens.
 			}
 		}
+		var metrics []string
+		if p.mockStore == nil && p.canBatchShared() {
+			metrics = []string{metric}
+			for len(metrics) < p.storeUpdateBatchSize && p.takeBatchToken() {
+				next := p.tryRecv()
+				if next == "" {
+					break
+				}
+				metrics = append(metrics, next)
+			}
+		}
 		if p.restartBudget != nil {
 			ready := true
 			if p.startupReady != nil {
@@ -832,7 +843,7 @@ LOOP:
 				}
 			}
 			if ready {
-				if !p.restartBudget.WaitWriteout(exit) {
+				if !p.restartBudget.WaitWriteoutBatch(exit, len(metrics)) {
 					return
 				}
 			} else {
@@ -840,16 +851,7 @@ LOOP:
 			}
 		}
 		var additional []string
-		if p.mockStore == nil && p.canBatchShared() {
-			metrics := []string{metric}
-			batchSize := p.storeUpdateBatchSize
-			for len(metrics) < batchSize && p.takeBatchToken() {
-				next := p.tryRecv()
-				if next == "" {
-					break
-				}
-				metrics = append(metrics, next)
-			}
+		if len(metrics) > 0 {
 			additional = metrics[1:]
 			if len(metrics) > 1 {
 				p.storeSharedBatch(metrics)

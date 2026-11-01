@@ -57,6 +57,27 @@ func InPlaceResults() []InPlaceResult {
 
 var rollupCorrections, sidecarSlotMerges, sidecarFolds [inPlaceResults]atomic.Uint64
 
+var matchedPlanBlocks, materializedPlanBlocks atomic.Uint64
+var matchedPlanPoints, materializedPlanPoints atomic.Uint64
+
+// InPlaceBlocks counts plans avoided by exact stored-point equality, or blocks
+// materialized for ordinary merge planning. It does not count changed points.
+func InPlaceBlocks(unchanged bool) uint64 {
+	if unchanged {
+		return matchedPlanBlocks.Load()
+	}
+	return materializedPlanBlocks.Load()
+}
+
+// InPlaceBlockPoints weights those decisions by physical block size, not by
+// incoming point count. Large unchanged blocks can dominate planning CPU.
+func InPlaceBlockPoints(unchanged bool) uint64 {
+	if unchanged {
+		return matchedPlanPoints.Load()
+	}
+	return materializedPlanPoints.Load()
+}
+
 // RollupCorrections returns the process-wide, monotonic number of buffered
 // rollup corrections (see rewriteBufferedRollups) by result.
 func RollupCorrections(kind InPlaceResult) uint64 {
@@ -229,6 +250,30 @@ func (whisper *Whisper) planInPlace(reader StorageBlockReader, pending [][]extra
 			if len(carry) == 0 && len(before) == 0 && len(within) == 0 {
 				continue
 			}
+			physicalPoints := block.count + 1
+			if physicalPoints < 0 {
+				physicalPoints = 0
+			}
+			if len(carry) == 0 && len(before) == 0 {
+				if matcher, ok := reader.(StorageBlockMatcher); ok {
+					var small [64]TimeSeriesPoint
+					points := small[:0]
+					for _, p := range within {
+						points = append(points, TimeSeriesPoint{Time: p.interval, Value: p.value})
+					}
+					matched, err := matcher.MatchesStoragePoints(archive.continuationBlock(i, block), points)
+					if err != nil {
+						return nil, 0, err
+					}
+					if matched {
+						matchedPlanBlocks.Add(1)
+						matchedPlanPoints.Add(uint64(physicalPoints))
+						continue
+					}
+				}
+			}
+			materializedPlanBlocks.Add(1)
+			materializedPlanPoints.Add(uint64(physicalPoints))
 			change, left, result, err := whisper.planBlock(reader, i, archive, block, carry, before, within)
 			if err != nil || result != InPlaced {
 				return nil, result, err

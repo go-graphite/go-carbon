@@ -16,6 +16,7 @@ import (
 // Drives the actual indexed-batch backend, including an imported OOO sidecar,
 // source compactions, database compactions and process-style close/reopen.
 func TestContinuationStoreMatchesCWhisperAfterImport(t *testing.T) {
+	t.Parallel() // All stores, source files and clocks belong to this matrix.
 	for _, config := range []struct {
 		name, retentions string
 		seed, block      int
