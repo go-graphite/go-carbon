@@ -25,14 +25,20 @@ func (p *Whisper) updateTokens() <-chan bool {
 
 // CPU admission controls catch-up speed from the remaining process allowance.
 // A 3x predecessor-rate ceiling limits exceptional cheap work without leaving
-// ordinary CPU headroom idle. A lower explicit configured cap still applies.
+// ordinary CPU headroom idle. The normal rate cap cannot constrain recovery
+// below the predecessor's throughput; process CPU admission remains in force.
 func (p *Whisper) setRestartRate() {
 	rateLimit := float64(p.maxUpdatesPerSecond)
+	floor := 0.
+	if p.restartFloor != nil {
+		floor = p.restartFloor()
+	}
 	if p.restartBudget != nil && p.restartBudget.SteadyRate() > 0 {
-		saved := 3 * p.restartBudget.SteadyRate()
-		if rateLimit <= 0 || saved < rateLimit {
-			rateLimit = saved
-		}
+		rateLimit = 3 * max(floor, p.restartBudget.SteadyRate())
+	} else if rateLimit > 0 {
+		// Even without qualified history a finite normal cap cannot hold
+		// recovery below the queue's required rate. Zero stays unlimited.
+		rateLimit = max(rateLimit, 3*floor)
 	}
 	if rateLimit <= 0 || math.IsNaN(rateLimit) || math.IsInf(rateLimit, 0) {
 		return
@@ -44,6 +50,9 @@ func (p *Whisper) setRestartRate() {
 		return
 	}
 	p.restartRate = rate
+	if p.restartBudget != nil {
+		p.restartBudget.SetRateCeiling(rateLimit)
+	}
 	// Store stalls must not bank a full second of catch-up credit. Keep at
 	// most 40ms, plus the throttle's one in-flight scheduling chunk.
 	old := p.restartTicker.Swap(helper.NewThrottleTickerWithBurst(rate, max(1, (rate+24)/25)))
@@ -56,6 +65,9 @@ func (p *Whisper) stopRestartTicker() {
 	p.restartRateMu.Lock()
 	defer p.restartRateMu.Unlock()
 	p.restartStopping = true
+	if p.restartBudget != nil {
+		p.restartBudget.SetRateCeiling(0)
+	}
 	if ticker := p.restartTicker.Swap(nil); ticker != nil {
 		ticker.Stop()
 	}
@@ -82,9 +94,9 @@ func (p *Whisper) startRestartWriteout() {
 		defer ticker.Stop()
 		last, previous := time.Now(), budget.Updates()
 		observe := func(rate float64) {
-			floor := 0.0
+			floor := budget.SteadyRate()
 			if p.restartFloor != nil {
-				floor = p.restartFloor()
+				floor = max(floor, p.restartFloor())
 			}
 			p.setRestartRate()
 			if budget.ObserveWriteout(floor, rate) && p.logger != nil {
@@ -92,7 +104,8 @@ func (p *Whisper) startRestartWriteout() {
 				p.logger.Warn("restart writeout below floor", zap.Float64("floor_updates_per_second", floor),
 					zap.Float64("updates_per_second", rate), zap.Duration("below_floor_for", s.BelowFor),
 					zap.Float64("process_cpu_cores", s.Process), zap.Float64("allowance_cores", s.Allowance),
-					zap.Float64("warming_granted_cores", s.Warming))
+					zap.Float64("warming_granted_cores", s.Warming), zap.Float64("writeout_granted_cores", s.Writeout),
+					zap.Float64("checkpoint_load_granted_cores", s.Checkpoint), zap.Float64("ceiling_updates_per_second", s.Ceiling), zap.Int("workers", p.workersCount))
 			}
 		}
 		observe(0)

@@ -442,10 +442,10 @@ func TestStartupWriteoutBelowFloorWarning(t *testing.T) {
 	})
 }
 
-func TestStartupWriteoutFloorCannotRaiseConfiguredCap(t *testing.T) {
+func TestStartupWriteoutWithoutHistoryRaisesCapToFloor(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var floor atomic.Int64
-		floor.Store(20)
+		floor.Store(0)
 		budget := restartcpu.NewWithCPU(2, func() float64 { return 0 })
 		p := &Whisper{recv: func(exit chan bool) string {
 			select {
@@ -469,11 +469,13 @@ func TestStartupWriteoutFloorCannotRaiseConfiguredCap(t *testing.T) {
 			t.Fatal("configured cap was not preserved", budget.Updates())
 		}
 		floor.Store(100)
+		time.Sleep(time.Second) // Let the next observation replace the rate tokens.
+		synctest.Wait()
 		before := budget.Updates()
 		time.Sleep(3 * time.Second)
 		synctest.Wait()
-		if delta := budget.Updates() - before; delta < 28 || delta > 32 {
-			t.Fatal("backlog increased its own cap", delta)
+		if delta := budget.Updates() - before; delta < 895 || delta > 905 {
+			t.Fatal("normal cap prevented the required floor", delta)
 		}
 		floor.Store(200)
 		stopped := make(chan struct{})

@@ -926,3 +926,63 @@ func TestWriteoutWindowValidatesLegacyCheckpoint(t *testing.T) {
 		})
 	}
 }
+
+// Admission can wait for a busy process, but it must neither hold a view/metric
+// lock nor defer accelerator completion indefinitely. Verify deadline wiring on
+// the real loader and durable lookups while the serial stream is paused.
+func TestMetadataCheckpointAdmissionDeadlineAndConcurrentAccess(t *testing.T) {
+	dir := t.TempDir()
+	seedCheckpoint(t, dir)
+	db, err := Open(dir, checkpointOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ready := make(chan struct{})
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	progress := new(PrewarmProgress)
+	var observedDeadline time.Time
+	go func() {
+		_, err := db.LoadMetadataCheckpointAfter(context.Background(), PrewarmOptions{
+			StartAfter: ready, Progress: progress,
+			CheckpointWait: func(ctx context.Context) error {
+				observedDeadline, _ = ctx.Deadline()
+				close(entered)
+				select {
+				case <-release:
+					return context.DeadlineExceeded
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		})
+		done <- err
+	}()
+	releasedAt := time.Now()
+	close(ready)
+	<-entered
+	if delta := observedDeadline.Sub(releasedAt); delta < MetadataCheckpointLoadTimeout || delta > MetadataCheckpointLoadTimeout+time.Second {
+		t.Fatal("load deadline does not start at readiness", delta)
+	}
+	ctx := context.Background()
+	if _, err := db.Metadata(ctx, "a"); err != nil {
+		t.Fatal("checkpoint pacing blocked existing reads", err)
+	}
+	if _, err := db.Create(ctx, MetricConfig{Name: "new", Retentions: []Retention{{Step: 1, Count: 100}}, AggregationMethod: Average}); err != nil {
+		t.Fatal("checkpoint pacing blocked new names", err)
+	}
+	if err := db.UpdateMany(ctx, "a", []Point{{Timestamp: 20, Value: 7}}); err != nil {
+		t.Fatal("checkpoint pacing blocked catch-up", err)
+	}
+	close(release)
+	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	if progress.CheckpointLoading() {
+		t.Fatal("timed-out checkpoint still marked loading")
+	}
+	if _, err := db.Metadata(ctx, "b"); err != nil {
+		t.Fatal("partial load lost durable fallback", err)
+	}
+}

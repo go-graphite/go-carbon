@@ -28,6 +28,9 @@ type ContinuationStateLoader interface {
 type PrewarmOptions struct {
 	// Wait paces optional warming behind writeout; it runs without views.
 	Wait func(context.Context) error
+	// CheckpointWait, if set, paces the serial checkpoint stream separately
+	// from required validation reads. It runs once per bounded record window.
+	CheckpointWait func(context.Context) error
 	// Progress reports completed catalog windows across both startup passes.
 	Progress *PrewarmProgress
 

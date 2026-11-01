@@ -25,6 +25,11 @@ const checkpointFile = "metadata-cache-v1"
 const checkpointMagic = "GCSTATE2"
 const checkpointLegacyMagic = "GCSTATE1"
 const maxCheckpointRecordSize = 16 << 20
+
+// MetadataCheckpointLoadTimeout bounds the accelerator attempt after input is
+// ready. A partial load is safe: missing or provisional records use the store.
+// This bounds CPU admission waits, not an uninterruptible filesystem read.
+const MetadataCheckpointLoadTimeout = 10 * time.Minute
 const provisionalState = uint64(1) << 63
 
 var checkpointIdentityKey = []byte("z/metadata-cache-identity")
@@ -149,6 +154,8 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 		}
 	}
 	started = time.Now()
+	ctx, cancel := context.WithTimeout(ctx, MetadataCheckpointLoadTimeout)
+	defer cancel()
 	if !s.checkpoint.valid || s.stateCache == nil {
 		return stats, nil
 	}
@@ -248,6 +255,10 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 		}
 	}
 	var record []byte
+	streamWait := options.CheckpointWait
+	if streamWait == nil {
+		streamWait = wait
+	}
 	window := make([]checkpointItem, 0, batch)
 	for {
 		if err = ctx.Err(); err != nil {
@@ -260,8 +271,8 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 				}
 				pacedBytes = stats.ReadBytes
 			}
-			if wait != nil {
-				if err = wait(ctx); err != nil {
+			if streamWait != nil {
+				if err = streamWait(ctx); err != nil {
 					return stats, err
 				}
 			}

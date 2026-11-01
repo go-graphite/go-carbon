@@ -3,17 +3,20 @@ package restartcpu
 
 import (
 	"context"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 // Budget accounts for the entire process, including receivers, reads and GC.
-// Warming and unfinished restart writeout share admission. Credits expire after
-// 40ms so idle time cannot fund a catch-up burst. Work already admitted may overshoot briefly.
+// Checkpoint loading, warming and unfinished restart writeout share admission.
+// Credits expire after 5ms so idle time cannot fund a catch-up burst. Work
+// already admitted may overshoot briefly; mandatory input and reads never wait.
 type Budget struct {
 	mu                   sync.Mutex
 	cores, credit, used  float64
+	reserved             float64
 	at                   time.Time
 	observedAt           time.Time
 	observedCPU          float64
@@ -29,6 +32,11 @@ type Budget struct {
 	written              atomic.Uint64
 	warmGrants           atomic.Uint64
 	writeGrants          atomic.Uint64
+	checkpointGrants     atomic.Uint64
+	checkpoints          atomic.Int64
+	checkpointWork       atomic.Uint64
+	checkpointTotal      atomic.Uint64
+	rateCeiling          atomic.Uint64
 	steadyRate           float64
 	source               string
 	samplerStop          context.CancelFunc
@@ -47,7 +55,7 @@ func New(cores float64) *Budget {
 // It also lets deterministic tests model saturated receivers without burning CPU.
 func NewWithCPU(cores float64, read func() float64) *Budget {
 	now, used := time.Now(), read()
-	return &Budget{cores: cores, at: now, used: used, observedAt: now, observedCPU: used, read: read, until: now.Add(30 * time.Minute)}
+	return &Budget{cores: cores, credit: cores * .005, at: now, used: used, observedAt: now, observedCPU: used, read: read, until: now.Add(30 * time.Minute)}
 }
 
 func (b *Budget) Cores() float64 { return b.cores }
@@ -97,9 +105,20 @@ func (b *Budget) delay(now time.Time) time.Duration {
 }
 
 func (b *Budget) admissionDelay(now time.Time, writeout bool) time.Duration {
+	return b.reserveDelay(now, writeout, 0)
+}
+
+// Reserve the expected cost immediately, then reconcile it with actual whole-
+// process CPU at the next sample. Without this, every worker and the loader
+// could admit unlimited work between samples, then all sleep through headroom.
+func (b *Budget) reserveDelay(now time.Time, writeout bool, cost float64) time.Duration {
+	return b.reserveWork(now, writeout, cost, false)
+}
+
+func (b *Budget) reserveWork(now time.Time, writeout bool, cost float64, checkpoint bool) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if now.Sub(b.at) >= 20*time.Millisecond {
+	if now.Sub(b.at) >= 5*time.Millisecond {
 		used := b.read()
 		if b.observedAt.IsZero() {
 			b.observedAt, b.observedCPU = b.at, b.used
@@ -113,16 +132,37 @@ func (b *Budget) admissionDelay(now time.Time, writeout bool) time.Duration {
 		}
 		// Mandatory work may exceed the allowance indefinitely. It must not
 		// leave optional work repaying an unbounded historical CPU debt.
-		b.credit = max(-b.cores*.1, min(b.cores*.04, b.credit+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
+		b.credit = max(-b.cores*.02, min(b.cores*.005, b.credit+b.reserved+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
+		b.reserved = 0
 		b.at, b.used = now, used
 	}
 	if !writeout && (b.writers.Load() > 0 || b.prefetchers.Load() > 0 || !b.belowAt.IsZero()) {
 		return 100 * time.Millisecond
 	}
-	if b.credit >= 0 {
+	// Keep one sampling slice of the checkpoint share available to its next
+	// batch. Writers may use all other credit, including idle checkpoint CPU,
+	// but cannot repeatedly win the race for every newly replenished slice.
+	minimum := 0.
+	if !checkpoint {
+		minimum = b.checkpointShareLocked() * .005
+	}
+	if b.credit >= minimum {
+		b.credit -= cost
+		b.reserved += cost
 		return 0
 	}
-	return min(100*time.Millisecond, max(20*time.Millisecond, time.Duration(-b.credit/b.cores*float64(time.Second))))
+	return min(20*time.Millisecond, max(time.Millisecond, time.Duration((minimum-b.credit)/b.cores*float64(time.Second))))
+}
+
+func (b *Budget) writeCost() float64 {
+	rate := math.Float64frombits(b.rateCeiling.Load())
+	if rate <= 0 {
+		rate = 3 * b.steadyRate
+	}
+	if rate > 0 {
+		return b.cores / rate
+	}
+	return min(.00001, b.cores*.001)
 }
 
 // Wait is only for optional warming/validation, never mandatory writeout.
@@ -145,7 +185,7 @@ func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		delay := b.admissionDelay(time.Now(), checkpoint)
+		delay := b.reserveDelay(time.Now(), checkpoint, max(.001, b.writeCost()))
 		if delay == 0 {
 			b.warmGrants.Add(1)
 			return nil

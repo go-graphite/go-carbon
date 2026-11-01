@@ -19,27 +19,32 @@ func (b *Budget) BeginWriteout() {
 // Waiting writers reserve priority over optional catalog warming.
 // A successful admission must be paired with EndWriteout.
 func (b *Budget) WaitWriteout(exit <-chan bool) bool {
-	return b.waitWork(exit, false)
+	return b.WaitWriteoutBatch(exit, 1)
+}
+
+// WaitWriteoutBatch reserves every update sharing a store commit.
+func (b *Budget) WaitWriteoutBatch(exit <-chan bool, updates int) bool {
+	return b.waitWork(exit, false, max(1, updates))
 }
 
 // WaitPrefetch admits required queue preparation or cold-state prefetch from
 // the same process credit. It cannot wait behind the writes that need it.
 // Pair a successful admission with EndPrefetch.
-func (b *Budget) WaitPrefetch(exit <-chan bool) bool { return b.waitWork(exit, true) }
+func (b *Budget) WaitPrefetch(exit <-chan bool) bool { return b.waitWork(exit, true, 1) }
 func (b *Budget) BeginPrefetch() {
 	b.prefetchers.Add(1)
 	b.warmGrants.Add(1)
 }
 func (b *Budget) EndPrefetch() { b.prefetchers.Add(-1) }
 
-func (b *Budget) waitWork(exit <-chan bool, warming bool) bool {
+func (b *Budget) waitWork(exit <-chan bool, warming bool, updates int) bool {
 	pending, grants := &b.writers, &b.writeGrants
 	if warming {
 		pending, grants = &b.prefetchers, &b.warmGrants
 	}
 	pending.Add(1)
 	for b.Active() {
-		delay := b.admissionDelay(time.Now(), true)
+		delay := b.reserveDelay(time.Now(), true, float64(updates)*b.writeCost())
 		if delay == 0 {
 			break
 		}
@@ -85,10 +90,13 @@ func (b *Budget) ObserveWriteout(floor, rate float64) bool {
 }
 
 type State struct {
-	Allowance, Process, Warming, Writeout, Floor, Rate float64
-	WarmGrants, WriteGrants                            uint64
-	BelowFor                                           time.Duration
+	Allowance, Process, Warming, Writeout, Checkpoint, Floor, Rate, Ceiling    float64
+	WarmGrants, WriteGrants, CheckpointGrants, CheckpointWork, CheckpointTotal uint64
+	CheckpointLoading                                                          bool
+	BelowFor                                                                   time.Duration
 }
+
+func (b *Budget) SetRateCeiling(rate float64) { b.rateCeiling.Store(math.Float64bits(rate)) }
 
 // State describes admission grants, not attributed CPU consumption. During
 // warming consumers share a finite allowance; their grants never add above it.
@@ -97,7 +105,10 @@ func (b *Budget) State() State {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := State{Allowance: b.cores, Process: b.process, Floor: b.floor, Rate: b.rate,
-		WarmGrants: b.warmGrants.Load(), WriteGrants: b.writeGrants.Load()}
+		Ceiling:    math.Float64frombits(b.rateCeiling.Load()),
+		WarmGrants: b.warmGrants.Load(), WriteGrants: b.writeGrants.Load(),
+		CheckpointGrants: b.checkpointGrants.Load(), CheckpointWork: b.checkpointWork.Load(),
+		CheckpointTotal: b.checkpointTotal.Load(), CheckpointLoading: b.checkpoints.Load() > 0}
 	writers, prefetchers := b.writers.Load(), b.prefetchers.Load()
 	if !active {
 		s.Warming = math.Inf(1)
@@ -106,12 +117,19 @@ func (b *Budget) State() State {
 		}
 	} else {
 		available := max(0, b.cores-b.process)
+		s.Checkpoint = min(available, b.checkpointShareLocked())
+		available -= s.Checkpoint
 		if prefetchers > 0 {
-			// Report the available shared grant among registered required jobs.
-			// Receivers waiting for names hold no writeout reservation.
+			// Report headroom among required jobs, retaining writeout demand
+			// across the rate-token and queue waits between registered writers.
 			s.Warming = available
-			if writers > 0 {
+			if b.released || writers > 0 {
 				s.Warming *= float64(prefetchers) / float64(prefetchers+writers)
+				if writers == 0 {
+					// A rate-token or queue wait is still writeout demand after
+					// release. Required preparation must not claim all headroom.
+					s.Warming = available / 2
+				}
 				s.Writeout = available - s.Warming
 			}
 		} else if b.released || writers > 0 {
@@ -127,17 +145,21 @@ func (b *Budget) State() State {
 }
 
 var (
-	grantDesc   = prometheus.NewDesc("restart_cpu_granted_cores", "CPU admission grant by consumer; finite shared allowance while warming, +Inf after pacing ends.", []string{"consumer"}, nil)
-	countDesc   = prometheus.NewDesc("restart_cpu_grants_total", "Admitted work windows or writeout jobs by consumer, not CPU consumption.", []string{"consumer"}, nil)
-	floorDesc   = prometheus.NewDesc("restart_cpu_writeout_floor_updates_per_second", "Minimum restart writeout rate derived from queued metrics and max delay.", nil, nil)
-	rateDesc    = prometheus.NewDesc("restart_cpu_writeout_updates_per_second", "Confirmed writeout updates per second during restart.", nil, nil)
-	processDesc = prometheus.NewDesc("restart_cpu_process_cores", "Latest measured whole-process user plus system CPU cores.", nil, nil)
+	grantDesc              = prometheus.NewDesc("restart_cpu_granted_cores", "CPU admission grant by consumer; finite shared allowance while warming, +Inf after pacing ends.", []string{"consumer"}, nil)
+	countDesc              = prometheus.NewDesc("restart_cpu_grants_total", "Admitted work windows or writeout jobs by consumer, not CPU consumption.", []string{"consumer"}, nil)
+	floorDesc              = prometheus.NewDesc("restart_cpu_writeout_floor_updates_per_second", "Minimum restart writeout rate: predecessor throughput or queued metrics divided by max delay, whichever is greater.", nil, nil)
+	rateDesc               = prometheus.NewDesc("restart_cpu_writeout_updates_per_second", "Confirmed writeout updates per second during restart.", nil, nil)
+	processDesc            = prometheus.NewDesc("restart_cpu_process_cores", "Latest measured whole-process user plus system CPU cores.", nil, nil)
+	allowanceDesc          = prometheus.NewDesc("restart_cpu_allowance_cores", "Whole-process restart CPU allowance.", nil, nil)
+	ceilingDesc            = prometheus.NewDesc("restart_cpu_writeout_ceiling_updates_per_second", "Restart rate-token ceiling, before whole-process CPU admission; zero means unlimited.", nil, nil)
+	checkpointProgressDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_bytes", "Checkpoint stream progress in file bytes; total is zero until known.", []string{"kind"}, nil)
+	checkpointLoadingDesc  = prometheus.NewDesc("restart_cpu_checkpoint_loading", "One while a checkpoint accelerator load is pending or running.", nil, nil)
 )
 
 type metrics struct{ budget atomic.Pointer[Budget] }
 
 func (m *metrics) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{grantDesc, countDesc, floorDesc, rateDesc, processDesc} {
+	for _, d := range []*prometheus.Desc{grantDesc, countDesc, floorDesc, rateDesc, processDesc, allowanceDesc, ceilingDesc, checkpointProgressDesc, checkpointLoadingDesc} {
 		ch <- d
 	}
 }
@@ -146,11 +168,22 @@ func (m *metrics) Collect(ch chan<- prometheus.Metric) {
 	s := m.budget.Load().State()
 	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Warming, "warming")
 	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Writeout, "writeout")
+	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Checkpoint, "checkpoint_load")
 	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.CounterValue, float64(s.WarmGrants), "warming")
 	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.CounterValue, float64(s.WriteGrants), "writeout")
+	ch <- prometheus.MustNewConstMetric(countDesc, prometheus.CounterValue, float64(s.CheckpointGrants), "checkpoint_load")
 	ch <- prometheus.MustNewConstMetric(floorDesc, prometheus.GaugeValue, s.Floor)
 	ch <- prometheus.MustNewConstMetric(rateDesc, prometheus.GaugeValue, s.Rate)
 	ch <- prometheus.MustNewConstMetric(processDesc, prometheus.GaugeValue, s.Process)
+	ch <- prometheus.MustNewConstMetric(allowanceDesc, prometheus.GaugeValue, s.Allowance)
+	ch <- prometheus.MustNewConstMetric(ceilingDesc, prometheus.GaugeValue, s.Ceiling)
+	ch <- prometheus.MustNewConstMetric(checkpointProgressDesc, prometheus.GaugeValue, float64(s.CheckpointWork), "completed")
+	ch <- prometheus.MustNewConstMetric(checkpointProgressDesc, prometheus.GaugeValue, float64(s.CheckpointTotal), "total")
+	loading := 0.
+	if s.CheckpointLoading {
+		loading = 1
+	}
+	ch <- prometheus.MustNewConstMetric(checkpointLoadingDesc, prometheus.GaugeValue, loading)
 }
 
 func (b *Budget) InitPrometheus(reg prometheus.Registerer) {
