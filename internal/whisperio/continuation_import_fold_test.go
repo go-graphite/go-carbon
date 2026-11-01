@@ -509,6 +509,7 @@ func TestImportFoldMatchesClassic(t *testing.T) {
 
 // importOnce imports path with codec into a fresh in-memory store and returns
 // it with the fold result Import counted ("" when it attempted none).
+// Callers must isolate the counter delta from concurrent imports.
 func importOnce(t testing.TB, codec *ContinuationCodec, path string, m store.Metadata, now int) (*countingIO, string) {
 	t.Helper()
 	kv := &countingIO{mapContinuationIO: mapContinuationIO{}}
@@ -1186,7 +1187,10 @@ func productionSidecarSource(t testing.TB, dir string, seed int64, minAge, maxAg
 // folding it during the import. It also reports the keys plus values the
 // codec handed the store. Set IMPORT_FOLD_METRICS to change the count.
 func TestImportFoldPebbleBytes(t *testing.T) {
-	t.Parallel()
+	// importOnce infers each import's result from process-wide counters. Keep
+	// other top-level tests (e.g. TestImportFoldMatchesClassic) from importing
+	// concurrently: the mutex below only isolates this test's two shapes.
+	// The shapes and their source fixtures can still run in parallel.
 	var imports sync.Mutex
 	n := 4
 	if testing.Short() {
