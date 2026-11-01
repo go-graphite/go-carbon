@@ -20,6 +20,7 @@ type Budget struct {
 	at                   time.Time
 	observedAt           time.Time
 	observedCPU          float64
+	processReady         bool
 	read                 func() float64
 	until                time.Time
 	warmed               atomic.Bool
@@ -127,12 +128,22 @@ func (b *Budget) reserveWork(now time.Time, writeout bool, cost float64, checkpo
 		// after a quiet 20ms slice must not report one core for a process
 		// spending ten cores across the preceding second.
 		if elapsed := now.Sub(b.observedAt); elapsed >= time.Second {
-			b.process = (used - b.observedCPU) / elapsed.Seconds()
+			value := (used - b.observedCPU) / elapsed.Seconds()
+			if !b.processReady {
+				b.process, b.processReady = value, true
+			} else {
+				// Reporting uses a five-second EWMA, updated at most once a
+				// second. Admission below always charges the raw CPU delta.
+				b.process += -math.Expm1(-elapsed.Seconds()/5) * (value - b.process)
+			}
 			b.observedAt, b.observedCPU = now, used
 		}
-		// Mandatory work may exceed the allowance indefinitely. It must not
-		// leave optional work repaying an unbounded historical CPU debt.
-		b.credit = max(-b.cores*.02, min(b.cores*.005, b.credit+b.reserved+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
+		// Preserve burst charges across quiet slices. A 20ms debt limit lost
+		// CPU whenever receivers/GC outran admission for longer than that,
+		// allowing sustained excess even though average mandatory CPU fit.
+		// Bound debt to one second of allowance: prolonged mandatory overload
+		// must not create an unbounded repayment obligation after it ends.
+		b.credit = max(-b.cores, min(b.cores*.005, b.credit+b.reserved+now.Sub(b.at).Seconds()*b.cores-(used-b.used)))
 		b.reserved = 0
 		b.at, b.used = now, used
 	}

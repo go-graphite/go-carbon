@@ -149,7 +149,7 @@ var (
 	countDesc              = prometheus.NewDesc("restart_cpu_grants_total", "Admitted work windows or writeout jobs by consumer, not CPU consumption.", []string{"consumer"}, nil)
 	floorDesc              = prometheus.NewDesc("restart_cpu_writeout_floor_updates_per_second", "Minimum restart writeout rate: predecessor throughput or queued metrics divided by max delay, whichever is greater.", nil, nil)
 	rateDesc               = prometheus.NewDesc("restart_cpu_writeout_updates_per_second", "Confirmed writeout updates per second during restart.", nil, nil)
-	processDesc            = prometheus.NewDesc("restart_cpu_process_cores", "Latest measured whole-process user plus system CPU cores.", nil, nil)
+	processDesc            = prometheus.NewDesc("restart_cpu_process_cores", "Whole-process user plus system CPU cores, five-second EWMA updated once per second; admission uses raw CPU deltas.", nil, nil)
 	allowanceDesc          = prometheus.NewDesc("restart_cpu_allowance_cores", "Whole-process restart CPU allowance.", nil, nil)
 	ceilingDesc            = prometheus.NewDesc("restart_cpu_writeout_ceiling_updates_per_second", "Restart rate-token ceiling, before whole-process CPU admission; zero means unlimited.", nil, nil)
 	checkpointProgressDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_bytes", "Checkpoint stream progress in file bytes; total is zero until known.", []string{"kind"}, nil)
