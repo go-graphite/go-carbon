@@ -1130,14 +1130,19 @@ restore-per-second = 0
 # time; with a service manager that only tracks the main process (for systemd,
 # KillMode=process) the next instance starts while that memory is reclaimed.
 # The host needs room for both processes briefly. Not supported with -daemon.
-# When both binaries support input handoff, a store with only the built-in
-# unbuffered TCP receiver with automatic plaintext/zstd detection also transfers its ingestion
+# When both binaries support input handoff, a file store with only the built-in
+# unbuffered TCP receiver with automatic plaintext/zstd/stream detection also transfers its ingestion
 # connections. Input received after the checkpoint is replayed before reading
 # the transferred connections. Other receiver configurations use stop/rebind.
 handoff-supervisor = false
 # A shared store (whisper.storage-backend = "pebble-chunk" without mirrored
 # files) cannot hand its reads over: their data is in a database only one
-# process opens. With this enabled, and the same receiver and successor
+# process opens. handoff-supervisor alone does NOT enable its input handoff:
+# set BOTH handoff-supervisor = true and store-input-handoff = true for a
+# shared store managed with systemd KillMode=process and KillSignal=USR2.
+# Keep this opt-in because a service manager that kills the whole process
+# group would kill the worker still receiving input after supervisor release.
+# With this enabled, and the same receiver and successor
 # requirements as above, the stopping instance still keeps reading input into
 # its tail log, closes the database, releases the supervisor and hands the
 # input sockets to the next instance once that has opened the database, so
@@ -1150,6 +1155,10 @@ handoff-supervisor = false
 # process that registers is checked again: one that cannot take input makes
 # input stop at once. Input received after the checkpoint is replayed before
 # the successor reads input, which on large stores runs at ~0.5M points/s.
+# This preserves the accepted sockets and their unread bytes, including zstd
+# frame prefixes and stream dictionaries. Without handoff, successful sender
+# writes are not delivery acknowledgements: unread input can be lost at close.
+# See doc/input-handoff.md for the complete configuration and a local check.
 store-input-handoff = false
 # Record format of the dump a stop writes: "legacy", "compact", or "blocks".
 # "compact" writes each metric's points in the cache's in-memory encoding,

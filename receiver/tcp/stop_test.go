@@ -1,15 +1,97 @@
 package tcp
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"net"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
+	"github.com/go-graphite/go-carbon/receiver/stream/codec"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
+
+func TestPlannedConnectionClose(t *testing.T) {
+	for _, protocol := range []string{"plaintext", "zstd", "stream", "stream-preamble"} {
+		t.Run(protocol, func(t *testing.T) {
+			var logs bytes.Buffer
+			core := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.Lock(zapcore.AddSync(&logs)), zap.InfoLevel)
+			r, err := newTCP("tcp", &Options{Listen: "127.0.0.1:0", Enabled: true}, func(*points.Points) {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Stop()
+			r.logger = zap.New(core)
+			c, err := net.Dial("tcp", r.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			var wire []byte
+			switch protocol {
+			case "plaintext":
+				wire = []byte("example.a 1 1700000000\npartial")
+			case "zstd":
+				wire = encodeFrames(t, []byte("example.a 1 1700000000\n"), 1024)
+				wire = append(wire, 0x28, 0xb5, 0x2f, 0xfd)
+			case "stream":
+				wire = streamWire(t, codec.FlagZstd)
+			case "stream-preamble":
+				wire = []byte{0}
+			}
+			if _, err := c.Write(wire); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for atomic.LoadInt32(&r.active) == 0 {
+				if time.Now().After(deadline) {
+					t.Fatal("connection did not start")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			r.Stop()
+			if strings.Contains(logs.String(), `"level":"error"`) {
+				t.Fatal("planned close logged at ERROR", logs.String())
+			}
+			if strings.Count(logs.String(), "input connection closed during shutdown") != 1 {
+				t.Fatal("expected one INFO for the locally closed connection", logs.String())
+			}
+			if r.errors != 0 || r.zstdStats.decodeErrors != 0 || r.streamCounters[streamDecodeErrors].Load() != 0 {
+				t.Fatal("planned close counted as a read/decode error")
+			}
+		})
+	}
+}
+
+func TestPlannedCloseOnlySuppressesLocalShutdown(t *testing.T) {
+	for _, stopping := range []bool{false, true} {
+		for _, readErr := range []error{net.ErrClosed, fmt.Errorf("read: %w", net.ErrClosed), syscall.ECONNRESET, errors.New("invalid frame")} {
+			t.Run(fmt.Sprintf("%v/%v", stopping, readErr), func(t *testing.T) {
+				var logs bytes.Buffer
+				core := zapcore.NewCore(zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()), zapcore.Lock(zapcore.AddSync(&logs)), zap.InfoLevel)
+				r := &TCP{logger: zap.New(core)}
+				r.stopping.Store(stopping)
+				c, peer := net.Pipe()
+				defer c.Close()
+				defer peer.Close()
+				r.streamFailure(c, readErr)
+				want := stopping && errors.Is(readErr, net.ErrClosed)
+				if (strings.Count(logs.String(), `"level":"info"`) == 1) != want ||
+					(strings.Count(logs.String(), `"level":"error"`) == 1) == want ||
+					(r.streamCounters[streamDecodeErrors].Load() == 0) != want {
+					t.Fatal("incorrect error classification", logs.String())
+				}
+			})
+		}
+	}
+}
 
 func TestStopTCP(t *testing.T) {
 	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")

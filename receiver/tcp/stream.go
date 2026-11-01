@@ -64,6 +64,9 @@ func (rcv *TCP) configureStream(o *Options) error {
 }
 
 func (rcv *TCP) streamFailure(conn net.Conn, err error) {
+	if rcv.plannedClose(err) {
+		return
+	}
 	rcv.streamCounters[streamDecodeErrors].Add(1)
 	atomic.AddUint32(&rcv.errors, 1)
 	rcv.logger.Error("stream decode failed", zap.String("peer", conn.RemoteAddr().String()), zap.Error(err))

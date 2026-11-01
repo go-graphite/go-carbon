@@ -17,6 +17,31 @@ import (
 	"github.com/lomik/zapwriter"
 )
 
+func TestStoreInputHandoffConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting string
+		want          bool
+	}{
+		{"supervisor alone", "", false},
+		{"explicitly enabled", "store-input-handoff = true\n", true},
+		{"explicitly disabled", "store-input-handoff = false\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "go-carbon.conf")
+			if err := os.WriteFile(path, []byte("[dump]\nhandoff-supervisor = true\n"+tc.setting), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := ReadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cfg.Dump.HandoffSupervisor || cfg.Dump.StoreInputHandoff != tc.want || len(cfg.unknownKeys) != 0 {
+				t.Fatalf("dump settings: %+v; unknown keys: %v", cfg.Dump, cfg.unknownKeys)
+			}
+		})
+	}
+}
+
 // storeHandoffSuccessor is a stand-in for the next binary's capability flags,
 // optionally including shared-store input handoff.
 func storeHandoffSuccessor(t *testing.T, storeInput bool) string {
@@ -278,6 +303,9 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 			wg.Wait()
 
 			logs := zapwriter.TestString()
+			if !tc.enabled && !strings.Contains(logs, "store input handoff disabled; stopping input") {
+				t.Fatal("disabled handoff was not diagnosed", logs)
+			}
 			if tc.handedOver {
 				failed.Range(func(c, err any) bool { t.Fatalf("client %v write failed: %v\n%s", c, err, logs); return false })
 				for _, want := range []string{"input handed over", "input handed off to successor", "took over input from stopping instance", "input tail loaded", "persister stopped with input active"} {
