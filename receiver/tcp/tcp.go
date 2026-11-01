@@ -19,6 +19,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/receiver/parse"
+	"github.com/go-graphite/go-carbon/receiver/stream/codec"
 	"github.com/klauspost/compress/gzip"
 	"github.com/klauspost/compress/snappy"
 	"github.com/lomik/graphite-pickle/framing"
@@ -53,19 +54,23 @@ func Register() {
 }
 
 type Options struct {
-	Listen           string `toml:"listen"`
-	Enabled          bool   `toml:"enabled"`
-	BufferSize       int    `toml:"buffer-size"`
-	Compression      string `toml:"compression"`
-	ZstdMaxFrameSize int    `toml:"zstd-max-frame-size"`
+	Listen             string `toml:"listen"`
+	Enabled            bool   `toml:"enabled"`
+	BufferSize         int    `toml:"buffer-size"`
+	Compression        string `toml:"compression"`
+	ZstdMaxFrameSize   int    `toml:"zstd-max-frame-size"`
+	StreamMaxFrameSize int    `toml:"stream-max-frame-size"`
+	StreamMaxNames     int    `toml:"stream-max-names"`
 }
 
 func NewOptions() *Options {
 	return &Options{
-		Listen:           ":2003",
-		Enabled:          true,
-		BufferSize:       0,
-		ZstdMaxFrameSize: defaultZstdMaxFrameSize,
+		Listen:             ":2003",
+		Enabled:            true,
+		BufferSize:         0,
+		ZstdMaxFrameSize:   defaultZstdMaxFrameSize,
+		StreamMaxFrameSize: codec.DefaultMaxFrameSize,
+		StreamMaxNames:     codec.DefaultMaxNames,
 	}
 }
 
@@ -108,9 +113,14 @@ type TCP struct {
 	compression         string
 	zstdMaxFrameSize    int
 	zstdStats           zstdStats
+	streamDisabled      bool
+	streamOptions       codec.Options
+	streamCounters      [streamCounterCount]atomic.Uint64
+	promStreamCounters  [streamCounterCount]*prometheus.CounterVec
 	handoff             handoffState
 	pointOut            atomic.Pointer[func(name []byte, value float64, timestamp int64)]
 	pointsOut           atomic.Pointer[func(name []byte, data []points.Point)]
+	streamPointOut      atomic.Pointer[func(name []byte, value float64, timestamp int64, slot *any)]
 }
 
 // SetPointOut configures the point callback for unbuffered plain-text input.
@@ -163,6 +173,9 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	}
 	r.compression = options.Compression
 	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
+	if err := r.configureStream(options); err != nil {
+		return nil, err
+	}
 	r.decompressor = newDecompressor(options.Compression)
 	r.handoff.enabled = options.BufferSize == 0 && options.Compression == ""
 
@@ -263,11 +276,14 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	lastDeadline := time.Now()
 	readTimeout := 2 * time.Minute
 	tracked.setReadDeadline(conn, lastDeadline.Add(readTimeout))
-	// Only connection startup dispatches on the first bytes. The line loop
-	// below is shared with the existing plaintext and legacy compression paths.
+	// A single connection-start dispatcher selects plaintext, zstd or stream.
 	var frames *zstdFrames
 	if rcv.compression == "" || rcv.compression == "zstd" {
 		frames, err = rcv.dispatchFirstBytes(reader)
+		if errors.Is(err, errStreamInput) {
+			detached = rcv.handleStream(conn, reader, rest, tracked)
+			return
+		}
 		if err != nil {
 			rcv.zstdFailure(err)
 			return
@@ -503,6 +519,8 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	atomic.AddUint32(&rcv.parseErrors, -parseErrors)
 	send("parseErrors", float64(parseErrors))
 
+	rcv.streamStat(send)
+
 	if rcv.buffer != nil {
 		send("bufferLen", float64(len(rcv.buffer)))
 		send("bufferCap", float64(cap(rcv.buffer)))
@@ -633,4 +651,5 @@ func (rcv *TCP) InitPrometheus(reg prometheus.Registerer) {
 
 	reg.MustRegister(rcv.promMetricsReceived)
 	rcv.zstdStats.initPrometheus(reg)
+	rcv.initStreamPrometheus(reg)
 }

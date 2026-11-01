@@ -67,3 +67,20 @@ func (c *Cache) AddPointRef(ref *PointRef, name []byte, value float64, timestamp
 		}
 	}
 }
+
+// AddStreamPoint binds a stream dictionary slot to this cache. Dictionary resets
+// and inherited stream snapshots supply empty slots, so references never cross
+// name assignments or cache lifetimes. The normal AddPointRef fallback retains
+// admission, tag handling and graceful input diversion.
+func (c *Cache) AddStreamPoint(name []byte, value float64, timestamp int64, slot *any) {
+	if slot == nil {
+		c.AddPoint(name, value, timestamp)
+		return
+	}
+	ref, ok := (*slot).(*PointRef)
+	if !ok {
+		ref = new(PointRef)
+		*slot = ref
+	}
+	c.AddPointRef(ref, name, value, timestamp)
+}

@@ -1,0 +1,197 @@
+package tcp
+
+import (
+	"bufio"
+	"bytes"
+	"io"
+	"net"
+	"sync/atomic"
+	"time"
+
+	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver/stream/codec"
+	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
+)
+
+const (
+	streamConnections = iota
+	streamFrames
+	streamPayloadBytes
+	streamNamesDefined
+	streamResets
+	streamDecodeErrors
+	streamCounterCount
+)
+
+var streamStatNames = [streamCounterCount]string{
+	"streamConnections", "streamFrames", "streamPayloadBytes", "streamNamesDefined", "streamResets", "streamDecodeErrors",
+}
+var streamPromNames = [streamCounterCount]string{
+	"stream_connections_tcp_total", "stream_frames_tcp_total", "stream_payload_bytes_tcp_total", "stream_names_defined_tcp_total", "stream_resets_tcp_total", "stream_decode_errors_tcp_total",
+}
+var streamPromHelp = [streamCounterCount]string{
+	"Counter of stream connections received via the TCP endpoint.",
+	"Counter of validated stream frames received via the TCP endpoint.",
+	"Counter of validated stream payload bytes received via the TCP endpoint.",
+	"Counter of stream dictionary names defined via the TCP endpoint.",
+	"Counter of stream dictionary resets received via the TCP endpoint.",
+	"Counter of stream protocol or transport failures via the TCP endpoint.",
+}
+
+// SetStreamPointOut installs an optional stream sink with a per-id opaque slot.
+// The sink may cache a reference in *slot; resets clear all slots, and restart
+// snapshots recreate them empty. It must not retain the slot pointer or modify
+// name. The hook takes precedence over SetPointOut for stream input only.
+// Existing connections adopt it at a frame boundary. Buffered receivers keep
+// using their configured store. No cache implementation is required here.
+func (rcv *TCP) SetStreamPointOut(out func(name []byte, value float64, timestamp int64, slot *any)) {
+	if rcv.buffer == nil {
+		rcv.streamPointOut.Store(&out)
+	}
+}
+
+func (rcv *TCP) configureStream(o *Options) error {
+	rcv.streamDisabled = o.Compression != ""
+	rcv.streamOptions = codec.Options{MaxFrameSize: o.StreamMaxFrameSize, MaxNames: o.StreamMaxNames}
+	d, err := codec.NewDecoder(rcv.streamOptions)
+	if err != nil {
+		return err
+	}
+	d.Close()
+	return nil
+}
+
+func (rcv *TCP) streamFailure(conn net.Conn, err error) {
+	rcv.streamCounters[streamDecodeErrors].Add(1)
+	atomic.AddUint32(&rcv.errors, 1)
+	rcv.logger.Error("stream decode failed", zap.String("peer", conn.RemoteAddr().String()), zap.Error(err))
+}
+
+// handleStream runs under handlePlain's connection lifecycle. Every accepted
+// frame is validated before rows reach the same sink as plaintext points.
+func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader, tracked *handoffConn) bool {
+	rcv.streamCounters[streamConnections].Add(1)
+	var preamble [codec.PreambleSize]byte
+	if n, err := io.ReadFull(r, preamble[:]); err != nil {
+		if tracked.detaching() {
+			return rcv.detach(tracked, r, rest, preamble[:n])
+		}
+		rcv.streamFailure(conn, err)
+		return false
+	}
+	flags, err := codec.ParsePreamble(preamble[:])
+	if err != nil {
+		rcv.streamFailure(conn, err)
+		return false
+	}
+	opts := rcv.streamOptions
+	opts.Flags = flags
+	d, err := codec.NewDecoder(opts)
+	if err != nil {
+		rcv.streamFailure(conn, err)
+		return false
+	}
+	defer d.Close()
+	var pointOut func([]byte, float64, int64)
+	if out := rcv.pointOut.Load(); out != nil {
+		pointOut = *out
+	}
+	var streamOut func([]byte, float64, int64, *any)
+	if out := rcv.streamPointOut.Load(); out != nil {
+		streamOut = *out
+	}
+	sinkReady := false
+	visit := func(_ uint32, name []byte, value float64, ts int64, slot *any) {
+		if !sinkReady {
+			if streamOut == nil {
+				if out := rcv.streamPointOut.Load(); out != nil {
+					streamOut = *out
+				}
+			}
+			if pointOut == nil && streamOut == nil {
+				if out := rcv.pointOut.Load(); out != nil {
+					pointOut = *out
+				}
+			}
+			sinkReady = true
+		}
+		switch {
+		case streamOut != nil:
+			streamOut(name, value, ts, slot)
+		case pointOut != nil:
+			pointOut(name, value, ts)
+		default:
+			rcv.out(points.OnePoint(string(name), value, ts))
+		}
+	}
+	for {
+		if rest != nil && rest.Len() == 0 {
+			rest.Reset(nil)
+		}
+		if tracked.detaching() {
+			return rcv.detachStream(conn, r, rest, tracked, d, flags)
+		}
+		// Resolve after the read, at the first row, so a sink installed while
+		// waiting for input is adopted. An installed stream hook stays local.
+		sinkReady = streamOut != nil
+
+		tracked.setReadDeadline(conn, time.Now().Add(2*time.Minute))
+		info, err := d.ReadFrame(r, visit)
+		if err != nil {
+			if tracked.detaching() {
+				return rcv.detachStream(conn, r, rest, tracked, d, flags)
+			}
+			if err != io.EOF { //nolint:errorlint // Only a direct EOF at a frame boundary is a clean shutdown.
+				rcv.streamFailure(conn, err)
+			}
+			return false
+		}
+		atomic.AddUint32(&rcv.metricsReceived, info.Rows)
+		rcv.streamCounters[streamFrames].Add(1)
+		rcv.streamCounters[streamPayloadBytes].Add(uint64(info.PayloadBytes))
+		rcv.streamCounters[streamNamesDefined].Add(uint64(info.Names))
+		if info.Kind == codec.ResetFrame {
+			rcv.streamCounters[streamResets].Add(1)
+		}
+	}
+}
+
+// detachStream serializes protocol state into ordinary wire input. ReadFrame
+// never emits an incomplete frame; its consumed bytes follow the last committed
+// state, before reader-buffered and inherited bytes. The successor autodetects
+// this preamble and replays state frames without emitting points.
+func (rcv *TCP) detachStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader, tracked *handoffConn, d *codec.Decoder, flags byte) bool {
+	prefix, err := codec.AppendPreamble(nil, flags)
+	if err == nil {
+		prefix, err = d.Snapshot(prefix)
+	}
+	if err != nil {
+		rcv.streamFailure(conn, err)
+		return false
+	}
+	prefix = append(prefix, d.Pending()...)
+	return rcv.detach(tracked, r, rest, prefix)
+}
+
+func (rcv *TCP) streamStat(send helper.StatCallback) {
+	for i, name := range streamStatNames {
+		n := float64(rcv.streamCounters[i].Swap(0))
+		send(name, n)
+		if rcv.promStreamCounters[i] != nil {
+			if n != 0 {
+				rcv.promStreamCounters[i].WithLabelValues().Add(n)
+			}
+		}
+	}
+}
+func (rcv *TCP) initStreamPrometheus(reg prometheus.Registerer) {
+	for i, name := range streamPromNames {
+		// Instantiate a series only on use, preserving the metrics exposed by
+		// existing plaintext/zstd-only receivers.
+		c := prometheus.NewCounterVec(prometheus.CounterOpts{Name: name, Help: streamPromHelp[i]}, nil)
+		rcv.promStreamCounters[i] = c
+		reg.MustRegister(c)
+	}
+}

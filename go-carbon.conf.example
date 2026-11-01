@@ -657,12 +657,20 @@ listen = ":2003"
 enabled = true
 # Optional internal queue between receiver and cache
 buffer-size = 0
-# Empty compression autodetects independent zstd frames or plaintext on this port.
+# Empty compression autodetects plaintext, independent zstd frames or stream.
 # Explicit "gzip", "snappy", or "zstd" selects that format without autodetection.
 compression = ""
 # Maximum decompressed frame size and advertised window, in bytes; zero uses
 # 16 MiB. Compressed frames are bounded by this + this/128 + 1024 bytes.
 zstd-max-frame-size = 16777216
+# Stream uses a connection dictionary and timestamp/value deltas, optionally zstd.
+# Outer zstd frames carry plaintext only; nested stream is rejected with an error.
+# Bound each stream frame's wire AND uncompressed payload bytes.
+stream-max-frame-size = 8388608
+# Bound distinct names per stream connection; the sender resets at its name cap.
+stream-max-names = 5000000
+# Protocol, sender API, metrics and restart behavior: doc/stream-input.md
+
 
 [pickle]
 listen = ":2004"

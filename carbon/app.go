@@ -1462,6 +1462,12 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			r.SetPointsOut(addPoints)
 		}
 
+		if r, ok := rcv.(interface {
+			SetStreamPointOut(func([]byte, float64, int64, *any))
+		}); ok && receiverStoreHook == nil {
+			r.SetStreamPointOut(core.AddStreamPoint)
+		}
+
 		if conf.Prometheus.Enabled {
 			rcv.InitPrometheus(app.PromRegisterer)
 		}
