@@ -2,6 +2,7 @@ package carbonserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -23,6 +24,41 @@ func (listener *CarbonserverListener) usesSharedCatalogCachePolicy() bool {
 }
 
 const metricStoreCatalogPageSize = 4096
+
+func (listener *CarbonserverListener) reportMetricStoreIndexUpdateError(err error) {
+	// PauseIndexUpdates is terminal and closes the index builder's exit channel.
+	// Deadlines and I/O errors remain failures even during this planned stop.
+	if listener.indexPaused.Load() && onlyIndexCancellation(err) {
+		listener.logger.Info("shared metric-store index update stopped by shutdown", zap.Error(err))
+		return
+	}
+	atomic.AddUint64(&listener.metrics.MetricStoreIndexUpdateErrors, 1)
+	if listener.prometheus.enabled {
+		listener.prometheus.metricStoreIndexUpdateErrors.Inc()
+	}
+	listener.logger.Error("failed to update shared metric-store index", zap.Error(err))
+}
+
+func onlyIndexCancellation(err error) bool {
+	if !errors.Is(err, context.Canceled) {
+		return false
+	}
+	// The external merge joins cancellation with errors closing its readers.
+	// A cleanup failure must still be reported, even if cancellation came first.
+	var joined interface{ Unwrap() []error }
+	if errors.As(err, &joined) {
+		for _, cause := range joined.Unwrap() {
+			if !onlyIndexCancellation(cause) {
+				return false
+			}
+		}
+		return true
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		return onlyIndexCancellation(cause)
+	}
+	return true
+}
 
 // UsesSharedCatalogIndex reports whether discovery uses only committed store metadata.
 func (listener *CarbonserverListener) UsesSharedCatalogIndex() bool {

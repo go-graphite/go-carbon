@@ -95,6 +95,7 @@ type metricStruct struct {
 	LockFiles                            uint64
 	FileScanTimeNS                       uint64
 	IndexBuildTimeNS                     uint64
+	MetricStoreIndexUpdateErrors         uint64
 	MetricsFetched                       uint64
 	ThrottledCreates                     uint64
 	MaxCreatesPerSecond                  uint64
@@ -403,6 +404,7 @@ type prometheus struct {
 	diskWaitDuration                 func(time.Duration)
 	metricStoreIndexRebuilds         prom.Counter
 	metricStoreIndexRebuildDurations prom.Histogram
+	metricStoreIndexUpdateErrors     prom.Counter
 
 	returnedMetrics prom.Counter
 	returnedMetric  func()
@@ -484,6 +486,10 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 			Help:    "Wall time of completed full shared-store discovery index rebuild attempts, including failures.",
 			Buckets: prom.ExponentialBuckets(0.001, 4, 12),
 		}),
+		metricStoreIndexUpdateErrors: prom.NewCounter(prom.CounterOpts{
+			Name: "metric_store_index_update_errors_total",
+			Help: "Failed shared-store discovery index updates, excluding cancellation by shutdown.",
+		}),
 	}
 
 	c.prometheus.request = func(endpoint string, code int) {
@@ -537,6 +543,7 @@ func (c *CarbonserverListener) InitPrometheus(reg prom.Registerer) {
 	reg.MustRegister(c.prometheus.returnedPoints)
 	reg.MustRegister(c.prometheus.metricStoreIndexRebuilds)
 	reg.MustRegister(c.prometheus.metricStoreIndexRebuildDurations)
+	reg.MustRegister(c.prometheus.metricStoreIndexUpdateErrors)
 }
 
 type metricDetailsFlat struct {
@@ -1403,7 +1410,7 @@ func (listener *CarbonserverListener) updateFileListWithPending(dir string, cach
 	metricStore := listener.getMetricIndexStore()
 	if metricStore != nil && !(cacheOnly && prepare != nil) {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
-			listener.logger.Error("failed to update shared metric-store index", zap.Error(err))
+			listener.reportMetricStoreIndexUpdateError(err)
 		}
 		return false
 	}
@@ -2243,6 +2250,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	senderRaw("oooPhysicalBytes", &listener.metrics.OOOPhysicalBytes, send)
 	senderRaw("lockFiles", &listener.metrics.LockFiles, send)
 	sender("index_build_time_ns", &listener.metrics.IndexBuildTimeNS, send)
+	sender("metric_store_index_update_errors", &listener.metrics.MetricStoreIndexUpdateErrors, send)
 	sender("file_scan_time_ns", &listener.metrics.FileScanTimeNS, send)
 
 	sender("query_cache_hit", &listener.metrics.QueryCacheHit, send)
