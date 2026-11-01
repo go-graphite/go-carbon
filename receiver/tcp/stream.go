@@ -3,6 +3,7 @@ package tcp
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"sync/atomic"
@@ -54,12 +55,24 @@ func (rcv *TCP) SetStreamPointOut(out func(name []byte, value float64, timestamp
 
 func (rcv *TCP) configureStream(o *Options) error {
 	rcv.streamDisabled = o.Compression != ""
-	rcv.streamOptions = codec.Options{MaxFrameSize: o.StreamMaxFrameSize, MaxNames: o.StreamMaxNames}
+	rcv.streamOptions = codec.Options{MaxFrameSize: o.StreamMaxFrameSize, MaxNames: o.StreamMaxNames, DictionaryBytes: o.StreamDictionaryBytes}
 	d, err := codec.NewDecoder(rcv.streamOptions)
 	if err != nil {
 		return err
 	}
 	d.Close()
+	budget := o.StreamDictionaryTotalBytes
+	if budget == 0 {
+		budget = 3 << 30
+	}
+	perConnection := o.StreamDictionaryBytes
+	if perConnection == 0 {
+		perConnection = codec.DefaultDictionaryBytes
+	}
+	if budget < int64(perConnection) {
+		return fmt.Errorf("stream-dictionary-total-bytes must cover one stream dictionary")
+	}
+	rcv.streamDictionaryBudget = budget
 	return nil
 }
 
@@ -75,6 +88,7 @@ func (rcv *TCP) streamFailure(conn net.Conn, err error) {
 // handleStream runs under handlePlain's connection lifecycle. Every accepted
 // frame is validated before rows reach the same sink as plaintext points.
 func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader, tracked *handoffConn) bool {
+	rcv.streamSeen.Store(true)
 	rcv.streamCounters[streamConnections].Add(1)
 	var preamble [codec.PreambleSize]byte
 	if n, err := io.ReadFull(r, preamble[:]); err != nil {
@@ -91,12 +105,36 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 	}
 	opts := rcv.streamOptions
 	opts.Flags = flags
+	reservation := int64(opts.DictionaryBytes)
+	if reservation == 0 {
+		reservation = codec.DefaultDictionaryBytes
+	}
+	budget := rcv.streamDictionaryBudget
+	if budget == 0 {
+		budget = 3 << 30
+	}
+	for {
+		used := rcv.streamDictionaryReserved.Load()
+		if reservation > budget-used {
+			rcv.streamFailure(conn, fmt.Errorf("stream dictionary byte budget exhausted: reserved %d, connection %d, budget %d", used, reservation, budget))
+			return false
+		}
+		if rcv.streamDictionaryReserved.CompareAndSwap(used, used+reservation) {
+			break
+		}
+	}
+	defer rcv.streamDictionaryReserved.Add(-reservation)
 	d, err := codec.NewDecoder(opts)
 	if err != nil {
 		rcv.streamFailure(conn, err)
 		return false
 	}
 	defer d.Close()
+	heldNames, heldBytes := int64(0), int64(0)
+	defer func() { rcv.streamRetainedNames.Add(-heldNames); rcv.streamRetainedBytes.Add(-heldBytes) }()
+	if resolve := rcv.streamNameResolver.Load(); resolve != nil {
+		d.SetNameResolver(*resolve)
+	}
 	var pointOut func([]byte, float64, int64)
 	if out := rcv.pointOut.Load(); out != nil {
 		pointOut = *out
@@ -139,6 +177,9 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		// Resolve after the read, at the first row, so a sink installed while
 		// waiting for input is adopted. An installed stream hook stays local.
 		sinkReady = streamOut != nil
+		if resolve := rcv.streamNameResolver.Load(); resolve != nil {
+			d.SetNameResolver(*resolve)
+		}
 
 		tracked.setReadDeadline(conn, time.Now().Add(2*time.Minute))
 		info, err := d.ReadFrame(r, visit)
@@ -151,6 +192,10 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 			}
 			return false
 		}
+		names, bytes := int64(d.NameCount()), int64(d.RetainedBytes())
+		rcv.streamRetainedNames.Add(names - heldNames)
+		rcv.streamRetainedBytes.Add(bytes - heldBytes)
+		heldNames, heldBytes = names, bytes
 		atomic.AddUint32(&rcv.metricsReceived, info.Rows)
 		rcv.streamCounters[streamFrames].Add(1)
 		rcv.streamCounters[streamPayloadBytes].Add(uint64(info.PayloadBytes))
@@ -179,6 +224,12 @@ func (rcv *TCP) detachStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 }
 
 func (rcv *TCP) streamStat(send helper.StatCallback) {
+	if rcv.streamSeen.Load() && rcv.streamPromRetention[0] != nil {
+		rcv.streamPromRetention[0].WithLabelValues().Set(float64(rcv.streamRetainedNames.Load()))
+		rcv.streamPromRetention[1].WithLabelValues().Set(float64(rcv.streamRetainedBytes.Load()))
+	}
+	send("streamRetainedNames", float64(rcv.streamRetainedNames.Load()))
+	send("streamRetainedBytes", float64(rcv.streamRetainedBytes.Load()))
 	for i, name := range streamStatNames {
 		n := float64(rcv.streamCounters[i].Swap(0))
 		send(name, n)
@@ -190,11 +241,27 @@ func (rcv *TCP) streamStat(send helper.StatCallback) {
 	}
 }
 func (rcv *TCP) initStreamPrometheus(reg prometheus.Registerer) {
+	for i, spec := range []struct{ name, help string }{
+		{"stream_dictionary_retained_names_tcp", "Wire ids retained by live stream connections."},
+		{"stream_dictionary_retained_bytes_tcp", "Allocated live stream id-table capacity, excluding shared cache series."},
+	} {
+		rcv.streamPromRetention[i] = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: spec.name, Help: spec.help}, nil)
+		reg.MustRegister(rcv.streamPromRetention[i])
+	}
+
 	for i, name := range streamPromNames {
 		// Instantiate a series only on use, preserving the metrics exposed by
 		// existing plaintext/zstd-only receivers.
 		c := prometheus.NewCounterVec(prometheus.CounterOpts{Name: name, Help: streamPromHelp[i]}, nil)
 		rcv.promStreamCounters[i] = c
 		reg.MustRegister(c)
+	}
+}
+
+// SetStreamNameResolver binds wire ids to store-wide immutable series identities.
+// Definitions and re-resolution may consult the store index; hot rows do not.
+func (rcv *TCP) SetStreamNameResolver(resolve func([]byte) any) {
+	if rcv.buffer == nil {
+		rcv.streamNameResolver.Store(&resolve)
 	}
 }

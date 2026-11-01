@@ -111,6 +111,7 @@ type indexFilter struct {
 // identifies the batch to notConfirmed, firstArrival and pending recovery,
 // from insertion until it is confirmed.
 type item struct {
+	streamGeneration uint64 // assigned lazily under the owning shard lock
 	points.Points
 	compact compactPoints
 	// log names the item for the input log, which keeps its stream id
@@ -152,6 +153,9 @@ func (it *item) decode() *points.Points {
 
 // A "thread" safe string to anything map.
 type Shard struct {
+	streamGeneration uint64
+	streamSeries     []seriesSlot
+	streamSeriesNew  int
 	mu               sync.RWMutex // Read Write mutex, guards access to internal map.
 	items            itemMap
 	notConfirmed     []*points.Points    // linear search for value/slot
@@ -303,6 +307,7 @@ func (*Cache) Stop() {}
 
 // Collect cache metrics
 func (c *Cache) Stat(send helper.StatCallback) {
+	send("streamSeriesIndexBytes", float64(c.StreamSeriesIndexBytes()))
 	s := c.settings.Load().(*cacheSettings)
 
 	send("size", float64(c.Size()))

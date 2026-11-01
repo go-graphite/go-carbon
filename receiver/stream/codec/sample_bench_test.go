@@ -205,7 +205,7 @@ func TestSampleRoundTrip(t *testing.T) {
 		if err := e.Add(p.name, p.value, p.ts); err != nil {
 			t.Fatal(err)
 		}
-		want = append(want, expected{id: e.ids[string(p.name)], p: p})
+		want = append(want, expected{id: e.rows[len(e.rows)-1].id, p: p})
 		if e.Ready() {
 			check()
 		}

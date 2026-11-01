@@ -54,23 +54,27 @@ func Register() {
 }
 
 type Options struct {
-	Listen             string `toml:"listen"`
-	Enabled            bool   `toml:"enabled"`
-	BufferSize         int    `toml:"buffer-size"`
-	Compression        string `toml:"compression"`
-	ZstdMaxFrameSize   int    `toml:"zstd-max-frame-size"`
-	StreamMaxFrameSize int    `toml:"stream-max-frame-size"`
-	StreamMaxNames     int    `toml:"stream-max-names"`
+	Listen                     string `toml:"listen"`
+	Enabled                    bool   `toml:"enabled"`
+	BufferSize                 int    `toml:"buffer-size"`
+	Compression                string `toml:"compression"`
+	ZstdMaxFrameSize           int    `toml:"zstd-max-frame-size"`
+	StreamMaxFrameSize         int    `toml:"stream-max-frame-size"`
+	StreamDictionaryTotalBytes int64  `toml:"stream-dictionary-total-bytes"`
+	StreamDictionaryBytes      int    `toml:"stream-dictionary-bytes"`
+	StreamMaxNames             int    `toml:"stream-max-names"`
 }
 
 func NewOptions() *Options {
 	return &Options{
-		Listen:             ":2003",
-		Enabled:            true,
-		BufferSize:         0,
-		ZstdMaxFrameSize:   defaultZstdMaxFrameSize,
-		StreamMaxFrameSize: codec.DefaultMaxFrameSize,
-		StreamMaxNames:     codec.DefaultMaxNames,
+		Listen:                     ":2003",
+		Enabled:                    true,
+		BufferSize:                 0,
+		ZstdMaxFrameSize:           defaultZstdMaxFrameSize,
+		StreamMaxFrameSize:         codec.DefaultMaxFrameSize,
+		StreamMaxNames:             codec.DefaultMaxNames,
+		StreamDictionaryBytes:      codec.DefaultDictionaryBytes,
+		StreamDictionaryTotalBytes: 3 << 30,
 	}
 }
 
@@ -95,33 +99,40 @@ const plainReadBufferSize = 64 << 10
 // TCP receive metrics from TCP connections
 type TCP struct {
 	helper.Stoppable
-	out                 func(*points.Points)
-	name                string // name for store metrics
-	maxMessageSize      uint32
-	metricsReceived     uint32
-	promMetricsReceived prometheus.Counter
-	errors              uint32 // read and framing failures
-	parseErrors         uint32 // rejected metric lines or framed messages
-	active              int32  // counter
-	stopping            atomic.Bool
-	listener            *net.TCPListener
-	isFraming           bool
-	frameParser         func(body []byte) ([]*points.Points, error)
-	phase               phasecpu.Phase
-	buffer              chan *points.Points
-	logger              *zap.Logger
-	decompressor        decompressor
-	compression         string
-	zstdMaxFrameSize    int
-	zstdStats           zstdStats
-	streamDisabled      bool
-	streamOptions       codec.Options
-	streamCounters      [streamCounterCount]atomic.Uint64
-	promStreamCounters  [streamCounterCount]*prometheus.CounterVec
-	handoff             handoffState
-	pointOut            atomic.Pointer[func(name []byte, value float64, timestamp int64)]
-	pointsOut           atomic.Pointer[func(name []byte, data []points.Point)]
-	streamPointOut      atomic.Pointer[func(name []byte, value float64, timestamp int64, slot *any)]
+	out                      func(*points.Points)
+	name                     string // name for store metrics
+	maxMessageSize           uint32
+	metricsReceived          uint32
+	promMetricsReceived      prometheus.Counter
+	errors                   uint32 // read and framing failures
+	parseErrors              uint32 // rejected metric lines or framed messages
+	active                   int32  // counter
+	stopping                 atomic.Bool
+	listener                 *net.TCPListener
+	isFraming                bool
+	frameParser              func(body []byte) ([]*points.Points, error)
+	phase                    phasecpu.Phase
+	buffer                   chan *points.Points
+	logger                   *zap.Logger
+	decompressor             decompressor
+	compression              string
+	zstdMaxFrameSize         int
+	zstdStats                zstdStats
+	streamDisabled           bool
+	streamOptions            codec.Options
+	streamDictionaryBudget   int64
+	streamDictionaryReserved atomic.Int64
+	streamSeen               atomic.Bool
+	streamPromRetention      [2]*prometheus.GaugeVec
+	streamRetainedNames      atomic.Int64
+	streamRetainedBytes      atomic.Int64
+	streamCounters           [streamCounterCount]atomic.Uint64
+	promStreamCounters       [streamCounterCount]*prometheus.CounterVec
+	handoff                  handoffState
+	pointOut                 atomic.Pointer[func(name []byte, value float64, timestamp int64)]
+	pointsOut                atomic.Pointer[func(name []byte, data []points.Point)]
+	streamNameResolver       atomic.Pointer[func([]byte) any]
+	streamPointOut           atomic.Pointer[func(name []byte, value float64, timestamp int64, slot *any)]
 }
 
 // SetPointOut configures the point callback for unbuffered plain-text input.

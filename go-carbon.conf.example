@@ -669,6 +669,10 @@ zstd-max-frame-size = 16777216
 stream-max-frame-size = 8388608
 # Bound distinct names per stream connection; the sender resets at its name cap.
 stream-max-names = 5000000
+# Per-connection retained dictionary bytes; listener reserves this per stream.
+stream-dictionary-bytes = 67108864
+# Total stream dictionary reservations, excluding frame/compression buffers.
+stream-dictionary-total-bytes = 3221225472
 # Protocol, sender API, metrics and restart behavior: doc/stream-input.md
 
 

@@ -10,7 +10,6 @@ import (
 )
 
 type entry struct {
-	name []byte
 	last point
 	slot any
 }
@@ -23,13 +22,18 @@ type Visit func(id uint32, name []byte, value float64, timestamp int64, slot *an
 
 // Decoder owns one connection's dictionary. After a protocol error, discard it.
 type Decoder struct {
-	opts      Options
-	entries   []entry
-	rows      []row
-	z         *zstd.Decoder
-	raw, wire []byte
-	readN     int
-	broken    bool
+	opts        Options
+	entries     []entry
+	names       []nameRef
+	definitions [][]byte
+	resolve     func([]byte) any
+	nameBytes   int
+	arena       nameArena
+	rows        []row
+	z           *zstd.Decoder
+	raw, wire   []byte
+	readN       int
+	broken      bool
 }
 
 func NewDecoder(o Options) (*Decoder, error) {
@@ -37,7 +41,7 @@ func NewDecoder(o Options) (*Decoder, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := &Decoder{opts: o}
+	d := &Decoder{opts: o, arena: nameArena{quantum: min(64<<10, o.DictionaryBytes/8)}}
 	if o.Flags&FlagZstd != 0 {
 		d.z, err = zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(uint64(o.MaxFrameSize)), zstd.WithDecoderMaxWindow(uint64(max(1<<10, o.MaxFrameSize))), zstd.WithDecodeAllCapLimit(true))
 	}
@@ -147,6 +151,9 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 	if info.Kind == ResetFrame {
 		clear(d.entries)
 		d.entries = d.entries[:0]
+		d.arena.reset()
+		d.names = d.names[:0]
+		d.nameBytes = 0
 		return info, nil
 	}
 	if d.z != nil {
@@ -171,6 +178,7 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 		return info, ErrLimit
 	}
 	info.Names = uint32(count)
+	d.definitions = d.definitions[:0]
 	for range int(count) {
 		n := r.uint()
 		if n == 0 || n > uint64(d.opts.MaxNameSize) {
@@ -180,7 +188,31 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 		if r.err != nil {
 			return info, ErrFrame
 		}
-		e := entry{name: append([]byte(nil), name...)}
+		size := nextCapacity(len(d.entries)+1, cap(d.entries))
+		charge := d.arena.bytes + size*84 + d.arena.extra(len(name))
+		if d.resolve != nil {
+			charge = size*40 + d.nameBytes + len(name) + (len(d.entries)+1)*64
+		}
+		if charge > d.opts.DictionaryBytes {
+			return info, ErrLimit
+		}
+		if size > cap(d.entries) {
+			entries := make([]entry, len(d.entries), size)
+			copy(entries, d.entries)
+			d.entries = entries
+		}
+		e := entry{}
+		d.nameBytes += len(name)
+		d.definitions = append(d.definitions, name)
+		if d.resolve == nil {
+			if size > cap(d.names) {
+				refs := make([]nameRef, len(d.names), size)
+				copy(refs, d.names)
+				d.names = refs
+			}
+			d.names = append(d.names, d.arena.add(name))
+		}
+
 		if info.Kind == StateFrame {
 			state := r.bytes(1)
 			if len(state) == 0 || state[0] > 1 {
@@ -200,6 +232,7 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 		if r.err != nil || len(r.data) != 0 || count == 0 {
 			return info, ErrFrame
 		}
+		d.bind(int(first))
 		return info, nil
 	}
 	idsLen, stampsLen := r.uint(), r.uint()
@@ -230,10 +263,11 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 	if ids.err != nil || stamps.err != nil || values.err != nil || len(ids.data)+len(stamps.data)+len(values.data) != 0 {
 		return info, ErrFrame
 	}
+	d.bind(int(first))
 	if visit != nil {
 		for _, p := range d.rows {
 			e := &d.entries[p.id]
-			visit(p.id, e.name, math.Float64frombits(p.bits), p.ts, &e.slot)
+			visit(p.id, d.name(int(p.id)), math.Float64frombits(p.bits), p.ts, &e.slot)
 		}
 	}
 	return info, nil
@@ -264,7 +298,7 @@ func (d *Decoder) Snapshot(dst []byte) ([]byte, error) {
 	for first := 0; first < len(d.entries); {
 		end, size := first, 20
 		for end < len(d.entries) {
-			n := len(d.entries[end].name) + 27
+			n := len(d.name(end)) + 27
 			if end > first && size+n > d.opts.FrameSize {
 				break
 			}
@@ -274,9 +308,10 @@ func (d *Decoder) Snapshot(dst []byte) ([]byte, error) {
 		raw = raw[:0]
 		raw = binary.AppendUvarint(raw, uint64(first))
 		raw = binary.AppendUvarint(raw, uint64(end-first))
-		for _, e := range d.entries[first:end] {
-			raw = binary.AppendUvarint(raw, uint64(len(e.name)))
-			raw = append(raw, e.name...)
+		for i, e := range d.entries[first:end] {
+			name := d.name(first + i)
+			raw = binary.AppendUvarint(raw, uint64(len(name)))
+			raw = append(raw, name...)
 			if e.last.valid {
 				raw = append(raw, 1)
 				raw = binary.BigEndian.AppendUint64(raw, uint64(e.last.ts))
@@ -292,4 +327,52 @@ func (d *Decoder) Snapshot(dst []byte) ([]byte, error) {
 		first = end
 	}
 	return dst, nil
+}
+
+// NameCount reports names whose ids are currently valid.
+func (d *Decoder) NameCount() int { return len(d.entries) }
+
+// RetainedBytes includes dictionary capacities and the reserved caller slots.
+func (d *Decoder) RetainedBytes() int {
+	n := cap(d.entries) * 40
+	if d.resolve == nil {
+		n += d.arena.bytes + cap(d.names)*12 + cap(d.entries)*32
+	}
+	return n
+}
+
+// NameReference provides immutable bytes owned by an external series index.
+// The reference is held by each connection's slot; wire ids remain independent.
+type NameReference interface{ StreamName() []byte }
+
+// SetNameResolver binds validated definitions to external series identities.
+// Call between frames. Existing ids are resolved once; no point is emitted.
+// Returned values must implement NameReference and live until their last slot
+// is released. Visit must preserve the bound reference in *slot.
+// The resolver is never called for a rejected frame.
+func (d *Decoder) SetNameResolver(resolve func([]byte) any) {
+	if resolve == nil || d.resolve != nil {
+		return
+	}
+	for i := range d.entries {
+		d.entries[i].slot = resolve(d.name(i))
+	}
+	d.resolve = resolve
+	d.names = nil
+	d.arena = nameArena{quantum: d.arena.quantum}
+}
+func (d *Decoder) name(i int) []byte {
+	if d.resolve != nil {
+		return d.entries[i].slot.(NameReference).StreamName()
+	}
+	return d.arena.name(d.names[i])
+}
+func (d *Decoder) bind(first int) {
+	if d.resolve != nil {
+		for i, name := range d.definitions {
+			d.entries[first+i].slot = d.resolve(name)
+		}
+	}
+	clear(d.definitions)
+	d.definitions = d.definitions[:0]
 }

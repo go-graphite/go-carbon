@@ -7,7 +7,7 @@ func TestStreamPointSlots(t *testing.T) {
 	var slot any
 	c.AddStreamPoint([]byte("example.a"), 1, 10, &slot)
 	ref, ok := slot.(*PointRef)
-	if !ok || ref.item == nil {
+	if !ok || ref.generation == 0 {
 		t.Fatal("slot was not bound")
 	}
 	c.AddStreamPoint([]byte("example.a"), 2, 11, &slot)
