@@ -14,6 +14,18 @@ spec.loader.exec_module(host_module)
 
 
 class HostTests(unittest.TestCase):
+    def test_write_ceiling_defaults_to_metal_budget_and_accepts_override(self):
+        argv = ['serve', '--pid-file', '/run/store.pid', '--devices', 'nvme0n1',
+                '--nic', 'eth0', '--cluster', 'metrics', '--site', 'region-a',
+                '--store-dir', '/var/lib/carbon/store']
+        args = host_module.parse_args(argv)
+        self.assertEqual(args.disk_write_mbps, 770)
+        self.assertLessEqual(args.disk_write_mbps * .98, 1100 * .7)
+        self.assertEqual(host_module.parse_args(argv + ['--disk-write-mbps', '400']).disk_write_mbps, 400)
+        for value in ('0', '-1', 'nan', 'inf'):
+            with self.subTest(value=value), mock.patch('sys.stderr'), self.assertRaises(SystemExit):
+                host_module.parse_args(argv + ['--disk-write-mbps', value])
+
     def host(self, root, apply=False):
         host = host_module.Host.__new__(host_module.Host)
         host.args = types.SimpleNamespace(cluster='metrics', site='region-a', apply=apply, read_port=8080)

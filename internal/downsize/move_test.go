@@ -436,7 +436,7 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 
 func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 	tune := newTuner([]string{"a", "b", "c"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
-	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 24, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 3.125e9, DiskWriteCapacity: 2e9}
+	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 24, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, DiskWriteCapacity: 2e9}
 	for range 30 {
 		if err := tune.observe("a", sample, storageSample{MaxTransfers: 64}); err != nil {
 			t.Fatal(err)
@@ -461,6 +461,28 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 	sample.NICIngressBytes, sample.NICEgressBytes = .6e9, .6e9
 	if hard, soft := guard(sample, storageSample{}, nil, nil, 100); hard != "" || soft != "" {
 		t.Fatal("duplex traffic was summed", hard, soft)
+	}
+	// An explicit helper --nic-mbps override must set the guard, including the
+	// legacy single-direction sample. The helper still defaults to 1000 MB/s.
+	sample.NICCapacityBytes = 2e9
+	sample.NICIngressBytes, sample.NICEgressBytes = 1.4e9, .1e9
+	if hard, soft := guard(sample, storageSample{}, nil, nil, 100); hard != "" || soft != "" {
+		t.Fatal("configured NIC headroom ignored", hard, soft)
+	}
+	for _, direction := range []string{"ingress", "egress", "legacy"} {
+		current := sample
+		current.NICIngressBytes, current.NICEgressBytes = 0, 0
+		switch direction {
+		case "ingress":
+			current.NICIngressBytes = 1.97e9
+		case "egress":
+			current.NICEgressBytes = 1.97e9
+		default:
+			current.NICBytesPerSecond = 1.97e9
+		}
+		if hard, soft := guard(current, storageSample{}, nil, nil, 100); hard != "" || soft == "" {
+			t.Fatal("configured NIC limit missed", direction, hard, soft)
+		}
 	}
 	started := time.Now()
 	tune.charge("a", "b", 1e9, started)

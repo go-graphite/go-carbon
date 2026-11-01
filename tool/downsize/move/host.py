@@ -264,7 +264,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     server = sub.add_parser('serve')
@@ -275,7 +275,8 @@ def main():
     server.add_argument('--nic', required=True)
     server.add_argument('--nic-gbps', type=float, default=25)
     server.add_argument('--nic-mbps', type=float, default=1000, help='usable MB/s in each direction')
-    server.add_argument('--disk-write-mbps', type=float, default=2000)
+    server.add_argument('--disk-write-mbps', type=float, default=770,
+                        help='total foreground + copy write ceiling in decimal MB/s (default: 70%% of 1100 MB/s; governor backs off at 98%%)')
     server.add_argument('--cluster', required=True)
     server.add_argument('--site', required=True)
     server.add_argument('--store-dir', required=True)
@@ -289,9 +290,15 @@ def main():
     restore = sub.add_parser('unblock')
     restore.add_argument('--read-port', type=int, required=True)
     restore.add_argument('--tag', required=True)
-    args = parser.parse_args()
-    if args.command == 'serve' and (args.nic_gbps <= 0 or args.nic_mbps <= 0 or args.disk_write_mbps <= 0):
-        parser.error('host bandwidth capacities must be positive')
+    args = parser.parse_args(argv)
+    if args.command == 'serve' and any(not math.isfinite(v) or v <= 0 for v in
+                                      (args.nic_gbps, args.nic_mbps, args.disk_write_mbps)):
+        parser.error('host bandwidth capacities must be finite and positive')
+    return args
+
+
+def main():
+    args = parse_args()
     if args.command == 'unblock':
         unblock(args.read_port, args.tag); return
     address, port = args.bind.rsplit(':', 1)

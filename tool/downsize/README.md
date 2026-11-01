@@ -20,6 +20,20 @@ existing journal. `config` generates local routing/configuration drafts;
 API for diagnostics and loopback benchmarks. Legacy `move`, `copy` and `ring`
 binaries delegate to the same Go packages.
 
+The host helper defaults `--disk-write-mbps` to **770 decimal MB/s** (70% of a
+1,100 MB/s sustained device rating). The governor backs off at 98% of that
+ceiling, **754.6 MB/s total foreground plus copy writes**. Override it explicitly
+for the measured host profile. This is a total-write guard, not a transfer rate:
+set `run --max-mbps` separately after reserving post-resize foreground writes,
+input logging and copy write amplification. Validate physical devices and read
+p99 under mixed I/O before executing a production plan.
+
+The helper's `--nic-mbps` sets usable bandwidth independently in each direction
+and defaults to 1,000 MB/s. The governor respects that explicit capacity (bounded
+by `--nic-gbps` in the helper) and backs off at 98%; an override above 1,000 MB/s
+requires a measured faster link and a foreground reserve. It does not add RX and
+TX on a full-duplex link.
+
 ## Members and planning
 
 ```json

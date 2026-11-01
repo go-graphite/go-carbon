@@ -191,13 +191,13 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 	if sample.DiskWriteCapacity > 0 && sample.DiskWriteBytes >= sample.DiskWriteCapacity*.98 {
 		return "", "disk write bandwidth"
 	}
-	if sample.NICIngressBytes >= min(1e9, sample.NICCapacityBytes)*.98 {
+	if sample.NICIngressBytes >= sample.NICCapacityBytes*.98 {
 		return "", "NIC ingress"
 	}
-	if sample.NICEgressBytes >= min(1e9, sample.NICCapacityBytes)*.98 {
+	if sample.NICEgressBytes >= sample.NICCapacityBytes*.98 {
 		return "", "NIC egress"
 	}
-	if sample.NICIngressBytes == 0 && sample.NICEgressBytes == 0 && sample.NICBytesPerSecond >= min(1e9, sample.NICCapacityBytes)*.98 {
+	if sample.NICIngressBytes == 0 && sample.NICEgressBytes == 0 && sample.NICBytesPerSecond >= sample.NICCapacityBytes*.98 {
 		return "", "NIC bandwidth"
 	}
 	if sample.RSS > sample.MemoryBytes*7/10 || sample.AvailableBytes < sample.MemoryBytes/10 {
