@@ -103,6 +103,7 @@ type TCP struct {
 	errors              uint32 // read and framing failures
 	parseErrors         uint32 // rejected metric lines or framed messages
 	active              int32  // counter
+	stopping            atomic.Bool
 	listener            *net.TCPListener
 	isFraming           bool
 	frameParser         func(body []byte) ([]*points.Points, error)
@@ -146,6 +147,21 @@ func (rcv *TCP) Addr() net.Addr {
 		return nil
 	}
 	return rcv.listener.Addr()
+}
+
+// Stop marks locally closed connections before waking their readers. Only
+// net.ErrClosed during this stop is expected; other read errors stay errors.
+func (rcv *TCP) Stop() {
+	rcv.stopping.Store(true)
+	rcv.Stoppable.Stop()
+}
+
+func (rcv *TCP) plannedClose(err error) bool {
+	if rcv.stopping.Load() && errors.Is(err, net.ErrClosed) {
+		rcv.logger.Info("input connection closed during shutdown", zap.Error(err))
+		return true
+	}
+	return false
 }
 
 func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, error) {
@@ -285,6 +301,9 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 			return
 		}
 		if err != nil {
+			if rcv.plannedClose(err) {
+				return
+			}
 			rcv.zstdFailure(err)
 			return
 		}
@@ -365,6 +384,9 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 			flush()
 			if tracked.detaching() {
 				detached = rcv.detachInput(tracked, reader, rest, line, frames)
+				return
+			}
+			if rcv.plannedClose(err) {
 				return
 			}
 			if err == io.EOF { //nolint:errorlint // Preserve legacy direct EOF classification; wrapped transport errors are read errors.
@@ -476,6 +498,9 @@ func (rcv *TCP) handleFraming(conn net.Conn) {
 			rcv.logger.Warn("bad message size")
 			return
 		case err != nil:
+			if rcv.plannedClose(err) {
+				return
+			}
 			atomic.AddUint32(&rcv.errors, 1)
 			rcv.logger.Warn("can't read message body", zap.Error(err))
 			return
@@ -535,6 +560,7 @@ func (rcv *TCP) Listen(addr *net.TCPAddr) error {
 // listen serves the listener open returns, after the inherited connections.
 func (rcv *TCP) listen(open func() (*net.TCPListener, error), inherited []Conn) error {
 	return rcv.StartFunc(func() error {
+		rcv.stopping.Store(false)
 
 		tcpListener, err := open()
 		if err != nil {

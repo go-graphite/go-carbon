@@ -336,7 +336,11 @@ func (app *App) DumpStop() (err error) {
 	wantHandover := readsHandoff && builder != nil && app.inputHandoffPossible() && handoff.InputSupported(app.readSuccessor)
 	// A shared store's reads need its database, which the successor opens
 	// only once this instance closed it, so reads cannot move. Input can.
-	storeInputConfigured := !readsHandoff && builder != nil && app.storeInputHandoffPossible() && app.inputHandoffPossible()
+	storeInputEligible := !readsHandoff && builder != nil && app.storeInputHandoffPossible() && app.inputHandoffPossible()
+	storeInputConfigured := storeInputEligible && app.Config.Dump.StoreInputHandoff
+	if storeInputEligible && !storeInputConfigured {
+		logger.Info("store input handoff disabled; stopping input", zap.String("setting", "dump.store-input-handoff"))
+	}
 	storeInput := storeInputConfigured && handoff.StoreInputSupported(app.readSuccessor)
 	if storeInputConfigured && !storeInput {
 		logger.Info("next binary does not support store input handoff; stopping input", zap.String("binary", app.readSuccessor))
@@ -740,12 +744,12 @@ func (app *App) handOffReads(logger *zap.Logger, supported bool, handover *input
 }
 
 // storeInputHandoffPossible reports whether this shared-store instance may
-// hand its input over although its reads cannot move. The worker outlives the
-// supervisor until the successor takes input, so it is opt-in.
+// hand its input over although its reads cannot move. Enabling the setting is
+// checked separately so a disabled handoff can be diagnosed before input stops.
 // Assumes we are holding app.Lock().
 func (app *App) storeInputHandoffPossible() bool {
 	c := app.Config
-	return c.Dump.StoreInputHandoff && app.readRelease != nil && app.MetricStore != nil && !c.Whisper.StoreMirrorFiles &&
+	return app.readRelease != nil && app.MetricStore != nil && !c.Whisper.StoreMirrorFiles &&
 		app.Tags == nil && app.Carbonserver != nil && c.Carbonserver.Enabled
 }
 
