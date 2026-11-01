@@ -22,11 +22,17 @@ func validateZstdLimit(n int) error {
 	return nil
 }
 
-// dispatchFirstBytes is the connection-start protocol boundary. A future
-// protocol can join here without adding work to the plaintext line loop.
+// errStreamInput selects the stream handler without consuming its preamble.
+var errStreamInput = errors.New("stream input")
+
+// dispatchFirstBytes is the only connection-start protocol boundary. Zstd and
+// stream are sibling wire protocols; the plaintext line loop does no detection.
 func (rcv *TCP) dispatchFirstBytes(wire *bufio.Reader) (*zstdFrames, error) {
 	if rcv.compression != "zstd" {
 		first, _ := wire.Peek(1)
+		if len(first) > 0 && first[0] == 0 && !rcv.streamDisabled {
+			return nil, errStreamInput
+		}
 		if len(first) == 0 || first[0] != 0x28 {
 			return nil, nil
 		}
@@ -57,6 +63,7 @@ type zstdFrames struct {
 	limit        int
 	frame, plain []byte
 	offset       int
+	started      bool
 	stats        *zstdStats
 }
 
@@ -152,6 +159,13 @@ func (z *zstdFrames) Read(p []byte) (int, error) {
 		if err != nil {
 			z.plain = z.plain[:0]
 			return 0, fmt.Errorf("decode zstd frame: %w", err)
+		}
+		if !z.started && len(z.plain) > 0 {
+			z.started = true
+			if z.plain[0] == 0 {
+				z.plain = z.plain[:0]
+				return 0, errors.New("stream input cannot be wrapped in zstd frames; use stream frame compression")
+			}
 		}
 		atomic.AddUint64(&z.stats.frames, 1)
 		atomic.AddUint64(&z.stats.decompressedBytes, uint64(len(z.plain)))

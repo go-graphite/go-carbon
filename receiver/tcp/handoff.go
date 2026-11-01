@@ -17,7 +17,7 @@ import (
 	"github.com/lomik/zapwriter"
 )
 
-// Handoff is a plaintext TCP receiver's input moved to another process: the
+// Handoff is a TCP receiver's plaintext or stream input moved to another process: the
 // listening socket and the accepted connections, each with the bytes read
 // from it but not yet parsed.
 type Handoff struct {
@@ -32,9 +32,9 @@ type Conn struct {
 	conn     net.Conn
 }
 
-// handoffState tracks plaintext connections so Detach can stop each at a line
-// boundary. Autodetected zstd frames can also move, since each frame is
-// independent. Legacy compression and buffered points cannot move.
+// handoffState tracks plaintext at line boundaries, independent zstd frames,
+// and stream input at committed frame boundaries. Legacy compression and
+// buffered points cannot move.
 type handoffState struct {
 	enabled    bool
 	mu         sync.Mutex
@@ -136,7 +136,7 @@ func (rcv *TCP) detachBytes(c *handoffConn, leftover []byte) bool {
 }
 
 // Handoffable reports whether Detach can move this receiver's connections:
-// plaintext or autodetected zstd input without buffering.
+// plaintext, autodetected zstd or stream input without buffering.
 func (rcv *TCP) Handoffable() bool { return rcv.handoff.enabled && rcv.listener != nil }
 
 // Detach stops the receiver but leaves its listening socket and accepted
@@ -171,7 +171,7 @@ func (rcv *TCP) Detach() (*Handoff, error) {
 	return out, nil
 }
 
-// NewInherited starts a plaintext TCP receiver on input another process handed
+// NewInherited starts a plaintext/stream TCP receiver on input another process handed
 // over with Detach. Leftover bytes of each connection are parsed before
 // anything read from it. It takes ownership of the handoff's files.
 func NewInherited(name string, options *Options, store func(*points.Points), h *Handoff) (*TCP, error) {
@@ -196,6 +196,10 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	}
 	r := &TCP{out: store, name: name, logger: zapwriter.Logger(name), decompressor: newDecompressor("")}
 	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
+	if err := r.configureStream(options); err != nil {
+		closeAll()
+		return nil, err
+	}
 	r.handoff.enabled = true
 	conns := make([]Conn, 0, len(h.Conns))
 	for _, c := range h.Conns {

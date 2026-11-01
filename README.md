@@ -26,6 +26,7 @@ Golang implementation of Graphite/Carbon server with classic architecture: Agent
 
 ## Features
 - Receive metrics from TCP and UDP ([plaintext protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-plaintext-protocol))
+- Receive compact binary [stream input](doc/stream-input.md) on the existing TCP plaintext port (autodetected, optional zstd)
 - Receive metrics with [Pickle protocol](http://graphite.readthedocs.org/en/latest/feeding-carbon.html#the-pickle-protocol) (TCP only)
 - Receive metrics from HTTP
 - Receive metrics from Apache Kafka
@@ -89,6 +90,9 @@ We're uploading Docker images to [ghcr.io](https://github.com/go-graphite/go-car
 Also, you can download test packages from build artifacts: Go to list of [test runs](https://github.com/go-graphite/go-carbon/actions/workflows/tests.yml), click on PR name, and click on *"packages-^1"* under *"Artifact"* section.
 
 ## Configuration
+
+The TCP receiver accepts both plaintext and the [stream protocol](doc/stream-input.md)
+on its existing port. Stream detection is automatic when `compression = ""`.
 
 ```
 $ go-carbon --help

@@ -1,6 +1,10 @@
 ## Changelog
 ##### master
 
+* Add compact binary stream input autodetected on the plaintext TCP port, a public
+  relay codec with optional zstd, bounded dictionary resets, restart state handoff,
+  and per-ID sink slots. See [stream input](doc/stream-input.md).
+
 ##### version 0.19.0
 
 * Adding info output for /metric/list handler by @deniszh in https://github.com/go-graphite/go-carbon/pull/681
