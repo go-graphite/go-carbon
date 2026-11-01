@@ -24,8 +24,9 @@ The host helper defaults `--disk-write-mbps` to **770 decimal MB/s** (70% of a
 1,100 MB/s sustained device rating). The governor backs off at 98% of that
 ceiling, **754.6 MB/s total foreground plus copy writes**. Override it explicitly
 for the measured host profile. This is a total-write guard, not a transfer rate:
-set `run --max-mbps` separately after reserving post-resize foreground writes,
-input logging and copy write amplification. Validate physical devices and read
+`run --max-mbps=0` (the default) leaves transfer pacing to the host governor.
+A positive value adds an operator rate ceiling. Set physical capacities from the
+measured device and reserve foreground headroom; include copy write amplification. Validate physical devices and read
 p99 under mixed I/O before executing a production plan.
 
 The helper's `--nic-mbps` sets usable bandwidth independently in each direction
@@ -104,8 +105,9 @@ Use reachable management addresses when the controller runs elsewhere. Supply
 origin. Replacement targets instead use their fixed worker origin from
 `placements`; the worker proxies the same helper endpoints.
 
-Defaults allow 1,000 MB/s ingress **and** egress per host, 2,000 MB/s disk writes,
-and up to 64 transfers. The governor subtracts observed foreground CPU and a core
+The helper defaults allow 1,000 MB/s ingress **and** egress per host and 770 MB/s
+total disk writes. The controller has no fixed transfer-rate cap and allows up
+to 64 transfers. The governor subtracts observed foreground CPU and a core
 reserve (8 on a 96-core host), respects runtime CPU/server/body/memory limits, and
 ramps from one stream. `--streams`, `--max-mbps`, `--batch`, `--batch-bytes`,
 `--delete-rate` and `--read-p99-ms` lower operator ceilings. Buckyd
@@ -116,7 +118,14 @@ CPU, NIC directions, disk bandwidth/utilization/await, L0/debt/stalls, free spac
 RSS/threads, ingest backlog, write failures, unlogged points and read p99 govern
 the ramp. Lost/stale telemetry or durability guards abort. Each `tune` JSON log
 reports `binding_resource`, sampled values, foreground CPU and the active ceiling.
-Streams pause when pressure persists. Worker admission leases expire when the
+A new helper is required: it reports committed foreground points as well as
+backlog. The controller captures both before copying. New admission pauses
+immediately when committed points/s falls below 90% of that baseline while
+backlog exceeds its baseline by max(10,000 points, 5%). Backlog above that envelope pauses admission even if committed rate is steady;
+recovery waits for it to drain. A lower offered rate without growing backlog does
+not trigger this floor. Significant backlog growth
+or a write stall also stops new admission immediately; two healthy samples allow
+a conservative restart. In-flight bounded requests can finish. Worker admission leases expire when the
 controller stops; already admitted chunks are bounded and cancel on lease expiry.
 
 For extra headroom, `--block-reads --replica-url http://other-site:8080
@@ -124,8 +133,14 @@ For extra headroom, `--block-reads --replica-url http://other-site:8080
 replica in another site. Helpers must run with `--apply` to insert rules. IPv4 and
 IPv6 reject rules have independent systemd expiry timers, and are removed at
 normal exit. Read capacity remains protected by the replica. Without isolation,
-keep union(old,new) read coverage throughout transfers. Read isolation is optional;
-never infer complete reads from successful file copying.
+keep union(old,new) read coverage throughout transfers. Read isolation is optional for the generic recipe;
+never infer complete reads from successful file copying. For a shrink that relies
+on another site for complete reads, keep the copied site excluded at the frontend
+until delta reconciliation and complete-history validation pass. Helper leases
+expire after controller death and are removed on exit, including errors; their
+presence probes do not establish archive completeness. Continuously supervise the
+intact sites' availability, latency, saturation and backlog. Stop copy on replica
+regression and retain the frontend exclusion while resolving it.
 
 ## Recipe: shrink N to M
 
@@ -286,3 +301,33 @@ negotiation. The proof contents and durable verification rules are unchanged.
 Generated `transfer-sources` lists include old-ring node names and their explicit
 HTTP endpoint hostnames, including management aliases. Apply these drafts before
 metric pulls so the source token is sent only to configured old-ring origins.
+
+For disjoint host groups, independent cluster controllers can run concurrently.
+Within one cluster use one controller for all donors: its per-host budgets must
+be shared across incoming pairs. The aggregate rate is bounded by each target's
+foreground writes plus copy amplification and by each donor's total egress;
+multiplying an isolated pair rate by the route count is not a capacity proof.
+
+Updated peers advertise batched retirement checks. After writer fencing, the
+controller streams the immutable plan once, checks source versions in bounded
+batches, and recopies changed names through the usual guarded transfer workers.
+Donors reconcile concurrently and share target admission. Filtered delta proofs
+have separate journal ranges, so they cannot make resume skip baseline rows.
+The final locked whole-catalog check still rejects new names, queued input and
+late revisions. Completed retirement is resumable. Older peers retain the legacy
+pending-page path; upgrade all participants for large-delta performance.
+
+For a complete copy that retains every source, use `run --reconcile` with updated
+peers. It records operation-scoped source version markers after durable target
+verification; this is non-destructive source bookkeeping and requires root
+read/update permissions. It does not call a data-delete endpoint. After the
+baseline it stops at `needs_writer_fence` unless `--barrier` supplies the same
+fresh cutover/drain/catalog-reconciliation proof used by retirement. Resume the
+same plan, state and `--reconcile` flag after fencing. Changed names are recopied
+and a locked full-catalog/version/pending-input check establishes coverage while
+leaving source histories intact. Keep read-site exclusion across this gate.
+`--reconcile` and `--delete` are mutually exclusive; the former is limited to
+single-copy retired-source range plans. Ordinary copy-only runs keep their
+previous baseline-only behavior. Version staging uses shared copy admission and
+physical guards; `--delete-rate` paces actual conditional deletion, not these
+non-destructive markers.

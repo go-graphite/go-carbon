@@ -41,6 +41,14 @@ def total(values, name, required=True):
     return sum(found)
 
 
+def foreground_counters(values, write_error_metric, offline=False):
+    # Go's uint64 decoder requires integer JSON tokens, including for zero.
+    return {'WriteErrors': 0 if offline else int(total(values, 'input_log_write_errors_total') + total(values, write_error_metric)),
+            'Unlogged': 0 if offline else int(total(values, 'input_log_unlogged_points_total')),
+            'WritePoints': 0 if offline else int(total(values, 'persister_pebble_points_total')),
+            'ForegroundMeasured': not offline}
+
+
 def read_p99(previous, current):
     if not previous:
         return 0, 0
@@ -152,9 +160,8 @@ class Host:
                       'NICIngressBytes': 0, 'NICEgressBytes': 0, 'DiskWriteBytes': 0, 'DiskWriteCapacity': self.args.disk_write_mbps * 1e6,
                       'RSS': int(status['VmRSS'].split()[0])*1024, 'Threads': int(status['Threads']),
                       'MemoryBytes': mem['MemTotal'], 'AvailableBytes': mem['MemAvailable'],
-                      'WriteErrors': 0 if offline else total(values, 'input_log_write_errors_total') + total(values, self.args.write_error_metric),
-                      'Unlogged': 0 if offline else total(values, 'input_log_unlogged_points_total'),
-                      'ReadP99MS': p99, 'ReadSamples': samples,
+                      **foreground_counters(values, self.args.write_error_metric, offline),
+                      'ReadP99MS': p99, 'ReadSamples': int(samples),
                       'Offline': offline, 'ReadsBlocked': offline or bool(self.lease and self.lease['expires_at'] > now and self.args.apply)}
             if self.previous:
                 old_time, old_cpu, old_disk, old_nic = self.previous

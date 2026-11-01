@@ -17,6 +17,7 @@ import (
 	"math/bits"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"os"
 	"os/exec"
@@ -144,6 +145,26 @@ func start(root, node string, nodes []string, continuation bool, cacheMB, memtab
 	must(app.Start())
 	return app
 }
+func transferExpectation(source, target store.Snapshot) store.Snapshot {
+	source.Archives = slices.Clone(source.Archives)
+	for i, archive := range target.Archives {
+		values := map[int64]store.Point{}
+		for _, point := range source.Archives[i].Points {
+			values[point.Timestamp] = point
+		}
+		for _, point := range archive.Points {
+			values[point.Timestamp] = point
+		}
+		var points []store.Point
+		for _, point := range values {
+			points = append(points, point)
+		}
+		sort.Slice(points, func(i, j int) bool { return points[i].Timestamp < points[j].Timestamp })
+		source.Archives[i].Points = points
+	}
+	return source
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -168,6 +189,10 @@ func run() error {
 	bucky := flag.String("bucky", "/tmp/bucky", "buckytools binary")
 	batch := flag.Int("batch", 2048, "bulk batch cap")
 	streams := flag.Int("streams", 4, "bulk per-host stream cap")
+	pairTarget := flag.Int("pair-target", -1, "measure only source to target 0 or 1; -1 measures both")
+	maxMBPS := flag.Float64("max-mbps", 0, "optional per-host transfer ceiling; zero leaves pacing to host guards")
+	deltaMetrics := flag.Int("delta-metrics", 0, "change this many source histories after baseline staging; requires reconciliation or deletion and both targets")
+	startFile := flag.String("start-file", "", "wait for this local barrier file after prewarming, for simultaneous independent pairs")
 	readQPS := flag.Int("read-qps", 1000, "storage fetch requests/s per target when reads > 0")
 	idleDuration := flag.Duration("duration", 30*time.Second, "idle baseline duration")
 	reads := flag.Int("reads", 0, "concurrent direct store reader workers per loaded host")
@@ -176,11 +201,19 @@ func run() error {
 	ingestSource := flag.Bool("ingest-source", false, "keep the source ingesting too; requires --delete=false")
 	auto := flag.Bool("auto", false, "use adaptive ramp rather than fixed ceiling")
 	measuredHealth := flag.Bool("measured-health", false, "governor uses live process CPU, per-App cache/write errors/read p99; other host fields are synthetic")
+	reconcile := flag.Bool("reconcile", false, "verify final delta while retaining source history")
 	remove := flag.Bool("delete", true, "verify then remove source copies")
 	overlap := flag.Int("overlap", 100, "one in N moved metrics preexists on target; zero disables")
 	memprofile := flag.String("memprofile", "", "allocation profiles before/after the transfer phase")
 	profile := flag.String("cpuprofile", "", "CPU profile of transfer stage (apps and load only, excludes mover child)")
+	mutexProfile := flag.String("mutexprofile", "", "mutex contention profile of the measured stage")
 	flag.Parse()
+	if *pairTarget < -1 || *pairTarget > 1 || *batch < 1 || *batch > 10000 || *streams < 1 {
+		return errors.New("invalid pair, batch or stream limit")
+	}
+	if *deltaMetrics < 0 || *deltaMetrics > 0 && (!*remove && !*reconcile || *pairTarget >= 0) {
+		return errors.New("delta injection requires reconciliation or deletion, and both targets")
+	}
 	if *ingestSource && *remove {
 		panic("live source ingestion requires --delete=false")
 	}
@@ -269,6 +302,7 @@ func run() error {
 		templates = append(templates, records[0])
 	}
 	must(template.Close())
+	inventoryStart := time.Now()
 	last := make([]string, 3)
 	if *reuse {
 		for owner, app := range apps {
@@ -288,6 +322,7 @@ func run() error {
 			}
 		}
 	}
+	inventorySeconds := time.Since(inventoryStart).Seconds()
 	seedImported := 0
 	seedStart := time.Now()
 	seedCPU := cpu()
@@ -320,6 +355,9 @@ func run() error {
 		}
 		if owner == 2 {
 			target := jump(name, 2)
+			if *pairTarget >= 0 && target != *pairTarget {
+				continue
+			}
 			names[target] = append(names[target], name)
 			moved++
 			for _, kv := range r.Keys {
@@ -331,6 +369,7 @@ func run() error {
 		flush(i)
 	}
 	report("seed", map[string]any{"metrics": *count, "seed_imported": seedImported, "moved": moved, "seconds": time.Since(seedStart).Seconds(), "cpu_seconds": cpu() - seedCPU, "raw_moved_bytes": rawBytes, "raw_bytes_per_metric": float64(rawBytes) / float64(moved)})
+	seedSeconds := time.Since(seedStart).Seconds()
 	if *overlap > 0 {
 		for target, list := range names {
 			for i, name := range list {
@@ -347,6 +386,7 @@ func run() error {
 			}
 		}
 	}
+	planStart := time.Now()
 	planDir := filepath.Join(*root, "plan")
 	must(os.MkdirAll(planDir, 0750))
 	planID := fmt.Sprintf("%x", sha256.Sum256([]byte(*root)))
@@ -358,6 +398,9 @@ func run() error {
 	}
 	var streamsOut []stream
 	for target, list := range names {
+		if len(list) == 0 {
+			continue
+		}
 		path := fmt.Sprintf("2-%d.jsonl", target)
 		f, err := os.Create(filepath.Join(planDir, path))
 		must(err)
@@ -372,9 +415,48 @@ func run() error {
 		must(f.Close())
 		streamsOut = append(streamsOut, stream{path, src, dst, len(list), int64(len(list) * 1024), hex.EncodeToString(h.Sum(nil))})
 	}
+	expected := map[string]store.Snapshot{}
+	var expectedMu sync.Mutex
+	deltaEndpoint := ""
+	if *deltaMetrics > 0 {
+		var once sync.Once
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/v1/transfer/pending-delete" {
+				once.Do(func() {
+					started := time.Now()
+					changed := 0
+					expectedMu.Lock()
+					defer expectedMu.Unlock()
+					for target, list := range names {
+						for _, name := range list {
+							if changed >= *deltaMetrics {
+								break
+							}
+							must(apps[2].MetricStore.UpdateMany(ctx, name, []store.Point{{Timestamp: now - 60, Value: 123456.25}}))
+							if _, sampled := expected[name]; sampled {
+								snapshot, err := apps[2].MetricStore.Snapshot(ctx, name)
+								must(err)
+								targetSnapshot, err := apps[target].MetricStore.Snapshot(ctx, name)
+								must(err)
+								expected[name] = transferExpectation(snapshot, targetSnapshot)
+							}
+							changed++
+						}
+					}
+					report("delta_injected", map[string]any{"metrics": changed, "seconds": time.Since(started).Seconds()})
+				})
+			}
+			apps[2].Buckyd.Handler().ServeHTTP(w, r)
+		}))
+		defer server.Close()
+		deltaEndpoint = server.URL
+	}
 	var members []map[string]string
 	for i, app := range apps {
 		members = append(members, map[string]string{"id": fmt.Sprintf("n%d", i), "node": identities[i] + ":" + port + fmt.Sprintf("=%03d", i), "endpoint": "http://" + app.Config.Buckyd.Bind})
+	}
+	if deltaEndpoint != "" {
+		members[2]["endpoint"] = deltaEndpoint
 	}
 	manifest := map[string]any{"format": "go-carbon-ring", "version": 1, "plan_id": planID, "spec": map[string]any{"version": 1, "cluster": "synthetic", "site": "local", "old": map[string]any{"hash": "jump_fnv1a", "replicas": 1, "nodes": members}, "new": map[string]any{"hash": "jump_fnv1a", "replicas": 1, "nodes": members[:2]}}, "streams": streamsOut}
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
@@ -387,28 +469,14 @@ func run() error {
 	if *mode == "seed" {
 		return nil
 	}
-	expected := map[string]store.Snapshot{}
+	planSeconds := time.Since(planStart).Seconds()
 	for target, list := range names {
 		for i := 0; i < len(list); i += max(1, len(list)/100) {
 			name := list[i]
 			snapshot, err := apps[2].MetricStore.Snapshot(ctx, name)
 			must(err)
 			if existing, err := apps[target].MetricStore.Snapshot(ctx, name); err == nil {
-				for ai, a := range existing.Archives {
-					values := map[int64]store.Point{}
-					for _, p := range snapshot.Archives[ai].Points {
-						values[p.Timestamp] = p
-					}
-					for _, p := range a.Points {
-						values[p.Timestamp] = p
-					}
-					points := make([]store.Point, 0, len(values))
-					for _, p := range values {
-						points = append(points, p)
-					}
-					sort.Slice(points, func(i, j int) bool { return points[i].Timestamp < points[j].Timestamp })
-					snapshot.Archives[ai].Points = points
-				}
+				snapshot = transferExpectation(snapshot, existing)
 			} else if !errors.Is(err, store.ErrNotFound) {
 				must(err)
 			}
@@ -454,6 +522,7 @@ func run() error {
 	}
 	loadCtx, stopLoad := context.WithCancel(ctx)
 	var load sync.WaitGroup
+	defer func() { stopLoad(); load.Wait() }()
 	var updates, readCount, loadErrors atomic.Int64
 	var readLatency [64]atomic.Uint64
 	var hostLatency [3][64]atomic.Uint64
@@ -466,6 +535,9 @@ func run() error {
 			server := health(app, &hostLatency[i])
 			defer server.Close()
 			helpers["http://"+app.Config.Buckyd.Bind] = server.URL
+			if i == 2 && deltaEndpoint != "" {
+				helpers[deltaEndpoint] = server.URL
+			}
 		}
 	}
 	for target := 0; target < loadHosts; target++ {
@@ -590,11 +662,30 @@ func run() error {
 		}
 		runtime.GC()
 	}
+	if *startFile != "" {
+		report("ready", map[string]any{"root": *root, "start_file": *startFile})
+		deadline := time.Now().Add(10 * time.Minute)
+		for {
+			if _, err := os.Stat(*startFile); err == nil {
+				break
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+			if time.Now().After(deadline) {
+				return errors.New("local start barrier timed out")
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
 	if *profile != "" {
 		f, err := os.Create(*profile)
 		must(err)
 		must(pprof.StartCPUProfile(f))
 		defer f.Close()
+	}
+	if *mutexProfile != "" {
+		runtime.SetMutexProfileFraction(1)
+		defer runtime.SetMutexProfileFraction(0)
 	}
 	if *memprofile != "" {
 		f, err := os.Create(*memprofile + ".before")
@@ -650,7 +741,7 @@ func run() error {
 		args = append(args, "127.0.0.1:"+port)
 		command = exec.Command(*bucky, args...)
 	default:
-		args := []string{"--plan", planDir, "--state", filepath.Join(*root, "state.jsonl"), "--apply", "--streams", strconvInt(*streams), "--batch", strconvInt(*batch), fmt.Sprintf("--auto=%t", *auto), "--delete-rate", "100000", "--tick", "1s", "--max-mbps", "1000"}
+		args := []string{"--plan", planDir, "--state", filepath.Join(*root, "state.jsonl"), "--apply", "--streams", strconvInt(*streams), "--batch", strconvInt(*batch), fmt.Sprintf("--auto=%t", *auto), "--delete-rate", "100000", "--tick", "1s", "--max-mbps", fmt.Sprint(*maxMBPS)}
 		if *measuredHealth {
 			path := filepath.Join(*root, "health.json")
 			data, err := json.Marshal(helpers)
@@ -662,6 +753,8 @@ func run() error {
 		}
 		if *remove {
 			args = append(args, "--delete", "--barrier", barrierPath)
+		} else if *reconcile {
+			args = append(args, "--reconcile", "--barrier", barrierPath)
 		}
 		if *unified {
 			args = append([]string{"run"}, args...)
@@ -677,52 +770,41 @@ func run() error {
 		command.Stderr = log
 		runErr = command.Run()
 	case *mode == "source":
-		pprof.Do(ctx, pprof.Labels("host", "source"), func(ctx context.Context) {
-			for _, list := range names {
-				for start := 0; start < len(list); start += *batch {
-					records, err := apps[2].MetricStore.ExportTransfer(ctx, list[start:min(start+*batch, len(list))])
-					if err != nil {
-						runErr = err
-						return
-					}
-					if err := store.WriteTransfer2(io.Discard, records); err != nil {
-						runErr = err
-						return
-					}
-				}
-			}
-		})
-	default:
-		var buffer store.TransferBuffer
-		for _, input := range inputs {
-			pprof.Do(ctx, pprof.Labels("host", fmt.Sprintf("target%d", input.target)), func(ctx context.Context) {
-				file, err := os.Open(input.path)
-				if err != nil {
-					runErr = err
-					return
-				}
-				defer file.Close()
-				info, err := file.Stat()
-				if err != nil {
-					runErr = err
-					return
-				}
-				records, err := buffer.Read(file, 160<<20, info.Size())
-				if err != nil {
-					runErr = err
-					return
-				}
-				proofs, err := apps[input.target].MetricStore.ImportTransfer(ctx, records)
-				if err != nil {
-					runErr = err
-					return
-				}
-				runErr = apps[input.target].MetricStore.VerifyTransfer(ctx, proofs)
-			})
-			if runErr != nil {
-				break
+		var batches [][]string
+		for _, list := range names {
+			for start := 0; start < len(list); start += *batch {
+				batches = append(batches, list[start:min(start+*batch, len(list))])
 			}
 		}
+		runErr = parallel(ctx, *streams, len(batches), func(ctx context.Context, i int, _ *store.TransferBuffer) error {
+			records, err := apps[2].MetricStore.ExportTransfer(ctx, batches[i])
+			if err != nil {
+				return err
+			}
+			return store.WriteTransfer2(io.Discard, records)
+		})
+	default:
+		runErr = parallel(ctx, *streams, len(inputs), func(ctx context.Context, i int, buffer *store.TransferBuffer) error {
+			input := inputs[i]
+			file, err := os.Open(input.path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+			info, err := file.Stat()
+			if err != nil {
+				return err
+			}
+			records, err := buffer.Read(file, 160<<20, info.Size())
+			if err != nil {
+				return err
+			}
+			proofs, err := apps[input.target].MetricStore.ImportTransfer(ctx, records)
+			if err != nil {
+				return err
+			}
+			return apps[input.target].MetricStore.VerifyTransfer(ctx, proofs)
+		})
 	}
 	stopLoad()
 	load.Wait()
@@ -731,6 +813,12 @@ func run() error {
 	var memAfter runtime.MemStats
 	runtime.ReadMemStats(&memAfter)
 	var childCPU float64
+	var usage syscall.Rusage
+	must(syscall.Getrusage(syscall.RUSAGE_SELF, &usage))
+	peakRSS := usage.Maxrss
+	if runtime.GOOS == "linux" {
+		peakRSS *= 1024
+	}
 	if command != nil && command.ProcessState != nil {
 		childCPU = command.ProcessState.UserTime().Seconds() + command.ProcessState.SystemTime().Seconds()
 	}
@@ -749,6 +837,12 @@ func run() error {
 	}
 	if *profile != "" {
 		pprof.StopCPUProfile()
+	}
+	if *mutexProfile != "" {
+		f, err := os.Create(*mutexProfile)
+		must(err)
+		must(pprof.Lookup("mutex").WriteTo(f, 0))
+		must(f.Close())
 	}
 	must(log.Close())
 	if *memprofile != "" {
@@ -798,7 +892,7 @@ func run() error {
 	if reportedBytes > 0 {
 		cpuPerGB = (cpuUsed + childCPU) / (float64(reportedBytes) / 1e9)
 	}
-	report("transfer", map[string]any{"mode": *mode, "continuation": *continuation, "metrics": *count, "moved": moved, "seconds": duration, "metrics_per_second": float64(reportedMoved) / duration, "raw_MB_per_second": float64(reportedBytes) / 1e6 / duration, "cpu_seconds": cpuUsed, "allocated_bytes": memAfter.TotalAlloc - memBefore.TotalAlloc, "allocations": memAfter.Mallocs - memBefore.Mallocs, "gc_cycles": memAfter.NumGC - memBefore.NumGC, "mover_cpu_seconds": childCPU, "cpu_seconds_per_raw_GB": cpuPerGB, "streams": *streams, "batch": *batch, "backend_cpus": runtime.GOMAXPROCS(0), "cache_mb": *cacheMB, "metadata_cache_mb": *metadataMB, "warm_exports": *warmExport, "memtable_mb": *memtableMB, "reads": *reads, "read_requests": readCount.Load() - readBefore, "host_read_requests": hostRequests, "host_nonempty_reads": hostNonempty, "read_until": readUntil, "host_read_p99_us_upper": hostP99, "read_source": *readSource, "read_p99_us_upper": readP99US, "read_qps_per_host": *readQPS, "cache_points_before": cacheBefore, "cache_points_after": cacheAfter, "committed_points": committed, "committed_updates": writes, "write_errors": writeErrors, "measured_health": *measuredHealth, "NIC_ceiling_MB_per_second": 1000, "ingest_sent_points": updates.Load() - sentBefore, "host_ingest_sent_points": hostOffered, "ingest_source": *ingestSource, "load_errors": loadErrors.Load(), "error": fmt.Sprint(runErr), "before": before, "after": after})
+	report("transfer", map[string]any{"mode": *mode, "inventory_seconds": inventorySeconds, "plan_seconds": planSeconds + seedSeconds, "copy_with_inventory_plan_seconds": duration + inventorySeconds + planSeconds + seedSeconds, "delta_metrics": *deltaMetrics, "reconcile": *reconcile, "delete_source": *remove, "started_unix_nano": started.UnixNano(), "process_peak_rss_bytes": peakRSS, "continuation": *continuation, "metrics": *count, "moved": moved, "seconds": duration, "metrics_per_second": float64(reportedMoved) / duration, "raw_MB_per_second": float64(reportedBytes) / 1e6 / duration, "cpu_seconds": cpuUsed, "allocated_bytes": memAfter.TotalAlloc - memBefore.TotalAlloc, "allocations": memAfter.Mallocs - memBefore.Mallocs, "gc_cycles": memAfter.NumGC - memBefore.NumGC, "mover_cpu_seconds": childCPU, "cpu_seconds_per_raw_GB": cpuPerGB, "streams": *streams, "batch": *batch, "backend_cpus": runtime.GOMAXPROCS(0), "cache_mb": *cacheMB, "metadata_cache_mb": *metadataMB, "warm_exports": *warmExport, "memtable_mb": *memtableMB, "reads": *reads, "read_requests": readCount.Load() - readBefore, "host_read_requests": hostRequests, "host_nonempty_reads": hostNonempty, "read_until": readUntil, "host_read_p99_us_upper": hostP99, "read_source": *readSource, "read_p99_us_upper": readP99US, "read_qps_per_host": *readQPS, "cache_points_before": cacheBefore, "cache_points_after": cacheAfter, "committed_points": committed, "committed_updates": writes, "write_errors": writeErrors, "measured_health": *measuredHealth, "transfer_ceiling_MB_per_second": *maxMBPS, "pair_target": *pairTarget, "ingest_sent_points": updates.Load() - sentBefore, "host_ingest_sent_points": hostOffered, "ingest_source": *ingestSource, "load_errors": loadErrors.Load(), "error": fmt.Sprint(runErr), "before": before, "after": after})
 	if runErr != nil {
 		data, _ := os.ReadFile(filepath.Join(*root, "move.log"))
 		lines := strings.Split(string(data), "\n")
@@ -811,6 +905,9 @@ func run() error {
 	if *mode == "idle" || *mode == "source" {
 		return nil
 	}
+	parityStart := time.Now()
+	expectedMu.Lock()
+	defer expectedMu.Unlock()
 	// Sample point-level public snapshots, and verify source catalogue removal.
 	for target, list := range names {
 		sort.Strings(list)
@@ -825,7 +922,7 @@ func run() error {
 	if *remove && len(sourceList) > 0 {
 		panic(fmt.Sprintf("source retains %d metrics", len(sourceList)))
 	}
-	report("parity", map[string]any{"sampled_histories": "passed", "source_remaining": len(sourceList)})
+	report("parity", map[string]any{"sampled_histories": "passed", "source_remaining": len(sourceList), "seconds": time.Since(parityStart).Seconds(), "end_to_end_seconds": duration + inventorySeconds + planSeconds + seedSeconds + time.Since(parityStart).Seconds()})
 	return nil
 }
 func strconvInt(n int) string { return fmt.Sprint(n) }

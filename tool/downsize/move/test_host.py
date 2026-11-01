@@ -14,6 +14,23 @@ spec.loader.exec_module(host_module)
 
 
 class HostTests(unittest.TestCase):
+    def test_foreground_counter_contract_and_missing_data(self):
+        values = {'input_log_write_errors_total': 0.0,
+                  'persister_pebble_write_failures_total': 0.0,
+                  'input_log_unlogged_points_total': 0.0,
+                  'persister_pebble_points_total': 12345.0}
+        result = host_module.foreground_counters(values, 'persister_pebble_write_failures_total')
+        self.assertTrue(result['ForegroundMeasured'])
+        for field in ('WriteErrors', 'Unlogged', 'WritePoints'):
+            self.assertIs(type(result[field]), int)
+        self.assertEqual(result['WritePoints'], 12345)
+        del values['persister_pebble_points_total']
+        with self.assertRaises(ValueError):
+            host_module.foreground_counters(values, 'persister_pebble_write_failures_total')
+        offline = host_module.foreground_counters({}, 'unused', offline=True)
+        self.assertFalse(offline['ForegroundMeasured'])
+        self.assertEqual(offline['WritePoints'], 0)
+
     def test_write_ceiling_defaults_to_metal_budget_and_accepts_override(self):
         argv = ['serve', '--pid-file', '/run/store.pid', '--devices', 'nvme0n1',
                 '--nic', 'eth0', '--cluster', 'metrics', '--site', 'region-a',

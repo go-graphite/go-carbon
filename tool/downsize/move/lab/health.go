@@ -48,6 +48,7 @@ func health(app *carbon.App, latency *[64]atomic.Uint64) *httptest.Server {
 			"Time": float64(now.UnixNano()) / 1e9, "Generation": "measured-lab", "StoragePhase": "shared",
 			"CPUCores": cores, "PhysicalCores": runtime.GOMAXPROCS(0), "CachePoints": app.Cache.Size(),
 			"WriteErrors": writes.Failures, "ReadSamples": total, "ReadP99MS": float64(p99) / 1000,
+			"WritePoints": writes.Points, "ForegroundMeasured": true,
 			"DiskBytes": 1 << 40, "DiskFreeBytes": 500 << 30, "DiskWriteCapacity": 2e9,
 			"MemoryBytes": 16 << 30, "AvailableBytes": 8 << 30, "NICCapacityBytes": 1e9,
 		})

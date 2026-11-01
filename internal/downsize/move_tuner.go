@@ -22,6 +22,8 @@ type hostSample struct {
 	RSS, MemoryBytes, AvailableBytes                                     uint64
 	Threads                                                              int
 	WriteErrors, Unlogged                                                uint64
+	WritePoints                                                          uint64
+	ForegroundMeasured                                                   bool
 	ReadP99MS                                                            float64
 	ReadsBlocked, Offline                                                bool
 }
@@ -34,6 +36,8 @@ type storageSample struct {
 	L0Sublevels                 int64
 	CompactionDebt, WriteStalls uint64
 	WriteStallActive            bool
+	PendingDeleteBatches        bool
+	StagedCopyVerification      bool
 }
 type capacity struct {
 	Streams, Batch int
@@ -44,12 +48,15 @@ type hostLimit struct {
 	readBaseline float64
 	deleteAt     time.Time
 	capacity
-	active              int
-	previous            *hostSample
-	storePrevious       *storageSample
-	healthy             int
-	ingressAt, egressAt time.Time
-	backgroundCPU       float64
+	active                    int
+	previous                  *hostSample
+	storePrevious             *storageSample
+	healthy                   int
+	ingressAt, egressAt       time.Time
+	backgroundCPU             float64
+	writeRate, foregroundRate float64
+	backlogBaseline           int64
+	foregroundReady           bool
 }
 type tuner struct {
 	mu            sync.Mutex
@@ -153,7 +160,7 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 		return "hard memory/thread reserve", ""
 	}
 	if previous != nil {
-		if sample.Generation != previous.Generation || sample.WriteErrors < previous.WriteErrors || sample.Unlogged < previous.Unlogged {
+		if sample.Generation != previous.Generation || sample.WriteErrors < previous.WriteErrors || sample.Unlogged < previous.Unlogged || sample.WritePoints < previous.WritePoints || sample.ForegroundMeasured != previous.ForegroundMeasured {
 			return "host restart/counter reset", ""
 		}
 		if sample.WriteErrors > previous.WriteErrors || sample.Unlogged > previous.Unlogged {
@@ -223,6 +230,18 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 		}
 	}
 	hard, soft := guard(sample, store, h.previous, h.storePrevious, readLimit)
+	if h.previous != nil && sample.ForegroundMeasured && sample.Time > h.previous.Time {
+		h.writeRate = float64(sample.WritePoints-h.previous.WritePoints) / (sample.Time - h.previous.Time)
+		// Preserve the pre-copy backlog envelope and write rate rather than
+		// learning a degraded baseline. Lower offered load without queued work
+		// is healthy; growing backlog yields even at a steady committed rate.
+		if h.foregroundReady && sample.CachePoints > h.backlogBaseline+max(10000, h.backlogBaseline/20) {
+			soft = "foreground backlog"
+			if h.foregroundRate > 0 && h.writeRate < h.foregroundRate*.9 {
+				soft = "foreground write floor"
+			}
+		}
+	}
 	if h.previous == nil {
 		h.backgroundCPU = sample.CPUCores
 	}
@@ -262,6 +281,9 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 		reason = soft
 		h.healthy = 0
 		h.Streams = max(0, h.Streams/2)
+		if soft == "foreground write floor" || soft == "foreground backlog" || soft == "ingest backlog growth" || soft == "write stall" {
+			h.Streams = 0
+		}
 		h.Batch = max(1, h.Batch/2)
 		h.BatchBytes = max(64<<10, h.BatchBytes/2)
 		h.DeleteRate = max(1, h.DeleteRate/2)
@@ -322,6 +344,9 @@ func (t *tuner) captureReadBaselines() {
 	for host, h := range t.hosts {
 		if h.previous != nil {
 			h.backgroundCPU = h.previous.CPUCores
+			h.foregroundRate = h.writeRate
+			h.backlogBaseline = h.previous.CachePoints
+			h.foregroundReady = h.previous.ForegroundMeasured
 		}
 		if h.previous != nil && h.previous.ReadSamples >= 20 && h.previous.ReadP99MS > 0 {
 			h.readBaseline = h.previous.ReadP99MS
