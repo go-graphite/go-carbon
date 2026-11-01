@@ -38,62 +38,66 @@ func (c testColdCodec) Repack(ctx context.Context, io ContinuationIO, r ColdPack
 	return RepackStats{Blocks: 1, Points: 200}, 1, false, nil
 }
 func TestColdPackPagesAndBusyStripe(t *testing.T) {
-	ctx := context.Background()
-	s, _ := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, TimeBuckets: true, Continuation: testColdCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20})
-	defer closeTestStore(t, s)
-	s.stopColdPack()
-	for i := 0; i < 201; i++ {
-		createTestMetric(t, s, fmt.Sprintf("page.%03d", i))
-	}
-	after := ""
-	count := 0
-	for {
-		names, err := s.coldPackPage(ctx, after)
-		if err != nil {
-			t.Fatal(err)
+	// Keep the 2 ms publication validation budget independent of host scheduling
+	// and disk IO: this test covers pagination and a deliberately busy stripe.
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true, TimeBuckets: true, Continuation: testColdCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+		defer closeTestStore(t, s)
+		s.stopColdPack()
+		for i := 0; i < 201; i++ {
+			createTestMetric(t, s, fmt.Sprintf("page.%03d", i))
 		}
-		if len(names) > ColdPackPageSize {
-			t.Fatal("unbounded page")
-		}
-		if len(names) == 0 {
-			break
-		}
-		for _, name := range names {
-			if name <= after {
-				t.Fatal("page regressed")
+		after := ""
+		count := 0
+		for {
+			names, err := s.coldPackPage(ctx, after)
+			if err != nil {
+				t.Fatal(err)
 			}
-			after = name
-			count++
+			if len(names) > ColdPackPageSize {
+				t.Fatal("unbounded page")
+			}
+			if len(names) == 0 {
+				break
+			}
+			for _, name := range names {
+				if name <= after {
+					t.Fatal("page regressed")
+				}
+				after = name
+				count++
+			}
 		}
-	}
-	if count != 201 {
-		t.Fatalf("listed %d metrics", count)
-	}
-	if err := s.ConfigureColdPack(ColdPackOptions{Mode: "exact"}); err != nil {
-		t.Fatal(err)
-	}
-	unlock := s.lockMetricMutation("page.000")
-	_, err := s.ColdPackStep(ctx)
-	unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st := s.ColdPackStats(); st.Conflicts != 1 || st.Blocks != 0 {
-		t.Fatalf("busy stripe waited or published: %+v", st)
-	}
-	for n := 0; n < 1000; n++ {
-		done, err := s.ColdPackStep(ctx)
+		if count != 201 {
+			t.Fatalf("listed %d metrics", count)
+		}
+		if err := s.ConfigureColdPack(ColdPackOptions{Mode: "exact"}); err != nil {
+			t.Fatal(err)
+		}
+		unlock := s.lockMetricMutation("page.000")
+		_, err := s.ColdPackStep(ctx)
+		unlock()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if done {
-			break
+		if st := s.ColdPackStats(); st.Conflicts != 1 || st.Blocks != 0 {
+			t.Fatalf("busy stripe waited or published: %+v", st)
 		}
-	}
-	st := s.ColdPackStats()
-	if st.Passes != 1 || st.Blocks != 200 || st.Pages != 5 {
-		t.Fatalf("paged sweep: %+v", st)
-	}
+		for n := 0; n < 1000; n++ {
+			done, err := s.ColdPackStep(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if done {
+				break
+			}
+		}
+		st := s.ColdPackStats()
+		if st.Passes != 1 || st.Blocks != 200 || st.Pages != 5 || st.Conflicts != 1 {
+			t.Fatalf("paged sweep: %+v", st)
+		}
+	})
 }
 func TestColdPackBudgetsAndFailures(t *testing.T) {
 	for _, tc := range []struct {
