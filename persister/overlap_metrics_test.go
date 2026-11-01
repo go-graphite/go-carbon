@@ -91,6 +91,17 @@ func TestOverlapUpdatesMetrics(t *testing.T) {
 		}
 	}
 	stats := map[string]float64{}
+	blockResults := map[string]bool{}
+	for _, family := range families {
+		if family.GetName() == "persister_in_place_blocks_total" || family.GetName() == "persister_in_place_block_points_total" {
+			for _, metric := range family.GetMetric() {
+				blockResults[family.GetName()+"/"+metric.GetLabel()[0].GetValue()] = true
+			}
+		}
+	}
+	if len(blockResults) != 4 {
+		t.Fatal("missing block planning diagnostics", blockResults)
+	}
 	p.sendOverlapUpdates(func(name string, value float64) { stats[name] = value })
 	if _, ok := stats["overlapUpdates.buffered_rollup"]; !ok || len(stats) != 5 {
 		t.Errorf("unexpected overlap stats %v", stats)

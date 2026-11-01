@@ -243,10 +243,12 @@ var integritySchemas = []struct {
 // the grid. After every update every stored block must encode again, which
 // every rewrite needs, and no update may fail.
 func TestRandomInterleavingsKeepBlocksEncodable(t *testing.T) {
+	t.Parallel() // This trace owns its codec, clock, filesystem and validation cache.
 	testRandomInterleavingsKeepBlocksEncodable(t, 0)
 }
 
 func TestRandomInterleavingsKeepBlocksEncodableSeed1(t *testing.T) {
+	t.Parallel() // This trace owns its codec, clock, filesystem and validation cache.
 	testRandomInterleavingsKeepBlocksEncodable(t, 1)
 }
 
@@ -329,6 +331,7 @@ func testRandomInterleavingsKeepBlocksEncodable(t *testing.T, selectedSeed int) 
 // with fetches between updates, and fails on any update, merge or snapshot
 // error.
 func TestRandomInterleavingsThroughStore(t *testing.T) {
+	t.Parallel()
 	seeds := 2
 	if testing.Short() {
 		seeds = 1

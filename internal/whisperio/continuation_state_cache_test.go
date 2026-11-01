@@ -49,6 +49,7 @@ func stateCacheStore(t testing.TB, dir string, buckets bool, cache int64, clock 
 // sidecar-merging), flushes, compactions and a reopen, and compares every
 // fetch and snapshot.
 func TestStateCacheMatchesUncachedStore(t *testing.T) {
+	t.Parallel()
 	for _, buckets := range []bool{false, true} {
 		t.Run(fmt.Sprintf("buckets=%v", buckets), func(t *testing.T) {
 			t.Parallel()

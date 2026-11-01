@@ -294,7 +294,8 @@ func withoutOverlapUpdates(families []*dto.MetricFamily) []*dto.MetricFamily {
 		name := family.GetName()
 		if !strings.HasSuffix(name, "persister_overlap_updates_total") && !strings.HasSuffix(name, "persister_rollup_corrections_total") &&
 			!strings.HasSuffix(name, "persister_sidecar_slot_merges_total") && !strings.HasSuffix(name, "persister_sidecar_folds_total") && !strings.Contains(name, "persister_ooo_direct_") &&
-			!strings.HasSuffix(name, "persister_rewrite_block_fallbacks_total") {
+			!strings.HasSuffix(name, "persister_rewrite_block_fallbacks_total") && !strings.HasSuffix(name, "persister_in_place_blocks_total") &&
+			!strings.HasSuffix(name, "persister_in_place_block_points_total") {
 			kept = append(kept, family)
 		}
 	}

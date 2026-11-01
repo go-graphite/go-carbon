@@ -36,6 +36,8 @@ type ContinuationCodec struct {
 	DirectLateWrites bool
 	// keepImportedSidecars reproduces legacy imports in oracle tests.
 	keepImportedSidecars bool
+	// keepDuplicatePlanning retains the reference path for differential tests.
+	keepDuplicatePlanning bool
 }
 
 // foldsImportedSidecars is disabled only by legacy-oracle tests.
@@ -630,6 +632,7 @@ func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO,
 	timer.Enter(stagetime.Load)
 	fs := newContinuationFiles(kv, false).withClock(clock)
 	fs.reuseBlockKeys = c.ReuseBlockKeys
+	fs.keepDuplicatePlanning = c.keepDuplicatePlanning
 	fs.timer = timer
 	if err := fs.prefetchNames(); err != nil {
 		return err

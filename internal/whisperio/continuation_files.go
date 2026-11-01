@@ -25,9 +25,10 @@ var continuationNames atomic.Uint64
 // Only headers and file identities stay in memory. Historical values live in
 // shared exact blocks; no raw Whisper body or per-metric OS file is retained.
 type continuationFiles struct {
-	sidecarDirty bool
-	kv           store.ContinuationIO
-	readOnly     bool
+	keepDuplicatePlanning bool
+	sidecarDirty          bool
+	kv                    store.ContinuationIO
+	readOnly              bool
 	// buckets writes new compressed blocks to the store's time-partitioned
 	// key space, bucketed by the day clock reports when each is written.
 	buckets bool

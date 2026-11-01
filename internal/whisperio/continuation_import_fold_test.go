@@ -274,6 +274,7 @@ func importFoldDelta(before map[string]uint64) map[string]uint64 {
 // grid (gridCheckingCodec), so no fold, patch or direct write stores a block
 // a later merge or rewrite cannot re-encode.
 func TestImportFoldMatchesClassic(t *testing.T) {
+	t.Parallel() // All stores, source files and clocks belong to this matrix.
 	const groups, workers = 4, 2
 	scenarios := inPlaceScenarios(true)
 	if !testing.Short() {
@@ -1185,6 +1186,7 @@ func productionSidecarSource(t testing.TB, dir string, seed int64, minAge, maxAg
 // folding it during the import. It also reports the keys plus values the
 // codec handed the store. Set IMPORT_FOLD_METRICS to change the count.
 func TestImportFoldPebbleBytes(t *testing.T) {
+	t.Parallel()
 	var imports sync.Mutex
 	n := 4
 	if testing.Short() {

@@ -285,6 +285,7 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 		prefix := desc.groupPrefix(f.data.id, block.Archive, block.Index)
 		start := f.fs.timer.Nested(stagetime.TailRead)
 		defer f.fs.timer.Unnest(stagetime.TailRead, start)
+		var scratch store.PointBlock
 		visit := func(key, value []byte) error {
 			first := len(points)
 			if first >= count {
@@ -296,27 +297,11 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 				return fmt.Errorf("invalid continuation physical group order: file %d archive %d block %d: group key %x, want group %d",
 					f.data.id, block.Archive, block.Index, key[min(len(key), len(prefix)):], first/desc.groupSize())
 			}
-			var group store.PointBlock
-			var decoded []store.Point
-			if desc.packed > 0 {
-				var err error
-				decoded, err = store.DecodeSealedPoints(value)
-				if err != nil {
-					return err
-				}
-				if len(decoded) != min(desc.groupSize(), count-first) {
-					return errors.New("sealed group count differs")
-				}
-			} else {
-				if err := store.DecodePointBlock(value, &group); err != nil {
-					return err
-				}
-				decoded = group.Points[:min(128, count-first)]
+			decoded, err := f.decodeStorageGroup(block, desc, first, value, &scratch, previous)
+			if err != nil {
+				return err
 			}
-			for slot, point := range decoded {
-				if desc.packed == 0 && group.Present[slot/64]&(uint64(1)<<uint(slot%64)) == 0 || point.Timestamp <= previous || point.Timestamp > math.MaxUint32 {
-					return fmt.Errorf("invalid continuation physical point: file %d archive %d block %d (count %d, step %d): point %d present %v at %d follows %d", f.data.id, block.Archive, block.Index, count, block.Step, first+slot, desc.packed > 0 || group.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0, point.Timestamp, previous)
-				}
+			for _, point := range decoded {
 				points = append(points, whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
 				previous = point.Timestamp
 			}

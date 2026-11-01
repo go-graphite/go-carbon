@@ -18,6 +18,7 @@ import (
 // updates; their fetches must match before and after the move and after
 // further updates that rotate blocks.
 func TestRelayoutMatchesV6Control(t *testing.T) {
+	t.Parallel() // All stores, source files and clocks belong to this matrix.
 	ctx := context.Background()
 	const base = int64(1792368000)
 	now := time.Unix(base, 0)
