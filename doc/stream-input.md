@@ -272,3 +272,13 @@ decoders and the real cache, drains cache batches at minute markers, and records
 natural/live heap, RSS, accepted rows and dictionary counters. It uses synthetic
 names only. Its measurements and temporary artifacts belong in a caller-chosen
 scratch/results directory.
+
+Pass `-dictionary-bytes=268435456` to measure a 256 MiB per-connection decoder
+allowance. This changes the harness decoder limit only. On the real listener,
+set `[tcp].stream-dictionary-bytes` and `stream-dictionary-total-bytes` and
+restart go-carbon; SIGHUP does not update either running listener limit. Keep
+the sender's `stream_options.peer_dictionary_bytes` at or below the receiver's
+per-connection allowance. v1 does not negotiate limits: an oversized dictionary
+fails decoding and closes the connection before rows from that frame reach the
+sink. Size the total reservation for every concurrent stream, including restart
+overlap, with separate headroom for frame/compression buffers and the cache.

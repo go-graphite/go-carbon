@@ -33,6 +33,7 @@ func main() {
 	connections := flag.Int("connections", 40, "connections retained")
 	profile := flag.String("profile", "", "heap profile path")
 	shared := flag.Bool("shared", true, "bind definitions to shared series")
+	dictionaryBytes := flag.Int("dictionary-bytes", codec.DefaultDictionaryBytes, "per-connection decoded dictionary byte limit")
 	flag.Parse()
 	c := cache.New()
 	c.SetMaxSize(0)
@@ -97,7 +98,7 @@ func main() {
 			if err != nil {
 				panic(err)
 			}
-			d, err = codec.NewDecoder(codec.Options{Flags: flags})
+			d, err = codec.NewDecoder(codec.Options{Flags: flags, DictionaryBytes: *dictionaryBytes})
 			if err != nil {
 				panic(err)
 			}

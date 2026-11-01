@@ -37,15 +37,19 @@ var (
 // both compressed and uncompressed payloads. MaxRows also controls encoder flush
 // cadence; FrameSize is its target payload size (default 256 KiB).
 // DictionaryBytes bounds connection dictionary capacity (default 64 MiB).
+// PeerDictionaryBytes bounds the encoder's estimate of decoded dictionary
+// capacity at the receiver (default 64 MiB, allowed range 1 MiB to 1 GiB).
+// It must not exceed the receiver's DictionaryBytes. It is not negotiated.
 // Shared encoders receive a separately budgeted NameTable.
 type Options struct {
-	Flags           byte
-	MaxFrameSize    int
-	FrameSize       int
-	MaxRows         int
-	MaxNames        int
-	MaxNameSize     int
-	DictionaryBytes int
+	Flags               byte
+	MaxFrameSize        int
+	FrameSize           int
+	MaxRows             int
+	MaxNames            int
+	MaxNameSize         int
+	DictionaryBytes     int
+	PeerDictionaryBytes int
 }
 
 func options(o Options) (Options, error) {
@@ -71,6 +75,12 @@ func options(o Options) (Options, error) {
 		o.DictionaryBytes = DefaultDictionaryBytes
 	}
 	if o.DictionaryBytes < 4096 {
+		return o, ErrLimit
+	}
+	if o.PeerDictionaryBytes == 0 {
+		o.PeerDictionaryBytes = DefaultDictionaryBytes
+	}
+	if o.PeerDictionaryBytes < 1<<20 || o.PeerDictionaryBytes > 1<<30 {
 		return o, ErrLimit
 	}
 	if o.MaxFrameSize < 64 || uint64(o.MaxFrameSize) > uint64(^uint32(0)) || o.FrameSize < 1 || o.MaxRows < 1 || uint64(o.MaxRows) > uint64(^uint32(0)) || o.MaxNames < 1 || uint64(o.MaxNames) > uint64(^uint32(0)) || o.MaxNameSize < 1 {

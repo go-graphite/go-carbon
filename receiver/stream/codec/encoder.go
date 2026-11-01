@@ -19,10 +19,20 @@ type row struct {
 	bits uint64
 }
 
+// ResetReason identifies the binding limit for an automatic encoder reset.
+type ResetReason string
+
+const (
+	ResetPeerBytes  ResetReason = "peer_bytes"
+	ResetLocalBytes ResetReason = "local_bytes"
+	ResetNames      ResetReason = "names"
+)
+
 // Encoder keeps a connection dictionary and reusable column buffers. Flush
 // before sending data, and send AppendPreamble once when opening the connection.
 // Add may queue complete frames internally; callers should Flush when Ready.
 type Encoder struct {
+	lastResetReason  ResetReason
 	unshared         uint64
 	opts             Options
 	table            *NameTable
@@ -142,10 +152,22 @@ func (e *Encoder) AddGlobal(name []byte, hash, token uint64, value float64, ts i
 			return false, false, err
 		}
 	}
-	if !ok && (e.states.n >= e.opts.MaxNames || e.states.n >= wireIDMask || e.projectedBytes() > e.opts.DictionaryBytes || e.projectedDecoded(len(name)) > DefaultDictionaryBytes) {
+	var reason ResetReason
+	if !ok {
+		switch {
+		case e.projectedDecoded(len(name)) > e.opts.PeerDictionaryBytes:
+			reason = ResetPeerBytes
+		case e.projectedBytes() > e.opts.DictionaryBytes:
+			reason = ResetLocalBytes
+		case e.states.n >= e.opts.MaxNames || e.states.n >= wireIDMask:
+			reason = ResetNames
+		}
+	}
+	if reason != "" {
 		if err := e.Reset(); err != nil {
 			return false, false, err
 		}
+		e.lastResetReason = reason
 		reset = true
 	}
 	if !ok {
@@ -187,6 +209,11 @@ func (e *Encoder) RetainedBytes() int {
 	return n
 }
 func (e *Encoder) NameCount() int { return e.states.n }
+
+// LastResetReason reports the last automatic reset's binding limit. When more
+// than one limit binds, peer bytes take precedence, then local bytes, then names.
+// Explicit Reset calls do not change it. Read it only after Add reports a reset.
+func (e *Encoder) LastResetReason() ResetReason { return e.lastResetReason }
 
 // Ready reports that the target rows/bytes were reached or a frame was queued.
 // A timer may also call Flush to bound latency on quiet connections.
