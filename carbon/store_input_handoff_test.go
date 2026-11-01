@@ -134,9 +134,11 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 				t.Fatal("not a shared store")
 			}
 			deadline := time.Now().Add(5 * time.Second)
-			// Completed conversion uses the catalog index; input-only handoff
-			// does not require a memory-mapped filesystem snapshot.
-			for first.Carbonserver.CurrentFileIndex() == nil {
+			// A catalog index can checkpoint its heap overlay, but a file
+			// index needs a mapped generation. The initial heap trie can be
+			// published before that generation is ready under a busy scan.
+			for first.Carbonserver.CurrentFileIndex() == nil ||
+				!first.Carbonserver.UsesSharedCatalogIndex() && !first.Carbonserver.HasMappedIndex() {
 				if time.Now().After(deadline) {
 					t.Fatal("initial index did not complete", zapwriter.TestString())
 				}
