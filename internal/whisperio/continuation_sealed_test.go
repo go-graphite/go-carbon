@@ -1,10 +1,11 @@
 package whisperio
 
 import (
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	whisper "github.com/go-graphite/go-whisper"
 	"math"
 	"testing"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	whisper "github.com/go-graphite/go-whisper"
 )
 
 func TestSealedBlockMutations(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,7 +101,7 @@ func TestLoadingCanBeInterrupted(t *testing.T) {
 	defer cancel()
 	count := 0
 	err := readLog(ctx, path, func([]byte, bool) { count++; cancel() })
-	if err != context.Canceled || count != 1 {
+	if !errors.Is(err, context.Canceled) || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
 }

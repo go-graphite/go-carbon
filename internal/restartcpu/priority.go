@@ -119,7 +119,8 @@ func (b *Budget) State() State {
 		available := max(0, b.cores-b.process)
 		s.Checkpoint = min(available, b.checkpointShareLocked())
 		available -= s.Checkpoint
-		if prefetchers > 0 {
+		switch {
+		case prefetchers > 0:
 			// Report headroom among required jobs, retaining writeout demand
 			// across the rate-token and queue waits between registered writers.
 			s.Warming = available
@@ -132,9 +133,9 @@ func (b *Budget) State() State {
 				}
 				s.Writeout = available - s.Warming
 			}
-		} else if b.released || writers > 0 {
+		case b.released || writers > 0:
 			s.Writeout = available
-		} else if b.belowAt.IsZero() && b.credit >= 0 {
+		case b.belowAt.IsZero() && b.credit >= 0:
 			s.Warming = available
 		}
 	}

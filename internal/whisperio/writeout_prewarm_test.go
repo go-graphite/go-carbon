@@ -3,10 +3,11 @@ package whisperio
 import (
 	"context"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"path/filepath"
 	"testing"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestWriteoutPrewarmMatchesUncachedUpdates(t *testing.T) {

@@ -3,12 +3,13 @@ package buckyd
 import (
 	"bytes"
 	"context"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
 func TestColdPackTransferNegotiation(t *testing.T) {

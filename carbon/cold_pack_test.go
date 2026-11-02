@@ -1,8 +1,9 @@
 package carbon
 
 import (
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"testing"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 func TestColdPackConfig(t *testing.T) {

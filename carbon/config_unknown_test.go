@@ -40,7 +40,7 @@ func TestUnknownConfigKeys(t *testing.T) {
 		{"tags", "[tags]\ntagdb-timout = '1s'\n", "tags.tagdb-timout", "tags.tagdb-timeout"},
 		{"dump", "[dump]\nrestore-per-secon = 2\n", "dump.restore-per-secon", "dump.restore-per-second"},
 		{"retired", "[carbonserver]\ngraphite-web-10-strict-mode = true\n", "carbonserver.graphite-web-10-strict-mode", ""},
-		{"array of tables", "[[logging]]\nlevle = 'info'\n[[logging]]\nlevle = 'warn'\n", "logging.levle", "logging.level"},
+		{"array of tables", "[[logging]]\nlevle = 'info'\n[[logging]]\nlevle = 'warn'\n", "logging.levle", "logging.level"}, //nolint:misspell // deliberate typo
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "go-carbon.conf")

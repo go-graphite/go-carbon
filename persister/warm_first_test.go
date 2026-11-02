@@ -2,9 +2,6 @@ package persister
 
 import (
 	"context"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
-	"github.com/go-graphite/go-carbon/internal/restartcpu"
-	"github.com/go-graphite/go-carbon/points"
 	"iter"
 	"reflect"
 	"slices"
@@ -13,6 +10,10 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/restartcpu"
+	"github.com/go-graphite/go-carbon/points"
 )
 
 type controlledWarmer struct {
