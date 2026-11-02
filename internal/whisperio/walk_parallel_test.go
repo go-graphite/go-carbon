@@ -60,6 +60,9 @@ func collectWalk(t *testing.T, walk func(func(MetricPath) error) error) []Metric
 func TestWalkMetricsParallelMatchesSerial(t *testing.T) {
 	root := t.TempDir()
 	writeWalkTree(t, root)
+	if err := os.WriteFile(filepath.Join(root, ".go-carbon-migration-source"), []byte("0123456789abcdef0123456789abcdef\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	want := collectWalk(t, func(fn func(MetricPath) error) error { return WalkMetrics(ctx, root, true, fn) })
 	if len(want) != 120 {
