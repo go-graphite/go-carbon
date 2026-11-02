@@ -10,18 +10,19 @@ import (
 )
 
 const (
-	Magic                    = "\x00GCS\r\n\x1a\n"
-	Version             byte = 1
-	FlagZstd            byte = 1
-	PreambleSize             = len(Magic) + 2
-	HeaderSize               = 20
-	DefaultMaxFrameSize      = 8 << 20
-	DefaultMaxNames          = 5_000_000
-	DefaultMaxRows           = 64 << 10
-	DefaultMaxNameSize       = 64 << 10
-	DataFrame           byte = 0
-	ResetFrame          byte = 1
-	StateFrame          byte = 2
+	Magic                       = "\x00GCS\r\n\x1a\n"
+	Version                byte = 1
+	FlagZstd               byte = 1
+	PreambleSize                = len(Magic) + 2
+	HeaderSize                  = 20
+	DefaultMaxFrameSize         = 8 << 20
+	DefaultMaxNames             = 5_000_000
+	DefaultDictionaryBytes      = 64 << 20
+	DefaultMaxRows              = 64 << 10
+	DefaultMaxNameSize          = 64 << 10
+	DataFrame              byte = 0
+	ResetFrame             byte = 1
+	StateFrame             byte = 2
 )
 
 var (
@@ -35,13 +36,20 @@ var (
 // Options bounds memory use. Zero fields select defaults. MaxFrameSize bounds
 // both compressed and uncompressed payloads. MaxRows also controls encoder flush
 // cadence; FrameSize is its target payload size (default 256 KiB).
+// DictionaryBytes bounds connection dictionary capacity (default 64 MiB).
+// PeerDictionaryBytes bounds the encoder's estimate of decoded dictionary
+// capacity at the receiver (default 64 MiB, allowed range 1 MiB to 1 GiB).
+// It must not exceed the receiver's DictionaryBytes. It is not negotiated.
+// Shared encoders receive a separately budgeted NameTable.
 type Options struct {
-	Flags        byte
-	MaxFrameSize int
-	FrameSize    int
-	MaxRows      int
-	MaxNames     int
-	MaxNameSize  int
+	Flags               byte
+	MaxFrameSize        int
+	FrameSize           int
+	MaxRows             int
+	MaxNames            int
+	MaxNameSize         int
+	DictionaryBytes     int
+	PeerDictionaryBytes int
 }
 
 func options(o Options) (Options, error) {
@@ -62,6 +70,18 @@ func options(o Options) (Options, error) {
 	}
 	if o.MaxNameSize == 0 {
 		o.MaxNameSize = DefaultMaxNameSize
+	}
+	if o.DictionaryBytes == 0 {
+		o.DictionaryBytes = DefaultDictionaryBytes
+	}
+	if o.DictionaryBytes < 4096 {
+		return o, ErrLimit
+	}
+	if o.PeerDictionaryBytes == 0 {
+		o.PeerDictionaryBytes = DefaultDictionaryBytes
+	}
+	if o.PeerDictionaryBytes < 1<<20 || o.PeerDictionaryBytes > 1<<30 {
+		return o, ErrLimit
 	}
 	if o.MaxFrameSize < 64 || uint64(o.MaxFrameSize) > uint64(^uint32(0)) || o.FrameSize < 1 || o.MaxRows < 1 || uint64(o.MaxRows) > uint64(^uint32(0)) || o.MaxNames < 1 || uint64(o.MaxNames) > uint64(^uint32(0)) || o.MaxNameSize < 1 {
 		return o, ErrLimit

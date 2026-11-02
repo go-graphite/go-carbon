@@ -5,13 +5,13 @@ import "github.com/zeebo/xxh3"
 // PointRef is a connection-owned hint for adding points to one metric. Its zero
 // value is ready to use. A ref must not be used concurrently. Reset it to
 // PointRef{} before assigning its connection ID to a different name, or when
-// releasing that ID: a ref retains the most recently cached batch and its name.
+// releasing that ID: the hint does not retain removed batches or their names.
 // Cache removals and replacements do not require the caller to reset it.
 type PointRef struct {
-	cache *Cache
-	item  *item
-	shard uint32
-	slot  uint32
+	cache      *Cache
+	generation uint64
+	shard      uint32
+	slot       uint32
 }
 
 // AddPointRef adds a point with the same admission and bookkeeping as AddPoint.
@@ -29,16 +29,16 @@ func (c *Cache) AddPointRef(ref *PointRef, name []byte, value float64, timestamp
 		c.AddPoint(name, value, timestamp)
 		return
 	}
-	if ref.cache == c && ref.item != nil {
+	if ref.cache == c && ref.generation != 0 {
 		shard := c.data[ref.shard]
 		shard.mu.Lock()
-		// The current table, not a retained pointer into an old table, proves
-		// membership. Deletion, replacement and rehashing can only invalidate
-		// this hint. Items are never recycled into a different batch.
-		if uint(ref.slot) < uint(len(shard.items.slots)) && shard.items.slots[ref.slot].item == ref.item && c.settings.Load().(*cacheSettings).xlog == nil {
-			c.addPointLocked(shard, s, ref.item, value, timestamp)
-			shard.mu.Unlock()
-			return
+		if uint(ref.slot) < uint(len(shard.items.slots)) {
+			values := shard.items.slots[ref.slot].item
+			if values != nil && values.streamGeneration == ref.generation && c.settings.Load().(*cacheSettings).xlog == nil {
+				c.addPointLocked(shard, s, values, value, timestamp)
+				shard.mu.Unlock()
+				return
+			}
 		}
 		shard.mu.Unlock()
 	}
@@ -62,7 +62,7 @@ func (c *Cache) AddPointRef(ref *PointRef, name []byte, value float64, timestamp
 	mask := len(shard.items.slots) - 1
 	for slot := int(hash>>shardBits) & mask; ; slot = (slot + 1) & mask {
 		if shard.items.slots[slot].item == values {
-			*ref = PointRef{cache: c, item: values, shard: index, slot: uint32(slot)}
+			*ref = PointRef{cache: c, generation: shard.streamIdentity(values), shard: index, slot: uint32(slot)}
 			return
 		}
 	}
@@ -73,6 +73,12 @@ func (c *Cache) AddPointRef(ref *PointRef, name []byte, value float64, timestamp
 // name assignments or cache lifetimes. The normal AddPointRef fallback retains
 // admission, tag handling and graceful input diversion.
 func (c *Cache) AddStreamPoint(name []byte, value float64, timestamp int64, slot *any) {
+	if slot != nil {
+		if series, ok := (*slot).(*StreamSeries); ok {
+			c.addStreamSeries(series, value, timestamp)
+			return
+		}
+	}
 	if slot == nil {
 		c.AddPoint(name, value, timestamp)
 		return

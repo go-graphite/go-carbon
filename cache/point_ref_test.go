@@ -24,12 +24,17 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 	t.Helper()
 	for i, a := range want.data {
 		b := got.data[i]
-		am, bm := map[string]*item{}, map[string]*item{}
+		// Stream generations are hints, not cache data. Compare fields by
+		// reference so the input log's atomic state is never copied.
+		semantic := func(it *item) []any {
+			return []any{&it.Points, &it.compact, &it.log, it.spread, it.sparse, it.startup, it.slot, it.firstArrival, it.throttleState, it.indexGeneration}
+		}
+		am, bm := map[string][]any{}, map[string][]any{}
 		for name, it := range a.items.all {
-			am[name] = it
+			am[name] = semantic(it)
 		}
 		for name, it := range b.items.all {
-			bm[name] = it
+			bm[name] = semantic(it)
 		}
 		if !reflect.DeepEqual(am, bm) {
 			t.Fatalf("shard %d queued items differ", i)
@@ -76,6 +81,7 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 	stats := func(c *Cache) map[string]float64 {
 		out := map[string]float64{}
 		c.Stat(func(name string, value float64) { out[name] = value })
+		delete(out, "streamSeriesIndexBytes")
 		return out
 	}
 	if !reflect.DeepEqual(stats(want), stats(got)) || want.EstimatedBytes() != got.EstimatedBytes() {
@@ -86,7 +92,9 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 	}
 }
 
-func TestPointRefMatchesAddPoint(t *testing.T) {
+func TestPointRefMatchesAddPoint(t *testing.T)     { testPointRefMatchesAddPoint(t, false) }
+func TestStreamSeriesMatchesAddPoint(t *testing.T) { testPointRefMatchesAddPoint(t, true) }
+func testPointRefMatchesAddPoint(t *testing.T, series bool) {
 	for _, mode := range []string{"plain", "bloom", "throttle", "stateful", "recovery", "tags"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -130,6 +138,7 @@ func TestPointRefMatchesAddPoint(t *testing.T) {
 					}
 				}
 				refs := map[string]*PointRef{}
+				seriesSlots := map[string]any{}
 				check := func() {
 					t.Helper()
 					comparePointRefCaches(t, cs[0], cs[1])
@@ -152,7 +161,16 @@ func TestPointRefMatchesAddPoint(t *testing.T) {
 					}
 					buf := []byte(name)
 					cs[0].AddPoint(buf, value, ts)
-					cs[1].AddPointRef(refs[name], buf, value, ts)
+					if series {
+						slot := seriesSlots[name]
+						if slot == nil {
+							slot = cs[1].ResolveStreamName(buf)
+						}
+						cs[1].AddStreamPoint(buf, value, ts, &slot)
+						seriesSlots[name] = slot
+					} else {
+						cs[1].AddPointRef(refs[name], buf, value, ts)
+					}
 					for i := range buf {
 						buf[i] = 'X'
 					}
@@ -260,7 +278,7 @@ func TestPointRefSlotIdentity(t *testing.T) {
 	var ref PointRef
 	name := []byte("slot.metric")
 	c.AddPointRef(&ref, name, 1, 1)
-	old := ref.item
+	old := c.data[ref.shard].items.slots[ref.slot].item
 	sh := c.data[ref.shard]
 	// Simulate any rehash, including one shrinking past the saved slot.
 	sh.mu.Lock()
@@ -269,13 +287,13 @@ func TestPointRefSlotIdentity(t *testing.T) {
 	ref.slot = ^uint32(0)
 	sh.mu.Unlock()
 	c.AddPointRef(&ref, name, 2, 2)
-	if ref.item != old || ref.slot == ^uint32(0) || len(c.Get(string(name))) != 2 {
+	if ref.generation != old.streamGeneration || ref.slot == ^uint32(0) || len(c.Get(string(name))) != 2 {
 		t.Fatal("rehash did not refresh the ref")
 	}
 	c.Pop(string(name))
 	c.AddPoint(name, 3, 3)
 	c.AddPointRef(&ref, name, 4, 4)
-	if ref.item == old || len(c.Get(string(name))) != 2 {
+	if ref.generation == old.streamGeneration || len(c.Get(string(name))) != 2 {
 		t.Fatal("removed item was reused")
 	}
 	other := New()

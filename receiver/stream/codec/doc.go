@@ -41,7 +41,7 @@
 // restores the dictionary and predictors but intentionally not caller slots.
 //
 // Both wire and uncompressed frame lengths, row counts, name lengths, and total
-// dictionary size are bounded before allocation. Bad frames are terminal: no
-// callback runs for a rejected frame, and the decoder must be discarded. A clean
+// dictionary size and retained bytes are bounded before allocation. Bad frames are terminal: no
+// callback or external name resolver runs for a rejected frame, and the decoder must be discarded. A clean
 // EOF is valid only between frames. Encoder and Decoder are not concurrency safe.
 package codec

@@ -19,20 +19,38 @@ type row struct {
 	bits uint64
 }
 
+// ResetReason identifies the binding limit for an automatic encoder reset.
+type ResetReason string
+
+const (
+	ResetPeerBytes  ResetReason = "peer_bytes"
+	ResetLocalBytes ResetReason = "local_bytes"
+	ResetNames      ResetReason = "names"
+)
+
 // Encoder keeps a connection dictionary and reusable column buffers. Flush
 // before sending data, and send AppendPreamble once when opening the connection.
 // Add may queue complete frames internally; callers should Flush when Ready.
 type Encoder struct {
-	opts         Options
-	ids          map[string]uint32
-	names        []string
-	last         []point
-	defined      int
-	rows, tmp    []row
-	cols         [3][]byte
-	raw, pending []byte
-	estimate     int
-	z            *zstd.Encoder
+	lastResetReason  ResetReason
+	unshared         uint64
+	opts             Options
+	table            *NameTable
+	ownsTable        bool
+	index            wireIndex
+	states           wireStates
+	definitions      []nameRef
+	arena            nameArena
+	decodedEntries   int
+	decodedBlocks    int
+	decodedUsed      int
+	decodedMaxBlocks int
+	defined          int
+	rows, tmp        []row
+	cols             [3][]byte
+	raw, pending     []byte
+	estimate         int
+	z                *zstd.Encoder
 }
 
 func NewEncoder(o Options) (*Encoder, error) {
@@ -40,7 +58,33 @@ func NewEncoder(o Options) (*Encoder, error) {
 	if err != nil {
 		return nil, err
 	}
-	e := &Encoder{opts: o, ids: make(map[string]uint32)}
+	nameBudget := o.DictionaryBytes - o.DictionaryBytes/4
+	if o.DictionaryBytes < 16<<10 {
+		nameBudget = o.DictionaryBytes / 2
+	}
+	table, err := NewNameTable(nameBudget, true)
+	if err != nil {
+		return nil, err
+	}
+	e, err := NewSharedEncoder(o, table)
+	if e != nil {
+		e.ownsTable = true
+		e.opts.DictionaryBytes = o.DictionaryBytes - nameBudget
+	}
+	return e, err
+}
+
+// NewSharedEncoder retains only global-to-wire ids and predictors. Name
+// definitions are copied into frame scratch, then released on Flush.
+func NewSharedEncoder(o Options, table *NameTable) (*Encoder, error) {
+	o, err := options(o)
+	if err != nil {
+		return nil, err
+	}
+	if table == nil {
+		return nil, ErrLimit
+	}
+	e := &Encoder{opts: o, table: table, arena: nameArena{quantum: min(64<<10, o.MaxFrameSize)}}
 	if o.Flags&FlagZstd != 0 {
 		e.z, err = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20))
 	}
@@ -49,6 +93,11 @@ func NewEncoder(o Options) (*Encoder, error) {
 
 // Close releases compression resources; it does not flush buffered points.
 func (e *Encoder) Close() {
+	for i := 0; i < e.states.n; i++ {
+		e.table.ReleaseKey(e.states.at(uint32(i)).global())
+	}
+	e.states = wireStates{}
+	e.index = nil
 	if e.z != nil {
 		_ = e.z.Close()
 	}
@@ -61,35 +110,110 @@ func (e *Encoder) Add(name []byte, value float64, ts int64) error {
 	if len(name) == 0 || len(name) > e.opts.MaxNameSize {
 		return ErrLimit
 	}
-	id, ok := e.ids[string(name)]
+	_, _, err := e.AddHashed(name, nameHash(name), value, ts)
+	return err
+}
+
+// AddHashed reuses a stable routing hash. Identity follows the NameTable
+// policy: exact bytes or a pair of independent fingerprints. The connection
+// byte limit includes allocated id-map and predictor capacity.
+func (e *Encoder) AddHashed(name []byte, hash uint64, value float64, ts int64) (defined, reset bool, err error) {
+	if len(name) == 0 || len(name) > e.opts.MaxNameSize {
+		return false, false, ErrLimit
+	}
+	token := e.table.Resolve(name, hash)
+	return e.AddGlobal(name, hash, token, value, ts)
+}
+
+// AddGlobal accepts a cached global token. The generation check rejects stale
+// tokens after queueing, expiry, reloads or reuse. Known IDs need no shared lock.
+func (e *Encoder) AddGlobal(name []byte, hash, token uint64, value float64, ts int64) (defined, reset bool, err error) {
+	if len(name) == 0 || len(name) > e.opts.MaxNameSize {
+		return false, false, ErrLimit
+	}
+	key := uint32(token) & 0xffffff
+	id, ok := e.index.find(key, &e.states)
+	ok = ok && e.states.at(id).nameToken() == token
+	if !ok && !e.table.Valid(token, hash) {
+		token = e.table.Resolve(name, hash)
+		key = uint32(token) & 0xffffff
+		id, ok = e.index.find(key, &e.states)
+		ok = ok && e.states.at(id).nameToken() == token
+	}
 	cost := 24
 	if !ok {
 		cost += len(name) + 10
 	}
 	if cost+32 > e.opts.MaxFrameSize {
-		return ErrLimit
+		return false, false, ErrLimit
 	}
 	if len(e.rows) > 0 && (len(e.rows) >= e.opts.MaxRows || e.estimate+cost+32 > e.opts.MaxFrameSize) {
 		if err := e.flushPending(); err != nil {
-			return err
+			return false, false, err
 		}
 	}
-	if !ok && len(e.names) >= e.opts.MaxNames {
-		if err := e.Reset(); err != nil {
-			return err
+	var reason ResetReason
+	if !ok {
+		switch {
+		case e.projectedDecoded(len(name)) > e.opts.PeerDictionaryBytes:
+			reason = ResetPeerBytes
+		case e.projectedBytes() > e.opts.DictionaryBytes:
+			reason = ResetLocalBytes
+		case e.states.n >= e.opts.MaxNames || e.states.n >= wireIDMask:
+			reason = ResetNames
 		}
+	}
+	if reason != "" {
+		if err := e.Reset(); err != nil {
+			return false, false, err
+		}
+		e.lastResetReason = reason
+		reset = true
 	}
 	if !ok {
-		id = uint32(len(e.names))
-		s := string(name)
-		e.ids[s] = id
-		e.names = append(e.names, s)
-		e.last = append(e.last, point{})
+		if !e.table.Acquire(token, hash) {
+			token = e.table.Resolve(name, hash)
+			if !e.table.Acquire(token, hash) {
+				token = 0
+			}
+		}
+		e.index.grow(e.states.n+1, &e.states)
+		key = uint32(token) & 0xffffff
+		id = e.states.add(token)
+		if token != 0 {
+			e.index.insert(key, id)
+		} else {
+			e.unshared++
+		}
+		e.definitions = append(e.definitions, e.arena.add(name))
+		e.decodedEntries = nextCapacity(e.states.n, e.decodedEntries)
+		if e.decodedBlocks == 0 || e.decodedUsed+len(name) > 64<<10 {
+			e.decodedBlocks++
+			e.decodedUsed = 0
+		}
+		e.decodedUsed += len(name)
+		e.decodedMaxBlocks = max(e.decodedMaxBlocks, e.decodedBlocks)
 	}
 	e.rows = append(e.rows, row{id: id, ts: ts, bits: math.Float64bits(value)})
 	e.estimate += cost
-	return nil
+	return !ok, reset, nil
 }
+func (e *Encoder) projectedBytes() int {
+	return e.states.projectedBytes() + indexCapacity(e.states.n+1, len(e.index))*4
+}
+func (e *Encoder) RetainedBytes() int {
+	n := e.states.bytes() + len(e.index)*4
+	if e.ownsTable {
+		n += e.table.Stats().Bytes
+	}
+	return n
+}
+func (e *Encoder) NameCount() int { return e.states.n }
+
+// LastResetReason reports the last automatic reset's binding limit. When more
+// than one limit binds, peer bytes take precedence, then local bytes, then names.
+// Explicit Reset calls do not change it. Read it only after Add reports a reset.
+func (e *Encoder) LastResetReason() ResetReason { return e.lastResetReason }
 
 // Ready reports that the target rows/bytes were reached or a frame was queued.
 // A timer may also call Flush to bound latency on quiet connections.
@@ -120,11 +244,17 @@ func (e *Encoder) Reset() error {
 	if err != nil {
 		return err
 	}
-	clear(e.ids)
-	clear(e.names)
-	e.names = e.names[:0]
-	e.last = e.last[:0]
+	for i := 0; i < e.states.n; i++ {
+		e.table.ReleaseKey(e.states.at(uint32(i)).global())
+	}
+	clear(e.index)
+	e.states.n = 0
+	e.definitions = e.definitions[:0]
+	e.arena.reset()
+
 	e.defined = 0
+	e.decodedBlocks = 0
+	e.decodedUsed = 0
 	return nil
 }
 
@@ -132,25 +262,28 @@ func (e *Encoder) flush(dst []byte) ([]byte, error) {
 	if len(e.rows) == 0 {
 		return dst, nil
 	}
-	e.rows, e.tmp = sortRows(e.rows, e.tmp, uint32(len(e.names)-1))
+	e.rows, e.tmp = sortRows(e.rows, e.tmp, uint32(e.states.n-1))
 	raw := e.raw[:0]
 	raw = binary.AppendUvarint(raw, uint64(e.defined))
-	raw = binary.AppendUvarint(raw, uint64(len(e.names)-e.defined))
-	for _, name := range e.names[e.defined:] {
-		raw = binary.AppendUvarint(raw, uint64(len(name)))
-		raw = append(raw, name...)
+	raw = binary.AppendUvarint(raw, uint64(e.states.n-e.defined))
+	for _, name := range e.definitions {
+		raw = binary.AppendUvarint(raw, uint64(name.size))
+		raw = append(raw, e.arena.name(name)...)
 	}
 	ids, stamps, values := e.cols[0][:0], e.cols[1][:0], e.cols[2][:0]
 	prev := row{}
 	for _, r := range e.rows {
 		ids = binary.AppendUvarint(ids, uint64(r.id-prev.id))
-		want := e.last[r.id]
-		if !want.valid {
+		want := *e.states.at(r.id)
+		if !want.valid() {
 			want.ts = prev.ts
 		}
 		stamps = binary.AppendVarint(stamps, r.ts-want.ts)
 		values = appendXor(values, r.bits^want.bits)
-		e.last[r.id] = point{ts: r.ts, bits: r.bits, valid: true}
+		state := e.states.at(r.id)
+		state.ts = r.ts
+		state.bits = r.bits
+		state.token |= predictorValid
 		prev = r
 	}
 	raw = binary.AppendUvarint(raw, uint64(len(ids)))
@@ -165,7 +298,9 @@ func (e *Encoder) flush(dst []byte) ([]byte, error) {
 	if err != nil {
 		return dst, err
 	}
-	e.defined = len(e.names)
+	e.defined = e.states.n
+	e.definitions = e.definitions[:0]
+	e.arena.reset()
 	e.rows = e.rows[:0]
 	e.estimate = 0
 	return dst, nil
@@ -215,3 +350,15 @@ func sortRows(rows, tmp []row, maxID uint32) ([]row, []row) {
 	}
 	return rows, tmp
 }
+
+func (e *Encoder) MapBytes() int { return len(e.index) * 4 }
+
+func (e *Encoder) projectedDecoded(n int) int {
+	blocks := e.decodedBlocks
+	if blocks == 0 || e.decodedUsed+n > 64<<10 {
+		blocks++
+	}
+	return nextCapacity(e.states.n+1, e.decodedEntries)*104 + max(blocks, e.decodedMaxBlocks)*((64<<10)+48)
+}
+
+func (e *Encoder) UnsharedTotal() uint64 { return e.unshared }

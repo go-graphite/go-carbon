@@ -669,6 +669,17 @@ zstd-max-frame-size = 16777216
 stream-max-frame-size = 8388608
 # Bound distinct names per stream connection; the sender resets at its name cap.
 stream-max-names = 5000000
+# Per-connection retained dictionary bytes; listener reserves this per stream.
+# Set the sender's stream_options.peer_dictionary_bytes no higher than this.
+# There is no negotiation: exceeding this limit causes a stream decode error
+# and closes the connection before any rows from the rejected frame are emitted.
+# Both dictionary byte settings below are read at startup; SIGHUP does not
+# update the running TCP listener. Restart the receiver before raising senders.
+stream-dictionary-bytes = 67108864
+# Total stream dictionary reservations, excluding frame/compression buffers.
+# Allow at least stream-dictionary-bytes times the maximum concurrent streams,
+# including overlap during restarts; excess streams are closed with an error.
+stream-dictionary-total-bytes = 3221225472
 # Protocol, sender API, metrics and restart behavior: doc/stream-input.md
 
 

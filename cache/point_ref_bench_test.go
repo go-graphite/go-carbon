@@ -59,7 +59,7 @@ func pointRefCache(b *testing.B) {
 			mask := len(slots) - 1
 			for slot := int(hash>>shardBits) & mask; ; slot = (slot + 1) & mask {
 				if slots[slot].item == it {
-					pointRefFixture.refs[i] = PointRef{cache: c, item: it, shard: shard, slot: uint32(slot)}
+					pointRefFixture.refs[i] = PointRef{cache: c, generation: c.data[shard].streamIdentity(it), shard: shard, slot: uint32(slot)}
 					break
 				}
 			}
@@ -71,7 +71,7 @@ func pointRefCache(b *testing.B) {
 			slots := c.data[ref.shard].items.slots
 			mask := len(slots) - 1
 			for slot := int(hash>>shardBits) & mask; ; slot = (slot + 1) & mask {
-				if slots[slot].item == ref.item {
+				if slots[slot].item != nil && slots[slot].item.streamGeneration == ref.generation {
 					ref.slot = uint32(slot)
 					break
 				}

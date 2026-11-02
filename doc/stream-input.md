@@ -14,6 +14,8 @@ buffer-size = 0
 compression = ""
 stream-max-frame-size = 8388608
 stream-max-names = 5000000
+stream-dictionary-bytes = 67108864
+stream-dictionary-total-bytes = 3221225472
 ```
 
 A nonempty receiver `compression` setting disables stream detection and retains
@@ -37,7 +39,13 @@ Each frame has a 20-byte header containing its kind, wire payload length,
 uncompressed length, row count and CRC-32C of the wire payload. Both payload
 lengths must fit `stream-max-frame-size`, before allocating or decompressing.
 The receiver also bounds rows at 65,536 per frame, individual names at 65,536
-bytes, and distinct names at `stream-max-names`. Encoder limits must fit the
+bytes, distinct names at `stream-max-names`, and retained dictionary capacity
+at `stream-dictionary-bytes` (64 MiB by default). The TCP listener reserves
+this allowance per stream connection under `stream-dictionary-total-bytes`
+(default 3 GiB, enough for 48 default-sized dictionaries). Exhaustion closes the
+new connection with a loud error; it never evicts an unannounced v1 id.
+Compression, frames and row buffers are bounded separately. The store-wide weak
+series index has a separate 128 MiB capacity ceiling, allocated lazily. Encoder limits must fit the
 receiver's limits; zero codec options select defaults.
 
 Data frames define new names once and assign dense connection-local IDs. They
@@ -50,7 +58,7 @@ unchanged. Compression is independent per frame.
 
 Reset frames clear the entire dictionary and prediction state. The encoder
 flushes pending rows and automatically queues a reset before adding a new name
-that would exceed its configured `MaxNames`. Long-lived stable connections
+that would exceed its configured byte or `MaxNames` bound. Long-lived stable connections
 amortize the initial dictionary cost; frequent reconnects or resets repeat it.
 
 ## Sender API
@@ -99,8 +107,9 @@ return err
 ```
 
 Flush at batch boundaries or on a timer to bound latency for quiet connections.
-`Add` copies a name only when new. Known-name `Add` and raw `Flush` reuse memory
-without per-point allocations after warmup. Automatic resets or size limits may
+`Add` copies new definitions into frame scratch. Shared encoders resolve names
+through a separately budgeted `NameTable`; known ids reuse predictor and frame
+buffers after warmup. Automatic resets or size limits may
 queue complete frames internally; call `Flush` when `Ready` is true to keep that
 queue bounded. After a write failure, reconnect with a new encoder and preamble.
 The protocol has no acknowledgements or delivery replay.
@@ -119,7 +128,8 @@ frame limit. The process-to-process handoff format is unchanged.
 The decoder callback receives `(id, name, value, timestamp, slot *any)`.
 `TCP.SetStreamPointOut` optionally exposes the slot to a sink that caches its own
 reference per ID. Slots survive data frames and are cleared by resets. Restart
-snapshots restore protocol state and leave slots empty for the successor's sink.
+snapshots restore protocol state; the successor resolves names against its own
+store before accepting new points.
 The hook takes precedence over `SetPointOut` for unbuffered stream input; buffered
 receivers use their configured store. This protocol does not depend on a cache
 implementation.
@@ -212,3 +222,63 @@ All four modes use the same resident cache and points. Timing includes connectio
 setup and dictionary/reference initialization. Divide `allocs/op` and `B/op` by
 the reported row count to obtain per-point allocation costs. The untimed oracle
 checks every cached value bit pattern and timestamp; no captured names are saved.
+
+## Shared series references
+
+The application pairs `TCP.SetStreamPointOut(cache.AddStreamPoint)` with
+`TCP.SetStreamNameResolver(cache.ResolveStreamName)`. The decoder validates a
+whole frame before resolving any definitions or emitting points. Each wire id
+holds its own predictors and a shared immutable series reference in a flat
+connection-owned slice. The receiver borrows the cache/index's canonical name;
+it does not retain a private name copy for every connection. Resetting one
+connection releases its references without changing any other connection's ids.
+
+Only definitions consult the sharded series index. A live point reads the
+series's atomic numeric cache hint and takes the existing cache-shard lock. No shared
+name-index lock is added per point. Generation-checked numeric hints cannot retain popped cache batches
+or alias reused memory. Each shard assigns a new number when a batch first
+needs a stream hint; reusing a cache slot cannot reuse that identity. Removal or rehashing falls back to ordinary admission,
+recovery, tag, quota and diversion paths, then refreshes the hint. Multiple
+connections reuse that refresh. Slots and hints are rebuilt on process handoff;
+the v1 snapshot restores names and predictors without replaying points.
+
+The bounded weak index neither owns names nor pins series after the final wire
+reference disappears. Under index pressure a new definition may re-resolve
+through the ordinary cache; existing connection references remain valid.
+`cache.streamSeriesIndexBytes` reports its allocated index capacity. Decoder
+bytes also conservatively charge referenced series/name storage when checking
+the per-connection bound, even when several connections share it.
+
+Prometheus gauges `stream_dictionary_retained_names_tcp` and
+`stream_dictionary_retained_bytes_tcp` report live wire ids and local table
+capacity. Their Stat counterparts are `streamRetainedNames` and
+`streamRetainedBytes`; these are gauges, so interval collection does not reset
+them. Closed connections release both their gauges and reserved byte allowance.
+
+The 40-connection benchmark keeps four independent wire-id dictionaries per
+partition on one cache. It measures process CPU per point and retained bytes,
+and supports the ordinary Go mutex profile:
+
+```sh
+GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor GOGC=100 \
+  go test ./receiver/tcp -run '^$' -bench '^BenchmarkStream40Connections$' \
+  -cpu=8 -benchtime=3s -benchmem -mutexprofile=mutex.pprof
+```
+
+`STREAM_RECEIVER_SHARED=0` selects the compatibility slot hook without external
+series binding. `test/stream/churn_receiver` is an independent process memory
+sink for the relay's opt-in churn soak; it replays complete v1 writes into 40
+decoders and the real cache, drains cache batches at minute markers, and records
+natural/live heap, RSS, accepted rows and dictionary counters. It uses synthetic
+names only. Its measurements and temporary artifacts belong in a caller-chosen
+scratch/results directory.
+
+Pass `-dictionary-bytes=268435456` to measure a 256 MiB per-connection decoder
+allowance. This changes the harness decoder limit only. On the real listener,
+set `[tcp].stream-dictionary-bytes` and `stream-dictionary-total-bytes` and
+restart go-carbon; SIGHUP does not update either running listener limit. Keep
+the sender's `stream_options.peer_dictionary_bytes` at or below the receiver's
+per-connection allowance. v1 does not negotiate limits: an oversized dictionary
+fails decoding and closes the connection before rows from that frame reach the
+sink. Size the total reservation for every concurrent stream, including restart
+overlap, with separate headroom for frame/compression buffers and the cache.
