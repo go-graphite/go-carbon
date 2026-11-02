@@ -182,6 +182,7 @@ type Options struct {
 	IngestParallel int
 	Now            func() time.Time
 	fs             vfs.FS // Fault-injection tests use the same storage path as production.
+	sourceIdentity func(vfs.FS, string) (incrementalIdentity, error)
 }
 
 // WithFS selects the filesystem used by the store, including its WAL and markers.
@@ -372,7 +373,10 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	pacing := newCompactionPacingFS(fs, options.CompactionRate)
 	fs = pacing
-	if err := checkIncrementalMarker(fs, dir, options.IncrementalSource); err != nil {
+	if options.sourceIdentity == nil {
+		options.sourceIdentity = readIncrementalIdentity
+	}
+	if _, err := checkIncrementalMarker(fs, dir, options.IncrementalSource, options.sourceIdentity); err != nil {
 		return nil, err
 	}
 	// An existing v6 store becomes v7 only once Pebble holds its lock and has
@@ -523,7 +527,7 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	s.startSnapshotRelease()
 	s.startWALSyncer()
-	if err := s.configureIncrementalSource(fs, dir, options.IncrementalSource); err != nil {
+	if err := s.configureIncrementalSource(fs, dir, options.IncrementalSource, options.sourceIdentity); err != nil {
 		return nil, s.openFailure(db, err)
 	}
 	if err := s.loadSidecars(); err != nil {
