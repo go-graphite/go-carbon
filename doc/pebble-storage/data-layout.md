@@ -24,8 +24,10 @@ earlier v7 binaries too, so roll back only to a build at least as new as the
 one that wrote the store.
 
 The incremental marker `INCREMENTAL-FILE-MIGRATION` records the source
-directory's path, device and inode, so a store cannot silently pair with a
-different Whisper tree.
+directory's path and reboot-stable identity: inode plus birth time, or a random
+source token when birth time is unavailable. Matching legacy device/inode
+markers are upgraded on open. See [source binding](../incremental-storage-migration.md)
+for permissions, compatibility and recovery requirements.
 
 ## Global keys
 
