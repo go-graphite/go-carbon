@@ -90,6 +90,7 @@ type inputHandover struct {
 	path       string
 	unlock     func() error
 	timer      *time.Timer
+	detached   *handoff.Input
 
 	// lost counts points accepted while the tail could not take them; the
 	// first failure stops input.
@@ -136,12 +137,14 @@ func (h *inputHandover) write(p *points.Points) error {
 }
 
 // Detach stops reading input, completes the tail, and returns the sockets. It
-// returns nil once input stopped.
+// returns nil once input stopped, or the retained state after a failed transfer.
 func (h *inputHandover) Detach() (*handoff.Input, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.done {
-		return nil, nil
+		in := h.detached
+		h.detached = nil
+		return in, nil
 	}
 	h.done = true
 	h.closed = time.Now()
@@ -162,7 +165,7 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		conns += len(ir.Conns)
 		in.Receivers = append(in.Receivers, ir)
 	}
-	// The successor replays the tail before reading any handed-over socket.
+	// The successor replays the tail before applying newer socket points.
 	tail, err := h.completeTail()
 	if err != nil {
 		in.Close()
@@ -173,6 +176,32 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		return nil, nil
 	}
 	return in, nil
+}
+
+// RetainInput keeps detached sockets on a recoverable transport failure. The
+// database is already released and the tail sealed, so resuming its receivers
+// would race the successor's recovery. Only a committed successor may read.
+func (h *inputHandover) RetainInput(in *handoff.Input) {
+	h.mu.Lock()
+	h.detached = in
+	h.mu.Unlock()
+	h.logger.Error("input transfer failed; retaining sockets for successor retry", zap.Duration("retention_window", handoff.InputRetentionTimeout))
+}
+
+func (h *inputHandover) RetryInput() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.detached != nil
+}
+
+// discardRetained runs only after the offer has stopped using these files.
+func (h *inputHandover) discardRetained(reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.detached != nil {
+		h.detached.Discard(h.logger, reason)
+		h.detached = nil
+	}
 }
 
 // released notes that the successor starts now and gives it the full
@@ -190,6 +219,10 @@ func (h *inputHandover) released() {
 func (h *inputHandover) stop(reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.detached != nil {
+		h.detached.Discard(h.logger, "handoff_abandoned")
+		h.detached = nil
+	}
 	if h.done {
 		return
 	}
@@ -207,7 +240,7 @@ func (h *inputHandover) stop(reason string) {
 }
 
 // tailFields describe the completed tail: the input accepted after the
-// checkpoint, which the successor replays before it reads input itself.
+// checkpoint, which the successor replays before it applies live input.
 // Assumes we are holding h.mu, after completeTail.
 func (h *inputHandover) tailFields(tail recovery.File) []zap.Field {
 	fields := []zap.Field{
@@ -250,7 +283,7 @@ func syncDir(path string) error {
 }
 
 // loadInputTails replays input a stopping instance appended after its
-// checkpoint. It runs before input opens, so tail points reach the cache
+// checkpoint. It runs before live input reaches the cache, so tail points arrive
 // before newer points of the same metric. A tail still being appended to is
 // waited for: its writer completes it before handing input over or stopping.
 func (app *App) loadInputTails(core *cache.Cache) error {

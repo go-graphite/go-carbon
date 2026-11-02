@@ -613,20 +613,33 @@ func (rcv *TCP) listen(open func() (*net.TCPListener, error), inherited []Conn) 
 			}
 		}
 
-		serve := func(conn net.Conn, leftover []byte) {
+		serve := func(conn net.Conn, leftover []byte, ahead *readAheadConn) {
 			if !rcv.handoff.enabled {
 				rcv.Go(func(exit chan bool) { handler(conn) })
 				return
 			}
+			if ahead == nil && rcv.handoff.replaying.Load() {
+				ahead = newReadAheadConn(conn)
+			}
 			// Count the handler before it starts, so Detach waits for it.
 			tracked := rcv.handoff.track(conn)
+			rcv.handoff.mu.Lock()
+			tracked.ahead = ahead
+			if ahead != nil {
+				ahead.tracked = tracked
+				if !rcv.handoff.replaying.Load() {
+					ahead.finish()
+				}
+				conn = ahead
+			}
+			rcv.handoff.mu.Unlock()
 			rcv.Go(func(exit chan bool) {
 				defer rcv.handoff.untrack(tracked)
 				rcv.handlePlain(conn, leftover, tracked)
 			})
 		}
 		for _, c := range inherited {
-			serve(c.conn, c.Leftover)
+			serve(c.conn, c.Leftover, c.ahead)
 		}
 
 		acceptDone := make(chan struct{})
@@ -648,7 +661,7 @@ func (rcv *TCP) listen(open func() (*net.TCPListener, error), inherited []Conn) 
 					continue
 				}
 
-				serve(conn, nil)
+				serve(conn, nil, nil)
 			}
 
 		})

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/helper"
+	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/stream/codec"
 	"github.com/prometheus/client_golang/prometheus"
@@ -217,10 +218,18 @@ func (rcv *TCP) detachStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 	}
 	if err != nil {
 		rcv.streamFailure(conn, err)
+		leftover := len(prefix) + len(d.Pending()) + r.Buffered()
+		if rest != nil {
+			leftover += rest.Len()
+		}
+		if tracked.ahead != nil {
+			leftover += len(tracked.ahead.pending(nil))
+		}
+		handoff.CloseInputConn(tracked.conn, leftover, rcv.logger, "snapshot_failed")
 		return false
 	}
 	prefix = append(prefix, d.Pending()...)
-	return rcv.detach(tracked, r, rest, prefix)
+	return rcv.detachOwned(tracked, r, rest, prefix)
 }
 
 func (rcv *TCP) streamStat(send helper.StatCallback) {

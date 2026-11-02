@@ -756,9 +756,9 @@ func (app *App) storeInputHandoffPossible() bool {
 // handOffStoreInput hands a shared store's input to its successor. Reads stop
 // and the database closes first, since the successor serves reads only once
 // it opened the database; then the successor is released, and input keeps
-// flowing into the tail log until it takes the sockets. On any failure the
-// caller stops input as without handoff. It returns when reads stopped, or
-// zero if they are still open.
+// flowing into the tail log until it takes the sockets. A failure before Detach
+// stops input as without handoff; a failed detached transfer retains sockets for
+// retry. It returns when reads stopped, or zero if they are still open.
 func (app *App) handOffStoreInput(logger *zap.Logger, handover *inputHandover) time.Time {
 	offer, err := handoff.NewOffer(readHandoffPath(app.Config))
 	if err != nil {
@@ -785,6 +785,10 @@ func (app *App) handOffStoreInput(logger *zap.Logger, handover *inputHandover) t
 	app.readRelease()
 	started := time.Now()
 	stats, taken, err := offer.ServeInputStats(handover, inputHandoffTimeout)
+	if errors.Is(err, handoff.ErrInputRetentionExpired) {
+		handover.discardRetained("retention_timeout")
+		logger.Error("input retention expired; predecessor exiting", zap.Error(err))
+	}
 	fields := []zap.Field{zap.Duration("wait", time.Since(started)), zap.String("successor_binary", stats.Peer),
 		zap.Bool("successor_supported", stats.PeerSupported), zap.Bool("successor_checked", stats.PeerKnown)}
 	if !stats.Registered.IsZero() {

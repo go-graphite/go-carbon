@@ -391,7 +391,7 @@ func (app *App) ParseConfig() error {
 			Name: "config_unknown_keys",
 			Help: "Unknown TOML keys in the currently loaded configuration.",
 		})
-		app.PromRegisterer.MustRegister(app.configUnknownKeys)
+		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics())
 	}
 	app.configUnknownKeys.Set(float64(len(app.Config.unknownKeys)))
 
@@ -1390,7 +1390,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 
 	// A stopping instance that handed reads over may also hand over its input
 	// sockets. It completes the tail of input it took meanwhile first, and
-	// that tail is replayed before any socket is read.
+	// that tail is replayed before newer socket points reach the cache.
 	inherited := app.inheritedInput
 	app.inheritedInput = nil
 	if claim := app.inputClaim; claim != nil {
@@ -1405,8 +1405,10 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			inherited.Close()
 		}
 	}()
-	if err = app.loadInputTails(core); err != nil {
-		return err
+	if inherited == nil {
+		if err = app.loadInputTails(core); err != nil {
+			return err
+		}
 	}
 	add, addPoint, addPoints := core.Add, core.AddPoint, core.AddPoints
 	if receiverStoreHook != nil {
@@ -1414,6 +1416,46 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		addPoints = func(name []byte, data []points.Point) {
 			for _, p := range data {
 				addPoint(name, p.Value, p.Timestamp)
+			}
+		}
+	}
+	addStreamPoint := core.AddStreamPoint
+	// Start inherited handlers (including dictionary replay and bounded raw
+	// socket read-ahead) before replaying the tail. Gate every live sink, on
+	// every connection, so corrections in the tail always precede live rows.
+	var tailReady chan struct{}
+	var tailOK atomic.Bool
+	if inherited != nil {
+		tailReady = make(chan struct{})
+		ready := tailReady
+		defer func() {
+			if tailReady != nil {
+				close(tailReady) // failed startup must not deadlock Stop
+			}
+		}()
+		oldAdd, oldPoint, oldPoints, oldStream := add, addPoint, addPoints, addStreamPoint
+		add = func(p *points.Points) {
+			<-ready
+			if tailOK.Load() {
+				oldAdd(p)
+			}
+		}
+		addPoint = func(name []byte, value float64, ts int64) {
+			<-ready
+			if tailOK.Load() {
+				oldPoint(name, value, ts)
+			}
+		}
+		addPoints = func(name []byte, data []points.Point) {
+			<-ready
+			if tailOK.Load() {
+				oldPoints(name, data)
+			}
+		}
+		addStreamPoint = func(name []byte, value float64, ts int64, slot *any) {
+			<-ready
+			if tailOK.Load() {
+				oldStream(name, value, ts, slot)
 			}
 		}
 	}
@@ -1465,7 +1507,7 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		if r, ok := rcv.(interface {
 			SetStreamPointOut(func([]byte, float64, int64, *any))
 		}); ok && receiverStoreHook == nil {
-			r.SetStreamPointOut(core.AddStreamPoint)
+			r.SetStreamPointOut(addStreamPoint)
 			if names, ok := rcv.(interface{ SetStreamNameResolver(func([]byte) any) }); ok {
 				names.SetStreamNameResolver(core.ResolveStreamName)
 			}
@@ -1481,6 +1523,19 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		})
 	}
 	/* TCP end */
+	if tailReady != nil {
+		if err = app.loadInputTails(core); err != nil {
+			return err
+		}
+		tailOK.Store(true)
+		close(tailReady)
+		tailReady = nil
+		for _, r := range app.Receivers {
+			if tcp, ok := r.Receiver.(*tcp_receiver.TCP); ok {
+				tcp.FinishInputReplay()
+			}
+		}
+	}
 
 	/* PICKLE start */
 	if conf.Pickle.Enabled {

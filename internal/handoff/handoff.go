@@ -31,13 +31,14 @@ const (
 	msgTaken    = 'T'
 	msgStopped  = 'S'
 	// Input handoff, after the old instance stopped accepting reads.
-	msgStoppedInput = 'Q' // like msgStopped; input is offered
-	msgInputRequest = 'I'
-	msgInputNone    = 'N' // input already stopped; nothing to take
-	msgInput        = 'P' // header, then file descriptors
-	msgFiles        = 'F'
-	msgFilesTaken   = 'f'
-	msgInputTaken   = 'A'
+	msgStoppedInput   = 'Q' // like msgStopped; input is offered
+	msgInputRequest   = 'I'
+	msgInputNone      = 'N' // input already stopped; nothing to take
+	msgInput          = 'P' // header, then file descriptors
+	msgFiles          = 'F'
+	msgFilesTaken     = 'f'
+	msgInputTaken     = 'A'
+	msgInputCommitted = 'C'
 	// Shared-store input handoff: the stopping instance stopped its reads
 	// (their data is in a database only one process opens) and offers input.
 	msgInputOnly = 'O'
@@ -49,18 +50,18 @@ const Protocol = "go-carbon-read-handoff/1"
 
 // InputProtocol is printed by a binary that can also take over input sockets.
 // Older binaries reject the flag, and are offered only the read listener.
-const InputProtocol = "go-carbon-input-handoff/1"
+const InputProtocol = "go-carbon-input-handoff/2"
 
 // SharedStoreProtocol confirms that mirrored migration can take both sockets
 // before opening a predecessor-owned database. Older successors keep the
 // existing database-release order.
-const SharedStoreProtocol = "go-carbon-shared-store-handoff/1"
+const SharedStoreProtocol = "go-carbon-shared-store-handoff/2"
 
 // StoreInputProtocol is printed by a binary that can take input from a
 // stopping instance that keeps no read listener: a shared store's reads need
 // its database, which only one process opens, so they restart while input
 // moves. Older binaries reject the flag and get the stop/rebind path.
-const StoreInputProtocol = "go-carbon-store-input-handoff/1"
+const StoreInputProtocol = "go-carbon-store-input-handoff/2"
 
 // maxFilesPerMessage stays well below Linux's SCM_MAX_FD (253); other
 // kernels may refuse even fewer, and a refused batch is halved.
@@ -85,18 +86,6 @@ type InputConn struct {
 	Leftover []byte
 }
 
-// Close closes every file of in; the receiving side owns its own copies.
-func (in *Input) Close() {
-	for _, r := range in.Receivers {
-		if r.Listener != nil {
-			_ = r.Listener.Close()
-		}
-		for _, c := range r.Conns {
-			_ = c.File.Close()
-		}
-	}
-}
-
 func (in *Input) files() []*os.File {
 	var files []*os.File
 	for _, r := range in.Receivers {
@@ -110,9 +99,15 @@ func (in *Input) files() []*os.File {
 
 type inputHeader struct {
 	Receivers []struct {
-		Name      string
-		Leftovers [][]byte
+		Name    string
+		Lengths []uint64
 	}
+}
+
+// The tail window bounds input accumulated before Detach. Transfer has its own
+// budget: a fixed setup allowance plus one second per 16 MiB of raw state.
+func inputTransferTimeout(bytes uint64) time.Duration {
+	return time.Minute + time.Duration(bytes/(16<<20))*time.Second
 }
 
 // InputSource is the stopping side's input.
@@ -120,6 +115,15 @@ type InputSource interface {
 	// Detach stops input without closing its sockets, after every point read
 	// so far is stored. It returns nil if input already stopped.
 	Detach() (*Input, error)
+}
+
+// retryInputSource owns detached input until transfer commits. Detach returns
+// the retained input on subsequent requests; failed claims have not read it.
+// This is used by stores that already released storage and sealed their tail.
+type retryInputSource interface {
+	InputSource
+	RetainInput(*Input)
+	RetryInput() bool
 }
 
 // InputSupported reports whether binary also takes over input sockets.
@@ -157,7 +161,11 @@ func protocolSupported(binary, flag, protocol string, extra ...string) bool {
 // when it could not be run or did not exit in time, which says nothing about
 // its support. A binary without the flag rejects it and exits non-zero.
 func protocolSupport(binary, flag, protocol string, extra ...string) (supported, known bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return protocolSupportUntil(time.Time{}, binary, flag, protocol, extra...)
+}
+
+func protocolSupportUntil(until time.Time, binary, flag, protocol string, extra ...string) (supported, known bool) {
+	ctx, cancel := context.WithDeadline(context.Background(), boundedDeadline(5*time.Second, until))
 	defer cancel()
 	args := append([]string{flag}, extra...)
 	out, err := exec.CommandContext(ctx, binary, args...).Output()
@@ -247,7 +255,7 @@ func (o *Offer) Serve(timeout time.Duration, tcp *net.TCPListener, stopAccepting
 	if _, err = conn.Write([]byte{msgStoppedInput}); err != nil {
 		return true, err
 	}
-	_, err = serveInput(conn, input, inputTimeout)
+	_, err = serveInput(conn, input, inputTimeout, false, time.Time{})
 	return true, err
 }
 
@@ -277,7 +285,9 @@ type ServeInputStats struct {
 // that no listener is offered but input is, so the successor binds reads
 // itself, then hands input over as Serve does. input.Detach runs only on the
 // successor's input request. It reports whether the successor took input; on
-// any failure the caller still owns input and stops it normally.
+// a failure before Detach the caller still owns input and stops it normally.
+// A retryInputSource retains detached input on transfer failure and keeps the
+// offer open for at most InputRetentionTimeout after the first failed transfer.
 //
 // The successor registers right after parsing its config but asks only once
 // its storage is open and its checkpoint serves. A binary without store input
@@ -293,9 +303,29 @@ func (o *Offer) ServeInput(input InputSource, timeout time.Duration) (bool, erro
 
 // ServeInputStats is ServeInput, also describing the successor.
 func (o *Offer) ServeInputStats(input InputSource, timeout time.Duration) (ServeInputStats, bool, error) {
-	var stats ServeInputStats
 	defer o.Close()
-	if err := o.ln.SetDeadline(time.Now().Add(RegisterTimeout)); err != nil {
+	var retryUntil time.Time
+	for {
+		stats, taken, err := o.serveInputStats(input, timeout, retryUntil)
+		if !taken && !retryUntil.IsZero() && !time.Now().Before(retryUntil) {
+			return stats, false, errors.Join(ErrInputRetentionExpired, err)
+		}
+		if retry, ok := input.(retryInputSource); !taken && !errors.Is(err, net.ErrClosed) && ok && retry.RetryInput() {
+			// A detached store has released its database and sealed its tail.
+			// It cannot safely consume more input there. Keep the original
+			// descriptors for bounded retries; failures never renew this window.
+			if retryUntil.IsZero() {
+				retryUntil = time.Now().Add(InputRetentionTimeout)
+			}
+			continue
+		}
+		return stats, taken, err
+	}
+}
+
+func (o *Offer) serveInputStats(input InputSource, timeout time.Duration, until time.Time) (ServeInputStats, bool, error) {
+	var stats ServeInputStats
+	if err := o.ln.SetDeadline(boundedDeadline(RegisterTimeout, until)); err != nil {
 		return stats, false, err
 	}
 	conn, err := o.ln.AcceptUnix()
@@ -306,12 +336,12 @@ func (o *Offer) ServeInputStats(input InputSource, timeout time.Duration) (Serve
 	stats.Registered = time.Now()
 	if exe, perr := PeerExecutable(conn); perr == nil {
 		stats.Peer = exe
-		stats.PeerSupported, stats.PeerKnown = protocolSupport(exe, "-store-input-handoff-protocol", StoreInputProtocol)
+		stats.PeerSupported, stats.PeerKnown = protocolSupportUntil(until, exe, "-store-input-handoff-protocol", StoreInputProtocol)
 		if stats.PeerKnown && !stats.PeerSupported {
 			return stats, false, fmt.Errorf("%w: %s", ErrSuccessorCannotTakeInput, exe)
 		}
 	}
-	if err = conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err = conn.SetDeadline(boundedDeadline(timeout, until)); err != nil {
 		return stats, false, err
 	}
 	var b [1]byte
@@ -321,14 +351,14 @@ func (o *Offer) ServeInputStats(input InputSource, timeout time.Duration) (Serve
 	if _, err = conn.Write([]byte{msgInputOnly}); err != nil {
 		return stats, false, err
 	}
-	taken, err := serveInput(conn, input, timeout)
+	taken, err := serveInput(conn, input, timeout, true, until)
 	return stats, taken, err
 }
 
 // serveInput waits for the successor's input request and hands input over. It
 // reports whether the successor confirmed it holds the input.
-func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) (bool, error) {
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration, allowRetry bool, until time.Time) (taken bool, err error) {
+	if err := conn.SetDeadline(boundedDeadline(timeout, until)); err != nil {
 		return false, err
 	}
 	var b [1]byte
@@ -341,25 +371,55 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) (b
 		return false, errors.Join(err, werr)
 	}
 	// The successor holds its own copies once they are sent.
-	defer in.Close()
+	defer func() {
+		if !taken && allowRetry {
+			if retain, ok := input.(retryInputSource); ok {
+				retain.RetainInput(in)
+				return
+			}
+		}
+		if taken {
+			in.closeCopies("transfer_committed")
+		} else {
+			in.Close()
+		}
+	}()
 	var header inputHeader
 	for _, r := range in.Receivers {
-		var leftovers [][]byte
+		var lengths []uint64
 		for _, c := range r.Conns {
-			leftovers = append(leftovers, c.Leftover)
+			lengths = append(lengths, uint64(len(c.Leftover)))
 		}
 		header.Receivers = append(header.Receivers, struct {
-			Name      string
-			Leftovers [][]byte
-		}{r.Name, leftovers})
+			Name    string
+			Lengths []uint64
+		}{r.Name, lengths})
 	}
 	raw, err := json.Marshal(header)
 	if err != nil {
 		return false, err
 	}
+	var payload uint64
+	for _, r := range header.Receivers {
+		for _, n := range r.Lengths {
+			payload += n
+		}
+	}
+	if err = conn.SetDeadline(boundedDeadline(inputTransferTimeout(payload), until)); err != nil {
+		return false, err
+	}
 	msg := binary.BigEndian.AppendUint32([]byte{msgInput}, uint32(len(raw)))
 	if _, err = conn.Write(append(msg, raw...)); err != nil {
 		return false, err
+	}
+	// Only small metadata is JSON. Raw, length-delimited state avoids base64,
+	// whole-payload copies and the old 32-bit aggregate payload limit.
+	for _, r := range in.Receivers {
+		for _, c := range r.Conns {
+			if _, err = conn.Write(c.Leftover); err != nil {
+				return false, err
+			}
+		}
 	}
 	files, size := in.files(), maxFilesPerMessage
 	for len(files) > 0 {
@@ -378,18 +438,21 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) (b
 		}
 		files = files[len(batch):]
 		// Some kernels refuse descriptors while earlier ones are unread.
-		if err = conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		if err = conn.SetReadDeadline(boundedDeadline(30*time.Second, until)); err != nil {
 			return false, err
 		}
 		if _, err = conn.Read(b[:]); err != nil || b[0] != msgFilesTaken {
 			return false, fmt.Errorf("successor did not receive input files: %w", err)
 		}
 	}
-	if err = conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	if err = conn.SetReadDeadline(boundedDeadline(30*time.Second, until)); err != nil {
 		return false, err
 	}
 	if _, err = conn.Read(b[:]); err != nil || b[0] != msgInputTaken {
 		return false, fmt.Errorf("successor did not confirm input: %w", err)
+	}
+	if _, err = conn.Write([]byte{msgInputCommitted}); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -398,6 +461,8 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration) (b
 type Claim struct {
 	conn         *net.UnixConn
 	inputOffered bool
+	path         string
+	storeInput   bool
 }
 
 // Register tells a stopping instance at path that this process will take its
@@ -407,7 +472,7 @@ func Register(path string) *Claim {
 	if err != nil {
 		return nil
 	}
-	return &Claim{conn: conn.(*net.UnixConn)}
+	return &Claim{conn: conn.(*net.UnixConn), path: path}
 }
 
 // Close abandons the claim; the stopping instance then closes its listener.
@@ -432,6 +497,7 @@ func (c *Claim) Take(want *net.TCPAddr) (net.Listener, func() error, error) {
 		// A shared-store instance stopped its reads but offers input: bind
 		// reads normally and take input when receivers start (TakeInput).
 		c.inputOffered = true
+		c.storeInput = true
 		return nil, nil, nil
 	}
 	if err == nil && (n != 1 || buf[0] != msgListener) {
@@ -493,6 +559,31 @@ func (c *Claim) InputOffered() bool { return c.inputOffered }
 // TakeInput asks for the stopping instance's input. It returns nil if none was
 // offered or input already stopped. The caller owns the returned files.
 func (c *Claim) TakeInput() (*Input, error) {
+	for {
+		in, err := c.takeInput()
+		if err == nil || !c.storeInput {
+			return in, err
+		}
+		// No socket is read until the complete transfer is committed. The
+		// predecessor retains originals on a transport failure, so retry the
+		// whole transfer rather than binding a listener and losing old input.
+		next := Register(c.path)
+		if next == nil {
+			return nil, err
+		}
+		ln, _, takeErr := next.Take(&net.TCPAddr{})
+		if ln != nil {
+			_ = ln.Close()
+		}
+		if takeErr != nil || !next.storeInput {
+			_ = next.Close()
+			return nil, errors.Join(err, takeErr)
+		}
+		*c = *next
+	}
+}
+
+func (c *Claim) takeInput() (*Input, error) {
 	if !c.inputOffered {
 		return nil, nil
 	}
@@ -528,30 +619,67 @@ func (c *Claim) TakeInput() (*Input, error) {
 	if err := json.Unmarshal(raw, &header); err != nil {
 		return nil, err
 	}
-	want := 0
+	var payload uint64
 	for _, r := range header.Receivers {
-		want += 1 + len(r.Leftovers)
-	}
-	files, err := receiveFiles(uc, want)
-	if err != nil {
-		for _, f := range files {
-			_ = f.Close()
+		for _, n := range r.Lengths {
+			payload += n
 		}
+	}
+	if err := uc.SetReadDeadline(time.Now().Add(inputTransferTimeout(payload))); err != nil {
 		return nil, err
 	}
-	in := &Input{}
+	leftovers := make([][][]byte, len(header.Receivers))
+	for i, r := range header.Receivers {
+		for _, n := range r.Lengths {
+			if n > uint64(int(^uint(0)>>1)) {
+				return nil, errors.New("input state exceeds address space")
+			}
+			b := make([]byte, int(n))
+			if _, err := io.ReadFull(uc, b); err != nil {
+				return nil, err
+			}
+			leftovers[i] = append(leftovers[i], b)
+		}
+	}
+	want := 0
 	for _, r := range header.Receivers {
+		want += 1 + len(r.Lengths)
+	}
+	files, err := receiveFiles(uc, want)
+	in := &Input{}
+	for i, r := range header.Receivers {
+		if len(files) == 0 {
+			break
+		}
 		ir := InputReceiver{Name: r.Name, Listener: files[0]}
 		files = files[1:]
-		for _, leftover := range r.Leftovers {
+		for _, leftover := range leftovers[i] {
+			if len(files) == 0 {
+				break
+			}
 			ir.Conns = append(ir.Conns, InputConn{File: files[0], Leftover: leftover})
 			files = files[1:]
 		}
 		in.Receivers = append(in.Receivers, ir)
 	}
-	if _, err = uc.Write([]byte{msgInputTaken}); err != nil {
-		in.Close()
+	if err != nil {
+		in.closeCopies("transfer_uncommitted")
+		for _, f := range files { // unexpected extra descriptors are never owned
+			_ = f.Close()
+		}
 		return nil, err
+	}
+	if err = uc.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		in.closeCopies("transfer_uncommitted")
+		return nil, err
+	}
+	if _, err = uc.Write([]byte{msgInputTaken}); err != nil {
+		in.closeCopies("transfer_uncommitted")
+		return nil, err
+	}
+	if _, err = io.ReadFull(uc, b[:1]); err != nil || b[0] != msgInputCommitted {
+		in.closeCopies("transfer_uncommitted")
+		return nil, fmt.Errorf("input transfer not committed: %w", err)
 	}
 	return in, nil
 }

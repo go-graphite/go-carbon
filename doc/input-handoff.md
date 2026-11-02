@@ -44,18 +44,82 @@ On USR2, the worker keeps receiving while it checkpoints the cache and finishes
 store flushes. It then diverts input to a tail log, closes reads and the shared
 database, and releases its supervisor. The successor opens the database,
 receives the listening and accepted sockets plus their decoder state/buffered
-bytes, replays the tail, and resumes reading those sockets. Reads still restart;
-input connections survive. A short read pause can backpressure a sender without
-closing its connection.
+bytes, and starts the inherited handlers before replaying the tail. Each handler
+restores its own dictionary in parallel. A lazy raw-byte buffer drains each
+inherited socket (and connections accepted during recovery) while restoration
+and tail replay run. Every live point sink waits until tail replay completes:
+tail corrections for a metric always precede newer socket points for that metric.
+Reads still restart; input connections survive.
+
+Read-ahead retains at most 8 MiB per connection plus a 64 KiB read block. A
+full buffer applies TCP backpressure; it never drops bytes. Memory grows with
+actual queued bytes, independently of packet sizes. At 280 connections the
+maximum ring allocation is 2.19 GiB. Once the tail is applied, each handler drains
+its buffered bytes, frees the ring and returns to direct socket reads. A slow
+recovery or input beyond this byte budget can still backpressure senders.
+
+Input handoff protocol version 2 sends a small JSON header containing 64-bit
+connection-state lengths, followed by raw state bytes and batched descriptors.
+Dictionary snapshots reserve their raw output capacity and transfer their owned
+storage without another full copy. The input-tail window remains 20 seconds;
+after Detach, transfer gets a separate budget of one minute plus one second per
+16 MiB of state. The successor waits for the predecessor's commit before reading
+any handed-over socket.
 
 The old worker probes the successor binary before offering sockets and checks
 the registering executable again where the platform supports it. If support is
 missing, the receiver configuration is incompatible, or the successor fails to
-take input within the existing timeout, input stops and the successor uses the
+request input within the tail window, input stops and the successor uses the
 ordinary recovery path. A disabled eligible handoff logs
 `store input handoff disabled; stopping input` with the setting's name. Successful
 handoff logs `input handed off to successor` and
 `took over input from stopping instance`.
+
+After Detach, a failed store-input transfer retains the original sockets and
+snapshots for **two minutes from the first failed transfer**. The successor
+retries the complete transfer without reading partial results. The predecessor
+has released its database and sealed the immutable tail, so resuming receivers
+there would race recovery. Repeated failures never renew the retention window;
+registration, capability probes, control writes and descriptor acknowledgements
+are bounded by its remaining time too. No new configuration option is needed.
+
+If no successor commits before that deadline, the predecessor closes retained
+sockets and exits through the ordinary shutdown path. It logs ERROR
+`input retention expired; predecessor exiting`. Each discarded accepted socket
+logs ERROR `input handoff socket discarded` with `reason`,
+`kernel_unread_bytes`, and `leftover_bytes`. Linux samples the exact unread
+receive-buffer count with SIOCINQ immediately before close, without draining the
+socket. Other platforms, or an ioctl failure, report `kernel_unread_bytes = -1`.
+This is a close-time observation; bytes still in transit are outside that count.
+Leftovers include decoder snapshots and buffered wire input, so their byte
+count cannot be translated directly into lost points. An ERROR
+`input handoff sockets discarded` sums `connections_closed`, known
+`kernel_unread_bytes`, `kernel_unread_unknown`, and `leftover_bytes`.
+
+The process exports these counters with a bounded `reason` label
+(`retention_timeout` for expiry):
+
+- `input_handoff_closed_connections_total`
+- `input_handoff_closed_kernel_unread_bytes_total`
+- `input_handoff_closed_kernel_unread_unknown_total`
+- `input_handoff_closed_leftover_bytes_total`
+
+Other discarded detached input, failed snapshots/duplication, and inherited
+startup failures use the same accounting. Descriptor copies released after a
+commit or an uncommitted receiving attempt log the same byte fields with
+`discarded = false` and do not increase loss counters. The final ERROR logs are
+the durable observation because the predecessor has already stopped its metrics
+endpoint. Process crashes and forced termination retain ordinary TCP delivery
+limitations.
+
+All input capability tokens (`input`, `shared-store`, `store-input`) advance to
+version 2; the read-listener protocol stays at version 1. Version 1 and version 2
+binaries decline input inheritance in both upgrade and rollback directions,
+before detaching input, and use ordinary stop/rebind with ordered recovery. This
+fallback preserves points already accepted by the receiver; it retains the
+existing limitations for unread TCP bytes described below. A mixed-version
+restart does not claim the connection-preservation guarantee of a version 2 to
+version 2 handoff.
 
 Without handoff, a successful TCP write is not a delivery acknowledgement.
 Bytes accepted by TCP but not parsed before the receiver closes can be lost;
