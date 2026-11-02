@@ -383,6 +383,10 @@ store-encoding = "legacy"
 # 2, and tags/rollback-mirror/whole-store live migration disabled. Embedded
 # buckyd can manage reclaimed shared metrics; pending source cleanup blocks deletes.
 # After reclamation rollback requires a compatible binary or replica/backup.
+# Retain the source directory and flag after completion. Its identity survives
+# reboot/device renumbering. Without directory birth time, the first open needs
+# a writable source for .go-carbon-migration-source; retain that identity file.
+# Matching legacy source markers upgrade on open; older binaries cannot reopen them.
 # See doc/incremental-storage-migration.md before enabling this experimental mode.
 # store-incremental-migration = false
 # Optional same-filesystem archive outside data-dir and store-dir. Originals

@@ -5,127 +5,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"os"
-	"path/filepath"
-	"strings"
-	"syscall"
 	"time"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
 	"github.com/go-graphite/go-carbon/helper"
 )
 
-const incrementalMarker = "INCREMENTAL-FILE-MIGRATION"
-const incrementalMarkerVersion = "go-carbon-incremental-v1\n"
-
 type ownershipError struct{ err error }
-
-func incrementalMarkerContents(fs vfs.FS, source string) (string, error) {
-	info, err := fs.Stat(source)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", errors.New("incremental source is not a directory")
-	}
-	identity := "virtual"
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		identity = fmt.Sprintf("%d:%d", uint64(stat.Dev), uint64(stat.Ino))
-	}
-	return incrementalMarkerVersion + source + "\n" + identity + "\n", nil
-}
-
-func checkIncrementalMarker(fs vfs.FS, dir, source string) error {
-	f, err := fs.Open(fs.PathJoin(dir, incrementalMarker))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	data, readErr := io.ReadAll(io.LimitReader(f, 16384))
-	if err := errors.Join(readErr, f.Close()); err != nil {
-		return err
-	}
-	expected, identityErr := incrementalMarkerContents(fs, source)
-	if source == "" || identityErr != nil || string(data) != expected {
-		return fmt.Errorf("%w: incremental migration requires its original source directory and mode", ErrFormat)
-	}
-	return nil
-}
-
-func (s *Store) configureIncrementalSource(fs vfs.FS, dir, source string) error {
-	if source == "" {
-		return nil
-	}
-	if !s.exactBlocks || !filepath.IsAbs(source) || filepath.Clean(source) != source || strings.ContainsAny(source, "\r\n") {
-		return errors.New("incremental migration requires exact encoding and a canonical absolute source directory")
-	}
-	for _, pair := range [][2]string{{source, dir}, {dir, source}} {
-		relative, err := filepath.Rel(pair[0], pair[1])
-		if err != nil || filepath.IsLocal(relative) {
-			return errors.New("incremental source and destination must be separate directory trees")
-		}
-	}
-	info, err := fs.Stat(source)
-	if err != nil || !info.IsDir() {
-		return fmt.Errorf("incremental source is not a directory: %w", errors.Join(err, ErrFormat))
-	}
-	marker := fs.PathJoin(dir, incrementalMarker)
-	if _, err := fs.Stat(marker); errors.Is(err, os.ErrNotExist) {
-		watermark, err := s.CatalogHighWatermark(context.Background())
-		if err != nil {
-			return err
-		}
-		if watermark != 0 {
-			return errors.New("incremental migration requires an empty destination, not an unverified baseline")
-		}
-		for _, name := range []string{"NEEDS-CATCHUP", "MIRROR-RECONCILE-REQUIRED"} {
-			if _, err := fs.Stat(fs.PathJoin(dir, name)); !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("incremental migration cannot adopt %s", name)
-			}
-		}
-		temporary := marker + ".next"
-		f, err := fs.Create(temporary)
-		if err != nil {
-			return err
-		}
-		contents, identityErr := incrementalMarkerContents(fs, source)
-		if identityErr != nil {
-			_ = f.Close()
-			return identityErr
-		}
-		_, writeErr := f.Write([]byte(contents))
-		if err := errors.Join(writeErr, f.Sync(), f.Close()); err != nil {
-			return err
-		}
-		if err := fs.Rename(temporary, marker); err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-	f, err := fs.Open(marker)
-	if err != nil {
-		return err
-	}
-	if err := errors.Join(f.Sync(), f.Close(), syncStoreDirectory(fs, dir)); err != nil {
-		return err
-	}
-	// The database lock is held and no readers/converters have started. These
-	// reserved directories contain only disposable captures and name-sort runs;
-	// a process crash must not accumulate a second working set on every restart.
-	for _, name := range []string{".incremental-capture", ".incremental-index"} {
-		if err := fs.RemoveAll(fs.PathJoin(dir, name)); err != nil {
-			return err
-		}
-	}
-	s.incrementalSource = source
-	return nil
-}
 
 func (s *Store) IncrementalSource() string { return s.incrementalSource }
 

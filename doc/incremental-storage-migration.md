@@ -32,6 +32,30 @@ completed metrics or repeats a full-store audit. Catalog IDs and source-director
 identity survive restart. Keep the original directory and incremental flag after
 completion. A completed source walk is not performance acceptance.
 
+The store's `INCREMENTAL-FILE-MIGRATION` marker binds the canonical source path
+and its directory identity. Version 2 uses inode and birth time (Linux `statx`,
+Darwin `stat`), which survive reboots and device renumbering and detect directory
+replacement even when its inode is reused. The source needs no extra files or
+write permission on filesystems that expose birth time.
+
+Without birth time, the first open creates and syncs a random 128-bit identity in
+`.go-carbon-migration-source` inside the source directory. This requires write
+permission and hard-link support once; subsequent opens only read it. Metric
+walks ignore this file because it has no `.wsp` suffix. Retain it for the entire
+migration and after completion; never copy it into a replacement source tree.
+A missing or changed token stops startup rather than creating a new binding.
+In-memory filesystems retain their virtual identity.
+
+A matching version 1 device/inode marker is atomically replaced and synced as
+version 2 while the database lock is held. Older binaries cannot read the new
+marker. Upgrade before rebooting: a legacy marker whose device/inode has already
+changed is still refused. The error identifies the marker path and recorded and
+current identities. Verify the original filesystem mount, source path and that
+the directory was not replaced; restore the original source or use a verified
+backup. Do not discard or rewrite the marker merely to bypass this check.
+If an older filesystem has no birth time and the source is read-only, make it
+writable for the one-time token creation before upgrading.
+
 A bounded 4,096-name write-fed priority queue gives hot metrics earlier service;
 after three priority jobs workers check cold scan work to avoid starvation.
 Hints are nonblocking and best effort. Both paths share all worker, memory, disk,

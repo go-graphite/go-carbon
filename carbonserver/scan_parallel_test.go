@@ -157,6 +157,7 @@ func writeScanTree(t *testing.T, root string, rng *rand.Rand) []string {
 	}
 	write(filepath.Join(root, "ns02", "orphan.wsp.ooo"), 4096)
 	write(filepath.Join(root, "ns02", "notes.txt"), 7)
+	write(filepath.Join(root, ".go-carbon-migration-source"), 33)
 	write(filepath.Join(root, "ns03", ".hidden.wsp"), 9)
 	write(filepath.Join(root, "dir.wsp", "inner.wsp"), 11) // a directory named like a metric
 	for _, dir := range []string{"empty", "ns04/empty/deeper"} {
@@ -372,6 +373,9 @@ func TestParallelScanMatchesSequential(t *testing.T) {
 			wantNames := seq.l.CurrentFileIndex().trieIdx.allMetrics('.')
 			slices.Sort(gotNames)
 			slices.Sort(wantNames)
+			if slices.Contains(gotNames, ".go-carbon-migration-source") || slices.Contains(wantNames, ".go-carbon-migration-source") {
+				t.Fatal("source identity file was indexed as a metric")
+			}
 			if !slices.Equal(gotNames, wantNames) {
 				t.Fatalf("indexed metrics differ: parallel %d, sequential %d", len(gotNames), len(wantNames))
 			}

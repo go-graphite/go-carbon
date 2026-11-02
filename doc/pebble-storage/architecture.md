@@ -63,7 +63,8 @@
 1. Validate options (budgets, sizes, bloom bits).
 2. Wrap the file system in `deferredSyncFS` when `ParallelTableSyncs > 0`.
 3. Check the incremental marker (`INCREMENTAL-FILE-MIGRATION`), which binds
-   the store to one source directory by path, device and inode.
+   the store to one source directory by path and a reboot-stable identity.
+   Legacy device/inode bindings must still match before they can be upgraded.
 4. Read the format marker (`CHUNKSTORE`). An empty directory gets a new
    marker. An existing v6 store with `TimeBuckets` is *planned* for v7 but
    not yet marked.
@@ -79,7 +80,8 @@
 7. `pebble.Open`. Only after it succeeds, holding the directory lock with
    validated options, is a v6 marker replaced by v7. A failed open leaves the
    store readable by older binaries.
-8. Start the snapshot-release worker, the WAL syncer, the incremental source,
+8. Start the snapshot-release worker, the WAL syncer, the incremental source
+   (durably upgrading a matching legacy binding under the database lock),
    the file ingester (`store-migration-ingest`), the periodic WAL sync loop
    (`store-sync-interval`), the catalog membership scan and, with time buckets
    and a positive rate, the relayout.
