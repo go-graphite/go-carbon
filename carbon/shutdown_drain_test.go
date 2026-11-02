@@ -3,7 +3,6 @@ package carbon
 import (
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -125,16 +124,13 @@ func startBlockedShutdownRead(t *testing.T) (*App, <-chan struct{}, func(), <-ch
 	cs.RegisterInternalInfoHandler("quick", func() map[string]interface{} {
 		return map[string]interface{}{"complete": true}
 	})
-	reserved, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
+	// Bind an ephemeral port directly: reserving one and closing it first lets a
+	// parallel test take the port before Listen binds it.
+	if err := cs.Listen("127.0.0.1:0"); err != nil {
 		t.Fatal(err)
 	}
-	addr := reserved.Addr().String()
+	addr := cs.HTTPListener().Addr().String()
 	app.Config.Carbonserver.Listen = addr
-	reserved.Close()
-	if err := cs.Listen(addr); err != nil {
-		t.Fatal(err)
-	}
 	readDone := make(chan error, 1)
 	go func() { readDone <- readShutdownResponse("http://" + addr + "/admin/info?scopes=blocked") }()
 	return app, started, unblock, readDone
