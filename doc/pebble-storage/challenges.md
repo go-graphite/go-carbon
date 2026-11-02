@@ -244,6 +244,17 @@ Removing one limit exposed the next:
   spent stalled earned a budget that was then spent at full speed.
 - **Fix.** Pace per interval from a live rate; the rate is reloadable.
 
+## Relayout used only one core
+
+- **Symptom.** With pacing inactive, planning and moving a large store's v6
+  history saturated one core and took most of a day.
+- **Fix.** `store-time-buckets-relayout-workers` runs 1–32 contiguous ID ranges
+  in parallel (default 1; restart required). Each worker keeps the 64 MiB /
+  4,096-metric group bounds, disjoint history-bucket table ranges, and per-metric
+  descriptor revalidation. One shared rate budget bounds total copied bytes.
+  Progress follows the first unfinished range; a restart safely replans any
+  later range whose v7 blocks were already moved.
+
 ## A failed open upgraded the marker
 
 - **Symptom** (found in review). A second opener rejected by Pebble's lock,

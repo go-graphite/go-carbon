@@ -161,6 +161,9 @@ func sharedStorePath(cfg *Config) string {
 }
 
 func validateStorageConfig(cfg *Config) error {
+	if workers := cfg.Whisper.StoreTimeBucketsRelayoutWorkers; workers < 1 || workers > 32 {
+		return errors.New("store-time-buckets-relayout-workers must be 1..32")
+	}
 	cold, err := store.NormalizeColdPack(coldPackOptions(cfg))
 	if err != nil {
 		return err
@@ -330,6 +333,7 @@ func storageSettingsChanged(old, next *Config) bool {
 		old.Whisper.StoreLiveMigration != next.Whisper.StoreLiveMigration ||
 		old.Whisper.StoreMigrationIngest != next.Whisper.StoreMigrationIngest ||
 		old.Whisper.StoreTimeBuckets != next.Whisper.StoreTimeBuckets ||
+		old.Whisper.StoreTimeBucketsRelayoutWorkers != next.Whisper.StoreTimeBucketsRelayoutWorkers ||
 		(old.Whisper.StoreTimeBucketsRelayoutRate > 0) != (next.Whisper.StoreTimeBucketsRelayoutRate > 0) ||
 		old.Whisper.StoreMigrationIngestLinger.Value() != next.Whisper.StoreMigrationIngestLinger.Value() ||
 		old.Whisper.StoreMigrationIngestGroup != next.Whisper.StoreMigrationIngestGroup ||

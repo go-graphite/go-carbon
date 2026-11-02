@@ -52,6 +52,10 @@ type Options struct {
 	// the history bucket in the background, at about this many bytes per
 	// second. It requires a v7 store and resumes after restarts.
 	RelayoutRate int64
+	// RelayoutWorkers splits the ID-ordered relayout into disjoint ranges.
+	// Zero selects one worker; otherwise 1..32. Changing it requires reopening.
+	// RelayoutRate remains the total byte budget across all workers.
+	RelayoutWorkers int
 	// ExactBlocks selects integer/floating-point adaptive encoding in a separate
 	// v4 store. A legacy store is never silently upgraded to this format.
 	ExactBlocks  bool
@@ -214,6 +218,7 @@ type Store struct {
 	checkpoint                     metadataCheckpoint
 	timeBuckets                    bool
 	relayout                       relayoutState
+	relayoutWorkers                int
 	relayoutStop                   context.CancelFunc
 	relayoutDone                   chan struct{}
 	deferredSync                   *deferredSyncFS
@@ -296,6 +301,9 @@ var storeComparer = func() *pebble.Comparer {
 // Open accepts only a new directory or an explicitly identified chunk store.
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
+	if options.RelayoutWorkers < 0 || options.RelayoutWorkers > 32 {
+		return nil, errors.New("relayout workers must be 1..32 (zero selects one)")
+	}
 	coldOptions, coldErr := NormalizeColdPack(options.ColdPack)
 	if coldErr != nil {
 		return nil, coldErr
@@ -409,6 +417,7 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	s.updatePointLookups.Store(options.UpdatePointLookups)
 	s.timeBuckets = format >= 7
+	s.relayoutWorkers = max(1, options.RelayoutWorkers)
 	s.coldPack.format.Store(format == 9)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,

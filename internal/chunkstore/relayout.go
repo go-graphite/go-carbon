@@ -8,12 +8,14 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
+	"golang.org/x/sync/errgroup"
 )
 
 // Relayout moves the v6 blocks of metrics converted before format v7 into the
@@ -75,10 +77,14 @@ func (s *Store) SetRelayoutRate(bytesPerSecond int64) error {
 func (s *Store) paceRelayout(ctx context.Context, paced *uint64, pacedAt *time.Time) error {
 	for {
 		rate := s.relayout.rate.Load()
-		copied := s.relayout.bytes.Load() - *paced
+		copiedThrough := s.relayout.bytes.Load()
+		copied := copiedThrough - *paced
 		ahead := time.Duration(float64(copied)/float64(rate)*float64(time.Second)) - time.Since(*pacedAt)
 		if rate <= 0 || ahead <= 0 {
-			break
+			// Other workers may finish copies while we wait. Only acknowledge
+			// the bytes checked above, so none escape the shared budget.
+			*paced, *pacedAt = copiedThrough, time.Now()
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -86,8 +92,6 @@ func (s *Store) paceRelayout(ctx context.Context, paced *uint64, pacedAt *time.T
 		case <-time.After(min(ahead, time.Second)):
 		}
 	}
-	*paced, *pacedAt = s.relayout.bytes.Load(), time.Now()
-	return nil
 }
 
 type relayoutItem struct {
@@ -126,44 +130,109 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 	}
 	s.relayout.ceiling.Store(ceiling)
 	cursor, done, err := s.relayoutCursor()
+	s.relayout.cursor.Store(cursor)
 	if err != nil || done {
 		s.relayout.done.Store(done)
 		return err
 	}
-	s.relayout.cursor.Store(cursor)
 	candidates, err := s.relayoutCandidates(ctx, cursor, ceiling)
 	if err != nil {
 		return err
 	}
 	paced, pacedAt := s.relayout.bytes.Load(), time.Now()
+	var paceMu sync.Mutex
+	pace := func(ctx context.Context) error {
+		paceMu.Lock()
+		defer paceMu.Unlock()
+		return s.paceRelayout(ctx, &paced, &pacedAt)
+	}
+	workers := min(max(1, s.relayoutWorkers), len(candidates))
+	// Positions are exclusive candidate indexes. Later ranges cannot advance
+	// the cursor past an unfinished earlier range, even if they finish first.
+	positions, ends := make([]int, workers), make([]int, workers)
+	for w := range workers {
+		positions[w], ends[w] = w*len(candidates)/workers, (w+1)*len(candidates)/workers
+	}
+	var cursorMu sync.Mutex
+	complete := func(worker, position int) error {
+		cursorMu.Lock()
+		defer cursorMu.Unlock()
+		positions[worker] = position
+		frontier := 0
+		for w, pos := range positions {
+			frontier = pos
+			if pos < ends[w] {
+				break
+			}
+		}
+		if frontier == 0 || candidates[frontier-1].id <= cursor {
+			return nil
+		}
+		last := candidates[frontier-1].id
+		if err := s.setRelayoutCursor(last, false); err != nil {
+			return err
+		}
+		cursor = last
+		s.relayout.cursor.Store(last)
+		return nil
+	}
+	if workers == 1 {
+		// Keep the default run on the caller's goroutine, with the same
+		// grouping and flush boundaries as the serial relayout.
+		err = s.relayoutRange(ctx, planner, candidates, func(i int) error { return complete(0, i) }, pace)
+	} else if workers > 1 {
+		group, workerCtx := errgroup.WithContext(ctx)
+		for w := range workers {
+			start, end := positions[w], ends[w]
+			group.Go(func() (err error) {
+				// Preserve the background runner's panic containment across
+				// worker goroutines; a maintenance panic must not crash the store.
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("panic: %v", r)
+					}
+				}()
+				return s.relayoutRange(workerCtx, planner, candidates[start:end], func(i int) error { return complete(w, start+i) }, pace)
+			})
+		}
+		err = group.Wait()
+	}
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.setRelayoutCursor(ceiling, true); err != nil {
+		return err
+	}
+	s.relayout.cursor.Store(ceiling)
+	s.relayout.done.Store(true)
+	return nil
+}
+
+// relayoutRange owns a contiguous range of metric IDs. Each flush completes
+// all candidates through its exclusive index before publishing progress.
+func (s *Store) relayoutRange(ctx context.Context, planner ContinuationRelayouter, candidates []relayoutCandidate, complete func(int) error, pace func(context.Context) error) error {
 	var group []relayoutItem
 	groupBytes := 0
-	flush := func(last uint64) error {
+	flush := func(position int) error {
 		if len(group) > 0 {
 			if err := s.relayoutGroup(ctx, group); err != nil {
 				return err
 			}
 		}
 		group, groupBytes = group[:0], 0
-		if err := s.setRelayoutCursor(last, false); err != nil {
+		if err := complete(position); err != nil {
 			return err
 		}
-		s.relayout.cursor.Store(last)
-		return s.paceRelayout(ctx, &paced, &pacedAt)
+		return pace(ctx)
 	}
 	for i, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		snap := s.db.NewSnapshot()
-		m, err := metadataFrom(snap, c.name)
-		var plan RelayoutPlan
-		if err == nil && m.ID == c.id && m.Continuation {
-			plan, err = planner.RelayoutPlan(ctx, s.newContinuationIO(ctx, snap, nil, m))
-		} else if errors.Is(err, ErrNotFound) || err == nil {
-			err = nil // deleted or replaced since the scan
-		}
-		snap.Close()
+		m, plan, err := s.planRelayout(ctx, planner, c)
 		if err != nil {
 			return fmt.Errorf("relayout plan %s: %w", c.name, err)
 		}
@@ -172,16 +241,25 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 			groupBytes += plan.Bytes
 		}
 		if groupBytes >= relayoutTargetBytes || len(group) >= relayoutMaxMetrics || i == len(candidates)-1 {
-			if err := flush(c.id); err != nil {
+			if err := flush(i + 1); err != nil {
 				return err
 			}
 		}
 	}
-	if err := s.setRelayoutCursor(ceiling, true); err != nil {
-		return err
-	}
-	s.relayout.done.Store(true)
 	return nil
+}
+
+func (s *Store) planRelayout(ctx context.Context, planner ContinuationRelayouter, c relayoutCandidate) (Metadata, RelayoutPlan, error) {
+	snap := s.db.NewSnapshot()
+	defer snap.Close() // Also release it if the background worker panics.
+	m, err := metadataFrom(snap, c.name)
+	var plan RelayoutPlan
+	if err == nil && m.ID == c.id && m.Continuation {
+		plan, err = planner.RelayoutPlan(ctx, s.newContinuationIO(ctx, snap, nil, m))
+	} else if errors.Is(err, ErrNotFound) || err == nil {
+		err = nil // deleted or replaced since the scan
+	}
+	return m, plan, err
 }
 
 type relayoutCandidate struct {

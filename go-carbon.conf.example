@@ -425,6 +425,9 @@ store-encoding = "legacy"
 # Changing a positive rate reloads on SIGHUP; enabling or disabling requires a
 # restart, so pause a running relayout with a tiny rate such as 1.
 # store-time-buckets-relayout-rate = 0
+# Parallel ID ranges, 1-32. Requires a restart; the rate above is the total
+# across all workers. Each worker buffers up to about 64 MiB of group values.
+# store-time-buckets-relayout-workers = 1
 # Cold continuation packing (exact incremental shared storage with time buckets).
 # Hot writes stay exact. Enabling upgrades the durable reader fence to v9;
 # upgrade readers, transfer peers and recovery tools first. All settings reload

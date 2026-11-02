@@ -24,10 +24,21 @@ import (
 // closing the store. The small codec isolates the engine's relayout protocol;
 // this is not a power-loss simulation or a physical CWhisper oracle.
 func TestRelayoutResumesAfterCrash(t *testing.T) {
+	testRelayoutResumesAfterCrash(t, 1)
+}
+
+func TestRelayoutParallelResumesAfterCrash(t *testing.T) {
+	testRelayoutResumesAfterCrash(t, 3)
+}
+
+func testRelayoutResumesAfterCrash(t *testing.T, workers int) {
 	t.Parallel()
 	const crashExit = 74
 	ctx := context.Background()
-	opts := Options{ExactBlocks: true, Continuation: relayoutCodec{}, TimeBuckets: true, CacheSize: 8 << 20, MemTableSize: 4 << 20}
+	opts := Options{ExactBlocks: true, Continuation: relayoutCodec{}, TimeBuckets: true, RelayoutWorkers: workers, CacheSize: 8 << 20, MemTableSize: 4 << 20}
+	// Two metrics per parallel range exercise interruption partway through
+	// one group's descriptor switches while later ranges finish independently.
+	names := []string{"m.first", "m.second", "m.third", "m.fourth", "m.fifth", "m.sixth"}
 	if phase := os.Getenv("GO_CARBON_TEST_RELAYOUT_CRASH_PHASE"); phase != "" {
 		crashRelayoutAt(t, phase, os.Getenv("GO_CARBON_TEST_RELAYOUT_CRASH_DIR"), opts, crashExit)
 		return
@@ -36,12 +47,13 @@ func TestRelayoutResumesAfterCrash(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			s, _ := openTestStore(t, dir, opts)
-			createTestMetric(t, s, "m.first")
-			createTestMetric(t, s, "m.second")
+			for _, name := range names {
+				createTestMetric(t, s, name)
+			}
 			closeTestStore(t, s)
 			childCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestRelayoutResumesAfterCrash$")
+			cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^"+strings.SplitN(t.Name(), "/", 2)[0]+"$")
 			cmd.Env = append(os.Environ(), "GO_CARBON_TEST_RELAYOUT_CRASH_PHASE="+phase, "GO_CARBON_TEST_RELAYOUT_CRASH_DIR="+dir)
 			output, err := cmd.CombinedOutput()
 			var exit *exec.ExitError
@@ -55,7 +67,7 @@ func TestRelayoutResumesAfterCrash(t *testing.T) {
 			closeTestStore(t, s)
 			s, _ = openTestStore(t, dir, opts)
 			defer closeTestStore(t, s)
-			for _, name := range []string{"m.first", "m.second"} {
+			for _, name := range names {
 				m, err := s.Metadata(ctx, name)
 				if err != nil {
 					t.Fatal(err)

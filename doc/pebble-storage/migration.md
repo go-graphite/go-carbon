@@ -178,8 +178,9 @@ After a v6 → v7 upgrade, existing blocks are still v6 and move only when
 rewritten. `store-time-buckets-relayout-rate` (bytes per second) moves them
 in the background (`internal/chunkstore/relayout.go`):
 
-1. Scan the catalog once, then walk metrics existing at start in ID order up
-   to that ID ceiling.
+1. Scan the catalog once up to the starting ID ceiling, sort by ID, and split
+   it into `store-time-buckets-relayout-workers` contiguous ranges (default 1,
+   valid 1–32, restart required). Workers walk their ranges in ID order.
 2. The codec plans each metric (`RelayoutPlan`): every v6 block except each
    archive's newest is copied byte-for-byte to the history bucket.
 3. A group of metrics (64 MiB or 4,096 metrics) is written as one table
@@ -188,10 +189,15 @@ in the background (`internal/chunkstore/relayout.go`):
    matches the plan: the descriptor flips to v7 and the old groups are
    point-deleted. A block rewritten meanwhile keeps its new state and its
    copies are deleted.
-5. The cursor `z/relayout` resumes after restarts.
+5. The cursor `z/relayout` advances only after every candidate through that ID
+   has finished: completed earlier ranges are skipped, then the first
+   unfinished range bounds progress. Only all workers finishing sets done.
+   After restart, later ranges may revisit already moved metrics; their v7
+   blocks produce no copies or descriptor changes.
 
-- **Pacing.** Per interval from a live rate: a stalled period earns no burst
-  afterwards. A positive rate change applies on `SIGHUP`.
+- **Pacing.** One shared byte budget across workers, per interval from a live
+  rate: a stalled period earns no burst afterwards. A positive rate change
+  applies on `SIGHUP`. At most one group per worker can be awaiting pacing.
 - **One run.** Only one relayout runs at a time; two runs planning the same
   metric could delete copies the other had made live.
 - **Metrics.** `store_relayout_{metrics,blocks,skipped,bytes}_total`,

@@ -36,7 +36,7 @@ for permissions, compatibility and recovery requirements.
 | `m/` + name | Catalog record (below). |
 | `r` + id(8) + generation(8) | Revision record: revision (8) and last-update time in ns (8). |
 | `z/sequence` | Metric ID allocator high-water mark. |
-| `z/relayout` | Relayout cursor (next metric ID) and done flag. |
+| `z/relayout` | Relayout cursor (last completed metric ID) and done flag. |
 | `f/cleanup/` + id(8) | Conversion cleanup queue: originals still to reclaim. |
 | `c` + id + generation + archive(2) + index(4) | Chunk of a non-continuation (legacy/exact) store. |
 | `u` + id(8) + generation(8) + suffix | Continuation key space of one metric generation. |

@@ -977,6 +977,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 			ColdPack:          coldPackOptions(conf),
 			TimeBuckets:       conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreTimeBuckets,
 			RelayoutRate:      conf.Whisper.StoreTimeBucketsRelayoutRate,
+			RelayoutWorkers:   conf.Whisper.StoreTimeBucketsRelayoutWorkers,
 			ExactBlocks:       conf.Whisper.StoreEncoding == "exact",
 			IncrementalSource: incrementalSource,
 			IngestFileStages:  conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
