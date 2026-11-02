@@ -28,8 +28,10 @@ import (
 // stateSlot locates one name's record; it holds no pointers. A free slot has
 // n == 0 and links the free list through next.
 type stateSlot struct {
-	hash       uint64
-	epoch      uint64
+	epoch uint64
+	// Slot numbers are int32, so the table needs at most 32 hash bits.
+	// Keep a 32-bit fingerprint; find still compares the complete name.
+	hash       uint32
 	chunk, off uint32
 	n          uint32
 	// prev and next link the shard's LRU list, most recently used first.
@@ -201,7 +203,7 @@ func (sh *stateShard) find(hash uint64, name string) (pos int, slot int32) {
 		if s < 0 {
 			return -1, -1
 		}
-		if sh.slots[s].hash == hash && string(recordKey(sh.record(s))) == name {
+		if sh.slots[s].hash == uint32(hash) && string(recordKey(sh.record(s))) == name {
 			return i, s
 		}
 	}
@@ -317,7 +319,7 @@ func (c *stateCache) put(sh *stateShard, hash uint64, name string, st *metricSta
 		sh.touch(s)
 	} else {
 		s = c.newSlot(sh)
-		sh.slots[s] = stateSlot{hash: hash}
+		sh.slots[s] = stateSlot{hash: uint32(hash)}
 		c.index(sh, s)
 		sh.pushFront(s)
 	}

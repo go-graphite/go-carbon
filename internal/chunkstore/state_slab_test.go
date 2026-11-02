@@ -248,7 +248,7 @@ func checkStateCacheInvariants(t testing.TB, c *stateCache) {
 			live32[slot.chunk] += slot.n
 			occupancy += int64(slot.n) + int64(stateSlotOverhead)
 			rec := sh.record(int32(s))
-			if pos, found := sh.find(slot.hash, string(recordKey(rec))); found != int32(s) || sh.table[pos] != int32(s)+1 {
+			if pos, found := sh.find(uint64(slot.hash), string(recordKey(rec))); found != int32(s) || sh.table[pos] != int32(s)+1 {
 				t.Fatalf("shard %d slot %d not found through the index", i, s)
 			}
 			if sh.entries[string(recordKey(rec))] == nil {
@@ -854,4 +854,32 @@ func TestStateChunkSize(t *testing.T) {
 	c.beginMutation(0, "big")
 	c.endMutation(0, "big")
 	checkStateCacheInvariants(t, c)
+}
+
+func TestStateCacheTruncatedHashCollisions(t *testing.T) {
+	c := newStateCache(1<<30, nil)
+	// All keys have identical fingerprints and homes, but different high bits.
+	// Grow, replace, remove from the middle of the probe chain, then reuse slots.
+	c.hash = func(name string) uint64 { return uint64(len(name))<<32 | 15 }
+	const stripe = 0
+	for i := range 100 {
+		name := strings.Repeat("x", i+1)
+		c.fill(stripe, name, c.epoch(stripe), testState(name, uint64(i+1)))
+	}
+	for i := 1; i < 100; i += 2 {
+		name := strings.Repeat("x", i+1)
+		c.beginMutation(stripe, name)
+		c.endMutation(stripe, name)
+	}
+	for i := range 100 {
+		name := strings.Repeat("x", i+1)
+		c.fill(stripe, name, c.epoch(stripe), testState(name, uint64(i+1)))
+		if got := c.get(stripe, name, c.epoch(stripe)); got == nil || got.meta.ID != uint64(i+1) {
+			t.Fatalf("wrong state after collision/slot reuse: %q: %v", name, got)
+		}
+	}
+	checkStateCacheInvariants(t, c)
+	if got := unsafe.Sizeof(stateSlot{}); got != 32 {
+		t.Fatalf("slot size = %d, want 32", got)
+	}
 }

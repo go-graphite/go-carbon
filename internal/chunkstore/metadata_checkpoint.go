@@ -339,7 +339,7 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 			if !s.checkpoint.fenced {
 				epoch |= provisionalState
 			}
-			sh.slots[slot] = stateSlot{hash: hash, epoch: epoch, chunk: chunk, off: off, n: n}
+			sh.slots[slot] = stateSlot{hash: uint32(hash), epoch: epoch, chunk: chunk, off: off, n: n}
 			c.index(sh, slot)
 			sh.pushFront(slot)
 			c.account(sh, int64(n)+int64(stateSlotOverhead))
