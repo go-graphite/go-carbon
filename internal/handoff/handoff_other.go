@@ -35,8 +35,6 @@ type InputConn struct {
 	Leftover []byte
 }
 
-func (*Input) Close() {}
-
 type InputSource interface {
 	Detach() (*Input, error)
 }

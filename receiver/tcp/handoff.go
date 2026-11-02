@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/lomik/zapwriter"
 )
@@ -131,11 +132,13 @@ func (rcv *TCP) detachBytes(c *handoffConn, leftover []byte) bool {
 	}
 	tcpConn, ok := c.conn.(*net.TCPConn)
 	if !ok {
+		handoff.CloseInputConn(c.conn, len(leftover), rcv.logger, "detach_failed")
 		return false
 	}
 	file, err := tcpConn.File()
 	if err != nil {
 		rcv.logger.Warn("connection not handed over", zap.Error(err))
+		handoff.CloseInputConn(c.conn, len(leftover), rcv.logger, "detach_failed")
 		return false
 	}
 	rcv.handoff.mu.Lock()
@@ -191,7 +194,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	closeAll := func() {
 		_ = h.Listener.Close()
 		for _, c := range h.Conns {
-			_ = c.File.Close()
+			handoff.CloseInputConn(c.File, len(c.Leftover), zapwriter.Logger(name), "inherited_start_failed")
 		}
 	}
 	if options.BufferSize != 0 || options.Compression != "" {
@@ -218,11 +221,12 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	conns := make([]Conn, 0, len(h.Conns))
 	for _, c := range h.Conns {
 		conn, err := net.FileConn(c.File)
-		_ = c.File.Close()
 		if err != nil {
+			handoff.CloseInputConn(c.File, len(c.Leftover), r.logger, "inherited_connection_unusable")
 			r.logger.Warn("inherited connection unusable", zap.Error(err))
 			continue
 		}
+		_ = c.File.Close() // conn owns the duplicate
 		// The pump starts before the tracked handler configures its deadline.
 		// Give its initial read an explicitly unexpired deadline.
 		_ = conn.SetReadDeadline(time.Time{})
@@ -243,7 +247,8 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	}, conns)
 	if err != nil {
 		for _, c := range conns {
-			_ = c.ahead.Close()
+			pending := c.ahead.pending(nil)
+			handoff.CloseInputConn(c.conn, len(c.Leftover)+len(pending), r.logger, "inherited_start_failed")
 		}
 		return nil, err
 	}

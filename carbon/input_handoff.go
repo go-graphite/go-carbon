@@ -142,7 +142,9 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.done {
-		return h.detached, nil
+		in := h.detached
+		h.detached = nil
+		return in, nil
 	}
 	h.done = true
 	h.closed = time.Now()
@@ -183,13 +185,23 @@ func (h *inputHandover) RetainInput(in *handoff.Input) {
 	h.mu.Lock()
 	h.detached = in
 	h.mu.Unlock()
-	h.logger.Error("input transfer failed; retaining sockets for successor retry")
+	h.logger.Error("input transfer failed; retaining sockets for successor retry", zap.Duration("retention_window", handoff.InputRetentionTimeout))
 }
 
 func (h *inputHandover) RetryInput() bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.detached != nil
+}
+
+// discardRetained runs only after the offer has stopped using these files.
+func (h *inputHandover) discardRetained(reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.detached != nil {
+		h.detached.Discard(h.logger, reason)
+		h.detached = nil
+	}
 }
 
 // released notes that the successor starts now and gives it the full
@@ -207,6 +219,10 @@ func (h *inputHandover) released() {
 func (h *inputHandover) stop(reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.detached != nil {
+		h.detached.Discard(h.logger, "handoff_abandoned")
+		h.detached = nil
+	}
 	if h.done {
 		return
 	}

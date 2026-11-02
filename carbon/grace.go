@@ -785,6 +785,10 @@ func (app *App) handOffStoreInput(logger *zap.Logger, handover *inputHandover) t
 	app.readRelease()
 	started := time.Now()
 	stats, taken, err := offer.ServeInputStats(handover, inputHandoffTimeout)
+	if errors.Is(err, handoff.ErrInputRetentionExpired) {
+		handover.discardRetained("retention_timeout")
+		logger.Error("input retention expired; predecessor exiting", zap.Error(err))
+	}
 	fields := []zap.Field{zap.Duration("wait", time.Since(started)), zap.String("successor_binary", stats.Peer),
 		zap.Bool("successor_supported", stats.PeerSupported), zap.Bool("successor_checked", stats.PeerKnown)}
 	if !stats.Registered.IsZero() {

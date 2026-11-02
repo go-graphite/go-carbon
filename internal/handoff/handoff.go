@@ -86,18 +86,6 @@ type InputConn struct {
 	Leftover []byte
 }
 
-// Close closes every file of in; the receiving side owns its own copies.
-func (in *Input) Close() {
-	for _, r := range in.Receivers {
-		if r.Listener != nil {
-			_ = r.Listener.Close()
-		}
-		for _, c := range r.Conns {
-			_ = c.File.Close()
-		}
-	}
-}
-
 func (in *Input) files() []*os.File {
 	var files []*os.File
 	for _, r := range in.Receivers {
@@ -173,7 +161,11 @@ func protocolSupported(binary, flag, protocol string, extra ...string) bool {
 // when it could not be run or did not exit in time, which says nothing about
 // its support. A binary without the flag rejects it and exits non-zero.
 func protocolSupport(binary, flag, protocol string, extra ...string) (supported, known bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return protocolSupportUntil(time.Time{}, binary, flag, protocol, extra...)
+}
+
+func protocolSupportUntil(until time.Time, binary, flag, protocol string, extra ...string) (supported, known bool) {
+	ctx, cancel := context.WithDeadline(context.Background(), boundedDeadline(5*time.Second, until))
 	defer cancel()
 	args := append([]string{flag}, extra...)
 	out, err := exec.CommandContext(ctx, binary, args...).Output()
@@ -263,7 +255,7 @@ func (o *Offer) Serve(timeout time.Duration, tcp *net.TCPListener, stopAccepting
 	if _, err = conn.Write([]byte{msgStoppedInput}); err != nil {
 		return true, err
 	}
-	_, err = serveInput(conn, input, inputTimeout, false)
+	_, err = serveInput(conn, input, inputTimeout, false, time.Time{})
 	return true, err
 }
 
@@ -295,7 +287,7 @@ type ServeInputStats struct {
 // successor's input request. It reports whether the successor took input; on
 // a failure before Detach the caller still owns input and stops it normally.
 // A retryInputSource retains detached input on transfer failure and keeps the
-// offer open until a successor retries; closing unread sockets is not recovery.
+// offer open for at most InputRetentionTimeout after the first failed transfer.
 //
 // The successor registers right after parsing its config but asks only once
 // its storage is open and its checkpoint serves. A binary without store input
@@ -312,22 +304,28 @@ func (o *Offer) ServeInput(input InputSource, timeout time.Duration) (bool, erro
 // ServeInputStats is ServeInput, also describing the successor.
 func (o *Offer) ServeInputStats(input InputSource, timeout time.Duration) (ServeInputStats, bool, error) {
 	defer o.Close()
+	var retryUntil time.Time
 	for {
-		stats, taken, err := o.serveInputStats(input, timeout)
+		stats, taken, err := o.serveInputStats(input, timeout, retryUntil)
+		if !taken && !retryUntil.IsZero() && !time.Now().Before(retryUntil) {
+			return stats, false, errors.Join(ErrInputRetentionExpired, err)
+		}
 		if retry, ok := input.(retryInputSource); !taken && !errors.Is(err, net.ErrClosed) && ok && retry.RetryInput() {
 			// A detached store has released its database and sealed its tail.
-			// It cannot safely consume more input there. Keep every original
-			// descriptor and state until a successor retries, instead of
-			// closing sockets with unread, already acknowledged TCP bytes.
+			// It cannot safely consume more input there. Keep the original
+			// descriptors for bounded retries; failures never renew this window.
+			if retryUntil.IsZero() {
+				retryUntil = time.Now().Add(InputRetentionTimeout)
+			}
 			continue
 		}
 		return stats, taken, err
 	}
 }
 
-func (o *Offer) serveInputStats(input InputSource, timeout time.Duration) (ServeInputStats, bool, error) {
+func (o *Offer) serveInputStats(input InputSource, timeout time.Duration, until time.Time) (ServeInputStats, bool, error) {
 	var stats ServeInputStats
-	if err := o.ln.SetDeadline(time.Now().Add(RegisterTimeout)); err != nil {
+	if err := o.ln.SetDeadline(boundedDeadline(RegisterTimeout, until)); err != nil {
 		return stats, false, err
 	}
 	conn, err := o.ln.AcceptUnix()
@@ -338,12 +336,12 @@ func (o *Offer) serveInputStats(input InputSource, timeout time.Duration) (Serve
 	stats.Registered = time.Now()
 	if exe, perr := PeerExecutable(conn); perr == nil {
 		stats.Peer = exe
-		stats.PeerSupported, stats.PeerKnown = protocolSupport(exe, "-store-input-handoff-protocol", StoreInputProtocol)
+		stats.PeerSupported, stats.PeerKnown = protocolSupportUntil(until, exe, "-store-input-handoff-protocol", StoreInputProtocol)
 		if stats.PeerKnown && !stats.PeerSupported {
 			return stats, false, fmt.Errorf("%w: %s", ErrSuccessorCannotTakeInput, exe)
 		}
 	}
-	if err = conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+	if err = conn.SetDeadline(boundedDeadline(timeout, until)); err != nil {
 		return stats, false, err
 	}
 	var b [1]byte
@@ -353,14 +351,14 @@ func (o *Offer) serveInputStats(input InputSource, timeout time.Duration) (Serve
 	if _, err = conn.Write([]byte{msgInputOnly}); err != nil {
 		return stats, false, err
 	}
-	taken, err := serveInput(conn, input, timeout, true)
+	taken, err := serveInput(conn, input, timeout, true, until)
 	return stats, taken, err
 }
 
 // serveInput waits for the successor's input request and hands input over. It
 // reports whether the successor confirmed it holds the input.
-func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration, allowRetry bool) (taken bool, err error) {
-	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration, allowRetry bool, until time.Time) (taken bool, err error) {
+	if err := conn.SetDeadline(boundedDeadline(timeout, until)); err != nil {
 		return false, err
 	}
 	var b [1]byte
@@ -380,7 +378,11 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration, al
 				return
 			}
 		}
-		in.Close()
+		if taken {
+			in.closeCopies("transfer_committed")
+		} else {
+			in.Close()
+		}
 	}()
 	var header inputHeader
 	for _, r := range in.Receivers {
@@ -403,7 +405,7 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration, al
 			payload += n
 		}
 	}
-	if err = conn.SetDeadline(time.Now().Add(inputTransferTimeout(payload))); err != nil {
+	if err = conn.SetDeadline(boundedDeadline(inputTransferTimeout(payload), until)); err != nil {
 		return false, err
 	}
 	msg := binary.BigEndian.AppendUint32([]byte{msgInput}, uint32(len(raw)))
@@ -436,14 +438,14 @@ func serveInput(conn *net.UnixConn, input InputSource, timeout time.Duration, al
 		}
 		files = files[len(batch):]
 		// Some kernels refuse descriptors while earlier ones are unread.
-		if err = conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		if err = conn.SetReadDeadline(boundedDeadline(30*time.Second, until)); err != nil {
 			return false, err
 		}
 		if _, err = conn.Read(b[:]); err != nil || b[0] != msgFilesTaken {
 			return false, fmt.Errorf("successor did not receive input files: %w", err)
 		}
 	}
-	if err = conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+	if err = conn.SetReadDeadline(boundedDeadline(30*time.Second, until)); err != nil {
 		return false, err
 	}
 	if _, err = conn.Read(b[:]); err != nil || b[0] != msgInputTaken {
@@ -644,32 +646,39 @@ func (c *Claim) takeInput() (*Input, error) {
 		want += 1 + len(r.Lengths)
 	}
 	files, err := receiveFiles(uc, want)
-	if err != nil {
-		for _, f := range files {
-			_ = f.Close()
-		}
-		return nil, err
-	}
 	in := &Input{}
 	for i, r := range header.Receivers {
+		if len(files) == 0 {
+			break
+		}
 		ir := InputReceiver{Name: r.Name, Listener: files[0]}
 		files = files[1:]
 		for _, leftover := range leftovers[i] {
+			if len(files) == 0 {
+				break
+			}
 			ir.Conns = append(ir.Conns, InputConn{File: files[0], Leftover: leftover})
 			files = files[1:]
 		}
 		in.Receivers = append(in.Receivers, ir)
 	}
+	if err != nil {
+		in.closeCopies("transfer_uncommitted")
+		for _, f := range files { // unexpected extra descriptors are never owned
+			_ = f.Close()
+		}
+		return nil, err
+	}
 	if err = uc.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
-		in.Close()
+		in.closeCopies("transfer_uncommitted")
 		return nil, err
 	}
 	if _, err = uc.Write([]byte{msgInputTaken}); err != nil {
-		in.Close()
+		in.closeCopies("transfer_uncommitted")
 		return nil, err
 	}
 	if _, err = io.ReadFull(uc, b[:1]); err != nil || b[0] != msgInputCommitted {
-		in.Close()
+		in.closeCopies("transfer_uncommitted")
 		return nil, fmt.Errorf("input transfer not committed: %w", err)
 	}
 	return in, nil

@@ -76,13 +76,41 @@ handoff logs `input handed off to successor` and
 `took over input from stopping instance`.
 
 After Detach, a failed store-input transfer retains the original sockets and
-snapshots. The successor retries the complete transfer without reading partial
-results. The predecessor has released its database and sealed the immutable
-tail, so resuming receivers there would race recovery. It therefore stays alive
-until a capable successor commits the transfer. A persistent failure requires a
-compatible successor; it can stall senders, but the predecessor does not discard
-unread sockets just because the control connection failed. Process crashes and
-forced termination retain ordinary TCP delivery limitations.
+snapshots for **two minutes from the first failed transfer**. The successor
+retries the complete transfer without reading partial results. The predecessor
+has released its database and sealed the immutable tail, so resuming receivers
+there would race recovery. Repeated failures never renew the retention window;
+registration, capability probes, control writes and descriptor acknowledgements
+are bounded by its remaining time too. No new configuration option is needed.
+
+If no successor commits before that deadline, the predecessor closes retained
+sockets and exits through the ordinary shutdown path. It logs ERROR
+`input retention expired; predecessor exiting`. Each discarded accepted socket
+logs ERROR `input handoff socket discarded` with `reason`,
+`kernel_unread_bytes`, and `leftover_bytes`. Linux samples the exact unread
+receive-buffer count with SIOCINQ immediately before close, without draining the
+socket. Other platforms, or an ioctl failure, report `kernel_unread_bytes = -1`.
+This is a close-time observation; bytes still in transit are outside that count.
+Leftovers include decoder snapshots and buffered wire input, so their byte
+count cannot be translated directly into lost points. An ERROR
+`input handoff sockets discarded` sums `connections_closed`, known
+`kernel_unread_bytes`, `kernel_unread_unknown`, and `leftover_bytes`.
+
+The process exports these counters with a bounded `reason` label
+(`retention_timeout` for expiry):
+
+- `input_handoff_closed_connections_total`
+- `input_handoff_closed_kernel_unread_bytes_total`
+- `input_handoff_closed_kernel_unread_unknown_total`
+- `input_handoff_closed_leftover_bytes_total`
+
+Other discarded detached input, failed snapshots/duplication, and inherited
+startup failures use the same accounting. Descriptor copies released after a
+commit or an uncommitted receiving attempt log the same byte fields with
+`discarded = false` and do not increase loss counters. The final ERROR logs are
+the durable observation because the predecessor has already stopped its metrics
+endpoint. Process crashes and forced termination retain ordinary TCP delivery
+limitations.
 
 All input capability tokens (`input`, `shared-store`, `store-input`) advance to
 version 2; the read-listener protocol stays at version 1. Version 1 and version 2
