@@ -24,8 +24,10 @@ type Visit func(id uint32, name []byte, value float64, timestamp int64, slot *an
 
 // Decoder owns one connection's dictionary. After a protocol error, discard it.
 type Decoder struct {
-	opts        Options
-	entries     []entry
+	opts    Options
+	entries []entry
+	// Separate validity bytes avoid seven bytes of padding per entry.
+	valid       []bool
 	names       []nameRef
 	definitions [][]byte
 	resolve     func([]byte) any
@@ -152,6 +154,7 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 	}
 	if info.Kind == ResetFrame {
 		clear(d.entries)
+		clear(d.valid)
 		d.entries = d.entries[:0]
 		d.arena.reset()
 		d.names = d.names[:0]
@@ -191,6 +194,8 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 			return info, ErrFrame
 		}
 		size := nextCapacity(len(d.entries)+1, cap(d.entries))
+		// Keep the conservative wire admission charge: existing senders use
+		// this bound to decide when to reset their dictionaries.
 		charge := d.arena.bytes + size*84 + d.arena.extra(len(name))
 		if d.resolve != nil {
 			charge = size*40 + d.nameBytes + len(name) + (len(d.entries)+1)*64
@@ -202,6 +207,11 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 			entries := make([]entry, len(d.entries), size)
 			copy(entries, d.entries)
 			d.entries = entries
+			if size > len(d.valid) {
+				valid := make([]bool, size)
+				copy(valid, d.valid)
+				d.valid = valid
+			}
 		}
 		e := entry{}
 		d.nameBytes += len(name)
@@ -225,7 +235,8 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 				if r.err != nil {
 					return info, ErrFrame
 				}
-				e.last = point{ts: int64(binary.BigEndian.Uint64(b[:8])), bits: binary.BigEndian.Uint64(b[8:]), valid: true}
+				e.last = point{ts: int64(binary.BigEndian.Uint64(b[:8])), bits: binary.BigEndian.Uint64(b[8:])}
+				d.valid[len(d.entries)] = true
 			}
 		}
 		d.entries = append(d.entries, e)
@@ -254,10 +265,11 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 		}
 		id += delta
 		want := d.entries[id].last
-		if !want.valid {
+		if !d.valid[id] {
 			want.ts = prevTS
+			d.valid[id] = true
 		}
-		p := point{ts: want.ts + stamps.sint(), bits: want.bits ^ values.xor(), valid: true}
+		p := point{ts: want.ts + stamps.sint(), bits: want.bits ^ values.xor()}
 		d.entries[id].last = p
 		d.rows = append(d.rows, row{id: uint32(id), ts: p.ts, bits: p.bits})
 		prevTS = p.ts
@@ -287,11 +299,11 @@ func (d *Decoder) Snapshot(dst []byte) ([]byte, error) {
 		// hundreds of handlers snapshot together. Reserve an upper bound for
 		// raw entries and bounded frame headers; compressed state stays lazy.
 		size, packing := 0, 0
-		for i, e := range d.entries {
+		for i := range d.entries {
 			n := len(d.name(i))
 			packing += n + 27
 			size += n + (bits.Len(uint(n)|1)+6)/7 + 1
-			if e.last.valid {
+			if d.valid[i] {
 				size += 16
 			}
 		}
@@ -330,7 +342,7 @@ func (d *Decoder) Snapshot(dst []byte) ([]byte, error) {
 			name := d.name(first + i)
 			raw = binary.AppendUvarint(raw, uint64(len(name)))
 			raw = append(raw, name...)
-			if e.last.valid {
+			if d.valid[first+i] {
 				raw = append(raw, 1)
 				raw = binary.BigEndian.AppendUint64(raw, uint64(e.last.ts))
 				raw = binary.BigEndian.AppendUint64(raw, e.last.bits)
@@ -352,7 +364,7 @@ func (d *Decoder) NameCount() int { return len(d.entries) }
 
 // RetainedBytes includes dictionary capacities and the reserved caller slots.
 func (d *Decoder) RetainedBytes() int {
-	n := cap(d.entries) * 40
+	n := cap(d.entries)*32 + cap(d.valid)
 	if d.resolve == nil {
 		n += d.arena.bytes + cap(d.names)*12 + cap(d.entries)*32
 	}
