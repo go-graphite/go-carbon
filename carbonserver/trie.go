@@ -2297,6 +2297,10 @@ func (ti *trieIndex) maxCreatesThrottle() bool {
 	return true
 }
 func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
+	return ti.throughputThrottleHashed(ps, helper.HashString(ps.Metric))
+}
+
+func (ti *trieIndex) throughputThrottleHashed(ps *points.Points, stripe uint64) bool {
 	dataLen := ti.metricDataLen(ps)
 
 	// WHY: hashes work much faster than the trie tree working.
@@ -2356,7 +2360,6 @@ func (ti *trieIndex) throughputThrottle(ps *points.Points) bool {
 		// batch increasing the counter to avoid potential
 		// over-throttling/accounting in parent nodes as the data is
 		// later on dropped due to lower child quotas.
-		stripe := helper.HashString(ps.Metric) // the cache shard, see throughputStripes
 		for _, tu := range tus {
 			tu.increase(dataLen, stripe)
 		}

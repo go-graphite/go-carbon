@@ -162,7 +162,7 @@ func TestQueueDeadlinesArrivalWithPreviousSettings(t *testing.T) {
 	shard.mu.Lock()
 	// Model AddPoint loading settings before the reload, then waiting for
 	// the shard lock while the new settings' scan records its deadline.
-	c.addPointLocked(shard, previous, shard.items.get("reload.metric"), 2, 2)
+	c.addPointLocked(shard, previous, shard.items.get("reload.metric"), xxh3.HashString("reload.metric"), 2, 2)
 	shard.mu.Unlock()
 	checkQueueDeadlines(t, c, time.Now())
 }

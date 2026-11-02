@@ -39,7 +39,7 @@ func (c *Cache) AddPoints(name []byte, data []points.Point) {
 				}
 				return
 			}
-			c.addPointLocked(shard, s, values, p.Value, p.Timestamp)
+			c.addPointLocked(shard, s, values, hash, p.Value, p.Timestamp)
 		}
 		shard.mu.Unlock()
 		return

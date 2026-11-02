@@ -96,8 +96,7 @@ type Cache struct {
 	restartBegin     func(<-chan bool) bool
 	restartEnd       func()
 
-	throttle          func(ps *points.Points, inCache bool) bool
-	throttleWithState func(ps *points.Points, inCache bool, state *any) bool
+	throttleWithHash func(ps *points.Points, inCache bool, hash uint64, state *any) bool
 }
 
 type indexFilter struct {
@@ -628,20 +627,15 @@ func (c *Cache) AddPoint(name []byte, value float64, timestamp int64) {
 	}
 	defer shard.mu.Unlock()
 
-	c.addPointLocked(shard, s, values, value, timestamp)
+	c.addPointLocked(shard, s, values, hash, value, timestamp)
 }
 
-func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, value float64, timestamp int64) {
-	if c.throttle != nil || c.throttleWithState != nil {
+func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, hash uint64, value float64, timestamp int64) {
+	if c.throttleWithHash != nil {
 		// The throttle does not retain the points of a cached metric.
 		shard.scratchData[0] = points.Point{Value: value, Timestamp: timestamp}
 		shard.scratch.Metric, shard.scratch.Data = values.Metric, shard.scratchData[:]
-		var throttled bool
-		if c.throttleWithState != nil {
-			throttled = c.throttleWithState(&shard.scratch, true, &values.throttleState)
-		} else {
-			throttled = c.throttle(&shard.scratch, true)
-		}
+		throttled := c.throttleWithHash(&shard.scratch, true, hash, &values.throttleState)
 		shard.scratch.Metric = ""
 		if throttled {
 			return
@@ -717,8 +711,9 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 
-	// Get map shard.
-	shard := c.GetShard(p.Metric)
+	// Get map shard; quota accounting reuses the same hash.
+	hash := xxh3.HashString(p.Metric)
+	shard := c.data[hash&(shardCount-1)] // as GetShard
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
@@ -758,15 +753,11 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	// insertion claims saved history first, so an existing item is reconciled
 	// already; repeated live points need no mapped-index lookup under this lock.
 	var throttleState any
-	if !recovered {
-		if c.throttleWithState != nil {
-			if exists {
-				throttleState = values.throttleState
-			}
-			if c.throttleWithState(p, exists, &throttleState) {
-				return nil
-			}
-		} else if c.throttle != nil && c.throttle(p, exists) {
+	if !recovered && c.throttleWithHash != nil {
+		if exists {
+			throttleState = values.throttleState
+		}
+		if c.throttleWithHash(p, exists, hash, &throttleState) {
 			return nil
 		}
 	}
@@ -965,16 +956,32 @@ func (c *Cache) GetRecentNewMetrics() []map[string]struct{} {
 }
 
 func (c *Cache) SetThrottle(throttle func(ps *points.Points, inCache bool) bool) {
-	c.throttle = throttle
-	c.throttleWithState = nil
+	c.throttleWithHash = nil
+	if throttle != nil {
+		c.throttleWithHash = func(ps *points.Points, inCache bool, _ uint64, _ *any) bool {
+			return throttle(ps, inCache)
+		}
+	}
 }
 
 // SetThrottleWithState lets a throttle retain metric-specific lookup state.
 // The shard lock guards state; the hook must invalidate it when rules change.
 // Configure before starting ingestion, as with SetThrottle.
 func (c *Cache) SetThrottleWithState(throttle func(ps *points.Points, inCache bool, state *any) bool) {
-	c.throttleWithState = throttle
-	c.throttle = nil
+	c.throttleWithHash = nil
+	if throttle != nil {
+		c.throttleWithHash = func(ps *points.Points, inCache bool, _ uint64, state *any) bool {
+			return throttle(ps, inCache, state)
+		}
+	}
+}
+
+// SetThrottleWithHash passes the cache's precomputed xxh3 name hash along with
+// metric-specific state. A callback can reuse it for accounting stripes without
+// hashing the name again. State is owned under the shard lock, as with
+// SetThrottleWithState. Configure before starting ingestion.
+func (c *Cache) SetThrottleWithHash(throttle func(ps *points.Points, inCache bool, hash uint64, state *any) bool) {
+	c.throttleWithHash = throttle
 }
 
 func (c *Cache) GetInfo() map[string]interface{} {

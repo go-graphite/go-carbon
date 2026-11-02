@@ -137,7 +137,7 @@ func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
 		if int(slot) < len(sh.items.slots) {
 			it := sh.items.slots[slot].item
 			if it != nil && it.streamGeneration == generation && c.settings.Load().(*cacheSettings).xlog == nil {
-				c.addPointLocked(sh, settings, it, value, ts)
+				c.addPointLocked(sh, settings, it, series.hash, value, ts)
 				sh.mu.Unlock()
 				return
 			}

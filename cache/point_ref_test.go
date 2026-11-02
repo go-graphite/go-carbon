@@ -95,7 +95,7 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 func TestPointRefMatchesAddPoint(t *testing.T)     { testPointRefMatchesAddPoint(t, false) }
 func TestStreamSeriesMatchesAddPoint(t *testing.T) { testPointRefMatchesAddPoint(t, true) }
 func testPointRefMatchesAddPoint(t *testing.T, series bool) {
-	for _, mode := range []string{"plain", "bloom", "throttle", "stateful", "recovery", "tags"} {
+	for _, mode := range []string{"plain", "bloom", "throttle", "stateful", "hashed", "recovery", "tags"} {
 		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				cs := [2]*Cache{New(), New()}
@@ -130,11 +130,20 @@ func testPointRefMatchesAddPoint(t *testing.T, series bool) {
 					if mode == "throttle" {
 						c.SetThrottle(hook)
 					}
-					if mode == "stateful" {
+					if mode == "stateful" || mode == "hashed" {
 						c.SetThrottleWithState(func(p *points.Points, exists bool, state *any) bool {
 							*state = generation // Model a namespace-route reload.
 							return hook(p, exists)
 						})
+						if mode == "hashed" && k == 1 {
+							c.SetThrottleWithHash(func(p *points.Points, exists bool, hash uint64, state *any) bool {
+								if hash != xxh3.HashString(p.Metric) {
+									t.Fatal("cache passed a different name hash")
+								}
+								*state = generation
+								return hook(p, exists)
+							})
+						}
 					}
 				}
 				refs := map[string]*PointRef{}

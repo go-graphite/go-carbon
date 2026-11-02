@@ -1361,7 +1361,7 @@ func (app *App) listenCarbonserver(core *cache.Cache, newMetricsChan chan string
 		// Restore bypasses live quotas and notifications, just as before warmup.
 		// Start the filesystem scan only after restored files have been written.
 		if app.Config.Whisper.Quotas != nil {
-			core.SetThrottleWithState(cs.ShouldThrottleMetricWithState)
+			core.SetThrottleWithHash(cs.ShouldThrottleMetricWithHash)
 		}
 		if conf.Carbonserver.CacheScan {
 			core.InitCacheScanAdds()
