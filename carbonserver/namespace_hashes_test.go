@@ -137,7 +137,7 @@ func requestNamespaceHashes(t testing.TB, server *httptest.Server, prefix string
 }
 
 func TestNamespaceHashesMatchesMetricList(t *testing.T) {
-	t.Parallel()
+	// Not parallel: it changes the package-level split threshold that parallel tests read.
 	defer func(v uint64) { namespaceHashesSplitMin = v }(namespaceHashesSplitMin)
 	namespaceHashesSplitMin = 1
 
