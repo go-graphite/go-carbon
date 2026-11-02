@@ -3,6 +3,7 @@
 package handoff
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -641,5 +642,173 @@ func TestStoreInputChecksRegisteredBinary(t *testing.T) {
 				t.Fatalf("gave input up after %v without a request: %v", elapsed, got.err)
 			}
 		})
+	}
+}
+
+// retainedSource models a store that has sealed its tail and released storage.
+// Failed transfers must leave its descriptors available for a fresh claim.
+type retainedSource struct {
+	in       *Input
+	retained chan struct{}
+	retry    atomic.Bool
+}
+
+func (s *retainedSource) Detach() (*Input, error) { return s.in, nil }
+func (s *retainedSource) RetainInput(*Input) {
+	s.retry.Store(true)
+	select {
+	case s.retained <- struct{}{}:
+	default:
+	}
+}
+func (s *retainedSource) RetryInput() bool { return s.retry.Load() }
+
+func TestFailedTransferRetainsUnreadInput(t *testing.T) {
+	peerIs(t, protocolScript(t, StoreInputProtocol))
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	listener, err := ln.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	state := make([]byte, 4<<20)
+	for i := range state {
+		state[i] = byte(i)
+	}
+	s := &retainedSource{in: &Input{Receivers: []InputReceiver{{Name: "tcp", Listener: listener, Conns: []InputConn{{File: r, Leftover: state}}}}}, retained: make(chan struct{}, 1)}
+	offer, err := NewOffer(socketPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer offer.Close()
+	done := make(chan error, 1)
+	go func() { _, err := offer.ServeInput(s, time.Second); done <- err }()
+	c := Register(offer.path)
+	if c == nil {
+		t.Fatal("register")
+	}
+	if _, _, err = c.Take(&net.TCPAddr{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = c.conn.Write([]byte{msgInputRequest}); err != nil {
+		t.Fatal(err)
+	}
+	var header [5]byte
+	if _, err = io.ReadFull(c.conn, header[:]); err != nil {
+		t.Fatal(err)
+	}
+	_ = c.Close() // fail with the state transfer in progress, before any FD ownership
+	select {
+	case <-s.retained:
+	case <-time.After(3 * time.Second):
+		t.Fatal("input not retained")
+	}
+	if _, err = w.WriteString("unread kernel bytes"); err != nil {
+		t.Fatal("original socket closed", err)
+	}
+	next := Register(offer.path)
+	if next == nil {
+		t.Fatal("retry register")
+	}
+	if _, _, err = next.Take(&net.TCPAddr{}); err != nil {
+		t.Fatal(err)
+	}
+	in, err := next.TakeInput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	got := in.Receivers[0].Conns[0]
+	if !bytes.Equal(got.Leftover, state) {
+		t.Fatal("state changed on retry")
+	}
+	b := make([]byte, len("unread kernel bytes"))
+	if _, err = io.ReadFull(got.File, b); err != nil || string(b) != "unread kernel bytes" {
+		t.Fatalf("unread input: %q %v", b, err)
+	}
+}
+
+func TestClaimRetriesInterruptedStoreTransfer(t *testing.T) {
+	peerIs(t, protocolScript(t, StoreInputProtocol))
+	offer, err := NewOffer(socketPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		uc, err := offer.ln.AcceptUnix()
+		if err != nil {
+			done <- err
+			return
+		}
+		var b [1]byte
+		_, err = io.ReadFull(uc, b[:])
+		if err == nil {
+			_, err = uc.Write([]byte{msgInputOnly})
+		}
+		if err == nil {
+			_, err = io.ReadFull(uc, b[:])
+		}
+		_ = uc.Close()
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = offer.ServeInput(inputFunc(func() (*Input, error) { return &Input{}, nil }), time.Second)
+		done <- err
+	}()
+	c := Register(offer.path)
+	if c == nil {
+		t.Fatal("register")
+	}
+	if _, _, err = c.Take(&net.TCPAddr{}); err != nil {
+		t.Fatal(err)
+	}
+	in, err := c.TakeInput()
+	if err != nil || in == nil {
+		t.Fatal("retry", err)
+	}
+	defer in.Close()
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTransferBudgetStartsAfterDetach(t *testing.T) {
+	peerIs(t, protocolScript(t, StoreInputProtocol))
+	offer, err := NewOffer(socketPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := offer.ServeInput(inputFunc(func() (*Input, error) { time.Sleep(80 * time.Millisecond); return &Input{}, nil }), 50*time.Millisecond)
+		done <- err
+	}()
+	c := Register(offer.path)
+	if c == nil {
+		t.Fatal("register")
+	}
+	if _, _, err = c.Take(&net.TCPAddr{}); err != nil {
+		t.Fatal(err)
+	}
+	in, err := c.TakeInput()
+	if err != nil || in == nil {
+		t.Fatal("transfer inherited expired tail deadline", err)
+	}
+	in.Close()
+	if err = <-done; err != nil {
+		t.Fatal(err)
 	}
 }

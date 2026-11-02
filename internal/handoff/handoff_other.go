@@ -11,9 +11,9 @@ import (
 
 const Protocol = "go-carbon-read-handoff/1"
 
-const InputProtocol = "go-carbon-input-handoff/1"
-const SharedStoreProtocol = "go-carbon-shared-store-handoff/1"
-const StoreInputProtocol = "go-carbon-store-input-handoff/1"
+const InputProtocol = "go-carbon-input-handoff/2"
+const SharedStoreProtocol = "go-carbon-shared-store-handoff/2"
+const StoreInputProtocol = "go-carbon-store-input-handoff/2"
 
 var RegisterTimeout = 10 * time.Second
 

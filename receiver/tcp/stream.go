@@ -220,7 +220,7 @@ func (rcv *TCP) detachStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		return false
 	}
 	prefix = append(prefix, d.Pending()...)
-	return rcv.detach(tracked, r, rest, prefix)
+	return rcv.detachOwned(tracked, r, rest, prefix)
 }
 
 func (rcv *TCP) streamStat(send helper.StatCallback) {

@@ -5,6 +5,8 @@ import (
 	"hash/crc32"
 	"io"
 	"math"
+	"math/bits"
+	"slices"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -279,6 +281,22 @@ func (d *Decoder) Decode(frame []byte, visit Visit) (info FrameInfo, err error) 
 func (d *Decoder) Snapshot(dst []byte) ([]byte, error) {
 	if d.broken {
 		return dst, ErrBroken
+	}
+	if d.opts.Flags&FlagZstd == 0 {
+		// Avoid repeatedly growing/copying a multi-megabyte dictionary while
+		// hundreds of handlers snapshot together. Reserve an upper bound for
+		// raw entries and bounded frame headers; compressed state stays lazy.
+		size, packing := 0, 0
+		for i, e := range d.entries {
+			n := len(d.name(i))
+			packing += n + 27
+			size += n + (bits.Len(uint(n)|1)+6)/7 + 1
+			if e.last.valid {
+				size += 16
+			}
+		}
+		frames := min(len(d.entries), 2*(packing/d.opts.FrameSize+1))
+		dst = slices.Grow(dst, size+frames*(HeaderSize+20)+HeaderSize)
 	}
 	var z *zstd.Encoder
 	if d.opts.Flags&FlagZstd != 0 {

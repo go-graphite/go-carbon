@@ -756,9 +756,9 @@ func (app *App) storeInputHandoffPossible() bool {
 // handOffStoreInput hands a shared store's input to its successor. Reads stop
 // and the database closes first, since the successor serves reads only once
 // it opened the database; then the successor is released, and input keeps
-// flowing into the tail log until it takes the sockets. On any failure the
-// caller stops input as without handoff. It returns when reads stopped, or
-// zero if they are still open.
+// flowing into the tail log until it takes the sockets. A failure before Detach
+// stops input as without handoff; a failed detached transfer retains sockets for
+// retry. It returns when reads stopped, or zero if they are still open.
 func (app *App) handOffStoreInput(logger *zap.Logger, handover *inputHandover) time.Time {
 	offer, err := handoff.NewOffer(readHandoffPath(app.Config))
 	if err != nil {

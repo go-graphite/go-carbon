@@ -30,6 +30,7 @@ type Conn struct {
 	File     *os.File
 	Leftover []byte
 	conn     net.Conn
+	ahead    *readAheadConn
 }
 
 // handoffState tracks plaintext at line boundaries, independent zstd frames,
@@ -43,10 +44,12 @@ type handoffState struct {
 	handlers   sync.WaitGroup
 	acceptDone chan struct{}
 	detached   []Conn
+	replaying  atomic.Bool
 }
 
 type handoffConn struct {
-	conn net.Conn
+	conn  net.Conn
+	ahead *readAheadConn
 	// mu orders read deadline updates with interrupt, so a refreshed deadline
 	// cannot undo it.
 	mu     sync.Mutex
@@ -104,7 +107,12 @@ func (c *handoffConn) interrupt() {
 // the socket cannot be duplicated; the caller then closes it, losing its
 // unparsed input as a normal stop would.
 func (rcv *TCP) detach(c *handoffConn, reader *bufio.Reader, rest *bytes.Reader, partial []byte) bool {
-	leftover := append([]byte(nil), partial...)
+	return rcv.detachOwned(c, reader, rest, append([]byte(nil), partial...))
+}
+
+// Stream snapshots already own their backing storage. Do not copy the entire
+// dictionary again just to append the small amount of buffered wire input.
+func (rcv *TCP) detachOwned(c *handoffConn, reader *bufio.Reader, rest *bytes.Reader, leftover []byte) bool {
 	if n := reader.Buffered(); n > 0 {
 		buffered, _ := reader.Peek(n)
 		leftover = append(leftover, buffered...)
@@ -118,6 +126,9 @@ func (rcv *TCP) detach(c *handoffConn, reader *bufio.Reader, rest *bytes.Reader,
 }
 
 func (rcv *TCP) detachBytes(c *handoffConn, leftover []byte) bool {
+	if c.ahead != nil {
+		leftover = c.ahead.pending(leftover)
+	}
 	tcpConn, ok := c.conn.(*net.TCPConn)
 	if !ok {
 		return false
@@ -174,6 +185,8 @@ func (rcv *TCP) Detach() (*Handoff, error) {
 // NewInherited starts a plaintext/stream TCP receiver on input another process handed
 // over with Detach. Leftover bytes of each connection are parsed before
 // anything read from it. It takes ownership of the handoff's files.
+// Call FinishInputReplay once ordered recovery is complete to release startup
+// read-ahead; handlers finish restoring their dictionaries before switching.
 func NewInherited(name string, options *Options, store func(*points.Points), h *Handoff) (*TCP, error) {
 	closeAll := func() {
 		_ = h.Listener.Close()
@@ -201,6 +214,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		return nil, err
 	}
 	r.handoff.enabled = true
+	r.handoff.replaying.Store(true)
 	conns := make([]Conn, 0, len(h.Conns))
 	for _, c := range h.Conns {
 		conn, err := net.FileConn(c.File)
@@ -209,7 +223,10 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 			r.logger.Warn("inherited connection unusable", zap.Error(err))
 			continue
 		}
-		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn})
+		// The pump starts before the tracked handler configures its deadline.
+		// Give its initial read an explicitly unexpired deadline.
+		_ = conn.SetReadDeadline(time.Time{})
+		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn, ahead: newReadAheadConn(conn)})
 	}
 	err = r.listen(func() (*net.TCPListener, error) {
 		ln, err := net.FileListener(h.Listener)
@@ -226,11 +243,25 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	}, conns)
 	if err != nil {
 		for _, c := range conns {
-			_ = c.conn.Close()
+			_ = c.ahead.Close()
 		}
 		return nil, err
 	}
 	return r, nil
+}
+
+// FinishInputReplay releases startup read-ahead once the input tail is applied.
+// Each handler drains its buffered bytes before returning to direct TCP reads,
+// and releases its ring. Dictionary replay still precedes all socket parsing.
+func (rcv *TCP) FinishInputReplay() {
+	rcv.handoff.replaying.Store(false)
+	rcv.handoff.mu.Lock()
+	defer rcv.handoff.mu.Unlock()
+	for c := range rcv.handoff.conns {
+		if c.ahead != nil {
+			c.ahead.finish()
+		}
+	}
 }
 
 func sameAddr(got net.Addr, want *net.TCPAddr) bool {
