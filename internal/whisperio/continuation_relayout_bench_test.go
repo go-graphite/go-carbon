@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
 )
@@ -36,10 +37,13 @@ func (c *relayoutBenchmarkCodec) Create(_ context.Context, io store.Continuation
 // Run with -benchtime=1x. Setup/close are excluded. Each trial uses a fresh
 // on-disk v6 store, upgraded to v7, with many independently planned metrics.
 // CPU includes every process thread (also background flushes/compactions).
+// GO_CARBON_RELAYOUT_BENCH_MEMORY=1 uses the same Pebble tables on a memory
+// filesystem to isolate CPU scaling from the local device's write overhead.
 func BenchmarkRelayoutWorkers(b *testing.B) {
 	ctx := context.Background()
 	now := time.Unix(1793200000, 0)
 	clock := func() time.Time { return now }
+	memory := os.Getenv("GO_CARBON_RELAYOUT_BENCH_MEMORY") == "1"
 	metrics := 4096
 	if value := os.Getenv("GO_CARBON_RELAYOUT_BENCH_METRICS"); value != "" {
 		var err error
@@ -91,7 +95,7 @@ func BenchmarkRelayoutWorkers(b *testing.B) {
 	if err != nil || len(plan.Blocks) < 8 || plan.Bytes < 64<<10 {
 		b.Fatalf("fixture too small: blocks=%d bytes=%d err=%v", len(plan.Blocks), plan.Bytes, err)
 	}
-	b.Logf("fixture: %d metrics, %d blocks and %d relayout bytes per metric", metrics, len(plan.Blocks), plan.Bytes)
+	b.Logf("fixture: %d metrics, %d blocks and %d relayout bytes per metric; memory filesystem=%v", metrics, len(plan.Blocks), plan.Bytes, memory)
 	cpu := func() float64 {
 		var r syscall.Rusage
 		if err := syscall.Getrusage(syscall.RUSAGE_SELF, &r); err != nil {
@@ -109,6 +113,9 @@ func BenchmarkRelayoutWorkers(b *testing.B) {
 				opts := store.Options{ExactBlocks: true, Continuation: codec, RelayoutWorkers: workers,
 					Now: clock, SyncInterval: time.Hour, CacheSize: 128 << 20, MemTableSize: 32 << 20,
 					CompactionWorkers: 4, BytesPerSync: 64 << 20}
+				if memory {
+					opts = opts.WithFS(vfs.NewMem())
+				}
 				db, err := store.Open(dir, opts)
 				if err != nil {
 					b.Fatal(err)
