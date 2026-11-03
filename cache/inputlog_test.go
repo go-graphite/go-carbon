@@ -444,7 +444,7 @@ func drainInputLog(c *Cache) (stop func()) {
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
-		spare := make([][]inputlog.Entry, ShardCount)
+		spare := make([]inputlog.Batch, ShardCount)
 		for gen := uint64(1); ; gen++ {
 			select {
 			case <-done:
@@ -452,9 +452,9 @@ func drainInputLog(c *Cache) (stop func()) {
 			case <-time.After(10 * time.Millisecond):
 			}
 			for shard := range spare {
-				taken := c.TakeLogEntries(shard, gen, spare[shard])
-				clear(taken)
-				spare[shard] = taken[:0]
+				taken := c.TakeLogBatch(shard, gen, spare[shard])
+				clear(taken.Refs)
+				spare[shard] = taken
 			}
 			c.LogLowWater()
 		}
@@ -475,11 +475,11 @@ func TestInputLogRequeueMovesTracking(t *testing.T) {
 	c.TakeLogEntries(index, 5, nil)
 	failed, _ := c.PopNotConfirmed("metric")
 	c.AddPoint([]byte("metric"), 2, 2)
-	current := &shard.items.get("metric").Points
+	current := shard.items.get("metric").identity()
 	c.Requeue(failed)
-	requeued := &shard.items.get("metric").Points
-	if gen, ok := shard.log.first[requeued]; !ok || gen != 0 || len(shard.log.first) != 1 {
-		t.Fatalf("requeued item tracked %v at %d, %d tracked", ok, gen, len(shard.log.first))
+	requeued := shard.items.get("metric")
+	if !requeued.has(itemLogTracked) || requeued.logFirst != 0 || len(shard.log.first) != 0 || shard.log.items[0] != 1 {
+		t.Fatalf("requeued tracking: tracked=%v first=%d flight=%v counts=%v", requeued.has(itemLogTracked), requeued.logFirst, shard.log.first, shard.log.items)
 	}
 	if _, ok := shard.log.first[failed]; ok {
 		t.Fatal("failed batch still tracked")

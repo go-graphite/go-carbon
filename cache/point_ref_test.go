@@ -27,7 +27,7 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 		// Stream generations are hints, not cache data. Compare fields by
 		// reference so the input log's atomic state is never copied.
 		semantic := func(it *item) []any {
-			return []any{&it.Points, &it.compact, &it.log, it.spread, it.sparse, it.startup, it.slot, it.firstArrival, it.throttleState, it.indexGeneration}
+			return []any{it.Metric, it.pending, &it.compact, &it.StreamRef, it.spread, it.has(itemSparse), it.has(itemStartup), it.slot, it.firstArrival, it.throttleState(), it.indexGeneration, it.logFirst, it.has(itemLogTracked)}
 		}
 		am, bm := map[string][]any{}, map[string][]any{}
 		for name, it := range a.items.all {
@@ -55,17 +55,23 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 		if !reflect.DeepEqual(arrivals(a), arrivals(b)) {
 			t.Fatal("in-flight arrivals differ")
 		}
-		if a.log.gen != b.log.gen || a.log.dropped != b.log.dropped || !reflect.DeepEqual(a.log.items, b.log.items) || len(a.log.entries) != len(b.log.entries) {
+		if a.log.gen != b.log.gen || a.log.dropped != b.log.dropped || !reflect.DeepEqual(a.log.items, b.log.items) || a.log.entries.Len() != b.log.entries.Len() {
 			t.Fatal("input-log accounting differs")
 		}
-		for j, x := range a.log.entries {
-			y := b.log.entries[j]
+		otherEntries := b.log.entries.Entries(nil)
+		for j, x := range a.log.entries.Entries(nil) {
+			y := otherEntries[j]
 			if x.Metric() != y.Metric() || math.Float64bits(x.Value) != math.Float64bits(y.Value) || x.Timestamp != y.Timestamp {
 				t.Fatal("input-log point differs")
 			}
 		}
 		tracked := func(sh *Shard) map[string][]uint64 {
 			out := map[string][]uint64{}
+			for name, it := range sh.items.all {
+				if it.has(itemLogTracked) {
+					out[name] = append(out[name], it.logFirst)
+				}
+			}
 			for p, gen := range sh.log.first {
 				out[p.Metric] = append(out[p.Metric], gen)
 			}

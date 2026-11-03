@@ -238,15 +238,15 @@ func TestBlocksDumpWithConcurrentReads(t *testing.T) {
 	}
 }
 
-// Points the cache encoder appends decode with the dump's checked decoder to
-// the same values and encoder state, and the dump's encoder writes the same
-// bytes as the cache's.
-func TestCacheEncodingIsCompactDumpEncoding(t *testing.T) {
+// The memory codec never escapes under the old disk format's identifier.
+// Use the existing checked decoder as an independent rollback oracle.
+func TestCacheDumpKeepsByteEncoding(t *testing.T) {
 	t.Parallel()
 	r := rand.New(rand.NewPCG(1, 1))
 	reader := bufio.NewReaderSize(nil, points.MB)
-	for range 1000 {
-		var enc compactPoints
+	c := New()
+	for range 300 {
+		c.Pop("m")
 		var data []points.Point
 		ts := int64(r.Uint64() >> 2)
 		for range 1 + r.IntN(40) {
@@ -255,17 +255,24 @@ func TestCacheEncodingIsCompactDumpEncoding(t *testing.T) {
 			if r.IntN(3) == 0 {
 				v = float64(r.IntN(5))
 			}
-			enc.append(v, ts)
+			c.AddPoint([]byte("m"), v, ts)
 			data = append(data, points.Point{Value: v, Timestamp: ts})
 		}
-		if got := recovery.AppendCompactPoints(nil, data); string(got) != string(enc.buf) {
-			t.Fatal("dump encoder differs from the cache encoder")
-		}
-		raw := recovery.AppendCompactRecord(nil, "m", enc.buf, enc.n)
-		reader.Reset(bytes.NewReader(raw))
-		var got []points.Point
-		if err := recovery.ReadCompact(reader, func(p *points.Points) { got = p.Data }); err != nil || !sameValues(got, data) {
-			t.Fatal("decoded points differ", err)
+		err := c.DumpShardsCompact(0, ShardCount, func(name string, encoded []byte, n int) error {
+			if got := recovery.AppendCompactPoints(nil, data); !bytes.Equal(got, encoded) {
+				t.Fatal("disk encoding changed")
+			}
+			raw := recovery.AppendCompactRecord(nil, name, encoded, n)
+			reader.Reset(bytes.NewReader(raw))
+			var got []points.Point
+			if err := recovery.ReadCompact(reader, func(p *points.Points) { got = p.Data }); err != nil {
+				t.Fatal(err)
+			}
+			requireSameBits(t, got, data)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 }

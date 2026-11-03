@@ -97,7 +97,7 @@ func BenchmarkDeadlineLookup(b *testing.B) {
 	for i := range items {
 		items[i].firstArrival = time.Unix(1790000000+int64(i), 0)
 		items[i].spread = uint16(i)
-		first[&items[i].Points] = items[i].firstArrival
+		first[items[i].identity()] = items[i].firstArrival
 	}
 	for _, old := range []bool{true, false} {
 		b.Run(fmt.Sprintf("map=%t", old), func(b *testing.B) {
@@ -106,7 +106,7 @@ func BenchmarkDeadlineLookup(b *testing.B) {
 				it := &items[i%n]
 				var deadline time.Time
 				if old {
-					at := first[&it.Points]
+					at := first[it.identity()]
 					if it.count() < s.minPointsFor(it) && !at.IsZero() {
 						deadline = at.Add(s.delayFor(it))
 					}

@@ -1,0 +1,194 @@
+package inputlog
+
+import (
+	"bytes"
+	"fmt"
+	"math"
+	"reflect"
+	"slices"
+	"testing"
+
+	"github.com/go-graphite/go-carbon/points"
+)
+
+// The Entry encoder is unchanged. Cold, warm and stale atomic hints from the
+// two-column path must produce exactly its bytes, including after segment
+// changes and replacement references for the same name.
+func TestBatchMatchesEntryEncoding(t *testing.T) {
+	var legacy, columnar, appended streamEncoder
+	var a, b, c streamScratch
+	refs := make([]*StreamRef, 128)
+	for i := range refs {
+		refs[i] = NewStreamRef(fmt.Sprintf("batch.metric.%d", i))
+	}
+	for cycle := range 8 {
+		seq := uint64(cycle/3 + 1)
+		legacy.begin(seq)
+		columnar.begin(seq)
+		appended.begin(seq)
+		var entries []Entry
+		var batch, viaAppend Batch
+		runLength := 1
+		if cycle%2 != 0 {
+			runLength = 17
+		}
+		for i := range 4096 {
+			ref := refs[((i/runLength)*17+cycle)%len(refs)]
+			if i%31 == 0 {
+				ref = NewStreamRef(ref.Metric)
+			}
+			value := math.Float64frombits(uint64(i*cycle)*0x9e3779b97f4a7c15 + uint64(i))
+			ts := int64(i)*math.MaxInt32 - int64(cycle)*math.MaxInt64
+			entries = append(entries, ref.Entry(value, ts))
+			batch.Refs = append(batch.Refs, ref)
+			batch.Points = append(batch.Points, points.Point{Value: value, Timestamp: ts})
+			viaAppend.Append(ref, value, ts)
+		}
+		for _, e := range entries {
+			legacy.add(&a, e)
+		}
+		// References now hold another encoder's hints, possibly for another ID.
+		for i, p := range batch.Points {
+			columnar.add(&b, batch.Refs[i].Entry(p.Value, p.Timestamp))
+		}
+		appended.addBatch(&c, &viaAppend)
+		var oldFrames, newFrames, appendedFrames [][]byte
+		legacy.flush(&a, nil, func(raw []byte, _ int) []byte {
+			oldFrames = append(oldFrames, bytes.Clone(raw))
+			return raw
+		})
+		columnar.flush(&b, nil, func(raw []byte, _ int) []byte {
+			newFrames = append(newFrames, bytes.Clone(raw))
+			return raw
+		})
+		appended.flush(&c, nil, func(raw []byte, _ int) []byte { appendedFrames = append(appendedFrames, bytes.Clone(raw)); return raw })
+		if !reflect.DeepEqual(oldFrames, appendedFrames) {
+			t.Fatalf("cycle %d batch append changed durable bytes", cycle)
+		}
+		if !reflect.DeepEqual(oldFrames, newFrames) {
+			t.Fatalf("cycle %d changed durable bytes", cycle)
+		}
+	}
+}
+
+type batchTestSource struct {
+	*fakeSource
+	spares []Batch
+}
+
+func (s *batchTestSource) TakeLogEntries(int, uint64, []Entry) []Entry {
+	panic("BatchSource fell back to row expansion")
+}
+
+func (s *batchTestSource) TakeLogBatch(shard int, gen uint64, spare Batch) Batch {
+	entries := s.fakeSource.TakeLogEntries(shard, gen, nil)
+	batch := s.spares[shard]
+	s.spares[shard] = spare
+	batch.Refs, batch.Points = batch.Refs[:0], batch.Points[:0]
+	for _, e := range entries {
+		batch.Refs = append(batch.Refs, e.Ref)
+		batch.Points = append(batch.Points, points.Point{Value: e.Value, Timestamp: e.Timestamp})
+	}
+	return batch
+}
+
+// Use the real group-commit driver, then reopen its segments through the
+// ordinary reader. Every consumed spare must have released its references.
+func TestBatchSourceReplayAndSpareOwnership(t *testing.T) {
+	src := &batchTestSource{fakeSource: newFakeSource(), spares: make([]Batch, testShards)}
+	src.refs = map[string]*StreamRef{}
+	dir := t.TempDir()
+	l, _, _ := reopen(t, dir, Options{}, src)
+	defer l.Kill()
+	want := recorded{}
+	for cycle := range 4 {
+		for i := range 1000 {
+			name := fmt.Sprintf("batch.metric.%d", i%64)
+			v, ts := float64(cycle*1000+i), int64(cycle*1000-i)
+			src.add(name, v, ts)
+			want.add(name, v, ts)
+		}
+		if err := l.Sync(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, spare := range l.spareBatches {
+		if len(spare.Points) != 0 || len(spare.Refs) != 0 || slices.ContainsFunc(spare.Refs[:cap(spare.Refs)], func(r *StreamRef) bool { return r != nil }) {
+			t.Fatal("consumed batch retained a popped item")
+		}
+	}
+	l.Kill()
+	reader, err := Open(dir, withTestDefaults(Options{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	got, stats := replayAll(t, reader)
+	equalRecorded(t, got, want)
+	if stats.Corrupt != 0 || stats.Points != 4000 {
+		t.Fatalf("replay stats %+v", stats)
+	}
+}
+
+// Wraparound timestamps and all float bits must survive spare reuse.
+func TestBatchRoundTripAndReuse(t *testing.T) {
+	var b Batch
+	refs := []*StreamRef{NewStreamRef("a"), NewStreamRef("b")}
+	for cycle := 0; cycle < 4; cycle++ {
+		var want []Entry
+		for i := 0; i < 4096; i++ {
+			ref := refs[(i/17)%2]
+			v := math.Float64frombits(uint64(i) * 0x9e3779b97f4a7c15)
+			ts := int64(uint64(i) * 0xd6e8feb86659fd93)
+			if i%3 == 0 {
+				v = math.Copysign(0, float64(cycle%2*2-1))
+				ts = 0
+			}
+			b.Append(ref, v, ts)
+			want = append(want, ref.Entry(v, ts))
+		}
+		data := make([]points.Point, 4096)
+		for i := range data {
+			data[i] = points.Point{Value: math.Float64frombits(uint64(i) * 0xd6e8feb86659fd93), Timestamp: int64(uint64(i) * 0x9e3779b97f4a7c15)}
+			want = append(want, refs[0].Entry(data[i].Value, data[i].Timestamp))
+		}
+		b.AppendPoints(refs[0], data)
+		got := b.Entries(nil)
+		if b.Len() != len(want) || len(got) != len(want) {
+			t.Fatal("point count")
+		}
+		for i, e := range got {
+			w := want[i]
+			if e.Ref != w.Ref || math.Float64bits(e.Value) != math.Float64bits(w.Value) || e.Timestamp != w.Timestamp {
+				t.Fatalf("point %d changed", i)
+			}
+		}
+		b.Reset()
+		if b.Len() != 0 || slices.ContainsFunc(b.Refs[:cap(b.Refs)], func(r *StreamRef) bool { return r != nil }) {
+			t.Fatal("reset retained a point or reference")
+		}
+	}
+}
+
+func TestBatchRecycleReleasesHighWater(t *testing.T) {
+	var b Batch
+	refs := []*StreamRef{NewStreamRef("a"), NewStreamRef("b")}
+	for i := 0; i < 10000; i++ {
+		b.Append(refs[i%2], 42, int64(i))
+	}
+	peak := b.Bytes()
+	b.Reset()
+	b.Append(refs[0], 123, 42)
+	b.Recycle()
+	if b.Len() != 0 || b.Bytes() >= peak/4 || b.Bytes() > 4096 {
+		t.Fatalf("burst capacity retained: %d -> %d", peak, b.Bytes())
+	}
+	if slices.ContainsFunc(b.Refs[:cap(b.Refs)], func(r *StreamRef) bool { return r != nil }) {
+		t.Fatal("recycled buffer retained metric")
+	}
+	b.Append(refs[1], math.Copysign(0, -1), math.MinInt64)
+	got := b.Entries(nil)
+	if len(got) != 1 || got[0].Ref != refs[1] || math.Float64bits(got[0].Value) != 1<<63 || got[0].Timestamp != math.MinInt64 {
+		t.Fatal("trimmed buffer changed point")
+	}
+}

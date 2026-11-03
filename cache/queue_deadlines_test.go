@@ -95,6 +95,7 @@ func TestQueueDeadlinesProbeAcrossRegionAndRehash(t *testing.T) {
 	// Force a probe across the 256-slot boundary using real hashes, so ready
 	// invalidates the item's actual region rather than its initial bucket.
 	m.slots = make([]itemSlot, 1024)
+	m.control = make([]byte, 1024)
 	var colliding []*item
 	for i := 0; len(colliding) < 3; i++ {
 		name := fmt.Sprintf("collision.%d", i)
@@ -175,7 +176,8 @@ func TestQueueDeadlinesSparseGrowth(t *testing.T) {
 	c.AddPoint([]byte("sparse.metric"), 1, 1)
 	shard := c.GetShard("sparse.metric")
 	it := shard.items.get("sparse.metric")
-	it.sparse, it.slot = true, 1<<30 // An earlier sparse deadline.
+	it.setFlag(itemSparse, true) // An earlier sparse deadline.
+	it.slot = 1 << 30
 	checkQueueDeadlines(t, c, time.Now())
 	c.AddPoint([]byte("sparse.metric"), 2, 2)
 	c.AddPoint([]byte("sparse.metric"), 3, 3)

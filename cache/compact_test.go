@@ -54,8 +54,8 @@ func requireSameBits(t testing.TB, got, want []points.Point) {
 	}
 }
 
-// requireRoundTrip also decodes every prefix from the buffer as it was when
-// that prefix was complete, which is what an unlocked reader sees.
+// requireRoundTrip decodes snapshots as an unlocked reader sees them: every
+// short prefix and a sample of longer prefixes, keeping fuzz work linear.
 func requireRoundTrip(t testing.TB, data []points.Point) {
 	t.Helper()
 	var c compactPoints
@@ -64,16 +64,19 @@ func requireRoundTrip(t testing.TB, data []points.Point) {
 		c.append(p.Value, p.Timestamp)
 		snapshots = append(snapshots, c)
 	}
-	decoded := appendDecoded(nil, c.buf, c.n)
+	decoded := c.appendDecoded(nil)
 	requireSameBits(t, decoded, data)
 	for i, s := range snapshots {
+		if len(data) > 128 && i > 64 && i != len(data)-1 && i%max(1, len(data)/32) != 0 {
+			continue
+		}
 		if s.n != i+1 {
 			t.Fatalf("snapshot %d holds %d points", i, s.n)
 		}
-		requireSameBits(t, appendDecoded(decoded[:0], s.buf, s.n), data[:i+1])
+		requireSameBits(t, s.appendDecoded(decoded[:0]), data[:i+1])
 	}
-	if len(data) > 0 && firstTimestamp(c.buf) != data[0].Timestamp {
-		t.Fatalf("first timestamp %d, want %d", firstTimestamp(c.buf), data[0].Timestamp)
+	if len(data) > 0 && c.firstTimestamp() != data[0].Timestamp {
+		t.Fatalf("first timestamp %d, want %d", c.firstTimestamp(), data[0].Timestamp)
 	}
 }
 
@@ -138,17 +141,15 @@ func TestCompactRoundTripRandom(t *testing.T) {
 	}
 }
 
-// The encoding is sized for regular series: a repeated value at a regular
-// step costs one byte.
+// Repeated values at a regular step cost two bits after the first step.
 func TestCompactSize(t *testing.T) {
 	data := make([]points.Point, 100)
 	for i := range data {
 		data[i] = points.Point{Value: 42, Timestamp: 1_760_000_000 + 60*int64(i)}
 	}
 	c := encodePoints(data)
-	// The first point stores the full timestamp and value, the second its step.
-	if want := 1 + 5 + 2 + 2 + 98; len(c.buf) != want {
-		t.Fatalf("encoded %d bytes, want %d", len(c.buf), want)
+	if got := c.encodedBytes(); got > 40 {
+		t.Fatalf("encoded %d bytes, want <=40", got)
 	}
 }
 
@@ -163,10 +164,10 @@ func TestCompactAppendAtCapacity(t *testing.T) {
 	}
 	want := compactPoints{buf: make([]byte, 0, 1024)}
 	want.appendPoints(data)
-	for capacity := 0; capacity <= len(want.buf)+maxPointBytes; capacity++ {
+	for capacity := 0; capacity <= len(want.buf)+32; capacity++ {
 		c := compactPoints{buf: make([]byte, 0, capacity)}
 		c.appendPoints(data)
-		if !slices.Equal(c.buf, want.buf) {
+		if !slices.Equal(c.buf, want.buf) || c.tail != want.tail || c.used != want.used {
 			t.Fatalf("capacity %d: %x, want %x", capacity, c.buf, want.buf)
 		}
 	}
@@ -187,8 +188,22 @@ func FuzzCompactRoundTrip(f *testing.F) {
 	for _, bits := range specialBits {
 		f.Add(seed(60, bits, 60, bits^1, 0, bits))
 	}
+	for _, kind := range []string{"counter", "stable", "rounded", "float"} {
+		for _, data := range compactWorkload(kind, 100)[:2] {
+			var raw []byte
+			for _, p := range data {
+				raw = binary.LittleEndian.AppendUint64(raw, uint64(p.Timestamp))
+				raw = binary.LittleEndian.AppendUint64(raw, math.Float64bits(p.Value))
+			}
+			f.Add(raw)
+		}
+	}
 	f.Fuzz(func(t *testing.T, raw []byte) {
-		// Each 16 bytes are a timestamp and a value's bits.
+		// Bound the snapshot allocations per fuzz input, while covering
+		// long series and every word offset. Each pair is timestamp/value bits.
+		if len(raw) > 16*1024 {
+			raw = raw[:16*1024]
+		}
 		data := make([]points.Point, len(raw)/16)
 		for i := range data {
 			ts := int64(binary.LittleEndian.Uint64(raw[16*i:]))
@@ -389,6 +404,183 @@ func BenchmarkCompactDecode(b *testing.B) {
 	b.SetBytes(int64(c.n))
 	out := make([]points.Point, 0, c.n)
 	for i := 0; i < b.N; i++ {
-		out = appendDecoded(out[:0], c.buf, c.n)
+		out = c.appendDecoded(out[:0])
+	}
+}
+
+// Every bit width at every offset, including the 64-bit spill path. Keeping
+// snapshots alive also checks that filling the tail never rewrites old bytes.
+func TestCompactBitWords(t *testing.T) {
+	rng := rand.New(rand.NewPCG(17, 23))
+	for offset := uint8(0); offset < 64; offset++ {
+		var c compactPoints
+		if offset != 0 {
+			c.put(0, offset)
+		}
+		var values []uint64
+		var widths []uint8
+		for width := uint8(1); width <= 64; width++ {
+			v := rng.Uint64() & (^uint64(0) >> (64 - width))
+			c.put(v, width)
+			values = append(values, v)
+			widths = append(widths, width)
+			saved := slices.Clone(c.buf)
+			snapshot := c
+			c.put(rng.Uint64(), 64)
+			if !slices.Equal(saved, c.buf[:len(saved)]) {
+				t.Fatal("published word changed")
+			}
+			c = snapshot
+		}
+		r := bitReader{buf: c.buf, tail: c.tail}
+		if offset != 0 {
+			r.get(offset)
+		}
+		for i, width := range widths {
+			got := uint64(0)
+			if width == 1 {
+				got = r.bit()
+			} else {
+				got = r.get(width)
+			}
+			if got != values[i] {
+				t.Fatalf("offset=%d width=%d: %#x want %#x", offset, width, got, values[i])
+			}
+		}
+	}
+}
+
+func TestCompactNumericRuns(t *testing.T) {
+	var data []points.Point
+	ts := int64(1_760_000_000)
+	add := func(v float64) { ts += 60; data = append(data, points.Point{Value: v, Timestamp: ts}) }
+	// Enter decimals from zero, change scales, then leave and reenter numeric
+	// runs. Large integer deltas exercise wraparound and every short-code edge.
+	for _, step := range []float64{1, 0.01, 0.001} {
+		add(0)
+		for i := -40; i < 100; i++ {
+			add(float64(i) * step)
+		}
+	}
+	for _, v := range []float64{-0x1p63, 0x1p63 - 1024, 0x1p53, 0x1p53 + 2, 0x1p63, math.Inf(1), math.Copysign(0, -1), 0, 1, 1, 2, 4, 7, 11, 16, 22, 29, math.Float64frombits(0x7ff8000000000042), 0.1, 0.11, 0, 0.01} {
+		add(v)
+	}
+	for _, d := range []int64{-65536, -32769, -32768, -129, -128, -9, -8, -1, 0, 1, 7, 8, 127, 128, 32767, 32768, math.MinInt64, math.MaxInt64} {
+		add(float64(d))
+		add(float64(-d))
+		add(0)
+	}
+	requireRoundTrip(t, data)
+}
+
+func TestCompactTimestampCodeBoundaries(t *testing.T) {
+	var data []points.Point
+	var ts, delta int64
+	for _, change := range []int64{-2049, -2048, -257, -256, -65, -64, -1, 0, 1, 63, 64, 255, 256, 2047, 2048, math.MaxInt64, math.MinInt64} {
+		delta += change
+		ts += delta
+		data = append(data, points.Point{Value: 1, Timestamp: ts})
+	}
+	requireRoundTrip(t, data)
+}
+
+func TestCompactSnapshotsWithPartialWords(t *testing.T) {
+	var c compactPoints
+	c.buf = make([]byte, 0, 4096)
+	var data []points.Point
+	var snapshots []compactPoints
+	var published [][]byte
+	for i := 0; i < 500; i++ {
+		value := float64(i)
+		if i%3 == 0 {
+			value = math.Float64frombits(uint64(i) * 0x9e3779b97f4a7c15)
+		}
+		p := points.Point{Value: value, Timestamp: int64(i)}
+		c.append(p.Value, p.Timestamp)
+		data = append(data, p)
+		snapshots = append(snapshots, c)
+		published = append(published, slices.Clone(c.buf))
+	}
+	for i := range snapshots {
+		if !slices.Equal(snapshots[i].buf, published[i]) {
+			t.Fatalf("snapshot %d bytes changed", i)
+		}
+		requireSameBits(t, snapshots[i].appendDecoded(nil), data[:i+1])
+	}
+}
+
+func TestCompactMixedCapacity(t *testing.T) {
+	for _, n := range []int{100, 4096} {
+		data := compactWorkload("mix", n)
+		capacity := 0
+		for _, p := range data {
+			c := encodePoints(p)
+			capacity += cap(c.buf) + 8 // charge the entire unfinished word, even when empty
+		}
+		got := float64(capacity) / float64(n*len(data))
+		t.Logf("n=%d retained stream capacity including tail %.4f B/point", n, got)
+		if got > 1.90 {
+			t.Fatalf("retained stream capacity including tail %.4f B/point exceeds 1.90", got)
+		}
+	}
+}
+
+func TestCompactIntegerDeltaOfDelta(t *testing.T) {
+	data := make([]points.Point, 1000)
+	value := int64(1_000_000)
+	for i := range data {
+		value += 1000 + int64(i%3)
+		data[i] = points.Point{Value: float64(value), Timestamp: int64(i)}
+	}
+	c := encodePoints(data)
+	requireSameBits(t, c.appendDecoded(nil), data)
+	// The large delta changes by only one or two; delta-of-delta is smaller
+	// than either a new integer delta or the float XOR window.
+	if c.encodedBytes() > 2*len(data) {
+		t.Fatalf("delta-of-delta run uses %.3f B/point", float64(c.encodedBytes())/float64(len(data)))
+	}
+}
+
+func TestCompactNumericRunAfterRawEscape(t *testing.T) {
+	data := make([]points.Point, 1000)
+	for i := range data {
+		v := float64(i%100+1) / 100
+		if i%100 == 0 {
+			v = math.Float64frombits(0x7ff8000000000042)
+		}
+		data[i] = points.Point{Value: v, Timestamp: int64(i)}
+	}
+	c := encodePoints(data)
+	requireSameBits(t, c.appendDecoded(nil), data)
+	if c.encodedBytes() > 2*len(data) {
+		t.Fatalf("raw escape prevents numeric recovery: %.3f B/point", float64(c.encodedBytes())/float64(len(data)))
+	}
+}
+
+// Exercise short numeric controls at many word offsets, including transitions
+// to raw floats and back. The oracle is the exact source point/float bit stream;
+// snapshots also verify the immutable-prefix contract on these fast paths.
+func TestCompactNumericFastPathsAcrossWords(t *testing.T) {
+	for prefix := 0; prefix < 64; prefix++ {
+		for _, step := range []float64{1, 0.01, 0.001} {
+			data := make([]points.Point, 0, 256)
+			ts := int64(1_760_000_000)
+			add := func(v float64) { ts += 60; data = append(data, points.Point{Value: v, Timestamp: ts}) }
+			for i := 0; i < prefix; i++ {
+				add(math.Float64frombits(uint64(i) * 0x9e3779b97f4a7c15))
+			}
+			value := 0
+			for i := 0; i < 160; i++ {
+				if i%31 == 0 {
+					add(math.Float64frombits(specialBits[i%len(specialBits)]))
+				}
+				if i%29 == 0 {
+					ts -= 1
+				}
+				value += i % 100
+				add(float64(value) * step)
+			}
+			requireRoundTrip(t, data)
+		}
 	}
 }
