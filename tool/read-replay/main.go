@@ -146,17 +146,18 @@ func runCLI(ctx context.Context, args []string, out, errOut io.Writer) int {
 		return fail(err)
 	}
 	report := summary{Config: c, Files: f.Args(), Input: input, Plan: p, DryRun: dry}
-	if ctx.Err() != nil {
+	switch {
+	case ctx.Err() != nil:
 		report.Reason = "signal"
 		report.Started, report.Stopped, report.Ended = loadStarted, time.Now(), time.Now()
 		_ = json.NewEncoder(out).Encode(struct {
 			Type   string `json:"type"`
 			Reason string `json:"stop_reason"`
 		}{"summary", "signal"})
-	} else if dry {
+	case dry:
 		printDryRun(out, requests, input, p)
 		report.Reason = "dry_run"
-	} else {
+	default:
 		client, transport := newClient(c)
 		report = runReplay(ctx, c, requests, s, report, client, out)
 		transport.CloseIdleConnections()

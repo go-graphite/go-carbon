@@ -3,6 +3,7 @@ package restartcpu
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -201,7 +202,7 @@ func TestRequiredCheckpointValidationSharesCPUWithActiveWriters(t *testing.T) {
 		time.Sleep(time.Second)
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() { time.Sleep(time.Millisecond); cancel() }()
-		if err := b.WaitCheckpoint(ctx); err != context.Canceled {
+		if err := b.WaitCheckpoint(ctx); !errors.Is(err, context.Canceled) {
 			t.Fatal("checkpoint bypassed shared CPU debt", err)
 		}
 	})

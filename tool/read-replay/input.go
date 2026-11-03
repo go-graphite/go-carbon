@@ -206,7 +206,7 @@ func readLog(ctx context.Context, path string, consume func([]byte, bool)) error
 		if !oversized {
 			line = append(line, part...)
 		}
-		if err == bufio.ErrBufferFull {
+		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
 		if len(line) > 0 || oversized {

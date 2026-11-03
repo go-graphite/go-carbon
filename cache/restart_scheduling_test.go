@@ -1,11 +1,12 @@
 package cache
 
 import (
-	"github.com/go-graphite/go-carbon/points"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestWarmFirstQueuePartitionsByReadinessThenAge(t *testing.T) {

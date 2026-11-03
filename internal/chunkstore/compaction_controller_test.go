@@ -22,7 +22,7 @@ func sampleCompactionRates(c *compactionController, dt time.Duration, ingress, o
 }
 
 func learnedCompactionController() *compactionController {
-	c := newCompactionController(newCompactionPacer(0), -1, time.Now())
+	c := newCompactionController(newCompactionPacer(0), time.Now())
 	for range 60 {
 		sampleCompactionRates(c, time.Minute, 20<<20, 60<<20, 1<<30)
 	}
@@ -31,7 +31,7 @@ func learnedCompactionController() *compactionController {
 
 func TestCompactionControllerLearnsIngress(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newCompactionController(newCompactionPacer(0), -1, time.Now())
+		c := newCompactionController(newCompactionPacer(0), time.Now())
 		if st := c.stats(); st.rate != 0 || st.bypass != "warmup" || st.target != compactionPacingFloor {
 			t.Fatalf("new controller: %+v", st)
 		}
@@ -196,7 +196,7 @@ func TestCompactionControllerStallCooldownAndReload(t *testing.T) {
 // The bucket's byte-for-byte output and timing have separate fake-time tests.
 func TestCompactionControllerHourlyPulse(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newCompactionController(newCompactionPacer(0), -1, time.Now())
+		c := newCompactionController(newCompactionPacer(0), time.Now())
 		var ingress, output, queued, peak, rawPeak, total, maxDebt uint64
 		for minute := range 4 * 60 {
 			in := uint64(10 << 20)
@@ -391,7 +391,7 @@ func TestCompactionControllerHeadroomScalesBudget(t *testing.T) {
 
 func TestCompactionControllerZeroWarmup(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		c := newCompactionController(newCompactionPacer(0), -1, time.Now())
+		c := newCompactionController(newCompactionPacer(0), time.Now())
 		c.setWarmup(0)
 		if st := c.stats(); st.rate != 0 || st.bypass != "warmup" || st.warmup != 0 {
 			t.Fatalf("zero warmup paced before any sample: %+v", st)
@@ -407,7 +407,7 @@ func TestCompactionControllerZeroWarmup(t *testing.T) {
 func TestCompactionControllerWarmupReloadKeepsStart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := time.Now()
-		c := newCompactionController(newCompactionPacer(0), -1, started)
+		c := newCompactionController(newCompactionPacer(0), started)
 		for range 10 {
 			sampleCompactionRates(c, time.Minute, 20<<20, 60<<20, 1<<30)
 		}

@@ -187,13 +187,13 @@ func TestFlushRateRejectsInvalid(t *testing.T) {
 	}
 }
 
-// writeFlushPayload writes n incompressible 4 KiB values. Pebble's first
-// memtable holds 256 KiB, so n <= 48 keeps one memtable: a second queued one
-// would release pacing.
-func writeFlushPayload(t *testing.T, db *Store, generation, n int) {
+// writeFlushPayload writes 40 incompressible 4 KiB values. Pebble's first
+// memtable holds 256 KiB, so at most 48 keeps one memtable: a second queued
+// one would release pacing.
+func writeFlushPayload(t *testing.T, db *Store, generation int) {
 	t.Helper()
 	value := make([]byte, 4<<10)
-	for i := range n {
+	for i := range 40 {
 		_, _ = rand.Read(value)
 		if err := db.db.Set(fmt.Appendf(nil, "p%06d", i), append([]byte{byte(generation)}, value...), pebble.NoSync); err != nil {
 			t.Fatal(err)
@@ -213,7 +213,7 @@ func TestFlushPacingStore(t *testing.T) {
 		t.Fatalf("fixed flush rate not applied: %+v", st)
 	}
 	// 40 x 4 KiB = 160 KiB of flush output: about one second at the budget.
-	writeFlushPayload(t, db, 0, 40)
+	writeFlushPayload(t, db, 0)
 	start := time.Now()
 	done, err := db.AsyncFlush()
 	if err != nil {
@@ -230,7 +230,7 @@ func TestFlushPacingStore(t *testing.T) {
 	}
 	// A caller waiting on Flush gets an unpaced flush.
 	paced := st.FlushPacerBytes
-	writeFlushPayload(t, db, 1, 40)
+	writeFlushPayload(t, db, 1)
 	start = time.Now()
 	if err := db.Flush(); err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func TestFlushPacingUrgentFlushReleasesPacedFlush(t *testing.T) {
 	}
 	defer db.Close()
 	// 160 KiB at 16 KiB/s would take ten seconds.
-	writeFlushPayload(t, db, 0, 40)
+	writeFlushPayload(t, db, 0)
 	background, err := db.AsyncFlush()
 	if err != nil {
 		t.Fatal(err)
@@ -303,7 +303,7 @@ func TestFlushPacingStartsAfterOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Left in the WAL by Close, so the next Open replays and flushes it.
-	writeFlushPayload(t, db, 0, 40)
+	writeFlushPayload(t, db, 0)
 	if err := db.db.LogData(nil, pebble.Sync); err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestFlushPacingColdPackDowngrade(t *testing.T) {
 	}
 	// The format downgrade waits for a flush before publishing its marker.
 	// This payload would take ten seconds at the configured flush rate.
-	writeFlushPayload(t, db, 0, 40)
+	writeFlushPayload(t, db, 0)
 	done := make(chan error, 1)
 	go func() { done <- db.DowngradeColdPack(ctx) }()
 	select {
