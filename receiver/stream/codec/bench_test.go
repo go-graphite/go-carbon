@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"strconv"
 	"testing"
 
+	testseries "github.com/go-graphite/go-carbon/internal/testutil/series"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -31,21 +31,7 @@ func syntheticNames(n int) [][]byte {
 	return names
 }
 func syntheticValue(id, epoch int) float64 {
-	switch id % 4 {
-	case 0:
-		return float64(id + epoch*100)
-	case 1:
-		return float64((id+epoch)%10000) / 100
-	case 2:
-		return float64(id % 100) // stable gauges
-	default:
-		// Deterministic full-mantissa random floats; no PRNG work in the benchmark.
-		x := uint64(id) + uint64(epoch)*0x9e3779b97f4a7c15
-		x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-		x = (x ^ (x >> 27)) * 0x94d049bb133111eb
-		x ^= x >> 31
-		return math.Float64frombits(x&((1<<52)-1) | 0x3ff0000000000000)
-	}
+	return testseries.Value(id%4, id, epoch)
 }
 
 func BenchmarkStream(b *testing.B) {

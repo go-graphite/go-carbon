@@ -1,7 +1,6 @@
 package cache
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"sync"
@@ -320,23 +319,16 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	if shard.items.get(name) != nil {
 		return fmt.Errorf("metric %q was written before pending recovery", name)
 	}
-	// A compact dump's first record is the item's encoding already: copy
-	// it instead of decoding and encoding again. Other records' points are
-	// decoded into the shard's scratch and appended. The slot was found by
-	// name, or name was read from it, so it need not be compared again;
-	// the bundle still checks that every record of the slot is named alike.
-	var head recovery.CompactRecord
-	tail, err := r.bundle.ReadCompactAs(slot, name, shard.claimData[:0], func(rec recovery.CompactRecord) { head = rec })
-	shard.claimData = tail[:0]
+	// All supported disk formats are decoded by recovery's checked reader,
+	// then appended in the memory-only bit format. A rollback sees the same
+	// disk bytes it did before this codec was introduced.
+	data, err := r.bundle.ReadCompactAs(slot, name, shard.claimData[:0], nil)
+	shard.claimData = data[:0]
 	if err != nil {
 		return err
 	}
 	values := newItem(name, 0)
-	if head.N > 0 {
-		values.compact = compactPoints{buf: bytes.Clone(head.Data), n: head.N,
-			ts: head.State.Timestamp, delta: head.State.Delta, bits: head.State.Bits}
-	}
-	values.compact.appendPoints(tail)
+	values.compact.appendPoints(data)
 	if cap(shard.claimData) > maxClaimScratch {
 		shard.claimData = nil
 	}

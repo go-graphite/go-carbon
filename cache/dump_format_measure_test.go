@@ -88,12 +88,16 @@ func TestMeasureDumpFormats(t *testing.T) {
 		return buf
 	}
 	compact := func(shard *Shard, buf []byte) []byte {
+		var decoded []points.Point
+		var encoded []byte
 		for name, it := range shard.items.all {
+			decoded = it.compact.appendDecoded(decoded[:0])
+			encoded = recovery.AppendCompactPoints(encoded[:0], decoded)
 			buf = binary.AppendUvarint(buf, uint64(len(name)))
 			buf = append(buf, name...)
 			buf = binary.AppendUvarint(buf, uint64(it.compact.n))
-			buf = binary.AppendUvarint(buf, uint64(len(it.compact.buf)))
-			buf = append(buf, it.compact.buf...)
+			buf = binary.AppendUvarint(buf, uint64(len(encoded)))
+			buf = append(buf, encoded...)
 		}
 		return buf
 	}
@@ -107,7 +111,7 @@ func TestMeasureDumpFormats(t *testing.T) {
 		for name, it := range shard.items.all {
 			buf = binary.AppendUvarint(buf, uint64(len(name)))
 			buf = append(buf, name...)
-			scratch = appendDecoded(scratch[:0], it.compact.buf, it.compact.n)
+			scratch = it.compact.appendDecoded(scratch[:0])
 			lastTs, lastBits := prevTs, uint64(0)
 			for j, p := range scratch {
 				d := 0

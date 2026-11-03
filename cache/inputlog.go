@@ -209,7 +209,7 @@ func (c *Cache) LogLowWater() uint64 {
 // changes it under this lock.
 func (shard *Shard) loggedPoints(p *points.Points) ([]points.Point, *inputlog.StreamRef) {
 	if values := shard.items.get(p.Metric); values != nil && &values.Points == p {
-		return appendDecoded(nil, values.compact.buf, values.compact.n), &values.log
+		return values.compact.appendDecoded(nil), &values.log
 	}
 	return p.Data, nil
 }

@@ -24,7 +24,7 @@ func (shard *Shard) visitLocked(scratch *points.Points, write func(*points.Point
 	}
 	for _, values := range shard.items.all {
 		scratch.Metric = values.Metric
-		scratch.Data = appendDecoded(scratch.Data[:0], values.compact.buf, values.compact.n)
+		scratch.Data = values.compact.appendDecoded(scratch.Data[:0])
 		if err := write(scratch); err != nil {
 			return err
 		}
@@ -170,14 +170,15 @@ func (shard *Shard) visitNamesLocked(visit func(string) error) error {
 }
 
 // DumpShardsCompact visits shards [lo, hi) like DumpShards, passing each
-// record's points in the compact encoding (see recovery.FormatCompact):
-// queued metrics as cached, without decoding, and in-flight batches encoded
-// into scratch. write must not retain data.
+// record in the existing recovery.FormatCompact byte encoding. The bit-packed
+// memory format is deliberately never persisted, so older binaries can read
+// every dump after a rollback. write must not retain data.
 func (c *Cache) DumpShardsCompact(lo, hi int, write func(metric string, data []byte, n int) error) error {
 	var scratch []byte
+	var decoded []points.Point
 	for _, shard := range c.data[lo:hi] {
 		shard.mu.RLock()
-		err := shard.visitCompactLocked(&scratch, write, write)
+		err := shard.visitCompactLocked(&scratch, &decoded, write)
 		shard.mu.RUnlock()
 		if err != nil {
 			return err
@@ -186,44 +187,26 @@ func (c *Cache) DumpShardsCompact(lo, hi int, write func(metric string, data []b
 	return nil
 }
 
-// DumpShardsCompactTo writes a stable cache into a dump segment. For block
-// dumps it borrows queued point bytes while the segment sorts names, but
-// still copies the reused encoding scratch of in-flight batches. The owner
-// must stop persistence and pending recovery and divert input before calling
-// it, and keep those writers stopped until WriteSegments returns. Reads may
-// continue: Get only decodes queued bytes. DumpStop supplies this boundary.
-// Call DumpShardsCompact for callbacks without this lifetime guarantee.
+// DumpShardsCompactTo transcodes queued points into the stable disk codec.
+// Segment must copy the reused scratch, including for block dumps.
 func (c *Cache) DumpShardsCompactTo(lo, hi int, out *recovery.Segment) error {
-	if out.Format() != recovery.FormatBlocks {
-		return c.DumpShardsCompact(lo, hi, out.WriteCompact)
-	}
-	var scratch []byte
-	for _, shard := range c.data[lo:hi] {
-		shard.mu.RLock()
-		err := shard.visitCompactLocked(&scratch, out.WriteCompact, out.WriteCompactBorrowed)
-		shard.mu.RUnlock()
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	return c.DumpShardsCompact(lo, hi, out.WriteCompact)
 }
 
-func (shard *Shard) visitCompactLocked(scratch *[]byte, write, queued func(string, []byte, int) error) error {
+func (shard *Shard) visitCompactLocked(scratch *[]byte, decoded *[]points.Point, write func(string, []byte, int) error) error {
 	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 		if p != nil && len(p.Data) > 0 {
-			var enc compactPoints
-			enc.buf = (*scratch)[:0]
-			enc.appendPoints(p.Data)
-			*scratch = enc.buf
-			if err := write(p.Metric, enc.buf, enc.n); err != nil {
+			*scratch = recovery.AppendCompactPoints((*scratch)[:0], p.Data)
+			if err := write(p.Metric, *scratch, len(p.Data)); err != nil {
 				return err
 			}
 		}
 	}
 	for name, values := range shard.items.all {
 		if values.compact.n > 0 {
-			if err := queued(name, values.compact.buf, values.compact.n); err != nil {
+			*decoded = values.compact.appendDecoded((*decoded)[:0])
+			*scratch = recovery.AppendCompactPoints((*scratch)[:0], *decoded)
+			if err := write(name, *scratch, len(*decoded)); err != nil {
 				return err
 			}
 		}

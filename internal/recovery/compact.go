@@ -23,14 +23,15 @@ const (
 	// FormatLegacy records are points.AppendBinary records, readable by
 	// every go-carbon release.
 	FormatLegacy Format = iota
-	// FormatCompact records hold a metric's points in the cache's compact
-	// encoding, copied from memory without re-encoding:
+	// FormatCompact records hold a metric's points in the original byte-aligned
+	// cache encoding. This disk codec stays stable independently of the
+	// current in-memory codec:
 	//
 	//	varint  name length, then the name   (as in legacy records)
 	//	varint  point count                  (as in legacy records)
 	//	uvarint encoded length, then the encoded points
 	//
-	// The encoding is that of cache/compact.go: per point a header byte
+	// The encoding has per point a header byte
 	// (bit 7: the timestamp delta changed; bits 0-6: value code), the
 	// change of delta as a zigzag uvarint when bit 7 is set, then the value
 	// bits XOR the previous value's: code 0 repeats them, otherwise code-1
@@ -64,7 +65,7 @@ func (f Format) String() string {
 	return "legacy"
 }
 
-// Compact reports whether f holds points in the cache's compact encoding.
+// Compact reports whether f holds points in the stable compact disk encoding.
 func (f Format) Compact() bool { return f == FormatCompact || f == FormatBlocks }
 
 // CacheFormat reports the format of the cache dump called name.

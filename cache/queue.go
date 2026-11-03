@@ -152,7 +152,7 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 		}
 	case TimestampOrder:
 		orderKey = func(values *item) int64 {
-			return firstTimestamp(values.compact.buf)
+			return values.compact.firstTimestamp()
 		}
 	}
 

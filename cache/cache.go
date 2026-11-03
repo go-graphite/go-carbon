@@ -145,7 +145,7 @@ func (it *item) count() int { return it.compact.n }
 // decode moves the queued points into Data, which callers may then own.
 // Called with the item unreachable from the shard, or with its shard locked.
 func (it *item) decode() *points.Points {
-	it.Data = appendDecoded(nil, it.compact.buf, it.compact.n)
+	it.Data = it.compact.appendDecoded(nil)
 	it.compact = compactPoints{}
 	return &it.Points
 }
@@ -368,7 +368,8 @@ func (c *Cache) Get(key string) []points.Point {
 		}
 	}
 
-	// Appended bytes never change, so the queued points decode unlocked.
+	// Published words never change, and this copy owns the partial tail,
+	// so queued points decode after releasing the shard lock.
 	var queued compactPoints
 	if values := shard.items.get(key); values != nil {
 		queued = values.compact
@@ -377,7 +378,7 @@ func (c *Cache) Get(key string) []points.Point {
 	if queued.n == 0 {
 		return data
 	}
-	return appendDecoded(data, queued.buf, queued.n)
+	return queued.appendDecoded(data)
 }
 
 // Has reports whether key has unwritten points. Unlike Get it takes a read
@@ -456,7 +457,7 @@ func (c *Cache) Requeue(p *points.Points) {
 		if r != nil {
 			r.moved(&current.Points, &values.Points)
 		}
-		values.compact.appendPoints(appendDecoded(nil, current.compact.buf, current.compact.n))
+		values.compact.appendPoints(current.compact.appendDecoded(nil))
 		// A missing arrival marks restored or previously unbatched data ready.
 		other := current.firstArrival
 		if other.IsZero() || (!first.IsZero() && other.Before(first)) {

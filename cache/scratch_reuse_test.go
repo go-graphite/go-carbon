@@ -262,7 +262,7 @@ func TestAddPointReservesPoppedLengthWithoutChangingAccounting(t *testing.T) {
 	}
 	var size int
 	for i := 0; i < 1000; i++ {
-		size = cycle(20)
+		size = cycle(100)
 	}
 	if shard.bytesHint() != size || size <= minBytesHint {
 		t.Fatalf("hint %d after %d-byte writeouts", shard.bytesHint(), size)
@@ -288,7 +288,7 @@ func TestAddPointReservesPoppedLengthWithoutChangingAccounting(t *testing.T) {
 	}
 
 	for i := 0; i < 2000; i++ {
-		cycle(200)
+		cycle(2000)
 	}
 	if shard.bytesHint() != maxBytesHint {
 		t.Fatalf("hint %d not bounded by %d", shard.bytesHint(), maxBytesHint)
