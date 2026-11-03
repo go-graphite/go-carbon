@@ -238,9 +238,27 @@ func EncodeSealedPointsDecimal(points []Point, step int) ([]byte, error) {
 	return exact, nil
 }
 
-// DecodeSealedPoints bounds both decompression and point allocation. The caller
-// retains no scratch owned by a pooled decoder, including on malformed input.
+// SealedPointBuffer reuses bounded point and decompression storage. Its zero
+// value is ready to use. It is not safe for concurrent use. Returned points are
+// borrowed until the next Decode, including a failed Decode; callers must copy
+// anything they retain. At most MaxSealedPoints points and maxSealedBody bytes
+// are retained, and no input bytes or pooled codec storage are retained.
+type SealedPointBuffer struct {
+	points []Point
+	body   []byte
+}
+
+// DecodeSealedPoints returns independent points, with bounded decompression and
+// point allocation. Use SealedPointBuffer when the result is consumed before
+// decoding another block.
 func DecodeSealedPoints(data []byte) ([]Point, error) {
+	var scratch SealedPointBuffer
+	return scratch.Decode(data)
+}
+
+// Decode replaces the borrowed points with one sealed block. On error it returns
+// nil; previously returned points may have been overwritten.
+func (scratch *SealedPointBuffer) Decode(data []byte) ([]Point, error) {
 	if len(data) < sealedHeader || len(data) > maxSealedBody+sealedHeader || data[0] != 3 || data[1]&^byte(31) != 0 || data[1]&sealedDecimal != 0 && data[1]&(sealedInteger|sealedDoD) != 0 || data[1]&sealedDoD != 0 && data[1]&sealedInteger == 0 {
 		return nil, errInvalidChunk
 	}
@@ -263,8 +281,13 @@ func DecodeSealedPoints(data []byte) ([]Point, error) {
 			}
 			limit = int(frame.FrameContentSize)
 		}
+		if cap(scratch.body) < limit {
+			scratch.body = make([]byte, 0, limit)
+		}
 		z := sealedDecoders.Get().(*zstd.Decoder)
-		decoded, err := z.DecodeAll(body, make([]byte, 0, limit))
+		// A previous large block must not relax this frame's expansion bound,
+		// including frames without FCS and concatenated frames.
+		decoded, err := z.DecodeAll(body, scratch.body[:0:limit])
 		sealedDecoders.Put(z)
 		if err != nil {
 			return nil, errInvalidChunk
@@ -281,7 +304,10 @@ func DecodeSealedPoints(data []byte) ([]Point, error) {
 	if crc32.Update(checksum, crc32.IEEETable, body) != binary.LittleEndian.Uint32(data[12:16]) {
 		return nil, errInvalidChunk
 	}
-	points := make([]Point, count)
+	if cap(scratch.points) < count {
+		scratch.points = make([]Point, count)
+	}
+	points := scratch.points[:count]
 	points[0].Timestamp = first
 	offset := 0
 	for i := 1; i < count; i++ {
