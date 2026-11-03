@@ -145,7 +145,7 @@ func newIngestTCPFixture(b *testing.B, resident int) *ingestTCPFixture {
 	c.SetBloomSize(50000000)
 	c.SetNewMetricsChan(make(chan string, 1))
 	c.SetMetricExists(func(string) bool { return true })
-	c.SetThrottleWithState(listener.ShouldThrottleMetricWithState)
+	c.SetThrottleWithHash(listener.ShouldThrottleMetricWithHash)
 	for _, name := range names {
 		c.AddPoint([]byte(name), 1, 1790000000)
 	}

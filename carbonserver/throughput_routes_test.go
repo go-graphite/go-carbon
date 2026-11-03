@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/zeebo/xxh3"
 )
 
 func routeListener(t *testing.T, quotas ...*Quota) (*CarbonserverListener, *trieIndex) {
@@ -170,12 +171,15 @@ func TestThroughputRoutesBatchesKeepPointBoundaries(t *testing.T) {
 				}
 				return oldListener.ShouldThrottleMetric(ps, inCache)
 			})
-			batched.SetThrottleWithState(func(ps *points.Points, inCache bool, state *any) bool {
+			batched.SetThrottleWithHash(func(ps *points.Points, inCache bool, hash uint64, state *any) bool {
 				calls++
+				if hash != xxh3.HashString(ps.Metric) {
+					t.Fatal("cache changed the accounting stripe")
+				}
 				if reset && calls%4 == 0 {
 					ti.throughputs.load("a").offset()
 				}
-				return listener.ShouldThrottleMetricWithState(ps, inCache, state)
+				return listener.ShouldThrottleMetricWithHash(ps, inCache, hash, state)
 			})
 			data := make([]points.Point, 32)
 			for i := range data {
@@ -192,6 +196,26 @@ func TestThroughputRoutesBatchesKeepPointBoundaries(t *testing.T) {
 					t.Fatal("batch changed usage")
 				}
 			}
+		}
+	}
+}
+
+func TestThroughputUsesProvidedHashIncludingZeroAndUncachedRoutes(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		l, ti := routeListener(t, &Quota{Pattern: "/", Throughput: math.MaxInt64})
+		if !cached {
+			ti.throughputs.routes.Store(nil)
+		}
+		ps := points.OnePoint("a.b.one", 1, 1)
+		var state any
+		for _, hash := range []uint64{0, 1, 1023, 1024, math.MaxUint64} {
+			if l.ShouldThrottleMetricWithHash(ps, true, hash, &state) {
+				t.Fatal("unlimited quota rejected a point")
+			}
+		}
+		r := ti.throughputs.load("/").dpRecorder()
+		if r.stripes[0].n != 2 || r.stripes[1].n != 1 || r.stripes[1023].n != 2 || r.total() != 5 {
+			t.Fatalf("cached=%t: provided hash was recomputed or remapped", cached)
 		}
 	}
 }

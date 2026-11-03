@@ -69,6 +69,13 @@ func (r *throughputRoutes) resolve(metric string) *throughputRoute {
 // The cache owns state under its shard lock. A quota reload or an index with a
 // different manager invalidates it; counter resets use the live recorders.
 func (listener *CarbonserverListener) ShouldThrottleMetricWithState(ps *points.Points, inCache bool, state *any) bool {
+	return listener.ShouldThrottleMetricWithHash(ps, inCache, helper.HashString(ps.Metric), state)
+}
+
+// ShouldThrottleMetricWithHash reuses the cache's xxh3 name hash for striped
+// accounting. Like ShouldThrottleMetricWithState, state belongs to one cache
+// item under its shard lock; route generations handle quota/index replacement.
+func (listener *CarbonserverListener) ShouldThrottleMetricWithHash(ps *points.Points, inCache bool, hash uint64, state *any) bool {
 	idx := listener.CurrentFileIndex()
 	if idx == nil || idx.trieIdx == nil {
 		return false
@@ -79,20 +86,23 @@ func (listener *CarbonserverListener) ShouldThrottleMetricWithState(ps *points.P
 		routes = ti.throughputs.routes.Load()
 	}
 	if routes == nil {
-		return ti.throttle(ps, inCache)
+		if ti.throughputThrottleHashed(ps, hash) {
+			return true
+		}
+		return !inCache && ti.throttleMetric(ps)
 	}
 	route, _ := (*state).(*throughputRoute)
 	if route == nil || route.owner != routes {
 		route = routes.resolve(ps.Metric)
 		*state = route
 	}
-	if ti.checkThroughput(ps, route.namespaces) {
+	if ti.checkThroughput(ps, route.namespaces, hash) {
 		return true
 	}
 	return !inCache && ti.throttleMetric(ps)
 }
 
-func (ti *trieIndex) checkThroughput(ps *points.Points, namespaces []*throughputUsagePerNamespace) bool {
+func (ti *trieIndex) checkThroughput(ps *points.Points, namespaces []*throughputUsagePerNamespace, stripe uint64) bool {
 	count := ti.metricDataLen(ps)
 	reset := ti.getResetFrequency()
 	for _, ns := range namespaces {
@@ -103,7 +113,6 @@ func (ti *trieIndex) checkThroughput(ps *points.Points, namespaces []*throughput
 			}
 		}
 	}
-	stripe := helper.HashString(ps.Metric)
 	for _, ns := range namespaces {
 		ns.increase(count, stripe)
 	}
