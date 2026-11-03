@@ -177,12 +177,12 @@ func TestContinuationRangeFetchOracle(t *testing.T) {
 		}
 		for _, hours := range []int{1, 6, 24, 168} {
 			from, until := now-120-hours*3600, now-120
-			codec.RangeReads = false
+			codec.RangeReadsEnabled = func() bool { return false }
 			want, err := db.Fetch(context.Background(), "range.metric", from, until)
 			if err != nil {
 				t.Fatal(err)
 			}
-			codec.RangeReads = true
+			codec.RangeReadsEnabled = func() bool { return true }
 			got, err := db.Fetch(context.Background(), "range.metric", from, until)
 			if err != nil {
 				t.Fatal(err)

@@ -2,8 +2,8 @@
 
 `[whisper] store-range-reads = true` enables time pruning during Fetch of v9
 cold-packed continuation blocks. The default is false; changing it requires a
-restart. No format version, keys, descriptors or stored values change. Disabling
-it restores the full reader immediately on the next process start; existing
+SIGHUP reload. No format version, keys, descriptors or stored values change. Disabling
+it restores the full reader for subsequent Fetch calls; existing
 v6/v7 and unsealed blocks always use that reader.
 
 The compressed Whisper header already prunes native blocks. A selected native
@@ -43,7 +43,7 @@ the optimization remains opt-in despite having no durable-format change.
 gapped and off-grid timestamps, special float bits, partial final groups,
 ordinary groups, stale keys from circular reuse, random windows and malformed
 inputs. A second oracle drives actual archive selection and v9 Fetch. The config
-test pins default-off, parsing and restart detection.
+test pins default-off, parsing and SIGHUP reload detection.
 
 `BenchmarkContinuationRangeFetch` drives the real writer and cold packer using
 `1s:2d,60s:28d,1h:2y`, with deterministic numeric values and 700 days of history.

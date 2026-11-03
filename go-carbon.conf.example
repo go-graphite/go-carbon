@@ -170,7 +170,8 @@ store-l0-compaction-concurrency = 0
 # No format change; old blocks keep the full reader. Skipped payloads are not
 # decompressed or checked by the sealed CRC. Restart required.
 # See doc/range-reads.md for scope, integrity semantics and measurements.
-# store-range-reads = false
+# # Applies on SIGHUP to subsequent Fetch calls; reads already running keep their policy.
+store-range-reads = false
 # Keep up to this many bytes of recently written or read metrics' committed
 # metadata in memory: catalog entries plus each metric's file names, manifests
 # and header pages, which every update and fetch otherwise reads back from the

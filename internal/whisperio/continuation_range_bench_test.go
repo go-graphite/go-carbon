@@ -82,7 +82,7 @@ func BenchmarkContinuationRangeFetch(b *testing.B) {
 	for _, hours := range []int{1, 6, 24, 7 * 24} {
 		for _, enabled := range []bool{false, true, true, false} {
 			b.Run(fmt.Sprintf("%dh/range=%v", hours, enabled), func(b *testing.B) {
-				codec.RangeReads = enabled
+				codec.RangeReadsEnabled = func() bool { return enabled }
 				b.ReportAllocs()
 				cpu := rangeCPUTime()
 				for b.Loop() {
