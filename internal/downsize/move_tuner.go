@@ -89,6 +89,34 @@ func (t *tuner) batch(source, target string) (int, int64) {
 	a, b := t.hosts[source], t.hosts[target]
 	return min(a.Batch, b.Batch), min(a.BatchBytes, b.BatchBytes)
 }
+
+// A single metric cannot be split. Wait for healthy observations to grow the
+// adaptive byte budget, without exceeding either server's configured ceiling.
+func (t *tuner) waitLargerBatch(ctx context.Context, source, target string, previous int64) (bool, error) {
+	for {
+		t.mu.Lock()
+		ceiling := t.maximum.BatchBytes
+		for _, host := range []string{source, target} {
+			if store := t.hosts[host].storePrevious; store != nil && store.MaxBodyBytes > 0 {
+				ceiling = min(ceiling, store.MaxBodyBytes)
+			}
+		}
+		budget := min(t.hosts[source].BatchBytes, t.hosts[target].BatchBytes)
+		changed := t.changed
+		t.mu.Unlock()
+		if previous >= ceiling {
+			return false, nil
+		}
+		if budget > previous {
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-changed:
+		}
+	}
+}
 func (t *tuner) admit(ctx context.Context, source, target string) (func(), error) {
 	for {
 		t.mu.Lock()

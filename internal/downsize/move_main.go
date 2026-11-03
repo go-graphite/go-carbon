@@ -640,6 +640,18 @@ func (m *mover) execute(ctx context.Context, t task) error {
 		}{t.Source, t.Names, byteBudget}, &proofs)
 		if err != nil {
 			var api *apiError
+			if errors.As(err, &api) && api.Status == 413 && len(t.Names) == 1 {
+				release()
+				release = func() {}
+				larger, waitErr := m.tuner.waitLargerBatch(ctx, t.Source, t.Target, byteBudget)
+				if waitErr != nil {
+					return waitErr
+				}
+				if larger {
+					event("retry_single_metric", map[string]any{"metric": t.Names[0], "previous_byte_budget": byteBudget})
+					return m.execute(ctx, t)
+				}
+			}
 			if errors.As(err, &api) && api.Status == 413 && len(t.Names) > 1 {
 				release()
 				release = func() {}
