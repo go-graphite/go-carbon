@@ -20,6 +20,16 @@ existing journal. `config` generates local routing/configuration drafts;
 API for diagnostics and loopback benchmarks. Legacy `move`, `copy` and `ring`
 binaries delegate to the same Go packages.
 
+If a planned name expires before export, a pull HTTP404 triggers authenticated
+donor HEAD checks. Confirmed absent names are durably recorded with counts and
+name lists in `SkippedAbsentSource` journal records and `skipped_absent_source`
+events; copying retries with the remaining names. Resume and journal compaction
+preserve those skips without changing immutable plan ordinals. More than 1% of
+an original batch (with one absent name allowed for small batches), or more than
+10,000 absent names across the journal, stops the run, including after resume.
+Other export/HEAD errors still fail the run. A source name recreated after a
+skip requires a fresh plan or the existing fenced reconciliation procedure.
+
 The host helper defaults `--disk-write-mbps` to **770 decimal MB/s** (70% of a
 1,100 MB/s sustained device rating). The governor backs off at 98% of that
 ceiling, **754.6 MB/s total foreground plus copy writes**. Override it explicitly

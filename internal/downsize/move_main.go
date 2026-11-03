@@ -623,6 +623,20 @@ func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task, re
 	return nil
 }
 func (m *mover) execute(ctx context.Context, t task) error {
+	return m.executeBatch(ctx, t, t)
+}
+func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
+	names, err := m.sourceNames(t)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 && t.Phase != "verified" {
+		t.Phase = "done"
+		t.Names = nil
+		m.stateMu.Lock()
+		defer m.stateMu.Unlock()
+		return m.journal.save(t)
+	}
 	release, err := m.tuner.admit(ctx, t.Source, t.Target)
 	if err != nil {
 		return err
@@ -637,9 +651,17 @@ func (m *mover) execute(ctx context.Context, t task) error {
 			Source   string
 			Names    []string
 			MaxBytes int64
-		}{t.Source, t.Names, byteBudget}, &proofs)
+		}{t.Source, names, byteBudget}, &proofs)
 		if err != nil {
 			var api *apiError
+			if errors.As(err, &api) && api.Status == 404 {
+				if skipErr := m.skipAbsentSource(ctx, batch, names); skipErr != nil {
+					return skipErr
+				}
+				release()
+				release = func() {}
+				return m.executeBatch(ctx, t, batch)
+			}
 			if errors.As(err, &api) && api.Status == 413 && len(t.Names) == 1 {
 				release()
 				release = func() {}
@@ -649,7 +671,7 @@ func (m *mover) execute(ctx context.Context, t task) error {
 				}
 				if larger {
 					event("retry_single_metric", map[string]any{"metric": t.Names[0], "previous_byte_budget": byteBudget})
-					return m.execute(ctx, t)
+					return m.executeBatch(ctx, t, batch)
 				}
 			}
 			if errors.As(err, &api) && api.Status == 413 && len(t.Names) > 1 {
@@ -661,18 +683,18 @@ func (m *mover) execute(ctx context.Context, t task) error {
 				left.Names = t.Names[:middle]
 				right.Start = left.End
 				right.Names = t.Names[middle:]
-				if err := m.execute(ctx, left); err != nil {
+				if err := m.executeBatch(ctx, left, batch); err != nil {
 					return err
 				}
-				return m.execute(ctx, right)
+				return m.executeBatch(ctx, right, batch)
 			}
 			return err
 		}
-		if len(proofs) != len(t.Names) {
+		if len(proofs) != len(names) {
 			return errors.New("import proof count mismatch")
 		}
 		for i, p := range proofs {
-			if p.Source.Name != t.Names[i] || p.Target.Name != t.Names[i] || p.Digest == "" {
+			if p.Source.Name != names[i] || p.Target.Name != names[i] || p.Digest == "" {
 				return errors.New("import proof name/digest mismatch")
 			}
 		}
