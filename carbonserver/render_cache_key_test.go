@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	protov3 "github.com/go-graphite/protocol/carbonapi_v3_pb"
 	"go.uber.org/zap"
 )
@@ -206,6 +207,15 @@ func TestRenderKeyMix(t *testing.T) {
 var renderKeySink string
 
 func BenchmarkRenderCacheKeys(b *testing.B) {
+	db, err := store.Open(b.TempDir(), store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			b.Error(err)
+		}
+	})
 	for _, shape := range []struct{ ranges, names int }{{1, 1}, {1, 4}, {2, 2}, {5, 2}, {1, 256}} {
 		targets := make(map[timeRange][]target)
 		for r := range shape.ranges {
@@ -215,9 +225,16 @@ func BenchmarkRenderCacheKeys(b *testing.B) {
 				targets[tr] = append(targets[tr], target{name, name})
 			}
 		}
+		// Sorting cost must include ordinary permutations, including the wide
+		// batch; already sorted names would make that comparison too favorable.
+		rng := rand.New(rand.NewSource(17))
+		for _, ts := range targets {
+			rng.Shuffle(len(ts), func(i, j int) { ts[i], ts[j] = ts[j], ts[i] })
+		}
 		for _, canonical := range []bool{false, true} {
 			b.Run(fmt.Sprintf("ranges%d/targets%d/canonical%v", shape.ranges, shape.names, canonical), func(b *testing.B) {
 				l := NewCarbonserverListener(nil)
+				l.SetMetricStore(db)
 				l.SetQueryCacheCanonicalKeys(canonical)
 				b.ReportAllocs()
 				b.ResetTimer()

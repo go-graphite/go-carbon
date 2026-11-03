@@ -265,6 +265,9 @@ type carbonserverConfig struct {
 	ScanFrequency              *Duration  `toml:"scan-frequency"`
 	QueryCacheEnabled          bool       `toml:"query-cache-enabled"`
 	QueryCacheCanonicalKeys    bool       `toml:"query-cache-canonical-keys"`
+	QueryRangeCacheEnabled     bool       `toml:"query-range-cache-enabled"`
+	QueryRangeCacheSizeMB      int        `toml:"query-range-cache-size-mb"`
+	QueryRangeCacheMutable     *Duration  `toml:"query-range-cache-mutable-window"`
 	StreamingQueryCacheEnabled bool       `toml:"streaming-query-cache-enabled"`
 	QueryCacheSizeMB           int        `toml:"query-cache-size-mb"`
 	QueryCacheCompression      string     `toml:"query-cache-compression"`
@@ -502,18 +505,20 @@ func NewConfig() *Config {
 			WriteTimeout: &Duration{
 				Duration: 60 * time.Second,
 			},
-			QueryCacheEnabled:     true,
-			QueryCacheSizeMB:      0,
-			QueryCacheCompression: "gzip",
-			FindCacheEnabled:      true,
-			FindCacheSizeMB:       0,
-			GlobCacheEnabled:      true,
-			GlobCacheSizeMB:       0,
-			TrigramIndex:          true,
-			CacheScan:             false,
-			MaxMetricsGlobbed:     10_000_000,
-			MaxMetricsRendered:    1_000_000,
-			FileListCacheVersion:  1, // see carbonserver/flc.go
+			QueryCacheEnabled:      true,
+			QueryRangeCacheSizeMB:  64,
+			QueryRangeCacheMutable: &Duration{30 * time.Minute},
+			QueryCacheSizeMB:       0,
+			QueryCacheCompression:  "gzip",
+			FindCacheEnabled:       true,
+			FindCacheSizeMB:        0,
+			GlobCacheEnabled:       true,
+			GlobCacheSizeMB:        0,
+			TrigramIndex:           true,
+			CacheScan:              false,
+			MaxMetricsGlobbed:      10_000_000,
+			MaxMetricsRendered:     1_000_000,
+			FileListCacheVersion:   1, // see carbonserver/flc.go
 		},
 		Carbonlink: carbonlinkConfig{
 			Listen:  "127.0.0.1:7002",
