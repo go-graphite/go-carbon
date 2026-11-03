@@ -286,6 +286,11 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 		start := f.fs.timer.Nested(stagetime.TailRead)
 		defer f.fs.timer.Unnest(stagetime.TailRead, start)
 		var scratch store.PointBlock
+		var sealed *store.SealedPointBuffer
+		if desc.packed > 0 {
+			sealed = getSealedPointBuffer()
+			defer putSealedPointBuffer(sealed)
+		}
 		visit := func(key, value []byte) error {
 			first := len(points)
 			if first >= count {
@@ -297,7 +302,7 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 				return fmt.Errorf("invalid continuation physical group order: file %d archive %d block %d: group key %x, want group %d",
 					f.data.id, block.Archive, block.Index, key[min(len(key), len(prefix)):], first/desc.groupSize())
 			}
-			decoded, err := f.decodeStorageGroup(block, desc, first, value, &scratch, previous)
+			decoded, err := f.decodeStorageGroup(block, desc, first, value, &scratch, sealed, previous)
 			if err != nil {
 				return err
 			}

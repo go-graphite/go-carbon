@@ -12,11 +12,11 @@ import (
 
 // decodeStorageGroup validates one physical group. previous validates adjacency
 // during a full scan; point probes pass zero and validate the selected group.
-func (f *continuationFile) decodeStorageGroup(block whisper.ContinuationBlock, desc blockDescriptor, first int, value []byte, scratch *store.PointBlock, previous int64) ([]store.Point, error) {
+func (f *continuationFile) decodeStorageGroup(block whisper.ContinuationBlock, desc blockDescriptor, first int, value []byte, scratch *store.PointBlock, sealed *store.SealedPointBuffer, previous int64) ([]store.Point, error) {
 	var decoded []store.Point
 	if desc.packed > 0 {
 		var err error
-		decoded, err = store.DecodeSealedPoints(value)
+		decoded, err = sealed.Decode(value)
 		if err != nil {
 			return nil, err
 		}
@@ -62,6 +62,11 @@ func (f *continuationFile) MatchesStoragePoints(block whisper.ContinuationBlock,
 	size := desc.groupSize()
 	groups := (desc.count + size - 1) / size
 	var scratch store.PointBlock
+	var sealed *store.SealedPointBuffer
+	if desc.packed > 0 {
+		sealed = getSealedPointBuffer()
+		defer putSealedPointBuffer(sealed)
+	}
 	var points []store.Point
 	cached, checked := -1, -1
 	read := func(index int) ([]store.Point, error) {
@@ -72,7 +77,7 @@ func (f *continuationFile) MatchesStoragePoints(block whisper.ContinuationBlock,
 		if err != nil {
 			return nil, err
 		}
-		points, err = f.decodeStorageGroup(block, desc, index*size, value, &scratch, 0)
+		points, err = f.decodeStorageGroup(block, desc, index*size, value, &scratch, sealed, 0)
 		if err != nil {
 			return nil, err
 		}
