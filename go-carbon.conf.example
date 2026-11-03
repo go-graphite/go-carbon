@@ -166,6 +166,11 @@ store-l0-compaction-concurrency = 0
 # consult bloom filters; prefix walks, like any iterator's, cannot. Requires
 # restart.
 # store-fetch-shared-iterator = false
+# Prune v9 sealed groups outside a fetch's time range using existing headers.
+# No format change; old blocks keep the full reader. Skipped payloads are not
+# decompressed or checked by the sealed CRC. Restart required.
+# See doc/range-reads.md for scope, integrity semantics and measurements.
+# store-range-reads = false
 # Keep up to this many bytes of recently written or read metrics' committed
 # metadata in memory: catalog entries plus each metric's file names, manifests
 # and header pages, which every update and fetch otherwise reads back from the

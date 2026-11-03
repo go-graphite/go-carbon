@@ -23,6 +23,11 @@ import (
 // blocks. It deliberately preserves buffers, main/OOO precedence and physical
 // block ownership, which a flattened archive snapshot cannot reconstruct.
 type ContinuationCodec struct {
+	// RangeReads prunes sealed groups using their existing time headers during
+	// Fetch. Skipped payloads are not decompressed or checked by the sealed CRC.
+	// Writes and verification retain complete decoding. Irregular timestamps
+	// use a conservative upper bound and cannot be pruned before the window.
+	RangeReads bool
 	// ReuseBlockKeys skips deleting a rewritten block's old groups when the
 	// new groups use the same keys (v6 layout, or the same time bucket): they
 	// are overwritten as the block refills and reads stop at the block's count.
@@ -745,6 +750,7 @@ func (c *ContinuationCodec) Fetch(ctx context.Context, kv store.ContinuationIO, 
 		return nil, err
 	}
 	fs := newContinuationFiles(kv, true)
+	fs.rangeReads = c.RangeReads
 	w, err := whisper.OpenWithOptions(fs.main(), continuationOptions(fs, clock))
 	if err != nil {
 		return nil, err

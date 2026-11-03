@@ -29,6 +29,7 @@ type continuationFiles struct {
 	sidecarDirty          bool
 	kv                    store.ContinuationIO
 	readOnly              bool
+	rangeReads            bool
 	// buckets writes new compressed blocks to the store's time-partitioned
 	// key space, bucketed by the day clock reports when each is written.
 	buckets bool

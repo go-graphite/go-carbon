@@ -357,6 +357,7 @@ func storageSettingsChanged(old, next *Config) bool {
 		old.Whisper.StoreReuseBlockKeys != next.Whisper.StoreReuseBlockKeys ||
 		old.Whisper.StoreOOODirectWrites != next.Whisper.StoreOOODirectWrites ||
 		old.Whisper.StoreFetchSharedIterator != next.Whisper.StoreFetchSharedIterator ||
+		old.Whisper.StoreRangeReads != next.Whisper.StoreRangeReads ||
 		old.Whisper.StoreMetadataCacheSize != next.Whisper.StoreMetadataCacheSize ||
 		old.Whisper.StoreBytesPerSync != next.Whisper.StoreBytesPerSync ||
 		old.Whisper.StoreSyncInterval.Value() != next.Whisper.StoreSyncInterval.Value()

@@ -259,14 +259,9 @@ func DecodeSealedPoints(data []byte) ([]Point, error) {
 // Decode replaces the borrowed points with one sealed block. On error it returns
 // nil; previously returned points may have been overwritten.
 func (scratch *SealedPointBuffer) Decode(data []byte) ([]Point, error) {
-	if len(data) < sealedHeader || len(data) > maxSealedBody+sealedHeader || data[0] != 3 || data[1]&^byte(31) != 0 || data[1]&sealedDecimal != 0 && data[1]&(sealedInteger|sealedDoD) != 0 || data[1]&sealedDoD != 0 && data[1]&sealedInteger == 0 {
-		return nil, errInvalidChunk
-	}
-	count := int(binary.LittleEndian.Uint16(data[2:4]))
-	step := int64(binary.LittleEndian.Uint32(data[8:12]))
-	first := int64(binary.LittleEndian.Uint32(data[4:8]))
-	if count == 0 || count > MaxSealedPoints || step == 0 || first == 0 {
-		return nil, errInvalidChunk
+	first, step, count, err := sealedHeaderFields(data)
+	if err != nil {
+		return nil, err
 	}
 	body := data[sealedHeader:]
 	if data[1]&sealedZstd != 0 {

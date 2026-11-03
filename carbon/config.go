@@ -121,6 +121,7 @@ type whisperConfig struct {
 	StoreReuseBlockKeys          bool      `toml:"store-reuse-block-keys"`
 	StoreOOODirectWrites         bool      `toml:"store-ooo-direct-writes"`
 	StoreFetchSharedIterator     bool      `toml:"store-fetch-shared-iterator"`
+	StoreRangeReads              bool      `toml:"store-range-reads"`
 	StoreMetadataCacheSize       int64     `toml:"store-metadata-cache-size"`
 	StoreMetadataCachePack       bool      `toml:"store-metadata-cache-pack"`
 	StoreUpdatePointLookups      bool      `toml:"store-update-point-lookups"`
