@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -24,10 +25,26 @@ import (
 // closing the store. The small codec isolates the engine's relayout protocol;
 // this is not a power-loss simulation or a physical CWhisper oracle.
 func TestRelayoutResumesAfterCrash(t *testing.T) {
+	testRelayoutResumesAfterCrash(t, 1)
+}
+
+func TestRelayoutParallelResumesAfterCrash(t *testing.T) {
+	testRelayoutResumesAfterCrash(t, 3)
+}
+
+func testRelayoutResumesAfterCrash(t *testing.T, workers int) {
 	t.Parallel()
 	const crashExit = 74
 	ctx := context.Background()
-	opts := Options{ExactBlocks: true, Continuation: relayoutCodec{}, TimeBuckets: true, CacheSize: 8 << 20, MemTableSize: 4 << 20}
+	opts := Options{ExactBlocks: true, Continuation: relayoutCodec{}, TimeBuckets: true, RelayoutWorkers: workers, CacheSize: 8 << 20, MemTableSize: 4 << 20}
+	// Two metrics per parallel chunk exercise interruption within one group
+	// while later chunks finish independently.
+	names := []string{"m.first", "m.second", "m.third", "m.fourth", "m.fifth", "m.sixth"}
+	if workers > 1 {
+		for i := len(names); i < workers*8*2; i++ {
+			names = append(names, fmt.Sprintf("m.extra.%03d", i))
+		}
+	}
 	if phase := os.Getenv("GO_CARBON_TEST_RELAYOUT_CRASH_PHASE"); phase != "" {
 		crashRelayoutAt(t, phase, os.Getenv("GO_CARBON_TEST_RELAYOUT_CRASH_DIR"), opts, crashExit)
 		return
@@ -36,12 +53,13 @@ func TestRelayoutResumesAfterCrash(t *testing.T) {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			s, _ := openTestStore(t, dir, opts)
-			createTestMetric(t, s, "m.first")
-			createTestMetric(t, s, "m.second")
+			for _, name := range names {
+				createTestMetric(t, s, name)
+			}
 			closeTestStore(t, s)
 			childCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^TestRelayoutResumesAfterCrash$")
+			cmd := exec.CommandContext(childCtx, os.Args[0], "-test.run=^"+strings.SplitN(t.Name(), "/", 2)[0]+"$")
 			cmd.Env = append(os.Environ(), "GO_CARBON_TEST_RELAYOUT_CRASH_PHASE="+phase, "GO_CARBON_TEST_RELAYOUT_CRASH_DIR="+dir)
 			output, err := cmd.CombinedOutput()
 			var exit *exec.ExitError
@@ -55,10 +73,13 @@ func TestRelayoutResumesAfterCrash(t *testing.T) {
 			closeTestStore(t, s)
 			s, _ = openTestStore(t, dir, opts)
 			defer closeTestStore(t, s)
-			for _, name := range []string{"m.first", "m.second"} {
+			for _, name := range names {
 				m, err := s.Metadata(ctx, name)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if m.Revision != 2 {
+					t.Fatalf("%s revision=%d, want one physical move", name, m.Revision)
 				}
 				io := s.newContinuationIO(ctx, s.db, nil, m)
 				for _, kv := range []struct {
@@ -105,6 +126,10 @@ func crashRelayoutAt(t *testing.T, phase, dir string, opts Options, code int) {
 		s.lockMetricMutation(first.Name)
 	case "after-first-switch":
 		s.lockMetricMutation(second.Name)
+	case "after-cursor":
+		if opts.RelayoutWorkers > 1 {
+			s.lockMetricMutation("m.third")
+		}
 	}
 	finished := make(chan error, 1)
 	go func() { finished <- s.RelayoutContinuation(ctx, 0) }()
@@ -118,6 +143,17 @@ func crashRelayoutAt(t *testing.T, phase, dir string, opts Options, code int) {
 			v, err := s.newContinuationIO(ctx, s.db, nil, first).Get([]byte("b"))
 			ready = err == nil && string(v) == "v7"
 		case "after-cursor":
+			if opts.RelayoutWorkers > 1 {
+				cursor, done, err := s.relayoutCursor()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cursor > 2 || done {
+					t.Fatalf("cursor passed blocked chunk: %d %v", cursor, done)
+				}
+				ready = cursor == 2
+				break
+			}
 			select {
 			case err := <-finished:
 				if err != nil {
@@ -130,6 +166,12 @@ func crashRelayoutAt(t *testing.T, phase, dir string, opts Options, code int) {
 			t.Fatalf("unknown phase %q", phase)
 		}
 		if ready {
+			if phase != "after-cursor" && opts.RelayoutWorkers > 1 {
+				cursor, done, err := s.relayoutCursor()
+				if err != nil || cursor != 0 || done {
+					t.Fatalf("cursor crossed unfinished chunk: %d %v %v", cursor, done, err)
+				}
+			}
 			if err := s.db.LogData(nil, pebble.Sync); err != nil {
 				t.Fatal(err)
 			}

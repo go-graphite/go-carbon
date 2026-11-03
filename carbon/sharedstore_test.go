@@ -200,6 +200,9 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"long compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{25 * time.Hour} }},
 		{"invalid flush rate", func(c *Config) { c.Whisper.StoreFlushRate = -2 }},
 		{"negative compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = -1 }},
+		{"zero relayout workers", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutWorkers = 0 }},
+		{"negative relayout workers", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutWorkers = -1 }},
+		{"large relayout workers", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutWorkers = 33 }},
 		{"large compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = 65 }},
 		{"negative L0 concurrency", func(c *Config) { c.Whisper.StoreL0CompactionConcurrency = -1 }},
 		{"large L0 concurrency", func(c *Config) { c.Whisper.StoreL0CompactionConcurrency = 65 }},
@@ -453,6 +456,11 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 	off.Whisper.StoreTimeBucketsRelayoutRate = 0
 	if !storageSettingsChanged(&next, &off) {
 		t.Fatal("disabling relayout must require a restart")
+	}
+	parallel := next
+	parallel.Whisper.StoreTimeBucketsRelayoutWorkers = 4
+	if !storageSettingsChanged(&next, &parallel) {
+		t.Fatal("changing relayout workers must require a restart")
 	}
 }
 

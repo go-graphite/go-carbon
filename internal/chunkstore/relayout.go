@@ -8,17 +8,19 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
+	"golang.org/x/sync/errgroup"
 )
 
 // Relayout moves the v6 blocks of metrics converted before format v7 into the
 // history bucket, so their cold history stops sitting beside hot keys. Metrics
-// are processed in ID order: each group's copies form one table covering only
+// are grouped in ID order: each group's copies form one table covering only
 // the group's ID range in the history bucket, disjoint from other groups and
 // from v7 conversions (whose IDs are higher), so it ingests into the bottom
 // level. Each block then switches under its metric lock only if its descriptor
@@ -75,10 +77,14 @@ func (s *Store) SetRelayoutRate(bytesPerSecond int64) error {
 func (s *Store) paceRelayout(ctx context.Context, paced *uint64, pacedAt *time.Time) error {
 	for {
 		rate := s.relayout.rate.Load()
-		copied := s.relayout.bytes.Load() - *paced
+		copiedThrough := s.relayout.bytes.Load()
+		copied := copiedThrough - *paced
 		ahead := time.Duration(float64(copied)/float64(rate)*float64(time.Second)) - time.Since(*pacedAt)
 		if rate <= 0 || ahead <= 0 {
-			break
+			// Other workers may finish copies while we wait. Only acknowledge
+			// the bytes checked above, so none escape the shared budget.
+			*paced, *pacedAt = copiedThrough, time.Now()
+			return nil
 		}
 		select {
 		case <-ctx.Done():
@@ -86,8 +92,6 @@ func (s *Store) paceRelayout(ctx context.Context, paced *uint64, pacedAt *time.T
 		case <-time.After(min(ahead, time.Second)):
 		}
 	}
-	*paced, *pacedAt = s.relayout.bytes.Load(), time.Now()
-	return nil
 }
 
 type relayoutItem struct {
@@ -126,44 +130,141 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 	}
 	s.relayout.ceiling.Store(ceiling)
 	cursor, done, err := s.relayoutCursor()
+	s.relayout.cursor.Store(cursor)
 	if err != nil || done {
 		s.relayout.done.Store(done)
 		return err
 	}
-	s.relayout.cursor.Store(cursor)
 	candidates, err := s.relayoutCandidates(ctx, cursor, ceiling)
 	if err != nil {
 		return err
 	}
 	paced, pacedAt := s.relayout.bytes.Load(), time.Now()
+	var paceMu sync.Mutex
+	pace := func(ctx context.Context) error {
+		paceMu.Lock()
+		defer paceMu.Unlock()
+		return s.paceRelayout(ctx, &paced, &pacedAt)
+	}
+	workers := min(max(1, s.relayoutWorkers), len(candidates))
+	if workers == 1 {
+		// Preserve the serial grouping, cursor and pacing boundaries, on the
+		// caller's goroutine. Parallel scheduling must not change K=1.
+		err = s.relayoutRange(ctx, planner, candidates, func(i int) error {
+			last := candidates[i-1].id
+			if err := s.setRelayoutCursor(last, false); err != nil {
+				return err
+			}
+			s.relayout.cursor.Store(last)
+			return nil
+		}, pace)
+	} else if workers > 1 {
+		chunkSize := relayoutChunkSize(len(candidates), workers)
+		chunks := (len(candidates) + chunkSize - 1) / chunkSize
+		var next atomic.Uint64
+		// A chunk is complete only after all its apply batches commit. Later
+		// chunks may finish first, but cannot take the cursor across a hole.
+		completed := make([]bool, chunks)
+		frontier := 0
+		var cursorMu sync.Mutex
+		complete := func(chunk int) error {
+			cursorMu.Lock()
+			defer cursorMu.Unlock()
+			completed[chunk] = true
+			through := frontier
+			for through < chunks && completed[through] {
+				through++
+			}
+			if through == frontier {
+				return nil
+			}
+			last := candidates[min(through*chunkSize, len(candidates))-1].id
+			if err := s.setRelayoutCursor(last, false); err != nil {
+				return err
+			}
+			frontier = through
+			s.relayout.cursor.Store(last)
+			return nil
+		}
+		group, workerCtx := errgroup.WithContext(ctx)
+		for range workers {
+			group.Go(func() (err error) {
+				// A maintenance panic must cancel and join the other workers,
+				// rather than crash the store.
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("panic: %v", r)
+					}
+				}()
+				for {
+					if err := workerCtx.Err(); err != nil {
+						return err
+					}
+					chunk := int(next.Add(1) - 1)
+					if chunk >= chunks {
+						return nil
+					}
+					start, end := chunk*chunkSize, min((chunk+1)*chunkSize, len(candidates))
+					publish := func(i int) error {
+						if i == end-start {
+							return complete(chunk)
+						}
+						return nil
+					}
+					if err := s.relayoutRange(workerCtx, planner, candidates[start:end], publish, pace); err != nil {
+						return err
+					}
+				}
+			})
+		}
+		err = group.Wait()
+	}
+	if err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.setRelayoutCursor(ceiling, true); err != nil {
+		return err
+	}
+	s.relayout.cursor.Store(ceiling)
+	s.relayout.done.Store(true)
+	return nil
+}
+
+// Aim for 8 chunks per worker, capped at the existing metric group bound.
+// This amortizes table ingestion while sharing skew concentrated at low IDs.
+// Even when the oldest tenth of IDs holds most history, it is shared across
+// multiple workers. Small catalogs use single-candidate chunks. A
+// chunk can still flush multiple times at the 64 MiB byte bound; one oversized
+// metric remains indivisible. Chunk boundaries add a final group flush.
+func relayoutChunkSize(candidates, workers int) int {
+	return min(relayoutMaxMetrics, max(1, candidates/(workers*8)))
+}
+
+// relayoutRange owns a contiguous chunk of metric IDs. Each flush completes
+// all candidates through its exclusive index before reporting progress.
+func (s *Store) relayoutRange(ctx context.Context, planner ContinuationRelayouter, candidates []relayoutCandidate, complete func(int) error, pace func(context.Context) error) error {
 	var group []relayoutItem
 	groupBytes := 0
-	flush := func(last uint64) error {
+	flush := func(position int) error {
 		if len(group) > 0 {
 			if err := s.relayoutGroup(ctx, group); err != nil {
 				return err
 			}
 		}
 		group, groupBytes = group[:0], 0
-		if err := s.setRelayoutCursor(last, false); err != nil {
+		if err := complete(position); err != nil {
 			return err
 		}
-		s.relayout.cursor.Store(last)
-		return s.paceRelayout(ctx, &paced, &pacedAt)
+		return pace(ctx)
 	}
 	for i, c := range candidates {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		snap := s.db.NewSnapshot()
-		m, err := metadataFrom(snap, c.name)
-		var plan RelayoutPlan
-		if err == nil && m.ID == c.id && m.Continuation {
-			plan, err = planner.RelayoutPlan(ctx, s.newContinuationIO(ctx, snap, nil, m))
-		} else if errors.Is(err, ErrNotFound) || err == nil {
-			err = nil // deleted or replaced since the scan
-		}
-		snap.Close()
+		m, plan, err := s.planRelayout(ctx, planner, c)
 		if err != nil {
 			return fmt.Errorf("relayout plan %s: %w", c.name, err)
 		}
@@ -172,16 +273,25 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 			groupBytes += plan.Bytes
 		}
 		if groupBytes >= relayoutTargetBytes || len(group) >= relayoutMaxMetrics || i == len(candidates)-1 {
-			if err := flush(c.id); err != nil {
+			if err := flush(i + 1); err != nil {
 				return err
 			}
 		}
 	}
-	if err := s.setRelayoutCursor(ceiling, true); err != nil {
-		return err
-	}
-	s.relayout.done.Store(true)
 	return nil
+}
+
+func (s *Store) planRelayout(ctx context.Context, planner ContinuationRelayouter, c relayoutCandidate) (Metadata, RelayoutPlan, error) {
+	snap := s.db.NewSnapshot()
+	defer snap.Close() // Also release it if the background worker panics.
+	m, err := metadataFrom(snap, c.name)
+	var plan RelayoutPlan
+	if err == nil && m.ID == c.id && m.Continuation {
+		plan, err = planner.RelayoutPlan(ctx, s.newContinuationIO(ctx, snap, nil, m))
+	} else if errors.Is(err, ErrNotFound) || err == nil {
+		err = nil // deleted or replaced since the scan
+	}
+	return m, plan, err
 }
 
 type relayoutCandidate struct {
