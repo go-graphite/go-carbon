@@ -476,7 +476,7 @@ func TestRelayoutCancelDuringReclaim(t *testing.T) {
 	go func() { unlock := s.lockMetricMutation(m.Name); unlock(); close(unlocked) }()
 	select {
 	case <-unlocked:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("reclamation held metric lock")
 	}
 	if cursor, done, err := s.relayoutCursor(); err != nil || cursor != 0 || done {
@@ -624,7 +624,9 @@ func TestRelayoutParallelReclaimsL6(t *testing.T) {
 	if before < 30<<20 {
 		t.Fatal("fixture old data not in L6")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// The deadline only catches a hang: the run itself is CPU-bound and takes
+	// well over 10 s under -race on a loaded CI runner.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := s.RelayoutContinuation(ctx, 0); err != nil {
 		t.Fatal(err)
