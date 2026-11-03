@@ -66,13 +66,16 @@ func TestAbsentSourceRetryResumeAndJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := mover{options: options{tokenEnv: "ABSENT_TEST_TOKEN"}, client: server.Client(), tuner: newTuner([]string{server.URL}, capacity{1, 100, 1 << 20, 1}, false, 0, 0), journal: j}
+	m := mover{options: options{tokenEnv: "ABSENT_TEST_TOKEN"}, client: server.Client(), tuner: newTestTuner([]string{server.URL}, capacity{1, 100, 1 << 20, 1}, false, 0, 0), journal: j}
 	job := task{Stream: "stream", Start: 0, End: 3, Source: server.URL, Target: server.URL, Names: []string{"a", "gone", "b"}}
 	if err := m.execute(context.Background(), job); err == nil {
 		t.Fatal("expected interruption")
 	}
 	if len(j.absent) != 1 {
 		t.Fatal("skip not recorded", j.absent)
+	}
+	if err := j.saveAdmission(&admissionState{Policy: defaultBacklogPolicy(), Hosts: map[string]hostAdmission{"test": {Baseline: &backlogBaseline{Min: 10, Median: 20, Max: 30, Samples: 10, Start: 1, End: 301}}}}); err != nil {
+		t.Fatal(err)
 	}
 	if err := j.compact(); err != nil {
 		t.Fatal(err)
@@ -84,6 +87,9 @@ func TestAbsentSourceRetryResumeAndJournal(t *testing.T) {
 	}
 	defer j.close()
 	m.journal = j
+	if j.admission == nil || j.admission.Hosts["test"].Baseline.Max != 30 {
+		t.Fatal("compaction lost admission while preserving absent-source skips", j.admission)
+	}
 	for _, skip := range j.absent {
 		if skip.Count != 1 || len(skip.Names) != 1 || skip.Names[0] != "gone" {
 			t.Fatal(skip)
@@ -190,7 +196,7 @@ func TestSingleAbsentSourceCompletesRange(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer j.close()
-	m := mover{client: server.Client(), journal: j, tuner: newTuner([]string{server.URL}, capacity{1, 1, 1 << 20, 1}, false, 0, 0)}
+	m := mover{client: server.Client(), journal: j, tuner: newTestTuner([]string{server.URL}, capacity{1, 1, 1 << 20, 1}, false, 0, 0)}
 	job := task{Stream: "stream", End: 1, Source: server.URL, Target: server.URL, Names: []string{"gone"}}
 	if err := m.execute(context.Background(), job); err != nil {
 		t.Fatal(err)

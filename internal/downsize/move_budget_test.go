@@ -47,7 +47,7 @@ func TestSingleMetricWaitsForAdaptiveByteBudget(t *testing.T) {
 		_ = json.NewEncoder(w).Encode([]chunkstore.TransferProof{{Source: chunkstore.TransferVersion{Name: "large"}, Target: chunkstore.TransferVersion{Name: "large"}, Digest: "digest"}})
 	}))
 	defer server.Close()
-	tune = newTuner([]string{"source", server.URL}, capacity{1, 1, maximum, 1}, true, 0, 0)
+	tune = newTestTuner([]string{"source", server.URL}, capacity{1, 1, maximum, 1}, true, 0, 0)
 	j, err := openJournal(filepath.Join(t.TempDir(), "state"), "plan")
 	if err != nil {
 		t.Fatal(err)
@@ -64,7 +64,7 @@ func TestSingleMetricWaitsForAdaptiveByteBudget(t *testing.T) {
 
 func TestSingleMetricBudgetWaitHonorsCeilingAndCancellation(t *testing.T) {
 	for _, serverLimit := range []int64{0, 2 << 20} {
-		tune := newTuner([]string{"source", "target"}, capacity{1, 1, 4 << 20, 1}, true, 0, 0)
+		tune := newTestTuner([]string{"source", "target"}, capacity{1, 1, 4 << 20, 1}, true, 0, 0)
 		tune.hosts["source"].storePrevious = &storageSample{MaxBodyBytes: serverLimit}
 		ceiling := int64(4 << 20)
 		if serverLimit > 0 {
