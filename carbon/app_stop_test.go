@@ -72,6 +72,12 @@ func TestRestoreStartupOrdering(t *testing.T) {
 				app.Config.Dump.Enabled = true
 				app.Config.Dump.Path = root
 				app.Config.Dump.RestorePerSecond = 0
+				if !tt.globalCompressed && !tt.schemaCompressed {
+					// Plain whisper restores in the background after Start returns. Throttle
+					// the two points so the dump is still pending when it is checked below;
+					// unthrottled, the restore can finish and remove it first.
+					app.Config.Dump.RestorePerSecond = 1
+				}
 				app.Config.Whisper.MaxUpdatesPerSecond = 10
 				app.Config.Cache.WriteoutMinPoints = 8
 				app.Config.Cache.WriteoutMaxDelay = Duration{time.Hour}
