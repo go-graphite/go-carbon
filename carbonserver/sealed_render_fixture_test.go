@@ -18,7 +18,7 @@ import (
 )
 
 // newSealedRenderFixture packs and verifies a small deterministic v9 render fixture.
-func newSealedRenderFixture(b testing.TB) (*CarbonserverListener, *store.Store, *whisperio.ContinuationCodec, int, int) {
+func newSealedRenderFixture(b testing.TB) (*CarbonserverListener, *store.Store, int, int) {
 	const now, count, metrics = 1700100000, 16384, 8
 	const first = now - count - 3600
 	ctx := context.Background()
@@ -127,5 +127,5 @@ func newSealedRenderFixture(b testing.TB) (*CarbonserverListener, *store.Store, 
 			}
 		}
 	}
-	return l, db, codec, first, count
+	return l, db, first, count
 }

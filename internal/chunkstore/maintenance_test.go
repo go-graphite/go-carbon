@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -78,7 +79,7 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 			}
 			if shutdown {
 				s.StopBackground()
-				if err := <-purged; err != context.Canceled {
+				if err := <-purged; !errors.Is(err, context.Canceled) {
 					t.Fatal("purge did not cancel", err)
 				}
 				return

@@ -39,7 +39,7 @@ func BenchmarkRenderRangeWriteoutParity(b *testing.B) {
 }
 
 func benchmarkRenderRangeLatency(b *testing.B, mix string, readers int, enabled bool) {
-	l, db, _, first, count := newSealedRenderFixture(b)
+	l, db, first, count := newSealedRenderFixture(b)
 	if err := l.SetQueryRangeCache(enabled, 64, 2*time.Hour); err != nil {
 		b.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestRenderRangeStorageReads(t *testing.T) {
 		results := map[bool][]uint64{}
 		for _, enabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("memo%v/cache%v", memo, enabled), func(t *testing.T) {
-				l, db, _, first, count := newSealedRenderFixture(t)
+				l, db, first, count := newSealedRenderFixture(t)
 				if !memo {
 					restore := db.DisableMetadataCacheForTest()
 					defer restore()

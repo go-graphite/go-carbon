@@ -16,7 +16,7 @@ import (
 // query inside a multi-group v9 block and cached historical prefixes. The
 // uncached render is the byte oracle; no durable data changes on toggle.
 func TestReadPathPackedV9RenderOracle(t *testing.T) {
-	l, _, _, first, count := newSealedRenderFixture(t)
+	l, _, first, count := newSealedRenderFixture(t)
 	l.initializeCaches()
 	targets := map[timeRange][]target{{int32(first + count/2), int32(first + count)}: {
 		{"sealed.render.m1", "sealed.render.m1"},
@@ -70,7 +70,7 @@ func TestReadPathPackedV9RenderOracle(t *testing.T) {
 
 // Publish policy while readers build keys and use the old/new prefix namespaces.
 func TestReadPathConcurrentPolicyToggle(t *testing.T) {
-	l, _, _, first, count := newSealedRenderFixture(t)
+	l, _, first, count := newSealedRenderFixture(t)
 	targets := map[timeRange][]target{{int32(first + count/2), int32(first + count)}: {{"sealed.render.m1", "sealed.render.m1"}}}
 	// Prepare an immutable warmed namespace before publishing it to readers.
 	// The fixture clock is historical, so default time.Now would bypass all
