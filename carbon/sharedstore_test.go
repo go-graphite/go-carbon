@@ -200,6 +200,8 @@ func TestSharedStorageConfigRejectsUnsupportedPolicies(t *testing.T) {
 		{"long compaction warmup", func(c *Config) { c.Whisper.StoreCompactionWarmup = &Duration{25 * time.Hour} }},
 		{"invalid flush rate", func(c *Config) { c.Whisper.StoreFlushRate = -2 }},
 		{"negative compaction workers", func(c *Config) { c.Whisper.StoreCompactionWorkers = -1 }},
+		{"zero relayout reserve", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutMinFree = 0 }},
+		{"zero relayout debt limit", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutMaxDebt = 0 }},
 		{"zero relayout workers", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutWorkers = 0 }},
 		{"negative relayout workers", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutWorkers = -1 }},
 		{"large relayout workers", func(c *Config) { c.Whisper.StoreTimeBucketsRelayoutWorkers = 33 }},
@@ -436,6 +438,8 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 	next := *cfg
 	next.Whisper.StoreCompactionWorkers = 2
 	next.Whisper.StoreTimeBucketsRelayoutRate = 1
+	next.Whisper.StoreTimeBucketsRelayoutMinFree = 300 << 30
+	next.Whisper.StoreTimeBucketsRelayoutMaxDebt = 16 << 30
 	if storageSettingsChanged(cfg, &next) {
 		t.Fatal("compaction workers and a positive relayout rate must hot-reload")
 	}
@@ -451,6 +455,9 @@ func TestReloadTunesCompactionWorkersAndRelayoutRate(t *testing.T) {
 	}
 	if got := store.RelayoutStats().Rate; got != 1 {
 		t.Fatalf("reloaded relayout rate %d, want 1", got)
+	}
+	if got := store.RelayoutStats(); got.MinFreeBytes != 300<<30 || got.MaxCompactionDebt != 16<<30 {
+		t.Fatalf("reloaded relayout limits: %+v", got)
 	}
 	off := next
 	off.Whisper.StoreTimeBucketsRelayoutRate = 0

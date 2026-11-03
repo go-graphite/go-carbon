@@ -103,7 +103,9 @@ type whisperConfig struct {
 	StoreTimeBuckets             bool      `toml:"store-time-buckets"`
 	StoreTimeBucketsRelayoutRate int64     `toml:"store-time-buckets-relayout-rate"`
 
-	StoreTimeBucketsRelayoutWorkers int `toml:"store-time-buckets-relayout-workers"`
+	StoreTimeBucketsRelayoutWorkers int   `toml:"store-time-buckets-relayout-workers"`
+	StoreTimeBucketsRelayoutMinFree int64 `toml:"store-time-buckets-relayout-min-free-bytes"`
+	StoreTimeBucketsRelayoutMaxDebt int64 `toml:"store-time-buckets-relayout-max-compaction-debt"`
 
 	StoreMigrationIOSlots        int       `toml:"store-migration-io-slots"`
 	StoreMigrationReclaimDelay   *Duration `toml:"store-migration-reclaim-delay"`
@@ -434,6 +436,8 @@ func NewConfig() *Config {
 		},
 		Whisper: whisperConfig{
 			StoreTimeBucketsRelayoutWorkers: 1,
+			StoreTimeBucketsRelayoutMinFree: 200 << 30,
+			StoreTimeBucketsRelayoutMaxDebt: 32 << 30,
 			StoreRestartCPUHeadroom:         restartcpu.DefaultHeadroom,
 			StorageBackend:                  "files",
 			StoreCacheSize:                  256 << 20,

@@ -155,7 +155,7 @@ func BenchmarkRelayoutWorkers(b *testing.B) {
 			var wallSeconds, cpuSeconds, workerSeconds, soloSeconds float64
 			for range b.N {
 				dir := b.TempDir()
-				opts := store.Options{ExactBlocks: true, Continuation: codec, RelayoutWorkers: workers,
+				opts := store.Options{ExactBlocks: true, Continuation: codec, RelayoutWorkers: workers, RelayoutMinFreeBytes: 1,
 					Now: clock, SyncInterval: time.Hour, CacheSize: 128 << 20, MemTableSize: 32 << 20,
 					CompactionWorkers: 4, BytesPerSync: 64 << 20}
 				if memory {

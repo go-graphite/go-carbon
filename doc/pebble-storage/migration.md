@@ -194,9 +194,19 @@ in the background (`internal/chunkstore/relayout.go`):
    matches the plan: the descriptor flips to v7 and the old groups are
    point-deleted. A block rewritten meanwhile keeps its new state and its
    copies are deleted.
-5. The cursor `z/relayout` advances only after every candidate through that ID
+5. Outside metric locks and planning snapshots, compact the group's deleted
+   old-key span through the bottom level. Discarded history copies have a
+   separate span; live history is not included in the old-key span. This makes
+   old L6 blocks reclaimable during the move even when point tombstones alone
+   would not trigger compaction. Compaction uses the existing
+   `store-compaction-rate` budget, with one non-parallel request per worker.
+   Each worker calls Pebble's stock `Compact(start, end, false)` synchronously,
+   checking context before and after each call. Cancellation waits for at most
+   its already-started span compaction; it starts no further spans and does not
+   publish that group's cursor. See the shutdown bound below.
+6. The cursor `z/relayout` advances only after every candidate through that ID
    has finished. A chunk becomes complete only after ingestion and all its
-   descriptor switches or stale-copy cleanups commit. Under one coordinator
+   descriptor switches or stale-copy cleanups commit and reclamation returns. Under one coordinator
    mutex, the cursor advances to the end of the longest fully completed prefix
    of chunks; later chunks cannot advance it across a hole. The cursor batch
    commits after the apply batches, using the existing WAL sync policy. Only
@@ -208,13 +218,42 @@ in the background (`internal/chunkstore/relayout.go`):
 - **Pacing.** One shared byte budget across workers, per interval from a live
   rate: a stalled period earns no burst afterwards. A positive rate change
   applies on `SIGHUP`. At most one group per worker can be awaiting pacing.
+- **Pressure guard.** Before each metric plan and before each group ingest,
+  pause new work when filesystem free bytes are below
+  `store-time-buckets-relayout-min-free-bytes` (default **200 GiB**), or Pebble
+  debt exceeds `store-time-buckets-relayout-max-compaction-debt` (default
+  **32 GiB**). Both must be positive and reload on `SIGHUP`, waking paused
+  workers. Recheck every second and resume automatically at the limits. A
+  disk-usage error also pauses until a valid sample returns (in-memory
+  filesystems without capacity reporting are exempt). All workers share one
+  pause state: one WARN and counter increment per entry, plus a resume log.
+  Already admitted groups can finish their deletes and reclaim space.
+- **Headroom.** Keep reserve for foreground writes, up to one admitted group
+  per worker, and overlapping SST compaction outputs. A metric can exceed the
+  64 MiB group target; compaction operates on whole overlapping SSTs, not
+  exact byte slices. Long-lived reader snapshots/iterators can retain obsolete
+  data/files, so the free-space guard remains necessary. A crash/cancellation
+  after publication can leave at most the in-flight groups' reclaim work to
+  later compaction; the existing cursor and descriptor checks remain safe.
 - **One run.** Only one relayout runs at a time; two runs planning the same
   metric could delete copies the other had made live.
 - **Metrics.** `store_relayout_{metrics,blocks,skipped,bytes}_total`,
   `store_relayout_rate_bytes`, `store_relayout_progress_ratio`,
-  `store_relayout_done`, `store_relayout_failed`.
+  `store_relayout_done`, `store_relayout_failed`, `store_relayout_paused`,
+  `store_relayout_pauses_total{reason}`, and `store_relayout_pause_reason{reason}`
+  (0/1 per reason: `low_free_space`, `compaction_debt`, `disk_usage_error`).
 - **When it pays.** Relayout moves cold history out of the way of hot
   headers. For workloads whose fine archives roll over within a day or two it
   barely changes compaction (a key-level model showed under 2%), and its
   copies and deletes add compaction while they run. Run it slowly, and pause
   it when the host is compaction-bound.
+
+Shutdown joins at most one already-started `Compact` call per relayout worker.
+The work is limited to a finished group's deleted span: normally a 64 MiB /
+4,096-metric group, plus whole overlapping SSTs. A single metric may exceed the
+byte target. L6's target file size is 128 MiB with the default level sizes, or
+`store-target-file-size` when overridden; this governs boundary-file overhead,
+not a strict byte limit. IO throughput, compaction pacing, forced memtable flushes
+and other queued compactions determine elapsed time. `Close` releases compaction
+pacing before joining relayout. A context cancellation alone still respects
+the configured IO budget until the current call returns.

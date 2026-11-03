@@ -42,12 +42,17 @@ type RelayoutStats struct {
 	Ceiling uint64
 	Done    bool
 	// Rate is the current pacing in bytes per second.
-	Rate int64
+	Rate                            int64
+	Paused                          bool
+	PauseReason                     string
+	Pauses                          map[string]uint64
+	MinFreeBytes, MaxCompactionDebt uint64
 	// Error is why a background run stopped, if it did.
 	Error string
 }
 
 type relayoutState struct {
+	guard                                   relayoutGuard
 	metrics, blocks, skipped, bytes, cursor atomic.Uint64
 	ceiling                                 atomic.Uint64
 	done                                    atomic.Bool
@@ -102,6 +107,7 @@ type relayoutItem struct {
 func (s *Store) RelayoutStats() RelayoutStats {
 	r := &s.relayout
 	stats := RelayoutStats{Metrics: r.metrics.Load(), Blocks: r.blocks.Load(), Skipped: r.skipped.Load(), Bytes: r.bytes.Load(), Cursor: r.cursor.Load(), Ceiling: r.ceiling.Load(), Done: r.done.Load(), Rate: r.rate.Load()}
+	r.guard.stats(&stats)
 	if e := r.err.Load(); e != nil {
 		stats.Error = *e
 	}
@@ -116,6 +122,7 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 		return errors.New("relayout already running")
 	}
 	defer s.relayout.running.Store(false)
+	defer s.relayout.guard.clear()
 	s.relayout.rate.Store(bytesPerSecond)
 	if !s.timeBuckets {
 		return fmt.Errorf("%w: relayout requires time buckets", ErrFormat)
@@ -264,6 +271,9 @@ func (s *Store) relayoutRange(ctx context.Context, planner ContinuationRelayoute
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if err := s.waitRelayout(ctx); err != nil {
+			return err
+		}
 		m, plan, err := s.planRelayout(ctx, planner, c)
 		if err != nil {
 			return fmt.Errorf("relayout plan %s: %w", c.name, err)
@@ -340,6 +350,9 @@ func (s *Store) relayoutCandidates(ctx context.Context, after, ceiling uint64) (
 // relayoutGroup ingests the group's copies as one table, then switches each
 // block whose descriptor is unchanged and deletes the copies of the rest.
 func (s *Store) relayoutGroup(ctx context.Context, items []relayoutItem) error {
+	if err := s.waitRelayout(ctx); err != nil {
+		return err
+	}
 	path := s.fs.PathJoin(s.dir, fileIngestDir, fmt.Sprintf("relayout-%020d.sst", items[0].m.ID))
 	if err := s.fs.MkdirAll(s.fs.PathDir(path), 0o755); err != nil {
 		return err
@@ -378,15 +391,52 @@ func (s *Store) relayoutGroup(ctx context.Context, items []relayoutItem) error {
 	if err != nil {
 		return fmt.Errorf("ingest relayout copies: %w", err)
 	}
+	spans := make(map[byte]*relayoutSpan)
 	for _, item := range items {
-		if err := s.relayoutApply(ctx, item); err != nil {
+		if err := s.relayoutApply(ctx, item, spans); err != nil {
 			return err
+		}
+	}
+	// Publication locks and planning snapshots are released before any IO
+	// wait. Finish reclamation before admitting this worker's next group or
+	// advancing its cursor. Old metric keys and discarded bucket copies must
+	// stay in separate spans so we never compact the intervening keyspace.
+	for _, kind := range []byte{'u', 't'} {
+		if span := spans[kind]; span != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// Stock Compact has no cancellation API. Join this bounded span
+			// synchronously, then stop before another span or cursor publish.
+			compactErr := s.db.Compact(span.start, append(span.end, 0), false)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if compactErr != nil {
+				return fmt.Errorf("reclaim relayout group: %w", compactErr)
+			}
 		}
 	}
 	return nil
 }
 
-func (s *Store) relayoutApply(ctx context.Context, item relayoutItem) error {
+type relayoutSpan struct{ start, end []byte }
+
+func addRelayoutSpan(spans map[byte]*relayoutSpan, key []byte) {
+	span := spans[key[0]]
+	if span == nil {
+		spans[key[0]] = &relayoutSpan{start: key, end: key}
+		return
+	}
+	if bytes.Compare(key, span.start) < 0 {
+		span.start = key
+	}
+	if bytes.Compare(key, span.end) > 0 {
+		span.end = key
+	}
+}
+
+func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, spans map[byte]*relayoutSpan) error {
 	unlock := s.lockMetricMutation(item.m.Name)
 	defer unlock()
 	current, err := s.metadataLocked(item.m.Name)
@@ -412,6 +462,7 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem) error {
 				return err
 			}
 			for _, key := range b.Removed {
+				addRelayoutSpan(spans, io.key(key))
 				if err := io.Delete(key); err != nil {
 					return err
 				}
@@ -422,6 +473,7 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem) error {
 		// The block changed after planning (or the generation is gone): its
 		// new state does not reference these copies.
 		for _, c := range b.Copies {
+			addRelayoutSpan(spans, io.key(c.Key))
 			if err := io.Delete(c.Key); err != nil {
 				return err
 			}

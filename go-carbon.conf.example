@@ -439,6 +439,17 @@ store-encoding = "legacy"
 # Parallel ID ranges, 1-32. Requires a restart; the rate above is the total
 # across all workers. Each worker buffers up to about 64 MiB of group values.
 # store-time-buckets-relayout-workers = 1
+# Relayout compacts each group's old-key span before copying the next group,
+# using store-compaction-rate. Cancellation joins the current span compaction
+# before the worker returns; no later span starts. Keep headroom for admitted
+# groups (one per worker), overlapping SST outputs and foreground writes. One metric may
+# exceed the 64 MiB group target; snapshots can delay physical reclamation.
+# Pause new plans/ingests below this reserve or above the debt limit; both
+# must be positive, reload on SIGHUP and resume automatically on recovery.
+# A disk-usage error also pauses. store_relayout_paused and the reason-labelled
+# store_relayout_pauses_total / store_relayout_pause_reason explain waits.
+# store-time-buckets-relayout-min-free-bytes = 214748364800
+# store-time-buckets-relayout-max-compaction-debt = 34359738368
 # Cold continuation packing (exact incremental shared storage with time buckets).
 # Hot writes stay exact. Enabling upgrades the durable reader fence to v9;
 # upgrade readers, transfer peers and recovery tools first. All settings reload

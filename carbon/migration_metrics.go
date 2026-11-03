@@ -190,6 +190,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_relayout_bytes_total", "Bytes the relayout copied into the history bucket.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Bytes) }),
 		gauge("store_relayout_rate_bytes", "Current relayout pacing in bytes per second; 0 when no relayout runs.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Rate) }),
 		gauge("store_relayout_progress_ratio", "Relayout progress through the ID-ordered catalog (0-1).", func(s *migrationSnapshot) float64 { return relayoutProgress(s.stats.relayout) }),
+		gauge("store_relayout_paused", "1 while relayout waits for free space, compaction debt or a valid disk-usage sample.", func(s *migrationSnapshot) float64 { return b(s.stats.relayout.Paused) }),
 		gauge("store_relayout_done", "1 once the relayout moved every pre-v7 block.", func(s *migrationSnapshot) float64 { return b(s.stats.relayout.Done) }),
 		gauge("store_purge_invalid_names_found", "Catalog records under names too long for the store that the purge's scan found (store-purge-invalid-names).", func(s *migrationSnapshot) float64 { return float64(s.stats.purgeFound) }),
 		counter("store_purge_invalid_names_removed_total", "Catalog records under names too long for the store that the purge removed.", func(s *migrationSnapshot) float64 { return float64(s.stats.purgeRemoved) }),
@@ -268,6 +269,8 @@ var migrationMetricSpecs = func() []metricSpec {
 
 // Pebble compactions by kind and filesystem operations by file kind.
 var (
+	relayoutPausesDesc           = prometheus.NewDesc("store_relayout_pauses_total", "Relayout pause entries by reason; shared across workers.", []string{"reason"}, nil)
+	relayoutPauseReasonDesc      = prometheus.NewDesc("store_relayout_pause_reason", "1 for the current relayout pause reason, otherwise 0.", []string{"reason"}, nil)
 	pebbleCompactionsDesc        = prometheus.NewDesc("pebble_compactions_total", "Completed Pebble compactions by kind; multi_level is a subset of default.", []string{"kind"}, nil)
 	pebbleCompactionBypassesDesc = prometheus.NewDesc("pebble_compaction_pacer_bypasses_total", "Compaction pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
 	pebbleFlushBypassesDesc      = prometheus.NewDesc("pebble_flush_pacer_bypasses_total", "Flush pacing bypass entries by reason, including changes between reasons.", []string{"reason"}, nil)
@@ -324,6 +327,8 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- storeLevelBytesDesc
 	ch <- pebbleLevelTargetDesc
 	ch <- pebbleLevelScoreDesc
+	ch <- relayoutPausesDesc
+	ch <- relayoutPauseReasonDesc
 	ch <- pebbleCompactionsDesc
 	ch <- pebbleCompactionBypassesDesc
 	ch <- pebbleFlushBypassesDesc
@@ -412,6 +417,14 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(persisterUpdateMaxDesc, prometheus.GaugeValue, stagetime.TakeUpdateMax().Seconds())
 	}
 	if s.store {
+		for _, reason := range []string{"low_free_space", "compaction_debt", "disk_usage_error"} {
+			ch <- prometheus.MustNewConstMetric(relayoutPausesDesc, prometheus.CounterValue, float64(s.stats.relayout.Pauses[reason]), reason)
+			active := 0.0
+			if s.stats.relayout.Paused && s.stats.relayout.PauseReason == reason {
+				active = 1
+			}
+			ch <- prometheus.MustNewConstMetric(relayoutPauseReasonDesc, prometheus.GaugeValue, active, reason)
+		}
 		for _, stage := range []struct {
 			name   string
 			timing store.FetchTiming

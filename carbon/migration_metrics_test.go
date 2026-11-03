@@ -8,6 +8,7 @@ import (
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/prometheus/client_golang/prometheus"
@@ -119,7 +120,7 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 	if _, ok := values["pebble_disk_bytes"]; !ok {
 		t.Fatal("store metrics missing with an open store")
 	}
-	for _, name := range []string{"pebble_compaction_rate_bytes", "pebble_compaction_pacer_target_rate_bytes", "pebble_compaction_pacer_auto", "pebble_compaction_pacer_bypass", "pebble_compaction_pacer_bytes_total", "pebble_compaction_pacer_wait_seconds_total", "pebble_flush_rate_bytes", "pebble_flush_pacer_target_rate_bytes", "pebble_flush_pacer_auto", "pebble_flush_pacer_bypass", "pebble_flush_pacer_bytes_total", "pebble_flush_pacer_wait_seconds_total", "pebble_compactions_total", "pebble_fs_ops_total", "pebble_fs_bytes_total", "pebble_block_cache_bytes", "pebble_table_cache_entries", "pebble_level_compaction_write_bytes_total", "pebble_level_compaction_read_bytes_total", "pebble_level_bytes", "store_metadata_cache_prewarmed_total", "store_metadata_cache_prewarm_bytes_total", "store_metadata_cache_prewarm_read_bytes_total", "store_metadata_cache_prewarm_duration_seconds_total", "store_relayout_bytes_total", "store_relayout_progress_ratio", "store_relayout_rate_bytes", "store_migration_sidecar_folds_total"} {
+	for _, name := range []string{"pebble_compaction_rate_bytes", "pebble_compaction_pacer_target_rate_bytes", "pebble_compaction_pacer_auto", "pebble_compaction_pacer_bypass", "pebble_compaction_pacer_bytes_total", "pebble_compaction_pacer_wait_seconds_total", "pebble_flush_rate_bytes", "pebble_flush_pacer_target_rate_bytes", "pebble_flush_pacer_auto", "pebble_flush_pacer_bypass", "pebble_flush_pacer_bytes_total", "pebble_flush_pacer_wait_seconds_total", "pebble_compactions_total", "pebble_fs_ops_total", "pebble_fs_bytes_total", "pebble_block_cache_bytes", "pebble_table_cache_entries", "pebble_level_compaction_write_bytes_total", "pebble_level_compaction_read_bytes_total", "pebble_level_bytes", "store_metadata_cache_prewarmed_total", "store_metadata_cache_prewarm_bytes_total", "store_metadata_cache_prewarm_read_bytes_total", "store_metadata_cache_prewarm_duration_seconds_total", "store_relayout_paused", "store_relayout_pauses_total", "store_relayout_pause_reason", "store_relayout_bytes_total", "store_relayout_progress_ratio", "store_relayout_rate_bytes", "store_migration_sidecar_folds_total"} {
 		if _, ok := values[name]; !ok {
 			t.Fatalf("%s missing with an open store", name)
 		}
@@ -205,5 +206,64 @@ func TestCollectorReportsPersisterTimingsAndMemory(t *testing.T) {
 	}
 	if _, ok := found["store_migration_working_bytes_reserved"]; ok {
 		t.Fatal("migration working bytes reported without a migration")
+	}
+}
+
+func TestMigrationCollectorRelayoutPauseReasons(t *testing.T) {
+	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, RelayoutMinFreeBytes: ^uint64(0), RelayoutWorkers: 4, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	createExpirationMetric(t, db, "pause.metrics")
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan error, 1)
+	go func() { finished <- db.RelayoutContinuation(ctx, 0) }()
+	defer func() { cancel(); <-finished }()
+	for deadline := time.Now().Add(5 * time.Second); !db.RelayoutStats().Paused; {
+		if time.Now().After(deadline) {
+			t.Fatal("relayout did not pause")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{MetricStore: db}})
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, f := range families {
+		switch f.GetName() {
+		case "store_relayout_paused":
+			found++
+			if f.Metric[0].GetGauge().GetValue() != 1 {
+				t.Fatal("paused gauge is not set")
+			}
+		case "store_relayout_pauses_total", "store_relayout_pause_reason":
+			found++
+			if len(f.Metric) != 3 {
+				t.Fatal("missing reason series")
+			}
+			for _, m := range f.Metric {
+				if len(m.Label) != 1 || m.Label[0].GetName() != "reason" {
+					t.Fatal("missing reason label")
+				}
+				want := 0.0
+				if m.Label[0].GetValue() == "low_free_space" {
+					want = 1
+				}
+				got := m.GetGauge().GetValue()
+				if f.GetName() == "store_relayout_pauses_total" {
+					got = m.GetCounter().GetValue()
+				}
+				if got != want {
+					t.Fatalf("%s{%s}=%v, want %v", f.GetName(), m.Label[0].GetValue(), got, want)
+				}
+			}
+		}
+	}
+	if found != 3 {
+		t.Fatalf("pause metric families=%d", found)
 	}
 }

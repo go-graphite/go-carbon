@@ -731,6 +731,10 @@ func TestConcurrentUpdatesHaveConsistentFetchMetadata(t *testing.T) {
 }
 
 func openTestStore(t *testing.T, dir string, opts Options) (*Store, int) {
+	// Local fixtures need only a tiny reserve; production defaults to 200 GiB.
+	if opts.RelayoutMinFreeBytes == 0 {
+		opts.RelayoutMinFreeBytes = 1
+	}
 	t.Helper()
 	if opts.fs == nil {
 		opts.fs = noSyncFS{FS: vfs.Default}

@@ -161,6 +161,9 @@ func sharedStorePath(cfg *Config) string {
 }
 
 func validateStorageConfig(cfg *Config) error {
+	if cfg.Whisper.StoreTimeBucketsRelayoutMinFree <= 0 || cfg.Whisper.StoreTimeBucketsRelayoutMaxDebt <= 0 {
+		return errors.New("store-time-buckets-relayout-min-free-bytes and store-time-buckets-relayout-max-compaction-debt must be positive")
+	}
 	if workers := cfg.Whisper.StoreTimeBucketsRelayoutWorkers; workers < 1 || workers > 32 {
 		return errors.New("store-time-buckets-relayout-workers must be 1..32")
 	}
