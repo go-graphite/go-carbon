@@ -1146,6 +1146,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 	carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 	carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
+	carbonserver.SetQueryCacheCanonicalKeys(conf.Carbonserver.QueryCacheCanonicalKeys)
 	carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 	if err := carbonserver.SetQueryCacheCompression(conf.Carbonserver.QueryCacheCompression); err != nil {
 		return nil, err

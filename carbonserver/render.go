@@ -296,6 +296,22 @@ func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeR
 	if metricStore := listener.getMetricStore(); metricStore != nil {
 		format += "&store=" + strconv.FormatUint(metricStore.ReadCacheEpoch(), 16)
 	}
+	key := ""
+	if listener.queryCacheCanonicalKeys {
+		key = canonicalRenderCacheKey(targets, format)
+	} else {
+		key = legacyRenderCacheKey(targets, format)
+	}
+	size := uint64(100 * 1024 * 1024)
+	renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
+	fetchSize := atomic.LoadUint64(&listener.metrics.FetchSize)
+	if renderRequests > 0 {
+		size = fetchSize / renderRequests
+	}
+	return key, size
+}
+
+func legacyRenderCacheKey(targets map[timeRange][]target, format string) string {
 	targetKeys := make([]string, 0, len(targets))
 	for tr, ts := range targets {
 		names := make([]string, 0, len(ts))
@@ -304,29 +320,7 @@ func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeR
 		}
 		targetKeys = append(targetKeys, fmt.Sprintf("%s&%d&%d", strings.Join(names, "&"), tr.from, tr.until))
 	}
-	// TODO(gmagnusson): Our cache key changes if we permute any of the
-	// metric names while keeping the from/until pairs fixed, or permute
-	// any combination of metric names and from/until pairs as a unit.
-	// These permutations to not change the response, so we should be more
-	// clever about how we construct the cache key.
-	//
-	// An option is to sort the metric names within each from/until pair,
-	// and to order (names,from,until) triples by the from timestamp.
-	//
-	// This is probably worth doing, as the only source of differences in
-	// from/until pairs I know of comes from using timeShift or timeStack,
-	// which again probably comes from trying to compare trends from last
-	// week to what's going on now, which is something people are generally
-	// interested in. It wouldn't be good to start adding false negative
-	// cache misses to those kinds of queries.
-	key := fmt.Sprintf("%s&%s", strings.Join(targetKeys, "&"), format)
-	size := uint64(100 * 1024 * 1024)
-	renderRequests := atomic.LoadUint64(&listener.metrics.RenderRequests)
-	fetchSize := atomic.LoadUint64(&listener.metrics.FetchSize)
-	if renderRequests > 0 {
-		size = fetchSize / renderRequests
-	}
-	return key, size
+	return fmt.Sprintf("%s&%s", strings.Join(targetKeys, "&"), format)
 }
 
 func (listener *CarbonserverListener) fetchWithCache(ctx context.Context, logger *zap.Logger, format responseFormat, targets map[timeRange][]target, tle *traceLogEntries) (fetchResponse, bool, error) {

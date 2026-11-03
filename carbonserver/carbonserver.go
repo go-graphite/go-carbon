@@ -310,6 +310,7 @@ type CarbonserverListener struct {
 	maxFetchDataGoroutines int
 
 	queryCacheEnabled          bool
+	queryCacheCanonicalKeys    bool
 	streamingQueryCacheEnabled bool
 	queryCacheSizeMB           int
 	queryCacheGzip             bool
@@ -815,6 +816,12 @@ func (listener *CarbonserverListener) SetMetricsAsCounters(metricsAsCounters boo
 }
 func (listener *CarbonserverListener) SetQueryCacheEnabled(enabled bool) {
 	listener.queryCacheEnabled = enabled
+}
+
+// SetQueryCacheCanonicalKeys allows equivalent target permutations to share a
+// reply. The cached reply retains the ordering of the request that filled it.
+func (listener *CarbonserverListener) SetQueryCacheCanonicalKeys(enabled bool) {
+	listener.queryCacheCanonicalKeys = enabled
 }
 func (listener *CarbonserverListener) SetQueryCacheSizeMB(size int) {
 	listener.queryCacheSizeMB = size

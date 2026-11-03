@@ -889,6 +889,10 @@ write-timeout = "60s"
 request-timeout = "60s"
 # Enable /render cache, it will cache the result for 1 minute
 query-cache-enabled = true
+# Share HTTP and streaming cache entries across target/range permutations.
+# Duplicate targets and exact path expressions are preserved. A cache hit uses
+# the series order of the request that filled it. Off preserves legacy ordering.
+query-cache-canonical-keys = false
 # Enable carbonV2 gRPC streaming render cache, it will cache the result for 1 minute
 streaming-query-cache-enabled = false
 # Maximum size in megabytes, 0 for unlimited
