@@ -5,6 +5,7 @@ package chunkstore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
@@ -178,7 +179,7 @@ func TestRelayoutReclaimCadenceMeasurement(t *testing.T) {
 			}
 			for _, m := range metas {
 				io := s.newContinuationIO(ctx, s.db, nil, m)
-				if _, err := io.Get(spaceGroupKey(0)); err != ErrNotFound {
+				if _, err := io.Get(spaceGroupKey(0)); !errors.Is(err, ErrNotFound) {
 					t.Fatalf("old key remains: %v", err)
 				}
 				if v, err := io.Get(ContinuationBucketKey(0, spaceGroupKey(0))); err != nil || len(v) != len(value) {

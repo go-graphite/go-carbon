@@ -287,7 +287,7 @@ func TestRelayoutSpaceOptions(t *testing.T) {
 					if mode == "compact" {
 						lo := continuationPrefix(metas[i].ID, metas[i].Generation)
 						hi := continuationPrefix(metas[i+3].ID+1, 0)
-						if err := s.db.Compact(lo[:], hi[:], false); err != nil {
+						if err := s.db.Compact(lo, hi, false); err != nil {
 							t.Fatal(err)
 						}
 					}
