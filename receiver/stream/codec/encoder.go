@@ -9,9 +9,8 @@ import (
 )
 
 type point struct {
-	ts    int64
-	bits  uint64
-	valid bool
+	ts   int64
+	bits uint64
 }
 type row struct {
 	id   uint32
