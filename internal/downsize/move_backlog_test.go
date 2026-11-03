@@ -18,6 +18,7 @@ func newTestTuner(hosts []string, maximum capacity, auto bool, mbps, p99 float64
 	for _, h := range t.hosts {
 		h.baseline = &backlogBaseline{Samples: 1}
 		h.debtBaseline = &backlogBaseline{Samples: 10, Start: 1, End: 301}
+		h.latencyBaseline = &backlogBaseline{Samples: 10, Start: 1, End: 301}
 	}
 	return t
 }
@@ -119,6 +120,7 @@ func TestBacklogObservationWindowAndMedian(t *testing.T) {
 	// Simulate elapsed observation time without making the test sleep for 5m.
 	tune.hosts["a"].backlogStart = sample.Time - tune.backlog.Window.Seconds()
 	tune.hosts["a"].debtStart = tune.hosts["a"].backlogStart
+	tune.hosts["a"].latencyStart = tune.hosts["a"].backlogStart
 	if err := tune.finishBacklogObservation(false); err != nil {
 		t.Fatal(err)
 	}

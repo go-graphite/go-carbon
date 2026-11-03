@@ -63,6 +63,10 @@ type hostLimit struct {
 	debtSamples               []int64
 	debtStart                 float64
 	debtGrowth, debtHigh      int
+	latencyBaseline           *backlogBaseline
+	latencySamples            []int64
+	latencyStart              float64
+	latencyHigh               int
 	hard                      string
 	foregroundReady           bool
 }
@@ -127,7 +131,7 @@ func (t *tuner) admit(ctx context.Context, source, target string) (func(), error
 		t.mu.Lock()
 		a, b := t.hosts[source], t.hosts[target]
 		for _, h := range []*hostLimit{a, b} {
-			if h.hard != "" || h.baseline == nil || h.debtBaseline == nil || t.collectingDebt {
+			if h.hard != "" || h.baseline == nil || h.debtBaseline == nil || h.latencyBaseline == nil || t.collectingDebt {
 				t.mu.Unlock()
 				return nil, fmt.Errorf("copy admission unavailable: hard=%q; pre-copy backlog baseline required", h.hard)
 			}
@@ -237,9 +241,6 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 	if sample.CPUCores > float64(sample.PhysicalCores)-cpuReserve(sample.PhysicalCores) {
 		return "", "CPU reserve"
 	}
-	if sample.DiskUtil > 90 && sample.DiskAwaitMS > 2 || sample.DiskAwaitMS > 10 {
-		return "", "data-drive latency"
-	}
 	if sample.DiskWriteCapacity > 0 && sample.DiskWriteBytes >= sample.DiskWriteCapacity*.98 {
 		return "", "disk write bandwidth"
 	}
@@ -276,8 +277,15 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	}
 	hard, soft := guard(sample, store, h.previous, h.storePrevious, readLimit)
 	debt := h.observeDebt(sample, store, t.backlog.GrowthSamples, t.collectingDebt || t.collecting)
+	latency := h.observeLatency(sample, t.collectingDebt || t.collecting)
+	if latency.Soft != "" && soft == "" {
+		soft = latency.Soft
+	}
 	if !t.collectingDebt && !t.collecting && h.debtBaseline == nil && hard == "" {
 		hard = "missing pre-copy compaction debt baseline; run --observe-only before copying"
+	}
+	if !t.collectingDebt && !t.collecting && h.latencyBaseline == nil && hard == "" {
+		hard = "missing pre-copy disk latency baseline; run --observe-only before copying"
 	}
 	if debt.Soft != "" && soft == "" {
 		soft = debt.Soft
@@ -349,7 +357,7 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	}
 	if hard != "" {
 		h.hard, h.Streams = hard, 0
-		event("tune", map[string]any{"host": host, "decision": "hard", "reason": hard, "binding_resource": hard, "limits": h.capacity, "backlog": backlog, "debt": debt, "sample": sample, "storage": store})
+		event("tune", map[string]any{"host": host, "decision": "hard", "reason": hard, "binding_resource": hard, "limits": h.capacity, "backlog": backlog, "debt": debt, "latency": latency, "sample": sample, "storage": store})
 		close(t.changed)
 		t.changed = make(chan struct{})
 		return fmt.Errorf("%s: %s (baseline=%+v current=%d ratio=%.4f soft_ratio=%.4f hard_ratio=%.4f)", host, hard, h.baseline, sample.CachePoints, backlog.Ratio, t.backlog.SoftRatio, t.backlog.HardRatio)
@@ -378,7 +386,7 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	if soft != "" {
 		decision = "soft"
 	}
-	event("tune", map[string]any{"host": host, "decision": decision, "limits": h.capacity, "reason": reason, "binding_resource": reason, "ceiling": ceiling, "background_cpu_cores": h.backgroundCPU, "backlog": backlog, "debt": debt, "sample": sample, "storage": store})
+	event("tune", map[string]any{"host": host, "decision": decision, "limits": h.capacity, "reason": reason, "binding_resource": reason, "ceiling": ceiling, "background_cpu_cores": h.backgroundCPU, "backlog": backlog, "debt": debt, "latency": latency, "sample": sample, "storage": store})
 	close(t.changed)
 	t.changed = make(chan struct{})
 	return nil

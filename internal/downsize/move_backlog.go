@@ -59,6 +59,8 @@ type hostAdmission struct {
 	BackgroundCPU                float64
 	DebtBaseline                 *backlogBaseline
 	DebtHigh, DebtGrowth         int
+	LatencyBaseline              *backlogBaseline
+	LatencyHigh                  int
 }
 
 type admissionState struct {
@@ -119,7 +121,7 @@ func (t *tuner) snapshotAdmission(synthetic bool) *admissionState {
 	for host, h := range t.hosts {
 		state.Hosts[host] = hostAdmission{Baseline: h.baseline, Previous: *h.previous, StorePrevious: *h.storePrevious,
 			Growth: h.growth, ForegroundRate: h.foregroundRate, ReadBaseline: h.readBaseline, BackgroundCPU: h.backgroundCPU,
-			DebtBaseline: h.debtBaseline, DebtHigh: h.debtHigh, DebtGrowth: h.debtGrowth}
+			DebtBaseline: h.debtBaseline, DebtHigh: h.debtHigh, DebtGrowth: h.debtGrowth, LatencyBaseline: h.latencyBaseline, LatencyHigh: h.latencyHigh}
 	}
 	return state
 }
@@ -142,11 +144,18 @@ func (t *tuner) restoreAdmission(state *admissionState, synthetic bool) error {
 			return fmt.Errorf("%s: missing or invalid saved compaction debt baseline; run --observe-only with copying off", host)
 		}
 		h.debtBaseline, h.debtHigh, h.debtGrowth = saved.DebtBaseline, saved.DebtHigh, saved.DebtGrowth
+		if saved.LatencyBaseline == nil && !t.collectingDebt || saved.LatencyBaseline != nil && !saved.LatencyBaseline.valid(t.backlog.Window, synthetic) || saved.LatencyHigh < 0 {
+			return fmt.Errorf("%s: missing or invalid disk latency baseline; run --observe-only", host)
+		}
+		h.latencyBaseline, h.latencyHigh = saved.LatencyBaseline, saved.LatencyHigh
 		// A resumed controller earns admission again from fresh healthy samples.
 		h.Streams, h.healthy = 0, 0
 		event("backlog_baseline_restored", map[string]any{"host": host, "baseline": h.baseline, "policy": t.backlog, "rising_samples": h.growth})
 		if h.debtBaseline != nil {
 			event("debt_baseline_restored", map[string]any{"host": host, "baseline": h.debtBaseline, "high_samples": h.debtHigh, "rising_samples": h.debtGrowth})
+		}
+		if h.latencyBaseline != nil {
+			event("latency_baseline_restored", map[string]any{"host": host, "baseline": h.latencyBaseline, "high_samples": h.latencyHigh})
 		}
 	}
 	return nil
@@ -156,6 +165,14 @@ func (t *tuner) finishBacklogObservation(synthetic bool) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for host, h := range t.hosts {
+		if h.latencyBaseline == nil {
+			b := observationBaseline(h.latencySamples, h.latencyStart, h.previous)
+			if !b.valid(t.backlog.Window, synthetic) {
+				return fmt.Errorf("%s: incomplete pre-copy disk latency window", host)
+			}
+			h.latencyBaseline, h.latencySamples = b, nil
+			event("latency_baseline", map[string]any{"host": host, "baseline": b, "unit": "microseconds", "high_samples_required": 3})
+		}
 		if h.debtBaseline == nil {
 			b := observationBaseline(h.debtSamples, h.debtStart, h.previous)
 			if !b.valid(t.backlog.Window, synthetic) {
@@ -214,7 +231,7 @@ func (m *mover) prepareAdmission(ctx context.Context, hosts []string) error {
 		}
 		missingDebt := false
 		for _, h := range m.tuner.hosts {
-			missingDebt = missingDebt || h.debtBaseline == nil
+			missingDebt = missingDebt || h.debtBaseline == nil || h.latencyBaseline == nil
 		}
 		m.tuner.collectingDebt = missingDebt
 		if missingDebt {

@@ -395,7 +395,7 @@ non-destructive markers.
 `resize run --apply --observe-only 10m` runs the same admission and resource
 guards, persists observations, and exits without starting transfer workers.
 Use the same plan, state and health-map flags as the intended copy. This also
-upgrades an existing backlog-only journal by observing compaction debt for the
+upgrades an existing backlog-only journal by observing compaction debt and device latency for the
 configured baseline window with copying disabled; the original backlog envelope
 and operation remain unchanged. Normal copy refuses journals missing that debt
 baseline. Do not run two controllers against the same state simultaneously.
@@ -412,3 +412,8 @@ control-host stream and complete observation windows. The controller has no
 control-host stream, so it does not infer a foreground regression from a single
 historical sample. Backlog guards remain independent and use each copy host's
 persisted envelope.
+
+Device latency uses a persisted per-host baseline in microseconds. Three samples
+above max(baseline maximum × 1.25, 10 ms) throttle admission; at utilization >90%
+the floor is 2 ms. This replaces idle-sensitive fixed latency limits, discovered
+by the copying-off tuning observation (12.691 ms await at 1.20% utilization).
