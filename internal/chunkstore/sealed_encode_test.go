@@ -132,8 +132,7 @@ func BenchmarkSealedEncode(b *testing.B) {
 					b.ResetTimer()
 					cpu := sealedCPU()
 					for b.Loop() {
-						data, err = enc.fn(p, 60)
-						if err != nil {
+						if _, err := enc.fn(p, 60); err != nil {
 							b.Fatal(err)
 						}
 					}
