@@ -114,6 +114,9 @@ func TestRenderRangeCacheInvalidationAndOverlay(t *testing.T) {
 			t.Fatal(err)
 		}
 		check(from+60, until, false)
+		check(from+60, until, false) // active revisions bypass admission
+		stamp.Add(61)
+		check(from+60, until, false) // stable series can be admitted again
 		check(from+60, until, true)
 	}
 	snapshot, err := db.Snapshot(context.Background(), name)

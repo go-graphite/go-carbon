@@ -314,7 +314,7 @@ func TestRenderRangeMovingWindowScreen(t *testing.T) {
 								t.Fatalf("response differs at refresh=%d series=%d", i/len(names), i%len(names))
 							}
 						}
-						if l.metrics.RangeCacheHit != 448 || l.metrics.RangeCacheMiss != 48 {
+						if l.metrics.RangeCacheHit != 416 || l.metrics.RangeCacheMiss != 80 {
 							t.Fatalf("hits=%d misses=%d", l.metrics.RangeCacheHit, l.metrics.RangeCacheMiss)
 						}
 					} else {

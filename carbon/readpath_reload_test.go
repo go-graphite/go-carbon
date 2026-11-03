@@ -13,8 +13,8 @@ import (
 )
 
 // SIGHUP calls ReloadConfig. Check its serving effects over real HTTP, not just
-// the parsed Config: equivalent request order hits the canonical cache,
-// and neither the listener nor the store is replaced.
+// the parsed Config: equivalent request order hits the canonical cache, prefix
+// reuse starts/stops, and neither the listener nor the store is replaced.
 func TestReadPathFlagsReload(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
@@ -27,6 +27,7 @@ func TestReadPathFlagsReload(t *testing.T) {
 		cfg.Whisper.StoreEncoding = "exact"
 		cfg.Carbonserver.QueryCacheEnabled = true
 		cfg.Carbonserver.MetricsAsCounters = true
+		cfg.Carbonserver.QueryRangeCacheSizeMB = 1
 	})
 	defer app.Stop()
 	listener, db := app.Carbonserver, app.MetricStore
@@ -76,6 +77,7 @@ func TestReadPathFlagsReload(t *testing.T) {
 	}
 	for stage, enabled := range []bool{true, false, true} {
 		cfg.Carbonserver.QueryCacheCanonicalKeys = enabled
+		cfg.Carbonserver.QueryRangeCacheEnabled = enabled
 		writeBatchingConfig(t, app.ConfigFilename, cfg)
 		if err := app.ReloadConfig(); err != nil {
 			t.Fatal(err)
@@ -84,11 +86,37 @@ func TestReadPathFlagsReload(t *testing.T) {
 			t.Fatal("reload replaced serving components")
 		}
 		from := now - 7200 + stage*30
+		before := counter("range_cache_hit")
 		render(from, false)
-		before := counter("query_cache_hit")
-		render(from, true)
+		if counter("range_cache_hit") != before {
+			t.Fatal("new/disabled namespace unexpectedly hit")
+		}
+		render(from+1, false) // new exact key, overlapping historical prefix
+		if got := counter("range_cache_hit") - before; got != map[bool]float64{false: 0, true: 2}[enabled] {
+			t.Fatalf("prefix flag=%v hits=%v", enabled, got)
+		}
+		// An unrelated reload must retain the populated prefix namespace.
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+		before = counter("range_cache_hit")
+		render(from+2, false)
+		if got := counter("range_cache_hit") - before; got != map[bool]float64{false: 0, true: 2}[enabled] {
+			t.Fatalf("unrelated reload lost prefix: enabled=%v hits=%v", enabled, got)
+		}
+		before = counter("query_cache_hit")
+		render(from+2, true)
 		if got := counter("query_cache_hit") - before; got != map[bool]float64{false: 0, true: 1}[enabled] {
 			t.Fatalf("canonical flag=%v hits=%v", enabled, got)
 		}
+	}
+	// Invalid cache settings must leave the currently serving policy intact.
+	cfg.Carbonserver.QueryRangeCacheSizeMB = 0
+	writeBatchingConfig(t, app.ConfigFilename, cfg)
+	if err := app.ReloadConfig(); err == nil {
+		t.Fatal("invalid enabled cache policy accepted")
+	}
+	if app.Config.Carbonserver.QueryRangeCacheSizeMB != 1 {
+		t.Fatal("failed reload published invalid config")
 	}
 }

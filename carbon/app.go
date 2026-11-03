@@ -223,7 +223,17 @@ func (app *App) configure() error {
 		}
 	}
 	if app.Carbonserver != nil {
-		app.Carbonserver.SetQueryCacheCanonicalKeys(cfg.Carbonserver.QueryCacheCanonicalKeys)
+		before, after := app.Config.Carbonserver, cfg.Carbonserver
+		// Preserve warmed prefixes on unrelated reloads. In-flight requests may
+		// finish in the old namespace when the policy changes.
+		if before.QueryRangeCacheEnabled != after.QueryRangeCacheEnabled ||
+			before.QueryRangeCacheSizeMB != after.QueryRangeCacheSizeMB ||
+			before.QueryRangeCacheMutable.Value() != after.QueryRangeCacheMutable.Value() {
+			if err := app.Carbonserver.SetQueryRangeCache(after.QueryRangeCacheEnabled, after.QueryRangeCacheSizeMB, after.QueryRangeCacheMutable.Value()); err != nil {
+				return err
+			}
+		}
+		app.Carbonserver.SetQueryCacheCanonicalKeys(after.QueryCacheCanonicalKeys)
 	}
 	// All fallible policy validation is complete. Join the old expiration
 	// worker before publishing the new policy, so reload cannot leave deletes

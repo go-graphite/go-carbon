@@ -10,6 +10,10 @@ import (
 )
 
 func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int) (*Series, error) {
+	return s.fetch(ctx, name, fromTime, untilTime, nil)
+}
+
+func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int, prefix *fetchPrefix) (*Series, error) {
 	if err := s.fileOwnershipError(); err != nil {
 		return nil, err
 	}
@@ -58,6 +62,12 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 	if err := s.checkFileOwnership(m); err != nil {
 		return nil, err
 	}
+	if prefix != nil && prefix.plan(m, fromTime, untilTime, s.now().Unix(), s.ReadCacheEpoch()) {
+		if prefix.end == prefix.until {
+			return prefix.join(m, nil), nil
+		}
+		fromTime = prefix.until - prefix.series.Step
+	}
 	if m.Continuation {
 		if s.continuation == nil {
 			return nil, ErrFormat
@@ -81,6 +91,9 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 			} else {
 				cache.fill(stripe, name, epoch, newMetricState(m).seal())
 			}
+		}
+		if err == nil && prefix != nil && prefix.count > 0 {
+			return prefix.join(m, series), nil
 		}
 		return series, err
 	}
@@ -121,7 +134,11 @@ func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int)
 	if err != nil {
 		return nil, err
 	}
-	return &Series{Metadata: m, FromTime: from, UntilTime: until, Step: step, Values: values}, nil
+	series := &Series{Metadata: m, FromTime: from, UntilTime: until, Step: step, Values: values}
+	if prefix != nil && prefix.count > 0 {
+		return prefix.join(m, series), nil
+	}
+	return series, nil
 }
 
 func hasArchivePoint(reader pebble.Reader, m Metadata, archive int) (bool, error) {

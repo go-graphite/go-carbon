@@ -896,7 +896,13 @@ query-cache-enabled = true
 query-cache-canonical-keys = false
 # Reuse historical per-series values across moving windows in the shared store.
 # Only the finest archive is eligible; every hit validates its store revision.
+# Revision validation and the tail fetch share one store read view.
 # Live cache points are overlaid after reuse. Retained-entry budget (not RSS).
+# Require at least one third historical coverage; cap each retained entry at 1 MiB.
+# Admit at most four evictions per entry. Revision changes release retained values
+# and bypass admission for min(1m, mutable window), avoiding writeout churn.
+# Contended cache locks fall back to ordinary reads.
+# Reloadable with SIGHUP. Disabling or changing settings drops retained prefixes.
 query-range-cache-enabled = false
 query-range-cache-size-mb = 64
 # Exclude recent slots, including the writeout delay and expected lateness.
