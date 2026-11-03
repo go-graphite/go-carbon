@@ -430,6 +430,11 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 		return
 	}
 	if err = s.checkFileOwnership(meta); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// Raw catalog scans include unpublished migration candidates.
+			// Leave their state for ownership publication or discard.
+			err, done = nil, true
+		}
 		return
 	}
 	batch := s.db.NewBatch()
