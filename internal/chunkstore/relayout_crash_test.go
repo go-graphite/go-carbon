@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -36,9 +37,14 @@ func testRelayoutResumesAfterCrash(t *testing.T, workers int) {
 	const crashExit = 74
 	ctx := context.Background()
 	opts := Options{ExactBlocks: true, Continuation: relayoutCodec{}, TimeBuckets: true, RelayoutWorkers: workers, CacheSize: 8 << 20, MemTableSize: 4 << 20}
-	// Two metrics per parallel range exercise interruption partway through
-	// one group's descriptor switches while later ranges finish independently.
+	// Two metrics per parallel chunk exercise interruption within one group
+	// while later chunks finish independently.
 	names := []string{"m.first", "m.second", "m.third", "m.fourth", "m.fifth", "m.sixth"}
+	if workers > 1 {
+		for i := len(names); i < workers*8*2; i++ {
+			names = append(names, fmt.Sprintf("m.extra.%03d", i))
+		}
+	}
 	if phase := os.Getenv("GO_CARBON_TEST_RELAYOUT_CRASH_PHASE"); phase != "" {
 		crashRelayoutAt(t, phase, os.Getenv("GO_CARBON_TEST_RELAYOUT_CRASH_DIR"), opts, crashExit)
 		return
@@ -71,6 +77,9 @@ func testRelayoutResumesAfterCrash(t *testing.T, workers int) {
 				m, err := s.Metadata(ctx, name)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if m.Revision != 2 {
+					t.Fatalf("%s revision=%d, want one physical move", name, m.Revision)
 				}
 				io := s.newContinuationIO(ctx, s.db, nil, m)
 				for _, kv := range []struct {
@@ -117,6 +126,10 @@ func crashRelayoutAt(t *testing.T, phase, dir string, opts Options, code int) {
 		s.lockMetricMutation(first.Name)
 	case "after-first-switch":
 		s.lockMetricMutation(second.Name)
+	case "after-cursor":
+		if opts.RelayoutWorkers > 1 {
+			s.lockMetricMutation("m.third")
+		}
 	}
 	finished := make(chan error, 1)
 	go func() { finished <- s.RelayoutContinuation(ctx, 0) }()
@@ -130,6 +143,17 @@ func crashRelayoutAt(t *testing.T, phase, dir string, opts Options, code int) {
 			v, err := s.newContinuationIO(ctx, s.db, nil, first).Get([]byte("b"))
 			ready = err == nil && string(v) == "v7"
 		case "after-cursor":
+			if opts.RelayoutWorkers > 1 {
+				cursor, done, err := s.relayoutCursor()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cursor > 2 || done {
+					t.Fatalf("cursor passed blocked chunk: %d %v", cursor, done)
+				}
+				ready = cursor == 2
+				break
+			}
 			select {
 			case err := <-finished:
 				if err != nil {
@@ -142,6 +166,12 @@ func crashRelayoutAt(t *testing.T, phase, dir string, opts Options, code int) {
 			t.Fatalf("unknown phase %q", phase)
 		}
 		if ready {
+			if phase != "after-cursor" && opts.RelayoutWorkers > 1 {
+				cursor, done, err := s.relayoutCursor()
+				if err != nil || cursor != 0 || done {
+					t.Fatalf("cursor crossed unfinished chunk: %d %v %v", cursor, done, err)
+				}
+			}
 			if err := s.db.LogData(nil, pebble.Sync); err != nil {
 				t.Fatal(err)
 			}

@@ -178,22 +178,32 @@ After a v6 → v7 upgrade, existing blocks are still v6 and move only when
 rewritten. `store-time-buckets-relayout-rate` (bytes per second) moves them
 in the background (`internal/chunkstore/relayout.go`):
 
-1. Scan the catalog once up to the starting ID ceiling, sort by ID, and split
-   it into `store-time-buckets-relayout-workers` contiguous ranges (default 1,
-   valid 1–32, restart required). Workers walk their ranges in ID order.
+1. Scan the catalog once up to the starting ID ceiling and sort by ID.
+   `store-time-buckets-relayout-workers` workers (default 1, valid 1–32,
+   restart required) claim contiguous chunks from a shared ascending queue.
+   Each chunk has `min(4096, max(1, candidates / (workers * 8)))` candidates;
+   this spreads history concentrated at low IDs across workers. A worker
+   claims another chunk after completing and pacing its current one. With one
+   worker, the original serial grouping and cursor boundaries are preserved.
 2. The codec plans each metric (`RelayoutPlan`): every v6 block except each
    archive's newest is copied byte-for-byte to the history bucket.
-3. A group of metrics (64 MiB or 4,096 metrics) is written as one table
-   covering only that ID range in the history bucket, then ingested.
+3. A group of metrics (64 MiB or 4,096 metrics, also flushed at each chunk
+   boundary) is written as one table covering only that ID range in the
+   history bucket, then ingested.
 4. Under each metric's lock, a block switches only if its descriptor still
    matches the plan: the descriptor flips to v7 and the old groups are
    point-deleted. A block rewritten meanwhile keeps its new state and its
    copies are deleted.
 5. The cursor `z/relayout` advances only after every candidate through that ID
-   has finished: completed earlier ranges are skipped, then the first
-   unfinished range bounds progress. Only all workers finishing sets done.
-   After restart, later ranges may revisit already moved metrics; their v7
-   blocks produce no copies or descriptor changes.
+   has finished. A chunk becomes complete only after ingestion and all its
+   descriptor switches or stale-copy cleanups commit. Under one coordinator
+   mutex, the cursor advances to the end of the longest fully completed prefix
+   of chunks; later chunks cannot advance it across a hole. The cursor batch
+   commits after the apply batches, using the existing WAL sync policy. Only
+   all workers finishing sets done. After restart, candidates above the cursor
+   are scanned and chunked again; already moved v7 blocks produce no copies or
+   descriptor changes. The cursor encoding is unchanged. Work inside an
+   unfinished chunk may be revisited, including groups that already committed.
 
 - **Pacing.** One shared byte budget across workers, per interval from a live
   rate: a stalled period earns no burst afterwards. A positive rate change

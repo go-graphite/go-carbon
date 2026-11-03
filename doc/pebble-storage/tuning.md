@@ -38,7 +38,7 @@ R = applies on `SIGHUP`; otherwise a restart is required.
 | `store-sync-interval` | `1s` | Periodic WAL sync; a crash may lose up to the interval. `0s` syncs every commit. |
 | `store-time-buckets` | false | v7 layout. One-way ([data-layout.md](data-layout.md#format-marker)). |
 | `store-time-buckets-relayout-rate` | 0 | Bytes per second moved into the history bucket. **R** for a positive rate; set 1 to pause. Turning it on or off needs a restart. |
-| `store-time-buckets-relayout-workers` | 1 | Parallel contiguous ID ranges, 1–32. Restart required. All workers share the rate above; each buffers about 64 MiB of group values, plus planning overhead. |
+| `store-time-buckets-relayout-workers` | 1 | Workers sharing an ascending chunk queue, 1–32. Restart required. All workers share the rate above; each buffers about 64 MiB of group values, plus planning overhead (a single metric may exceed the target). Chunk boundaries can flush smaller groups; one worker retains serial grouping. |
 
 ### Conversion
 

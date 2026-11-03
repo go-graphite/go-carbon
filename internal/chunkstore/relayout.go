@@ -20,7 +20,7 @@ import (
 
 // Relayout moves the v6 blocks of metrics converted before format v7 into the
 // history bucket, so their cold history stops sitting beside hot keys. Metrics
-// are processed in ID order: each group's copies form one table covering only
+// are grouped in ID order: each group's copies form one table covering only
 // the group's ID range in the history bucket, disjoint from other groups and
 // from v7 conversions (whose IDs are higher), so it ingests into the bottom
 // level. Each block then switches under its metric lock only if its descriptor
@@ -147,52 +147,74 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 		return s.paceRelayout(ctx, &paced, &pacedAt)
 	}
 	workers := min(max(1, s.relayoutWorkers), len(candidates))
-	// Positions are exclusive candidate indexes. Later ranges cannot advance
-	// the cursor past an unfinished earlier range, even if they finish first.
-	positions, ends := make([]int, workers), make([]int, workers)
-	for w := range workers {
-		positions[w], ends[w] = w*len(candidates)/workers, (w+1)*len(candidates)/workers
-	}
-	var cursorMu sync.Mutex
-	complete := func(worker, position int) error {
-		cursorMu.Lock()
-		defer cursorMu.Unlock()
-		positions[worker] = position
-		frontier := 0
-		for w, pos := range positions {
-			frontier = pos
-			if pos < ends[w] {
-				break
+	if workers == 1 {
+		// Preserve the serial grouping, cursor and pacing boundaries, on the
+		// caller's goroutine. Parallel scheduling must not change K=1.
+		err = s.relayoutRange(ctx, planner, candidates, func(i int) error {
+			last := candidates[i-1].id
+			if err := s.setRelayoutCursor(last, false); err != nil {
+				return err
 			}
-		}
-		if frontier == 0 || candidates[frontier-1].id <= cursor {
+			s.relayout.cursor.Store(last)
+			return nil
+		}, pace)
+	} else if workers > 1 {
+		chunkSize := relayoutChunkSize(len(candidates), workers)
+		chunks := (len(candidates) + chunkSize - 1) / chunkSize
+		var next atomic.Uint64
+		// A chunk is complete only after all its apply batches commit. Later
+		// chunks may finish first, but cannot take the cursor across a hole.
+		completed := make([]bool, chunks)
+		frontier := 0
+		var cursorMu sync.Mutex
+		complete := func(chunk int) error {
+			cursorMu.Lock()
+			defer cursorMu.Unlock()
+			completed[chunk] = true
+			through := frontier
+			for through < chunks && completed[through] {
+				through++
+			}
+			if through == frontier {
+				return nil
+			}
+			last := candidates[min(through*chunkSize, len(candidates))-1].id
+			if err := s.setRelayoutCursor(last, false); err != nil {
+				return err
+			}
+			frontier = through
+			s.relayout.cursor.Store(last)
 			return nil
 		}
-		last := candidates[frontier-1].id
-		if err := s.setRelayoutCursor(last, false); err != nil {
-			return err
-		}
-		cursor = last
-		s.relayout.cursor.Store(last)
-		return nil
-	}
-	if workers == 1 {
-		// Keep the default run on the caller's goroutine, with the same
-		// grouping and flush boundaries as the serial relayout.
-		err = s.relayoutRange(ctx, planner, candidates, func(i int) error { return complete(0, i) }, pace)
-	} else if workers > 1 {
 		group, workerCtx := errgroup.WithContext(ctx)
-		for w := range workers {
-			start, end := positions[w], ends[w]
+		for range workers {
 			group.Go(func() (err error) {
-				// Preserve the background runner's panic containment across
-				// worker goroutines; a maintenance panic must not crash the store.
+				// A maintenance panic must cancel and join the other workers,
+				// rather than crash the store.
 				defer func() {
 					if r := recover(); r != nil {
 						err = fmt.Errorf("panic: %v", r)
 					}
 				}()
-				return s.relayoutRange(workerCtx, planner, candidates[start:end], func(i int) error { return complete(w, start+i) }, pace)
+				for {
+					if err := workerCtx.Err(); err != nil {
+						return err
+					}
+					chunk := int(next.Add(1) - 1)
+					if chunk >= chunks {
+						return nil
+					}
+					start, end := chunk*chunkSize, min((chunk+1)*chunkSize, len(candidates))
+					publish := func(i int) error {
+						if i == end-start {
+							return complete(chunk)
+						}
+						return nil
+					}
+					if err := s.relayoutRange(workerCtx, planner, candidates[start:end], publish, pace); err != nil {
+						return err
+					}
+				}
 			})
 		}
 		err = group.Wait()
@@ -211,8 +233,18 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 	return nil
 }
 
-// relayoutRange owns a contiguous range of metric IDs. Each flush completes
-// all candidates through its exclusive index before publishing progress.
+// Aim for 8 chunks per worker, capped at the existing metric group bound.
+// This amortizes table ingestion while sharing skew concentrated at low IDs.
+// Even when the oldest tenth of IDs holds most history, it is shared across
+// multiple workers. Small catalogs use single-candidate chunks. A
+// chunk can still flush multiple times at the 64 MiB byte bound; one oversized
+// metric remains indivisible. Chunk boundaries add a final group flush.
+func relayoutChunkSize(candidates, workers int) int {
+	return min(relayoutMaxMetrics, max(1, candidates/(workers*8)))
+}
+
+// relayoutRange owns a contiguous chunk of metric IDs. Each flush completes
+// all candidates through its exclusive index before reporting progress.
 func (s *Store) relayoutRange(ctx context.Context, planner ContinuationRelayouter, candidates []relayoutCandidate, complete func(int) error, pace func(context.Context) error) error {
 	var group []relayoutItem
 	groupBytes := 0
