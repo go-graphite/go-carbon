@@ -53,10 +53,12 @@ buffer length. Readers never inspect spare capacity. A writer can fill and
 publish later words without touching a byte or bit an existing snapshot
 reads. No atomic read/modify/write of a shared byte is needed.
 
-Capacity grows by one sixteenth, with a minimum 8-byte increment. The
+Capacity grows by one quarter, with a minimum 8-byte increment. The
 allocation uses an append to nil so the slice exposes the runtime
 allocator's rounded capacity and the writer can use its padding. Existing shard capacity hints remain in use. Memory accounting
 includes the larger encoder struct automatically through `unsafe.Sizeof(item{})`.
+The wider growth step reduces copying and allocation CPU; the mixed-workload
+capacity regression gate is 1.90 B/point, including the full partial word.
 Benchmarks distinguish encoded bytes (including the partial tail), slice
 capacity, state plus capacity, and actual retained heap with allocator rounding.
 Metric names, indexes and other cache metadata are reported separately.
@@ -92,7 +94,7 @@ rounded gauges and 10% random-mantissa floats (70% integer series).
 writeout. `CACHE_COMPACT_MEMORY=1` enables `TestCompactWorkloadHeap`, including
 random run lengths averaging 105 points and a 30%-random-float sensitivity case.
 
-A 70%-integer share alone cannot guarantee 1.6 bytes/point. If the other 30%
+A 70%-integer share alone cannot guarantee a fixed bytes/point budget. If the other 30%
 contains independent 52-bit mantissas, those mantissas alone require 1.95
 bytes/point before timestamps, integer values, metadata or slack. Whole-cache
 heap also includes metric names and indexes; a point-buffer target is not a
@@ -110,3 +112,10 @@ A shared name registry can later supply metric IDs at `newItem` and the
 input-log naming, pending recovery and stream names. This branch continues to
 key and validate items by full metric names; ID keys belong to that separate
 integration.
+
+
+Input-log staging keeps raw 16-byte points beside 8-byte references. It avoids
+compressing each point twice. The log consumer resolves each consecutive
+reference run once, fills reusable row scratch, then uses the existing durable
+encoder. Recycled columns release burst capacity after a much smaller window;
+ordinary windows retain and reuse their arrays.

@@ -154,11 +154,10 @@ func TestCompactWorkloadHeap(t *testing.T) {
 			}
 			t.Logf("kind=%s variable=%v points=%d encoded=%.4f capacity=%.4f buffer-heap=%.4f state+buffer-heap=%.4f B/point",
 				kind, variable, total, float64(encoded)/float64(total), float64(capacity)/float64(total), float64(after-before)/float64(total), float64(after-before+uint64(metrics)*uint64(unsafe.Sizeof(compactPoints{})))/float64(total))
-			if kind == "mix" && float64(after-before+8*metrics)/float64(total) > 1.6 {
-				t.Fatal("point buffers plus the entire partial word exceed 1.6 B/point")
+			if kind == "mix" && float64(after-before+8*metrics)/float64(total) > 1.90 {
+				t.Fatal("point buffers plus the entire partial word exceed 1.90 B/point")
 			}
 			runtime.KeepAlive(enc)
-			enc = nil
 			before = heapInUse()
 			c := New()
 			c.SetMaxSize(0)

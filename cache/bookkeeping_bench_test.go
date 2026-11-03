@@ -63,8 +63,8 @@ func BenchmarkCacheBookkeepingHeap(b *testing.B) {
 		}
 		heap := int64(after.HeapAlloc) - int64(before.HeapAlloc)
 		// These names are exactly 174 bytes, rounded to 176 by the allocator.
-		// Point buffers in this fixture are exactly 128 bytes (a size class).
-		if len(nameOf(0)) != 174 || pointBuffers != int64(n)*128 {
+		// Point buffers in this fixture are exactly 32 bytes (a size class).
+		if len(nameOf(0)) != 174 || pointBuffers != int64(n)*32 {
 			b.Fatalf("update payload accounting: name=%d point buffers=%d", len(nameOf(0)), pointBuffers)
 		}
 		bookkeeping := heap - int64(n)*176 - pointBuffers

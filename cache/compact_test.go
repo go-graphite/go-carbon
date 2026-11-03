@@ -519,8 +519,8 @@ func TestCompactMixedCapacity(t *testing.T) {
 		}
 		got := float64(capacity) / float64(n*len(data))
 		t.Logf("n=%d retained stream capacity including tail %.4f B/point", n, got)
-		if got > 1.6 {
-			t.Fatalf("retained stream capacity including tail %.4f B/point exceeds 1.6", got)
+		if got > 1.90 {
+			t.Fatalf("retained stream capacity including tail %.4f B/point exceeds 1.90", got)
 		}
 	}
 }
@@ -554,5 +554,33 @@ func TestCompactNumericRunAfterRawEscape(t *testing.T) {
 	requireSameBits(t, c.appendDecoded(nil), data)
 	if c.encodedBytes() > 2*len(data) {
 		t.Fatalf("raw escape prevents numeric recovery: %.3f B/point", float64(c.encodedBytes())/float64(len(data)))
+	}
+}
+
+// Exercise short numeric controls at many word offsets, including transitions
+// to raw floats and back. The oracle is the exact source point/float bit stream;
+// snapshots also verify the immutable-prefix contract on these fast paths.
+func TestCompactNumericFastPathsAcrossWords(t *testing.T) {
+	for prefix := 0; prefix < 64; prefix++ {
+		for _, step := range []float64{1, 0.01, 0.001} {
+			data := make([]points.Point, 0, 256)
+			ts := int64(1_760_000_000)
+			add := func(v float64) { ts += 60; data = append(data, points.Point{Value: v, Timestamp: ts}) }
+			for i := 0; i < prefix; i++ {
+				add(math.Float64frombits(uint64(i) * 0x9e3779b97f4a7c15))
+			}
+			value := 0
+			for i := 0; i < 160; i++ {
+				if i%31 == 0 {
+					add(math.Float64frombits(specialBits[i%len(specialBits)]))
+				}
+				if i%29 == 0 {
+					ts -= 1
+				}
+				value += i % 100
+				add(float64(value) * step)
+			}
+			requireRoundTrip(t, data)
+		}
 	}
 }

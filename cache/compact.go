@@ -52,7 +52,7 @@ func (c *compactPoints) reserve(extra int) {
 	if cap(c.buf)-len(c.buf) >= extra {
 		return
 	}
-	capacity := max(len(c.buf)+extra, cap(c.buf)+max(cap(c.buf)/16, 8))
+	capacity := max(len(c.buf)+extra, cap(c.buf)+max(cap(c.buf)/4, 8))
 	// Appending to nil exposes the runtime's size-class rounding. A make
 	// with the requested capacity would hide that padding from the writer.
 	b := append([]byte(nil), make([]byte, capacity)...)
@@ -62,13 +62,19 @@ func (c *compactPoints) reserve(extra int) {
 }
 
 // put writes low bits first, publishing only complete, immutable words.
+// Callers provide a value that fits in n bits.
 func (c *compactPoints) put(v uint64, n uint8) {
-	v &= ^uint64(0) >> (64 - n)
 	c.tail |= v << c.used
 	if n < 64-c.used {
 		c.used += n
 		return
 	}
+	c.putFull(v, n)
+}
+
+// Keep word publication and allocation off the common partial-word path so
+// short writes inline into the timestamp and value encoders.
+func (c *compactPoints) putFull(v uint64, n uint8) {
 	c.reserve(8)
 	c.buf = binary.LittleEndian.AppendUint64(c.buf, c.tail)
 	left := 64 - c.used
@@ -192,15 +198,41 @@ func (c *compactPoints) append(value float64, timestamp int64) {
 		c.n, c.ts, c.integerDelta = c.n+1, timestamp, 0
 		return
 	}
-	c.putTimestamp(delta - c.delta)
 	previous := math.Float64frombits(c.bits)
 	if x == 0 {
+		c.putTimestamp(delta - c.delta)
 		c.put(0, 1)
 		c.integerDelta = 0
 	} else {
 		integer, ok := normalized(value, c.scale)
-		prev, prevOK := normalized(previous, c.scale)
+		// A numeric run ends on every XOR escape, so its previous value is
+		// already known to be exactly representable at this scale.
+		prev := int64(0)
+		if c.scale != 0 {
+			prev = int64(previous)
+		}
+		if c.scale == 2 {
+			prev = int64(math.Round(previous * 100))
+		}
+		if c.scale == 3 {
+			prev = int64(math.Round(previous * 1000))
+		}
 		d := integer - prev
+		if ok && d == c.integerDelta {
+			if delta == c.delta {
+				c.put(2, 3)
+			} else {
+				c.putTimestamp(delta - c.delta)
+				c.put(1, 2)
+			}
+			c.n, c.ts, c.delta, c.bits = c.n+1, timestamp, delta, v
+			return
+		}
+		if delta == c.delta {
+			c.put(0, 1)
+		} else {
+			c.putTimestamp(delta - c.delta)
+		}
 		dd := d - c.integerDelta
 		leading, trailing := uint8(bits.LeadingZeros64(x)), uint8(bits.TrailingZeros64(x))
 		width := 64 - leading - trailing
@@ -216,13 +248,11 @@ func (c *compactPoints) append(value float64, timestamp int64) {
 			}
 		}
 		switch {
-		case ok && prevOK && d == c.integerDelta:
-			c.put(1, 2)
-		case ok && prevOK && 5+integerSize(dd) < 3+integerSize(d) && 5+integerSize(dd) < xorSize:
+		case ok && 5+integerSize(dd) < 3+integerSize(d) && 5+integerSize(dd) < xorSize:
 			c.put(15, 5)
 			c.putInteger(dd)
 			c.integerDelta = d
-		case ok && prevOK && 3+integerSize(d) < xorSize:
+		case ok && 3+integerSize(d) < xorSize:
 			c.put(3, 3)
 			c.putInteger(d)
 			c.integerDelta = d
@@ -335,6 +365,10 @@ func (r *bitReader) timestamp() int64 {
 	if r.bit() == 0 {
 		return 0
 	}
+	return r.timestampNonzero()
+}
+
+func (r *bitReader) timestampNonzero() int64 {
 	if r.bit() == 0 {
 		return unzigzag(r.get(7))
 	}
@@ -385,8 +419,53 @@ func (c *compactPoints) appendDecoded(dst []points.Point) []points.Point {
 	var leading, width uint8
 	r := bitReader{buf: c.buf[k:], tail: c.tail}
 	for i := 1; i < c.n; i++ {
-		delta += r.timestamp()
+		// Regular timestamps plus repeated values/numeric deltas dominate
+		// ordinary series. Consume their complete controls in one step.
+		if r.left >= 3 {
+			if r.word&3 == 0 {
+				r.word >>= 2
+				r.left -= 2
+				ts += delta
+				integerDelta = 0
+				out[i] = points.Point{Value: math.Float64frombits(v), Timestamp: ts}
+				continue
+			}
+			if scale != 0 && r.word&7 == 2 {
+				r.word >>= 3
+				r.left -= 3
+				ts += delta
+				integer += integerDelta
+				v = math.Float64bits(denormalized(integer, scale))
+				out[i] = points.Point{Value: math.Float64frombits(v), Timestamp: ts}
+				continue
+			}
+		}
+		// Numeric deltas in 4 or 8 bits use a single bounded word read.
+		// Larger fields and controls crossing a word use the general decoder.
+		if scale != 0 && r.left >= 14 && r.word&15 == 6 {
+			var used uint8
+			var d int64
+			if r.word&16 == 0 {
+				d, used = unzigzag(r.word>>5&15), 9
+			} else if r.word&32 == 0 {
+				d, used = unzigzag(r.word>>6&255), 14
+			}
+			if used != 0 {
+				r.word >>= used
+				r.left -= used
+				ts += delta
+				integerDelta = d
+				integer += d
+				v = math.Float64bits(denormalized(integer, scale))
+				out[i] = points.Point{Value: math.Float64frombits(v), Timestamp: ts}
+				continue
+			}
+		}
+		if r.bit() != 0 {
+			delta += r.timestampNonzero()
+		}
 		ts += delta
+		//nolint:gocritic // Each condition consumes the next bit of the prefix code.
 		if r.bit() == 0 {
 			integerDelta = 0
 		} else if scale == 0 {

@@ -12,8 +12,8 @@ import (
 // logged. At 4.5M points/s a one-second cycle records about 4400 per shard,
 // but cycles stretch to seconds while shard locks are contended, and relays
 // then flush their backlog at several times the usual rate: 1<<15 dropped
-// up to 27M points per burst. Staging packs deltas/XORs and consecutive reference runs; the admission
-// limit remains a point count, independent of compression ratio.
+// up to 27M points per burst. Staging retains raw points in separate reference/value columns;
+// the admission limit remains a point count.
 const maxShardLogEntries = 1 << 17
 
 // Restore can run much faster than the log writer. Leave half the bounded
