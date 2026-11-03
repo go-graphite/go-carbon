@@ -143,6 +143,7 @@ type App struct {
 	metadataPrewarmProgress *store.PrewarmProgress
 	restartBudget           *restartcpu.Budget
 	restartBudgetStop       context.CancelFunc
+	storeMaintenance        *storeMaintenanceGate
 
 	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
 	readPolicyConfig    atomic.Pointer[Config]
@@ -924,9 +925,14 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		app.restartBudgetStop = nil
 	}
 	app.restartBudget = nil
+	app.storeMaintenance = nil
 	if conf.Whisper.StoreMetadataCachePrewarm && conf.Whisper.StoreMetadataCacheSize > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		app.restartBudget = restartcpu.Start(ctx, filepath.Join(sharedStorePath(conf), "restart-cpu.json"), conf.Whisper.StoreMetadataCachePrewarmCPUCores, conf.Whisper.StoreRestartCPUHeadroom)
+		if app.PromRegisterer != nil {
+			app.restartBudget.InitPrometheus(app.PromRegisterer)
+		}
+		app.storeMaintenance = newStoreMaintenanceGate(app.metadataPrewarmGate, app.restartBudget.Active, storeMaintenanceMaxWait)
 		budget := app.restartBudget
 		app.restartBudgetStop = func() {
 			cancel()
@@ -973,6 +979,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
+			MaintenanceWait:   app.storeMaintenance.wait,
 			Continuation:      continuation,
 			ColdPack:          coldPackOptions(conf),
 			TimeBuckets:       conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreTimeBuckets,

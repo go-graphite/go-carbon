@@ -41,8 +41,12 @@ const (
 )
 
 type Options struct {
-	ColdPack     ColdPackOptions
-	Continuation ContinuationCodec
+	// MaintenanceWait defers optional scans/rewrites until restart warming and
+	// pacing end. The caller supplies a bounded, cancellation-aware lifetime
+	// gate. Nil keeps offline tools' immediate maintenance behavior.
+	MaintenanceWait func(context.Context, string) error
+	ColdPack        ColdPackOptions
+	Continuation    ContinuationCodec
 	// TimeBuckets writes new continuation blocks to a time-partitioned key
 	// space (format v7), so compactions of recent writes stop rewriting each
 	// metric's cold history. It upgrades a v6 store's marker in place; older
@@ -197,6 +201,9 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
+	maintenanceWait      func(context.Context, string) error
+	maintenanceCtx       context.Context
+	maintenanceStop      context.CancelFunc
 	coldPack             coldPackState
 	transferPendingAny   func() bool
 	transferPending      func(string) bool
@@ -400,6 +407,8 @@ func Open(dir string, options Options) (*Store, error) {
 		options.MemTableSize = 64 << 20
 	}
 	s := &Store{now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s.maintenanceWait = options.MaintenanceWait
+	s.maintenanceCtx, s.maintenanceStop = context.WithCancel(context.Background())
 	// Flush pacing starts once the store is open: WAL recovery and WAL moves
 	// flush at full speed.
 	s.flushPacing = options.ExactBlocks
@@ -588,6 +597,9 @@ func Open(dir string, options Options) (*Store, error) {
 		s.relayoutStop, s.relayoutDone = cancel, make(chan struct{})
 		go func() {
 			defer close(s.relayoutDone)
+			if err := s.waitMaintenance(ctx, "relayout"); err != nil {
+				return
+			}
 			// A background maintenance failure stops only the relayout; a panic
 			// here must not take down the process and restart into it again.
 			defer func() {
@@ -652,10 +664,22 @@ func unrefCaches(s *Store) {
 }
 
 func (s *Store) openFailure(db *pebble.DB, err error) error {
+	s.maintenanceStop()
 	s.StopCompactionPacing()
+	s.stopRelayout()
+	if f := s.catalogMembership; f != nil {
+		f.halt()
+	}
+	if s.syncStop != nil {
+		close(s.syncStop)
+		<-s.syncDone
+	}
 	s.stopSnapshotRelease()
 	s.stopWALSyncer()
 	closeErr := db.Close()
+	if s.compactOnce.done != nil {
+		<-s.compactOnce.done
+	}
 	if s.cache != nil {
 		s.cache.Unref()
 	}
@@ -910,6 +934,7 @@ func (s *Store) LastCloseTimings() CloseTimings { return s.closeTimings }
 // them. Afterwards the store takes no writes but its callers'. It is safe to
 // call more than once, and concurrently with Close.
 func (s *Store) StopBackground() {
+	s.maintenanceStop()
 	s.prewarm.stop()
 	s.stopRelayout()
 	if f := s.catalogMembership; f != nil {
@@ -962,6 +987,7 @@ func (s *Store) CloseForExit() error { return s.close(true) }
 func (s *Store) Close() error { return s.close(false) }
 
 func (s *Store) close(forExit bool) error {
+	s.maintenanceStop()
 	// Closing must not wait on an operational compaction rate budget.
 	s.StopCompactionPacing()
 	close(s.compactionStop)
@@ -1007,6 +1033,9 @@ func (s *Store) close(forExit bool) error {
 		err = s.db.CloseForExit()
 	} else {
 		err = s.db.Close()
+	}
+	if s.compactOnce.done != nil {
+		<-s.compactOnce.done
 	}
 	if s.deferredSync != nil {
 		// Close the tables of jobs that never reached their manifest commit.
@@ -1077,7 +1106,7 @@ type Stats struct {
 	CatalogFilterBytes                                                                                 uint64
 	CatalogFilterReady                                                                                 bool
 	CacheShards, RangeDelCacheShards                                                                   int
-	// CompactOnceRunning is true while a CompactOnce full compaction runs.
+	// CompactOnceRunning is true while a CompactOnce full compaction is pending or running.
 	CompactOnceRunning bool
 	// StateCache reports the metadata cache (see Options.MetadataCacheSize).
 	StateCache StateCacheStats

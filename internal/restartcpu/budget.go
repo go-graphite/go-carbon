@@ -12,7 +12,8 @@ import (
 // Budget accounts for the entire process, including receivers, reads and GC.
 // Checkpoint loading, warming and unfinished restart writeout share admission.
 // Credits expire after 5ms so idle time cannot fund a catch-up burst. Work
-// already admitted may overshoot briefly; mandatory input and reads never wait.
+// already admitted may overshoot briefly. Mandatory input and reads never wait;
+// duty-paced checkpoints and bounded required validation can bypass CPU debt.
 type Budget struct {
 	mu                   sync.Mutex
 	cores, credit, used  float64
@@ -37,6 +38,9 @@ type Budget struct {
 	checkpoints          atomic.Int64
 	checkpointWork       atomic.Uint64
 	checkpointTotal      atomic.Uint64
+	checkpointFailures   atomic.Uint64
+	checkpointTimeouts   atomic.Uint64
+	checkpointPreparedAt time.Time
 	rateCeiling          atomic.Uint64
 	steadyRate           float64
 	source               string
@@ -116,7 +120,26 @@ func (b *Budget) reserveDelay(now time.Time, writeout bool, cost float64) time.D
 	return b.reserveWork(now, writeout, cost, false)
 }
 
+type workClass uint8
+
+const (
+	optionalWork workClass = iota
+	writeoutWork
+	checkpointWork
+	checkpointValidationWork
+)
+
 func (b *Budget) reserveWork(now time.Time, writeout bool, cost float64, checkpoint bool) time.Duration {
+	class := optionalWork
+	if checkpoint {
+		class = checkpointWork
+	} else if writeout {
+		class = writeoutWork
+	}
+	return b.reserveAdmission(now, class, cost)
+}
+
+func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if now.Sub(b.at) >= 5*time.Millisecond {
@@ -147,17 +170,26 @@ func (b *Budget) reserveWork(now time.Time, writeout bool, cost float64, checkpo
 		b.reserved = 0
 		b.at, b.used = now, used
 	}
-	if !writeout && (b.writers.Load() > 0 || b.prefetchers.Load() > 0 || !b.belowAt.IsZero()) {
+	if class == optionalWork && (b.writers.Load() > 0 || b.prefetchers.Load() > 0 || !b.belowAt.IsZero()) {
 		return 100 * time.Millisecond
 	}
 	// Keep one sampling slice of the checkpoint share available to its next
 	// batch. Writers may use all other credit, including idle checkpoint CPU,
 	// but cannot repeatedly win the race for every newly replenished slice.
 	minimum := 0.
-	if !checkpoint {
+	if class != checkpointWork {
 		minimum = b.checkpointShareLocked() * .005
 	}
-	if b.credit >= minimum {
+	// The serial stream already duty-paces its bounded share. Whole-process
+	// debt from unrelated maintenance or receivers must not veto it forever.
+	// Legacy validation gets a separate progress window per 100ms, including
+	// when no writeout floor exists. Queue preparation cannot consume it.
+	mandatory := class == checkpointWork || class == checkpointValidationWork &&
+		(b.checkpointPreparedAt.IsZero() || now.Sub(b.checkpointPreparedAt) >= 100*time.Millisecond)
+	if b.credit >= minimum || mandatory {
+		if class == checkpointValidationWork {
+			b.checkpointPreparedAt = now
+		}
 		b.credit -= cost
 		b.reserved += cost
 		return 0
@@ -180,9 +212,9 @@ func (b *Budget) writeCost() float64 {
 // Call before acquiring a database view or a metric lock.
 func (b *Budget) Wait(ctx context.Context) error { return b.waitCPU(ctx, false) }
 
-// WaitCheckpoint streams the saved accelerator and the validation needed by
-// upcoming cold writes alongside writes, within the same process credit. It
-// must not starve behind the writes it accelerates. No view or shard lock may be held.
+// WaitCheckpoint admits required legacy validation with a bounded progress
+// window even under CPU debt and without a writeout floor. Bulk checkpoint
+// streams use Checkpoint.Wait instead. No view or shard lock may be held.
 func (b *Budget) WaitCheckpoint(ctx context.Context) error { return b.waitCPU(ctx, true) }
 
 func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
@@ -196,7 +228,11 @@ func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		delay := b.reserveDelay(time.Now(), checkpoint, max(.001, b.writeCost()))
+		class := optionalWork
+		if checkpoint {
+			class = checkpointValidationWork
+		}
+		delay := b.reserveAdmission(time.Now(), class, max(.001, b.writeCost()))
 		if delay == 0 {
 			b.warmGrants.Add(1)
 			return nil

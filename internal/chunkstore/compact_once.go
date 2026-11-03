@@ -9,6 +9,7 @@ import (
 const compactOnceMarker = "COMPACTED"
 
 type compactOnceState struct {
+	done    chan struct{}
 	running atomic.Bool
 	err     atomic.Pointer[string]
 }
@@ -27,9 +28,14 @@ func (s *Store) startCompactOnce(token string) error {
 	if err != nil || done == token {
 		return err
 	}
+	s.compactOnce.done = make(chan struct{})
 	s.compactOnce.running.Store(true)
 	go func() {
+		defer close(s.compactOnce.done)
 		defer s.compactOnce.running.Store(false)
+		if err := s.waitMaintenance(s.maintenanceCtx, "compact-once"); err != nil {
+			return
+		}
 		// Close cancels the compaction; Compact panics if it starts after.
 		defer func() {
 			if r := recover(); r != nil {

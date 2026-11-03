@@ -117,8 +117,8 @@ func (b *Budget) State() State {
 		}
 	} else {
 		available := max(0, b.cores-b.process)
-		s.Checkpoint = min(available, b.checkpointShareLocked())
-		available -= s.Checkpoint
+		s.Checkpoint = b.checkpointShareLocked()
+		available = max(0, available-s.Checkpoint)
 		switch {
 		case prefetchers > 0:
 			// Report headroom among required jobs, retaining writeout demand
@@ -154,19 +154,24 @@ var (
 	allowanceDesc          = prometheus.NewDesc("restart_cpu_allowance_cores", "Whole-process restart CPU allowance.", nil, nil)
 	ceilingDesc            = prometheus.NewDesc("restart_cpu_writeout_ceiling_updates_per_second", "Restart rate-token ceiling, before whole-process CPU admission; zero means unlimited.", nil, nil)
 	checkpointProgressDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_bytes", "Checkpoint stream progress in file bytes; total is zero until known.", []string{"kind"}, nil)
+	checkpointFailuresDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_failures_total", "Invalid or failed enabled checkpoint loads, including unavailable checkpoints and timeouts.", nil, nil)
+	checkpointTimeoutsDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_timeouts_total", "Checkpoint loads or legacy validation that exceeded their deadline.", nil, nil)
 	checkpointLoadingDesc  = prometheus.NewDesc("restart_cpu_checkpoint_loading", "One while a checkpoint accelerator load is pending or running.", nil, nil)
 )
 
 type metrics struct{ budget atomic.Pointer[Budget] }
 
 func (m *metrics) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{grantDesc, countDesc, floorDesc, rateDesc, processDesc, allowanceDesc, ceilingDesc, checkpointProgressDesc, checkpointLoadingDesc} {
+	for _, d := range []*prometheus.Desc{grantDesc, countDesc, floorDesc, rateDesc, processDesc, allowanceDesc, ceilingDesc, checkpointProgressDesc, checkpointLoadingDesc, checkpointFailuresDesc, checkpointTimeoutsDesc} {
 		ch <- d
 	}
 }
 
 func (m *metrics) Collect(ch chan<- prometheus.Metric) {
-	s := m.budget.Load().State()
+	b := m.budget.Load()
+	s := b.State()
+	ch <- prometheus.MustNewConstMetric(checkpointFailuresDesc, prometheus.CounterValue, float64(b.checkpointFailures.Load()))
+	ch <- prometheus.MustNewConstMetric(checkpointTimeoutsDesc, prometheus.CounterValue, float64(b.checkpointTimeouts.Load()))
 	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Warming, "warming")
 	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Writeout, "writeout")
 	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Checkpoint, "checkpoint_load")

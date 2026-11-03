@@ -49,8 +49,8 @@ func (p *Checkpoint) Finish() {
 
 // checkpointShareLocked lends at most one core to the serial loader. When
 // writeout is below its floor and CPU has less room than the full stream share,
-// it gets a quarter share, retaining progress while yielding to writeout. All
-// classes pass whole-process admission; this share cannot bypass CPU debt.
+// it gets a quarter share, retaining progress while yielding to writeout.
+// The serial stream duty-paces this bounded mandatory share under process debt.
 func (b *Budget) checkpointShareLocked() float64 {
 	if b.checkpoints.Load() == 0 {
 		return 0

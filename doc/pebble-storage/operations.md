@@ -44,6 +44,49 @@ Grafana write is needed. Offline checks verify panel IDs, layout and variable
 references. Live query and visual rendering checks still belong to the importing
 operator because no monitoring endpoint is assumed.
 
+## Restart warming and maintenance
+
+With metadata prewarm and a positive metadata cache enabled, history relayout,
+cold-pack, expiration, compact-once, catalog membership and invalid-name purge
+wait for warming to finish and restart CPU pacing to end. Warming ends after the
+checkpoint load/validation or its fallback scan finishes or gives up. Pacing
+normally lasts at least 30 minutes and can extend while restart backlog drains.
+Maintenance waits at most 35 minutes from store startup; this fixed safety bound
+survives SIGHUP and needs no new configuration. Expiration still waits separately
+for pending-point restoration. WAL writes, flushes, ordinary Pebble compaction
+and foreground operations continue throughout.
+
+Look for `store maintenance waiting for restart warm-up` and
+`store maintenance starting`, with the maintenance name, wait duration and release
+reason. `store maintenance restart wait expired` is WARN and means the maximum
+wait released maintenance despite unfinished warming or pacing. Shutdown cancels
+pending workers. SIGHUP can update/disable cold-pack or expiration policy without
+starting it through the current startup gate or resetting the deadline.
+
+A valid checkpoint reports `metadata cache checkpoint loaded` at INFO. Every
+invalid or failed enabled load reports `metadata cache checkpoint load failed`
+at WARN, including entries, validated/fenced counts, bytes, runtime, timeout flag
+and any error. Disabled checkpointing makes no load attempt. An unavailable
+checkpoint on a first start counts as invalid, as does a rejected clean fence.
+Failed accelerators remain safe: missing metadata uses the durable store.
+
+| Prometheus metric | Meaning |
+| --- | --- |
+| `restart_cpu_checkpoint_load_failures_total` | Enabled load attempts ending invalid or with an error, including unavailable files, corruption and deadlines; final legacy validation is included. |
+| `restart_cpu_checkpoint_load_timeouts_total` | Subset of failures ending with a deadline error. |
+| `restart_cpu_granted_cores{consumer="checkpoint_load"}` | Bounded duty share reserved for active checkpoint streams, including under process CPU debt; this is admission, not attributed CPU use. |
+| `restart_cpu_grants_total{consumer="checkpoint_load"}` | Number of admitted checkpoint work windows. |
+
+The failure counters belong to the process's shared restart budget and survive
+persister reloads. Alert on a nonzero timeout counter or increases in failures;
+allow for a missing checkpoint on first start. A nonzero checkpoint grant does
+not guarantee completion before the ten-minute load deadline under slow I/O.
+The serial loader duty-paces at most one core (or allowance / 8), reduced
+fourfold during a material writeout shortfall near the CPU allowance. It retains
+progress when mandatory CPU or maintenance released by the safety bound runs
+concurrently. See
+[restart CPU allowance](../restart-cpu.md) for admission and history details.
+
 ## Reclaim, free space and discard
 
 After migration, distinguish logical ownership, original-file reclamation,

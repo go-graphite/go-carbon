@@ -171,6 +171,14 @@ func (s *Store) Delete(ctx context.Context, name string) error { return s.delete
 // unreferenced. The compaction then rewrites only the tables over that key
 // range, dropping the long keys and their tombstones.
 func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
+	ctx, end, ok := s.prewarm.begin(ctx)
+	if !ok {
+		return 0, context.Canceled
+	}
+	defer end()
+	if err := s.waitMaintenance(ctx, "purge-invalid-names"); err != nil {
+		return 0, err
+	}
 	s.purgeRunning.Store(true)
 	defer s.purgeRunning.Store(false)
 	view := s.db.NewSnapshot()
