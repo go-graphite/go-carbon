@@ -9,11 +9,20 @@ import (
 )
 
 func (it *item) memoryBytes() int64 {
-	return int64(unsafe.Sizeof(item{})) + int64(len(it.Metric)+cap(it.compact.buf))
+	return int64(unsafe.Sizeof(item{})) + it.extraMemory() + int64(len(it.Metric)+cap(it.compact.buf))
+}
+
+func (it *item) extraMemory() int64 {
+	if it.pending == nil {
+		return 0
+	}
+	return int64(unsafe.Sizeof(points.Points{}))
 }
 
 func flightMemory(p *points.Points) int64 {
-	return int64(unsafe.Sizeof(item{})) + int64(len(p.Metric)) + int64(cap(p.Data))*int64(unsafe.Sizeof(points.Point{}))
+	// Staging may retain the popped item until its log batch is consumed.
+	// Conservatively charge it along with the newly detached Points header.
+	return int64(unsafe.Sizeof(item{})) + int64(unsafe.Sizeof(points.Points{})) + int64(len(p.Metric)) + int64(cap(p.Data))*int64(unsafe.Sizeof(points.Point{}))
 }
 
 // memoryBytes estimates owned allocations under the shard lock. Map overhead

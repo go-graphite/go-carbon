@@ -117,9 +117,9 @@ func (l *shardLog) untrackItem(it *item) {
 
 // pop transfers ownership to the in-flight map without changing counts. A
 // successor with the same name has a different Points identity/generation.
-func (l *shardLog) pop(it *item) {
+func (l *shardLog) pop(it *item, p *points.Points) {
 	if l.first != nil && it.logTracked {
-		l.first[&it.Points] = it.logFirst
+		l.first[p] = it.logFirst
 		it.logTracked = false
 	}
 }
@@ -177,7 +177,7 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		if n > 0 && n+it.count() > budget {
 			return n
 		}
-		l.recordPoints(&it.log, it.compact.appendDecoded(nil))
+		l.recordPoints(&it.StreamRef, it.compact.appendDecoded(nil))
 		n += it.count()
 		l.release(it.logFirst)
 		it.logFirst = l.gen

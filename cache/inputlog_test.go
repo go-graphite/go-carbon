@@ -475,7 +475,7 @@ func TestInputLogRequeueMovesTracking(t *testing.T) {
 	c.TakeLogEntries(index, 5, nil)
 	failed, _ := c.PopNotConfirmed("metric")
 	c.AddPoint([]byte("metric"), 2, 2)
-	current := &shard.items.get("metric").Points
+	current := shard.items.get("metric").identity()
 	c.Requeue(failed)
 	requeued := shard.items.get("metric")
 	if !requeued.logTracked || requeued.logFirst != 0 || len(shard.log.first) != 0 || shard.log.items[0] != 1 {

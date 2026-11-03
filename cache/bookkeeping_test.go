@@ -38,10 +38,10 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 		counts := map[uint64]int32{}
 		for _, it := range sh.items.all {
 			if enabled && it.logTracked {
-				got[&it.Points] = it.logFirst
+				got[it.identity()] = it.logFirst
 				counts[it.logFirst]++
 			}
-			if _, ok := sh.log.first[&it.Points]; ok {
+			if _, ok := sh.log.first[it.identity()]; ok {
 				t.Fatal("queued item retained in in-flight map")
 			}
 		}
@@ -68,7 +68,7 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 		switch rng.IntN(12) {
 		case 0:
 			if it := sh.items.get(name); it != nil {
-				delete(want, &it.Points)
+				delete(want, it.identity())
 			}
 			c.Pop(name)
 		case 1, 2:
@@ -88,17 +88,17 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 					first, tracked := want[p]
 					delete(want, p)
 					if old := sh.items.get(p.Metric); old != nil {
-						if g, ok := want[&old.Points]; ok && (!tracked || g < first) {
+						if g, ok := want[old.identity()]; ok && (!tracked || g < first) {
 							first, tracked = g, true
 						}
-						delete(want, &old.Points)
+						delete(want, old.identity())
 					}
 					c.Requeue(p)
 					if enabled {
 						if !tracked {
 							first = gen
 						}
-						want[&sh.items.get(p.Metric).Points] = first
+						want[sh.items.get(p.Metric).identity()] = first
 					}
 					c.Requeue(p) // An old identity must not merge twice.
 				}
@@ -125,7 +125,7 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 			if !enabled {
 				gen = 0
 				for _, it := range sh.items.all {
-					want[&it.Points] = 0
+					want[it.identity()] = 0
 				}
 				for _, p := range flight {
 					want[p] = 0
@@ -136,7 +136,7 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 			old := sh.items.get(name)
 			c.AddPoint([]byte(name), float64(step), int64(step))
 			if enabled && old == nil {
-				want[&sh.items.get(name).Points] = gen
+				want[sh.items.get(name).identity()] = gen
 			}
 		}
 		check()
@@ -269,5 +269,65 @@ func TestBookkeepingConcurrentReadersAndDrainer(t *testing.T) {
 	wg.Wait()
 	if recorded != count || c.LogDropped() != 0 {
 		t.Fatalf("recorded=%d, dropped=%d", recorded, c.LogDropped())
+	}
+}
+
+func TestItemDeferredIdentityAccounting(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	c.AddPoint([]byte("optional.state"), 42, 1)
+	sh := c.GetShard("optional.state")
+	it := sh.items.get("optional.state")
+	if it.pending != nil {
+		t.Fatal("ordinary item allocated a recovery identity")
+	}
+	before := sh.items.bytes
+	if sh.setItemThrottle(it, 1) || sh.items.bytes != before || it.throttleState() != 1 {
+		t.Fatal("inline quota state changed accounting")
+	}
+	sh.setItemThrottle(it, nil)
+	identity := sh.itemIdentity(it)
+	if sh.itemIdentity(it) != identity || sh.items.bytes != before+it.extraMemory() {
+		t.Fatal("identity changed or was charged twice")
+	}
+	p, ok := c.PopNotConfirmed(it.Metric)
+	if !ok || p != identity || len(p.Data) != 1 || p.Data[0].Value != 42 {
+		t.Fatal("pop changed recovery identity or data")
+	}
+	c.Requeue(p)
+	if got := c.Get(it.Metric); len(got) != 1 || got[0].Value != 42 {
+		t.Fatal("retry lost points")
+	}
+	p, _ = c.PopNotConfirmed(it.Metric)
+	c.Confirm(p)
+	if !c.IsEmpty() {
+		t.Fatal("confirmation retained a batch")
+	}
+}
+
+// The state slot passed to a configured hook must not escape on every hot
+// point. The side object is initialized once and the shard scratch is cleared.
+func TestStatefulThrottleHotPathDoesNotAllocate(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	c.SetThrottleWithState(func(_ *points.Points, _ bool, state *any) bool {
+		if *state == nil {
+			*state = uint64(1)
+		}
+		return false
+	})
+	name := []byte("stateful.no-escape")
+	c.AddPoint(name, 42, 1)
+	sh := c.GetShard(string(name))
+	it := sh.items.get(string(name))
+	before := cap(it.compact.buf)
+	it.compact.reserve(8192)
+	sh.items.bytes += int64(cap(it.compact.buf) - before)
+	allocations := testing.AllocsPerRun(1000, func() { c.AddPoint(name, 42, 1) })
+	if allocations != 0 {
+		t.Fatalf("stateful point allocated %.3f objects", allocations)
+	}
+	if sh.throttleScratch != nil || it.throttleState() != uint64(1) {
+		t.Fatal("scratch retained state or item lost it")
 	}
 }

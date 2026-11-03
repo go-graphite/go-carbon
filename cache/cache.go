@@ -139,6 +139,9 @@ type Shard struct {
 	// from this shard, when sparse spreading is enabled (see
 	// SetWriteoutSparseSpread). Metrics sharing a slot keep the newest.
 	sparseLast []uint32
+	// throttleScratch passes state to the hook without a per-point escaping local.
+	// The owning shard lock guards it; it is cleared after every callback.
+	throttleScratch any
 }
 
 // maxBytesHint bounds the capacity reserved for a new item.
@@ -409,7 +412,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	delete(shard.firstArrival, p)
 	if current := shard.items.get(p.Metric); current != nil {
 		if r != nil {
-			r.moved(&current.Points, &values.Points)
+			r.moved(shard.itemIdentity(current), values.identity())
 		}
 		values.compact.appendPoints(current.compact.appendDecoded(nil))
 		// A missing arrival marks restored or previously unbatched data ready.
@@ -420,7 +423,7 @@ func (c *Cache) Requeue(p *points.Points) {
 		shard.log.mergeItem(values, current)
 	}
 	if r != nil {
-		r.moved(p, &values.Points)
+		r.moved(p, values.identity())
 	}
 	values.firstArrival = first
 	shard.log.mergeFlight(values, p)
@@ -590,7 +593,7 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		// The throttle does not retain the points of a cached metric.
 		shard.scratchData[0] = points.Point{Value: value, Timestamp: timestamp}
 		shard.scratch.Metric, shard.scratch.Data = values.Metric, shard.scratchData[:]
-		throttled := c.throttleWithHash(&shard.scratch, true, hash, &values.throttleState)
+		throttled := c.throttleWithHash(&shard.scratch, true, hash, &values.throttle)
 		shard.scratch.Metric = ""
 		if throttled {
 			return
@@ -604,7 +607,7 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 	values.compact.append(value, timestamp)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 	if shard.log.first != nil {
-		logGrew = shard.log.record(&values.log, value, timestamp)
+		logGrew = shard.log.record(&values.StreamRef, value, timestamp)
 	}
 	if cap(values.compact.buf) != capacity || logGrew {
 		c.syncMemoryLocked(shard)
@@ -711,9 +714,12 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	var throttleState any
 	if !recovered && c.throttleWithHash != nil {
 		if exists {
-			throttleState = values.throttleState
+			shard.throttleScratch = values.throttleState()
 		}
-		if c.throttleWithHash(p, exists, hash, &throttleState) {
+		rejected := c.throttleWithHash(p, exists, hash, &shard.throttleScratch)
+		throttleState = shard.throttleScratch
+		shard.throttleScratch = nil
+		if rejected {
 			return nil
 		}
 	}
@@ -750,14 +756,16 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 			sendMetricToNewMetricChan(c, p.Metric)
 		}
 	}
-	values.throttleState = throttleState
+	metadataChanged := shard.setItemThrottle(values, throttleState)
 	capacity, logCapacity := cap(values.compact.buf), shard.log.stagingBytes()
 	values.compact.appendPoints(p.Data)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 
 	if recovered {
 		if r := c.pending.Load(); r != nil {
-			r.track(&values.Points)
+			before := values.extraMemory()
+			r.track(shard.itemIdentity(values))
+			metadataChanged = metadataChanged || values.extraMemory() != before
 		}
 	}
 	if shard.log.first != nil {
@@ -766,11 +774,11 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 		// Recovered points keep their own durable source until persisted.
 		if !recovered {
-			shard.log.recordPoints(&values.log, p.Data)
+			shard.log.recordPoints(&values.StreamRef, p.Data)
 		}
 	}
 
-	if !exists || cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
+	if !exists || metadataChanged || cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
@@ -868,9 +876,9 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 		shard.noteWritten(values, s)
 		c.addSizeLocked(shard, -int64(values.count()), s.sizeSlack)
 		// Tracking follows the batch while a replacement item may be queued.
-		shard.log.pop(values)
 		// Get reads in-flight Data under this lock.
 		p = values.decode()
+		shard.log.pop(values, p)
 		if !values.firstArrival.IsZero() {
 			if shard.firstArrival == nil {
 				shard.firstArrival = make(map[*points.Points]time.Time)

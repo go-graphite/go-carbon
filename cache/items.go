@@ -9,18 +9,15 @@ import (
 )
 
 // item holds a metric's queued points. While in Shard.items they are
-// compact and Data is nil; popping decodes them into Data. &item.Points
-// identifies the batch to notConfirmed, firstArrival and pending recovery,
-// from insertion until it is confirmed.
+// compact. A Points header is allocated only at pop, or when pending recovery
+// needs a stable identity before pop. Quota state stays inline on the ingest
+// path; ordinary queued items have no raw slice header or separate identity.
 type item struct {
-	hash             uint64 // exact map hash, including forced collisions in tests
-	logFirst         uint64 // first unpersisted generation while queued; see logTracked
-	streamGeneration uint64 // assigned lazily under the owning shard lock
-	points.Points
-	compact compactPoints
-	// log names the item for the input log, which keeps its stream id
-	// there; the cache does not touch it after creation.
-	log inputlog.StreamRef
+	hash               uint64 // exact map hash, including forced collisions in tests
+	logFirst           uint64 // first unpersisted generation while queued; see logTracked
+	streamGeneration   uint64 // assigned lazily under the owning shard lock
+	inputlog.StreamRef        // owns the canonical name and atomic input-log hint
+	compact            compactPoints
 	// spread is the metric's share of the writeout spread (see
 	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
 	spread uint16
@@ -29,20 +26,20 @@ type item struct {
 	// SetWriteoutSparseSpread).
 	sparse bool
 	// startup holds the first batching window to its phase even at the point
-	// threshold. It uses existing padding; ordinary arrivals do no extra work.
+	// threshold.
 	startup    bool
 	logTracked bool
 	// slot locates the metric in its shard's sparseLast table.
 	slot            uint32
 	firstArrival    time.Time
-	throttleState   any
+	throttle        any            // hot for every configured quota check
+	pending         *points.Points // allocated only when recovery needs a queued identity
 	indexGeneration uint64
 }
 
 func newItem(metric string, capacity int) *item {
 	h := writeoutHash(metric)
-	it := &item{Points: points.Points{Metric: metric}, compact: compactPoints{buf: make([]byte, 0, capacity)}, spread: uint16(h >> 48), slot: sparseSlot(h)}
-	it.log.Metric = metric
+	it := &item{StreamRef: inputlog.StreamRef{Metric: metric}, compact: compactPoints{buf: make([]byte, 0, capacity)}, spread: uint16(h >> 48), slot: sparseSlot(h)}
 	return it
 }
 
@@ -51,9 +48,40 @@ func (it *item) count() int { return it.compact.n }
 // decode moves the queued points into Data, which callers may then own.
 // Called with the item unreachable from the shard, or with its shard locked.
 func (it *item) decode() *points.Points {
-	it.Data = it.compact.appendDecoded(nil)
+	p := it.pending
+	if p == nil {
+		p = &points.Points{Metric: it.Metric}
+	}
+	p.Data = it.compact.appendDecoded(nil)
 	it.compact = compactPoints{}
-	return &it.Points
+	return p
+}
+
+// Recovery alone needs a queued Points identity. The raw header is the
+// on-demand side structure; a normal item creates its header only at pop.
+// Quota state remains inline: moving that hot slot behind a side pointer
+// exceeded the ingest CPU budget in the stateful workload.
+func (it *item) identity() *points.Points {
+	if it.pending == nil {
+		it.pending = &points.Points{Metric: it.Metric}
+	}
+	return it.pending
+}
+
+func (it *item) throttleState() any { return it.throttle }
+
+// Called only for items already in this shard's map. New replacements call
+// identity directly and setHashed charges their complete state on insertion.
+func (sh *Shard) itemIdentity(it *item) *points.Points {
+	before := it.extraMemory()
+	p := it.identity()
+	sh.items.bytes += it.extraMemory() - before
+	return p
+}
+
+func (sh *Shard) setItemThrottle(it *item, state any) bool {
+	it.throttle = state
+	return false
 }
 
 type itemSlot struct {

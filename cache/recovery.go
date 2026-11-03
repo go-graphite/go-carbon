@@ -340,7 +340,7 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 	// spread deadline and be written once with its first live points. A new
 	// one is written at once: the first scan waits for it.
 	deferred := s.writeoutRestoreSpread && s.batching() && !r.isNewSlot(slot)
-	r.trackAs(&values.Points, deferred)
+	r.trackAs(shard.itemIdentity(values), deferred)
 	shard.log.trackItem(values)
 	r.claim(slot)
 	c.syncMemoryLocked(shard)

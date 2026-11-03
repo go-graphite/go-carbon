@@ -97,3 +97,16 @@ contains independent 52-bit mantissas, those mantissas alone require 1.95
 bytes/point before timestamps, integer values, metadata or slack. Whole-cache
 heap also includes metric names and indexes; a point-buffer target is not a
 whole-cache heap claim. Measure the actual mix before a wider rollout.
+
+
+Queued item headers keep the input log's `StreamRef` as their single metric
+name. A raw `points.Points` header is created at writeout, or earlier only when
+pending recovery needs a stable identity; quota state stays inline to avoid a per-metric allocation and pointer
+lookup on configured ingest paths. A successful write, retry, and live successor keep their
+own identities. This changes no dump, handoff, or input-log bytes.
+
+A shared name registry can later supply metric IDs at `newItem` and the
+`itemMap.get*` / `setHashed` boundary. That requires the same registry for cache,
+input-log naming, pending recovery and stream names. This branch continues to
+key and validate items by full metric names; ID keys belong to that separate
+integration.
