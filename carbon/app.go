@@ -988,7 +988,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		var continuation store.ContinuationCodec
 		if conf.Whisper.StoreIncrementalMigration {
 			incrementalSource = conf.Whisper.DataDir
-			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites}
+			continuation = &whisperio.ContinuationCodec{ReuseBlockKeys: conf.Whisper.StoreReuseBlockKeys, DirectLateWrites: conf.Whisper.StoreOOODirectWrites, RangeReadsEnabled: func() bool { return app.readPolicyConfig.Load().Whisper.StoreRangeReads }}
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{

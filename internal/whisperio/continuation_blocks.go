@@ -242,8 +242,6 @@ func (f *continuationFile) ReadStorageBlock(block whisper.ContinuationBlock) ([]
 	return f.ReadStorageBlockInto(block, nil)
 }
 
-// ReadStorageBlockInto returns a borrowed result in dst. Callers retaining block
-// values use ReadStorageBlock, whose nil destination allocates independent data.
 // errStopGroupVisit ends a group walk once a block's count is read.
 var errStopGroupVisit = errors.New("stop continuation group visit")
 
@@ -255,11 +253,24 @@ var skippedBlockDeletes atomic.Uint64
 // groups in place instead of deleting them (ContinuationCodec.ReuseBlockKeys).
 func SkippedBlockDeletes() uint64 { return skippedBlockDeletes.Load() }
 
+// ReadStorageBlockInto returns a borrowed result in dst. Callers retaining block
+// values use ReadStorageBlock, whose nil destination allocates independent data.
 func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock, dst []whisper.TimeSeriesPoint) ([]whisper.TimeSeriesPoint, error) {
+	return f.readStorageBlock(block, dst, 0, 0, false)
+}
+
+// ReadStorageBlockRange covers the inclusive physical time range. It may return
+// the full block when pruning is disabled or unavailable; Whisper clips it.
+// Only Fetch enables pruning; writer planning and verification keep full reads.
+func (f *continuationFile) ReadStorageBlockRange(block whisper.ContinuationBlock, from, until int) ([]whisper.TimeSeriesPoint, error) {
+	return f.readStorageBlock(block, nil, from, until, f.fs.rangeReads)
+}
+
+func (f *continuationFile) readStorageBlock(block whisper.ContinuationBlock, dst []whisper.TimeSeriesPoint, from, until int, partial bool) ([]whisper.TimeSeriesPoint, error) {
 	if err := f.validateBlock(block); err != nil {
 		return nil, err
 	}
-	if f.fs.verifiedBlocks != nil {
+	if !partial && f.fs.verifiedBlocks != nil {
 		if points, ok := f.fs.verifiedBlocks[verifiedBlockKey{file: f.data.id, block: block}]; ok {
 			return append(dst[:0], points...), nil
 		}
@@ -273,11 +284,19 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 		return nil, fmt.Errorf("continuation physical point count differs: file %d archive %d block %d holds %d points, header %d",
 			f.data.id, block.Archive, block.Index, count, block.Count)
 	}
+	// Ordinary groups retain the original full reader. Bounds in sealed v9
+	// headers are independent of archive alignment and circular slot ownership.
+	partial = partial && desc.packed > 0 && !(from <= block.First && until >= block.Last)
 	points := dst[:0]
-	if cap(points) < count {
-		points = make([]whisper.TimeSeriesPoint, 0, count)
+	capacity := count
+	if partial {
+		capacity = min(count, max(0, (until-from)/block.Step+1))
+	}
+	if cap(points) < capacity {
+		points = make([]whisper.TimeSeriesPoint, 0, capacity)
 	}
 	previous := int64(0)
+	visited, firstTime := 0, 0
 	if count > 0 {
 		// A physical CWhisper block usually spans many 128-point groups.
 		// Walk their contiguous keys once instead of opening a fresh LSM
@@ -292,7 +311,7 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 			defer putSealedPointBuffer(sealed)
 		}
 		visit := func(key, value []byte) error {
-			first := len(points)
+			first := visited
 			if first >= count {
 				// Groups past the count are left over from an earlier
 				// incarnation of this block whose keys the rewrite reuses.
@@ -302,14 +321,50 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 				return fmt.Errorf("invalid continuation physical group order: file %d archive %d block %d: group key %x, want group %d",
 					f.data.id, block.Archive, block.Index, key[min(len(key), len(prefix)):], first/desc.groupSize())
 			}
+			if partial {
+				lo, hi, n, err := store.SealedTimeBounds(value)
+				if err != nil {
+					return err
+				}
+				if n != min(desc.groupSize(), count-first) || lo <= previous {
+					return errors.New("invalid sealed group time bounds or count")
+				}
+				if first == 0 {
+					firstTime = int(lo)
+				}
+				// An irregular group's conservative upper bound prevents pruning
+				// it before from. Decode the last group too when its actual last
+				// timestamp is needed to check the native header.
+				if hi < int64(from) || lo > int64(until) && (first+n < count || hi != math.MaxUint32) {
+					visited += n
+					previous = hi
+					if hi == math.MaxUint32 {
+						previous = lo
+					}
+					return nil
+				}
+			}
 			decoded, err := f.decodeStorageGroup(block, desc, first, value, &scratch, sealed, previous)
 			if err != nil {
 				return err
 			}
-			for _, point := range decoded {
-				points = append(points, whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
-				previous = point.Timestamp
+			selected := decoded
+			if partial {
+				lo := sort.Search(len(decoded), func(i int) bool { return decoded[i].Timestamp >= int64(from) })
+				hi := sort.Search(len(decoded), func(i int) bool { return decoded[i].Timestamp > int64(until) })
+				if hi < lo {
+					hi = lo
+				}
+				selected = decoded[lo:hi]
 			}
+			for _, point := range selected {
+				points = append(points, whisper.TimeSeriesPoint{Time: int(point.Timestamp), Value: point.Value})
+			}
+			previous = decoded[len(decoded)-1].Timestamp
+			if first == 0 {
+				firstTime = int(decoded[0].Timestamp)
+			}
+			visited += len(decoded)
 			return nil
 		}
 		if count <= desc.groupSize() {
@@ -329,16 +384,16 @@ func (f *continuationFile) ReadStorageBlockInto(block whisper.ContinuationBlock,
 		if err != nil && !errors.Is(err, errStopGroupVisit) {
 			return nil, err
 		}
-		if len(points) != count {
+		if visited != count {
 			return nil, fmt.Errorf("missing continuation physical group: file %d archive %d block %d: %d of %d points",
-				f.data.id, block.Archive, block.Index, len(points), count)
+				f.data.id, block.Archive, block.Index, visited, count)
 		}
 	}
-	if count != 0 && (block.First != 0 && points[0].Time != block.First || block.Last != 0 && points[count-1].Time != block.Last) {
+	if count != 0 && (block.First != 0 && firstTime != block.First || block.Last != 0 && int(previous) != block.Last) {
 		return nil, fmt.Errorf("continuation physical point bounds differ: file %d archive %d block %d: stored %d to %d, header %d to %d",
-			f.data.id, block.Archive, block.Index, points[0].Time, points[count-1].Time, block.First, block.Last)
+			f.data.id, block.Archive, block.Index, firstTime, previous, block.First, block.Last)
 	}
-	if f.fs.verifiedBlocks != nil {
+	if !partial && f.fs.verifiedBlocks != nil {
 		f.fs.verifiedBlocks[verifiedBlockKey{file: f.data.id, block: block}] = append([]whisper.TimeSeriesPoint(nil), points...)
 	}
 	return points, nil

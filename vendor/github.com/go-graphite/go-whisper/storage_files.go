@@ -75,6 +75,15 @@ type StorageBlockReader interface {
 	ReadStorageBlock(ContinuationBlock) ([]TimeSeriesPoint, error)
 }
 
+// StorageBlockRangeReader optionally restricts physical reads to an inclusive
+// time window. Implementations must also provide StorageBlockReader.
+// Slot filtering, live rollups and OOO precedence remain in Whisper.
+// Full block readers are still required by writer planning and verification.
+// Returning a superset is permitted; storedPoints clips it to the requested range.
+type StorageBlockRangeReader interface {
+	ReadStorageBlockRange(ContinuationBlock, int, int) ([]TimeSeriesPoint, error)
+}
+
 // StorageBlockMatcher proves that replacing the requested points cannot change
 // their visible archive slots in the current transaction. Raw timestamp/value
 // equality is insufficient if off-grid neighbors alias a slot. A watermark
