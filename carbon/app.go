@@ -223,6 +223,9 @@ func (app *App) configure() error {
 			return err
 		}
 	}
+	if app.Carbonserver != nil {
+		app.Carbonserver.SetQueryCacheCanonicalKeys(cfg.Carbonserver.QueryCacheCanonicalKeys)
+	}
 	// All fallible policy validation is complete. Join the old expiration
 	// worker before publishing the new policy, so reload cannot leave deletes
 	// running under an obsolete rule. ReloadConfig restarts it below.
@@ -1154,6 +1157,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetIdleTimeout(conf.Carbonserver.IdleTimeout.Value())
 	carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 	carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
+	carbonserver.SetQueryCacheCanonicalKeys(conf.Carbonserver.QueryCacheCanonicalKeys)
 	carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 	if err := carbonserver.SetQueryCacheCompression(conf.Carbonserver.QueryCacheCompression); err != nil {
 		return nil, err

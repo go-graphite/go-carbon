@@ -3,6 +3,7 @@ package carbonserver
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,6 +16,12 @@ import (
 
 func TestMetricStoreRenderCacheInvalidation(t *testing.T) {
 	t.Parallel()
+	for _, canonical := range []bool{false, true} {
+		t.Run(fmt.Sprint(canonical), func(t *testing.T) { testMetricStoreRenderCacheInvalidation(t, canonical) })
+	}
+}
+
+func testMetricStoreRenderCacheInvalidation(t *testing.T, canonical bool) {
 	const now = 1700000000
 	ctx := context.Background()
 	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, Now: func() time.Time { return time.Unix(now, 0) }})
@@ -24,6 +31,7 @@ func TestMetricStoreRenderCacheInvalidation(t *testing.T) {
 	defer db.Close()
 	populateMetricStoreCatalog(ctx, t, db, now)
 	listener := newMetricStoreTestListener(t, cache.New(), db, false)
+	listener.SetQueryCacheCanonicalKeys(canonical)
 	listener.maxMetricsRendered = 100
 	listener.queryCache = expireCache{ec: expirecache.New(1 << 20)}
 	listener.SetQueryCacheEnabled(true)

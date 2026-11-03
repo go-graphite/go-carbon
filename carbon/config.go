@@ -264,6 +264,7 @@ type carbonserverConfig struct {
 	RequestTimeout             *Duration  `toml:"request-timeout"`
 	ScanFrequency              *Duration  `toml:"scan-frequency"`
 	QueryCacheEnabled          bool       `toml:"query-cache-enabled"`
+	QueryCacheCanonicalKeys    bool       `toml:"query-cache-canonical-keys"`
 	StreamingQueryCacheEnabled bool       `toml:"streaming-query-cache-enabled"`
 	QueryCacheSizeMB           int        `toml:"query-cache-size-mb"`
 	QueryCacheCompression      string     `toml:"query-cache-compression"`

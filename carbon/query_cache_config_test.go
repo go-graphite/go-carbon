@@ -39,3 +39,17 @@ func TestQueryCacheCompressionConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryCacheCanonicalKeysConfig(t *testing.T) {
+	if NewConfig().Carbonserver.QueryCacheCanonicalKeys {
+		t.Fatal("canonical keys must be opt in")
+	}
+	path := filepath.Join(t.TempDir(), "go-carbon.conf")
+	if err := os.WriteFile(path, []byte("[carbonserver]\nquery-cache-canonical-keys = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := ReadConfig(path)
+	if err != nil || !cfg.Carbonserver.QueryCacheCanonicalKeys {
+		t.Fatalf("config flag was not parsed: %v", err)
+	}
+}
