@@ -504,6 +504,9 @@ func (s *Store) startColdPack() {
 	c.wake = make(chan struct{}, 1)
 	go func() {
 		defer close(c.done)
+		if err := s.waitMaintenance(ctx, "cold-pack"); err != nil {
+			return
+		}
 		var pacer coldPackPacer
 		timer := time.NewTimer(time.Second)
 		defer timer.Stop()

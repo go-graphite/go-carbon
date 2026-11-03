@@ -36,13 +36,18 @@ headroom above mandatory CPU consumption. Zero never means unlimited CPU.
 Optional catalog warming and validation yield to waiting writers, required
 cold-state prefetch, and any observed writeout-floor shortfall, even when CPU
 credit remains. Bulk checkpoint loading and validation needed by upcoming cold
-writes share CPU credit alongside catch-up writeout. The serial checkpoint
+writes run alongside catch-up writeout. The serial checkpoint
 stream gets at most one core of duty time (or allowance / 8 on smaller processes).
 When process CPU leaves less room than that share and writeout is below 95%
 of its floor, the stream share reduces fourfold; spare CPU keeps the full
 share. The exact floor still controls warnings. One 5 ms sampling slice of the checkpoint share
 is reserved so writers cannot repeatedly consume every refill before the next
-checkpoint batch. Required validation keeps dependent-work priority. Batch wall
+checkpoint batch. The serial stream retains its duty-paced share even under
+whole-process CPU debt, so unrelated maintenance or receivers cannot starve it.
+Legacy checkpoint validation gets a separate required window per 100ms under
+CPU debt, including without a writeout floor. Optional catalog warming and queue
+preparation retain their existing admission paths. This bounded mandatory work
+can exceed the process allowance alongside mandatory intake and reads. Batch wall
 time is a conservative CPU estimate, including I/O and lock waits. Tiny duty
 delays accumulate into 5 ms windows so timer rounding cannot multiply the load
 time. Already
@@ -56,6 +61,20 @@ missing metadata uses ordinary durable-store lookups and provisional legacy
 records still require validation. This bounds the attempt, not guaranteed full
 population under sustained CPU saturation, and cannot interrupt a blocked
 filesystem syscall. No writeout gate is added.
+
+Deferrable store maintenance waits for both the warming attempt (including any
+fallback scan) to finish and restart pacing to end. This covers history relayout,
+cold-pack, expiration sweeps, compact-once, catalog membership construction and
+invalid-name purging. The wait is bounded to 35 minutes from store startup,
+including store opening and restoration. A timeout starts maintenance with a
+warning even if warming or backlog drain is stuck. The checkpoint's mandatory
+share still applies if the two overlap. Each worker logs when waiting and when
+starting, including its release reason; shutdown cancels pending waiters.
+SIGHUP keeps the original gate and deadline when changing maintenance policy.
+Expiration additionally waits for pending-point restoration before scanning.
+Mandatory WAL/flush work, ordinary Pebble compaction, foreground operations and
+explicit offline maintenance calls keep their existing behavior. With metadata
+prewarm disabled or no metadata cache, no restart maintenance wait is installed.
 
 During restart pacing, the rate-token ceiling is three times the greater of
 saved steady throughput and queued metrics divided by max delay, replacing
@@ -71,9 +90,10 @@ process allowance; mandatory intake and reads remain independent.
 
 `restart_cpu_granted_cores` and `restart_cpu_grants_total` include consumer
 `checkpoint_load` alongside `warming` and `writeout`. Grants describe admission
-headroom, not measured CPU attribution. A released writer retains a reported
-share while waiting for rate tokens or names. The shares add to no more than
-the available allowance. `restart_cpu_checkpoint_loading` shows a pending or
+shares, not measured CPU attribution. A released writer retains a reported
+share while waiting for rate tokens or names. The consumer shares add to no more
+than the configured allowance; checkpoint admission can exceed remaining process
+headroom. `restart_cpu_checkpoint_loading` shows a pending or
 running load, and `restart_cpu_checkpoint_load_bytes{kind="completed"|"total"}`
 shows its stream progress (total is zero until known; the last known progress
 is retained after failure). Compare `restart_cpu_process_cores` against
@@ -82,6 +102,13 @@ against `restart_cpu_writeout_floor_updates_per_second` and
 `restart_cpu_writeout_ceiling_updates_per_second`. A zero ceiling means unlimited
 rate tokens, with CPU admission still active. The shortfall warning also logs
 the ceiling, worker count and each consumer's grant.
+
+Enabled checkpoint loads that finish invalid or with an error log WARN with
+runtime, entry counts, bytes, timeout status and the error. They increment
+`restart_cpu_checkpoint_load_failures_total`; deadline errors also increment
+`restart_cpu_checkpoint_load_timeouts_total`, including legacy validation.
+Missing first-start checkpoints count as failures. Explicitly disabled
+checkpointing makes no load attempt. These counters survive persister reloads.
 
 Increasing headroom trades extra CPU for faster recovery; it does not guarantee
 a recovery time or cache peak. A rough spend estimate at a fixed steady

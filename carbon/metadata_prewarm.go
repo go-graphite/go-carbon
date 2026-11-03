@@ -80,7 +80,9 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 			}
 			cancel()
 		}
-		logger.Info("metadata cache checkpoint loaded", zap.String("source", source), zap.Bool("valid", checkpoint.Valid), zap.Int64("entries", checkpoint.Entries), zap.Int64("validated", checkpoint.Validated), zap.Int64("fenced", checkpoint.Fenced), zap.Int64("bytes", checkpoint.Bytes), zap.Int64("read_bytes", checkpoint.ReadBytes), zap.Duration("runtime", checkpoint.Duration), zap.Error(loadErr))
+		if metadataCheckpointEnabled(conf) {
+			reportMetadataCheckpoint(logger, source, checkpoint, loadErr, budget)
+		}
 		// Warm-first writeout prefetches its own queue windows; a missing or
 		// invalid checkpoint does not need the catalog walk.
 		if checkpoint.Valid || metadataWarmFirst(conf) {
@@ -122,6 +124,15 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 			zap.Int("rate", options.Rate), zap.Int("byte_rate", options.ByteRate), zap.Duration("runtime", stats.Duration), zap.Error(err))
 	}()
 	return done
+}
+
+func reportMetadataCheckpoint(logger *zap.Logger, source string, checkpoint store.MetadataCheckpointStats, loadErr error, budget *restartcpu.Budget) {
+	budget.RecordCheckpointLoad(checkpoint.Valid, loadErr)
+	level, message := zap.InfoLevel, "metadata cache checkpoint loaded"
+	if !checkpoint.Valid || loadErr != nil {
+		level, message = zap.WarnLevel, "metadata cache checkpoint load failed"
+	}
+	logger.Log(level, message, zap.String("source", source), zap.Bool("valid", checkpoint.Valid), zap.Int64("entries", checkpoint.Entries), zap.Int64("validated", checkpoint.Validated), zap.Int64("fenced", checkpoint.Fenced), zap.Int64("bytes", checkpoint.Bytes), zap.Int64("read_bytes", checkpoint.ReadBytes), zap.Duration("runtime", checkpoint.Duration), zap.Bool("timeout", errors.Is(loadErr, context.DeadlineExceeded)), zap.Error(loadErr))
 }
 
 // startMetadataPrewarm starts the prewarm for the shared store and records

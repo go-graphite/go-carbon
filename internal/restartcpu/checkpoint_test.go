@@ -45,26 +45,29 @@ func TestCheckpointWriteoutAndWarmingSplit(t *testing.T) {
 			t.Fatal("checkpoint did not yield below floor", elapsed)
 		}
 		b.ObserveWriteout(13700, 15000)
-		if s := b.State(); s.Checkpoint != .5 || s.Warming+s.Writeout+s.Checkpoint > 24 {
+		if s := b.State(); s.Checkpoint != 1 || s.Warming+s.Writeout+s.Checkpoint > 24 {
 			t.Fatal(s)
 		}
 	})
 }
 
-func TestCheckpointSharesDebtAndCancellation(t *testing.T) {
+func TestCheckpointMandatoryShareAndCancellation(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		started := time.Now()
 		b := NewWithCPU(24, func() float64 { return 25 * time.Since(started).Seconds() })
 		p := b.NewCheckpoint(nil)
 		defer p.Finish()
 		time.Sleep(time.Second)
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		defer cancel()
-		if err := p.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatal("checkpoint escaped process debt", err)
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatal("checkpoint starved under process debt", err)
 		}
-		if s := b.State(); s.Checkpoint != 0 || math.IsInf(s.Checkpoint, 0) {
+		if s := b.State(); s.Checkpoint != 1 || math.IsInf(s.Checkpoint, 0) {
 			t.Fatal(s)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := p.Wait(ctx); !errors.Is(err, context.Canceled) {
+			t.Fatal("checkpoint ignored cancellation", err)
 		}
 	})
 }
@@ -203,6 +206,58 @@ func TestCheckpointCoalescesTinyDutyDelays(t *testing.T) {
 		}
 		if p.owed > 5*time.Millisecond {
 			t.Fatal("unbounded duty debt", p.owed)
+		}
+	})
+}
+
+func TestCheckpointDutyStillBoundsMandatoryShareUnderDebt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		b := NewWithCPU(8, func() float64 { return 9 * time.Since(start).Seconds() })
+		p, q := b.NewCheckpoint(nil), b.NewCheckpoint(nil)
+		defer p.Finish()
+		defer q.Finish()
+		time.Sleep(time.Second)
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(8 * time.Millisecond) // one worker's measured batch
+		before := time.Now()
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(before) < 8*time.Millisecond {
+			t.Fatal("mandatory bypass escaped half-core duty pacing")
+		}
+		if s := b.State(); s.Checkpoint != 1 || s.Process <= s.Allowance {
+			t.Fatal(s)
+		}
+	})
+}
+
+func TestCheckpointValidationProgressWithoutWriteoutFloor(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		b := NewWithCPU(1, func() float64 { return 2 * time.Since(start).Seconds() })
+		time.Sleep(time.Second)
+		// Required queue preparation keeps its existing process-credit path;
+		// it cannot consume the checkpoint's validation progress window.
+		b.BeginPrefetch()
+		defer b.EndPrefetch()
+		if err := b.WaitCheckpoint(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if err := b.WaitCheckpoint(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("required validation escaped bounded duty", err)
+		}
+		before := time.Now()
+		if err := b.WaitCheckpoint(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(before) < 50*time.Millisecond {
+			t.Fatal("validation progress window unbounded")
 		}
 	})
 }

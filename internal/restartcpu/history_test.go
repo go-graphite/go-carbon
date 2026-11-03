@@ -200,10 +200,13 @@ func TestRequiredCheckpointValidationSharesCPUWithActiveWriters(t *testing.T) {
 		}
 		used = 3
 		time.Sleep(time.Second)
+		if err := b.WaitCheckpoint(context.Background()); err != nil {
+			t.Fatal("required validation starved under CPU debt", err)
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() { time.Sleep(time.Millisecond); cancel() }()
 		if err := b.WaitCheckpoint(ctx); !errors.Is(err, context.Canceled) {
-			t.Fatal("checkpoint bypassed shared CPU debt", err)
+			t.Fatal("validation ignored cancellation between progress windows", err)
 		}
 	})
 }

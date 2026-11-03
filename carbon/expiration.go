@@ -69,6 +69,7 @@ type metricExpirer struct {
 	cancel                                       context.CancelFunc
 	done                                         chan struct{}
 	restored                                     <-chan struct{}
+	maintenanceWait                              func(context.Context, string) error
 	dryRun                                       bool
 	deleteRate, deleteWorkers, maxDeletes, maxL0 int
 	maxDebt                                      uint64
@@ -118,9 +119,10 @@ func (app *App) startExpiration() {
 		rate: cfg.StoreExpirationScanRate, now: time.Now,
 		dryRun: cfg.StoreExpirationDryRun, deleteRate: cfg.StoreExpirationDeleteRate, deleteWorkers: cfg.StoreExpirationDeleteWorkers,
 		maxDeletes: cfg.StoreExpirationMaxDeletes, maxL0: cfg.StoreExpirationMaxL0, maxDebt: uint64(cfg.StoreExpirationMaxDebt),
-		pending:  core.Has,
-		stats:    app.expirationStats,
-		restored: app.storeRestoreDone,
+		pending:         core.Has,
+		stats:           app.expirationStats,
+		restored:        app.storeRestoreDone,
+		maintenanceWait: app.storeMaintenance.wait,
 	}
 	if app.metricStoreIndex != nil {
 		r.notify = app.metricStoreIndex.notify
@@ -148,6 +150,11 @@ func (r *metricExpirer) start() {
 			case <-ctx.Done():
 				return
 			case <-r.restored:
+			}
+		}
+		if r.maintenanceWait != nil {
+			if err := r.maintenanceWait(ctx, "expiration"); err != nil {
+				return
 			}
 		}
 		for {

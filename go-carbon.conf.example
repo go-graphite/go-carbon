@@ -233,6 +233,11 @@ store-l0-compaction-concurrency = 0
 # With prewarm enabled, checkpointing and warm-first writeout default to true.
 # Parallel eager validation is the default; lazy validation stays opt-in.
 # Explicit false selects legacy behavior for checkpointing or warm-first.
+# With prewarm and a positive metadata cache, deferrable store maintenance
+# (relayout, cold-pack, expiration, compact-once, catalog membership and invalid
+# name purge) waits for warming AND restart pacing to finish. The wait is capped
+# at 35 minutes from store startup, preserved across SIGHUP; expiry logs WARN.
+# Input, reads, WAL/flushes and ordinary Pebble compaction continue meanwhile.
 # Warm-first starts writeout immediately after input readiness. Cached names
 # pass through; bounded cold prefetch overlaps ordinary writeout. If no
 # prefetched name is ready, workers read cold state on their CPU-admitted write
@@ -266,13 +271,19 @@ store-l0-compaction-concurrency = 0
 # Ordered restoration required before input readiness remains urgent.
 #
 # A valid checkpoint streams serialized slab records asynchronously after input
-# readiness, within the metadata budget and shared CPU allowance. Its serial
-# stream gets at most one core of duty time, reduced fourfold when CPU is
+# readiness, within the metadata budget. Its serial stream gets at most one
+# core of duty time (or allowance / 8), reduced fourfold when CPU is
 # near the allowance and writeout is materially below its floor. Tiny duty
 # delays coalesce into 5ms windows. One CPU sampling slice is reserved
-# for checkpoint progress; catch-up writeout continues concurrently. The load
+# for checkpoint progress; its duty-paced share cannot be zeroed by process CPU
+# debt. Legacy validation has a required window per 100ms even without a writeout
+# floor. Catch-up writeout continues concurrently. The load
 # attempt ends after 10 minutes of CPU/storage waits; partial loads use ordinary
 # durable-store lookups. An uninterruptible filesystem read may delay cancellation.
+# Invalid/failed enabled loads log WARN and increment
+# restart_cpu_checkpoint_load_failures_total; deadlines also increment
+# restart_cpu_checkpoint_load_timeouts_total. Missing first-start checkpoints
+# count as failures; explicitly disabled checkpointing makes no attempt.
 # A v2 file
 # saved by a clean stop restores authoritative records under its exact clean
 # identity/sequence fence with no revision reads. Legacy v1 records are

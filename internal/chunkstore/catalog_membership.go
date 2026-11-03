@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"hash/maphash"
@@ -25,12 +26,18 @@ type catalogMembership struct {
 	stop     chan struct{}
 	stopOnce sync.Once
 	done     chan struct{}
+	cancel   context.CancelFunc
 }
 
 // halt stops the scan and waits for it to end. It is safe to call more than
 // once and concurrently.
 func (f *catalogMembership) halt() {
-	f.stopOnce.Do(func() { close(f.stop) })
+	f.stopOnce.Do(func() {
+		close(f.stop)
+		if f.cancel != nil {
+			f.cancel()
+		}
+	})
 	<-f.done
 }
 
@@ -82,9 +89,8 @@ func (s *Store) startCatalogMembership() {
 	if s.incrementalSource == "" {
 		return
 	}
-	view := s.db.NewSnapshot()
 	var high uint64
-	if value, closer, err := view.Get(sequenceKey()); err == nil {
+	if value, closer, err := s.db.Get(sequenceKey()); err == nil {
 		if len(value) == 8 {
 			high = binary.BigEndian.Uint64(value)
 		}
@@ -94,7 +100,18 @@ func (s *Store) startCatalogMembership() {
 	// Publish before Open returns, so every concurrent catalog write joins the
 	// same filter even if it is newer than the initial snapshot.
 	s.catalogMembership = f
-	go s.loadCatalogMembership(view, f)
+	ctx, cancel := context.WithCancel(s.maintenanceCtx)
+	f.cancel = cancel
+	go func() {
+		defer cancel()
+		if err := s.waitMaintenance(ctx, "catalog-membership"); err != nil {
+			close(f.done)
+			return
+		}
+		// Publish the filter before writes, but take the scan's snapshot only
+		// after admission so the restart wait does not pin obsolete tables.
+		s.loadCatalogMembership(s.db.NewSnapshot(), f)
+	}()
 }
 
 // membershipRefresh bounds how long the catalog scan reads through one
