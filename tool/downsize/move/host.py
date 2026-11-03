@@ -144,6 +144,10 @@ class Host:
             cpu = [int(v) for v in Path('/proc/stat').read_text().splitlines()[0].split()[1:9]]
             disk = {d: [int(v) for v in Path('/sys/class/block/%s/stat' % d).read_text().split()] for d in self.args.devices.split(',')}
             nic = tuple(int(Path('/sys/class/net/%s/statistics/%s_bytes' % (self.args.nic, direction)).read_text()) for direction in ('rx', 'tx'))
+            # Timestamp the proc/sys counter snapshot, before HTTP collection.
+            # A slow previous HTTP request followed by a fast one must not
+            # divide a full counter interval by the tiny response-time gap.
+            now = time.time()
             offline = getattr(self.args, 'offline', False)
             values = {} if offline else metrics(self.args.metrics_url)
             admin = {} if offline else fetch_json(self.args.admin_url + '/admin/info?scopes=storage,cache')
@@ -152,7 +156,6 @@ class Host:
             volume = os.statvfs(self.args.store_dir)
             p99, samples = read_p99(self.histogram, values)
             self.histogram = values
-            now = time.time()
             sample = {'Time': now, 'Generation': generation, 'StoragePhase': phase, 'CachePoints': cached,
                       'DiskBytes': volume.f_blocks*volume.f_frsize, 'DiskFreeBytes': volume.f_bavail*volume.f_frsize, 'PhysicalCores': self.cores,
                       'CPUCores': 0, 'DiskUtil': 0, 'DiskAwaitMS': 0, 'NICBytesPerSecond': 0,
