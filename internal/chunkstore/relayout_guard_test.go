@@ -164,7 +164,7 @@ func TestRelayoutLowSpaceStopsCopiesAndCursor(t *testing.T) {
 			if st := s.RelayoutStats(); st.Bytes != 0 || st.Cursor != 0 || st.Done || st.Pauses["low_free_space"] != 1 {
 				t.Fatalf("work escaped gate: %+v", st)
 			}
-			fs.free.Store(100)
+			fs.free.Store(100 + 32*relayoutTargetBytes)
 			if err := s.SetRelayoutLimits(100, DefaultRelayoutMaxCompactionDebt); err != nil {
 				t.Fatal(err)
 			}

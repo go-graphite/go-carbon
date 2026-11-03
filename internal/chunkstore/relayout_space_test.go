@@ -296,6 +296,11 @@ func TestRelayoutSpaceOptions(t *testing.T) {
 					}
 				}
 			}
+			if mode == "implemented" {
+				if err := s.reclaimRelayout(context.Background(), true, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
 			// Allow automatic compactions and file deletion to finish, without forcing
 			// compaction of the old span in the automatic-policy experiments.
 			for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
@@ -361,8 +366,8 @@ func TestRelayoutReclaimsL6WhileRunning(t *testing.T) {
 		}
 		// 16 groups copy 32 MiB in all. Allow two 2 MiB groups for table
 		// framing/overlap, while the unfixed path retains the whole 32 MiB.
-		if growth := liveBytes() - before; growth > 4<<20 {
-			t.Fatalf("group %d: growth=%d, want <= two groups", i/2, growth)
+		if growth := liveBytes() - before; growth > 6<<20 {
+			t.Fatalf("group %d: growth=%d, want <= configured batch plus overlap", i/2, growth)
 		}
 		for _, m := range metas[i : i+2] {
 			io := s.newContinuationIO(ctx, s.db, nil, m)
@@ -378,6 +383,9 @@ func TestRelayoutReclaimsL6WhileRunning(t *testing.T) {
 				}
 			}
 		}
+	}
+	if err := s.reclaimRelayout(ctx, true, 0); err != nil {
+		t.Fatal(err)
 	}
 	tables, err := s.db.SSTables(pebble.WithProperties())
 	if err != nil {
@@ -442,7 +450,7 @@ func TestRelayoutCancelDuringReclaim(t *testing.T) {
 	fs := &relayoutCancelFS{FS: vfs.NewMem(), onOutput: func() { close(entered); <-release }}
 	// Each metric forces a separate group, so cancellation must also stop the
 	// next copy, not merely leave the cursor behind a completed whole run.
-	s, _ := openTestStore(t, "/store", Options{fs: fs, ExactBlocks: true, TimeBuckets: true, Continuation: &controlledRelayoutCodec{}})
+	s, _ := openTestStore(t, "/store", Options{fs: fs, ExactBlocks: true, TimeBuckets: true, Continuation: &controlledRelayoutCodec{}, RelayoutReclaimBytes: 1})
 	fs.store.Store(s)
 	m := createTestMetric(t, s, "cancel.first")
 	next := createTestMetric(t, s, "cancel.second")
@@ -581,8 +589,8 @@ func TestRelayoutCancellationLatency(t *testing.T) {
 				t.Fatalf("cancel: %v", finished.err)
 			}
 			stats := s.RelayoutStats()
-			if stats.Done || stats.Cursor != 0 {
-				t.Fatalf("cancelled group published cursor: %+v", stats)
+			if stats.Done || stats.UnreclaimedBytes == 0 {
+				t.Fatalf("cancelled batch lost its durable obligation: %+v", stats)
 			}
 			t.Logf("workers=%d cancel_to_worker_return=%s copied=%d blocks=%d l6_max_file_bytes=%d l6_target_file_bytes=%d", workers, finished.at.Sub(at), stats.Bytes, stats.Blocks, maxL6, s.pebbleOptions.Levels[6].TargetFileSize)
 		})
@@ -597,7 +605,7 @@ func relayoutSpaceFixture(t *testing.T, workers int) (*Store, spaceRelayoutCodec
 		value[i] = byte(r.Uint32())
 	}
 	codec := spaceRelayoutCodec{value: value}
-	s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), Continuation: codec, TimeBuckets: true, ExactBlocks: true, MemTableSize: 1 << 20, TargetFileSize: 128 << 10, RelayoutWorkers: workers, CacheSize: 1 << 20})
+	s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), Continuation: codec, TimeBuckets: true, ExactBlocks: true, MemTableSize: 1 << 20, TargetFileSize: 128 << 10, RelayoutReclaimBytes: 5 << 20, RelayoutWorkers: workers, CacheSize: 1 << 20})
 	t.Cleanup(func() { closeTestStore(t, s) })
 	var metas []Metadata
 	for i := 0; i < 32; i++ {

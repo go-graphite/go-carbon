@@ -31,7 +31,7 @@ const (
 	relayoutMaxMetrics  = 4096
 )
 
-func relayoutCursorKey() []byte { return []byte("z/relayout") }
+func relayoutCursorKey() []byte { return []byte("R/relayout/cursor") }
 
 // RelayoutStats reports progress of the current process.
 type RelayoutStats struct {
@@ -42,17 +42,19 @@ type RelayoutStats struct {
 	Ceiling uint64
 	Done    bool
 	// Rate is the current pacing in bytes per second.
-	Rate                            int64
-	Paused                          bool
-	PauseReason                     string
-	Pauses                          map[string]uint64
-	MinFreeBytes, MaxCompactionDebt uint64
+	Rate                                                     int64
+	Paused                                                   bool
+	PauseReason                                              string
+	Pauses                                                   map[string]uint64
+	MinFreeBytes, MaxCompactionDebt                          uint64
+	ReclaimBytes, UnreclaimedBytes, Reclaims, ReclaimedBytes uint64
 	// Error is why a background run stopped, if it did.
 	Error string
 }
 
 type relayoutState struct {
 	guard                                   relayoutGuard
+	reclaim                                 relayoutReclaimState
 	metrics, blocks, skipped, bytes, cursor atomic.Uint64
 	ceiling                                 atomic.Uint64
 	done                                    atomic.Bool
@@ -81,6 +83,11 @@ func (s *Store) SetRelayoutRate(bytesPerSecond int64) error {
 // earning a burst afterwards.
 func (s *Store) paceRelayout(ctx context.Context, paced *uint64, pacedAt *time.Time) error {
 	for {
+		if s.db != nil {
+			if err := s.reclaimRelayout(ctx, false, 0); err != nil {
+				return err
+			}
+		}
 		rate := s.relayout.rate.Load()
 		copiedThrough := s.relayout.bytes.Load()
 		copied := copiedThrough - *paced
@@ -108,6 +115,7 @@ func (s *Store) RelayoutStats() RelayoutStats {
 	r := &s.relayout
 	stats := RelayoutStats{Metrics: r.metrics.Load(), Blocks: r.blocks.Load(), Skipped: r.skipped.Load(), Bytes: r.bytes.Load(), Cursor: r.cursor.Load(), Ceiling: r.ceiling.Load(), Done: r.done.Load(), Rate: r.rate.Load()}
 	r.guard.stats(&stats)
+	r.reclaim.stats(&stats)
 	if e := r.err.Load(); e != nil {
 		stats.Error = *e
 	}
@@ -130,6 +138,9 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 	planner, ok := s.continuation.(ContinuationRelayouter)
 	if !ok {
 		return fmt.Errorf("%w: continuation codec cannot relayout", ErrFormat)
+	}
+	if err := s.recoverRelayoutReclaim(ctx); err != nil {
+		return err
 	}
 	ceiling, err := s.CatalogHighWatermark(ctx)
 	if err != nil {
@@ -230,6 +241,9 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 		return err
 	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.reclaimRelayout(ctx, true, 0); err != nil {
 		return err
 	}
 	if err := s.setRelayoutCursor(ceiling, true); err != nil {
@@ -350,9 +364,19 @@ func (s *Store) relayoutCandidates(ctx context.Context, after, ceiling uint64) (
 // relayoutGroup ingests the group's copies as one table, then switches each
 // block whose descriptor is unchanged and deletes the copies of the rest.
 func (s *Store) relayoutGroup(ctx context.Context, items []relayoutItem) error {
-	if err := s.waitRelayout(ctx); err != nil {
+	g, err := s.beginRelayoutGroup(ctx, items)
+	if err != nil {
 		return err
 	}
+	defer g.finish()
+	if err := s.ingestRelayoutGroup(ctx, items, g); err != nil {
+		return err
+	}
+	g.finish()
+	return s.reclaimRelayout(ctx, false, 0)
+}
+
+func (s *Store) ingestRelayoutGroup(ctx context.Context, items []relayoutItem, g *relayoutReclaimGroup) error {
 	path := s.fs.PathJoin(s.dir, fileIngestDir, fmt.Sprintf("relayout-%020d.sst", items[0].m.ID))
 	if err := s.fs.MkdirAll(s.fs.PathDir(path), 0o755); err != nil {
 		return err
@@ -391,30 +415,9 @@ func (s *Store) relayoutGroup(ctx context.Context, items []relayoutItem) error {
 	if err != nil {
 		return fmt.Errorf("ingest relayout copies: %w", err)
 	}
-	spans := make(map[byte]*relayoutSpan)
 	for _, item := range items {
-		if err := s.relayoutApply(ctx, item, spans); err != nil {
+		if err := s.relayoutApply(ctx, item, g); err != nil {
 			return err
-		}
-	}
-	// Publication locks and planning snapshots are released before any IO
-	// wait. Finish reclamation before admitting this worker's next group or
-	// advancing its cursor. Old metric keys and discarded bucket copies must
-	// stay in separate spans so we never compact the intervening keyspace.
-	for _, kind := range []byte{'u', 't'} {
-		if span := spans[kind]; span != nil {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			// Stock Compact has no cancellation API. Join this bounded span
-			// synchronously, then stop before another span or cursor publish.
-			compactErr := s.db.Compact(span.start, append(span.end, 0), false)
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if compactErr != nil {
-				return fmt.Errorf("reclaim relayout group: %w", compactErr)
-			}
 		}
 	}
 	return nil
@@ -436,7 +439,7 @@ func addRelayoutSpan(spans map[byte]*relayoutSpan, key []byte) {
 	}
 }
 
-func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, spans map[byte]*relayoutSpan) error {
+func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, g *relayoutReclaimGroup) error {
 	unlock := s.lockMetricMutation(item.m.Name)
 	defer unlock()
 	current, err := s.metadataLocked(item.m.Name)
@@ -462,7 +465,7 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, spans map[
 				return err
 			}
 			for _, key := range b.Removed {
-				addRelayoutSpan(spans, io.key(key))
+				addRelayoutSpan(g.spans, io.key(key))
 				if err := io.Delete(key); err != nil {
 					return err
 				}
@@ -473,7 +476,7 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, spans map[
 		// The block changed after planning (or the generation is gone): its
 		// new state does not reference these copies.
 		for _, c := range b.Copies {
-			addRelayoutSpan(spans, io.key(c.Key))
+			addRelayoutSpan(g.spans, io.key(c.Key))
 			if err := io.Delete(c.Key); err != nil {
 				return err
 			}
@@ -491,9 +494,15 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, spans map[
 			return err
 		}
 	}
+	// The journal and descriptor/delete mutations share a WAL batch. A
+	// cursor committed later cannot outlive the obligation after recovery.
+	if err := batch.Set(g.key, encodeRelayoutReclaim(g.bytes+uint64(item.plan.Bytes), g.spans), nil); err != nil {
+		return err
+	}
 	if err := s.commit(batch); err != nil {
 		return err
 	}
+	g.committed(uint64(item.plan.Bytes))
 	if moved > 0 {
 		s.relayout.metrics.Add(1)
 		s.relayout.blocks.Add(uint64(moved))
@@ -504,6 +513,9 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, spans map[
 
 func (s *Store) relayoutCursor() (uint64, bool, error) {
 	value, closer, err := s.db.Get(relayoutCursorKey())
+	if errors.Is(err, pebble.ErrNotFound) {
+		value, closer, err = s.db.Get([]byte("z/relayout"))
+	}
 	if errors.Is(err, pebble.ErrNotFound) {
 		return 0, false, nil
 	}

@@ -260,6 +260,19 @@ func TestRelayoutSkipsChangedBlocks(t *testing.T) {
 	if st := s.RelayoutStats(); st.Metrics != 1 || st.Blocks != 1 || st.Skipped != 1 {
 		t.Fatalf("stats %+v", st)
 	}
+	keys, spans, pending, err := s.readRelayoutReclaims(ctx)
+	if err != nil || len(keys) != 1 || len(spans) != 2 || pending != 10 {
+		t.Fatalf("mixed old/copy journal: keys=%d spans=%d bytes=%d err=%v", len(keys), len(spans), pending, err)
+	}
+	if err := s.reclaimRelayout(ctx, true, 0); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.RelayoutStats(); st.UnreclaimedBytes != 0 || st.Reclaims != 1 {
+		t.Fatalf("mixed reclaim: %+v", st)
+	}
+	if got := []string{get(kept, copyKey), get(changed, []byte("c")), get(changed, copyKey)}; !reflect.DeepEqual(got, []string{"group", "group", "<none>"}) {
+		t.Fatalf("reclamation changed live data: %q", got)
+	}
 }
 
 // A rate raised while a relayout waits applies within the recheck interval,

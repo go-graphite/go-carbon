@@ -57,25 +57,43 @@ func (g *relayoutGuard) clear() {
 	g.paused, g.reason = false, ""
 }
 
-func (s *Store) waitRelayout(ctx context.Context) error {
-	return s.relayout.guard.wait(ctx, func() (uint64, uint64, error) {
-		usage, err := s.fs.GetDiskUsage(s.dir)
-		// In-memory filesystems have no capacity. Real usage failures pause
-		// closed and retry; a missing sample must never admit more copies.
-		if errors.Is(err, vfs.ErrUnsupported) {
-			err = nil
-			usage.AvailBytes = ^uint64(0)
-		}
-		return usage.AvailBytes, s.db.Metrics().Compact.EstimatedDebt, err
-	})
+func (g *relayoutGuard) wake() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.changed != nil {
+		close(g.changed)
+	}
+	g.changed = make(chan struct{})
+}
+
+func (s *Store) relayoutPressure() (uint64, uint64, error) {
+	usage, err := s.fs.GetDiskUsage(s.dir)
+	if errors.Is(err, vfs.ErrUnsupported) {
+		err = nil
+		usage.AvailBytes = ^uint64(0)
+	}
+	return usage.AvailBytes, s.db.Metrics().Compact.EstimatedDebt, err
+}
+func (s *Store) waitRelayout(ctx context.Context) error { return s.waitRelayoutSize(ctx, 0) }
+func (s *Store) waitRelayoutSize(ctx context.Context, needed uint64) error {
+	return s.relayout.guard.waitPolicy(ctx, s.relayoutPressure, func() error { return s.reclaimRelayout(ctx, false, needed) }, needed)
 }
 
 func (g *relayoutGuard) wait(ctx context.Context, sample func() (free, debt uint64, err error)) error {
+	return g.waitPolicy(ctx, sample, nil, 0)
+}
+
+func (g *relayoutGuard) waitPolicy(ctx context.Context, sample func() (uint64, uint64, error), before func() error, needed uint64) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		reason, changed := g.observe(sample)
+		if before != nil {
+			if err := before(); err != nil {
+				return err
+			}
+		}
+		reason, changed := g.observePolicy(sample, needed)
 		if reason == "" {
 			return nil
 		}
@@ -91,7 +109,7 @@ func (g *relayoutGuard) wait(ctx context.Context, sample func() (free, debt uint
 	}
 }
 
-func (g *relayoutGuard) observe(sample func() (uint64, uint64, error)) (string, <-chan struct{}) {
+func (g *relayoutGuard) observePolicy(sample func() (uint64, uint64, error), needed uint64) (string, <-chan struct{}) {
 	// Serialize observation and publication so workers cannot publish an
 	// older observation after another worker has entered a pause.
 	g.mu.Lock()
@@ -101,7 +119,7 @@ func (g *relayoutGuard) observe(sample func() (uint64, uint64, error)) (string, 
 	switch {
 	case diskErr != nil:
 		reason = "disk_usage_error"
-	case free < g.minFree:
+	case free < g.minFree || needed > (free-g.minFree)/3:
 		reason = "low_free_space"
 	case debt > g.maxDebt:
 		reason = "compaction_debt"

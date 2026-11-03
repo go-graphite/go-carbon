@@ -63,6 +63,8 @@ type Options struct {
 	// Zero selects the defaults (200 GiB free, 32 GiB compaction debt).
 	// Both limits can be changed with SetRelayoutLimits while workers run.
 	RelayoutMinFreeBytes, RelayoutMaxCompactionDebt uint64
+	// Zero selects 32 GiB, additionally capped by half the free reserve headroom.
+	RelayoutReclaimBytes uint64
 	// ExactBlocks selects integer/floating-point adaptive encoding in a separate
 	// v4 store. A legacy store is never silently upgraded to this format.
 	ExactBlocks  bool
@@ -437,6 +439,10 @@ func Open(dir string, options Options) (*Store, error) {
 		options.RelayoutMaxCompactionDebt = DefaultRelayoutMaxCompactionDebt
 	}
 	_ = s.SetRelayoutLimits(options.RelayoutMinFreeBytes, options.RelayoutMaxCompactionDebt)
+	if options.RelayoutReclaimBytes == 0 {
+		options.RelayoutReclaimBytes = DefaultRelayoutReclaimBytes
+	}
+	_ = s.SetRelayoutReclaimBytes(options.RelayoutReclaimBytes)
 	s.coldPack.format.Store(format == 9)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,

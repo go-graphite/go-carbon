@@ -10,16 +10,18 @@ import (
 
 func TestRelayoutSpaceConfig(t *testing.T) {
 	cfg := NewConfig()
-	if cfg.Whisper.StoreTimeBucketsRelayoutMinFree != store.DefaultRelayoutMinFreeBytes || cfg.Whisper.StoreTimeBucketsRelayoutMaxDebt != store.DefaultRelayoutMaxCompactionDebt {
+	if cfg.Whisper.StoreTimeBucketsRelayoutMinFree != store.DefaultRelayoutMinFreeBytes || cfg.Whisper.StoreTimeBucketsRelayoutMaxDebt != store.DefaultRelayoutMaxCompactionDebt || cfg.Whisper.StoreTimeBucketsRelayoutReclaimBytes != store.DefaultRelayoutReclaimBytes {
 		t.Fatal("unexpected relayout pressure defaults")
 	}
 	path := filepath.Join(t.TempDir(), "go-carbon.conf")
 	for i, body := range []string{
-		"store-time-buckets-relayout-min-free-bytes = 123456789\nstore-time-buckets-relayout-max-compaction-debt = 987654321\n",
+		"store-time-buckets-relayout-min-free-bytes = 123456789\nstore-time-buckets-relayout-max-compaction-debt = 987654321\nstore-time-buckets-relayout-reclaim-bytes = 123456\n",
 		"store-time-buckets-relayout-min-free-bytes = 0\n",
 		"store-time-buckets-relayout-max-compaction-debt = 0\n",
 		"store-time-buckets-relayout-min-free-bytes = -1\n",
 		"store-time-buckets-relayout-max-compaction-debt = -1\n",
+		"store-time-buckets-relayout-reclaim-bytes = 0\n",
+		"store-time-buckets-relayout-reclaim-bytes = -1\n",
 	} {
 		if err := os.WriteFile(path, []byte("[whisper]\n"+body), 0600); err != nil {
 			t.Fatal(err)
@@ -32,7 +34,7 @@ func TestRelayoutSpaceConfig(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Whisper.StoreTimeBucketsRelayoutMinFree != 123456789 || got.Whisper.StoreTimeBucketsRelayoutMaxDebt != 987654321 {
+			if got.Whisper.StoreTimeBucketsRelayoutMinFree != 123456789 || got.Whisper.StoreTimeBucketsRelayoutMaxDebt != 987654321 || got.Whisper.StoreTimeBucketsRelayoutReclaimBytes != 123456 {
 				t.Fatal("limits not decoded")
 			}
 		} else if err == nil {
