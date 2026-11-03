@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
@@ -58,7 +59,7 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 	id := binary.BigEndian.Uint64(identity)
 	manifest, err := kv.Get(continuationManifestKey(id))
 	if err != nil {
-		return stats, 0, false, err
+		return stats, 0, false, fmt.Errorf("cold pack manifest file %d: %w", id, err)
 	}
 	d, err := decodeContinuationManifest(manifest)
 	if err != nil {
@@ -127,7 +128,7 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 			}
 			points, err := f.ReadStorageBlock(block)
 			if err != nil {
-				return stats, next, false, err
+				return stats, next, false, fmt.Errorf("cold pack file %d archive %d block %d: %w", id, archive, index, err)
 			}
 			if len(points) == 0 {
 				return stats, next, false, errors.New("empty cold pack range")

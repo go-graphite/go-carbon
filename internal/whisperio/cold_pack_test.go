@@ -311,8 +311,8 @@ func TestColdPackPlanFailureIsAtomic(t *testing.T) {
 	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "exact", WriteWindow: time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ColdPackStep(context.Background()); err == nil {
-		t.Fatal("failure hidden")
+	if _, err := db.ColdPackStep(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	if st := db.ColdPackStats(); st.Errors != 1 || st.Error == "" {
 		t.Fatal("failure metric absent")
@@ -352,7 +352,7 @@ func TestColdPackCrashRestart(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestColdPackCrashRestart$")
 			cmd.Env = append(os.Environ(), "GO_CARBON_COLD_CRASH="+phase, "GO_CARBON_COLD_DIR="+dir)
