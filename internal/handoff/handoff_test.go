@@ -618,12 +618,14 @@ func TestStoreInputChecksRegisteredBinary(t *testing.T) {
 				stats, taken, err := offer.ServeInputStats(inputFunc(func() (*Input, error) { detached = true; return nil, nil }), 2*time.Second)
 				result <- served{stats, taken, err}
 			}()
+			// The server starts its request deadline when it accepts the registration,
+			// before Register returns here: measure from before Register.
+			started := time.Now()
 			claim := Register(path)
 			if claim == nil {
 				t.Fatal("register")
 			}
 			defer claim.Close()
-			started := time.Now()
 			got := <-result
 			elapsed := time.Since(started)
 			if got.taken || detached {
