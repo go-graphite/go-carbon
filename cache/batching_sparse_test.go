@@ -21,7 +21,7 @@ func TestWriteoutSparseSpreadPlacement(t *testing.T) {
 		dense.compact.append(1, 3600)
 		sparse := newItem(name, 0)
 		sparse.compact.append(1, 3600)
-		sparse.sparse = true
+		sparse.setFlag(itemSparse, true)
 		d := s.delayFor(sparse)
 		if d < 0 || d >= maxDelay {
 			t.Fatalf("sparse delay %v of %s outside [0, %v)", d, name, maxDelay)
@@ -85,7 +85,7 @@ func TestWriteoutSparseSpreadClassifies(t *testing.T) {
 	// Unknown history: dense, at the full delay.
 	c.Add(points.OnePoint(hourly, 1, t0))
 	c.Add(points.OnePoint(minutely, 1, t0))
-	if values, _ := sparseItem(c, hourly); values.sparse {
+	if values, _ := sparseItem(c, hourly); values.has(itemSparse) {
 		t.Fatal("a metric without written history is sparse")
 	}
 	writeOnce(t, c, hourly)
@@ -94,15 +94,15 @@ func TestWriteoutSparseSpreadClassifies(t *testing.T) {
 	c.Add(points.OnePoint(hourly, 2, t0+3600))
 	c.Add(points.OnePoint(minutely, 2, t0+60))
 	values, first := sparseItem(c, hourly)
-	if !values.sparse {
+	if !values.has(itemSparse) {
 		t.Fatal("hourly metric not sparse after a written point an hour older")
 	}
 	delay := s.delayFor(values)
 	if want := time.Duration(float64(maxDelay) * float64(values.sparseShare()) / (1 << 16)); delay != want || delay >= maxDelay*3/4 {
 		t.Fatalf("sparse delay %v, want %v", delay, want)
 	}
-	if dense, _ := sparseItem(c, minutely); dense.sparse || s.delayFor(dense) != maxDelay {
-		t.Fatalf("minutely metric sparse=%v delay %v", dense.sparse, s.delayFor(dense))
+	if dense, _ := sparseItem(c, minutely); dense.has(itemSparse) || s.delayFor(dense) != maxDelay {
+		t.Fatalf("minutely metric sparse=%v delay %v", dense.has(itemSparse), s.delayFor(dense))
 	}
 	q, next := c.makeQueueAt(first.Add(delay - time.Millisecond))
 	if q != nil || !next.Equal(first.Add(delay)) {
@@ -118,12 +118,12 @@ func TestWriteoutSparseSpreadClassifies(t *testing.T) {
 	// even for a metric sparse before.
 	writeOnce(t, c, hourly)
 	c.Add(points.OnePoint(hourly, 3, t0+3600+959))
-	if values, _ := sparseItem(c, hourly); values.sparse {
+	if values, _ := sparseItem(c, hourly); values.has(itemSparse) {
 		t.Fatal("sparse with a written point 959s older")
 	}
 	writeOnce(t, c, hourly)
 	c.Add(points.OnePoint(hourly, 4, t0+3600+959+960))
-	if values, _ := sparseItem(c, hourly); !values.sparse {
+	if values, _ := sparseItem(c, hourly); !values.has(itemSparse) {
 		t.Fatal("not sparse with a written point 960s older")
 	}
 }
@@ -139,8 +139,8 @@ func TestWriteoutSparseSpreadReturnsDenseWithMorePoints(t *testing.T) {
 	c.Add(points.OnePoint(name, 1, 1_792_004_400))
 	c.Add(points.OnePoint(name, 1, 1_792_004_400)) // a resent duplicate
 	values, first := sparseItem(c, name)
-	if delay := s.delayFor(values); !values.sparse || delay >= maxDelay {
-		t.Fatalf("two points: sparse=%v delay %v", values.sparse, delay)
+	if delay := s.delayFor(values); !values.has(itemSparse) || delay >= maxDelay {
+		t.Fatalf("two points: sparse=%v delay %v", values.has(itemSparse), delay)
 	}
 	c.Add(points.OnePoint(name, 1, 1_792_004_460))
 	if delay := s.delayFor(values); delay != maxDelay {
@@ -165,8 +165,8 @@ func TestWriteoutSparseSpreadOffKeepsDeadlines(t *testing.T) {
 		c.Add(points.OnePoint(name, 1, 1_792_004_400))
 		values, _ := sparseItem(c, name)
 		want := maxDelay - time.Duration(float64(maxDelay)*spread*float64(values.spread)/(1<<16))
-		if values.sparse || s.delayFor(values) != want {
-			t.Fatalf("spread %v, option off: sparse=%v delay %v, want %v", spread, values.sparse, s.delayFor(values), want)
+		if values.has(itemSparse) || s.delayFor(values) != want {
+			t.Fatalf("spread %v, option off: sparse=%v delay %v, want %v", spread, values.has(itemSparse), s.delayFor(values), want)
 		}
 		for _, shard := range c.data {
 			if shard.sparseLast != nil {
@@ -185,7 +185,7 @@ func TestWriteoutSparseSpreadReload(t *testing.T) {
 	writeOnce(t, c, name)
 	c.Add(points.OnePoint(name, 1, 1_792_004_400))
 	values, _ := sparseItem(c, name)
-	if !values.sparse || c.settings.Load().(*cacheSettings).delayFor(values) >= maxDelay {
+	if !values.has(itemSparse) || c.settings.Load().(*cacheSettings).delayFor(values) >= maxDelay {
 		t.Fatal("not sparse")
 	}
 
@@ -203,7 +203,7 @@ func TestWriteoutSparseSpreadReload(t *testing.T) {
 	c.SetWriteoutSparseSpread(true)
 	writeOnce(t, c, name)
 	c.Add(points.OnePoint(name, 1, 1_792_008_000))
-	if values, _ := sparseItem(c, name); !values.sparse {
+	if values, _ := sparseItem(c, name); !values.has(itemSparse) {
 		t.Fatal("not sparse after a write with the option re-enabled")
 	}
 }
@@ -307,7 +307,7 @@ func TestWriteoutSparseSpreadFlattensHourlyPulse(t *testing.T) {
 							r.writes[m.interval]++
 							if m.interval == 3600 {
 								r.hourOfMinute[now%3600/60]++
-								if m.it.sparse {
+								if m.it.has(itemSparse) {
 									r.sparse++
 								}
 							}
@@ -322,7 +322,7 @@ func TestWriteoutSparseSpreadFlattensHourlyPulse(t *testing.T) {
 						m.it, m.first = newItem(m.name, 0), now
 						shard.items.set(m.name, m.it)
 						if s.writeoutSparseSpread {
-							m.it.sparse = shard.sparseSince(m.it, int64(now), s.writeoutMaxDelay, shard.items.len())
+							m.it.setFlag(itemSparse, shard.sparseSince(m.it, int64(now), s.writeoutMaxDelay, shard.items.len()))
 						}
 					}
 					m.it.compact.append(1, int64(now))

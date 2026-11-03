@@ -176,7 +176,8 @@ func TestQueueDeadlinesSparseGrowth(t *testing.T) {
 	c.AddPoint([]byte("sparse.metric"), 1, 1)
 	shard := c.GetShard("sparse.metric")
 	it := shard.items.get("sparse.metric")
-	it.sparse, it.slot = true, 1<<30 // An earlier sparse deadline.
+	it.setFlag(itemSparse, true) // An earlier sparse deadline.
+	it.slot = 1 << 30
 	checkQueueDeadlines(t, c, time.Now())
 	c.AddPoint([]byte("sparse.metric"), 2, 2)
 	c.AddPoint([]byte("sparse.metric"), 3, 3)

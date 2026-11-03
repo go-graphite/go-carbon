@@ -37,7 +37,7 @@ func TestBookkeepingGenerationOracle(t *testing.T) {
 		got := map[*points.Points]uint64{}
 		counts := map[uint64]int32{}
 		for _, it := range sh.items.all {
-			if enabled && it.logTracked {
+			if enabled && it.has(itemLogTracked) {
 				got[it.identity()] = it.logFirst
 				counts[it.logFirst]++
 			}
@@ -329,5 +329,53 @@ func TestStatefulThrottleHotPathDoesNotAllocate(t *testing.T) {
 	}
 	if sh.throttleScratch != nil || it.throttleState() != uint64(1) {
 		t.Fatal("scratch retained state or item lost it")
+	}
+}
+
+func TestBookkeepingDrainReleasesHighWater(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	c.EnableInputLog()
+	c.SetWriteoutBatching(960, 960*1e9)
+	sh := c.GetShard("drain.capacity")
+	index := slices.Index(c.data, sh)
+	var names []string
+	for i := 0; len(names) < 200; i++ {
+		name := fmt.Sprintf("drain.capacity.%d", i)
+		if c.GetShard(name) == sh {
+			names = append(names, name)
+		}
+	}
+	for i, name := range names {
+		c.TakeLogBatch(index, uint64(i+1), inputlog.Batch{})
+		c.AddPoint([]byte(name), float64(i), int64(i))
+	}
+	var flight []*points.Points
+	for _, name := range names {
+		p, ok := c.PopNotConfirmed(name)
+		if !ok {
+			t.Fatal("missing pop")
+		}
+		flight = append(flight, p)
+	}
+	if sh.flightPeak < 200 || len(sh.log.items) != 200 || len(sh.firstArrival) != 200 {
+		t.Fatal("fixture did not reach the tracking peak")
+	}
+	for _, p := range flight {
+		c.Confirm(p)
+	}
+	if sh.flightPeak != 0 || sh.log.generationPeak != 0 || cap(sh.notConfirmed) > 64 || sh.firstArrival != nil || len(sh.log.items) != 0 || sh.log.first == nil || len(sh.log.first) != 0 {
+		t.Fatal("drained tracking retained burst capacity or disabled logging")
+	}
+	taken := c.TakeLogBatch(index, 1000, inputlog.Batch{})
+	if len(sh.items.slots) != 0 || len(sh.items.control) != 0 || sh.items.bytes != 0 {
+		t.Fatal("empty item map retained its high-water table")
+	}
+	c.AddPoint([]byte(names[0]), 123, 456)
+	if got := c.Get(names[0]); len(got) != 1 || got[0].Value != 123 || sh.log.lowWater() != 1000 {
+		t.Fatal("new generation after drain changed data or tracking")
+	}
+	if taken.Len() != 1 || taken.Entries(nil)[0].Metric() != names[len(names)-1] {
+		t.Fatal("drain mutated the consumer's accepted point")
 	}
 }

@@ -51,10 +51,10 @@ func (b *Batch) Reset() {
 // column capacities before and after every accepted point.
 func (b *Batch) Append(ref *StreamRef, value float64, timestamp int64) bool {
 	grew := false
+	// Keep the same-reference case in this frame. The slow run allocator and
+	// field encoder otherwise added two out-of-line calls to every point.
 	if len(b.Refs) == 0 || b.Refs[len(b.Refs)-1] != ref {
-		grew = len(b.Refs) == cap(b.Refs) || len(b.Ends) == cap(b.Ends)
-		b.Refs = append(b.Refs, ref)
-		b.Ends = append(b.Ends, 0)
+		grew = b.startRun(ref)
 	}
 
 	d := int64(uint64(timestamp) - b.ts)
@@ -67,8 +67,7 @@ func (b *Batch) Append(ref *StreamRef, value float64, timestamp int64) bool {
 	// is never part of Len or emitted bytes; no unsafe or overread is used.
 	if cap(b.Packed)-at < 17 {
 		grew = true
-		b.Packed = append(b.Packed, make([]byte, 17)...)
-		b.Packed = b.Packed[:at]
+		b.Packed = growStaging(b.Packed, at+17)
 	}
 	out := b.Packed[:at+17]
 	out[at] = byte(nt | nv<<4)
@@ -87,35 +86,80 @@ func (b *Batch) AppendPoints(ref *StreamRef, data []points.Point) {
 	if len(data) == 0 {
 		return
 	}
-	if len(b.Refs) == 0 || b.Refs[len(b.Refs)-1] != ref {
-		b.Refs = append(b.Refs, ref)
-		b.Ends = append(b.Ends, 0)
-	}
-	// Reserve once for the entire batch and keep the predictor in registers.
-	// The retained stream contains only the used prefix, never these pad bytes.
-	at := len(b.Packed)
-	if cap(b.Packed)-at < 17*len(data) {
-		b.Packed = append(b.Packed, make([]byte, 17*len(data))...)
-		b.Packed = b.Packed[:at]
-	}
-	out := b.Packed[:cap(b.Packed)]
+	b.startRun(ref)
+	// Bound pessimistic reservation to 64 points: a long constant-valued
+	// restore batch must not reserve seventeen bytes for every packed point.
 	ts, value := b.ts, b.value
-	for _, p := range data {
-		d := int64(uint64(p.Timestamp) - ts)
-		t := uint64(d<<1) ^ uint64(d>>63)
-		current := math.Float64bits(p.Value)
-		v := current ^ value
-		nt, nv := uint((bits.Len64(t)+7)/8), uint((bits.Len64(v)+7)/8)
-		out[at] = byte(nt | nv<<4)
-		binary.LittleEndian.PutUint64(out[at+1:], t)
-		binary.LittleEndian.PutUint64(out[at+1+int(nt):], v)
-		at += 1 + int(nt+nv)
-		ts, value = uint64(p.Timestamp), current
+	for start := 0; start < len(data); {
+		end := min(start+64, len(data))
+		at := len(b.Packed)
+		if cap(b.Packed)-at < 17*(end-start) {
+			b.Packed = growStaging(b.Packed, at+17*(end-start))
+		}
+		out := b.Packed[:cap(b.Packed)]
+		for _, p := range data[start:end] {
+			d := int64(uint64(p.Timestamp) - ts)
+			t := uint64(d<<1) ^ uint64(d>>63)
+			current := math.Float64bits(p.Value)
+			v := current ^ value
+			nt, nv := uint((bits.Len64(t)+7)/8), uint((bits.Len64(v)+7)/8)
+			out[at] = byte(nt | nv<<4)
+			binary.LittleEndian.PutUint64(out[at+1:], t)
+			binary.LittleEndian.PutUint64(out[at+1+int(nt):], v)
+			at += 1 + int(nt+nv)
+			ts, value = uint64(p.Timestamp), current
+		}
+		b.Packed = out[:at]
+		start = end
 	}
-	b.Packed = out[:at]
 	b.ts, b.value = ts, value
 	b.n += len(data)
 	b.Ends[len(b.Ends)-1] = uint32(b.n)
+}
+
+// A staged run owns one reference, not one reference per point. Slow growth
+// exposes allocator rounding and keeps long staging windows close to their
+// actual occupancy; neither column can silently retain a 25% growth step.
+func (b *Batch) startRun(ref *StreamRef) bool {
+	if len(b.Refs) > 0 && b.Refs[len(b.Refs)-1] == ref {
+		return false
+	}
+	grew := len(b.Refs) == cap(b.Refs) || len(b.Ends) == cap(b.Ends)
+	b.Refs = growStaging(b.Refs, len(b.Refs)+1)
+	b.Ends = growStaging(b.Ends, len(b.Ends)+1)
+	b.Refs = append(b.Refs, ref)
+	b.Ends = append(b.Ends, 0)
+	return grew
+}
+
+func growStaging[T any](old []T, required int) []T {
+	if cap(old) >= required {
+		return old
+	}
+	capacity := max(required, cap(old)+max(cap(old)/16, 8))
+	next := append([]T(nil), make([]T, capacity)...)
+	copy(next, old)
+	return next[:len(old)]
+}
+
+// Recycle is called by the consumer only after encoding. An ordinary window
+// reuses its allocation; a drained or much smaller window releases burst
+// capacity. Reset alone keeps capacity for callers swapping empty spares.
+func (b *Batch) Recycle() {
+	refs, pts, encoded := len(b.Refs), len(b.Points), len(b.Packed)
+	b.Reset()
+	if cap(b.Refs) > max(4*refs, 64) {
+		b.Refs = make([]*StreamRef, 0, 2*refs)
+	}
+	if cap(b.Ends) > max(4*refs, 64) {
+		b.Ends = make([]uint32, 0, 2*refs)
+	}
+	if cap(b.Points) > max(4*pts, 64) {
+		b.Points = make([]points.Point, 0, 2*pts)
+	}
+	if cap(b.Packed) > max(4*encoded, 4096) {
+		b.Packed = make([]byte, 0, 2*encoded)
+	}
 }
 
 type batchReader struct {

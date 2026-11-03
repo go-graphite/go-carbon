@@ -665,7 +665,7 @@ func (l *Log) encodePartition(p int, gen, seq uint64, w *workerBuffer) int {
 			collect += time.Since(at)
 			part.enc.addBatch(&w.streamScratch, &batch)
 			total += batch.Len()
-			batch.Reset()
+			batch.Recycle()
 			l.spareBatches[shard] = batch
 		} else {
 			entries := l.src.TakeLogEntries(shard, gen+1, l.spare[shard])

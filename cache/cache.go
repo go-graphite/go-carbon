@@ -112,6 +112,7 @@ type Shard struct {
 	mu               sync.RWMutex // Read Write mutex, guards access to internal map.
 	items            itemMap
 	notConfirmed     []*points.Points    // linear search for value/slot
+	flightPeak       int                 // maximum simultaneous in-flight batches since a capacity reset
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
 	adds             map[string]struct{} // map to maintain all the new metric names
 	// Only in-flight batches need a map; queued items hold their arrival.
@@ -367,6 +368,7 @@ func (c *Cache) Confirm(p *points.Points) {
 	removeNotConfirmed(shard, p)
 	delete(shard.firstArrival, p)
 	shard.log.untrack(p)
+	shard.releaseDrainedTracking()
 	c.syncMemoryLocked(shard)
 	shard.mu.Unlock()
 	if r := c.pending.Load(); r != nil {
@@ -429,6 +431,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	shard.log.mergeFlight(values, p)
 	shard.log.trackItem(values)
 	shard.items.set(p.Metric, values)
+	shard.releaseDrainedTracking()
 	c.syncMemoryLocked(shard)
 	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
 	c.writeoutQueue.notifyAt(time.Now())
@@ -741,7 +744,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 				// Reloaded under the lock, so a table disabling just released
 				// is not allocated again.
 				if cur := c.settings.Load().(*cacheSettings); cur.writeoutSparseSpread && count > 0 {
-					values.sparse = shard.sparseSince(values, p.Data[0].Timestamp, cur.writeoutMaxDelay, shard.items.len())
+					values.setFlag(itemSparse, shard.sparseSince(values, p.Data[0].Timestamp, cur.writeoutMaxDelay, shard.items.len()))
 				}
 			}
 			c.spreadStartup(values, s, now, held)
@@ -820,7 +823,7 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 		n := values.count()
 		minPoints := s.minPointsFor(values)
 		crossedThreshold := n >= minPoints && n-count < minPoints
-		if exists && (immediate || crossedThreshold || values.sparse && n > sparseMaxPoints && n-count <= sparseMaxPoints) {
+		if exists && (immediate || crossedThreshold || values.has(itemSparse) && n > sparseMaxPoints && n-count <= sparseMaxPoints) {
 			shard.items.invalidateItemDeadline(values)
 		}
 		if immediate || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
@@ -891,6 +894,7 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 			shard.notConfirmed = append(shard.notConfirmed, p)
 		}
 		shard.notConfirmedUsed++
+		shard.flightPeak = max(shard.flightPeak, shard.notConfirmedUsed)
 		shard.inFlightBytes += flightMemory(p)
 		c.syncMemoryLocked(shard)
 	}
@@ -978,4 +982,22 @@ func (c *Cache) SetRestartOrder(active func() bool) {
 	c.mu.Lock()
 	c.restartOrder = active
 	c.mu.Unlock()
+}
+
+// Keep small, repeatedly reused tracking capacity. A large completed batch must
+// not pin the peak in-flight population for the lifetime of the process.
+func (s *Shard) releaseDrainedTracking() {
+	if s.notConfirmedUsed != 0 || s.flightPeak <= 64 {
+		return
+	}
+	if cap(s.notConfirmed) > 64 {
+		s.notConfirmed = make([]*points.Points, 4)
+	}
+	if len(s.firstArrival) == 0 {
+		s.firstArrival = nil
+	}
+	if s.log.first != nil && len(s.log.first) == 0 {
+		s.log.first = make(map[*points.Points]uint64)
+	}
+	s.flightPeak = 0
 }

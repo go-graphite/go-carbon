@@ -65,7 +65,7 @@ func TestWriteoutStartupSpread(t *testing.T) {
 		c.AddPoint([]byte(name), 2, 2000)
 		it, first := sparseItem(c, name)
 		s := c.settings.Load().(*cacheSettings)
-		if it.startup || !first.Equal(time.Now()) || !deadlineOf(c, name).Equal(first.Add(s.delayFor(it))) {
+		if it.has(itemStartup) || !first.Equal(time.Now()) || !deadlineOf(c, name).Equal(first.Add(s.delayFor(it))) {
 			t.Fatal("second batch received another shortened window")
 		}
 		for range s.minPointsFor(it) - 1 {
@@ -110,7 +110,7 @@ func TestWriteoutStartupSpreadConcurrent(t *testing.T) {
 		it := newItem("startup.earlier", 0)
 		it.firstArrival = now
 		c.spreadStartup(it, c.settings.Load().(*cacheSettings), now, false)
-		if it.startup || !it.firstArrival.Equal(now) {
+		if it.has(itemStartup) || !it.firstArrival.Equal(now) {
 			t.Fatal("arrival older than the startup epoch changed its window")
 		}
 	})
@@ -189,7 +189,7 @@ func TestWriteoutStartupSpreadDurableRestore(t *testing.T) {
 	}
 	writeOnce(t, restarted, name)
 	restarted.AddPoint([]byte(name), 5, 5)
-	if it, _ := sparseItem(restarted, name); !it.startup {
+	if it, _ := sparseItem(restarted, name); !it.has(itemStartup) {
 		t.Fatal("first live batch after replay was not phased")
 	}
 }
@@ -236,7 +236,7 @@ func TestWriteoutStartupSpreadReplayClaims(t *testing.T) {
 	}
 	writeOnce(t, c, "metric")
 	c.AddPoint([]byte("metric"), 10, 10)
-	if it, _ := sparseItem(c, "metric"); !it.startup {
+	if it, _ := sparseItem(c, "metric"); !it.has(itemStartup) {
 		t.Fatal("first live batch after a replay claim was not phased")
 	}
 }
@@ -282,14 +282,15 @@ func TestWriteoutStartupSpreadSimulation(t *testing.T) {
 			}
 			startupWindows := 0
 			for first < horizon {
-				it.compact.n, it.startup = saved, false
+				it.compact.n = saved
+				it.setFlag(itemStartup, false)
 				now := epoch.Add(time.Duration(first) * time.Second)
 				it.firstArrival = now
 				if saved > 0 {
 					it.firstArrival = s.restoreArrival(it, now)
 				}
 				c.spreadStartup(it, s, now, false)
-				if it.startup {
+				if it.has(itemStartup) {
 					startupWindows++
 					if startupWindows > 1 {
 						t.Fatal("metric received recurring shortened windows")
@@ -308,7 +309,7 @@ func TestWriteoutStartupSpreadSimulation(t *testing.T) {
 				}
 				if due.IsZero() {
 					end = float64(first)
-				} else if !it.startup {
+				} else if !it.has(itemStartup) {
 					end = min(end, thresholdAt)
 				}
 				last := nextArrival - gap

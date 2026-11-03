@@ -68,15 +68,15 @@ func (c *Cache) spreadStartup(values *item, s *cacheSettings, now time.Time, hel
 		if held {
 			// Held work starts draining at release over the full window,
 			// independently of the ordinary spread and point threshold.
-			values.sparse = false
+			values.setFlag(itemSparse, false)
 			deadline := clock.at.Add(time.Duration(float64(s.writeoutMaxDelay) * float64(values.sparseShare()) / (1 << 16)))
 			values.firstArrival = deadline.Add(-s.delayFor(values))
-			values.startup = true
+			values.setFlag(itemStartup, true)
 		}
 		// Post-release arrivals keep their normal batching deadlines.
 		return
 	}
-	if !s.writeoutStartupSpread || values.sparse {
+	if !s.writeoutStartupSpread || values.has(itemSparse) {
 		return
 	}
 	epoch := c.startupAt.Load()
@@ -96,7 +96,7 @@ func (c *Cache) spreadStartup(values *item, s *cacheSettings, now time.Time, hel
 	deadline := epoch.Add(time.Duration(float64(delay) * float64(values.sparseShare()) / (1 << 16)))
 	if now.Before(deadline) {
 		values.firstArrival = deadline.Add(-delay)
-		values.startup = true
+		values.setFlag(itemStartup, true)
 	}
 }
 
@@ -269,7 +269,7 @@ func (s *cacheSettings) minPointsFor(values *item) int {
 
 // delayFor returns values' max delay since its first arrival.
 func (s *cacheSettings) delayFor(values *item) time.Duration {
-	if values.sparse && s.writeoutSparseSpread && values.count() <= sparseMaxPoints {
+	if values.has(itemSparse) && s.writeoutSparseSpread && values.count() <= sparseMaxPoints {
 		return time.Duration(float64(s.writeoutMaxDelay) * float64(values.sparseShare()) / (1 << 16))
 	}
 	if s.writeoutSpread == 0 {
@@ -302,7 +302,7 @@ func (s *cacheSettings) underPressure(size int64) bool {
 // Called with the shard locked. Zero means immediately eligible.
 func writeoutDeadline(values *item, s *cacheSettings) time.Time {
 	first := values.firstArrival
-	if values.startup && (s.writeoutStartupSpread || s.startupWriteout != nil) && !first.IsZero() {
+	if values.has(itemStartup) && (s.writeoutStartupSpread || s.startupWriteout != nil) && !first.IsZero() {
 		return s.writeoutWall(first.Add(s.delayFor(values)))
 	}
 	if values.count() >= s.minPointsFor(values) || first.IsZero() {

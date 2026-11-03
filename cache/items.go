@@ -21,20 +21,31 @@ type item struct {
 	// spread is the metric's share of the writeout spread (see
 	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
 	spread uint16
-	// sparse marks an item whose metric last wrote a point at least
-	// writeout-max-delay before this item's first (see
-	// SetWriteoutSparseSpread).
-	sparse bool
-	// startup holds the first batching window to its phase even at the point
-	// threshold.
-	startup    bool
-	logTracked bool
+	// flags holds sparse-spread, startup-window and queued log ownership bits.
+	// Sparse means this metric last wrote at least writeout-max-delay before
+	// this item; startup holds its first batching window to the chosen phase.
+	flags uint8
 	// slot locates the metric in its shard's sparseLast table.
 	slot            uint32
 	firstArrival    time.Time
 	throttle        any            // hot for every configured quota check
 	pending         *points.Points // allocated only when recovery needs a queued identity
 	indexGeneration uint64
+}
+
+const (
+	itemSparse uint8 = 1 << iota
+	itemStartup
+	itemLogTracked
+)
+
+func (it *item) has(flag uint8) bool { return it.flags&flag != 0 }
+func (it *item) setFlag(flag uint8, value bool) {
+	if value {
+		it.flags |= flag
+	} else {
+		it.flags &^= flag
+	}
 }
 
 func newItem(metric string, capacity int) *item {

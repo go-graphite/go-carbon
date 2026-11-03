@@ -144,6 +144,12 @@ func TestPackedBatchRoundTripAndReuse(t *testing.T) {
 			b.Append(ref, v, ts)
 			want = append(want, ref.Entry(v, ts))
 		}
+		data := make([]points.Point, 4096)
+		for i := range data {
+			data[i] = points.Point{Value: math.Float64frombits(uint64(i) * 0xd6e8feb86659fd93), Timestamp: int64(uint64(i) * 0x9e3779b97f4a7c15)}
+			want = append(want, refs[0].Entry(data[i].Value, data[i].Timestamp))
+		}
+		b.AppendPoints(refs[0], data)
 		got := b.Entries(nil)
 		if b.Len() != len(want) || len(got) != len(want) {
 			t.Fatal("point count")
@@ -158,5 +164,28 @@ func TestPackedBatchRoundTripAndReuse(t *testing.T) {
 		if b.Len() != 0 || len(b.Ends) != 0 || len(b.Packed) != 0 || slices.ContainsFunc(b.Refs[:cap(b.Refs)], func(r *StreamRef) bool { return r != nil }) {
 			t.Fatal("reset retained a point or reference")
 		}
+	}
+}
+
+func TestPackedBatchRecycleReleasesHighWater(t *testing.T) {
+	var b Batch
+	refs := []*StreamRef{NewStreamRef("a"), NewStreamRef("b")}
+	for i := 0; i < 10000; i++ {
+		b.Append(refs[i%2], 42, int64(i))
+	}
+	peak := b.Bytes()
+	b.Reset()
+	b.Append(refs[0], 123, 42)
+	b.Recycle()
+	if b.Len() != 0 || b.Bytes() >= peak/4 || b.Bytes() > 4096 {
+		t.Fatalf("burst capacity retained: %d -> %d", peak, b.Bytes())
+	}
+	if slices.ContainsFunc(b.Refs[:cap(b.Refs)], func(r *StreamRef) bool { return r != nil }) {
+		t.Fatal("recycled buffer retained metric")
+	}
+	b.Append(refs[1], math.Copysign(0, -1), math.MinInt64)
+	got := b.Entries(nil)
+	if len(got) != 1 || got[0].Ref != refs[1] || math.Float64bits(got[0].Value) != 1<<63 || got[0].Timestamp != math.MinInt64 {
+		t.Fatal("trimmed buffer changed point")
 	}
 }

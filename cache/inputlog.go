@@ -27,16 +27,17 @@ const maxShardRestoredLogEntries = maxShardLogEntries / 2
 // generation inline; first contains only in-flight batches and is nil while
 // logging is off.
 type shardLog struct {
-	entries     inputlog.Batch
-	gen         uint64
-	first       map[*points.Points]uint64
-	items       map[uint64]int32 // tracked items per first generation
-	oldest      uint64           // no tracked item is older
-	dropped     uint64
-	waitDrained chan struct{}
+	entries        inputlog.Batch
+	gen            uint64
+	first          map[*points.Points]uint64
+	items          map[uint64]int32 // tracked items per first generation
+	generationPeak int              // high-water number of simultaneously retained generations
+	oldest         uint64           // no tracked item is older
+	dropped        uint64
+	waitDrained    chan struct{}
 }
 
-// stagingBytes includes capacity slack in both columns.
+// stagingBytes includes capacity slack in every staging column.
 func (l *shardLog) stagingBytes() int64 {
 	return l.entries.Bytes()
 }
@@ -82,6 +83,7 @@ func (l *shardLog) track(p *points.Points) {
 	if _, tracked := l.first[p]; !tracked {
 		l.first[p] = l.gen
 		l.items[l.gen]++
+		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
 }
 
@@ -96,48 +98,56 @@ func (l *shardLog) untrack(p *points.Points) {
 func (l *shardLog) release(gen uint64) {
 	if l.items[gen]--; l.items[gen] <= 0 {
 		delete(l.items, gen)
+		if len(l.items) == 0 && l.generationPeak > 64 {
+			l.items = make(map[uint64]int32)
+			l.generationPeak = 0
+		}
 	}
 }
 
 // trackItem keeps queued tracking on the item instead of one pointer-map
 // entry per metric. Every generation includes both queued and in-flight items.
 func (l *shardLog) trackItem(it *item) {
-	if l.first != nil && !it.logTracked {
-		it.logFirst, it.logTracked = l.gen, true
+	if l.first != nil && !it.has(itemLogTracked) {
+		it.logFirst = l.gen
+		it.setFlag(itemLogTracked, true)
 		l.items[l.gen]++
+		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
 }
 
 func (l *shardLog) untrackItem(it *item) {
-	if l.first != nil && it.logTracked {
+	if l.first != nil && it.has(itemLogTracked) {
 		l.release(it.logFirst)
-		it.logTracked = false
+		it.setFlag(itemLogTracked, false)
 	}
 }
 
 // pop transfers ownership to the in-flight map without changing counts. A
 // successor with the same name has a different Points identity/generation.
 func (l *shardLog) pop(it *item, p *points.Points) {
-	if l.first != nil && it.logTracked {
+	if l.first != nil && it.has(itemLogTracked) {
 		l.first[p] = it.logFirst
-		it.logTracked = false
+		it.setFlag(itemLogTracked, false)
 	}
 }
 
 func (l *shardLog) mergeGeneration(into *item, gen uint64) {
-	if !into.logTracked || gen < into.logFirst {
-		if into.logTracked {
+	if !into.has(itemLogTracked) || gen < into.logFirst {
+		if into.has(itemLogTracked) {
 			l.release(into.logFirst)
 		}
-		into.logFirst, into.logTracked = gen, true
+		into.logFirst = gen
+		into.setFlag(itemLogTracked, true)
 		l.items[gen]++
+		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
 }
 
 // mergeItem and mergeFlight transfer the oldest generation to a replacement
 // queued item, removing each old identity exactly once.
 func (l *shardLog) mergeItem(into, from *item) {
-	if l.first != nil && from.logTracked {
+	if l.first != nil && from.has(itemLogTracked) {
 		gen := from.logFirst
 		l.untrackItem(from)
 		l.mergeGeneration(into, gen)
@@ -171,7 +181,7 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 	}
 	n := 0
 	for _, it := range queued.all {
-		if !it.logTracked || it.logFirst >= gen {
+		if !it.has(itemLogTracked) || it.logFirst >= gen {
 			continue
 		}
 		if n > 0 && n+it.count() > budget {
@@ -182,6 +192,7 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		l.release(it.logFirst)
 		it.logFirst = l.gen
 		l.items[l.gen]++
+		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
 	for p, first := range l.first {
 		if first >= gen {
@@ -195,6 +206,7 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 		l.release(first)
 		l.first[p] = l.gen
 		l.items[l.gen]++
+		l.generationPeak = max(l.generationPeak, len(l.items))
 	}
 	return n
 }
@@ -208,7 +220,7 @@ func (c *Cache) EnableInputLog() {
 		if shard.log.first == nil {
 			shard.log = shardLog{first: make(map[*points.Points]uint64), items: make(map[uint64]int32)}
 			for _, values := range shard.items.all {
-				values.logTracked = false
+				values.setFlag(itemLogTracked, false)
 				shard.log.trackItem(values)
 			}
 			for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
@@ -242,6 +254,12 @@ func (c *Cache) TakeLogBatch(shard int, gen uint64, spare inputlog.Batch) inputl
 	spare.Reset()
 	s.log.entries, s.log.gen = spare, gen
 	s.log.wakeRestore()
+	// Empty maps can retain millions of slots after a complete drain. Releasing
+	// at a log cycle avoids reallocating the table on each pop/reinsert lifetime.
+	if s.items.n == 0 && len(s.items.slots) > 0 {
+		s.items = itemMap{}
+	}
+	s.releaseDrainedTracking()
 	c.syncMemoryLocked(s)
 	s.mu.Unlock()
 	return taken
