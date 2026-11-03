@@ -174,47 +174,127 @@ replica copy.
 
 ## Relayout (v7)
 
-After a v6 → v7 upgrade, existing blocks are still v6 and move only when
-rewritten. `store-time-buckets-relayout-rate` (bytes per second) moves them
-in the background (`internal/chunkstore/relayout.go`):
+After a v6 → v7 upgrade, existing blocks keep their v6 keys until rewritten.
+`store-time-buckets-relayout-rate` moves their cold history in the background.
+The newest block in each archive remains on its current path until it rotates.
+The normal restart maintenance gate still runs before this work.
 
-1. Scan the catalog once up to the starting ID ceiling and sort by ID.
-   `store-time-buckets-relayout-workers` workers (default 1, valid 1–32,
-   restart required) claim contiguous chunks from a shared ascending queue.
-   Each chunk has `min(4096, max(1, candidates / (workers * 8)))` candidates;
-   this spreads history concentrated at low IDs across workers. A worker
-   claims another chunk after completing and pacing its current one. With one
-   worker, the original serial grouping and cursor boundaries are preserved.
-2. The codec plans each metric (`RelayoutPlan`): every v6 block except each
-   archive's newest is copied byte-for-byte to the history bucket.
-3. A group of metrics (64 MiB or 4,096 metrics, also flushed at each chunk
-   boundary) is written as one table covering only that ID range in the
-   history bucket, then ingested.
-4. Under each metric's lock, a block switches only if its descriptor still
-   matches the plan: the descriptor flips to v7 and the old groups are
-   point-deleted. A block rewritten meanwhile keeps its new state and its
-   copies are deleted.
-5. The cursor `z/relayout` advances only after every candidate through that ID
-   has finished. A chunk becomes complete only after ingestion and all its
-   descriptor switches or stale-copy cleanups commit. Under one coordinator
-   mutex, the cursor advances to the end of the longest fully completed prefix
-   of chunks; later chunks cannot advance it across a hole. The cursor batch
-   commits after the apply batches, using the existing WAL sync policy. Only
-   all workers finishing sets done. After restart, candidates above the cursor
-   are scanned and chunked again; already moved v7 blocks produce no copies or
-   descriptor changes. The cursor encoding is unchanged. Work inside an
-   unfinished chunk may be revisited, including groups that already committed.
+1. Scan the catalog up to the starting ID ceiling, sort by ID, and let
+   `store-time-buckets-relayout-workers` (1–32, default 1) claim ascending chunks.
+   Each chunk has `min(4096, max(1, candidates / (workers * 8)))` candidates.
+   Groups flush at 64 MiB, 4,096 metrics or a chunk boundary. One large metric
+   can exceed the byte target. Workers share the configured copy rate.
+2. Before planning and ingestion, check pressure and the shared byte budget.
+   Reserve each admitted group's planned bytes across all workers. Ingest its
+   unchanged copies as a history-bucket SST, then acquire each metric's mutation
+   lock and compare the descriptor with its plan.
+3. In **one WAL batch per metric**, switch unchanged descriptors, point-delete
+   their old groups (or discard copies of changed blocks), increment the
+   revision, and update the group's durable reclaim journal. Maintenance does
+   not refresh metric activity. Release mutation locks and planning snapshots
+   before any pacing or compaction wait.
+4. Finished groups add to one shared reclaim batch. Keep copying until the next
+   group would exceed `store-time-buckets-relayout-reclaim-bytes` (default
+   **32 GiB**), or the pending batch reaches that threshold. Available disk
+   space can lower the limit: it never exceeds half the free bytes above the
+   min-free reserve, allowing for reserved copies that have not finished yet.
+   An indivisible group can exceed a deliberately smaller configured threshold,
+   but must fit the filesystem budget and owns its batch alone.
+5. A reclaim barrier stops new ingests and joins admitted groups. Merge their
+   journaled deleted spans, keeping old metric keys (`u`) and discarded history
+   copies (`t`) separate. Check reserve, debt and disk-sample validity before
+   each span, then call stock Pebble `Compact(start, end, false)` synchronously.
+   Only after every span succeeds is the journal removed. Reclaim a final
+   partial batch before marking the run done.
 
-- **Pacing.** One shared byte budget across workers, per interval from a live
-  rate: a stalled period earns no burst afterwards. A positive rate change
-  applies on `SIGHUP`. At most one group per worker can be awaiting pacing.
-- **One run.** Only one relayout runs at a time; two runs planning the same
-  metric could delete copies the other had made live.
-- **Metrics.** `store_relayout_{metrics,blocks,skipped,bytes}_total`,
-  `store_relayout_rate_bytes`, `store_relayout_progress_ratio`,
-  `store_relayout_done`, `store_relayout_failed`.
-- **When it pays.** Relayout moves cold history out of the way of hot
-  headers. For workloads whose fine archives roll over within a day or two it
-  barely changes compaction (a key-level model showed under 2%), and its
-  copies and deletes add compaction while they run. Run it slowly, and pause
-  it when the host is compaction-bound.
+Compacting after every group rewrites the same overlapping L6 files repeatedly.
+Batching amortizes those rewrites over many groups. Size the byte threshold well
+above the overlapping file size, and measure compaction bytes per copied byte.
+The opt-in `TestRelayoutReclaimCadenceMeasurement` uses 48 MiB L6 targets versus
+1 MiB groups to expose this cost; tiny per-group files cannot model it. It also
+scales the default L0:L6 target ratio (2:128 MiB). Large L0 targets can make sparse
+metadata flushes overlap many history files: Pebble's initial grandparent-overlap
+budget is ten L0 target file sizes and its flush heuristic can enlarge it. Keep
+the reclaim threshold well above that overlap budget too, especially when
+overriding target file sizes.
+
+### Cursor and crash recovery
+
+The cursor may advance after a group's descriptor/delete/journal batches commit,
+while physical reclamation is still pending. This is safe because the reclaim
+obligation is in the **same atomic batch** as the deletes, and precedes the
+cursor in the WAL. A durable cursor cannot skip a missing obligation.
+
+The journal is `R/relayout/reclaim/<group-first-ID>`. It records copied bytes and
+bounds of keys actually deleted, and is updated incrementally with successful
+metric publications. The cursor now uses `R/relayout/cursor`, preserving its
+9-byte value. `z/relayout` is read as the legacy fallback. Maintenance keys sort
+before the metric data, so they do not introduce a new high-key tail spanning
+all remaining `u` keys when a memtable flushes.
+
+On every start or in-process retry, **force startup catch-up before interpreting
+the cursor**, including a completed cursor. Read and merge the journal, compact
+its spans, and clear it only after success. Already moved descriptors need not
+appear in the next plan. A crash after compaction but before journal removal
+repeats that compaction safely; a crash or cancellation before all spans finish
+retains the entire obligation. Corrupt journal state stops the run with an error.
+No on-disk data-codec or Pebble format upgrade is introduced.
+
+Parallel chunks can finish out of order. Cursor publication still uses the
+longest completed prefix and cannot cross an unfinished chunk. The journal is
+independent of that prefix, so later chunks' cleanup also survives a crash.
+A batch generation check prevents queued reclaim requests from needlessly
+reclaiming a fresh partial batch after another worker already did the work.
+
+### Pressure, pacing and operation
+
+- **Limits.** `store-time-buckets-relayout-min-free-bytes` defaults to **200 GiB**;
+  `store-time-buckets-relayout-max-compaction-debt` defaults to **32 GiB**.
+  The reclaim threshold is separately configured by
+  `store-time-buckets-relayout-reclaim-bytes`, default **32 GiB**. All are
+  positive and reload on `SIGHUP`, without reopening the store.
+- **Pause/resume.** New copies and new reclaim spans pause below the reserve,
+  above the debt limit, or while disk-usage samples fail. Recheck every second;
+  limit reloads wake waiters. Raising the reserve above free space still pauses
+  new reclaim IO. Partial batches remain journaled while paused. Capacity-less
+  in-memory filesystems have no disk cap.
+- **IO.** One merged reclaim runs at a time across all relayout workers, using
+  the existing `store-compaction-rate` budget. A completed reclaim and any
+  following span must pass the debt gate again; they cannot release a queue of
+  simultaneous per-group compactions. Foreground mutation locks are not held.
+- **Copy pacing.** The rate remains shared across workers, with no burst credit
+  from stalls. Live reclaim-threshold changes are checked while copy pacing
+  waits as well as before the next group. Worker count and enabling/disabling
+  relayout still require a restart.
+- **Headroom.** The threshold counts planned copied bytes, not exact filesystem
+  allocation. Allow for table overlap, framing, in-flight groups and pinned
+  readers. Long-lived snapshots/iterators can delay file deletion. Reserve and
+  admission checks stop further growth while that space is unavailable.
+- **Cancellation.** Check context before and after each stock Compact call.
+  Cancellation joins an already-started **batch span**, potentially 32 GiB plus
+  overlapping SSTs, then starts no further spans. This can take much longer than
+  a single group. `Close` releases compaction pacing before joining maintenance;
+  context cancellation or StopBackground alone still respects the current IO
+  budget. Throughput, forced flushes, queues and whole-file overlap determine
+  elapsed time. L6's default target is 128 MiB, or `store-target-file-size` when
+  overridden; a single metric can also exceed the group target.
+- **One run.** Only one relayout runs at a time. Planning the same metric in
+  overlapping runs could let one delete the other's newly live copies.
+
+### Metrics
+
+Existing `store_relayout_{metrics,blocks,skipped,bytes}_total`, rate, cursor
+progress, done/failed and pressure metrics remain. Cursor progress measures
+published descriptors; it can reach the ceiling while a final reclaim is paused.
+`store_relayout_done` is set only after the final journal is cleared.
+
+- `store_relayout_reclaim_bytes`: configured batch threshold; headroom may lower it.
+- `store_relayout_unreclaimed_bytes`: known pending journal bytes, loaded when
+  relayout starts and updated as metrics publish.
+- `store_relayout_reclaims_total` and `store_relayout_reclaimed_bytes_total`:
+  completed merged batches and the copied bytes they cover. Startup catch-up may
+  cover work copied by an earlier process.
+- `store_relayout_paused`, `store_relayout_pauses_total{reason}` and
+  `store_relayout_pause_reason{reason}`: shared pressure state, one WARN/counter
+  entry per continuous pause. Reasons are `low_free_space`, `compaction_debt`
+  and `disk_usage_error`; recovery logs once.

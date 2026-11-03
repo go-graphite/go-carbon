@@ -60,6 +60,11 @@ type Options struct {
 	// Zero selects one worker; otherwise 1..32. Changing it requires reopening.
 	// RelayoutRate remains the total byte budget across all workers.
 	RelayoutWorkers int
+	// Zero selects the defaults (200 GiB free, 32 GiB compaction debt).
+	// Both limits can be changed with SetRelayoutLimits while workers run.
+	RelayoutMinFreeBytes, RelayoutMaxCompactionDebt uint64
+	// Zero selects 32 GiB, additionally capped by half the free reserve headroom.
+	RelayoutReclaimBytes uint64
 	// ExactBlocks selects integer/floating-point adaptive encoding in a separate
 	// v4 store. A legacy store is never silently upgraded to this format.
 	ExactBlocks  bool
@@ -427,6 +432,17 @@ func Open(dir string, options Options) (*Store, error) {
 	s.updatePointLookups.Store(options.UpdatePointLookups)
 	s.timeBuckets = format >= 7
 	s.relayoutWorkers = max(1, options.RelayoutWorkers)
+	if options.RelayoutMinFreeBytes == 0 {
+		options.RelayoutMinFreeBytes = DefaultRelayoutMinFreeBytes
+	}
+	if options.RelayoutMaxCompactionDebt == 0 {
+		options.RelayoutMaxCompactionDebt = DefaultRelayoutMaxCompactionDebt
+	}
+	_ = s.SetRelayoutLimits(options.RelayoutMinFreeBytes, options.RelayoutMaxCompactionDebt)
+	if options.RelayoutReclaimBytes == 0 {
+		options.RelayoutReclaimBytes = DefaultRelayoutReclaimBytes
+	}
+	_ = s.SetRelayoutReclaimBytes(options.RelayoutReclaimBytes)
 	s.coldPack.format.Store(format == 9)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,

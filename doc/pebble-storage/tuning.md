@@ -39,6 +39,15 @@ R = applies on `SIGHUP`; otherwise a restart is required.
 | `store-time-buckets` | false | v7 layout. One-way ([data-layout.md](data-layout.md#format-marker)). |
 | `store-time-buckets-relayout-rate` | 0 | Bytes per second moved into the history bucket. **R** for a positive rate; set 1 to pause. Turning it on or off needs a restart. |
 | `store-time-buckets-relayout-workers` | 1 | Workers sharing an ascending chunk queue, 1–32. Restart required. All workers share the rate above; each buffers about 64 MiB of group values, plus planning overhead (a single metric may exceed the target). Chunk boundaries can flush smaller groups; one worker retains serial grouping. |
+| `store-time-buckets-relayout-min-free-bytes` | 214748364800 (200 GiB) | **R**, positive. Pause new relayout plans/ingests and reclaim spans below this filesystem reserve; resume automatically when free bytes recover. Reserve space for foreground writes, admitted groups and overlapping SST outputs. |
+| `store-time-buckets-relayout-max-compaction-debt` | 34359738368 (32 GiB) | **R**, positive. Pause copies and each new reclaim span above this Pebble debt estimate. One merged reclaim runs at a time, using `store-compaction-rate`. Independent of cold-pack's limit. |
+| `store-time-buckets-relayout-reclaim-bytes` | 34359738368 (32 GiB) | **R**, positive. Copied bytes per shared reclaim batch; cap by half available space above min-free, reserving admitted copies. Keep well above overlapping L6 file size to amortize rewrites. Reclaim at the limit and completion; durable journals preserve unfinished work across cursor progress/restarts. Smaller limits reclaim sooner at higher write amplification. Cancellation may join one full batch span. |
+
+Relayout reclamation also pays for sparse metadata flush overlap. Pebble starts
+with ten L0 target file sizes of grandparent overlap and can enlarge it; a large
+`store-target-file-size` without a smaller `store-l0-target-file-size` can make
+that cost substantial. Size the reclaim budget above both this overlap and L6
+boundary files, and measure compaction write bytes per copied byte.
 
 ### Conversion
 
@@ -88,7 +97,7 @@ R = applies on `SIGHUP`; otherwise a restart is required.
 | Block cache | `pebble_block_cache_{hits,misses}_total` | Hit ratio of 97%+ is normal on a warm host. |
 | Ingestion | `pebble_ingest_*_total` | L0 bytes and memtable overlaps should stay near zero. |
 | Conversion | `store_migration_*` | Workers, in flight, skipped, waiting for space. |
-| Relayout | `store_relayout_*` | Rate, progress, failures. |
+| Relayout | `store_relayout_*` | Rate, descriptor progress, pending/reclaimed bytes and batches, failures and pressure pauses by reason. |
 | Host | dirty page cache, device utilization | A large dirty backlog delays every store sync. |
 
 Diagnosis method that paid off repeatedly: take a goroutine dump

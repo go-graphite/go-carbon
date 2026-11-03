@@ -43,6 +43,7 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 				}
 			}
 			opts.RelayoutRate = 1 << 20
+			opts.RelayoutMinFreeBytes = 1 // the test machine's free space must not pause relayout
 			opts.ColdPack = ColdPackOptions{Mode: "exact", Interval: time.Hour}
 			opts.CompactOnce = "maintenance-test"
 			s, err = Open(dir, opts)

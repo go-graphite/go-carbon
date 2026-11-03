@@ -59,8 +59,9 @@ func TestRelayoutMatchesV6Control(t *testing.T) {
 		t.Helper()
 		db, err := openMemoryTestStore(t, filepath.Join(root, dir, "shared"), store.Options{ExactBlocks: true, Continuation: &ContinuationCodec{},
 			IncrementalSource: filepath.Join(root, dir, "source"), TimeBuckets: buckets, Now: clock, SyncInterval: time.Hour,
-			RelayoutWorkers: 4,
-			CacheSize:       16 << 20, MemTableSize: 4 << 20})
+			RelayoutWorkers:      4,
+			RelayoutMinFreeBytes: 1,
+			CacheSize:            16 << 20, MemTableSize: 4 << 20})
 		if err != nil {
 			t.Fatal(err)
 		}

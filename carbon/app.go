@@ -455,6 +455,12 @@ func (app *App) ReloadConfig() error {
 		if err = app.MetricStore.SetFlushRate(app.Config.Whisper.StoreFlushRate); err != nil {
 			return err
 		}
+		if err = app.MetricStore.SetRelayoutLimits(uint64(app.Config.Whisper.StoreTimeBucketsRelayoutMinFree), uint64(app.Config.Whisper.StoreTimeBucketsRelayoutMaxDebt)); err != nil {
+			return err
+		}
+		if err = app.MetricStore.SetRelayoutReclaimBytes(uint64(app.Config.Whisper.StoreTimeBucketsRelayoutReclaimBytes)); err != nil {
+			return err
+		}
 		if rate := app.Config.Whisper.StoreTimeBucketsRelayoutRate; rate > 0 {
 			if err = app.MetricStore.SetRelayoutRate(rate); err != nil {
 				return err
@@ -992,19 +998,22 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		}
 		compactionWarmup := conf.Whisper.StoreCompactionWarmup.Value()
 		app.MetricStore, err = app.openStoreWithHandoff(core, store.Options{
-			MaintenanceWait:   app.storeMaintenance.wait,
-			Continuation:      continuation,
-			ColdPack:          coldPackOptions(conf),
-			TimeBuckets:       conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreTimeBuckets,
-			RelayoutRate:      conf.Whisper.StoreTimeBucketsRelayoutRate,
-			RelayoutWorkers:   conf.Whisper.StoreTimeBucketsRelayoutWorkers,
-			ExactBlocks:       conf.Whisper.StoreEncoding == "exact",
-			IncrementalSource: incrementalSource,
-			IngestFileStages:  conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
-			IngestLinger:      conf.Whisper.StoreMigrationIngestLinger.Value(),
-			IngestGroupBytes:  conf.Whisper.StoreMigrationIngestGroup,
-			IngestParallel:    conf.Whisper.StoreMigrationIngestParallel,
-			CacheSize:         conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
+			MaintenanceWait:           app.storeMaintenance.wait,
+			Continuation:              continuation,
+			ColdPack:                  coldPackOptions(conf),
+			TimeBuckets:               conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreTimeBuckets,
+			RelayoutRate:              conf.Whisper.StoreTimeBucketsRelayoutRate,
+			RelayoutWorkers:           conf.Whisper.StoreTimeBucketsRelayoutWorkers,
+			RelayoutReclaimBytes:      uint64(conf.Whisper.StoreTimeBucketsRelayoutReclaimBytes),
+			RelayoutMinFreeBytes:      uint64(conf.Whisper.StoreTimeBucketsRelayoutMinFree),
+			RelayoutMaxCompactionDebt: uint64(conf.Whisper.StoreTimeBucketsRelayoutMaxDebt),
+			ExactBlocks:               conf.Whisper.StoreEncoding == "exact",
+			IncrementalSource:         incrementalSource,
+			IngestFileStages:          conf.Whisper.StoreIncrementalMigration && conf.Whisper.StoreMigrationIngest,
+			IngestLinger:              conf.Whisper.StoreMigrationIngestLinger.Value(),
+			IngestGroupBytes:          conf.Whisper.StoreMigrationIngestGroup,
+			IngestParallel:            conf.Whisper.StoreMigrationIngestParallel,
+			CacheSize:                 conf.Whisper.StoreCacheSize, MemTableSize: conf.Whisper.StoreMemTableSize,
 			SyncInterval:                conf.Whisper.StoreSyncInterval.Value(),
 			CompactionWorkers:           conf.Whisper.StoreCompactionWorkers,
 			CompactionRate:              conf.Whisper.StoreCompactionRate,

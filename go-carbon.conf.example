@@ -445,6 +445,23 @@ store-encoding = "legacy"
 # Parallel ID ranges, 1-32. Requires a restart; the rate above is the total
 # across all workers. Each worker buffers up to about 64 MiB of group values.
 # store-time-buckets-relayout-workers = 1
+# Reclaim in shared batches, rather than rewriting the same L6 files for every
+# 64 MiB group. Size this well above overlapping L6 files. Positive, SIGHUP
+# reloadable; effective limit is capped by half the free space above min-free,
+# allowing for admitted copies. A final partial batch is reclaimed at completion.
+# Descriptor/delete batches journal their cleanup atomically, so cursor progress
+# may run ahead without losing unfinished reclamation on a crash/restart.
+# store-time-buckets-relayout-reclaim-bytes = 34359738368
+# Pause copies and new reclaim spans below this reserve or above the debt limit.
+# Both must be positive and reload on SIGHUP; partial batches remain journaled.
+# One merged reclaim runs at a time, using store-compaction-rate. Cancellation
+# joins its current batch span (potentially 32 GiB plus overlapping SSTs), then
+# starts no further spans. Allow headroom for foreground writes, overlap and
+# pinned readers; a single metric can exceed the group target.
+# store_relayout_{reclaim_bytes,unreclaimed_bytes,reclaims_total} explain cadence;
+# store_relayout_paused / pauses_total / pause_reason explain pressure waits.
+# store-time-buckets-relayout-min-free-bytes = 214748364800
+# store-time-buckets-relayout-max-compaction-debt = 34359738368
 # Cold continuation packing (exact incremental shared storage with time buckets).
 # Hot writes stay exact. Enabling upgrades the durable reader fence to v9;
 # upgrade readers, transfer peers and recovery tools first. All settings reload
