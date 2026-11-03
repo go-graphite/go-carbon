@@ -886,7 +886,13 @@ func (whisper *Whisper) storedPoints(archive *archiveInfo, from, until int) ([]d
 			descriptor := ContinuationBlock{Archive: whisper.archiveIndexOf(archive), Index: block.index,
 				Offset: archive.blockOffset(block.index), Size: archive.blockSize, Step: archive.secondsPerPoint,
 				First: block.start, Last: block.end, Count: block.count + 1}
-			points, err := input.ReadStorageBlock(descriptor)
+			var points []TimeSeriesPoint
+			var err error
+			if ranged, ok := whisper.file.(StorageBlockRangeReader); ok {
+				points, err = ranged.ReadStorageBlockRange(descriptor, from, until)
+			} else {
+				points, err = input.ReadStorageBlock(descriptor)
+			}
 			if err != nil {
 				return nil, err
 			}
