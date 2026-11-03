@@ -222,6 +222,9 @@ func (app *App) configure() error {
 			return err
 		}
 	}
+	if app.Carbonserver != nil {
+		app.Carbonserver.SetQueryCacheCanonicalKeys(cfg.Carbonserver.QueryCacheCanonicalKeys)
+	}
 	// All fallible policy validation is complete. Join the old expiration
 	// worker before publishing the new policy, so reload cannot leave deletes
 	// running under an obsolete rule. ReloadConfig restarts it below.

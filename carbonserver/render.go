@@ -297,7 +297,7 @@ func (listener *CarbonserverListener) getRenderCacheKeyAndSize(targets map[timeR
 		format += "&store=" + strconv.FormatUint(metricStore.ReadCacheEpoch(), 16)
 	}
 	key := ""
-	if listener.queryCacheCanonicalKeys {
+	if listener.queryCacheCanonicalKeys.Load() {
 		key = canonicalRenderCacheKey(targets, format)
 	} else {
 		key = legacyRenderCacheKey(targets, format)
