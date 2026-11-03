@@ -30,6 +30,7 @@ type options struct {
 	maxBytes                                                                         int64
 	tick                                                                             time.Duration
 	mbps, p99                                                                        float64
+	backlog                                                                          backlogPolicy
 }
 type apiError struct {
 	Status  int
@@ -62,7 +63,7 @@ func event(kind string, fields map[string]any) {
 }
 func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
-	var o options
+	o := options{backlog: defaultBacklogPolicy()}
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
 	flags.StringVar(&o.state, "state", "move-state.jsonl", "durable checkpoint journal")
 	flags.StringVar(&o.barrier, "barrier", "", "fresh cutover/drain/reconciliation proof; required for --delete")
@@ -85,6 +86,11 @@ func MoveMain(args []string) error {
 	flags.DurationVar(&o.tick, "tick", 10*time.Second, "host guard and tuner tick")
 	flags.Float64Var(&o.mbps, "max-mbps", 0, "optional transfer MB/s ceiling per host direction; zero uses physical host guards without a fixed rate cap")
 	flags.Float64Var(&o.p99, "read-p99-ms", 100, "read p99 guard while reads are enabled")
+	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run")
+	flags.Float64Var(&o.backlog.SoftRatio, "backlog-soft-ratio", o.backlog.SoftRatio, "pause admission above this multiple of pre-copy maximum backlog")
+	flags.Float64Var(&o.backlog.HardRatio, "backlog-hard-ratio", o.backlog.HardRatio, "abort above this multiple of pre-copy maximum backlog")
+	flags.IntVar(&o.backlog.GrowthSamples, "backlog-growth-samples", o.backlog.GrowthSamples, "pause on consecutive rising samples beyond baseline maximum plus observed swing")
+	flags.Float64Var(&o.backlog.BytesPerPoint, "cache-bytes-per-point", o.backlog.BytesPerPoint, "estimated cache bytes/point for 90% host-memory safety ceiling (minimum 16)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -97,6 +103,12 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.backlog == (backlogPolicy{}) {
+		o.backlog = defaultBacklogPolicy()
+	}
+	if err := o.backlog.validate(); err != nil {
+		return err
+	}
 	if o.deleteMode == "" {
 		o.deleteMode = "auto"
 	}
@@ -173,7 +185,7 @@ func run(ctx context.Context, o options) error {
 		for _, r := range p.Streams {
 			event("would_transfer", map[string]any{"stream": r.Path, "sha256": r.SHA256, "source": r.sourceURL, "target": r.targetURL, "metrics": r.Metrics, "estimated_bytes": r.EstimatedBytes, "then": m.previewActions(r.sourceURL)})
 		}
-		return nil
+		return errors.New("dry run has no pre-copy backlog baseline; admission is unverified; --apply observes and persists a baseline before copying")
 	}
 	if o.localLab {
 		for h := range hosts {
@@ -220,6 +232,7 @@ func run(ctx context.Context, o options) error {
 		return errors.New("use the lab read workload toggle to benchmark isolation")
 	}
 	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.p99)
+	m.tuner.backlog = o.backlog
 	journalID := p.PlanID + fmt.Sprintf(":delete=%t:mode=%s", o.delete, o.deleteMode)
 	if o.reconcile {
 		journalID += ":reconcile=true"
@@ -231,7 +244,7 @@ func run(ctx context.Context, o options) error {
 	defer j.close()
 	m.journal = j
 	event("operation", map[string]any{"operation": j.operation, "state": o.state})
-	if err := m.poll(ctx, origins); err != nil {
+	if err := m.prepareAdmission(ctx, origins); err != nil {
 		return err
 	}
 	if o.reconcile {
@@ -244,15 +257,6 @@ func run(ctx context.Context, o options) error {
 			}
 		}
 		m.tuner.mu.Unlock()
-	}
-	if !o.localLab {
-		if err := sleepContext(ctx, o.tick); err != nil {
-			return err
-		}
-		if err := m.poll(ctx, origins); err != nil {
-			return err
-		}
-		m.tuner.captureReadBaselines()
 	}
 	if o.blockReads {
 		if err := m.readLeases(ctx, origins, false); err != nil {
@@ -765,6 +769,9 @@ func (m *mover) poll(ctx context.Context, hosts []string) error {
 			return err
 		}
 	}
+	if !m.tuner.collecting {
+		return m.saveAdmission()
+	}
 	return nil
 }
 func (m *mover) pollHost(ctx context.Context, h string) error {
@@ -788,7 +795,7 @@ func (m *mover) pollHost(ctx context.Context, h string) error {
 			if store.Hostname != hostname {
 				return errors.New("local-lab backend is not on this machine")
 			}
-			sample = hostSample{Time: float64(time.Now().Unix()), Generation: "local-lab", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, ReadSamples: 100, PhysicalCores: 16, MemoryBytes: 16 << 30, AvailableBytes: 8 << 30, NICCapacityBytes: 1e10}
+			sample = hostSample{Time: float64(time.Now().UnixNano()) / 1e9, Generation: "local-lab", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, ReadSamples: 100, PhysicalCores: 16, MemoryBytes: 16 << 30, AvailableBytes: 8 << 30, NICCapacityBytes: 1e10}
 		} else {
 			if err := m.helper(ctx, h, "/sample", nil, &sample); err != nil {
 				return fmt.Errorf("%w: %s: %w", errGuards, h, err)

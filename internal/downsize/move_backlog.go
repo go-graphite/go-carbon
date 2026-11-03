@@ -1,0 +1,222 @@
+package downsize
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"time"
+)
+
+// backlogPolicy is saved with the run: resuming cannot relax the envelope or
+// learn a new baseline from work that the controller already admitted.
+type backlogPolicy struct {
+	Window        time.Duration `json:"baseline_window"`
+	SoftRatio     float64       `json:"soft_ratio"`
+	HardRatio     float64       `json:"hard_ratio"`
+	GrowthSamples int           `json:"growth_samples"`
+	BytesPerPoint float64       `json:"estimated_bytes_per_point"`
+}
+
+func defaultBacklogPolicy() backlogPolicy {
+	return backlogPolicy{5 * time.Minute, 1.25, 1.6, 5, 64}
+}
+
+func (p backlogPolicy) validate() error {
+	if p.Window < 3*time.Minute || p.Window > 24*time.Hour ||
+		math.IsNaN(p.SoftRatio) || math.IsInf(p.SoftRatio, 0) || p.SoftRatio <= 1 ||
+		math.IsNaN(p.HardRatio) || math.IsInf(p.HardRatio, 0) || p.HardRatio <= p.SoftRatio ||
+		p.GrowthSamples < 2 || p.GrowthSamples > 10000 ||
+		math.IsNaN(p.BytesPerPoint) || math.IsInf(p.BytesPerPoint, 0) || p.BytesPerPoint < 16 || p.BytesPerPoint > 1<<20 {
+		return errors.New("invalid backlog guard policy: window must be 3m..24h, 1 < soft ratio < hard ratio, growth samples 2..10000, cache bytes/point 16..1048576")
+	}
+	return nil
+}
+
+type backlogBaseline struct {
+	Min, Median, Max int64
+	Start, End       float64
+	Samples          int
+}
+
+func (b *backlogBaseline) valid(window time.Duration, synthetic bool) bool {
+	if b == nil || b.Min < 0 || b.Median < b.Min || b.Max < b.Median ||
+		math.IsNaN(b.Start) || math.IsInf(b.Start, 0) || math.IsNaN(b.End) || math.IsInf(b.End, 0) || b.End < b.Start {
+		return false
+	}
+	return synthetic && b.Samples >= 1 || b.Samples >= 10 && b.End-b.Start >= window.Seconds()
+}
+
+// Last observations and trend survive controller restart as well as the immutable
+// baseline. This preserves counter-reset checks and a partly observed rise.
+type hostAdmission struct {
+	Baseline                     *backlogBaseline
+	Previous                     hostSample
+	StorePrevious                storageSample
+	Growth                       int
+	ForegroundRate, ReadBaseline float64
+	BackgroundCPU                float64
+}
+
+type admissionState struct {
+	Policy    backlogPolicy
+	Synthetic bool
+	Hosts     map[string]hostAdmission
+}
+
+type backlogStatus struct {
+	Baseline       *backlogBaseline `json:"baseline"`
+	Current        int64            `json:"current_points"`
+	Ratio          float64          `json:"ratio"`
+	SoftRatio      float64          `json:"soft_ratio"`
+	HardRatio      float64          `json:"hard_ratio"`
+	Swing          int64            `json:"swing_points"`
+	Growth         int              `json:"rising_samples"`
+	GrowthRequired int              `json:"growth_samples"`
+	EstimatedBytes float64          `json:"estimated_cache_bytes"`
+	MemoryLimit    float64          `json:"cache_memory_limit_bytes"`
+}
+
+func backlogGuard(sample hostSample, b *backlogBaseline, p backlogPolicy, growth int) (hard, soft string, status backlogStatus) {
+	status = backlogStatus{Baseline: b, Current: sample.CachePoints, SoftRatio: p.SoftRatio, HardRatio: p.HardRatio,
+		Growth: growth, GrowthRequired: p.GrowthSamples, EstimatedBytes: float64(sample.CachePoints) * p.BytesPerPoint,
+		MemoryLimit: float64(sample.MemoryBytes) * .9}
+	if b == nil {
+		return "missing pre-copy backlog baseline; observe and persist a baseline before admission", "", status
+	}
+	status.Ratio = float64(sample.CachePoints) / float64(max(1, b.Max))
+	status.Swing = b.Max - b.Min
+	if sample.CachePoints < 0 {
+		return "invalid negative cache points", "", status
+	}
+	if status.EstimatedBytes > status.MemoryLimit {
+		return "hard estimated cache memory reserve", "", status
+	}
+	if status.Ratio > p.HardRatio {
+		return "hard ingest backlog ratio", "", status
+	}
+	if status.Ratio > p.SoftRatio {
+		return "", "ingest backlog ratio", status
+	}
+	if growth >= p.GrowthSamples {
+		return "", "ingest backlog growth", status
+	}
+	return "", "", status
+}
+
+func beyondBacklogSwing(current int64, b *backlogBaseline) bool {
+	// Subtraction after the comparison avoids overflow at large point counts.
+	return b != nil && current > b.Max && current-b.Max > b.Max-b.Min
+}
+
+func (t *tuner) snapshotAdmission(synthetic bool) *admissionState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := &admissionState{Policy: t.backlog, Synthetic: synthetic, Hosts: map[string]hostAdmission{}}
+	for host, h := range t.hosts {
+		state.Hosts[host] = hostAdmission{h.baseline, *h.previous, *h.storePrevious, h.growth, h.foregroundRate, h.readBaseline, h.backgroundCPU}
+	}
+	return state
+}
+
+func (t *tuner) restoreAdmission(state *admissionState, synthetic bool) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state.Policy != t.backlog || state.Synthetic != synthetic || len(state.Hosts) != len(t.hosts) {
+		return errors.New("saved backlog policy/hosts differ; resume with the original flags and plan")
+	}
+	for host, h := range t.hosts {
+		saved, ok := state.Hosts[host]
+		if !ok || !saved.Baseline.valid(t.backlog.Window, synthetic) || saved.Growth < 0 {
+			return fmt.Errorf("%s: missing or invalid saved pre-copy backlog baseline", host)
+		}
+		h.baseline, h.previous, h.storePrevious = saved.Baseline, &saved.Previous, &saved.StorePrevious
+		h.growth, h.foregroundRate, h.readBaseline, h.backgroundCPU = saved.Growth, saved.ForegroundRate, saved.ReadBaseline, saved.BackgroundCPU
+		h.foregroundReady = saved.Previous.ForegroundMeasured
+		// A resumed controller earns admission again from fresh healthy samples.
+		h.Streams, h.healthy = 0, 0
+		event("backlog_baseline_restored", map[string]any{"host": host, "baseline": h.baseline, "policy": t.backlog, "rising_samples": h.growth})
+	}
+	return nil
+}
+
+func (t *tuner) finishBacklogObservation(synthetic bool) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for host, h := range t.hosts {
+		if h.baseline != nil {
+			continue
+		}
+		if len(h.backlogSamples) == 0 || h.previous == nil {
+			return fmt.Errorf("%s: missing pre-copy backlog observations", host)
+		}
+		values := slices.Clone(h.backlogSamples)
+		slices.Sort(values)
+		mid := len(values) / 2
+		median := values[mid]
+		if len(values)%2 == 0 {
+			median = values[mid-1] + (values[mid]-values[mid-1])/2
+		}
+		b := &backlogBaseline{Min: values[0], Median: median, Max: values[len(values)-1], Start: h.backlogStart, End: h.previous.Time, Samples: len(values)}
+		if !b.valid(t.backlog.Window, synthetic) {
+			return fmt.Errorf("%s: incomplete pre-copy backlog window: %d samples over %.1fs; need >=10 samples over %s", host, b.Samples, b.End-b.Start, t.backlog.Window)
+		}
+		h.baseline, h.backlogSamples = b, nil
+		h.foregroundRate, h.foregroundReady = h.writeRate, h.previous.ForegroundMeasured
+		event("backlog_baseline", map[string]any{"host": host, "baseline": b, "policy": t.backlog, "synthetic": synthetic})
+	}
+	t.collecting = false
+	return nil
+}
+
+func (m *mover) saveAdmission() error {
+	state := m.tuner.snapshotAdmission(m.localLab)
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.journal.saveAdmission(state)
+}
+
+func (m *mover) prepareAdmission(ctx context.Context, hosts []string) error {
+	if m.journal.admission != nil {
+		if err := m.tuner.restoreAdmission(m.journal.admission, m.localLab); err != nil {
+			return err
+		}
+		if err := m.poll(ctx, hosts); err != nil {
+			return err
+		}
+		// Whole-store workers need their initial lease before the monitoring
+		// loop starts. Earn the same two healthy samples as range admission.
+		if !m.localLab {
+			if err := sleepContext(ctx, m.tick); err != nil {
+				return err
+			}
+		}
+		return m.poll(ctx, hosts)
+	}
+	if len(m.journal.tasks) > 0 {
+		return errors.New("missing saved pre-copy backlog baseline in existing run; cannot re-baseline after copy work")
+	}
+	m.tuner.collecting = true
+	event("backlog_observation", map[string]any{"window": m.tuner.backlog.Window.String(), "synthetic": m.localLab, "admission": "blocked until baseline is durable"})
+	if err := m.poll(ctx, hosts); err != nil {
+		return err
+	}
+	if !m.localLab {
+		started := time.Now()
+		for time.Since(started) < m.tuner.backlog.Window {
+			if err := sleepContext(ctx, m.tick); err != nil {
+				return err
+			}
+			if err := m.poll(ctx, hosts); err != nil {
+				return err
+			}
+		}
+	}
+	if err := m.tuner.finishBacklogObservation(m.localLab); err != nil {
+		return err
+	}
+	m.tuner.captureReadBaselines()
+	// No transfer worker is started until the baseline has been fsynced.
+	return m.saveAdmission()
+}

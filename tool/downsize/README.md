@@ -119,14 +119,63 @@ RSS/threads, ingest backlog, write failures, unlogged points and read p99 govern
 the ramp. Lost/stale telemetry or durability guards abort. Each `tune` JSON log
 reports `binding_resource`, sampled values, foreground CPU and the active ceiling.
 A new helper is required: it reports committed foreground points as well as
-backlog. The controller captures both before copying. New admission pauses
-immediately when committed points/s falls below 90% of that baseline while
-backlog exceeds its baseline by max(10,000 points, 5%). Backlog above that envelope pauses admission even if committed rate is steady;
-recovery waits for it to drain. A lower offered rate without growing backlog does
-not trigger this floor. Significant backlog growth
-or a write stall also stops new admission immediately; two healthy samples allow
-a conservative restart. In-flight bounded requests can finish. Worker admission leases expire when the
+backlog. Before any copy or replacement starts, the controller observes every
+host for **five minutes**, with at least ten advancing samples per host (tick
+defaults to 10s). It records cached **points**, not metric names: per-host minimum,
+median, maximum, window timestamps and sample count. This new explicit window
+replaces the old two-sample observation. Choose a longer window to cover a known
+batching cycle (for example `--backlog-baseline-window 30m` for 1800s max-delay).
+The window must be at least three minutes; the historical historical snapshots are
+context, not reusable per-host temporal baselines.
+
+| Controller flag | Default | Operating `guards.json` field | Meaning |
+| --- | ---: | --- | --- |
+| `--backlog-baseline-window` | `5m` | `backlog_baseline_window_seconds: 300` | New run's pre-copy observation; minimum `3m`, maximum `24h` |
+| `--backlog-soft-ratio` | `1.25` | `backlog_soft_ratio: 1.25` | Pause new work above baseline max × ratio |
+| `--backlog-hard-ratio` | `1.6` | `backlog_hard_ratio: 1.6` | Abort above baseline max × ratio; must exceed soft ratio |
+| `--backlog-growth-samples` | `5` | `backlog_growth_samples: 5` | Pause on N strictly rising samples, all above max + (max − min) |
+| `--cache-bytes-per-point` | `64` | `cache_bytes_per_point: 64` | Estimated cache bytes/point for a hard ceiling at 90% of `MemoryBytes` |
+
+`guards.json` is an operating worksheet, not a controller config input; pass
+nondefault values as flags. These guards apply with `--auto=false` too. The old
+500M-point hard stop and single-sample 5% backlog check are removed. A steady
+1.4B-point high-backlog host can pass its own envelope while other host guards remain
+binding. Ratios use max(1, baseline maximum) so a genuinely empty baseline fails
+closed on new backlog. Threshold comparisons are strict `>`; equality is allowed.
+The 64-byte estimate is a conservative budgeting assumption, **not a measured
+cache cost**: `points.Point` has 16 bytes of values before slice/item/index and
+allocation overhead, and queued data may be compacted (`cache/cache.go`). Select
+a larger estimate for a measured higher cost. This coarse memory bound supplements
+the existing RSS (>90%) and available-memory (<5%) hard reserves; it does not
+replace them or estimate memory available to the copy.
+
+Both ratio and sustained-growth soft breaches pause admission immediately. If
+committed points/s also falls below 90% of the saved pre-copy rate, the decision is
+reported as `foreground write floor`. A lower offered rate without backlog
+pressure does not trigger this floor. A falling or equal sample resets the rising
+sequence; a stable backlog below the soft ratio can recover after two healthy
+samples. A write stall also pauses new admission. In-flight bounded requests can
+finish. Worker admission leases expire when the
 controller stops; already admitted chunks are bounded and cancel on lease expiry.
+
+The baseline, policy and latest counters/trend are fsynced in the **same run
+journal** before copying and after each completed host poll, and survive journal
+compaction. Resume the same state/flags: the controller restores the original
+baseline, starts admission at zero and requires fresh healthy observations. It
+never re-baselines on restart, after read isolation, or after replacement. A
+generation change, reset counter, non-advancing telemetry, missing/corrupt baseline
+or changed policy aborts. Old journals that already contain copy work but lack a
+baseline fail closed; do not delete an in-progress journal to bypass this check.
+An interrupted observation with no admitted work can safely start observation
+again. `--local-lab` uses an explicitly synthetic loopback baseline without waiting;
+that saved state cannot resume as a production run.
+
+Each `tune` event reports `decision` (`healthy`/`soft`/`hard`), reason and numeric
+`backlog`: baseline min/median/max, current points, current/max ratio, soft/hard
+ratios, observed swing, rising count/required count and estimated cache bytes/memory
+ceiling. Hard errors also include baseline/current/ratios and exit nonzero. A dry
+run prints planned actions, contacts no hosts and exits nonzero with
+`no pre-copy backlog baseline; admission is unverified`; it does not qualify a run.
 
 For extra headroom, `--block-reads --replica-url http://other-site:8080
 --replica-site region-b` renews read-isolation leases after probing affected data on a

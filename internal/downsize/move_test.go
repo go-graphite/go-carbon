@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -241,8 +242,8 @@ func TestDryRunNeverContactsHosts(t *testing.T) {
 	root := fixturePlan(t, "http://127.0.0.1:1", "http://127.0.0.1:2", []string{"dry"})
 	o := testOptions(root)
 	o.apply = false
-	if err := run(context.Background(), o); err != nil {
-		t.Fatal(err)
+	if err := run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "no pre-copy backlog baseline") {
+		t.Fatal("dry run did not report unverified admission", err)
 	}
 	if _, err := os.Stat(o.state); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("dry run created journal")
@@ -250,8 +251,10 @@ func TestDryRunNeverContactsHosts(t *testing.T) {
 }
 
 func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
-	tune := newTuner([]string{"a", "b"}, capacity{Streams: 16, Batch: 8192, BatchBytes: 64 << 20, DeleteRate: 10000}, false, 0, 100)
-	sample := hostSample{Time: float64(time.Now().Unix()) - 2, Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 3e9, ForegroundMeasured: true, WritePoints: 100000, CachePoints: 20000}
+	tune := newTestTuner([]string{"a", "b"}, capacity{Streams: 16, Batch: 8192, BatchBytes: 64 << 20, DeleteRate: 10000}, false, 0, 100)
+	tune.collecting = true
+	tune.hosts["a"].baseline = nil
+	sample := hostSample{Time: float64(time.Now().Unix()) - 2, Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 3e9, ForegroundMeasured: true, WritePoints: 100000, CachePoints: 100000}
 	observe := func() {
 		t.Helper()
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
@@ -262,6 +265,9 @@ func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
 	sample.Time++
 	sample.WritePoints += 100000
 	observe()
+	if err := tune.finishBacklogObservation(true); err != nil {
+		t.Fatal(err)
+	}
 	tune.captureReadBaselines()
 	// Offered traffic can fall without pressure; a rate drop alone is safe.
 	sample.Time++
@@ -270,7 +276,7 @@ func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
 	if tune.hosts["a"].Streams == 0 {
 		t.Fatal("lower offered load paused the copy")
 	}
-	sample.CachePoints += 20000
+	sample.CachePoints += 40000
 	sample.Time += .1
 	sample.WritePoints += 5000
 	observe()
@@ -285,7 +291,7 @@ func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
 	// Recovery requires two healthy observations; never lower the baseline to
 	// the impaired write rate. Isolation only bypasses the read guard.
 	sample.ReadsBlocked = true
-	sample.CachePoints = 20000
+	sample.CachePoints = 100000
 	sample.Time += .1
 	sample.WritePoints += 10000
 	observe()
@@ -305,7 +311,7 @@ func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
 	release()
 	sample.Time += .1
 	sample.WritePoints += 10000
-	sample.CachePoints = 40000
+	sample.CachePoints = 140000
 	observe()
 	if tune.hosts["a"].Streams != 0 {
 		t.Fatal("backlog did not pause copy at a healthy committed rate")
@@ -349,9 +355,10 @@ func TestJournalLockTruncationAndCompaction(t *testing.T) {
 	}
 }
 func TestTunerRampBackoffAndHardStop(t *testing.T) {
-	tune := newTuner([]string{"a", "b"}, capacity{8, 2048, 64 << 20, 65536}, true, 0, 100)
+	tune := newTestTuner([]string{"a", "b"}, capacity{8, 2048, 64 << 20, 65536}, true, 0, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100}
 	for range 4 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
@@ -361,6 +368,7 @@ func TestTunerRampBackoffAndHardStop(t *testing.T) {
 	}
 	sample.CPUCores = 90
 	previous := tune.hosts["a"].Streams
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
@@ -374,6 +382,7 @@ func TestTunerRampBackoffAndHardStop(t *testing.T) {
 		t.Fatal("static high thread count throttles", hard, soft)
 	}
 	sample.Unlogged = 1
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err == nil {
 		t.Fatal("unlogged points did not hard stop")
 	}
@@ -641,13 +650,15 @@ func TestMoverSplitsOversizedBatches(t *testing.T) {
 }
 
 func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
-	tune := newTuner([]string{"a", "b"}, capacity{8, 8192, 64 << 20, 65536}, true, 0, 100)
+	tune := newTestTuner([]string{"a", "b"}, capacity{8, 8192, 64 << 20, 65536}, true, 0, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100, ReadP99MS: 2}
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
 	tune.captureReadBaselines()
 	sample.ReadP99MS = 50
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
@@ -661,6 +672,7 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 	}
 	sample.ReadP99MS = 2
 	for range 2 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
@@ -671,9 +683,10 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 }
 
 func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
-	tune := newTuner([]string{"a", "b", "c"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
+	tune := newTestTuner([]string{"a", "b", "c"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 24, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, DiskWriteCapacity: 2e9}
 	for range 30 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{MaxTransfers: 64}); err != nil {
 			t.Fatal(err)
 		}
@@ -688,6 +701,7 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 		func(s *hostSample) { s.CPUCores = 90 },
 	} {
 		current := sample
+		current.Time += .01
 		change(&current)
 		if hard, soft := guard(current, storageSample{}, &sample, nil, 100); hard != "" || soft == "" {
 			t.Fatal("binding resource missed", hard, soft)
@@ -732,9 +746,10 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 }
 
 func TestTunerReadIsolationReleasesCPUCeiling(t *testing.T) {
-	tune := newTuner([]string{"a"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
+	tune := newTestTuner([]string{"a"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 75, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9}
 	for range 30 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
@@ -743,11 +758,13 @@ func TestTunerReadIsolationReleasesCPUCeiling(t *testing.T) {
 		t.Fatal("foreground CPU not reserved", tune.hosts["a"].Streams)
 	}
 	sample.CPUCores, sample.ReadsBlocked = 10, true
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
 	tune.captureReadBaselines()
 	for range 30 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
