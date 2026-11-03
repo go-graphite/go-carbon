@@ -390,3 +390,25 @@ single-copy retired-source range plans. Ordinary copy-only runs keep their
 previous baseline-only behavior. Version staging uses shared copy admission and
 physical guards; `--delete-rate` paces actual conditional deletion, not these
 non-destructive markers.
+# Observing copy admission without transferring
+
+`resize run --apply --observe-only 10m` runs the same admission and resource
+guards, persists observations, and exits without starting transfer workers.
+Use the same plan, state and health-map flags as the intended copy. This also
+upgrades an existing backlog-only journal by observing compaction debt for the
+configured baseline window with copying disabled; the original backlog envelope
+and operation remain unchanged. Normal copy refuses journals missing that debt
+baseline. Do not run two controllers against the same state simultaneously.
+
+Debt records per-host min/median/max with backlog in Admission. Copy backs off
+after three samples above `max(8 GiB, debt baseline maximum × 1.25)`, or five
+strictly rising samples above baseline maximum plus observed swing (the existing
+`--backlog-growth-samples` controls both trends). Debt >64 GiB, L0 at stop-1,
+write stalls/errors, and hard memory/disk reserves remain absolute hard stops.
+The L0 soft threshold remains `max(2, stop/2)`.
+
+Foreground throughput comparisons require an external supervisor with a
+control-host stream and complete observation windows. The controller has no
+control-host stream, so it does not infer a foreground regression from a single
+historical sample. Backlog guards remain independent and use each copy host's
+persisted envelope.

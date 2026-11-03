@@ -29,6 +29,7 @@ type options struct {
 	streams, batch, deleteRate                                                       int
 	maxBytes                                                                         int64
 	tick                                                                             time.Duration
+	observeOnly                                                                      time.Duration
 	mbps, p99                                                                        float64
 	backlog                                                                          backlogPolicy
 }
@@ -84,6 +85,7 @@ func MoveMain(args []string) error {
 	flags.IntVar(&o.deleteRate, "delete-rate", 65536, "maximum deleted metrics/s per source")
 	flags.Int64Var(&o.maxBytes, "batch-bytes", 64<<20, "maximum estimated bytes per transfer; server max_body_bytes still applies")
 	flags.DurationVar(&o.tick, "tick", 10*time.Second, "host guard and tuner tick")
+	flags.DurationVar(&o.observeOnly, "observe-only", 0, "run admission guards for this duration without starting transfer workers; also learn missing debt baselines with copying off")
 	flags.Float64Var(&o.mbps, "max-mbps", 0, "optional transfer MB/s ceiling per host direction; zero uses physical host guards without a fixed rate cap")
 	flags.Float64Var(&o.p99, "read-p99-ms", 100, "read p99 guard while reads are enabled")
 	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run")
@@ -103,6 +105,9 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.observeOnly < 0 || o.observeOnly > 0 && (!o.apply || o.delete || o.reconcile || o.blockReads) {
+		return errors.New("--observe-only requires --apply and copy-only flags without --block-reads")
+	}
 	if o.backlog == (backlogPolicy{}) {
 		o.backlog = defaultBacklogPolicy()
 	}
@@ -246,6 +251,20 @@ func run(ctx context.Context, o options) error {
 	event("operation", map[string]any{"operation": j.operation, "state": o.state})
 	if err := m.prepareAdmission(ctx, origins); err != nil {
 		return err
+	}
+	if o.observeOnly > 0 {
+		event("observation_started", map[string]any{"duration": o.observeOnly.String(), "transfers": false})
+		deadline := time.Now().Add(o.observeOnly)
+		for time.Now().Before(deadline) {
+			if err := sleepContext(ctx, min(o.tick, time.Until(deadline))); err != nil {
+				return err
+			}
+			if err := m.poll(ctx, origins); err != nil {
+				return err
+			}
+		}
+		event("observation_complete", map[string]any{"transfers": false})
+		return nil
 	}
 	if o.reconcile {
 		m.tuner.mu.Lock()
@@ -803,7 +822,7 @@ func (m *mover) poll(ctx context.Context, hosts []string) error {
 			return err
 		}
 	}
-	if !m.tuner.collecting {
+	if !m.tuner.collecting && !m.tuner.collectingDebt {
 		return m.saveAdmission()
 	}
 	return nil

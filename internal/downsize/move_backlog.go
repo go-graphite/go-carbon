@@ -57,6 +57,8 @@ type hostAdmission struct {
 	Growth                       int
 	ForegroundRate, ReadBaseline float64
 	BackgroundCPU                float64
+	DebtBaseline                 *backlogBaseline
+	DebtHigh, DebtGrowth         int
 }
 
 type admissionState struct {
@@ -115,7 +117,9 @@ func (t *tuner) snapshotAdmission(synthetic bool) *admissionState {
 	defer t.mu.Unlock()
 	state := &admissionState{Policy: t.backlog, Synthetic: synthetic, Hosts: map[string]hostAdmission{}}
 	for host, h := range t.hosts {
-		state.Hosts[host] = hostAdmission{h.baseline, *h.previous, *h.storePrevious, h.growth, h.foregroundRate, h.readBaseline, h.backgroundCPU}
+		state.Hosts[host] = hostAdmission{Baseline: h.baseline, Previous: *h.previous, StorePrevious: *h.storePrevious,
+			Growth: h.growth, ForegroundRate: h.foregroundRate, ReadBaseline: h.readBaseline, BackgroundCPU: h.backgroundCPU,
+			DebtBaseline: h.debtBaseline, DebtHigh: h.debtHigh, DebtGrowth: h.debtGrowth}
 	}
 	return state
 }
@@ -134,9 +138,16 @@ func (t *tuner) restoreAdmission(state *admissionState, synthetic bool) error {
 		h.baseline, h.previous, h.storePrevious = saved.Baseline, &saved.Previous, &saved.StorePrevious
 		h.growth, h.foregroundRate, h.readBaseline, h.backgroundCPU = saved.Growth, saved.ForegroundRate, saved.ReadBaseline, saved.BackgroundCPU
 		h.foregroundReady = saved.Previous.ForegroundMeasured
+		if saved.DebtBaseline == nil && !t.collectingDebt || saved.DebtBaseline != nil && !saved.DebtBaseline.valid(t.backlog.Window, synthetic) || saved.DebtHigh < 0 || saved.DebtGrowth < 0 {
+			return fmt.Errorf("%s: missing or invalid saved compaction debt baseline; run --observe-only with copying off", host)
+		}
+		h.debtBaseline, h.debtHigh, h.debtGrowth = saved.DebtBaseline, saved.DebtHigh, saved.DebtGrowth
 		// A resumed controller earns admission again from fresh healthy samples.
 		h.Streams, h.healthy = 0, 0
 		event("backlog_baseline_restored", map[string]any{"host": host, "baseline": h.baseline, "policy": t.backlog, "rising_samples": h.growth})
+		if h.debtBaseline != nil {
+			event("debt_baseline_restored", map[string]any{"host": host, "baseline": h.debtBaseline, "high_samples": h.debtHigh, "rising_samples": h.debtGrowth})
+		}
 	}
 	return nil
 }
@@ -145,20 +156,21 @@ func (t *tuner) finishBacklogObservation(synthetic bool) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for host, h := range t.hosts {
+		if h.debtBaseline == nil {
+			b := observationBaseline(h.debtSamples, h.debtStart, h.previous)
+			if !b.valid(t.backlog.Window, synthetic) {
+				return fmt.Errorf("%s: incomplete pre-copy compaction debt window", host)
+			}
+			h.debtBaseline, h.debtSamples = b, nil
+			event("debt_baseline", map[string]any{"host": host, "baseline": b, "soft_limit_bytes": max(float64(8<<30), float64(b.Max)*1.25), "high_samples_required": 3, "growth_samples": t.backlog.GrowthSamples})
+		}
 		if h.baseline != nil {
 			continue
 		}
 		if len(h.backlogSamples) == 0 || h.previous == nil {
 			return fmt.Errorf("%s: missing pre-copy backlog observations", host)
 		}
-		values := slices.Clone(h.backlogSamples)
-		slices.Sort(values)
-		mid := len(values) / 2
-		median := values[mid]
-		if len(values)%2 == 0 {
-			median = values[mid-1] + (values[mid]-values[mid-1])/2
-		}
-		b := &backlogBaseline{Min: values[0], Median: median, Max: values[len(values)-1], Start: h.backlogStart, End: h.previous.Time, Samples: len(values)}
+		b := observationBaseline(h.backlogSamples, h.backlogStart, h.previous)
 		if !b.valid(t.backlog.Window, synthetic) {
 			return fmt.Errorf("%s: incomplete pre-copy backlog window: %d samples over %.1fs; need >=10 samples over %s", host, b.Samples, b.End-b.Start, t.backlog.Window)
 		}
@@ -167,7 +179,22 @@ func (t *tuner) finishBacklogObservation(synthetic bool) error {
 		event("backlog_baseline", map[string]any{"host": host, "baseline": b, "policy": t.backlog, "synthetic": synthetic})
 	}
 	t.collecting = false
+	t.collectingDebt = false
 	return nil
+}
+
+func observationBaseline(samples []int64, start float64, previous *hostSample) *backlogBaseline {
+	if len(samples) == 0 || previous == nil {
+		return nil
+	}
+	values := slices.Clone(samples)
+	slices.Sort(values)
+	mid := len(values) / 2
+	median := values[mid]
+	if len(values)%2 == 0 {
+		median = values[mid-1] + (values[mid]-values[mid-1])/2
+	}
+	return &backlogBaseline{Min: values[0], Median: median, Max: values[len(values)-1], Start: start, End: previous.Time, Samples: len(values)}
 }
 
 func (m *mover) saveAdmission() error {
@@ -179,8 +206,19 @@ func (m *mover) saveAdmission() error {
 
 func (m *mover) prepareAdmission(ctx context.Context, hosts []string) error {
 	if m.journal.admission != nil {
+		// Legacy journals may learn only the new debt envelope, and only during
+		// an explicit observation with all transfer workers disabled.
+		m.tuner.collectingDebt = m.observeOnly > 0
 		if err := m.tuner.restoreAdmission(m.journal.admission, m.localLab); err != nil {
 			return err
+		}
+		missingDebt := false
+		for _, h := range m.tuner.hosts {
+			missingDebt = missingDebt || h.debtBaseline == nil
+		}
+		m.tuner.collectingDebt = missingDebt
+		if missingDebt {
+			return m.observeAdmission(ctx, hosts)
 		}
 		if err := m.poll(ctx, hosts); err != nil {
 			return err
@@ -198,6 +236,11 @@ func (m *mover) prepareAdmission(ctx context.Context, hosts []string) error {
 		return errors.New("missing saved pre-copy backlog baseline in existing run; cannot re-baseline after copy work")
 	}
 	m.tuner.collecting = true
+	m.tuner.collectingDebt = true
+	return m.observeAdmission(ctx, hosts)
+}
+
+func (m *mover) observeAdmission(ctx context.Context, hosts []string) error {
 	event("backlog_observation", map[string]any{"window": m.tuner.backlog.Window.String(), "synthetic": m.localLab, "admission": "blocked until baseline is durable"})
 	if err := m.poll(ctx, hosts); err != nil {
 		return err

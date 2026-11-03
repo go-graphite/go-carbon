@@ -59,17 +59,22 @@ type hostLimit struct {
 	backlogSamples            []int64
 	backlogStart              float64
 	growth                    int
+	debtBaseline              *backlogBaseline
+	debtSamples               []int64
+	debtStart                 float64
+	debtGrowth, debtHigh      int
 	hard                      string
 	foregroundReady           bool
 }
 type tuner struct {
-	mu            sync.Mutex
-	changed       chan struct{}
-	hosts         map[string]*hostLimit
-	maximum       capacity
-	mbps, readP99 float64
-	backlog       backlogPolicy
-	collecting    bool
+	mu             sync.Mutex
+	changed        chan struct{}
+	hosts          map[string]*hostLimit
+	maximum        capacity
+	mbps, readP99  float64
+	backlog        backlogPolicy
+	collecting     bool
+	collectingDebt bool
 }
 
 func newTuner(hosts []string, maximum capacity, auto bool, mbps, p99 float64) *tuner {
@@ -122,7 +127,7 @@ func (t *tuner) admit(ctx context.Context, source, target string) (func(), error
 		t.mu.Lock()
 		a, b := t.hosts[source], t.hosts[target]
 		for _, h := range []*hostLimit{a, b} {
-			if h.hard != "" || h.baseline == nil {
+			if h.hard != "" || h.baseline == nil || h.debtBaseline == nil || t.collectingDebt {
 				t.mu.Unlock()
 				return nil, fmt.Errorf("copy admission unavailable: hard=%q; pre-copy backlog baseline required", h.hard)
 			}
@@ -221,7 +226,7 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 		return "hard storage pressure", ""
 	}
 	if store.WriteStallActive || (old != nil && store.WriteStalls > old.WriteStalls) {
-		return "", "write stall"
+		return "write stall", ""
 	}
 	if sample.Threads > 6000 && previous != nil && sample.Threads-previous.Threads > 64 {
 		return "", "OS thread growth"
@@ -250,7 +255,7 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 	if sample.RSS > sample.MemoryBytes*7/10 || sample.AvailableBytes < sample.MemoryBytes/10 {
 		return "", "memory reserve"
 	}
-	if store.L0Sublevels >= max(2, stopL0/2) || store.CompactionDebt > 8<<30 {
+	if store.L0Sublevels >= max(2, stopL0/2) {
 		return "", "compaction pressure"
 	}
 	if !sample.ReadsBlocked && p99 > 0 && (math.IsNaN(sample.ReadP99MS) || sample.ReadP99MS > p99) {
@@ -270,6 +275,13 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 		}
 	}
 	hard, soft := guard(sample, store, h.previous, h.storePrevious, readLimit)
+	debt := h.observeDebt(sample, store, t.backlog.GrowthSamples, t.collectingDebt || t.collecting)
+	if !t.collectingDebt && !t.collecting && h.debtBaseline == nil && hard == "" {
+		hard = "missing pre-copy compaction debt baseline; run --observe-only before copying"
+	}
+	if debt.Soft != "" && soft == "" {
+		soft = debt.Soft
+	}
 	if hard == "" && h.previous != nil && sample.ForegroundMeasured && sample.Time > h.previous.Time {
 		h.writeRate = float64(sample.WritePoints-h.previous.WritePoints) / (sample.Time - h.previous.Time)
 	}
@@ -302,9 +314,6 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	}
 	if backlogSoft != "" {
 		soft = backlogSoft
-		if h.foregroundReady && h.foregroundRate > 0 && h.writeRate < h.foregroundRate*.9 {
-			soft = "foreground write floor"
-		}
 	}
 	if h.previous == nil {
 		h.backgroundCPU = sample.CPUCores
@@ -340,7 +349,7 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	}
 	if hard != "" {
 		h.hard, h.Streams = hard, 0
-		event("tune", map[string]any{"host": host, "decision": "hard", "reason": hard, "binding_resource": hard, "limits": h.capacity, "backlog": backlog, "sample": sample, "storage": store})
+		event("tune", map[string]any{"host": host, "decision": "hard", "reason": hard, "binding_resource": hard, "limits": h.capacity, "backlog": backlog, "debt": debt, "sample": sample, "storage": store})
 		close(t.changed)
 		t.changed = make(chan struct{})
 		return fmt.Errorf("%s: %s (baseline=%+v current=%d ratio=%.4f soft_ratio=%.4f hard_ratio=%.4f)", host, hard, h.baseline, sample.CachePoints, backlog.Ratio, t.backlog.SoftRatio, t.backlog.HardRatio)
@@ -369,7 +378,7 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	if soft != "" {
 		decision = "soft"
 	}
-	event("tune", map[string]any{"host": host, "decision": decision, "limits": h.capacity, "reason": reason, "binding_resource": reason, "ceiling": ceiling, "background_cpu_cores": h.backgroundCPU, "backlog": backlog, "sample": sample, "storage": store})
+	event("tune", map[string]any{"host": host, "decision": decision, "limits": h.capacity, "reason": reason, "binding_resource": reason, "ceiling": ceiling, "background_cpu_cores": h.backgroundCPU, "backlog": backlog, "debt": debt, "sample": sample, "storage": store})
 	close(t.changed)
 	t.changed = make(chan struct{})
 	return nil
