@@ -1,16 +1,71 @@
 package cache
 
-import "github.com/zeebo/xxh3"
+import (
+	"time"
+
+	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/points"
+	"github.com/zeebo/xxh3"
+)
+
+// item holds a metric's queued points. While in Shard.items they are
+// compact and Data is nil; popping decodes them into Data. &item.Points
+// identifies the batch to notConfirmed, firstArrival and pending recovery,
+// from insertion until it is confirmed.
+type item struct {
+	hash             uint64 // exact map hash, including forced collisions in tests
+	logFirst         uint64 // first unpersisted generation while queued; see logTracked
+	streamGeneration uint64 // assigned lazily under the owning shard lock
+	points.Points
+	compact compactPoints
+	// log names the item for the input log, which keeps its stream id
+	// there; the cache does not touch it after creation.
+	log inputlog.StreamRef
+	// spread is the metric's share of the writeout spread (see
+	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
+	spread uint16
+	// sparse marks an item whose metric last wrote a point at least
+	// writeout-max-delay before this item's first (see
+	// SetWriteoutSparseSpread).
+	sparse bool
+	// startup holds the first batching window to its phase even at the point
+	// threshold. It uses existing padding; ordinary arrivals do no extra work.
+	startup    bool
+	logTracked bool
+	// slot locates the metric in its shard's sparseLast table.
+	slot            uint32
+	firstArrival    time.Time
+	throttleState   any
+	indexGeneration uint64
+}
+
+func newItem(metric string, capacity int) *item {
+	h := writeoutHash(metric)
+	it := &item{Points: points.Points{Metric: metric}, compact: compactPoints{buf: make([]byte, 0, capacity)}, spread: uint16(h >> 48), slot: sparseSlot(h)}
+	it.log.Metric = metric
+	return it
+}
+
+func (it *item) count() int { return it.compact.n }
+
+// decode moves the queued points into Data, which callers may then own.
+// Called with the item unreachable from the shard, or with its shard locked.
+func (it *item) decode() *points.Points {
+	it.Data = it.compact.appendDecoded(nil)
+	it.compact = compactPoints{}
+	return &it.Points
+}
 
 type itemSlot struct {
-	hash uint64
 	item *item
 }
 
-// itemMap uses the shard hash directly. A nil item with a nonzero hash is a
-// deleted slot; a zero slot ends a probe. Full names disambiguate collisions.
+// itemMap keeps pointers and one control byte per slot. Controls are zero for
+// empty, one for deleted, or a seven-bit fingerprint with its high bit set.
+// Items retain the exact hash; full names disambiguate even exact collisions.
 type itemMap struct {
 	slots     []itemSlot
+	control   []byte
 	n, used   int
 	bytes     int64
 	deadlines *queueDeadlines
@@ -24,14 +79,15 @@ func (m *itemMap) getHashed(hash uint64, name string) *item {
 	if len(m.slots) == 0 {
 		return nil
 	}
+	tag := itemTag(hash)
 	mask := len(m.slots) - 1
 	for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
 		slot := &m.slots[i]
 		if slot.item == nil {
-			if slot.hash == 0 {
+			if m.control[i] == 0 {
 				return nil
 			}
-		} else if slot.hash == hash && slot.item.Metric == name {
+		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == name {
 			return slot.item
 		}
 	}
@@ -41,14 +97,15 @@ func (m *itemMap) getBytesHashed(hash uint64, name []byte) *item {
 	if len(m.slots) == 0 {
 		return nil
 	}
+	tag := itemTag(hash)
 	mask := len(m.slots) - 1
 	for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
 		slot := &m.slots[i]
 		if slot.item == nil {
-			if slot.hash == 0 {
+			if m.control[i] == 0 {
 				return nil
 			}
-		} else if slot.hash == hash && slot.item.Metric == string(name) {
+		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == string(name) {
 			return slot.item
 		}
 	}
@@ -59,6 +116,7 @@ func (m *itemMap) set(name string, it *item) { m.setHashed(xxh3.HashString(name)
 func (m *itemMap) setHashed(hash uint64, it *item) {
 	if len(m.slots) == 0 {
 		m.slots = make([]itemSlot, 8)
+		m.control = make([]byte, 8)
 		m.deadlines = nil
 	}
 	if (m.used+1)*2 > len(m.slots) {
@@ -69,12 +127,14 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 		old := m.slots
 		m.deadlines = nil
 		m.slots, m.n, m.used, m.bytes = make([]itemSlot, n), 0, 0, 0
+		m.control = make([]byte, n)
 		for _, slot := range old {
 			if slot.item != nil {
-				m.setHashed(slot.hash, slot.item)
+				m.setHashed(slot.item.hash, slot.item)
 			}
 		}
 	}
+	tag := itemTag(hash)
 	mask := len(m.slots) - 1
 	free := -1
 	for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
@@ -83,18 +143,21 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 			if free < 0 {
 				free = i
 			}
-			if slot.hash == 0 {
-				if m.slots[free].hash == 0 {
+			if m.control[i] == 0 {
+				if m.control[free] == 0 {
 					m.used++
 				}
-				m.slots[free] = itemSlot{hash: hash, item: it}
+				it.hash = hash
+				m.slots[free] = itemSlot{item: it}
+				m.control[free] = tag
 				m.invalidateDeadline(free)
 				m.n++
 				m.bytes += it.memoryBytes()
 				return
 			}
-		} else if slot.hash == hash && slot.item.Metric == it.Metric {
+		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == it.Metric {
 			m.bytes += it.memoryBytes() - slot.item.memoryBytes()
+			it.hash = hash
 			slot.item = it
 			m.invalidateDeadline(i)
 			return
@@ -108,16 +171,18 @@ func (m *itemMap) removeHashed(hash uint64, name string) {
 	if len(m.slots) == 0 {
 		return
 	}
+	tag := itemTag(hash)
 	mask := len(m.slots) - 1
 	for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
 		slot := &m.slots[i]
 		if slot.item == nil {
-			if slot.hash == 0 {
+			if m.control[i] == 0 {
 				return
 			}
-		} else if slot.hash == hash && slot.item.Metric == name {
+		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == name {
 			m.bytes -= slot.item.memoryBytes()
-			*slot = itemSlot{hash: 1}
+			*slot = itemSlot{}
+			m.control[i] = 1
 			m.invalidateDeadline(i)
 			m.n--
 			return
@@ -133,3 +198,5 @@ func (m *itemMap) all(yield func(string, *item) bool) {
 		}
 	}
 }
+
+func itemTag(hash uint64) byte { return byte(hash>>57) | 0x80 }

@@ -95,6 +95,7 @@ func TestQueueDeadlinesProbeAcrossRegionAndRehash(t *testing.T) {
 	// Force a probe across the 256-slot boundary using real hashes, so ready
 	// invalidates the item's actual region rather than its initial bucket.
 	m.slots = make([]itemSlot, 1024)
+	m.control = make([]byte, 1024)
 	var colliding []*item
 	for i := 0; len(colliding) < 3; i++ {
 		name := fmt.Sprintf("collision.%d", i)

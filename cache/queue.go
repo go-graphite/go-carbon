@@ -37,7 +37,7 @@ func (m *itemMap) invalidateItemDeadline(it *item) {
 		if slot := &m.slots[i]; slot.item == it {
 			m.invalidateDeadline(i)
 			return
-		} else if slot.item == nil && slot.hash == 0 {
+		} else if slot.item == nil && m.control[i] == 0 {
 			break
 		}
 	}

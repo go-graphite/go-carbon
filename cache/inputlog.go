@@ -12,8 +12,8 @@ import (
 // logged. At 4.5M points/s a one-second cycle records about 4400 per shard,
 // but cycles stretch to seconds while shard locks are contended, and relays
 // then flush their backlog at several times the usual rate: 1<<15 dropped
-// up to 27M points per burst on converting hosts. Entries are 32 bytes, so
-// a full buffer across all shards holds 4 GiB.
+// up to 27M points per burst. The reference and point columns use 24 bytes
+// per entry, so a full buffer across all shards holds 3 GiB before slack.
 const maxShardLogEntries = 1 << 17
 
 // Restore can run much faster than the log writer. Leave half the bounded
@@ -23,9 +23,11 @@ const maxShardRestoredLogEntries = maxShardLogEntries / 2
 // shardLog is a shard's part of the input log, guarded by the shard lock.
 // Points are recorded at generation gen. Every cached or in-flight item is
 // tracked with the generation of its oldest point not yet persisted, so the
-// log knows which segments it still needs. first is nil while logging is off.
+// log knows which segments it still needs. Queued items hold their first
+// generation inline; first contains only in-flight batches and is nil while
+// logging is off.
 type shardLog struct {
-	entries     []inputlog.Entry
+	entries     inputlog.Batch
 	gen         uint64
 	first       map[*points.Points]uint64
 	items       map[uint64]int32 // tracked items per first generation
@@ -34,10 +36,15 @@ type shardLog struct {
 	waitDrained chan struct{}
 }
 
+// stagingBytes includes capacity slack in both columns.
+func (l *shardLog) stagingBytes() int64 {
+	return int64(cap(l.entries.Refs))*8 + int64(cap(l.entries.Points))*16
+}
+
 // restoreSpace is called under the shard lock, before adding restored data.
 // Live input keeps its non-blocking admission policy.
 func (l *shardLog) restoreSpace(n int) <-chan struct{} {
-	if l.first == nil || len(l.entries)+n <= maxShardRestoredLogEntries {
+	if l.first == nil || len(l.entries.Points)+n <= maxShardRestoredLogEntries {
 		return nil
 	}
 	if l.waitDrained == nil {
@@ -54,11 +61,12 @@ func (l *shardLog) wakeRestore() {
 }
 
 func (l *shardLog) record(ref *inputlog.StreamRef, value float64, timestamp int64) {
-	if len(l.entries) >= maxShardLogEntries {
+	if len(l.entries.Points) >= maxShardLogEntries {
 		l.dropped++
 		return
 	}
-	l.entries = append(l.entries, ref.Entry(value, timestamp))
+	l.entries.Refs = append(l.entries.Refs, ref)
+	l.entries.Points = append(l.entries.Points, points.Point{Value: value, Timestamp: timestamp})
 }
 
 func (l *shardLog) recordPoints(ref *inputlog.StreamRef, data []points.Point) {
@@ -92,19 +100,55 @@ func (l *shardLog) release(gen uint64) {
 	}
 }
 
-// merge moves from's points into into, which keeps the older generation.
-func (l *shardLog) merge(into, from *points.Points) {
-	gen, tracked := l.first[from]
-	if !tracked {
-		return
+// trackItem keeps queued tracking on the item instead of one pointer-map
+// entry per metric. Every generation includes both queued and in-flight items.
+func (l *shardLog) trackItem(it *item) {
+	if l.first != nil && !it.logTracked {
+		it.logFirst, it.logTracked = l.gen, true
+		l.items[l.gen]++
 	}
-	l.untrack(from)
-	if current, ok := l.first[into]; !ok || gen < current {
-		if ok {
-			l.release(current)
+}
+
+func (l *shardLog) untrackItem(it *item) {
+	if l.first != nil && it.logTracked {
+		l.release(it.logFirst)
+		it.logTracked = false
+	}
+}
+
+// pop transfers ownership to the in-flight map without changing counts. A
+// successor with the same name has a different Points identity/generation.
+func (l *shardLog) pop(it *item) {
+	if l.first != nil && it.logTracked {
+		l.first[&it.Points] = it.logFirst
+		it.logTracked = false
+	}
+}
+
+func (l *shardLog) mergeGeneration(into *item, gen uint64) {
+	if !into.logTracked || gen < into.logFirst {
+		if into.logTracked {
+			l.release(into.logFirst)
 		}
-		l.first[into] = gen
+		into.logFirst, into.logTracked = gen, true
 		l.items[gen]++
+	}
+}
+
+// mergeItem and mergeFlight transfer the oldest generation to a replacement
+// queued item, removing each old identity exactly once.
+func (l *shardLog) mergeItem(into, from *item) {
+	if l.first != nil && from.logTracked {
+		gen := from.logFirst
+		l.untrackItem(from)
+		l.mergeGeneration(into, gen)
+	}
+}
+
+func (l *shardLog) mergeFlight(into *item, from *points.Points) {
+	if gen, tracked := l.first[from]; tracked {
+		l.untrack(from)
+		l.mergeGeneration(into, gen)
 	}
 }
 
@@ -119,27 +163,36 @@ func (l *shardLog) lowWater() uint64 {
 	return l.oldest
 }
 
-// relog records again, at the current generation, the points of items first
-// recorded before gen, so their old segments can be reused. pointsOf returns
-// a tracked item's points.
-func (l *shardLog) relog(gen uint64, budget int, pointsOf func(*points.Points) ([]points.Point, *inputlog.StreamRef)) int {
+// relog records old queued and in-flight batches again at the current
+// generation, so the log can recycle their old segments. The first eligible
+// batch may exceed budget, preserving the previous progress guarantee.
+func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 	if l.first == nil || l.lowWater() >= gen {
 		return 0
 	}
 	n := 0
+	for _, it := range queued.all {
+		if !it.logTracked || it.logFirst >= gen {
+			continue
+		}
+		if n > 0 && n+it.count() > budget {
+			return n
+		}
+		l.recordPoints(&it.log, it.compact.appendDecoded(nil))
+		n += it.count()
+		l.release(it.logFirst)
+		it.logFirst = l.gen
+		l.items[l.gen]++
+	}
 	for p, first := range l.first {
 		if first >= gen {
 			continue
 		}
-		data, ref := pointsOf(p)
-		if n > 0 && n+len(data) > budget {
+		if n > 0 && n+len(p.Data) > budget {
 			break
 		}
-		if ref == nil {
-			ref = inputlog.NewStreamRef(p.Metric)
-		}
-		l.recordPoints(ref, data)
-		n += len(data)
+		l.recordPoints(inputlog.NewStreamRef(p.Metric), p.Data)
+		n += len(p.Data)
 		l.release(first)
 		l.first[p] = l.gen
 		l.items[l.gen]++
@@ -156,7 +209,8 @@ func (c *Cache) EnableInputLog() {
 		if shard.log.first == nil {
 			shard.log = shardLog{first: make(map[*points.Points]uint64), items: make(map[uint64]int32)}
 			for _, values := range shard.items.all {
-				shard.log.track(&values.Points)
+				values.logTracked = false
+				shard.log.trackItem(values)
 			}
 			for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
 				if p != nil {
@@ -180,16 +234,29 @@ func (c *Cache) DisableInputLog() {
 	}
 }
 
-// TakeLogEntries implements inputlog.Source.
-func (c *Cache) TakeLogEntries(shard int, gen uint64, spare []inputlog.Entry) []inputlog.Entry {
+// TakeLogBatch implements inputlog.BatchSource. Swapping both columns under
+// the shard lock gives the log immutable rows while ingestion continues.
+func (c *Cache) TakeLogBatch(shard int, gen uint64, spare inputlog.Batch) inputlog.Batch {
 	s := c.data[shard]
 	s.mu.Lock()
 	taken := s.log.entries
-	s.log.entries, s.log.gen = spare[:0], gen
+	spare.Refs, spare.Points = spare.Refs[:0], spare.Points[:0]
+	s.log.entries, s.log.gen = spare, gen
 	s.log.wakeRestore()
 	c.syncMemoryLocked(s)
 	s.mu.Unlock()
 	return taken
+}
+
+// TakeLogEntries implements the original Source interface for callers that
+// still consume rows. The log uses TakeLogBatch, without this expansion.
+func (c *Cache) TakeLogEntries(shard int, gen uint64, spare []inputlog.Entry) []inputlog.Entry {
+	batch := c.TakeLogBatch(shard, gen, inputlog.Batch{})
+	entries := spare[:0]
+	for i, p := range batch.Points {
+		entries = append(entries, batch.Refs[i].Entry(p.Value, p.Timestamp))
+	}
+	return entries
 }
 
 // LogLowWater implements inputlog.Source.
@@ -203,17 +270,6 @@ func (c *Cache) LogLowWater() uint64 {
 	return low
 }
 
-// loggedPoints returns the points of an item the input log tracks, cached or
-// in flight. Called under the shard lock: a cached item holds its points
-// compact, an in-flight batch is only read by the persister, and requeue
-// changes it under this lock.
-func (shard *Shard) loggedPoints(p *points.Points) ([]points.Point, *inputlog.StreamRef) {
-	if values := shard.items.get(p.Metric); values != nil && &values.Points == p {
-		return values.compact.appendDecoded(nil), &values.log
-	}
-	return p.Data, nil
-}
-
 // RelogBefore implements inputlog.Source.
 func (c *Cache) RelogBefore(gen uint64, budget int) int {
 	n := 0
@@ -222,7 +278,7 @@ func (c *Cache) RelogBefore(gen uint64, budget int) int {
 			break
 		}
 		shard.mu.Lock()
-		n += shard.log.relog(gen, budget-n, shard.loggedPoints)
+		n += shard.log.relog(gen, budget-n, &shard.items)
 		c.syncMemoryLocked(shard)
 		shard.mu.Unlock()
 	}

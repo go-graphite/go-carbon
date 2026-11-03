@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/helper"
-	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/tags"
 	"github.com/greatroar/blobloom"
@@ -103,51 +102,6 @@ type indexFilter struct {
 	*blobloom.SyncFilter
 	generation uint64
 	capacity   uint64
-}
-
-// item holds a metric's queued points. While in Shard.items they are
-// compact and Data is nil; popping decodes them into Data. &item.Points
-// identifies the batch to notConfirmed, firstArrival and pending recovery,
-// from insertion until it is confirmed.
-type item struct {
-	streamGeneration uint64 // assigned lazily under the owning shard lock
-	points.Points
-	compact compactPoints
-	// log names the item for the input log, which keeps its stream id
-	// there; the cache does not touch it after creation.
-	log inputlog.StreamRef
-	// spread is the metric's share of the writeout spread (see
-	// SetWriteoutSpread), fixed at creation so batching checks need no hash.
-	spread uint16
-	// sparse marks an item whose metric last wrote a point at least
-	// writeout-max-delay before this item's first (see
-	// SetWriteoutSparseSpread).
-	sparse bool
-	// startup holds the first batching window to its phase even at the point
-	// threshold. It uses existing padding; ordinary arrivals do no extra work.
-	startup bool
-	// slot locates the metric in its shard's sparseLast table.
-	slot            uint32
-	firstArrival    time.Time
-	throttleState   any
-	indexGeneration uint64
-}
-
-func newItem(metric string, capacity int) *item {
-	h := writeoutHash(metric)
-	it := &item{Points: points.Points{Metric: metric}, compact: compactPoints{buf: make([]byte, 0, capacity)}, spread: uint16(h >> 48), slot: sparseSlot(h)}
-	it.log.Metric = metric
-	return it
-}
-
-func (it *item) count() int { return it.compact.n }
-
-// decode moves the queued points into Data, which callers may then own.
-// Called with the item unreachable from the shard, or with its shard locked.
-func (it *item) decode() *points.Points {
-	it.Data = it.compact.appendDecoded(nil)
-	it.compact = compactPoints{}
-	return &it.Points
 }
 
 // A "thread" safe string to anything map.
@@ -463,14 +417,14 @@ func (c *Cache) Requeue(p *points.Points) {
 		if other.IsZero() || (!first.IsZero() && other.Before(first)) {
 			first = other
 		}
-		shard.log.merge(&values.Points, &current.Points)
+		shard.log.mergeItem(values, current)
 	}
 	if r != nil {
 		r.moved(p, &values.Points)
 	}
 	values.firstArrival = first
-	shard.log.merge(&values.Points, p)
-	shard.log.track(&values.Points)
+	shard.log.mergeFlight(values, p)
+	shard.log.trackItem(values)
 	shard.items.set(p.Metric, values)
 	c.syncMemoryLocked(shard)
 	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
@@ -645,13 +599,13 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 	if c.overflows(s, 1) {
 		return
 	}
-	capacity, logCapacity := cap(values.compact.buf), cap(shard.log.entries)
+	capacity, logCapacity := cap(values.compact.buf), shard.log.stagingBytes()
 	values.compact.append(value, timestamp)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 	if shard.log.first != nil {
 		shard.log.record(&values.log, value, timestamp)
 	}
-	if cap(values.compact.buf) != capacity || cap(shard.log.entries) != logCapacity {
+	if cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, 1, true, false)
@@ -796,7 +750,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 	values.throttleState = throttleState
-	capacity, logCapacity := cap(values.compact.buf), cap(shard.log.entries)
+	capacity, logCapacity := cap(values.compact.buf), shard.log.stagingBytes()
 	values.compact.appendPoints(p.Data)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 
@@ -807,7 +761,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 	if shard.log.first != nil {
 		if !exists {
-			shard.log.track(&values.Points)
+			shard.log.trackItem(values)
 		}
 		// Recovered points keep their own durable source until persisted.
 		if !recovered {
@@ -815,7 +769,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 
-	if !exists || cap(values.compact.buf) != capacity || cap(shard.log.entries) != logCapacity {
+	if !exists || cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
@@ -878,7 +832,7 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	if exists {
 		shard.items.remove(key)
 		values.firstArrival = time.Time{}
-		shard.log.untrack(&values.Points)
+		shard.log.untrackItem(values)
 		shard.notePopped(len(values.compact.buf))
 		s := c.settings.Load().(*cacheSettings)
 		shard.noteWritten(values, s)
@@ -912,6 +866,8 @@ func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 		s := c.settings.Load().(*cacheSettings)
 		shard.noteWritten(values, s)
 		c.addSizeLocked(shard, -int64(values.count()), s.sizeSlack)
+		// Tracking follows the batch while a replacement item may be queued.
+		shard.log.pop(values)
 		// Get reads in-flight Data under this lock.
 		p = values.decode()
 		if !values.firstArrival.IsZero() {

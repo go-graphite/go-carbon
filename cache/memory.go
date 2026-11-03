@@ -5,7 +5,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -22,10 +21,10 @@ func flightMemory(p *points.Points) int64 {
 // are not known here. Names shared by an in-flight and queued batch may overlap.
 func (s *Shard) memoryBytes() int64 {
 	return int64(unsafe.Sizeof(Shard{})) + s.items.bytes + s.inFlightBytes +
-		int64(cap(s.items.slots))*int64(unsafe.Sizeof(itemSlot{})) +
+		int64(cap(s.items.slots))*int64(unsafe.Sizeof(itemSlot{})) + int64(cap(s.items.control)) +
 		int64(cap(s.notConfirmed))*8 + int64(cap(s.sparseLast))*4 +
 		int64(cap(s.claimData))*int64(unsafe.Sizeof(points.Point{})) +
-		int64(cap(s.log.entries))*int64(unsafe.Sizeof(inputlog.Entry{})) +
+		s.log.stagingBytes() +
 		int64(len(s.log.first)+len(s.log.items)+len(s.adds))*48 + int64(len(s.firstArrival))*64
 }
 

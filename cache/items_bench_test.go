@@ -17,7 +17,7 @@ func BenchmarkItemMapResident(b *testing.B) {
 		mask := len(shard.items.slots) - 1
 		for i, slot := range shard.items.slots {
 			if slot.item != nil {
-				probes += ((i - (int(slot.hash>>shardBits) & mask)) & mask) + 1
+				probes += ((i - (int(slot.item.hash>>shardBits) & mask)) & mask) + 1
 				nameBytes += len(slot.item.Metric)
 			}
 		}

@@ -191,24 +191,26 @@ type Log struct {
 	nextSeq   uint64
 
 	// Owned by the cycle goroutine after Start.
-	src       Source
-	shardsPer int
-	gen       uint64
-	active    *segment
-	live      []*segment // oldest first; active is last
-	spares    []string
-	ticks     []tick // first frame of every cycle that wrote, oldest first
-	lowWaters []sample
-	durable   uint64 // low-water old enough for TruncateLag
-	spare     [][]Entry
-	parts     [partitions]partitionBuffer
-	workers   []workerBuffer
-	steady    int64 // bytes of the last cycle that did not start a segment
-	wbuf      []byte
-	wseg      *segment
-	woff      int64
-	dirty     []*segment
-	enc       *zstd.Encoder
+	src          Source
+	shardsPer    int
+	gen          uint64
+	active       *segment
+	live         []*segment // oldest first; active is last
+	spares       []string
+	ticks        []tick // first frame of every cycle that wrote, oldest first
+	lowWaters    []sample
+	durable      uint64 // low-water old enough for TruncateLag
+	spare        [][]Entry
+	batchSource  BatchSource
+	spareBatches []Batch
+	parts        [partitions]partitionBuffer
+	workers      []workerBuffer
+	steady       int64 // bytes of the last cycle that did not start a segment
+	wbuf         []byte
+	wseg         *segment
+	woff         int64
+	dirty        []*segment
+	enc          *zstd.Encoder
 
 	syncs   chan chan error
 	copies  chan copyRequest
@@ -463,7 +465,12 @@ func (l *Log) NeedsReplay() bool { return len(l.pending) > 0 }
 func (l *Log) Start(src Source, shards int) {
 	l.src = src
 	l.shardsPer = max(shards/partitions, 1)
-	l.spare = make([][]Entry, l.shardsPer*partitions)
+	if source, ok := src.(BatchSource); ok {
+		l.batchSource = source
+		l.spareBatches = make([]Batch, l.shardsPer*partitions)
+	} else {
+		l.spare = make([][]Entry, l.shardsPer*partitions)
+	}
 	l.workers = make([]workerBuffer, l.opts.Workers)
 	l.enc, _ = zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest),
 		zstd.WithEncoderConcurrency(l.opts.Workers), zstd.WithEncoderCRC(false))
@@ -653,20 +660,31 @@ func (l *Log) encodePartition(p int, gen, seq uint64, w *workerBuffer) int {
 	total := 0
 	for shard := p * l.shardsPer; shard < (p+1)*l.shardsPer; shard++ {
 		at := time.Now()
-		entries := l.src.TakeLogEntries(shard, gen+1, l.spare[shard])
-		collect += time.Since(at)
-		for _, e := range entries {
-			part.enc.add(&w.streamScratch, e)
+		if l.batchSource != nil {
+			batch := l.batchSource.TakeLogBatch(shard, gen+1, l.spareBatches[shard])
+			collect += time.Since(at)
+			for i, point := range batch.Points {
+				part.enc.add(&w.streamScratch, batch.Refs[i].Entry(point.Value, point.Timestamp))
+			}
+			total += len(batch.Points)
+			// Release popped items; the segment dictionary retains only names.
+			clear(batch.Refs)
+			batch.Refs, batch.Points = batch.Refs[:0], batch.Points[:0]
+			l.spareBatches[shard] = batch
+		} else {
+			entries := l.src.TakeLogEntries(shard, gen+1, l.spare[shard])
+			collect += time.Since(at)
+			for _, e := range entries {
+				part.enc.add(&w.streamScratch, e)
+			}
+			total += len(entries)
+			clear(entries)
+			l.spare[shard] = entries[:0]
 		}
 		// A segment's first cycle defines every name: bound their bytes too.
 		if len(w.rows) >= maxSortRows || len(w.names) >= 2*maxFrameRaw {
 			w.raw = part.enc.flush(&w.streamScratch, w.raw, emit)
 		}
-		total += len(entries)
-		// Drop the names so a popped item is not retained by its log record.
-		// The segment's dictionary keeps them until the next segment.
-		clear(entries)
-		l.spare[shard] = entries[:0]
 	}
 	w.raw = part.enc.flush(&w.streamScratch, w.raw, emit)
 	return total
