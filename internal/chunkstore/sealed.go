@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"hash/crc32"
 	"math"
+	"math/bits"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
@@ -43,7 +44,8 @@ func EncodeSealedPoints(points []Point, step int) ([]byte, error) {
 		return nil, errInvalidChunk
 	}
 	flags := byte(sealedImplicit)
-	integer := true
+	integer, linear := true, true
+	var valueStep int64
 	for i, p := range points {
 		if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || i > 0 && p.Timestamp <= points[i-1].Timestamp {
 			return nil, errInvalidChunk
@@ -54,21 +56,63 @@ func EncodeSealedPoints(points []Point, step int) ([]byte, error) {
 		if !(p.Value >= -float64(exactIntegerLimit) && p.Value <= float64(exactIntegerLimit)) || math.Float64bits(float64(int64(p.Value))) != math.Float64bits(p.Value) {
 			integer = false
 		}
+		if integer && i == 1 {
+			valueStep = int64(p.Value) - int64(points[0].Value)
+		} else if i > 1 && integer && linear && int64(p.Value)-int64(points[i-1].Value) != valueStep {
+			linear = false
+		}
 	}
-	body := make([]byte, 0, len(points)*9)
+	// Exponent zero reuses the existing decimal modes without rounding. The
+	// integer preflight excludes -0, nonfinite values and inexact conversions.
+	// For very short blocks the ordinary delta representation can be smaller.
+	run := integer && linear && len(points) >= 4
+	capacity := len(points) * 9
+	if run {
+		capacity = 2 + 2*binary.MaxVarintLen64
+		if flags&sealedImplicit == 0 {
+			capacity += len(points) - 1
+		}
+	}
+	body := make([]byte, 0, capacity)
 	if flags&sealedImplicit == 0 {
 		for i := 1; i < len(points); i++ {
 			body = binary.AppendUvarint(body, uint64(points[i].Timestamp-points[i-1].Timestamp))
 		}
 	}
+	if run {
+		body = binary.AppendVarint(body, 0) // exact integer exponent
+		mode := byte(decimalLinear)
+		if valueStep == 0 {
+			mode = decimalConstant
+		}
+		body = append(body, mode)
+		body = binary.AppendVarint(body, int64(points[0].Value))
+		if mode == decimalLinear {
+			body = binary.AppendVarint(body, valueStep)
+		}
+		return encodeSealedBody(len(points), points[0].Timestamp, step, flags|sealedDecimal, body), nil
+	}
 	timeEnd := len(body)
+	tryBoth := integer
+	if integer && len(points) >= 256 {
+		useDoD, ambiguous := sealedDeltaChoice(points)
+		tryBoth = ambiguous
+		if useDoD {
+			flags |= sealedDoD
+		}
+	}
 	if integer {
 		flags |= sealedInteger
-		var previous int64
+		var previous, previousDelta int64
 		for _, p := range points {
 			value := int64(p.Value)
-			body = binary.AppendVarint(body, value-previous)
-			previous = value
+			delta := value - previous
+			residual := delta
+			if flags&sealedDoD != 0 {
+				residual -= previousDelta
+			}
+			body = binary.AppendVarint(body, residual)
+			previous, previousDelta = value, delta
 		}
 	} else {
 		for plane := uint(0); plane < 8; plane++ {
@@ -81,7 +125,7 @@ func EncodeSealedPoints(points []Point, step int) ([]byte, error) {
 		return encodeSealedBody(len(points), points[0].Timestamp, step, flags, body)
 	}
 	best := encode(flags, body)
-	if integer {
+	if tryBoth {
 		dod := append([]byte(nil), body[:timeEnd]...)
 		var previous, delta int64
 		for _, p := range points {
@@ -95,6 +139,34 @@ func EncodeSealedPoints(points []Point, step int) ([]byte, error) {
 		}
 	}
 	return best, nil
+}
+
+// sealedDeltaChoice estimates varint bytes without constructing either stream.
+// A close estimate says little about Zstd's preference (notably for smooth
+// gauges), so retain the compressed-size comparison within one byte per 128
+// rows, with an eight-byte allowance for predictor startup. Small blocks bypass
+// this scan entirely. points have already passed the exact-integer preflight.
+func sealedDeltaChoice(points []Point) (useDoD, ambiguous bool) {
+	var previous, previousDelta int64
+	var deltaBytes, dodBytes int
+	for _, p := range points {
+		value := int64(p.Value)
+		delta := value - previous
+		deltaBytes += sealedVarintLen(delta)
+		dodBytes += sealedVarintLen(delta - previousDelta)
+		previous, previousDelta = value, delta
+	}
+	difference := deltaBytes - dodBytes
+	margin := max(8, len(points)>>7)
+	if difference >= -margin && difference <= margin {
+		return false, true
+	}
+	return difference > 0, false
+}
+
+func sealedVarintLen(v int64) int {
+	zigzag := uint64(v)<<1 ^ uint64(v>>63)
+	return max(1, (bits.Len64(zigzag)+6)/7)
 }
 
 func encodeSealedBody(count int, first int64, step int, flags byte, body []byte) []byte {
@@ -123,6 +195,11 @@ func EncodeSealedPointsDecimal(points []Point, step int) ([]byte, error) {
 	exact, err := EncodeSealedPoints(points, step)
 	if err != nil {
 		return nil, err
+	}
+	// Exact integer runs already use the exponent-zero decimal representation.
+	// Rebuilding the same mantissas and streams cannot make them smaller.
+	if exact[1]&sealedDecimal != 0 {
+		return exact, nil
 	}
 	exponent := 309
 	for _, p := range points {
