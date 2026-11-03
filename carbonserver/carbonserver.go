@@ -104,6 +104,9 @@ type metricStruct struct {
 	QueryCacheStoredBytes                uint64
 	QueryCacheHit                        uint64
 	QueryCacheMiss                       uint64
+	RangeCacheHit                        uint64
+	RangeCacheMiss                       uint64
+	RangeCacheValues                     uint64
 	FindCacheHit                         uint64
 	FindCacheMiss                        uint64
 	findMetricsFoundWithoutResponseCache uint64
@@ -311,6 +314,7 @@ type CarbonserverListener struct {
 
 	queryCacheEnabled          bool
 	queryCacheCanonicalKeys    atomic.Bool
+	queryRangeCache            atomic.Pointer[renderRangeCache]
 	streamingQueryCacheEnabled bool
 	queryCacheSizeMB           int
 	queryCacheGzip             bool
@@ -2262,6 +2266,9 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 
 	sender("query_cache_hit", &listener.metrics.QueryCacheHit, send)
 	sender("query_cache_miss", &listener.metrics.QueryCacheMiss, send)
+	sender("range_cache_hit", &listener.metrics.RangeCacheHit, send)
+	sender("range_cache_miss", &listener.metrics.RangeCacheMiss, send)
+	sender("range_cache_values", &listener.metrics.RangeCacheValues, send)
 
 	sender("find_cache_hit", &listener.metrics.FindCacheHit, send)
 	sender("find_cache_miss", &listener.metrics.FindCacheMiss, send)

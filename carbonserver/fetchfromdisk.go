@@ -170,7 +170,7 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 func (listener *CarbonserverListener) fetchFromMetricStore(metricStore *store.Store, metric string, fromTime, untilTime int32) (*metricFromDisk, error) {
 	started := time.Now()
-	series, err := metricStore.Fetch(context.Background(), metric, int(fromTime), int(untilTime))
+	series, err := listener.fetchMetricStoreSeries(context.Background(), metricStore, metric, int(fromTime), int(untilTime))
 	// Cache waits have their own metric, as in the CWhisper path above.
 	diskWait := time.Since(started)
 	if errors.Is(err, store.ErrNotFound) {

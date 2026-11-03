@@ -1150,6 +1150,9 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 	carbonserver.SetWriteTimeout(conf.Carbonserver.WriteTimeout.Value())
 	carbonserver.SetQueryCacheEnabled(conf.Carbonserver.QueryCacheEnabled)
 	carbonserver.SetQueryCacheCanonicalKeys(conf.Carbonserver.QueryCacheCanonicalKeys)
+	if err := carbonserver.SetQueryRangeCache(conf.Carbonserver.QueryRangeCacheEnabled, conf.Carbonserver.QueryRangeCacheSizeMB, conf.Carbonserver.QueryRangeCacheMutable.Value()); err != nil {
+		return nil, err
+	}
 	carbonserver.SetQueryCacheSizeMB(conf.Carbonserver.QueryCacheSizeMB)
 	if err := carbonserver.SetQueryCacheCompression(conf.Carbonserver.QueryCacheCompression); err != nil {
 		return nil, err

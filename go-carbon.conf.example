@@ -894,6 +894,13 @@ query-cache-enabled = true
 # the series order of the request that filled it. Off preserves legacy ordering.
 # Reloadable with SIGHUP. Existing requests finish under their sampled key policy.
 query-cache-canonical-keys = false
+# Reuse historical per-series values across moving windows in the shared store.
+# Only the finest archive is eligible; every hit validates its store revision.
+# Live cache points are overlaid after reuse. Retained-entry budget (not RSS).
+query-range-cache-enabled = false
+query-range-cache-size-mb = 64
+# Exclude recent slots, including the writeout delay and expected lateness.
+query-range-cache-mutable-window = "30m"
 # Enable carbonV2 gRPC streaming render cache, it will cache the result for 1 minute
 streaming-query-cache-enabled = false
 # Maximum size in megabytes, 0 for unlimited
