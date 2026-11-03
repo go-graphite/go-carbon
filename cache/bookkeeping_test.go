@@ -166,18 +166,18 @@ func TestBookkeepingLogDrainLimitsAndLoss(t *testing.T) {
 	default:
 		t.Fatal("drain did not release restore admission")
 	}
-	if len(batch.Points) != maxShardLogEntries || len(batch.Refs) != len(batch.Points) {
+	if batch.Len() != maxShardLogEntries {
 		t.Fatal("column lengths or live drain limit changed")
 	}
 	// Popping and reusing the name must not alter the already drained batch.
 	c.Pop(name)
 	c.AddPoint([]byte(name), 42, math.MinInt64)
-	for i, p := range batch.Points {
-		if batch.Refs[i].Metric != name || math.Float64bits(p.Value) != uint64(i) || p.Timestamp != int64(i)-17 {
+	for i, p := range batch.Entries(nil) {
+		if p.Metric() != name || math.Float64bits(p.Value) != uint64(i) || p.Timestamp != int64(i)-17 {
 			t.Fatalf("drained point %d changed", i)
 		}
 	}
-	if len(sh.log.entries.Points) != 1 || c.LogDropped() != 7 || sh.log.restoreSpace(maxShardRestoredLogEntries-1) != nil || sh.log.restoreSpace(maxShardRestoredLogEntries) == nil {
+	if sh.log.entries.Len() != 1 || c.LogDropped() != 7 || sh.log.restoreSpace(maxShardRestoredLogEntries-1) != nil || sh.log.restoreSpace(maxShardRestoredLogEntries) == nil {
 		t.Fatal("drain changed loss accounting or restore limit")
 	}
 }
@@ -201,7 +201,7 @@ func TestBookkeepingRelogBudget(t *testing.T) {
 	if l.items[0] != 2 || l.items[8] != 1 || l.lowWater() != 0 {
 		t.Fatal("skipped batches lost their old generation")
 	}
-	if got := l.relog(4, 5, &m); got != 5 || l.lowWater() != 8 || len(l.entries.Points) != 12 {
+	if got := l.relog(4, 5, &m); got != 5 || l.lowWater() != 8 || l.entries.Len() != 12 {
 		t.Fatalf("remaining batches did not fit budget: %d", got)
 	}
 }
@@ -236,19 +236,19 @@ func TestBookkeepingConcurrentReadersAndDrainer(t *testing.T) {
 		var spare inputlog.Batch
 		for gen := uint64(1); ; gen++ {
 			batch := c.TakeLogBatch(index, gen, spare)
-			for i, p := range batch.Points {
-				if batch.Refs[i].Metric != name || p.Value != float64(p.Timestamp) {
+			for _, p := range batch.Entries(nil) {
+				if p.Metric() != name || p.Value != float64(p.Timestamp) {
 					t.Error("drainer observed changed point")
 					return
 				}
 			}
-			recorded += len(batch.Points)
+			recorded += batch.Len()
 			clear(batch.Refs)
 			spare = batch
 			select {
 			case <-done:
 				batch = c.TakeLogBatch(index, gen+1, inputlog.Batch{})
-				recorded += len(batch.Points)
+				recorded += batch.Len()
 				return
 			default:
 			}

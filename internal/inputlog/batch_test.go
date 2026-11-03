@@ -15,8 +15,8 @@ import (
 // two-column path must produce exactly its bytes, including after segment
 // changes and replacement references for the same name.
 func TestBatchMatchesEntryEncoding(t *testing.T) {
-	var legacy, columnar streamEncoder
-	var a, b streamScratch
+	var legacy, columnar, packed streamEncoder
+	var a, b, c streamScratch
 	refs := make([]*StreamRef, 128)
 	for i := range refs {
 		refs[i] = NewStreamRef(fmt.Sprintf("batch.metric.%d", i))
@@ -25,8 +25,9 @@ func TestBatchMatchesEntryEncoding(t *testing.T) {
 		seq := uint64(cycle/3 + 1)
 		legacy.begin(seq)
 		columnar.begin(seq)
+		packed.begin(seq)
 		var entries []Entry
-		var batch Batch
+		var batch, compact Batch
 		for i := range 4096 {
 			ref := refs[(i*17+cycle)%len(refs)]
 			if i%31 == 0 {
@@ -37,6 +38,7 @@ func TestBatchMatchesEntryEncoding(t *testing.T) {
 			entries = append(entries, ref.Entry(value, ts))
 			batch.Refs = append(batch.Refs, ref)
 			batch.Points = append(batch.Points, points.Point{Value: value, Timestamp: ts})
+			compact.Append(ref, value, ts)
 		}
 		for _, e := range entries {
 			legacy.add(&a, e)
@@ -45,7 +47,8 @@ func TestBatchMatchesEntryEncoding(t *testing.T) {
 		for i, p := range batch.Points {
 			columnar.add(&b, batch.Refs[i].Entry(p.Value, p.Timestamp))
 		}
-		var oldFrames, newFrames [][]byte
+		packed.addBatch(&c, &compact)
+		var oldFrames, newFrames, packedFrames [][]byte
 		legacy.flush(&a, nil, func(raw []byte, _ int) []byte {
 			oldFrames = append(oldFrames, bytes.Clone(raw))
 			return raw
@@ -54,6 +57,10 @@ func TestBatchMatchesEntryEncoding(t *testing.T) {
 			newFrames = append(newFrames, bytes.Clone(raw))
 			return raw
 		})
+		packed.flush(&c, nil, func(raw []byte, _ int) []byte { packedFrames = append(packedFrames, bytes.Clone(raw)); return raw })
+		if !reflect.DeepEqual(oldFrames, packedFrames) {
+			t.Fatalf("cycle %d packed staging changed durable bytes", cycle)
+		}
 		if !reflect.DeepEqual(oldFrames, newFrames) {
 			t.Fatalf("cycle %d changed durable bytes", cycle)
 		}
@@ -116,5 +123,40 @@ func TestBatchSourceReplayAndSpareOwnership(t *testing.T) {
 	equalRecorded(t, got, want)
 	if stats.Corrupt != 0 || stats.Points != 4000 {
 		t.Fatalf("replay stats %+v", stats)
+	}
+}
+
+// Run lengths, all packed field widths, wraparound timestamps and all float
+// bits must survive spare reuse. The unpacker uses padded, bounded loads.
+func TestPackedBatchRoundTripAndReuse(t *testing.T) {
+	var b Batch
+	refs := []*StreamRef{NewStreamRef("a"), NewStreamRef("b")}
+	for cycle := 0; cycle < 4; cycle++ {
+		var want []Entry
+		for i := 0; i < 4096; i++ {
+			ref := refs[(i/17)%2]
+			v := math.Float64frombits(uint64(i) * 0x9e3779b97f4a7c15)
+			ts := int64(uint64(i) * 0xd6e8feb86659fd93)
+			if i%3 == 0 {
+				v = math.Copysign(0, float64(cycle%2*2-1))
+				ts = 0
+			}
+			b.Append(ref, v, ts)
+			want = append(want, ref.Entry(v, ts))
+		}
+		got := b.Entries(nil)
+		if b.Len() != len(want) || len(got) != len(want) {
+			t.Fatal("point count")
+		}
+		for i, e := range got {
+			w := want[i]
+			if e.Ref != w.Ref || math.Float64bits(e.Value) != math.Float64bits(w.Value) || e.Timestamp != w.Timestamp {
+				t.Fatalf("point %d changed", i)
+			}
+		}
+		b.Reset()
+		if b.Len() != 0 || len(b.Ends) != 0 || len(b.Packed) != 0 || slices.ContainsFunc(b.Refs[:cap(b.Refs)], func(r *StreamRef) bool { return r != nil }) {
+			t.Fatal("reset retained a point or reference")
+		}
 	}
 }

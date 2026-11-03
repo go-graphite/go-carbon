@@ -663,13 +663,9 @@ func (l *Log) encodePartition(p int, gen, seq uint64, w *workerBuffer) int {
 		if l.batchSource != nil {
 			batch := l.batchSource.TakeLogBatch(shard, gen+1, l.spareBatches[shard])
 			collect += time.Since(at)
-			for i, point := range batch.Points {
-				part.enc.add(&w.streamScratch, batch.Refs[i].Entry(point.Value, point.Timestamp))
-			}
-			total += len(batch.Points)
-			// Release popped items; the segment dictionary retains only names.
-			clear(batch.Refs)
-			batch.Refs, batch.Points = batch.Refs[:0], batch.Points[:0]
+			part.enc.addBatch(&w.streamScratch, &batch)
+			total += batch.Len()
+			batch.Reset()
 			l.spareBatches[shard] = batch
 		} else {
 			entries := l.src.TakeLogEntries(shard, gen+1, l.spare[shard])

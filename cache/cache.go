@@ -599,13 +599,14 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 	if c.overflows(s, 1) {
 		return
 	}
-	capacity, logCapacity := cap(values.compact.buf), shard.log.stagingBytes()
+	capacity := cap(values.compact.buf)
+	logGrew := false
 	values.compact.append(value, timestamp)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 	if shard.log.first != nil {
-		shard.log.record(&values.log, value, timestamp)
+		logGrew = shard.log.record(&values.log, value, timestamp)
 	}
-	if cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
+	if cap(values.compact.buf) != capacity || logGrew {
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, 1, true, false)

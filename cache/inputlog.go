@@ -12,8 +12,8 @@ import (
 // logged. At 4.5M points/s a one-second cycle records about 4400 per shard,
 // but cycles stretch to seconds while shard locks are contended, and relays
 // then flush their backlog at several times the usual rate: 1<<15 dropped
-// up to 27M points per burst. The reference and point columns use 24 bytes
-// per entry, so a full buffer across all shards holds 3 GiB before slack.
+// up to 27M points per burst. Staging packs deltas/XORs and consecutive reference runs; the admission
+// limit remains a point count, independent of compression ratio.
 const maxShardLogEntries = 1 << 17
 
 // Restore can run much faster than the log writer. Leave half the bounded
@@ -38,13 +38,13 @@ type shardLog struct {
 
 // stagingBytes includes capacity slack in both columns.
 func (l *shardLog) stagingBytes() int64 {
-	return int64(cap(l.entries.Refs))*8 + int64(cap(l.entries.Points))*16
+	return l.entries.Bytes()
 }
 
 // restoreSpace is called under the shard lock, before adding restored data.
 // Live input keeps its non-blocking admission policy.
 func (l *shardLog) restoreSpace(n int) <-chan struct{} {
-	if l.first == nil || len(l.entries.Points)+n <= maxShardRestoredLogEntries {
+	if l.first == nil || l.entries.Len()+n <= maxShardRestoredLogEntries {
 		return nil
 	}
 	if l.waitDrained == nil {
@@ -60,19 +60,18 @@ func (l *shardLog) wakeRestore() {
 	}
 }
 
-func (l *shardLog) record(ref *inputlog.StreamRef, value float64, timestamp int64) {
-	if len(l.entries.Points) >= maxShardLogEntries {
+func (l *shardLog) record(ref *inputlog.StreamRef, value float64, timestamp int64) bool {
+	if l.entries.Len() >= maxShardLogEntries {
 		l.dropped++
-		return
+		return false
 	}
-	l.entries.Refs = append(l.entries.Refs, ref)
-	l.entries.Points = append(l.entries.Points, points.Point{Value: value, Timestamp: timestamp})
+	return l.entries.Append(ref, value, timestamp)
 }
 
 func (l *shardLog) recordPoints(ref *inputlog.StreamRef, data []points.Point) {
-	for _, point := range data {
-		l.record(ref, point.Value, point.Timestamp)
-	}
+	n := min(len(data), maxShardLogEntries-l.entries.Len())
+	l.entries.AppendPoints(ref, data[:n])
+	l.dropped += uint64(len(data) - n)
 }
 
 // track starts tracking a new item at the current generation.
@@ -234,13 +233,13 @@ func (c *Cache) DisableInputLog() {
 	}
 }
 
-// TakeLogBatch implements inputlog.BatchSource. Swapping both columns under
-// the shard lock gives the log immutable rows while ingestion continues.
+// TakeLogBatch implements inputlog.BatchSource. Swapping staging buffers under
+// the shard lock gives the log immutable points while ingestion continues.
 func (c *Cache) TakeLogBatch(shard int, gen uint64, spare inputlog.Batch) inputlog.Batch {
 	s := c.data[shard]
 	s.mu.Lock()
 	taken := s.log.entries
-	spare.Refs, spare.Points = spare.Refs[:0], spare.Points[:0]
+	spare.Reset()
 	s.log.entries, s.log.gen = spare, gen
 	s.log.wakeRestore()
 	c.syncMemoryLocked(s)
@@ -252,11 +251,7 @@ func (c *Cache) TakeLogBatch(shard int, gen uint64, spare inputlog.Batch) inputl
 // still consume rows. The log uses TakeLogBatch, without this expansion.
 func (c *Cache) TakeLogEntries(shard int, gen uint64, spare []inputlog.Entry) []inputlog.Entry {
 	batch := c.TakeLogBatch(shard, gen, inputlog.Batch{})
-	entries := spare[:0]
-	for i, p := range batch.Points {
-		entries = append(entries, batch.Refs[i].Entry(p.Value, p.Timestamp))
-	}
-	return entries
+	return batch.Entries(spare[:0])
 }
 
 // LogLowWater implements inputlog.Source.

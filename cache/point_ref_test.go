@@ -55,12 +55,13 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 		if !reflect.DeepEqual(arrivals(a), arrivals(b)) {
 			t.Fatal("in-flight arrivals differ")
 		}
-		if a.log.gen != b.log.gen || a.log.dropped != b.log.dropped || !reflect.DeepEqual(a.log.items, b.log.items) || len(a.log.entries.Points) != len(b.log.entries.Points) {
+		if a.log.gen != b.log.gen || a.log.dropped != b.log.dropped || !reflect.DeepEqual(a.log.items, b.log.items) || a.log.entries.Len() != b.log.entries.Len() {
 			t.Fatal("input-log accounting differs")
 		}
-		for j, x := range a.log.entries.Points {
-			y := b.log.entries.Points[j]
-			if a.log.entries.Refs[j].Metric != b.log.entries.Refs[j].Metric || math.Float64bits(x.Value) != math.Float64bits(y.Value) || x.Timestamp != y.Timestamp {
+		otherEntries := b.log.entries.Entries(nil)
+		for j, x := range a.log.entries.Entries(nil) {
+			y := otherEntries[j]
+			if x.Metric() != y.Metric() || math.Float64bits(x.Value) != math.Float64bits(y.Value) || x.Timestamp != y.Timestamp {
 				t.Fatal("input-log point differs")
 			}
 		}
