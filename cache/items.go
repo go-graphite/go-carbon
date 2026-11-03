@@ -95,6 +95,11 @@ func (sh *Shard) setItemThrottle(it *item, state any) bool {
 	return false
 }
 
+// A modest increase over half-full avoids a capacity doubling around normal
+// occupancy peaks while keeping linear probes short. See the capacity-plan
+// and resident-lookup benchmarks before changing this policy.
+const itemMapLoadNumerator, itemMapLoadDenominator = 5, 8
+
 type itemSlot struct {
 	item *item
 }
@@ -158,9 +163,9 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 		m.control = make([]byte, 8)
 		m.deadlines = nil
 	}
-	if (m.used+1)*2 > len(m.slots) {
+	if (m.used+1)*itemMapLoadDenominator > len(m.slots)*itemMapLoadNumerator {
 		n := len(m.slots)
-		if (m.n+1)*2 > n {
+		if (m.n+1)*itemMapLoadDenominator > n*itemMapLoadNumerator {
 			n *= 2
 		}
 		old := m.slots

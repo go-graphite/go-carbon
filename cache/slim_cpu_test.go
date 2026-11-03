@@ -30,13 +30,24 @@ func bookkeepingCPU(b *testing.B, single bool) {
 	for range b.N {
 		c := New()
 		c.SetMaxSize(0)
+		if os.Getenv("CACHE_CPU_THROTTLE") != "" {
+			c.SetThrottleWithState(func(_ *points.Points, _ bool, state *any) bool {
+				if *state == nil {
+					*state = uint64(1)
+				}
+				return false
+			})
+		}
 		l, _ := startInputLog(b, b.TempDir(), c, inputlog.Options{SyncInterval: time.Hour, SegmentSize: 64 << 20, Workers: 4})
 		var ingest, logCPU, popCPU int64
+		var ingestAllocations, ingestBytes uint64
 		for cycle := 0; cycle < rounds; cycle++ {
 			for i, name := range names {
 				c.AddRecovered(&points.Points{Metric: name, Data: data[i%len(data)][:n-staged]})
 			}
 			runtime.GC()
+			var memBefore, memAfter runtime.MemStats
+			runtime.ReadMemStats(&memBefore)
 			before := compactCPUTime()
 			for i, name := range names {
 				tail := data[i%len(data)][n-staged:]
@@ -49,6 +60,8 @@ func bookkeepingCPU(b *testing.B, single bool) {
 				}
 			}
 			a := compactCPUTime()
+			runtime.ReadMemStats(&memAfter)
+			logStart := compactCPUTime()
 			syncLog(b, l)
 			z := compactCPUTime()
 			for _, name := range names {
@@ -61,7 +74,9 @@ func bookkeepingCPU(b *testing.B, single bool) {
 			end := compactCPUTime()
 			if cycle >= 2 {
 				ingest += a - before
-				logCPU += z - a
+				logCPU += z - logStart
+				ingestAllocations += memAfter.Mallocs - memBefore.Mallocs
+				ingestBytes += memAfter.TotalAlloc - memBefore.TotalAlloc
 				popCPU += end - z
 			}
 		}
@@ -69,6 +84,8 @@ func bookkeepingCPU(b *testing.B, single bool) {
 			b.Fatal("incomplete lifecycle")
 		}
 		l.Close()
+		b.ReportMetric(float64(ingestAllocations)/float64((rounds-2)*metrics*staged), "ingest-allocs/point")
+		b.ReportMetric(float64(ingestBytes)/float64((rounds-2)*metrics*staged), "ingest-alloc-B/point")
 		b.ReportMetric(float64(ingest)/float64((rounds-2)*metrics*staged), "ingest-cpu-ns/point")
 		b.ReportMetric(float64(logCPU)/float64((rounds-2)*metrics*staged), "log-cpu-ns/point")
 		b.ReportMetric(float64(popCPU)/float64((rounds-2)*metrics*n), "pop-cpu-ns/point")
