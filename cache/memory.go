@@ -101,6 +101,20 @@ func (c *Cache) EstimatedBytes() int64 {
 	return n + c.queueMemory()
 }
 
+// PointBytes sums the capacities of queued compact point buffers. Capacity
+// includes spare allocated space, matching EstimatedBytes. Inline codec state
+// (including the partial word), names, item headers and in-flight batches are
+// excluded. It visits shards, not items.
+func (c *Cache) PointBytes() int64 {
+	var n int64
+	for _, shard := range c.data {
+		shard.mu.RLock()
+		n += shard.items.pointBytes
+		shard.mu.RUnlock()
+	}
+	return n
+}
+
 func (c *Cache) bytePressure(s *cacheSettings) bool {
 	return s.maxBytes > 0 && c.stat.bytes.Load()+c.queueMemory() > s.maxBytes/4*3
 }

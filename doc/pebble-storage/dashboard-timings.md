@@ -87,7 +87,8 @@ go-carbon registers client_golang's Go collector with every runtime metric
 | `pebble_memtable_bytes` | Memtables, including queued ones |
 | `pebble_table_cache_entries` | Open table readers (each holds a file descriptor and index state) |
 | `cache_points`, `cache_metrics` | Points and metrics in go-carbon's write cache |
-| `cache_estimated_bytes` | Estimated write-cache memory: 16 B per point plus about 160 B per metric |
+| `cache_estimated_bytes` | Estimated owned write-cache memory: names, items, buffer capacities, indexes, in-flight points, input-log tracking and queue scratch |
+| `cache_point_bytes` | Allocated capacity (`cap`, including spare space) of queued compact point buffers; excludes inline codec state (including the partial word), names, item headers and in-flight batches. Divide by `cache_points` for buffer bytes per queued point. |
 | `store_migration_working_bytes_reserved` | Conversion working memory currently reserved |
 
 ### Pebble compactions and filesystem I/O
@@ -203,7 +204,7 @@ Panels are per host (`sum by (host_name)`).
    "description": "Pebble memtables, including those queued for flush."},
   {"row": "memory", "title": "write cache", "unit": "bytes",
    "exprs": {"estimated bytes": "max by (host_name) (cache_estimated_bytes{SEL})"},
-   "description": "Estimated memory of go-carbon's write cache (16 B per point plus about 160 B per metric). Points and metrics: cache_points, cache_metrics."},
+   "description": "Estimated owned memory of go-carbon's write cache, including names, items, buffer capacities, indexes, in-flight points, input-log tracking and queue scratch. Use cache_point_bytes / cache_points for queued point-buffer bytes per point."},
   {"row": "memory", "title": "open tables", "unit": "short",
    "expr": "max by (host_name) (pebble_table_cache_entries{SEL})",
    "description": "Open Pebble table readers. Fewer than the store's table count means tables are reopened on reads."},

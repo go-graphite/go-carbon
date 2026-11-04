@@ -88,6 +88,9 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 	if _, ok := values["pebble_disk_bytes"]; ok {
 		t.Fatal("store metrics reported without a store")
 	}
+	if _, ok := values["cache_point_bytes"]; ok {
+		t.Fatal("point buffer bytes reported without a cache")
+	}
 	if v, ok := values["store_migration_running"]; !ok || v != 0 {
 		t.Fatalf("migration gauge missing or set: %v %v", v, ok)
 	}
@@ -189,7 +192,7 @@ func TestCollectorReportsPersisterTimingsAndMemory(t *testing.T) {
 	for _, f := range families {
 		found[f.GetName()] = f
 	}
-	for _, name := range []string{"persister_stage_seconds_total", "persister_stage_calls_total", "persister_update_duration_seconds", "persister_update_seconds_max", "cache_points", "cache_metrics", "cache_estimated_bytes"} {
+	for _, name := range []string{"persister_stage_seconds_total", "persister_stage_calls_total", "persister_update_duration_seconds", "persister_update_seconds_max", "cache_points", "cache_metrics", "cache_estimated_bytes", "cache_point_bytes"} {
 		if found[name] == nil {
 			t.Fatalf("%s missing", name)
 		}
@@ -202,6 +205,9 @@ func TestCollectorReportsPersisterTimingsAndMemory(t *testing.T) {
 	}
 	if got := found["cache_estimated_bytes"].GetMetric()[0].GetGauge().GetValue(); got != float64(c.EstimatedBytes()) {
 		t.Fatalf("cache_estimated_bytes %v, want %d", got, c.EstimatedBytes())
+	}
+	if got := found["cache_point_bytes"].GetMetric()[0].GetGauge().GetValue(); got == 0 || got != float64(c.PointBytes()) {
+		t.Fatalf("cache_point_bytes %v, want %d", got, c.PointBytes())
 	}
 	if found["persister_update_duration_seconds"].GetMetric()[0].GetHistogram().GetSampleCount() == 0 {
 		t.Fatal("update histogram empty")

@@ -323,6 +323,7 @@ func TestStatefulThrottleHotPathDoesNotAllocate(t *testing.T) {
 	before := cap(it.compact.buf)
 	it.compact.reserve(8192)
 	sh.items.bytes += int64(cap(it.compact.buf) - before)
+	sh.items.pointBytes += int64(cap(it.compact.buf) - before)
 	allocations := testing.AllocsPerRun(1000, func() { c.AddPoint(name, 42, 1) })
 	if allocations != 0 {
 		t.Fatalf("stateful point allocated %.3f objects", allocations)
