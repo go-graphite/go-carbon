@@ -103,8 +103,10 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 	m.archived.Store(20)
 	app.incrementalMigration.Store(m)
 	values = gather(app)
-	for name, want := range map[string]float64{"store_migration_running": 1, "store_migration_converted_total": 5, "store_migration_reclaimed_bytes_total": 120, "store_migration_workers_max": 8, "store_ooo_inventory_ready": 1, "store_ooo_sidecars": 0, "store_ooo_sidecar_points": 0, "store_ooo_sidecar_oldest_timestamp_seconds": 0} {
-		if values[name] != want {
+	for name, want := range map[string]float64{"store_migration_running": 1, "store_migration_converted_total": 5, "store_migration_reclaimed_bytes_total": 120, "store_migration_workers_max": 8, "store_ooo_inventory_ready": 1, "store_ooo_sidecars": 0, "store_ooo_sidecar_points": 0, "store_ooo_sidecar_oldest_timestamp_seconds": 0,
+		"store_cold_pack_resumed_total": 0, "store_cold_pack_checkpoints_total": 0,
+		"store_cold_pack_metrics_visited": 0, "store_cold_pack_persisted_metrics_visited": 0} {
+		if value, ok := values[name]; !ok || value != want {
 			t.Fatalf("%s = %v, want %v", name, values[name], want)
 		}
 	}

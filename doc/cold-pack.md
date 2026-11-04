@@ -105,10 +105,32 @@ transient disk space before old tables are reclaimed. Bounded publication cannot
 place a hard deadline on filesystem syncs or a Pebble write stall that starts
 between admission and commit; monitor the maximum lock metric and read latency.
 
-The cursor is process-local. Restart begins an idempotent sweep again; completed
-ranges are already sealed and are skipped. New or recreated metrics behind the
-cursor are visited on a later sweep. The interval is a pause after the complete
-paged sweep, not after every page.
+The sweep keeps an advisory checkpoint in Pebble's own metadata keyspace at
+`z/cold-pack-cursor`. It stores the metric name, descriptor cursor, completed
+pass count, metrics visited in this pass and any unpack-pass failure. The
+versioned record has a checksum. It is WAL-synced at bounded step boundaries
+no more often than every 30 seconds, with additional checkpoints on pass
+completion, mode/write-window changes and clean stop. Unchanged state is not
+rewritten. Checkpointing runs outside metric stripes and never on the ingestion
+write path. Stores that have never enabled cold packing need no checkpoint writes.
+
+Restart resumes when the saved mode, write window and `CHUNKSTORE` format marker
+match. Changes among off/exact/decimal/unpack, write-window changes, marker
+changes, or missing/corrupt/unknown-version checkpoints start from the beginning.
+Turning off invalidates the prior position even if no worker step runs. Byte/CPU
+budgets, pressure limits and the sweep interval can change without discarding
+progress. Corrupt and unknown-version checkpoints emit a warning.
+
+Syncing a checkpoint also makes all preceding packed-range publications durable,
+including when ordinary writes use periodic WAL sync. A crash may replay work
+since the last checkpoint; a checkpoint cannot get ahead of published ranges.
+Every range remains independently atomic and readable, and repeated work is
+idempotent. The unsaved tail can exceed 30 seconds during a long bounded step or
+pacing/pressure wait. A deleted cursor metric continues at the next catalog key.
+New/recreated metrics and corrections behind the cursor are visited on a later
+sweep. Unpack failures persist across restart; a resumed failed pass cannot
+authorize downgrade. The interval is a pause after the complete paged sweep,
+not after every page; the between-pass timer itself is not persisted.
 
 ## Exact and decimal values
 
@@ -173,6 +195,16 @@ not immediate filesystem reclamation. `pending_metrics` counts the discovered
 page queue, not an estimated full-store backlog. The administrative status API
 also includes the mode, name/descriptor cursor, counters and most recent error.
 Errors are logged with `ERROR`; successful sweeps log cumulative progress.
+`store_cold_pack_resumed_total` counts restored positions in this process and
+resume logs one `INFO` line with mode, metric, descriptor and pass position.
+`store_cold_pack_metrics_visited` counts completed catalog entries in the current
+pass, including restored progress; it resets at the end of a pass or a policy
+change that restarts the cursor. `store_cold_pack_persisted_metrics_visited` shows
+that count at the latest durable checkpoint, and
+`store_cold_pack_checkpoints_total` counts checkpoint writes in this process.
+Completed pass counts survive compatible restarts; other work counters remain
+process-local. Visited counts indicate progress through the catalog, not an
+estimated percentage or the number of metrics with eligible blocks.
 
 Fast oracle tests cover exact/decimal values, corruption and allocation bounds,
 physical mutation paths, atomic failed plans, crash/restart, concurrent ingestion,
