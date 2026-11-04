@@ -215,9 +215,9 @@ func EncodeSealedPointsDecimal(points []Point, step int) ([]byte, error) {
 		exponent = 0
 	}
 	values := make([]int64, len(points))
-	scale := math.Pow10(exponent)
+	scale, divide := decimalScale(exponent)
 	for i, p := range points {
-		m, ok := decimalMantissa(p.Value, scale)
+		m, ok := decimalMantissa(p.Value, scale, divide)
 		if !ok {
 			return exact, nil
 		}

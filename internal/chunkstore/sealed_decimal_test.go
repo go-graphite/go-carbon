@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"math"
+	"strconv"
 	"testing"
 )
 
@@ -92,6 +93,35 @@ func TestSealedDecimalBound(t *testing.T) {
 					}
 				}
 				data[i] ^= 0x80
+			}
+		}
+	}
+}
+
+func TestSealedDecimalShortDecimalsKeepBits(t *testing.T) {
+	for _, digits := range []int{1, 2, 4, 6} {
+		points := make([]Point, 240)
+		for i := range points {
+			v, err := strconv.ParseFloat(strconv.FormatFloat(float64(i*7919%100003)/1000, 'f', digits, 64), 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			points[i] = Point{Timestamp: 1700000000 + int64(i*60), Value: v}
+		}
+		data, err := EncodeSealedPointsDecimal(points, 60)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data[1]&sealedDecimal == 0 {
+			t.Fatalf("%d digits: decimal not chosen", digits)
+		}
+		got, err := DecodeSealedPoints(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, p := range points {
+			if math.Float64bits(p.Value) != math.Float64bits(got[i].Value) {
+				t.Fatalf("%d digits: %v restored as %v", digits, p.Value, got[i].Value)
 			}
 		}
 	}

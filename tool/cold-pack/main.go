@@ -27,8 +27,9 @@ func run() (err error) {
 	source := flag.String("source", "", "original canonical source binding, if incremental")
 	mode := flag.String("mode", "unpack", "exact, decimal or unpack")
 	downgrade := flag.Bool("downgrade", false, "after clean unpack, sync and replace v9 fence with v7")
+	workers := flag.Int("workers", 1, "parallel maintenance workers (1-64)")
 	rate := flag.Int64("bytes-per-second", 1<<20, "maintenance read plus batch byte budget")
-	cpu := flag.Float64("cpu-fraction", .02, "conservative fraction of one worker")
+	cpu := flag.Float64("cpu-fraction", .02, "worker duty fraction (up to workers * fraction cores)")
 	window := flag.Duration("write-window", 24*time.Hour, "keep more recent ranges ordinary")
 	reserve := flag.Uint64("min-free-bytes", 1<<30, "minimum free disk reserve")
 	debt := flag.Uint64("max-compaction-debt", 64<<20, "pause while estimated compaction debt exceeds this")
@@ -44,7 +45,7 @@ func run() (err error) {
 	}
 	defer func() { err = errors.Join(err, db.Close()) }()
 	db.StopBackground()
-	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve, MaxCompactionDebt: *debt}); err != nil {
+	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, Workers: *workers, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve, MaxCompactionDebt: *debt}); err != nil {
 		return err
 	}
 	if err = db.RunColdPack(ctx); err != nil {

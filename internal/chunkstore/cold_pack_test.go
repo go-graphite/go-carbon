@@ -246,7 +246,7 @@ func TestColdPackBackgroundShortStepsAndReload(t *testing.T) {
 }
 
 func TestColdPackOptions(t *testing.T) {
-	for _, o := range []ColdPackOptions{{Mode: "unknown"}, {BytesPerSecond: -1}, {CPUFraction: -.1}, {CPUFraction: 2}, {WriteWindow: -1}, {Interval: time.Nanosecond}} {
+	for _, o := range []ColdPackOptions{{Workers: -1}, {Workers: 65}, {Mode: "unknown"}, {BytesPerSecond: -1}, {CPUFraction: -.1}, {CPUFraction: 2}, {WriteWindow: -1}, {Interval: time.Nanosecond}} {
 		if _, err := NormalizeColdPack(o); err == nil {
 			t.Fatalf("invalid policy accepted: %+v", o)
 		}

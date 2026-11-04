@@ -94,6 +94,7 @@ type whisperConfig struct {
 	StoreIncrementalMigration    bool      `toml:"store-incremental-migration"`
 	StoreMigrationIngest         bool      `toml:"store-migration-ingest"`
 	StoreColdPack                string    `toml:"store-cold-pack"`
+	StoreColdPackWorkers         int       `toml:"store-cold-pack-workers"`
 	StoreColdPackMinFree         uint64    `toml:"store-cold-pack-min-free-bytes"`
 	StoreColdPackRate            int64     `toml:"store-cold-pack-bytes-per-second"`
 	StoreColdPackCPU             float64   `toml:"store-cold-pack-cpu-fraction"`
