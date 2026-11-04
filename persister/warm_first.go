@@ -73,24 +73,28 @@ func (p *Whisper) startWarmFirst() {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	finished := make(chan struct{})
-	// Keep fetching independent of prefetch I/O. One bounded source pump
-	// also drives queue rebuilds while the prefetcher prepares a cold batch.
-	p.Go(func(exit chan bool) {
-		for {
-			name := recv(exit)
-			if name == "" {
-				return
+	// Keep fetching independent of prefetch I/O, with the same concurrency as
+	// ordinary writeout. Get checks eligibility under a cache shard lock: one
+	// source pump would stall every worker behind a single contended shard,
+	// especially once restart ordering gives way to the normal queue order.
+	for range max(1, p.workersCount) {
+		p.Go(func(exit chan bool) {
+			for {
+				name := recv(exit)
+				if name == "" {
+					return
+				}
+				if !p.claimWarmName(name) {
+					continue
+				}
+				select {
+				case raw <- name:
+				case <-exit:
+					return
+				}
 			}
-			if !p.claimWarmName(name) {
-				continue
-			}
-			select {
-			case raw <- name:
-			case <-exit:
-				return
-			}
-		}
-	})
+		})
+	}
 	p.Go(func(exit chan bool) {
 		select {
 		case <-exit:
@@ -179,7 +183,7 @@ func (p *Whisper) startWarmFirst() {
 }
 
 // Reservations are bounded by worker batch slots, the raw/ready/prefetch
-// windows and one source-pump name. They prevent refreshed snapshots from
+// windows and one name per source pump. They prevent refreshed snapshots from
 // spending rate/CPU grants on names already in the pipeline.
 type warmReservations struct {
 	mu    sync.Mutex

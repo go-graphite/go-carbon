@@ -2,10 +2,12 @@ package persister
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -14,7 +16,10 @@ import (
 	whisper "github.com/go-graphite/go-whisper"
 )
 
-var storageClockProcesses = make(chan struct{}, 10)
+var storageClockProcesses = sync.OnceValue(func() chan struct{} {
+	parallel, _ := strconv.Atoi(flag.Lookup("test.parallel").Value.String())
+	return make(chan struct{}, max(1, min(10, parallel)))
+})
 
 // The real persister uses whisper.Now, so independent clock-driven cases need
 // separate processes to run concurrently without changing production clocks.
@@ -26,6 +31,7 @@ func storageClockMatrix(t *testing.T) bool {
 	}
 	t.Parallel()
 	parent := t.Name()
+	processes := storageClockProcesses()
 	// Join concurrent Run calls without occupying a parallel slot per waiter.
 	var cases sync.WaitGroup
 	for _, method := range []whisper.AggregationMethod{whisper.Average, whisper.Sum, whisper.First, whisper.Last, whisper.Min, whisper.Max} {
@@ -33,8 +39,8 @@ func storageClockMatrix(t *testing.T) bool {
 			cases.Add(1)
 			go func() {
 				defer cases.Done()
-				storageClockProcesses <- struct{}{}
-				defer func() { <-storageClockProcesses }()
+				processes <- struct{}{}
+				defer func() { <-processes }()
 				t.Run(fmt.Sprintf("%s/xff%g", method, xff), func(t *testing.T) {
 					parts := strings.Split(t.Name(), "/")
 					for i := range parts {
