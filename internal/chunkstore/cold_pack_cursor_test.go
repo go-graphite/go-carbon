@@ -76,7 +76,7 @@ func cursorTestSteps(t *testing.T, s *Store, n int) bool {
 }
 
 func TestColdPackCheckpointCrashResume(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		strict := vfs.NewStrictMem()
 		codec := &cursorTestCodec{}
 		o := cursorTestOptions(strict, codec)
@@ -120,7 +120,7 @@ func TestColdPackCheckpointCrashResume(t *testing.T) {
 }
 
 func TestColdPackCheckpointPassAcrossRestarts(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		codec := &cursorTestCodec{}
 		o := cursorTestOptions(vfs.NewMem(), codec)
 		s, _ := openTestStore(t, "/store", o)
@@ -160,7 +160,7 @@ func TestColdPackCheckpointPassAcrossRestarts(t *testing.T) {
 }
 
 func TestColdPackCheckpointBackgroundStop(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		codec := &cursorTestCodec{}
 		o := cursorTestOptions(vfs.NewMem(), codec)
 		o.ColdPack.Mode = "off"
@@ -191,7 +191,7 @@ func TestColdPackCheckpointBackgroundStop(t *testing.T) {
 func TestColdPackCheckpointInvalidation(t *testing.T) {
 	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets"} {
 		t.Run(change, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				codec := &cursorTestCodec{}
 				o := cursorTestOptions(vfs.NewMem(), codec)
 				s, _ := openTestStore(t, "/store", o)
@@ -252,7 +252,7 @@ func TestColdPackCheckpointInvalidation(t *testing.T) {
 func TestColdPackCheckpointCorrupt(t *testing.T) {
 	for _, kind := range []string{"checksum", "truncated", "json", "version", "position", "missing"} {
 		t.Run(kind, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				codec := &cursorTestCodec{}
 				o := cursorTestOptions(vfs.NewMem(), codec)
 				s, _ := openTestStore(t, "/store", o)
@@ -316,7 +316,7 @@ func TestColdPackCheckpointCorrupt(t *testing.T) {
 func TestColdPackCheckpointDeletedMetric(t *testing.T) {
 	for _, steps := range []int{1, 3} { // cursor within a metric, or after it
 		t.Run(fmt.Sprint(steps), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				codec := &cursorTestCodec{}
 				o := cursorTestOptions(vfs.NewMem(), codec)
 				s, _ := openTestStore(t, "/store", o)
@@ -341,7 +341,7 @@ func TestColdPackCheckpointDeletedMetric(t *testing.T) {
 }
 
 func TestColdPackCheckpointUnpackFailure(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		codec := &cursorTestCodec{skip: true}
 		o := cursorTestOptions(vfs.NewMem(), codec)
 		o.ColdPack.Mode = "unpack"

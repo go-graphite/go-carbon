@@ -55,7 +55,7 @@ func TestColdPackMetricFailureContinuesAndRetries(t *testing.T) {
 	defer zapwriter.Test()()
 	for _, block := range []uint64{0, 1} {
 		t.Run(fmt.Sprint(block), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				codec := &failingColdCodec{}
 				s, _ := openTestStore(t, "/store", failureColdOptions(codec))
 				s.StopBackground()
@@ -103,7 +103,7 @@ func TestColdPackMetricFailureContinuesAndRetries(t *testing.T) {
 }
 
 func TestColdPackBackgroundMetricFailureDoesNotDelayPass(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		codec := &failingColdCodec{before: func(_ context.Context, name string, _ uint64) error {
 			if name == "a" {
 				return ErrNotFound
@@ -126,7 +126,7 @@ func TestColdPackBackgroundMetricFailureDoesNotDelayPass(t *testing.T) {
 }
 
 func TestColdPackCancellationRetainsBlockCursor(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		codec := &failingColdCodec{}
 		s, _ := openTestStore(t, "/store", failureColdOptions(codec))
 		s.StopBackground()

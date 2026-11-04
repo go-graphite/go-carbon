@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"testing/synctest"
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
@@ -26,7 +25,7 @@ func (c timedFetchCodec) Fetch(_ context.Context, io ContinuationIO, m Metadata,
 func TestFetchTimingsSeparateBodyAndFinalCloses(t *testing.T) {
 	failed := errors.New("fetch failed")
 	for _, fetchErr := range []error{nil, failed} {
-		synctest.Test(t, func(t *testing.T) {
+		pebbleSynctest(t, func(t *testing.T) {
 			s, now := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true,
 				Continuation: timedFetchCodec{err: fetchErr}, FetchSharedIterator: true})
 			defer closeTestStore(t, s)

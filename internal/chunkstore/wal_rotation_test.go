@@ -20,7 +20,7 @@ import (
 )
 
 func TestExactStoreWALRotationDoesNotBlockUpdates(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		fs := &rotationFS{FS: vfs.NewMem()}
 		s, now := openTestStore(t, "/store", Options{fs: fs, ExactBlocks: true, SyncInterval: time.Hour})
 		defer closeTestStore(t, s)
@@ -49,7 +49,7 @@ func TestExactStoreWALRotationDoesNotBlockUpdates(t *testing.T) {
 // indefinitely blocked disk must not hold the commit mutex during one handoff,
 // acknowledge a Sync write, flush/recycle the old WAL, or publish a new WAL.
 func TestWALRotationBlockedSync(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		strict := vfs.NewStrictMem()
 		fs := &rotationFS{FS: strict}
 		db := openRotationDB(t, fs, true)
@@ -229,7 +229,7 @@ func TestWALRotationConcurrentNaturalFlushAndRecycle(t *testing.T) {
 func TestWALRotationPowerLoss(t *testing.T) {
 	for _, cut := range []string{"sync", "create", "dir-sync", "next-sync"} {
 		t.Run(cut, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				strict := vfs.NewStrictMem()
 				fs := &rotationFS{FS: strict}
 				db := openRotationDB(t, fs, true)
@@ -277,7 +277,7 @@ func TestWALRotationPowerLoss(t *testing.T) {
 }
 
 func TestWALRotationCloseDrainsHandoff(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		fs := &rotationFS{FS: vfs.NewMem()}
 		db := openRotationDB(t, fs, true)
 		mustSetRotation(t, db, "before", pebble.Sync)
