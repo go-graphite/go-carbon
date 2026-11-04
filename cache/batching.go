@@ -346,11 +346,16 @@ func (s *cacheSettings) phaseDeadline(values *item) time.Time {
 	if left <= 0 {
 		left += period
 	}
-	return s.writeoutWall(values.firstArrival.Add(left))
+	return values.firstArrival.Add(left)
 }
 
 // Called with the shard locked. Zero means immediately eligible.
 func writeoutDeadline(values *item, s *cacheSettings) time.Time {
+	return s.writeoutWall(writeoutDeadlineClock(values, s))
+}
+
+// writeoutDeadlineClock returns a deadline on the unshifted batching clock.
+func writeoutDeadlineClock(values *item, s *cacheSettings) time.Time {
 	first := values.firstArrival
 	if s.batching() && !s.writeoutPhase.IsZero() && !first.IsZero() {
 		if !values.has(itemStartup) && values.count() >= s.minPointsFor(values) {
@@ -359,12 +364,12 @@ func writeoutDeadline(values *item, s *cacheSettings) time.Time {
 		return s.phaseDeadline(values)
 	}
 	if values.has(itemStartup) && (s.writeoutStartupSpread || s.startupWriteout != nil) && !first.IsZero() {
-		return s.writeoutWall(first.Add(s.delayFor(values)))
+		return first.Add(s.delayFor(values))
 	}
 	if values.count() >= s.minPointsFor(values) || first.IsZero() {
 		return time.Time{}
 	}
-	return s.writeoutWall(first.Add(s.delayFor(values)))
+	return first.Add(s.delayFor(values))
 }
 
 // WriteoutReady must also be checked by the persister under its per-metric
