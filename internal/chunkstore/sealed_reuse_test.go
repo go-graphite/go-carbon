@@ -42,7 +42,7 @@ func BenchmarkSealedDecodeOwned(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.ReportAllocs()
-				cpu := processCPU()
+				cpu := sealedCPU()
 				b.ResetTimer()
 				for range b.N {
 					if _, err := DecodeSealedPoints(data); err != nil {
@@ -50,7 +50,7 @@ func BenchmarkSealedDecodeOwned(b *testing.B) {
 					}
 				}
 				b.StopTimer()
-				b.ReportMetric((processCPU()-cpu)*1e9/float64(b.N), "cpu-ns/op")
+				b.ReportMetric(float64(sealedCPU()-cpu)/float64(b.N), "cpu-ns/op")
 				b.ReportMetric(float64(len(data)), "encoded-B/block")
 			})
 		}
@@ -185,12 +185,6 @@ func TestSealedPointBufferDecimalReuse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Decimal encoding has a relative-error bound. Reuse must preserve
-			// every bit produced by the independent owning decoder.
-			want, err = DecodeSealedPoints(data)
-			if err != nil {
-				t.Fatal(err)
-			}
 			got, err := scratch.Decode(data)
 			if err != nil {
 				t.Fatal(err)
@@ -217,7 +211,7 @@ func BenchmarkSealedDecodeReuse(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.ReportAllocs()
-				cpu := processCPU()
+				cpu := sealedCPU()
 				b.ResetTimer()
 				for range b.N {
 					if _, err := scratch.Decode(data); err != nil {
@@ -225,7 +219,7 @@ func BenchmarkSealedDecodeReuse(b *testing.B) {
 					}
 				}
 				b.StopTimer()
-				b.ReportMetric((processCPU()-cpu)*1e9/float64(b.N), "cpu-ns/op")
+				b.ReportMetric(float64(sealedCPU()-cpu)/float64(b.N), "cpu-ns/op")
 				b.ReportMetric(float64(len(data)), "encoded-B/block")
 			})
 		}

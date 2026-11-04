@@ -312,10 +312,10 @@ func TestColdPackPlanFailureIsAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.ColdPackStep(context.Background()); err != nil {
-		t.Fatal(err)
+		t.Fatalf("metric failure stopped sweep: %v", err)
 	}
-	if st := db.ColdPackStats(); st.Errors != 1 || st.Error == "" {
-		t.Fatal("failure metric absent")
+	if st := db.ColdPackStats(); st.Errors != 1 || st.Skipped != 1 || st.Error == "" || st.BlockCursor != 0 || st.MetricsVisited != 1 {
+		t.Fatalf("failed plan was not counted/retired: %+v", st)
 	}
 	got, err := db.Snapshot(context.Background(), "cold.metric")
 	if err != nil {
@@ -352,7 +352,7 @@ func TestColdPackCrashRestart(t *testing.T) {
 			if err := db.Close(); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestColdPackCrashRestart$")
 			cmd.Env = append(os.Environ(), "GO_CARBON_COLD_CRASH="+phase, "GO_CARBON_COLD_DIR="+dir)

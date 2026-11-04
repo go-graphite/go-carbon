@@ -8,11 +8,12 @@ import (
 
 func TestColdPackConfig(t *testing.T) {
 	cfg := NewConfig()
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.MaxCompactionDebt != 64<<20 {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
 		t.Fatalf("default %+v %v", o, err)
 	}
+	cfg.Whisper.StoreColdPackWorkers = 8
 	cfg.Whisper.StoreColdPackMaxDebt = 8 << 30
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.MaxCompactionDebt != 8<<30 {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.MaxCompactionDebt != 8<<30 || o.Workers != 8 {
 		t.Fatalf("max compaction debt %+v %v", o, err)
 	}
 	cfg.Whisper.StoreColdPack = "decimal"
@@ -22,6 +23,7 @@ func TestColdPackConfig(t *testing.T) {
 	cfg.Whisper.StoreColdPack = "off"
 	next := *cfg
 	next.Whisper.StoreColdPack = "exact"
+	next.Whisper.StoreColdPackWorkers = 2
 	next.Whisper.StoreColdPackRate = 12345
 	next.Whisper.StoreColdPackMaxDebt = 16 << 30
 	if storageSettingsChanged(cfg, &next) {
@@ -46,6 +48,16 @@ func TestColdPackReload(t *testing.T) {
 	}
 	if app.MetricStore != db || db.TransferFormat() != 9 || db.ColdPackStats().Mode != "exact" {
 		t.Fatal("reload did not enable worker in place")
+	}
+	for _, workers := range []int{8, 2} {
+		cfg.Whisper.StoreColdPackWorkers = workers
+		writeSharedConfig(t, path, cfg)
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+		if app.MetricStore != db {
+			t.Fatal("workers reload replaced store")
+		}
 	}
 	cfg.Whisper.StoreColdPack = "off"
 	writeSharedConfig(t, path, cfg)

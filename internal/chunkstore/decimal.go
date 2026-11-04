@@ -33,13 +33,33 @@ func decimalExponent(v float64) (int, bool) {
 	}
 	return e, true
 }
-func decimalMantissa(v, scale float64) (int64, bool) {
+
+// decimalScale returns the power of ten for exponent and whether values divide
+// by it. Powers up to 1e22 are exact, so dividing rounds once and a short
+// decimal such as 0.3 restores to the float64 its text parses to; multiplying
+// by an inexact 1e-1 would give 0.30000000000000004.
+func decimalScale(exponent int) (float64, bool) {
+	if exponent < 0 && exponent >= -22 {
+		return math.Pow10(-exponent), true
+	}
+	return math.Pow10(exponent), false
+}
+func decimalValue(m int64, scale float64, divide bool) float64 {
+	if divide {
+		return float64(m) / scale
+	}
+	return float64(m) * scale
+}
+func decimalMantissa(v, scale float64, divide bool) (int64, bool) {
 	scaled := math.Round(v / scale)
+	if divide {
+		scaled = math.Round(v * scale)
+	}
 	if !(scaled > -0x1p62 && scaled < 0x1p62) {
 		return 0, false
 	}
 	m := int64(scaled)
-	restored := float64(m) * scale
+	restored := decimalValue(m, scale, divide)
 	if v != 0 && (m == 0 || math.Abs((restored-v)/v) > decimalRelativeError) {
 		return 0, false
 	}
@@ -120,7 +140,7 @@ func decodeDecimalPoints(payload []byte, points []Point) error {
 			offset += n
 		}
 	}
-	scale := math.Pow10(int(exponent))
+	scale, divide := decimalScale(int(exponent))
 	count := 0
 	for slot := range points {
 		switch mode {
@@ -143,7 +163,7 @@ func decodeDecimalPoints(payload []byte, points []Point) error {
 		if previous <= -1<<62 || previous >= 1<<62 {
 			return errInvalidChunk
 		}
-		v := float64(previous) * scale
+		v := decimalValue(previous, scale, divide)
 		if math.IsInf(v, 0) || previous != 0 && (v == 0 || math.Abs(v) < 0x1p-1022) {
 			return errInvalidChunk
 		}

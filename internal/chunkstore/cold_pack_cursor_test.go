@@ -189,7 +189,7 @@ func TestColdPackCheckpointBackgroundStop(t *testing.T) {
 }
 
 func TestColdPackCheckpointInvalidation(t *testing.T) {
-	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets"} {
+	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets", "workers"} {
 		t.Run(change, func(t *testing.T) {
 			pebbleSynctest(t, func(t *testing.T) {
 				codec := &cursorTestCodec{}
@@ -209,6 +209,8 @@ func TestColdPackCheckpointInvalidation(t *testing.T) {
 					if err := replaceFormatMarker(o.fs, "/store", formatMarkerTimeBuckets); err != nil {
 						t.Fatal(err)
 					}
+				case "workers":
+					o.ColdPack.Workers = 8
 				case "budgets":
 					o.ColdPack.BytesPerSecond = 2 << 20
 					o.ColdPack.CPUFraction = .1
@@ -228,7 +230,7 @@ func TestColdPackCheckpointInvalidation(t *testing.T) {
 				}
 				defer closeTestStore(t, s)
 				st := s.ColdPackStats()
-				if change == "budgets" {
+				if change == "budgets" || change == "workers" {
 					if st.Cursor != "b" || st.BlockCursor != 1 || st.MetricsVisited != 1 || st.Resumed != 1 {
 						t.Fatalf("budget change discarded progress: %+v", st)
 					}
@@ -238,7 +240,7 @@ func TestColdPackCheckpointInvalidation(t *testing.T) {
 				codec.calls = nil
 				cursorTestSteps(t, s, 1)
 				want := cursorRepackCall{"a", 0}
-				if change == "budgets" {
+				if change == "budgets" || change == "workers" {
 					want = cursorRepackCall{"b", 1}
 				}
 				if len(codec.calls) != 1 || codec.calls[0] != want {

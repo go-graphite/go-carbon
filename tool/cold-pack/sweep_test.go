@@ -35,15 +35,15 @@ func (f *sweepFS) GetDiskUsage(path string) (vfs.DiskUsage, error) {
 
 type sweepCodec struct {
 	whisperio.ContinuationCodec
-	nanos time.Duration
-	calls int
+	nanos atomic.Int64
+	calls atomic.Int64
 }
 
 func (c *sweepCodec) Repack(ctx context.Context, kv store.ContinuationIO, r store.ColdPackRequest) (store.RepackStats, uint64, bool, error) {
 	start := time.Now()
 	stats, next, done, err := c.ContinuationCodec.Repack(ctx, kv, r)
-	c.nanos += time.Since(start)
-	c.calls++
+	c.nanos.Add(int64(time.Since(start)))
+	c.calls.Add(1)
 	return stats, next, done, err
 }
 
@@ -63,6 +63,14 @@ func TestColdPackSyntheticSweep(t *testing.T) {
 	if err != nil || count < 16 {
 		t.Fatal("COLD_PACK_SWEEP_METRICS must be >= 16")
 	}
+	workers := 1
+	if value := os.Getenv("COLD_PACK_SWEEP_WORKERS"); value != "" {
+		workers, err = strconv.Atoi(value)
+		if err != nil || workers < 1 || workers > 64 {
+			t.Fatal("COLD_PACK_SWEEP_WORKERS must be 1-64")
+		}
+	}
+	dense := os.Getenv("COLD_PACK_SWEEP_DENSE") != ""
 	selected := os.Getenv("COLD_PACK_SWEEP_TRIAL")
 	if selected != "" && selected != "raised" && selected != "default" && selected != "unlimited" {
 		t.Fatal("COLD_PACK_SWEEP_TRIAL must be raised, default or unlimited")
@@ -71,7 +79,18 @@ func TestColdPackSyntheticSweep(t *testing.T) {
 	defer cancel()
 	const base = int64(1700000040)
 	root := t.TempDir()
-	opts := store.Options{ExactBlocks: true, TimeBuckets: true, CacheSize: 32 << 20, MemTableSize: 8 << 20, MetadataCacheSize: 1 << 20, SyncInterval: time.Second, Now: func() time.Time { return time.Unix(base+3*86400, 0) }}
+	clock := base + 3*86400
+	if dense {
+		clock = base + 60*86400
+	}
+	opts := store.Options{ExactBlocks: true, TimeBuckets: true, CacheSize: 32 << 20, MemTableSize: 8 << 20, MetadataCacheSize: 1 << 20, SyncInterval: time.Second, Now: func() time.Time { return time.Unix(clock, 0) }}
+	if dense {
+		// Dense parallel sweeps can fill the tiny sparse-fixture memtables
+		// faster than they flush. Use modest storage headroom so this trial
+		// measures scaling rather than repeated one-second pressure pauses.
+		opts.MemTableSize = 64 << 20
+		opts.L0StopWritesThreshold = 32
+	}
 	open := func(dir string, codec *sweepCodec, fs *sweepFS) *store.Store {
 		t.Helper()
 		opts.Continuation = codec
@@ -85,17 +104,21 @@ func TestColdPackSyntheticSweep(t *testing.T) {
 	name := func(i int) string { return fmt.Sprintf("synthetic.service.instance.%08d", i) }
 	fixture := open(filepath.Join(root, "fixture"), &sweepCodec{}, &sweepFS{FS: vfs.Default})
 	t.Cleanup(func() { fixture.Close() })
-	points := make([]store.Point, 1800)
+	pointCount, retention := 1800, 10080
+	if dense {
+		pointCount, retention = 65536, 201600
+	}
+	points := make([]store.Point, pointCount)
 	for i := range points {
 		points[i] = store.Point{Timestamp: base + int64(i*60), Value: 1000 + math.Sin(float64(i))*.0123456789012345}
 	}
 	for i := 0; i < count; i++ {
-		cfg := store.MetricConfig{Name: name(i), Retentions: []store.Retention{{Step: 60, Count: 10080}}, AggregationMethod: store.Average}
+		cfg := store.MetricConfig{Name: name(i), Retentions: []store.Retention{{Step: 60, Count: retention}}, AggregationMethod: store.Average}
 		if _, err := fixture.Create(ctx, cfg); err != nil {
 			t.Fatal(err)
 		}
 		n := 64
-		if i%16 == 0 {
+		if dense || i%16 == 0 {
 			n = len(points)
 		}
 		if err := fixture.UpdateMany(ctx, cfg.Name, points[:n]); err != nil {
@@ -129,7 +152,7 @@ func TestColdPackSyntheticSweep(t *testing.T) {
 				db.Close()
 			}
 		})
-		if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "exact", BytesPerSecond: trial.rate, CPUFraction: trial.cpu, MinFreeBytes: 1, MaxCompactionDebt: 1 << 40}); err != nil {
+		if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "exact", Workers: workers, BytesPerSecond: trial.rate, CPUFraction: trial.cpu, MinFreeBytes: 1, MaxCompactionDebt: 1 << 40}); err != nil {
 			t.Fatal(err)
 		}
 		fs.nanos.Store(0)
@@ -164,12 +187,13 @@ func TestColdPackSyntheticSweep(t *testing.T) {
 			t.Fatal(err)
 		}
 		stats := db.ColdPackStats()
-		if stats.Passes != 1 || stats.Points == 0 || stats.Errors+stats.Conflicts+stats.Skipped+stats.PressurePauses != 0 {
+		if stats.Passes != 1 || stats.Points == 0 || stats.Errors+stats.Skipped != 0 || !dense && stats.Conflicts+stats.PressurePauses != 0 {
 			t.Fatalf("incomplete sweep: %+v", stats)
 		}
-		result := map[string]any{"trial": trial.name, "metrics": count, "cpu_fraction": trial.cpu, "bytes_per_second": trial.rate,
-			"wall_s": wall, "process_cpu_s": cpu, "cpu_cores": cpu / wall, "points_per_second": float64(stats.Points) / wall,
-			"worker_s": float64(stats.WorkerNanos) / 1e9, "repack_s": codec.nanos.Seconds(), "repack_calls": codec.calls,
+		result := map[string]any{"trial": trial.name, "metrics": count, "workers": workers, "dense": dense,
+			"metrics_per_second": float64(count) / wall, "blocks_per_second": float64(stats.Blocks) / wall, "cpu_fraction": trial.cpu, "bytes_per_second": trial.rate,
+			"wall_s": wall, "process_cpu_s": cpu, "cpu_cores": cpu / wall, "memtable_bytes": opts.MemTableSize, "l0_stop_writes_threshold": opts.L0StopWritesThreshold, "points_per_second": float64(stats.Points) / wall,
+			"worker_s": float64(stats.WorkerNanos) / 1e9, "repack_s": float64(codec.nanos.Load()) / 1e9, "repack_calls": codec.calls.Load(),
 			"disk_usage_s": float64(fs.nanos.Load()) / 1e9, "disk_usage_calls": fs.calls.Load(), "stats": stats}
 		encoded, _ := json.Marshal(result)
 		t.Log(string(encoded))

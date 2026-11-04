@@ -467,11 +467,12 @@ store-encoding = "legacy"
 # upgrade readers, transfer peers and recovery tools first. All settings reload
 # on SIGHUP. See doc/cold-pack.md for numeric precision and downgrade procedure.
 # store-cold-pack = "off"              # off | exact | decimal | unpack
+# store-cold-pack-workers = 1           # parallel workers, 1-64; reload preserves cursor
 # store-cold-pack-bytes-per-second = 1048576 # snapshot reads + WAL batch bytes
-# store-cold-pack-cpu-fraction = 0.02   # conservative fraction of one worker
+# store-cold-pack-cpu-fraction = 0.02   # duty fraction; up to workers * fraction cores
 # store-cold-pack-write-window = "24h" # ranges with newer samples stay ordinary
 # store-cold-pack-interval = "1h"       # delay between completed catalog sweeps
-# store-cold-pack-min-free-bytes = 1073741824 # plus 8 MiB operation headroom
+# store-cold-pack-min-free-bytes = 1073741824 # plus 8 MiB headroom per worker
 # store-cold-pack-max-compaction-debt = 67108864 # pause above this Pebble debt
 
 

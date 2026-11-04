@@ -16,14 +16,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// ColdPackOptions controls one low-priority worker. Mode is off, exact, decimal,
+// ColdPackOptions controls low-priority workers. Mode is off, exact, decimal,
 // or unpack. Decimal rounding occurs only while sealing, never in hot writes.
 type ColdPackOptions struct {
 	Mode           string
+	Workers        int // default 1; at most 64
 	BytesPerSecond int64
 	MinFreeBytes   uint64
-	// CPUFraction bounds worker wall time / elapsed time. Charging IO wait as CPU
-	// is conservative; Pebble's asynchronous flush/compaction CPU is separate.
+	// CPUFraction bounds the duty fraction of the worker group (up to Workers *
+	// CPUFraction cores). Charging the slowest worker's IO wait to the whole
+	// group is conservative; asynchronous flush/compaction CPU is separate.
 	CPUFraction float64
 	WriteWindow time.Duration
 	Interval    time.Duration
@@ -35,6 +37,12 @@ type ColdPackOptions struct {
 func NormalizeColdPack(o ColdPackOptions) (ColdPackOptions, error) {
 	if o.Mode == "" {
 		o.Mode = "off"
+	}
+	if o.Workers == 0 {
+		o.Workers = 1
+	}
+	if o.Workers < 1 || o.Workers > ColdPackPageSize {
+		return o, errors.New("cold pack workers must be between 1 and 64")
 	}
 	if o.MinFreeBytes == 0 {
 		o.MinFreeBytes = 1 << 30
@@ -101,6 +109,7 @@ type ColdPackStats struct {
 	Cursor                                           string
 	BlockCursor                                      uint64
 	PendingMetrics                                   int
+	ActiveWorkers                                    int
 	Active                                           bool
 	Mode, Error                                      string
 }
@@ -113,7 +122,7 @@ type coldPackState struct {
 	format      atomic.Bool
 	cleanUnpack bool
 	passFailed  bool
-	pending     []string
+	pending     []*coldPackWork
 	wake        chan struct{}
 	cancel      context.CancelFunc
 	done        chan struct{}
@@ -121,6 +130,14 @@ type coldPackState struct {
 	checkpoint        coldPackCheckpoint
 	checkpointAt      time.Time
 	checkpointPresent bool
+}
+
+// Entries remain in catalog order until the entire prefix has completed. Only
+// run owns these fields; each wave lends distinct entries to its workers.
+type coldPackWork struct {
+	name  string
+	block uint64
+	done  bool
 }
 
 // ConfigureColdPack joins an old operation before returning, so switching off on
@@ -168,10 +185,11 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
 		c.stats.MetricsVisited = 0
 		c.pending = nil
+		c.stats.PendingMetrics = 0
 		c.passFailed = false
 	}
 	if o.Mode != "off" || c.options.Mode != "" && c.options.Mode != "off" {
-		zapwriter.Logger("storage").Info("cold pack configured", zap.String("mode", o.Mode), zap.Int64("bytes_per_second", o.BytesPerSecond), zap.Float64("cpu_fraction", o.CPUFraction), zap.Duration("write_window", o.WriteWindow), zap.Uint64("max_compaction_debt", o.MaxCompactionDebt))
+		zapwriter.Logger("storage").Info("cold pack configured", zap.String("mode", o.Mode), zap.Int("workers", o.Workers), zap.Int64("bytes_per_second", o.BytesPerSecond), zap.Float64("cpu_fraction", o.CPUFraction), zap.Duration("write_window", o.WriteWindow), zap.Uint64("max_compaction_debt", o.MaxCompactionDebt))
 	}
 	c.cleanUnpack = false
 	c.options = o
@@ -199,7 +217,6 @@ func (s *Store) ColdPackStats() ColdPackStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	stats := c.stats
-	stats.PendingMetrics = len(c.pending)
 	return stats
 }
 
@@ -233,16 +250,17 @@ func (s *Store) coldPackPage(ctx context.Context, after string) ([]string, error
 // mode, write window or format marker starts a new sweep. Deleted cursor names
 // seek to the next key; new/recreated metrics and corrections behind the cursor
 // are visited next pass. Every range remains independently atomic and readable.
-// Metric errors are logged and skipped until the next pass; cancellation and
-// step-wide failures are returned.
+// Each call joins a wave of at most Workers distinct metrics before publishing
+// the contiguous completion watermark. A metric error is logged and counted,
+// then skipped for this pass; cancellation and step-wide errors are returned.
 // Only one caller may advance it.
 func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error) {
 	c := &s.coldPack
 	c.run.Lock()
 	defer c.run.Unlock()
 	c.mu.Lock()
-	o, cursor, block := c.options, c.stats.Cursor, c.stats.BlockCursor
-	c.stats.Active = o.Mode != "off"
+	o := c.options
+	c.stats.Active = o.Mode != "off" && o.Mode != ""
 	c.mu.Unlock()
 	if o.Mode == "off" || o.Mode == "" {
 		return true, nil
@@ -250,7 +268,9 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	start := time.Now()
 	defer func() {
 		c.mu.Lock()
-		c.stats.WorkerNanos += uint64(time.Since(start))
+		if o.Workers == 1 {
+			c.stats.WorkerNanos += uint64(time.Since(start))
+		}
 		c.stats.Active = false
 		if failure != nil {
 			c.passFailed = true
@@ -275,7 +295,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	if diskErr != nil && !errors.Is(diskErr, pebble.ErrNotFound) && !errors.Is(diskErr, vfs.ErrUnsupported) {
 		return false, fmt.Errorf("cold pack disk reserve: %w", diskErr)
 	}
-	if diskErr == nil && (usage.AvailBytes < o.MinFreeBytes || usage.AvailBytes-o.MinFreeBytes < coldPackReadLimit*4) {
+	if diskErr == nil && (usage.AvailBytes < o.MinFreeBytes || usage.AvailBytes-o.MinFreeBytes < uint64(coldPackReadLimit*4*o.Workers)) {
 		c.mu.Lock()
 		c.stats.PressurePauses++
 		c.mu.Unlock()
@@ -288,20 +308,22 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 		c.mu.Unlock()
 		return false, nil
 	}
-	if block == 0 {
+	if len(c.pending) == 0 {
 		c.mu.Lock()
-		empty := len(c.pending) == 0
+		cursor, block := c.stats.Cursor, c.stats.BlockCursor
 		c.mu.Unlock()
-		if empty {
+		if block != 0 {
+			// A serial or parallel checkpoint can retain a published descriptor
+			// position within the oldest unfinished metric.
+			c.pending = []*coldPackWork{{name: cursor, block: block}}
+		} else {
 			names, err := s.coldPackPage(ctx, cursor)
 			if err != nil {
 				return false, err
 			}
 			c.mu.Lock()
 			c.stats.Pages++
-			c.mu.Unlock()
 			if len(names) == 0 {
-				c.mu.Lock()
 				c.stats.Cursor = ""
 				c.stats.Passes++
 				c.stats.MetricsVisited = 0
@@ -310,45 +332,108 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 				c.mu.Unlock()
 				return true, nil
 			}
-			c.mu.Lock()
-			c.pending = names
 			c.mu.Unlock()
+			for _, name := range names {
+				c.pending = append(c.pending, &coldPackWork{name: name})
+			}
 		}
-		c.mu.Lock()
-		cursor, c.pending = c.pending[0], c.pending[1:]
-		c.mu.Unlock()
 	}
 	c.mu.Lock()
 	c.cleanUnpack = false
+	c.stats.PendingMetrics = 0
+	for _, work := range c.pending {
+		if !work.done {
+			c.stats.PendingMetrics++
+		}
+	}
 	c.mu.Unlock()
-	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, cursor, ColdPackRequest{Cursor: block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode})
+
+	// One bounded range per worker, then join. The wave barrier bounds memory,
+	// pacing overshoot and reload latency without per-range channel traffic.
+	var wg sync.WaitGroup
+	var failures []error
+	var failureMu sync.Mutex
+	started := 0
+	for _, work := range c.pending {
+		if work.done {
+			continue
+		}
+		process := func() {
+			if err := s.coldPackWork(ctx, work, o); err != nil {
+				failureMu.Lock()
+				failures = append(failures, err)
+				failureMu.Unlock()
+			}
+		}
+		if o.Workers == 1 {
+			process() // preserve the serial path without goroutine overhead
+		} else {
+			wg.Go(process)
+		}
+		started++
+		if started == o.Workers {
+			break
+		}
+	}
+	wg.Wait()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Failed plans still consume IO budget, but never publish their mutations.
+	// Retire only the completed prefix. Later successes remain in the bounded
+	// page until the oldest outstanding metric finishes; a crash may replay
+	// them. Failed metrics are retired too, and retried from block zero next
+	// pass; passFailed prevents a partial unpack from authorizing downgrade.
+	for len(c.pending) > 0 && c.pending[0].done {
+		c.stats.Cursor, c.stats.BlockCursor = c.pending[0].name, 0
+		c.stats.MetricsVisited++
+		c.pending = c.pending[1:]
+	}
+	if len(c.pending) > 0 && c.pending[0].block != 0 {
+		c.stats.Cursor, c.stats.BlockCursor = c.pending[0].name, c.pending[0].block
+	}
+	c.stats.PendingMetrics = 0
+	for _, work := range c.pending {
+		if !work.done {
+			c.stats.PendingMetrics++
+		}
+	}
+	return false, errors.Join(failures...)
+}
+
+func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPackOptions) error {
+	c := &s.coldPack
+	c.mu.Lock()
+	c.stats.ActiveWorkers++
+	c.mu.Unlock()
+	started := time.Now()
+	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode})
+	if err == nil && !done && next <= work.block {
+		err = errors.New("cold pack codec did not advance")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stats.ActiveWorkers--
+	if o.Workers > 1 {
+		c.stats.WorkerNanos += uint64(time.Since(started))
+	}
+	// Failed plans still consume read/worker budget. Retire a failed metric
+	// without publishing its plan, so it cannot hold the rest of the pass.
 	c.stats.ReadBytes += read
 	c.stats.WriteBytes += written
 	if err != nil {
 		if ctx.Err() != nil {
-			err = ctx.Err()
+			return ctx.Err()
 		}
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			// Preserve an unfinished first range in the queue; later ranges
-			// already retain their name and block cursor.
-			if block == 0 {
-				c.pending = append([]string{cursor}, c.pending...)
-			}
-			return false, err
+		if errors.Is(err, context.Canceled) {
+			return err
 		}
 		c.stats.Errors++
 		c.stats.Skipped++
-		c.stats.Error = fmt.Sprintf("metric %q block %d: %v", cursor, block, err)
+		c.stats.Error = fmt.Sprintf("metric %q block %d: %v", work.name, work.block, err)
 		c.passFailed = true
-		zapwriter.Logger("storage").Error("cold pack metric failed", zap.String("metric", cursor), zap.Uint64("block_cursor", block), zap.Error(err))
-		// Retire the entire metric, including a saved descriptor cursor, so
-		// later names finish this pass. The next sweep retries from zero.
-		c.stats.Cursor, c.stats.BlockCursor = cursor, 0
-		c.stats.MetricsVisited++
-		return false, nil
+		zapwriter.Logger("storage").Error("cold pack metric failed", zap.String("metric", work.name), zap.Uint64("block_cursor", work.block), zap.Error(err))
+		work.block, work.done = 0, true
+		return nil
 	}
 	c.stats.Metrics += stats.Metrics
 	c.stats.Blocks += stats.Blocks
@@ -364,12 +449,8 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	if conflict {
 		c.stats.Conflicts++
 	}
-	c.stats.Cursor, c.stats.BlockCursor = cursor, next
-	if done {
-		c.stats.BlockCursor = 0
-		c.stats.MetricsVisited++
-	}
-	return false, nil
+	work.block, work.done = next, done
+	return nil
 }
 
 // limitedRepackIO caps snapshot bytes and buffered mutations before publication.
@@ -489,9 +570,9 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	}
 	if err = s.checkFileOwnership(meta); err != nil {
 		if errors.Is(err, ErrNotFound) {
-			// Raw catalog scans include unpublished migration candidates.
-			// Leave their state for ownership publication or discard.
-			err, done = nil, true
+			// Staged migration candidates remain in the raw catalog until
+			// verified/published or discarded. They are not ours to rewrite.
+			done, err = true, nil
 		}
 		return
 	}
@@ -507,9 +588,6 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 		err = nil
 		done = true
 		return
-	}
-	if err == nil && !done && next <= request.Cursor {
-		err = errors.New("cold pack codec did not advance")
 	}
 	if err != nil || stats.Blocks == 0 {
 		return

@@ -238,7 +238,8 @@ var migrationMetricSpecs = func() []metricSpec {
 		gauge("store_cold_pack_max_lock_seconds", "Maximum stripe publication lock duration in this process.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.MaxLockNanos) / 1e9 }),
 		gauge("store_cold_pack_failed", "Latched after any cold-pack failure in this process; later metrics and passes continue.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Error != "") }),
 		gauge("store_cold_pack_pending_metrics", "Discovered catalog entries queued in the current bounded page; not a full-store backlog estimate.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.PendingMetrics) }),
-		gauge("store_cold_pack_active", "Worker currently executing a bounded step.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Active) }),
+		gauge("store_cold_pack_active_workers", "Workers currently executing bounded metric ranges.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ActiveWorkers) }),
+		gauge("store_cold_pack_active", "Worker group currently executing a bounded step.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Active) }),
 
 		gauge("pebble_block_cache_bytes", "Bytes held by the Pebble block cache.", func(s *migrationSnapshot) float64 { return float64(s.stats.blockCacheBytes) }),
 		gauge("pebble_table_cache_entries", "Open table readers in the Pebble table cache.", func(s *migrationSnapshot) float64 { return float64(s.stats.tableCacheEntries) }),
