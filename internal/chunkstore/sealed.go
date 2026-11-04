@@ -170,9 +170,12 @@ func sealedVarintLen(v int64) int {
 }
 
 func encodeSealedBody(count int, first int64, step int, flags byte, body []byte) []byte {
+	return encodeSealedBodyVersion(count, first, step, flags, body, 3)
+}
 
+func encodeSealedBodyVersion(count int, first int64, step int, flags byte, body []byte, version byte) []byte {
 	out := make([]byte, sealedHeader, sealedHeader+len(body))
-	out[0], out[1] = 3, flags
+	out[0], out[1] = version, flags
 	binary.LittleEndian.PutUint16(out[2:4], uint16(count))
 	binary.LittleEndian.PutUint32(out[4:8], uint32(first))
 	binary.LittleEndian.PutUint32(out[8:12], uint32(step))
@@ -322,6 +325,12 @@ func (scratch *SealedPointBuffer) Decode(data []byte) ([]Point, error) {
 	}
 	if data[1]&sealedDecimal != 0 {
 		if err := decodeDecimalPoints(body[offset:], points); err != nil {
+			return nil, err
+		}
+		return points, nil
+	}
+	if data[0] == 4 {
+		if err := decodeSealedFloat(body[offset:], points); err != nil {
 			return nil, err
 		}
 		return points, nil
