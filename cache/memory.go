@@ -29,7 +29,7 @@ func flightMemory(p *points.Points) int64 {
 // includes growth slack; allocator size-class rounding and throttle-owned data
 // are not known here. Names shared by an in-flight and queued batch may overlap.
 func (s *Shard) memoryBytes() int64 {
-	return int64(unsafe.Sizeof(Shard{})) + s.items.bytes + s.inFlightBytes +
+	return int64(unsafe.Sizeof(Shard{})) + s.items.bytes + s.inFlightBytes + s.writeout.memoryBytes() +
 		int64(cap(s.items.slots))*int64(unsafe.Sizeof(itemSlot{})) + int64(cap(s.items.control)) +
 		int64(cap(s.notConfirmed))*8 + int64(cap(s.sparseLast))*4 +
 		int64(cap(s.claimData))*int64(unsafe.Sizeof(points.Point{})) +

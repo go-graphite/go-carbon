@@ -11,11 +11,19 @@ type WriteoutState struct {
 	Pressure, Recovering           bool
 }
 
-// WriteoutState samples arrivals under one shard lock at a time. Call it at
-// controller frequency, never per update. Ages measure residence, not sample
-// timestamps, which may legitimately contain historical or future data.
+// WriteoutState queries per-shard counts without visiting cached metrics.
+// Eligibility is delayed by less than a second; oldest residence age is
+// overestimated by less than a second. Point and metric totals are exact under
+// each shard lock. Ages refer to first arrival, never sample timestamps.
+// A batching-settings reload rebuilds each shard's indexes once, on its next
+// sample. Unrelated settings and startup-clock release need no rebuild.
 func (c *Cache) WriteoutState() WriteoutState {
-	now := time.Now()
+	return c.writeoutStateAt(time.Now())
+}
+
+func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
+	c.writeoutStateMu.Lock()
+	defer c.writeoutStateMu.Unlock()
 	s := c.settings.Load().(*cacheSettings)
 	state := WriteoutState{
 		MaxPoints: s.maxSize, MaxDelay: s.writeoutMaxDelay,
@@ -25,16 +33,24 @@ func (c *Cache) WriteoutState() WriteoutState {
 	if !s.writeoutPhase.IsZero() {
 		state.MeanDelay = s.writeoutMaxDelay
 	}
+	clockNow, held := s.writeoutTime(now)
 	for _, shard := range c.data {
-		shard.mu.RLock()
-		state.Metrics += int64(shard.items.len())
-		for _, it := range shard.items.all {
-			state.Points += int64(it.count())
-			if !now.Before(writeoutDeadline(it, s)) {
-				state.Eligible++
+		for {
+			shard.mu.RLock()
+			if shard.writeout.settings == s {
+				break
 			}
-			if !it.firstArrival.IsZero() {
-				state.OldestAge = max(state.OldestAge, now.Sub(s.writeoutWall(it.firstArrival)))
+			shard.mu.RUnlock()
+			c.rebuildWriteout(shard, s)
+		}
+		state.Metrics += int64(shard.items.len())
+		state.Points += shard.sizePublished + shard.sizeDelta
+		w := &shard.writeout
+		state.Eligible += w.immediate
+		if !held {
+			state.Eligible += w.deadlines.through(floorSecond(clockNow.Sub(c.writeoutEpoch)))
+			if first, ok := w.arrivals.oldest(); ok {
+				state.OldestAge = max(state.OldestAge, clockNow.Sub(c.writeoutEpoch.Add(secondDuration(first))))
 			}
 		}
 		shard.mu.RUnlock()

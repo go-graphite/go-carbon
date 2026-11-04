@@ -353,9 +353,13 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 		if startup {
 			c.spreadStartup(values, s, now, held)
 		}
+		shard.writeout.add(values, 1)
+		c.syncMemoryLocked(shard)
 		c.writeoutQueue.notifyAt(writeoutDeadline(values, s))
 		return nil
 	}
+	shard.writeout.add(values, 1)
+	c.syncMemoryLocked(shard)
 	c.writeoutQueue.notifyAt(time.Now())
 	return nil
 }

@@ -58,7 +58,9 @@ type Cache struct {
 	pending   atomic.Pointer[pendingRecovery]
 	startupAt atomic.Pointer[time.Time]
 
-	queueLastBuild time.Time
+	writeoutEpoch   time.Time
+	writeoutStateMu sync.Mutex
+	queueLastBuild  time.Time
 	// queueScratch keeps the last rebuild's sort buffer; see takeQueue.
 	queueScratch      atomic.Pointer[queue]
 	queueScratchBytes atomic.Int64
@@ -113,6 +115,8 @@ type Shard struct {
 	streamSeriesNew  int
 	mu               sync.RWMutex // Read Write mutex, guards access to internal map.
 	items            itemMap
+	sizePublished    int64
+	writeout         writeoutSummary
 	notConfirmed     []*points.Points    // linear search for value/slot
 	flightPeak       int                 // maximum simultaneous in-flight batches since a capacity reset
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
@@ -173,6 +177,7 @@ func (shard *Shard) bytesHint() int {
 func New() *Cache {
 	c := &Cache{
 		data:          make([]*Shard, shardCount),
+		writeoutEpoch: time.Now(),
 		writeStrategy: Noop,
 	}
 
@@ -191,6 +196,11 @@ func New() *Cache {
 	}
 
 	c.settings.Store(&settings)
+	for _, shard := range c.data {
+		shard.writeout.epoch = c.writeoutEpoch
+		shard.writeout.settings = &settings
+		shard.writeout.stableSettings = &settings
+	}
 
 	c.writeoutQueue = NewWriteoutQueue(c)
 	var memory int64
@@ -415,6 +425,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	first := shard.firstArrival[p]
 	delete(shard.firstArrival, p)
 	if current := shard.items.get(p.Metric); current != nil {
+		shard.writeout.add(current, -1)
 		if r != nil {
 			r.moved(shard.itemIdentity(current), values.identity())
 		}
@@ -433,6 +444,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	shard.log.mergeFlight(values, p)
 	shard.log.trackItem(values)
 	shard.items.set(p.Metric, values)
+	shard.writeout.add(values, 1)
 	shard.releaseDrainedTracking()
 	c.syncMemoryLocked(shard)
 	c.addSizeLocked(shard, int64(count), c.settings.Load().(*cacheSettings).sizeSlack)
@@ -514,6 +526,7 @@ func (c *Cache) addSizeLocked(shard *Shard, n, slack int64) (before, after int64
 		return size, size
 	}
 	delta := shard.sizeDelta
+	shard.sizePublished += delta
 	shard.sizeDelta = 0
 	after = atomic.AddInt64(&c.stat.size, delta)
 	return after - delta, after
@@ -675,9 +688,9 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 
-	// Get map shard; quota accounting reuses the same hash.
+	// Get map shard.
 	hash := xxh3.HashString(p.Metric)
-	shard := c.data[hash&(shardCount-1)] // as GetShard
+	shard := c.data[hash&(shardCount-1)]
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 
@@ -700,7 +713,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	// readers may wait for the cache to drain.
 	spreadRestore := restored && !recovered && !immediate && s.writeoutRestoreSpread && s.batching() && shard.log.first != nil
 
-	values := shard.items.get(p.Metric)
+	values := shard.items.getHashed(hash, p.Metric)
 	exists := values != nil
 	if !exists {
 		if r := c.pending.Load(); r != nil {
@@ -709,7 +722,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 				// silently would lose already accepted points.
 				panic(fmt.Errorf("claim validated recovery source: %w", err))
 			}
-			values = shard.items.get(p.Metric)
+			values = shard.items.getHashed(hash, p.Metric)
 			exists = values != nil
 		}
 	}
@@ -736,7 +749,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 
 	if !exists {
 		values = newItem(p.Metric, shard.bytesHint())
-		shard.items.set(p.Metric, values)
+		shard.items.setHashed(hash, values)
 		if s.batching() && (!restored || spreadRestore) {
 			now, held := s.writeoutTime(time.Now())
 			if spreadRestore {
@@ -813,9 +826,7 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 		}
 	}
 	before, size := c.addSizeLocked(shard, int64(count), s.sizeSlack)
-	if immediate {
-		values.firstArrival = time.Time{}
-	}
+	updateSummary := !exists || immediate
 	// An arrival may have loaded settings before a reload and waited behind
 	// a scan using the new thresholds. Its count must invalidate that summary.
 	if d := shard.items.deadlines; d != nil && d.settings != s {
@@ -823,10 +834,16 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 	}
 	if s.batching() {
 		n := values.count()
-		minPoints := s.minPointsFor(values)
-		crossedThreshold := n >= minPoints && n-count < minPoints
+		// Spread is at most one half. Most batches are far below even that
+		// lower bound; avoid computing their floating-point threshold per point.
+		crossedThreshold := false
+		if n >= s.writeoutMinPoints/2 {
+			minPoints := s.minPointsFor(values)
+			crossedThreshold = n >= minPoints && n-count < minPoints
+		}
 		if exists && (immediate || crossedThreshold || values.has(itemSparse) && n > sparseMaxPoints && n-count <= sparseMaxPoints) {
 			shard.items.invalidateItemDeadline(values)
+			updateSummary = true
 		}
 		if immediate || crossedThreshold || (s.underPressure(size) && !s.underPressure(before)) {
 			c.writeoutQueue.notifyAt(time.Now())
@@ -834,17 +851,22 @@ func (c *Cache) addedLocked(shard *Shard, s *cacheSettings, values *item, count 
 			c.writeoutQueue.notifyAt(writeoutDeadline(values, s))
 		}
 	}
+	if updateSummary || shard.writeout.stableSettings != s {
+		c.appendWriteout(shard, values, count, exists, immediate)
+	}
 }
 
 // Pop removes an element from the map and returns it
 func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
-	shard := c.GetShard(key)
+	hash := xxh3.HashString(key)
+	shard := c.data[hash&(shardCount-1)]
 	shard.mu.Lock()
-	values := shard.items.get(key)
+	values := shard.items.getHashed(hash, key)
 	exists = values != nil
 	if exists {
-		shard.items.remove(key)
+		shard.writeout.add(values, -1)
+		shard.items.removeHashed(hash, key)
 		values.firstArrival = time.Time{}
 		shard.log.untrackItem(values)
 		shard.notePopped(len(values.compact.buf))
@@ -870,12 +892,14 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 
 func (c *Cache) PopNotConfirmed(key string) (p *points.Points, exists bool) {
 	// Try to get shard.
-	shard := c.GetShard(key)
+	hash := xxh3.HashString(key)
+	shard := c.data[hash&(shardCount-1)]
 	shard.mu.Lock()
-	values := shard.items.get(key)
+	values := shard.items.getHashed(hash, key)
 	exists = values != nil
 	if exists {
-		shard.items.remove(key)
+		shard.writeout.add(values, -1)
+		shard.items.removeHashed(hash, key)
 		shard.notePopped(len(values.compact.buf))
 		s := c.settings.Load().(*cacheSettings)
 		shard.noteWritten(values, s)
