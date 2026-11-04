@@ -30,6 +30,7 @@ type deferredReclaim struct {
 	rootMu         sync.RWMutex
 	root           *os.File
 	delay          time.Duration
+	disabled       bool
 	started        time.Time
 	workers        int
 	mu             sync.Mutex
@@ -91,7 +92,7 @@ const (
 )
 
 func (p *Whisper) reclaimWorkers() int {
-	workers := cap(p.conversionIO)
+	_, workers := p.ConversionIOSlots()
 	if workers == 0 {
 		workers = 4 * runtime.GOMAXPROCS(0)
 	}
@@ -101,12 +102,28 @@ func (p *Whisper) reclaimWorkers() int {
 // SetDeferredReclaim delays unlinking converted originals by at least delay and
 // batches them by directory; zero keeps reclamation inside each conversion.
 func (p *Whisper) SetDeferredReclaim(delay time.Duration) {
-	if delay <= 0 || p.reclaim != nil {
+	p.ioMu.Lock()
+	defer p.ioMu.Unlock()
+	if p.reclaim != nil {
+		p.reclaim.mu.Lock()
+		p.reclaim.delay = max(0, delay)
+		p.reclaim.disabled = delay <= 0
+		p.reclaim.mu.Unlock()
+		return
+	}
+	if delay <= 0 {
 		return
 	}
 	// File syscalls can block OS threads. Match conversion I/O parallelism,
 	// capped at 512, with a CPU-derived default when no slots were configured.
-	workers := p.reclaimWorkers()
+	workers := 0
+	if p.conversionIO != nil {
+		_, workers = p.conversionIO.status()
+	}
+	if workers == 0 {
+		workers = 4 * runtime.GOMAXPROCS(0)
+	}
+	workers = max(64, min(workers, 512))
 	r := &deferredReclaim{
 		delay: delay, started: time.Now(), workers: workers,
 		dirs: make(map[string]*reclaimDirectoryQueue), wake: make(chan struct{}, 1),
@@ -124,6 +141,8 @@ func (p *Whisper) SetDeferredReclaim(delay time.Duration) {
 // StopDeferredReclaim stops the reclaimer. Queued originals stay pending
 // cleanups for the next run.
 func (p *Whisper) StopDeferredReclaim() {
+	p.ioMu.Lock()
+	defer p.ioMu.Unlock()
 	if r := p.reclaim; r != nil {
 		close(r.stop)
 		<-r.done
@@ -133,7 +152,7 @@ func (p *Whisper) StopDeferredReclaim() {
 
 // DeferredReclaimQueued reports deferred cleanup jobs, including active batches.
 func (p *Whisper) DeferredReclaimQueued() int64 {
-	if r := p.reclaim; r != nil {
+	if r := p.reclaimer(); r != nil {
 		return r.queued.Load()
 	}
 	return 0
@@ -148,7 +167,7 @@ type DeferredReclaimStats struct {
 }
 
 func (p *Whisper) DeferredReclaimStats() DeferredReclaimStats {
-	if r := p.reclaim; r != nil {
+	if r := p.reclaimer(); r != nil {
 		return DeferredReclaimStats{
 			Completed: r.completed.Load(), InlineFallback: r.inlineFallback.Load(),
 			Batches: r.batches.Load(), Jobs: r.jobs.Load(), BatchNanos: r.batchNanos.Load(),
@@ -164,7 +183,7 @@ func (p *Whisper) DeferredReclaimStats() DeferredReclaimStats {
 func (r *deferredReclaim) push(job reclaimJob) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.queued.Load() >= reclaimMaxQueued {
+	if r.disabled || r.queued.Load() >= reclaimMaxQueued {
 		return false
 	}
 	job.due = time.Since(r.started).Nanoseconds() + int64(r.delay)
@@ -369,4 +388,10 @@ func removeOriginals(path string) error {
 		}
 	}
 	return nil
+}
+
+func (p *Whisper) reclaimer() *deferredReclaim {
+	p.ioMu.RLock()
+	defer p.ioMu.RUnlock()
+	return p.reclaim
 }

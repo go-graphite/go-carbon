@@ -41,3 +41,8 @@ func (c *Cache) WriteoutState() WriteoutState {
 	}
 	return state
 }
+
+// WriteoutMaxDelay returns the live batching deadline without scanning metrics.
+func (c *Cache) WriteoutMaxDelay() time.Duration {
+	return c.settings.Load().(*cacheSettings).writeoutMaxDelay
+}

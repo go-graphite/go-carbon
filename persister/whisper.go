@@ -38,6 +38,9 @@ type StoreFunc func(metric string)
 // Whisper write data to *.wsp files
 type Whisper struct {
 	helper.Stoppable
+	liveSettings             atomic.Pointer[whisperSettings]
+	reloadMu                 sync.Mutex
+	ioMu                     sync.RWMutex
 	recv                     func(chan bool) string
 	warmFirst                bool
 	warmPending              *warmReservations
@@ -49,6 +52,7 @@ type Whisper struct {
 	startupGate              <-chan struct{}
 	startupDone              <-chan struct{}
 	startupWait              time.Duration
+	startupStarted           atomic.Int64
 	startupFull              func() bool
 	startupProgress          func() (uint64, uint64)
 	startupCheckpointLoading func() bool
@@ -112,7 +116,7 @@ type Whisper struct {
 	reclaimedDirectories directorySyncs
 	// reclaim, when set, unlinks converted originals later in batches.
 	reclaim      *deferredReclaim
-	conversionIO chan struct{}
+	conversionIO *conversionSlot
 	writeStats   persisterWriteStats
 	mockStore    func() (StoreFunc, func())
 	logger       *zap.Logger
@@ -419,6 +423,7 @@ func (p *Whisper) compactOutOfOrder(w *whisper.Whisper, metric, path string) *wh
 // The bool requests full mirror repair after an uncertain merge; successful
 // mirrored compaction returns its dirty archive windows instead.
 func (p *Whisper) compactOutOfOrderResult(w *whisper.Whisper, metric, path string) (*whisper.Whisper, bool, []whisper.ArchiveWindow) {
+	settings := p.settings()
 	sidecar := w.OutOfOrderPath()
 	if sidecar == "" {
 		return w, false, nil
@@ -426,7 +431,7 @@ func (p *Whisper) compactOutOfOrderResult(w *whisper.Whisper, metric, path strin
 	// Without a buffered token the receive below cannot succeed, so skip the
 	// stat. This only peeks: tokens are consumed exactly as before. A closed
 	// (zero-rate) ticker is empty and never merges either way.
-	if len(p.outOfOrder.ticker.C) == 0 {
+	if len(settings.outOfOrder.ticker.C) == 0 {
 		return w, false, nil
 	}
 
@@ -445,12 +450,12 @@ func (p *Whisper) compactOutOfOrderResult(w *whisper.Whisper, metric, path strin
 	if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
 		size = stat.Blocks * 512
 	}
-	if p.outOfOrder.policy.MinPoints <= 0 && size < p.outOfOrder.threshold {
+	if settings.outOfOrder.policy.MinPoints <= 0 && size < settings.outOfOrder.threshold {
 		return w, false, nil
 	}
 
 	select {
-	case hasCapacity := <-p.outOfOrder.ticker.C:
+	case hasCapacity := <-settings.outOfOrder.ticker.C:
 		if !hasCapacity {
 			return w, false, nil
 		}
@@ -461,14 +466,14 @@ func (p *Whisper) compactOutOfOrderResult(w *whisper.Whisper, metric, path strin
 
 	merged := true
 	var windows []whisper.ArchiveWindow
-	if p.outOfOrder.policy.MinPoints > 0 {
+	if settings.outOfOrder.policy.MinPoints > 0 {
 		atomic.AddUint32(&p.oooCompactionChecks, 1)
 	}
 	switch {
 	case p.mirrorFiles:
-		merged, windows, err = w.MergeOutOfOrderWithArchiveWindows(p.outOfOrder.policy)
-	case p.outOfOrder.policy.MinPoints > 0:
-		merged, err = w.MergeOutOfOrderWithOptions(p.outOfOrder.policy)
+		merged, windows, err = w.MergeOutOfOrderWithArchiveWindows(settings.outOfOrder.policy)
+	case settings.outOfOrder.policy.MinPoints > 0:
+		merged, err = w.MergeOutOfOrderWithOptions(settings.outOfOrder.policy)
 	default:
 		err = w.MergeOutOfOrder()
 	}
@@ -491,10 +496,10 @@ func (p *Whisper) compactOutOfOrderResult(w *whisper.Whisper, metric, path strin
 	// MergeOutOfOrder may already have closed it, so the close error is ignored.
 	_ = w.Close()
 	nw, err := whisper.OpenWithOptions(path, &whisper.Options{
-		Sparse:     p.sparse,
-		FLock:      p.flock,
-		Compressed: p.compressed,
-		OutOfOrder: p.outOfOrder.enabled,
+		Sparse:     settings.sparse,
+		FLock:      settings.flock,
+		Compressed: settings.compressed,
+		OutOfOrder: settings.outOfOrder.enabled,
 	})
 	if err != nil {
 		p.logger.Error("failed to reopen whisper file after out-of-order merge failure",
@@ -575,8 +580,9 @@ func (p *Whisper) store(metric string) {
 }
 
 func (p *Whisper) whisperPath(metric string) (string, bool) {
+	settings := p.settings()
 	var path string
-	if p.tagsEnabled && strings.IndexByte(metric, ';') >= 0 {
+	if settings.tagsEnabled && strings.IndexByte(metric, ';') >= 0 {
 		path = tags.FilePath(p.rootPath, metric, p.hashFilenames) + ".wsp"
 	} else {
 		path = filepath.Join(p.rootPath, strings.ReplaceAll(metric, ".", "/")+".wsp")
@@ -605,11 +611,12 @@ func (p *Whisper) whisperPath(metric string) (string, bool) {
 }
 
 func (p *Whisper) openWhisper(path string, existingOnly bool) (*whisper.Whisper, error) {
+	settings := p.settings()
 	return whisper.OpenWithOptions(path, &whisper.Options{
-		Sparse:       p.sparse,
-		FLock:        p.flock,
-		Compressed:   p.compressed,
-		OutOfOrder:   p.outOfOrder.enabled,
+		Sparse:       settings.sparse,
+		FLock:        settings.flock,
+		Compressed:   settings.compressed,
+		OutOfOrder:   settings.outOfOrder.enabled,
 		ExistingOnly: existingOnly,
 	})
 }
@@ -626,6 +633,7 @@ func (p *Whisper) openOrCreateWhisper(metric, path string) (*whisper.Whisper, bo
 }
 
 func (p *Whisper) prepareWhisperCreate(metric, path string, err error) bool {
+	settings := p.settings()
 	// create new whisper if file not exists
 	if !os.IsNotExist(err) {
 		// There are cases that new files are created but data are not saved
@@ -636,7 +644,7 @@ func (p *Whisper) prepareWhisperCreate(metric, path string, err error) bool {
 		if err2 != nil {
 			p.logger.Error("failed to stat whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err2)))
 		}
-		if !p.removeEmptyFile || err2 != nil || stat.Size() > 0 {
+		if !settings.removeEmptyFile || err2 != nil || stat.Size() > 0 {
 			p.logger.Error("failed to open whisper file", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
 			if errors.Is(err, syscall.ENAMETOOLONG) {
 				p.popConfirm(metric)
@@ -655,28 +663,29 @@ func (p *Whisper) prepareWhisperCreate(metric, path string, err error) bool {
 }
 
 func (p *Whisper) createWhisper(metric, path string) *whisper.Whisper {
-	schema, ok := p.schemas.Match(metric)
+	settings := p.settings()
+	schema, ok := settings.schemas.Match(metric)
 	if !ok {
 		p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
 		return nil
 	}
 
-	aggr := p.aggregation.Match(metric)
+	aggr := settings.aggregation.Match(metric)
 	if aggr == nil {
 		p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
 		return nil
 	}
 
-	compressed := p.compressed
+	compressed := settings.compressed
 	if schema.Compressed != nil {
 		compressed = *schema.Compressed
 	}
 	w, err := whisperpath.Create(filepath.Dir(path), os.ModePerm, func() (*whisper.Whisper, error) {
 		return whisper.CreateWithOptions(path, schema.Retentions, aggr.aggregationMethod, float32(aggr.xFilesFactor), &whisper.Options{
-			Sparse:     p.sparse,
-			FLock:      p.flock,
+			Sparse:     settings.sparse,
+			FLock:      settings.flock,
 			Compressed: compressed,
-			OutOfOrder: p.outOfOrder.enabled,
+			OutOfOrder: settings.outOfOrder.enabled,
 		})
 	})
 	if err != nil {
@@ -693,8 +702,8 @@ func (p *Whisper) createWhisper(metric, path string) *whisper.Whisper {
 		return nil
 	}
 
-	if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
-		p.taggedFn(metric, true)
+	if settings.tagsEnabled && settings.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
+		settings.taggedFn(metric, true)
 	}
 
 	p.createLogger.Debug("created",
@@ -713,8 +722,9 @@ func (p *Whisper) createWhisper(metric, path string) *whisper.Whisper {
 }
 
 func (p *Whisper) migrateWhisper(w *whisper.Whisper, newFile bool, metric, path string) (*whisper.Whisper, error) {
+	settings := p.settings()
 	// Check if schema and aggregation is still up-to-date
-	if !newFile && p.onlineMigration.enabled {
+	if !newFile && settings.onlineMigration.enabled {
 		// errors are logged already
 		var err error
 		w, _, err = p.checkAndUpdateSchemaAndAggregation(w, metric)
@@ -723,10 +733,10 @@ func (p *Whisper) migrateWhisper(w *whisper.Whisper, newFile bool, metric, path 
 				_ = w.Close()
 			}
 			w, err = whisper.OpenWithOptions(path, &whisper.Options{
-				Sparse:     p.sparse,
-				FLock:      p.flock,
-				Compressed: p.compressed,
-				OutOfOrder: p.outOfOrder.enabled,
+				Sparse:     settings.sparse,
+				FLock:      settings.flock,
+				Compressed: settings.compressed,
+				OutOfOrder: settings.outOfOrder.enabled,
 			})
 			if err != nil {
 				p.logger.Error("failed to reopen whisper file after schema migration", zap.String("path", path), zap.Error(p.simplifyPathError(err)))
@@ -738,6 +748,7 @@ func (p *Whisper) migrateWhisper(w *whisper.Whisper, newFile bool, metric, path 
 }
 
 func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
+	settings := p.settings()
 	defer func() {
 		if w != nil {
 			_ = w.Close()
@@ -774,7 +785,7 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 		defer p.confirm(values)
 	}
 
-	if p.outOfOrder.enabled && p.outOfOrder.ticker != nil {
+	if settings.outOfOrder.enabled && settings.outOfOrder.ticker != nil {
 		w = p.compactOutOfOrder(w, metric, path)
 	}
 
@@ -783,8 +794,8 @@ func (p *Whisper) writeWhisper(w *whisper.Whisper, metric, path string) {
 
 	// atomic.AddUint64(&p.blockUpdateManyNs, uint64(time.Since(start).Nanoseconds()))
 
-	if p.tagsEnabled && p.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
-		p.taggedFn(metric, false)
+	if settings.tagsEnabled && settings.taggedFn != nil && strings.IndexByte(metric, ';') >= 0 {
+		settings.taggedFn(metric, false)
 	}
 	if hint := p.incrementalPriority.Load(); hint != nil {
 		(*hint)(metric)
@@ -806,7 +817,7 @@ LOOP:
 		if p.throttleUpdates() {
 			select {
 			case _, open := <-p.updateTokens():
-				if !open && p.maxUpdatesPerSecond == -1 {
+				if !open && p.settings().maxUpdatesPerSecond == -1 {
 					continue LOOP
 				}
 			case <-exit:
@@ -835,7 +846,7 @@ LOOP:
 		var metrics []string
 		if p.mockStore == nil && p.canBatchShared() {
 			metrics = []string{metric}
-			for len(metrics) < p.storeUpdateBatchSize && p.takeBatchToken() {
+			for len(metrics) < p.settings().storeUpdateBatchSize && p.takeBatchToken() {
 				next := p.tryRecv()
 				if next == "" {
 					break
@@ -886,6 +897,7 @@ LOOP:
 
 // Stat callback
 func (p *Whisper) Stat(send helper.StatCallback) {
+	settings := p.settings()
 	updateOperations := atomic.LoadUint32(&p.updateOperations)
 	committedPoints := atomic.LoadUint32(&p.committedPoints)
 	atomic.AddUint32(&p.updateOperations, -updateOperations)
@@ -923,20 +935,20 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	send("created", float64(created))
 	send("nameTooLongDroppedPoints", float64(nameTooLong))
 	send("oooDiscardedPoints", float64(oooDiscardedPoints))
-	if p.outOfOrder.enabled {
+	if settings.outOfOrder.enabled {
 		// oooDiverted tracks how many of the oooDiscardedPoints above were
 		// saved to a sidecar instead of lost
 		send("oooDiverted", float64(oooDiverted))
 		send("oooCompactions", float64(oooCompactions))
 		send("oooCompactErrors", float64(oooCompactErrors))
-		if p.outOfOrder.policy.MinPoints > 0 {
+		if settings.outOfOrder.policy.MinPoints > 0 {
 			send("oooCompactionChecks", float64(oooCompactionChecks))
 			send("oooCompactionDeferred", float64(oooCompactionDeferred))
 		}
 	}
 	p.sendOverlapUpdates(send)
-	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
-	if p.maxUpdatesPerSecond == -1 {
+	send("maxUpdatesPerSecond", float64(settings.maxUpdatesPerSecond))
+	if settings.maxUpdatesPerSecond == -1 {
 		rate, target, reason := p.autoUpdateObservation()
 		send("autoUpdateRate", rate)
 		send("autoUpdateRateTarget", target)
@@ -951,7 +963,7 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	send("workers", float64(p.workersCount))
 	send("extended", float64(extended))
 
-	if p.onlineMigration.enabled {
+	if settings.onlineMigration.enabled {
 		stat := &p.onlineMigration.stat
 
 		total := atomic.LoadUint32(&stat.total)
@@ -991,8 +1003,8 @@ func (p *Whisper) Start() error {
 		return fmt.Errorf("automatic writeout rate requires cache state")
 	}
 	return p.StartFunc(func() error {
+		p.liveSettings.Store(nil)
 		p.updateTicker = helper.NewThrottleTicker(max(0, p.maxUpdatesPerSecond))
-		p.startAutoUpdateRate()
 		if p.onlineMigration.enabled {
 			p.onlineMigration.ticker = helper.NewHardThrottleTicker(p.onlineMigration.rate)
 		}
@@ -1000,6 +1012,8 @@ func (p *Whisper) Start() error {
 			p.outOfOrder.ticker = helper.NewHardThrottleTicker(p.outOfOrder.rate)
 		}
 
+		p.liveSettings.Store(p.settings())
+		p.startAutoUpdateRate()
 		p.startWarmFirst()
 		p.startStartupGate()
 		p.startRestartWriteout()
@@ -1012,24 +1026,27 @@ func (p *Whisper) Start() error {
 	})
 }
 
-func (p *Whisper) Stop() {
-	p.StopDeferredReclaim()
-	p.StopFunc(func() {
-		p.stopRestartTicker()
-		p.stopAutoUpdateRate()
-		p.updateTicker.Stop()
+func (p *Whisper) Stop() { p.stop(false) }
 
-		if p.onlineMigration.ticker != nil {
-			p.onlineMigration.ticker.Stop()
+func (p *Whisper) stop(reloading bool) {
+	p.StopFunc(func() {
+		p.stopRestartTickerForReload(reloading)
+		p.stopAutoUpdateRate()
+		p.settings().updateTicker.Stop()
+
+		if p.settings().onlineMigration.ticker != nil {
+			p.settings().onlineMigration.ticker.Stop()
 		}
-		if p.outOfOrder.ticker != nil {
-			p.outOfOrder.ticker.Stop()
+		if p.settings().outOfOrder.ticker != nil {
+			p.settings().outOfOrder.ticker.Stop()
 		}
 	})
+	p.StopDeferredReclaim()
 }
 
 func (p *Whisper) GetRetentionPeriod(metric string) (int, bool) {
-	schema, ok := p.schemas.Match(metric)
+	settings := p.settings()
+	schema, ok := settings.schemas.Match(metric)
 	if !ok {
 		return 0, false
 	}
@@ -1040,7 +1057,8 @@ func (p *Whisper) GetRetentionPeriod(metric string) (int, bool) {
 }
 
 func (p *Whisper) GetAggrConf(metric string) (string, float64, bool) {
-	aggr := p.aggregation.Match(metric)
+	settings := p.settings()
+	aggr := settings.aggregation.Match(metric)
 	if aggr == nil {
 		return "", float64(0), false
 	}
@@ -1060,46 +1078,47 @@ func (*Whisper) simplifyPathError(err error) error {
 }
 
 func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric string) (*whisper.Whisper, bool, error) {
+	settings := p.settings()
 	// TODO: skip check and update if the config files has not been updated
 	// for a long time and all the metrics have been validated? this only
 	// help if the check is expensive, most likely it's not.
 
 	logger := p.logger.Named("online_migration")
-	schema, ok := p.schemas.Match(metric)
+	schema, ok := settings.schemas.Match(metric)
 	if !ok {
 		logger.Error("no storage schema defined for metric", zap.String("metric", metric))
 		return w, false, nil
 	}
-	aggr := p.aggregation.Match(metric)
+	aggr := settings.aggregation.Match(metric)
 	if aggr == nil {
 		logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
 		return w, false, nil
 	}
 
-	compressed := p.compressed
+	compressed := settings.compressed
 	if schema.Compressed != nil {
 		compressed = *schema.Compressed
 	}
 	options := &whisper.Options{
-		Sparse:     p.sparse,
-		FLock:      p.flock,
+		Sparse:     settings.sparse,
+		FLock:      settings.flock,
 		Compressed: compressed,
-		OutOfOrder: p.outOfOrder.enabled,
+		OutOfOrder: settings.outOfOrder.enabled,
 	}
 
 	retentions := whisper.NewRetentionsNoPointer(w.Retentions())
 	aggregationmethod := w.AggregationMethod()
 	xFilesFactor := w.XFilesFactor()
 	var updateSchema, updateXff, updateAggrMethod bool
-	if schema.canMigrate(p.onlineMigration.schema) && !retentions.Equal(schema.Retentions) {
+	if schema.canMigrate(settings.onlineMigration.schema) && !retentions.Equal(schema.Retentions) {
 		retentions = schema.Retentions
 		updateSchema = true
 	}
-	if aggr.canMigrateXff(p.onlineMigration.xff) && xFilesFactor != float32(aggr.xFilesFactor) {
+	if aggr.canMigrateXff(settings.onlineMigration.xff) && xFilesFactor != float32(aggr.xFilesFactor) {
 		xFilesFactor = float32(aggr.xFilesFactor)
 		updateXff = true
 	}
-	if aggr.canMigrateAggregationMethod(p.onlineMigration.aggregationMethod) && aggregationmethod != aggr.aggregationMethod {
+	if aggr.canMigrateAggregationMethod(settings.onlineMigration.aggregationMethod) && aggregationmethod != aggr.aggregationMethod {
 		aggregationmethod = aggr.aggregationMethod
 		updateAggrMethod = true
 	}
@@ -1110,7 +1129,7 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 	}
 
 	select {
-	case hasCapacity := <-p.onlineMigration.ticker.C:
+	case hasCapacity := <-settings.onlineMigration.ticker.C:
 		if !hasCapacity {
 			return w, false, nil
 		}
@@ -1163,10 +1182,10 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 
 	// reopen whisper file
 	nw, err := whisper.OpenWithOptions(path, &whisper.Options{
-		Sparse:     p.sparse,
-		FLock:      p.flock,
+		Sparse:     settings.sparse,
+		FLock:      settings.flock,
 		Compressed: compressed,
-		OutOfOrder: p.outOfOrder.enabled,
+		OutOfOrder: settings.outOfOrder.enabled,
 	})
 	if err != nil {
 		logger.Error("failed to reopen whisper file after config migration", zap.String("metric", metric), zap.Error(err))
@@ -1192,6 +1211,7 @@ func (p *Whisper) checkAndUpdateSchemaAndAggregation(w *whisper.Whisper, metric 
 
 // skipcq: RVV-A0005
 func (p *Whisper) CheckPolicyConsistencies(rate int, printInconsistentMetrics bool) error {
+	settings := p.settings()
 	var summary struct {
 		total              int
 		errors             int
@@ -1234,13 +1254,13 @@ func (p *Whisper) CheckPolicyConsistencies(rate int, printInconsistentMetrics bo
 
 		metric := strings.TrimPrefix(strings.ReplaceAll(strings.TrimPrefix(strings.TrimSuffix(path, ".wsp"), p.rootPath), "/", "."), ".")
 
-		schema, ok := p.schemas.Match(metric)
+		schema, ok := settings.schemas.Match(metric)
 		if !ok {
 			summary.brokenSchemaConfig++
 			log.Printf("no storage schema defined for metric: %s", metric)
 			return nil
 		}
-		aggr := p.aggregation.Match(metric)
+		aggr := settings.aggregation.Match(metric)
 		if aggr == nil {
 			summary.brokenAggConfig++
 			log.Printf("no storage aggregation defined for metric: %s", metric)

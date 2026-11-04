@@ -117,28 +117,49 @@ type autoUpdateRate struct {
 	metrics                 *autoUpdateMetrics
 }
 
-// SetAutoUpdateRate supplies cache state and limits for -1 mode. Like the fixed
-// setter, configure before Start; the application replaces persisters on reload.
+// SetAutoUpdateRate supplies cache state and limits for -1 mode before Start.
 func (p *Whisper) SetAutoUpdateRate(state func() cache.WriteoutState, floor, ceiling int) {
 	p.autoUpdate.state, p.autoUpdate.floor, p.autoUpdate.ceiling = state, floor, ceiling
 }
 
 func (p *Whisper) sampleAutoUpdateRate() {
-	a := &p.autoUpdate
-	s := a.state()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.stopping {
+	if p.settings().maxUpdatesPerSecond != -1 {
 		return
 	}
+	a := &p.autoUpdate
+	a.mu.Lock()
+	state, stopping := a.state, a.stopping
+	a.mu.Unlock()
+	if stopping {
+		return
+	}
+	// The cache scan can take seconds on a large cache. Metrics, the stats
+	// collector and restart pacing share autoUpdate.mu, so never scan under it.
+	s := p.autoUpdateState(state)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopping || p.settings().maxUpdatesPerSecond != -1 {
+		return
+	}
+	p.sampleAutoUpdateRateLocked(s)
+}
+
+func (p *Whisper) autoUpdateState(state func() cache.WriteoutState) cache.WriteoutState {
+	s := state()
 	if p.recovering != nil {
 		s.Recovering = p.recovering()
 	}
+	return s
+}
+
+// Caller holds autoUpdate.mu. Also used before publishing a new rate mode.
+func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
+	a := &p.autoUpdate
 	previous := a.applied
 	rate := a.controller.step(time.Now(), s, a.floor, a.ceiling)
 	a.reason = a.controller.reason
 	// Avoid rebuilding tickers for sub-percent measurement noise.
-	if previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01) {
+	if a.ticker.Load() != nil && previous >= a.floor && (a.ceiling <= 0 || previous <= a.ceiling) && previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01) {
 		return
 	}
 	a.applied = rate
@@ -158,12 +179,9 @@ func (p *Whisper) sampleAutoUpdateRate() {
 }
 
 func (p *Whisper) startAutoUpdateRate() {
-	if p.maxUpdatesPerSecond != -1 {
-		return
-	}
 	a := &p.autoUpdate
 	a.mu.Lock()
-	a.stopping, a.applied, a.controller = false, 0, autoUpdateController{}
+	a.stopping, a.applied = false, 0
 	a.mu.Unlock()
 	p.sampleAutoUpdateRate()
 	p.Go(func(exit chan bool) {
@@ -191,7 +209,8 @@ func (p *Whisper) stopAutoUpdateRate() {
 }
 
 func (p *Whisper) throttleUpdates() bool {
-	if p.maxUpdatesPerSecond == -1 {
+	settings := p.settings()
+	if settings.maxUpdatesPerSecond == -1 {
 		return true
 	}
 	if p.restartPaced() {

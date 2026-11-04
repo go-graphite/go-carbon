@@ -220,16 +220,13 @@ func (p *Whisper) convertFile(ctx context.Context, metric string, fault func(str
 	if p.incrementalStore == nil {
 		return result, errors.New("incremental migration is disabled")
 	}
-	if p.conversionIO != nil {
-		slot := conversionSlot(p.conversionIO)
-		select {
-		case slot <- struct{}{}:
-		case <-ctx.Done():
-			return result, ctx.Err()
-		}
-		defer slot.Release()
-		ctx = store.WithIngestYield(ctx, slot)
+	slot := p.conversionSlots()
+	if err := slot.acquire(ctx); err != nil {
+		return result, err
 	}
+	defer slot.Release()
+	ctx = store.WithIngestYield(ctx, slot)
+
 	unlock, err := p.lockMetricContext(ctx, metric)
 	if err != nil {
 		return result, err
@@ -294,7 +291,7 @@ func (p *Whisper) convertFile(ctx context.Context, metric string, fault func(str
 			return result, err
 		}
 	}
-	if r := p.reclaim; r != nil && fault == nil && p.incrementalArchive == "" && !result.PreviouslyOwned {
+	if r := p.reclaimer(); r != nil && fault == nil && p.incrementalArchive == "" && !result.PreviouslyOwned {
 		if r.push(reclaimJob{name: metadata.Name, id: metadata.ID, generation: metadata.Generation, path: path}) {
 			if info, err := os.Lstat(path); err == nil {
 				if stat, ok := info.Sys().(*syscall.Stat_t); ok {
@@ -373,7 +370,7 @@ func syncReclaimedDirectory(path, root string) error {
 }
 
 func (p *Whisper) pruneOriginalDirectory(ctx context.Context, dir string) error {
-	if r := p.reclaim; r != nil {
+	if r := p.reclaimer(); r != nil {
 		r.rootMu.RLock()
 		if r.root != nil {
 			err := whisperpath.PruneAt(int(r.root.Fd()), p.rootPath, dir, ctx.Err)
@@ -452,20 +449,72 @@ func (d *directorySyncs) sync(path, root string) error {
 // syscall pins an OS thread, and Go aborts at its thread limit; thousands of
 // conversions released together by one ingestion group exceeded it. Waiting
 // for a group holds no slot.
-type conversionSlot chan struct{}
-
-func (s conversionSlot) Release() { <-s }
-func (s conversionSlot) Acquire() { s <- struct{}{} }
-
-// ConversionIOSlots reports conversions inside file I/O and the slot count.
-func (p *Whisper) ConversionIOSlots() (used, slots int) {
-	return len(p.conversionIO), cap(p.conversionIO)
+// One semaphore survives every limit change, including zero (unlimited).
+// Replacing its channel would forget active conversions and admit a second
+// cohort beyond the thread/I/O guard. A lower limit drains existing holders.
+type conversionSlot struct {
+	mu          sync.Mutex
+	used, limit int
+	changed     chan struct{}
 }
 
-// SetConversionIOSlots bounds concurrent conversion file I/O; zero disables it.
-// Configure it before conversions start.
-func (p *Whisper) SetConversionIOSlots(n int) {
-	if n > 0 {
-		p.conversionIO = make(chan struct{}, n)
+func (s *conversionSlot) wake() {
+	if s.changed != nil {
+		close(s.changed)
+		s.changed = nil
 	}
+}
+func (s *conversionSlot) Release() { s.mu.Lock(); s.used--; s.wake(); s.mu.Unlock() }
+func (s *conversionSlot) Acquire() { _ = s.acquire(context.Background()) }
+func (s *conversionSlot) acquire(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		if s.limit <= 0 || s.used < s.limit {
+			s.used++
+			s.mu.Unlock()
+			return nil
+		}
+		if s.changed == nil {
+			s.changed = make(chan struct{})
+		}
+		changed := s.changed
+		s.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+func (s *conversionSlot) status() (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.used, s.limit
+}
+
+// ConversionIOSlots reports conversions inside file I/O and the slot count.
+func (p *Whisper) ConversionIOSlots() (used, slots int) { return p.conversionSlots().status() }
+
+// SetConversionIOSlots changes the live limit without discarding active grants.
+// Zero disables limiting; accounting remains live for a later finite limit.
+func (p *Whisper) SetConversionIOSlots(n int) {
+	slots := p.conversionSlots()
+	slots.mu.Lock()
+	defer slots.mu.Unlock()
+	if slots.limit != max(0, n) {
+		slots.limit = max(0, n)
+		slots.wake()
+	}
+}
+
+func (p *Whisper) conversionSlots() *conversionSlot {
+	p.ioMu.Lock()
+	defer p.ioMu.Unlock()
+	if p.conversionIO == nil {
+		p.conversionIO = &conversionSlot{}
+	}
+	return p.conversionIO
 }

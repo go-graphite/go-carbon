@@ -432,6 +432,7 @@ func (app *App) ReloadConfig() error {
 		return errors.New("configuration reload is fenced by whole-store copy; sealed input requires a restart")
 	}
 
+	previousConfig := app.Config
 	var err error
 	if err = app.configure(); err != nil {
 		return err
@@ -479,35 +480,49 @@ func (app *App) ReloadConfig() error {
 		app.MetricStore.SetUpdatePointLookups(app.Config.Whisper.StoreUpdatePointLookups)
 	}
 
-	app.Cache.SetMaxSize(app.Config.Cache.MaxSize)
-	app.Cache.SetMaxBytes(app.Config.Cache.MaxBytes)
+	// Publishing identical cache settings invalidates deadline summaries and
+	// rebuilding an unchanged bloom filter discards its history. Preserve both
+	// on unrelated reloads, as well as preserving the writer pool below.
+	before, after := previousConfig.Cache, app.Config.Cache
+	if before.MaxSize != after.MaxSize {
+		app.Cache.SetMaxSize(after.MaxSize)
+	}
+	if before.MaxBytes != after.MaxBytes {
+		app.Cache.SetMaxBytes(after.MaxBytes)
+	}
 	store.SetStatePacking(app.Config.Whisper.StoreMetadataCachePack)
-	app.heartbeatCacheMax.Store(int64(app.Config.Cache.MaxSize))
-	app.Cache.SetWriteStrategy(app.Config.Cache.WriteStrategy)
-	app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
-	app.Cache.SetBloomSize(app.Config.Cache.BloomSize)
-	if err := app.Cache.SetWriteoutBatching(app.Config.Cache.WriteoutMinPoints, app.Config.Cache.WriteoutMaxDelay.Value()); err != nil {
-		return err
+	app.heartbeatCacheMax.Store(int64(after.MaxSize))
+	if before.WriteStrategy != after.WriteStrategy {
+		app.Cache.SetWriteStrategy(after.WriteStrategy)
 	}
-	if err := app.Cache.SetWriteoutSpread(app.Config.Cache.WriteoutSpread); err != nil {
-		return err
+	if previousConfig.Tags.Enabled != app.Config.Tags.Enabled {
+		app.Cache.SetTagsEnabled(app.Config.Tags.Enabled)
 	}
-	app.Cache.SetWriteoutRestoreSpread(app.Config.Cache.WriteoutRestoreSpread)
-	app.Cache.SetWriteoutSparseSpread(app.Config.Cache.WriteoutSparseSpread)
-	app.Cache.SetWriteoutStartupSpread(app.Config.Cache.WriteoutStartupSpread)
+	if before.BloomSize != after.BloomSize {
+		app.Cache.SetBloomSize(after.BloomSize)
+	}
+	if before.WriteoutMinPoints != after.WriteoutMinPoints || before.WriteoutMaxDelay != after.WriteoutMaxDelay {
+		if err := app.Cache.SetWriteoutBatching(after.WriteoutMinPoints, after.WriteoutMaxDelay.Value()); err != nil {
+			return err
+		}
+	}
+	if before.WriteoutSpread != after.WriteoutSpread {
+		if err := app.Cache.SetWriteoutSpread(after.WriteoutSpread); err != nil {
+			return err
+		}
+	}
+	if before.WriteoutRestoreSpread != after.WriteoutRestoreSpread {
+		app.Cache.SetWriteoutRestoreSpread(after.WriteoutRestoreSpread)
+	}
+	if before.WriteoutSparseSpread != after.WriteoutSparseSpread {
+		app.Cache.SetWriteoutSparseSpread(after.WriteoutSparseSpread)
+	}
+	if before.WriteoutStartupSpread != after.WriteoutStartupSpread {
+		app.Cache.SetWriteoutStartupSpread(after.WriteoutStartupSpread)
+	}
 	app.Cache.SetWriteoutPacing(app.Config.Whisper.MaxUpdatesPerSecond == -1)
 
-	if app.Persister != nil {
-		app.Persister.Stop()
-		app.Persister = nil
-	}
-
-	if app.Tags != nil {
-		app.Tags.Stop()
-		app.Tags = nil
-	}
-
-	if err = app.startPersister(); err != nil {
+	if err = app.reloadPersister(previousConfig); err != nil {
 		return err
 	}
 	app.startExpiration()
@@ -676,7 +691,7 @@ func (app *App) Stop() {
 	app.stopAll()
 }
 
-func (app *App) startPersister() error {
+func (app *App) startTags() {
 	if app.Config.Tags.Enabled {
 		app.Tags = tags.New(&tags.Options{
 			LocalPath:           app.Config.Tags.LocalDir,
@@ -687,91 +702,118 @@ func (app *App) startPersister() error {
 		})
 	}
 
-	if app.Config.Whisper.Enabled {
-		p := persister.NewWhisper(
-			app.Config.Whisper.DataDir,
-			app.Config.Whisper.Schemas,
-			app.Config.Whisper.Aggregation,
-			app.Cache.WriteoutQueue().Get,
-			app.Cache.PopNotConfirmed,
-			app.Cache.Confirm,
-			app.Cache.Pop,
-		)
-		p.SetWriteoutBatchReceiver(app.Cache.WriteoutQueue().TryGet)
-		p.SetStoreUpdateBatchSize(app.Config.Whisper.StoreUpdateBatchSize)
-		p.SetRequeue(app.Cache.Requeue)
-		p.SetBacklogged(app.Cache.Backlogged)
-		p.SetRecovering(app.Cache.Recovering)
-		p.SetWriteoutReady(app.Cache.WriteoutReady)
-		if app.MetricStore != nil {
-			p.SetMetricStore(app.MetricStore)
-			if app.Config.Whisper.StoreIncrementalMigration {
-				slots := app.Config.Whisper.StoreMigrationIOSlots
-				if slots == 0 {
-					slots = defaultConversionIOSlots
-				}
-				p.SetConversionIOSlots(slots)
-				if d := app.Config.Whisper.StoreMigrationReclaimDelay; d != nil {
-					p.SetDeferredReclaim(d.Value())
-				}
-				if err := p.SetIncrementalMigration(app.MetricStore, sharedStorePath(app.Config)); err != nil {
-					return err
-				}
-				if err := p.SetIncrementalMigrationArchive(app.Config.Whisper.StoreMigrationArchiveDir); err != nil {
-					return err
-				}
+}
+
+func (app *App) newPersister() (*persister.Whisper, error) {
+	p := persister.NewWhisper(
+		app.Config.Whisper.DataDir,
+		app.Config.Whisper.Schemas,
+		app.Config.Whisper.Aggregation,
+		app.Cache.WriteoutQueue().Get,
+		app.Cache.PopNotConfirmed,
+		app.Cache.Confirm,
+		app.Cache.Pop,
+	)
+	p.SetWriteoutBatchReceiver(app.Cache.WriteoutQueue().TryGet)
+	p.SetStoreUpdateBatchSize(app.Config.Whisper.StoreUpdateBatchSize)
+	p.SetRequeue(app.Cache.Requeue)
+	p.SetBacklogged(app.Cache.Backlogged)
+	p.SetRecovering(app.Cache.Recovering)
+	p.SetWriteoutReady(app.Cache.WriteoutReady)
+	if app.MetricStore != nil {
+		p.SetMetricStore(app.MetricStore)
+		if app.Config.Whisper.StoreIncrementalMigration {
+			if err := p.SetIncrementalMigration(app.MetricStore, sharedStorePath(app.Config)); err != nil {
+				return nil, err
 			}
-			p.SetMirrorFiles(app.Config.Whisper.StoreMirrorFiles)
-			p.SetMirrorImportMissing(app.Config.Whisper.StoreLiveMigration && !app.sharedStoreReads.Load())
-			if app.Config.Whisper.StoreMirrorFiles {
-				if app.mirrorState == nil {
-					app.mirrorState = &persister.MirrorState{ScratchDir: sharedStorePath(app.Config)}
-				}
-				p.SetMirrorState(app.mirrorState)
+			if err := p.SetIncrementalMigrationArchive(app.Config.Whisper.StoreMigrationArchiveDir); err != nil {
+				return nil, err
 			}
 		}
-		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
-		p.SetAutoUpdateRate(func() cache.WriteoutState {
-			state := app.Cache.WriteoutState()
-			if log := app.inputLog.Load(); log != nil {
-				state.OldestAge = max(state.OldestAge, log.Metrics().OldestUnpersisted)
+		p.SetMirrorFiles(app.Config.Whisper.StoreMirrorFiles)
+		p.SetMirrorImportMissing(app.Config.Whisper.StoreLiveMigration && !app.sharedStoreReads.Load())
+		if app.Config.Whisper.StoreMirrorFiles {
+			if app.mirrorState == nil {
+				app.mirrorState = &persister.MirrorState{ScratchDir: sharedStorePath(app.Config)}
 			}
-			return state
-		}, app.Config.Whisper.MaxUpdatesPerSecondAutoMin, app.Config.Whisper.MaxUpdatesPerSecondAutoMax)
-		p.SetSparse(app.Config.Whisper.Sparse)
-		p.SetFLock(app.Config.Whisper.FLock)
-		p.SetCompressed(app.Config.Whisper.Compressed)
-		p.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
-		p.SetWorkers(app.Config.Whisper.Workers)
-		p.SetHashFilenames(app.Config.Whisper.HashFilenames)
-		if app.Config.Prometheus.Enabled {
-			p.InitPrometheus(app.PromRegisterer)
+			p.SetMirrorState(app.mirrorState)
 		}
-		if app.Tags != nil {
-			p.SetTagsEnabled(true)
-			p.SetTaggedFn(app.Tags.Add)
-		}
-
-		if cfg := app.Config.Whisper; cfg.OnlineMigration {
-			scope := strings.Split(strings.TrimSpace(cfg.OnlineMigrationGlobalScope), ",")
-			p.EnableOnlineMigration(cfg.OnlineMigrationRate, scope)
-		}
-
-		if cfg := app.Config.Whisper; cfg.OutOfOrder {
-			p.EnableOutOfOrder(cfg.OutOfOrderCompactRate, cfg.OutOfOrderCompactThreshold)
-			p.SetOutOfOrderCompactionPolicy(cfg.OutOfOrderCompactMinPoints,
-				cfg.OutOfOrderCompactMaxPointAge.Value(), cfg.OutOfOrderCompactRetentionMargin.Value())
-		}
-
-		app.Cache.SetRestartOrder(nil)
-		app.setMetadataPrewarmGate(p)
-		app.Cache.SetRestartWarmFirst(nil, nil, nil)
-		if app.MetricStore != nil && app.restartBudget != nil && app.Config.Whisper.StoreMetadataCachePrewarm && app.Config.Whisper.StoreMetadataCacheSize > 0 && metadataWarmFirst(app.Config.Whisper) {
-			app.Cache.SetRestartWarmFirst(app.MetricStore.MetadataCached, app.restartBudget.WaitPrefetch, app.restartBudget.EndPrefetch)
-		}
-		p.Start()
-		app.Persister = p
 	}
+	p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
+	p.SetAutoUpdateRate(func() cache.WriteoutState {
+		state := app.Cache.WriteoutState()
+		if log := app.inputLog.Load(); log != nil {
+			state.OldestAge = max(state.OldestAge, log.Metrics().OldestUnpersisted)
+		}
+		return state
+	}, app.Config.Whisper.MaxUpdatesPerSecondAutoMin, app.Config.Whisper.MaxUpdatesPerSecondAutoMax)
+	p.SetSparse(app.Config.Whisper.Sparse)
+	p.SetFLock(app.Config.Whisper.FLock)
+	p.SetCompressed(app.Config.Whisper.Compressed)
+	p.SetRemoveEmptyFile(app.Config.Whisper.RemoveEmptyFile)
+	p.SetWorkers(app.Config.Whisper.Workers)
+	p.SetHashFilenames(app.Config.Whisper.HashFilenames)
+	if app.Tags != nil {
+		p.SetTagsEnabled(true)
+		p.SetTaggedFn(app.Tags.Add)
+	}
+
+	if cfg := app.Config.Whisper; cfg.OnlineMigration {
+		scope := strings.Split(strings.TrimSpace(cfg.OnlineMigrationGlobalScope), ",")
+		p.EnableOnlineMigration(cfg.OnlineMigrationRate, scope)
+	}
+
+	if cfg := app.Config.Whisper; cfg.OutOfOrder {
+		p.EnableOutOfOrder(cfg.OutOfOrderCompactRate, cfg.OutOfOrderCompactThreshold)
+		p.SetOutOfOrderCompactionPolicy(cfg.OutOfOrderCompactMinPoints,
+			cfg.OutOfOrderCompactMaxPointAge.Value(), cfg.OutOfOrderCompactRetentionMargin.Value())
+	}
+
+	return p, nil
+}
+
+func (app *App) configurePersisterIO(p *persister.Whisper) {
+	if app.Config.Whisper.StoreIncrementalMigration {
+		slots := app.Config.Whisper.StoreMigrationIOSlots
+		if slots == 0 {
+			slots = defaultConversionIOSlots
+		}
+		p.SetConversionIOSlots(slots)
+		delay := time.Duration(0)
+		if d := app.Config.Whisper.StoreMigrationReclaimDelay; d != nil {
+			delay = d.Value()
+		}
+		p.SetDeferredReclaim(delay)
+	}
+}
+
+func (app *App) startPersister() error {
+	if app.Tags == nil {
+		app.startTags()
+	}
+	if !app.Config.Whisper.Enabled {
+		return nil
+	}
+	p, err := app.newPersister()
+	if err != nil {
+		return err
+	}
+	app.configurePersisterIO(p)
+	if app.Config.Prometheus.Enabled {
+		p.InitPrometheus(app.PromRegisterer)
+	}
+
+	app.Cache.SetRestartOrder(nil)
+	app.setMetadataPrewarmGate(p)
+	app.Cache.SetRestartWarmFirst(nil, nil, nil)
+	if app.MetricStore != nil && app.restartBudget != nil && app.Config.Whisper.StoreMetadataCachePrewarm && app.Config.Whisper.StoreMetadataCacheSize > 0 && metadataWarmFirst(app.Config.Whisper) {
+		app.Cache.SetRestartWarmFirst(app.MetricStore.MetadataCached, app.restartBudget.WaitPrefetch, app.restartBudget.EndPrefetch)
+	}
+	if err := p.Start(); err != nil {
+		p.Stop()
+		return err
+	}
+	app.Persister = p
 	return nil
 }
 

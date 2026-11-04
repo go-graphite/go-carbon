@@ -33,6 +33,7 @@ func (p *Whisper) SetMirrorFiles(enabled bool) {
 }
 
 func (p *Whisper) storeShared(ctx context.Context, metric string) {
+	settings := p.settings()
 	// store entered the route stage; metadata preparation continues it.
 	timer := stagetime.FromContext(ctx)
 	// Readers hold the stripe shared across their persistent snapshot and cache
@@ -159,7 +160,7 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 			p.mirrorFailed(metric)
 		}
 		var compactionWindows []whisper.ArchiveWindow
-		if err == nil && p.outOfOrder.enabled && p.outOfOrder.ticker != nil {
+		if err == nil && settings.outOfOrder.enabled && settings.outOfOrder.ticker != nil {
 			var repairRequired bool
 			mirror, repairRequired, compactionWindows = p.compactOutOfOrderResult(mirror, metric, path)
 			if repairRequired {
@@ -229,7 +230,7 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 		update := func() error {
 			if maintained, ok := p.metricStore.(interface {
 				UpdateManyMaintained(context.Context, string, []store.Point, store.ContinuationMaintenance) error
-			}); ok && metadata.Continuation && p.outOfOrder.enabled {
+			}); ok && metadata.Continuation && settings.outOfOrder.enabled {
 				return maintained.UpdateManyMaintained(ctx, metric, values.Data, p.sharedMaintenance())
 			}
 			return p.metricStore.UpdateMany(ctx, metric, values.Data)
@@ -291,27 +292,28 @@ func (p *Whisper) storeShared(ctx context.Context, metric string) {
 			p.confirm(values)
 		}
 	}
-	if p.tagsEnabled && p.taggedFn != nil && strings.Contains(metric, ";") {
-		p.taggedFn(metric, false)
+	if settings.tagsEnabled && settings.taggedFn != nil && strings.Contains(metric, ";") {
+		settings.taggedFn(metric, false)
 	}
 }
 
 func (p *Whisper) sharedMaintenance() store.ContinuationMaintenance {
-	return store.ContinuationMaintenance{MinBytes: p.outOfOrder.threshold,
-		MinPoints: p.outOfOrder.policy.MinPoints, MaxPointAge: p.outOfOrder.policy.MaxPointAge, RetentionMargin: p.outOfOrder.policy.RetentionMargin,
+	settings := p.settings()
+	return store.ContinuationMaintenance{MinBytes: settings.outOfOrder.threshold,
+		MinPoints: settings.outOfOrder.policy.MinPoints, MaxPointAge: settings.outOfOrder.policy.MaxPointAge, RetentionMargin: settings.outOfOrder.policy.RetentionMargin,
 		Allow: func() bool {
-			if p.outOfOrder.ticker == nil {
+			if settings.outOfOrder.ticker == nil {
 				return false
 			}
 			select {
-			case capacity := <-p.outOfOrder.ticker.C:
+			case capacity := <-settings.outOfOrder.ticker.C:
 				return capacity
 			default:
 				return false
 			}
 		},
 		Result: func(merged bool, err error) {
-			if p.outOfOrder.policy.MinPoints > 0 {
+			if settings.outOfOrder.policy.MinPoints > 0 {
 				atomic.AddUint32(&p.oooCompactionChecks, 1)
 			}
 			switch {
@@ -352,15 +354,16 @@ func (p *Whisper) createSharedMetric(ctx context.Context, metric string) bool {
 // createShared creates metric in the store from its schema and aggregation,
 // logging every failure except a refused name.
 func (p *Whisper) createShared(ctx context.Context, metric string) error {
+	settings := p.settings()
 	if err := store.ValidateMetricName(metric); err != nil {
 		return err
 	}
-	schema, ok := p.schemas.Match(metric)
+	schema, ok := settings.schemas.Match(metric)
 	if !ok {
 		p.logger.Error("no storage schema defined for metric", zap.String("metric", metric))
 		return errNoSchema
 	}
-	aggr := p.aggregation.Match(metric)
+	aggr := settings.aggregation.Match(metric)
 	if aggr == nil {
 		p.logger.Error("no storage aggregation defined for metric", zap.String("metric", metric))
 		return errNoSchema
@@ -376,8 +379,8 @@ func (p *Whisper) createShared(ctx context.Context, metric string) error {
 	_, err := p.metricStore.Create(ctx, config)
 	if err == nil && !p.mirrorFiles {
 		atomic.AddUint32(&p.created, 1)
-		if p.tagsEnabled && p.taggedFn != nil && strings.Contains(metric, ";") {
-			p.taggedFn(metric, true)
+		if settings.tagsEnabled && settings.taggedFn != nil && strings.Contains(metric, ";") {
+			settings.taggedFn(metric, true)
 		}
 	} else if errors.Is(err, store.ErrExists) {
 		err = p.discardStaleStage(ctx, metric, config)

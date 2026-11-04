@@ -231,8 +231,8 @@ func TestAutoUpdateRateReload(t *testing.T) {
 		if err := app.ReloadConfig(); err != nil {
 			t.Fatal(err)
 		}
-		if app.Cache != core || app.Persister == previous {
-			t.Fatal("reload lost cache or retained old persister")
+		if app.Cache != core || app.Persister != previous {
+			t.Fatal("reload replaced cache or persister")
 		}
 		stats := make(map[string]float64)
 		app.Persister.Stat(func(name string, value float64) { stats[name] = value })

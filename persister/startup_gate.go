@@ -68,6 +68,7 @@ func (p *Whisper) waitStartup(exit <-chan bool) bool {
 		return false
 	}
 	started := time.Now()
+	p.startupStarted.Store(started.UnixNano())
 	reason := "stopped"
 	var scanned, total uint64
 	var projection time.Duration
