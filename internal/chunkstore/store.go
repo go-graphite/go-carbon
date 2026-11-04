@@ -36,6 +36,7 @@ const (
 	formatMarkerContinuation = "go-carbon-chunks-v6\n"
 	formatMarkerTimeBuckets  = "go-carbon-chunks-v7\n"
 	formatMarkerColdPack     = "go-carbon-chunks-v9\n"
+	formatMarkerFloatCodec   = "go-carbon-chunks-v11\n"
 	legacyRevisionSize       = 8
 	revisionSize             = 16
 )
@@ -446,7 +447,8 @@ func Open(dir string, options Options) (*Store, error) {
 		options.RelayoutReclaimBytes = DefaultRelayoutReclaimBytes
 	}
 	_ = s.SetRelayoutReclaimBytes(options.RelayoutReclaimBytes)
-	s.coldPack.format.Store(format == 9)
+	s.coldPack.format.Store(format >= 9)
+	s.coldPack.floatFormat.Store(format >= 11)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
 		MaxConcurrentCompactions: func() int { return int(s.compactionWorkers.Load()) },
@@ -776,7 +778,7 @@ func checkFormatForContinuation(fs vfs.FS, dir string, options Options) (int, bo
 	}
 	if len(names) != 0 {
 		format, err := checkFormatMarker(fs, dir)
-		if err != nil || format != 6 && format != 7 && format != 9 {
+		if err != nil || format != 6 && format != 7 && format != 9 && format != 11 {
 			return 0, false, false, fmt.Errorf("%w: continuation mode requires its own v6 or v7 destination", ErrFormat)
 		}
 		if format == 6 && options.TimeBuckets {
@@ -801,7 +803,7 @@ func checkFormatMarker(fs vfs.FS, dir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: missing marker; migrate legacy data through buckyd", ErrFormat)
 	}
-	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarkerV2)+1)))
+	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarkerFloatCodec)+1)))
 	closeErr := f.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
 		return 0, fmt.Errorf("read store marker: %w", err)
@@ -821,6 +823,8 @@ func checkFormatMarker(fs vfs.FS, dir string) (int, error) {
 		return 7, nil
 	case formatMarkerColdPack:
 		return 9, nil
+	case formatMarkerFloatCodec:
+		return 11, nil
 	default:
 		return 0, ErrFormat
 	}

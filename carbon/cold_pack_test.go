@@ -8,7 +8,7 @@ import (
 
 func TestColdPackConfig(t *testing.T) {
 	cfg := NewConfig()
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.PackTails || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.PackTails || o.FloatCodec || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
 		t.Fatalf("default %+v %v", o, err)
 	}
 	cfg.Whisper.StoreColdPackTails = true
@@ -28,6 +28,7 @@ func TestColdPackConfig(t *testing.T) {
 	next.Whisper.StoreColdPackWorkers = 2
 	next.Whisper.StoreColdPackRate = 12345
 	next.Whisper.StoreColdPackMaxDebt = 16 << 30
+	next.Whisper.StoreColdPackFloatCodec = true
 	if storageSettingsChanged(cfg, &next) {
 		t.Fatal("maintenance policy requires restart")
 	}
@@ -60,6 +61,17 @@ func TestColdPackReload(t *testing.T) {
 		}
 		if app.MetricStore != db {
 			t.Fatal("workers reload replaced store")
+		}
+	}
+	for _, mode := range []string{"float-repack", "float-downgrade"} {
+		cfg.Whisper.StoreColdPack = mode
+		cfg.Whisper.StoreColdPackFloatCodec = mode == "float-repack"
+		writeSharedConfig(t, path, cfg)
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+		if app.MetricStore != db || db.TransferFormat() != 9 || db.ColdPackStats().Mode != mode {
+			t.Fatal("float policy did not reload in place without fencing")
 		}
 	}
 	cfg.Whisper.StoreColdPack = "off"

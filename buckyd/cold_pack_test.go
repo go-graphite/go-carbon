@@ -3,6 +3,7 @@ package buckyd
 import (
 	"bytes"
 	"context"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,6 +50,66 @@ func TestColdPackTransferNegotiation(t *testing.T) {
 		}
 		if w.Code != want {
 			t.Fatalf("%q: %d %s", query, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestColdPackFloatTransferNegotiation(t *testing.T) {
+	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, Now: func() time.Time { return time.Unix(1700200000, 0) }, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.StopBackground()
+	ctx := context.Background()
+	cfg := store.MetricConfig{Name: "transfer.float", AggregationMethod: store.Average, Retentions: []store.Retention{{Step: 60, Count: 10080}}}
+	if _, err := db.Create(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	r := rand.New(rand.NewPCG(19, 37))
+	p := make([]store.Point, 1800)
+	for i := range p {
+		p[i] = store.Point{Timestamp: 1700000040 + int64(i*60), Value: float64(r.IntN(16)) / 3}
+	}
+	if err := db.UpdateMany(ctx, cfg.Name, p); err != nil {
+		t.Fatal(err)
+	}
+	options := store.ColdPackOptions{Mode: "exact", CPUFraction: 1, BytesPerSecond: 1 << 40}
+	if err := db.ConfigureColdPack(options); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RunColdPack(ctx); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(Config{TmpDir: t.TempDir(), MaxBodyBytes: 1 << 20}, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.SetTransferFlush(func(ctx context.Context, _ []string) error {
+		options.Mode = "float-repack"
+		options.FloatCodec = true
+		if err := db.ConfigureColdPack(options); err != nil {
+			return err
+		}
+		return db.RunColdPack(ctx)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/transfer/export?store_format=9", bytes.NewBufferString(`["transfer.float"]`))
+	out := httptest.NewRecorder()
+	svc.Handler().ServeHTTP(out, req)
+	if out.Code != 409 || db.TransferFormat() != 11 {
+		t.Fatalf("mid-export fence: status=%d format=%d %s", out.Code, db.TransferFormat(), out.Body.String())
+	}
+	svc.SetTransferFlush(nil)
+	for _, query := range []string{"?store_format=9", "?store_format=10", "?store_format=11&wire=2"} {
+		req := httptest.NewRequest(http.MethodPost, "/v1/transfer/export"+query, bytes.NewBufferString(`["transfer.float"]`))
+		out := httptest.NewRecorder()
+		svc.Handler().ServeHTTP(out, req)
+		want := 409
+		if query == "?store_format=11&wire=2" {
+			want = 200
+		}
+		if out.Code != want {
+			t.Fatalf("%s: %d %s", query, out.Code, out.Body.String())
 		}
 	}
 }

@@ -27,6 +27,7 @@ type coldPackCheckpoint struct {
 	Format, Mode                string
 	PackTails                   bool `json:",omitempty"`
 	WriteWindow                 time.Duration
+	FloatCodec                  bool `json:",omitempty"`
 	Cursor                      string
 	BlockCursor                 uint64
 	Passes                      uint64
@@ -68,7 +69,7 @@ func (s *Store) loadColdPackCheckpoint(marker string) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if saved.Format != marker || saved.Mode != c.options.Mode || saved.WriteWindow != c.options.WriteWindow || saved.PackTails != c.options.PackTails {
+	if saved.Format != marker || saved.Mode != c.options.Mode || saved.WriteWindow != c.options.WriteWindow || saved.PackTails != c.options.PackTails || saved.FloatCodec != c.options.FloatCodec {
 		return nil
 	}
 	c.stats.Cursor, c.stats.BlockCursor = saved.Cursor, saved.BlockCursor
@@ -96,7 +97,8 @@ func (s *Store) saveColdPackCheckpoint(force bool) error {
 	c := &s.coldPack
 	c.mu.Lock()
 	saved := coldPackCheckpoint{
-		Version: 1, Mode: c.options.Mode, PackTails: c.options.PackTails, WriteWindow: c.options.WriteWindow,
+		FloatCodec: c.options.FloatCodec,
+		Version:    1, Mode: c.options.Mode, PackTails: c.options.PackTails, WriteWindow: c.options.WriteWindow,
 		Cursor: c.stats.Cursor, BlockCursor: c.stats.BlockCursor,
 		Passes: c.stats.Passes, MetricsVisited: c.stats.MetricsVisited, PassFailed: c.passFailed,
 		StoredPoints: c.stats.StoredPoints, StoredMetrics: c.stats.StoredMetrics, StoredAt: c.stats.StoredAt,
