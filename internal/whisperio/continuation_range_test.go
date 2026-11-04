@@ -13,8 +13,8 @@ import (
 )
 
 func rangeBlockFixture(tb testing.TB, count int, kind string, packed bool) (*continuationFile, whisper.ContinuationBlock, mapContinuationIO, []whisper.TimeSeriesPoint) {
-	tb.Helper()
 	const step = 60
+	tb.Helper()
 	kv := mapContinuationIO{}
 	fs := newContinuationFiles(kv, false)
 	fs.rangeReads = true

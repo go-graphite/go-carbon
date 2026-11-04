@@ -353,7 +353,7 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 		{"capable successor never asks", "silent", true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if isolatedTestProcess(t) {
+			if isolatedTestProcessSerial(t) {
 				return
 			}
 			defer zapwriter.Test()()
@@ -361,6 +361,14 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 			// Preserve the 1.1 s executable-probe margin below while keeping the
 			// slow flush beyond the handoff window.
 			inputHandoffTimeout = 2 * time.Second
+			// The capable case checks uninterrupted ownership transfer, not
+			// the duration of opening a real store on a busy test machine.
+			// Only fallback cases need the short no-request deadline. Keep
+			// their slow-flush regression independent of that startup budget.
+			const slowFlush = 2500 * time.Millisecond
+			if tc.successor == "handoff" {
+				inputHandoffTimeout = time.Minute
+			}
 			t.Cleanup(func() { inputHandoffTimeout = saved })
 			var accepted acceptLog
 			accepted.install(t)
@@ -408,9 +416,9 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			// The flush the stop waits for before input closes takes longer
-			// than inputHandoffTimeout, as on the production host.
-			flusher := &slowFlusher{db: first.MetricStore, delay: inputHandoffTimeout + 500*time.Millisecond}
+			// The flush exceeds the fallback no-request deadline. A capable
+			// successor has a separate startup budget and must keep input live.
+			flusher := &slowFlusher{db: first.MetricStore, delay: slowFlush}
 			savedFlush := stopFlushStore
 			stopFlushStore = func(*store.Store) stopFlusher { return flusher }
 			t.Cleanup(func() { stopFlushStore = savedFlush })

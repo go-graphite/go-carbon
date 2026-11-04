@@ -19,7 +19,7 @@ import (
 // when it touches only recent data. Readers are closed-loop (no arrival queue).
 // CPU includes those deterministic writes; p50/p99 time only the render.
 func BenchmarkRenderRangeLatency(b *testing.B) {
-	for _, mix := range []string{"moving", "writeout", "historical", "tailheavy"} {
+	for _, mix := range []string{"moving", "writeout", "historical", "tailheavy", "range"} {
 		for _, readers := range []int{1, 8} {
 			for _, enabled := range []bool{false, true} {
 				b.Run(fmt.Sprintf("%s/readers%d/cache%v", mix, readers, enabled), func(b *testing.B) { benchmarkRenderRangeLatency(b, mix, readers, enabled) })
@@ -39,7 +39,10 @@ func BenchmarkRenderRangeWriteoutParity(b *testing.B) {
 }
 
 func benchmarkRenderRangeLatency(b *testing.B, mix string, readers int, enabled bool) {
-	l, db, first, count := newSealedRenderFixture(b)
+	l, db, codec, first, count := newSealedRenderFixture(b)
+	if mix == "range" {
+		codec.RangeReadsEnabled = func() bool { return true }
+	}
 	if err := l.SetQueryRangeCache(enabled, 64, 2*time.Hour); err != nil {
 		b.Fatal(err)
 	}
@@ -117,7 +120,7 @@ func TestRenderRangeStorageReads(t *testing.T) {
 		results := map[bool][]uint64{}
 		for _, enabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("memo%v/cache%v", memo, enabled), func(t *testing.T) {
-				l, db, first, count := newSealedRenderFixture(t)
+				l, db, _, first, count := newSealedRenderFixture(t)
 				if !memo {
 					restore := db.DisableMetadataCacheForTest()
 					defer restore()

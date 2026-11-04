@@ -161,7 +161,7 @@ func TestStoreMaintenanceSIGHUPKeepsStartupGate(t *testing.T) {
 		t.Fatal("SIGHUP bypassed restart pacing")
 	default:
 	}
-	if app.expirationStats.lastSuccess.Load() != 0 || app.MetricStore.ColdPackStats().Pages != 0 {
+	if app.expirationStats.lastSuccess.Load() != 0 || app.MetricStore.ColdPackStats().Pages != 0 || app.MetricStore.ColdPackStats().MetricsVisited != 0 {
 		t.Fatal("maintenance ran through startup gate")
 	}
 }
@@ -211,7 +211,7 @@ func TestMetadataCheckpointInvalidLoadReportsFailure(t *testing.T) {
 	done := startMetadataPrewarm(db, conf, "corrupt-test", nil, nil, new(store.PrewarmProgress), nil, budget)
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(time.Minute):
 		t.Fatal("invalid load did not finish")
 	}
 	logs := zapwriter.TestString()

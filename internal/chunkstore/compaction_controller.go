@@ -83,8 +83,7 @@ type compactionController struct {
 	urgentFlushes          int
 }
 
-// newCompactionController returns an auto-mode (-1) compaction controller
-// without flush pacing.
+// newCompactionController builds an auto-mode (-1) controller with flush pacing off.
 func newCompactionController(p *compactionPacer, now time.Time) *compactionController {
 	return newPacingController(p, newCompactionPacer(0), -1, 0, now)
 }

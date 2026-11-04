@@ -151,9 +151,14 @@ func handoffTestConfig(t *testing.T, root string) *Config {
 	cfg.Whisper.OutOfOrder = true
 	cfg.Tags.Enabled = false
 	cfg.Dump.Enabled = true
-	// Honor the configured temporary root, using a short prefix so the Unix
-	// socket path also fits sockaddr_un on macOS.
-	dumpDir, err := os.MkdirTemp("", "h-")
+	// Unix socket paths must fit sockaddr_un, including on macOS where
+	// the default testing temporary directory can be too long. Honor a short
+	// configured TMPDIR so tests can keep all artifacts in a private workspace.
+	dumpBase := os.TempDir()
+	if len(filepath.Join(dumpBase, "h-4294967295", "read-handoff.sock")) >= 104 {
+		dumpBase = "/tmp"
+	}
+	dumpDir, err := os.MkdirTemp(dumpBase, "h-")
 	if err != nil {
 		t.Fatal(err)
 	}

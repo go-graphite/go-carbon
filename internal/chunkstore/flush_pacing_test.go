@@ -188,8 +188,8 @@ func TestFlushRateRejectsInvalid(t *testing.T) {
 }
 
 // writeFlushPayload writes 40 incompressible 4 KiB values. Pebble's first
-// memtable holds 256 KiB, so at most 48 keeps one memtable: a second queued
-// one would release pacing.
+// memtable holds 256 KiB, so up to 48 values keep one memtable: a second
+// queued one would release pacing.
 func writeFlushPayload(t *testing.T, db *Store, generation int) {
 	t.Helper()
 	value := make([]byte, 4<<10)
