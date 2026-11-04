@@ -145,6 +145,8 @@ type whisperConfig struct {
 	QuotasFilename               string    `toml:"quotas-file"`
 	Workers                      int       `toml:"workers"`
 	MaxUpdatesPerSecond          int       `toml:"max-updates-per-second"`
+	MaxUpdatesPerSecondAutoMin   int       `toml:"max-updates-per-second-auto-min"`
+	MaxUpdatesPerSecondAutoMax   int       `toml:"max-updates-per-second-auto-max"`
 	Sparse                       bool      `toml:"sparse-create"`
 	PhysicalSizeFactor           float32   `toml:"physical-size-factor"`
 	FLock                        bool      `toml:"flock"`
@@ -438,6 +440,7 @@ func NewConfig() *Config {
 			},
 		},
 		Whisper: whisperConfig{
+			MaxUpdatesPerSecondAutoMin:           1,
 			StoreTimeBucketsRelayoutReclaimBytes: 32 << 30,
 			StoreTimeBucketsRelayoutWorkers:      1,
 			StoreTimeBucketsRelayoutMinFree:      200 << 30,

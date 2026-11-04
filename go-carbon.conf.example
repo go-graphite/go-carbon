@@ -534,8 +534,16 @@ quotas-reload-interval = "0s"
 pebble-chunk-ignore-physical-quotas = false
 # Worker threads count. Metrics sharded by "crc32(metricName) % workers"
 workers = 8
-# Limits the number of whisper update_many() calls per second. 0 - no limit
+# Limits store updates per second. 0 = unlimited; positive = fixed rate.
+# -1 = automatic pacing from cache population, batching deadlines and pressure.
+# Auto requires cache writeout batching. All three rate settings are reloadable.
+# Restart drain retains its existing CPU/catch-up allowance in auto mode.
 max-updates-per-second = 0
+# Auto floor in updates/s (positive).
+max-updates-per-second-auto-min = 1
+# Auto ceiling in updates/s. 0 = unlimited. A low ceiling can exceed the maximum
+# delay; monitor oldest unpersisted age and cache growth. Restart drain may exceed it.
+max-updates-per-second-auto-max = 0
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)

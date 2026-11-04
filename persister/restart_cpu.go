@@ -20,6 +20,14 @@ func (p *Whisper) updateTokens() <-chan bool {
 	if ticker := p.restartTicker.Load(); ticker != nil {
 		return ticker.C
 	}
+	// With no predecessor rate, restart CPU admission grants the full remaining
+	// allowance. Auto must not insert a second, lower limit in that path.
+	if p.maxUpdatesPerSecond == -1 && p.restartPaced() {
+		return p.updateTicker.C
+	}
+	if ticker := p.autoUpdate.ticker.Load(); ticker != nil {
+		return ticker.C
+	}
 	return p.updateTicker.C
 }
 
@@ -77,7 +85,9 @@ func (p *Whisper) startRestartWriteout() {
 	if p.restartBudget == nil {
 		return
 	}
+	p.restartRateMu.Lock()
 	p.restartStopping, p.restartRate = false, 0
+	p.restartRateMu.Unlock()
 	p.setRestartRate()
 	p.Go(func(exit chan bool) {
 		for _, ready := range []<-chan struct{}{p.startupReady, p.startupGate} {

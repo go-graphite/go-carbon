@@ -179,6 +179,14 @@ func TestWarmFirstKeepsTheNameAfterAFullPrefetchWindow(t *testing.T) {
 }
 
 func TestWarmFirstReservationsDeduplicateRebuiltQueue(t *testing.T) {
+	for _, mode := range []int{10, -1} {
+		t.Run(strconv.Itoa(mode), func(t *testing.T) {
+			testWarmFirstReservations(t, mode)
+		})
+	}
+}
+
+func testWarmFirstReservations(t *testing.T, mode int) {
 	synctest.Test(t, func(t *testing.T) {
 		source := make(chan string, 3)
 		source <- "warm"
@@ -207,7 +215,8 @@ func TestWarmFirstReservationsDeduplicateRebuiltQueue(t *testing.T) {
 		p.SetMetricStore(warmer)
 		p.SetWarmFirst(true)
 		p.SetWorkers(2)
-		p.SetMaxUpdatesPerSecond(10)
+		p.SetMaxUpdatesPerSecond(mode)
+		p.SetAutoUpdateRate(steadyUpdateState, 1, 1)
 		p.SetRestartBudget(budget, nil)
 		p.SetMockStore(func() (StoreFunc, func()) {
 			return func(name string) {

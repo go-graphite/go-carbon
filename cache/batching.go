@@ -283,11 +283,21 @@ func (s *cacheSettings) delayFor(values *item) time.Duration {
 // releases, held recovery keeps the normal rate unless pressure needs it.
 func (c *Cache) Backlogged() bool {
 	s := c.settings.Load().(*cacheSettings)
+	return c.recovering(s) || s.underPressure(c.approxSize()) || c.bytePressure(s)
+}
+
+// Recovering reports urgent restoration that bypasses ordinary writeout pacing.
+// It shares Backlogged's recovery rule without conflating it with pressure.
+func (c *Cache) Recovering() bool {
+	return c.recovering(c.settings.Load().(*cacheSettings))
+}
+
+func (c *Cache) recovering(s *cacheSettings) bool {
 	recovery := c.pending.Load() != nil
 	if recovery && s.startupWriteout != nil && s.startupWriteout.released.Load() != nil {
 		recovery = false
 	}
-	return recovery || s.underPressure(c.approxSize()) || c.bytePressure(s)
+	return recovery
 }
 
 func (c *Cache) batchWrites(s *cacheSettings) bool {

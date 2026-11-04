@@ -363,6 +363,14 @@ func validateCacheConfig(cfg *Config) error {
 	if !(cfg.Cache.WriteoutSpread >= 0 && cfg.Cache.WriteoutSpread <= 0.5) {
 		return fmt.Errorf("cache.writeout-max-delay-spread must be within [0, 0.5]")
 	}
+	if cfg.Whisper.MaxUpdatesPerSecond < -1 || cfg.Whisper.MaxUpdatesPerSecondAutoMin < 1 ||
+		cfg.Whisper.MaxUpdatesPerSecondAutoMax < 0 ||
+		cfg.Whisper.MaxUpdatesPerSecondAutoMax > 0 && cfg.Whisper.MaxUpdatesPerSecondAutoMax < cfg.Whisper.MaxUpdatesPerSecondAutoMin {
+		return fmt.Errorf("whisper update rate must be -1, zero or positive; auto-min must be positive and auto-max zero or at least auto-min")
+	}
+	if cfg.Whisper.MaxUpdatesPerSecond == -1 && cfg.Cache.WriteoutMaxDelay.Value() <= 0 {
+		return fmt.Errorf("automatic writeout rate requires cache.writeout-max-delay")
+	}
 
 	return nil
 }
@@ -692,6 +700,7 @@ func (app *App) startPersister() error {
 		p.SetStoreUpdateBatchSize(app.Config.Whisper.StoreUpdateBatchSize)
 		p.SetRequeue(app.Cache.Requeue)
 		p.SetBacklogged(app.Cache.Backlogged)
+		p.SetRecovering(app.Cache.Recovering)
 		p.SetWriteoutReady(app.Cache.WriteoutReady)
 		if app.MetricStore != nil {
 			p.SetMetricStore(app.MetricStore)
@@ -721,6 +730,13 @@ func (app *App) startPersister() error {
 			}
 		}
 		p.SetMaxUpdatesPerSecond(app.Config.Whisper.MaxUpdatesPerSecond)
+		p.SetAutoUpdateRate(func() cache.WriteoutState {
+			state := app.Cache.WriteoutState()
+			if log := app.inputLog.Load(); log != nil {
+				state.OldestAge = max(state.OldestAge, log.Metrics().OldestUnpersisted)
+			}
+			return state
+		}, app.Config.Whisper.MaxUpdatesPerSecondAutoMin, app.Config.Whisper.MaxUpdatesPerSecondAutoMax)
 		p.SetSparse(app.Config.Whisper.Sparse)
 		p.SetFLock(app.Config.Whisper.FLock)
 		p.SetCompressed(app.Config.Whisper.Compressed)

@@ -71,8 +71,39 @@ boundary files, and measure compaction write bytes per copied byte.
 ### Persister and cache
 
 - **`max-updates-per-second`** sets how many store updates the persister
-  attempts, and so most of its CPU and the store's write volume. The stock
-  setting on the large host was 162,500.
+  attempts, and so most of its CPU and the store's write volume. **R.** Zero
+  is unlimited, positive values keep fixed pacing, and `-1` enables automatic
+  pacing. Auto needs `cache.writeout-min-points` and `writeout-max-delay` and
+  applies to all storage backends. A fixed cap well above average demand can
+  empty the eligible queue in a burst, then idle until the next batching cycle.
+- **`max-updates-per-second-auto-min`** (default `1`) and
+  **`max-updates-per-second-auto-max`** (default `0`, unlimited) bound auto
+  pacing in updates/s. Both are **R**. The floor must be positive, and a
+  positive ceiling must be at least the floor. Normal pressure and age guards
+  respect the ceiling. During restart drain, existing restoration bypasses,
+  predecessor-rate catch-up and CPU admission take precedence over auto pacing.
+  Positive fixed rates retain their existing restart and pressure behavior.
+- **Auto controller.** Every five seconds it samples existing cache arrivals,
+  eligible metric count, point count, and capacity. Its steady target is cached
+  metrics divided by the mean spread delay plus half the catch-up slack, with
+  3% headroom. Slack is `max(30s, min(240s, max-delay / 4))`. Reserving part of
+  that window for queued work keeps the writer busy between eligibility waves.
+  The demand estimate and effective rate follow increases immediately and
+  decreases with a one-minute time constant. Additional guards raise the
+  target when point count exceeds 120% of recent peaks, point capacity reaches
+  70%, byte capacity is under pressure, or the eligible queue cannot drain
+  before the oldest arrival reaches max-delay plus slack. Arrival age also
+  uses `input_log_oldest_unpersisted_age_seconds` when the log is enabled.
+  The age bound needs sufficient worker/storage capacity and a sufficient
+  ceiling; storage stalls and an undersized ceiling can violate it.
+- **Auto observations.** `persister_auto_update_rate` is the effective limit
+  (zero means unrestricted restart drain), `persister_auto_update_rate_target`
+  is the bounded target before downward smoothing, and
+  `persister_auto_update_rate_reason{reason}` identifies the last adjustment
+  or active restart override. `persister_auto_update_rate_adjustments_total`
+  counts adjustments by reason across reloads. Changes of at least 25% produce
+  an INFO log. Graphite stats expose `autoUpdateRate`, `autoUpdateRateTarget`
+  and `autoUpdateRateReason.*`. These observations exist only in auto mode.
 - **Cache size.** The cache is not a backlog; its steady size is set by
   persister throughput: `cache ≈ receive rate × active metrics ÷ updates per
   second`. A slower persister means a bigger cache, not lost points, until
