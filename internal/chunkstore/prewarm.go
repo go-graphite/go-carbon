@@ -24,13 +24,26 @@ type ContinuationStateLoader interface {
 	LoadState(context.Context, ContinuationIO, Metadata, func() time.Time) error
 }
 
+// CheckpointPacer accounts only active windows. Idle closes the last window
+// before waiting for I/O buffers; Finish releases the worker on every exit.
+// No method is called while a cache lock or database view is held.
+type CheckpointPacer interface {
+	Wait(context.Context) error
+	Idle(context.Context) error
+	Finish()
+}
+
 // PrewarmOptions paces PrewarmMetadata.
 type PrewarmOptions struct {
 	// Wait paces optional warming behind writeout; it runs without views.
 	Wait func(context.Context) error
-	// CheckpointWait, if set, paces the serial checkpoint stream separately
-	// from required validation reads. It runs once per bounded record window.
+	// CheckpointWait, if set, paces the checkpoint reader separately from
+	// required validation reads. Called serially, without any cache locks.
 	CheckpointWait func(context.Context) error
+	// CheckpointWorker creates a private CPU pacer for each load/save worker.
+	// Wait runs between bounded record windows; Idle excludes buffer queue
+	// waits, and Finish always runs, including on cancellation and I/O errors.
+	CheckpointWorker func() CheckpointPacer
 	// Progress reports completed catalog windows across both startup passes.
 	Progress *PrewarmProgress
 
@@ -38,7 +51,8 @@ type PrewarmOptions struct {
 	// doing work. Shutdown still cancels a prewarm waiting here.
 	StartAfter <-chan struct{}
 	// Workers read concurrently, each through its own read view and
-	// iterators; zero means DefaultPrewarmWorkers.
+	// iterators; zero means DefaultPrewarmWorkers. Checkpoint load/save also
+	// use this count, with CPU admission supplied by CheckpointWorker.
 	Workers int
 	// match is set only by PrewarmPendingMetadata.
 	match func(string) bool

@@ -2,10 +2,12 @@ package restartcpu
 
 import (
 	"context"
+	"math"
+	"runtime"
 	"time"
 )
 
-// Checkpoint paces one serial stream of bounded checkpoint batches. Elapsed
+// Checkpoint paces one worker's bounded checkpoint batches. Elapsed
 // batch time is a conservative CPU estimate: I/O and lock waits are included.
 // Validation workers still use WaitCheckpoint for required dependent reads.
 // Each stream owns its pacer; call Finish after loading, including on failure.
@@ -14,6 +16,17 @@ type Checkpoint struct {
 	last     time.Time
 	owed     time.Duration
 	progress func() (uint64, uint64)
+}
+
+// CheckpointWorkers leaves at least half the allowance for mandatory input,
+// reads and writeout. Fractional shares use one duty-paced worker. An explicit
+// worker setting can reduce concurrency; zero uses the available allowance.
+func (b *Budget) CheckpointWorkers(requested int) int {
+	workers := max(1, min(256, runtime.GOMAXPROCS(0), int(math.Ceil(b.cores/2))))
+	if requested > 0 {
+		workers = min(workers, requested)
+	}
+	return workers
 }
 
 func (b *Budget) NewCheckpoint(progress func() (uint64, uint64)) *Checkpoint {
@@ -47,15 +60,15 @@ func (p *Checkpoint) Finish() {
 	p.budget.checkpoints.Add(-1)
 }
 
-// checkpointShareLocked lends at most one core to the serial loader. When
+// checkpointShareLocked lends up to half the allowance to the worker pool. When
 // writeout is below its floor and CPU has less room than the full stream share,
 // it gets a quarter share, retaining progress while yielding to writeout.
-// The serial stream duty-paces this bounded mandatory share under process debt.
+// Bulk workers duty-pace this bounded mandatory share even under process debt.
 func (b *Budget) checkpointShareLocked() float64 {
 	if b.checkpoints.Load() == 0 {
 		return 0
 	}
-	share := min(1., b.cores/8)
+	share := min(float64(b.checkpoints.Load()), b.cores/2)
 	// One-second confirmation samples vary with batching. A material shortfall
 	// yields CPU; a few completions crossing a sample boundary do not stretch
 	// the accelerator's completion time. Warning accounting stays exact.
@@ -65,7 +78,7 @@ func (b *Budget) checkpointShareLocked() float64 {
 	return share
 }
 
-func (p *Checkpoint) Wait(ctx context.Context) error {
+func (p *Checkpoint) accountWindow(ctx context.Context) (float64, error) {
 	b := p.budget
 	p.report()
 	work := 0.
@@ -88,11 +101,27 @@ func (p *Checkpoint) Wait(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return ctx.Err()
+				return work, ctx.Err()
 			case <-timer.C:
 			}
 		}
 	}
+	return work, ctx.Err()
+}
+
+// Idle settles the last active window without admitting another one. Queue
+// waits after this call are excluded from the worker's CPU estimate.
+func (p *Checkpoint) Idle(ctx context.Context) error {
+	_, err := p.accountWindow(ctx)
+	return err
+}
+
+func (p *Checkpoint) Wait(ctx context.Context) error {
+	work, err := p.accountWindow(ctx)
+	if err != nil {
+		return err
+	}
+	b := p.budget
 	for b.Active() {
 		if err := ctx.Err(); err != nil {
 			return err

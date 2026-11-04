@@ -20,6 +20,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/internal/recovery"
+	"github.com/go-graphite/go-carbon/internal/restartcpu"
 
 	"go.uber.org/zap"
 
@@ -1014,7 +1015,17 @@ func (app *App) prepareMetadataCheckpoint(logger *zap.Logger) {
 		cancel()
 	}
 	started := time.Now()
-	err := app.MetricStore.PrepareMetadataCheckpoint(ctx)
+	options := store.PrewarmOptions{Workers: app.Config.Whisper.StoreMetadataCachePrewarmWorkers}
+	if app.restartBudget != nil && app.restartBudget.Cores() > 0 {
+		// The predecessor's startup budget may have expired hours ago. Give
+		// preparation a fresh meter with the same allowance after writers stop.
+		budget := restartcpu.New(app.restartBudget.Cores())
+		options.Workers = budget.CheckpointWorkers(options.Workers)
+		options.CheckpointWorker = func() store.CheckpointPacer {
+			return budget.NewCheckpoint(nil)
+		}
+	}
+	err := app.MetricStore.PrepareMetadataCheckpointWithOptions(ctx, options)
 	close(done)
 	<-stopped
 	logger.Info("metadata cache checkpoint prepared", zap.Duration("runtime", time.Since(started)), zap.Error(err))

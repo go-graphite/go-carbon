@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"runtime"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -103,9 +104,9 @@ func TestCheckpointProgressRetainsLastBytesOnFailure(t *testing.T) {
 	}
 }
 
-func TestOverlappingCheckpointStreamsShareOneCore(t *testing.T) {
+func TestOverlappingCheckpointWorkersShareHalfAllowance(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b := NewWithCPU(24, func() float64 { return 0 })
+		b := NewWithCPU(2, func() float64 { return 0 })
 		p, q := b.NewCheckpoint(nil), b.NewCheckpoint(nil)
 		defer p.Finish()
 		defer q.Finish()
@@ -188,7 +189,7 @@ func TestCheckpointMetricsExposeProgressAndAllowance(t *testing.T) {
 
 func TestCheckpointCoalescesTinyDutyDelays(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		b := NewWithCPU(2, func() float64 { return 0 }) // quarter-core duty share
+		b := NewWithCPU(.5, func() float64 { return 0 }) // quarter-core duty share
 		p := b.NewCheckpoint(nil)
 		defer p.Finish()
 		if err := p.Wait(context.Background()); err != nil {
@@ -210,10 +211,61 @@ func TestCheckpointCoalescesTinyDutyDelays(t *testing.T) {
 	})
 }
 
+func TestCheckpointPoolBounds(t *testing.T) {
+	for _, cores := range []float64{.25, 1, 6, 23, 96} {
+		b := NewWithCPU(cores, func() float64 { return 0 })
+		workers := b.CheckpointWorkers(0)
+		if workers < 1 || workers > runtime.GOMAXPROCS(0) || workers > int(math.Ceil(cores/2)) || b.CheckpointWorkers(1) != 1 {
+			t.Fatal(cores, workers)
+		}
+		var pool []*Checkpoint
+		for range workers * 2 { // Two overlapping loads share the same cap.
+			pool = append(pool, b.NewCheckpoint(nil))
+		}
+		if got := b.State().Checkpoint; got != min(cores/2, float64(len(pool))) {
+			t.Fatal("pool exceeded its share", cores, got)
+		}
+		for _, p := range pool {
+			p.Finish()
+		}
+		if b.State().CheckpointLoading {
+			t.Fatal("pool did not release its grant")
+		}
+	}
+}
+
+func TestCheckpointIdleDoesNotChargeBufferWaits(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		b := NewWithCPU(.5, func() float64 { return 0 })
+		p := b.NewCheckpoint(nil) // quarter-core active duty
+		defer p.Finish()
+		ctx := context.Background()
+		if err := p.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Millisecond) // last active window
+		start := time.Now()
+		if err := p.Idle(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(start); elapsed != 6*time.Millisecond {
+			t.Fatal("last active window was not settled", elapsed)
+		}
+		time.Sleep(time.Second) // waiting for the next reader/writer buffer
+		start = time.Now()
+		if err := p.Wait(ctx); err != nil || time.Since(start) != 0 {
+			t.Fatal("buffer wait was charged as CPU work", err, time.Since(start))
+		}
+		if b.State().CheckpointGrants != 2 {
+			t.Fatal("idle admitted work that was not requested")
+		}
+	})
+}
+
 func TestCheckpointDutyStillBoundsMandatoryShareUnderDebt(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
-		b := NewWithCPU(8, func() float64 { return 9 * time.Since(start).Seconds() })
+		b := NewWithCPU(2, func() float64 { return 3 * time.Since(start).Seconds() })
 		p, q := b.NewCheckpoint(nil), b.NewCheckpoint(nil)
 		defer p.Finish()
 		defer q.Finish()

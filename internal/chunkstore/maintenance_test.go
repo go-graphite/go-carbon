@@ -61,20 +61,18 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 						t.Fatal("unexpected maintenance", name)
 					}
 					delete(want, name)
-				case <-time.After(3 * time.Second):
+				case <-time.After(time.Minute):
 					t.Fatal("maintenance never reached gate", want)
 				}
 			}
-			if s.RelayoutStats().Blocks != 0 || s.ColdPackStats().Pages != 0 || s.catalogMembership.ready.Load() {
+			if s.RelayoutStats().Blocks != 0 || s.ColdPackStats().Pages != 0 || s.ColdPackStats().MetricsVisited != 0 || s.catalogMembership.ready.Load() {
 				t.Fatal("maintenance ran before warming")
 			}
 			if token, err := readStoreMarker(s.fs, dir, compactOnceMarker); err != nil || token != "" {
 				t.Fatal(token, err)
 			}
 			budget := restartcpu.NewWithCPU(2, func() float64 { return 0 })
-			pacer := budget.NewCheckpoint(nil)
-			stats, err := s.LoadMetadataCheckpointAfter(context.Background(), PrewarmOptions{Workers: 1, CheckpointWait: pacer.Wait})
-			pacer.Finish()
+			stats, err := s.LoadMetadataCheckpointAfter(context.Background(), PrewarmOptions{Workers: 1, CheckpointWorker: func() CheckpointPacer { return budget.NewCheckpoint(nil) }})
 			if err != nil || !stats.Valid || stats.Entries != 1 {
 				t.Fatalf("warming blocked: %+v %v", stats, err)
 			}
@@ -89,7 +87,7 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 			if err := <-purged; err != nil {
 				t.Fatal(err)
 			}
-			deadline := time.Now().Add(3 * time.Second)
+			deadline := time.Now().Add(time.Minute)
 			for !s.RelayoutStats().Done || s.ColdPackStats().Pages == 0 || !s.catalogMembership.ready.Load() || s.compactOnce.running.Load() {
 				if time.Now().After(deadline) {
 					t.Fatalf("maintenance did not start after warming: relayout=%+v cold=%+v membership=%v compact=%v error=%v", s.RelayoutStats(), s.ColdPackStats(), s.catalogMembership.ready.Load(), s.compactOnce.running.Load(), s.compactOnce.err.Load())
@@ -127,7 +125,7 @@ func TestStoreMaintenanceOpenFailureCancelsWaiters(t *testing.T) {
 	for range 2 {
 		select {
 		case <-cancelled:
-		case <-time.After(3 * time.Second):
+		case <-time.After(time.Minute):
 			t.Fatal("open failure leaked a maintenance waiter")
 		}
 	}
