@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
@@ -15,6 +16,7 @@ import (
 const (
 	DefaultRelayoutMinFreeBytes      = 200 << 30
 	DefaultRelayoutMaxCompactionDebt = 32 << 30
+	relayoutPressureInterval         = 250 * time.Millisecond
 )
 
 // One pressure state is shared by all workers. Only transitions into a pause
@@ -26,6 +28,15 @@ type relayoutGuard struct {
 	paused           bool
 	reason           string
 	pauses           map[string]uint64
+	// A single caller refreshes outside mu. Other workers share the result;
+	// reload/wake invalidates it, even if a refresh is already in progress.
+	sampling     chan struct{}
+	sampledAt    time.Time
+	sampledWake  <-chan struct{}
+	free, debt   uint64
+	diskErr      error
+	spent        atomic.Uint64
+	sampledSpent uint64
 }
 
 // SetRelayoutLimits applies live pressure limits, including during a pause.
@@ -37,10 +48,7 @@ func (s *Store) SetRelayoutLimits(minFreeBytes, maxCompactionDebt uint64) error 
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.minFree, g.maxDebt = minFreeBytes, maxCompactionDebt
-	if g.changed != nil {
-		close(g.changed)
-	}
-	g.changed = make(chan struct{})
+	g.wakeLocked()
 	return nil
 }
 
@@ -61,10 +69,62 @@ func (g *relayoutGuard) clear() {
 func (g *relayoutGuard) wake() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.wakeLocked()
+}
+
+func (g *relayoutGuard) wakeLocked() {
 	if g.changed != nil {
 		close(g.changed)
 	}
 	g.changed = make(chan struct{})
+}
+
+// lockPressure returns with mu held and one current pressure sample available.
+// No IO, Pebble lock or wait for another sampler holds mu. A wake during IO
+// discards that observation so a reload cannot publish an older sample.
+func (g *relayoutGuard) lockPressure(sample func() (uint64, uint64, error)) {
+	for {
+		g.mu.Lock()
+		if !g.sampledAt.IsZero() && g.sampledWake == g.changed && time.Since(g.sampledAt) < relayoutPressureInterval {
+			return
+		}
+		if done := g.sampling; done != nil {
+			g.mu.Unlock()
+			<-done
+			continue
+		}
+		done := make(chan struct{})
+		g.sampling = done
+		wake, spent := g.changed, g.spent.Load()
+		g.mu.Unlock()
+		g.refreshPressure(sample, done, wake, spent)
+	}
+}
+
+func (g *relayoutGuard) refreshPressure(sample func() (uint64, uint64, error), done chan struct{}, wake <-chan struct{}, spent uint64) {
+	// Release followers even if maintenance's panic recovery catches a sampler
+	// panic; otherwise cancellation could leave them waiting forever.
+	defer func() {
+		g.mu.Lock()
+		g.sampling = nil
+		close(done)
+		g.mu.Unlock()
+	}()
+	free, debt, err := sample()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if wake == g.changed {
+		g.free, g.debt, g.diskErr = free, debt, err
+		g.sampledAt, g.sampledWake, g.sampledSpent = time.Now(), wake, spent
+	}
+}
+
+// Charge copies published since the sample, conservatively including any
+// written while IO sampled the filesystem. Reservations are charged separately
+// at admission; reclaimed bytes earn no credit until the next real sample.
+func (g *relayoutGuard) freeLocked() uint64 {
+	spent := g.spent.Load() - g.sampledSpent
+	return g.free - min(g.free, spent)
 }
 
 func (s *Store) relayoutPressure() (uint64, uint64, error) {
@@ -111,11 +171,9 @@ func (g *relayoutGuard) waitPolicy(ctx context.Context, sample func() (uint64, u
 }
 
 func (g *relayoutGuard) observePolicy(sample func() (uint64, uint64, error), needed uint64) (string, <-chan struct{}) {
-	// Serialize observation and publication so workers cannot publish an
-	// older observation after another worker has entered a pause.
-	g.mu.Lock()
+	g.lockPressure(sample)
 	defer g.mu.Unlock()
-	free, debt, diskErr := sample()
+	free, debt, diskErr := g.freeLocked(), g.debt, g.diskErr
 	reason := ""
 	switch {
 	case diskErr != nil:

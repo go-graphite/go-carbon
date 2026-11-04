@@ -193,18 +193,25 @@ The normal restart maintenance gate still runs before this work.
    revision, and update the group's durable reclaim journal. Maintenance does
    not refresh metric activity. Release mutation locks and planning snapshots
    before any pacing or compaction wait.
-4. Finished groups add to one shared reclaim batch. Keep copying until the next
+4. Finished groups add to a shared filling batch. Keep copying until the next
    group would exceed `store-time-buckets-relayout-reclaim-bytes` (default
    **32 GiB**), or the pending batch reaches that threshold. Available disk
    space can lower the limit: it never exceeds half the free bytes above the
    min-free reserve, allowing for reserved copies that have not finished yet.
    An indivisible group can exceed a deliberately smaller configured threshold,
    but must fit the filesystem budget and owns its batch alone.
-5. A reclaim barrier stops new ingests and joins admitted groups. Merge their
+5. A short reclaim barrier joins admitted groups and seals their journal records.
+   Release the barrier while this batch compacts, allowing other workers to
+   fill at most one further batch. One worker owns the synchronous reclaim;
+   there is no detached maintenance goroutine. The filling batch and sealed
+   batch together still obey the same filesystem headroom cap. Merge their
    journaled deleted spans, keeping old metric keys (`u`) and discarded history
    copies (`t`) separate. Check reserve, debt and disk-sample validity before
-   each span, then call stock Pebble `Compact(start, end, false)` synchronously.
-   Only after every span succeeds is the journal removed. Reclaim a final
+   each span, then call stock Pebble `Compact(start, end, true)` synchronously.
+   Disjoint file ranges share the normal compaction worker and output-byte
+   budgets; overlapping ranges still serialize inside Pebble.
+   Only after every span succeeds are that sealed batch's journal keys removed;
+   records published by later groups remain. Reclaim a final
    partial batch before marking the run done.
 
 Compacting after every group rewrites the same overlapping L6 files repeatedly.
@@ -254,8 +261,12 @@ reclaiming a fresh partial batch after another worker already did the work.
   `store-time-buckets-relayout-reclaim-bytes`, default **32 GiB**. All are
   positive and reload on `SIGHUP`, without reopening the store.
 - **Pause/resume.** New copies and new reclaim spans pause below the reserve,
-  above the debt limit, or while disk-usage samples fail. Recheck every second;
-  limit reloads wake waiters. Raising the reserve above free space still pauses
+  above the debt limit, or while disk-usage samples fail. Workers share one
+  pressure sample for up to 250 ms; the sampler releases the guard mutex before
+  Pebble metrics and filesystem IO. Charge copies published since that sample
+  against cached free space, with no reclaim credit until resampling. Paused
+  workers recheck every second; limit reloads invalidate samples and wake waiters.
+  Raising the reserve above free space still pauses
   new reclaim IO. Partial batches remain journaled while paused. Capacity-less
   in-memory filesystems have no disk cap.
 - **IO.** One merged reclaim runs at a time across all relayout workers, using
@@ -288,7 +299,8 @@ progress, done/failed and pressure metrics remain. Cursor progress measures
 published descriptors; it can reach the ceiling while a final reclaim is paused.
 `store_relayout_done` is set only after the final journal is cleared.
 
-- `store_relayout_reclaim_bytes`: configured batch threshold; headroom may lower it.
+- `store_relayout_reclaim_bytes`: configured threshold per batch; at most one
+  sealed batch and one filling batch are outstanding, and headroom may lower it.
 - `store_relayout_unreclaimed_bytes`: known pending journal bytes, loaded when
   relayout starts and updated as metrics publish.
 - `store_relayout_reclaims_total` and `store_relayout_reclaimed_bytes_total`:

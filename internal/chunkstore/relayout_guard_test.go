@@ -69,6 +69,7 @@ func TestRelayoutGuardSharedPauseResume(t *testing.T) {
 				}
 				// A second entry counts once, and cancellation wakes without a poll delay.
 				healthy.Store(false)
+				s.relayout.guard.wake()
 				go func() { done <- s.relayout.guard.wait(ctx, sample) }()
 				synctest.Wait()
 				cancel()
@@ -80,6 +81,88 @@ func TestRelayoutGuardSharedPauseResume(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestRelayoutGuardSharesSamplesOutsideMutex(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s := &Store{}
+		_ = s.SetRelayoutLimits(100, 200)
+		g := &s.relayout.guard
+		var samples atomic.Int64
+		var fail atomic.Bool
+		var debt atomic.Uint64
+		entered, release := make(chan struct{}), make(chan struct{})
+		sample := func() (uint64, uint64, error) {
+			if samples.Add(1) == 2 {
+				close(entered)
+				<-release
+			}
+			if fail.Load() {
+				return 0, 0, errors.New("injected sample failure")
+			}
+			return 1000, debt.Load(), nil
+		}
+		done := make(chan struct{}, 16)
+		for range 16 {
+			go func() {
+				for range 100 {
+					g.observePolicy(sample, 0)
+				}
+				done <- struct{}{}
+			}()
+		}
+		for range 16 {
+			<-done
+		}
+		if n := samples.Load(); n != 1 {
+			t.Fatalf("unshared samples: %d", n)
+		}
+		time.Sleep(relayoutPressureInterval - time.Nanosecond)
+		g.observePolicy(sample, 0)
+		if n := samples.Load(); n != 1 {
+			t.Fatalf("early refresh: %d", n)
+		}
+		time.Sleep(time.Nanosecond)
+		observed := make(chan string, 1)
+		go func() { reason, _ := g.observePolicy(sample, 0); observed <- reason }()
+		<-entered
+		// Both stats and a live reload must complete while sample IO is blocked.
+		_ = s.RelayoutStats()
+		_ = s.SetRelayoutLimits(2000, 200)
+		close(release)
+		if reason := <-observed; reason != "low_free_space" {
+			t.Fatalf("reload lost: %s", reason)
+		}
+		if n := samples.Load(); n != 3 {
+			t.Fatalf("pre-wake sample was published: %d", n)
+		}
+		fail.Store(true)
+		g.wake()
+		if reason, _ := g.observePolicy(sample, 0); reason != "disk_usage_error" {
+			t.Fatalf("sample error lost: %s", reason)
+		}
+		fail.Store(false)
+		debt.Store(201)
+		_ = s.SetRelayoutLimits(100, 200)
+		if reason, _ := g.observePolicy(sample, 0); reason != "compaction_debt" {
+			t.Fatalf("sample debt lost: %s", reason)
+		}
+	})
+}
+
+func TestRelayoutGuardSamplePanicReleasesFollowers(t *testing.T) {
+	g := &relayoutGuard{}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("sampler did not panic")
+			}
+		}()
+		g.observePolicy(func() (uint64, uint64, error) { panic("sample") }, 0)
+	}()
+	if reason, _ := g.observePolicy(func() (uint64, uint64, error) { return 100, 0, nil }, 0); reason != "" {
+		t.Fatalf("sampler did not recover: %s", reason)
 	}
 }
 
