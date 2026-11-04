@@ -1005,6 +1005,9 @@ func (s *Store) close(forExit bool) error {
 	t := &s.closeTimings
 	s.prewarm.stop()
 	s.stopRelayout()
+	// Also checkpoint callers of ColdPackStep/RunColdPack which stopped the
+	// background worker before advancing the sweep themselves.
+	coldPackErr := s.checkpointColdPackOnStop()
 	if s.ingest != nil {
 		s.ingest.close()
 	}
@@ -1054,7 +1057,7 @@ func (s *Store) close(forExit bool) error {
 	if s.rangeDelCache != nil {
 		s.rangeDelCache.Unref()
 	}
-	return err
+	return errors.Join(err, coldPackErr)
 }
 
 // Flush writes the memtables at full speed: its caller waits for them.

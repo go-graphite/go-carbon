@@ -94,6 +94,8 @@ type ContinuationRepacker interface {
 type ColdPackStats struct {
 	RepackStats
 	Pages, Passes, Errors, Conflicts, PressurePauses uint64
+	Resumed, Checkpoints                             uint64
+	MetricsVisited, PersistedMetricsVisited          uint64
 	ReadBytes, WriteBytes                            uint64
 	WorkerNanos, LockNanos, MaxLockNanos             uint64
 	Cursor                                           string
@@ -115,6 +117,10 @@ type coldPackState struct {
 	wake        chan struct{}
 	cancel      context.CancelFunc
 	done        chan struct{}
+	// Checkpoint bookkeeping is protected by run, not mu.
+	checkpoint        coldPackCheckpoint
+	checkpointAt      time.Time
+	checkpointPresent bool
 }
 
 // ConfigureColdPack joins an old operation before returning, so switching off on
@@ -136,6 +142,15 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 	c := &s.coldPack
 	c.run.Lock()
 	defer c.run.Unlock()
+	// Compare the saved marker before an enabling policy can upgrade it again.
+	initial := c.options.Mode == ""
+	var marker string
+	if initial && s.db != nil {
+		marker, err = readStoreMarker(s.fs, s.dir, "CHUNKSTORE")
+		if err != nil {
+			return err
+		}
+	}
 	if o.Mode != "off" && o.Mode != "unpack" && !c.format.Load() {
 		if err := replaceFormatMarker(s.fs, s.dir, formatMarkerColdPack); err != nil {
 			return fmt.Errorf("fence cold pack format: %w", err)
@@ -148,8 +163,10 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.mu.Unlock()
 		return nil
 	}
-	if c.options.Mode != o.Mode {
+	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow
+	if reset {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
+		c.stats.MetricsVisited = 0
 		c.pending = nil
 		c.passFailed = false
 	}
@@ -160,6 +177,14 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 	c.options = o
 	c.stats.Mode = o.Mode
 	c.mu.Unlock()
+	if initial && s.db != nil {
+		if err := s.loadColdPackCheckpoint(marker); err != nil {
+			return err
+		}
+	}
+	if err := s.saveColdPackCheckpoint(true); err != nil {
+		return err
+	}
 	if c.wake != nil {
 		select {
 		case c.wake <- struct{}{}:
@@ -200,10 +225,16 @@ func (s *Store) coldPackPage(ctx context.Context, after string) ([]string, error
 	return names, it.Error()
 }
 
-// ColdPackStep advances a bounded amount of work. Cursor state is intentionally
-// in memory: after a crash the idempotent sweep restarts, while every published
-// range is independently atomic and readable. Metric errors are logged and
-// skipped until the next pass; cancellation and step-wide failures are returned.
+// ColdPackStep advances a bounded amount of work. The advisory metric/block
+// cursor is WAL-synced every 30 seconds at step boundaries, on pass completion,
+// policy changes and clean stop. Syncing the cursor also makes earlier range
+// publications durable. A crash can replay work after the last checkpoint; it
+// cannot checkpoint ahead of publication. Missing/invalid state or a different
+// mode, write window or format marker starts a new sweep. Deleted cursor names
+// seek to the next key; new/recreated metrics and corrections behind the cursor
+// are visited next pass. Every range remains independently atomic and readable.
+// Metric errors are logged and skipped until the next pass; cancellation and
+// step-wide failures are returned.
 // Only one caller may advance it.
 func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error) {
 	c := &s.coldPack
@@ -229,6 +260,14 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 			}
 		}
 		c.mu.Unlock()
+		if err := s.saveColdPackCheckpoint(finished); err != nil {
+			failure = errors.Join(failure, err)
+			c.mu.Lock()
+			c.passFailed = true
+			c.stats.Errors++
+			c.stats.Error = err.Error()
+			c.mu.Unlock()
+		}
 	}()
 	// Pressure gates are sampled once per bounded step. Never wait for a writer's
 	// lock; later sweeps retry conflicts and busy stripes.
@@ -265,6 +304,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 				c.mu.Lock()
 				c.stats.Cursor = ""
 				c.stats.Passes++
+				c.stats.MetricsVisited = 0
 				c.cleanUnpack = o.Mode == "unpack" && !c.passFailed
 				c.passFailed = false
 				c.mu.Unlock()
@@ -307,6 +347,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 		// Retire the entire metric, including a saved descriptor cursor, so
 		// later names finish this pass. The next sweep retries from zero.
 		c.stats.Cursor, c.stats.BlockCursor = cursor, 0
+		c.stats.MetricsVisited++
 		return false, nil
 	}
 	c.stats.Metrics += stats.Metrics
@@ -326,6 +367,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	c.stats.Cursor, c.stats.BlockCursor = cursor, next
 	if done {
 		c.stats.BlockCursor = 0
+		c.stats.MetricsVisited++
 	}
 	return false, nil
 }
@@ -528,6 +570,7 @@ func (s *Store) startColdPack() {
 	c.wake = make(chan struct{}, 1)
 	go func() {
 		defer close(c.done)
+		defer s.checkpointColdPackOnStop()
 		if err := s.waitMaintenance(ctx, "cold-pack"); err != nil {
 			return
 		}
