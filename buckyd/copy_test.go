@@ -33,7 +33,7 @@ func TestStoreCopyFencesBulkMutations(t *testing.T) {
 	if w.Code != http.StatusOK || !manager.Active() {
 		t.Fatalf("checkpoint: %d %s", w.Code, w.Body.String())
 	}
-	for _, op := range []string{"import", "pull", "delete", "stage-delete", "retire"} {
+	for _, op := range []string{"import", "pull", "delete", "stage-delete", "stage-copy", "retire"} {
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/transfer/"+op, http.NoBody))
 		if w.Code != http.StatusConflict {

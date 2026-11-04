@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -200,5 +201,25 @@ func TestTransferCachedMetadataAndUnorderedIDsMatchReference(t *testing.T) {
 	}
 	if s.Stats().TransferExport.MetadataHits != uint64(len(names)) {
 		t.Fatal("existing metadata cache not used")
+	}
+	target, _ := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	defer closeTestStore(t, target)
+	proofs, err := target.ImportTransfer(ctx, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Reverse(proofs)
+	if err := target.VerifyTransfer(ctx, proofs); err != nil {
+		t.Fatal("unordered proof verification", err)
+	}
+	if err := target.UpdateMany(ctx, names[0], []Point{{Timestamp: int64(now - 50), Value: 99}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.VerifyTransfer(ctx, proofs); err != nil {
+		t.Fatal("newer foreground revision invalidated a durable receipt", err)
+	}
+	proofs[0].Target.ID++
+	if err := target.VerifyTransfer(ctx, proofs); !errors.Is(err, ErrConflict) {
+		t.Fatal("wrong target identity accepted", err)
 	}
 }

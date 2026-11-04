@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"reflect"
 	"testing"
 )
@@ -19,6 +20,12 @@ func TestTransferBinaryMatchesV1RecordsAndRejectsDamage(t *testing.T) {
 	}
 	if TransferWireSize2(records) != int64(wire.Len()) {
 		t.Fatal("wrong binary size")
+	}
+	// Fixed pre-buffering wire bytes, independently framed with big-endian
+	// integers and a body SHA-256 trailer. Buffering must preserve the protocol.
+	digest := sha256.Sum256(wire.Bytes())
+	if hex.EncodeToString(digest[:]) != "a56d84ba779beb7fc9d781f74d6d23cb4895e520ab345e003002dde2bf5e84a2" {
+		t.Fatal("binary wire bytes changed")
 	}
 	want, err := ReadTransfer(bytes.NewReader(old.Bytes()), int64(old.Len()))
 	if err != nil {

@@ -24,7 +24,7 @@ import (
 // Bulk requests use root namespace authorization once per batch. A scoped
 // token cannot turn a batch endpoint into an escape from its metric scope.
 func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
-	op := map[string]string{"/v1/transfer/export": "read", "/v1/transfer/import": "update", "/v1/transfer/pull": "update", "/v1/transfer/verify": "read", "/v1/transfer/delete": "delete", "/v1/transfer/stage-delete": "delete", "/v1/transfer/pending-delete": "read", "/v1/transfer/retire": "delete", "/v1/transfer/status": "read", "/v1/transfer/list": "read"}[r.URL.Path]
+	op := map[string]string{"/v1/transfer/export": "read", "/v1/transfer/import": "update", "/v1/transfer/pull": "update", "/v1/transfer/verify": "read", "/v1/transfer/delete": "delete", "/v1/transfer/stage-delete": "delete", "/v1/transfer/stage-copy": "update", "/v1/transfer/pending-delete": "read", "/v1/transfer/check-staged": "read", "/v1/transfer/retire": "delete", "/v1/transfer/status": "read", "/v1/transfer/list": "read"}[r.URL.Path]
 	if op == "" {
 		http.NotFound(w, r)
 		return
@@ -64,14 +64,16 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		hostname, _ := os.Hostname()
 		_ = json.NewEncoder(w).Encode(struct {
 			chunkstore.Stats
-			MaxTransfers int
-			L0StopWrites int64
-			MaxBodyBytes int64
-			StoreFormat  int
-			Protocol     int
-			Hostname     string
-			CPULimit     int
-		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0)})
+			MaxTransfers           int
+			L0StopWrites           int64
+			MaxBodyBytes           int64
+			StoreFormat            int
+			Protocol               int
+			Hostname               string
+			CPULimit               int
+			PendingDeleteBatches   bool
+			StagedCopyVerification bool
+		}{s.store.Stats(), s.config.MaxTransfers, s.store.TransferL0StopWrites(), s.config.MaxBodyBytes, s.store.TransferFormat(), 1, hostname, runtime.GOMAXPROCS(0), true, true})
 		return
 	}
 	if !s.acquireTransfer() {
@@ -273,17 +275,37 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]int{"verified": len(proofs)})
 	case "/v1/transfer/pending-delete":
-		var request struct{ Operation string }
+		var request struct {
+			Operation string
+			Names     []string
+		}
 		if !decode(&request) {
 			return
 		}
-		names, err := s.store.PendingTransferDelete(r.Context(), request.Operation, 256)
+		var names []string
+		var err error
+		if len(request.Names) > 0 {
+			names, err = s.store.PendingTransferNames(r.Context(), request.Operation, request.Names)
+		} else {
+			names, err = s.store.PendingTransferDelete(r.Context(), request.Operation, 256)
+		}
 		if err != nil {
 			fail(err)
 			return
 		}
 		reply(names)
-	case "/v1/transfer/stage-delete":
+	case "/v1/transfer/check-staged":
+		var request struct{ Operation string }
+		if !decode(&request) {
+			return
+		}
+		count, err := s.store.VerifyStagedTransfer(r.Context(), request.Operation)
+		if err != nil {
+			fail(err)
+			return
+		}
+		reply(map[string]int64{"verified": count})
+	case "/v1/transfer/stage-delete", "/v1/transfer/stage-copy":
 		var request struct {
 			Operation string
 			Versions  []chunkstore.TransferVersion
