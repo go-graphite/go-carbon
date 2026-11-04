@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from common import HTTP, atomic_write, counter_increase, output, positive, samples
+from common import HTTP, atomic_write, counter_increase, output, positive, positive_int, samples
 
 
 DEFAULT_COUNTERS = ['persister_pebble_write_failures_total', 'input_log_write_errors_total']
@@ -109,6 +109,7 @@ def guard(directory, run=command, sleep=time.sleep, clock=time.monotonic, get_me
                 sleep(min(state['interval'], max(0, deadline - clock())))
         previous = {key: 0 for key in current}
         until = clock() + state['duration']
+        failures = 0
         state['status'] = 'guarding'
         save_state(directory, state)
         while True:
@@ -116,15 +117,24 @@ def guard(directory, run=command, sleep=time.sleep, clock=time.monotonic, get_me
             if delta > state['max_errors']:
                 raise ValueError('error increase %g exceeds %g' % (delta, state['max_errors']))
             state['last_delta'] = delta
+            state['probe_failures'] = failures
             state['elapsed_seconds'] = clock() - start
             save_state(directory, state)
             if clock() >= until:
                 break
             previous = current
             sleep(min(state['interval'], max(0, until - clock())))
-            # Subsequent HTTP or readiness failures trigger rollback immediately.
+            # Readiness failures trigger rollback immediately. A busy daemon can miss a
+            # scrape deadline, so metrics failures roll back only when consecutive.
             check_ready(state, run=run)
-            current = get_metrics(state)
+            try:
+                current = get_metrics(state)
+                failures = 0
+            except (OSError, ValueError) as exc:
+                failures += 1
+                if failures >= state.get('max_probe_failures', 1):
+                    raise ValueError('%d consecutive metrics failures: %s' % (failures, exc)) from None
+                current = previous
         state['status'] = 'complete'
         save_state(directory, state)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -161,7 +171,8 @@ def start(args, run=command):
                  service=args.service, metrics_endpoint=args.metrics_endpoint, token_file=args.token_file,
                  counters=counters, duration=args.duration, interval=args.interval,
                  max_errors=args.max_errors, startup_timeout=args.startup_timeout,
-                 restart_timeout=args.restart_timeout, http_timeout=args.http_timeout, status='prepared')
+                 restart_timeout=args.restart_timeout, http_timeout=args.http_timeout,
+                 max_probe_failures=args.max_probe_failures, status='prepared')
     if not args.apply:
         output({'action': 'binary canary', 'state': state, 'candidate_drop_in': candidate, 'apply': False})
         return
@@ -197,6 +208,8 @@ def main():
     swap.add_argument('--startup-timeout', type=positive, default=300)
     swap.add_argument('--restart-timeout', type=positive, default=600)
     swap.add_argument('--http-timeout', type=positive, default=10)
+    swap.add_argument('--max-probe-failures', type=positive_int, default=3,
+                      help='consecutive failed metrics scrapes that trigger rollback while guarding')
     swap.add_argument('--apply', action='store_true')
     for action in ('guard', 'show', 'rollback'):
         sub = commands.add_parser(action)

@@ -183,7 +183,11 @@ A binary rollback cannot reverse an incompatible storage migration.
 Defaults are a three-hour guard, checks every 120 seconds, and rollback on more
 than 20 new errors per check. `--duration`, `--interval`, `--max-errors`,
 `--startup-timeout`, `--restart-timeout` and `--http-timeout` are seconds/count
-controls. The default required counters are
+controls. Once guarding, a stopped service or a different serving binary rolls
+back at the next check, but a failed or slow metrics scrape rolls back only after
+`--max-probe-failures` consecutive misses (default 3): a daemon busy after restart
+can miss one scrape deadline. The next successful scrape is compared with the last
+successful one, so errors during the missed checks still count. The default required counters are
 `persister_pebble_write_failures_total` and `input_log_write_errors_total`.
 For input logging disabled, explicitly replace the defaults with
 `--error-counter persister_pebble_write_failures_total`; repeat the flag for any
