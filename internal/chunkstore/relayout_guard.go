@@ -3,12 +3,13 @@ package chunkstore
 import (
 	"context"
 	"errors"
-	"log"
 	"maps"
 	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 const (
@@ -126,7 +127,7 @@ func (g *relayoutGuard) observePolicy(sample func() (uint64, uint64, error), nee
 	}
 	if reason == "" {
 		if g.paused {
-			log.Printf("relayout resumed: free_bytes=%d compaction_debt=%d", free, debt)
+			zapwriter.Logger("storage").Info("relayout resumed", zap.Uint64("free_bytes", free), zap.Uint64("compaction_debt", debt))
 		}
 		g.paused, g.reason = false, ""
 		return "", nil
@@ -136,7 +137,7 @@ func (g *relayoutGuard) observePolicy(sample func() (uint64, uint64, error), nee
 			g.pauses = make(map[string]uint64)
 		}
 		g.pauses[reason]++
-		log.Printf("[WARN] relayout paused: reason=%s free_bytes=%d min_free_bytes=%d compaction_debt=%d max_compaction_debt=%d disk_error=%v", reason, free, g.minFree, debt, g.maxDebt, diskErr)
+		zapwriter.Logger("storage").Warn("relayout paused", zap.String("reason", reason), zap.Uint64("free_bytes", free), zap.Uint64("min_free_bytes", g.minFree), zap.Uint64("compaction_debt", debt), zap.Uint64("max_compaction_debt", g.maxDebt), zap.Error(diskErr))
 	}
 	g.paused, g.reason = true, reason
 	return reason, g.changed

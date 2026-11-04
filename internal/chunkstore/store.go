@@ -616,18 +616,7 @@ func Open(dir string, options Options) (*Store, error) {
 			if err := s.waitMaintenance(ctx, "relayout"); err != nil {
 				return
 			}
-			// A background maintenance failure stops only the relayout; a panic
-			// here must not take down the process and restart into it again.
-			defer func() {
-				if r := recover(); r != nil {
-					msg := fmt.Sprintf("panic: %v", r)
-					s.relayout.err.Store(&msg)
-				}
-			}()
-			if err := s.RelayoutContinuation(ctx, options.RelayoutRate); err != nil && !errors.Is(err, context.Canceled) {
-				msg := err.Error()
-				s.relayout.err.Store(&msg)
-			}
+			s.runRelayoutBackground(ctx, options.RelayoutRate)
 		}()
 	}
 	if err := s.startCompactOnce(options.CompactOnce); err != nil {

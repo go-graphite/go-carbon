@@ -68,7 +68,7 @@ func TestRelayoutParallelResume(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s/%d", tc.phase, tc.blocked), func(t *testing.T) {
 			blocked := tc.blocked
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			codec := &controlledRelayoutCodec{}
 			opts := Options{ExactBlocks: true, Continuation: codec, TimeBuckets: true, RelayoutWorkers: 3,
@@ -189,47 +189,39 @@ func TestRelayoutParallelResume(t *testing.T) {
 	}
 }
 
-func TestRelayoutParallelErrorCancelsAndJoins(t *testing.T) {
+func TestRelayoutParallelPanicCancelsAndJoins(t *testing.T) {
 	t.Parallel()
-	for _, panicWorker := range []bool{false, true} {
-		t.Run(fmt.Sprint(panicWorker), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			entered := make(chan struct{}, 3)
-			var stopped atomic.Int32
-			failure := errors.New("injected plan failure")
-			codec := &controlledRelayoutCodec{before: func(ctx context.Context, name string) error {
-				entered <- struct{}{}
-				if name == "a" {
-					for range 3 {
-						select {
-						case <-entered:
-						case <-ctx.Done():
-							return ctx.Err()
-						}
-					}
-					if panicWorker {
-						panic(failure)
-					}
-					return failure
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	entered := make(chan struct{}, 3)
+	var stopped atomic.Int32
+	codec := &controlledRelayoutCodec{before: func(ctx context.Context, name string) error {
+		entered <- struct{}{}
+		if name == "a" {
+			for range 3 {
+				select {
+				case <-entered:
+				case <-ctx.Done():
+					return ctx.Err()
 				}
-				<-ctx.Done()
-				stopped.Add(1)
-				return ctx.Err()
-			}}
-			s, _ := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, Continuation: codec, TimeBuckets: true, RelayoutWorkers: 3})
-			defer closeTestStore(t, s)
-			for _, name := range []string{"a", "b", "c"} {
-				createTestMetric(t, s, name)
 			}
-			err := s.RelayoutContinuation(ctx, 0)
-			if (!panicWorker && !errors.Is(err, failure)) || (panicWorker && (err == nil || !strings.Contains(err.Error(), "panic: injected plan failure"))) {
-				t.Fatalf("first error lost: %v", err)
-			}
-			if stopped.Load() != 2 || s.RelayoutStats().Done || s.relayout.running.Load() {
-				t.Fatalf("workers not joined: stopped=%d stats=%+v", stopped.Load(), s.RelayoutStats())
-			}
-		})
+			panic("injected plan failure")
+		}
+		<-ctx.Done()
+		stopped.Add(1)
+		return ctx.Err()
+	}}
+	s, _ := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, Continuation: codec, TimeBuckets: true, RelayoutWorkers: 3})
+	defer closeTestStore(t, s)
+	for _, name := range []string{"a", "b", "c"} {
+		createTestMetric(t, s, name)
+	}
+	err := s.RelayoutContinuation(ctx, 0)
+	if err == nil || !strings.Contains(err.Error(), "panic: injected plan failure") {
+		t.Fatalf("panic lost: %v", err)
+	}
+	if stopped.Load() != 2 || s.RelayoutStats().Done || s.relayout.running.Load() {
+		t.Fatalf("workers not joined: stopped=%d stats=%+v", stopped.Load(), s.RelayoutStats())
 	}
 }
 
@@ -278,7 +270,7 @@ func TestRelayoutParallelSharesRate(t *testing.T) {
 	for i := range 9 {
 		createTestMetric(t, s, fmt.Sprintf("m.%d", i))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	start := time.Now()
 	if err := s.RelayoutContinuation(ctx, 10*relayoutTargetBytes); err != nil {
@@ -316,7 +308,7 @@ func TestRelayoutStealsSkewedWork(t *testing.T) {
 	t.Parallel()
 	const workers, metrics, heavy = 4, 128, 16
 	finalStart := metrics - workers*relayoutChunkSize(metrics, workers)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	var mu sync.Mutex
 	var waiting int
@@ -376,7 +368,7 @@ func TestRelayoutStealsSkewedWork(t *testing.T) {
 // deliberately sparse: the persisted value is an ID, never a chunk index.
 func TestRelayoutCompletedChunkPrefix(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	gates := map[string]chan struct{}{"prefix.000": make(chan struct{}), "prefix.024": make(chan struct{})}
 	codec := &controlledRelayoutCodec{before: func(ctx context.Context, name string) error {

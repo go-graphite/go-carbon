@@ -15,6 +15,8 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/objstorage/objstorageprovider"
 	"github.com/cockroachdb/pebble/sstable"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -31,12 +33,14 @@ const (
 	relayoutMaxMetrics  = 4096
 )
 
+var errRelayoutPublication = errors.New("relayout publication failed")
+
 func relayoutCursorKey() []byte { return []byte("R/relayout/cursor") }
 
 // RelayoutStats reports progress of the current process.
 type RelayoutStats struct {
-	Metrics, Blocks, Skipped, Bytes uint64
-	Cursor                          uint64
+	Metrics, Blocks, Skipped, Bytes, Errors uint64
+	Cursor                                  uint64
 	// Ceiling is the highest metric ID the run covers; Cursor/Ceiling is its
 	// progress through the ID-ordered catalog.
 	Ceiling uint64
@@ -48,7 +52,8 @@ type RelayoutStats struct {
 	Pauses                                                   map[string]uint64
 	MinFreeBytes, MaxCompactionDebt                          uint64
 	ReclaimBytes, UnreclaimedBytes, Reclaims, ReclaimedBytes uint64
-	// Error is why a background run stopped, if it did.
+	// Error latches the latest failure in this process, even while later
+	// metrics/passes continue. Done requires a complete pass without errors.
 	Error string
 }
 
@@ -56,6 +61,7 @@ type relayoutState struct {
 	guard                                   relayoutGuard
 	reclaim                                 relayoutReclaimState
 	metrics, blocks, skipped, bytes, cursor atomic.Uint64
+	errors                                  atomic.Uint64
 	ceiling                                 atomic.Uint64
 	done                                    atomic.Bool
 	err                                     atomic.Pointer[string]
@@ -113,7 +119,7 @@ type relayoutItem struct {
 
 func (s *Store) RelayoutStats() RelayoutStats {
 	r := &s.relayout
-	stats := RelayoutStats{Metrics: r.metrics.Load(), Blocks: r.blocks.Load(), Skipped: r.skipped.Load(), Bytes: r.bytes.Load(), Cursor: r.cursor.Load(), Ceiling: r.ceiling.Load(), Done: r.done.Load(), Rate: r.rate.Load()}
+	stats := RelayoutStats{Metrics: r.metrics.Load(), Blocks: r.blocks.Load(), Skipped: r.skipped.Load(), Bytes: r.bytes.Load(), Errors: r.errors.Load(), Cursor: r.cursor.Load(), Ceiling: r.ceiling.Load(), Done: r.done.Load(), Rate: r.rate.Load()}
 	r.guard.stats(&stats)
 	r.reclaim.stats(&stats)
 	if e := r.err.Load(); e != nil {
@@ -123,7 +129,9 @@ func (s *Store) RelayoutStats() RelayoutStats {
 }
 
 // RelayoutContinuation runs until every v6 block of metrics existing at start
-// is moved, ctx ends or an error occurs. bytesPerSecond > 0 paces the copies;
+// is moved, ctx ends or a store-wide error occurs. Metric planning failures
+// are logged and skipped; a failed pass resets its cursor for the next run.
+// bytesPerSecond > 0 paces the copies;
 // SetRelayoutRate changes the pacing while it runs.
 func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) error {
 	if !s.relayout.running.CompareAndSwap(false, true) {
@@ -131,6 +139,7 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 	}
 	defer s.relayout.running.Store(false)
 	defer s.relayout.guard.clear()
+	errorsBefore := s.relayout.errors.Load()
 	s.relayout.rate.Store(bytesPerSecond)
 	if !s.timeBuckets {
 		return fmt.Errorf("%w: relayout requires time buckets", ErrFormat)
@@ -169,6 +178,9 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 		// Preserve the serial grouping, cursor and pacing boundaries, on the
 		// caller's goroutine. Parallel scheduling must not change K=1.
 		err = s.relayoutRange(ctx, planner, candidates, func(i int) error {
+			if s.relayout.errors.Load() != errorsBefore {
+				return nil // a restart must revisit failures from this pass
+			}
 			last := candidates[i-1].id
 			if err := s.setRelayoutCursor(last, false); err != nil {
 				return err
@@ -188,6 +200,9 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 		complete := func(chunk int) error {
 			cursorMu.Lock()
 			defer cursorMu.Unlock()
+			if s.relayout.errors.Load() != errorsBefore {
+				return nil // keep the durable watermark before the failed chunk
+			}
 			completed[chunk] = true
 			through := frontier
 			for through < chunks && completed[through] {
@@ -246,6 +261,15 @@ func (s *Store) RelayoutContinuation(ctx context.Context, bytesPerSecond int64) 
 	if err := s.reclaimRelayout(ctx, true, 0); err != nil {
 		return err
 	}
+	if s.relayout.errors.Load() > errorsBefore {
+		// Keep successful moves, but rescan on the next run (also after a
+		// restart). Already moved blocks produce no new copies.
+		if err := s.setRelayoutCursor(0, false); err != nil {
+			return err
+		}
+		s.relayout.cursor.Store(0)
+		return fmt.Errorf("relayout pass failed: %s", *s.relayout.err.Load())
+	}
 	if err := s.setRelayoutCursor(ceiling, true); err != nil {
 		return err
 	}
@@ -290,7 +314,14 @@ func (s *Store) relayoutRange(ctx context.Context, planner ContinuationRelayoute
 		}
 		m, plan, err := s.planRelayout(ctx, planner, c)
 		if err != nil {
-			return fmt.Errorf("relayout plan %s: %w", c.name, err)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			s.relayoutMetricFailure(c.name, c.id, "plan", err)
+			plan = RelayoutPlan{}
 		}
 		if len(plan.Blocks) > 0 {
 			group = append(group, relayoutItem{m: m, plan: plan})
@@ -311,6 +342,12 @@ func (s *Store) planRelayout(ctx context.Context, planner ContinuationRelayouter
 	m, err := metadataFrom(snap, c.name)
 	var plan RelayoutPlan
 	if err == nil && m.ID == c.id && m.Continuation {
+		if err := s.checkFileOwnership(m); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				err = nil // unpublished migration candidate
+			}
+			return m, plan, err
+		}
 		plan, err = planner.RelayoutPlan(ctx, s.newContinuationIO(ctx, snap, nil, m))
 	} else if errors.Is(err, ErrNotFound) || err == nil {
 		err = nil // deleted or replaced since the scan
@@ -417,10 +454,56 @@ func (s *Store) ingestRelayoutGroup(ctx context.Context, items []relayoutItem, g
 	}
 	for _, item := range items {
 		if err := s.relayoutApply(ctx, item, g); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, errRelayoutPublication) {
+				return fmt.Errorf("relayout apply %q id %d: %w", item.m.Name, item.m.ID, err)
+			}
+			// Preparation failed before publication. Leave its copies intact:
+			// the old descriptor still owns the source, and a later pass can
+			// overwrite/reuse these copies. Never delete a possibly live copy.
+			s.relayoutMetricFailure(item.m.Name, item.m.ID, "apply", err)
 		}
 	}
 	return nil
+}
+
+func (s *Store) relayoutMetricFailure(name string, id uint64, stage string, err error) {
+	message := fmt.Sprintf("relayout %s %q id %d: %v", stage, name, id, err)
+	s.relayout.err.Store(&message)
+	s.relayout.errors.Add(1)
+	s.relayout.skipped.Add(1)
+	zapwriter.Logger("storage").Error("relayout metric failed", zap.String("metric", name), zap.Uint64("metric_id", id), zap.Uint64("block_cursor", 0), zap.String("stage", stage), zap.Error(err))
+}
+
+// Run one whole pass before retrying metric failures. Store-wide failures
+// retain their last safe cursor. Neither path restarts the process.
+func (s *Store) runRelayoutBackground(ctx context.Context, rate int64) {
+	s.relayout.rate.Store(rate)
+	for {
+		err := func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("relayout panic: %v", r)
+				}
+			}()
+			return s.RelayoutContinuation(ctx, s.relayout.rate.Load())
+		}()
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		message := err.Error()
+		s.relayout.err.Store(&message)
+		zapwriter.Logger("storage").Error("relayout failed", zap.Uint64("cursor", s.relayout.cursor.Load()), zap.Error(err))
+		timer := time.NewTimer(time.Hour)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 type relayoutSpan struct{ start, end []byte }
@@ -500,7 +583,7 @@ func (s *Store) relayoutApply(ctx context.Context, item relayoutItem, g *relayou
 		return err
 	}
 	if err := s.commit(batch); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errRelayoutPublication, err)
 	}
 	g.committed(uint64(item.plan.Bytes))
 	if moved > 0 {

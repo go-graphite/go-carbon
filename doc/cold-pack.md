@@ -54,6 +54,25 @@ Native ranges above 65536 points are skipped and counted. A decoded native range
 limited to 2 MiB and mutations to 256 KiB plus the revision record. Oversized
 headers/ranges are skipped rather than splitting a native writer boundary.
 
+Unpublished migration candidates are ignored until ownership is published.
+A metric failure logs at ERROR through the `storage` zap logger, including its
+name, descriptor cursor and error. It increments both `store_cold_pack_errors_total`
+and `store_cold_pack_skipped_total`, then advances past that metric. The next
+pass retries from descriptor zero. Cancellation retains unfinished work;
+store-wide failures (for example catalog or disk-admission failures) still pause the worker.
+`store_cold_pack_failed` latches any non-cancellation error in this process and
+stays set until restart, including when later metrics and passes succeed.
+An offline `RunColdPack` completes the pass before returning a metric failure.
+Any skip, conflict or failure prevents that unpack pass from authorizing downgrade.
+
+Relayout also logs and skips metric planning and apply-preparation failures, counts them in
+`store_relayout_errors_total`, finishes the other metrics, and retries after an
+hour in the background. Its durable cursor stays before failed work until the
+pass ends, then resets for a rescan; a restart cannot forget failed metrics.
+Already moved blocks need no new copies. `store_relayout_failed` also latches
+until restart. Store-wide ingestion, publication, compaction and cursor failures
+abort that run and are logged through zap before retrying.
+
 Snapshot reads, decompression and encoding happen outside the metric stripe.
 Publication uses TryLock, rechecks ID, generation and revision, and abandons a
 stale plan. A busy stripe is retried in a later sweep. Metadata validation that
