@@ -264,6 +264,41 @@ pressure pauses, worker seconds, maximum stripe lock duration, active work and a
 latched failure flag. Logical input minus output is the encoded byte saving,
 not immediate filesystem reclamation. `active_workers` counts executing metric
 ranges; `active` covers the whole wave.
+
+Lifecycle counters separate sealing from restoring writable groups:
+
+| Series | Meaning |
+| --- | --- |
+| `store_cold_pack_blocks_total`, `store_cold_pack_points_total` | All sealing work, including repacks; administrative unpacking is excluded. |
+| `store_cold_pack_repacked_blocks_total`, `store_cold_pack_repacked_points_total` | The subset sealed after a previous thaw. |
+| `store_cold_pack_repacked_input_bytes_total`, `store_cold_pack_repacked_output_bytes_total` | Logical bytes before/after sealing that subset, with the same accounting as the existing input/output counters. |
+| `store_cold_pack_thaws_total{reason}` | Completed codec thaws by writer entrypoint: `append` (append to an existing range), `patch` (replace stored values), `rewrite` (rewrite a range suffix), `unpack` (administrative unpack mode). Patches/rewrites can come from late writes or rollup correction. |
+| `store_cold_pack_thawed_points_total` | Points restored from sealed groups to ordinary 128-point groups. |
+| `store_cold_pack_thawed_bytes_total` | Sealed group bytes read plus ordinary group bytes rewritten; includes logical group keys/values, excludes descriptor bytes and batch framing. |
+
+First packs are `blocks_total - repacked_blocks_total`, with the full
+`store_cold_pack_` prefix on both names (similarly for points and input/output
+bytes). Before these lifecycle counters, blocks/points also included unpacking;
+avoid mixing versions in a comparison window. The administrative status API
+continues to report all maintenance blocks/points, with unpacked subsets.
+Sealing/repacking counters count published batches. Thaw counters count completed
+codec work in this process across stores; a later error, revision conflict or
+transaction failure can discard that work. They are work rates, not a durable
+count of currently thawed ranges. Circular slot reuse replaces the old range
+directly and performs no thaw.
+
+Thaw history is durable without extending the descriptor: thaw sets bit 31 of
+its bucket and writes ordinary groups under that full bucket address. Repacking
+keeps it; replacing the range from its first point with a fresh descriptor clears
+it. Hour/day buckets cannot naturally reach that bit within Whisper's uint32
+timestamp domain. Old v7/v9 decoders preserve all bucket bits and route reads,
+writes, transfers and deletions to the same address, so rollback to a v9-capable
+binary is safe. Do not mask the bit when constructing group keys. The existing
+unpack/downgrade procedure still applies to binaries predating v9. Thaws performed
+by an older binary do not gain the marker and cannot later be identified as
+repacks; data correctness is unaffected. Ordinary Update paths add no metric
+operations, IO, locks or allocations.
+
 `pending_metrics` counts unfinished names in the discovered page, including
 in-flight names, not an estimated full-store backlog. The administrative status API
 also includes the mode, name/descriptor cursor, counters and most recent error.
