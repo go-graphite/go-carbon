@@ -282,8 +282,8 @@ func (p *Whisper) SetBacklogged(backlogged func() bool) {
 	p.backlogged = backlogged
 }
 
-// SetRecovering supplies the cheap urgent-restoration signal for auto mode.
-// Unlike capacity pressure, urgent restoration retains its full-speed bypass.
+// SetRecovering supplies urgent-restoration state for automatic rate sampling.
+// Recovery raises the sampled target without bypassing token admission.
 func (p *Whisper) SetRecovering(recovering func() bool) { p.recovering = recovering }
 
 // SetRestartBudget gives mandatory writes priority over optional restart work.
@@ -805,7 +805,10 @@ LOOP:
 	for {
 		if p.throttleUpdates() {
 			select {
-			case <-p.updateTokens():
+			case _, open := <-p.updateTokens():
+				if !open && p.maxUpdatesPerSecond == -1 {
+					continue LOOP
+				}
 			case <-exit:
 				return
 			}

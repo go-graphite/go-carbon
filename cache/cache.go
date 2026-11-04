@@ -42,6 +42,8 @@ type cacheSettings struct {
 	writeoutSpread    float64
 	// writeoutRestoreSpread: see SetWriteoutRestoreSpread.
 	writeoutRestoreSpread bool
+	// writeoutPhase anchors automatic eligibility independently of prior writes.
+	writeoutPhase time.Time
 	// writeoutSparseSpread: see SetWriteoutSparseSpread.
 	writeoutSparseSpread bool
 	// writeoutStartupSpread: see SetWriteoutStartupSpread.

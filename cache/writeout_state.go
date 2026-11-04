@@ -22,6 +22,9 @@ func (c *Cache) WriteoutState() WriteoutState {
 		MeanDelay: time.Duration(float64(s.writeoutMaxDelay) * (1 - s.writeoutSpread/2)),
 		Pressure:  c.bytePressure(s), Recovering: c.recovering(s),
 	}
+	if !s.writeoutPhase.IsZero() {
+		state.MeanDelay = s.writeoutMaxDelay
+	}
 	for _, shard := range c.data {
 		shard.mu.RLock()
 		state.Metrics += int64(shard.items.len())

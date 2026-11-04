@@ -1,27 +1,32 @@
 package persister
 
 import (
+	"context"
 	"fmt"
 	"math"
+	"os"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/restartcpu"
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 func steadyUpdateState() cache.WriteoutState {
 	return cache.WriteoutState{Metrics: 1_000_000, Points: 8_000_000,
-		MaxDelay: 960 * time.Second, MeanDelay: 840 * time.Second}
+		MaxDelay: 960 * time.Second, MeanDelay: 960 * time.Second}
 }
 
 func TestAutoUpdateController(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	s := steadyUpdateState()
-	want := float64(s.Metrics) / (s.MeanDelay + autoUpdateSlack(s.MaxDelay)/2).Seconds() * autoUpdateMargin
+	want := float64(s.Metrics) / s.MeanDelay.Seconds() * autoUpdateMargin
 	t.Run("steady convergence", func(t *testing.T) {
 		c := autoUpdateController{at: now, started: now, rate: want * 3, need: want * 3 / autoUpdateMargin, equilibrium: float64(s.Points)}
 		var rate int
@@ -109,7 +114,7 @@ func TestAutoUpdateRateModes(t *testing.T) {
 		}
 		p.Stop()
 	}
-	t.Run("recovery bypass is immediate", func(t *testing.T) {
+	t.Run("recovery remains bounded", func(t *testing.T) {
 		var recovering atomic.Bool
 		p := &Whisper{}
 		p.SetMaxUpdatesPerSecond(-1)
@@ -119,8 +124,8 @@ func TestAutoUpdateRateModes(t *testing.T) {
 			t.Fatal("auto pressure escaped its ceiling")
 		}
 		recovering.Store(true)
-		if p.throttleUpdates() {
-			t.Fatal("recovery waited for an auto sample")
+		if !p.throttleUpdates() {
+			t.Fatal("recovery bypassed auto admission")
 		}
 		recovering.Store(false)
 		if !p.throttleUpdates() {
@@ -140,14 +145,11 @@ func TestAutoUpdateRateModes(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer p.Stop()
-				if rate, _, reason := p.autoUpdateObservation(); rate != 3*predecessor || reason != "restart" {
-					t.Fatalf("auto ceiling throttled restart: rate=%g reason=%s", rate, reason)
+				if rate, _, _ := p.autoUpdateObservation(); rate != 10 {
+					t.Fatalf("restart replaced bounded auto rate: %g", rate)
 				}
-				if predecessor == 0 && p.updateTokens() != p.updateTicker.C {
-					t.Fatal("auto throttled unrestricted CPU allowance")
-				}
-				if predecessor > 0 && p.updateTokens() != p.restartTicker.Load().C {
-					t.Fatal("auto replaced predecessor allowance")
+				if p.updateTokens() != p.autoUpdate.ticker.Load().C || p.restartTicker.Load() != nil {
+					t.Fatal("restart installed a competing auto admission budget")
 				}
 			})
 		}
@@ -256,6 +258,7 @@ func TestAutoUpdateSimulation(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			c := cache.New()
 			c.SetMaxSize(0)
+			c.SetWriteoutPacing(auto)
 			if err := c.SetWriteoutBatching(960, delay); err != nil {
 				t.Fatal(err)
 			}
@@ -371,5 +374,280 @@ func TestAutoUpdateSimulation(t *testing.T) {
 	t.Logf("auto with 2x input step: cv=%.4f cache=%.0f max_age=%s", step.cv, step.equilibrium, step.age)
 	if step.age > delay+autoUpdateSlack(delay) || step.cv > .15 || step.equilibrium > 1.3*fixed.equilibrium {
 		t.Fatalf("input step failed to settle safely: %+v", step)
+	}
+}
+
+// A restart observer can still be waiting for readiness after CPU pacing has
+// ended. Its installed ticker must not override a steady auto observation.
+func TestAutoUpdateExpiredRestartLimiter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		budget := restartcpu.NewWithCPU(2, func() float64 { return 0 })
+		budget.SetSteadyRate(7666)
+		budget.Warmed()
+		time.Sleep(31 * time.Minute)
+		var written atomic.Uint64
+		p := &Whisper{recv: func(chan bool) string { return "metric" }}
+		p.SetWorkers(96)
+		p.SetMaxUpdatesPerSecond(-1)
+		state := steadyUpdateState()
+		state.Metrics = 11_650_000
+		p.SetAutoUpdateRate(func() cache.WriteoutState { return state }, 1, 23000)
+		p.SetStartupGate(make(chan struct{}), make(chan struct{}), time.Hour, nil)
+		p.SetRestartBudget(budget, nil)
+		p.SetMockStore(func() (StoreFunc, func()) {
+			return func(string) {
+				written.Add(1)
+				time.Sleep(time.Millisecond)
+			}, nil
+		})
+		if err := p.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer p.Stop()
+		time.Sleep(100 * time.Second)
+		synctest.Wait()
+		rate, _, reason := p.autoUpdateObservation()
+		actual := float64(written.Load()) / 100
+		t.Logf("reported %.0f/s (%s), actual %.0f/s, restart active %v, ticker installed %v", rate, reason, actual, budget.Active(), p.restartTicker.Load() != nil)
+		if reason != "steady" || actual > rate*1.02 {
+			t.Fatalf("steady auto cap escaped: actual %.0f/s reported %.0f/s (%s)", actual, rate, reason)
+		}
+	})
+}
+
+// The default population scales demand and capacity together for race runs.
+// Set AUTO_CAP_SIM_METRICS=1000000 for the full restart experiment.
+func TestAutoUpdateRestartSimulation(t *testing.T) {
+	metrics := 5000
+	if v := os.Getenv("AUTO_CAP_SIM_METRICS"); v != "" {
+		var err error
+		metrics, err = strconv.Atoi(v)
+		if err != nil || metrics < 1000 {
+			t.Fatal("invalid AUTO_CAP_SIM_METRICS")
+		}
+	}
+	const delay = 960 * time.Second
+	for _, auto := range []bool{false, true} {
+		t.Run(map[bool]string{false: "fixed", true: "auto"}[auto], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c := cache.New()
+				c.SetMaxSize(0)
+				c.EnableInputLog()
+				c.SetWriteoutRestoreSpread(true)
+				c.SetWriteoutSparseSpread(true)
+				c.SetWriteoutPacing(auto)
+				if err := c.SetWriteoutBatching(960, delay); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.SetWriteoutSpread(.25); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.SetWriteStrategy("max"); err != nil {
+					t.Fatal(err)
+				}
+				var names [60][][]byte
+				start := time.Now()
+				for i := 0; i < metrics; i++ {
+					name := []byte(fmt.Sprintf("restart.metric.%08d", i))
+					names[i%60] = append(names[i%60], name)
+					c.AddRestored(points.OnePoint(string(name), 1, start.Unix()))
+				}
+				abort, request, next := make(chan bool), make(chan struct{}, 1), make(chan string, 1)
+				done := make(chan struct{})
+				defer func() { close(abort); <-done }()
+				go func() {
+					defer close(done)
+					for {
+						select {
+						case <-abort:
+							return
+						case <-request:
+							name := c.WriteoutQueue().Get(abort)
+							if name == "" {
+								return
+							}
+							next <- name
+						}
+					}
+				}()
+				controller := autoUpdateController{}
+				pending := false
+				var bins [120]float64
+				var eligible [120]int64
+				var maxAge time.Duration
+				rate := int(math.Ceil(1.6 * float64(metrics) / delay.Seconds()))
+				for second := 0; second < 7200; second++ {
+					if second%60 == 0 {
+						for shard := range cache.ShardCount {
+							c.TakeLogEntries(shard, uint64(second+1), nil)
+						}
+					}
+					for _, name := range names[second%60] {
+						c.AddPoint(name, 1, time.Now().Unix())
+					}
+					if auto && second%5 == 0 {
+						rate = controller.step(time.Now(), c.WriteoutState(), 1, int(math.Ceil(23000*float64(metrics)/11500000)))
+					}
+					if !pending {
+						request <- struct{}{}
+						pending = true
+					}
+					synctest.Wait()
+					write := func(name string) {
+						p, ok := c.PopNotConfirmed(name)
+						if !ok {
+							t.Fatal("queued absent metric")
+						}
+						for _, point := range p.Data {
+							maxAge = max(maxAge, time.Since(time.Unix(point.Timestamp, 0)))
+						}
+						c.Confirm(p)
+						bins[second/60]++
+					}
+					select {
+					case name := <-next:
+						pending = false
+						write(name)
+						for i := 1; i < rate; i++ {
+							name := c.WriteoutQueue().TryGet()
+							if name == "" {
+								break
+							}
+							write(name)
+						}
+					default:
+					}
+					if second%60 == 59 {
+						eligible[second/60] = c.WriteoutState().Eligible
+					}
+					time.Sleep(time.Second)
+				}
+				maxAge = max(maxAge, c.WriteoutState().OldestAge)
+				var cvs, means [8]float64
+				for window := range cvs {
+					var sum, squares float64
+					for _, n := range bins[window*15 : (window+1)*15] {
+						sum += n
+						squares += n * n
+					}
+					mean := sum / 15
+					means[window] = mean / 60
+					cvs[window] = math.Sqrt(max(0, squares/15-mean*mean)) / mean
+				}
+				t.Logf("metrics=%d cv_15m=%0.4f mean_updates_per_second=%0.2f max_point_age=%s", metrics, cvs, means, maxAge)
+				trough := 30
+				for i := 31; i < len(bins); i++ {
+					if bins[i] < bins[trough] {
+						trough = i
+					}
+				}
+				t.Logf("lowest minute after 30m: minute=%d updates=%.0f eligible_at_end=%d", trough, bins[trough], eligible[trough])
+				if auto && os.Getenv("AUTO_CAP_SIM_BASELINE") == "" {
+					for w, cv := range cvs {
+						need := float64(metrics) / delay.Seconds()
+						if w >= 2 && (means[w] < need*.95 || means[w] > need*1.10) {
+							t.Errorf("window %d-%d min rate=%g need=%g", w*15, (w+1)*15, means[w], need)
+						}
+						if w >= 2 && cv > .15 {
+							t.Errorf("window %d-%d min cv=%g exceeds .15", w*15, (w+1)*15, cv)
+						}
+					}
+					if maxAge > delay+autoUpdateSlack(delay) {
+						t.Errorf("max point age %s exceeds delay + slack", maxAge)
+					}
+				}
+			})
+		})
+	}
+}
+
+func TestAutoUpdateRecoveryLimiter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var written atomic.Uint64
+		p := &Whisper{recv: func(chan bool) string { return "recovery.metric" }}
+		p.SetWorkers(96)
+		p.SetMaxUpdatesPerSecond(-1)
+		p.SetRecovering(func() bool { return true })
+		state := steadyUpdateState()
+		state.Metrics = 96000
+		p.SetAutoUpdateRate(func() cache.WriteoutState { return state }, 1, 0)
+		p.SetMockStore(func() (StoreFunc, func()) { return func(string) { written.Add(1); time.Sleep(time.Millisecond) }, nil })
+		if err := p.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer p.Stop()
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		rate, _, reason := p.autoUpdateObservation()
+		if n := written.Load(); float64(n) > rate*10*1.02 {
+			t.Fatalf("pending recovery bypassed %.0f/s cap (%s): %d writes", rate, reason, n)
+		}
+	})
+}
+
+type countedUpdateStore struct {
+	updates, batches atomic.Uint64
+	fallback         bool
+}
+
+func (s *countedUpdateStore) Metadata(context.Context, string) (store.Metadata, error) {
+	return store.Metadata{}, nil
+}
+func (s *countedUpdateStore) Create(context.Context, store.MetricConfig) (store.Metadata, error) {
+	return store.Metadata{}, nil
+}
+func (s *countedUpdateStore) UpdateMany(context.Context, string, []points.Point) error {
+	s.updates.Add(1)
+	return nil
+}
+func (s *countedUpdateStore) UpdateBatch(_ context.Context, updates []store.MetricUpdate, _ *store.ContinuationMaintenance) error {
+	s.batches.Add(1)
+	if s.fallback {
+		return store.ErrFormat
+	}
+	s.updates.Add(uint64(len(updates)))
+	return nil
+}
+
+func TestAutoUpdateSharedBatchAccounting(t *testing.T) {
+	for _, workers := range []int{1, 96} {
+		for _, fallback := range []bool{false, true} {
+			t.Run(fmt.Sprintf("workers=%d/fallback=%v", workers, fallback), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					var sequence atomic.Uint64
+					next := func() string { return fmt.Sprintf("batch.metric.%d", sequence.Add(1)) }
+					db := &countedUpdateStore{fallback: fallback}
+					p := NewWhisper("", nil, nil, func(chan bool) string { return next() }, func(name string) (*points.Points, bool) { return points.OnePoint(name, 1, time.Now().Unix()), true }, nil, nil)
+					p.SetMetricStore(db)
+					p.SetRequeue(func(*points.Points) {})
+					p.SetWriteoutBatchReceiver(next)
+					p.SetStoreUpdateBatchSize(8)
+					p.SetWorkers(workers)
+					p.SetMaxUpdatesPerSecond(-1)
+					p.SetRecovering(func() bool { return true })
+					state := steadyUpdateState()
+					state.Metrics = 1_200_000
+					p.SetAutoUpdateRate(func() cache.WriteoutState { return state }, 1, 0)
+					if err := p.Start(); err != nil {
+						t.Fatal(err)
+					}
+					defer p.Stop()
+					time.Sleep(20 * time.Second)
+					synctest.Wait()
+					p.Stop()
+					rate, _, _ := p.autoUpdateObservation()
+					actual := db.updates.Load()
+					if float64(actual) > rate*20*1.01 || float64(actual) < rate*20*.9 {
+						t.Fatalf("rate %.0f/s, %d updates in 20s", rate, actual)
+					}
+					if n := atomic.LoadUint32(&p.updateOperations); uint64(n) != actual {
+						t.Fatalf("%d members counted as %d updates", actual, n)
+					}
+					if workers == 1 && db.batches.Load() == 0 {
+						t.Fatal("shared batch path was not exercised")
+					}
+				})
+			})
+		}
 	}
 }

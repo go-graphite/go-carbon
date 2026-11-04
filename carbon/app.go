@@ -495,6 +495,7 @@ func (app *App) ReloadConfig() error {
 	app.Cache.SetWriteoutRestoreSpread(app.Config.Cache.WriteoutRestoreSpread)
 	app.Cache.SetWriteoutSparseSpread(app.Config.Cache.WriteoutSparseSpread)
 	app.Cache.SetWriteoutStartupSpread(app.Config.Cache.WriteoutStartupSpread)
+	app.Cache.SetWriteoutPacing(app.Config.Whisper.MaxUpdatesPerSecond == -1)
 
 	if app.Persister != nil {
 		app.Persister.Stop()
@@ -996,6 +997,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	core.SetWriteoutRestoreSpread(conf.Cache.WriteoutRestoreSpread)
 	core.SetWriteoutSparseSpread(conf.Cache.WriteoutSparseSpread)
 	core.SetWriteoutStartupSpread(conf.Cache.WriteoutStartupSpread)
+	core.SetWriteoutPacing(conf.Whisper.MaxUpdatesPerSecond == -1)
 	app.pauseMetadataPrewarmWriteout(core)
 
 	app.Cache = core

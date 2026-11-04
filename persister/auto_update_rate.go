@@ -37,10 +37,9 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 		dt = autoUpdateInterval
 	}
 	c.at = now
-	// Reserve half the bounded slack for queued writes. Targeting only the
-	// eligibility delay overestimates demand: each capped write itself delays
-	// that metric's next batch, emptying the queue again every cycle.
-	seconds := max(1, (s.MeanDelay + autoUpdateSlack(s.MaxDelay)/2).Seconds())
+	// Stable eligibility phases repeat once per mean delay. Slack is only
+	// for queueing and catch-up; including it in steady demand underfunds work.
+	seconds := max(1, s.MeanDelay.Seconds())
 	need := float64(s.Metrics) / seconds
 	alpha := 1 - math.Exp(-dt.Seconds()/autoUpdateSmoothing.Seconds())
 	// Follow growth immediately; only decreases need a quiet observation window.
@@ -78,6 +77,14 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 	if deadline := float64(s.Eligible) / left.Seconds(); deadline > target {
 		target, reason = deadline, "deadline"
 	}
+	// Urgent restoration has to drain within the ordinary delay, rather
+	// than making every worker unbounded while any saved source remains.
+	if s.Recovering {
+		left := max(autoUpdateInterval, s.MaxDelay-s.OldestAge-autoUpdateInterval)
+		if recovery := float64(s.Eligible) / left.Seconds(); recovery > target {
+			target, reason = recovery, "recovery"
+		}
+	}
 	if target < float64(floor) {
 		target, reason = float64(floor), "floor"
 	}
@@ -107,7 +114,6 @@ type autoUpdateRate struct {
 	reason                  string
 	stopping                bool
 	ticker                  atomic.Pointer[helper.ThrottleTicker]
-	recovering              atomic.Bool
 	metrics                 *autoUpdateMetrics
 }
 
@@ -125,15 +131,17 @@ func (p *Whisper) sampleAutoUpdateRate() {
 	if a.stopping {
 		return
 	}
-	a.recovering.Store(s.Recovering)
+	if p.recovering != nil {
+		s.Recovering = p.recovering()
+	}
 	previous := a.applied
 	rate := a.controller.step(time.Now(), s, a.floor, a.ceiling)
+	a.reason = a.controller.reason
 	// Avoid rebuilding tickers for sub-percent measurement noise.
 	if previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01) {
 		return
 	}
 	a.applied = rate
-	a.reason = a.controller.reason
 	if a.metrics != nil {
 		a.metrics.adjust(a.controller.reason)
 	}
@@ -182,18 +190,11 @@ func (p *Whisper) stopAutoUpdateRate() {
 }
 
 func (p *Whisper) throttleUpdates() bool {
+	if p.maxUpdatesPerSecond == -1 {
+		return true
+	}
 	if p.restartPaced() {
 		return true
 	}
-	if p.maxUpdatesPerSecond == -1 {
-		return !p.autoRecovering()
-	}
 	return p.backlogged == nil || !p.backlogged()
-}
-
-func (p *Whisper) autoRecovering() bool {
-	if p.recovering != nil {
-		return p.recovering()
-	}
-	return p.autoUpdate.recovering.Load()
 }

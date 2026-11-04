@@ -26,9 +26,9 @@ func (m *autoUpdateMetrics) adjust(reason string) {
 
 func (p *Whisper) initAutoUpdateMetrics(reg prometheus.Registerer) {
 	m := &autoUpdateMetrics{
-		rate:    prometheus.NewDesc("persister_auto_update_rate", "Effective automatic writeout limit in updates/s; zero means recovery is unlimited.", nil, nil),
+		rate:    prometheus.NewDesc("persister_auto_update_rate", "Effective automatic writeout limit in updates/s, including restart and recovery.", nil, nil),
 		target:  prometheus.NewDesc("persister_auto_update_rate_target", "Automatic writeout target in updates/s before downward smoothing.", nil, nil),
-		reason:  prometheus.NewDesc("persister_auto_update_rate_reason", "Reason for the last automatic rate adjustment or active restart override (one-hot).", []string{"reason"}, nil),
+		reason:  prometheus.NewDesc("persister_auto_update_rate_reason", "Reason for the current automatic rate target (one-hot).", []string{"reason"}, nil),
 		changes: prometheus.NewDesc("persister_auto_update_rate_adjustments_total", "Automatic writeout rate changes, by reason, across persister reloads.", []string{"reason"}, nil),
 	}
 	if err := reg.Register(m); err != nil {
@@ -47,14 +47,6 @@ func (p *Whisper) autoUpdateObservation() (rate, target float64, reason string) 
 	a.mu.Lock()
 	rate, target, reason = float64(a.applied), a.controller.target, a.reason
 	a.mu.Unlock()
-	if p.restartPaced() {
-		p.restartRateMu.Lock()
-		rate = float64(p.restartRate)
-		p.restartRateMu.Unlock()
-		reason = "restart"
-	} else if p.autoRecovering() {
-		rate, reason = 0, "recovery"
-	}
 	return
 }
 
