@@ -155,3 +155,48 @@ func TestRestartColdQueueProgressBelowMandatoryCPU(t *testing.T) {
 		}
 	})
 }
+
+// Refreshed warm-first windows may contain entries whose original batch is no
+// longer eligible. These must not spend the floor before store() rejects them.
+func TestRestartFloorIgnoresStaleQueueNames(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		budget := restartcpu.NewWithCPU(.238, func() float64 { return .28 * time.Since(started).Seconds() })
+		budget.SetSteadyRate(585.5)
+		time.Sleep(time.Second)
+		var sequence atomic.Uint64
+		p := &Whisper{recv: func(exit chan bool) string {
+			select {
+			case <-exit:
+				return ""
+			default:
+			}
+			if sequence.Add(1)%3 == 0 {
+				return "stale"
+			}
+			return "ready"
+		}}
+		p.SetWorkers(8)
+		p.SetMaxUpdatesPerSecond(50000)
+		p.SetRestartBudget(budget, nil)
+		p.SetWriteoutReady(func(name string) bool { return name == "ready" })
+		p.SetMockStore(func() (StoreFunc, func()) {
+			return func(name string) {
+				if name == "ready" {
+					p.recordUpdate()
+				}
+			}, nil
+		})
+		if err := p.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer p.Stop()
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		rate := float64(budget.Updates()) / 10
+		t.Logf("one-third stale queue entries: confirmed %.1f/s floor=585.5/s", rate)
+		if rate < 585.5*.95 || rate > 585.5*1.02 {
+			t.Fatal("stale queue entries spent the floor", rate)
+		}
+	})
+}

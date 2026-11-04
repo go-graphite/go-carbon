@@ -835,6 +835,13 @@ LOOP:
 			// exit closed
 			break LOOP
 		}
+		// Warm-first windows and refreshed queue snapshots can retain a name
+		// whose batch has already been written. Do not spend mandatory floor
+		// admission on that stale entry.
+		if p.writeoutReady != nil && !p.writeoutReady(metric) {
+			p.finishWarmName(metric)
+			continue LOOP
+		}
 		if !startupPassed {
 			select {
 			case <-p.startupReady:
@@ -855,6 +862,10 @@ LOOP:
 				next := p.tryRecv()
 				if next == "" {
 					break
+				}
+				if p.writeoutReady != nil && !p.writeoutReady(next) {
+					p.finishWarmName(next)
+					continue
 				}
 				metrics = append(metrics, next)
 			}

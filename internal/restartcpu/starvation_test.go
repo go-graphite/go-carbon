@@ -189,3 +189,42 @@ func TestWarningLimitSurvivesBriefFloorRecoveries(t *testing.T) {
 		}
 	})
 }
+
+// Missed service is bounded even when a storage wait lasts hours. Actual idle
+// time still cannot accumulate a second-sized burst after that debt is spent.
+func TestPendingFloorCreditIsBounded(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := time.Now()
+		b := NewWithCPU(.238, func() float64 { return .28 * time.Since(started).Seconds() })
+		b.ObserveWriteout(585.5, 0)
+		b.BeginWriteout()
+		time.Sleep(time.Hour)
+		take := func() int {
+			n := 0
+			for n < 10000 && b.reserveAdmission(time.Now(), writeoutWork, b.writeCost(), 1) == 0 {
+				n++
+			}
+			return n
+		}
+		if n := take(); n < 585 || n > 587 {
+			t.Fatal("pending floor service must retain at most one second", n)
+		}
+		b.EndWriteout()
+		time.Sleep(time.Hour)
+		if n := take(); n > 25 {
+			t.Fatal("idle time added excess floor credit", n)
+		}
+		b.BeginWriteout()
+		time.Sleep(time.Second)
+		b.BeginPrefetch() // Refill earned service at the old queue floor.
+		b.EndPrefetch()
+		b.ObserveWriteout(10, 0)
+		if n := take(); n > 11 {
+			t.Fatal("shrinking floor retained more than one second of service", n)
+		}
+		b.EndWriteout()
+		if b.floorPending != 0 {
+			t.Fatal("pending work leaked", b.floorPending)
+		}
+	})
+}

@@ -97,27 +97,40 @@ Normal settings resume when pacing ends. The writeout floor is the greater of
 saved steady throughput and queued metrics divided by max delay. A separate
 floor-rate admission bucket allows those writes despite process CPU debt. Every
 admitted update, including CPU-funded catch-up, debits that bucket, so the floor
-cannot fund extra catch-up. Idle credit is capped at 40ms of the floor, with at
-most one admitted batch beyond it; earlier catch-up cannot build unlimited floor
-debt. CPU-funded retries retain their original timing. All work still charges
+cannot fund extra catch-up. While writers or required preparation are pending,
+retain at most one second of owed floor service across scheduling, queue and I/O
+pauses. A 40ms cap on that balance discarded tokens during repeated pauses and
+could sustain a below-floor rate even with spare physical write capacity. Truly
+idle time adds at most 40ms of new credit. Previously earned service credit is
+retained across brief gaps between jobs, within the one-second bound, with at
+most one admitted batch beyond it. Earlier catch-up cannot build unlimited floor
+debt. Workers recheck eligibility after warm-first queueing and before CPU
+admission, so stale names do not spend floor grants. CPU-funded retries retain their original timing. All work still charges
 the whole-process CPU meter, so optional work sees the cost of mandatory writes.
 
 Reaching the floor also requires eligible work, working storage, enough workers
 and physical CPU capacity for those updates. When the floor itself cannot fit
 the saved allowance, only that mandatory rate can exceed it. Catch-up above the
 floor remains subject to the original process allowance. Mandatory intake and
-reads remain independent. Automatic rate tokens and their configured maximum
-still apply, including when lower than the restart floor.
+reads remain independent. The floor still cannot guarantee progress through a
+physical storage or CPU bottleneck.
 
 Automatic pacing (`max-updates-per-second = -1`) retains its own rate tokens,
-bounded by `max-updates-per-second-auto-max`, throughout restart. Its CPU cost
+using `max-updates-per-second-auto-max` for ordinary control. During restart,
+its effective token rate is `max(ordinary automatic rate, mandatory floor)`;
+this lifts a lower automatic maximum only far enough to meet durability demand.
+Unlike fixed mode it does not grant a 3x token ceiling: automatic control aims
+for flat writes. The ordinary controller's state and smoothing stay independent
+of this override, which is removed when the shared restart budget ends. Metrics
+and adjustment logs report the temporary target with reason `restart`.
+Its CPU cost
 reservations use three times the greater of the current automatic rate and
 saved steady throughput, refreshed on SIGHUP and on automatic rate changes.
 Without throughput history, the default write cost remains in use. This gives
 reservation sampling enough headroom to reach the token rate without using low
 predecessor throughput as a second rate limit, or making low auto demand slow
-startup warming. It does not raise the automatic token cap or the process CPU
-allowance. SIGHUP updates compatible persister settings in place; structural changes
+startup warming. The temporary floor does not raise the process CPU allowance;
+above-floor catch-up still needs process headroom. SIGHUP updates compatible persister settings in place; structural changes
 rebuild the persister. Both paths retain the shared CPU budget.
 
 Warm-first prefetch keeps one queue reader per persister worker. Eligibility

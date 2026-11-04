@@ -133,7 +133,7 @@ func TestAutoUpdateAppReloadThroughRestartEnd(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				check("auto restart", 27)
+				check("auto restart", 32)
 				if err := app.Cache.FinishPendingRecovery(); err != nil {
 					t.Fatal(err)
 				}

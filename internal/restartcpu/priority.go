@@ -11,6 +11,7 @@ import (
 
 // BeginWriteout marks urgent work that must run before input is ready.
 func (b *Budget) BeginWriteout() {
+	b.floorWork(1)
 	b.writers.Add(1)
 	b.writeGrants.Add(1)
 }
@@ -32,10 +33,14 @@ func (b *Budget) WaitWriteoutBatch(exit <-chan bool, updates int) bool {
 // Pair a successful admission with EndPrefetch.
 func (b *Budget) WaitPrefetch(exit <-chan bool) bool { return b.waitWork(exit, true, 1) }
 func (b *Budget) BeginPrefetch() {
+	b.floorWork(1)
 	b.prefetchers.Add(1)
 	b.warmGrants.Add(1)
 }
-func (b *Budget) EndPrefetch() { b.prefetchers.Add(-1) }
+func (b *Budget) EndPrefetch() {
+	b.prefetchers.Add(-1)
+	b.floorWork(-1)
+}
 
 func (b *Budget) waitWork(exit <-chan bool, warming bool, updates int) bool {
 	pending, grants := &b.writers, &b.writeGrants
@@ -43,6 +48,7 @@ func (b *Budget) waitWork(exit <-chan bool, warming bool, updates int) bool {
 		pending, grants = &b.prefetchers, &b.warmGrants
 	}
 	pending.Add(1)
+	b.floorWork(1)
 	for b.Active() {
 		writes, class := updates, writeoutWork
 		if warming {
@@ -57,6 +63,7 @@ func (b *Budget) waitWork(exit <-chan bool, warming bool, updates int) bool {
 		case <-exit:
 			timer.Stop()
 			pending.Add(-1)
+			b.floorWork(-1)
 			return false
 		case <-timer.C:
 		}
@@ -65,7 +72,10 @@ func (b *Budget) waitWork(exit <-chan bool, warming bool, updates int) bool {
 	return true
 }
 
-func (b *Budget) EndWriteout()    { b.writers.Add(-1) }
+func (b *Budget) EndWriteout() {
+	b.writers.Add(-1)
+	b.floorWork(-1)
+}
 func (b *Budget) RecordWrite()    { b.written.Add(1) }
 func (b *Budget) Updates() uint64 { return b.written.Load() }
 

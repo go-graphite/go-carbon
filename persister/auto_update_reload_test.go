@@ -342,7 +342,7 @@ func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
 					if rate < want*.99 || rate > want*1.01 {
 						t.Errorf("%s: actual=%.0f/s want=%.0f/s", stage, rate, want)
 					}
-					if p.maxUpdatesPerSecond == -1 && (reported != target || targetRate != target) {
+					if p.maxUpdatesPerSecond == -1 && (reported != want || targetRate != want) {
 						t.Errorf("%s: reported=%g target=%g want=%d", stage, reported, targetRate, target)
 					}
 				}
@@ -351,7 +351,7 @@ func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
 					check("fixed restart", 3*31150)
 					start(-1)
 				}
-				check("auto restart", target)
+				check("auto restart", 31150)
 				drained.Store(true)
 				check("auto restart ended", target)
 				if budget.Active() || !p.restartStopping {
@@ -368,8 +368,10 @@ func TestAutoUpdateReloadThroughRestartEnd(t *testing.T) {
 // Keep the real cache queue, eligibility phases and warm-first pump across a
 // reload and restart end. Scale the host's population and rates by 1000.
 func TestAutoUpdateCacheReloadThroughRestartEnd(t *testing.T) {
+	t.Parallel()
 	for _, initial := range []int{50, -1} {
 		t.Run(strconv.Itoa(initial), func(t *testing.T) {
+			t.Parallel()
 			synctest.Test(t, func(t *testing.T) {
 				const metrics = 29700
 				const delay = 1800 * time.Second
@@ -510,8 +512,8 @@ func TestAutoUpdateRestartReservationFollowsSampler(t *testing.T) {
 				time.Sleep(autoUpdateInterval)
 				synctest.Wait()
 				check()
-				if rate, _, _ := p.autoUpdateObservation(); rate != 100 {
-					t.Fatal("sample did not raise auto rate to ceiling", rate)
+				if rate, _, _ := p.autoUpdateObservation(); rate != max(100, saved) {
+					t.Fatal("sample did not apply auto rate and mandatory floor", rate)
 				}
 				p.Stop()
 				p.sampleAutoUpdateRate()

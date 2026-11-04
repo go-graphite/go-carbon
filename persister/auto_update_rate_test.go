@@ -146,8 +146,8 @@ func TestAutoUpdateRateModes(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer p.Stop()
-				if rate, _, _ := p.autoUpdateObservation(); rate != 10 {
-					t.Fatalf("restart replaced bounded auto rate: %g", rate)
+				if rate, _, _ := p.autoUpdateObservation(); rate != max(10, predecessor) {
+					t.Fatalf("restart did not apply mandatory floor: %g", rate)
 				}
 				if p.updateTokens() != p.autoUpdate.ticker.Load().C || p.restartTicker.Load() != nil {
 					t.Fatal("restart installed a competing auto admission budget")
@@ -297,6 +297,7 @@ func TestAutoUpdateMetricsReload(t *testing.T) {
 // no modeled queue, age distribution or writeout deadlines replace cache logic.
 // Scaling population and cap together keeps this inexpensive under -race.
 func TestAutoUpdateSimulation(t *testing.T) {
+	t.Parallel()
 	const metrics = 5_000
 	const referenceMetrics = 1_000_000
 	const delay = 960 * time.Second
@@ -470,6 +471,7 @@ func TestAutoUpdateExpiredRestartLimiter(t *testing.T) {
 // The default population scales demand and capacity together for race runs.
 // Set AUTO_CAP_SIM_METRICS=1000000 for the full restart experiment.
 func TestAutoUpdateRestartSimulation(t *testing.T) {
+	t.Parallel()
 	metrics := 5000
 	if v := os.Getenv("AUTO_CAP_SIM_METRICS"); v != "" {
 		var err error
@@ -479,13 +481,20 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 		}
 	}
 	const delay = 960 * time.Second
-	for _, auto := range []bool{false, true} {
-		t.Run(map[bool]string{false: "fixed", true: "auto"}[auto], func(t *testing.T) {
+	type result struct {
+		drain time.Duration
+		cv    float64
+	}
+	results := map[string]result{}
+	for _, mode := range []string{"fixed", "auto", "auto_floor_before", "auto_floor"} {
+		auto := mode != "fixed"
+		floorCase := mode == "auto_floor" || mode == "auto_floor_before"
+		t.Run(mode, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c := cache.New()
 				c.SetMaxSize(0)
 				c.EnableInputLog()
-				c.SetWriteoutRestoreSpread(true)
+				c.SetWriteoutRestoreSpread(!floorCase)
 				c.SetWriteoutSparseSpread(true)
 				c.SetWriteoutPacing(auto)
 				if err := c.SetWriteoutBatching(960, delay); err != nil {
@@ -499,9 +508,12 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 				}
 				var names [60][][]byte
 				start := time.Now()
+				remaining := make(map[string]bool)
+				var drain time.Duration
 				for i := 0; i < metrics; i++ {
 					name := []byte(fmt.Sprintf("restart.metric.%08d", i))
 					names[i%60] = append(names[i%60], name)
+					remaining[string(name)] = true
 					c.AddRestored(points.OnePoint(string(name), 1, start.Unix()))
 				}
 				abort, request, next := make(chan bool), make(chan struct{}, 1), make(chan string, 1)
@@ -523,6 +535,17 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 					}
 				}()
 				controller := autoUpdateController{}
+				p := &Whisper{}
+				p.SetMaxUpdatesPerSecond(-1)
+				ceiling := int(math.Ceil(26500 * float64(metrics) / 11500000))
+				p.SetAutoUpdateRate(c.WriteoutState, 1, ceiling)
+				if mode == "auto_floor" {
+					budget := restartcpu.NewWithCPU(2, func() float64 { return 0 })
+					budget.SetSteadyRate(37900 * float64(metrics) / 11500000)
+					budget.Warmed()
+					p.SetRestartBudget(budget, nil)
+				}
+				defer p.stopAutoUpdateRate()
 				pending := false
 				var bins [120]float64
 				var eligible [120]int64
@@ -538,7 +561,12 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 						c.AddPoint(name, 1, time.Now().Unix())
 					}
 					if auto && second%5 == 0 {
-						rate = controller.step(time.Now(), c.WriteoutState(), 1, int(math.Ceil(23000*float64(metrics)/11500000)))
+						if floorCase {
+							p.sampleAutoUpdateRate()
+							rate = p.autoUpdate.applied
+						} else {
+							rate = controller.step(time.Now(), c.WriteoutState(), 1, int(math.Ceil(23000*float64(metrics)/11500000)))
+						}
 					}
 					if !pending {
 						request <- struct{}{}
@@ -554,6 +582,10 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 							maxAge = max(maxAge, time.Since(time.Unix(point.Timestamp, 0)))
 						}
 						c.Confirm(p)
+						delete(remaining, name)
+						if len(remaining) == 0 && drain == 0 {
+							drain = time.Since(start)
+						}
 						bins[second/60]++
 					}
 					select {
@@ -586,6 +618,8 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 					means[window] = mean / 60
 					cvs[window] = math.Sqrt(max(0, squares/15-mean*mean)) / mean
 				}
+				results[mode] = result{drain: drain, cv: cvs[7]}
+				t.Logf("restored drain=%s", drain)
 				t.Logf("metrics=%d cv_15m=%0.4f mean_updates_per_second=%0.2f max_point_age=%s", metrics, cvs, means, maxAge)
 				trough := 30
 				for i := 31; i < len(bins); i++ {
@@ -611,6 +645,15 @@ func TestAutoUpdateRestartSimulation(t *testing.T) {
 			})
 		})
 	}
+	before, after := results["auto_floor_before"], results["auto_floor"]
+	t.Logf("automatic ceiling below floor: drain %s -> %s; steady cv %.4f -> %.4f", before.drain, after.drain, before.cv, after.cv)
+	if after.drain == 0 || after.drain >= before.drain*85/100 {
+		t.Fatal("restart floor did not shorten drain", before, after)
+	}
+	if math.Abs(before.cv-after.cv) > .02 {
+		t.Fatal("temporary floor changed steady variability", before, after)
+	}
+
 }
 
 func TestAutoUpdateRecoveryLimiter(t *testing.T) {
