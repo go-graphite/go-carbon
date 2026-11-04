@@ -37,8 +37,8 @@ func (p *Whisper) takeBatchToken() bool {
 		return true
 	}
 	select {
-	case <-p.updateTokens():
-		return true
+	case _, open := <-p.updateTokens():
+		return open || p.maxUpdatesPerSecond != -1
 	default:
 		return false
 	}

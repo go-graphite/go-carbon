@@ -45,6 +45,7 @@ func TestAutoUpdateRateReload(t *testing.T) {
 	cfg.Carbonserver.Enabled, cfg.Buckyd.Enabled = false, false
 	cfg.Common.MetricInterval = &Duration{time.Hour}
 	cfg.Cache.WriteoutMinPoints, cfg.Cache.WriteoutMaxDelay = 960, Duration{time.Hour}
+	cfg.Cache.WriteoutSpread = .25
 	cfg.Whisper.MaxUpdatesPerSecond = -1
 	cfg.Whisper.MaxUpdatesPerSecondAutoMin = 7
 	cfg.Whisper.MaxUpdatesPerSecondAutoMax = 13
@@ -77,6 +78,13 @@ func TestAutoUpdateRateReload(t *testing.T) {
 		}
 		if mode == -1 && stats["autoUpdateRate"] != float64(cfg.Whisper.MaxUpdatesPerSecondAutoMin) {
 			t.Fatalf("auto floor did not reload: %v", stats)
+		}
+		wantPeriod := time.Hour
+		if mode != -1 {
+			wantPeriod = time.Hour * 7 / 8
+		}
+		if state := core.WriteoutState(); state.MeanDelay != wantPeriod {
+			t.Fatalf("mode %d retained wrong eligibility schedule: %+v", mode, state)
 		}
 		if got := core.Get("reload.auto.metric"); len(got) != 1 {
 			t.Fatal("reload lost a deferred point")

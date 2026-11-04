@@ -216,7 +216,7 @@ func testWarmFirstReservations(t *testing.T, mode int) {
 		p.SetWarmFirst(true)
 		p.SetWorkers(2)
 		p.SetMaxUpdatesPerSecond(mode)
-		p.SetAutoUpdateRate(steadyUpdateState, 1, 1)
+		p.SetAutoUpdateRate(steadyUpdateState, 1, 10)
 		p.SetRestartBudget(budget, nil)
 		p.SetMockStore(func() (StoreFunc, func()) {
 			return func(name string) {

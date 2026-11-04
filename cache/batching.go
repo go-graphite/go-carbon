@@ -64,6 +64,11 @@ func (c *Cache) SetWriteoutStartupSpread(on bool) {
 // The mixed sparse share is independent of the ordinary period's spread;
 // using that spread for both phase and period makes the waves converge again.
 func (c *Cache) spreadStartup(values *item, s *cacheSettings, now time.Time, held bool) {
+	if !s.writeoutPhase.IsZero() {
+		// Retain real arrival age; the stable phase supplies the first window too.
+		values.setFlag(itemStartup, held)
+		return
+	}
 	if clock := s.startupWriteout; clock != nil {
 		if held {
 			// Held work starts draining at release over the full window,
@@ -117,6 +122,9 @@ func (c *Cache) SetWriteoutRestoreSpread(on bool) {
 // writeout deadline in [now, now+writeoutMaxDelay), placed by the metric's
 // spread fraction.
 func (s *cacheSettings) restoreArrival(values *item, now time.Time) time.Time {
+	if !s.writeoutPhase.IsZero() {
+		return now
+	}
 	at := time.Duration(float64(s.writeoutMaxDelay) * float64(values.spread) / (1 << 16))
 	return now.Add(at - s.delayFor(values))
 }
@@ -309,9 +317,47 @@ func (s *cacheSettings) underPressure(size int64) bool {
 	return s.maxSize > 0 && size > s.maxSize/4*3+s.maxSize%4*3/4
 }
 
+// SetWriteoutPacing enables stable eligibility phases for automatic pacing.
+// Fixed-rate callers retain the existing relative deadlines and spread. Each
+// metric's phase uses an independently mixed hash and repeats every max delay,
+// so an early write cannot move its following deadline into a new write wave.
+func (c *Cache) SetWriteoutPacing(on bool) {
+	s := *c.settings.Load().(*cacheSettings)
+	if on == !s.writeoutPhase.IsZero() {
+		return
+	}
+	if on {
+		s.writeoutPhase = time.Now()
+	} else {
+		s.writeoutPhase = time.Time{}
+	}
+	c.settings.Store(&s)
+	c.writeoutQueue.notifyAt(time.Now())
+}
+
+func (s *cacheSettings) phaseDeadline(values *item) time.Time {
+	period := s.writeoutMaxDelay
+	elapsed := values.firstArrival.Sub(s.writeoutPhase) % period
+	if elapsed < 0 {
+		elapsed += period
+	}
+	phase := time.Duration(float64(period) * float64(values.sparseShare()) / (1 << 16))
+	left := phase - elapsed
+	if left <= 0 {
+		left += period
+	}
+	return s.writeoutWall(values.firstArrival.Add(left))
+}
+
 // Called with the shard locked. Zero means immediately eligible.
 func writeoutDeadline(values *item, s *cacheSettings) time.Time {
 	first := values.firstArrival
+	if s.batching() && !s.writeoutPhase.IsZero() && !first.IsZero() {
+		if !values.has(itemStartup) && values.count() >= s.minPointsFor(values) {
+			return time.Time{}
+		}
+		return s.phaseDeadline(values)
+	}
 	if values.has(itemStartup) && (s.writeoutStartupSpread || s.startupWriteout != nil) && !first.IsZero() {
 		return s.writeoutWall(first.Add(s.delayFor(values)))
 	}

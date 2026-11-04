@@ -6,6 +6,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/restartcpu"
 )
 
@@ -51,7 +52,11 @@ func TestRestartCatchupDrainsWithinAvailableCPUHeadroom(t *testing.T) {
 				p.SetWorkers(4)
 				if tc.auto {
 					p.SetMaxUpdatesPerSecond(-1)
-					p.SetAutoUpdateRate(steadyUpdateState, 1, 10)
+					p.SetAutoUpdateRate(func() cache.WriteoutState {
+						pending := int64(offered.Load() - budget.Updates())
+						return cache.WriteoutState{Metrics: pending + 500, Eligible: pending,
+							MaxDelay: 5 * time.Second, MeanDelay: 5 * time.Second, Recovering: true}
+					}, 100, 1000)
 				}
 				p.SetRestartBudget(budget, func() float64 { return 100 })
 				p.SetMockStore(func() (StoreFunc, func()) {

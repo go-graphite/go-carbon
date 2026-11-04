@@ -79,31 +79,36 @@ boundary files, and measure compaction write bytes per copied byte.
 - **`max-updates-per-second-auto-min`** (default `1`) and
   **`max-updates-per-second-auto-max`** (default `0`, unlimited) bound auto
   pacing in updates/s. Both are **R**. The floor must be positive, and a
-  positive ceiling must be at least the floor. Normal pressure and age guards
-  respect the ceiling. During restart drain, existing restoration bypasses,
-  predecessor-rate catch-up and CPU admission take precedence over auto pacing.
-  Positive fixed rates retain their existing restart and pressure behavior.
-- **Auto controller.** Every five seconds it samples existing cache arrivals,
-  eligible metric count, point count, and capacity. Its steady target is cached
-  metrics divided by the mean spread delay plus half the catch-up slack, with
-  3% headroom. Slack is `max(30s, min(240s, max-delay / 4))`. Reserving part of
-  that window for queued work keeps the writer busy between eligibility waves.
-  The demand estimate and effective rate follow increases immediately and
-  decreases with a one-minute time constant. Additional guards raise the
-  target when point count exceeds 120% of recent peaks, point capacity reaches
-  70%, byte capacity is under pressure, or the eligible queue cannot drain
-  before the oldest arrival reaches max-delay plus slack. Arrival age also
-  uses `input_log_oldest_unpersisted_age_seconds` when the log is enabled.
+  positive ceiling must be at least the floor. Pressure, age and recovery
+  guards respect the ceiling. Auto uses one token budget through restart,
+  recovery and shared commits; each metric in a commit spends one token.
+  Restart CPU admission still applies. Positive fixed rates retain their
+  existing restart and pressure behavior.
+- **Auto eligibility.** Metrics have stable, independently hashed phases
+  repeated every `writeout-max-delay`. Restored durable points use the same
+  phases; early writes do not shift subsequent phases. This replaces relative
+  delay spread in auto mode, while the spread point threshold still applies.
+  Sparse points also use these phases. Held startup windows begin at release.
+- **Auto controller.** Every five seconds it samples cache arrivals, eligible
+  metric count, point count and capacity. Its steady target is cached metrics
+  divided by max delay, with 3% headroom. Demand and effective rate follow
+  increases immediately and decreases with a one-minute time constant.
+  Additional guards raise the target when point count exceeds 120% of recent
+  peaks, point capacity reaches 70%, byte capacity is under pressure, or the
+  eligible queue cannot drain before the oldest arrival reaches max delay
+  plus slack. Slack is `max(30s, min(240s, max-delay / 4))`. Urgent restoration
+  targets the ordinary delay instead of bypassing the limiter. Age also uses
+  `input_log_oldest_unpersisted_age_seconds` when the log is enabled.
   The age bound needs sufficient worker/storage capacity and a sufficient
   ceiling; storage stalls and an undersized ceiling can violate it.
-- **Auto observations.** `persister_auto_update_rate` is the effective limit
-  (zero means unrestricted restart drain), `persister_auto_update_rate_target`
+- **Auto observations.** `persister_auto_update_rate` is the effective token
+  limit, including restart and recovery. `persister_auto_update_rate_target`
   is the bounded target before downward smoothing, and
-  `persister_auto_update_rate_reason{reason}` identifies the last adjustment
-  or active restart override. `persister_auto_update_rate_adjustments_total`
-  counts adjustments by reason across reloads. Changes of at least 25% produce
-  an INFO log. Graphite stats expose `autoUpdateRate`, `autoUpdateRateTarget`
-  and `autoUpdateRateReason.*`. These observations exist only in auto mode.
+  `persister_auto_update_rate_reason{reason}` identifies the current target's
+  reason. `persister_auto_update_rate_adjustments_total` counts rate changes
+  by reason across reloads. Changes of at least 25% produce an INFO log.
+  Graphite stats expose `autoUpdateRate`, `autoUpdateRateTarget` and
+  `autoUpdateRateReason.*`. These observations exist only in auto mode.
 - **Cache size.** The cache is not a backlog; its steady size is set by
   persister throughput: `cache ≈ receive rate × active metrics ÷ updates per
   second`. A slower persister means a bigger cache, not lost points, until

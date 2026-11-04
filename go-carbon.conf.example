@@ -261,8 +261,9 @@ store-range-reads = false
 # Point ownership stays in the cache until ordinary pop/confirmation. Normal
 # write strategy returns when the startup allowance ends.
 # Restart catch-up uses the remaining whole-process CPU allowance, including
-# after warming completes. Its rate ceiling is three times the greater of saved
-# steady throughput and the queue's required floor. While restart pacing is
+# after warming completes. Auto mode (max-updates-per-second = -1) keeps its
+# sampled token limit. With a fixed cap, the rate ceiling is three times the
+# greater of saved steady throughput and the queue's required floor. While restart pacing is
 # active, this replaces max-updates-per-second so a lower normal cap or saved
 # rate cannot prevent recovery. Without saved throughput, a finite configured
 # cap is raised to at least three times the queue floor; zero stays unlimited.
@@ -537,12 +538,12 @@ workers = 8
 # Limits store updates per second. 0 = unlimited; positive = fixed rate.
 # -1 = automatic pacing from cache population, batching deadlines and pressure.
 # Auto requires cache writeout batching. All three rate settings are reloadable.
-# Restart drain retains its existing CPU/catch-up allowance in auto mode.
+# Auto retains its token limit during restart and recovery; CPU admission also applies.
 max-updates-per-second = 0
 # Auto floor in updates/s (positive).
 max-updates-per-second-auto-min = 1
 # Auto ceiling in updates/s. 0 = unlimited. A low ceiling can exceed the maximum
-# delay; monitor oldest unpersisted age and cache growth. Restart drain may exceed it.
+# delay; monitor oldest unpersisted age and cache growth.
 max-updates-per-second-auto-max = 0
 # Sparse file creation
 sparse-create = false

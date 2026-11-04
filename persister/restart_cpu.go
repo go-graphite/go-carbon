@@ -17,15 +17,16 @@ func (p *Whisper) recordUpdate() {
 }
 
 func (p *Whisper) updateTokens() <-chan bool {
+	// Auto has one admission budget, including during restart. An installed
+	// restart ticker can outlive the CPU budget while its observer waits for
+	// startup signals, so it must never shadow the automatic limit.
+	if p.maxUpdatesPerSecond == -1 {
+		if ticker := p.autoUpdate.ticker.Load(); ticker != nil {
+			return ticker.C
+		}
+		return nil
+	}
 	if ticker := p.restartTicker.Load(); ticker != nil {
-		return ticker.C
-	}
-	// With no predecessor rate, restart CPU admission grants the full remaining
-	// allowance. Auto must not insert a second, lower limit in that path.
-	if p.maxUpdatesPerSecond == -1 && p.restartPaced() {
-		return p.updateTicker.C
-	}
-	if ticker := p.autoUpdate.ticker.Load(); ticker != nil {
 		return ticker.C
 	}
 	return p.updateTicker.C
@@ -36,6 +37,9 @@ func (p *Whisper) updateTokens() <-chan bool {
 // ordinary CPU headroom idle. The normal rate cap cannot constrain recovery
 // below the predecessor's throughput; process CPU admission remains in force.
 func (p *Whisper) setRestartRate() {
+	if p.maxUpdatesPerSecond == -1 {
+		return
+	}
 	rateLimit := float64(p.maxUpdatesPerSecond)
 	floor := 0.
 	if p.restartFloor != nil {
