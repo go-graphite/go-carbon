@@ -186,7 +186,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_continuation_invalid_points_total", "Input points dropped because their timestamps do not fit a 32-bit Whisper timestamp, such as milliseconds sent as seconds.", func(s *migrationSnapshot) float64 { return float64(s.stats.invalidPoints) }),
 		counter("store_relayout_metrics_total", "Metrics whose pre-v7 blocks the relayout moved to the history bucket.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Metrics) }),
 		counter("store_relayout_blocks_total", "Pre-v7 blocks the relayout moved.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Blocks) }),
-		counter("store_relayout_skipped_total", "Metrics the relayout skipped because they changed while it planned them.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Skipped) }),
+		counter("store_relayout_skipped_total", "Changed blocks and failed metrics deferred to a later relayout pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Skipped) }),
 		counter("store_relayout_bytes_total", "Bytes the relayout copied into the history bucket.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Bytes) }),
 		gauge("store_relayout_reclaim_bytes", "Configured bytes per relayout reclaim batch; filesystem headroom can lower the effective limit.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.ReclaimBytes) }),
 		gauge("store_relayout_unreclaimed_bytes", "Copied bytes whose durable relayout reclamation obligations remain pending.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.UnreclaimedBytes) }),
@@ -199,7 +199,8 @@ var migrationMetricSpecs = func() []metricSpec {
 		gauge("store_purge_invalid_names_found", "Catalog records under names too long for the store that the purge's scan found (store-purge-invalid-names).", func(s *migrationSnapshot) float64 { return float64(s.stats.purgeFound) }),
 		counter("store_purge_invalid_names_removed_total", "Catalog records under names too long for the store that the purge removed.", func(s *migrationSnapshot) float64 { return float64(s.stats.purgeRemoved) }),
 		gauge("store_purge_invalid_names_running", "1 while the purge of names too long for the store runs, including its final flush and compaction.", func(s *migrationSnapshot) float64 { return b(s.stats.purgeRunning) }),
-		gauge("store_relayout_failed", "1 when the background relayout stopped with an error.", func(s *migrationSnapshot) float64 { return b(s.stats.relayout.Error != "") }),
+		counter("store_relayout_errors_total", "Relayout metric failures; skipped until the next pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.relayout.Errors) }),
+		gauge("store_relayout_failed", "Latched after any relayout failure in this process; later metrics and passes continue.", func(s *migrationSnapshot) float64 { return b(s.stats.relayout.Error != "") }),
 	}
 	for _, backend := range []struct {
 		name string
@@ -224,14 +225,14 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_cold_pack_read_bytes_total", "Snapshot bytes read by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ReadBytes) }),
 		counter("store_cold_pack_write_bytes_total", "WAL batch bytes published by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WriteBytes) }),
 		counter("store_cold_pack_errors_total", "Cold maintenance errors; inspect server logs.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Errors) }),
-		counter("store_cold_pack_skipped_total", "Oversized ranges skipped by bounded maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Skipped) }),
+		counter("store_cold_pack_skipped_total", "Oversized ranges and failed metrics skipped until the next pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Skipped) }),
 		counter("store_cold_pack_conflicts_total", "Publication conflicts retried on later sweeps.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Conflicts) }),
 		counter("store_cold_pack_pages_total", "Bounded catalog pages examined.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Pages) }),
 		counter("store_cold_pack_passes_total", "Completed catalog sweeps.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Passes) }),
 		counter("store_cold_pack_pressure_pauses_total", "Steps paused for storage pressure.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.PressurePauses) }),
 		counter("store_cold_pack_worker_seconds_total", "Conservative worker time charged to the CPU budget.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WorkerNanos) / 1e9 }),
 		gauge("store_cold_pack_max_lock_seconds", "Maximum stripe publication lock duration in this process.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.MaxLockNanos) / 1e9 }),
-		gauge("store_cold_pack_failed", "Latched background failure; inspect logs.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Error != "") }),
+		gauge("store_cold_pack_failed", "Latched after any cold-pack failure in this process; later metrics and passes continue.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Error != "") }),
 		gauge("store_cold_pack_pending_metrics", "Discovered catalog entries queued in the current bounded page; not a full-store backlog estimate.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.PendingMetrics) }),
 		gauge("store_cold_pack_active", "Worker currently executing a bounded step.", func(s *migrationSnapshot) float64 { return b(s.stats.coldPack.Active) }),
 

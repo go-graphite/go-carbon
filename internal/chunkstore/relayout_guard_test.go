@@ -1,11 +1,9 @@
 package chunkstore
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,16 +11,13 @@ import (
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/lomik/zapwriter"
 )
 
 func TestRelayoutGuardSharedPauseResume(t *testing.T) {
-	var logs bytes.Buffer
-	previous := log.Writer()
-	log.SetOutput(&logs)
-	defer log.SetOutput(previous)
 	for _, reason := range []string{"low_free_space", "compaction_debt", "disk_usage_error"} {
-		logs.Reset()
 		t.Run(reason, func(t *testing.T) {
+			defer zapwriter.Test()()
 			synctest.Test(t, func(t *testing.T) {
 				s := &Store{}
 				if err := s.SetRelayoutLimits(100, 200); err != nil {
@@ -58,7 +53,7 @@ func TestRelayoutGuardSharedPauseResume(t *testing.T) {
 				if s.RelayoutStats().Pauses[reason] != 1 {
 					t.Fatal("polls counted as new pauses")
 				}
-				if n := strings.Count(logs.String(), "[WARN] relayout paused:"); n != 1 {
+				if n := strings.Count(zapwriter.TestString(), "relayout paused"); n != 1 {
 					t.Fatalf("WARN count during shared pause: %d", n)
 				}
 				healthy.Store(true)

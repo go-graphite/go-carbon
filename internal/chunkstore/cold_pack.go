@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,8 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 // ColdPackOptions controls one low-priority worker. Mode is off, exact, decimal,
@@ -153,7 +154,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.passFailed = false
 	}
 	if o.Mode != "off" || c.options.Mode != "" && c.options.Mode != "off" {
-		log.Printf("cold pack configured: mode=%s bytes_per_second=%d cpu_fraction=%g write_window=%s max_compaction_debt=%d", o.Mode, o.BytesPerSecond, o.CPUFraction, o.WriteWindow, o.MaxCompactionDebt)
+		zapwriter.Logger("storage").Info("cold pack configured", zap.String("mode", o.Mode), zap.Int64("bytes_per_second", o.BytesPerSecond), zap.Float64("cpu_fraction", o.CPUFraction), zap.Duration("write_window", o.WriteWindow), zap.Uint64("max_compaction_debt", o.MaxCompactionDebt))
 	}
 	c.cleanUnpack = false
 	c.options = o
@@ -201,7 +202,9 @@ func (s *Store) coldPackPage(ctx context.Context, after string) ([]string, error
 
 // ColdPackStep advances a bounded amount of work. Cursor state is intentionally
 // in memory: after a crash the idempotent sweep restarts, while every published
-// range is independently atomic and readable. Only one caller may advance it.
+// range is independently atomic and readable. Metric errors are logged and
+// skipped until the next pass; cancellation and step-wide failures are returned.
+// Only one caller may advance it.
 func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error) {
 	c := &s.coldPack
 	c.run.Lock()
@@ -281,13 +284,30 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, cursor, ColdPackRequest{Cursor: block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode})
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Failed plans still consume IO budget, but never publish their mutations.
+	c.stats.ReadBytes += read
+	c.stats.WriteBytes += written
 	if err != nil {
-		// A newly selected name has not yet been published as the cursor. Keep
-		// it queued across errors/cancellation rather than silently skipping it.
-		if block == 0 {
-			c.pending = append([]string{cursor}, c.pending...)
+		if ctx.Err() != nil {
+			err = ctx.Err()
 		}
-		return false, err
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			// Preserve an unfinished first range in the queue; later ranges
+			// already retain their name and block cursor.
+			if block == 0 {
+				c.pending = append([]string{cursor}, c.pending...)
+			}
+			return false, err
+		}
+		c.stats.Errors++
+		c.stats.Skipped++
+		c.stats.Error = fmt.Sprintf("metric %q block %d: %v", cursor, block, err)
+		c.passFailed = true
+		zapwriter.Logger("storage").Error("cold pack metric failed", zap.String("metric", cursor), zap.Uint64("block_cursor", block), zap.Error(err))
+		// Retire the entire metric, including a saved descriptor cursor, so
+		// later names finish this pass. The next sweep retries from zero.
+		c.stats.Cursor, c.stats.BlockCursor = cursor, 0
+		return false, nil
 	}
 	c.stats.Metrics += stats.Metrics
 	c.stats.Blocks += stats.Blocks
@@ -298,8 +318,6 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	if stats.Skipped > 0 || conflict {
 		c.passFailed = true
 	}
-	c.stats.ReadBytes += read
-	c.stats.WriteBytes += written
 	c.stats.LockNanos += uint64(lockTime)
 	c.stats.MaxLockNanos = max(c.stats.MaxLockNanos, uint64(lockTime))
 	if conflict {
@@ -308,8 +326,6 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	c.stats.Cursor, c.stats.BlockCursor = cursor, next
 	if done {
 		c.stats.BlockCursor = 0
-	} else if next == 0 {
-		return false, errors.New("cold pack codec did not advance")
 	}
 	return false, nil
 }
@@ -430,6 +446,11 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 		return
 	}
 	if err = s.checkFileOwnership(meta); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// Raw catalog scans include unpublished migration candidates.
+			// Leave their state for ownership publication or discard.
+			err, done = nil, true
+		}
 		return
 	}
 	batch := s.db.NewBatch()
@@ -444,6 +465,9 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 		err = nil
 		done = true
 		return
+	}
+	if err == nil && !done && next <= request.Cursor {
+		err = errors.New("cold pack codec did not advance")
 	}
 	if err != nil || stats.Blocks == 0 {
 		return
@@ -535,10 +559,10 @@ func (s *Store) startColdPack() {
 			after := s.ColdPackStats()
 			delay = s.coldPackDelay(&pacer, before, started)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("ERROR cold pack failed: %v", err)
+				zapwriter.Logger("storage").Error("cold pack failed", zap.String("metric", after.Cursor), zap.Uint64("block_cursor", after.BlockCursor), zap.Error(err))
 			}
 			if done && o.Mode != "off" {
-				log.Printf("cold pack pass complete: mode=%s blocks=%d saved_bytes=%d skipped=%d conflicts=%d", o.Mode, after.Blocks, int64(after.InputBytes)-int64(after.OutputBytes), after.Skipped, after.Conflicts)
+				zapwriter.Logger("storage").Info("cold pack pass complete", zap.String("mode", o.Mode), zap.Uint64("blocks", after.Blocks), zap.Int64("saved_bytes", int64(after.InputBytes)-int64(after.OutputBytes)), zap.Uint64("skipped", after.Skipped), zap.Uint64("conflicts", after.Conflicts))
 			}
 			if done || err != nil {
 				delay = max(delay, o.Interval)
@@ -563,6 +587,7 @@ func (s *Store) stopColdPack() {
 // RunColdPack completes one paced sweep. Offline tools use the same step and
 // pacing policy as the background worker; callers must stop that worker first.
 func (s *Store) RunColdPack(ctx context.Context) error {
+	errorsBefore := s.ColdPackStats().Errors
 	var pacer coldPackPacer
 	timer := time.NewTimer(0)
 	timer.Stop()
@@ -572,6 +597,11 @@ func (s *Store) RunColdPack(ctx context.Context) error {
 		started := time.Now()
 		done, err := s.ColdPackStep(ctx)
 		if err != nil || done {
+			if err == nil {
+				if stats := s.ColdPackStats(); stats.Errors > errorsBefore {
+					err = fmt.Errorf("cold pack pass failed: %s", stats.Error)
+				}
+			}
 			return err
 		}
 		delay := s.coldPackDelay(&pacer, before, started)

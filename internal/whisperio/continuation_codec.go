@@ -867,7 +867,7 @@ func (c *ContinuationCodec) RelayoutPlan(ctx context.Context, kv store.Continuat
 		} else if v, err := kv.Get(key); err == nil {
 			value = v
 		} else {
-			return store.RelayoutPlan{}, err
+			return store.RelayoutPlan{}, fmt.Errorf("relayout file %d archive %d block %d group %d: %w", id.file, id.archive, id.index, (b.desc.count-1)/128, err)
 		}
 		var group store.PointBlock
 		if err := store.DecodePointBlock(value, &group); err != nil {

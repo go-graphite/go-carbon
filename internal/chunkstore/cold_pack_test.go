@@ -119,7 +119,7 @@ func TestColdPackBudgetsAndFailures(t *testing.T) {
 				if err != nil || st.Skipped != 1 || st.Blocks != 0 || st.WriteBytes != 0 {
 					t.Fatalf("budget %+v %v", st, err)
 				}
-			} else if err == nil || st.Errors != 1 || st.Error == "" {
+			} else if err != nil || st.Errors != 1 || st.Skipped != 1 || st.Error == "" {
 				t.Fatalf("silent failure %+v %v", st, err)
 			}
 		})
