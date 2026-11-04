@@ -36,19 +36,25 @@ headroom above mandatory CPU consumption. Zero never means unlimited CPU.
 Optional catalog warming and validation yield to waiting writers, required
 cold-state prefetch, and any observed writeout-floor shortfall, even when CPU
 credit remains. Bulk checkpoint loading and validation needed by upcoming cold
-writes run alongside catch-up writeout. The serial checkpoint
-stream gets at most one core of duty time (or allowance / 8 on smaller processes).
-When process CPU leaves less room than that share and writeout is below 95%
-of its floor, the stream share reduces fourfold; spare CPU keeps the full
+writes run alongside catch-up writeout. The checkpoint worker
+pool gets at most half the allowance, capped by
+GOMAXPROCS and an explicit `store-metadata-cache-prewarm-workers` setting.
+Zero workers selects concurrency from the allowance. Each worker owns a duty
+pacer, so fractional allowances still work with one worker and overlapping
+loads share the same aggregate allowance. When process CPU leaves less room
+than that share and writeout is below 95%
+of its floor, the pool share reduces fourfold; spare CPU keeps the full
 share. The exact floor still controls warnings. One 5 ms sampling slice of the checkpoint share
 is reserved so writers cannot repeatedly consume every refill before the next
-checkpoint batch. The serial stream retains its duty-paced share even under
+checkpoint batch. Bulk checkpoint workers retain their duty-paced share even under
 whole-process CPU debt, so unrelated maintenance or receivers cannot starve it.
 Legacy checkpoint validation gets a separate required window per 100ms under
 CPU debt, including without a writeout floor. Optional catalog warming and queue
 preparation retain their existing admission paths. This bounded mandatory work
 can exceed the process allowance alongside mandatory intake and reads. Batch wall
-time is a conservative CPU estimate, including I/O and lock waits. Tiny duty
+time is a conservative CPU estimate, including dependent reads and lock waits.
+Workers close the active window before waiting for another I/O buffer, so time
+blocked on the reader/writer queue is not charged as CPU. Tiny duty
 delays accumulate into 5 ms windows so timer rounding cannot multiply the load
 time. Already
 admitted bounded batches can briefly overlap writes; admission does not preempt
@@ -157,3 +163,22 @@ the initial point count before recording history. Restart admission retains
 its separate drain policy: it continues for at least 30 minutes and until
 warming and the startup backlog finish. History is saved each eligible minute
 and at shutdown; shutdown joins the sampler before a successor can use its file.
+
+Checkpoint load and preparation retain the v1/v2 file framing. A sequential
+reader cuts the stream into roughly 4 MiB sections at record boundaries and
+hands bounded buffers to parallel workers. Clean-fenced records copy directly
+into cache arenas without allocating a name per entry. Legacy v1 records still
+use revision validation before promotion. Cache fills never evict live state.
+Preparation copies independent cache shards in bounded windows and computes
+checksums in workers; one writer appends large sequential buffers. It uses a
+fresh CPU meter with the same allowance after writers stop. The clean stamp,
+sequence check, file sync, rename and directory sync remain the publication
+boundary. A predecessor/rollback can read the resulting file directly.
+
+The checkpoint contains continuation state as well as fixed metadata: names,
+retentions, manifests, headers and any cached tail state. Large entries reflect
+that payload. `store-metadata-cache-pack` controls the existing per-state Snappy
+packing (default false in the application). It preserves the same checkpoint
+format, but only helps compressible state; the fixed frame adds just eight bytes
+per entry. Changing packing or retention of cached state is independent of the
+parallel checkpoint pipeline.

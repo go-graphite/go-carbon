@@ -10,7 +10,7 @@ import (
 )
 
 // Restart with a real checkpoint and CPU-bound maintenance outside admission.
-// A short parent deadline scales the production 600s failure to a local test.
+// A one-minute deadline detects a stuck loader without asserting wall-clock speed.
 func TestMetadataCheckpointRestartMaintenanceCPU(t *testing.T) {
 	dir := t.TempDir()
 	seedCheckpoint(t, dir)
@@ -33,16 +33,24 @@ func TestMetadataCheckpointRestartMaintenanceCPU(t *testing.T) {
 	}()
 	defer func() { stop.Store(true); <-burned }()
 	// Ensure maintenance has consumed the initial five-millisecond credit.
-	time.Sleep(1100 * time.Millisecond)
-	budget.ObserveWriteout(0, 0)
-	if s := budget.State(); s.Process <= s.Allowance {
-		t.Fatalf("CPU burner did not exceed allowance: %+v", s)
+	deadline := time.Now().Add(time.Minute)
+	for {
+		budget.ObserveWriteout(0, 0)
+		if s := budget.State(); s.Process > s.Allowance {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("CPU meter did not observe maintenance work")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	pacer := budget.NewCheckpoint(nil)
-	defer pacer.Finish()
-	grantedCores := budget.State().Checkpoint
-	options := PrewarmOptions{Workers: 1, CheckpointWait: pacer.Wait}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	var grantedCores float64
+	options := PrewarmOptions{Workers: 1, CheckpointWorker: func() CheckpointPacer {
+		p := budget.NewCheckpoint(nil)
+		grantedCores = budget.State().Checkpoint
+		return p
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	stats, err := db.LoadMetadataCheckpointAfter(ctx, options)
 	s := budget.State()

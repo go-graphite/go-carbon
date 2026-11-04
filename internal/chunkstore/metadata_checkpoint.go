@@ -15,7 +15,6 @@ import (
 
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
-	"golang.org/x/sync/errgroup"
 )
 
 const checkpointFile = "metadata-cache-v1"
@@ -131,7 +130,7 @@ func (s *Store) LoadMetadataCheckpoint(ctx context.Context, wait func(context.Co
 
 // LoadMetadataCheckpointAfter waits for readiness while registered for shutdown.
 func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options PrewarmOptions) (stats MetadataCheckpointStats, err error) {
-	ready, wait, progress := options.StartAfter, options.Wait, options.Progress
+	ready, progress := options.StartAfter, options.Progress
 	started := time.Now()
 	defer func() {
 		stats.Duration = time.Since(started)
@@ -170,7 +169,7 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 		return stats, err
 	}
 	defer f.Close()
-	reader := bufio.NewReaderSize(f, 256<<10)
+	reader := bufio.NewReaderSize(f, 64<<10)
 	var header [52]byte
 	if _, err = io.ReadFull(reader, header[:]); err != nil {
 		return stats, err
@@ -180,186 +179,16 @@ func (s *Store) LoadMetadataCheckpointAfter(ctx context.Context, options Prewarm
 	if !bytes.Equal(header[:], s.checkpoint.openHeader[:]) {
 		return stats, errors.New("metadata checkpoint fence changed since open")
 	}
-	var frame [8]byte
-	var records, readBytes uint64
-	var pacedBytes int64
-	pace := prewarmPacer{rate: options.Rate, byteRate: options.ByteRate}
-	readBytes = uint64(len(header))
 	stats.ReadBytes = int64(len(header))
 	if progress != nil {
 		if info, err := f.Stat(); err == nil {
-			progress.work.Store(readBytes)
+			progress.work.Store(uint64(len(header)))
 			progress.total.Store(uint64(info.Size()))
 		}
 	}
-	// Bound both queued validation records and concurrent read views. Reuse a
-	// view/iterator across a larger ID-sorted batch, then close it before pacing.
-	workers := options.Workers
-	if workers == 0 {
-		workers = DefaultPrewarmWorkers()
-	}
-	workers = max(1, min(workers, 256))
-	if s.checkpoint.fenced || s.checkpoint.lazy {
-		workers = 0
-	}
-	batch := options.Batch
-	if batch <= 0 {
-		batch = 1024
-	}
-	batch = min(batch, 4096)
-	group, validationCtx := errgroup.WithContext(ctx)
-	ctx = validationCtx
-	windows := make(chan []checkpointItem, workers)
-	results := make([]MetadataCheckpointStats, workers)
-	for i := range workers {
-		group.Go(func() error {
-			for items := range windows {
-				if wait != nil {
-					if err := wait(ctx); err != nil {
-						return err
-					}
-				}
-				before := results[i].ReadBytes
-				if err := s.validateCheckpointWindow(ctx, items, &results[i]); err != nil {
-					return err
-				}
-				if !pace.waitBytes(ctx, 0, int(results[i].ReadBytes-before)) {
-					return ctx.Err()
-				}
-			}
-			return nil
-		})
-	}
-	defer func() {
-		close(windows)
-		if validationErr := group.Wait(); validationErr != nil {
-			stats.Valid = false
-			if err == nil || errors.Is(err, context.Canceled) {
-				err = validationErr
-			}
-		}
-		for _, result := range results {
-			stats.Validated += result.Validated
-			stats.ReadBytes += result.ReadBytes
-		}
-	}()
-	submit := func(items []checkpointItem) error {
-		if len(items) == 0 {
-			return nil
-		}
-		select {
-		case windows <- items:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	var record []byte
-	streamWait := options.CheckpointWait
-	if streamWait == nil {
-		streamWait = wait
-	}
-	window := make([]checkpointItem, 0, batch)
-	for {
-		if err = ctx.Err(); err != nil {
-			return stats, err
-		}
-		if records%DefaultPrewarmBatch == 0 {
-			if records > 0 {
-				if !pace.waitBytes(ctx, DefaultPrewarmBatch, int(stats.ReadBytes-pacedBytes)) {
-					return stats, ctx.Err()
-				}
-				pacedBytes = stats.ReadBytes
-			}
-			if streamWait != nil {
-				if err = streamWait(ctx); err != nil {
-					return stats, err
-				}
-			}
-		}
-		if _, err = io.ReadFull(reader, frame[:]); err != nil {
-			return stats, err
-		}
-		n := binary.LittleEndian.Uint32(frame[:4])
-		readBytes += uint64(len(frame))
-		stats.ReadBytes += int64(len(frame))
-		if n == 0 {
-			if progress != nil {
-				progress.work.Store(readBytes)
-			}
-			if err := submit(window); err != nil {
-				return stats, err
-			}
-			if !pace.waitBytes(ctx, int(records%DefaultPrewarmBatch), int(stats.ReadBytes-pacedBytes)) {
-				return stats, ctx.Err()
-			}
-			stats.Valid = true
-			return stats, nil
-		}
-		if n > maxCheckpointRecordSize {
-			return stats, errors.New("metadata checkpoint record too large")
-		}
-		if cap(record) < int(n) {
-			record = make([]byte, n)
-		}
-		record = record[:n]
-		if _, err = io.ReadFull(reader, record); err != nil {
-			return stats, err
-		}
-		records++
-		readBytes += uint64(n)
-		stats.ReadBytes += int64(n)
-		if progress != nil && records%DefaultPrewarmBatch == 0 {
-			progress.work.Store(readBytes)
-		}
-		if crc32.ChecksumIEEE(record) != binary.LittleEndian.Uint32(frame[4:]) {
-			return stats, errors.New("metadata checkpoint checksum mismatch")
-		}
-		keyLen, w := binary.Uvarint(record)
-		if w <= 0 || keyLen == 0 || keyLen > uint64(len(record)-w) || uint64(len(record)-w)-keyLen < stateRecordFixed+1 {
-			return stats, errors.New("invalid metadata checkpoint record")
-		}
-		// Alias records need their original catalog lookup; never promote one
-		// using only the cached key's binding from the clean fence.
-		if record[w+int(keyLen)+41]&stateRecordOwnName != 0 {
-			continue
-		}
-		name := string(record[w : w+int(keyLen)])
-		c := s.stateCache
-		sh := &c.shards[s.metricStripe(name)]
-		hash := c.hash(name)
-		sh.mu.Lock()
-		_, slot := sh.find(hash, name)
-		changed := c.checkpointChanges != nil && c.checkpointChanges.mayContain(name)
-		if !changed && slot < 0 && sh.entries[name] == nil && sh.bytes+int64(n)+int64(stateSlotOverhead) <= c.shardBudget {
-			slot = c.newSlot(sh)
-			chunk, off, dst := c.reserve(&sh.arena, int(n))
-			copy(dst[:n], record)
-			epoch := sh.epoch.Load()
-			if !s.checkpoint.fenced {
-				epoch |= provisionalState
-			}
-			sh.slots[slot] = stateSlot{hash: uint32(hash), epoch: epoch, chunk: chunk, off: off, n: n}
-			c.index(sh, slot)
-			sh.pushFront(slot)
-			c.account(sh, int64(n)+int64(stateSlotOverhead))
-			c.entries.Add(1)
-			stats.Entries++
-			stats.Bytes += int64(n)
-			if s.checkpoint.fenced {
-				stats.Fenced++
-			} else if !s.checkpoint.lazy {
-				window = append(window, checkpointItem{meta: checkpointRecordMetadata(record, name), recordEpoch: sh.slots[slot].epoch})
-			}
-		}
-		sh.mu.Unlock()
-		if len(window) == batch {
-			if err := submit(window); err != nil {
-				return stats, err
-			}
-			window = make([]checkpointItem, 0, batch)
-		}
-	}
+	err = s.loadCheckpointRecords(ctx, reader, options, &stats)
+	stats.Valid = err == nil
+	return stats, err
 }
 
 // ValidateMetadataCheckpoint validates the offered names next, in bounded
@@ -555,15 +384,21 @@ func (s *Store) validateCheckpointWindow(ctx context.Context, items []checkpoint
 // PrepareMetadataCheckpoint runs while listeners remain available, after store
 // writers stop. Close checks its sequence again and never repeats this work.
 func (s *Store) PrepareMetadataCheckpoint(ctx context.Context) error {
+	return s.PrepareMetadataCheckpointWithOptions(ctx, PrewarmOptions{})
+}
+
+// PrepareMetadataCheckpointWithOptions bounds parallel preparation with the same
+// worker count and CPU pacers used for loading. Writers must already be stopped.
+func (s *Store) PrepareMetadataCheckpointWithOptions(ctx context.Context, options PrewarmOptions) error {
 	if !s.checkpoint.enabled {
 		return nil
 	}
 	s.checkpoint.prepared = true
-	s.checkpoint.saveErr = s.saveMetadataCheckpoint(ctx)
+	s.checkpoint.saveErr = s.saveMetadataCheckpoint(ctx, options)
 	return s.checkpoint.saveErr
 }
 
-func (s *Store) saveMetadataCheckpoint(ctx context.Context) error {
+func (s *Store) saveMetadataCheckpoint(ctx context.Context, options PrewarmOptions) error {
 	c := &s.checkpoint
 	if _, err := rand.Read(c.clean[:]); err != nil {
 		return err
@@ -585,58 +420,22 @@ func (s *Store) saveMetadataCheckpoint(ctx context.Context) error {
 		}
 		_ = s.fs.Remove(tmp)
 	}()
-	writer := bufio.NewWriterSize(f, 256<<10)
+	// Workers already produce large buffers. Write them directly rather than
+	// copying the entire checkpoint through another buffered writer.
+	writer := f
 	var header [52]byte
 	copy(header[:8], checkpointMagic)
 	copy(header[8:24], c.identity[:])
 	copy(header[24:40], c.clean[:])
 	binary.LittleEndian.PutUint64(header[40:48], c.sequence)
 	binary.LittleEndian.PutUint32(header[48:], crc32.ChecksumIEEE(header[:48]))
-	if _, err := writer.Write(header[:]); err != nil {
+	if err := writeCheckpointBytes(writer, header[:]); err != nil {
 		return err
 	}
-	var record []byte
-	var frame [8]byte
-	for i := range s.stateCache.shards {
-		sh := &s.stateCache.shards[i]
-		// Reads still run during Prepare and may fill or evict cache slots.
-		sh.mu.Lock()
-		slots := len(sh.slots)
-		sh.mu.Unlock()
-		for slot := 0; slot < slots; slot++ {
-			if slot%32 == 0 {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
-			}
-			sh.mu.Lock()
-			live := sh.slots[slot].n != 0 && sh.slots[slot].n <= maxCheckpointRecordSize && sh.slots[slot].epoch&provisionalState == 0
-			if live {
-				// A v1 lazy load or a mutation in progress cannot be certified
-				// by the v2 fence. Omit it rather than laundering old state.
-				live = sh.entries[string(recordKey(sh.record(int32(slot))))] == nil
-			}
-			if live {
-				record = append(record[:0], sh.record(int32(slot))...)
-			}
-			sh.mu.Unlock()
-			if !live {
-				continue
-			}
-			binary.LittleEndian.PutUint32(frame[:4], uint32(len(record)))
-			binary.LittleEndian.PutUint32(frame[4:], crc32.ChecksumIEEE(record))
-			if _, err := writer.Write(frame[:]); err != nil {
-				return err
-			}
-			if _, err := writer.Write(record); err != nil {
-				return err
-			}
-		}
-	}
-	if _, err := writer.Write(make([]byte, 8)); err != nil {
+	if err := s.saveCheckpointRecords(ctx, writer, options); err != nil {
 		return err
 	}
-	if err := writer.Flush(); err != nil {
+	if err := writeCheckpointBytes(writer, make([]byte, 8)); err != nil {
 		return err
 	}
 	if err := f.Sync(); err != nil {

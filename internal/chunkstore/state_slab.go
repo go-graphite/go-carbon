@@ -269,7 +269,9 @@ func (c *stateCache) newSlot(sh *stateShard) int32 {
 	}
 	before := cap(sh.slots)
 	sh.slots = append(sh.slots, stateSlot{})
-	c.arenaBytes.Add(int64(cap(sh.slots)-before) * int64(unsafe.Sizeof(stateSlot{})))
+	if cap(sh.slots) != before {
+		c.arenaBytes.Add(int64(cap(sh.slots)-before) * int64(unsafe.Sizeof(stateSlot{})))
+	}
 	return int32(len(sh.slots) - 1)
 }
 

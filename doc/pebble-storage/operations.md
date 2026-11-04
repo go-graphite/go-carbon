@@ -74,17 +74,16 @@ Failed accelerators remain safe: missing metadata uses the durable store.
 | --- | --- |
 | `restart_cpu_checkpoint_load_failures_total` | Enabled load attempts ending invalid or with an error, including unavailable files, corruption and deadlines; final legacy validation is included. |
 | `restart_cpu_checkpoint_load_timeouts_total` | Subset of failures ending with a deadline error. |
-| `restart_cpu_granted_cores{consumer="checkpoint_load"}` | Bounded duty share reserved for active checkpoint streams, including under process CPU debt; this is admission, not attributed CPU use. |
+| `restart_cpu_granted_cores{consumer="checkpoint_load"}` | Bounded duty share reserved for active checkpoint workers, including under process CPU debt; this is admission, not attributed CPU use. |
 | `restart_cpu_grants_total{consumer="checkpoint_load"}` | Number of admitted checkpoint work windows. |
 
 The failure counters belong to the process's shared restart budget and survive
 persister reloads. Alert on a nonzero timeout counter or increases in failures;
 allow for a missing checkpoint on first start. A nonzero checkpoint grant does
 not guarantee completion before the ten-minute load deadline under slow I/O.
-The serial loader duty-paces at most one core (or allowance / 8), reduced
-fourfold during a material writeout shortfall near the CPU allowance. It retains
-progress when mandatory CPU or maintenance released by the safety bound runs
-concurrently. See
+Workers duty-pace at most half the allowance (one eighth during a material
+writeout shortfall near the CPU allowance), retaining progress when mandatory
+CPU or maintenance released by the safety bound runs concurrently. See
 [restart CPU allowance](../restart-cpu.md) for admission and history details.
 
 ## Reclaim, free space and discard

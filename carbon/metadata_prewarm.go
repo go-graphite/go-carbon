@@ -44,16 +44,14 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 		// credit. Cold metadata can keep writeout below its floor, so loading
 		// must not wait behind the writes that the checkpoint accelerates.
 		checkpointOptions := options
-		var checkpointPacer *restartcpu.Checkpoint
-		if budget != nil {
+		if budget != nil && budget.Cores() > 0 {
 			checkpointOptions.Wait = budget.WaitCheckpoint
-			checkpointPacer = budget.NewCheckpoint(progress.Snapshot)
-			checkpointOptions.CheckpointWait = checkpointPacer.Wait
+			checkpointOptions.Workers = budget.CheckpointWorkers(conf.StoreMetadataCachePrewarmWorkers)
+			checkpointOptions.CheckpointWorker = func() store.CheckpointPacer {
+				return budget.NewCheckpoint(progress.Snapshot)
+			}
 		}
 		checkpoint, loadErr := db.LoadMetadataCheckpointAfter(context.Background(), checkpointOptions)
-		if checkpointPacer != nil {
-			checkpointPacer.Finish()
-		}
 		// Legacy lazy checkpoints may contain provisional records. Validate
 		// upcoming writes first, then finish the remainder under the same
 		// allowance and remaining load deadline before reporting warming

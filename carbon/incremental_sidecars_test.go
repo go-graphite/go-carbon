@@ -69,7 +69,12 @@ func TestIncrementalEmptySourceWaitsForSidecarInventory(t *testing.T) {
 	path, cfg := legacyIncrementalAppFixture(t)
 	app := startIncrementalApp(t, path)
 	m := app.incrementalMigration.Load()
-	waitMigration(t, func() bool { return m.receipt()["phase"] != "files" && m.receipt()["phase"] != "index" })
+	waitMigration(t, func() bool {
+		// One snapshot must exclude both phases: index can become files
+		// between two receipts without reaching the inventory wait.
+		phase := m.receipt()["phase"]
+		return phase != "files" && phase != "index"
+	})
 	if r := m.receipt(); r["phase"] != "sidecars" || r["source_complete"] != false {
 		t.Fatalf("empty source finalized before the inventory scan: %v", r)
 	}

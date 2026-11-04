@@ -199,7 +199,11 @@ store-range-reads = false
 # full catalog is retained. Views close between batches before pacing, so a
 # slow scan does not pin obsolete tables during compactions.
 # Both passes use store-metadata-cache-prewarm-workers (0: GOMAXPROCS/12,
-# at least 2, at most 16). Catalog windows are disjoint and bounded; no view
+# at least 2, at most 16). Checkpoint load and shutdown preparation also use
+# that worker setting as a cap; zero selects concurrency from half the restart
+# CPU allowance, capped by GOMAXPROCS. They retain the v1/v2 file format and
+# pipeline large sequential I/O with parallel cache inserts/checksums.
+# Catalog windows are disjoint and bounded; no view
 # stays open waiting for a paced worker. Rate bounds metrics per second and
 # byte-rate bounds logical key/value bytes/s, including refused fills.
 # Both rates default to 0; workers bound concurrency. cpu-cores is a shared
@@ -278,8 +282,8 @@ store-range-reads = false
 # Ordered restoration required before input readiness remains urgent.
 #
 # A valid checkpoint streams serialized slab records asynchronously after input
-# readiness, within the metadata budget. Its serial stream gets at most one
-# core of duty time (or allowance / 8), reduced fourfold when CPU is
+# readiness, within the metadata budget. Its worker pool gets at most half the
+# CPU allowance, reduced fourfold when CPU is
 # near the allowance and writeout is materially below its floor. Tiny duty
 # delays coalesce into 5ms windows. One CPU sampling slice is reserved
 # for checkpoint progress; its duty-paced share cannot be zeroed by process CPU
