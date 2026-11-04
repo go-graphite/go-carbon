@@ -164,7 +164,8 @@ func (c Codec) planeVariant(kind string, g Group, base []byte) ([]byte, error) {
 			times = binary.AppendUvarint(times, uint64(g.Points[i].Timestamp-g.Points[i-1].Timestamp))
 		}
 	}
-	raw := append(times, frPlanes(g.Points, false)...)
+	raw := append([]byte(nil), times...)
+	raw = append(raw, frPlanes(g.Points, false)...)
 	out := make([]byte, 16)
 	copy(out, base[:12])
 	out[0] = 3

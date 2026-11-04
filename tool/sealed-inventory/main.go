@@ -100,7 +100,7 @@ func main() {
 }
 func run(args []string) error {
 	if len(args) == 0 || (args[0] != "inventory" && args[0] != "transcode") {
-		return errors.New("usage: sealed-inventory inventory|transcode -sst-dir DIR -out report.json [-tmp DIR] [-policy current,prefix256,minfour,alp,chimp]")
+		return errors.New("usage: sealed-inventory inventory|transcode -sst-dir DIR -out report.json [-tmp DIR] [-policy current,float-codec,prefix256,minfour,alp,chimp]")
 	}
 	c := config{mode: args[0]}
 	fs := flag.NewFlagSet(c.mode, flag.ContinueOnError)
@@ -110,7 +110,7 @@ func run(args []string) error {
 	fs.StringVar(&c.dir, "sst-dir", "", "directory of immutable SST files")
 	fs.StringVar(&c.out, "out", "", "JSON report (outside the SST directory)")
 	fs.StringVar(&c.tmp, "tmp", "", "temporary output directory, outside SST directory")
-	fs.StringVar(&c.policies, "policy", "current,prefix256,minfour,alp,chimp", "comma-separated policies")
+	fs.StringVar(&c.policies, "policy", "current,float-codec", "comma-separated policies; research controls prefix256,minfour,alp,chimp also available")
 	fs.StringVar(&c.levels, "levels-json", "", "optional JSON filename-to-level mapping, copied from a known snapshot")
 	fs.IntVar(&c.level, "level", 6, "fallback writer level (0..6)")
 	fs.IntVar(&c.files, "files", 0, "first N files in sorted filename order; 0=all (sample before linking)")
@@ -128,7 +128,7 @@ func run(args []string) error {
 	}
 	for _, p := range strings.Split(c.policies, ",") {
 		switch p {
-		case "current", "prefix256", "minfour", "alp", "chimp":
+		case "current", "prefix256", "minfour", "alp", "chimp", "float-codec", "float-codec-min":
 		default:
 			return fmt.Errorf("unknown policy %q", p)
 		}

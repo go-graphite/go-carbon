@@ -227,3 +227,21 @@ groups. Temperature and newest-observed position still use tail groups from the
 data sample, so unsampled tails remain unknown. Physical versions, cross-file
 range deletions, active memtables and buffered writer heads are not a live-store
 view; cold-native attribution is a candidate estimate, not packing eligibility.
+
+## Production float codec policy
+
+`-policy current,float-codec` compares the paired current rewrite with the
+production `EncodeSealedPointsFloat` encoder (64-point prefix selection). It writes native version-4 frames
+without the two-byte private research envelope. CPU includes construction of
+the complete current fallback. Every changed frame is decoded by the production
+reader and compared timestamp/IEEE-word for timestamp/IEEE-word. The usual path,
+disk, cleanup, range-tombstone and baseline-agreement guards apply. Outputs
+remain offline experiments: do not ingest these standalone rewritten SSTs.
+
+The default transcode policy list is now `current,float-codec`; the previous
+`prefix256,minfour,alp,chimp` research controls remain explicitly selectable.
+Inventory identifies native v4 `float-alp`, `float-dictionary`, and
+`float-chimp128` groups separately.
+
+`float-codec-min` is an additional native exhaustive control over the same
+encoders and decoder, for measuring the extra stock saving versus CPU cost.

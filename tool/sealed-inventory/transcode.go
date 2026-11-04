@@ -78,6 +78,20 @@ func safeCandidate(policy string, g floatresearch.Group, original []byte) (kind 
 			err = fmt.Errorf("codec panic: %v", p)
 		}
 	}()
+	if policy == "float-codec" || policy == "float-codec-min" {
+		fn := chunkstore.EncodeSealedPointsFloat
+		if policy == "float-codec-min" {
+			fn = chunkstore.EncodeSealedPointsFloatMin
+		}
+		data, err = fn(g.Points, g.Step)
+		if err != nil {
+			return "", nil, err
+		}
+		if len(data) >= len(original) {
+			return "sealed", original, nil
+		}
+		return "float-codec", data, nil
+	}
 	if policy == "current" {
 		_, err = codec.Encode("sealed", g)
 		return "sealed", original, err

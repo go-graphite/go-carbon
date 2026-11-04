@@ -388,7 +388,7 @@ func TestPolicyOracleSpecials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"current", "prefix256", "minfour", "alp", "chimp"} {
+	for _, p := range []string{"current", "float-codec", "float-codec-min", "prefix256", "minfour", "alp", "chimp"} {
 		t.Run(p, func(t *testing.T) {
 			_, b, e := safeCandidate(p, floatresearch.Group{Points: points, Step: 60}, original)
 			if e != nil {
@@ -402,6 +402,50 @@ func TestPolicyOracleSpecials(t *testing.T) {
 				t.Fatal("size fallback failed")
 			}
 		})
+	}
+}
+
+func TestNativeFloatSSTTranscode(t *testing.T) {
+	dir := fixture(t)
+	root := t.TempDir()
+	temp := filepath.Join(root, "rewrite")
+	if err := os.Mkdir(temp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(root, "report.json")
+	if err := run([]string{"transcode", "-sst-dir", dir, "-tmp", temp, "-out", out, "-policy", "float-codec", "-read-mb-s", "0", "-keep"}); err != nil {
+		t.Fatal(err)
+	}
+	var changed uint64
+	for _, f := range loadReport(t, out).Files {
+		p := f.Policies["float-codec"]
+		if p.OracleFailures != 0 || !f.BaselineWithin3Pct {
+			t.Fatalf("oracle=%d baseline=%f", p.OracleFailures, f.BaselineDeltaPct)
+		}
+		changed += p.ChangedGroups
+		paths, err := filepath.Glob(filepath.Join(temp, "sealed-inventory-*", f.Name+".float-codec.sst"))
+		if err != nil || len(paths) != 1 {
+			t.Fatal("missing native output", err)
+		}
+		compareTables(t, filepath.Join(dir, f.Name), paths[0])
+		r, it := table(t, paths[0])
+		for k, v := it.First(); k != nil; k, v = it.Next() {
+			value, _, err := v.Value(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(value) >= 16 && value[0] == 4 {
+				class, n, err := classify(k.UserKey, value)
+				if err != nil || !strings.HasPrefix(class, "sealed/float-") || n == 0 {
+					t.Fatalf("native classification: %s %d %v", class, n, err)
+				}
+			}
+		}
+		_ = it.Close()
+		_ = r.Close()
+	}
+	if changed == 0 {
+		t.Fatal("no native groups exercised")
 	}
 }
 

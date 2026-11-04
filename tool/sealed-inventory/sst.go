@@ -174,7 +174,7 @@ func classify(key, value []byte) (string, uint64, error) {
 	if len(suffix) == 20 && suffix[0] == 'f' && suffix[9] == 'c' && len(value) == 21 && value[0] == 5 {
 		return "sealed/prefix-reference", 0, nil
 	}
-	if len(suffix) == 20 && suffix[0] == 'f' && suffix[9] == 'c' && len(value) > 1 && value[0] == 4 {
+	if len(suffix) == 20 && suffix[0] == 'f' && suffix[9] == 'c' && len(value) > 1 && value[0] == 4 && value[1] == 3 {
 		class, n, err := classify(key, value[1:])
 		return strings.Replace(class, "sealed/", "sealed/prefix/", 1), n, err
 	}
@@ -182,6 +182,43 @@ func classify(key, value []byte) (string, uint64, error) {
 		return "descriptor", 0, nil
 	}
 	if len(suffix) == 20 && suffix[0] == 'f' && (suffix[9] == 'c' || suffix[9] == 'p') {
+		if len(value) >= 16 && value[0] == 4 {
+			_, _, count, err := chunkstore.SealedTimeBounds(value)
+			if err != nil {
+				return "", 0, err
+			}
+			body, err := sealedBody(value)
+			if err != nil {
+				return "", 0, err
+			}
+			if value[1]&4 == 0 {
+				for i := 1; i < count; i++ {
+					_, n := binary.Uvarint(body)
+					if n <= 0 {
+						return "", 0, errors.New("bad float timestamps")
+					}
+					body = body[n:]
+				}
+			}
+			if len(body) == 0 {
+				return "", 0, errors.New("missing float mode")
+			}
+			kind := "unknown"
+			switch body[0] {
+			case 1:
+				kind = "float-alp"
+			case 2:
+				kind = "float-dictionary"
+			case 3:
+				kind = "float-chimp128"
+			}
+			if value[1]&8 != 0 {
+				kind += "/zstd"
+			} else {
+				kind += "/raw"
+			}
+			return "sealed/" + kind, uint64(count), nil
+		}
 		if len(value) >= 16 && value[0] == 3 {
 			n := uint64(binary.LittleEndian.Uint16(value[2:4]))
 			if n < 1 || n > chunkstore.MaxSealedPoints {
