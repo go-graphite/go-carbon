@@ -18,9 +18,12 @@ func TestRestartCatchupDrainsWithinAvailableCPUHeadroom(t *testing.T) {
 		mandatory float64
 		backlog   int
 		deadline  time.Duration
+		auto      bool
 	}{
-		{"one_spare_core", .5, 1200, 10 * time.Second},
-		{"quarter_spare_core", 1.25, 500, 15 * time.Second},
+		{"one_spare_core", .5, 1200, 10 * time.Second, false},
+		{"quarter_spare_core", 1.25, 500, 15 * time.Second, false},
+		{"auto_one_spare_core", .5, 1200, 10 * time.Second, true},
+		{"auto_quarter_spare_core", 1.25, 500, 15 * time.Second, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -46,6 +49,10 @@ func TestRestartCatchupDrainsWithinAvailableCPUHeadroom(t *testing.T) {
 					}
 				}}
 				p.SetWorkers(4)
+				if tc.auto {
+					p.SetMaxUpdatesPerSecond(-1)
+					p.SetAutoUpdateRate(steadyUpdateState, 1, 10)
+				}
 				p.SetRestartBudget(budget, func() float64 { return 100 })
 				p.SetMockStore(func() (StoreFunc, func()) {
 					return func(string) {

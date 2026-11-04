@@ -61,6 +61,7 @@ type Whisper struct {
 	popConfirm               func(string) (*points.Points, bool)
 	requeue                  func(*points.Points)
 	backlogged               func() bool
+	recovering               func() bool
 	restartBudget            *restartcpu.Budget
 	restartFloor             func() float64
 	restartTicker            atomic.Pointer[helper.ThrottleTicker]
@@ -101,6 +102,7 @@ type Whisper struct {
 	hashFilenames       bool
 	removeEmptyFile     bool
 	maxUpdatesPerSecond int
+	autoUpdate          autoUpdateRate
 	updateTicker        *helper.ThrottleTicker
 	storeMutex          [storeMutexCount]sync.Mutex
 	// converting names metrics whose original is being imported. Their
@@ -195,6 +197,7 @@ func NewWhisper(
 func (p *Whisper) InitPrometheus(reg prometheus.Registerer) {
 	p.startupRegisterer = reg
 	p.initStartupGateMetrics()
+	p.initAutoUpdateMetrics(reg)
 	if p.restartBudget != nil {
 		p.restartBudget.InitPrometheus(reg)
 	}
@@ -278,6 +281,10 @@ func (p *Whisper) SetCompressed(compressed bool) {
 func (p *Whisper) SetBacklogged(backlogged func() bool) {
 	p.backlogged = backlogged
 }
+
+// SetRecovering supplies the cheap urgent-restoration signal for auto mode.
+// Unlike capacity pressure, urgent restoration retains its full-speed bypass.
+func (p *Whisper) SetRecovering(recovering func() bool) { p.recovering = recovering }
 
 // SetRestartBudget gives mandatory writes priority over optional restart work.
 // floor reports queued metrics / max delay. Set before Start.
@@ -796,7 +803,7 @@ func (p *Whisper) worker(exit chan bool) {
 	startupPassed := p.startupGate == nil
 LOOP:
 	for {
-		if p.restartPaced() || p.backlogged == nil || !p.backlogged() {
+		if p.throttleUpdates() {
 			select {
 			case <-p.updateTokens():
 			case <-exit:
@@ -926,6 +933,18 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 	}
 	p.sendOverlapUpdates(send)
 	send("maxUpdatesPerSecond", float64(p.maxUpdatesPerSecond))
+	if p.maxUpdatesPerSecond == -1 {
+		rate, target, reason := p.autoUpdateObservation()
+		send("autoUpdateRate", rate)
+		send("autoUpdateRateTarget", target)
+		for _, label := range autoUpdateReasons {
+			value := 0.0
+			if label == reason {
+				value = 1
+			}
+			send("autoUpdateRateReason."+label, value)
+		}
+	}
 	send("workers", float64(p.workersCount))
 	send("extended", float64(extended))
 
@@ -965,8 +984,12 @@ func (p *Whisper) Stat(send helper.StatCallback) {
 
 // Start worker
 func (p *Whisper) Start() error {
+	if p.maxUpdatesPerSecond == -1 && p.autoUpdate.state == nil {
+		return fmt.Errorf("automatic writeout rate requires cache state")
+	}
 	return p.StartFunc(func() error {
-		p.updateTicker = helper.NewThrottleTicker(p.maxUpdatesPerSecond)
+		p.updateTicker = helper.NewThrottleTicker(max(0, p.maxUpdatesPerSecond))
+		p.startAutoUpdateRate()
 		if p.onlineMigration.enabled {
 			p.onlineMigration.ticker = helper.NewHardThrottleTicker(p.onlineMigration.rate)
 		}
@@ -990,6 +1013,7 @@ func (p *Whisper) Stop() {
 	p.StopDeferredReclaim()
 	p.StopFunc(func() {
 		p.stopRestartTicker()
+		p.stopAutoUpdateRate()
 		p.updateTicker.Stop()
 
 		if p.onlineMigration.ticker != nil {
