@@ -152,7 +152,7 @@ var (
 	rateDesc               = prometheus.NewDesc("restart_cpu_writeout_updates_per_second", "Confirmed writeout updates per second during restart.", nil, nil)
 	processDesc            = prometheus.NewDesc("restart_cpu_process_cores", "Whole-process user plus system CPU cores, five-second EWMA updated once per second; admission uses raw CPU deltas.", nil, nil)
 	allowanceDesc          = prometheus.NewDesc("restart_cpu_allowance_cores", "Whole-process restart CPU allowance.", nil, nil)
-	ceilingDesc            = prometheus.NewDesc("restart_cpu_writeout_ceiling_updates_per_second", "Restart rate-token ceiling, before whole-process CPU admission; zero means unlimited.", nil, nil)
+	ceilingDesc            = prometheus.NewDesc("restart_cpu_writeout_ceiling_updates_per_second", "Restart CPU reservation rate; fixed mode also uses it for rate tokens, auto mode has its own token limit. Zero selects saved/default write cost.", nil, nil)
 	checkpointProgressDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_bytes", "Checkpoint stream progress in file bytes; total is zero until known.", []string{"kind"}, nil)
 	checkpointFailuresDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_failures_total", "Invalid or failed enabled checkpoint loads, including unavailable checkpoints and timeouts.", nil, nil)
 	checkpointTimeoutsDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_timeouts_total", "Checkpoint loads or legacy validation that exceeded their deadline.", nil, nil)

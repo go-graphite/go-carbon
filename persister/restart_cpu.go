@@ -38,6 +38,9 @@ func (p *Whisper) updateTokens() <-chan bool {
 // below the predecessor's throughput; process CPU admission remains in force.
 func (p *Whisper) setRestartRate() {
 	if p.maxUpdatesPerSecond == -1 {
+		p.autoUpdate.mu.Lock()
+		p.setAutoRestartRate(p.autoUpdate.applied)
+		p.autoUpdate.mu.Unlock()
 		return
 	}
 	rateLimit := float64(p.maxUpdatesPerSecond)
@@ -70,6 +73,23 @@ func (p *Whisper) setRestartRate() {
 	old := p.restartTicker.Swap(helper.NewThrottleTickerWithBurst(rate, max(1, (rate+24)/25)))
 	if old != nil {
 		old.Stop()
+	}
+}
+
+// Auto owns the rate tokens, but restart CPU admission still reserves a cost
+// per update. Use its current rate rather than falling back to a potentially
+// low predecessor rate after the old persister clears the shared ceiling.
+// As in fixed restart pacing, leave 3x reservation headroom. Retain a cheaper
+// predecessor/default estimate so low auto demand cannot slow startup warming.
+func (p *Whisper) setAutoRestartRate(rate int) {
+	p.restartRateMu.Lock()
+	defer p.restartRateMu.Unlock()
+	if p.restartBudget != nil && !p.restartStopping {
+		ceiling := 0.
+		if steady := p.restartBudget.SteadyRate(); steady > 0 {
+			ceiling = 3 * max(float64(rate), steady)
+		}
+		p.restartBudget.SetRateCeiling(ceiling)
 	}
 }
 

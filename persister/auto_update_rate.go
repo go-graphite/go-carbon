@@ -142,6 +142,7 @@ func (p *Whisper) sampleAutoUpdateRate() {
 		return
 	}
 	a.applied = rate
+	p.setAutoRestartRate(rate)
 	if a.metrics != nil {
 		a.metrics.adjust(a.controller.reason)
 	}
