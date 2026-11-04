@@ -68,6 +68,7 @@ type Whisper struct {
 	recovering               func() bool
 	restartBudget            *restartcpu.Budget
 	restartFloor             func() float64
+	restartBacklog           func() bool
 	restartTicker            atomic.Pointer[helper.ThrottleTicker]
 	restartRateMu            sync.Mutex
 	restartRate              int
@@ -298,6 +299,10 @@ func (p *Whisper) SetRestartBudget(budget *restartcpu.Budget, floor func() float
 		budget.InitPrometheus(p.startupRegisterer)
 	}
 }
+
+// SetRestartBacklog reports eligible work for shortfall diagnostics. Deferred
+// batching alone must not be reported as a stalled writer. Set before Start.
+func (p *Whisper) SetRestartBacklog(backlog func() bool) { p.restartBacklog = backlog }
 
 // SetRequeue configures how failed writes are returned to the live cache.
 func (p *Whisper) SetRequeue(requeue func(*points.Points)) {

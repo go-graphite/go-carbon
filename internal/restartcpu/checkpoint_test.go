@@ -292,10 +292,14 @@ func TestCheckpointValidationProgressWithoutWriteoutFloor(t *testing.T) {
 		start := time.Now()
 		b := NewWithCPU(1, func() float64 { return 2 * time.Since(start).Seconds() })
 		time.Sleep(time.Second)
-		// Required queue preparation keeps its existing process-credit path;
-		// it cannot consume the checkpoint's validation progress window.
-		b.BeginPrefetch()
-		defer b.EndPrefetch()
+		// Continuous required queue preparation must not consume the
+		// checkpoint's separate validation progress window.
+		b.ObserveWriteout(100, 0)
+		if !b.WaitPrefetch(make(chan bool)) {
+			t.Fatal("prefetch failed")
+		}
+		b.EndPrefetch()
+		b.ObserveWriteout(0, 0)
 		if err := b.WaitCheckpoint(context.Background()); err != nil {
 			t.Fatal(err)
 		}

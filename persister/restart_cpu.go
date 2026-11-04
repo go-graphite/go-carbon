@@ -133,22 +133,8 @@ func (p *Whisper) startRestartWriteout() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		last, previous := time.Now(), budget.Updates()
-		observe := func(rate float64) {
-			floor := budget.SteadyRate()
-			if p.restartFloor != nil {
-				floor = max(floor, p.restartFloor())
-			}
-			p.setRestartRate()
-			if budget.ObserveWriteout(floor, rate) && p.logger != nil {
-				s := budget.State()
-				p.logger.Warn("restart writeout below floor", zap.Float64("floor_updates_per_second", floor),
-					zap.Float64("updates_per_second", rate), zap.Duration("below_floor_for", s.BelowFor),
-					zap.Float64("process_cpu_cores", s.Process), zap.Float64("allowance_cores", s.Allowance),
-					zap.Float64("warming_granted_cores", s.Warming), zap.Float64("writeout_granted_cores", s.Writeout),
-					zap.Float64("checkpoint_load_granted_cores", s.Checkpoint), zap.Float64("ceiling_updates_per_second", s.Ceiling), zap.Int("workers", p.workersCount))
-			}
-		}
-		observe(0)
+
+		p.observeRestartWriteout(0)
 		for {
 			select {
 			case <-exit:
@@ -159,7 +145,7 @@ func (p *Whisper) startRestartWriteout() {
 					return
 				}
 				written := budget.Updates()
-				observe(float64(written-previous) / at.Sub(last).Seconds())
+				p.observeRestartWriteout(float64(written-previous) / at.Sub(last).Seconds())
 				last, previous = at, written
 			}
 		}
@@ -178,4 +164,35 @@ func (p *Whisper) restartPaced() bool {
 		}
 	}
 	return true
+}
+
+// Observe confirmed writes, and distinguish eligible backlog from a normal
+// quiet batching phase. Escalation state belongs to the shared budget so a
+// persister reload cannot repeat an error or clear its counter.
+func (p *Whisper) observeRestartWriteout(rate float64) {
+	budget := p.restartBudget
+	floor := budget.SteadyRate()
+	if p.restartFloor != nil {
+		floor = max(floor, p.restartFloor())
+	}
+	backlog := floor > 0
+	if p.restartBacklog != nil {
+		backlog = p.restartBacklog()
+	}
+	p.setRestartRate()
+	warn, failed := budget.ObserveWriteoutBacklog(floor, rate, backlog)
+	if (!warn && !failed) || p.logger == nil {
+		return
+	}
+	s := budget.State()
+	level, message := zap.WarnLevel, "restart writeout below floor"
+	if failed {
+		level, message = zap.ErrorLevel, "restart writeout stalled"
+	}
+	p.logger.Log(level, message, zap.Float64("floor_updates_per_second", floor),
+		zap.Float64("updates_per_second", rate), zap.Duration("below_floor_for", s.BelowFor),
+		zap.Float64("process_cpu_cores", s.Process), zap.Float64("allowance_cores", s.Allowance),
+		zap.Float64("warming_granted_cores", s.Warming), zap.Float64("writeout_granted_cores", s.Writeout),
+		zap.Float64("checkpoint_load_granted_cores", s.Checkpoint), zap.Float64("ceiling_updates_per_second", s.Ceiling),
+		zap.Uint64("floor_grants", s.FloorGrants), zap.Int("workers", p.workersCount))
 }

@@ -256,7 +256,8 @@ func TestRestartHistoryWaitsForPendingConfirmation(t *testing.T) {
 	core.PauseStartupWriteout()
 	core.ResumeStartupWriteout(time.Now())
 	state := restartHistoryState(core, nil)
-	if _, ready := state(); ready {
+	drained := restartDrainState(core, nil)
+	if _, ready := state(); ready || drained() {
 		t.Fatal("unclaimed restoration was recorded as steady")
 	}
 	if err := core.RecoverPending(nil, 0); err != nil {
@@ -267,12 +268,44 @@ func TestRestartHistoryWaitsForPendingConfirmation(t *testing.T) {
 		if !ok {
 			t.Fatal("restored metric missing", name)
 		}
-		if _, ready := state(); ready {
+		if _, ready := state(); ready || drained() {
 			t.Fatal("claimed or in-flight restoration was recorded as steady")
 		}
 		core.Confirm(p)
 	}
-	if _, ready := state(); !ready {
+	if _, ready := state(); !ready || !drained() {
 		t.Fatal("confirmed restoration still blocked history")
 	}
+}
+
+func TestRestartDrainAllowsOrdinaryGrowthAfterRestoration(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		core := cache.New()
+		defer core.Stop()
+		core.SetMaxSize(0)
+		if err := core.SetWriteoutBatching(100, 960*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		core.Add(points.OnePoint("live", 1, time.Now().Unix()))
+		intakePoints := core.Size()
+		restored := make(chan struct{})
+		budget := restartcpu.NewWithCPU(24, func() float64 { return 0 })
+		budget.SetDrain(restartDrainState(core, restored))
+		budget.Warmed()
+		time.Sleep(31 * time.Minute)
+		if !budget.Active() {
+			t.Fatal("unfinished dump loading lost pacing")
+		}
+		for range 100 {
+			core.Add(points.OnePoint("live", 2, time.Now().Unix()))
+		}
+		if core.Size() <= intakePoints {
+			t.Fatal("did not reproduce growth above intake-ready target")
+		}
+		close(restored)
+		time.Sleep(time.Second)
+		if budget.Active() {
+			t.Fatal("ordinary growth kept restart CPU pacing active after restoration")
+		}
+	})
 }

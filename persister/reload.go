@@ -121,6 +121,7 @@ func (p *Whisper) ReloadSettings(next *Whisper) {
 // cache restart scheduling and shared CPU budget belong to the application.
 func (p *Whisper) InheritRuntime(previous *Whisper) {
 	p.restartBudget, p.restartFloor = previous.restartBudget, previous.restartFloor
+	p.restartBacklog = previous.restartBacklog
 	p.warmFirst = previous.warmFirst && (p.restartBudget == nil || p.restartBudget.Active())
 	p.startupReady, p.startupDone = previous.startupReady, previous.startupDone
 	p.startupWait, p.startupFull = previous.startupWait, previous.startupFull

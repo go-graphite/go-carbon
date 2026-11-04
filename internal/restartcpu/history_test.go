@@ -188,7 +188,7 @@ func TestHistorySaveFailureIsReported(t *testing.T) {
 	}
 }
 
-func TestRequiredCheckpointValidationSharesCPUWithActiveWriters(t *testing.T) {
+func TestRequiredCheckpointValidationMakesBoundedProgressWithActiveWriters(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		used := 0.0
 		b := NewWithCPU(2, func() float64 { return used })
@@ -201,12 +201,12 @@ func TestRequiredCheckpointValidationSharesCPUWithActiveWriters(t *testing.T) {
 		used = 3
 		time.Sleep(time.Second)
 		if err := b.WaitCheckpoint(context.Background()); err != nil {
-			t.Fatal("required validation starved under CPU debt", err)
+			t.Fatal("required validation stalled behind dependent writers", err)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		go func() { time.Sleep(time.Millisecond); cancel() }()
-		if err := b.WaitCheckpoint(ctx); !errors.Is(err, context.Canceled) {
-			t.Fatal("validation ignored cancellation between progress windows", err)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+		defer cancel()
+		if err := b.WaitCheckpoint(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("validation bypass was not bounded", err)
 		}
 	})
 }

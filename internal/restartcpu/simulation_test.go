@@ -131,7 +131,7 @@ func TestRestartPacingSimulation(t *testing.T) {
 						for tokens >= 8 && pending >= 8 {
 							delay := time.Duration(0)
 							if mode == "after" {
-								delay = b.reserveDelay(now, true, 8*b.writeCost())
+								delay = b.reserveAdmission(now, writeoutWork, 8*b.writeCost(), 8)
 							} else {
 								delay = legacyDelay()
 							}

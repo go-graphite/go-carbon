@@ -166,6 +166,7 @@ func (app *App) setMetadataPrewarmGate(p *persister.Whisper) {
 			}
 			return 0
 		})
+		p.SetRestartBacklog(func() bool { return core.WriteoutState().Eligible > 0 })
 	}
 	if limit > 0 {
 		app.Cache.PauseStartupWriteout()

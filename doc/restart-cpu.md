@@ -29,9 +29,12 @@ rejected. The older 30-sample median format remains readable within its original
 freshness window and uses the same configured headroom.
 
 The allowance includes user and system CPU from the entire process. Receivers,
-reads and input logging proceed independently; optional warming and post-gate
-writeout share the remaining allowance. A configured fallback should leave
-headroom above mandatory CPU consumption. Zero never means unlimited CPU.
+reads and input logging proceed independently. Catch-up above the writeout
+floor and optional warming share the remaining allowance. Writeout at its floor
+is mandatory durability work: a low or stale CPU history must never stop every
+writer. The allowance selection remains unchanged, including fractional saved
+history; raising the configured fallback is not needed to recover writes.
+Zero never means unlimited CPU.
 
 Optional catalog warming and validation yield to waiting writers, required
 cold-state prefetch, and any observed writeout-floor shortfall, even when CPU
@@ -44,20 +47,23 @@ pacer, so fractional allowances still work with one worker and overlapping
 loads share the same aggregate allowance. When process CPU leaves less room
 than that share and writeout is below 95%
 of its floor, the pool share reduces fourfold; spare CPU keeps the full
-share. The exact floor still controls warnings. One 5 ms sampling slice of the checkpoint share
+share. The exact floor still controls warnings. One 5 ms sampling slice of the
+checkpoint share
 is reserved so writers cannot repeatedly consume every refill before the next
-checkpoint batch. Bulk checkpoint workers retain their duty-paced share even under
-whole-process CPU debt, so unrelated maintenance or receivers cannot starve it.
-Legacy checkpoint validation gets a separate required window per 100ms under
-CPU debt, including without a writeout floor. Optional catalog warming and queue
-preparation retain their existing admission paths. This bounded mandatory work
-can exceed the process allowance alongside mandatory intake and reads. Batch wall
+checkpoint batch. Required queue construction, cold prefetch and validation
+retain dependent-work priority. If CPU debt would block a due writeout floor, these prerequisites get
+one shared progress window per 100ms. Their existing bounded batches and queue
+windows still apply. Legacy checkpoint validation also gets a shared required
+window per 100ms without a writeout floor. Optional catalog warming cannot use
+that escape. Bulk checkpoint workers retain their duty-paced share even when
+whole-process CPU exceeds the allowance; unrelated CPU debt cannot reduce their
+admission to zero. This bounded mandatory work may exceed the process allowance
+alongside mandatory intake/reads and floor writes. Batch wall
 time is a conservative CPU estimate, including dependent reads and lock waits.
 Workers close the active window before waiting for another I/O buffer, so time
 blocked on the reader/writer queue is not charged as CPU. Tiny duty
 delays accumulate into 5 ms windows so timer rounding cannot multiply the load
-time. Already
-admitted bounded batches can briefly overlap writes; admission does not preempt
+time. Already admitted bounded batches can briefly overlap writes; admission does not preempt
 running work. Estimated work costs are reserved immediately and reconciled
 against whole-process CPU every 5 ms, with at most 5 ms of saved CPU credit.
 
@@ -88,11 +94,20 @@ greater of saved steady throughput and queued metrics divided by max delay, repl
 is raised to at least three times the queue floor; zero stays unlimited.
 A growing queue can raise this rate ceiling; the CPU allowance stays fixed.
 Normal settings resume when pacing ends. The writeout floor is the greater of
-saved steady throughput and queued metrics divided by max delay. Rate tokens
-and between-sample cost reservations cannot hold writeout below
-a known predecessor floor; reaching it also requires ready work, enough workers
-and CPU capacity for those updates. CPU admission limits catch-up within the
-process allowance; mandatory intake and reads remain independent.
+saved steady throughput and queued metrics divided by max delay. A separate
+floor-rate admission bucket allows those writes despite process CPU debt. Every
+admitted update, including CPU-funded catch-up, debits that bucket, so the floor
+cannot fund extra catch-up. Idle credit is capped at 40ms of the floor, with at
+most one admitted batch beyond it; earlier catch-up cannot build unlimited floor
+debt. CPU-funded retries retain their original timing. All work still charges
+the whole-process CPU meter, so optional work sees the cost of mandatory writes.
+
+Reaching the floor also requires eligible work, working storage, enough workers
+and physical CPU capacity for those updates. When the floor itself cannot fit
+the saved allowance, only that mandatory rate can exceed it. Catch-up above the
+floor remains subject to the original process allowance. Mandatory intake and
+reads remain independent. Automatic rate tokens and their configured maximum
+still apply, including when lower than the restart floor.
 
 Automatic pacing (`max-updates-per-second = -1`) retains its own rate tokens,
 bounded by `max-updates-per-second-auto-max`, throughout restart. Its CPU cost
@@ -117,9 +132,8 @@ workers, and readers share the queue's existing rebuild callback.
 `restart_cpu_granted_cores` and `restart_cpu_grants_total` include consumer
 `checkpoint_load` alongside `warming` and `writeout`. Grants describe admission
 shares, not measured CPU attribution. A released writer retains a reported
-share while waiting for rate tokens or names. The consumer shares add to no more
-than the configured allowance; checkpoint admission can exceed remaining process
-headroom. `restart_cpu_checkpoint_loading` shows a pending or
+share while waiting for rate tokens or names. The shares add to no more than
+the available allowance. `restart_cpu_checkpoint_loading` shows a pending or
 running load, and `restart_cpu_checkpoint_load_bytes{kind="completed"|"total"}`
 shows its stream progress (total is zero until known; the last known progress
 is retained after failure). Compare `restart_cpu_process_cores` against
@@ -129,7 +143,21 @@ against `restart_cpu_writeout_floor_updates_per_second`. The
 reservation rate: fixed mode also issues tokens at that rate, while auto uses
 its separate `persister_auto_update_rate` token limit. A zero ceiling selects
 saved throughput or the default write cost for CPU reservations. The shortfall
-warning also logs the ceiling, worker count and each consumer's grant.
+warning also logs the ceiling, worker count, each consumer's grant, and
+`floor_grants`. `restart_cpu_writeout_floor_grants_total` counts batches admitted
+despite CPU debt; these do not imply spare CPU headroom in the grant gauges.
+
+Shortfall diagnostics require eligible backlog or an in-flight write, so normal
+deferred batching does not count as a stall. The first WARN is emitted after
+more than 10s below the floor; reminders are limited to one per five minutes.
+After three continuous minutes below half the floor, one ERROR
+(`restart writeout stalled`) is emitted per escalation.
+`restart_cpu_writeout_stalled` is one while that severe shortfall persists during
+pacing, and `restart_cpu_writeout_stalls_total` counts escalations across persister
+reloads. Recovery to at least half the floor, or disappearance of eligible and
+in-flight work, clears the severe episode. A later episode can escalate again.
+The mandatory floor admission recovers CPU starvation immediately; diagnostics
+also expose failures that CPU admission cannot repair, such as storage errors.
 
 Enabled checkpoint loads that finish invalid or with an error log WARN with
 runtime, entry counts, bytes, timeout status and the error. They increment
@@ -159,10 +187,13 @@ catch-up ceiling because of gaps between writeout phases.
 
 Normal batching can keep more points than were present when receivers opened,
 and max-delay writeout can have quiet phases. These do not require a return to
-the initial point count before recording history. Restart admission retains
-its separate drain policy: it continues for at least 30 minutes and until
-warming and the startup backlog finish. History is saved each eligible minute
-and at shutdown; shutdown joins the sampler before a successor can use its file.
+the initial point count before recording history. Restart admission continues
+for at least 30 minutes and until warming finishes, dump restoration completes, and saved
+recovery records are confirmed durable. It does not wait for live points to
+return to the intake-ready count: ordinary buffering and workload growth can
+keep that old target out of reach indefinitely. There is no absolute timeout
+for genuine unfinished warming or restoration; those remain restart work.
+History is saved each eligible minute and at shutdown; shutdown joins the sampler before a successor can use its file.
 
 Checkpoint load and preparation retain the v1/v2 file framing. A sequential
 reader cuts the stream into roughly 4 MiB sections at record boundaries and
