@@ -268,9 +268,21 @@ func (s *Store) coldPackPage(ctx context.Context, after string) ([]string, error
 // then skipped for this pass; cancellation and step-wide errors are returned.
 // Only one caller may advance it.
 func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error) {
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
+	if !ok {
+		return false, context.Canceled
+	}
+	defer end()
+	return s.coldPackStep(ctx)
+}
+
+func (s *Store) coldPackStep(ctx context.Context) (finished bool, failure error) {
 	c := &s.coldPack
 	c.run.Lock()
 	defer c.run.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	c.mu.Lock()
 	o := c.options
 	c.stats.Active = o.Mode != "off" && o.Mode != ""
@@ -665,7 +677,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 
 func (s *Store) startColdPack() {
 	c := &s.coldPack
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.maintenanceCtx)
 	c.cancel = cancel
 	c.done = make(chan struct{})
 	c.wake = make(chan struct{}, 1)
@@ -696,7 +708,7 @@ func (s *Store) startColdPack() {
 			}
 			before := s.ColdPackStats()
 			started := time.Now()
-			done, err := s.ColdPackStep(ctx)
+			done, err := s.coldPackStep(ctx)
 			c.mu.Lock()
 			o := c.options
 			c.mu.Unlock()
@@ -731,6 +743,11 @@ func (s *Store) stopColdPack() {
 // RunColdPack completes one paced sweep. Offline tools use the same step and
 // pacing policy as the background worker; callers must stop that worker first.
 func (s *Store) RunColdPack(ctx context.Context) error {
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
+	if !ok {
+		return context.Canceled
+	}
+	defer end()
 	errorsBefore := s.ColdPackStats().Errors
 	var pacer coldPackPacer
 	timer := time.NewTimer(0)
@@ -739,7 +756,7 @@ func (s *Store) RunColdPack(ctx context.Context) error {
 	for {
 		before := s.ColdPackStats()
 		started := time.Now()
-		done, err := s.ColdPackStep(ctx)
+		done, err := s.coldPackStep(ctx)
 		if err != nil || done {
 			if err == nil {
 				if stats := s.ColdPackStats(); stats.Errors > errorsBefore {

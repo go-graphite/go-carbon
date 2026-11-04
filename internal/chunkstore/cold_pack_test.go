@@ -127,7 +127,7 @@ func TestColdPackBudgetsAndFailures(t *testing.T) {
 }
 func TestColdPackPacerAndStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := &Store{}
+		s := &Store{maintenanceCtx: context.Background()}
 		s.coldPack.options, _ = NormalizeColdPack(ColdPackOptions{Mode: "off", CPUFraction: .1, BytesPerSecond: 1 << 20})
 		started := time.Now()
 		time.Sleep(100 * time.Millisecond)

@@ -22,6 +22,11 @@ func sealedTransferKey(kv RelayoutKV) bool {
 // unpack sweep. It refuses skips/conflicts/failures; restart and retry unpacking
 // after an interruption. Rounded decimal values retain their stored precision.
 func (s *Store) DowngradeColdPack(ctx context.Context) error {
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
+	if !ok {
+		return context.Canceled
+	}
+	defer end()
 	s.coldPack.run.Lock()
 	defer s.coldPack.run.Unlock()
 	if err := ctx.Err(); err != nil {

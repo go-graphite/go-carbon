@@ -1,6 +1,8 @@
 package chunkstore
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 )
@@ -36,7 +38,7 @@ func (s *Store) startCompactOnce(token string) error {
 		if err := s.waitMaintenance(s.maintenanceCtx, "compact-once"); err != nil {
 			return
 		}
-		// Close cancels the compaction; Compact panics if it starts after.
+		// Compact can panic if Close races this worker's admission.
 		defer func() {
 			if r := recover(); r != nil {
 				msg := fmt.Sprintf("panic: %v", r)
@@ -45,11 +47,11 @@ func (s *Store) startCompactOnce(token string) error {
 		}()
 		// Every key starts with a printable type byte, so [0x00, 0xff)
 		// covers the keyspace.
-		err := s.db.Compact([]byte{0x00}, []byte{0xff}, true)
+		err := s.compactSpans(s.maintenanceCtx, []byte{0x00}, []byte{0xff}, nil)
 		if err == nil {
 			err = writeStoreMarker(s.fs, s.dir, compactOnceMarker, token)
 		}
-		if err != nil {
+		if err != nil && !errors.Is(err, context.Canceled) {
 			msg := err.Error()
 			s.compactOnce.err.Store(&msg)
 		}

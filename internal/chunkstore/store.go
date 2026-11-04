@@ -206,9 +206,11 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
-	maintenanceWait      func(context.Context, string) error
-	maintenanceCtx       context.Context
-	maintenanceStop      context.CancelFunc
+	maintenanceWait func(context.Context, string) error
+	maintenanceCtx  context.Context
+	maintenanceStop context.CancelFunc
+	// Owner-driven maintenance lives until close, independently of StopBackground.
+	explicitMaintenance  operationState
 	coldPack             coldPackState
 	transferPendingAny   func() bool
 	transferPending      func(string) bool
@@ -216,6 +218,7 @@ type Store struct {
 	sidecars             sidecarCatalog
 	transferDeleteRanges atomic.Uint64
 	compactOnce          compactOnceState
+	manualCompaction     manualCompactionState
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
 	fetchTimings        fetchTimingCounters
@@ -292,7 +295,7 @@ type Store struct {
 	// backgroundStopped is set once StopBackground completed.
 	backgroundStopped atomic.Bool
 	// prewarm tracks running PrewarmMetadata calls.
-	prewarm prewarmState
+	prewarm operationState
 	// walSyncMu makes the WAL byte count and the adjustment for empty sync
 	// records one observation. Ordinary writes do not acquire this mutex.
 	walSyncMu sync.Mutex
@@ -609,7 +612,7 @@ func Open(dir string, options Options) (*Store, error) {
 	s.invalidateReadCache()
 	s.startCatalogMembership()
 	if options.RelayoutRate > 0 && s.timeBuckets {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(s.maintenanceCtx)
 		s.relayoutStop, s.relayoutDone = cancel, make(chan struct{})
 		go func() {
 			defer close(s.relayoutDone)
@@ -937,11 +940,15 @@ func (s *Store) LastCloseTimings() CloseTimings { return s.closeTimings }
 // Close stops them too, while the store serves nothing; a stop calls this
 // early instead, while input still flows, so its close does not wait for
 // them. Afterwards the store takes no writes but its callers'. It is safe to
-// call more than once, and concurrently with Close.
+// call more than once, and concurrently with Close. Owner-driven Compact,
+// cold-pack and purge calls remain available until Close.
 func (s *Store) StopBackground() {
 	s.maintenanceStop()
 	s.prewarm.stop()
 	s.stopRelayout()
+	if s.compactOnce.done != nil {
+		<-s.compactOnce.done
+	}
 	if f := s.catalogMembership; f != nil {
 		f.halt()
 	}
@@ -952,9 +959,13 @@ func (s *Store) StopBackground() {
 func (s *Store) BackgroundStopped() bool { return s.backgroundStopped.Load() }
 
 func (s *Store) stopRelayout() {
-	s.stopColdPack()
+	// Signal both workers before joining either: a cold-pack block must not
+	// delay cancellation of an unrelated running reclaim.
 	if s.relayoutStop != nil {
 		s.relayoutStop()
+	}
+	s.stopColdPack()
+	if s.relayoutStop != nil {
 		<-s.relayoutDone
 	}
 }
@@ -992,6 +1003,9 @@ func (s *Store) CloseForExit() error { return s.close(true) }
 func (s *Store) Close() error { return s.close(false) }
 
 func (s *Store) close(forExit bool) error {
+	// Refuse new owner operations and cancel every admitted caller before any
+	// joins. Cancellation reaches each span's admission check synchronously.
+	s.explicitMaintenance.cancel()
 	s.maintenanceStop()
 	// Closing must not wait on an operational compaction rate budget.
 	s.StopCompactionPacing()
@@ -1003,6 +1017,7 @@ func (s *Store) close(forExit bool) error {
 		*d, step = now.Sub(step), now
 	}
 	t := &s.closeTimings
+	s.explicitMaintenance.stop()
 	s.prewarm.stop()
 	s.stopRelayout()
 	// Also checkpoint callers of ColdPackStep/RunColdPack which stopped the
@@ -1070,10 +1085,20 @@ func (s *Store) Flush() error {
 // AsyncFlush starts a flush nobody waits for, which flush pacing may spread.
 func (s *Store) AsyncFlush() (<-chan struct{}, error) { return s.db.AsyncFlush() }
 func (s *Store) Compact() error {
+	// Explicit/offline compactions share the close lifetime. Close
+	// must not race a caller admitting its next file span after cancellation.
+	ctx, finish, ok := s.explicitMaintenance.begin(context.Background())
+	if !ok {
+		return context.Canceled
+	}
+	defer finish()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.Flush(); err != nil {
 		return err
 	}
-	return s.db.Compact([]byte{0}, []byte{255}, true)
+	return s.compactSpans(ctx, []byte{0}, []byte{255}, nil)
 }
 
 // CompactionKinds counts completed compactions by kind.

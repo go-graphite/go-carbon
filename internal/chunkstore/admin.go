@@ -171,7 +171,7 @@ func (s *Store) Delete(ctx context.Context, name string) error { return s.delete
 // unreferenced. The compaction then rewrites only the tables over that key
 // range, dropping the long keys and their tombstones.
 func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
-	ctx, end, ok := s.prewarm.begin(ctx)
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
 	if !ok {
 		return 0, context.Canceled
 	}
@@ -207,7 +207,7 @@ func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
 	if len(records) == 0 {
 		// An earlier run may have deleted them and stopped before its
 		// compaction; the deleted long keys still bloat those tables' indexes.
-		return 0, s.compactRange([]byte("m/"), []byte("m0"))
+		return 0, s.compactRange(ctx, []byte("m/"), []byte("m0"))
 	}
 	s.purgeFound.Store(uint64(len(records)))
 	first, last := catalogKey(records[0].name), catalogKey(records[len(records)-1].name)
@@ -270,15 +270,18 @@ func (s *Store) PurgeInvalidNames(ctx context.Context) (int, error) {
 		removed += len(group)
 		s.purgeRemoved.Add(uint64(len(group)))
 	}
-	return removed, s.compactRange(first, append(last, 0))
+	return removed, s.compactRange(ctx, first, append(last, 0))
 }
 
 // compactRange flushes the memtables and compacts [start, end) in parallel.
-func (s *Store) compactRange(start, end []byte) error {
+func (s *Store) compactRange(ctx context.Context, start, end []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.Flush(); err != nil {
 		return err
 	}
-	return s.db.Compact(start, end, true)
+	return s.compactSpans(ctx, start, end, nil)
 }
 
 func (s *Store) DeleteIfUnchanged(ctx context.Context, name string, expected Metadata) error {

@@ -139,45 +139,6 @@ var ErrMetadataCacheDisabled = errors.New("metadata cache disabled")
 // stops: the budget is split among shards, and the fullest fill first.
 const prewarmFullFraction = 0.97
 
-// prewarmState lets StopBackground and Close cancel running prewarms and wait
-// for them before the database closes.
-type prewarmState struct {
-	mu      sync.Mutex
-	stopped bool
-	// base is canceled by stop; every prewarm's context follows it.
-	base       context.Context
-	cancelBase context.CancelFunc
-	running    sync.WaitGroup
-}
-
-// begin registers a prewarm and returns its context and the function that
-// ends it, or false once stopped.
-func (p *prewarmState) begin(ctx context.Context) (context.Context, func(), bool) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.stopped {
-		return nil, nil, false
-	}
-	if p.base == nil {
-		p.base, p.cancelBase = context.WithCancel(context.Background())
-	}
-	ctx, cancel := context.WithCancel(ctx)
-	unlink := context.AfterFunc(p.base, cancel)
-	p.running.Add(1)
-	return ctx, func() { unlink(); cancel(); p.running.Done() }, true
-}
-
-// stop cancels every prewarm, refuses new ones and waits for them to end.
-func (p *prewarmState) stop() {
-	p.mu.Lock()
-	p.stopped = true
-	if p.cancelBase != nil {
-		p.cancelBase()
-	}
-	p.mu.Unlock()
-	p.running.Wait()
-}
-
 // PrewarmMetadata loads the committed state of names into the metadata cache:
 // the catalog metadata and the continuation state an update starts by reading
 // (see ContinuationStateLoader), which every first update and fetch of a
