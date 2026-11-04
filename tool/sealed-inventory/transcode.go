@@ -240,7 +240,8 @@ func (r *runner) rewrite(path, destination, policy string, opts sstable.WriterOp
 			return nil, e
 		}
 		original := value
-		if policy != "baseline" && isFloatGroup(k.UserKey, value) && k.Kind() == sstable.InternalKeyKindSet {
+		floatGroup := isFloatGroup(k.UserKey, value) && k.Kind() == sstable.InternalKeyKindSet
+		if policy != "baseline" && floatGroup {
 			points, e := chunkstore.DecodeSealedPoints(original)
 			if e != nil {
 				return nil, fmt.Errorf("invalid source group: %w", e)
@@ -273,6 +274,9 @@ func (r *runner) rewrite(path, destination, policy string, opts sstable.WriterOp
 				stats.ChangedGroups++
 			}
 			stats.Winners[kind]++
+		}
+		if floatGroup {
+			stats.FloatGroupBytes += uint64(len(value))
 		}
 		if err = writer.Add(*k, value); err != nil {
 			return nil, err

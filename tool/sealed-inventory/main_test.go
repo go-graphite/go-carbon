@@ -209,14 +209,36 @@ func TestInventoryAndTranscode(t *testing.T) {
 	}
 	// Run all policies with deletion, then verify cleanup.
 	all := filepath.Join(root, "all.json")
-	if err = run([]string{"transcode", "-sst-dir", dir, "-tmp", temp, "-out", all, "-read-mb-s", "0"}); err != nil {
+	if err = run([]string{"transcode", "-sst-dir", dir, "-tmp", temp, "-out", all, "-policy", "current,float-codec,float-codec-min", "-read-mb-s", "0"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range loadReport(t, all).Files {
+		r, it := table(t, filepath.Join(dir, f.Name))
+		var sourceFloatBytes uint64
+		for k, v := it.First(); k != nil; k, v = it.Next() {
+			value, _, err := v.Value(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if isFloatGroup(k.UserKey, value) && k.Kind() == sstable.InternalKeyKindSet {
+				sourceFloatBytes += uint64(len(value))
+			}
+		}
+		if err := it.Error(); err != nil {
+			t.Fatal(err)
+		}
+		_ = it.Close()
+		_ = r.Close()
+		if f.Policies["current"].FloatGroupBytes != sourceFloatBytes || sourceFloatBytes == 0 {
+			t.Fatal("current float bytes disagree with source")
+		}
 		if p := f.Policies["current"]; p.Bytes != f.BaselineBytes || p.ChangedGroups != 0 {
 			t.Fatal("current rewrite changed source values")
 		}
 		for _, p := range f.Policies {
+			if p.FloatGroupBytes > sourceFloatBytes || p.FloatGroupBytes == 0 {
+				t.Fatal("candidate float byte bounds")
+			}
 			if p.OracleFailures > 0 {
 				t.Fatal("oracle failures")
 			}
@@ -416,8 +438,9 @@ func TestNativeFloatSSTTranscode(t *testing.T) {
 	if err := run([]string{"transcode", "-sst-dir", dir, "-tmp", temp, "-out", out, "-policy", "float-codec", "-read-mb-s", "0", "-keep"}); err != nil {
 		t.Fatal(err)
 	}
-	var changed uint64
-	for _, f := range loadReport(t, out).Files {
+	result := loadReport(t, out)
+	var changed, totalFloatBytes uint64
+	for _, f := range result.Files {
 		p := f.Policies["float-codec"]
 		if p.OracleFailures != 0 || !f.BaselineWithin3Pct {
 			t.Fatalf("oracle=%d baseline=%f", p.OracleFailures, f.BaselineDeltaPct)
@@ -429,6 +452,7 @@ func TestNativeFloatSSTTranscode(t *testing.T) {
 		}
 		compareTables(t, filepath.Join(dir, f.Name), paths[0])
 		r, it := table(t, paths[0])
+		var floatBytes uint64
 		for k, v := it.First(); k != nil; k, v = it.Next() {
 			value, _, err := v.Value(nil)
 			if err != nil {
@@ -440,9 +464,23 @@ func TestNativeFloatSSTTranscode(t *testing.T) {
 					t.Fatalf("native classification: %s %d %v", class, n, err)
 				}
 			}
+			class, _, err := classify(k.UserKey, value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasPrefix(class, "sealed/float-") && k.Kind() == sstable.InternalKeyKindSet {
+				floatBytes += uint64(len(value))
+			}
 		}
 		_ = it.Close()
 		_ = r.Close()
+		if p.FloatGroupBytes != floatBytes || floatBytes == 0 {
+			t.Fatalf("float bytes: report=%d actual=%d", p.FloatGroupBytes, floatBytes)
+		}
+		totalFloatBytes += floatBytes
+	}
+	if result.Policies["float-codec"].FloatGroupBytes != totalFloatBytes {
+		t.Fatal("float byte aggregation mismatch")
 	}
 	if changed == 0 {
 		t.Fatal("no native groups exercised")

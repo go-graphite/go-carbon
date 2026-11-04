@@ -39,6 +39,7 @@ type tally struct {
 }
 type policyReport struct {
 	Bytes                                        uint64
+	FloatGroupBytes                              uint64
 	SavedBytes                                   int64
 	WholeFileSavingPct, FloatBytesSavingPct      float64
 	EncodeDeltaNSPerPoint, DecodeDeltaNSPerPoint float64
@@ -294,6 +295,7 @@ func run(args []string) error {
 				result.Policies[name] = dst
 			}
 			dst.Bytes += p.Bytes
+			dst.FloatGroupBytes += p.FloatGroupBytes
 			dst.EncodeCPU += p.EncodeCPU
 			dst.DecodeCPU += p.DecodeCPU
 			dst.Points += p.Points

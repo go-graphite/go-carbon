@@ -133,6 +133,7 @@ Field names use Go's exported names (PascalCase). Top-level totals aggregate `Fi
 | `Level`, `LevelSource`, `WriterOptions` | Explicit level map or fallback L6, actual writer configuration and its source |
 | `BaselineBytes`, `BaselineDeltaPct`, `BaselineWithin3Pct` | Unchanged rewrite size; delta against original; required agreement diagnostic |
 | `Policies.*.Bytes`, `SavedBytes`, `WholeFileSavingPct` | Candidate rewrite size and savings against the **paired unchanged rewrite**, not a mix of original and rewritten sizes |
+| `Policies.*.FloatGroupBytes` | Exact sum of encoded eligible float SET-value frame lengths after policy selection, including unchanged fallbacks; excludes keys, outer SST compression and SST overhead |
 | `FloatBytesSavingPct` | Whole-file paired byte saving / original attributed float-group physical bytes; block/index effects are included in the numerator |
 | `EncodeCPU`, `DecodeCPU`, `Points` | Process CPU nanoseconds and eligible float-point denominator |
 | `EncodeNSPerPoint`, `DecodeNSPerPoint` | CPU / points, including full current fallback construction for candidate encoding |
