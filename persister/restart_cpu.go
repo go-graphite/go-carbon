@@ -17,10 +17,11 @@ func (p *Whisper) recordUpdate() {
 }
 
 func (p *Whisper) updateTokens() <-chan bool {
+	settings := p.settings()
 	// Auto has one admission budget, including during restart. An installed
 	// restart ticker can outlive the CPU budget while its observer waits for
 	// startup signals, so it must never shadow the automatic limit.
-	if p.maxUpdatesPerSecond == -1 {
+	if settings.maxUpdatesPerSecond == -1 {
 		if ticker := p.autoUpdate.ticker.Load(); ticker != nil {
 			return ticker.C
 		}
@@ -29,7 +30,7 @@ func (p *Whisper) updateTokens() <-chan bool {
 	if ticker := p.restartTicker.Load(); ticker != nil {
 		return ticker.C
 	}
-	return p.updateTicker.C
+	return settings.updateTicker.C
 }
 
 // CPU admission controls catch-up speed from the remaining process allowance.
@@ -37,13 +38,16 @@ func (p *Whisper) updateTokens() <-chan bool {
 // ordinary CPU headroom idle. The normal rate cap cannot constrain recovery
 // below the predecessor's throughput; process CPU admission remains in force.
 func (p *Whisper) setRestartRate() {
-	if p.maxUpdatesPerSecond == -1 {
-		p.autoUpdate.mu.Lock()
+	// Serialize the mode snapshot with live reload, so an observer cannot
+	// overwrite a new automatic reservation with a preceding fixed-mode rate.
+	p.autoUpdate.mu.Lock()
+	defer p.autoUpdate.mu.Unlock()
+	settings := p.settings()
+	if settings.maxUpdatesPerSecond == -1 {
 		p.setAutoRestartRate(p.autoUpdate.applied)
-		p.autoUpdate.mu.Unlock()
 		return
 	}
-	rateLimit := float64(p.maxUpdatesPerSecond)
+	rateLimit := float64(settings.maxUpdatesPerSecond)
 	floor := 0.
 	if p.restartFloor != nil {
 		floor = p.restartFloor()
@@ -93,11 +97,13 @@ func (p *Whisper) setAutoRestartRate(rate int) {
 	}
 }
 
-func (p *Whisper) stopRestartTicker() {
+func (p *Whisper) stopRestartTicker() { p.stopRestartTickerForReload(false) }
+
+func (p *Whisper) stopRestartTickerForReload(reloading bool) {
 	p.restartRateMu.Lock()
 	defer p.restartRateMu.Unlock()
 	p.restartStopping = true
-	if p.restartBudget != nil {
+	if p.restartBudget != nil && !reloading {
 		p.restartBudget.SetRateCeiling(0)
 	}
 	if ticker := p.restartTicker.Swap(nil); ticker != nil {

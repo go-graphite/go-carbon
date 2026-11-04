@@ -25,7 +25,8 @@ func (p *Whisper) SetWriteoutBatchReceiver(recv func() string) { p.tryRecv = rec
 func (p *Whisper) SetStoreUpdateBatchSize(size int) { p.storeUpdateBatchSize = max(1, min(size, 8)) }
 
 func (p *Whisper) canBatchShared() bool {
-	if p.storeUpdateBatchSize <= 1 {
+	settings := p.settings()
+	if settings.storeUpdateBatchSize <= 1 {
 		return false
 	}
 	_, ok := p.metricStore.(batchMetricStore)
@@ -33,18 +34,20 @@ func (p *Whisper) canBatchShared() bool {
 }
 
 func (p *Whisper) takeBatchToken() bool {
+	settings := p.settings()
 	if !p.throttleUpdates() {
 		return true
 	}
 	select {
 	case _, open := <-p.updateTokens():
-		return open || p.maxUpdatesPerSecond != -1
+		return open || settings.maxUpdatesPerSecond != -1
 	default:
 		return false
 	}
 }
 
 func (p *Whisper) storeSharedBatch(metrics []string) {
+	settings := p.settings()
 	start := time.Now()
 	ctx, timer := stagetime.Start(context.Background())
 	defer timer.Finish()
@@ -91,7 +94,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			return
 		}
 		var maintenance *store.ContinuationMaintenance
-		if p.outOfOrder.enabled {
+		if settings.outOfOrder.enabled {
 			m := p.sharedMaintenance()
 			maintenance = &m
 		}
@@ -124,8 +127,8 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 					p.confirm(batch)
 				}
 			}
-			if p.tagsEnabled && p.taggedFn != nil && strings.Contains(batch.Metric, ";") {
-				p.taggedFn(batch.Metric, false)
+			if settings.tagsEnabled && settings.taggedFn != nil && strings.Contains(batch.Metric, ";") {
+				settings.taggedFn(batch.Metric, false)
 			}
 			stagetime.ObserveUpdate(time.Since(start))
 		}

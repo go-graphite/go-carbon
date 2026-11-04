@@ -160,10 +160,10 @@ func (app *App) setMetadataPrewarmGate(p *persister.Whisper) {
 	limit := metadataPrewarmLimit(app.Config)
 	p.SetWarmFirst(metadataWarmFirst(conf))
 	if app.restartBudget != nil && app.restartBudget.Cores() > 0 {
-		core, delay := app.Cache, app.Config.Cache.WriteoutMaxDelay.Value()
+		core := app.Cache
 		core.SetRestartOrder(app.restartBudget.Active)
 		p.SetRestartBudget(app.restartBudget, func() float64 {
-			if delay > 0 {
+			if delay := core.WriteoutMaxDelay(); delay > 0 {
 				return float64(core.Len()) / delay.Seconds()
 			}
 			return 0

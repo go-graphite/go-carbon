@@ -58,7 +58,16 @@ func (m *autoUpdateMetrics) Describe(ch chan<- *prometheus.Desc) {
 
 func (m *autoUpdateMetrics) Collect(ch chan<- prometheus.Metric) {
 	p := m.owner.Load()
-	if p == nil || p.maxUpdatesPerSecond != -1 {
+	if p == nil {
+		return
+	}
+	// The registry can expose a replacement before Start publishes settings.
+	// Read only immutable constructor data until then, not uninitialized tickers.
+	mode := p.maxUpdatesPerSecond
+	if settings := p.liveSettings.Load(); settings != nil {
+		mode = settings.maxUpdatesPerSecond
+	}
+	if mode != -1 {
 		return
 	}
 	rate, target, reason := p.autoUpdateObservation()

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/restartcpu"
 	"github.com/go-graphite/go-carbon/points"
@@ -154,6 +155,57 @@ func TestAutoUpdateRateModes(t *testing.T) {
 			})
 		}
 	})
+}
+
+// A full cache scan can take seconds: /metrics, the stats collector and the
+// restart pacer must not wait for it. 1 Nov 2026: 15-17 s scrapes on a canary.
+func TestAutoUpdateScanDoesNotBlockReaders(t *testing.T) {
+	for _, reload := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reload=%v", reload), func(t *testing.T) {
+			p := &Whisper{}
+			p.SetMaxUpdatesPerSecond(-1)
+			p.liveSettings.Store(&whisperSettings{maxUpdatesPerSecond: -1, updateTicker: helper.NewThrottleTicker(0)})
+			entered, release := make(chan struct{}), make(chan struct{})
+			scan := func() cache.WriteoutState {
+				close(entered)
+				<-release
+				return steadyUpdateState()
+			}
+			p.SetAutoUpdateRate(scan, 1, 10)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if reload {
+					next := &Whisper{}
+					next.liveSettings.Store(&whisperSettings{maxUpdatesPerSecond: -1, updateTicker: helper.NewThrottleTicker(0)})
+					next.SetAutoUpdateRate(scan, 1, 10)
+					p.ReloadSettings(next)
+				} else {
+					p.sampleAutoUpdateRate()
+				}
+			}()
+			<-entered
+			observed := make(chan struct{})
+			go func() {
+				p.autoUpdateObservation()
+				p.setRestartRate()
+				close(observed)
+			}()
+			select {
+			case <-observed:
+			case <-time.After(time.Minute):
+				t.Fatal("autoUpdate.mu held during the cache scan")
+			}
+			close(release)
+			<-done
+			if rate, _, _ := p.autoUpdateObservation(); rate != 10 {
+				t.Fatalf("sample after the scan not applied: %g", rate)
+			}
+			if ticker := p.autoUpdate.ticker.Load(); ticker != nil {
+				ticker.Stop()
+			}
+		})
+	}
 }
 
 func TestAutoUpdateLimiterFollowsState(t *testing.T) {

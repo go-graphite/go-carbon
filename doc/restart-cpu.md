@@ -96,7 +96,8 @@ Without throughput history, the default write cost remains in use. This gives
 reservation sampling enough headroom to reach the token rate without using low
 predecessor throughput as a second rate limit, or making low auto demand slow
 startup warming. It does not raise the automatic token cap or the process CPU
-allowance. A SIGHUP replaces the persister but retains the shared CPU budget.
+allowance. SIGHUP updates compatible persister settings in place; structural changes
+rebuild the persister. Both paths retain the shared CPU budget.
 
 Warm-first prefetch keeps one queue reader per persister worker. Eligibility
 checks can wait for a cache shard lock, so a single reader would make one
