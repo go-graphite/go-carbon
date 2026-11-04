@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"runtime"
 	"slices"
 	"sort"
 	"sync/atomic"
@@ -17,6 +18,17 @@ type queueDeadlines struct {
 	settings *cacheSettings
 	released *time.Time
 	next     []time.Time
+}
+
+// matches is checked under the shard lock before using cached summaries.
+func (d *queueDeadlines) matches(s *cacheSettings) bool {
+	if d == nil || d.settings != s {
+		return false
+	}
+	if s.startupWriteout == nil {
+		return d.released == nil
+	}
+	return d.released == s.startupWriteout.released.Load()
 }
 
 func (m *itemMap) invalidateDeadline(slot int) {
@@ -46,47 +58,149 @@ func (m *itemMap) invalidateItemDeadline(it *item) {
 	clear(m.deadlines.next)
 }
 
-func (m *itemMap) readyAt(now time.Time, s *cacheSettings, yield func(*item)) time.Time {
+// readyAtRegion visits at most 256 slots. Callers hold the shard lock and may
+// release it between regions; each visit rechecks settings and startup release.
+func (m *itemMap) readyAtRegion(region int, now time.Time, s *cacheSettings, yield func(*item)) time.Time {
 	if m.deadlines == nil {
 		m.deadlines = &queueDeadlines{next: make([]time.Time, (len(m.slots)+(1<<queueRegionBits)-1)>>queueRegionBits)}
 	}
 	d := m.deadlines
-	var released *time.Time
-	if s.startupWriteout != nil {
-		released = s.startupWriteout.released.Load()
-	}
-	if d.settings != s || d.released != released {
+	if !d.matches(s) {
 		clear(d.next)
-		d.settings, d.released = s, released
+		d.settings = s
+		d.released = nil
+		if s.startupWriteout != nil {
+			d.released = s.startupWriteout.released.Load()
+		}
+	}
+
+	deadline := d.next[region]
+	if now.Before(deadline) {
+		return deadline
+	}
+	deadline = time.Time{}
+	ready := false
+	start := region << queueRegionBits
+	for _, slot := range m.slots[start:min(start+(1<<queueRegionBits), len(m.slots))] {
+		if slot.item == nil {
+			continue
+		}
+		at := writeoutDeadline(slot.item, s)
+		if !now.Before(at) {
+			ready = true
+			yield(slot.item)
+		} else if deadline.IsZero() || at.Before(deadline) {
+			deadline = at
+		}
+	}
+	d.next[region] = deadline
+	if ready {
+		d.next[region] = time.Time{}
+	}
+	return deadline
+}
+
+// SetWriteoutScanYield limits queue scans to one deadline region per lock visit
+// and yields CPU between visits during restart ordering. Enabled by default;
+// disabling restores whole-shard visits for workloads where the extra
+// scheduling is undesirable. Buffer
+// growth remains outside the lock in either mode. Reloads affect the next build.
+func (c *Cache) SetWriteoutScanYield(on bool) {
+	s := *c.settings.Load().(*cacheSettings)
+	s.writeoutScanYield = on
+	c.settings.Store(&s)
+}
+
+// queueScan retains the starting table across region visits. Slots never move
+// within a table. After a rehash, resolve its names in the current table before
+// inspecting items: Pop may already be decoding detached items without mu.
+// Arrivals behind the cursor notify the next build, as with a visited shard.
+// WriteoutReady and the persister's metric lock still govern actual writes.
+type queueScan struct {
+	slots []itemSlot
+	start int
+}
+
+// appendRegion visits at most 256 slots, and grows the candidate buffer outside
+// mu. A catalog-sized queue allocation/copy must never block live ingestion.
+func (scan *queueScan) appendRegion(shard *Shard, now time.Time, s *cacheSettings, batch bool, strategy WriteStrategy, q queue) (queue, time.Time, bool) {
+	shard.mu.Lock()
+	if scan.start == 0 {
+		scan.slots = shard.items.slots
 	}
 	var next time.Time
-	for region, deadline := range d.next {
-		if !now.Before(deadline) {
-			deadline = time.Time{}
-			ready := false
-			start := region << queueRegionBits
-			for _, slot := range m.slots[start:min(start+(1<<queueRegionBits), len(m.slots))] {
-				if slot.item == nil {
-					continue
-				}
-				at := writeoutDeadline(slot.item, s)
-				if !now.Before(at) {
-					ready = true
-					yield(slot.item)
-				} else if deadline.IsZero() || at.Before(deadline) {
-					deadline = at
-				}
+	current := len(scan.slots) > 0 && len(shard.items.slots) > 0 && &scan.slots[0] == &shard.items.slots[0]
+	if s.writeoutScanYield && batch && current && shard.items.deadlines.matches(s) {
+		// Coalesce deferred regions without visiting their table slots. Scanning
+		// this small summary array needs no extra lock or scheduler turn per region.
+		for scan.start < len(scan.slots) {
+			at := shard.items.deadlines.next[scan.start>>queueRegionBits]
+			if !now.Before(at) {
+				break
 			}
-			d.next[region] = deadline
-			if ready {
-				d.next[region] = time.Time{}
+			if next.IsZero() || at.Before(next) {
+				next = at
 			}
+			scan.start = min(scan.start+(1<<queueRegionBits), len(scan.slots))
 		}
-		if !deadline.IsZero() && (next.IsZero() || deadline.Before(next)) {
-			next = deadline
+		if scan.start == len(scan.slots) {
+			shard.mu.Unlock()
+			return q, next, false
 		}
 	}
-	return next
+	end := len(scan.slots)
+	if s.writeoutScanYield {
+		end = min(scan.start+(1<<queueRegionBits), end)
+	}
+	if cap(q)-len(q) < end-scan.start {
+		shard.mu.Unlock()
+		q = slices.Grow(q, end-scan.start)
+		shard.mu.Lock()
+		current = len(scan.slots) > 0 && len(shard.items.slots) > 0 && &scan.slots[0] == &shard.items.slots[0]
+	}
+	add := func(p *item) {
+		var key int64
+		switch strategy {
+		case MaximumLength:
+			key = int64(p.count())
+		case TimestampOrder:
+			key = p.compact.firstTimestamp()
+		}
+		q = append(q, queueItem{p.Metric, key})
+	}
+	if batch && current {
+		for region := scan.start >> queueRegionBits; region<<queueRegionBits < end; region++ {
+			if at := shard.items.readyAtRegion(region, now, s, add); !at.IsZero() && (next.IsZero() || at.Before(next)) {
+				next = at
+			}
+		}
+	} else {
+		for _, slot := range scan.slots[scan.start:end] {
+			p := slot.item
+			if p == nil {
+				continue
+			}
+			if !current {
+				p = shard.items.getHashed(p.hash, p.Metric)
+				if p == nil {
+					continue
+				}
+			}
+			if batch {
+				if at := writeoutDeadline(p, s); now.Before(at) {
+					if next.IsZero() || at.Before(next) {
+						next = at
+					}
+					continue
+				}
+			}
+			add(p)
+		}
+	}
+	scan.start = end
+	more := end < len(scan.slots)
+	shard.mu.Unlock()
+	return q, next, more
 }
 
 type queueItem struct {
@@ -141,24 +255,15 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 		c.mu.Unlock()
 	}()
 
-	orderKey := func(_ *item) int64 {
-		return 0
-	}
-
-	switch writeStrategy {
-	case MaximumLength:
-		orderKey = func(values *item) int64 {
-			return int64(values.count())
-		}
-	case TimestampOrder:
-		orderKey = func(values *item) int64 {
-			return values.compact.firstTimestamp()
-		}
-	}
-
 	s := c.settings.Load().(*cacheSettings)
 	batch := c.batchWrites(s)
-	q, scratch := c.takeQueue(int(c.Len()), batch)
+	n := int(c.Len())
+	if n == 0 {
+		// Keep the previous scratch and avoid allocating from empty tombstone
+		// tables. An arrival during this check wakes the next rebuild.
+		return nil, time.Time{}, false
+	}
+	q, scratch := c.takeQueue(n, batch)
 	index := int32(0)
 	var next time.Time
 	var shardRanges [shardCount]struct{ next, end int32 }
@@ -166,23 +271,26 @@ func (c *Cache) makeQueuePlan(now time.Time) (chan string, time.Time, bool) {
 	for i := 0; i < shardCount; i++ {
 		shard := c.data[i]
 		shardRanges[i].next = index
-		shard.mu.Lock()
 
-		add := func(p *item) {
-			q = append(q, queueItem{p.Metric, orderKey(p)})
-			index++
-		}
-		if batch {
-			if at := shard.items.readyAt(now, s, add); !at.IsZero() && (next.IsZero() || at.Before(next)) {
+		var scan queueScan
+		for {
+			var at time.Time
+			var more bool
+			q, at, more = scan.appendRegion(shard, now, s, batch, writeStrategy, q)
+			if !at.IsZero() && (next.IsZero() || at.Before(next)) {
 				next = at
 			}
-		} else {
-			for _, p := range shard.items.all {
-				add(p)
+			if !more {
+				break
+			}
+			// Hand runnable receivers the CPU as well as the lock. In particular,
+			// reacquiring an uncontended mutex need not schedule a waiting handler.
+			if oldest {
+				runtime.Gosched()
 			}
 		}
+		index = int32(len(q))
 
-		shard.mu.Unlock()
 		shardRanges[i].end = index
 	}
 

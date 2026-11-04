@@ -501,6 +501,9 @@ func (app *App) ReloadConfig() error {
 	if before.BloomSize != after.BloomSize {
 		app.Cache.SetBloomSize(after.BloomSize)
 	}
+	if before.WriteoutScanYield != after.WriteoutScanYield {
+		app.Cache.SetWriteoutScanYield(after.WriteoutScanYield)
+	}
 	if before.WriteoutMinPoints != after.WriteoutMinPoints || before.WriteoutMaxDelay != after.WriteoutMaxDelay {
 		if err := app.Cache.SetWriteoutBatching(after.WriteoutMinPoints, after.WriteoutMaxDelay.Value()); err != nil {
 			return err
@@ -1031,6 +1034,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	if err = core.SetWriteoutSpread(conf.Cache.WriteoutSpread); err != nil {
 		return nil, err
 	}
+	core.SetWriteoutScanYield(conf.Cache.WriteoutScanYield)
 	core.SetWriteoutRestoreSpread(conf.Cache.WriteoutRestoreSpread)
 	core.SetWriteoutSparseSpread(conf.Cache.WriteoutSparseSpread)
 	core.SetWriteoutStartupSpread(conf.Cache.WriteoutStartupSpread)
