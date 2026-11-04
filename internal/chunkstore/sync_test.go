@@ -21,7 +21,7 @@ func TestAdministrativeMutationsFollowSyncPolicy(t *testing.T) {
 		t.Run(mutation.name, func(t *testing.T) {
 			for _, policy := range adminSyncPolicies() {
 				t.Run(policy.name, func(t *testing.T) {
-					synctest.Test(t, func(t *testing.T) {
+					pebbleSynctest(t, func(t *testing.T) {
 						runAdministrativeMutationSyncPolicy(t, mutation, policy)
 					})
 				})
@@ -277,7 +277,7 @@ func assertAdminState(t *testing.T, s *Store, want adminState) {
 }
 
 func TestPeriodicSyncWithConcurrentUpdates(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		strict := vfs.NewStrictMem()
 		s, now := openTestStore(t, "/store", Options{fs: strict, SyncInterval: time.Millisecond})
 		closed := false
@@ -351,7 +351,7 @@ func checkSyncPolicyCrashRecovery(t *testing.T, exact bool) {
 		{name: "shutdown sync", interval: time.Hour, wantPoints: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				strict := vfs.NewStrictMem()
 				fs := &walSyncFS{FS: strict}
 				const dir = "/store"

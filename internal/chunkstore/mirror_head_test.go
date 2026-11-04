@@ -273,7 +273,7 @@ func TestCanonicalRunBitmapIsBounded(t *testing.T) {
 func TestCanonicalChunkCrashAtomicity(t *testing.T) {
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				strict := vfs.NewStrictMem()
 				db, now := openTestStore(t, "/store", Options{ExactBlocks: true, fs: strict, SyncInterval: time.Second})
 				m := createTestMetric(t, db, "mirror")

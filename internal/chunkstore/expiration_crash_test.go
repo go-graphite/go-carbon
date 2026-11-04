@@ -14,7 +14,7 @@ import (
 func TestExpirationBatchCrashRecovery(t *testing.T) {
 	for _, action := range []string{"lost", "synced", "flushed", "recreated", "periodic"} {
 		t.Run(action, func(t *testing.T) {
-			synctest.Test(t, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
 				ctx := context.Background()
 				strict := vfs.NewStrictMem()
 				fs := &walSyncFS{FS: strict}

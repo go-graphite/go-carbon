@@ -103,7 +103,7 @@ func TestRelayoutApplyMetricFailureDoesNotBlockGroup(t *testing.T) {
 }
 
 func TestRelayoutBackgroundRetriesFailedPass(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		fail := true
 		codec := &controlledRelayoutCodec{before: func(_ context.Context, name string) error {
 			if fail && name == "a" {

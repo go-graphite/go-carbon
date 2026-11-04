@@ -40,7 +40,7 @@ func (c testColdCodec) Repack(ctx context.Context, io ContinuationIO, r ColdPack
 func TestColdPackPagesAndBusyStripe(t *testing.T) {
 	// Keep the 2 ms publication validation budget independent of host scheduling
 	// and disk IO: this test covers pagination and a deliberately busy stripe.
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		ctx := context.Background()
 		s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true, TimeBuckets: true, Continuation: testColdCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 		defer closeTestStore(t, s)
@@ -216,7 +216,7 @@ func TestColdPackPacerRetainsIndependentBudgets(t *testing.T) {
 }
 
 func TestColdPackBackgroundShortStepsAndReload(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
 		s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true, TimeBuckets: true, Continuation: testColdCodec{}, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 		defer closeTestStore(t, s)
 		for i := range 130 {
