@@ -107,10 +107,13 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 }
 
 type autoUpdateRate struct {
+	snapshot                cache.WriteoutState
 	mu                      sync.Mutex
 	controller              autoUpdateController
 	state                   func() cache.WriteoutState
 	floor, ceiling, applied int
+	ordinary                int
+	target                  float64
 	reason                  string
 	stopping                bool
 	ticker                  atomic.Pointer[helper.ThrottleTicker]
@@ -155,22 +158,38 @@ func (p *Whisper) autoUpdateState(state func() cache.WriteoutState) cache.Writeo
 // Caller holds autoUpdate.mu. Also used before publishing a new rate mode.
 func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
 	a := &p.autoUpdate
-	previous := a.applied
-	rate := a.controller.step(time.Now(), s, a.floor, a.ceiling)
-	a.reason = a.controller.reason
+	a.snapshot = s
+	a.ordinary = a.controller.step(time.Now(), s, a.floor, a.ceiling)
+	p.applyAutoUpdateRateLocked()
+}
+
+// Keep the ordinary controller independent of the temporary durability floor.
+// Caller holds autoUpdate.mu, including during reload before mode publication.
+func (p *Whisper) applyAutoUpdateRateLocked() {
+	a := &p.autoUpdate
+	if a.stopping || a.ordinary <= 0 {
+		return
+	}
+	s := a.snapshot
+	previous, rate := a.applied, a.ordinary
+	a.target, a.reason = a.controller.target, a.controller.reason
+	if floor := p.mandatoryRestartRate(); float64(rate) < floor {
+		rate = int(math.Ceil(min(floor, float64(int(^uint(0)>>1)/2))))
+		a.target, a.reason = max(a.target, floor), "restart"
+	}
+	p.setAutoRestartRate(rate)
 	// Avoid rebuilding tickers for sub-percent measurement noise.
-	if a.ticker.Load() != nil && previous >= a.floor && (a.ceiling <= 0 || previous <= a.ceiling) && previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01) {
+	if a.ticker.Load() != nil && (previous == rate || previous >= a.floor && (a.ceiling <= 0 || previous <= a.ceiling) && previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01)) {
 		return
 	}
 	a.applied = rate
-	p.setAutoRestartRate(rate)
 	if a.metrics != nil {
-		a.metrics.adjust(a.controller.reason)
+		a.metrics.adjust(a.reason)
 	}
 	if p.logger != nil && (previous == 0 || math.Abs(float64(rate-previous)) >= float64(previous)*.25) {
 		p.logger.Info("automatic writeout rate adjusted", zap.Int("updates_per_second", rate),
-			zap.Int("previous_updates_per_second", previous), zap.Float64("target_updates_per_second", a.controller.target),
-			zap.String("reason", a.controller.reason), zap.Int64("cached_metrics", s.Metrics), zap.Duration("oldest_age", s.OldestAge))
+			zap.Int("previous_updates_per_second", previous), zap.Float64("target_updates_per_second", a.target),
+			zap.String("reason", a.reason), zap.Int64("cached_metrics", s.Metrics), zap.Duration("oldest_age", s.OldestAge))
 	}
 	old := a.ticker.Swap(helper.NewThrottleTickerWithBurst(rate, max(1, rate/25)))
 	if old != nil {

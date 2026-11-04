@@ -53,6 +53,7 @@ type Budget struct {
 	floorAt, preparedAt  time.Time
 	checkpointPreparedAt time.Time
 	floorCredit          float64
+	floorPending         int
 	floorGrants          uint64
 	severeAt             time.Time
 	stalled              bool
@@ -194,11 +195,7 @@ func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64, 
 	floor := max(b.floor, b.steadyRate)
 	burst := max(1, floor*.04)
 	if floor > 0 && (updates > 0 || class == preparationWork) {
-		if !b.floorAt.IsZero() {
-			b.floorCredit += now.Sub(b.floorAt).Seconds() * floor
-		}
-		b.floorCredit = min(burst, b.floorCredit)
-		b.floorAt = now
+		b.refillFloorLocked(now)
 	}
 	mandatory := floor > 0 && b.floorCredit >= 0 && (updates > 0 ||
 		class == preparationWork && (b.preparedAt.IsZero() || now.Sub(b.preparedAt) >= 100*time.Millisecond))
@@ -235,6 +232,35 @@ func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64, 
 	return delay
 }
 
+// Retain at most one second of service owed to pending durability work. A
+// scheduler, queue or I/O pause must not discard floor tokens just because it
+// lasts longer than the small idle burst. CPU-funded writes debit the same
+// balance; this repays missed floor service, not extra catch-up throughput.
+func (b *Budget) refillFloorLocked(now time.Time) {
+	floor := max(b.floor, b.steadyRate)
+	burst := max(1, floor)
+	if b.floorPending == 0 {
+		// Idle time adds no credit beyond the idle burst, but must not erase
+		// service owed to the preceding busy window. A shrinking queue floor
+		// still bounds retained service to one second at the current rate.
+		burst = min(burst, max(max(1, floor*.04), b.floorCredit))
+	}
+	if !b.floorAt.IsZero() {
+		b.floorCredit += now.Sub(b.floorAt).Seconds() * floor
+	}
+	b.floorCredit = min(burst, b.floorCredit)
+	b.floorAt = now
+}
+
+// Account transitions as well as admissions, so genuinely idle time still banks
+// only 40ms and cannot be mistaken for a pending writer's missed service.
+func (b *Budget) floorWork(delta int) {
+	b.mu.Lock()
+	b.refillFloorLocked(time.Now())
+	b.floorPending += delta
+	b.mu.Unlock()
+}
+
 func (b *Budget) writeCost() float64 {
 	rate := math.Float64frombits(b.rateCeiling.Load())
 	if rate <= 0 {
@@ -259,6 +285,10 @@ func (b *Budget) WaitCheckpoint(ctx context.Context) error { return b.waitCPU(ct
 func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
 	if !b.Active() {
 		return ctx.Err()
+	}
+	if checkpoint {
+		b.floorWork(1)
+		defer b.floorWork(-1)
 	}
 	for {
 		if !b.Active() {

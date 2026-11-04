@@ -33,6 +33,22 @@ func (p *Whisper) updateTokens() <-chan bool {
 	return settings.updateTicker.C
 }
 
+// mandatoryRestartRate is temporary: automatic control resumes exactly its
+// ordinary rate when the shared restart budget finishes.
+func (p *Whisper) mandatoryRestartRate() float64 {
+	if p.restartBudget == nil || !p.restartBudget.Active() {
+		return 0
+	}
+	floor := p.restartBudget.SteadyRate()
+	if p.restartFloor != nil {
+		floor = max(floor, p.restartFloor())
+	}
+	if math.IsNaN(floor) || math.IsInf(floor, 0) {
+		return 0
+	}
+	return floor
+}
+
 // CPU admission controls catch-up speed from the remaining process allowance.
 // A 3x predecessor-rate ceiling limits exceptional cheap work without leaving
 // ordinary CPU headroom idle. The normal rate cap cannot constrain recovery
@@ -44,7 +60,7 @@ func (p *Whisper) setRestartRate() {
 	defer p.autoUpdate.mu.Unlock()
 	settings := p.settings()
 	if settings.maxUpdatesPerSecond == -1 {
-		p.setAutoRestartRate(p.autoUpdate.applied)
+		p.applyAutoUpdateRateLocked()
 		return
 	}
 	rateLimit := float64(settings.maxUpdatesPerSecond)
@@ -141,6 +157,7 @@ func (p *Whisper) startRestartWriteout() {
 				return
 			case at := <-ticker.C:
 				if !budget.Active() {
+					p.setRestartRate()
 					p.stopRestartTicker()
 					return
 				}
