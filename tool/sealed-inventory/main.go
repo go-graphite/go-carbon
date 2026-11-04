@@ -377,6 +377,11 @@ func outside(input, path string) error {
 		tail = filepath.Join(filepath.Base(cur), tail)
 		cur = parent
 	}
+	// Compare resolved paths on both sides: a symlinked input (macOS /var -> /private/var)
+	// would otherwise never contain the resolved output.
+	if resolved, e := filepath.EvalSymlinks(input); e == nil {
+		input = resolved
+	}
 	rel, err := filepath.Rel(input, abs)
 	if err != nil {
 		return err
