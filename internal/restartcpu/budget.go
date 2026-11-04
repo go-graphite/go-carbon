@@ -13,7 +13,8 @@ import (
 // Checkpoint loading, warming and unfinished restart writeout share admission.
 // Credits expire after 5ms so idle time cannot fund a catch-up burst. Work
 // already admitted may overshoot briefly. Mandatory input and reads never wait;
-// duty-paced checkpoints and bounded required validation can bypass CPU debt.
+// writeout at its rate floor, duty-paced checkpoints and bounded required
+// preparation can bypass debt.
 type Budget struct {
 	mu                   sync.Mutex
 	cores, credit, used  float64
@@ -40,7 +41,6 @@ type Budget struct {
 	checkpointTotal      atomic.Uint64
 	checkpointFailures   atomic.Uint64
 	checkpointTimeouts   atomic.Uint64
-	checkpointPreparedAt time.Time
 	rateCeiling          atomic.Uint64
 	steadyRate           float64
 	source               string
@@ -50,6 +50,13 @@ type Budget struct {
 	released             bool
 	floor, rate, process float64
 	belowAt, warnedAt    time.Time
+	floorAt, preparedAt  time.Time
+	checkpointPreparedAt time.Time
+	floorCredit          float64
+	floorGrants          uint64
+	severeAt             time.Time
+	stalled              bool
+	stalls               uint64
 }
 
 func New(cores float64) *Budget {
@@ -125,6 +132,7 @@ type workClass uint8
 const (
 	optionalWork workClass = iota
 	writeoutWork
+	preparationWork
 	checkpointWork
 	checkpointValidationWork
 )
@@ -136,10 +144,10 @@ func (b *Budget) reserveWork(now time.Time, writeout bool, cost float64, checkpo
 	} else if writeout {
 		class = writeoutWork
 	}
-	return b.reserveAdmission(now, class, cost)
+	return b.reserveAdmission(now, class, cost, 0)
 }
 
-func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64) time.Duration {
+func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64, updates int) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if now.Sub(b.at) >= 5*time.Millisecond {
@@ -180,13 +188,39 @@ func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64) 
 	if class != checkpointWork {
 		minimum = b.checkpointShareLocked() * .005
 	}
-	// The serial stream already duty-paces its bounded share. Whole-process
-	// debt from unrelated maintenance or receivers must not veto it forever.
-	// Legacy validation gets a separate progress window per 100ms, including
-	// when no writeout floor exists. Queue preparation cannot consume it.
-	mandatory := class == checkpointWork || class == checkpointValidationWork &&
+	// Durability has a mandatory rate floor, just as intake and reads have
+	// mandatory CPU. Debit every admitted write, including CPU-funded catch-up,
+	// so a CPU shortfall cannot add a second stream of floor-rate writes.
+	floor := max(b.floor, b.steadyRate)
+	burst := max(1, floor*.04)
+	if floor > 0 && (updates > 0 || class == preparationWork) {
+		if !b.floorAt.IsZero() {
+			b.floorCredit += now.Sub(b.floorAt).Seconds() * floor
+		}
+		b.floorCredit = min(burst, b.floorCredit)
+		b.floorAt = now
+	}
+	mandatory := floor > 0 && b.floorCredit >= 0 && (updates > 0 ||
+		class == preparationWork && (b.preparedAt.IsZero() || now.Sub(b.preparedAt) >= 100*time.Millisecond))
+	// Bulk checkpoint workers already duty-pace their measured windows to
+	// their shared allowance. Whole-process debt must not veto that bounded
+	// share: unrelated maintenance/receivers can otherwise starve it forever.
+	// Legacy validation gets one required preparation window per 100ms even
+	// without a writeout floor; it must also finish before warming can end.
+	mandatory = mandatory || class == checkpointWork || class == checkpointValidationWork &&
 		(b.checkpointPreparedAt.IsZero() || now.Sub(b.checkpointPreparedAt) >= 100*time.Millisecond)
 	if b.credit >= minimum || mandatory {
+		if b.credit < minimum && updates > 0 {
+			b.floorGrants++
+		}
+		if floor > 0 && updates > 0 {
+			// Bound debt as well as idle credit: earlier catch-up must not
+			// postpone the mandatory floor for more than one short window.
+			b.floorCredit = max(-max(burst, float64(updates)), b.floorCredit-float64(updates))
+		}
+		if class == preparationWork {
+			b.preparedAt = now
+		}
 		if class == checkpointValidationWork {
 			b.checkpointPreparedAt = now
 		}
@@ -194,7 +228,11 @@ func (b *Budget) reserveAdmission(now time.Time, class workClass, cost float64) 
 		b.reserved += cost
 		return 0
 	}
-	return min(20*time.Millisecond, max(time.Millisecond, time.Duration((minimum-b.credit)/b.cores*float64(time.Second))))
+	delay := min(20*time.Millisecond, max(time.Millisecond, time.Duration((minimum-b.credit)/b.cores*float64(time.Second))))
+	if floor > 0 && updates > 0 {
+		delay = min(delay, max(time.Millisecond, time.Duration(-b.floorCredit/floor*float64(time.Second))))
+	}
+	return delay
 }
 
 func (b *Budget) writeCost() float64 {
@@ -214,7 +252,8 @@ func (b *Budget) Wait(ctx context.Context) error { return b.waitCPU(ctx, false) 
 
 // WaitCheckpoint admits required legacy validation with a bounded progress
 // window even under CPU debt and without a writeout floor. Bulk checkpoint
-// streams use Checkpoint.Wait instead. No view or shard lock may be held.
+// streams use Checkpoint.Wait instead.
+// No view or shard lock may be held.
 func (b *Budget) WaitCheckpoint(ctx context.Context) error { return b.waitCPU(ctx, true) }
 
 func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
@@ -232,7 +271,7 @@ func (b *Budget) waitCPU(ctx context.Context, checkpoint bool) error {
 		if checkpoint {
 			class = checkpointValidationWork
 		}
-		delay := b.reserveAdmission(time.Now(), class, max(.001, b.writeCost()))
+		delay := b.reserveAdmission(time.Now(), class, max(.001, b.writeCost()), 0)
 		if delay == 0 {
 			b.warmGrants.Add(1)
 			return nil

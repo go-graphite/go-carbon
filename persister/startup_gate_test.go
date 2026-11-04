@@ -364,8 +364,8 @@ func TestStartupWriteoutPriorityAtCPUAllowance(t *testing.T) {
 		defer func() { cancel(); <-warming }()
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
-		if budget.Updates() != 0 {
-			t.Fatal("cold writeout bypassed the shared CPU allowance")
+		if got := budget.Updates(); got < 90 || got > 110 {
+			t.Fatal("mandatory writes must reach the floor while catch-up waits for CPU", got)
 		}
 		if s := budget.State(); math.IsInf(s.Writeout, 1) || s.Warming+s.Writeout > 2 {
 			t.Fatal(s)

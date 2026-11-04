@@ -27,8 +27,8 @@ func (b *Budget) WaitWriteoutBatch(exit <-chan bool, updates int) bool {
 	return b.waitWork(exit, false, max(1, updates))
 }
 
-// WaitPrefetch admits required queue preparation or cold-state prefetch from
-// the same process credit. It cannot wait behind the writes that need it.
+// WaitPrefetch shares process credit for required queue/cold-state preparation,
+// with bounded progress windows when CPU debt would block the writeout floor.
 // Pair a successful admission with EndPrefetch.
 func (b *Budget) WaitPrefetch(exit <-chan bool) bool { return b.waitWork(exit, true, 1) }
 func (b *Budget) BeginPrefetch() {
@@ -44,7 +44,11 @@ func (b *Budget) waitWork(exit <-chan bool, warming bool, updates int) bool {
 	}
 	pending.Add(1)
 	for b.Active() {
-		delay := b.reserveDelay(time.Now(), true, float64(updates)*b.writeCost())
+		writes, class := updates, writeoutWork
+		if warming {
+			writes, class = 0, preparationWork
+		}
+		delay := b.reserveAdmission(time.Now(), class, float64(updates)*b.writeCost(), writes)
 		if delay == 0 {
 			break
 		}
@@ -66,8 +70,18 @@ func (b *Budget) RecordWrite()    { b.written.Add(1) }
 func (b *Budget) Updates() uint64 { return b.written.Load() }
 
 // ObserveWriteout samples confirmed writes, not attempts or queue admissions.
-// The caller logs a warning when a floor violation persists for more than 10s.
+// Tests and callers without a queue sample treat a positive floor as backlog.
 func (b *Budget) ObserveWriteout(floor, rate float64) bool {
+	warn, _ := b.ObserveWriteoutBacklog(floor, rate, floor > 0)
+	return warn
+}
+
+// ObserveWriteoutBacklog reports a warning after 10s, then at most every five
+// minutes. A sustained severe shortfall escalates once after three minutes.
+// Only eligible backlog counts: ordinary batching may legitimately be quiet.
+func (b *Budget) ObserveWriteoutBacklog(floor, rate float64, backlog bool) (warn, failed bool) {
+	// An in-flight commit may own the last eligible cache item.
+	backlog = backlog || b.writers.Load() > 0
 	now := time.Now()
 	if b.cores > 0 {
 		b.delay(now)
@@ -75,18 +89,30 @@ func (b *Budget) ObserveWriteout(floor, rate float64) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.released, b.floor, b.rate = true, floor, rate
-	if floor <= 0 || rate >= floor {
+	if !backlog || floor <= 0 || rate >= .5*floor {
+		b.severeAt, b.stalled = time.Time{}, false
+	} else {
+		if b.severeAt.IsZero() {
+			b.severeAt = now
+		}
+		if !b.stalled && now.Sub(b.severeAt) >= 3*time.Minute {
+			b.stalled = true
+			b.stalls++
+			failed = true
+		}
+	}
+	if !backlog || floor <= 0 || rate >= floor {
 		b.belowAt = time.Time{}
-		return false
+		return false, failed
 	}
 	if b.belowAt.IsZero() {
 		b.belowAt = now
 	}
-	if now.Sub(b.belowAt) > 10*time.Second && (b.warnedAt.IsZero() || now.Sub(b.warnedAt) >= 10*time.Second) {
+	if now.Sub(b.belowAt) > 10*time.Second && (b.warnedAt.IsZero() || now.Sub(b.warnedAt) >= 5*time.Minute) {
 		b.warnedAt = now
-		return true
+		warn = true
 	}
-	return false
+	return warn, failed
 }
 
 type State struct {
@@ -94,6 +120,8 @@ type State struct {
 	WarmGrants, WriteGrants, CheckpointGrants, CheckpointWork, CheckpointTotal uint64
 	CheckpointLoading                                                          bool
 	BelowFor                                                                   time.Duration
+	Stalled                                                                    bool
+	Stalls, FloorGrants                                                        uint64
 }
 
 func (b *Budget) SetRateCeiling(rate float64) { b.rateCeiling.Store(math.Float64bits(rate)) }
@@ -105,7 +133,8 @@ func (b *Budget) State() State {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := State{Allowance: b.cores, Process: b.process, Floor: b.floor, Rate: b.rate,
-		Ceiling:    math.Float64frombits(b.rateCeiling.Load()),
+		Ceiling: math.Float64frombits(b.rateCeiling.Load()),
+		Stalled: b.stalled && active, Stalls: b.stalls, FloorGrants: b.floorGrants,
 		WarmGrants: b.warmGrants.Load(), WriteGrants: b.writeGrants.Load(),
 		CheckpointGrants: b.checkpointGrants.Load(), CheckpointWork: b.checkpointWork.Load(),
 		CheckpointTotal: b.checkpointTotal.Load(), CheckpointLoading: b.checkpoints.Load() > 0}
@@ -154,15 +183,18 @@ var (
 	allowanceDesc          = prometheus.NewDesc("restart_cpu_allowance_cores", "Whole-process restart CPU allowance.", nil, nil)
 	ceilingDesc            = prometheus.NewDesc("restart_cpu_writeout_ceiling_updates_per_second", "Restart CPU reservation rate; fixed mode also uses it for rate tokens, auto mode has its own token limit. Zero selects saved/default write cost.", nil, nil)
 	checkpointProgressDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_bytes", "Checkpoint stream progress in file bytes; total is zero until known.", []string{"kind"}, nil)
+	checkpointLoadingDesc  = prometheus.NewDesc("restart_cpu_checkpoint_loading", "One while a checkpoint accelerator load is pending or running.", nil, nil)
 	checkpointFailuresDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_failures_total", "Invalid or failed enabled checkpoint loads, including unavailable checkpoints and timeouts.", nil, nil)
 	checkpointTimeoutsDesc = prometheus.NewDesc("restart_cpu_checkpoint_load_timeouts_total", "Checkpoint loads or legacy validation that exceeded their deadline.", nil, nil)
-	checkpointLoadingDesc  = prometheus.NewDesc("restart_cpu_checkpoint_loading", "One while a checkpoint accelerator load is pending or running.", nil, nil)
+	stalledDesc            = prometheus.NewDesc("restart_cpu_writeout_stalled", "One after three minutes below half the writeout floor with eligible backlog during restart pacing.", nil, nil)
+	stallsDesc             = prometheus.NewDesc("restart_cpu_writeout_stalls_total", "Sustained severe restart writeout shortfalls, counted once per escalation.", nil, nil)
+	floorGrantsDesc        = prometheus.NewDesc("restart_cpu_writeout_floor_grants_total", "Writeout batches admitted at the mandatory rate floor despite process CPU debt.", nil, nil)
 )
 
 type metrics struct{ budget atomic.Pointer[Budget] }
 
 func (m *metrics) Describe(ch chan<- *prometheus.Desc) {
-	for _, d := range []*prometheus.Desc{grantDesc, countDesc, floorDesc, rateDesc, processDesc, allowanceDesc, ceilingDesc, checkpointProgressDesc, checkpointLoadingDesc, checkpointFailuresDesc, checkpointTimeoutsDesc} {
+	for _, d := range []*prometheus.Desc{grantDesc, countDesc, floorDesc, rateDesc, processDesc, allowanceDesc, ceilingDesc, checkpointProgressDesc, checkpointLoadingDesc, checkpointFailuresDesc, checkpointTimeoutsDesc, stalledDesc, stallsDesc, floorGrantsDesc} {
 		ch <- d
 	}
 }
@@ -190,6 +222,13 @@ func (m *metrics) Collect(ch chan<- prometheus.Metric) {
 		loading = 1
 	}
 	ch <- prometheus.MustNewConstMetric(checkpointLoadingDesc, prometheus.GaugeValue, loading)
+	stalled := 0.
+	if s.Stalled {
+		stalled = 1
+	}
+	ch <- prometheus.MustNewConstMetric(stalledDesc, prometheus.GaugeValue, stalled)
+	ch <- prometheus.MustNewConstMetric(stallsDesc, prometheus.CounterValue, float64(s.Stalls))
+	ch <- prometheus.MustNewConstMetric(floorGrantsDesc, prometheus.CounterValue, float64(s.FloorGrants))
 }
 
 func (b *Budget) InitPrometheus(reg prometheus.Registerer) {

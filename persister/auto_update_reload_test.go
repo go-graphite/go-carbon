@@ -256,8 +256,13 @@ func TestAutoUpdateLiveReload(t *testing.T) {
 							t.Errorf("fixed admission regressed: %.0f/s want %.0f/s", rate, want)
 						}
 					}
-					if tc.active && cores > allowance+.2 {
-						t.Errorf("restart CPU admission exceeded allowance: %.2f", cores)
+					// Only the mandatory floor can exceed a stale CPU allowance.
+					floorCPU := 5 + 20144*tc.cost
+					if tc.active && cores > max(allowance, floorCPU)+.2 {
+						t.Errorf("restart catch-up exceeded allowance and mandatory floor: %.2f", cores)
+					}
+					if cpuBound && floorCPU > allowance && (rate < 20144*.99 || rate > 20144*1.01) {
+						t.Errorf("CPU overload must admit the floor while withholding catch-up: %.0f/s", rate)
 					}
 					if cpuBound && rate < 16000 {
 						t.Errorf("restart CPU headroom left idle: %.0f/s", rate)

@@ -939,12 +939,6 @@ func (app *App) Start() (err error) {
 
 func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers bool) error {
 	// Receivers and inherited input are ready before metadata scanning runs.
-	if app.restartBudget != nil {
-		floor := core.Size()
-		app.restartBudget.SetDrain(func() bool {
-			return core.PendingOutstanding() == 0 && (floor == 0 || core.Size() <= floor)
-		})
-	}
 	close(app.metadataPrewarmReady)
 	conf := app.Config
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
@@ -964,6 +958,7 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 		app.startMetadataPrewarm("catalog", core.MetricNames())
 	}
 	if app.restartBudget != nil {
+		app.restartBudget.SetDrain(restartDrainState(core, app.storeRestoreDone))
 		app.restartBudget.SetHistoryState(restartHistoryState(core, app.storeRestoreDone))
 	}
 	if app.MetricStore != nil && app.Carbonserver != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
