@@ -233,6 +233,9 @@ func TestColdPackParallelCrashResume(t *testing.T) {
 				if st := s.ColdPackStats(); st.Passes != 1 || st.ActiveWorkers != 0 || st.PendingMetrics != 0 {
 					t.Fatalf("resume: %+v", st)
 				}
+				if st := s.ColdPackStats(); st.StoredPoints != count*600 || st.StoredMetrics != count {
+					t.Fatalf("crash replay lost or double counted points: %+v", st)
+				}
 				for _, name := range names {
 					meta, err := s.Metadata(context.Background(), name)
 					if err != nil {

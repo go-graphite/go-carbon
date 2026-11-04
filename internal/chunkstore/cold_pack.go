@@ -85,6 +85,11 @@ var ErrColdPackBudget = errors.New("cold pack operation exceeds bounded budget")
 
 type RepackStats struct {
 	Metrics, Blocks, Points, InputBytes, OutputBytes, Skipped uint64
+	// ObservedPoints counts only descriptors consumed before the returned
+	// cursor, even when a page reads ahead. Observed is false for unsupported
+	// layouts. These fields do not describe points rewritten by maintenance.
+	ObservedPoints uint64
+	Observed       bool
 }
 
 type ColdPackRequest struct {
@@ -112,20 +117,25 @@ type ColdPackStats struct {
 	ActiveWorkers                                    int
 	Active                                           bool
 	Mode, Error                                      string
+	// Last completed pass, published together under mu. The timestamp is zero
+	// until a pass completes (or a compatible checkpoint restores its result).
+	StoredPoints, StoredMetrics uint64
+	StoredAt                    int64
 }
 
 type coldPackState struct {
-	mu          sync.Mutex
-	options     ColdPackOptions
-	stats       ColdPackStats
-	run         sync.Mutex
-	format      atomic.Bool
-	cleanUnpack bool
-	passFailed  bool
-	pending     []*coldPackWork
-	wake        chan struct{}
-	cancel      context.CancelFunc
-	done        chan struct{}
+	mu                      sync.Mutex
+	options                 ColdPackOptions
+	stats                   ColdPackStats
+	run                     sync.Mutex
+	format                  atomic.Bool
+	cleanUnpack             bool
+	passFailed              bool
+	passPoints, passMetrics uint64
+	pending                 []*coldPackWork
+	wake                    chan struct{}
+	cancel                  context.CancelFunc
+	done                    chan struct{}
 	// Checkpoint bookkeeping is protected by run, not mu.
 	checkpoint        coldPackCheckpoint
 	checkpointAt      time.Time
@@ -135,9 +145,11 @@ type coldPackState struct {
 // Entries remain in catalog order until the entire prefix has completed. Only
 // run owns these fields; each wave lends distinct entries to its workers.
 type coldPackWork struct {
-	name  string
-	block uint64
-	done  bool
+	name    string
+	block   uint64
+	done    bool
+	points  uint64
+	counted bool
 }
 
 // ConfigureColdPack joins an old operation before returning, so switching off on
@@ -184,6 +196,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 	if reset {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
 		c.stats.MetricsVisited = 0
+		c.passPoints, c.passMetrics = 0, 0
 		c.pending = nil
 		c.stats.PendingMetrics = 0
 		c.passFailed = false
@@ -315,7 +328,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 		if block != 0 {
 			// A serial or parallel checkpoint can retain a published descriptor
 			// position within the oldest unfinished metric.
-			c.pending = []*coldPackWork{{name: cursor, block: block}}
+			c.pending = []*coldPackWork{{name: cursor, block: block, points: c.checkpoint.MetricPoints, counted: c.checkpoint.MetricCounted}}
 		} else {
 			names, err := s.coldPackPage(ctx, cursor)
 			if err != nil {
@@ -327,6 +340,9 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 				c.stats.Cursor = ""
 				c.stats.Passes++
 				c.stats.MetricsVisited = 0
+				c.stats.StoredPoints, c.stats.StoredMetrics = c.passPoints, c.passMetrics
+				c.stats.StoredAt = s.now().Unix()
+				c.passPoints, c.passMetrics = 0, 0
 				c.cleanUnpack = o.Mode == "unpack" && !c.passFailed
 				c.passFailed = false
 				c.mu.Unlock()
@@ -334,7 +350,7 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 			}
 			c.mu.Unlock()
 			for _, name := range names {
-				c.pending = append(c.pending, &coldPackWork{name: name})
+				c.pending = append(c.pending, &coldPackWork{name: name, counted: true})
 			}
 		}
 	}
@@ -384,6 +400,10 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 	// them. Failed metrics are retired too, and retried from block zero next
 	// pass; passFailed prevents a partial unpack from authorizing downgrade.
 	for len(c.pending) > 0 && c.pending[0].done {
+		if work := c.pending[0]; work.counted {
+			c.passPoints += work.points
+			c.passMetrics++
+		}
 		c.stats.Cursor, c.stats.BlockCursor = c.pending[0].name, 0
 		c.stats.MetricsVisited++
 		c.pending = c.pending[1:]
@@ -433,6 +453,7 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 		c.passFailed = true
 		zapwriter.Logger("storage").Error("cold pack metric failed", zap.String("metric", work.name), zap.Uint64("block_cursor", work.block), zap.Error(err))
 		work.block, work.done = 0, true
+		work.counted = false
 		return nil
 	}
 	c.stats.Metrics += stats.Metrics
@@ -449,6 +470,8 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	if conflict {
 		c.stats.Conflicts++
 	}
+	work.points += stats.ObservedPoints
+	work.counted = work.counted && stats.Observed
 	work.block, work.done = next, done
 	return nil
 }

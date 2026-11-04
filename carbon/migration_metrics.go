@@ -218,6 +218,9 @@ var migrationMetricSpecs = func() []metricSpec {
 		)
 	}
 	specs = append(specs,
+		gauge("store_points_stored", "Points in native ranges of fully counted metrics in the last completed cold-pack pass; excludes live buffers and sidecars.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredPoints) }),
+		gauge("store_points_stored_metrics", "Metrics whose native descriptors were fully counted in the last completed cold-pack pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredMetrics) }),
+		gauge("store_points_stored_timestamp_seconds", "Completion time of the last stored-point count; zero before a completed pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredAt) }),
 		counter("store_cold_pack_blocks_total", "Native ranges packed or unpacked.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Blocks) }),
 		counter("store_cold_pack_points_total", "Points rewritten by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Points) }),
 		counter("store_cold_pack_input_bytes_total", "Logical source bytes replaced by sealing.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.InputBytes) }),

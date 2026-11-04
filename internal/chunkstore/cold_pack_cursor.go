@@ -23,14 +23,19 @@ var coldPackCheckpointKey = []byte("z/cold-pack-cursor")
 // Seeking after Cursor reconstructs the queue without skipping unvisited names.
 // PassFailed must survive restarts so a partial unpack cannot authorize downgrade.
 type coldPackCheckpoint struct {
-	Version        int
-	Format, Mode   string
-	WriteWindow    time.Duration
-	Cursor         string
-	BlockCursor    uint64
-	Passes         uint64
-	MetricsVisited uint64
-	PassFailed     bool
+	Version                     int
+	Format, Mode                string
+	WriteWindow                 time.Duration
+	Cursor                      string
+	BlockCursor                 uint64
+	Passes                      uint64
+	MetricsVisited              uint64
+	PassFailed                  bool
+	StoredPoints, StoredMetrics uint64 `json:",omitempty"`
+	StoredAt                    int64  `json:",omitempty"`
+	PassPoints, PassMetrics     uint64 `json:",omitempty"`
+	MetricPoints                uint64 `json:",omitempty"`
+	MetricCounted               bool   `json:",omitempty"`
 }
 
 // loadColdPackCheckpoint is called once by ConfigureColdPack under run, before
@@ -69,6 +74,8 @@ func (s *Store) loadColdPackCheckpoint(marker string) error {
 	c.stats.Passes, c.stats.MetricsVisited = saved.Passes, saved.MetricsVisited
 	c.stats.PersistedMetricsVisited = saved.MetricsVisited
 	c.passFailed = saved.PassFailed
+	c.stats.StoredPoints, c.stats.StoredMetrics, c.stats.StoredAt = saved.StoredPoints, saved.StoredMetrics, saved.StoredAt
+	c.passPoints, c.passMetrics = saved.PassPoints, saved.PassMetrics
 	c.checkpoint, c.checkpointAt = saved, time.Now()
 	if saved.Mode != "off" && (saved.Cursor != "" || saved.Passes != 0) {
 		c.stats.Resumed++
@@ -91,8 +98,19 @@ func (s *Store) saveColdPackCheckpoint(force bool) error {
 		Version: 1, Mode: c.options.Mode, WriteWindow: c.options.WriteWindow,
 		Cursor: c.stats.Cursor, BlockCursor: c.stats.BlockCursor,
 		Passes: c.stats.Passes, MetricsVisited: c.stats.MetricsVisited, PassFailed: c.passFailed,
+		StoredPoints: c.stats.StoredPoints, StoredMetrics: c.stats.StoredMetrics, StoredAt: c.stats.StoredAt,
+		PassPoints: c.passPoints, PassMetrics: c.passMetrics,
 	}
 	c.mu.Unlock()
+	// Only the contiguous completed prefix and oldest unfinished metric can
+	// survive a restart. Later parallel completions are replayed, not counted
+	// twice. run owns pending and the saved checkpoint while mu is released.
+	if saved.BlockCursor != 0 {
+		saved.MetricPoints, saved.MetricCounted = c.checkpoint.MetricPoints, c.checkpoint.MetricCounted
+		if len(c.pending) > 0 {
+			saved.MetricPoints, saved.MetricCounted = c.pending[0].points, c.pending[0].counted
+		}
+	}
 	if saved.Mode == "" || saved.Mode == "off" && !c.checkpointPresent {
 		return nil
 	}

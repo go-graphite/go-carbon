@@ -157,6 +157,53 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 	}
 }
 
+func TestCollectorReportsStoredPoints(t *testing.T) {
+	now := time.Unix(1700120040, 0)
+	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.StopBackground()
+	createExpirationMetric(t, db, "counted")
+	if err := db.UpdateMany(context.Background(), "counted", []store.Point{{Timestamp: now.Unix() - 60, Value: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{MetricStore: db}})
+	check := func(points, metrics, timestamp float64) {
+		t.Helper()
+		families, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]float64{"store_points_stored": points, "store_points_stored_metrics": metrics, "store_points_stored_timestamp_seconds": timestamp}
+		for _, f := range families {
+			if value, ok := want[f.GetName()]; ok {
+				if f.GetType() != dto.MetricType_GAUGE || f.Metric[0].GetGauge().GetValue() != value {
+					t.Fatalf("%s: got %v, want %v", f.GetName(), f.Metric, value)
+				}
+				delete(want, f.GetName())
+			}
+		}
+		if len(want) != 0 {
+			t.Fatalf("missing gauges: %v", want)
+		}
+	}
+	check(0, 0, 0)
+	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "exact"}); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := db.ColdPackStep(context.Background()); done || err != nil {
+		t.Fatalf("first step: done=%v err=%v", done, err)
+	}
+	check(0, 0, 0)
+	if err := db.RunColdPack(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	check(1, 1, float64(now.Unix()))
+}
+
 func TestRelayoutProgress(t *testing.T) {
 	for _, c := range []struct {
 		r    store.RelayoutStats

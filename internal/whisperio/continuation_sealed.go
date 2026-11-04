@@ -69,6 +69,7 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 	if !d.layout.Compressed {
 		return stats, 0, true, nil
 	}
+	stats.Observed = true
 	fs := newContinuationFiles(kv, false)
 	f := &continuationFile{fs: fs, data: d}
 	pager, ok := kv.(store.ContinuationPageReader)
@@ -108,6 +109,9 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 		if err := ctx.Err(); err != nil {
 			return stats, next, false, err
 		}
+		// The page may contain descriptors beyond an early rewrite return.
+		// Count only the consumed prefix so the next call cannot double count.
+		stats.ObservedPoints += uint64(desc.count)
 		eligible := desc.bucketed && desc.count > 128 && desc.packed == 0
 		if r.Mode == "unpack" {
 			eligible = desc.packed != 0
