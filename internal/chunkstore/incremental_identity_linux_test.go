@@ -42,7 +42,7 @@ func TestIncrementalStatxIdentity(t *testing.T) {
 			if got != tc.want || (err != nil) != tc.fail {
 				t.Fatalf("identity=%q err=%v", got, err)
 			}
-			if errors.Is(tc.statErr, unix.EIO) && !errors.Is(err, unix.EIO) {
+			if tc.statErr == unix.EIO && !errors.Is(err, unix.EIO) {
 				t.Fatal("lost statx error")
 			}
 		})

@@ -240,7 +240,11 @@ func TestUnclaimedAndAbandonedOffers(t *testing.T) {
 
 // socketPath stays below the 104-byte unix socket limit on macOS.
 func socketPath(t *testing.T) string {
-	dir, err := os.MkdirTemp("/tmp", "ho")
+	base := os.TempDir()
+	if len(filepath.Join(base, "ho4294967295", "h.sock")) >= 104 {
+		base = "/tmp"
+	}
+	dir, err := os.MkdirTemp(base, "ho")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,9 +14,11 @@ import (
 
 // Exercise the real cold packer and render path together, including a narrow
 // query inside a multi-group v9 block and cached historical prefixes. The
-// uncached render is the byte oracle; no durable data changes on toggle.
+// unpruned, uncached render is the byte oracle; no durable data changes on toggle.
 func TestReadPathPackedV9RenderOracle(t *testing.T) {
-	l, _, first, count := newSealedRenderFixture(t)
+	l, _, codec, first, count := newSealedRenderFixture(t)
+	var pruning atomic.Bool
+	codec.RangeReadsEnabled = pruning.Load
 	l.initializeCaches()
 	targets := map[timeRange][]target{{int32(first + count/2), int32(first + count)}: {
 		{"sealed.render.m1", "sealed.render.m1"},
@@ -34,10 +36,13 @@ func TestReadPathPackedV9RenderOracle(t *testing.T) {
 		return result.data
 	}
 	want := render()
-	for _, mode := range []struct{ canonical, prefix bool }{
-		{false, false}, {true, false}, {false, true}, {true, true},
+	for _, mode := range []struct{ prune, canonical, prefix bool }{
+		{true, false, false}, {false, true, false}, {false, false, true},
+		{true, true, false}, {false, true, true},
+		{true, false, true}, {true, true, true}, {false, false, false},
 	} {
 		t.Run(fmt.Sprint(mode), func(t *testing.T) {
+			pruning.Store(mode.prune)
 			l.SetQueryCacheCanonicalKeys(mode.canonical)
 			if err := l.SetQueryRangeCache(mode.prefix, 1, 2*time.Hour); err != nil {
 				t.Fatal(err)
@@ -70,7 +75,9 @@ func TestReadPathPackedV9RenderOracle(t *testing.T) {
 
 // Publish policy while readers build keys and use the old/new prefix namespaces.
 func TestReadPathConcurrentPolicyToggle(t *testing.T) {
-	l, _, first, count := newSealedRenderFixture(t)
+	l, _, codec, first, count := newSealedRenderFixture(t)
+	var pruning atomic.Bool
+	codec.RangeReadsEnabled = pruning.Load
 	targets := map[timeRange][]target{{int32(first + count/2), int32(first + count)}: {{"sealed.render.m1", "sealed.render.m1"}}}
 	// Prepare an immutable warmed namespace before publishing it to readers.
 	// The fixture clock is historical, so default time.Now would bypass all
@@ -90,6 +97,7 @@ func TestReadPathConcurrentPolicyToggle(t *testing.T) {
 	for range 4 {
 		wg.Go(func() {
 			for i := range 20 {
+				pruning.Store(i%2 == 0)
 				l.SetQueryCacheCanonicalKeys(i%2 == 0)
 				if i%2 == 0 {
 					l.queryRangeCache.Store(warmed)

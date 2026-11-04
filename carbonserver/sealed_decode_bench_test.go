@@ -22,24 +22,24 @@ import (
 	"go.uber.org/zap"
 )
 
-// BenchmarkSealedRender uses the actual v9 cold packer, Pebble fetch, Whisper
-// archive selection, HTTP render handler and protobuf serialization. Eight
-// series return about 1.2 MB/render, near the supplied production replay's
-// 1.7 MB mean. The deterministic counter/decimal/random mix is synthetic;
-// production value distributions were not captured. Response caching is off.
-// Readers are closed-loop; p99 includes scheduler/GC delays but no arrival queue.
-func BenchmarkSealedRender(b *testing.B) {
+// newSealedRenderFixture packs and verifies a small deterministic v9 render fixture.
+func newSealedRenderFixture(b testing.TB) (*CarbonserverListener, *store.Store, *whisperio.ContinuationCodec, int, int) {
 	const now, count, metrics = 1700100000, 16384, 8
 	const first = now - count - 3600
 	ctx := context.Background()
+	codec := &whisperio.ContinuationCodec{}
 	db, err := store.Open(b.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true,
-		Continuation: &whisperio.ContinuationCodec{}, CacheSize: 16 << 20,
+		Continuation: codec, CacheSize: 16 << 20,
 		MetadataCacheSize: 4 << 20, MemTableSize: 4 << 20,
 		Now: func() time.Time { return time.Unix(now, 0) }})
 	if err != nil {
 		b.Fatal(err)
 	}
-	defer db.Close()
+	b.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			b.Error(err)
+		}
+	})
 	rng := rand.New(rand.NewSource(73))
 	want := make(map[string][]float64)
 	for m := range metrics {
@@ -132,6 +132,27 @@ func BenchmarkSealedRender(b *testing.B) {
 			}
 		}
 	}
+	return l, db, codec, first, count
+}
+
+// BenchmarkSealedRender uses the actual v9 cold packer, Pebble fetch, Whisper
+// archive selection, HTTP render handler and protobuf serialization. Eight
+// series return about 1.2 MB/render, near the supplied production replay's
+// 1.7 MB mean. The deterministic counter/decimal/random mix is synthetic;
+// production value distributions were not captured. Response caching is off.
+// Readers are closed-loop; p99 includes scheduler/GC delays but no arrival queue.
+func BenchmarkSealedRender(b *testing.B) {
+	l, _, _, first, count := newSealedRenderFixture(b)
+	url := fmt.Sprintf("/render/?format=protobuf&target=sealed.render.*&from=%d&until=%d", first, first+count)
+	render := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		l.renderHandler(w, httptest.NewRequest(http.MethodGet, url, http.NoBody))
+		if w.Code != http.StatusOK {
+			b.Errorf("render status %d: %s", w.Code, w.Body.String())
+		}
+		return w
+	}
+	w := render()
 	for _, readers := range []int{1, 8} {
 		b.Run(fmt.Sprintf("readers=%d", readers), func(b *testing.B) {
 			for range readers {

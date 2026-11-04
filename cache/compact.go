@@ -465,8 +465,8 @@ func (c *compactPoints) appendDecoded(dst []points.Point) []points.Point {
 			delta += r.timestampNonzero()
 		}
 		ts += delta
-		//nolint:gocritic // Each condition consumes the next bit of the prefix code.
-		if r.bit() == 0 {
+		// Each r.bit() consumes the next prefix bit, so this chain cannot be a switch.
+		if r.bit() == 0 { //nolint:gocritic // ifElseChain: conditions read the stream in order
 			integerDelta = 0
 		} else if scale == 0 {
 			if r.bit() != 0 {

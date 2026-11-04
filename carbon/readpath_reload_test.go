@@ -76,6 +76,7 @@ func TestReadPathFlagsReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	for stage, enabled := range []bool{true, false, true} {
+		cfg.Whisper.StoreRangeReads = enabled
 		cfg.Carbonserver.QueryCacheCanonicalKeys = enabled
 		cfg.Carbonserver.QueryRangeCacheEnabled = enabled
 		writeBatchingConfig(t, app.ConfigFilename, cfg)

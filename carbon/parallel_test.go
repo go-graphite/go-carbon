@@ -18,13 +18,26 @@ const isolatedTestCase = "GRAPHITE_TEST_ISOLATED_CASE"
 // Coverage and selective subtest runs stay in process, retaining their profiles
 // and Go's complete subtest filter semantics.
 func isolatedTestProcess(t *testing.T) bool {
+	return isolatedTestProcessMode(t, true)
+}
+
+// Wall-clock handoff tests model a bounded sender buffer. Run those processes
+// serially so competing storage startups do not consume the simulated outage
+// budget before the handoff itself can run.
+func isolatedTestProcessSerial(t *testing.T) bool {
+	return isolatedTestProcessMode(t, false)
+}
+
+func isolatedTestProcessMode(t *testing.T, parallel bool) bool {
 	t.Helper()
 	name := os.Getenv(isolatedTestCase)
 	if name == t.Name() || strings.HasPrefix(name, t.Name()+"/") || testing.CoverMode() != "" ||
 		strings.Contains(flag.Lookup("test.run").Value.String(), "/") {
 		return false
 	}
-	t.Parallel()
+	if parallel {
+		t.Parallel()
+	}
 	parts := strings.Split(t.Name(), "/")
 	for i := range parts {
 		parts[i] = "^" + regexp.QuoteMeta(parts[i]) + "$"
