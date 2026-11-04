@@ -392,7 +392,7 @@ func (r *runner) scan(path string) (*fileReport, error) {
 				return nil, e
 			}
 			size := uint64(len(k.UserKey) + len(value))
-			if class == "ordinary" {
+			if class == "ordinary" && r.cfg.mode != "transcode" {
 				row, e := index.row(k.UserKey)
 				if e != nil {
 					return nil, e

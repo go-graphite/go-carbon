@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -188,6 +189,12 @@ func TestInventoryAndTranscode(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := loadReport(t, trans)
+	if !reflect.DeepEqual(report.Classes, result.Classes) || report.FileBytes != result.FileBytes || report.FloatDataBytes != result.FloatDataBytes || report.SealedDataBytes != result.SealedDataBytes {
+		t.Fatal("transcode changed inventory class or physical-byte accounting")
+	}
+	if len(result.Ordinary) != 0 || len(result.OrdinaryByReason) != 0 {
+		t.Fatal("transcode should omit ordinary eligibility details")
+	}
 	var changed uint64
 	for _, f := range result.Files {
 		if !f.BaselineWithin3Pct {

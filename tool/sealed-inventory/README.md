@@ -11,6 +11,11 @@ sealed-inventory transcode -sst-dir DIR -policy current,prefix256,minfour,alp,ch
 
 The tool processes files and policies serially. `-procs` caps GOMAXPROCS; serial codec measurement avoids attributing concurrent policy work to the wrong policy. Progress goes to stderr every ten seconds, with a baseline-size diagnostic per file.
 
+Transcode omits ordinary-group eligibility metadata joins and leaves `Ordinary`
+and `OrdinaryByReason` empty. Its class counts and physical-byte accounting still
+include all ordinary entries. Run `inventory` separately when those details are
+needed; they do not affect float transcoding or paired SST sizes.
+
 The temporary filesystem must have at least **50 GiB free** initially and before each rewrite, and capacity for twice the sampled input. A write guard prevents live outputs from exceeding **2× sampled input**; a periodic disk guard stops writes below **25 GB free**. Normal operation retains only one output at a time and deletes it after measuring. `-keep` retains tables, subject to that same aggregate 2× limit: several policies may exceed it and cause a refusal. Use a single candidate policy when retaining a pair. SIGINT/SIGTERM cancels throttled reads and removes the run's temporary outputs, including retained outputs from earlier files. Completed unrelated runs are untouched.
 
 The paired baseline rewrites every internal point key/version and its original value. Every candidate preserves those keys, point deletions, and range deletions; it changes only SET values for sealed float-byte-plane groups. Same-file newer range deletions are reported as tombstoned entry/point counts, without dropping physical bytes or applying compaction. Cross-file visibility cannot be inferred from independent SSTs.

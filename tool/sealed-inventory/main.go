@@ -222,29 +222,30 @@ func run(args []string) error {
 	if c.writeWindow < 0 {
 		return errors.New("write-window must be nonnegative")
 	}
-	metadataFiles, _, err := listFiles(c.metadataDir, 0)
-	if err != nil {
-		return err
-	}
-	index, err := r.openOrdinaryIndex(files)
-	if err == nil {
-		index.metadataPaths = metadataFiles
-		index.runner = &r
-	}
-	if err != nil {
-		return err
-	}
 	analysisNow := start
 	if c.asOf != "" {
 		analysisNow, err = time.Parse(time.RFC3339, c.asOf)
 		if err != nil {
-			index.close()
 			return err
 		}
 	}
-	index.cutoff = analysisNow.Add(-c.writeWindow).Unix()
-	defer index.close()
-	r.ordinary = index
+	// Transcoding needs physical class accounting and the paired rewrites, not
+	// ordinary eligibility details. Joining descriptors across sampled SSTs can
+	// otherwise dominate the measured IO without affecting any codec result.
+	if c.mode != "transcode" {
+		metadataFiles, _, err := listFiles(c.metadataDir, 0)
+		if err != nil {
+			return err
+		}
+		index, err := r.openOrdinaryIndex(files)
+		if err != nil {
+			return err
+		}
+		index.metadataPaths, index.runner = metadataFiles, &r
+		index.cutoff = analysisNow.Add(-c.writeWindow).Unix()
+		defer index.close()
+		r.ordinary = index
+	}
 	result := report{OrdinaryCutoffUTC: analysisNow.Add(-c.writeWindow).UTC().Format(time.RFC3339), Ordinary: map[string]*ordinaryRow{}, OrdinaryByReason: map[string]*tally{}, SchemaVersion: 3, Mode: c.mode, Architecture: runtime.GOOS + "/" + runtime.GOARCH, GoVersion: runtime.Version(), StartedUTC: start.UTC().Format(time.RFC3339), Procs: c.procs, ReadMBPerSecond: c.readMB, Classes: map[string]*tally{}, Notes: []string{
 		"Ordinary rows partition ordinary bytes. Schema comes from store-wide manifests, else only archive ordinal is known. Newest-observed/open-candidate is relative to sampled tail groups, not proof of the live writer head. Missing metadata, obsolete versions and descriptor mismatch remain explicit. Descriptors/manifests are joined across every SST in metadata-dir using bounded index seeks, with a 32-reader LRU, 128-file/metric LRU and 2 MiB/8192-entry per-file/metric bound. Tail temperature/position still uses selected SSTs only; unseen tails remain unknown. Cross-file range deletions are not resolved.",
 		"PhysicalBytes is compressed data-block bytes including 5-byte trailers apportioned by user-key+value logical bytes; it is an exact accounting convention, not independent compressibility.",
@@ -254,6 +255,9 @@ func run(args []string) error {
 		"Whole-file savings compare paired unchanged and candidate rewrites; original-file delta and baseline agreement are reported separately. These are per-file rewrites, not a cross-file compaction.",
 		"Production uses pure-Go Snappy outer blocks; inner research Zstd uses klauspost pure Go. No cgo required.",
 	}}
+	if c.mode == "transcode" {
+		result.Notes[0] = "Transcode omits ordinary eligibility metadata joins and leaves Ordinary/OrdinaryByReason empty. Classes, points and physical byte accounting still include every ordinary entry. Use inventory for ordinary details."
+	}
 	result.Policies = map[string]*policyReport{}
 	for _, path := range files {
 		if err = ctx.Err(); err != nil {
