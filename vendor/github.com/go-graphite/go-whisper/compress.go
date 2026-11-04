@@ -788,6 +788,12 @@ func (whisper *Whisper) archiveUpdateManyCompressed(archive *archiveInfo, points
 			knownValues = append(knownValues, dPoint.value)
 		}
 
+		// Slot reuse can invalidate the entire stored window. XFF zero still
+		// requires a value; leave the lower archive untouched when none remain.
+		if len(knownValues) == 0 {
+			continue
+		}
+
 		knownPercent := float32(len(knownValues)) / float32(lower.secondsPerPoint/archive.secondsPerPoint)
 		// check we have enough data points to propagate a value
 		if knownPercent >= whisper.xFilesFactor {
