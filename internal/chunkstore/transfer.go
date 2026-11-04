@@ -383,10 +383,10 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 	}
 	proofs := make([]TransferProof, 0, len(records))
-	// Small groups bound the time foreground writers wait on a stripe and the
-	// number of tombstones accumulated by retirement of old target generations.
-	for start := 0; start < len(records); start += 64 {
-		end := min(start+64, len(records))
+	// Sixteen-name groups reduce stripe intersections between concurrent
+	// streams and bound foreground lock waits and retirement tombstones.
+	for start := 0; start < len(records); start += 16 {
+		end := min(start+16, len(records))
 		group, err := s.publishTransfer(ctx, records[start:end], metas[start:end])
 		if err != nil {
 			return nil, err
@@ -485,16 +485,21 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
 		}
+		err = nil
 		p := TransferProof{Source: r.Version, Target: transferVersion(m), Digest: transferDigest(r), Merged: merged, KeyCount: len(r.Keys), Counts: r.Counts, Sampled: r.PointDigest != ""}
-		encodedStage, err := s.encodeCatalog(m)
-		if err != nil {
-			return nil, err
-		}
-		if err := b.Set(catalogKey(m.Name), encodedStage, nil); err != nil {
-			return nil, err
-		}
-		if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
-			return nil, err
+		// Only the ordinary chunk reader resolves its temporary catalog through
+		// this batch. Continuation readers use the unpublished ID or raw record.
+		if !m.Continuation && (r.PointDigest != "" || merged) {
+			encodedStage, err := s.encodeCatalog(m)
+			if err != nil {
+				return nil, err
+			}
+			if err := b.Set(catalogKey(m.Name), encodedStage, nil); err != nil {
+				return nil, err
+			}
+			if err := b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
+				return nil, err
+			}
 		}
 		if r.PointDigest != "" && !r.Continuation {
 			snapshot, err := s.transferSnapshot(ctx, b, m)
@@ -511,18 +516,6 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 				return nil, ErrConflict
 			}
 			if err := s.checkFileOwnership(old); err != nil {
-				return nil, err
-			}
-			// The staged ID is unpublished. Read its continuation directly; ordinary
-			// chunks need only a temporary catalog entry visible inside this batch.
-			enc, err := s.encodeCatalog(m)
-			if err != nil {
-				return nil, err
-			}
-			if err = b.Set(catalogKey(m.Name), enc, nil); err != nil {
-				return nil, err
-			}
-			if err = b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
 				return nil, err
 			}
 			var source Snapshot
@@ -553,11 +546,13 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 					return nil, ErrFormat
 				}
 				kv := s.newContinuationIO(ctx, b, b, m)
-				if err := s.dropContinuation(ctx, s.db, b, m); err != nil {
-					return nil, err
-				}
-				if err := kv.DeletePrefix(nil); err != nil {
-					return nil, err
+				// This reserved ID has never been published. The independently
+				// verified SSTs contain exactly r.Keys, so point-delete those keys
+				// without reopening all LSM levels to rediscover their prefixes.
+				for _, staged := range r.Keys {
+					if err := b.Delete(kv.key(staged.Key), nil); err != nil {
+						return nil, err
+					}
 				}
 				if err := restorer.RestoreArchives(ctx, kv, want, s.now); err != nil {
 					return nil, err
@@ -733,15 +728,38 @@ func (e *transferProofEncoder) digest(p *TransferProof) ([sha256.Size]byte, erro
 func (s *Store) VerifyTransfer(ctx context.Context, proofs []TransferProof) error {
 	view := s.db.NewSnapshot()
 	defer view.Close()
-	walk := &transferReader{reader: view}
+	walk := &transferReader{reader: view, ordered: true}
 	defer walk.close()
+	order := make([]int, len(proofs))
+	for i := range order {
+		order[i] = i
+	}
+	metas := make([]Metadata, len(proofs))
+	// Catalog order is by name, while revisions and receipts are by ID. Read
+	// each in its own order, retaining one consistent snapshot for all checks.
+	slices.SortFunc(order, func(a, b int) int { return strings.Compare(proofs[a].Target.Name, proofs[b].Target.Name) })
+	for _, i := range order {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := proofs[i].Target.Name
+		value, err := walk.lookup(&walk.catalog, catalogLower, catalogUpper, catalogKey(name))
+		if err != nil {
+			return err
+		}
+		metas[i], err = decodeCatalog(name, value)
+		if err != nil {
+			return err
+		}
+	}
+	slices.SortFunc(order, func(a, b int) int { return cmp.Compare(metas[a].ID, metas[b].ID) })
 	var receiptEncoder transferProofEncoder
-	for i := range proofs {
+	for _, i := range order {
 		p := &proofs[i]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		m, err := walk.metadata(p.Target.Name)
+		m, err := walk.revision(metas[i])
 		if err != nil {
 			return err
 		}
@@ -1111,24 +1129,89 @@ func (s *Store) PendingTransferDelete(ctx context.Context, operation string, lim
 	return result, it.Error()
 }
 
-// RetireTransferredStore is deliberately for an entirely drained physical node.
-// It blocks writers only for the final catalog/version check. Every catalog
-// member must have a durable verification marker for its current version;
-// unknown metrics and late writes abort the whole delete. One range tombstone
-// avoids the quadratic iterator fragmentation of millions of per-ID tombstones.
-func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (int64, error) {
+// PendingTransferNames checks one bounded plan batch. Unlike repeated pending
+// catalog pages, a complete reconciliation visits each planned name once.
+// Retirement still rechecks the whole catalog under writer locks, including
+// names created after the plan and versions changed during this pass.
+func (s *Store) PendingTransferNames(ctx context.Context, operation string, names []string) ([]string, error) {
+	scope, err := transferScope(operation)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 || len(names) > MaxTransferMetrics {
+		return nil, ErrTransferLimit
+	}
+	view := s.db.NewSnapshot()
+	defer view.Close()
+	walk := &transferReader{reader: view, ordered: true}
+	defer walk.close()
+	ordered := slices.Clone(names)
+	slices.Sort(ordered)
+	metas := make([]Metadata, 0, len(ordered))
+	for _, name := range ordered {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value, err := walk.lookup(&walk.catalog, catalogLower, catalogUpper, catalogKey(name))
+		if errors.Is(err, ErrNotFound) {
+			// Completed or partially retired source on resume. The full final
+			// catalog check still rejects any remaining unstaged names.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		m, err := decodeCatalog(name, value)
+		if err != nil {
+			return nil, err
+		}
+		metas = append(metas, m)
+	}
+	slices.SortFunc(metas, func(a, b Metadata) int { return cmp.Compare(a.ID, b.ID) })
+	result := make([]string, 0)
+	for _, m := range metas {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		m, err = walk.revision(m)
+		if err != nil {
+			return nil, err
+		}
+		staged, err := walk.deleteStaged(m, scope)
+		if err != nil {
+			return nil, err
+		}
+		if !staged || s.pendingTransfer(m.Name) {
+			result = append(result, m.Name)
+		}
+	}
+	return result, nil
+}
+
+// VerifyStagedTransfer establishes complete, current source coverage without
+// deleting any history. The same locked check gates actual retirement.
+func (s *Store) VerifyStagedTransfer(ctx context.Context, operation string) (int64, error) {
 	scope, err := transferScope(operation)
 	if err != nil {
 		return 0, err
 	}
+	unlock := s.lockTransferWriters()
+	defer unlock()
+	return s.verifyStagedCatalog(ctx, scope)
+}
+
+func (s *Store) lockTransferWriters() func() {
 	for i := range s.metricMu {
 		s.metricMu[i].Lock()
 	}
-	defer func() {
+	return func() {
 		for i := len(s.metricMu) - 1; i >= 0; i-- {
 			s.metricMu[i].Unlock()
 		}
-	}()
+	}
+}
+
+func (s *Store) verifyStagedCatalog(ctx context.Context, scope []byte) (int64, error) {
 	if err := s.fileOwnershipError(); err != nil {
 		return 0, err
 	}
@@ -1171,6 +1254,25 @@ func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (i
 		count++
 	}
 	if err := errors.Join(it.Error(), it.Close()); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// RetireTransferredStore is deliberately for an entirely drained physical node.
+// It blocks writers only for the final catalog/version check. Every catalog
+// member must have a durable verification marker for its current version;
+// unknown metrics and late writes abort the whole delete. One range tombstone
+// avoids the quadratic iterator fragmentation of millions of per-ID tombstones.
+func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (int64, error) {
+	scope, err := transferScope(operation)
+	if err != nil {
+		return 0, err
+	}
+	unlock := s.lockTransferWriters()
+	defer unlock()
+	count, err := s.verifyStagedCatalog(ctx, scope)
+	if err != nil {
 		return 0, err
 	}
 	if count == 0 {

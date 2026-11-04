@@ -1,6 +1,7 @@
 package chunkstore
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
@@ -27,7 +28,9 @@ func WriteTransfer2(w io.Writer, records []TransferMetric) error {
 		}
 	}
 	h := sha256.New()
-	out := io.MultiWriter(w, h)
+	// Sparse records contain many tiny lengths and descriptors. Coalesce them
+	// before both hashing and writing, rather than updating SHA for each field.
+	out := bufio.NewWriterSize(io.MultiWriter(w, h), 64<<10)
 	var data [8]byte
 	var err error
 	write := func(v []byte) {
@@ -69,6 +72,9 @@ func WriteTransfer2(w io.Writer, records []TransferMetric) error {
 		}
 	}
 	if err != nil {
+		return err
+	}
+	if err := out.Flush(); err != nil {
 		return err
 	}
 	_, err = w.Write(h.Sum(nil))
