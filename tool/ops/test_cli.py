@@ -94,7 +94,7 @@ class CLITest(unittest.TestCase):
                                       service='go-carbon.service', error_counter=None,
                                       metrics_endpoint='http://127.0.0.1:7007', token_file=None,
                                       duration=3, interval=1, max_errors=20, startup_timeout=2,
-                                      restart_timeout=10, http_timeout=1, apply=True)
+                                      restart_timeout=10, http_timeout=1, max_probe_failures=3, apply=True)
             calls = []
             with patch('canary.metrics', return_value={}), contextlib.redirect_stdout(io.StringIO()):
                 canary.start(args, run=lambda argv, **kwargs: calls.append(argv))

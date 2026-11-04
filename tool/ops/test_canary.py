@@ -77,6 +77,7 @@ class CanaryTest(unittest.TestCase):
         self.assertIn('startup timeout', read_state(self.root)['failure'])
 
     def test_metrics_loss_after_ready_rolls_back(self):
+        save_state(self.root, dict(self.state, duration=10, max_probe_failures=3))
         clock = Clock()
         with patch('canary.metrics', side_effect=ValueError('missing metrics')):
             def metric(_):
@@ -86,7 +87,50 @@ class CanaryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 guard(self.root, run=self.run_command, sleep=clock.sleep, clock=clock.time,
                       get_metrics=metric, check_ready=lambda state, run: None)
+        state = read_state(self.root)
+        self.assertEqual(state['status'], 'rolled-back')
+        self.assertIn('3 consecutive metrics failures', state['failure'])
+        self.assertEqual(clock.now, 3)
+
+    def test_isolated_metrics_failures_keep_new_binary(self):
+        save_state(self.root, dict(self.state, duration=6, max_probe_failures=3))
+        clock = Clock()
+        # Failures at t=1, 3 and 4 never reach three in a row; the burst after them still counts.
+        values = {0: 0, 2: 1, 5: 3, 6: 4}
+        def metric(_):
+            if clock.now not in values:
+                raise OSError('timed out')
+            return {('errors', ()): values[clock.now]}
+        guard(self.root, run=self.run_command, sleep=clock.sleep, clock=clock.time,
+              get_metrics=metric, check_ready=lambda state, run: None)
+        state = read_state(self.root)
+        self.assertEqual(state['status'], 'complete')
+        self.assertEqual(state['last_delta'], 1)
+        self.assertEqual(self.drop.read_text(), self.candidate)
+
+    def test_error_burst_across_failed_scrape_rolls_back(self):
+        save_state(self.root, dict(self.state, duration=4, max_probe_failures=3))
+        clock = Clock()
+        def metric(_):
+            if clock.now == 1:
+                raise OSError('timed out')
+            return {('errors', ()): 0 if clock.now == 0 else 21}
+        with self.assertRaises(ValueError):
+            guard(self.root, run=self.run_command, sleep=clock.sleep, clock=clock.time,
+                  get_metrics=metric, check_ready=lambda state, run: None)
+        self.assertIn('error increase', read_state(self.root)['failure'])
+
+    def test_readiness_loss_while_guarding_rolls_back_at_once(self):
+        save_state(self.root, dict(self.state, duration=10, max_probe_failures=3))
+        clock = Clock()
+        def health(state, run):
+            if clock.now:
+                raise ValueError('service is not active')
+        with self.assertRaises(ValueError):
+            guard(self.root, run=self.run_command, sleep=clock.sleep, clock=clock.time,
+                  get_metrics=lambda _: {('errors', ()): 0}, check_ready=health)
         self.assertEqual(read_state(self.root)['status'], 'rolled-back')
+        self.assertEqual(clock.now, 1)
 
     def test_rollback_preserves_external_changes(self):
         self.drop.write_text('external edit')
