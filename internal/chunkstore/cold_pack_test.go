@@ -82,7 +82,7 @@ func TestColdPackPagesAndBusyStripe(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st := s.ColdPackStats(); st.Conflicts != 1 || st.Blocks != 0 || !strings.Contains(st.Error, "metric stripe busy") {
+		if st := s.ColdPackStats(); st.Conflicts != 1 || st.Blocks != 0 || st.Error != "" || !strings.Contains(st.LastIncomplete, "metric stripe busy") {
 			t.Fatalf("busy stripe waited or published: %+v", st)
 		}
 		for n := 0; n < 1000; n++ {
@@ -97,6 +97,12 @@ func TestColdPackPagesAndBusyStripe(t *testing.T) {
 		st := s.ColdPackStats()
 		if st.Passes != 1 || st.Blocks != 200 || st.Pages != 5 || st.Conflicts != 1 {
 			t.Fatalf("paged sweep: %+v", st)
+		}
+		if err := s.RunColdPack(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if st := s.ColdPackStats(); st.Passes != 2 || st.Blocks != 401 || st.Conflicts != 1 || st.Error != "" {
+			t.Fatalf("busy stripe was not retried cleanly: %+v", st)
 		}
 	})
 }
@@ -117,7 +123,7 @@ func TestColdPackBudgetsAndFailures(t *testing.T) {
 			_, err := s.ColdPackStep(context.Background())
 			st := s.ColdPackStats()
 			if tc.skip {
-				if err != nil || st.Skipped != 1 || st.Blocks != 0 || st.WriteBytes != 0 || !strings.Contains(st.Error, "skipped 1 ranges") {
+				if err != nil || st.Skipped != 1 || st.Blocks != 0 || st.WriteBytes != 0 || st.Error != "" || !strings.Contains(st.LastIncomplete, "skipped 1 ranges") {
 					t.Fatalf("budget %+v %v", st, err)
 				}
 			} else if err != nil || st.Errors != 1 || st.Skipped != 1 || st.Error == "" {

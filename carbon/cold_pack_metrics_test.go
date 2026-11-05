@@ -2,6 +2,9 @@ package carbon
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +13,114 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
+
+type statusColdCodec struct {
+	whisperio.ContinuationCodec
+	before func(context.Context) (store.RepackStats, error)
+}
+
+func (c *statusColdCodec) Repack(ctx context.Context, _ store.ContinuationIO, _ store.ColdPackRequest) (store.RepackStats, uint64, bool, error) {
+	stats, err := c.before(ctx)
+	return stats, 0, true, err
+}
+
+func TestCollectorColdPackFailureLatch(t *testing.T) {
+	ctx := context.Background()
+	now := time.Unix(1700120040, 0)
+	codec := &statusColdCodec{}
+	db, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: codec,
+		CacheSize: 1 << 20, MemTableSize: 1 << 20, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.StopBackground()
+	if _, err := db.Create(ctx, store.MetricConfig{Name: "status", Retentions: []store.Retention{{Step: 60, Count: 10080}}, AggregationMethod: store.Average}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "exact"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "unpack", CPUFraction: 1, BytesPerSecond: 1 << 40, MinFreeBytes: 1}); err != nil {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{MetricStore: db}})
+	var conflicts, skipped, failures uint64
+	for pass, reason := range []string{"conflict", "skip", "failure", "conflict", "skip", "clean"} {
+		t.Run(fmt.Sprint(pass+1)+"-"+reason, func(t *testing.T) {
+			codec.before = func(ctx context.Context) (store.RepackStats, error) {
+				switch reason {
+				case "conflict":
+					// Mutate after the maintenance snapshot was taken. Revision
+					// validation must reject publication regardless of timing.
+					err := db.UpdateMany(ctx, "status", []store.Point{{Timestamp: now.Unix() - 60, Value: float64(pass)}})
+					return store.RepackStats{Blocks: 1}, err
+				case "skip":
+					return store.RepackStats{}, store.ErrColdPackBudget
+				case "failure":
+					return store.RepackStats{}, errors.New("injected repack failure")
+				default:
+					return store.RepackStats{}, nil
+				}
+			}
+			err := db.RunColdPack(ctx)
+			if (err != nil) != (reason == "failure") {
+				t.Fatalf("pass result: %v", err)
+			}
+			switch reason {
+			case "conflict":
+				conflicts++
+			case "skip":
+				skipped++
+			case "failure":
+				failures++
+				skipped++
+			}
+			st := db.ColdPackStats()
+			if st.Passes != uint64(pass+1) || st.Conflicts != conflicts || st.Skipped != skipped || st.Errors != failures {
+				t.Fatalf("pass did not finish and retry: %+v", st)
+			}
+			if failures == 0 && st.Error != "" || failures != 0 && !strings.Contains(st.Error, "injected repack failure") {
+				t.Errorf("failure field must retain only real errors: %+v", st)
+			}
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			failed := 0.0
+			if failures != 0 {
+				failed = 1
+			}
+			want := map[string]float64{"store_cold_pack_failed": failed, "store_cold_pack_errors_total": float64(failures),
+				"store_cold_pack_conflicts_total": float64(conflicts), "store_cold_pack_skipped_total": float64(skipped)}
+			for _, family := range families {
+				if expected, ok := want[family.GetName()]; ok {
+					metric := family.Metric[0]
+					got := metric.GetCounter().GetValue()
+					if family.GetType() == dto.MetricType_GAUGE {
+						got = metric.GetGauge().GetValue()
+					}
+					if got != expected {
+						t.Errorf("%s = %v, want %v", family.GetName(), got, expected)
+					}
+					delete(want, family.GetName())
+				}
+			}
+			if len(want) != 0 {
+				t.Errorf("missing metrics: %v", want)
+			}
+			err = db.DowngradeColdPack(ctx)
+			if reason == "clean" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, store.ErrColdPackIncomplete) {
+				t.Fatalf("incomplete pass authorized downgrade: %v", err)
+			}
+		})
+	}
+}
 
 func TestCollectorColdPackLifecycle(t *testing.T) {
 	ctx := context.Background()

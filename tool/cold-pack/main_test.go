@@ -103,6 +103,7 @@ type retryColdCodec struct {
 	failures int
 	err      error
 	cancel   context.CancelFunc
+	conflict func(context.Context) error
 }
 
 func (c *retryColdCodec) Repack(ctx context.Context, io store.ContinuationIO, r store.ColdPackRequest) (store.RepackStats, uint64, bool, error) {
@@ -112,6 +113,9 @@ func (c *retryColdCodec) Repack(ctx context.Context, io store.ContinuationIO, r 
 	}
 	if c.failures > 0 {
 		c.failures--
+		if c.conflict != nil {
+			return store.RepackStats{Blocks: 1}, 0, true, c.conflict(ctx)
+		}
 		return store.RepackStats{Skipped: 1}, 0, true, c.err
 	}
 	return c.ContinuationCodec.Repack(ctx, io, r)
@@ -119,14 +123,17 @@ func (c *retryColdCodec) Repack(ctx context.Context, io store.ContinuationIO, r 
 
 func TestColdPackDowngradeRetries(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		failures  int
-		metricErr bool
-		downgrade bool
-		cancel    bool
-		passes    uint64
-		format    int
+		name           string
+		failures       int
+		metricErr      bool
+		metricConflict bool
+		downgrade      bool
+		cancel         bool
+		passes         uint64
+		format         int
 	}{
+		{name: "two-conflicted-passes", failures: 2, metricConflict: true, downgrade: true, passes: 3, format: 7},
+		{name: "persistent-conflict", failures: 3, metricConflict: true, downgrade: true, passes: 3, format: 9},
 		{name: "two-skipped-passes", failures: 2, downgrade: true, passes: 3, format: 7},
 		{name: "failed-metric", failures: 1, metricErr: true, downgrade: true, passes: 2, format: 7},
 		{name: "persistent-skip", failures: 3, downgrade: true, passes: 3, format: 9},
@@ -155,6 +162,11 @@ func TestColdPackDowngradeRetries(t *testing.T) {
 			if _, err := db.Create(ctx, store.MetricConfig{Name: "retry", Retentions: []store.Retention{{Step: 60, Count: 10080}}, AggregationMethod: store.Average}); err != nil {
 				t.Fatal(err)
 			}
+			if tc.metricConflict {
+				codec.conflict = func(ctx context.Context) error {
+					return db.UpdateMany(ctx, "retry", []store.Point{{Timestamp: time.Now().Unix() - 60, Value: float64(codec.failures)}})
+				}
+			}
 			// Raise the fence before unpacking, without running an exact sweep.
 			if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "exact"}); err != nil {
 				t.Fatal(err)
@@ -173,13 +185,43 @@ func TestColdPackDowngradeRetries(t *testing.T) {
 			if tc.cancel && !errors.Is(err, context.Canceled) {
 				t.Fatalf("lost cancellation: %v", err)
 			}
+			incomplete := "skipped 1 ranges"
+			if tc.metricConflict {
+				incomplete = "metric changed during planning"
+				if stats.Conflicts != uint64(tc.failures) {
+					t.Errorf("missing conflicts: %+v", stats)
+				}
+			}
+			if tc.failures > 0 && !tc.metricErr && !strings.Contains(stats.LastIncomplete, incomplete) {
+				t.Errorf("missing incomplete reason: %+v", stats)
+			}
+			if (stats.Error != "") != tc.metricErr {
+				t.Errorf("failure field includes a benign incomplete pass: %+v", stats)
+			}
 			if err != nil {
-				for _, field := range []string{"errors=", "conflicts=", "skipped=", "last_error=", "cursor=", "block_cursor="} {
+				if tc.metricErr && !strings.Contains(err.Error(), "injected metric failure") || !tc.metricErr && !tc.cancel && !strings.Contains(err.Error(), incomplete) {
+					t.Errorf("missing failure/incomplete reason: %v", err)
+				}
+				for _, field := range []string{"errors=", "conflicts=", "skipped=", "last_error=", "last_incomplete=", "cursor=", "block_cursor="} {
 					if !strings.Contains(err.Error(), field) {
 						t.Fatalf("missing diagnostic %s: %v", field, err)
 					}
 				}
 			}
 		})
+	}
+}
+
+func TestColdPackFailureReportsBothReasons(t *testing.T) {
+	stats := store.ColdPackStats{RepackStats: store.RepackStats{Skipped: 3}, Errors: 1, Conflicts: 2,
+		Error: "broken manifest", LastIncomplete: "metric stripe busy"}
+	err := coldPackFailure(store.ErrColdPackIncomplete, 3, stats)
+	if !errors.Is(err, store.ErrColdPackIncomplete) {
+		t.Fatalf("lost downgrade refusal: %v", err)
+	}
+	for _, want := range []string{`last_error="broken manifest"`, `last_incomplete="metric stripe busy"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %s: %v", want, err)
+		}
 	}
 }

@@ -93,6 +93,6 @@ func runColdPack(ctx context.Context, db *chunkstore.Store, downgrade bool) erro
 }
 
 func coldPackFailure(err error, passes int, stats chunkstore.ColdPackStats) error {
-	return fmt.Errorf("after %d cold-pack pass(es): %w (errors=%d conflicts=%d skipped=%d last_error=%q cursor=%q block_cursor=%d)",
-		passes, err, stats.Errors, stats.Conflicts, stats.Skipped, stats.Error, stats.Cursor, stats.BlockCursor)
+	return fmt.Errorf("after %d cold-pack pass(es): %w (errors=%d conflicts=%d skipped=%d last_error=%q last_incomplete=%q cursor=%q block_cursor=%d)",
+		passes, err, stats.Errors, stats.Conflicts, stats.Skipped, stats.Error, stats.LastIncomplete, stats.Cursor, stats.BlockCursor)
 }
