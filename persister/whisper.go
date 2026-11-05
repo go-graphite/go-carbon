@@ -115,6 +115,8 @@ type Whisper struct {
 	converting sync.Map
 	// reclaimedDirectories coalesces directory syncs after unlinking originals.
 	reclaimedDirectories directorySyncs
+	// reclaimMu serializes reclaimer lifecycle calls; workers only take ioMu.
+	reclaimMu sync.Mutex
 	// reclaim, when set, unlinks converted originals later in batches.
 	reclaim      *deferredReclaim
 	conversionIO *conversionSlot
