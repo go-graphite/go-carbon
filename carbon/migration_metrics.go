@@ -41,6 +41,7 @@ type migrationSnapshot struct {
 	reclaim                               persister.DeferredReclaimStats
 	persister                             bool
 	pebble, whisper                       persister.BackendWrites
+	transferRequeued                      map[string]uint64
 	store                                 bool
 	stats                                 storeStatsView
 	workingReserved                       int64
@@ -218,6 +219,11 @@ var migrationMetricSpecs = func() []metricSpec {
 			persisterSpec("persister_"+backend.name+"_write_failures_total", "Failed persister updates to the "+backend.name+" backend.", func(s *migrationSnapshot) float64 { return float64(get(s).Failures) }),
 			persisterSpec("persister_"+backend.name+"_write_seconds_total", "Seconds spent in successful "+backend.name+" backend updates.", func(s *migrationSnapshot) float64 { return get(s).Seconds }),
 		)
+	}
+	for _, reason := range []string{"canceled", "deadline", "absent", "storage_error"} {
+		item := persisterSpec("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", func(s *migrationSnapshot) float64 { return float64(s.transferRequeued[reason]) })
+		item.desc = prometheus.NewDesc("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", nil, prometheus.Labels{"reason": reason})
+		specs = append(specs, item)
 	}
 	specs = append(specs,
 		gauge("store_points_stored", "Points in native ranges of fully counted metrics in the last completed cold-pack pass; excludes live buffers and sidecars.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredPoints) }),
@@ -402,6 +408,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.reclaimQueued = p.DeferredReclaimQueued()
 		s.reclaim = p.DeferredReclaimStats()
 		s.pebble, s.whisper = p.WriteStats()
+		s.transferRequeued = p.TransferFlushRequeues()
 	}
 	if cache != nil {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()

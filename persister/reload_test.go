@@ -186,6 +186,12 @@ func TestReloadAppliesFileAndMigrationPolicies(t *testing.T) {
 	next.EnableOutOfOrder(100, 65536)
 	next.SetOutOfOrderCompactionPolicy(10, time.Minute, time.Hour)
 	p.ReloadSettings(next)
+	// The first limiter refill is asynchronous. This test checks reloaded
+	// policies, so supply migration capacity independently of its scheduling.
+	select {
+	case p.settings().onlineMigration.ticker.C <- true:
+	default:
+	}
 	// Online migration takes a throttle token without blocking. Wait for the
 	// reloaded ticker to produce capacity so a loaded runner cannot skip it.
 	deadline := time.Now().Add(5 * time.Second)

@@ -2,6 +2,7 @@ package carbon
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -320,5 +321,58 @@ func TestMigrationCollectorRelayoutPauseReasons(t *testing.T) {
 	}
 	if found != 3 {
 		t.Fatalf("pause metric families=%d", found)
+	}
+}
+
+type canceledTransferMetricStore struct{ *store.Store }
+
+func (s canceledTransferMetricStore) UpdateBatch(ctx context.Context, u []store.MetricUpdate, m *store.ContinuationMaintenance) error {
+	ctx, cancel := context.WithCancel(ctx)
+	cancel()
+	return s.Store.UpdateBatch(ctx, u, m)
+}
+func TestMigrationCollectorExportsTransferRequeues(t *testing.T) {
+	now := time.Unix(100000, 0)
+	db := expirationTestDB(t, &now)
+	name := "requeued"
+	createExpirationMetric(t, db, name)
+	core := cache.New()
+	core.Add(points.OnePoint(name, 1, 99999))
+	p := persister.NewWhisper(t.TempDir(), nil, nil, nil, core.PopNotConfirmed, core.Confirm, core.Pop)
+	p.SetRequeue(core.Requeue)
+	p.SetMetricStore(canceledTransferMetricStore{db})
+	if err := p.FlushForTransfer(context.Background(), []string{name}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: &App{Persister: p, MetricStore: db}})
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, family := range families {
+		if family.GetName() == "persister_pebble_write_failures_total" && family.Metric[0].GetCounter().GetValue() != 0 {
+			t.Fatal("cancellation counted as storage failure")
+		}
+		if family.GetName() != "persister_transfer_flush_requeued_total" {
+			continue
+		}
+		found = true
+		if len(family.Metric) != 4 {
+			t.Fatal("reason contract", family)
+		}
+		for _, metric := range family.Metric {
+			want := float64(0)
+			if metric.GetLabel()[0].GetValue() == "canceled" {
+				want = 1
+			}
+			if metric.GetCounter().GetValue() != want {
+				t.Fatal(metric)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("requeue telemetry missing")
 	}
 }
