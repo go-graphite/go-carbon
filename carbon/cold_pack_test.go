@@ -8,12 +8,13 @@ import (
 
 func TestColdPackConfig(t *testing.T) {
 	cfg := NewConfig()
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.PackTails || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
 		t.Fatalf("default %+v %v", o, err)
 	}
+	cfg.Whisper.StoreColdPackTails = true
 	cfg.Whisper.StoreColdPackWorkers = 8
 	cfg.Whisper.StoreColdPackMaxDebt = 8 << 30
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.MaxCompactionDebt != 8<<30 || o.Workers != 8 {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.MaxCompactionDebt != 8<<30 || o.Workers != 8 || !o.PackTails {
 		t.Fatalf("max compaction debt %+v %v", o, err)
 	}
 	cfg.Whisper.StoreColdPack = "decimal"
@@ -23,6 +24,7 @@ func TestColdPackConfig(t *testing.T) {
 	cfg.Whisper.StoreColdPack = "off"
 	next := *cfg
 	next.Whisper.StoreColdPack = "exact"
+	next.Whisper.StoreColdPackTails = true
 	next.Whisper.StoreColdPackWorkers = 2
 	next.Whisper.StoreColdPackRate = 12345
 	next.Whisper.StoreColdPackMaxDebt = 16 << 30
@@ -50,6 +52,7 @@ func TestColdPackReload(t *testing.T) {
 		t.Fatal("reload did not enable worker in place")
 	}
 	for _, workers := range []int{8, 2} {
+		cfg.Whisper.StoreColdPackTails = workers == 8
 		cfg.Whisper.StoreColdPackWorkers = workers
 		writeSharedConfig(t, path, cfg)
 		if err := app.ReloadConfig(); err != nil {

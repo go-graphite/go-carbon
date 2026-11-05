@@ -20,7 +20,8 @@ import (
 // or unpack. Decimal rounding occurs only while sealing, never in hot writes.
 type ColdPackOptions struct {
 	Mode           string
-	Workers        int // default 1; at most 64
+	PackTails      bool // opt-in whole-range v9 packing of cold non-bucketed native heads
+	Workers        int  // default 1; at most 64
 	BytesPerSecond int64
 	MinFreeBytes   uint64
 	// CPUFraction bounds the duty fraction of the worker group (up to Workers *
@@ -95,9 +96,10 @@ type RepackStats struct {
 }
 
 type ColdPackRequest struct {
-	Cursor uint64 // codec-owned descriptor seek position
-	Cutoff time.Time
-	Mode   string
+	Cursor    uint64 // codec-owned descriptor seek position
+	Cutoff    time.Time
+	Mode      string
+	PackTails bool
 }
 
 // ContinuationRepacker examines at most 32 descriptors and rewrites at most one
@@ -197,7 +199,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.mu.Unlock()
 		return nil
 	}
-	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow
+	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow || c.options.PackTails != o.PackTails
 	if reset {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
 		c.stats.MetricsVisited = 0
@@ -207,7 +209,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.passFailed = false
 	}
 	if o.Mode != "off" || c.options.Mode != "" && c.options.Mode != "off" {
-		zapwriter.Logger("storage").Info("cold pack configured", zap.String("mode", o.Mode), zap.Int("workers", o.Workers), zap.Int64("bytes_per_second", o.BytesPerSecond), zap.Float64("cpu_fraction", o.CPUFraction), zap.Duration("write_window", o.WriteWindow), zap.Uint64("max_compaction_debt", o.MaxCompactionDebt))
+		zapwriter.Logger("storage").Info("cold pack configured", zap.String("mode", o.Mode), zap.Bool("pack_tails", o.PackTails), zap.Int("workers", o.Workers), zap.Int64("bytes_per_second", o.BytesPerSecond), zap.Float64("cpu_fraction", o.CPUFraction), zap.Duration("write_window", o.WriteWindow), zap.Uint64("max_compaction_debt", o.MaxCompactionDebt))
 	}
 	c.cleanUnpack = false
 	c.options = o
@@ -431,7 +433,7 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	c.stats.ActiveWorkers++
 	c.mu.Unlock()
 	started := time.Now()
-	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode})
+	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode, PackTails: o.PackTails})
 	if err == nil && !done && next <= work.block {
 		err = errors.New("cold pack codec did not advance")
 	}
@@ -719,7 +721,7 @@ func (s *Store) startColdPack() {
 				zapwriter.Logger("storage").Error("cold pack failed", zap.String("metric", after.Cursor), zap.Uint64("block_cursor", after.BlockCursor), zap.Error(err))
 			}
 			if done && o.Mode != "off" {
-				zapwriter.Logger("storage").Info("cold pack pass complete", zap.String("mode", o.Mode), zap.Uint64("blocks", after.Blocks), zap.Int64("saved_bytes", int64(after.InputBytes)-int64(after.OutputBytes)), zap.Uint64("skipped", after.Skipped), zap.Uint64("conflicts", after.Conflicts))
+				zapwriter.Logger("storage").Info("cold pack pass complete", zap.String("mode", o.Mode), zap.Bool("pack_tails", o.PackTails), zap.Uint64("blocks", after.Blocks), zap.Int64("saved_bytes", int64(after.InputBytes)-int64(after.OutputBytes)), zap.Uint64("skipped", after.Skipped), zap.Uint64("conflicts", after.Conflicts))
 			}
 			if done || err != nil {
 				delay = max(delay, o.Interval)

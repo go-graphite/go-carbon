@@ -66,6 +66,7 @@ In `[whisper]`:
 
 ```toml
 store-cold-pack = "off" # off, exact, decimal, unpack
+store-cold-pack-tails = false # whole cold stranded native heads; v9 compatible
 store-cold-pack-workers = 1
 store-cold-pack-bytes-per-second = 1048576
 store-cold-pack-cpu-fraction = 0.02
@@ -85,10 +86,30 @@ select defaults. All settings reload on SIGHUP; invalid settings fail the
 reload. Turning off joins all current bounded operations and prevents subsequent
 packing. It retains the upgraded reader fence and existing sealed data.
 
-Only time-bucketed (v7 layout) blocks larger than one 128-point group are
-eligible. Blocks a store wrote before time buckets were enabled stay in the v6
-layout and are skipped until `store-time-buckets-relayout-rate` moves them into
-the history bucket.
+By default, only time-bucketed (v7 layout) blocks larger than one 128-point
+group are eligible. Relayout moves older native blocks into the history bucket,
+but leaves each archive's newest block metric-prefixed. A series that stops
+writing can leave this newest native block stranded until expiration.
+
+`store-cold-pack-tails = true` additionally packs that non-bucketed newest block
+when its whole archive is cold. It reads authoritative writer headers, stored
+block/encoder/buffer bounds and pending rollup windows from finer buffers. An
+unknown bound, or a sample interval reaching the write-window cutoff, prevents
+packing. The native tail's last point must also precede the cutoff. Short tails
+of 128 or fewer points are allowed, subject to the same strict encoded-size
+benefit check, 65,536-point maximum, read/batch budgets and revision fence as
+other packing. The complete native range moves atomically into the existing
+history bucket with ordinary v9 sealed frames and the existing packed descriptor.
+There are no v10 keys or fence. Release v9 readers/writers can reopen the store,
+correct or resume the series through the existing thaw path, and reset reused
+circular slots. Active long-step heads remain ordinary; closed-prefix packing is
+outside this option.
+
+This option defaults to false and reloads on SIGHUP. Changing it resets unfinished
+sweep progress and its compatible checkpoint policy so newly eligible tails are
+visited. It has no effect while `store-cold-pack = "off"`. Packing uses the chosen
+exact/decimal mode and existing cold-pack counters. Disabling the option leaves
+already sealed tails readable; `unpack` handles them even with tails disabled.
 
 `unpack` restores ordinary 128-point groups. This is also paced, and leaves the
 reader fence in place during online use. Changing exact/decimal/unpack policy
@@ -105,8 +126,8 @@ descriptors per step and prepares at most one native range per transaction.
 The wave joins before admitting more work, pacing, checkpointing or reloading.
 An uneven page can use fewer workers while its last metrics finish. The sweep
 never collects or sorts the whole catalog and never probes unallocated
-descriptor slots. It reads manifests for layout without loading authoritative
-header pages.
+descriptor slots. The default path reads manifests for layout without loading authoritative
+header pages; the tails option additionally reads the header and buffer bounds.
 Native ranges above 65536 points are skipped and counted. A decoded native range holds at most 1 MiB of points. Snapshot reads are
 limited to 2 MiB and mutations to 256 KiB plus the revision record. Oversized
 headers/ranges are skipped rather than splitting a native writer boundary.

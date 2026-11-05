@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	whisper "github.com/go-graphite/go-whisper"
@@ -89,8 +90,8 @@ func (f *continuationFile) thawBlock(block whisper.ContinuationBlock, desc *bloc
 // descriptor work on metrics with years of history; native layout is preserved.
 func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO, r store.ColdPackRequest) (store.RepackStats, uint64, bool, error) {
 	var stats store.RepackStats
-	// Packing needs layout and file identity, never authoritative header pages.
-	// Read only the manifest rather than warming every live rollup buffer.
+	// The default path reads only the manifest. Tail packing also reads the
+	// authoritative header below: native points can lag active rollup buffers.
 	identity, err := kv.Get(continuationNameKey("main.wsp"))
 	if errors.Is(err, store.ErrNotFound) {
 		return stats, 0, true, nil
@@ -115,6 +116,37 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 		return stats, 0, true, nil
 	}
 	stats.Observed = true
+	// Relayout leaves each archive's newest native block metric-prefixed. Only
+	// move that head when its entire archive (including buffered points and
+	// encoder watermarks) is cold. Unknown bounds fail closed. Until is exclusive,
+	// so this deliberately also protects the sample interval crossing the cutoff.
+	heads := map[int]int{}
+	coldArchives := map[int]bool{}
+	if r.PackTails && r.Mode != "unpack" {
+		headerFS := newContinuationFiles(kv, true)
+		source, err := whisper.OpenWithOptions(headerFS.main(), continuationOptions(headerFS, func() time.Time { return r.Cutoff }))
+		if err != nil {
+			return stats, 0, false, err
+		}
+		physical, layoutErr := source.ContinuationLayout()
+		bounds := append(source.StoredArchiveBounds(), source.BufferedRollupWindows()...)
+		if err := errors.Join(layoutErr, source.Close()); err != nil {
+			return stats, 0, false, err
+		}
+		until := map[int]int{}
+		for _, window := range bounds {
+			until[window.Archive] = max(until[window.Archive], window.Until)
+		}
+		last := map[int]int{}
+		for _, block := range physical.Blocks {
+			bound := until[block.Archive]
+			if block.Last > last[block.Archive] {
+				last[block.Archive] = block.Last
+				heads[block.Archive] = block.Index
+				coldArchives[block.Archive] = bound > 0 && int64(bound) < r.Cutoff.Unix()
+			}
+		}
+	}
 	fs := newContinuationFiles(kv, false)
 	f := &continuationFile{fs: fs, data: d}
 	pager, ok := kv.(store.ContinuationPageReader)
@@ -157,7 +189,15 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 		// The page may contain descriptors beyond an early rewrite return.
 		// Count only the consumed prefix so the next call cannot double count.
 		stats.ObservedPoints += uint64(desc.count)
-		eligible := desc.bucketed && desc.count > 128 && desc.packed == 0
+		head, knownHead := heads[archive]
+		activeHead := knownHead && head == index && !coldArchives[archive]
+		tail := !desc.bucketed && knownHead && head == index && coldArchives[archive]
+		eligible := (desc.bucketed && desc.count > 128 || tail && desc.count > 0) && desc.packed == 0
+		// A resumed packed tail keeps its bucket after thawing. Protect that
+		// now-active head too, even if a finer buffer has not propagated yet.
+		if activeHead {
+			eligible = false
+		}
 		if r.Mode == "unpack" {
 			eligible = desc.packed != 0
 		}
@@ -200,30 +240,36 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 					encoded = append(encoded, value)
 				}
 				prefix := desc.groupPrefix(d.id, archive, index)
+				packedDesc := desc
+				if !packedDesc.bucketed {
+					packedDesc.bucketed = true
+					packedDesc.bucket = continuationHistoryBucket
+				}
+				packedDesc.packed = store.ColdPackPoints
+				descriptorGrowth := uint64(len(packedDesc.encode()) - len(desc.encode()))
 				var oldBytes, newBytes uint64
 				if err := kv.Visit(prefix, func(k, v []byte) error { oldBytes += uint64(len(k) + len(v)); return nil }); err != nil {
 					return stats, next, false, err
 				}
 				for i, v := range encoded {
-					newBytes += uint64(len(desc.groupKey(d.id, archive, index, i)) + len(v))
+					newBytes += uint64(len(packedDesc.groupKey(d.id, archive, index, i)) + len(v))
 				}
-				if newBytes+4 < oldBytes {
+				if newBytes+descriptorGrowth < oldBytes {
 					if err := kv.DeletePrefix(prefix); err != nil {
 						return stats, next, false, err
 					}
 					for i, v := range encoded {
-						if err := kv.Set(desc.groupKey(d.id, archive, index, i), v); err != nil {
+						if err := kv.Set(packedDesc.groupKey(d.id, archive, index, i), v); err != nil {
 							return stats, next, false, err
 						}
 					}
-					desc.packed = store.ColdPackPoints
-					if err := kv.Set(continuationBlockPrefix(d.id, 'b', archive, index), desc.encode()); err != nil {
+					if err := kv.Set(continuationBlockPrefix(d.id, 'b', archive, index), packedDesc.encode()); err != nil {
 						return stats, next, false, err
 					}
 					stats.Blocks = 1
 					stats.Points = uint64(len(points))
 					stats.InputBytes = oldBytes
-					stats.OutputBytes = newBytes + 4
+					stats.OutputBytes = newBytes + descriptorGrowth
 					if desc.bucket&continuationThawedBucket != 0 {
 						stats.RepackedBlocks = 1
 						stats.RepackedPoints = stats.Points

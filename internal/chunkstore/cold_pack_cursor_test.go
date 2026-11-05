@@ -189,7 +189,7 @@ func TestColdPackCheckpointBackgroundStop(t *testing.T) {
 }
 
 func TestColdPackCheckpointInvalidation(t *testing.T) {
-	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets", "workers"} {
+	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets", "workers", "tails"} {
 		t.Run(change, func(t *testing.T) {
 			pebbleSynctest(t, func(t *testing.T) {
 				codec := &cursorTestCodec{}
@@ -203,6 +203,8 @@ func TestColdPackCheckpointInvalidation(t *testing.T) {
 				switch change {
 				case "decimal", "unpack", "off":
 					o.ColdPack.Mode = change
+				case "tails":
+					o.ColdPack.PackTails = true
 				case "window":
 					o.ColdPack.WriteWindow = 2 * time.Hour
 				case "format":
