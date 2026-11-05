@@ -121,8 +121,13 @@ func (m *itemMap) get(name string) *item {
 }
 
 func (m *itemMap) getHashed(hash uint64, name string) *item {
+	it, _ := m.getHashedSlot(hash, name)
+	return it
+}
+
+func (m *itemMap) getHashedSlot(hash uint64, name string) (*item, int) {
 	if len(m.slots) == 0 {
-		return nil
+		return nil, -1
 	}
 	tag := itemTag(hash)
 	mask := len(m.slots) - 1
@@ -130,10 +135,10 @@ func (m *itemMap) getHashed(hash uint64, name string) *item {
 		slot := &m.slots[i]
 		if slot.item == nil {
 			if m.control[i] == 0 {
-				return nil
+				return nil, -1
 			}
 		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == name {
-			return slot.item
+			return slot.item, i
 		}
 	}
 }
@@ -158,7 +163,7 @@ func (m *itemMap) getBytesHashed(hash uint64, name []byte) *item {
 
 func (m *itemMap) set(name string, it *item) { m.setHashed(xxh3.HashString(name), it) }
 
-func (m *itemMap) setHashed(hash uint64, it *item) {
+func (m *itemMap) setHashed(hash uint64, it *item) int {
 	if len(m.slots) == 0 {
 		m.slots = make([]itemSlot, 8)
 		m.control = make([]byte, 8)
@@ -200,7 +205,7 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 				m.n++
 				m.bytes += it.memoryBytes()
 				m.pointBytes += int64(cap(it.compact.buf))
-				return
+				return free
 			}
 		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == it.Metric {
 			m.bytes += it.memoryBytes() - slot.item.memoryBytes()
@@ -208,7 +213,7 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 			it.hash = hash
 			slot.item = it
 			m.invalidateDeadline(i)
-			return
+			return i
 		}
 	}
 }

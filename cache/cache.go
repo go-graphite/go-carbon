@@ -113,7 +113,8 @@ type indexFilter struct {
 type Shard struct {
 	streamGeneration uint64
 	streamSeries     []seriesSlot
-	streamSeriesNew  int
+	streamSeriesUsed int
+	seriesMu         sync.Mutex   // Guards the weak identity index, never acquired under mu.
 	mu               sync.RWMutex // Read Write mutex, guards access to internal map.
 	items            itemMap
 	sizePublished    int64
@@ -664,7 +665,7 @@ func (c *Cache) addRestored(p *points.Points, immediate bool) {
 		}
 		return
 	}
-	for wait := c.addWithRestore(p, true, false, immediate); wait != nil; wait = c.addWithRestore(p, true, false, immediate) {
+	for wait := c.addWithRestore(p, true, false, immediate, nil); wait != nil; wait = c.addWithRestore(p, true, false, immediate, nil) {
 		<-wait
 	}
 }
@@ -677,10 +678,10 @@ func (c *Cache) AddRecovered(p *points.Points) {
 }
 
 func (c *Cache) add(p *points.Points, restored, recovered bool) {
-	c.addWithRestore(p, restored, recovered, false)
+	c.addWithRestore(p, restored, recovered, false, nil)
 }
 
-func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool) <-chan struct{} {
+func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *StreamSeries) <-chan struct{} {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
@@ -722,7 +723,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	// readers may wait for the cache to drain.
 	spreadRestore := restored && !recovered && !immediate && s.writeoutRestoreSpread && s.batching() && shard.log.first != nil
 
-	values := shard.items.getHashed(hash, p.Metric)
+	values, slot := shard.items.getHashedSlot(hash, p.Metric)
 	exists := values != nil
 	if !exists {
 		if r := c.pending.Load(); r != nil {
@@ -731,13 +732,18 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 				// silently would lose already accepted points.
 				panic(fmt.Errorf("claim validated recovery source: %w", err))
 			}
-			values = shard.items.getHashed(hash, p.Metric)
+			values, slot = shard.items.getHashedSlot(hash, p.Metric)
 			exists = values != nil
 		}
 	}
 	// Recovery attaches only to an empty cache with receivers closed. Every
 	// insertion claims saved history first, so an existing item is reconciled
 	// already; repeated live points need no mapped-index lookup under this lock.
+	// Even a rejected point can refresh a stale hint for an existing item,
+	// just as the old post-insertion lookup did.
+	if series != nil && exists && hash == series.hash && p.Metric == series.name {
+		shard.bindStreamSeries(series, values, slot)
+	}
 	var throttleState any
 	if !recovered && c.throttleWithHash != nil {
 		if exists {
@@ -758,7 +764,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 
 	if !exists {
 		values = newItem(p.Metric, shard.bytesHint())
-		shard.items.setHashed(hash, values)
+		slot = shard.items.setHashed(hash, values)
 		if s.batching() && (!restored || spreadRestore) {
 			now, held := s.writeoutTime(time.Now())
 			if spreadRestore {
@@ -810,6 +816,9 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
+	if series != nil && !exists && hash == series.hash && p.Metric == series.name {
+		shard.bindStreamSeries(series, values, slot)
+	}
 	return nil
 }
 

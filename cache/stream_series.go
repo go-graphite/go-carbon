@@ -23,6 +23,9 @@ type seriesSlot struct {
 	ref  weak.Pointer[StreamSeries]
 }
 
+// Keep this an independently bounded identity cache, rather than sizing it from
+// live cache items: dictionaries may outlive those items, and distinct dead names
+// must not cause unbounded growth. At cap, replacement needs no liveness scan.
 const maxStreamSeriesSlots = 8192 // 128 MiB across 1024 shards, allocated lazily
 
 // StreamName is read-only and remains valid while this series is referenced.
@@ -36,96 +39,95 @@ func (s *StreamSeries) StreamName() []byte {
 func (c *Cache) ResolveStreamName(name []byte) any {
 	hash := xxh3.Hash(name)
 	sh := c.data[hash&(shardCount-1)]
-	sh.mu.Lock()
-	defer func() {
-		sh.streamSeriesBytes.Store(int64(cap(sh.streamSeries)) * 16)
-		sh.mu.Unlock()
-	}()
-	if len(sh.streamSeries) == 0 {
-		sh.streamSeries = make([]seriesSlot, 16)
+	// Ingestion never takes seriesMu. Weak-pointer promotion and index growth
+	// must not hold mu: a cold weak reference can fault in heap span metadata.
+	sh.seriesMu.Lock()
+	defer sh.seriesMu.Unlock()
+	size := len(sh.streamSeries)
+	if size == 0 {
+		size = 16
+	} else if sh.streamSeriesUsed >= size/2 && size < maxStreamSeriesSlots {
+		size *= 2
 	}
-	if sh.streamSeriesNew >= len(sh.streamSeries)/2 {
+	if size != len(sh.streamSeries) {
 		old := sh.streamSeries
-		live := 0
-		for _, slot := range old {
-			if slot.ref.Value() != nil {
-				live++
-			}
-		}
-		size := len(old)
-		if live*2 >= size {
-			size = min(maxStreamSeriesSlots, size*2)
-		}
 		sh.streamSeries = make([]seriesSlot, size)
-		sh.streamSeriesNew = 0
+		sh.streamSeriesUsed = 0
 		for _, slot := range old {
-			if slot.ref.Value() == nil {
-				continue
-			}
-			mask := size - 1
-			for step := 0; step < min(64, size); step++ {
-				i := (int(slot.hash>>shardBits) + step) & mask
-				if sh.streamSeries[i].hash == 0 || step == min(64, size)-1 {
-					sh.streamSeries[i] = slot
-					break
-				}
+			if slot.ref != (weak.Pointer[StreamSeries]{}) {
+				sh.putStreamSeries(slot)
 			}
 		}
+		sh.streamSeriesBytes.Store(int64(size) * int64(unsafe.Sizeof(seriesSlot{})))
 	}
 	mask := len(sh.streamSeries) - 1
 	free := -1
 	for step := 0; step < min(64, len(sh.streamSeries)); step++ {
 		i := (int(hash>>shardBits) + step) & mask
 		slot := &sh.streamSeries[i]
-		existing := slot.ref.Value()
-		if existing != nil && slot.hash == hash && existing.name == string(name) {
-			return existing
-		}
-		if existing == nil && free < 0 {
+		if slot.ref == (weak.Pointer[StreamSeries]{}) {
 			free = i
-		}
-		if slot.hash == 0 {
 			break
 		}
-	}
-	if free < 0 {
-		if len(sh.streamSeries) < maxStreamSeriesSlots {
-			old := sh.streamSeries
-			sh.streamSeries = make([]seriesSlot, len(old)*2)
-			mask = len(sh.streamSeries) - 1
-			for _, slot := range old {
-				if slot.ref.Value() == nil {
-					continue
-				}
-				for i := int(slot.hash>>shardBits) & mask; ; i = (i + 1) & mask {
-					if sh.streamSeries[i].hash == 0 {
-						sh.streamSeries[i] = slot
-						break
-					}
-				}
+		// Most probes have a different hash. Do not promote those weak
+		// references, even to look for dead slots. Exact names still resolve
+		// collisions, including a zero hash.
+		if slot.hash == hash {
+			existing := slot.ref.Value()
+			if existing != nil && existing.name == string(name) {
+				return existing
 			}
-			for i := int(hash>>shardBits) & mask; ; i = (i + 1) & mask {
-				if sh.streamSeries[i].hash == 0 {
-					free = i
-					break
-				}
+			if existing == nil && free < 0 {
+				free = i
 			}
-		} else {
-			free = int(hash>>shardBits) & mask
 		}
 	}
+	// Only borrowing the canonical name needs the cache lock. No weak-pointer
+	// work or index allocation happens in this critical section. Lock order is
+	// seriesMu -> mu; the cache never takes seriesMu while holding mu.
+	sh.mu.RLock()
 	metric := ""
 	if it := sh.items.getBytesHashed(hash, name); it != nil {
 		metric = it.Metric
 	}
+	sh.mu.RUnlock()
 	if metric == "" {
 		metric = string(name)
 	}
-	sh.streamSeriesNew++
 	series := &StreamSeries{name: metric, cache: c, hash: hash}
+	if free < 0 {
+		free = int(hash>>shardBits) & mask
+	}
+	if sh.streamSeries[free].ref == (weak.Pointer[StreamSeries]{}) {
+		sh.streamSeriesUsed++
+	}
 	sh.streamSeries[free] = seriesSlot{hash, weak.Make(series)}
 	return series
 }
+
+// putStreamSeries bounds all probes, including growth. At capacity this index
+// is an identity cache, not an ownership map: replacing a live or dead weak slot
+// may forgo sharing, but cannot change point admission or retain a name. Growing
+// copies hashes and weak handles without touching any referent's heap metadata.
+func (sh *Shard) putStreamSeries(slot seriesSlot) {
+	mask := len(sh.streamSeries) - 1
+	home := int(slot.hash>>shardBits) & mask
+	for step := 0; step < min(64, len(sh.streamSeries)); step++ {
+		i := (home + step) & mask
+		if sh.streamSeries[i].ref == (weak.Pointer[StreamSeries]{}) {
+			sh.streamSeries[i] = slot
+			sh.streamSeriesUsed++
+			return
+		}
+		if sh.streamSeries[i].hash == slot.hash {
+			// Also reuses expired entries without a separate liveness probe.
+			sh.streamSeries[i] = slot
+			return
+		}
+	}
+	sh.streamSeries[home] = slot
+}
+
 func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
 	settings := c.settings.Load().(*cacheSettings)
 	if settings.xlog != nil || settings.tagsEnabled || series.cache != c {
@@ -150,26 +152,7 @@ func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
 
 	// The ordinary insertion path preserves quota, recovery, tags, throttling and
 	// graceful diversion, while passing the existing immutable name allocation.
-	c.add(points.OnePoint(series.name, value, ts), false, false)
-	sh.mu.Lock()
-	defer sh.mu.Unlock()
-	it := sh.items.getBytesHashed(series.hash, series.StreamName())
-	if it == nil {
-		series.hint.Store(0)
-		return
-	}
-	mask := len(sh.items.slots) - 1
-	for slot := int(series.hash>>shardBits) & mask; ; slot = (slot + 1) & mask {
-		if sh.items.slots[slot].item == it {
-			generation := sh.streamIdentity(it)
-			if generation != 0 && generation < 1<<40 && slot < 0xffffff {
-				series.hint.Store(generation<<24 | uint64(slot+1))
-			} else {
-				series.hint.Store(0)
-			}
-			return
-		}
-	}
+	c.addWithRestore(points.OnePoint(series.name, value, ts), false, false, false, series)
 }
 
 // StreamSeriesIndexBytes reports the fixed-width weak index capacity. Series
@@ -190,4 +173,15 @@ func (sh *Shard) streamIdentity(it *item) uint64 {
 		it.streamGeneration = sh.streamGeneration
 	}
 	return it.streamGeneration
+}
+
+// bindStreamSeries publishes an insertion/lookup result while the owning shard
+// is still locked. A rehash or eviction later invalidates the generation check.
+func (sh *Shard) bindStreamSeries(series *StreamSeries, it *item, slot int) {
+	generation := sh.streamIdentity(it)
+	if generation != 0 && generation < 1<<40 && slot < 0xffffff {
+		series.hint.Store(generation<<24 | uint64(slot+1))
+	} else {
+		series.hint.Store(0)
+	}
 }
