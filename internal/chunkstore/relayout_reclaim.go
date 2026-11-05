@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 
 	"github.com/cockroachdb/pebble"
-	"github.com/cockroachdb/pebble/vfs"
 )
 
 const DefaultRelayoutReclaimBytes = 32 << 30
@@ -22,13 +21,16 @@ const DefaultRelayoutReclaimBytes = 32 << 30
 var relayoutReclaimPrefix = []byte("R/relayout/reclaim/")
 
 type relayoutReclaimState struct {
-	// Only relayout workers use gate. Writers join admitted groups, then reclaim
-	// a stable journal while stopping new ingests. Foreground writers never wait.
+	// Only relayout workers use gate. Join admitted groups to seal a journal
+	// snapshot, then release it while Compact runs. reclaimMu admits one
+	// reclaimer; workers can fill one further batch. Foreground writers never wait.
 	gate                sync.RWMutex
+	reclaimMu           sync.Mutex
 	initialized         atomic.Bool
 	limit               atomic.Uint64
 	mu                  sync.Mutex
 	pending, reserved   uint64
+	reclaiming          uint64 // subset of pending in the sealed journal snapshot
 	reclaims, reclaimed uint64
 }
 
@@ -57,25 +59,22 @@ func (m *relayoutReclaimState) stats(out *RelayoutStats) {
 	out.Reclaims, out.ReclaimedBytes = m.reclaims, m.reclaimed
 }
 
-// capacity samples the available headroom each time. Unsupported in-memory
-// filesystems have no space cap; a missing real sample admits no new bytes.
+// Capacity shares the guard's pressure sample and conservative copy charge.
+// A failed real sample admits no new bytes.
 func (s *Store) relayoutReclaimCapacity() (configured, space uint64) {
 	configured = s.relayout.reclaim.limit.Load()
 	if configured == 0 {
 		configured = DefaultRelayoutReclaimBytes
 	}
 	g := &s.relayout.guard
-	g.mu.Lock()
+	g.lockPressure(s.relayoutPressure)
 	reserve := g.minFree
+	free, err := g.freeLocked(), g.diskErr
 	g.mu.Unlock()
-	usage, err := s.fs.GetDiskUsage(s.dir)
-	if errors.Is(err, vfs.ErrUnsupported) {
-		return configured, math.MaxUint64
-	}
-	if err != nil || usage.AvailBytes <= reserve {
+	if err != nil || free <= reserve {
 		return configured, 0
 	}
-	return configured, (usage.AvailBytes - reserve) / 2
+	return configured, (free - reserve) / 2
 }
 
 func (s *Store) initRelayoutReclaim(ctx context.Context) error {
@@ -136,9 +135,10 @@ func (s *Store) beginRelayoutGroup(ctx context.Context, items []relayoutItem) (*
 		}
 		cap := min(configured, space)
 		total := m.pending + m.reserved
+		filling := total - m.reclaiming
 		// An indivisible metric/group may exceed a deliberately tiny configured
 		// threshold, but must fit the filesystem cap and owns the batch alone.
-		fits := n <= space && (total == 0 || n <= cap && total <= cap-n)
+		fits := n <= space && (total == 0 || total <= space-n && (filling == 0 || n <= cap && filling <= cap-n))
 		if fits {
 			m.reserved += n
 		}
@@ -173,6 +173,7 @@ func (g *relayoutReclaimGroup) committed(n uint64) {
 	m.mu.Lock()
 	m.reserved -= n
 	m.pending += n
+	g.s.relayout.guard.spent.Add(n)
 	m.mu.Unlock()
 	g.bytes += n
 	g.remaining -= n
@@ -204,8 +205,8 @@ func (s *Store) reclaimRelayout(ctx context.Context, force bool, needed uint64) 
 		cap := min(configured, space)
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		total := m.pending + m.reserved
-		return m.pending > 0 && (total >= cap || needed > cap-total)
+		total := m.pending - m.reclaiming + m.reserved
+		return m.pending > m.reclaiming && (total >= cap || needed > cap-total)
 	}
 	if !force && !due() {
 		return nil
@@ -213,28 +214,47 @@ func (s *Store) reclaimRelayout(ctx context.Context, force bool, needed uint64) 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	m.gate.Lock()
-	defer m.gate.Unlock()
+	if force {
+		m.reclaimMu.Lock()
+	} else if !m.reclaimMu.TryLock() {
+		return nil // a sealed batch is reclaiming; keep filling the next one
+	}
+	defer m.reclaimMu.Unlock()
 	m.mu.Lock()
 	stale := m.reclaims != epoch
 	m.mu.Unlock()
 	if stale {
 		return nil
 	}
+	m.gate.Lock()
 	// Other workers may have reclaimed while this caller waited.
 	keys, spans, n, err := s.readRelayoutReclaims(ctx)
 	if err != nil {
+		m.gate.Unlock()
 		return err
 	}
 	m.mu.Lock()
 	m.pending = n
 	m.mu.Unlock()
 	if len(keys) == 0 {
+		m.gate.Unlock()
 		return nil
 	}
 	if !force && !due() {
+		m.gate.Unlock()
 		return nil
 	}
+	// Every journal writer in this snapshot has finished. Later groups have
+	// distinct first IDs, so none can update a key we will remove below.
+	m.mu.Lock()
+	m.reclaiming = n
+	m.mu.Unlock()
+	m.gate.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.reclaiming = 0
+		m.mu.Unlock()
+	}()
 	for _, kind := range []byte{'u', 't'} {
 		if span := spans[kind]; span != nil {
 			// An operator can pause new reclaim IO with either pressure limit,
@@ -245,7 +265,9 @@ func (s *Store) reclaimRelayout(ctx context.Context, force bool, needed uint64) 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			compactErr := s.db.Compact(span.start, append(append([]byte(nil), span.end...), 0), false)
+			// Stock Pebble splits disjoint file ranges through its normal
+			// scheduler, retaining the shared worker and output-pacing budgets.
+			compactErr := s.db.Compact(span.start, append(append([]byte(nil), span.end...), 0), true)
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -267,7 +289,8 @@ func (s *Store) reclaimRelayout(ctx context.Context, force bool, needed uint64) 
 		return err
 	}
 	m.mu.Lock()
-	m.pending = 0
+	m.pending -= n
+	m.reclaiming = 0
 	m.reclaims++
 	m.reclaimed += n
 	m.mu.Unlock()
@@ -326,19 +349,27 @@ func (s *Store) readRelayoutReclaims(ctx context.Context) ([][]byte, map[byte]*r
 }
 
 func encodeRelayoutReclaim(n uint64, spans map[byte]*relayoutSpan) []byte {
-	out := binary.BigEndian.AppendUint64([]byte{1}, n)
-	for _, kind := range []byte{'u', 't'} {
-		var lo, hi []byte
-		if span := spans[kind]; span != nil {
-			lo, hi = span.start, span.end
-		}
-		for _, key := range [][]byte{lo, hi} {
-			out = binary.AppendUvarint(out, uint64(len(key)))
-			out = append(out, key...)
-		}
+	// Reserve the four length varints and both pairs of bounds once; this
+	// record is rebuilt in every metric's descriptor publication batch.
+	var bounds [4][]byte
+	if span := spans['u']; span != nil {
+		bounds[0], bounds[1] = span.start, span.end
+	}
+	if span := spans['t']; span != nil {
+		bounds[2], bounds[3] = span.start, span.end
+	}
+	size := 9 + 4*binary.MaxVarintLen64
+	for _, key := range bounds {
+		size += len(key)
+	}
+	out := binary.BigEndian.AppendUint64(append(make([]byte, 0, size), 1), n)
+	for _, key := range bounds {
+		out = binary.AppendUvarint(out, uint64(len(key)))
+		out = append(out, key...)
 	}
 	return out
 }
+
 func decodeRelayoutReclaim(value []byte) (uint64, map[byte]*relayoutSpan, error) {
 	invalid := errors.New("invalid relayout reclaim journal")
 	if len(value) < 9 || value[0] != 1 {
