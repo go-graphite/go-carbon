@@ -186,6 +186,15 @@ func TestReloadAppliesFileAndMigrationPolicies(t *testing.T) {
 	next.EnableOutOfOrder(100, 65536)
 	next.SetOutOfOrderCompactionPolicy(10, time.Minute, time.Hour)
 	p.ReloadSettings(next)
+	// Online migration takes a throttle token without blocking. Wait for the
+	// reloaded ticker to produce capacity so a loaded runner cannot skip it.
+	deadline := time.Now().Add(5 * time.Second)
+	for len(p.settings().onlineMigration.ticker.C) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("online migration ticker produced no capacity after reload")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	for _, name := range []string{"reload.created", "reload.existing"} {
 		cache.add(name, now+2, 9)
 		p.store(name)
