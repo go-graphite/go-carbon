@@ -102,6 +102,8 @@ func (p *Whisper) reclaimWorkers() int {
 // SetDeferredReclaim delays unlinking converted originals by at least delay and
 // batches them by directory; zero keeps reclamation inside each conversion.
 func (p *Whisper) SetDeferredReclaim(delay time.Duration) {
+	p.reclaimMu.Lock()
+	defer p.reclaimMu.Unlock()
 	p.ioMu.Lock()
 	defer p.ioMu.Unlock()
 	if p.reclaim != nil {
@@ -141,12 +143,17 @@ func (p *Whisper) SetDeferredReclaim(delay time.Duration) {
 // StopDeferredReclaim stops the reclaimer. Queued originals stay pending
 // cleanups for the next run.
 func (p *Whisper) StopDeferredReclaim() {
-	p.ioMu.Lock()
-	defer p.ioMu.Unlock()
-	if r := p.reclaim; r != nil {
+	p.reclaimMu.Lock()
+	defer p.reclaimMu.Unlock()
+	if r := p.reclaimer(); r != nil {
+		// Workers still use reclaimer() while pruning. Keep r available, but
+		// never hold ioMu while joining them. reclaimMu prevents a concurrent
+		// start, reload or second stop until this reclaimer has fully drained.
 		close(r.stop)
 		<-r.done
+		p.ioMu.Lock()
 		p.reclaim = nil
+		p.ioMu.Unlock()
 	}
 }
 
