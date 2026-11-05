@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"testing/synctest"
 
 	"github.com/cockroachdb/pebble/vfs"
 )
@@ -93,4 +94,43 @@ func TestFloatFenceSyncFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloseJoinsFloatDowngradeAudit(t *testing.T) {
+	pebbleSynctest(t, func(t *testing.T) {
+		s, _ := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true, TimeBuckets: true,
+			Continuation: testColdCodec{}, CacheSize: 1 << 20, MemTableSize: 2 << 20})
+		s.StopBackground()
+		if err := s.ConfigureColdPack(ColdPackOptions{Mode: "float-downgrade", BytesPerSecond: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.fenceFloatCodec(); err != nil {
+			t.Fatal(err)
+		}
+		// A full audit batch enters a long cancellable pacing wait.
+		if err := s.db.Set([]byte("audit.fixture"), make([]byte, 1<<20), nil); err != nil {
+			t.Fatal(err)
+		}
+		s.coldPack.cleanUnpack = true
+		downgraded := make(chan error, 1)
+		go func() { downgraded <- s.DowngradeFloatCodec(context.Background()) }()
+		synctest.Wait()
+		select {
+		case err := <-downgraded:
+			t.Fatal("audit did not enter pacing wait", err)
+		default:
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-downgraded; !errors.Is(err, context.Canceled) {
+			t.Fatal("close did not cancel and join float audit", err)
+		}
+		if s.TransferFormat() != 11 {
+			t.Fatal("cancelled audit lowered fence")
+		}
+		if err := s.DowngradeFloatCodec(context.Background()); !errors.Is(err, context.Canceled) {
+			t.Fatal("float downgrade admitted after close", err)
+		}
+	})
 }

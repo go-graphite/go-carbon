@@ -30,8 +30,8 @@ func TestColdPackConfig(t *testing.T) {
 	next.Whisper.StoreColdPackMaxDebt = 16 << 30
 	next.Whisper.StoreColdPackFloatCodec = true
 	next.Whisper.StoreColdPackFloatExhaustive = true
-	if o := coldPackOptions(&next); !o.FloatExhaustive {
-		t.Fatal("exhaustive option lost")
+	if o := coldPackOptions(&next); !o.PackTails || !o.FloatCodec || !o.FloatExhaustive {
+		t.Fatalf("combined options lost: %+v", o)
 	}
 	if storageSettingsChanged(cfg, &next) {
 		t.Fatal("maintenance policy requires restart")

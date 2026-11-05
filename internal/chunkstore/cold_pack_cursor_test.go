@@ -189,11 +189,14 @@ func TestColdPackCheckpointBackgroundStop(t *testing.T) {
 }
 
 func TestColdPackCheckpointInvalidation(t *testing.T) {
-	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets", "workers", "tails"} {
+	for _, change := range []string{"decimal", "unpack", "off", "window", "format", "budgets", "workers", "tails", "float-codec", "float-exhaustive"} {
 		t.Run(change, func(t *testing.T) {
 			pebbleSynctest(t, func(t *testing.T) {
 				codec := &cursorTestCodec{}
 				o := cursorTestOptions(vfs.NewMem(), codec)
+				if change == "float-exhaustive" {
+					o.ColdPack.FloatCodec = true
+				}
 				s, _ := openTestStore(t, "/store", o)
 				s.stopColdPack()
 				createTestMetric(t, s, "a")
@@ -203,6 +206,10 @@ func TestColdPackCheckpointInvalidation(t *testing.T) {
 				switch change {
 				case "decimal", "unpack", "off":
 					o.ColdPack.Mode = change
+				case "float-codec":
+					o.ColdPack.FloatCodec = true
+				case "float-exhaustive":
+					o.ColdPack.FloatExhaustive = true
 				case "tails":
 					o.ColdPack.PackTails = true
 				case "window":
@@ -366,4 +373,51 @@ func TestColdPackCheckpointUnpackFailure(t *testing.T) {
 			t.Fatal("restart cleared the unpack failure")
 		}
 	})
+}
+
+func TestColdPackFlagReloadIdentity(t *testing.T) {
+	for _, flag := range []string{"tails", "float-codec", "float-exhaustive"} {
+		t.Run(flag, func(t *testing.T) {
+			pebbleSynctest(t, func(t *testing.T) {
+				codec := &cursorTestCodec{}
+				o := cursorTestOptions(vfs.NewMem(), codec)
+				o.ColdPack.PackTails, o.ColdPack.FloatCodec, o.ColdPack.FloatExhaustive = true, true, true
+				// Keep FloatExhaustive off when toggling its required writer flag.
+				if flag == "float-codec" {
+					o.ColdPack.FloatExhaustive = false
+				}
+				s, _ := openTestStore(t, "/store", o)
+				s.StopBackground()
+				defer func() { closeTestStore(t, s) }()
+				createTestMetric(t, s, "a")
+				createTestMetric(t, s, "b")
+				for _, enabled := range []bool{false, true} {
+					cursorTestSteps(t, s, 4)
+					if st := s.ColdPackStats(); st.Cursor != "b" || st.BlockCursor != 1 {
+						t.Fatalf("missing in-flight cursor: %+v", st)
+					}
+					switch flag {
+					case "tails":
+						o.ColdPack.PackTails = enabled
+					case "float-codec":
+						o.ColdPack.FloatCodec = enabled
+					case "float-exhaustive":
+						o.ColdPack.FloatExhaustive = enabled
+					}
+					if err := s.ConfigureColdPack(o.ColdPack); err != nil {
+						t.Fatal(err)
+					}
+					if st := s.ColdPackStats(); st.Cursor != "" || st.BlockCursor != 0 || st.MetricsVisited != 0 {
+						t.Fatalf("reload kept old policy's cursor: %+v", st)
+					}
+					closeTestStore(t, s)
+					s, _ = openTestStore(t, "/store", o)
+					s.StopBackground()
+					if st := s.ColdPackStats(); st.Cursor != "" || st.BlockCursor != 0 || st.MetricsVisited != 0 {
+						t.Fatalf("restart restored old policy's cursor: %+v", st)
+					}
+				}
+			})
+		})
+	}
 }
