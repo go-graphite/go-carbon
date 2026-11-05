@@ -158,7 +158,7 @@ func TestColdPackCancellationRetainsBlockCursor(t *testing.T) {
 		if _, err := s.ColdPackStep(ctx); !errors.Is(err, context.Canceled) {
 			t.Fatalf("cancellation lost: %v", err)
 		}
-		if st := s.ColdPackStats(); st.Cursor != "cancel" || st.BlockCursor != 1 || st.Errors != 0 || st.Skipped != 0 {
+		if st := s.ColdPackStats(); st.Cursor != "cancel" || st.BlockCursor != 1 || st.Errors != 0 || st.Skipped != 0 || st.Error != "" {
 			t.Fatalf("unfinished range retired: %+v", st)
 		}
 		codec.before = nil

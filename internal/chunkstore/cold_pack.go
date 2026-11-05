@@ -123,7 +123,13 @@ type ColdPackStats struct {
 	PendingMetrics                                   int
 	ActiveWorkers                                    int
 	Active                                           bool
-	Mode, Error                                      string
+	Mode                                             string
+	// Error is the last real failure in this process, retained across clean
+	// passes. Only paths that increment Errors may set it.
+	Error string
+	// LastIncomplete is the most recent benign conflict or bounded skip. It
+	// keeps retry diagnostics without latching the failure gauge.
+	LastIncomplete string
 	// Last completed pass, published together under mu. The timestamp is zero
 	// until a pass completes (or a compatible checkpoint restores its result).
 	StoredPoints, StoredMetrics uint64
@@ -306,8 +312,8 @@ func (s *Store) coldPackStep(ctx context.Context) (finished bool, failure error)
 		c.stats.Active = false
 		if failure != nil {
 			c.passFailed = true
-			c.stats.Error = failure.Error()
 			if !errors.Is(failure, context.Canceled) {
+				c.stats.Error = failure.Error()
 				c.stats.Errors++
 			}
 		}
@@ -492,9 +498,9 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	if stats.Skipped > 0 || conflict != "" {
 		c.passFailed = true
 		if conflict != "" {
-			c.stats.Error = fmt.Sprintf("metric %q block %d: %s", work.name, work.block, conflict)
+			c.stats.LastIncomplete = fmt.Sprintf("metric %q block %d: %s", work.name, work.block, conflict)
 		} else {
-			c.stats.Error = fmt.Sprintf("metric %q block %d: skipped %d ranges", work.name, work.block, stats.Skipped)
+			c.stats.LastIncomplete = fmt.Sprintf("metric %q block %d: skipped %d ranges", work.name, work.block, stats.Skipped)
 		}
 	}
 	c.stats.LockNanos += uint64(lockTime)

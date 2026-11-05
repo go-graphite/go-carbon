@@ -140,6 +140,9 @@ pass retries from descriptor zero. Cancellation retains unfinished work;
 store-wide failures (for example a checkpoint failure) still pause the worker.
 `store_cold_pack_failed` latches any non-cancellation error in this process and
 stays set until restart, including when later metrics and passes succeed.
+Benign publication conflicts and bounded skips keep the pass dirty and retry on
+the next sweep without setting that gauge. Their most recent reason is retained
+in `ColdPackStats.LastIncomplete`; `ColdPackStats.Error` records real failures only.
 An offline `RunColdPack` completes the pass before returning a metric failure.
 Any skip, conflict or failure prevents that unpack pass from authorizing downgrade.
 
@@ -322,7 +325,9 @@ operations, IO, locks or allocations.
 
 `pending_metrics` counts unfinished names in the discovered page, including
 in-flight names, not an estimated full-store backlog. The administrative status API
-also includes the mode, name/descriptor cursor, counters and most recent error.
+also includes the mode, name/descriptor cursor, counters, most recent error and
+incomplete reason. The offline tool reports both `last_error` and `last_incomplete`
+when retries cannot complete a clean unpack and downgrade.
 Errors are logged with `ERROR`; successful sweeps log cumulative progress.
 `store_cold_pack_resumed_total` counts restored positions in this process and
 resume logs one `INFO` line with mode, metric, descriptor and pass position.
