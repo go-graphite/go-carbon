@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver/stream/codec"
 )
 
 // Opt-in fixed-offer restart experiment. The sender has five seconds of bounded
@@ -35,6 +36,7 @@ func TestLiveIngestLoad(t *testing.T) {
 	}
 	mode := os.Getenv("LIVE_BACKGROUND")
 	compressed := os.Getenv("LIVE_ZSTD") == "1"
+	stream := os.Getenv("LIVE_STREAM") == "1"
 	const connections, rows = 16, 128
 	c := cache.New()
 	c.SetMaxSize(0)
@@ -70,6 +72,13 @@ func TestLiveIngestLoad(t *testing.T) {
 	defer r.Stop()
 	r.SetPointOut(func(name []byte, v float64, ts int64) { c.AddPoint(name, v, ts); accepted.Add(1) })
 	r.SetPointsOut(func(name []byte, data []points.Point) { c.AddPoints(name, data); accepted.Add(int64(len(data))) })
+	if stream {
+		r.SetStreamPointOut(func(name []byte, value float64, ts int64, slot *any) {
+			c.AddStreamPoint(name, value, ts, slot)
+			accepted.Add(1)
+		})
+		r.SetStreamNameResolver(c.ResolveStreamName)
+	}
 	var conns [connections]net.Conn
 	var wire [connections][][]byte
 	for w := range connections {
@@ -78,6 +87,17 @@ func TestLiveIngestLoad(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer conns[w].Close()
+		if stream {
+			preamble, err := codec.AppendPreamble(nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := conns[w].Write(preamble); err != nil {
+				t.Fatal(err)
+			}
+			wire[w] = liveStreamLoadFrames(t, w, n, name)
+			continue
+		}
 		for batch := range 128 {
 			var plain []byte
 			for j := range rows {
@@ -188,8 +208,14 @@ func TestLiveIngestLoad(t *testing.T) {
 				target := min(seconds*rate/connections/rows, int(elapsed.Sub(started).Seconds()*float64(rate/connections)/rows))
 				for batches < target {
 					offered.Add(rows)
+					frame := batches % len(wire[w])
+					if stream && batches >= 128 {
+						// The first cycle defines names. Later cycles retain IDs
+						// and use stable zero timestamp/value deltas.
+						frame = 128 + batches%128
+					}
 					select {
-					case q <- wire[w][batches%len(wire[w])]:
+					case q <- wire[w][frame]:
 					default:
 						dropped.Add(rows)
 					}
@@ -206,7 +232,7 @@ func TestLiveIngestLoad(t *testing.T) {
 	elapsed := time.Since(started)
 	got := accepted.Load()
 	cpu = streamBenchCPU(t) - cpu
-	t.Logf("metrics=%d restored=%d ratio_seconds=%.1f rate=%d zstd=%t background=%s offered=%d accepted=%d accepted/offered=%.6f accepted/s=%.0f relay_dropped=%d popped=%d restored_during=%d cpu_cores=%.3f", n, n*perMetric, float64(n*perMetric)/float64(rate), rate, compressed, mode, offered.Load(), got, float64(got)/float64(offered.Load()), float64(got)/elapsed.Seconds(), dropped.Load(), popped.Load(), restored.Load(), float64(cpu)/float64(elapsed))
+	t.Logf("metrics=%d restored=%d ratio_seconds=%.1f rate=%d zstd=%t stream=%t background=%s offered=%d accepted=%d accepted/offered=%.6f accepted/s=%.0f relay_dropped=%d popped=%d restored_during=%d cpu_cores=%.3f", n, n*perMetric, float64(n*perMetric)/float64(rate), rate, compressed, stream, mode, offered.Load(), got, float64(got)/float64(offered.Load()), float64(got)/elapsed.Seconds(), dropped.Load(), popped.Load(), restored.Load(), float64(cpu)/float64(elapsed))
 	close(stop)
 	background.Wait()
 	// Measurement ends above. Flush the bounded sender tail without background

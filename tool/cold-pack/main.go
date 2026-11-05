@@ -43,18 +43,56 @@ func run() (err error) {
 	if err != nil {
 		return err
 	}
-	defer func() { err = errors.Join(err, db.Close()) }()
+	defer func() {
+		err = errors.Join(err, db.Close())
+		if err != nil {
+			err = errors.Join(err, json.NewEncoder(os.Stderr).Encode(db.ColdPackStats()))
+		}
+	}()
 	db.StopBackground()
 	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, Workers: *workers, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve, MaxCompactionDebt: *debt}); err != nil {
 		return err
 	}
-	if err = db.RunColdPack(ctx); err != nil {
+	if err = runColdPack(ctx, db, *downgrade); err != nil {
 		return err
 	}
-	if *downgrade {
-		if err = db.DowngradeColdPack(ctx); err != nil {
-			return err
+	return json.NewEncoder(os.Stdout).Encode(db.ColdPackStats())
+}
+
+// A pass may finish without authorizing downgrade: conflicts, bounded skips,
+// or a resumed failed pass require another sweep. Keep the store's safety check
+// authoritative and cap the offline retry work.
+func runColdPack(ctx context.Context, db *chunkstore.Store, downgrade bool) error {
+	passes := 1
+	if downgrade {
+		passes = 3
+	}
+	for pass := 1; ; pass++ {
+		before := db.ColdPackStats()
+		err := db.RunColdPack(ctx)
+		if err == nil {
+			if !downgrade {
+				return nil
+			}
+			err = db.DowngradeColdPack(ctx)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, chunkstore.ErrColdPackIncomplete) {
+				return coldPackFailure(err, pass, db.ColdPackStats())
+			}
+		}
+		stats := db.ColdPackStats()
+		// Retry completed sweeps only. Interrupted sweeps retain their
+		// cursor; cancellation never starts another pass.
+		if !downgrade || stats.Passes == before.Passes || pass == passes || ctx.Err() != nil ||
+			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return coldPackFailure(err, pass, stats)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(db.ColdPackStats())
+}
+
+func coldPackFailure(err error, passes int, stats chunkstore.ColdPackStats) error {
+	return fmt.Errorf("after %d cold-pack pass(es): %w (errors=%d conflicts=%d skipped=%d last_error=%q cursor=%q block_cursor=%d)",
+		passes, err, stats.Errors, stats.Conflicts, stats.Skipped, stats.Error, stats.Cursor, stats.BlockCursor)
 }

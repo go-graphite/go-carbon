@@ -21,6 +21,7 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver/tcp"
 )
 
 // slowFlusher holds flush completions until the test releases them, preserving
@@ -267,6 +268,84 @@ func TestDumpStopStopsStoreBackgroundBeforeInputCloses(t *testing.T) {
 	app.FlushTraces = nil
 	if stoppedAtClose.Load() != 1 {
 		t.Fatalf("store background work still ran when input closed (%d):\n%s", stoppedAtClose.Load(), zapwriter.TestString())
+	}
+	app.ReleaseForHandoff()
+}
+
+// Cancellation can still be joining one entered maintenance IO. Input during
+// that join must reach persistence, rather than filling an undrained cache.
+func TestDumpStopPersistsWhileMaintenanceCancels(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	path, cfg := sharedAppConfig(t)
+	cfg.Tcp.Enabled = true
+	cfg.Whisper.StoreMetadataCacheSize = 4 << 20
+	cfg.Whisper.StoreMetadataCachePrewarm = false
+	cfg.Cache.WriteoutMinPoints = 1
+	cfg.Cache.WriteoutMaxDelay = Duration{time.Millisecond}
+	cfg.Dump.Enabled, cfg.Dump.Path = true, t.TempDir()
+	writeSharedConfig(t, path, cfg)
+	app := New(path)
+	if err := app.ParseConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.Stop()
+	db := app.MetricStore
+	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }) }
+	defer finish()
+	warmed := make(chan struct{})
+	go func() {
+		defer close(warmed)
+		_, _ = db.PrewarmMetadata(context.Background(), func(yield func(string) bool) { yield("maintenance.probe") }, store.PrewarmOptions{Workers: 1, Wait: func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			close(cancelled)
+			<-release
+			return ctx.Err()
+		}})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("maintenance never entered")
+	}
+	listen := app.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
+	stopped := make(chan error, 1)
+	go func() { stopped <- app.DumpStop() }()
+	<-cancelled
+	// Give the old ordering time to stop its otherwise idle persister.
+	time.Sleep(100 * time.Millisecond)
+	conn, err := net.Dial("tcp", listen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "during.cancellation 42 %d\n", time.Now().Unix()-1); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := db.Metadata(context.Background(), "during.cancellation"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			finish()
+			<-stopped
+			t.Fatal("persistence stopped before maintenance finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	finish()
+	<-warmed
+	if err := <-stopped; err != nil {
+		t.Fatal(err)
 	}
 	app.ReleaseForHandoff()
 }

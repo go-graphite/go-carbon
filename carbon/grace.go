@@ -71,6 +71,10 @@ func (app *App) DumpStop() (err error) {
 	// The store's background scans would otherwise stop in its close, with
 	// input closed: stop them while input flows. See stopStoreBackground.
 	backgroundStopped := app.stopStoreBackground()
+	// Finish cancellation with persistence AND input active. Stopping the
+	// writers first leaves a finite cache holding all input for the duration
+	// of an entered maintenance IO, eventually backpressuring the relays.
+	<-backgroundStopped
 	defer func() {
 		if err == nil {
 			return
@@ -157,7 +161,6 @@ func (app *App) DumpStop() (err error) {
 	}
 	<-persisterStopped
 	app.Persister = nil
-	<-backgroundStopped
 	// Save the advisory metadata accelerator with input and read listeners
 	// available. It must not extend the later storage/read handoff gap.
 	app.prepareMetadataCheckpoint(logger)

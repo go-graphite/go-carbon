@@ -80,7 +80,7 @@ func TestRelayoutReclaimPerformance(t *testing.T) {
 		t.Skip("opt-in on-disk measurement")
 	}
 	for _, shape := range []string{"skew", "small"} {
-		for _, mode := range []string{"compact-false", "compact-true", "K1", "K4", "K8"} {
+		for _, mode := range []string{"compact-false", "compact-true", "K1", "K4", "K8", "K4-overlap"} {
 			t.Run(shape+"/"+mode, func(t *testing.T) {
 				dir := t.TempDir()
 				usage, err := vfs.Default.GetDiskUsage(dir)
@@ -94,7 +94,7 @@ func TestRelayoutReclaimPerformance(t *testing.T) {
 				}
 				codec := reclaimPerfCodec{value: value, skew: shape == "skew"}
 				workers := 1
-				if mode == "K4" {
+				if mode == "K4" || mode == "K4-overlap" {
 					workers = 4
 				}
 				if mode == "K8" {
@@ -165,10 +165,19 @@ func TestRelayoutReclaimPerformance(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if mode == "K4-overlap" {
+					// Explicit copy/reclaim pipeline at a fixed 80 MiB/s copy
+					// ceiling, while the same aggregate output cap applies.
+					if err := s.SetRelayoutRate(80 << 20); err != nil {
+						t.Fatal(err)
+					}
+				}
 				before := s.db.Metrics()
 				ioBefore := s.fsStats.Stats()
 				peak := before.DiskSpaceUsage()
 				var peakPending uint64
+				var overlapSamples, lastCopied uint64
+				peakL0 := before.Levels[0].NumFiles
 				stop, stopped := make(chan struct{}), make(chan struct{})
 				go func() {
 					defer close(stopped)
@@ -179,8 +188,14 @@ func TestRelayoutReclaimPerformance(t *testing.T) {
 						case <-stop:
 							return
 						case <-ticker.C:
-							peak = max(peak, s.db.Metrics().DiskSpaceUsage())
-							peakPending = max(peakPending, s.RelayoutStats().UnreclaimedBytes)
+							m, st := s.db.Metrics(), s.RelayoutStats()
+							peak = max(peak, m.DiskSpaceUsage())
+							peakL0 = max(peakL0, m.Levels[0].NumFiles)
+							peakPending = max(peakPending, st.UnreclaimedBytes)
+							if m.Compact.NumInProgress > 0 && st.Bytes > lastCopied {
+								overlapSamples++
+							}
+							lastCopied = st.Bytes
 						}
 					}
 				}()
@@ -229,9 +244,12 @@ func TestRelayoutReclaimPerformance(t *testing.T) {
 					flushed += l.BytesFlushed - before.Levels[i].BytesFlushed
 				}
 				st := s.RelayoutStats()
-				out := map[string]any{"shape": shape, "mode": mode, "wall_s": wall, "cpu_s": cpuSeconds, "copied": st.Bytes, "metrics": st.Metrics, "reclaims": st.Reclaims, "L6_files": len(tables[6]), "compact_write": writes, "compact_read": reads, "ingested": ingested, "flushed": flushed, "table_write": ioAfter.Bytes[FSWrite][FSTable] - ioBefore.Bytes[FSWrite][FSTable], "peak_growth": peak - before.DiskSpaceUsage(), "peak_pending": peakPending, "alloc_bytes": memAfter.TotalAlloc - memBefore.TotalAlloc, "allocs": memAfter.Mallocs - memBefore.Mallocs}
+				out := map[string]any{"shape": shape, "mode": mode, "wall_s": wall, "cpu_s": cpuSeconds, "copied": st.Bytes, "metrics": st.Metrics, "reclaims": st.Reclaims, "L6_files": len(tables[6]), "compact_write": writes, "compact_read": reads, "ingested": ingested, "flushed": flushed, "table_write": ioAfter.Bytes[FSWrite][FSTable] - ioBefore.Bytes[FSWrite][FSTable], "peak_growth": peak - before.DiskSpaceUsage(), "peak_pending": peakPending, "alloc_bytes": memAfter.TotalAlloc - memBefore.TotalAlloc, "allocs": memAfter.Mallocs - memBefore.Mallocs, "flush_count": after.Flush.Count - before.Flush.Count, "L0_before": before.Levels[0].NumFiles, "L0_after": after.Levels[0].NumFiles, "L0_peak": peakL0, "overlap_samples": overlapSamples}
 				encoded, _ := json.Marshal(out)
 				t.Log("PERF " + string(encoded))
+				if mode == "K4-overlap" && overlapSamples == 0 {
+					t.Fatal("no copy publication overlapped compaction")
+				}
 				if peakPending > 2*limit {
 					t.Fatalf("more than two batches pending: %d > %d", peakPending, 2*limit)
 				}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -81,7 +82,7 @@ func TestColdPackPagesAndBusyStripe(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st := s.ColdPackStats(); st.Conflicts != 1 || st.Blocks != 0 {
+		if st := s.ColdPackStats(); st.Conflicts != 1 || st.Blocks != 0 || !strings.Contains(st.Error, "metric stripe busy") {
 			t.Fatalf("busy stripe waited or published: %+v", st)
 		}
 		for n := 0; n < 1000; n++ {
@@ -116,7 +117,7 @@ func TestColdPackBudgetsAndFailures(t *testing.T) {
 			_, err := s.ColdPackStep(context.Background())
 			st := s.ColdPackStats()
 			if tc.skip {
-				if err != nil || st.Skipped != 1 || st.Blocks != 0 || st.WriteBytes != 0 {
+				if err != nil || st.Skipped != 1 || st.Blocks != 0 || st.WriteBytes != 0 || !strings.Contains(st.Error, "skipped 1 ranges") {
 					t.Fatalf("budget %+v %v", st, err)
 				}
 			} else if err != nil || st.Errors != 1 || st.Skipped != 1 || st.Error == "" {
@@ -127,7 +128,7 @@ func TestColdPackBudgetsAndFailures(t *testing.T) {
 }
 func TestColdPackPacerAndStop(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		s := &Store{}
+		s := &Store{maintenanceCtx: context.Background()}
 		s.coldPack.options, _ = NormalizeColdPack(ColdPackOptions{Mode: "off", CPUFraction: .1, BytesPerSecond: 1 << 20})
 		started := time.Now()
 		time.Sleep(100 * time.Millisecond)

@@ -265,9 +265,9 @@ func (s *Store) reclaimRelayout(ctx context.Context, force bool, needed uint64) 
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			// Stock Pebble splits disjoint file ranges through its normal
-			// scheduler, retaining the shared worker and output-pacing budgets.
-			compactErr := s.db.Compact(span.start, append(append([]byte(nil), span.end...), 0), true)
+			compactErr := s.compactSpans(ctx, span.start, append(append([]byte(nil), span.end...), 0), func() error {
+				return s.relayout.guard.waitPolicy(ctx, s.relayoutPressure, nil, 0)
+			})
 			if err := ctx.Err(); err != nil {
 				return err
 			}

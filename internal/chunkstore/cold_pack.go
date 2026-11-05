@@ -275,9 +275,21 @@ func (s *Store) coldPackPage(ctx context.Context, after string) ([]string, error
 // then skipped for this pass; cancellation and step-wide errors are returned.
 // Only one caller may advance it.
 func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error) {
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
+	if !ok {
+		return false, context.Canceled
+	}
+	defer end()
+	return s.coldPackStep(ctx)
+}
+
+func (s *Store) coldPackStep(ctx context.Context) (finished bool, failure error) {
 	c := &s.coldPack
 	c.run.Lock()
 	defer c.run.Unlock()
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	c.mu.Lock()
 	o := c.options
 	c.stats.Active = o.Mode != "off" && o.Mode != ""
@@ -294,9 +306,9 @@ func (s *Store) ColdPackStep(ctx context.Context) (finished bool, failure error)
 		c.stats.Active = false
 		if failure != nil {
 			c.passFailed = true
+			c.stats.Error = failure.Error()
 			if !errors.Is(failure, context.Canceled) {
 				c.stats.Errors++
-				c.stats.Error = failure.Error()
 			}
 		}
 		c.mu.Unlock()
@@ -477,12 +489,17 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	c.stats.RepackedInputBytes += stats.RepackedInputBytes
 	c.stats.RepackedOutputBytes += stats.RepackedOutputBytes
 	c.stats.Skipped += stats.Skipped
-	if stats.Skipped > 0 || conflict {
+	if stats.Skipped > 0 || conflict != "" {
 		c.passFailed = true
+		if conflict != "" {
+			c.stats.Error = fmt.Sprintf("metric %q block %d: %s", work.name, work.block, conflict)
+		} else {
+			c.stats.Error = fmt.Sprintf("metric %q block %d: skipped %d ranges", work.name, work.block, stats.Skipped)
+		}
 	}
 	c.stats.LockNanos += uint64(lockTime)
 	c.stats.MaxLockNanos = max(c.stats.MaxLockNanos, uint64(lockTime))
-	if conflict {
+	if conflict != "" {
 		c.stats.Conflicts++
 	}
 	work.points += stats.ObservedPoints
@@ -591,12 +608,12 @@ func (p *limitedRepackIO) VisitPage(prefix, start []byte, limit int, fn func([]b
 	return true, it.Error()
 }
 
-func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPackRequest) (stats RepackStats, next uint64, done bool, read, written uint64, held time.Duration, conflict bool, err error) {
+func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPackRequest) (stats RepackStats, next uint64, done bool, read, written uint64, held time.Duration, conflict string, err error) {
 	snap := s.db.NewSnapshot()
 	defer snap.Close()
 	meta, e := metadataFrom(snap, name)
 	if errors.Is(e, ErrNotFound) {
-		return stats, 0, true, 0, 0, 0, false, nil
+		return stats, 0, true, 0, 0, 0, "", nil
 	}
 	if e != nil {
 		err = e
@@ -647,7 +664,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	unlock, ok := s.tryLockMetricMutation(name)
 	if !ok {
 		stats = RepackStats{}
-		conflict = true
+		conflict = "metric stripe busy"
 		return
 	}
 	locked := time.Now()
@@ -655,7 +672,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	current, e := s.metadataLocked(name)
 	if errors.Is(e, ErrNotFound) || e == nil && (current.ID != meta.ID || current.Generation != meta.Generation || current.Revision != meta.Revision) {
 		stats = RepackStats{}
-		conflict = true
+		conflict = "metric changed during planning"
 		return
 	}
 	if e != nil {
@@ -664,7 +681,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	}
 	if time.Since(locked) > 2*time.Millisecond {
 		stats = RepackStats{}
-		conflict = true
+		conflict = "publication validation exceeded 2ms"
 		return
 	}
 	if err = ctx.Err(); err != nil {
@@ -680,7 +697,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 
 func (s *Store) startColdPack() {
 	c := &s.coldPack
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.maintenanceCtx)
 	c.cancel = cancel
 	c.done = make(chan struct{})
 	c.wake = make(chan struct{}, 1)
@@ -711,7 +728,7 @@ func (s *Store) startColdPack() {
 			}
 			before := s.ColdPackStats()
 			started := time.Now()
-			done, err := s.ColdPackStep(ctx)
+			done, err := s.coldPackStep(ctx)
 			c.mu.Lock()
 			o := c.options
 			c.mu.Unlock()
@@ -746,6 +763,11 @@ func (s *Store) stopColdPack() {
 // RunColdPack completes one paced sweep. Offline tools use the same step and
 // pacing policy as the background worker; callers must stop that worker first.
 func (s *Store) RunColdPack(ctx context.Context) error {
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
+	if !ok {
+		return context.Canceled
+	}
+	defer end()
 	errorsBefore := s.ColdPackStats().Errors
 	var pacer coldPackPacer
 	timer := time.NewTimer(0)
@@ -754,7 +776,7 @@ func (s *Store) RunColdPack(ctx context.Context) error {
 	for {
 		before := s.ColdPackStats()
 		started := time.Now()
-		done, err := s.ColdPackStep(ctx)
+		done, err := s.coldPackStep(ctx)
 		if err != nil || done {
 			if err == nil {
 				if stats := s.ColdPackStats(); stats.Errors > errorsBefore {

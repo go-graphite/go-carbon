@@ -2,6 +2,7 @@ package chunkstore
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -327,7 +328,7 @@ func TestCompactionPacingCloseReleasesWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := <-compacted; err != nil && !errors.Is(err, pebble.ErrClosed) && !errors.Is(err, pebble.ErrCancelledCompaction) {
+	if err := <-compacted; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, pebble.ErrClosed) && !errors.Is(err, pebble.ErrCancelledCompaction) {
 		t.Fatal(err)
 	}
 }

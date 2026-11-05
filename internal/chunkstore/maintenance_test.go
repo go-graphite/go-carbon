@@ -52,7 +52,9 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 			}
 			defer closeTestStore(t, s)
 			purged := make(chan error, 1)
-			go func() { _, err := s.PurgeInvalidNames(context.Background()); purged <- err }()
+			// This caller owns a background purge; explicit owner purges can
+			// instead outlive StopBackground by supplying their own context.
+			go func() { _, err := s.PurgeInvalidNames(s.maintenanceCtx); purged <- err }()
 			want := map[string]bool{"catalog-membership": true, "relayout": true, "cold-pack": true, "compact-once": true, "purge-invalid-names": true}
 			for len(want) > 0 {
 				select {
@@ -78,6 +80,9 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 			}
 			if shutdown {
 				s.StopBackground()
+				if s.compactOnce.running.Load() {
+					t.Fatal("StopBackground returned with compact-once running")
+				}
 				if err := <-purged; !errors.Is(err, context.Canceled) {
 					t.Fatal("purge did not cancel", err)
 				}
@@ -95,6 +100,59 @@ func TestStoreMaintenanceAdmissionAndShutdown(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 			}
 		})
+	}
+}
+
+func TestMaintenanceCancellationPrecedesJoins(t *testing.T) {
+	entered, cancelled := make(chan string, 3), make(chan string, 3)
+	want := map[string]bool{"relayout": true, "cold-pack": true, "compact-once": true}
+	opts := Options{ExactBlocks: true, TimeBuckets: true, Continuation: maintenanceCodec{},
+		CacheSize: 1 << 20, MemTableSize: 1 << 20, MetadataCacheSize: 4 << 20,
+		RelayoutRate: 1, CompactOnce: "cancel-all", ColdPack: ColdPackOptions{Mode: "exact"},
+		MaintenanceWait: func(ctx context.Context, name string) error {
+			if want[name] {
+				entered <- name
+				<-ctx.Done()
+				cancelled <- name
+			}
+			return ctx.Err()
+		}}
+	s, _ := openTestStore(t, t.TempDir(), opts)
+	defer closeTestStore(t, s)
+	for range 3 {
+		select {
+		case <-entered:
+		case <-time.After(time.Minute):
+			t.Fatal("maintenance did not enter its gate")
+		}
+	}
+	holding, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	go func() {
+		_, _ = s.PrewarmMetadata(context.Background(), func(yield func(string) bool) { yield("missing") }, PrewarmOptions{Workers: 1, Wait: func(ctx context.Context) error {
+			close(holding)
+			<-ctx.Done()
+			<-release
+			return ctx.Err()
+		}})
+	}()
+	<-holding
+	stopped := make(chan struct{})
+	go func() { s.StopBackground(); close(stopped) }()
+	for range 3 {
+		select {
+		case name := <-cancelled:
+			if !want[name] {
+				t.Fatal("unexpected cancellation", name)
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("joining prewarm delayed cancellation of other maintenance")
+		}
+	}
+	select {
+	case <-stopped:
+		t.Fatal("StopBackground did not join its prewarm")
+	default:
 	}
 }
 
