@@ -38,13 +38,16 @@ const authHeader = "X-Buckyd-Authorization"
 const readHeaderTimeout = 10 * time.Second
 
 type Config struct {
-	Enabled          bool     `toml:"enabled"`
-	Bind             string   `toml:"bind"`
-	TmpDir           string   `toml:"tmpdir"`
-	MaxBodyBytes     int64    `toml:"max_body_bytes"`
-	MaxTransfers     int      `toml:"max_transfers"`
-	CopyMinFreeBytes int64    `toml:"copy-min-free-bytes"`
-	JWTSecretFile    string   `toml:"auth-jwt-secret-file"`
+	Enabled          bool   `toml:"enabled"`
+	Bind             string `toml:"bind"`
+	TmpDir           string `toml:"tmpdir"`
+	MaxBodyBytes     int64  `toml:"max_body_bytes"`
+	MaxTransfers     int    `toml:"max_transfers"`
+	CopyMinFreeBytes int64  `toml:"copy-min-free-bytes"`
+	JWTSecretFile    string `toml:"auth-jwt-secret-file"`
+	// WaitForJWTSecret keeps ingestion running when boot-time secret delivery
+	// is late. Management requests return 503 until the file can be loaded.
+	WaitForJWTSecret bool     `toml:"wait-for-auth-secret"`
 	Node             string   `toml:"node"`
 	Hash             string   `toml:"hash"`
 	Replicas         int      `toml:"replicas"`
@@ -99,6 +102,7 @@ type Service struct {
 	store         *chunkstore.Store
 	whisperIO     *whisperio.Adapter
 	secret        []byte
+	authPending   bool // protected by mu; no handler runs until secret is set
 	server        *http.Server
 	listener      net.Listener
 	transfers     chan struct{}
@@ -134,13 +138,17 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 		return nil, fmt.Errorf("create buckyd temporary directory: %w", err)
 	}
 	secret, err := readSecret(config.JWTSecretFile)
-	if err != nil {
+	waiting := err != nil && config.WaitForJWTSecret && errors.Is(err, os.ErrNotExist)
+	if err != nil && !waiting {
 		return nil, err
 	}
-	return &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}, nil
+	return &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, authPending: waiting, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}, nil
 }
 
 func validateConfig(config Config) error {
+	if config.WaitForJWTSecret && config.JWTSecretFile == "" {
+		return errors.New("wait-for-auth-secret requires auth-jwt-secret-file")
+	}
 	if config.CopyMinFreeBytes < 0 {
 		return errors.New("copy-min-free-bytes must not be negative")
 	}
@@ -458,11 +466,32 @@ func (s *Service) Handler() http.Handler {
 			http.Error(w, "buckyd is stopped", http.StatusServiceUnavailable)
 			return
 		}
+		// A missing secret must never select the legacy unauthenticated path.
+		// Each management request retries delivery; publication under mu happens
+		// before the first handler, after which the secret is immutable.
+		if s.authPending {
+			secret, err := readSecret(s.config.JWTSecretFile)
+			if err != nil {
+				s.mu.Unlock()
+				w.Header().Set("Retry-After", "1")
+				http.Error(w, "buckyd authentication secret is not ready", http.StatusServiceUnavailable)
+				return
+			}
+			s.secret, s.authPending = secret, false
+		}
 		s.handlers.Add(1)
 		s.mu.Unlock()
 		defer s.handlers.Done()
 		mux.ServeHTTP(w, r)
 	})
+}
+
+// AuthSecretReady is false while management requests are unavailable because
+// the configured secret has not been delivered. The next request retries it.
+func (s *Service) AuthSecretReady() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.authPending
 }
 
 func (s *Service) allowed(metric, op string, r *http.Request) error {

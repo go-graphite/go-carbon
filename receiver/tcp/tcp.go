@@ -64,6 +64,9 @@ type Options struct {
 	StreamDictionaryTotalBytes int64  `toml:"stream-dictionary-total-bytes"`
 	StreamDictionaryBytes      int    `toml:"stream-dictionary-bytes"`
 	StreamMaxNames             int    `toml:"stream-max-names"`
+	// HandoffReadAheadBytes bounds wire input retained per connection while
+	// ordered recovery gates its point sink. Zero keeps the 8 MiB default.
+	HandoffReadAheadBytes int `toml:"handoff-read-ahead-bytes"`
 }
 
 func NewOptions() *Options {
@@ -77,6 +80,13 @@ func NewOptions() *Options {
 		StreamDictionaryBytes:      codec.DefaultDictionaryBytes,
 		StreamDictionaryTotalBytes: 3 << 30,
 	}
+}
+
+// ValidateHandoffReadAhead rejects unsafe buffer sizes before a reload can
+// replace the configuration used by the successor.
+func (o *Options) ValidateHandoffReadAhead() error {
+	_, err := readAheadLimit(o.HandoffReadAheadBytes)
+	return err
 }
 
 type FramingOptions struct {
@@ -133,6 +143,7 @@ type TCP struct {
 	streamCounters           [streamCounterCount]atomic.Uint64
 	promStreamCounters       [streamCounterCount]*prometheus.CounterVec
 	handoff                  handoffState
+	handoffReadAheadBytes    int
 	pointOut                 atomic.Pointer[func(name []byte, value float64, timestamp int64)]
 	pointsOut                atomic.Pointer[func(name []byte, data []points.Point)]
 	streamNameResolver       atomic.Pointer[func([]byte) any]
@@ -213,6 +224,9 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	}
 
 	if err := validateZstdLimit(options.ZstdMaxFrameSize); err != nil {
+		return nil, err
+	}
+	if r.handoffReadAheadBytes, err = readAheadLimit(options.HandoffReadAheadBytes); err != nil {
 		return nil, err
 	}
 	r.cacheLookupBatch = options.CacheLookupBatch
@@ -669,7 +683,7 @@ func (rcv *TCP) listen(open func() (*net.TCPListener, error), inherited []Conn) 
 				return
 			}
 			if ahead == nil && rcv.handoff.replaying.Load() {
-				ahead = newReadAheadConn(conn)
+				ahead = newReadAheadConnLimit(conn, rcv.handoffReadAheadBytes)
 			}
 			// Count the handler before it starts, so Detach waits for it.
 			tracked := rcv.handoff.track(conn)
@@ -750,6 +764,7 @@ func (rcv *TCP) InitPrometheus(reg prometheus.Registerer) {
 	)
 
 	reg.MustRegister(rcv.promMetricsReceived)
+	rcv.initReadAheadPrometheus(reg)
 	rcv.zstdStats.initPrometheus(reg)
 	rcv.initStreamPrometheus(reg)
 }

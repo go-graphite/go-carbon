@@ -2,16 +2,60 @@ package tcp
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const handoffReadAheadBytes = 8 << 20
 const handoffReadBlock = 64 << 10
+
+func readAheadLimit(configured int) (int, error) {
+	if configured == 0 {
+		return handoffReadAheadBytes, nil
+	}
+	if configured < handoffReadBlock || configured > 1<<30 {
+		return 0, fmt.Errorf("tcp.handoff-read-ahead-bytes must be zero or between %d and %d", handoffReadBlock, 1<<30)
+	}
+	return configured, nil
+}
+
+func (rcv *TCP) initReadAheadPrometheus(reg prometheus.Registerer) {
+	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "tcp_handoff_read_ahead_limit_bytes",
+		Help: "Maximum startup wire buffer per TCP connection, excluding one 64 KiB read block. Applies when receivers start.",
+	}, func() float64 { return float64(rcv.handoffReadAheadBytes) }))
+	for _, maximum := range []bool{false, true} {
+		name, help := "tcp_handoff_read_ahead_buffered_bytes", "Wire bytes awaiting ordered recovery across TCP connections."
+		if maximum {
+			name, help = "tcp_handoff_read_ahead_max_connection_buffered_bytes", "Largest startup wire buffer on one TCP connection."
+		}
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{Name: name, Help: help}, func() float64 {
+			rcv.handoff.mu.Lock()
+			defer rcv.handoff.mu.Unlock()
+			n := 0
+			for c := range rcv.handoff.conns {
+				if r := c.ahead; r != nil {
+					r.mu.Lock()
+					size := r.size + len(r.last)
+					r.mu.Unlock()
+					if maximum {
+						n = max(n, size)
+					} else {
+						n += size
+					}
+				}
+			}
+			return float64(n)
+		}))
+	}
+}
 
 // readAheadConn drains inherited sockets while their dictionaries and the input
 // tail are replayed. A lazy byte ring bounds retained input independently of
@@ -32,10 +76,15 @@ type readAheadConn struct {
 	direct             bool
 	tracked            *handoffConn
 	interrupted        bool
+	limit              int
 }
 
 func newReadAheadConn(c net.Conn) *readAheadConn {
-	r := &readAheadConn{Conn: c, done: make(chan struct{})}
+	return newReadAheadConnLimit(c, handoffReadAheadBytes)
+}
+
+func newReadAheadConnLimit(c net.Conn, limit int) *readAheadConn {
+	r := &readAheadConn{Conn: c, done: make(chan struct{}), limit: limit}
 	r.readable = sync.NewCond(&r.mu)
 	r.writable = sync.NewCond(&r.mu)
 	go r.pump()
@@ -50,8 +99,8 @@ func (r *readAheadConn) pump() {
 		r.mu.Lock()
 		rest := b[:n]
 		for len(rest) > 0 {
-			if len(r.data)-r.size < len(rest) && len(r.data) < handoffReadAheadBytes {
-				data := make([]byte, min(handoffReadAheadBytes, max(handoffReadBlock, 2*len(r.data))))
+			if len(r.data)-r.size < len(rest) && len(r.data) < r.limit {
+				data := make([]byte, min(r.limit, max(handoffReadBlock, 2*len(r.data))))
 				first := copy(data, r.data[r.head:min(len(r.data), r.head+r.size)])
 				copy(data[first:], r.data[:r.size-first])
 				r.data, r.head = data, 0

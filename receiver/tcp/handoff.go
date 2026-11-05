@@ -205,6 +205,11 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		closeAll()
 		return nil, err
 	}
+	readAheadBytes, err := readAheadLimit(options.HandoffReadAheadBytes)
+	if err != nil {
+		closeAll()
+		return nil, err
+	}
 	want, err := net.ResolveTCPAddr("tcp", options.Listen)
 	if err != nil {
 		closeAll()
@@ -212,6 +217,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	}
 	r := &TCP{out: store, name: name, logger: zapwriter.Logger(name), decompressor: newDecompressor("")}
 	r.cacheLookupBatch = options.CacheLookupBatch
+	r.handoffReadAheadBytes = readAheadBytes
 	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
 	if err := r.configureStream(options); err != nil {
 		closeAll()
@@ -231,7 +237,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		// The pump starts before the tracked handler configures its deadline.
 		// Give its initial read an explicitly unexpired deadline.
 		_ = conn.SetReadDeadline(time.Time{})
-		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn, ahead: newReadAheadConn(conn)})
+		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn, ahead: newReadAheadConnLimit(conn, readAheadBytes)})
 	}
 	err = r.listen(func() (*net.TCPListener, error) {
 		ln, err := net.FileListener(h.Listener)

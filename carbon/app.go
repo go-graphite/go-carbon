@@ -294,6 +294,9 @@ func loadConfig(filename string) (*Config, error) {
 	if err := validateInputLogConfig(cfg); err != nil {
 		return nil, err
 	}
+	if err := cfg.Tcp.ValidateHandoffReadAhead(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
@@ -1728,6 +1731,22 @@ func (app *App) startBuckyd() (err error) {
 		app.Buckyd, err = buckyd.New(conf.Buckyd, app.MetricStore)
 		if err != nil {
 			return fmt.Errorf("configure buckyd: %w", err)
+		}
+		if !app.Buckyd.AuthSecretReady() {
+			zapwriter.Logger("app").Warn("buckyd authentication secret unavailable; management returns 503 while input continues",
+				zap.String("setting", "buckyd.wait-for-auth-secret"))
+		}
+		if conf.Prometheus.Enabled {
+			service := app.Buckyd
+			app.PromRegisterer.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "buckyd_auth_secret_ready",
+				Help: "One when Buckyd has loaded its authentication secret; zero while management requests return 503 and retry delivery.",
+			}, func() float64 {
+				if service.AuthSecretReady() {
+					return 1
+				}
+				return 0
+			}))
 		}
 		if app.metricStoreIndex != nil {
 			app.Buckyd.SetOnChange(app.metricStoreIndex.notify)
