@@ -299,9 +299,9 @@ func (s *Store) coldPackStep(ctx context.Context) (finished bool, failure error)
 		c.stats.Active = false
 		if failure != nil {
 			c.passFailed = true
+			c.stats.Error = failure.Error()
 			if !errors.Is(failure, context.Canceled) {
 				c.stats.Errors++
-				c.stats.Error = failure.Error()
 			}
 		}
 		c.mu.Unlock()
@@ -474,12 +474,17 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	c.stats.InputBytes += stats.InputBytes
 	c.stats.OutputBytes += stats.OutputBytes
 	c.stats.Skipped += stats.Skipped
-	if stats.Skipped > 0 || conflict {
+	if stats.Skipped > 0 || conflict != "" {
 		c.passFailed = true
+		if conflict != "" {
+			c.stats.Error = fmt.Sprintf("metric %q block %d: %s", work.name, work.block, conflict)
+		} else {
+			c.stats.Error = fmt.Sprintf("metric %q block %d: skipped %d ranges", work.name, work.block, stats.Skipped)
+		}
 	}
 	c.stats.LockNanos += uint64(lockTime)
 	c.stats.MaxLockNanos = max(c.stats.MaxLockNanos, uint64(lockTime))
-	if conflict {
+	if conflict != "" {
 		c.stats.Conflicts++
 	}
 	work.points += stats.ObservedPoints
@@ -588,12 +593,12 @@ func (p *limitedRepackIO) VisitPage(prefix, start []byte, limit int, fn func([]b
 	return true, it.Error()
 }
 
-func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPackRequest) (stats RepackStats, next uint64, done bool, read, written uint64, held time.Duration, conflict bool, err error) {
+func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPackRequest) (stats RepackStats, next uint64, done bool, read, written uint64, held time.Duration, conflict string, err error) {
 	snap := s.db.NewSnapshot()
 	defer snap.Close()
 	meta, e := metadataFrom(snap, name)
 	if errors.Is(e, ErrNotFound) {
-		return stats, 0, true, 0, 0, 0, false, nil
+		return stats, 0, true, 0, 0, 0, "", nil
 	}
 	if e != nil {
 		err = e
@@ -644,7 +649,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	unlock, ok := s.tryLockMetricMutation(name)
 	if !ok {
 		stats = RepackStats{}
-		conflict = true
+		conflict = "metric stripe busy"
 		return
 	}
 	locked := time.Now()
@@ -652,7 +657,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	current, e := s.metadataLocked(name)
 	if errors.Is(e, ErrNotFound) || e == nil && (current.ID != meta.ID || current.Generation != meta.Generation || current.Revision != meta.Revision) {
 		stats = RepackStats{}
-		conflict = true
+		conflict = "metric changed during planning"
 		return
 	}
 	if e != nil {
@@ -661,7 +666,7 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	}
 	if time.Since(locked) > 2*time.Millisecond {
 		stats = RepackStats{}
-		conflict = true
+		conflict = "publication validation exceeded 2ms"
 		return
 	}
 	if err = ctx.Err(); err != nil {

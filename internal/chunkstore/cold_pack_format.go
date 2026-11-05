@@ -18,6 +18,9 @@ func sealedTransferKey(kv RelayoutKV) bool {
 	return len(kv.Key) == 16 && kv.Key[0] == 'f' && kv.Key[9] == 'b' && len(kv.Value) == 12
 }
 
+// ErrColdPackIncomplete means another clean unpack sweep is required.
+var ErrColdPackIncomplete = errors.New("downgrade requires a complete clean unpack sweep")
+
 // DowngradeColdPack is for an exclusively opened offline store after a complete
 // unpack sweep. It refuses skips/conflicts/failures; restart and retry unpacking
 // after an interruption. Rounded decimal values retain their stored precision.
@@ -36,7 +39,7 @@ func (s *Store) DowngradeColdPack(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.options.Mode != "unpack" || !c.cleanUnpack || c.stats.Cursor != "" {
-		return errors.New("downgrade requires a complete clean unpack sweep")
+		return ErrColdPackIncomplete
 	}
 	if err := s.Flush(); err != nil {
 		return err
