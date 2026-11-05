@@ -37,8 +37,8 @@ func sealedTransferKey(kv RelayoutKV) bool {
 	return len(kv.Key) == 16 && kv.Key[0] == 'f' && kv.Key[9] == 'b' && len(kv.Value) == 12
 }
 
-// ErrColdPackIncomplete means another clean unpack sweep is required.
-var ErrColdPackIncomplete = errors.New("downgrade requires a complete clean unpack sweep")
+// ErrColdPackIncomplete means another clean downgrade sweep is required.
+var ErrColdPackIncomplete = errors.New("downgrade requires a complete clean sweep")
 
 // DowngradeColdPack is for an exclusively opened offline store after a complete
 // unpack sweep. It refuses skips/conflicts/failures; restart and retry unpacking
@@ -97,6 +97,11 @@ func (s *Store) fenceFloatCodec() error {
 // DowngradeFloatCodec lowers the v11 fence after a complete clean offline sweep
 // has rewritten every v4 group to legacy byte planes. Ordinary v9 sealing stays.
 func (s *Store) DowngradeFloatCodec(ctx context.Context) error {
+	ctx, end, ok := s.explicitMaintenance.begin(ctx)
+	if !ok {
+		return context.Canceled
+	}
+	defer end()
 	c := &s.coldPack
 	c.run.Lock()
 	defer c.run.Unlock()
@@ -106,7 +111,7 @@ func (s *Store) DowngradeFloatCodec(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.options.Mode != "float-downgrade" || c.options.FloatCodec || !c.cleanUnpack || c.stats.Cursor != "" {
-		return errors.New("float downgrade requires a complete clean float-downgrade sweep")
+		return fmt.Errorf("float downgrade requires a complete clean float-downgrade sweep: %w", ErrColdPackIncomplete)
 	}
 	// A full visible-key audit also covers staged/unowned metrics and orphan
 	// groups that a descriptor sweep cannot reach. Never lower the reader fence
