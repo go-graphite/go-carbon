@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -34,7 +36,7 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 		for _, stripe := range stripes {
 			p.storeMutex[stripe].Lock()
 		}
-		err := func() error {
+		err := func() (result error) {
 			defer func() {
 				for i := len(stripes) - 1; i >= 0; i-- {
 					p.storeMutex[stripes[i]].Unlock()
@@ -42,6 +44,24 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 			}()
 			var values []*points.Points
 			var updates []store.MetricUpdate
+			// The popped batches remain owned here until confirmation. In
+			// particular, cancellation after commit must still confirm success.
+			pending := 0
+			defer func() {
+				if pending == len(values) {
+					return
+				}
+				names := make([]string, 0, len(values)-pending)
+				pointCount := 0
+				for _, batch := range values[pending:] {
+					p.requeue(batch)
+					names = append(names, batch.Metric)
+					pointCount += len(batch.Data)
+				}
+				reason := transferFlushReason(result)
+				p.writeStats.transferRequeued[reason].Add(1)
+				p.logger.Warn("transfer flush requeued", zap.String("reason", transferFlushReasons[reason]), zap.Strings("metrics", names), zap.Int("points", pointCount), zap.Error(result))
+			}()
 			for _, name := range group {
 				if batch, ok := p.pop(name); ok {
 					values = append(values, batch)
@@ -61,29 +81,27 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 				}
 				atomic.AddUint32(&p.committedPoints, uint32(len(batch.Data)))
 				atomic.AddUint32(&p.updateOperations, 1)
+				pending++
 			}
 			started := time.Now()
 			err := db.UpdateBatch(ctx, updates, nil)
-			for _, batch := range values {
-				p.writeStats.shared.observe(len(batch.Data), time.Since(started), err)
-			}
 			if errors.Is(err, store.ErrFormat) {
 				// Native chunk stores have no continuation batch writer.
-				for i, batch := range values {
-					if err := p.metricStore.UpdateMany(ctx, batch.Metric, batch.Data); err != nil {
-						for _, pending := range values[i:] {
-							p.requeue(pending)
-						}
+				for _, batch := range values {
+					started := time.Now()
+					err := p.metricStore.UpdateMany(ctx, batch.Metric, batch.Data)
+					p.observeTransferWrite(batch, time.Since(started), err)
+					if err != nil {
 						return err
 					}
 					confirm(batch)
 				}
 				return nil
 			}
+			for _, batch := range values {
+				p.observeTransferWrite(batch, time.Since(started), err)
+			}
 			if err != nil {
-				for _, batch := range values {
-					p.requeue(batch)
-				}
 				return err
 			}
 			for _, batch := range values {
@@ -96,4 +114,41 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 		}
 	}
 	return nil
+}
+
+// Expected request/absence errors are retries, not storage failures. Inspect all
+// leaves so a joined storage error and cancellation still fail closed.
+func transferFlushReason(err error) int {
+	if group, ok := err.(interface{ Unwrap() []error }); ok {
+		reason := -1
+		for _, child := range group.Unwrap() {
+			next := transferFlushReason(child)
+			if reason != -1 && reason != next {
+				return 3
+			}
+			reason = next
+		}
+		if reason >= 0 {
+			return reason
+		}
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return transferFlushReason(wrapped.Unwrap())
+	}
+	switch {
+	case errors.Is(err, context.Canceled):
+		return 0
+	case errors.Is(err, context.DeadlineExceeded):
+		return 1
+	case errors.Is(err, store.ErrNotFound):
+		return 2
+	default:
+		return 3
+	}
+}
+
+func (p *Whisper) observeTransferWrite(batch *points.Points, took time.Duration, err error) {
+	if err == nil || transferFlushReason(err) == 3 {
+		p.writeStats.shared.observe(len(batch.Data), took, err)
+	}
 }

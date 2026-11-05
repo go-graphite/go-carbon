@@ -23,6 +23,7 @@ func (s *backendWriteStats) observe(points int, took time.Duration, err error) {
 
 type persisterWriteStats struct {
 	shared, original backendWriteStats
+	transferRequeued [4]atomic.Uint64
 }
 
 // BackendWrites reports cumulative updates, points, failures and seconds spent
@@ -43,3 +44,16 @@ func (p *Whisper) WriteStats() (pebble, whisper BackendWrites) {
 // Workers is the number of persister workers; dividing a stage's summed time by
 // it estimates the wall time the stage takes per worker.
 func (p *Whisper) Workers() int { return p.workersCount }
+
+var transferFlushReasons = [...]string{"canceled", "deadline", "absent", "storage_error"}
+
+// TransferFlushRequeues counts groups returned to the cache, once per group,
+// only after all unconfirmed batches have been requeued. It is disjoint from
+// write failures for expected request/absence errors; storage_error counts both.
+func (p *Whisper) TransferFlushRequeues() map[string]uint64 {
+	result := make(map[string]uint64, len(transferFlushReasons))
+	for i, reason := range transferFlushReasons {
+		result[reason] = p.writeStats.transferRequeued[i].Load()
+	}
+	return result
+}
