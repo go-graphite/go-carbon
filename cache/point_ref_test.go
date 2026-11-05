@@ -93,6 +93,8 @@ func comparePointRefCaches(t *testing.T, want, got *Cache) {
 	if !reflect.DeepEqual(stats(want), stats(got)) || want.EstimatedBytes() != got.EstimatedBytes() {
 		t.Fatal("cache stats differ")
 	}
+	checkPointBytes(t, want, true)
+	checkPointBytes(t, got, true)
 	if a, b := want.pending.Load(), got.pending.Load(); a != nil && (b == nil || a.remaining.Load() != b.remaining.Load()) {
 		t.Fatal("pending recovery counts differ")
 	}

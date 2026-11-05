@@ -108,11 +108,12 @@ type itemSlot struct {
 // empty, one for deleted, or a seven-bit fingerprint with its high bit set.
 // Items retain the exact hash; full names disambiguate even exact collisions.
 type itemMap struct {
-	slots     []itemSlot
-	control   []byte
-	n, used   int
-	bytes     int64
-	deadlines *queueDeadlines
+	slots      []itemSlot
+	control    []byte
+	n, used    int
+	bytes      int64
+	pointBytes int64 // sum of queued compact buffer capacities, under the shard lock
+	deadlines  *queueDeadlines
 }
 
 func (m *itemMap) get(name string) *item {
@@ -171,6 +172,7 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 		old := m.slots
 		m.deadlines = nil
 		m.slots, m.n, m.used, m.bytes = make([]itemSlot, n), 0, 0, 0
+		m.pointBytes = 0
 		m.control = make([]byte, n)
 		for _, slot := range old {
 			if slot.item != nil {
@@ -197,10 +199,12 @@ func (m *itemMap) setHashed(hash uint64, it *item) {
 				m.invalidateDeadline(free)
 				m.n++
 				m.bytes += it.memoryBytes()
+				m.pointBytes += int64(cap(it.compact.buf))
 				return
 			}
 		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == it.Metric {
 			m.bytes += it.memoryBytes() - slot.item.memoryBytes()
+			m.pointBytes += int64(cap(it.compact.buf) - cap(slot.item.compact.buf))
 			it.hash = hash
 			slot.item = it
 			m.invalidateDeadline(i)
@@ -225,6 +229,7 @@ func (m *itemMap) removeHashed(hash uint64, name string) {
 			}
 		} else if m.control[i] == tag && slot.item.hash == hash && slot.item.Metric == name {
 			m.bytes -= slot.item.memoryBytes()
+			m.pointBytes -= int64(cap(slot.item.compact.buf))
 			*slot = itemSlot{}
 			m.control[i] = 1
 			m.invalidateDeadline(i)

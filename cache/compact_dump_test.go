@@ -123,6 +123,7 @@ func TestCompactDumpCheckpointRoundTrip(t *testing.T) {
 		t.Run(f.String(), func(t *testing.T) {
 			t.Parallel()
 			c, want := randomCache(t, 500)
+			checkPointBytes(t, c, true)
 			wal := []*points.Points{points.OnePoint("metric.2", 7, 1_900_000_000), points.OnePoint("new.metric", 8, 1_900_000_000)}
 			want["metric.2"] = append(want["metric.2"], wal[0].Data...)
 			want["new.metric"] = wal[1].Data
@@ -163,6 +164,7 @@ func TestCompactDumpCheckpointRoundTrip(t *testing.T) {
 			if err := next.RecoverPending(make(chan struct{}), 0); err != nil {
 				t.Fatal(err)
 			}
+			checkPointBytes(t, next, true)
 			for name, data := range want {
 				if got := next.Get(name); !sameValues(got, data) {
 					t.Fatal("claimed history", name, len(got), len(data))
@@ -170,6 +172,7 @@ func TestCompactDumpCheckpointRoundTrip(t *testing.T) {
 			}
 			// A claimed compact item keeps appending after the copied bytes.
 			next.Add(points.OnePoint("metric.4", 2, 2_100_000_000))
+			checkPointBytes(t, next, true)
 			if got := next.Get("metric.4"); !sameValues(got, append(want["metric.4"], points.Point{Value: 2, Timestamp: 2_100_000_000})) {
 				t.Fatal("append after claim")
 			}

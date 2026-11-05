@@ -628,6 +628,7 @@ func (c *Cache) addPointLocked(shard *Shard, s *cacheSettings, values *item, has
 		logGrew = shard.log.record(&values.StreamRef, value, timestamp)
 	}
 	if cap(values.compact.buf) != capacity || logGrew {
+		shard.items.pointBytes += int64(cap(values.compact.buf) - capacity)
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, 1, true, false)
@@ -797,6 +798,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 
 	if !exists || metadataChanged || cap(values.compact.buf) != capacity || shard.log.stagingBytes() != logCapacity {
+		shard.items.pointBytes += int64(cap(values.compact.buf) - capacity)
 		c.syncMemoryLocked(shard)
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
