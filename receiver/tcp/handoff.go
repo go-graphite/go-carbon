@@ -211,6 +211,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		return nil, err
 	}
 	r := &TCP{out: store, name: name, logger: zapwriter.Logger(name), decompressor: newDecompressor("")}
+	r.cacheLookupBatch = options.CacheLookupBatch
 	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
 	if err := r.configureStream(options); err != nil {
 		closeAll()

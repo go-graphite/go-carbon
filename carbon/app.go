@@ -1524,8 +1524,14 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		}
 	}
 	add, addPoint, addPoints := core.Add, core.AddPoint, core.AddPoints
+	addPointBatch := core.AddPointBatch
 	if receiverStoreHook != nil {
 		add, addPoint = receiverStoreHook(add, addPoint)
+		addPointBatch = func(names [][]byte, data []points.Point) {
+			for i, p := range data {
+				addPoint(names[i], p.Value, p.Timestamp)
+			}
+		}
 		addPoints = func(name []byte, data []points.Point) {
 			for _, p := range data {
 				addPoint(name, p.Value, p.Timestamp)
@@ -1546,6 +1552,12 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			}
 		}()
 		oldAdd, oldPoint, oldPoints, oldStream := add, addPoint, addPoints, addStreamPoint
+		oldBatch := addPointBatch
+		addPointBatch = func(names [][]byte, data []points.Point) {
+			if gate.pass() {
+				oldBatch(names, data)
+			}
+		}
 		add = func(p *points.Points) {
 			if gate.pass() {
 				oldAdd(p)
@@ -1610,6 +1622,12 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 			SetPointsOut(func([]byte, []points.Point))
 		}); ok {
 			r.SetPointsOut(addPoints)
+		}
+
+		if r, ok := rcv.(interface {
+			SetPointBatchOut(func([][]byte, []points.Point))
+		}); ok {
+			r.SetPointBatchOut(addPointBatch)
 		}
 
 		if r, ok := rcv.(interface {

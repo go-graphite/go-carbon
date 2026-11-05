@@ -720,6 +720,11 @@ listen = ":2003"
 enabled = true
 # Optional internal queue between receiver and cache
 buffer-size = 0
+# Experimental, default off; unbuffered TCP plaintext (including compression).
+# Warm exact cache-name lookups in bounded batches, then admit points in order.
+# Intended for cold individual names; repeated-name runs may use more CPU.
+# Restart the receiver to change this setting.
+cache-lookup-batch = false
 # Empty compression autodetects plaintext, independent zstd frames or stream.
 # Explicit "gzip", "snappy", or "zstd" selects that format without autodetection.
 compression = ""

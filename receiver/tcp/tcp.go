@@ -54,6 +54,7 @@ func Register() {
 }
 
 type Options struct {
+	CacheLookupBatch           bool   `toml:"cache-lookup-batch"`
 	Listen                     string `toml:"listen"`
 	Enabled                    bool   `toml:"enabled"`
 	BufferSize                 int    `toml:"buffer-size"`
@@ -95,9 +96,12 @@ func NewFramingOptions() *FramingOptions {
 }
 
 const plainReadBufferSize = 64 << 10
+const plainLookupBatchSize = 64
 
 // TCP receive metrics from TCP connections
 type TCP struct {
+	cacheLookupBatch bool
+	pointBatchOut    atomic.Pointer[func([][]byte, []points.Point)]
 	helper.Stoppable
 	out                      func(*points.Points)
 	name                     string // name for store metrics
@@ -152,6 +156,19 @@ func (rcv *TCP) SetPointsOut(out func(name []byte, data []points.Point)) {
 	}
 }
 
+// SetPointBatchOut configures ordered multi-name lookup batches for an
+// unbuffered receiver with cache-lookup-batch enabled. out borrows both slices
+// and every name until it returns.
+func (rcv *TCP) SetPointBatchOut(out func([][]byte, []points.Point)) {
+	if rcv.buffer == nil {
+		if out == nil {
+			rcv.pointBatchOut.Store(nil)
+			return
+		}
+		rcv.pointBatchOut.Store(&out)
+	}
+}
+
 // Addr returns binded socket address. For bind port 0 in tests
 func (rcv *TCP) Addr() net.Addr {
 	if rcv.listener == nil {
@@ -198,6 +215,7 @@ func newTCP(name string, options *Options, store func(*points.Points)) (*TCP, er
 	if err := validateZstdLimit(options.ZstdMaxFrameSize); err != nil {
 		return nil, err
 	}
+	r.cacheLookupBatch = options.CacheLookupBatch
 	r.compression = options.Compression
 	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
 	if err := r.configureStream(options); err != nil {
@@ -338,12 +356,30 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	if out := rcv.pointsOut.Load(); out != nil {
 		pointsOut = *out
 	}
+	var pointBatchOut func([][]byte, []points.Point)
+	var lookupNames [][]byte
+	var lookupData []points.Point
+	adoptPointBatch := func() {
+		if rcv.cacheLookupBatch && pointBatchOut == nil {
+			if out := rcv.pointBatchOut.Load(); out != nil {
+				pointBatchOut = *out
+				lookupNames = make([][]byte, 0, plainLookupBatchSize)
+				lookupData = make([]points.Point, 0, plainLookupBatchSize)
+			}
+		}
+	}
+	adoptPointBatch()
 	var batchName []byte
 	var batch []points.Point
-	if pointsOut != nil {
+	if pointsOut != nil && pointBatchOut == nil {
 		batch = make([]points.Point, 0, 64)
 	}
 	flush := func() {
+		if len(lookupData) > 0 {
+			pointBatchOut(lookupNames, lookupData)
+			clear(lookupNames)
+			lookupNames, lookupData = lookupNames[:0], lookupData[:0]
+		}
 		if len(batch) > 0 {
 			pointsOut(batchName, batch)
 			batch, batchName = batch[:0], nil
@@ -353,7 +389,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 
 	for lines := 0; ; lines++ {
 		var bufferedLine []byte
-		if len(batch) > 0 {
+		if len(batch) > 0 || len(lookupData) > 0 {
 			buffered, _ := reader.Peek(reader.Buffered())
 			// ReadSlice may refill even with a partial next line buffered.
 			end := bytes.IndexByte(buffered, '\n')
@@ -426,15 +462,29 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 				)
 			} else {
 				received++
+				if rcv.cacheLookupBatch && pointBatchOut == nil && rcv.buffer == nil {
+					flush()
+					adoptPointBatch()
+					if pointBatchOut != nil {
+						batch = nil
+					}
+				}
 				// Inherited handlers start before the application sets pointOut.
 				// Adopt it even if it arrived while ReadLine was blocked, then
 				// retain the callback without an atomic load per subsequent point.
-				if pointOut == nil && pointsOut == nil && rcv.buffer == nil {
+				if pointOut == nil && pointsOut == nil && pointBatchOut == nil && rcv.buffer == nil {
+					adoptPointBatch()
 					if out := rcv.pointOut.Load(); out != nil {
 						pointOut = *out
 					}
 				}
 				switch {
+				case pointBatchOut != nil:
+					lookupNames = append(lookupNames, name)
+					lookupData = append(lookupData, points.Point{Value: value, Timestamp: timestamp})
+					if len(lookupData) == cap(lookupData) {
+						flush()
+					}
 				case pointsOut != nil:
 					if len(batch) > 0 && (!bytes.Equal(batchName, name) || len(batch) == cap(batch)) {
 						flush()
