@@ -24,7 +24,7 @@ func repackSealedFloats(ctx context.Context, kv store.ContinuationIO, prefix []b
 		if err != nil {
 			return fmt.Errorf("sealed float rewrite: %w", err)
 		}
-		eligible := store.IsLegacySealedFloat(v) && points[len(points)-1].Timestamp < r.Cutoff.Unix()
+		eligible := (store.IsLegacySealedFloat(v) || r.FloatExhaustive && len(v) > 0 && v[0] == 4) && points[len(points)-1].Timestamp < r.Cutoff.Unix()
 		if r.Mode == "float-downgrade" {
 			eligible = v[0] == 4
 		}
@@ -32,6 +32,9 @@ func repackSealedFloats(ctx context.Context, kv store.ContinuationIO, prefix []b
 			return nil
 		}
 		encode := store.EncodeSealedPointsFloat
+		if r.FloatExhaustive {
+			encode = store.EncodeSealedPointsFloatMin
+		}
 		if r.Mode == "float-downgrade" {
 			encode = store.EncodeSealedPoints
 		}

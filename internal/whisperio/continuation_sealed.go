@@ -256,7 +256,11 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 						return stats, next, false, err
 					}
 					if r.FloatCodec && store.IsLegacySealedFloat(value) {
-						value, err = store.EncodeSealedPointsFloat(input, a.Step)
+						floatEncode := store.EncodeSealedPointsFloat
+						if r.FloatExhaustive {
+							floatEncode = store.EncodeSealedPointsFloatMin
+						}
+						value, err = floatEncode(input, a.Step)
 						if err != nil {
 							return stats, next, false, err
 						}

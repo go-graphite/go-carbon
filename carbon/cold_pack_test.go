@@ -8,7 +8,7 @@ import (
 
 func TestColdPackConfig(t *testing.T) {
 	cfg := NewConfig()
-	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.PackTails || o.FloatCodec || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
+	if o, err := store.NormalizeColdPack(coldPackOptions(cfg)); err != nil || o.Mode != "off" || o.PackTails || o.FloatCodec || o.FloatExhaustive || o.Workers != 1 || o.MaxCompactionDebt != 64<<20 {
 		t.Fatalf("default %+v %v", o, err)
 	}
 	cfg.Whisper.StoreColdPackTails = true
@@ -29,6 +29,10 @@ func TestColdPackConfig(t *testing.T) {
 	next.Whisper.StoreColdPackRate = 12345
 	next.Whisper.StoreColdPackMaxDebt = 16 << 30
 	next.Whisper.StoreColdPackFloatCodec = true
+	next.Whisper.StoreColdPackFloatExhaustive = true
+	if o := coldPackOptions(&next); !o.FloatExhaustive {
+		t.Fatal("exhaustive option lost")
+	}
 	if storageSettingsChanged(cfg, &next) {
 		t.Fatal("maintenance policy requires restart")
 	}

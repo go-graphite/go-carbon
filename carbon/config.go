@@ -95,6 +95,7 @@ type whisperConfig struct {
 	StoreMigrationIngest         bool      `toml:"store-migration-ingest"`
 	StoreColdPack                string    `toml:"store-cold-pack"`
 	StoreColdPackFloatCodec      bool      `toml:"store-cold-pack-float-codec"`
+	StoreColdPackFloatExhaustive bool      `toml:"store-cold-pack-float-exhaustive"`
 	StoreColdPackTails           bool      `toml:"store-cold-pack-tails"`
 	StoreColdPackWorkers         int       `toml:"store-cold-pack-workers"`
 	StoreColdPackMinFree         uint64    `toml:"store-cold-pack-min-free-bytes"`

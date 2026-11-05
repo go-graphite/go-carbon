@@ -19,9 +19,24 @@ func floatSweep(t *testing.T, db *store.Store, mode string, enabled bool) {
 	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: mode, FloatCodec: enabled, WriteWindow: time.Second, CPUFraction: 1, BytesPerSecond: 1 << 40}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RunColdPack(context.Background()); err != nil {
-		t.Fatal(err)
+	finishFloatSweep(t, db)
+}
+
+// A completed sweep may defer a publication at the 2ms validation guard.
+// Resume its checkpoint first, then retry a dirty sweep without changing policy.
+func finishFloatSweep(t *testing.T, db *store.Store) {
+	t.Helper()
+	for attempt := 0; attempt < 3; attempt++ {
+		before := db.ColdPackStats()
+		if err := db.RunColdPack(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		after := db.ColdPackStats()
+		if after.Errors == before.Errors && after.Conflicts == before.Conflicts && after.Skipped == before.Skipped {
+			return
+		}
 	}
+	t.Fatalf("no clean float sweep: %+v", db.ColdPackStats())
 }
 func floatGroups(t *testing.T, db *store.Store, name string) (old, new int) {
 	t.Helper()
@@ -312,9 +327,7 @@ func TestColdPackFloatCheckpointResume(t *testing.T) {
 		if db.ColdPackStats().Resumed == 0 {
 			t.Fatal("cursor not resumed")
 		}
-		if err := db.RunColdPack(ctx); err != nil {
-			t.Fatal(err)
-		}
+		finishFloatSweep(t, db)
 		for metric := 0; metric < 4; metric++ {
 			_, new := floatGroups(t, db, fmt.Sprintf("resume.%d", metric))
 			if mode == "float-repack" && new == 0 || mode == "float-downgrade" && new != 0 {

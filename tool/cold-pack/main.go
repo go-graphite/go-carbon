@@ -27,6 +27,7 @@ func run() (err error) {
 	source := flag.String("source", "", "original canonical source binding, if incremental")
 	mode := flag.String("mode", "unpack", "exact, decimal, unpack, float-repack or float-downgrade")
 	floatCodec := flag.Bool("float-codec", false, "enable the exact float codec writer")
+	floatExhaustive := flag.Bool("float-exhaustive", false, "compare all exact float codecs at pack time (requires -float-codec)")
 	downgrade := flag.Bool("downgrade", false, "after a clean offline sweep, lower float-downgrade to v9 or unpack to v7")
 	workers := flag.Int("workers", 1, "parallel maintenance workers (1-64)")
 	rate := flag.Int64("bytes-per-second", 1<<20, "maintenance read plus batch byte budget")
@@ -51,7 +52,7 @@ func run() (err error) {
 		}
 	}()
 	db.StopBackground()
-	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, FloatCodec: *floatCodec, Workers: *workers, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve, MaxCompactionDebt: *debt}); err != nil {
+	if err = db.ConfigureColdPack(chunkstore.ColdPackOptions{Mode: *mode, FloatCodec: *floatCodec, FloatExhaustive: *floatExhaustive, Workers: *workers, BytesPerSecond: *rate, CPUFraction: *cpu, WriteWindow: *window, MinFreeBytes: *reserve, MaxCompactionDebt: *debt}); err != nil {
 		return err
 	}
 	if err = runColdPack(ctx, db, *downgrade); err != nil {

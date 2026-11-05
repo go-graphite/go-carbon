@@ -25,7 +25,8 @@ func EncodeSealedPointsFloat(points []Point, step int) ([]byte, error) {
 	return EncodeSealedPointsFloatPrefix(points, step, 64)
 }
 
-// EncodeSealedPointsFloatMin is the exhaustive offline transcode control.
+// EncodeSealedPointsFloatMin compares every exact value codec at pack time.
+// It is opt-in because it encodes the complete group with each candidate.
 // Integer/decimal groups stay on the existing format. A new frame must be
 // strictly smaller than the complete legacy frame, including timestamps/CRC.
 func EncodeSealedPointsFloatMin(points []Point, step int) ([]byte, error) {

@@ -204,3 +204,48 @@ func TestSealedFloatBitWindows(t *testing.T) {
 		t.Fatal("out-of-bounds read accepted")
 	}
 }
+
+func BenchmarkSealedFloatSelectors(b *testing.B) {
+	points := make([]Point, 4096)
+	for i := range points {
+		points[i] = Point{Timestamp: int64(i*60 + 60), Value: float64(i%31) / 3}
+	}
+	for _, tt := range []struct {
+		name string
+		enc  func([]Point, int) ([]byte, error)
+	}{{"prefix", EncodeSealedPointsFloat}, {"exhaustive", EncodeSealedPointsFloatMin}} {
+		b.Run(tt.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.SetBytes(int64(len(points)))
+			for i := 0; i < b.N; i++ {
+				if _, err := tt.enc(points, 60); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+func TestExhaustiveFloatPolicy(t *testing.T) {
+	if _, err := NormalizeColdPack(ColdPackOptions{FloatExhaustive: true}); err == nil {
+		t.Fatal("exhaustive without float codec accepted")
+	}
+	s, _ := openTestStore(t, t.TempDir(), Options{ExactBlocks: true, TimeBuckets: true, Continuation: testColdCodec{}})
+	defer closeTestStore(t, s)
+	s.StopBackground()
+	o := ColdPackOptions{Mode: "exact", FloatCodec: true}
+	if err := s.ConfigureColdPack(o); err != nil {
+		t.Fatal(err)
+	}
+	s.coldPack.mu.Lock()
+	s.coldPack.stats.Cursor = "old.policy"
+	s.coldPack.stats.BlockCursor = 123
+	s.coldPack.mu.Unlock()
+	o.FloatExhaustive = true
+	if err := s.ConfigureColdPack(o); err != nil {
+		t.Fatal(err)
+	}
+	if st := s.ColdPackStats(); st.Cursor != "" || st.BlockCursor != 0 {
+		t.Fatal("selector change retained old cursor", st)
+	}
+}

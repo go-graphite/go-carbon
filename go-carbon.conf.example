@@ -472,6 +472,8 @@ store-encoding = "legacy"
 # upgrade readers, transfer peers and recovery tools first. All settings reload
 # on SIGHUP. See doc/cold-pack.md for numeric precision and downgrade procedure.
 # store-cold-pack = "off"              # off | exact | decimal | unpack
+# store-cold-pack-float-codec = false   # enable exact v11 float codecs
+# store-cold-pack-float-exhaustive = false # compare all complete candidates; extra paced CPU
 # store-cold-pack-workers = 1           # parallel workers, 1-64; reload preserves cursor
 # store-cold-pack-bytes-per-second = 1048576 # snapshot reads + WAL batch bytes
 # store-cold-pack-cpu-fraction = 0.02   # duty fraction; up to workers * fraction cores

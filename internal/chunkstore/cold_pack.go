@@ -19,12 +19,13 @@ import (
 // ColdPackOptions controls low-priority workers. Float rewrite modes reuse the
 // same pacing/checkpoint/publication path as exact, decimal and unpack.
 type ColdPackOptions struct {
-	Mode           string
-	FloatCodec     bool // opt-in writer; readers always understand the format
-	PackTails      bool // opt-in whole-range v9 packing of cold non-bucketed native heads
-	Workers        int  // default 1; at most 64
-	BytesPerSecond int64
-	MinFreeBytes   uint64
+	Mode            string
+	FloatCodec      bool // opt-in writer; readers always understand the format
+	FloatExhaustive bool
+	PackTails       bool // opt-in whole-range v9 packing of cold non-bucketed native heads
+	Workers         int  // default 1; at most 64
+	BytesPerSecond  int64
+	MinFreeBytes    uint64
 	// CPUFraction bounds the duty fraction of the worker group (up to Workers *
 	// CPUFraction cores). Charging the slowest worker's IO wait to the whole
 	// group is conservative; asynchronous flush/compaction CPU is separate.
@@ -67,6 +68,9 @@ func NormalizeColdPack(o ColdPackOptions) (ColdPackOptions, error) {
 	if o.Mode != "off" && o.Mode != "exact" && o.Mode != "decimal" && o.Mode != "unpack" && o.Mode != "float-repack" && o.Mode != "float-downgrade" {
 		return o, errors.New("cold pack mode must be off, exact, decimal, unpack, float-repack or float-downgrade")
 	}
+	if o.FloatExhaustive && !o.FloatCodec {
+		return o, errors.New("exhaustive float selection requires float-codec on")
+	}
 	if o.Mode == "float-repack" && !o.FloatCodec || o.Mode == "float-downgrade" && o.FloatCodec {
 		return o, errors.New("float-repack requires float-codec on; float-downgrade requires it off")
 	}
@@ -100,11 +104,12 @@ type RepackStats struct {
 }
 
 type ColdPackRequest struct {
-	Cursor     uint64 // codec-owned descriptor seek position
-	Cutoff     time.Time
-	Mode       string
-	PackTails  bool
-	FloatCodec bool
+	Cursor          uint64 // codec-owned descriptor seek position
+	Cutoff          time.Time
+	Mode            string
+	FloatExhaustive bool
+	PackTails       bool
+	FloatCodec      bool
 }
 
 // ContinuationRepacker examines at most 32 descriptors and rewrites at most one
@@ -212,7 +217,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.mu.Unlock()
 		return nil
 	}
-	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow || c.options.PackTails != o.PackTails || c.options.FloatCodec != o.FloatCodec
+	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow || c.options.PackTails != o.PackTails || c.options.FloatCodec != o.FloatCodec || c.options.FloatExhaustive != o.FloatExhaustive
 	if reset {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
 		c.stats.MetricsVisited = 0
@@ -458,7 +463,7 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	c.stats.ActiveWorkers++
 	c.mu.Unlock()
 	started := time.Now()
-	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode, PackTails: o.PackTails, FloatCodec: o.FloatCodec})
+	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode, PackTails: o.PackTails, FloatCodec: o.FloatCodec, FloatExhaustive: o.FloatExhaustive})
 	if err == nil && !done && next <= work.block {
 		err = errors.New("cold pack codec did not advance")
 	}

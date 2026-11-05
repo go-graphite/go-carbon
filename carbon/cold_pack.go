@@ -8,6 +8,7 @@ func coldPackOptions(cfg *Config) chunkstore.ColdPackOptions {
 	w := cfg.Whisper
 	o := chunkstore.ColdPackOptions{Mode: w.StoreColdPack, PackTails: w.StoreColdPackTails, Workers: w.StoreColdPackWorkers, MinFreeBytes: w.StoreColdPackMinFree, BytesPerSecond: w.StoreColdPackRate, CPUFraction: w.StoreColdPackCPU, MaxCompactionDebt: w.StoreColdPackMaxDebt}
 	o.FloatCodec = w.StoreColdPackFloatCodec
+	o.FloatExhaustive = w.StoreColdPackFloatExhaustive
 	if w.StoreColdPackWindow != nil {
 		o.WriteWindow = w.StoreColdPackWindow.Value()
 	}
