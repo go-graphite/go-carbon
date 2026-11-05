@@ -127,7 +127,15 @@ type Shard struct {
 	// Points added (or removed, if negative) but not yet published to
 	// Cache.stat.size. Publishing in batches keeps ingestion from serializing
 	// on one shared counter.
-	sizeDelta           int64
+	sizeDelta int64
+	// size is the complete shard total, published under mu with one store per
+	// update. Keep it beside sizeDelta on the cache line ingestion already owns.
+	size                atomic.Int64
+	metrics             atomic.Int32
+	notConfirmedCount   atomic.Int32
+	memory              atomic.Int64
+	pointBytes          atomic.Int64
+	streamSeriesBytes   atomic.Int64
 	byteSize, byteDelta int64
 	inFlightBytes       int64
 	// scratch passes AddPoint's point to the throttle under mu.
@@ -208,6 +216,7 @@ func New() *Cache {
 	var memory int64
 	for _, shard := range c.data {
 		shard.byteSize = shard.memoryBytes()
+		shard.memory.Store(shard.byteSize)
 		memory += shard.byteSize
 	}
 	c.stat.bytes.Store(memory)
@@ -454,25 +463,19 @@ func (c *Cache) Requeue(p *points.Points) {
 }
 
 func (c *Cache) Len() int32 {
-	l := 0
-	for i := 0; i < shardCount; i++ {
-		shard := c.data[i]
-		shard.mu.RLock()
-		l += shard.items.len()
-		shard.mu.RUnlock()
+	var l int32
+	for _, shard := range c.data {
+		l += shard.metrics.Load()
 	}
-	return int32(l)
+	return l
 }
 
 func (c *Cache) NotConfirmedLength() int32 {
-	l := 0
-	for i := 0; i < shardCount; i++ {
-		shard := c.data[i]
-		shard.mu.RLock()
-		l += shard.notConfirmedUsed
-		shard.mu.RUnlock()
+	var l int32
+	for _, shard := range c.data {
+		l += shard.notConfirmedCount.Load()
 	}
-	return int32(l)
+	return l
 }
 
 // IsEmpty reports whether the cache has neither queued nor in-flight points.
@@ -491,14 +494,16 @@ func (c *Cache) IsEmpty() bool {
 	return true
 }
 
-// Size returns the number of cached points. It visits every shard; hot paths
-// use approxSize instead.
+// Size returns the number of cached points without taking shard locks. Each
+// shard publishes its complete total, so there is no publication slack error
+// (zero <= shardCount*sizeSlack), even while a delta moves to stat.size. The
+// sum samples shards at different instants, rather than one global snapshot;
+// concurrent updates can be observed before or after their publication.
+// Hot paths use approxSize instead of visiting every shard.
 func (c *Cache) Size() int64 {
-	size := atomic.LoadInt64(&c.stat.size)
+	var size int64
 	for _, shard := range c.data {
-		shard.mu.RLock()
-		size += shard.sizeDelta
-		shard.mu.RUnlock()
+		size += shard.size.Load()
 	}
 	return size
 }
@@ -523,6 +528,7 @@ func sizeSlackFor(maxSize int64) int64 {
 // differ only when the shard publishes its accumulated delta.
 func (c *Cache) addSizeLocked(shard *Shard, n, slack int64) (before, after int64) {
 	shard.sizeDelta += n
+	shard.size.Store(shard.sizePublished + shard.sizeDelta)
 	if shard.sizeDelta >= -slack && shard.sizeDelta <= slack {
 		size := atomic.LoadInt64(&c.stat.size)
 		return size, size

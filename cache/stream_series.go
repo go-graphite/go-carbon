@@ -37,7 +37,10 @@ func (c *Cache) ResolveStreamName(name []byte) any {
 	hash := xxh3.Hash(name)
 	sh := c.data[hash&(shardCount-1)]
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
+	defer func() {
+		sh.streamSeriesBytes.Store(int64(cap(sh.streamSeries)) * 16)
+		sh.mu.Unlock()
+	}()
 	if len(sh.streamSeries) == 0 {
 		sh.streamSeries = make([]seriesSlot, 16)
 	}
@@ -174,9 +177,7 @@ func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
 func (c *Cache) StreamSeriesIndexBytes() int {
 	n := 0
 	for _, sh := range c.data {
-		sh.mu.RLock()
-		n += cap(sh.streamSeries) * 16
-		sh.mu.RUnlock()
+		n += int(sh.streamSeriesBytes.Load())
 	}
 	return n
 }
