@@ -63,14 +63,19 @@ func (c *Cache) SetMaxBytes(limit uint64) {
 	c.writeoutQueue.notifyAt(time.Now())
 }
 
-// syncMemoryLocked publishes allocation changes in batches, keeping a warm
-// point that fits its buffer off the shared counter.
+// syncMemoryLocked publishes shard metrics at allocation/ownership changes.
+// A warm point that fits its buffer needs only the size store in addSizeLocked.
+// The shared admission counter still publishes allocation changes in batches.
 func (c *Cache) syncMemoryLocked(shard *Shard) {
+	n := shard.memoryBytes()
+	shard.memory.Store(n)
+	shard.pointBytes.Store(shard.items.pointBytes)
+	shard.metrics.Store(int32(shard.items.len()))
+	shard.notConfirmedCount.Store(int32(shard.notConfirmedUsed))
 	s := c.settings.Load().(*cacheSettings)
 	if s.maxBytes <= 0 {
 		return
 	}
-	n := shard.memoryBytes()
 	shard.byteDelta += n - shard.byteSize
 	shard.byteSize = n
 	if shard.byteDelta < -s.byteSlack || shard.byteDelta > s.byteSlack {
@@ -90,13 +95,12 @@ func (c *Cache) queueMemory() int64 {
 // EstimatedBytes accounts for queued names, items, buffer capacities and indexes,
 // in-flight batches, input-log tracking/buffers, sparse tables and queue scratch.
 // It visits shards, not metrics. Pending recovery's mapped files and the input
-// log encoder's own buffers are outside the cache's ownership.
+// log encoder's own buffers are outside the cache's ownership. Shard totals are
+// published at allocation changes; sampling never waits for a shard lock.
 func (c *Cache) EstimatedBytes() int64 {
 	var n int64
 	for _, shard := range c.data {
-		shard.mu.RLock()
-		n += shard.memoryBytes()
-		shard.mu.RUnlock()
+		n += shard.memory.Load()
 	}
 	return n + c.queueMemory()
 }
@@ -104,13 +108,11 @@ func (c *Cache) EstimatedBytes() int64 {
 // PointBytes sums the capacities of queued compact point buffers. Capacity
 // includes spare allocated space, matching EstimatedBytes. Inline codec state
 // (including the partial word), names, item headers and in-flight batches are
-// excluded. It visits shards, not items.
+// excluded. It samples atomic shard totals without taking shard locks.
 func (c *Cache) PointBytes() int64 {
 	var n int64
 	for _, shard := range c.data {
-		shard.mu.RLock()
-		n += shard.items.pointBytes
-		shard.mu.RUnlock()
+		n += shard.pointBytes.Load()
 	}
 	return n
 }
