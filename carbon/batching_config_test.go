@@ -236,3 +236,44 @@ func TestWriteoutStartupSpreadAfterReplay(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteoutScanYieldConfig(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	path := testConfig(t, t.TempDir())
+	cfg, err := ReadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Cache.WriteoutScanYield {
+		t.Fatal("scan yielding must default on")
+	}
+	cfg.Whisper.Enabled = false
+	cfg.Tcp.Enabled, cfg.Udp.Enabled, cfg.Pickle.Enabled = false, false, false
+	cfg.Grpc.Enabled, cfg.Carbonlink.Enabled = false, false
+	cfg.Common.MetricInterval = &Duration{time.Hour}
+	cfg.Cache.WriteoutScanYield = false
+	writeBatchingConfig(t, path, cfg)
+	app := New(path)
+	if err := app.ParseConfig(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer app.Stop()
+	if got := app.Cache.GetInfo()["writeout_scan_yield"]; got != false {
+		t.Fatalf("startup scan yielding=%v", got)
+	}
+	for _, on := range []bool{true, false} {
+		cfg.Cache.WriteoutScanYield = on
+		writeBatchingConfig(t, path, cfg)
+		if err := app.ReloadConfig(); err != nil {
+			t.Fatal(err)
+		}
+		if got := app.Cache.GetInfo()["writeout_scan_yield"]; got != on {
+			t.Fatalf("reload scan yielding=%v want %v", got, on)
+		}
+	}
+}

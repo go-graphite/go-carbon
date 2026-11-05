@@ -37,6 +37,7 @@ type cacheSettings struct {
 	sizeSlack         int64 // see sizeSlackFor
 	xlog              func(*points.Points) error
 	tagsEnabled       bool
+	writeoutScanYield bool
 	writeoutMinPoints int
 	writeoutMaxDelay  time.Duration
 	writeoutSpread    float64
@@ -188,11 +189,12 @@ func New() *Cache {
 	}
 
 	settings := cacheSettings{
-		maxSize:     1000000,
-		byteSlack:   byteSlackFor(0),
-		sizeSlack:   sizeSlackFor(1000000),
-		tagsEnabled: false,
-		xlog:        nil,
+		maxSize:           1000000,
+		writeoutScanYield: true,
+		byteSlack:         byteSlackFor(0),
+		sizeSlack:         sizeSlackFor(1000000),
+		tagsEnabled:       false,
+		xlog:              nil,
 	}
 
 	c.settings.Store(&settings)
@@ -989,10 +991,11 @@ func (c *Cache) GetInfo() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"size":            c.Size(),
-		"limit":           s.maxSize,
-		"estimated_bytes": c.EstimatedBytes(),
-		"byte_limit":      s.maxBytes,
+		"size":                c.Size(),
+		"limit":               s.maxSize,
+		"estimated_bytes":     c.EstimatedBytes(),
+		"byte_limit":          s.maxBytes,
+		"writeout_scan_yield": s.writeoutScanYield,
 	}
 }
 

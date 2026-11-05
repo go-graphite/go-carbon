@@ -223,6 +223,7 @@ type cacheConfig struct {
 	MaxBytes          uint64   `toml:"max-bytes"`
 	WriteStrategy     string   `toml:"write-strategy"`
 	BloomSize         uint64   `toml:"bloom-size"`
+	WriteoutScanYield bool     `toml:"writeout-scan-yield"`
 	WriteoutMinPoints int      `toml:"writeout-min-points"`
 	WriteoutMaxDelay  Duration `toml:"writeout-max-delay"`
 	// WriteoutSpread shortens each metric's min points and max delay by a
@@ -489,8 +490,9 @@ func NewConfig() *Config {
 			OutOfOrderCompactRetentionMargin: Duration{time.Minute},
 		},
 		Cache: cacheConfig{
-			MaxSize:       1000000,
-			WriteStrategy: "max",
+			MaxSize:           1000000,
+			WriteStrategy:     "max",
+			WriteoutScanYield: true,
 		},
 		Udp:    udp.NewOptions(),
 		Tcp:    tcp.NewOptions(),

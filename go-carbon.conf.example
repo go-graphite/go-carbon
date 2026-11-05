@@ -628,6 +628,12 @@ remove-empty-file = false
 # out-of-order-compact-retention-margin = "1m"
 
 [cache]
+# Bound queue lock visits to 256 slots and yield CPU to live TCP handlers
+# between visits during restart ordering.
+# Candidate-buffer growth never holds a shard lock. Disable for whole-shard
+# visits if scan scheduling overhead outweighs live-input latency. Default on;
+# SIGHUP applies to the next queue rebuild. Persistence and quotas are unchanged.
+writeout-scan-yield = true
 # Limit of in-memory stored points (not metrics)
 max-size = 1000000
 # Optional additional byte budget, using cache_estimated_bytes (0 disables).

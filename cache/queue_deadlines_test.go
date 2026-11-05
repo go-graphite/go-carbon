@@ -183,3 +183,14 @@ func TestQueueDeadlinesSparseGrowth(t *testing.T) {
 	c.AddPoint([]byte("sparse.metric"), 3, 3)
 	checkQueueDeadlines(t, c, time.Now())
 }
+
+// Full-region walk retained for the deadline oracle and isolated scan benchmarks.
+func (m *itemMap) readyAt(now time.Time, s *cacheSettings, yield func(*item)) time.Time {
+	var next time.Time
+	for region := 0; region<<queueRegionBits < len(m.slots); region++ {
+		if at := m.readyAtRegion(region, now, s, yield); !at.IsZero() && (next.IsZero() || at.Before(next)) {
+			next = at
+		}
+	}
+	return next
+}
