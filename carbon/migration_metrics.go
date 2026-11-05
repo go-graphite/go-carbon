@@ -53,6 +53,7 @@ type migrationSnapshot struct {
 
 type storeStatsView struct {
 	coldPack                                                                store.ColdPackStats
+	thaws                                                                   whisperio.ThawStats
 	ingestTables, ingestEntries, ingestBytes, ingestL0Bytes, ingestOverlaps uint64
 	flushBytes, compactionWriteBytes, compactionReadBytes                   uint64
 	diskBytes, compactionDebt, memTableBytes, walBytes                      uint64
@@ -222,10 +223,20 @@ var migrationMetricSpecs = func() []metricSpec {
 		gauge("store_points_stored", "Points in native ranges of fully counted metrics in the last completed cold-pack pass; excludes live buffers and sidecars.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredPoints) }),
 		gauge("store_points_stored_metrics", "Metrics whose native descriptors were fully counted in the last completed cold-pack pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredMetrics) }),
 		gauge("store_points_stored_timestamp_seconds", "Completion time of the last stored-point count; zero before a completed pass.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.StoredAt) }),
-		counter("store_cold_pack_blocks_total", "Native ranges packed or unpacked.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Blocks) }),
-		counter("store_cold_pack_points_total", "Points rewritten by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Points) }),
+		counter("store_cold_pack_blocks_total", "Native ranges sealed, including repacks; excludes administrative unpacking.", func(s *migrationSnapshot) float64 {
+			return float64(s.stats.coldPack.Blocks - s.stats.coldPack.UnpackedBlocks)
+		}),
+		counter("store_cold_pack_points_total", "Points sealed, including repacks; excludes administrative unpacking.", func(s *migrationSnapshot) float64 {
+			return float64(s.stats.coldPack.Points - s.stats.coldPack.UnpackedPoints)
+		}),
 		counter("store_cold_pack_input_bytes_total", "Logical source bytes replaced by sealing.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.InputBytes) }),
 		counter("store_cold_pack_output_bytes_total", "Logical bytes after sealing.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.OutputBytes) }),
+		counter("store_cold_pack_repacked_blocks_total", "Native ranges sealed after a previous thaw.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.RepackedBlocks) }),
+		counter("store_cold_pack_repacked_points_total", "Points sealed after a previous thaw.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.RepackedPoints) }),
+		counter("store_cold_pack_repacked_input_bytes_total", "Logical source bytes replaced by sealing previously thawed ranges.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.RepackedInputBytes) }),
+		counter("store_cold_pack_repacked_output_bytes_total", "Logical bytes after sealing previously thawed ranges.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.RepackedOutputBytes) }),
+		counter("store_cold_pack_thawed_points_total", "Points restored to ordinary groups by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Points) }),
+		counter("store_cold_pack_thawed_bytes_total", "Logical group keys and values read plus rewritten by completed codec thaws in this process, including unpublished transactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.thaws.Bytes) }),
 		counter("store_cold_pack_read_bytes_total", "Snapshot bytes read by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.ReadBytes) }),
 		counter("store_cold_pack_write_bytes_total", "WAL batch bytes published by cold maintenance.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.WriteBytes) }),
 		counter("store_cold_pack_errors_total", "Cold maintenance errors; inspect server logs.", func(s *migrationSnapshot) float64 { return float64(s.stats.coldPack.Errors) }),
@@ -302,6 +313,8 @@ var storeMigrationSidecarFoldsDesc = prometheus.NewDesc("store_migration_sidecar
 	"Converted files whose sidecar was folded, by in-place decision or full-rewrite reason; error means conversion failed.",
 	[]string{"result"}, nil)
 
+var storeColdPackThawsDesc = prometheus.NewDesc("store_cold_pack_thaws_total", "Completed codec thaws in this process by writer path, including unpublished transactions.", []string{"reason"}, nil)
+
 // Persister stage timing: summed work per stage (stagetime), the update
 // duration histogram and the slowest update per scrape.
 var (
@@ -353,6 +366,7 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- pebbleFetchStageSecondsDesc
 	ch <- pebbleFetchStageCallsDesc
 	ch <- storeMigrationSidecarFoldsDesc
+	ch <- storeColdPackThawsDesc
 	ch <- persisterStageSecondsDesc
 	ch <- persisterStageCallsDesc
 	ch <- persisterUpdateDesc
@@ -398,7 +412,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		st := db.Stats()
 		s.store = true
 		s.sidecars = db.Sidecars()
-		s.stats = storeStatsView{coldPack: st.ColdPack,
+		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
 			flushBytes: st.FlushWriteBytes, compactionWriteBytes: st.CompactionWriteBytes, compactionReadBytes: st.CompactionReadBytes,
@@ -434,6 +448,12 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(persisterUpdateMaxDesc, prometheus.GaugeValue, stagetime.TakeUpdateMax().Seconds())
 	}
 	if s.store {
+		for _, thaw := range []struct {
+			reason string
+			count  uint64
+		}{{"append", s.stats.thaws.Appends}, {"patch", s.stats.thaws.Patches}, {"rewrite", s.stats.thaws.Rewrites}, {"unpack", s.stats.thaws.Unpacks}} {
+			ch <- prometheus.MustNewConstMetric(storeColdPackThawsDesc, prometheus.CounterValue, float64(thaw.count), thaw.reason)
+		}
 		for _, reason := range []string{"low_free_space", "compaction_debt", "disk_usage_error"} {
 			ch <- prometheus.MustNewConstMetric(relayoutPausesDesc, prometheus.CounterValue, float64(s.stats.relayout.Pauses[reason]), reason)
 			active := 0.0

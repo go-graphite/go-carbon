@@ -85,6 +85,8 @@ var ErrColdPackBudget = errors.New("cold pack operation exceeds bounded budget")
 
 type RepackStats struct {
 	Metrics, Blocks, Points, InputBytes, OutputBytes, Skipped uint64
+	// Repacked is the subset of sealing work on previously thawed ranges.
+	RepackedBlocks, RepackedPoints, RepackedInputBytes, RepackedOutputBytes uint64
 	// ObservedPoints counts only descriptors consumed before the returned
 	// cursor, even when a page reads ahead. Observed is false for unsupported
 	// layouts. These fields do not describe points rewritten by maintenance.
@@ -106,6 +108,9 @@ type ContinuationRepacker interface {
 
 type ColdPackStats struct {
 	RepackStats
+	// Blocks/Points retain their maintenance-work meaning in the status API;
+	// subtract unpack work when exporting sealing-only lifecycle counters.
+	UnpackedBlocks, UnpackedPoints                   uint64
 	Pages, Passes, Errors, Conflicts, PressurePauses uint64
 	Resumed, Checkpoints                             uint64
 	MetricsVisited, PersistedMetricsVisited          uint64
@@ -459,8 +464,16 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	c.stats.Metrics += stats.Metrics
 	c.stats.Blocks += stats.Blocks
 	c.stats.Points += stats.Points
+	if o.Mode == "unpack" {
+		c.stats.UnpackedBlocks += stats.Blocks
+		c.stats.UnpackedPoints += stats.Points
+	}
 	c.stats.InputBytes += stats.InputBytes
 	c.stats.OutputBytes += stats.OutputBytes
+	c.stats.RepackedBlocks += stats.RepackedBlocks
+	c.stats.RepackedPoints += stats.RepackedPoints
+	c.stats.RepackedInputBytes += stats.RepackedInputBytes
+	c.stats.RepackedOutputBytes += stats.RepackedOutputBytes
 	c.stats.Skipped += stats.Skipped
 	if stats.Skipped > 0 || conflict {
 		c.passFailed = true

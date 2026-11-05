@@ -440,8 +440,12 @@ func (f *continuationFile) appendStorageBlock(block whisper.ContinuationBlock, p
 	} else if desc.count != previous {
 		return fmt.Errorf("continuation append predecessor differs: %d != %d", desc.count, previous)
 	}
-	if err := f.thawBlock(block, &desc); err != nil {
-		return err
+	// Keep thaw accounting and its stack frame off ordinary writes. This is
+	// the existing thawBlock fast-return check, before making the rare call.
+	if desc.packed != 0 {
+		if err := f.thawBlock(block, &desc, thawAppend); err != nil {
+			return err
+		}
 	}
 	previousTime := int64(0)
 	var predecessor *store.PointBlock
@@ -531,8 +535,10 @@ func (f *continuationFile) ReplaceStoragePoints(block whisper.ContinuationBlock,
 	if desc.count != block.Count {
 		return fmt.Errorf("continuation patched block count differs: %d != %d", desc.count, block.Count)
 	}
-	if err := f.thawBlock(block, &desc); err != nil {
-		return err
+	if desc.packed != 0 {
+		if err := f.thawBlock(block, &desc, thawPatch); err != nil {
+			return err
+		}
 	}
 	var group *store.PointBlock
 	current := -1
@@ -591,8 +597,10 @@ func (f *continuationFile) RewriteStorageBlock(block whisper.ContinuationBlock, 
 	if desc.count < from {
 		return fmt.Errorf("continuation rewrite starts past the stored points: %d > %d", from, desc.count)
 	}
-	if err := f.thawBlock(block, &desc); err != nil {
-		return err
+	if desc.packed != 0 {
+		if err := f.thawBlock(block, &desc, thawRewrite); err != nil {
+			return err
+		}
 	}
 	for position := from; position < len(points); {
 		key := desc.groupKey(f.data.id, block.Archive, block.Index, position/128)

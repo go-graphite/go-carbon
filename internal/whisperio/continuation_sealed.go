@@ -1,6 +1,7 @@
 package whisperio
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -10,16 +11,50 @@ import (
 	whisper "github.com/go-graphite/go-whisper"
 )
 
+// The bucket high bit records a previous thaw. It remains part of the physical
+// bucket address: old decoders preserve all 32 bits and route groups correctly.
+// Merely masking it on reads would break rollback. Hour buckets cannot reach
+// this bit within Whisper's uint32 timestamp domain (nor could day buckets).
+const continuationThawedBucket uint32 = 1 << 31
+
+// thawReadIO measures the sealed groups through the existing full reader,
+// including its single-group Get path, without another read or hot-path work.
+type thawReadIO struct {
+	store.ContinuationIO
+	prefix []byte
+	bytes  uint64
+}
+
+func (io *thawReadIO) Get(key []byte) ([]byte, error) {
+	value, err := io.ContinuationIO.Get(key)
+	if err == nil && bytes.HasPrefix(key, io.prefix) {
+		io.bytes += uint64(len(key) + len(value))
+	}
+	return value, err
+}
+
+func (io *thawReadIO) Visit(prefix []byte, visit func([]byte, []byte) error) error {
+	return io.ContinuationIO.Visit(prefix, func(key, value []byte) error {
+		io.bytes += uint64(len(key) + len(value))
+		return visit(key, value)
+	})
+}
+
 // thawBlock restores ordinary groups inside the caller's indexed transaction.
 // Late corrections, appends and circular reuse then follow the existing writer.
-func (f *continuationFile) thawBlock(block whisper.ContinuationBlock, desc *blockDescriptor) error {
+func (f *continuationFile) thawBlock(block whisper.ContinuationBlock, desc *blockDescriptor, reason thawReason) error {
 	if desc.packed == 0 {
 		return nil
 	}
 	// The incoming block may describe new bounds/count. Read the old image.
 	old := block
 	old.Count, old.First, old.Last = 0, 0, 0
-	points, err := f.ReadStorageBlock(old)
+	read := thawReadIO{ContinuationIO: f.fs.kv, prefix: desc.groupPrefix(f.data.id, block.Archive, block.Index)}
+	fs := *f.fs
+	fs.kv, fs.verifiedBlocks = &read, nil
+	reader := *f
+	reader.fs = &fs
+	points, err := reader.ReadStorageBlock(old)
 	if err != nil {
 		return err
 	}
@@ -27,17 +62,27 @@ func (f *continuationFile) thawBlock(block whisper.ContinuationBlock, desc *bloc
 		return err
 	}
 	desc.packed = 0
+	desc.bucket |= continuationThawedBucket
+	var written uint64
 	for first := 0; first < len(points); first += 128 {
 		var group store.PointBlock
 		for i, p := range points[first:min(len(points), first+128)] {
 			group.Present[i/64] |= uint64(1) << uint(i%64)
 			group.Points[i] = store.Point{Timestamp: int64(p.Time), Value: p.Value}
 		}
-		if err := f.setPointBlock(desc.groupKey(f.data.id, block.Archive, block.Index, first/128), &group); err != nil {
+		key := desc.groupKey(f.data.id, block.Archive, block.Index, first/128)
+		written += uint64(len(key) + len(store.EncodePointBlock(&group)))
+		if err := f.setPointBlock(key, &group); err != nil {
 			return err
 		}
 	}
-	return f.fs.kv.Set(continuationBlockPrefix(f.data.id, 'b', block.Archive, block.Index), desc.encode())
+	if err := f.fs.kv.Set(continuationBlockPrefix(f.data.id, 'b', block.Archive, block.Index), desc.encode()); err != nil {
+		return err
+	}
+	coldPackThawCounters.blocks[reason].Add(1)
+	coldPackThawCounters.points.Add(uint64(len(points)))
+	coldPackThawCounters.bytes.Add(read.bytes + written)
+	return nil
 }
 
 // Repack prepares at most one bounded native range. The ordinal cursor bounds
@@ -123,7 +168,7 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 		if eligible {
 			block := whisper.ContinuationBlock{Archive: archive, Index: index, Offset: a.Offset + index*a.BlockSize, Size: a.BlockSize, Step: a.Step}
 			if r.Mode == "unpack" {
-				if err := f.thawBlock(block, &desc); err != nil {
+				if err := f.thawBlock(block, &desc, thawUnpack); err != nil {
 					return stats, next, false, err
 				}
 				stats.Blocks = 1
@@ -179,6 +224,12 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 					stats.Points = uint64(len(points))
 					stats.InputBytes = oldBytes
 					stats.OutputBytes = newBytes + 4
+					if desc.bucket&continuationThawedBucket != 0 {
+						stats.RepackedBlocks = 1
+						stats.RepackedPoints = stats.Points
+						stats.RepackedInputBytes = stats.InputBytes
+						stats.RepackedOutputBytes = stats.OutputBytes
+					}
 					return stats, next, false, nil
 				}
 			}
