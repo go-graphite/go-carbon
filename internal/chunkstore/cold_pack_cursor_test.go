@@ -53,7 +53,7 @@ func (c *cursorTestCodec) Repack(_ context.Context, io ContinuationIO, r ColdPac
 		}
 	}
 	err = io.Set([]byte(fmt.Sprintf("packed/%d", r.Cursor)), []byte("published"))
-	return RepackStats{Blocks: 1}, r.Cursor + 1, r.Cursor == 2, err
+	return RepackStats{Blocks: 1, Observed: true, ObservedPoints: 100 * (r.Cursor + 1)}, r.Cursor + 1, r.Cursor == 2, err
 }
 
 func cursorTestOptions(fs vfs.FS, codec *cursorTestCodec) Options {

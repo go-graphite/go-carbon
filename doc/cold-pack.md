@@ -12,6 +12,54 @@ Decimal mode can save more space for sparse and dense floating-point datasets,
 with the precision contract below. Compact headers and live decimal writes are
 not part of this feature.
 
+## Stored point counts
+
+`store_points_stored` is the sum of native range descriptor point counts for
+fully counted metrics in the last completed cold-pack pass.
+`store_points_stored_metrics` reports how many metrics contributed, including
+empty compressed metrics. `store_points_stored_timestamp_seconds` is that pass's
+completion time, or zero when no completed count is available. All three are
+gauges; an unfinished pass leaves the previous result visible. A dashboard can
+divide `pebble_disk_bytes` by `store_points_stored` when the denominator is
+positive, while checking coverage and freshness alongside the ratio.
+
+Every native descriptor consumed by exact, decimal or unpack maintenance
+contributes, including hot, already sealed, legacy non-bucketed and oversized
+ranges that are not rewritten. Page read-ahead is counted only when the cursor
+consumes it. Metrics with errors, read-budget exhaustion or publication conflicts
+are excluded in their entirety, as are unsupported layouts and unpublished
+migration candidates. Coverage counts metrics, not the percentage of stored
+points: a missing large metric can still materially bias the ratio.
+
+Counts are exact for the descriptors observed, rather than a simultaneous
+whole-store snapshot: ongoing writes, expiration and range reuse can change
+earlier observations before a pass finishes. Live propagation buffers, sidecars,
+pending ingestion and non-native storage are excluded. Native points still
+present physically count even if they are outside the current fetch window.
+There are no new ingestion operations or descriptor reads. Maintenance adds
+integer accumulation and fixed-size counters to its existing bounded page.
+
+Totals and the matching contiguous cursor progress share the existing checkpoint
+record and sync schedule. Compatible restarts restore the last completed result
+immediately and resume the unfinished count. Later parallel completions replay
+without double counting. A new store or an incompatible/missing checkpoint starts
+at zero until a pass completes. An older checkpoint without point counts can
+provide only partial coverage on its first resumed pass; the next full pass
+counts all supported metrics. Changing mode or write window resets unfinished
+counts while retaining the last completed result within the running process.
+
+Cold packing defaults to off; its write window does not prevent descriptor
+counting, but its interval and pressure gates delay fresh results. With cold
+packing disabled, no existing guaranteed descriptor-reading sweep is available:
+metric expiration may inspect catalog metadata alone. No additional scan or
+sampler runs for these gauges. The cheapest independent alternative would be a
+clearly labelled estimate from a bounded catalog sample: for example, start at
+most 64 randomly selected metrics per hour, with a hard 2 MiB/hour total read
+budget, the same 32-descriptor pages, and CPU pacing. Unfinished samples would
+carry over under the same budget. It would need metric selection and coverage
+weighting, and could be biased by very uneven metric sizes. Its useful accuracy
+and total cost have not been established, so it is not enabled automatically.
+
 ## Configuration and reload
 
 In `[whisper]`:
