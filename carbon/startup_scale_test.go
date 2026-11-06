@@ -1,6 +1,9 @@
+//go:build unix
+
 package carbon
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -12,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -46,6 +50,21 @@ func captureFixture(t testing.TB) (*startupInput, string) {
 	h, err := original.Detach()
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Fixed per-socket windows prevent loopback autotuning from exhausting
+	// the Mac's finite mbuf pool; daemon/production options stay unchanged.
+	control, err := h.Listener.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var socketErr error
+	if err = control.Control(func(fd uintptr) {
+		socketErr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 128<<10)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if socketErr != nil {
+		t.Fatal(socketErr)
 	}
 	opts.Listen = address
 	s.receiver, err = tcp.NewInheritedCapture("tcp", opts, h, s)
@@ -206,6 +225,7 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	persisted := make([]uint64, (total+63)/64)
 	seen := make([]atomic.Uint64, len(persisted))
 	var persistedCount atomic.Int64
+	var socketRetries atomic.Int64
 	var restoredCount int64
 	var invalid atomic.Bool
 	check := func(name string, d points.Point) (int, bool) {
@@ -227,9 +247,14 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	}
 	stopPersist := make(chan struct{})
 	persistDone := make(chan struct{})
-	start := time.Now().Add(100 * time.Millisecond)
+	start := time.Now()
+	offerReady := make(chan struct{})
+	releaseOffer := sync.OnceFunc(func() { close(offerReady) })
+	stopPersister := sync.OnceFunc(func() { close(stopPersist) })
+	defer func() { stopPersister(); releaseOffer(); <-persistDone }()
 	go func() {
 		defer close(persistDone)
+		<-offerReady
 		index := 0
 		for {
 			select {
@@ -276,7 +301,27 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if err = conns[i].(*net.TCPConn).SetWriteBuffer(128 << 10); err != nil {
+			t.Fatal(err)
+		}
 	}
+	awaitCapture(t, func() bool {
+		active := float64(0)
+		s.receiver.Stat(func(name string, value float64) {
+			if name == "active" {
+				active = value
+			}
+		})
+		return int(active) == clients
+	})
+	if core.Size() != limit {
+		t.Fatal("restored cache drained during connection setup", core.Size())
+	}
+	setup := time.Since(start)
+	start = time.Now().Add(100 * time.Millisecond)
+	releaseOffer()
+	t.Logf("connection_setup=%v cache_at_offer=%d producers=%d", setup, core.Size(), clients)
+
 	var wg sync.WaitGroup
 	var late [clients]time.Duration
 	before := mutexWaitSeconds()
@@ -300,10 +345,19 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 					raw = strconv.AppendInt(raw, 1700000000+int64(seq/slots), 10)
 					raw = append(raw, '\n')
 				}
-				n, err := conn.Write(raw)
-				if err != nil || n != len(raw) {
-					t.Errorf("sender: %d/%d %v", n, len(raw), err)
-					return
+				remaining := raw
+				for len(remaining) > 0 {
+					n, e := conn.Write(remaining)
+					remaining = remaining[n:]
+					if errors.Is(e, syscall.ENOBUFS) && time.Since(target) < time.Second {
+						socketRetries.Add(1)
+						time.Sleep(100 * time.Microsecond)
+						continue
+					}
+					if e != nil || n == 0 {
+						t.Errorf("sender remaining=%d: %v", len(remaining), e)
+						return
+					}
 				}
 				late[client] = max(late[client], time.Since(target))
 			}
@@ -315,7 +369,7 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	captureTime := time.Since(start)
 	s.receiver.Stop()
 	s.pauseReplay()
-	close(stopPersist)
+	stopPersister()
 	<-persistDone
 	var peak runtime.MemStats
 	runtime.ReadMemStats(&peak)
@@ -364,7 +418,7 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	for _, v := range late {
 		lag = max(lag, v)
 	}
-	t.Logf("seconds=%d cpus=%d clients=%d offered=%d/s name_bytes=%d send=%v drained=%v raw_GB_s=%.3f captured=%d replayed=%d persisted=%d retained_records=%d exact_union=%d spool_bytes=%d retired_bytes=%d cache_points=%d cache_bytes=%d heap_sys=%d sender_max_lag=%v mutex_wait_per_wall=%.3f paused=%v", seconds, runtime.NumCPU(), clients, rate, len(names[0][0]), sendTime, captureTime, float64(s.rawBytes.Load())/captureTime.Seconds()/1e9, s.points.Load(), s.replayedPoints.Load(), persistedCount.Load(), retained.Load(), union, s.size.Load()-s.retiredBytes.Load(), s.retiredBytes.Load(), core.Size(), core.EstimatedBytes(), peak.HeapSys, lag, wait/captureTime.Seconds(), s.paused.Load())
+	t.Logf("seconds=%d cpus=%d clients=%d offered=%d/s name_bytes=%d send=%v drained=%v raw_GB_s=%.3f captured=%d replayed=%d persisted=%d retained_records=%d exact_union=%d spool_bytes=%d retired_bytes=%d cache_points=%d cache_bytes=%d heap_sys=%d sender_max_lag=%v mutex_wait_per_wall=%.3f paused=%v enobufs_retries=%d socket_buffer_bytes=131072", seconds, runtime.NumCPU(), clients, rate, len(names[0][0]), sendTime, captureTime, float64(s.rawBytes.Load())/captureTime.Seconds()/1e9, s.points.Load(), s.replayedPoints.Load(), persistedCount.Load(), retained.Load(), union, s.size.Load()-s.retiredBytes.Load(), s.retiredBytes.Load(), core.Size(), core.EstimatedBytes(), peak.HeapSys, lag, wait/captureTime.Seconds(), s.paused.Load(), socketRetries.Load())
 	if invalid.Load() || union != total {
 		t.Fatal("exact multiset receipts failed", union, total, invalid.Load())
 	}
