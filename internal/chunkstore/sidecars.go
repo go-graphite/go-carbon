@@ -176,17 +176,23 @@ func (s *Store) commitSidecars(batch *pebble.Batch, name string, summary *Sideca
 	return s.commitSidecarRecords(batch, []SidecarRecord{{Name: name, SidecarSummary: *summary}}, commit)
 }
 
-// commitSidecarRecords keeps grouped updates and their inventory atomic. The
-// caller holds each metric's mutation lock and supplies its final summary.
+// commitSidecarRecords keeps grouped catalog updates atomic and publishes their
+// inventory only after a successful commit. The caller holds each metric's
+// mutation lock and supplies its final summary.
 func (s *Store) commitSidecarRecords(batch *pebble.Batch, records []SidecarRecord, commit func(*pebble.Batch) error) error {
 	if len(records) == 0 {
 		return commit(batch)
 	}
 	c := &s.sidecars
+	needed := make([]bool, len(records))
 	c.mu.Lock()
+	for i, record := range records {
+		needed[i] = record.Present || c.entries[record.Name] != nil
+	}
+	c.mu.Unlock()
 	changed := false
-	for _, record := range records {
-		if !record.Present && c.entries[record.Name] == nil {
+	for i, record := range records {
+		if !needed[i] {
 			continue
 		}
 		changed = true
@@ -197,18 +203,20 @@ func (s *Store) commitSidecarRecords(batch *pebble.Batch, records []SidecarRecor
 			err = batch.Delete(sidecarCatalogKey(record.Name), nil)
 		}
 		if err != nil {
-			c.mu.Unlock()
 			return err
 		}
 	}
 	if !changed {
-		c.mu.Unlock()
 		return commit(batch)
 	}
-	defer c.mu.Unlock()
+	// The caller owns each name's mutation stripe. Independent names can
+	// commit concurrently; only publication into the inventory needs mu.
+	// Never serialize all sidecar writers (or metrics) across WAL/fsync.
 	if err := commit(batch); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for _, record := range records {
 		c.set(record.Name, record.SidecarSummary)
 	}
@@ -336,8 +344,6 @@ func (s *Store) inspectSidecar(ctx context.Context, name string, codec Continuat
 // throughout that scan update the same catalog under their metric locks.
 func (s *Store) markSidecarsReady() error {
 	c := &s.sidecars
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	b := s.db.NewBatch()
 	defer b.Close()
 	if err := b.Set(sidecarReadyKey, []byte{1}, nil); err != nil {
@@ -346,6 +352,8 @@ func (s *Store) markSidecarsReady() error {
 	if err := s.commit(b); err != nil {
 		return err
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.ready {
 		c.ready = true
 		close(c.readyCh)
