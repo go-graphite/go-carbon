@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"math"
 	"slices"
 	"time"
 )
@@ -17,6 +16,7 @@ import (
 // and off-grid timestamps, including otherwise disjoint archives.
 type NativeCombineClass struct {
 	Archives, IntersectingArchives, NormalizedArchives int
+	MaterializedArchives                               int
 	CopiedBlocks, CombinedBlocks                       int
 	CopiedBytes, CombinedBytes                         uint64
 }
@@ -82,22 +82,22 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 		return TransferMetric{}, class, err
 	}
 	want := a
+	class.MaterializedArchives = len(a.Archives)
 	want.Archives = make([]Archive, len(a.Archives))
 	for i, archive := range a.Archives {
 		if err := ctx.Err(); err != nil {
 			return TransferMetric{}, class, err
 		}
 		class.Archives++
-		intersects, normalizes := nativeArchiveIntersection(archive, b.Archives[i])
+		points, intersects, normalizes, err := nativeArchiveUnion(archive, b.Archives[i])
+		if err != nil {
+			return TransferMetric{}, class, err
+		}
 		if intersects {
 			class.IntersectingArchives++
 		}
 		if normalizes {
 			class.NormalizedArchives++
-		}
-		points, err := fillArchive(archive.Points, b.Archives[i].Points, archive.Retention.Step)
-		if err != nil {
-			return TransferMetric{}, class, err
 		}
 		want.Archives[i] = Archive{archive.Retention, retainTransferSlots(points, archive.Retention)}
 	}
@@ -159,21 +159,6 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 }
 
 func nativeClassicPointKey(key []byte) bool { return len(key) == 20 && key[0] == 'f' && key[9] == 'p' }
-
-func nativeArchiveIntersection(source, target Archive) (intersects, normalizes bool) {
-	r := source.Retention
-	slots := make(map[int64]struct{}, len(source.Points))
-	for _, p := range source.Points {
-		normalizes = normalizes || math.IsNaN(p.Value) || p.Timestamp%int64(r.Step) != 0
-		slots[p.Timestamp/int64(r.Step)%int64(r.Count)] = struct{}{}
-	}
-	for _, p := range target.Points {
-		normalizes = normalizes || math.IsNaN(p.Value) || p.Timestamp%int64(r.Step) != 0
-		_, found := slots[p.Timestamp/int64(r.Step)%int64(r.Count)]
-		intersects = intersects || found
-	}
-	return
-}
 
 func (s *Store) nativeRecordSnapshot(ctx context.Context, record TransferMetric) (Snapshot, error) {
 	m := Metadata{MetricConfig: record.Config, ID: record.Version.ID, Generation: record.Version.Generation, Continuation: record.Continuation}

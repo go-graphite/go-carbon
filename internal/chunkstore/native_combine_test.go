@@ -57,7 +57,7 @@ func TestNativeCombineConcurrentWriter(t *testing.T) {
 	name := "native.combine.concurrent"
 	for _, s := range []*Store{source, target, reference} {
 		createTestMetric(t, s, name)
-		if err := s.UpdateMany(ctx, name, []Point{{Timestamp: 1790000040, Value: 1}}); err != nil {
+		if err := s.UpdateMany(ctx, name, []Point{{Timestamp: 99900, Value: 1}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -79,7 +79,7 @@ func TestNativeCombineConcurrentWriter(t *testing.T) {
 		done := make(chan error, 1)
 		go func() {
 			for _, s := range []*Store{target, reference} {
-				if err := s.UpdateMany(ctx, name, []Point{{Timestamp: 1790000040, Value: 42}, {Timestamp: 1790000100, Value: 7}}); err != nil {
+				if err := s.UpdateMany(ctx, name, []Point{{Timestamp: 99900, Value: 42}, {Timestamp: 99960, Value: 7}}); err != nil {
 					done <- err
 					return
 				}
@@ -107,6 +107,9 @@ func TestNativeCombineConcurrentWriter(t *testing.T) {
 	got, _ := target.Snapshot(ctx, name)
 	if err := EqualSnapshots(want, got); err != nil {
 		t.Fatal(err)
+	}
+	if len(got.Archives[0].Points) != 2 || got.Archives[0].Points[0].Value != 42 || got.Archives[0].Points[1].Value != 7 {
+		t.Fatal("concurrent live points absent", got)
 	}
 	if target.NativeStats().CombineRetries != 1 {
 		t.Fatal("writer did not force exactly one revision retry", target.NativeStats())

@@ -149,6 +149,9 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 				pieces[p.Position] = &piece
 				s.catalogChanged(p.Meta.Name)
 				s.invalidateReadCache()
+				s.nativeCounters.combineCopiedBlocks.Add(uint64(p.Class.CopiedBlocks))
+				s.nativeCounters.combinePointBlocks.Add(uint64(p.Class.CombinedBlocks))
+				s.nativeCounters.combineMaterialized.Add(uint64(p.Class.MaterializedArchives))
 				if err := s.nativeStep("combine-name-published"); err != nil {
 					return receipt, err
 				}
@@ -233,6 +236,8 @@ func (s *Store) saveNativeCombineIntent(intent nativeCombineIntent) error {
 }
 
 func (s *Store) reserveNativeCombineIDs(intent *nativeCombineIntent, count int) (uint64, error) {
+	began := time.Now()
+	defer func() { s.nativeCounters.reserve.Add(uint64(time.Since(began))) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	high, err := s.CatalogHighWatermark(context.Background())
@@ -302,6 +307,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if err := s.nativeStep("combine-reserved"); err != nil {
 		return err
 	}
+	buildBegan := time.Now()
 	tables, err := s.newNativeTables(intent.Receipt.Identity, first)
 	if err != nil {
 		return err
@@ -345,7 +351,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if err != nil {
 		return err
 	}
-	if err := s.ingestNativeCombineTables(intent, tables, floatCodec); err != nil {
+	if err := s.ingestNativeCombineTables(intent, tables, floatCodec, buildBegan); err != nil {
 		return err
 	}
 	if err := s.nativeStep("combine-ingested"); err != nil {
@@ -373,11 +379,12 @@ func (s *Store) validateNativeCombineRecord(r TransferMetric) error {
 	return nil
 }
 
-func (s *Store) ingestNativeCombineTables(intent *nativeCombineIntent, tables *nativeTables, floatCodec bool) error {
+func (s *Store) ingestNativeCombineTables(intent *nativeCombineIntent, tables *nativeTables, floatCodec bool, buildBegan time.Time) error {
 	if err := tables.close(); err != nil {
 		s.nativeWriteFailed(err)
 		return err
 	}
+	s.nativeCounters.build.Add(uint64(time.Since(buildBegan)))
 	intent.Spans = append(intent.Spans, tables.spans()...)
 	if err := s.saveNativeCombineIntent(*intent); err != nil {
 		return err
@@ -394,7 +401,9 @@ func (s *Store) ingestNativeCombineTables(intent *nativeCombineIntent, tables *n
 		}
 	}
 	if len(tables.paths) != 0 {
+		began := time.Now()
 		stats, err := s.db.IngestWithStats(tables.paths)
+		s.nativeCounters.ingest.Add(uint64(time.Since(began)))
 		if err != nil {
 			s.nativeWriteFailed(err)
 			return err
@@ -414,6 +423,7 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 	if err != nil {
 		return nil, err
 	}
+	buildBegan := time.Now()
 	tables, err := s.newNativeTables(intent.Receipt.Identity, first)
 	if err != nil {
 		return nil, err
@@ -476,7 +486,7 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 		}
 		prepared = append(prepared, p)
 	}
-	if err := s.ingestNativeCombineTables(intent, tables, floatCodec); err != nil {
+	if err := s.ingestNativeCombineTables(intent, tables, floatCodec, buildBegan); err != nil {
 		return nil, err
 	}
 	return prepared, nil

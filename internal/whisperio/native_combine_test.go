@@ -148,3 +148,41 @@ func TestNativeCombineOffGridDifferential(t *testing.T) {
 	}
 	compareNativeCombine(t, source, target, reference, cfg.Name)
 }
+
+func TestNativeCombineClassicUsesEncodedBlocks(t *testing.T) {
+	ctx := context.Background()
+	clock := func() time.Time { return time.Unix(1000000, 0) }
+	cfg := store.MetricConfig{Name: "combine.classic", Retentions: []store.Retention{{Step: 10, Count: 600}}, AggregationMethod: store.Sum}
+	codec := &ContinuationCodec{}
+	makeRecord := func(point store.Point) store.TransferMetric {
+		kv := make(mapContinuationIO)
+		snap := store.Snapshot{Metadata: store.Metadata{MetricConfig: cfg}, Archives: []store.Archive{{Retention: cfg.Retentions[0], Points: []store.Point{point}}}}
+		if err := codec.RestoreArchives(ctx, kv, snap, clock); err != nil {
+			t.Fatal(err)
+		}
+		groups, ok, err := codec.NativeClassicBlocks(ctx, kv, snap.Metadata, clock)
+		if err != nil || !ok || len(groups) != 1 {
+			t.Fatalf("classic block path rejected: ok=%v groups=%d err=%v namespace=%v", ok, len(groups), err, kv)
+		}
+		r := store.TransferMetric{Config: cfg, Version: store.TransferVersion{Name: cfg.Name, ID: 1, Generation: 1, Revision: 1}, Continuation: true}
+		if err := kv.Visit(nil, func(k, v []byte) error { r.Keys = append(r.Keys, store.RelayoutKV{Key: k, Value: v}); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	left, right := makeRecord(store.Point{Timestamp: 996000, Value: 1}), makeRecord(store.Point{Timestamp: 997280, Value: 2})
+	source, target, reference := combineMemoryStore(t, clock, false), combineMemoryStore(t, clock, false), combineMemoryStore(t, clock, false)
+	if _, err := source.ImportTransfer(ctx, []store.TransferMetric{left}); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []*store.Store{target, reference} {
+		if _, err := s.ImportTransfer(ctx, []store.TransferMetric{right}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compareNativeCombine(t, source, target, reference, cfg.Name)
+	stats := target.NativeStats()
+	if stats.CombineMaterializedArchives != 0 || stats.CombineCopiedBlocks != 2 || stats.CombinePointBlocks != 0 {
+		t.Fatal("classic combine materialized disjoint archives", stats)
+	}
+}
