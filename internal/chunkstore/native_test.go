@@ -107,7 +107,7 @@ func TestNativePendingNameAppearsAfterCandidates(t *testing.T) {
 }
 
 func TestNativeCrashVisibilityAndReceipt(t *testing.T) {
-	for _, stage := range []string{"reserved", "staged", "ingested", "before-publish", "published"} {
+	for _, stage := range []string{"reserved", "staged", "ingested", "before-publish", "publish-committed", "published"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx := context.Background()
 			source, now := openTestStore(t, "/source", Options{fs: vfs.NewMem(), ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})

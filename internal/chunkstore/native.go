@@ -589,6 +589,10 @@ func (s *Store) publishNative(ctx context.Context, request NativeRange, metas []
 	// Catalogs, sidecar inventory and the receipt became visible together
 	// under the creation lock. Keep the per-range lock until fsync completes:
 	// neither this import nor a duplicate/receipt query can acknowledge early.
+	if err := s.nativeStep("publish-committed"); err != nil {
+		s.nativeWriteFailed(err)
+		return err
+	}
 	syncBegan := time.Now()
 	err = b.SyncWait()
 	s.nativeCounters.publishSync.Add(uint64(time.Since(syncBegan)))
