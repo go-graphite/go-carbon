@@ -2,6 +2,7 @@ package whisperio
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"testing"
 
@@ -23,7 +24,13 @@ func TestSpliceMaskOwnersAgainstPointUnion(t *testing.T) {
 		for side := range sources {
 			for sequence := 1; sequence <= 16; sequence++ {
 				count := random.Intn(600) + 1
+				if sequence == 16 {
+					count = store.MaxSealedPoints
+				}
 				start := int64(1790000000/60+random.Intn(1200)) * 60
+				if seed%2 == 1 {
+					start = int64(math.MaxUint32/60-20000+random.Intn(1200)) * 60
+				}
 				points := make([]store.Point, count)
 				irregular := sequence%3 == 0
 				for i := range points {

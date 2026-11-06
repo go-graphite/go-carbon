@@ -8,9 +8,11 @@ import (
 )
 
 type spliceSlotOwner struct {
+	// Eligibility bounds physical timestamps to uint32 and group ordinals to
+	// MaxSealedPoints. Keep each winner in 16 bytes instead of 24.
 	fragment  *spliceFragment
-	ordinal   int
-	timestamp int64
+	ordinal   uint16
+	timestamp uint32
 }
 type spliceOwnerChunk struct {
 	single   splicePart
@@ -54,16 +56,16 @@ func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoc
 		c.owners = new([128]spliceSlotOwner)
 		for i := 0; i < c.single.count; i++ {
 			o := c.single.ordinal + i
-			c.owners[(c.single.slot+i)%128] = spliceSlotOwner{c.fragment, o, spliceOrdinalTime(c.fragment, o, r.Step)}
+			c.owners[(c.single.slot+i)%128] = spliceSlotOwner{c.fragment, uint16(o), uint32(spliceOrdinalTime(c.fragment, o, r.Step))}
 		}
 		c.fragment = nil
 	}
 	for i := 0; i < count; i++ {
 		o := ordinal + i
-		ts := spliceOrdinalTime(f, o, r.Step)
+		ts := uint32(spliceOrdinalTime(f, o, r.Step))
 		old := &c.owners[(slot+i)%128]
 		if old.fragment == nil || ts > old.timestamp || ts == old.timestamp && spliceRankAfter(epoch, f, epoch, old.fragment) {
-			*old = spliceSlotOwner{f, o, ts}
+			*old = spliceSlotOwner{f, uint16(o), ts}
 		}
 	}
 	c.mask[0] |= mask[0]
@@ -141,14 +143,14 @@ func selectSpliceOwners(ctx context.Context, a, b []spliceFragment, r store.Rete
 			count := 1
 			for slot+count < 128 {
 				next := chunk.owners[slot+count]
-				if next.fragment != o.fragment || next.ordinal != o.ordinal+count {
+				if next.fragment != o.fragment || int(next.ordinal) != int(o.ordinal)+count {
 					break
 				}
 				count++
 			}
-			result = append(result, splicePart{*o.fragment, index*128 + slot, o.ordinal, count})
+			result = append(result, splicePart{*o.fragment, index*128 + slot, int(o.ordinal), count})
 			for i := 0; i < count; i++ {
-				include(chunk.owners[slot+i].timestamp)
+				include(int64(chunk.owners[slot+i].timestamp))
 			}
 			slot += count
 		}

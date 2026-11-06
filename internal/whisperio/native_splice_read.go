@@ -240,15 +240,18 @@ func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.Contin
 			continue
 		}
 		for i, value := range series.Values() {
+			ts := int64(series.FromTime() + i*series.Step())
+			if ts <= 0 || ts > math.MaxUint32 || ts%int64(m.Retentions[window.Archive].Step) != 0 {
+				return nil, false, nil
+			}
 			if math.IsNaN(value) {
-				ts := int64(series.FromTime() + i*series.Step())
 				if owner := spliceLatestInSlot(result[window.Archive], m.Retentions[window.Archive], ts); owner > 0 && owner <= ts {
 					return nil, false, nil
 				}
 				continue
 			}
 			sequence++
-			result[window.Archive] = append(result[window.Archive], spliceFragment{first: int64(series.FromTime() + i*series.Step()), count: 1, value: value, priority: priority + 1, sequence: sequence})
+			result[window.Archive] = append(result[window.Archive], spliceFragment{first: ts, count: 1, value: value, priority: priority + 1, sequence: sequence})
 		}
 	}
 	return result, true, nil
