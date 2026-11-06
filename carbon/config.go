@@ -200,7 +200,7 @@ type whisperConfig struct {
 	// second (0: unlimited). ByteRate also caps logical key/value bytes read per
 	// second (0: unlimited). See App.startMetadataPrewarm.
 	// RestartCPUHeadroom multiplies fresh steady CPU history (1..4, default 1.05).
-	// CPUCores is only the no-history fallback (0: finite host-derived allowance).
+	// CPUCores is a minimum even with history (0: history or finite host fallback).
 	// Both settings are read at startup; writeout has priority over optional warming.
 	StoreRestartCPUHeadroom           float64 `toml:"store-restart-cpu-headroom"`
 	StoreMetadataCachePrewarmCPUCores float64 `toml:"store-metadata-cache-prewarm-cpu-cores"`

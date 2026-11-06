@@ -45,7 +45,7 @@ func TestRecentSteadyHistoryAndShutdown(t *testing.T) {
 	}
 }
 
-func TestHistoryWinsOverConfiguredFallback(t *testing.T) {
+func TestHistoryRespectsConfiguredFloor(t *testing.T) {
 	host, _ := os.Hostname()
 	for _, tc := range []struct {
 		name  string
@@ -67,7 +67,7 @@ func TestHistoryWinsOverConfiguredFallback(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "cpu.json")
 			synctest.Test(t, func(t *testing.T) {
 				for _, headroom := range []float64{1, DefaultHeadroom, 1.5, 4} {
-					for _, configured := range []float64{0, 48} {
+					for _, configured := range []float64{0, 8, 48, 120} {
 						h := history{Host: tc.host, Steady: sample{time.Now().Add(-tc.age), tc.cores}, Updates: 14000}
 						data, err := json.Marshal(h)
 						if err != nil {
@@ -83,6 +83,9 @@ func TestHistoryWinsOverConfiguredFallback(t *testing.T) {
 						}
 						if tc.fresh {
 							want, source, rate = 12*headroom, "history", 14000
+							if configured > want {
+								want, source = configured, "configured"
+							}
 						}
 						if math.Abs(b.Cores()-want) > 1e-9 || b.Source() != source || b.SteadyRate() != rate {
 							t.Errorf("headroom=%g configured=%g: got %g/%s/%g, want %g/%s/%g", headroom, configured, b.Cores(), b.Source(), b.SteadyRate(), want, source, rate)
@@ -175,7 +178,7 @@ func TestHistoryRecordsFirstCompleteSteadyMinute(t *testing.T) {
 		}
 		next := startHistory(context.Background(), path, 48, DefaultHeadroom, func() float64 { return 0 })
 		defer next.Stop()
-		if math.Abs(next.Cores()-12.6) > 1e-9 || next.SteadyRate() != 14000 || next.Source() != "history" {
+		if next.Cores() != 48 || next.SteadyRate() != 14000 || next.Source() != "configured" {
 			t.Fatal(next.Cores(), next.SteadyRate())
 		}
 	})

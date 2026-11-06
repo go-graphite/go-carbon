@@ -50,6 +50,24 @@ restart simulations retain their rates/CVs; cache-driven automatic reloads retai
 their minute-by-minute writes. No queue eligibility decision uses these rounded
 indexes: `WriteoutReady` still checks the exact deadline.
 
+## Handoff growth
+
+After a handoff, saved points intentionally receive a new batching residence
+clock and spread deadlines; `OldestAge` does not retain the predecessor's
+oldest arrival. `Recovering` also clears when the startup gate releases, even
+while deferred checkpoint points remain unpersisted. `Restored` reports that
+all checkpoint metrics are claimed while the immutable pending source still
+awaits durable confirmation. On the first non-urgent observation of that state,
+the controller uses the completed restore's point count as its growth baseline
+for one maximum-delay window. It can then detect sustained growth at the normal
+five-second cadence before residence ages reach their first deadline. Initial
+partial restore loading does not establish that baseline. Empty starts retain
+their ordinary fill grace period. Source retirement does not restart it, and
+a long startup hold does not consume the restored comparison window.
+Eligibility, deadline spreading, automatic ceilings
+and restart CPU admission still apply; restored age is not synthesized from
+sample timestamps. A stable restored queue alone does not demand a write burst.
+
 ## Settings reloads
 
 Changing minimum points, maximum delay, spread, phase, sparse behavior, startup

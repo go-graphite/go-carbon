@@ -17,6 +17,9 @@ func scanWriteoutStateAt(c *Cache, now time.Time) WriteoutState {
 	state := WriteoutState{MaxPoints: s.maxSize, MaxDelay: s.writeoutMaxDelay,
 		MeanDelay: time.Duration(float64(s.writeoutMaxDelay) * (1 - s.writeoutSpread/2)),
 		Pressure:  c.bytePressure(s), Recovering: c.recovering(s)}
+	if pending := c.pending.Load(); pending != nil {
+		state.Restored = pending.remaining.Load() == 0
+	}
 	if !s.writeoutPhase.IsZero() {
 		state.MeanDelay = s.writeoutMaxDelay
 	}
@@ -292,11 +295,14 @@ func TestWriteoutStatePendingRecoveryOracle(t *testing.T) {
 	if err := c.AttachPendingRecovery(pendingFixtureWithKnown(t, true)); err != nil {
 		t.Fatal(err)
 	}
+	if c.WriteoutState().Restored {
+		t.Fatal("unclaimed checkpoint reported a complete restore")
+	}
 	if err := c.RecoverPending(nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	checkWriteoutOracle(t, c)
-	if !c.WriteoutState().Recovering {
+	if state := c.WriteoutState(); !state.Recovering || !state.Restored {
 		t.Fatal("urgent recovery flag lost")
 	}
 	c.AddPoint([]byte("metric"), 7, 7)
@@ -309,8 +315,8 @@ func TestWriteoutStatePendingRecoveryOracle(t *testing.T) {
 	}
 	checkWriteoutOracle(t, c)
 	c.ResumeStartupWriteout(time.Now())
-	if c.WriteoutState().Recovering {
-		t.Fatal("held recovery retained urgent flag after release")
+	if state := c.WriteoutState(); state.Recovering || !state.Restored {
+		t.Fatal("release lost deferred history or retained urgent recovery", state)
 	}
 	checkWriteoutOracle(t, c)
 	for _, name := range []string{"metric", "other"} {
@@ -322,6 +328,9 @@ func TestWriteoutStatePendingRecoveryOracle(t *testing.T) {
 	}
 	if err := c.FinishPendingRecovery(); err != nil {
 		t.Fatal(err)
+	}
+	if c.WriteoutState().Restored {
+		t.Fatal("retired source still reports restoration")
 	}
 	checkWriteoutOracle(t, c)
 }

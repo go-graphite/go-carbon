@@ -4,25 +4,26 @@ With metadata prewarming and a positive metadata cache size enabled,
 `[whisper] store-restart-cpu-headroom` multiplies saved steady CPU consumption
 to set the whole-process restart allowance. It defaults to `1.05`, preserving
 the previous multiplier, and accepts finite values from `1.0` through `4.0`.
-`store-metadata-cache-prewarm-cpu-cores` supplies a **fallback** when history
-is unavailable. Both settings are startup-only: SIGHUP accepts config changes
+`store-metadata-cache-prewarm-cpu-cores` supplies a **minimum allowance**, even
+with fresh history. Both settings are startup-only: SIGHUP accepts config changes
 but the active allowance changes only on the next process start.
 
 The selection order is:
 
 | Available history | Configured value | Allowance | Logged source |
 | --- | --- | --- | --- |
-| Fresh host-local steady sample | Any | `store-restart-cpu-headroom` × saved steady CPU cores | `history` |
+| Fresh host-local steady sample | At most history × headroom, including `0` | `store-restart-cpu-headroom` × saved steady CPU cores | `history` |
+| Fresh host-local steady sample | Greater than history × headroom | Configured cores | `configured` |
 | None, invalid or stale | Positive | Configured cores | `fallback` |
 | None, invalid or stale | `0` (default) | Host CPU count / 12, rounded down, at least 1 and at most GOMAXPROCS | `fallback` |
 
-For example, a fallback of `48` provides headroom on a first start. Once the
-process records a steady value of `16` cores, its next start uses `16.8` cores,
-with the default headroom, even while the configured fallback remains `48`.
-Setting headroom to `1.5` instead gives `24` cores for the same history. Headroom
-never multiplies either fallback. The startup `restart CPU allowance` log
-includes `source`, configured `headroom`, and selected `cores`; on the fallback
-path the logged headroom is unused.
+For example, configured cores of `48` provide headroom on a first start and
+remain the minimum on later starts. With a saved steady value of `16` cores,
+the next start still uses `48`, including with headroom `1.5`. With configured
+cores `0`, the same history selects `24` cores. Headroom never multiplies the
+configured minimum or host fallback. The startup `restart CPU allowance` log
+includes `source`, configured `headroom`, and selected `cores`; with source
+`configured` or `fallback`, the logged headroom does not multiply the selected value.
 
 A sample expires after 24 hours. History from another host or the future is
 rejected. The older 30-sample median format remains readable within its original
@@ -32,8 +33,9 @@ The allowance includes user and system CPU from the entire process. Receivers,
 reads and input logging proceed independently. Catch-up above the writeout
 floor and optional warming share the remaining allowance. Writeout at its floor
 is mandatory durability work: a low or stale CPU history must never stop every
-writer. The allowance selection remains unchanged, including fractional saved
-history; raising the configured fallback is not needed to recover writes.
+writer. The mandatory floor remains available with fractional saved history;
+configured cores can provide the extra CPU needed above that historical rate
+when current load has increased.
 Zero never means unlimited CPU.
 
 Optional catalog warming and validation yield to waiting writers, required
@@ -206,7 +208,45 @@ recovery records are confirmed durable. It does not wait for live points to
 return to the intake-ready count: ordinary buffering and workload growth can
 keep that old target out of reach indefinitely. There is no absolute timeout
 for genuine unfinished warming or restoration; those remain restart work.
-History is saved each eligible minute and at shutdown; shutdown joins the sampler before a successor can use its file.
+History is saved each eligible minute and at shutdown. Shutdown joins that
+process's sampler, but a handoff successor may already have selected its allowance.
+
+## Overriding history at a handoff restart
+
+For this fixed binary, set `[whisper] store-metadata-cache-prewarm-cpu-cores`
+to a host-appropriate whole-process minimum before the restart. For example,
+`120` with fresh `10`-core history and headroom `1.5` selects `120` cores,
+logging `source: configured`. Missing history selects the same value with
+`source: fallback`. Do not move or delete history. The predecessor's final
+save cannot lower the configured minimum, regardless of handoff ordering.
+Verify the new PID's allowance log and `restart_cpu_allowance_cores`, then
+confirm writeout keeps up and cache/input-log pressure falls. A higher history
+estimate still wins. SIGHUP alone does not update the active CPU allowance.
+
+For an older binary where configured cores are only a fallback:
+
+1. Before initiating the handoff, move `<shared-store>/restart-cpu.json` to a
+   unique backup and create an **empty directory at that exact file path**.
+   Ensure directory creation succeeded; if a sampler recreated the file in
+   between, move that new file aside too and retry before restarting.
+2. Keep the directory in place through handoff. It prevents both a successor
+   reading history and the old sampler's atomic rename from replacing it.
+   Merely moving/deleting the file is unreliable: the predecessor saves its
+   in-memory history again at Stop.
+3. Verify the new PID logged `source: fallback` and the configured cores.
+   After the predecessor has exited and the successor selected its allowance,
+   remove the empty directory with `rmdir`. Do not restore the low history;
+   the running sampler can write new history at its next eligible minute or Stop.
+
+The directory park intentionally causes history-save errors while it is in
+place. It changes only the optional accelerator, not cached points or durable
+store files. Keep the backup for inspection. Choose a minimum that leaves
+foreground CPU headroom: the fixed binary still accounts for receivers, reads
+and GC and paces restart work within that allowance. Zero preserves automatic
+history selection; it is not an unlimited setting. Neither selection can create
+physical CPU/storage capacity or predict every later load increase.
+
+## Checkpoint compatibility
 
 Checkpoint load and preparation retain the v1/v2 file framing. A sequential
 reader cuts the stream into roughly 4 MiB sections at record boundaries and

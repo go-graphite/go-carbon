@@ -44,8 +44,8 @@ func (b *Budget) SetHistoryState(state func() (int64, bool)) {
 	}
 }
 
-// Stop joins the sampler and its final atomic save before the next process can
-// reuse the directory. It is safe to repeat. Failure only loses an accelerator.
+// Stop joins the sampler and its final atomic save. A handoff successor may
+// already be running. It is safe to repeat. Failure only loses an accelerator.
 func (b *Budget) Stop() error {
 	if b == nil || b.samplerStop == nil {
 		return nil
@@ -58,9 +58,9 @@ func (b *Budget) Stop() error {
 	return b.historyErr
 }
 
-// Start multiplies a recent host-local steady EWMA by headroom, independent of
-// the executable build. Missing history selects cores as a fallback, or a finite
-// host-derived allowance when cores is zero. The caller validates headroom in 1..4.
+// Start multiplies a recent host-local steady EWMA by headroom, with configured
+// cores as a minimum allowance. With neither history nor configured cores, it
+// uses a finite host-derived allowance. The caller validates headroom in 1..4.
 func Start(ctx context.Context, path string, cores, headroom float64) *Budget {
 	return startHistory(ctx, path, cores, headroom, CPU)
 }
@@ -82,7 +82,13 @@ func startHistory(ctx context.Context, path string, cores, headroom float64, rea
 	}
 	source := "history"
 	if savedCores > 0 {
-		cores = headroom * savedCores
+		if allowance := headroom * savedCores; cores > allowance {
+			// Load may have increased since the last qualified steady minute.
+			// An explicit minimum also survives a predecessor's final save.
+			source = "configured"
+		} else {
+			cores = allowance
+		}
 	} else {
 		source = "fallback"
 		if cores == 0 {
