@@ -27,6 +27,8 @@ type options struct {
 	engine                                                                           string
 	bulkOnly                                                                         bool
 	bulkCombine                                                                      bool
+	deferredOnly                                                                     bool
+	deferredRange                                                                    string
 	maxBatches                                                                       int64
 	localSources, localTarget                                                        string
 	plan, state, barrier, healthMap, tokenEnv, controlTokenEnv, replica, replicaSite string
@@ -80,6 +82,8 @@ func MoveMain(args []string) error {
 	flags.StringVar(&o.engine, "engine", "metric", "metric or bulk (native absent-name SST engine; existing plan/journal)")
 	flags.BoolVar(&o.bulkOnly, "bulk-only", false, "finish native absence pass and leave deferred combines in the same journal")
 	flags.BoolVar(&o.bulkCombine, "combine-existing", false, "combine present names natively with optimistic publication (requires --engine bulk)")
+	flags.BoolVar(&o.deferredOnly, "deferred-only", false, "combine only acknowledged native deferrals; never issue plan gaps")
+	flags.StringVar(&o.deferredRange, "deferred-range", "", "restrict deferred work to one existing STREAM:START:END journal range")
 	flags.StringVar(&o.localSources, "local-sources", "", "experimental checkpoint-local comparison: JSON source-origin to verified-copy directory map; retains existing import limits")
 	flags.StringVar(&o.localTarget, "local-target", "", "loopback Buckyd origin for local checkpoint imports; checked against the plan's target identity")
 	flags.Int64Var(&o.maxBatches, "max-batches", 0, "stop after producing this many journal batches (0 runs the full plan)")
@@ -122,6 +126,9 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if (o.deferredOnly || o.deferredRange != "") && (o.engine != "bulk" || !o.bulkCombine || !o.bulkOnly) {
+		return errors.New("deferred scope requires --engine bulk --combine-existing --bulk-only")
+	}
 	if o.engine == "bulk" {
 		return runNative(ctx, o)
 	}

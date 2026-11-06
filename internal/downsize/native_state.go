@@ -14,10 +14,19 @@ import (
 // One range record carries the native copied bitmap and the reviewed importer's
 // single in-flight fallback. Children never become overlapping journal ranges.
 type nativeRangeState struct {
-	Intent  bool `json:",omitempty"`
-	Receipt chunkstore.NativeReceipt
-	Done    []byte
-	Pending *task `json:",omitempty"`
+	Intent   bool `json:",omitempty"`
+	Combine  bool `json:",omitempty"`
+	Receipt  chunkstore.NativeReceipt
+	Done     []byte
+	Pending  *task                   `json:",omitempty"`
+	Combines []nativeDeferredAttempt `json:",omitempty"`
+}
+
+// Nil Receipt is a durable intent. Keep its original selection on recovery;
+// recalculating it after a lost acknowledgement could identify different work.
+type nativeDeferredAttempt struct {
+	Selection []byte
+	Receipt   *chunkstore.NativeReceipt `json:",omitempty"`
 }
 
 func (s *nativeRangeState) done(i int) bool {
@@ -102,7 +111,7 @@ func (m *mover) executeNativeFallback(ctx context.Context, parent task) error {
 	if err != nil {
 		return err
 	}
-	request := chunkstore.NativeRange{Operation: m.journal.operation, Plan: m.planData.PlanID, Stream: parent.Stream, Source: parent.Source, Start: parent.Start, End: parent.End, Names: names}
+	request := chunkstore.NativeRange{Operation: m.journal.operation, Plan: m.planData.PlanID, Stream: parent.Stream, Source: parent.Source, Start: parent.Start, End: parent.End, Names: names, Combine: parent.Native.Combine}
 	var durable chunkstore.NativeReceipt
 	if _, err := m.requestOnce(ctx, parent.Target, "/v1/native/receipt", request, &durable); err != nil {
 		return fmt.Errorf("native handoff receipt unresolved (resume --engine bulk; never replay through metric mode): %w", err)
@@ -118,7 +127,7 @@ func (m *mover) executeNativeFallback(ctx context.Context, parent task) error {
 		if durable.Identity != identity || durable.NamesSHA256 != namesHash || durable.Count != len(names) || len(durable.Copied) != (len(names)+7)/8 {
 			return errors.New("native recovered receipt differs from plan")
 		}
-		parent.Native = &nativeRangeState{Receipt: durable, Done: bytes.Clone(durable.Copied)}
+		parent.Native = &nativeRangeState{Combine: request.Combine, Receipt: durable, Done: bytes.Clone(durable.Copied)}
 		parent.Bytes = durable.Bytes
 		if parent.Native.complete() {
 			parent.Phase = "done"
