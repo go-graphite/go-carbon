@@ -56,10 +56,11 @@ func run() error {
 	repeat := flag.Int("repeat", 32, "explicit history replication under distinct names")
 	batch := flag.Int("batch", 128, "names per independent apply")
 	workers := flag.Int("workers", runtime.GOMAXPROCS(0), "apply workers")
+	foreground := flag.Int("foreground", 0, "private concurrent writers on colliding stripes; 0 disables")
 	profile := flag.String("profile-prefix", "", "CPU, mutex and block profile prefix")
 	epoch := flag.Int64("now", 1793986000, "frozen archive clock")
 	flag.Parse()
-	if *fixtures == "" || *parent == "" || *repeat < 1 || *batch < 1 || *batch > store.MaxTransferMetrics || *workers < 1 || (*mode != "native" && *mode != "legacy" && *mode != "overlap") {
+	if *fixtures == "" || *parent == "" || *repeat < 1 || *batch < 1 || *batch > store.MaxTransferMetrics || *workers < 1 || *foreground < 0 || (*mode != "native" && *mode != "legacy" && *mode != "overlap") {
 		return errors.New("invalid options")
 	}
 	root, err := os.MkdirTemp(*parent, "ingest-eval-")
@@ -198,6 +199,10 @@ func run() error {
 		j.request = store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "private-captured-history", Start: int64(i), End: int64(end), Names: allNames[i:end]}
 		jobs = append(jobs, j)
 	}
+	control, stopForeground, err := foregroundProbe(ctx, target, allNames, *foreground, *epoch)
+	if err != nil {
+		return err
+	}
 	var cpu *os.File
 	if *profile != "" {
 		cpu, err = os.Create(*profile + ".cpu")
@@ -253,6 +258,10 @@ func run() error {
 	close(queue)
 	wg.Wait()
 	seconds := time.Since(began).Seconds()
+	foregroundLatency, foregroundErr := stopForeground()
+	if foregroundErr != nil {
+		return foregroundErr
+	}
 	after := counters()
 	applyAfter := target.TransferApplyStats()
 	if cpu != nil {
@@ -322,5 +331,5 @@ func run() error {
 	}
 	// Keep response identity independent of scheduling order.
 	stats := target.Stats()
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"mode": *mode, "captured_histories": len(rows), "replication": *repeat, "names": len(allNames), "batch": *batch, "workers": *workers, "wire_bytes": wireBytes, "seconds": seconds, "MBps": float64(wireBytes) / seconds / 1e6, "output_sha256": hex.EncodeToString(hash.Sum(nil)), "equal_raw_keys": keys, "logical_point_bits": points, "mismatches": 0, "apply_before": applyBefore, "apply_after": applyAfter, "native_stats": target.NativeStats(), "ingest_l0_bytes": stats.IngestL0Bytes, "ingest_memtable_overlaps": stats.IngestMemtableOverlaps, "before": before, "after": after, "temporary_stores_removed_on_exit": true, "input_origin": "logical archives re-encoded by current codec, not native production layout"})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"foreground_control": control, "foreground_during_apply": foregroundLatency, "mode": *mode, "captured_histories": len(rows), "replication": *repeat, "names": len(allNames), "batch": *batch, "workers": *workers, "wire_bytes": wireBytes, "seconds": seconds, "MBps": float64(wireBytes) / seconds / 1e6, "output_sha256": hex.EncodeToString(hash.Sum(nil)), "equal_raw_keys": keys, "logical_point_bits": points, "mismatches": 0, "apply_before": applyBefore, "apply_after": applyAfter, "native_stats": target.NativeStats(), "ingest_l0_bytes": stats.IngestL0Bytes, "ingest_memtable_overlaps": stats.IngestMemtableOverlaps, "before": before, "after": after, "temporary_stores_removed_on_exit": true, "input_origin": "logical archives re-encoded by current codec, not native production layout"})
 }

@@ -478,7 +478,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			_ = b.Close()
 		}
 	}()
-	walk := &transferReader{reader: view}
+	walk := &transferReader{reader: view, native: true}
 	defer walk.close()
 	proofs := make([]TransferProof, len(records))
 	var receiptEncoder transferProofEncoder
@@ -537,7 +537,19 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			if err != nil {
 				return nil, err
 			}
-			target, err := s.transferSnapshot(ctx, view, old)
+			// Materialize the immutable target's encoded keys with one ordered
+			// walk. Codec point/block reads then use the private record, avoiding
+			// repeated live LSM/cache lookups for every archive block.
+			var target Snapshot
+			if old.Continuation {
+				var raw TransferMetric
+				raw, err = s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
+				if err == nil {
+					target, err = s.continuation.Snapshot(ctx, transferRecordIO(raw), old, s.now)
+				}
+			} else {
+				target, err = s.transferSnapshot(ctx, view, old)
+			}
 			if err != nil {
 				return nil, err
 			}

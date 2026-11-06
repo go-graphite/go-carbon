@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"errors"
+	"slices"
 )
 
 // Bucket discovery reads the descriptors already exported under one snapshot.
@@ -12,10 +13,12 @@ type transferRecordIO TransferMetric
 var errTransferReadOnly = errors.New("read-only transfer")
 
 func (r transferRecordIO) Get(key []byte) ([]byte, error) {
-	for _, kv := range r.Keys {
-		if bytes.Equal(kv.Key, key) {
-			return bytes.Clone(kv.Value), nil
-		}
+	// Exporters sort these keys, and both import protocols validate strict
+	// order before reaching codec operations. Avoid scanning all archive groups
+	// for every block lookup while retaining the detached writable return value.
+	i, found := slices.BinarySearchFunc(r.Keys, key, func(kv RelayoutKV, key []byte) int { return bytes.Compare(kv.Key, key) })
+	if found {
+		return bytes.Clone(r.Keys[i].Value), nil
 	}
 	return nil, ErrNotFound
 }
