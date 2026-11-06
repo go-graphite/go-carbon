@@ -59,6 +59,10 @@ func handoffWire(t *testing.T, flags byte) []byte {
 }
 
 func TestStreamHandoffEveryByte(t *testing.T) {
+	testStreamHandoffEveryByte(t, false)
+}
+func TestStreamCaptureHandoffEveryByte(t *testing.T) { testStreamHandoffEveryByte(t, true) }
+func testStreamHandoffEveryByte(t *testing.T, capture bool) {
 	for _, flags := range []byte{0, codec.FlagZstd} {
 		wire := handoffWire(t, flags)
 		for cut := 1; cut <= len(wire); cut++ {
@@ -107,7 +111,7 @@ func TestStreamHandoffEveryByte(t *testing.T) {
 					t.Fatalf("got %d inherited connections", len(h.Conns))
 				}
 				// The new owner uses only the ordinary receiver and wire decoder.
-				next, err := NewInherited("tcp", &Options{Enabled: true, Listen: listener.Addr().String()}, after.add, h)
+				next, err := inheritTestInput(capture, &Options{Enabled: true, Listen: listener.Addr().String()}, after.add, h)
 				if err != nil {
 					t.Fatal(err)
 				}

@@ -146,9 +146,10 @@ func (app *App) openInputLog(core *cache.Cache) error {
 }
 
 // replayInputLog loads the points a crash left in the log. It runs before
-// receivers and legacy dump restore, after a pending checkpoint is attached:
-// logged input is newer than any checkpoint, whose history each replayed
-// metric claims first, and older than dump files a crash left unrestored.
+// live receiver sinks and legacy dump restore. With a pending checkpoint it
+// runs after the handoff tail: the log can contain corrections accepted after
+// capture was sealed, so replaying the older tail last would revert them.
+// Without a checkpoint it precedes ordinary ordered dump restoration.
 // Replayed points precede live points in each cache item, so they need not
 // drain before receivers open, even for compressed whisper.
 func (app *App) replayInputLog(core *cache.Cache) error {

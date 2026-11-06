@@ -9,6 +9,41 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
+func TestRestartIncludesCaptureSwitchPause(t *testing.T) {
+	for _, handoff := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unclean", true: "handoff"}[handoff], func(t *testing.T) {
+			app := New("")
+			app.Config = NewConfig()
+			app.Config.Dump.Path = t.TempDir()
+			app.restartMetrics = newRestartMetrics()
+			base := time.Unix(42, 0)
+			app.restart.lastAlive = base
+			app.restart.inputOpened = base.Add(time.Second)
+			app.restart.kind = "unclean"
+			if handoff {
+				app.restart.prev = &restartRecord{InputClosed: base, Exited: base.Add(time.Second), PID: 42, Dump: "cache.42.42.bin"}
+				app.restart.kind = "handoff"
+			}
+			app.restart.noteInputPause(250 * time.Millisecond)
+			app.finishRestart()
+			deadline := time.Now().Add(time.Second)
+			for {
+				var metric dto.Metric
+				if err := app.restartMetrics.inputUnavailable.Write(&metric); err != nil {
+					t.Fatal(err)
+				}
+				if metric.GetGauge().GetValue() == 1.25 {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("switch pause omitted", metric.GetGauge().GetValue())
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
 // metricValue returns the value of the gathered metric name with the given
 // label pairs, and whether it was found.
 func metricValue(t *testing.T, app *App, name string, labels map[string]string) (float64, bool) {

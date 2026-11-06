@@ -124,7 +124,11 @@ type App struct {
 	pendingInputReady chan struct{}
 	// checkpointOpen opens the pending checkpoint while the start opens
 	// storage; restoreWithPendingReads takes it.
-	checkpointOpen *checkpointOpen
+	checkpointOpen        *checkpointOpen
+	startupInput          *startupInput
+	inputTailOffsets      map[string]int64
+	startupCapturedPoints uint64
+	startupInputPauseAt   time.Time
 	// A legacy mirrored predecessor may retain its store until the socket
 	// handoff completes. These fields retain the early read/input takeover
 	// until ordinary startup can attach the now-open store and persister.
@@ -644,6 +648,12 @@ func (app *App) stopAll() {
 		_ = app.Cache.SetWriteoutBatching(0, 0)
 	}
 	<-app.stopListeners()
+	if app.startupInput != nil {
+		if err := app.startupInput.close(); err != nil {
+			zapwriter.Logger("app").Error("startup input capture failed", zap.Error(err))
+		}
+		app.startupInput = nil
+	}
 	app.closeInputLog()
 
 	logger := zapwriter.Logger("app")
@@ -859,6 +869,12 @@ func (app *App) Start() (err error) {
 	app.applyRuntimeProfiling()
 	app.applyMallocTrim()
 	app.beginRestart()
+	app.inputTailOffsets = nil
+	app.startupCapturedPoints = 0
+	app.startupInputPauseAt = time.Time{}
+	if err = app.startStartupInput(); err != nil {
+		return err
+	}
 	// Verifying a large checkpoint takes seconds; do it while storage opens.
 	app.startCheckpointOpen()
 	defer app.discardCheckpointOpen()
@@ -904,8 +920,12 @@ func (app *App) Start() (err error) {
 		}
 	}
 	lap("pending_checkpoint")
-	if err = app.replayInputLog(core); err != nil {
-		return err
+	// A validated checkpoint's tail precedes the newer continuous log. Keep
+	// both ahead of live sinks; ordered legacy restoration retains its own order.
+	if app.pendingDone == nil {
+		if err = app.replayInputLog(core); err != nil {
+			return err
+		}
 	}
 	lap("input_log_replay")
 	if restoreBeforeReceivers && !readsStarted && !pendingReads {
@@ -1500,6 +1520,9 @@ func (g *tailGate) pass() bool {
 
 func (app *App) startReceivers(core *cache.Cache) (err error) {
 	conf := app.Config
+	if err = app.finishStartupInput(core); err != nil {
+		return err
+	}
 	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver
 	var rcvOptions map[string]interface{}
@@ -1524,6 +1547,11 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	if inherited == nil {
 		if err = app.loadInputTails(core); err != nil {
 			return err
+		}
+		if app.pendingDone != nil {
+			if err = app.replayInputLog(core); err != nil {
+				return err
+			}
 		}
 	}
 	add, addPoint, addPoints := core.Add, core.AddPoint, core.AddPoints
@@ -1611,6 +1639,12 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 				return
 			}
 			rcv = inheritedTCP
+			if !app.startupInputPauseAt.IsZero() {
+				pause := time.Since(app.startupInputPauseAt)
+				app.restart.noteInputPause(pause)
+				app.startupInputPauseAt = time.Time{}
+				zapwriter.Logger("app").Info("startup input capture switched to live input", zap.Duration("input_pause", pause))
+			}
 			zapwriter.Logger("app").Info("took over input from stopping instance", zap.String("receiver", "tcp"), zap.Int("connections", len(h.Conns)))
 		} else if rcv, err = receiver.New("tcp", rcvOptions, add); err != nil {
 			return
@@ -1645,6 +1679,10 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 		if conf.Prometheus.Enabled {
 			rcv.InitPrometheus(app.PromRegisterer)
 		}
+		if tcp, ok := rcv.(*tcp_receiver.TCP); ok && app.startupCapturedPoints > 0 {
+			tcp.SeedCapturedPoints(app.startupCapturedPoints)
+			app.startupCapturedPoints = 0
+		}
 
 		app.Receivers = append(app.Receivers, &NamedReceiver{
 			Receiver: rcv,
@@ -1655,6 +1693,11 @@ func (app *App) startReceivers(core *cache.Cache) (err error) {
 	if tail != nil {
 		if err = app.loadInputTails(core); err != nil {
 			return err
+		}
+		if app.pendingDone != nil {
+			if err = app.replayInputLog(core); err != nil {
+				return err
+			}
 		}
 		tail.ok.Store(true)
 		close(tail.ready)

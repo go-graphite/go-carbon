@@ -134,6 +134,10 @@ func TestZstdFailureIsLoud(t *testing.T) {
 }
 
 func TestZstdHandoff(t *testing.T) {
+	testZstdHandoff(t, false)
+}
+func TestZstdCaptureHandoff(t *testing.T) { testZstdHandoff(t, true) }
+func testZstdHandoff(t *testing.T, capture bool) {
 	for _, mode := range []string{"decoded-tail", "partial-frame", "split-line", "idle"} {
 		t.Run(mode, func(t *testing.T) {
 			before, after := sequenceStore{wake: make(chan struct{}, 1)}, sequenceStore{wake: make(chan struct{}, 1)}
@@ -214,7 +218,7 @@ func TestZstdHandoff(t *testing.T) {
 			if len(h.Conns) != 1 {
 				t.Fatalf("lost connection: %d", len(h.Conns))
 			}
-			next, err := NewInherited("tcp", &Options{Listen: addr, Enabled: true}, after.add, h)
+			next, err := inheritTestInput(capture, &Options{Listen: addr, Enabled: true}, after.add, h)
 			if err != nil {
 				t.Fatal(err)
 			}

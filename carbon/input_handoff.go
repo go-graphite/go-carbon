@@ -3,6 +3,7 @@ package carbon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,7 +15,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/go-graphite/go-carbon/cache"
-	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
@@ -319,7 +319,20 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 			// Different raw tag orders may normalize to the same cache key.
 			workers = 1
 		}
-		count, err := replayInputTail(path, workers, func(p *points.Points) {
+		file, err := os.Open(path)
+		if err != nil {
+			_ = release()
+			return err
+		}
+		if offset := app.inputTailOffsets[path]; offset > 0 {
+			_, err = file.Seek(offset, io.SeekStart)
+			if err != nil {
+				_ = file.Close()
+				_ = release()
+				return err
+			}
+		}
+		count, err := replayInputTailReader(file, workers, func(p *points.Points) {
 			// These points were accepted before the checkpoint. Never apply
 			// live quotas again or discard them because recovery filled cache.
 			// Reserve space before admitting another record; a single metric
@@ -329,7 +342,16 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 			}
 			core.AddRecovered(p)
 		})
+		_ = file.Close()
+		delete(app.inputTailOffsets, path)
 		_ = release()
+		// A killed owner can leave the last legacy record unfinished. The
+		// reader already delivered every complete point before the torn end.
+		// Keep that durable prefix; structural corruption still fails startup.
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			logger.Warn("unfinished input tail record after crash; recovered complete prefix", zap.String("filename", path), zap.Int("points", count), zap.Error(err))
+			err = nil
+		}
 		logger.Info("input tail loaded", zap.String("filename", path), zap.Int("points", count), zap.Int("workers", workers),
 			zap.Duration("lock_wait", waited), zap.Duration("runtime", time.Since(started)), zap.Error(err))
 		if err != nil {
@@ -377,35 +399,22 @@ func takeInputReceiver(in *handoff.Input, name string) *tcp.Handoff {
 // on-disk order. Wait for every worker even on a read error: callers must not
 // release the tail lock or open live input while recovered writes are in flight.
 func replayInputTail(path string, workers int, add func(*points.Points)) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return replayInputTailReader(f, workers, add)
+}
+
+func replayInputTailReader(reader io.Reader, workers int, add func(*points.Points)) (int, error) {
 	count := 0
 	if workers <= 1 {
-		err := points.ReadFromFile(path, func(p *points.Points) {
+		err := points.ReadBinary(reader, func(p *points.Points) {
 			count += len(p.Data)
 			add(p)
 		})
 		return count, err
 	}
-	queues := make([]chan *points.Points, workers)
-	var wg sync.WaitGroup
-	for i := range queues {
-		// Bound read-ahead independently of the tail's size.
-		queue := make(chan *points.Points, 32)
-		queues[i] = queue
-		wg.Go(func() {
-			for p := range queue {
-				add(p)
-			}
-		})
-	}
-	err := points.ReadFromFile(path, func(p *points.Points) {
-		count += len(p.Data)
-		// Hash the owned string directly. With a power-of-two worker count,
-		// this also keeps each cache/confirmation shard on a single worker.
-		queues[helper.HashString(p.Metric)%uint64(workers)] <- p
-	})
-	for _, queue := range queues {
-		close(queue)
-	}
-	wg.Wait()
-	return count, err
+	return replayInputTailBatches(reader, workers, add)
 }
