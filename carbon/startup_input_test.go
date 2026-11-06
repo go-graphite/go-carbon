@@ -27,6 +27,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/lomik/zapwriter"
+	"github.com/zeebo/xxh3"
 )
 
 // Delay all storage/index work after the real input-only offer. More than the
@@ -128,15 +129,17 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	counts := map[string]int{}
-	if _, err := replayInputTailReader(io.NewSectionReader(spool.file, 0, spool.size.Load()), 1, func(p *points.Points) {
-		for _, d := range p.Data {
-			if int(d.Value) != counts[p.Metric] {
-				t.Error("capture lost, duplicated, or reordered points")
+	for _, shard := range append([]*startupShard{spool.legacy}, spool.shards...) {
+		if _, err := replayInputTailReader(io.NewSectionReader(shard.file, 0, shard.size.Load()), 1, func(p *points.Points) {
+			for _, d := range p.Data {
+				if int(d.Value) != counts[p.Metric] {
+					t.Error("capture lost, duplicated, or reordered points")
+				}
+				counts[p.Metric]++
 			}
-			counts[p.Metric]++
+		}); err != nil {
+			t.Fatal(err)
 		}
-	}); err != nil {
-		t.Fatal(err)
 	}
 	if len(counts) != clients {
 		t.Fatal(counts)
@@ -196,39 +199,39 @@ func TestStartupInputCrashProcess(t *testing.T) {
 	if stage == "before_append" {
 		os.Exit(99)
 	}
-	var raw []byte
-	n := 0
-	for _, p := range startupPoints(stamp, 1) {
-		raw = p.AppendBinary(raw)
-		n += len(p.Data)
-	}
-	if stage == "during_append" {
-		// Model SIGKILL during the final write: all earlier records are
-		// complete; the last point's timestamp is torn.
-		if _, err := s.file.Write(raw[:len(raw)-1]); err != nil {
+	for i, p := range startupPoints(stamp, 1) {
+		shard := s.shards[xxh3.HashString(p.Metric)%uint64(len(s.shards))]
+		raw := p.AppendBinary(nil)
+		if stage == "during_append" && i == 1 {
+			if _, err := shard.file.Write(raw[:len(raw)-1]); err != nil {
+				t.Fatal(err)
+			}
+			if err := shard.sync(); err != nil {
+				t.Fatal(err)
+			}
+			os.Exit(99)
+		}
+		if err := shard.Write(raw, len(p.Data)); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.file.Sync(); err != nil {
-			t.Fatal(err)
-		}
-		os.Exit(99)
-	}
-	if err := s.Write(raw, n); err != nil {
-		t.Fatal(err)
 	}
 	if stage == "after_write" {
 		os.Exit(99)
 	}
-	if err := s.file.Sync(); err != nil {
-		t.Fatal(err)
+	for _, shard := range s.shards {
+		if err := shard.sync(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if stage == "after_sync" {
 		os.Exit(99)
 	}
 	if stage == "during_replay" {
 		core := cache.New()
-		if _, err := replayInputTailReader(io.NewSectionReader(s.file, 0, s.size.Load()), 8, core.AddRecovered); err != nil {
-			t.Fatal(err)
+		for _, shard := range s.shards {
+			if _, err := replayCaptureShard(io.NewSectionReader(shard.file, 0, shard.size.Load()), core.AddRecovered); err != nil {
+				t.Fatal(err)
+			}
 		}
 		os.Exit(99)
 	}

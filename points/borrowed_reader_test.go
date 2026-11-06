@@ -20,7 +20,8 @@ func TestBorrowedReaderMatchesLegacyAtEveryCut(t *testing.T) {
 	for cut := 0; cut <= len(raw); cut++ {
 		var want, got []*Points
 		original := ReadBinary(bytes.NewReader(raw[:cut]), func(p *Points) { want = append(want, p) })
-		borrowed := ReadBinaryBorrowed(bytes.NewReader(raw[:cut]), func(name []byte, data []Point) {
+		buffer := []int{4096, 64 << 10, 4 << 20}[cut%3]
+		borrowed := ReadBinaryBorrowedSize(bytes.NewReader(raw[:cut]), buffer, func(name []byte, data []Point) {
 			got = append(got, &Points{Metric: string(name), Data: append([]Point(nil), data...)})
 		})
 		if fmt.Sprint(original) != fmt.Sprint(borrowed) || !reflect.DeepEqual(want, got) {

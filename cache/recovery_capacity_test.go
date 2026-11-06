@@ -70,3 +70,41 @@ func TestRecoveryCapacityPreservesPressureBoundary(t *testing.T) {
 		t.Fatal("unlimited cache rejected recovery")
 	}
 }
+
+func TestStartupRecoveryCoexistsWithFullRestoredCache(t *testing.T) {
+	c := New()
+	c.SetMaxSize(10000)
+	c.AddRecovered(&points.Points{Metric: "restored", Data: make([]points.Point, 10000)})
+	if c.HasRecoveryCapacity(1) {
+		t.Fatal("fixture must block ordinary recovery")
+	}
+	budget := c.NewStartupRecoveryBudget(8<<20, 128<<20)
+	if !budget.HasCapacity(1) {
+		t.Fatal("restored cache consumed startup headroom")
+	}
+	c.AddRecovered(&points.Points{Metric: "spool", Data: make([]points.Point, 8<<20)})
+	if budget.HasCapacity(1) {
+		t.Fatal("startup recovery budget is unbounded")
+	}
+	c.Pop("spool")
+	if !budget.HasCapacity(1) {
+		t.Fatal("persisted data did not release recovery headroom")
+	}
+}
+
+func TestStartupRecoveryAdmitsOneOversizedRecord(t *testing.T) {
+	c := New()
+	c.SetMaxSize(1000)
+	budget := c.NewStartupRecoveryBudget(1000, 1<<20)
+	if !budget.HasCapacity(1000000) {
+		t.Fatal("empty cache cannot make recovery progress")
+	}
+	c.AddRecovered(&points.Points{Metric: "oversized", Data: make([]points.Point, 1000000)})
+	if budget.HasCapacity(1) {
+		t.Fatal("oversized admission allowed further growth")
+	}
+	c.Pop("oversized")
+	if !budget.HasCapacity(1) {
+		t.Fatal("drain did not restore capacity")
+	}
+}

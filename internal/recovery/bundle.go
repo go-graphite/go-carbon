@@ -141,6 +141,17 @@ func TailName(wal string) string {
 	return strings.TrimSuffix(wal, ".bin") + ".tail.bin"
 }
 
+// IsGenerationTail includes the successor's independent capture shards. Their
+// names sort after the predecessor tail and retain the legacy binary format.
+func IsGenerationTail(name, wal string) bool {
+	tail := TailName(wal)
+	if name == tail {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(name, tail+".capture-")
+	return ok && len(suffix) == len("00.tail.bin") && suffix[0] >= '0' && suffix[0] <= '9' && suffix[1] >= '0' && suffix[1] <= '9' && suffix[2:] == ".tail.bin"
+}
+
 // IsTail reports whether name is such an input log.
 func IsTail(name string) bool {
 	return strings.HasPrefix(name, "input.") && strings.HasSuffix(name, ".tail.bin")
@@ -282,7 +293,7 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 	// caller replays it before opening input.
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || name == manifest.Cache.Name || name == manifest.WAL.Name || name == TailName(manifest.WAL.Name) {
+		if entry.IsDir() || name == manifest.Cache.Name || name == manifest.WAL.Name || IsGenerationTail(name, manifest.WAL.Name) {
 			continue
 		}
 		if isGeneration(name) {
@@ -414,6 +425,17 @@ func (b *Bundle) Retire() error {
 	for _, file := range []File{b.manifest.Cache, b.manifest.WAL, b.manifest.Index, {Name: TailName(b.manifest.WAL.Name)}} {
 		if err := os.Remove(filepath.Join(b.dir, file.Name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
+		}
+	}
+	entries, err := os.ReadDir(b.dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && IsGenerationTail(entry.Name(), b.manifest.WAL.Name) {
+			if err := os.Remove(filepath.Join(b.dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
 		}
 	}
 	// Leave the manifest: missing source files force fallback, and a subsequent

@@ -481,3 +481,36 @@ func (c *Cache) FinishPendingRecovery() error {
 	c.pending.CompareAndSwap(r, nil)
 	return nil
 }
+
+// StartupRecoveryBudget permits bounded recovery headroom above the configured
+// resident cache. A full restored cache must not prevent tail replay from ever
+// starting. Pending checkpoint claims still happen under the metric shard lock.
+// Parallel readers may overshoot by one record each; oversized checkpoint metric
+// claims retain the existing recovery exception. Callers seal capture on pressure.
+type StartupRecoveryBudget struct {
+	cache         *Cache
+	points, bytes int64
+}
+
+func (c *Cache) NewStartupRecoveryBudget(extraPoints, extraBytes int64) *StartupRecoveryBudget {
+	settings := c.settings.Load().(*cacheSettings)
+	return &StartupRecoveryBudget{cache: c,
+		points: max(c.Size(), settings.maxSize) + extraPoints,
+		bytes:  max(c.EstimatedBytes(), settings.maxBytes) + extraBytes}
+}
+
+func (b *StartupRecoveryBudget) HasCapacity(count int) bool {
+	c := b.cache
+	// Cheap upper bounds keep the common path free of a whole-cache sample.
+	// Near pressure, exact published shard totals reclaim conservative slack.
+	pointPressure := c.approxSize()+shardCount*sizeSlackFor(0)+int64(count) > b.points
+	bytePressure := c.stat.bytes.Load()+shardCount*byteSlackFor(0)+c.queueMemory() > b.bytes
+	if !pointPressure && !bytePressure {
+		return true
+	}
+	size := c.Size()
+	if size == 0 && c.NotConfirmedLength() == 0 {
+		return true
+	} // One oversized record can always progress.
+	return (!pointPressure || size+int64(count) <= b.points) && (!bytePressure || c.EstimatedBytes() <= b.bytes)
+}

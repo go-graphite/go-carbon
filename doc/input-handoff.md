@@ -44,31 +44,50 @@ On USR2, the worker keeps receiving while it checkpoints the cache and finishes
 store flushes. It then diverts input to a tail log, closes reads and the shared
 database, and releases its supervisor. The successor takes the listening and
 accepted sockets immediately, before opening storage or validating the pending
-checkpoint. Its handlers restore decoder state and append complete legacy
-records to the **same tail file**, encoding in private 64 KiB batches rather
-than serializing an allocation and writer lock per point. New connections use
-the same capture path. The tail is synced every second and when sealed.
+checkpoint. Its handlers restore decoder state and encode complete legacy
+records into connection-local batches, partitioned by metric hash. Each partition
+has an independent file, a bounded submission queue and one appender goroutine.
+The appender coalesces ready batches and publishes a complete-record byte frontier
+only after `write(2)` returns. Readers use atomics and `ReadAt`; they never acquire
+an appender lock. New connections follow the same path. Files are synced every
+second and at seal, and their directory entries are synced before capture starts.
 
 Storage opening, checkpoint verification, and file-list/index loading run while
-capture drains input. Reads start only after the ordinary checkpoint/index
-validation, and continue to merge saved history with recovered cache points.
-Recovery follows complete-record file frontiers while capture continues. FIFO
-workers receive batches of up to 128 points; each metric keeps its recorded
-order and claims its checkpoint history before tail corrections. Once the
-unreplayed suffix is at most 1 MiB, capture handlers detach and flush. The same
-decoder and worker pool finish that bounded suffix, and the synced tail stays
-available for crash recovery. The ordinary inherited receiver resumes the same
-sockets. Decoder leftovers and partial frames retain their existing handoff
-semantics. Reads still restart; input connections survive.
+capture drains input. Reads start after ordinary checkpoint/index validation.
+Recovery first applies the immutable predecessor tail, then decodes capture
+partitions in parallel. One metric always remains in one partition, preserving
+its recorded correction order, and claims its checkpoint history before applying
+tail corrections. Live sinks open only after all capture readers finish. This
+retains saved-history → predecessor-tail → capture → continuous-log → live order,
+including same-timestamp corrections.
 
-The source tail remains owned by pending recovery until all recovered points
-are persisted, including points captured before storage opened. With a valid
+Capacity derives from GOMAXPROCS, Linux MemAvailable, the host/cgroup and Go memory
+limits, and available disk space. Up to 64 appenders/readers overlap CPU and I/O;
+reader/coalescing buffers scale with available memory. Separate bounded recovery
+headroom lets a full restored cache coexist with tail replay. Replay starts with
+a CPU-derived rate reservation and grows when runtime CPU metrics show idle
+capacity. The chosen sizes are logged as `startup capture capacity selected` and
+exported as `startup_capture_*` metrics.
+
+Capture seals when readers approach their frontiers. It also seals on a duration,
+disk-space or recovery-capacity bound, logs ERROR, and sets
+`startup_capture_fallback = 1`. Duration adapts to measured write rate and disk
+budget with an absolute 120-second ceiling; spool size uses at most one eighth of
+initial free disk and never more than 128 GiB, plus bounded in-flight flushes.
+The fallback retains inherited descriptors, pauses input, and drains the finite
+spool before opening live sinks. It can backpressure relays, as ordinary ordered
+recovery does, but it cannot grow a spool indefinitely waiting for cache space.
+Files and socket handoff state remain available until the final flush has been
+replayed; decoder leftovers and partial frames retain existing semantics.
+
+The source tail and capture partitions remain owned by pending recovery until
+all recovered points are persisted, including points captured before storage opened. With a valid
 checkpoint, the order is saved history, tail, newer continuous input-log replay,
 then live input. This preserves corrections if the successor crashes after
 accepting newer logged values. After a crash tears the final binary record,
 recovery keeps its complete point prefix and warns about the unfinished end;
-other structural decoding errors still fail startup. A failed startup retains the ordinary tail for
-the next recovery; no new source format or handoff protocol is needed. This
+other structural decoding errors still fail startup. A failed startup retains
+the ordinary tail and all capture files for the next recovery; no new source format or handoff protocol is needed. This
 works when the predecessor supports the existing version 2 input-only offer.
 
 Capture uses local disk space proportional to input received while storage and
@@ -80,14 +99,18 @@ the usual TCP delivery limitations below, and power loss has the one-second
 sync window. No application-level acknowledgement is introduced.
 
 `input capture active before storage and checkpoint` marks intake readiness.
-`startup input capture sealed` reports captured points/bytes, replayed prefix
-points/bytes, and capture duration. The following `input tail loaded` reports
+`startup input capture sealed` reports captured points/bytes, replayed
+points, fallback status and capture duration. The following `input tail loaded` reports
 only the remaining suffix. Add prefix and suffix when checking recovered counts;
 add predecessor tail points and successor captured points for the input total.
 `restart_input_unavailable_seconds` includes both the initial gap to capture
 readiness and the final capture-to-live pause. The restart log also reports
 `input_capture_switch_seconds`, so the second pause is not hidden by early
-intake readiness. Snapshotting decoder state at that switch still scales with
+intake readiness. During startup `/metrics` skips store collection if the lifecycle lock is busy,
+reports `migration_collection_skipped = 1`, and continues exporting capture
+telemetry. `/debug/pprof` remains independent of the lifecycle lock.
+
+Snapshotting decoder state at that switch still scales with
 connection state; it does not wait for unrelated cache history.
 
 The brief final switch, and the existing mirrored-store handoff path, use RAM

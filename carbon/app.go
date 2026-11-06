@@ -126,6 +126,7 @@ type App struct {
 	// storage; restoreWithPendingReads takes it.
 	checkpointOpen        *checkpointOpen
 	startupInput          *startupInput
+	startupCaptureState   atomic.Pointer[startupInput]
 	inputTailOffsets      map[string]int64
 	startupCapturedPoints uint64
 	startupInputPauseAt   time.Time
@@ -656,6 +657,9 @@ func (app *App) stopAll() {
 		if err := app.startupInput.close(); err != nil {
 			zapwriter.Logger("app").Error("startup input capture failed", zap.Error(err))
 		}
+		if app.startupInput.inherited != nil {
+			closeTCPHandoff(app.startupInput.inherited)
+		}
 		app.startupInput = nil
 	}
 	app.closeInputLog()
@@ -875,6 +879,7 @@ func (app *App) Start() (err error) {
 	app.beginRestart()
 	app.inputTailOffsets = nil
 	app.startupCapturedPoints = 0
+	app.startupCaptureState.Store(nil)
 	app.startupInputPauseAt = time.Time{}
 	if err = app.startStartupInput(); err != nil {
 		return err

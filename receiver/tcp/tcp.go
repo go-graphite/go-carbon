@@ -362,7 +362,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	// connection incrementing the shared counter per point serializes them.
 	var received uint32
 	defer func() { atomic.AddUint32(&rcv.metricsReceived, received) }()
-	capture := captureBuffer{out: rcv.capture}
+	capture := newCaptureBuffer(rcv.capture)
 	if capture.out != nil {
 		defer func() {
 			if err := capture.flush(); err != nil {

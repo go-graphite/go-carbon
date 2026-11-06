@@ -145,7 +145,7 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		streamOut = *out
 	}
 	sinkReady := false
-	capture := captureBuffer{out: rcv.capture}
+	capture := newCaptureBuffer(rcv.capture)
 	if capture.out != nil {
 		defer func() {
 			if err := capture.flush(); err != nil {
