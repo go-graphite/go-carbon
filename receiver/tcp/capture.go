@@ -21,17 +21,22 @@ type ShardedCapture interface {
 	CaptureShards() []Capture
 }
 
+// captureSubmitter reuses connection-owned acknowledgements. A submission
+// still lends its bytes only until the matching acknowledgement is received.
+type captureSubmitter interface{ SubmitCapture([]byte, int, chan error) }
 type captureSubmission interface {
 	BeginWrite([]byte, int) func() error
 }
 
 type captureBuffer struct {
-	pending func() error
-	shards  []captureBuffer
-	out     Capture
-	buf     []byte
-	n       int
-	err     error
+	pending   func() error
+	done      chan error
+	submitted bool
+	shards    []captureBuffer
+	out       Capture
+	buf       []byte
+	n         int
+	err       error
 }
 
 func newCaptureBuffer(out Capture) captureBuffer {
@@ -71,7 +76,13 @@ func (b *captureBuffer) flush() error {
 		if part.n == 0 || part.err != nil {
 			continue
 		}
-		if out, ok := part.out.(captureSubmission); ok {
+		if out, ok := part.out.(captureSubmitter); ok {
+			if part.done == nil {
+				part.done = make(chan error, 1)
+			}
+			out.SubmitCapture(part.buf, part.n, part.done)
+			part.submitted = true
+		} else if out, ok := part.out.(captureSubmission); ok {
 			part.pending = out.BeginWrite(part.buf, part.n)
 		} else {
 			part.err = part.out.Write(part.buf, part.n)
@@ -79,6 +90,10 @@ func (b *captureBuffer) flush() error {
 	}
 	for i := range b.shards {
 		part := &b.shards[i]
+		if part.submitted {
+			part.err = <-part.done
+			part.submitted = false
+		}
 		if part.pending != nil {
 			part.err = part.pending()
 			part.pending = nil

@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -94,6 +95,10 @@ func ReadCaptureReaderBorrowed(reader io.Reader, visit func([]byte, []points.Poi
 // ReadCaptureFrames lends complete, checksum-verified frames until visit returns.
 // A torn final frame is never delivered. Each caller owns its decoder and reader.
 func ReadCaptureFrames(reader io.Reader, visit func([]byte, int) error) (int, error) {
+	return ReadCaptureFramesBuffer(reader, 256<<10, visit)
+}
+func ReadCaptureFramesBuffer(reader io.Reader, buffer int, visit func([]byte, int) error) (int, error) {
+	reader = bufio.NewReaderSize(reader, max(4096, buffer))
 	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxCaptureRaw))
 	if err != nil {
 		return 0, err

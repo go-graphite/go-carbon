@@ -317,6 +317,8 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	if core.Size() != limit {
 		t.Fatal("restored cache drained during connection setup", core.Size())
 	}
+	var allocBefore runtime.MemStats
+	runtime.ReadMemStats(&allocBefore)
 	setup := time.Since(start)
 	start = time.Now().Add(100 * time.Millisecond)
 	releaseOffer()
@@ -419,6 +421,12 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 		lag = max(lag, v)
 	}
 	t.Logf("seconds=%d cpus=%d clients=%d offered=%d/s name_bytes=%d send=%v drained=%v raw_GB_s=%.3f captured=%d replayed=%d persisted=%d retained_records=%d exact_union=%d spool_bytes=%d retired_bytes=%d cache_points=%d cache_bytes=%d heap_sys=%d sender_max_lag=%v mutex_wait_per_wall=%.3f paused=%v enobufs_retries=%d socket_buffer_bytes=131072", seconds, runtime.NumCPU(), clients, rate, len(names[0][0]), sendTime, captureTime, float64(s.rawBytes.Load())/captureTime.Seconds()/1e9, s.points.Load(), s.replayedPoints.Load(), persistedCount.Load(), retained.Load(), union, s.size.Load()-s.retiredBytes.Load(), s.retiredBytes.Load(), core.Size(), core.EstimatedBytes(), peak.HeapSys, lag, wait/captureTime.Seconds(), s.paused.Load(), socketRetries.Load())
+	timings := s.ioTimings()
+	var gcPause uint64
+	for _, ns := range peak.PauseNs {
+		gcPause = max(gcPause, ns)
+	}
+	t.Logf("write_calls=%d encode_max=%v write_max=%v sync_max=%v rotate_max=%v allocated_bytes_per_point=%.1f gc_pause_max=%v gc_cycles=%d", timings[captureWrite].calls, time.Duration(timings[captureEncode].maximum), time.Duration(timings[captureWrite].maximum), time.Duration(timings[captureSync].maximum), time.Duration(timings[captureRotate].maximum), float64(peak.TotalAlloc-allocBefore.TotalAlloc)/float64(total), time.Duration(gcPause), peak.NumGC-allocBefore.NumGC)
 	if invalid.Load() || union != total {
 		t.Fatal("exact multiset receipts failed", union, total, invalid.Load())
 	}

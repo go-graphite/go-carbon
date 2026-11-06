@@ -35,8 +35,9 @@ func startupPolicy(path string) startupCapturePolicy {
 func chooseStartupPolicy(cpus int, available, free int64) startupCapturePolicy {
 	cpus = max(1, cpus)
 	shards := 1
-	// Two I/O streams per runnable core overlap decode/cache work and disk I/O.
-	for shards < cpus*2 {
+	// One FIFO per runnable core keeps parallelism without multiplying every
+	// socket flush into excessive tiny submissions. Each FIFO has its own reader.
+	for shards < cpus {
 		shards *= 2
 	}
 	// Reserve most available memory for the restored cache and normal runtime.

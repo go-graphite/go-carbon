@@ -41,6 +41,7 @@ type startupShard struct {
 	stream       cache.RecoveryStream
 	names        map[string]string
 	nameBytes    int
+	timings      [captureIOCount]captureTiming
 }
 type startupSegment struct {
 	file                      *os.File
@@ -144,7 +145,7 @@ func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startup
 	for i := range p.shards {
 		sh := &startupShard{owner: s, requests: make(chan startupAppend, 256), written: make(chan struct{})}
 		sh.path = fmt.Sprintf("%s.capture-epoch-%020d.%06d", path, s.epoch, i)
-		seg, e := sh.newSegment(0)
+		seg, e := sh.newSegment(0, false)
 		if e != nil {
 			return nil, e
 		}
@@ -160,7 +161,7 @@ func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startup
 	}
 	return s, nil
 }
-func (s *startupShard) newSegment(index uint64) (*startupSegment, error) {
+func (s *startupShard) newSegment(index uint64, syncDirectory bool) (*startupSegment, error) {
 	path := fmt.Sprintf("%s.%012d.tail.bin", s.path, index)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if err != nil {
@@ -172,10 +173,12 @@ func (s *startupShard) newSegment(index uint64) (*startupSegment, error) {
 		return nil, err
 	}
 	// Sync the directory before publishing/acknowledging any record in this file.
-	if err = syncDir(filepath.Dir(path)); err != nil {
-		f.Close()
-		unlock()
-		return nil, err
+	if syncDirectory {
+		if err = syncDir(filepath.Dir(path)); err != nil {
+			f.Close()
+			unlock()
+			return nil, err
+		}
 	}
 	return &startupSegment{file: f, path: path, unlock: unlock, source: s.stream.Next()}, nil
 }
@@ -202,14 +205,19 @@ func (s *startupInput) Write(raw []byte, n int) error {
 	}
 	return err
 }
-func (s *startupShard) BeginWrite(raw []byte, n int) func() error {
+func (s *startupShard) SubmitCapture(raw []byte, n int, done chan error) {
 	if failure := s.err.Load(); failure != nil {
-		return func() error { return failure.err }
+		done <- failure.err
+		return
 	}
-	done := make(chan error, 1)
 	s.requests <- startupAppend{data: raw, count: n, done: done}
+}
+func (s *startupShard) BeginWrite(raw []byte, n int) func() error {
+	done := make(chan error, 1)
+	s.SubmitCapture(raw, n, done)
 	return func() error { return <-done }
 }
+
 func (s *startupShard) Write(raw []byte, n int) error { return s.BeginWrite(raw, n)() }
 func (s *startupShard) fail(err error) {
 	if err != nil {
@@ -252,6 +260,7 @@ func (s *startupShard) appendLoop() {
 		pending = append(pending[:0], first)
 		buf = append(buf[:0], first.data...)
 		count := first.count
+
 	drain:
 		for len(buf) < s.owner.policy.writeBuffer {
 			select {
@@ -274,13 +283,16 @@ func (s *startupShard) appendLoop() {
 		if failure := s.err.Load(); failure != nil {
 			err = failure.err
 		} else {
+			encodedAt := time.Now()
 			frame = recovery.EncodeCaptureFrame(enc, buf, frame, count)
+			s.timings[captureEncode].observe(encodedAt)
 			cur := s.current.Load()
 			if cur.size.Load() > 0 && cur.size.Load()+int64(len(frame)) > s.owner.policy.segmentBytes {
 				// Sealing rotates the append file, never the socket or the input stream.
-				err = cur.file.Sync()
+				rotatedAt := time.Now()
+				err = s.syncFile(cur.file)
 				if err == nil {
-					next, e := s.newSegment(index + 1)
+					next, e := s.newSegment(index+1, true)
 					err = e
 					if err == nil {
 						index++
@@ -293,6 +305,8 @@ func (s *startupShard) appendLoop() {
 						cur = next
 					}
 				}
+
+				s.timings[captureRotate].observe(rotatedAt)
 			}
 			if err == nil {
 				for s.owner.diskDanger(int64(len(frame))) {
@@ -308,7 +322,9 @@ func (s *startupShard) appendLoop() {
 				}
 			}
 			if err == nil {
+				writtenAt := time.Now()
 				n, e := cur.file.Write(frame)
+				s.timings[captureWrite].observe(writtenAt)
 				err = e
 				if err == nil && n != len(frame) {
 					err = io.ErrShortWrite
@@ -348,7 +364,7 @@ func (s *startupShard) appendLoop() {
 	}
 	cur := s.current.Load()
 	cur.sealed.Store(true)
-	s.fail(cur.file.Sync())
+	s.fail(s.syncFile(cur.file))
 }
 
 // One reservation covers the complete frame, including conservative name
@@ -496,7 +512,7 @@ func (s *startupShard) sync() error {
 	if cur == nil {
 		return nil
 	}
-	return cur.file.Sync()
+	return s.syncFile(cur.file)
 }
 
 // Delete only a durably retired contiguous prefix. A directory sync between
@@ -584,9 +600,8 @@ func (s *startupShard) replay(sink *startupSink) {
 		return
 	}
 	defer dec.Close()
-	frame := make([]byte, 0, s.owner.policy.readBuffer)
+	window := captureReadWindow{target: s.owner.policy.readBuffer}
 	raw := make([]byte, 0, s.owner.policy.readBuffer)
-	var header [recovery.CaptureHeaderSize]byte
 	for {
 		select {
 		case <-s.owner.replayStop:
@@ -626,28 +641,12 @@ func (s *startupShard) replay(sink *startupSink) {
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		if _, err = seg.file.ReadAt(header[:], pos.offset); err != nil {
-			s.fail(err)
-			return
-		}
-		size, e := recovery.CaptureFrameSize(header[:])
+		frame, e := window.frame(seg, pos.offset, seg.size.Load())
 		if e != nil {
 			s.fail(e)
 			return
 		}
-		if pos.offset+int64(size) > seg.size.Load() {
-			s.fail(io.ErrUnexpectedEOF)
-			return
-		}
-		if cap(frame) < size {
-			frame = make([]byte, size)
-		} else {
-			frame = frame[:size]
-		}
-		if _, err = seg.file.ReadAt(frame, pos.offset); err != nil {
-			s.fail(err)
-			return
-		}
+		size := len(frame)
 		var count int
 		raw, count, err = recovery.DecodeCaptureFrame(dec, frame, raw)
 		if err != nil {

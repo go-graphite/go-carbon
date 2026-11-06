@@ -46,12 +46,16 @@ database, and releases its supervisor. The successor takes the listening and
 accepted sockets immediately, before opening storage or validating the pending
 checkpoint. Its handlers restore decoder state and encode complete legacy
 records into connection-local batches, partitioned by metric hash. Each partition
-has one append owner and an independent FIFO. Appenders coalesce submissions,
-write independently checksummed zstd frames, and publish complete-frame byte
-frontiers atomically. Replay uses independent `ReadAt` calls and decoders; no
+has one append owner and an independent FIFO. Connection-local acknowledgements
+are reused across flushes. Appenders coalesce submissions, write independently
+checksummed zstd frames, and publish complete-frame byte frontiers atomically.
+Replay prefetches published prefixes with independent `ReadAt` windows and decoders; no
 producer mutex protects a reader or any file syscall. Directory entries are
 synced before accepting data; active files are synced once per second, on rotation,
-and before handing descriptors over. Independent final syncs run concurrently.
+and before handing descriptors over. Initial directory creation is synced as one
+batch before attaching receivers. Independent final syncs run concurrently.
+The `startup_capture_operation_{seconds_total,calls_total,max_seconds}` metrics
+separate encode, write, sync and rotation latency without taking lifecycle locks.
 
 Storage and checkpoint validation run while receivers capture. `Start` attaches
 background replay and returns without detaching receivers. A partition reader
@@ -76,7 +80,7 @@ The shared cache admission implementation reserves up to one quarter of current
 available memory per sample, prices observed bytes per point and distinct metric
 headers, and publishes denied admission as automatic writeout pressure. Explicit
 configured point/byte ceilings remain authoritative. Capture owns no second cache
-budget. Shards/readers are the next power of two above twice GOMAXPROCS, reduced
+budget. Shards/readers are the next power of two at least GOMAXPROCS, reduced
 for memory and disk safety. Initial decompression and coalescing arenas scale with
 available memory, within 64 KiB–4 MiB and 64 KiB–2 MiB bounds respectively.
 
