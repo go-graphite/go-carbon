@@ -88,6 +88,12 @@ func TestNativeCombineDifferential(t *testing.T) {
 				if err := store.EqualSnapshots(want, got); err != nil {
 					t.Fatalf("%s: %v", name, err)
 				}
+				if _, err := reference.VerifyTransferFetch(ctx, want); err != nil {
+					t.Fatal("reference render", err)
+				}
+				if _, err := target.VerifyTransferFetch(ctx, got); err != nil {
+					t.Fatal("native render", err)
+				}
 			}
 			// A lost acknowledgement cannot cause a second merge after newer
 			// foreground points have arrived, even with a completely invalid body.
@@ -270,5 +276,71 @@ func TestNativeCombineSidecarDifferential(t *testing.T) {
 				t.Fatal("sidecar inventory diverged")
 			}
 		})
+	}
+}
+
+func TestNativeCombineSeveralBucketedHistories(t *testing.T) {
+	ctx := context.Background()
+	source, target, reference := nativeMemoryStore(t, true, true), nativeMemoryStore(t, true, true), nativeMemoryStore(t, true, true)
+	names := []string{"combine.bucket.cursor.a", "combine.bucket.cursor.b", "combine.bucket.cursor.c"}
+	pointsFor := func(i int) []store.Point {
+		var points []store.Point
+		for ts := int64(995000); ts < 999900; ts += 10 {
+			points = append(points, store.Point{Timestamp: ts, Value: float64(ts%71 + int64(i))})
+		}
+		return points
+	}
+	for i, name := range names {
+		putTransferPoints(t, source, name, pointsFor(i))
+	}
+	for i := len(names) - 1; i >= 0; i-- {
+		for _, s := range []*store.Store{target, reference} {
+			putTransferPoints(t, s, names[i], pointsFor(i))
+		}
+	}
+	records, err := source.ExportTransfer(ctx, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bucketed := false
+	for _, kv := range records[0].Keys {
+		if len(kv.Key) > 0 && kv.Key[0] == 'T' {
+			bucketed = true
+		}
+	}
+	if !bucketed {
+		t.Fatal("cursor fixture has no physical time-bucket groups")
+	}
+	if _, err := reference.ImportTransfer(ctx, records); err != nil {
+		t.Fatal(err)
+	}
+	pin, err := source.PinNativeSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	var wire bytes.Buffer
+	if err := pin.Write(ctx, names, &wire); err != nil {
+		t.Fatal(err)
+	}
+	r := store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: 3, Names: names, Combine: true}
+	if _, err := target.NativeImport(ctx, r, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		want, err := reference.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := target.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EqualSnapshots(want, got); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := target.VerifyTransferFetch(ctx, got); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

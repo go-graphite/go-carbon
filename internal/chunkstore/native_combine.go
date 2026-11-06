@@ -477,26 +477,29 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 	defer func() { err = errors.Join(err, tables.close()); _ = s.fs.RemoveAll(tables.directory) }()
 	view := s.db.NewSnapshot()
 	defer view.Close()
-	walk := &transferReader{reader: view, native: true}
-	defer walk.close()
+	sourceWalk := &transferReader{reader: view, native: true, ordered: true}
+	targetWalk := &transferReader{reader: view, native: true}
+	defer sourceWalk.close()
+	defer targetWalk.close()
 	floatCodec := false
 	for j, i := range pending {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		walk.arena.free = walk.arena.slab
+		sourceWalk.arena.free = sourceWalk.arena.slab
+		targetWalk.arena.free = targetWalk.arena.slab
 		raw := Metadata(intent.Raw[i])
-		source, err := s.transferFromLimit(ctx, view, raw, math.MaxInt64, walk)
+		source, err := s.transferFromLimit(ctx, view, raw, math.MaxInt64, sourceWalk)
 		if err != nil {
 			return nil, err
 		}
-		old, err := walk.metadata(raw.Name)
+		old, err := targetWalk.metadata(raw.Name)
 		p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: intent.Positions[i], Meta: nativeCombineMetadata(raw)}}
 		if err == nil {
 			if err := nativeCompatibleTarget(s, old, source); err != nil {
 				return nil, err
 			}
-			target, err := s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
+			target, err := s.transferFromLimit(ctx, view, old, math.MaxInt64, targetWalk)
 			if err != nil {
 				return nil, err
 			}

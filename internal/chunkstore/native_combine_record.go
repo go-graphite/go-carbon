@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 )
@@ -23,7 +24,7 @@ type NativeCombineClass struct {
 
 type ContinuationNativeClassic interface {
 	NativeClassicBlocks(context.Context, ContinuationIO, Metadata, func() time.Time) ([]RelayoutKV, bool, error)
-	RestoreNativeClassicBlocks(context.Context, ContinuationIO, Metadata, []RelayoutKV, func() time.Time) error
+	RestoreNativeClassicBlocks(context.Context, ContinuationIO, Metadata, []RelayoutKV, func() time.Time) (bool, error)
 }
 
 // nativeCombineRecord runs entirely outside writer locks. Keeping the exact
@@ -58,28 +59,31 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 				}
 				if canonical {
 					memory := nativeRecordMemory{values: make(map[string][]byte)}
-					if err := codec.RestoreNativeClassicBlocks(ctx, &memory, Metadata{MetricConfig: source.Config}, result.Keys, s.now); err != nil {
+					compatible, err := codec.RestoreNativeClassicBlocks(ctx, &memory, Metadata{MetricConfig: source.Config}, result.Keys, s.now)
+					if err != nil {
 						return TransferMetric{}, c, err
 					}
-					result.Keys, result.Continuation = nil, true
-					if err := memory.Visit(nil, func(k, v []byte) error {
-						result.Keys = append(result.Keys, RelayoutKV{bytes.Clone(k), v})
-						return nil
-					}); err != nil {
-						return result, c, err
+					if compatible {
+						result.Keys, result.Continuation = nil, true
+						if err := memory.Visit(nil, func(k, v []byte) error {
+							result.Keys = append(result.Keys, RelayoutKV{bytes.Clone(k), v})
+							return nil
+						}); err != nil {
+							return result, c, err
+						}
+						return result, c, nil
 					}
-					return result, c, nil
 				}
 			}
 		}
 	}
 	a, err := s.nativeRecordSnapshot(ctx, source)
 	if err != nil {
-		return TransferMetric{}, class, err
+		return TransferMetric{}, class, fmt.Errorf("native donor view %s: %w", source.Config.Name, err)
 	}
 	b, err := s.nativeRecordSnapshot(ctx, target)
 	if err != nil {
-		return TransferMetric{}, class, err
+		return TransferMetric{}, class, fmt.Errorf("native survivor view %s: %w", target.Config.Name, err)
 	}
 	want := a
 	class.MaterializedArchives = len(a.Archives)

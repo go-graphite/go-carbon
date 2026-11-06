@@ -3,6 +3,8 @@ package whisperio
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
+	"math"
 	"math/rand/v2"
 	"path/filepath"
 	"strings"
@@ -64,6 +66,12 @@ func compareNativeCombine(t *testing.T, source, target, reference *store.Store, 
 	}
 	if err := store.EqualSnapshots(a, b); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := reference.VerifyTransferFetch(ctx, a); err != nil {
+		t.Fatal("reference render", err)
+	}
+	if _, err := target.VerifyTransferFetch(ctx, b); err != nil {
+		t.Fatal("native render", err)
 	}
 }
 
@@ -184,5 +192,40 @@ func TestNativeCombineClassicUsesEncodedBlocks(t *testing.T) {
 	stats := target.NativeStats()
 	if stats.CombineMaterializedArchives != 0 || stats.CombineCopiedBlocks != 2 || stats.CombinePointBlocks != 0 {
 		t.Fatal("classic combine materialized disjoint archives", stats)
+	}
+}
+
+func TestNativeClassicRestoreAnchorsEncodedGroups(t *testing.T) {
+	ctx := context.Background()
+	clock := func() time.Time { return time.Unix(1000080, 0) }
+	m := store.Metadata{MetricConfig: store.MetricConfig{Name: "classic.rotate", Retentions: []store.Retention{{Step: 10, Count: 512}}, AggregationMethod: store.Sum}}
+	var block store.PointBlock
+	block.Present[0] = 1
+	block.Points[0] = store.Point{Timestamp: 999680, Value: math.Copysign(0, -1)}
+	key := make([]byte, 6)
+	binary.BigEndian.PutUint32(key[2:], 1)
+	value := store.EncodePointBlock(&block)
+	kv := make(mapContinuationIO)
+	codec := &ContinuationCodec{}
+	ok, err := codec.RestoreNativeClassicBlocks(ctx, kv, m, []store.RelayoutKV{{Key: key, Value: value}}, clock)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	got, err := codec.Fetch(ctx, kv, m, 999600, 999999, clock)
+	if err != nil || got == nil {
+		t.Fatal(err)
+	}
+	i := (999680 - got.FromTime) / got.Step
+	if i < 0 || i >= len(got.Values) || math.Float64bits(got.Values[i]) != math.Float64bits(block.Points[0].Value) {
+		t.Fatal("rotated raw point invisible to Fetch", got)
+	}
+	// A sub-group rotation needs regrouping. Refuse it without writing an
+	// invalid classic image, so the caller uses the exact archive restorer.
+	block.Present[0] = 2
+	block.Points[1] = store.Point{Timestamp: 999690, Value: 7}
+	kv = make(mapContinuationIO)
+	ok, err = codec.RestoreNativeClassicBlocks(ctx, kv, m, []store.RelayoutKV{{Key: key, Value: store.EncodePointBlock(&block)}}, clock)
+	if err != nil || ok || len(kv) != 0 {
+		t.Fatal("unrepresentable byte copy was published", ok, err, len(kv))
 	}
 }

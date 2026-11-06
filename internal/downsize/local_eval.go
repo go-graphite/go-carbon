@@ -261,7 +261,7 @@ func BulkEvalMain(args []string) error {
 			if repetition == 0 {
 				snapshot, err := donor.Snapshot(ctx, name)
 				if err != nil {
-					return err
+					return fmt.Errorf("captured donor snapshot %s: %w", name, err)
 				}
 				for _, a := range snapshot.Archives {
 					capturedPoints += len(a.Points)
@@ -379,7 +379,7 @@ func BulkEvalMain(args []string) error {
 	}
 	reference, err := measure("reference", donor, baseline, oracleBatch)
 	if err != nil {
-		return err
+		return fmt.Errorf("reviewed reference import: %w", err)
 	}
 	var cpu *os.File
 	if *profilePrefix != "" {
@@ -432,7 +432,7 @@ func BulkEvalMain(args []string) error {
 			return e
 		}
 	}
-	var archives, points int
+	var archives, points, renderArchives, renderPoints, renderWindows int
 	for _, name := range names {
 		want, err := baseline.Snapshot(ctx, name)
 		if err != nil {
@@ -445,10 +445,20 @@ func BulkEvalMain(args []string) error {
 		if err := store.EqualSnapshots(want, got); err != nil {
 			return fmt.Errorf("differential %s: %w", name, err)
 		}
+		if _, err := baseline.VerifyTransferFetch(ctx, want); err != nil {
+			return fmt.Errorf("reference render: %w", err)
+		}
+		render, err := bulk.VerifyTransferFetch(ctx, got)
+		if err != nil {
+			return fmt.Errorf("native render: %w", err)
+		}
+		renderArchives += render.Archives
+		renderPoints += render.Points
+		renderWindows += render.Windows
 		archives += len(want.Archives)
 		for _, a := range want.Archives {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }

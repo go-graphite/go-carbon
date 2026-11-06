@@ -191,7 +191,7 @@ func (r *transferReader) visitBucket(ctx context.Context, prefix []byte, visit f
 		if r.bucketReaders == nil {
 			r.bucketReaders = make(map[uint32]*transferReader)
 		}
-		reader = &transferReader{reader: r.reader, ordered: true, export: r.export}
+		reader = &transferReader{reader: r.reader, ordered: r.ordered, export: r.export}
 		r.bucketReaders[bucket] = reader
 	}
 	return reader.visit(ctx, &reader.chunks, prefix[:5], prefixEnd(prefix[:5]), prefix, visit)
