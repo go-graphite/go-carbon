@@ -63,6 +63,49 @@ func TestNativeLiveCreateAtPublication(t *testing.T) {
 	}
 }
 
+func TestNativePendingNameAppearsAfterCandidates(t *testing.T) {
+	ctx := context.Background()
+	source, _ := openTestStore(t, "/source", Options{fs: vfs.NewMem(), ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	defer closeTestStore(t, source)
+	target, _ := openTestStore(t, "/target", Options{fs: vfs.NewMem(), ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	defer closeTestStore(t, target)
+	name := "native.pending-race"
+	createTestMetric(t, source, name)
+	var pending atomic.Bool
+	target.SetTransferPending(func(string) bool { return pending.Load() })
+	candidates, err := target.NativeCandidates(ctx, []string{name})
+	if err != nil || !nativeBit(candidates, 0) {
+		t.Fatal("initial candidate", candidates, err)
+	}
+	pin, err := source.PinNativeSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	var wire bytes.Buffer
+	if err := pin.Write(ctx, []string{name}, &wire); err != nil {
+		t.Fatal(err)
+	}
+	target.nativeTestHook = func(stage string) error {
+		if stage == "before-publish" {
+			pending.Store(true) // live intake queues a name without creating its catalog yet
+		}
+		return nil
+	}
+	request := NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: 1, Names: []string{name}, Candidates: candidates}
+	receipt, err := target.NativeImport(ctx, request, &wire)
+	if err != nil || receipt.CopiedCount != 0 || receipt.DeferredCount != 1 {
+		t.Fatal("pending name published", receipt, err)
+	}
+	if _, err := target.Metadata(ctx, name); !errors.Is(err, ErrNotFound) {
+		t.Fatal("pending name acquired a native catalog", err)
+	}
+	candidates, err = target.NativeCandidates(ctx, []string{name})
+	if err != nil || nativeBit(candidates, 0) {
+		t.Fatal("pending name remained a candidate", candidates, err)
+	}
+}
+
 func TestNativeCrashVisibilityAndReceipt(t *testing.T) {
 	for _, stage := range []string{"reserved", "staged", "ingested", "before-publish", "published"} {
 		t.Run(stage, func(t *testing.T) {

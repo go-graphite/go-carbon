@@ -28,9 +28,9 @@ func (app *App) configureStoreCopy() error {
 		if app.copyInputSealed || current.Tags.Enabled || current.Whisper.StoreMirrorFiles || current.Whisper.StoreLiveMigration {
 			return errors.New("native copy requires unsealed completed shared storage without tags or rollback mirroring")
 		}
-		if app.storeRestoreDone != nil {
+		if app.storeRestoreLoaded != nil {
 			select {
-			case <-app.storeRestoreDone:
+			case <-app.storeRestoreLoaded:
 			default:
 				return errors.New("store recovery has not finished")
 			}

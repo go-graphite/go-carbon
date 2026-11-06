@@ -493,7 +493,7 @@ func (s *Store) publishNative(ctx context.Context, request NativeRange, metas []
 			return err
 		}
 		_, err := walk.lookup(&walk.catalog, catalogLower, catalogUpper, catalogKey(m.Name))
-		if err == nil {
+		if err == nil || errors.Is(err, ErrNotFound) && s.pendingTransfer(m.Name) {
 			for _, span := range tables.unusedSpans(m) {
 				if err := b.DeleteRange(span.Lower, span.Upper, nil); err != nil {
 					return err
@@ -571,9 +571,9 @@ func (s *Store) NativeCandidates(ctx context.Context, names []string) ([]byte, e
 			return nil, err
 		}
 		_, err := walk.lookup(&walk.catalog, catalogLower, catalogUpper, catalogKey(names[i]))
-		if errors.Is(err, ErrNotFound) {
+		if errors.Is(err, ErrNotFound) && !s.pendingTransfer(names[i]) {
 			bits[i/8] |= 1 << uint(i%8)
-		} else if err != nil {
+		} else if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
 		}
 	}

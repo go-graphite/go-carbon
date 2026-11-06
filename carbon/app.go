@@ -157,6 +157,7 @@ type App struct {
 	expirer             *metricExpirer
 	expirationStats     *expirationStats
 	storeRestoreDone    <-chan struct{}
+	storeRestoreLoaded  <-chan struct{} // native copy waits for loading, not saved-history writeout
 	inputLog            atomic.Pointer[inputlog.Log]
 	copyInputSealed     bool
 	restart             restartState
@@ -971,6 +972,7 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 	if conf.Dump.Enabled && !restoreBeforeReceivers {
 		restored := make(chan struct{})
 		app.storeRestoreDone = restored
+		app.storeRestoreLoaded = restored
 		db := app.MetricStore
 		ready, warmed, progress, budget := app.metadataPrewarmReady, app.metadataPrewarmComplete(), app.metadataPrewarmProgress, app.restartBudget
 		go func() {
@@ -1012,6 +1014,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	conf := app.Config
 	app.sharedStoreReads.Store(!conf.Whisper.StoreLiveMigration)
 	app.storeRestoreDone = nil
+	app.storeRestoreLoaded = nil
 	app.storeHandoffReady = false
 	app.storeHandoffMetrics = nil
 	app.storeHandoffInputStarted = false

@@ -108,6 +108,8 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	// persistence do not compete with the work keeping fresh input closed.
 	stop, done := make(chan struct{}), make(chan struct{})
 	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
+	loadedDone := make(chan struct{})
+	app.storeRestoreLoaded = loadedDone
 	inputReady := make(chan struct{})
 	app.pendingInputReady = inputReady
 	go func() {
@@ -123,6 +125,10 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 			logger.Warn("pending recovery stopped", zap.Error(err))
 			return
 		}
+		// Every saved name is now in cache or persisted. Native publication
+		// checks both under the store creation lock; it need not wait for the
+		// potentially hours-long writeout of already loaded history.
+		close(loadedDone)
 		loaded := time.Now()
 		app.setRestoreDuration(loaded.Sub(started))
 		// Metrics the saved read index held may wait for a spread writeout
