@@ -8,9 +8,11 @@ import (
 )
 
 type splicePayload struct {
-	data   []byte
-	sealed bool
-	points []store.Point
+	data         []byte
+	sealed       bool
+	points       []store.Point
+	present      [2]uint64
+	presentKnown bool
 }
 type spliceFragment struct {
 	first                              int64

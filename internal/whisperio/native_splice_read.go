@@ -290,8 +290,18 @@ func (c *ContinuationCodec) nativeClassicFragments(ctx context.Context, kv store
 			var points []store.Point
 			var err error
 			if borrowed {
+				if first, _, n, known := store.CanonicalPointRun(payload.data, r.Step); known {
+					if index*128+n > r.Count || base <= 0 || (first-base)/int64(r.Step)%int64(r.Count) != int64(index*128) {
+						return errSpliceUnsupported
+					}
+					payload.present, payload.presentKnown = spliceMask(0, n), true
+					(*sequence)++
+					result[ai] = append(result[ai], spliceFragment{first: first, count: n, payload: payload, priority: priority, sequence: *sequence})
+					return nil
+				}
 				err = store.DecodePointBlock(payload.data, &scratch)
 				points = scratch.Points[:]
+				payload.present, payload.presentKnown = scratch.Present, err == nil
 			} else {
 				points, err = splicePayloadPoints(payload)
 			}

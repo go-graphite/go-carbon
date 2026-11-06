@@ -85,11 +85,14 @@ func (c *ContinuationCodec) writeReferencedArchives(ctx context.Context, m store
 					present[1] |= mask[1]
 				}
 				if identity {
-					var original store.PointBlock
-					if err := store.DecodePointBlock(payload.data, &original); err != nil {
-						return nil, err
+					if !payload.presentKnown {
+						var original store.PointBlock
+						if err := store.DecodePointBlock(payload.data, &original); err != nil {
+							return nil, err
+						}
+						payload.present, payload.presentKnown = original.Present, true
 					}
-					if present == original.Present {
+					if present == payload.present {
 						if err := output.Set(continuationBodyKey(fdata.id, 'p', ai, 0, index), payload.data); err != nil {
 							return nil, err
 						}
