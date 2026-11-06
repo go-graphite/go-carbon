@@ -91,7 +91,10 @@ disk quota fence instead of deadlocking behind an already-paused appender.
 
 Cache batch identities retain the earliest source reference in each stream,
 through pop, requeue, merging and confirmation. The finite checkpoint tracks its
-own claimed history, rather than every future captured point. Older checkpoint
+own claimed history, rather than every future captured point. Independently
+spooled batches do not enroll in the continuous journal or its relogging; batches
+replayed from that journal retain its generation tracking. Mixed/requeued batches
+preserve both owners. Older checkpoint
 and journal sources gate current partition retirement. Files retire only as a
 confirmed contiguous prefix, with a directory sync between removals. This prevents
 an older correction reappearing after a newer source was removed. Shutdown during

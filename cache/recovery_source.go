@@ -13,11 +13,31 @@ type RecoveryStream struct{ next atomic.Uint64 }
 type RecoverySource struct {
 	stream   *RecoveryStream
 	sequence uint64
+	journal  bool
 	pending  atomic.Int64
 }
 
 func (s *RecoveryStream) Next() *RecoverySource {
 	return &RecoverySource{stream: s, sequence: s.next.Add(1)}
+}
+
+// NextJournal identifies records whose durable authority is the continuous
+// input log itself. Ordinary capture files must not pin/relog that journal.
+func (s *RecoveryStream) NextJournal() *RecoverySource {
+	source := s.Next()
+	source.journal = true
+	return source
+}
+func (r recoverySourceRefs) needsJournal() bool {
+	if r.first != nil && r.first.journal {
+		return true
+	}
+	for _, source := range r.rest {
+		if source.journal {
+			return true
+		}
+	}
+	return false
 }
 func (s *RecoverySource) Pending() int64  { return s.pending.Load() }
 func (c *Cache) HasPendingRecovery() bool { return c.pending.Load() != nil }

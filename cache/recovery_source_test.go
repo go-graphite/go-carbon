@@ -75,3 +75,43 @@ func TestCapturedStreamDoesNotPinFiniteCheckpoint(t *testing.T) {
 		t.Fatal(source.Pending())
 	}
 }
+
+func TestIndependentCaptureDoesNotPinOrRelogOlderJournal(t *testing.T) {
+	c := New()
+	c.EnableInputLog()
+	var journal, spool RecoveryStream
+	logged := journal.NextJournal()
+	captured := spool.Next()
+	c.AddRecoveredFrom(points.OnePoint("old.journal", 1, 1), logged)
+	c.AddRecoveredFrom(points.OnePoint("new.spool", 2, 1), captured)
+	for i := range c.data {
+		c.TakeLogEntries(i, 1, nil)
+	}
+	if c.LogLowWater() != 0 {
+		t.Fatal("old journal retired before confirmation")
+	}
+	p, _ := c.PopNotConfirmed("old.journal")
+	c.Confirm(p)
+	p, _ = c.PopNotConfirmed("new.spool")
+	c.Requeue(p)
+	if c.LogLowWater() != 1 {
+		t.Fatal("independent capture/requeue pinned the predecessor journal")
+	}
+	if count := c.RelogBefore(2, 1000); count != 0 {
+		t.Fatal("independent source redundantly relogged", count)
+	}
+	// A normal, journal-owned point merging into the same batch must still
+	// acquire tracking and keep that generation until its confirmation.
+	c.Add(points.OnePoint("new.spool", 3, 1))
+	for i := range c.data {
+		c.TakeLogEntries(i, 2, nil)
+	}
+	if c.LogLowWater() != 1 {
+		t.Fatal("mixed live journal ownership lost")
+	}
+	p, _ = c.PopNotConfirmed("new.spool")
+	c.Confirm(p)
+	if c.LogLowWater() != 2 || logged.Pending() != 0 || captured.Pending() != 0 {
+		t.Fatal("source/generation not released")
+	}
+}

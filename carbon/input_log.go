@@ -156,7 +156,7 @@ func (app *App) replayInputLog(core *cache.Cache) error {
 	if s := app.startupInput; s != nil {
 		// Ordinary fallback restores the journal before ordered dump files. Retain
 		// that boundary as the first history token, ahead of the locked raw tail.
-		seg := &startupSegment{source: s.legacy.stream.Next()}
+		seg := &startupSegment{source: s.legacy.stream.NextJournal()}
 		seg.next.Store(s.legacy.first.Load())
 		s.legacy.first.Store(seg)
 		s.historyLog.Store(seg)

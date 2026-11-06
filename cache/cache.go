@@ -461,7 +461,10 @@ func (c *Cache) Requeue(p *points.Points) {
 	shard.moveSource(p, values.identity())
 	values.firstArrival = first
 	shard.log.mergeFlight(values, p)
-	shard.log.trackItem(values)
+	refs, independent := shard.recoverySources[values.pending]
+	if !independent || refs.needsJournal() {
+		shard.log.trackItem(values)
+	}
 	shard.items.set(p.Metric, values)
 	shard.writeout.add(values, 1)
 	shard.releaseDrainedTracking()
@@ -816,7 +819,8 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 	if shard.log.first != nil {
-		if !exists {
+		if !recovered || source == nil || source.journal {
+			metadataChanged = metadataChanged || !values.has(itemLogTracked)
 			shard.log.trackItem(values)
 		}
 		// Recovered points keep their own durable source until persisted.

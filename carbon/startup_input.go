@@ -171,7 +171,7 @@ func (app *App) finishStartupInput(core *cache.Cache) error {
 			if s.historyLog.Load() != nil {
 				return nil
 			}
-			seg := &startupSegment{source: s.legacy.stream.Next()}
+			seg := &startupSegment{source: s.legacy.stream.NextJournal()}
 			tail.next.Store(seg)
 			tail = seg
 			s.historyLog.Store(seg)
