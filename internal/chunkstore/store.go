@@ -37,6 +37,7 @@ const (
 	formatMarkerTimeBuckets  = "go-carbon-chunks-v7\n"
 	formatMarkerColdPack     = "go-carbon-chunks-v9\n"
 	formatMarkerFloatCodec   = "go-carbon-chunks-v11\n"
+	formatMarkerReferences   = "go-carbon-chunks-v12\n"
 	legacyRevisionSize       = 8
 	revisionSize             = 16
 )
@@ -228,6 +229,7 @@ type Store struct {
 	transferDeleteRanges  atomic.Uint64
 	compactOnce           compactOnceState
 	manualCompaction      manualCompactionState
+	referenceFormat       atomic.Bool
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
 	fetchTimings        fetchTimingCounters
@@ -460,6 +462,7 @@ func Open(dir string, options Options) (*Store, error) {
 	_ = s.SetRelayoutReclaimBytes(options.RelayoutReclaimBytes)
 	s.coldPack.format.Store(format >= 9)
 	s.coldPack.floatFormat.Store(format >= 11)
+	s.referenceFormat.Store(format >= 12)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
 		MaxConcurrentCompactions: func() int { return int(s.compactionWorkers.Load()) },
@@ -795,8 +798,14 @@ func checkFormatForContinuation(fs vfs.FS, dir string, options Options) (int, bo
 	}
 	if len(names) != 0 {
 		format, err := checkFormatMarker(fs, dir)
-		if err != nil || format != 6 && format != 7 && format != 9 && format != 11 {
+		if err != nil || format != 6 && format != 7 && format != 9 && format != 11 && format != 12 {
 			return 0, false, false, fmt.Errorf("%w: continuation mode requires its own v6 or v7 destination", ErrFormat)
+		}
+		if format == 12 {
+			reader, ok := options.Continuation.(ContinuationReferenceReader)
+			if !ok || !reader.NativeReferenceReader() {
+				return 0, false, false, fmt.Errorf("%w: continuation codec lacks v12 reference reader", ErrFormat)
+			}
 		}
 		if format == 6 && options.TimeBuckets {
 			// v6 data stays readable; only new blocks use the v7 layout. Open
@@ -842,6 +851,8 @@ func checkFormatMarker(fs vfs.FS, dir string) (int, error) {
 		return 9, nil
 	case formatMarkerFloatCodec:
 		return 11, nil
+	case formatMarkerReferences:
+		return 12, nil
 	default:
 		return 0, ErrFormat
 	}

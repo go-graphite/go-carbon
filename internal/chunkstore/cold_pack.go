@@ -205,11 +205,18 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 			return err
 		}
 	}
-	if (o.Mode == "exact" || o.Mode == "decimal" || o.Mode == "float-repack") && !c.format.Load() {
-		if err := replaceFormatMarker(s.fs, s.dir, formatMarkerColdPack); err != nil {
+	if o.Mode == "exact" || o.Mode == "decimal" || o.Mode == "float-repack" {
+		c.formatMu.Lock()
+		if !c.format.Load() {
+			err = replaceFormatMarker(s.fs, s.dir, formatMarkerColdPack)
+			if err == nil {
+				c.format.Store(true)
+			}
+		}
+		c.formatMu.Unlock()
+		if err != nil {
 			return fmt.Errorf("fence cold pack format: %w", err)
 		}
-		c.format.Store(true)
 	}
 	c.mu.Lock()
 	// An unrelated SIGHUP must not wake a paced worker and forgive its wait.

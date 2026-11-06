@@ -53,6 +53,11 @@ func (t *nativeTables) add(ctx context.Context, m Metadata, kv RelayoutKV) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if m.Continuation && referenceManifest(kv) {
+		if err := t.store.fenceReferences(); err != nil {
+			return err
+		}
+	}
 	prefix := chunkPrefix(m.ID, m.Generation)
 	if m.Continuation {
 		prefix = continuationPrefix(m.ID, m.Generation)

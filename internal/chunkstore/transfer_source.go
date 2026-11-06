@@ -40,6 +40,12 @@ func OpenTransferSource(directory string, options TransferSourceOptions) (*Trans
 	if format < 4 || format == 5 || (format >= 6 && codec == nil) || (format == 4 && codec != nil) {
 		return nil, fmt.Errorf("unsupported transfer source format/codec: %d", format)
 	}
+	if format == 12 {
+		reader, ok := codec.(ContinuationReferenceReader)
+		if !ok || !reader.NativeReferenceReader() {
+			return nil, fmt.Errorf("%w: continuation codec lacks v12 reference reader", ErrFormat)
+		}
+	}
 	cache := pebble.NewCache(max(cacheBytes, 1<<20))
 	opts := &pebble.Options{ReadOnly: true, ErrorIfNotExists: true, Cache: cache,
 		Comparer: storeComparer, Merger: exactChunkMerger, MemTableSize: 64 << 20}
@@ -63,6 +69,7 @@ func OpenTransferSource(directory string, options TransferSourceOptions) (*Trans
 	}
 	s.coldPack.format.Store(format >= 9)
 	s.coldPack.floatFormat.Store(format >= 11)
+	s.referenceFormat.Store(format >= 12)
 	return &TransferSource{store: s}, nil
 }
 

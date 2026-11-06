@@ -325,6 +325,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	}
 	seen := make(map[string]bool, len(records))
 	needsFloatFormat := false
+	needsReferences := false
 	for _, r := range records {
 		if err := errors.Join(validateName(r.Config.Name), validate(r.Config)); err != nil {
 			return nil, err
@@ -337,8 +338,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			return nil, ErrFormat
 		}
 		for i, kv := range r.Keys {
+			needsReferences = needsReferences || r.Continuation && referenceManifest(kv)
 			if r.Continuation && newFloatGroup(kv.Key, kv.Value) {
-				if s.AcceptTransferFormat() < 11 {
+				if !s.acceptsFloatCodec() {
 					return nil, fmt.Errorf("%w: float codec blocks require v11 destination capability", ErrFormat)
 				}
 				needsFloatFormat = true
@@ -356,6 +358,11 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			if isContinuationBucketSuffix(kv.Key) && !s.timeBuckets {
 				return nil, ErrFormat
 			}
+		}
+	}
+	if needsReferences {
+		if err := s.fenceReferences(); err != nil {
+			return nil, err
 		}
 	}
 	began := time.Now()

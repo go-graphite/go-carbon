@@ -433,7 +433,7 @@ func (s *Store) validateNativeCombineRecord(r TransferMetric) error {
 		if len(kv.Key) == 0 || len(kv.Key) > 4096 || len(kv.Value) > 16<<20 || i > 0 && bytes.Compare(r.Keys[i-1].Key, kv.Key) >= 0 {
 			return ErrFormat
 		}
-		if !r.Continuation && len(kv.Key) != 6 || r.Continuation && newFloatGroup(kv.Key, kv.Value) && s.AcceptTransferFormat() < 11 || r.Continuation && sealedTransferKey(kv) && !s.coldPack.format.Load() || isContinuationBucketSuffix(kv.Key) && !s.timeBuckets {
+		if !r.Continuation && len(kv.Key) != 6 || r.Continuation && newFloatGroup(kv.Key, kv.Value) && !s.acceptsFloatCodec() || r.Continuation && sealedTransferKey(kv) && !s.coldPack.format.Load() || isContinuationBucketSuffix(kv.Key) && !s.timeBuckets {
 			return ErrFormat
 		}
 	}

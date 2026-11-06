@@ -332,7 +332,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			if !record.Continuation && len(kv.Key) != 6 {
 				return receipt, ErrFormat
 			}
-			if record.Continuation && newFloatGroup(kv.Key, kv.Value) && s.AcceptTransferFormat() < 11 {
+			if record.Continuation && newFloatGroup(kv.Key, kv.Value) && !s.acceptsFloatCodec() {
 				return receipt, ErrFormat
 			}
 			if record.Continuation && newFloatGroup(kv.Key, kv.Value) {

@@ -12,6 +12,9 @@ import (
 // TransferFormat is the minimum reader version required for a physical copy.
 // The fence deliberately covers an entire v9 store, including ordinary metrics.
 func (s *Store) TransferFormat() int {
+	if s.referenceFormat.Load() {
+		return 12
+	}
 	if s.coldPack.floatFormat.Load() {
 		return 11
 	}
@@ -28,10 +31,23 @@ func (s *Store) AcceptTransferFormat() int {
 	c.mu.Lock()
 	enabled := c.options.FloatCodec
 	c.mu.Unlock()
+	if s.supportsReferences() && (s.referenceFormat.Load() || c.floatFormat.Load() || enabled) {
+		return 12
+	}
 	if enabled {
 		return 11
 	}
 	return s.TransferFormat()
+}
+
+func (s *Store) acceptsFloatCodec() bool {
+	if s.coldPack.floatFormat.Load() {
+		return true
+	}
+	s.coldPack.mu.Lock()
+	enabled := s.coldPack.options.FloatCodec
+	s.coldPack.mu.Unlock()
+	return enabled
 }
 func sealedTransferKey(kv RelayoutKV) bool {
 	return len(kv.Key) == 16 && kv.Key[0] == 'f' && kv.Key[9] == 'b' && len(kv.Value) == 12
@@ -44,6 +60,9 @@ var ErrColdPackIncomplete = errors.New("downgrade requires a complete clean swee
 // unpack sweep. It refuses skips/conflicts/failures; restart and retry unpacking
 // after an interruption. Rounded decimal values retain their stored precision.
 func (s *Store) DowngradeColdPack(ctx context.Context) error {
+	if s.referenceFormat.Load() {
+		return fmt.Errorf("referenced history requires the v12 reader: %w", ErrColdPackIncomplete)
+	}
 	ctx, end, ok := s.explicitMaintenance.begin(ctx)
 	if !ok {
 		return context.Canceled
@@ -97,6 +116,9 @@ func (s *Store) fenceFloatCodec() error {
 // DowngradeFloatCodec lowers the v11 fence after a complete clean offline sweep
 // has rewritten every v4 group to legacy byte planes. Ordinary v9 sealing stays.
 func (s *Store) DowngradeFloatCodec(ctx context.Context) error {
+	if s.referenceFormat.Load() {
+		return fmt.Errorf("referenced history requires the v12 reader: %w", ErrColdPackIncomplete)
+	}
 	ctx, end, ok := s.explicitMaintenance.begin(ctx)
 	if !ok {
 		return context.Canceled

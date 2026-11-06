@@ -155,7 +155,7 @@ func TestColdPackFloatLifecycle(t *testing.T) {
 	if err := target.ConfigureColdPack(store.ColdPackOptions{Mode: "exact", FloatCodec: true}); err != nil {
 		t.Fatal(err)
 	}
-	if target.TransferFormat() != 9 || target.AcceptTransferFormat() != 11 {
+	if target.TransferFormat() != 9 || target.AcceptTransferFormat() != 12 {
 		t.Fatal("capability upgraded marker")
 	}
 	if _, err := target.ImportTransfer(ctx, records); err != nil {

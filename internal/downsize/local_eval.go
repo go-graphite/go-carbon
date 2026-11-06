@@ -79,7 +79,7 @@ func BulkEvalMain(args []string) error {
 		if err := json.Unmarshal(data, &capture); err != nil {
 			return err
 		}
-		if capture.StoreFormat < 6 || capture.StoreFormat > 11 || len(capture.SHA256) != 64 || filepath.Base(capture.WireFile) != capture.WireFile {
+		if capture.StoreFormat < 6 || capture.StoreFormat > 12 || len(capture.SHA256) != 64 || filepath.Base(capture.WireFile) != capture.WireFile {
 			return errors.New("invalid native capture metadata")
 		}
 		for _, name := range capture.Names {
