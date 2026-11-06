@@ -44,6 +44,9 @@ func TestNativeCombineCaptureWithRealSurvivorArchives(t *testing.T) {
 		t.Fatal("empty fixture")
 	}
 	snap.Archives[0].Points[0].Value = 42
+	originalPoints := len(snap.Archives[0].Points)
+	last := snap.Archives[0].Points[originalPoints-1]
+	snap.Archives[0].Points = append(snap.Archives[0].Points, store.Point{Timestamp: last.Timestamp + int64(snap.Archives[0].Retention.Step), Value: 91})
 	target := filepath.Join(dir, "target.wsp")
 	if err := whisperio.New(nil).ExportSnapshot(ctx, snap, target); err != nil {
 		t.Fatal(err)
@@ -74,8 +77,33 @@ func TestNativeCombineCaptureWithRealSurvivorArchives(t *testing.T) {
 	}
 	save()
 	args := []string{"--native-capture", capturePath, "--native", "--combine-existing", "--memory", "--scratch", dir}
+	out, err := os.Create(filepath.Join(dir, "result.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = out
+	defer func() { os.Stdout = stdout; out.Close() }()
 	if err := BulkEvalMain(args); err != nil {
 		t.Fatal(err)
+	}
+	os.Stdout = stdout
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		EqualBits int          `json:"equal_point_bits"`
+		Shape     combineShape `json:"time_range_shape"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.EqualBits != originalPoints+1 || len(result.Shape.Archives) != 1 || result.Shape.Archives[0].SurvivorPoints != originalPoints+1 || result.Shape.Archives[0].SurvivorMax != last.Timestamp+int64(snap.Archives[0].Retention.Step) {
+		t.Fatalf("survivor image was replaced by donor history: %+v", result)
 	}
 	capture.TargetSHA256[name] = strings.Repeat("0", 64)
 	save()

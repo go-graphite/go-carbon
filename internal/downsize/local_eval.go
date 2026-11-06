@@ -304,7 +304,7 @@ func BulkEvalMain(args []string) error {
 				}
 				for _, db := range []*store.Store{baseline, bulk} {
 					if err := func() error {
-						if *capturePath == "" {
+						if *capturePath == "" || !forced {
 							return seed(db, name, path)
 						}
 						records, err := donor.ExportTransfer(ctx, []string{name})
@@ -422,6 +422,10 @@ func BulkEvalMain(args []string) error {
 	systemBefore := ingestSystemCounters()
 	var local result
 	var nativeDeferred []string
+	var copyBefore, copyAfter map[string]string
+	if *profilePrefix != "" {
+		copyBefore = evalCopyCounters()
+	}
 	if *native {
 		local, nativeDeferred, err = measureNative(ctx, donor, bulk, names, *batch, *workers, *combine)
 	} else {
@@ -429,6 +433,9 @@ func BulkEvalMain(args []string) error {
 	}
 	systemAfter := ingestSystemCounters()
 	applyAfter := bulk.TransferApplyStats()
+	if *profilePrefix != "" {
+		copyAfter = evalCopyCounters()
+	}
 	if cpu != nil {
 		pprof.StopCPUProfile()
 		_ = cpu.Close()
@@ -443,6 +450,13 @@ func BulkEvalMain(args []string) error {
 			if profileErr != nil {
 				return profileErr
 			}
+		}
+		data, e := json.MarshalIndent(map[string]any{"before": copyBefore, "after": copyAfter}, "", "  ")
+		if e != nil {
+			return e
+		}
+		if e = os.WriteFile(*profilePrefix+".counters.json", data, 0600); e != nil {
+			return e
 		}
 	}
 	if err != nil {
