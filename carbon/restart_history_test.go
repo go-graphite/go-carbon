@@ -107,14 +107,14 @@ func TestRestartCPUAllowanceLogging(t *testing.T) {
 			}
 			source, cores := `"fallback"`, "48"
 			if fresh {
-				source, cores = `"history"`, "24"
+				source = `"configured"`
 			}
 			logs := zapwriter.TestString()
 			if !strings.Contains(logs, "restart CPU allowance") || !logHas(logs, "source", source) || !logHas(logs, "headroom", "1.5") || !logHas(logs, "cores", cores) {
 				t.Fatal("allowance log omitted selection", logs)
 			}
 			if strings.Contains(logs, "using conservative allowance") {
-				t.Fatal("configured fallback was reported as the host-derived default", logs)
+				t.Fatal("configured allowance was reported as the host-derived default", logs)
 			}
 		})
 	}

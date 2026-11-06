@@ -211,11 +211,11 @@ store-range-reads = false
 # process user+system time. Reads, receivers and input logging never wait on it.
 # Linux reads the all-thread process CPU clock; the process-cores gauge reports
 # a full-second window, separately from the 20ms CPU-admission checks.
-# Fresh host-local history always wins: store-restart-cpu-headroom times the
-# steady CPU EWMA, valid for 24 hours, even when cpu-cores is configured.
+# Restart allowance is max(cpu-cores, store-restart-cpu-headroom times the
+# steady host-local CPU EWMA, valid for 24 hours).
 # Headroom defaults to 1.05 (valid range 1.0..4.0) and also applies to the
 # legacy median; increasing it lets catch-up use more CPU above steady load.
-# cpu-cores is only the fallback when history is missing, invalid or stale;
+# cpu-cores is a minimum and the fallback when history is missing, invalid or stale;
 # headroom does not multiply it. 0 derives a finite fallback below.
 # A complete minute with both endpoints after warming/restoration, without
 # cache pressure or queued-point growth, is enough. Normal buffering need not
@@ -225,7 +225,7 @@ store-range-reads = false
 # and at shutdown.
 # Quiet minutes refresh CPU without reducing saved throughput: the throughput
 # EWMA updates only for positive minute rates meeting 95% of the writeout floor.
-# The sampler is joined before a successor can overwrite its file. Executable
+# Stop joins its sampler; handoff may already have started the successor. Executable
 # versions share this history; the preceding 30-sample median format is accepted.
 # Without fresh history or a positive configured fallback, a warning reports a
 # conservative host-CPU-count/12 allowance (at least one core, at most GOMAXPROCS).
@@ -331,7 +331,7 @@ store-range-reads = false
 # store-metadata-cache-checkpoint-lazy = false
 # store-metadata-cache-warm-first = true
 # store-restart-cpu-headroom = 1.05 # startup-only; SIGHUP does not change the allowance
-# store-metadata-cache-prewarm-cpu-cores = 0
+# store-metadata-cache-prewarm-cpu-cores = 0 # startup CPU floor, including with fresh history
 # store-metadata-cache-prewarm-workers = 0
 # store-metadata-cache-prewarm-rate = 0
 # store-metadata-cache-prewarm-byte-rate = 0

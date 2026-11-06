@@ -87,7 +87,11 @@ func TestBudgetLoadsHostHistory(t *testing.T) {
 	for _, headroom := range []float64{1, DefaultHeadroom, 1.5, 4} {
 		for _, configured := range []float64{0, 48} {
 			b := Start(context.Background(), path, configured, headroom)
-			if math.Abs(b.Cores()-14*headroom) > 1e-9 || b.Source() != "history" {
+			source := "history"
+			if configured > 14*headroom {
+				source = "configured"
+			}
+			if math.Abs(b.Cores()-max(configured, 14*headroom)) > 1e-9 || b.Source() != source {
 				t.Errorf("headroom=%g configured=%g: legacy history got %g/%s", headroom, configured, b.Cores(), b.Source())
 			}
 			if err := b.Stop(); err != nil {
