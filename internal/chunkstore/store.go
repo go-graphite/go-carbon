@@ -217,16 +217,17 @@ type Store struct {
 	maintenanceCtx        context.Context
 	maintenanceStop       context.CancelFunc
 	// Owner-driven maintenance lives until close, independently of StopBackground.
-	explicitMaintenance  operationState
-	coldPack             coldPackState
-	transferPendingAny   func() bool
-	transferPending      func(string) bool
-	transferExport       transferExportCounters
-	transferApply        transferApplyCounters
-	sidecars             sidecarCatalog
-	transferDeleteRanges atomic.Uint64
-	compactOnce          compactOnceState
-	manualCompaction     manualCompactionState
+	explicitMaintenance   operationState
+	coldPack              coldPackState
+	transferPendingAny    func() bool
+	transferPending       func(string) bool
+	transferExport        transferExportCounters
+	transferApply         transferApplyCounters
+	transferApplyTestHook func() // deterministic concurrent-publication tests only
+	sidecars              sidecarCatalog
+	transferDeleteRanges  atomic.Uint64
+	compactOnce           compactOnceState
+	manualCompaction      manualCompactionState
 	// fetchSharedIterator is the Options field.
 	fetchSharedIterator bool
 	fetchTimings        fetchTimingCounters

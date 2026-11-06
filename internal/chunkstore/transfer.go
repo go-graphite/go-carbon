@@ -468,42 +468,29 @@ type ContinuationArchiveRestorer interface {
 	RestoreArchives(context.Context, ContinuationIO, Snapshot, func() time.Time) error
 }
 
-func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, metas []Metadata) ([]TransferProof, error) {
-	names := make([]string, len(records))
-	for i, r := range records {
-		names[i] = r.Config.Name
-	}
-	var states []*metricState
-	if s.stateCache != nil {
-		states = make([]*metricState, len(records))
-	}
-	wait := time.Now()
-	unlock := s.lockTransfer(names, states)
-	locked := time.Now()
-	s.transferApply.wait.Add(uint64(locked.Sub(wait)))
-	defer func() { unlock(); s.transferApply.recordHold(time.Since(locked)) }()
+// prepareTransfer preserves the reviewed archive/slot operations, but reads
+// the target from one immutable view. Only private reserved IDs are read through
+// the indexed batch. The caller validates every target revision before commit.
+func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, metas []Metadata, view pebble.Reader) (prepared *preparedTransfer, err error) {
 	b := s.db.NewIndexedBatch()
-	defer b.Close()
-	walk := &transferReader{reader: s.db}
+	defer func() {
+		if prepared == nil {
+			_ = b.Close()
+		}
+	}()
+	walk := &transferReader{reader: view}
 	defer walk.close()
 	proofs := make([]TransferProof, len(records))
 	var receiptEncoder transferProofEncoder
 	var sidecars []SidecarRecord
+	expected := make([]Metadata, len(records))
 	for i, r := range records {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		m := metas[i]
-		var state *metricState
-		if states != nil {
-			state = states[i]
-		}
-		old, err := Metadata{}, ErrNotFound
-		if state != nil {
-			old, err = state.meta, nil
-		} else if s.catalogMembership.mayContain(m.Name) {
-			old, err = walk.metadata(m.Name)
-		}
+		old, err := walk.metadata(m.Name)
+		expected[i] = old
 		merged := err == nil
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -550,7 +537,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			if err != nil {
 				return nil, err
 			}
-			target, err := s.transferSnapshotCached(ctx, s.db, old, state)
+			target, err := s.transferSnapshot(ctx, view, old)
 			if err != nil {
 				return nil, err
 			}
@@ -609,7 +596,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 				}
 			}
 			p.Digest, p.Counts = snapshotDigest(want)
-			if err := s.retireTransfer(ctx, b, old); err != nil {
+			if err := s.retireTransferFrom(ctx, b, view, old); err != nil {
 				return nil, err
 			}
 		}
@@ -651,17 +638,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			return nil, err
 		}
 	}
-	walk.close()
-	// ImportTransfer performs the durability barrier after every group has
-	// committed and released its stripes. Failed requests never authorize delete.
-	if err := s.commitSidecarRecords(b, sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
-		return nil, err
-	}
-	s.pendingSync.Store(true)
-	for _, m := range metas {
-		s.catalogChanged(m.Name)
-	}
-	return proofs, nil
+	return &preparedTransfer{batch: b, expected: expected, metas: metas, proofs: proofs, sidecars: sidecars}, nil
 }
 
 // retainTransferSlots applies the same finite archive capacity as an ordinary
@@ -708,6 +685,12 @@ func (s *Store) transferSidecarSummary(ctx context.Context, b *pebble.Batch, m M
 
 func (s *Store) retireTransfer(ctx context.Context, b *pebble.Batch, m Metadata) error {
 	s.canonicalRun(m.ID).Clear(m.ID)
+	return s.retireTransferFrom(ctx, b, b, m)
+}
+
+// Snapshot-based preparation only stages tombstones. The publication revision
+// fence proves these are still all the retired generation's keys at commit.
+func (s *Store) retireTransferFrom(ctx context.Context, b *pebble.Batch, reader pebble.Reader, m Metadata) error {
 	if err := b.Delete(transferReceiptKey(m), nil); err != nil {
 		return err
 	}
@@ -717,14 +700,14 @@ func (s *Store) retireTransfer(ctx context.Context, b *pebble.Batch, m Metadata)
 	if m.Continuation {
 		// The indexed batch observes its own writes, so the continuation IO uses
 		// point deletes. Per-metric ranges here would fragment every live read.
-		if err := s.dropContinuation(ctx, b, b, m); err != nil {
+		if err := s.dropContinuation(ctx, reader, b, m); err != nil {
 			return err
 		}
-		kv := s.newContinuationIO(ctx, b, b, m)
+		kv := s.newContinuationIO(ctx, reader, b, m)
 		return kv.DeletePrefix(nil)
 	}
 	prefix := chunkPrefix(m.ID, 0)[:9]
-	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	it, err := reader.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
 		return err
 	}
