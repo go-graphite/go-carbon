@@ -59,6 +59,13 @@ func runNative(ctx context.Context, o options) error {
 	}
 	defer j.close()
 	j.preserveRows = true
+	if o.deferredOnly {
+		for _, t := range j.tasks {
+			if t.Native != nil && t.Native.Intent {
+				return errors.New("resolve unacknowledged native ranges before --deferred-only")
+			}
+		}
+	}
 	if o.deferredRange != "" {
 		t, ok := j.tasks[o.deferredRange]
 		if !ok || t.Kind != "native-range" || t.Native == nil || t.Native.Intent {
