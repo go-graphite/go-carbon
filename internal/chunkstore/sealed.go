@@ -262,45 +262,9 @@ func DecodeSealedPoints(data []byte) ([]Point, error) {
 // Decode replaces the borrowed points with one sealed block. On error it returns
 // nil; previously returned points may have been overwritten.
 func (scratch *SealedPointBuffer) Decode(data []byte) ([]Point, error) {
-	first, step, count, err := sealedHeaderFields(data)
+	first, step, count, body, err := scratch.sealedBody(data)
 	if err != nil {
 		return nil, err
-	}
-	body := data[sealedHeader:]
-	if data[1]&sealedZstd != 0 {
-		limit := count * 20
-		var frame zstd.Header
-		if err := frame.Decode(body); err != nil {
-			return nil, errInvalidChunk
-		}
-		if frame.HasFCS {
-			if frame.FrameContentSize > uint64(limit) {
-				return nil, errInvalidChunk
-			}
-			limit = int(frame.FrameContentSize)
-		}
-		if cap(scratch.body) < limit {
-			scratch.body = make([]byte, 0, limit)
-		}
-		z := sealedDecoders.Get().(*zstd.Decoder)
-		// A previous large block must not relax this frame's expansion bound,
-		// including frames without FCS and concatenated frames.
-		decoded, err := z.DecodeAll(body, scratch.body[:0:limit])
-		sealedDecoders.Put(z)
-		if err != nil {
-			return nil, errInvalidChunk
-		}
-		body = decoded
-	}
-	if len(body) > maxSealedBody {
-		return nil, errInvalidChunk
-	}
-	header := [12]byte{}
-	copy(header[:], data[:12])
-	header[1] &^= sealedZstd
-	checksum := crc32.Update(0, crc32.IEEETable, header[:])
-	if crc32.Update(checksum, crc32.IEEETable, body) != binary.LittleEndian.Uint32(data[12:16]) {
-		return nil, errInvalidChunk
 	}
 	if cap(scratch.points) < count {
 		scratch.points = make([]Point, count)
@@ -371,4 +335,50 @@ func (scratch *SealedPointBuffer) Decode(data []byte) ([]Point, error) {
 		return nil, errInvalidChunk
 	}
 	return points, nil
+}
+
+// sealedBody verifies the bounded frame and CRC without expanding points.
+// Returned bytes borrow scratch until the next operation.
+func (scratch *SealedPointBuffer) sealedBody(data []byte) (first, step int64, count int, body []byte, err error) {
+	first, step, count, err = sealedHeaderFields(data)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	body = data[sealedHeader:]
+	if data[1]&sealedZstd != 0 {
+		limit := count * 20
+		var frame zstd.Header
+		if err := frame.Decode(body); err != nil {
+			return 0, 0, 0, nil, errInvalidChunk
+		}
+		if frame.HasFCS {
+			if frame.FrameContentSize > uint64(limit) {
+				return 0, 0, 0, nil, errInvalidChunk
+			}
+			limit = int(frame.FrameContentSize)
+		}
+		if cap(scratch.body) < limit {
+			scratch.body = make([]byte, 0, limit)
+		}
+		z := sealedDecoders.Get().(*zstd.Decoder)
+		// A previous large block must not relax this frame's expansion bound,
+		// including frames without FCS and concatenated frames.
+		decoded, err := z.DecodeAll(body, scratch.body[:0:limit])
+		sealedDecoders.Put(z)
+		if err != nil {
+			return 0, 0, 0, nil, errInvalidChunk
+		}
+		body = decoded
+	}
+	if len(body) > maxSealedBody {
+		return 0, 0, 0, nil, errInvalidChunk
+	}
+	header := [12]byte{}
+	copy(header[:], data[:12])
+	header[1] &^= sealedZstd
+	checksum := crc32.Update(0, crc32.IEEETable, header[:])
+	if crc32.Update(checksum, crc32.IEEETable, body) != binary.LittleEndian.Uint32(data[12:16]) {
+		return 0, 0, 0, nil, errInvalidChunk
+	}
+	return first, step, count, body, nil
 }

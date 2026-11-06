@@ -53,3 +53,42 @@ func TestCanonicalSealedRunAgainstDecoder(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalBytePlanesWithoutPointExpansion(t *testing.T) {
+	for _, count := range []int{4, 128, 8192} {
+		for _, value := range []float64{.1, math.Copysign(0, -1), math.SmallestNonzeroFloat64, math.MaxFloat64, math.NaN(), math.Inf(-1)} {
+			points := make([]Point, count)
+			for i := range points {
+				points[i] = Point{Timestamp: 1790000040 + int64(i)*60, Value: value}
+			}
+			data, err := EncodeSealedPoints(points, 60)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var scratch SealedPointBuffer
+			first, last, n, known := scratch.CanonicalRun(data, 60)
+			want := !math.IsNaN(value) && !math.IsInf(value, 0)
+			if known != want || known && (first != points[0].Timestamp || last != points[count-1].Timestamp || n != count) {
+				t.Fatalf("count=%d value=%g proof=%t range=%d:%d:%d", count, value, known, first, last, n)
+			}
+			if len(scratch.points) != 0 {
+				t.Fatal("expanded points while proving a byte-plane group")
+			}
+			if known {
+				got, err := scratch.Decode(data)
+				if err != nil || len(got) != count {
+					t.Fatal(err)
+				}
+				for i, p := range got {
+					if p.Timestamp != points[i].Timestamp || math.Float64bits(p.Value) != math.Float64bits(value) {
+						t.Fatal("proof disagrees with decoder", i, p)
+					}
+				}
+			}
+			data[len(data)-1] ^= 1
+			if _, _, _, known := scratch.CanonicalRun(data, 60); known {
+				t.Fatal("corrupt frame proved canonical")
+			}
+		}
+	}
+}
