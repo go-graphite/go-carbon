@@ -21,6 +21,17 @@ type preparedTransfer struct {
 // fall back to decoding under writer stripes. The reserved source ID stays
 // immutable until the successful publication of this group.
 func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, metas []Metadata) ([]TransferProof, error) {
+	// Busy stripes usually stay busy on a draining survivor. Avoid preparing a
+	// large batch only to discard it on the same contention after decoding.
+	if len(records) > 1 {
+		names := make([]string, len(records))
+		for i := range records {
+			names[i] = records[i].Config.Name
+		}
+		if s.transferBusy(names) {
+			return s.publishTransferSingles(ctx, records, metas)
+		}
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -39,16 +50,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		committed, err := s.commitPreparedTransfer(ctx, prepared)
 		_ = prepared.batch.Close()
 		if errors.Is(err, errTransferSplit) {
-			s.transferApply.splits.Add(1)
-			proofs := make([]TransferProof, 0, len(records))
-			for i := range records {
-				group, e := s.publishTransfer(ctx, records[i:i+1], metas[i:i+1])
-				if e != nil {
-					return nil, e
-				}
-				proofs = append(proofs, group...)
-			}
-			return proofs, nil
+			return s.publishTransferSingles(ctx, records, metas)
 		}
 		if err != nil {
 			return nil, err
@@ -57,6 +59,19 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			return prepared.proofs, nil
 		}
 	}
+}
+
+func (s *Store) publishTransferSingles(ctx context.Context, records []TransferMetric, metas []Metadata) ([]TransferProof, error) {
+	s.transferApply.splits.Add(1)
+	proofs := make([]TransferProof, 0, len(records))
+	for i := range records {
+		group, err := s.publishTransfer(ctx, records[i:i+1], metas[i:i+1])
+		if err != nil {
+			return nil, err
+		}
+		proofs = append(proofs, group...)
+	}
+	return proofs, nil
 }
 
 func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer) (bool, error) {

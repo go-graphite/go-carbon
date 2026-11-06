@@ -438,13 +438,30 @@ func (s *Store) lockTransfer(names []string) func() {
 	return unlock
 }
 
-func (s *Store) acquireTransfer(names []string, try bool) (func(), int) {
+func (s *Store) transferStripes(names []string) []uint64 {
 	stripes := make([]uint64, 0, len(names))
 	for _, name := range names {
 		stripes = append(stripes, s.metricStripe(name))
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
+	return stripes
+}
+
+// A hint only: publication rechecks the complete set after preparation.
+func (s *Store) transferBusy(names []string) bool {
+	stripes := s.transferStripes(names)
+	if !lockset.TryLock(s.metricMu[:], stripes) {
+		return true
+	}
+	for i := len(stripes) - 1; i >= 0; i-- {
+		s.metricMu[stripes[i]].Unlock()
+	}
+	return false
+}
+
+func (s *Store) acquireTransfer(names []string, try bool) (func(), int) {
+	stripes := s.transferStripes(names)
 	if try {
 		if !lockset.TryLock(s.metricMu[:], stripes) {
 			return nil, 0
