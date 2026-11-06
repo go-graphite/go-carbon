@@ -31,3 +31,17 @@ func TestMemoryReserveBounds(t *testing.T) {
 		t.Fatal("small limit omitted minimum reserve")
 	}
 }
+
+func TestLatencyResolvesProductionReadRange(t *testing.T) {
+	var h Latency
+	for _, d := range []time.Duration{30, 60, 65, 66, 70} {
+		before := h.Snapshot()
+		for range 100 {
+			h.Observe(d * time.Millisecond)
+		}
+		p99, count := h.Snapshot().P99Since(before)
+		if count != 100 || p99 < d*time.Millisecond || p99 > d*time.Millisecond*9/8 {
+			t.Fatal("coarse read latency quantization", d, p99, count)
+		}
+	}
+}

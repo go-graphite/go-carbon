@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/hostcapacity"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -22,6 +23,8 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 	defer db.Close()
 	populateMetricStoreCatalog(context.Background(), t, db, now)
 	listener := newMetricStoreTestListener(t, cache.New(), db, false)
+	var capacityReads hostcapacity.Latency
+	listener.SetCapacityReadLatency(&capacityReads)
 	// Warm the tiny storage read. A separate blocked cache lookup must be
 	// charged to cache wait, as in the CWhisper read path, rather than disk wait.
 	if _, err := db.Fetch(context.Background(), "servers.api.cpu.user", now-10, now); err != nil {
@@ -44,6 +47,9 @@ func TestMetricStoreDiskWaitExcludesCacheWait(t *testing.T) {
 		}
 		if diskWait >= cacheWait {
 			t.Fatalf("disk wait includes the separate cache wait: disk=%s cache=%s", diskWait, cacheWait)
+		}
+		if p99, count := capacityReads.Snapshot().P99Since(hostcapacity.LatencySnapshot{}); count != 1 || p99 >= cacheWait {
+			t.Fatalf("capacity read latency includes cache wait: p99=%s samples=%d cache=%s", p99, count, cacheWait)
 		}
 		t.Logf("storage read=%s, separate cache wait=%s", diskWait, cacheWait)
 	})

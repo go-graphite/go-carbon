@@ -7,13 +7,22 @@ import (
 )
 
 // Latency records bounded-memory read latency independently of Prometheus.
-// Buckets are noncumulative upper bounds, 1us doubling; the last is overflow.
-type Latency struct{ buckets [32]atomic.Uint64 }
-type LatencySnapshot [32]uint64
+// Eight buckets per power of two bound quantization error to 12.5%, rather
+// than rounding a normal 66ms read into a 131ms observation. The last bucket
+// contains values above 16 seconds. No request/metric labels are retained.
+const latencyBuckets = 24*8 + 1
+
+type Latency struct{ buckets [latencyBuckets]atomic.Uint64 }
+type LatencySnapshot [latencyBuckets]uint64
 
 func (h *Latency) Observe(d time.Duration) {
-	us := uint64(max(time.Duration(1), d/time.Microsecond))
-	index := min(31, bits.Len64(us-1))
+	d = max(time.Microsecond, d)
+	exponent := bits.Len64(uint64(d/time.Microsecond)) - 1
+	index := latencyBuckets - 1
+	if exponent < 24 {
+		base := time.Microsecond << exponent
+		index = exponent*8 + int((d-base)*8/base)
+	}
 	h.buckets[index].Add(1)
 }
 
@@ -41,7 +50,11 @@ func (s LatencySnapshot) P99Since(previous LatencySnapshot) (p99 time.Duration, 
 	for i := range s {
 		cumulative += s[i] - previous[i]
 		if cumulative >= target {
-			return time.Microsecond * time.Duration(uint64(1)<<i), count
+			if i == latencyBuckets-1 {
+				return time.Microsecond << 24, count
+			}
+			base := time.Microsecond << (i / 8)
+			return base + base*time.Duration(i%8+1)/8, count
 		}
 	}
 	return

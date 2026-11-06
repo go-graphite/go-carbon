@@ -33,7 +33,7 @@ func (p *Whisper) initAutoUpdateMetrics(reg prometheus.Registerer) {
 		changes:      prometheus.NewDesc("persister_auto_update_rate_adjustments_total", "Automatic writeout rate changes, by reason, across persister reloads.", []string{"reason"}, nil),
 		capacity:     prometheus.NewDesc("persister_auto_capacity_updates_per_second", "Current hardware feedback ceiling (-1 auto-max mode); zero in other modes.", nil, nil),
 		hardCeiling:  prometheus.NewDesc("persister_auto_capacity_hard_ceiling_updates_per_second", "Safety ceiling from workers, execution threads and measured CPU/latency per confirmed update.", nil, nil),
-		readP99:      prometheus.NewDesc("persister_auto_capacity_read_p99_seconds", "Read p99 in the last controller interval; zero when no reads completed.", nil, nil),
+		readP99:      prometheus.NewDesc("persister_auto_capacity_read_p99_seconds", "Per-series storage-fetch p99 in the last controller interval, excluding request assembly and network time; zero when no reads completed.", nil, nil),
 		tokenWaiters: prometheus.NewDesc("persister_update_token_waiters", "Workers currently blocked waiting for update-rate tokens in hardware capacity mode; zero in other modes.", nil, nil),
 	}
 	if err := reg.Register(m); err != nil {

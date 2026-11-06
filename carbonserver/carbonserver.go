@@ -2865,9 +2865,6 @@ func (listener *CarbonserverListener) bucketRequestTimesGRPC(payload, peer strin
 }
 
 func (listener *CarbonserverListener) bucketRequestTimes(t time.Duration) int {
-	if listener.capacityReadLatency != nil {
-		listener.capacityReadLatency.Observe(t)
-	}
 	listener.prometheus.duration(t)
 
 	ms := t.Nanoseconds() / int64(time.Millisecond)
