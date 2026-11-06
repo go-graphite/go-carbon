@@ -36,7 +36,7 @@ func TestNativeCaptureAndDifferentialEvaluator(t *testing.T) {
 	if err := NativeCaptureMain(context.Background(), []string{"--source", server.URL, "--names", namesFile, "--out", out}); err != nil {
 		t.Fatal(err)
 	}
-	if err := BulkEvalMain([]string{"--native-capture", out, "--scratch", dir, "--native", "--memory", "--batch", "2", "--workers", "2", "--overlap-percent", "34"}); err != nil {
+	if err := BulkEvalMain([]string{"--native-capture", out, "--scratch", dir, "--native", "--memory", "--sample-names", "2", "--batch", "2", "--workers", "2", "--overlap-percent", "34"}); err != nil {
 		t.Fatal(err)
 	}
 }

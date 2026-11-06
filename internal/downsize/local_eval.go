@@ -35,6 +35,7 @@ type result struct {
 func BulkEvalMain(args []string) error {
 	flags := flag.NewFlagSet("resize bulk-eval", flag.ContinueOnError)
 	fixtures := flags.String("fixtures", "", "JSON list of name/source/target paths; paths relative to the JSON file")
+	sampleNames := flags.Int("sample-names", 0, "uniform name subset of a native capture for the differential oracle; full stream integrity is still checked (0=all)")
 	capturePath := flags.String("native-capture", "", "capture-native metadata; retains production native block values/layout")
 	parent := flags.String("scratch", "", "existing private scratch directory")
 	repeat := flags.Int("repeat", 1, "repeat captured histories under distinct names (reported as replication)")
@@ -49,7 +50,7 @@ func BulkEvalMain(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
+	if *sampleNames < 0 || (*sampleNames > 0 && *capturePath == "") || (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
 		return errors.New("invalid evaluation options")
 	}
 	var input []bulkEvalFixture
@@ -137,6 +138,12 @@ func BulkEvalMain(args []string) error {
 			}
 			planned[name] = true
 		}
+		selected := make(map[string]bool)
+		if *sampleNames > 0 && *sampleNames < len(capture.Names) {
+			for i := range *sampleNames {
+				selected[capture.Names[i*len(capture.Names) / *sampleNames]] = true
+			}
+		}
 		seen := make(map[string]bool, len(capture.Names))
 		copied := make(map[string]bool, len(capture.Names))
 		var records []store.TransferMetric
@@ -162,7 +169,7 @@ func BulkEvalMain(args []string) error {
 				return errors.New("native capture names differ")
 			}
 			seen[name] = true
-			if record.Version.ID == 0 {
+			if record.Version.ID == 0 || (len(selected) > 0 && !selected[name]) {
 				continue
 			}
 			copied[name] = true
@@ -408,5 +415,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }
