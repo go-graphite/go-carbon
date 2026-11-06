@@ -140,4 +140,22 @@ func TestNativeCombinePreparesIndependentNamesConcurrently(t *testing.T) {
 			t.Fatal("failed preparation published a name", name, after, err)
 		}
 	}
+	codec.failName, codec.started = "", make(chan string, len(names))
+	close(codec.release)
+	if receipt, err := target.NativeImport(ctx, request, nil); err != nil || receipt.CopiedCount != len(names) {
+		t.Fatal("source-free resume after failed parallel preparation", receipt, err)
+	}
+	for _, name := range names {
+		want, err := reference.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := target.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EqualSnapshots(want, got); err != nil {
+			t.Fatal("resumed", name, err)
+		}
+	}
 }
