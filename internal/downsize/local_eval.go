@@ -68,6 +68,7 @@ func BulkEvalMain(args []string) error {
 	}
 	var input []bulkEvalFixture
 	var capture nativeCapture
+	nativeLayouts := make(map[string]string)
 	if *capturePath != "" {
 		if !*native || *repeat != 1 {
 			return errors.New("native capture requires --native --repeat 1")
@@ -135,6 +136,7 @@ func BulkEvalMain(args []string) error {
 			db.Close()
 			return nil, err
 		}
+		db.StopBackground()
 		return db, nil
 	}
 	donor, err := open("donor")
@@ -208,6 +210,7 @@ func BulkEvalMain(args []string) error {
 				continue
 			}
 			copied[name] = true
+			nativeLayouts[name] = evalRecordLayoutDigest(record)
 			for i, kv := range record.Keys {
 				record.Keys[i] = store.RelayoutKV{Key: bytes.Clone(kv.Key), Value: bytes.Clone(kv.Value)}
 				bytesBuffered += len(kv.Key) + len(kv.Value)
@@ -332,6 +335,10 @@ func BulkEvalMain(args []string) error {
 				}
 			}
 		}
+	}
+	layoutsVerified, err := verifyEvalLayouts(ctx, donor, names, nativeLayouts)
+	if err != nil {
+		return err
 	}
 	var shape *combineShape
 	if *combine || *shapeOnly {
@@ -528,5 +535,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"time_range_shape": shape, "render_checked_archives": ingestRenderArchives, "render_checked_point_bits": ingestRenderPoints, "output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"now_unix": *epoch, "gomaxprocs": runtime.GOMAXPROCS(0), "original_native_layouts_verified": layoutsVerified, "background_maintenance_stopped": donor.BackgroundStopped() && baseline.BackgroundStopped() && bulk.BackgroundStopped(), "time_range_shape": shape, "render_checked_archives": ingestRenderArchives, "render_checked_point_bits": ingestRenderPoints, "output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }
