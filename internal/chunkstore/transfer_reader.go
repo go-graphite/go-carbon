@@ -15,6 +15,7 @@ type transferReader struct {
 	bucketReaders                                                       map[uint32]*transferReader
 	export                                                              *transferExportCounters
 	ordered                                                             bool
+	native                                                              bool
 	state                                                               *metricState
 	arena                                                               transferArena
 	reader                                                              pebble.Reader
@@ -153,11 +154,12 @@ func (s *Store) ListTransferNames(ctx context.Context, prefix, after string, lim
 
 // Returned slices cannot grow into adjacent fields. Batches own the slabs until
 // their records are released, avoiding one heap object per tiny raw key/value.
-type transferArena struct{ free []byte }
+type transferArena struct{ free, slab []byte }
 
 func (a *transferArena) alloc(n int) []byte {
 	if len(a.free) < n {
 		a.free = make([]byte, max(64<<10, n))
+		a.slab = a.free
 	}
 	value := a.free[:n:n]
 	a.free = a.free[n:]
@@ -183,7 +185,7 @@ func (r *transferReader) visitBucket(ctx context.Context, prefix []byte, visit f
 	bucket := binary.BigEndian.Uint32(prefix[1:5])
 	reader := r.bucketReaders[bucket]
 	if reader == nil {
-		if len(r.bucketReaders) >= 64 {
+		if !r.native && len(r.bucketReaders) >= 64 {
 			return r.visit(ctx, &r.buckets, []byte{'t'}, []byte{'u'}, prefix, visit)
 		}
 		if r.bucketReaders == nil {

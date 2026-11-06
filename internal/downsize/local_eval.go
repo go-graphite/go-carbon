@@ -3,11 +3,15 @@
 package downsize
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
@@ -30,6 +35,7 @@ type result struct {
 func BulkEvalMain(args []string) error {
 	flags := flag.NewFlagSet("resize bulk-eval", flag.ContinueOnError)
 	fixtures := flags.String("fixtures", "", "JSON list of name/source/target paths; paths relative to the JSON file")
+	capturePath := flags.String("native-capture", "", "capture-native metadata; retains production native block values/layout")
 	parent := flags.String("scratch", "", "existing private scratch directory")
 	repeat := flags.Int("repeat", 1, "repeat captured histories under distinct names (reported as replication)")
 	batch := flags.Int("batch", 512, "metrics per measured import")
@@ -37,20 +43,42 @@ func BulkEvalMain(args []string) error {
 	single := flags.Bool("single-oracle", false, "reference imports one name at a time")
 	overlapPercent := flags.Int("overlap-percent", 0, "seed this percentage of survivor names from captured donor histories, then add survivor corrections (0 uses captured targets)")
 	profilePrefix := flags.String("profile-prefix", "", "write CPU/mutex/block profiles of the checkpoint phase under this local prefix")
+	native := flags.Bool("native", false, "measure the native owning-daemon SST engine; deferred combines are outside timing")
+	memory := flags.Bool("memory", false, "private in-memory Pebble fixtures (not physical-disk throughput)")
 	epoch := flags.Int64("now", time.Now().Unix(), "fixed evaluation clock, Unix seconds")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *fixtures == "" || *parent == "" || *repeat < 1 || *batch < 1 || *batch > 10000 || *workers < 1 || *workers > 16 || *overlapPercent < 0 || *overlapPercent > 100 {
+	if (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
 		return errors.New("invalid evaluation options")
 	}
-	data, err := os.ReadFile(*fixtures)
-	if err != nil {
-		return err
-	}
 	var input []bulkEvalFixture
-	if err := json.Unmarshal(data, &input); err != nil {
-		return err
+	var capture nativeCapture
+	if *capturePath != "" {
+		if !*native || *repeat != 1 {
+			return errors.New("native capture requires --native --repeat 1")
+		}
+		data, err := os.ReadFile(*capturePath)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &capture); err != nil {
+			return err
+		}
+		if capture.StoreFormat < 6 || capture.StoreFormat > 11 || len(capture.SHA256) != 64 || filepath.Base(capture.WireFile) != capture.WireFile {
+			return errors.New("invalid native capture metadata")
+		}
+		for _, name := range capture.Names {
+			input = append(input, bulkEvalFixture{Name: name})
+		}
+	} else {
+		data, err := os.ReadFile(*fixtures)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, &input); err != nil {
+			return err
+		}
 	}
 	if len(input) == 0 {
 		return errors.New("empty fixtures")
@@ -64,10 +92,14 @@ func BulkEvalMain(args []string) error {
 	ctx := context.Background()
 	open := func(name string) (*store.Store, error) {
 		originals := filepath.Join(root, name+"-originals")
-		if err := os.Mkdir(originals, 0700); err != nil {
+		fs := vfs.Default
+		if *memory {
+			fs = vfs.NewMem()
+		}
+		if err := fs.MkdirAll(originals, 0700); err != nil {
 			return nil, err
 		}
-		return store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}})
+		return store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
 	}
 	donor, err := open("donor")
 	if err != nil {
@@ -84,6 +116,87 @@ func BulkEvalMain(args []string) error {
 		return err
 	}
 	defer bulk.Close()
+	if *capturePath != "" {
+		file, err := os.Open(filepath.Join(filepath.Dir(*capturePath), capture.WireFile))
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		hash := sha256.New()
+		stream, err := store.NewTransferStream(io.TeeReader(file, hash))
+		if err != nil {
+			return err
+		}
+		if stream.Count != len(capture.Names) {
+			return errors.New("native capture name count differs")
+		}
+		planned := make(map[string]bool, len(capture.Names))
+		for _, name := range capture.Names {
+			if planned[name] {
+				return errors.New("duplicate capture name")
+			}
+			planned[name] = true
+		}
+		seen := make(map[string]bool, len(capture.Names))
+		copied := make(map[string]bool, len(capture.Names))
+		var records []store.TransferMetric
+		var bytesBuffered int
+		flush := func() error {
+			if len(records) == 0 {
+				return nil
+			}
+			_, err := donor.ImportTransfer(ctx, records)
+			records = nil
+			bytesBuffered = 0
+			return err
+		}
+		// Seed with the reviewed importer, not the engine under test: a shared
+		// native seeding bug must not erase the same points from both oracle sides.
+		for range stream.Count {
+			record, err := stream.Next()
+			if err != nil {
+				return err
+			}
+			name := record.Config.Name
+			if !planned[name] || seen[name] {
+				return errors.New("native capture names differ")
+			}
+			seen[name] = true
+			if record.Version.ID == 0 {
+				continue
+			}
+			copied[name] = true
+			for i, kv := range record.Keys {
+				record.Keys[i] = store.RelayoutKV{Key: bytes.Clone(kv.Key), Value: bytes.Clone(kv.Value)}
+				bytesBuffered += len(kv.Key) + len(kv.Value)
+			}
+			records = append(records, record)
+			if len(records) >= 512 || bytesBuffered >= 4<<20 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		_, count, err := stream.Finish()
+		if err != nil {
+			return err
+		}
+		if count != capture.Bytes || hex.EncodeToString(hash.Sum(nil)) != capture.SHA256 {
+			return errors.New("native capture integrity mismatch")
+		}
+		if err := flush(); err != nil {
+			return err
+		}
+		input = nil
+		for _, name := range capture.Names {
+			if copied[name] {
+				input = append(input, bulkEvalFixture{Name: name})
+			}
+		}
+		if len(input) == 0 {
+			return errors.New("native capture contains no committed history")
+		}
+	}
 	seed := func(db *store.Store, name, path string) error {
 		snapshot, err := whisperio.ReadSnapshotIn(ctx, name, path, root)
 		if err != nil {
@@ -108,7 +221,12 @@ func BulkEvalMain(args []string) error {
 				name = fmt.Sprintf("bulk_eval.r%d.%s", repetition, name)
 			}
 			source := filepath.Join(filepath.Dir(*fixtures), row.Source)
-			if err := seed(donor, name, source); err != nil {
+			if err := func() error {
+				if *capturePath != "" {
+					return nil
+				}
+				return seed(donor, name, source)
+			}(); err != nil {
 				return fmt.Errorf("seed donor %s: %w", name, err)
 			}
 			names = append(names, name)
@@ -129,7 +247,17 @@ func BulkEvalMain(args []string) error {
 					path = source
 				}
 				for _, db := range []*store.Store{baseline, bulk} {
-					if err := seed(db, name, path); err != nil {
+					if err := func() error {
+						if *capturePath == "" {
+							return seed(db, name, path)
+						}
+						records, err := donor.ExportTransfer(ctx, []string{name})
+						if err != nil {
+							return err
+						}
+						_, err = db.ImportTransfer(ctx, records)
+						return err
+					}(); err != nil {
 						return err
 					}
 					if forced {
@@ -149,15 +277,18 @@ func BulkEvalMain(args []string) error {
 			}
 		}
 	}
-	checkpoint := filepath.Join(root, "checkpoint")
-	if err := donor.Checkpoint(checkpoint); err != nil {
-		return err
+	var source *store.TransferSource
+	if !*native {
+		checkpoint := filepath.Join(root, "checkpoint")
+		if err := donor.Checkpoint(checkpoint); err != nil {
+			return err
+		}
+		source, err = store.OpenTransferSource(checkpoint, store.TransferSourceOptions{Continuation: &whisperio.ContinuationCodec{}, CacheBytes: 32 << 20, Now: clock})
+		if err != nil {
+			return err
+		}
+		defer source.Close()
 	}
-	source, err := store.OpenTransferSource(checkpoint, store.TransferSourceOptions{Continuation: &whisperio.ContinuationCodec{}, CacheBytes: 32 << 20, Now: clock})
-	if err != nil {
-		return err
-	}
-	defer source.Close()
 	type exporter interface {
 		ExportTransferLimit(context.Context, []string, int64) ([]store.TransferMetric, error)
 	}
@@ -221,7 +352,13 @@ func BulkEvalMain(args []string) error {
 		runtime.SetMutexProfileFraction(1)
 		runtime.SetBlockProfileRate(1)
 	}
-	local, err := measure("checkpoint", source, bulk, *batch)
+	var local result
+	var nativeDeferred []string
+	if *native {
+		local, nativeDeferred, err = measureNative(ctx, donor, bulk, names, *batch, *workers)
+	} else {
+		local, err = measure("checkpoint", source, bulk, *batch)
+	}
 	if cpu != nil {
 		pprof.StopCPUProfile()
 		_ = cpu.Close()
@@ -241,6 +378,17 @@ func BulkEvalMain(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Keep reviewed deferred-combine work outside native throughput/profile.
+	for start := 0; start < len(nativeDeferred); start += *batch {
+		group := nativeDeferred[start:min(start+*batch, len(nativeDeferred))]
+		records, e := donor.ExportTransferLimit(ctx, group, 160<<20)
+		if e != nil {
+			return e
+		}
+		if _, e = bulk.ImportTransfer(ctx, records); e != nil {
+			return e
+		}
+	}
 	var archives, points int
 	for _, name := range names {
 		want, err := baseline.Snapshot(ctx, name)
@@ -259,5 +407,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "checkpoint": local, "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }

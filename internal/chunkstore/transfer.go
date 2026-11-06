@@ -252,7 +252,7 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 		}
 	}
 	slices.SortFunc(record.Keys, func(a, b RelayoutKV) int { return bytes.Compare(a.Key, b.Key) })
-	if crc32.ChecksumIEEE([]byte(m.Name))%64 == 0 {
+	if (len(shared) == 0 || !shared[0].native) && crc32.ChecksumIEEE([]byte(m.Name))%64 == 0 {
 		var state *metricState
 		if len(shared) > 0 {
 			state = shared[0].state

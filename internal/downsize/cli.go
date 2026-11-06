@@ -24,6 +24,8 @@ func Main(args []string) error {
 	switch args[0] {
 	case "run":
 		return MoveMain(args[1:])
+	case "capture-native":
+		return NativeCaptureMain(ctx, args[1:])
 	case "bulk-eval":
 		return BulkEvalMain(args[1:])
 	case "snapshot":

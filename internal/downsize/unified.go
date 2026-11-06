@@ -313,5 +313,27 @@ func Status(plan, state string, out io.Writer) error {
 			latest[taskKey(row.Task)] = row.Task
 		}
 	}
-	return json.NewEncoder(out).Encode(map[string]any{"plan_id": manifest.PlanID, "tasks": latest})
+	var done, deferred, pending int64
+	for _, t := range latest {
+		if t.Phase == "done" {
+			done += t.End - t.Start
+			continue
+		}
+		if t.Native == nil {
+			pending += t.End - t.Start
+			continue
+		}
+		if t.Native.Intent {
+			pending += t.End - t.Start
+			continue
+		}
+		for i := range t.Native.Receipt.Count {
+			if t.Native.done(i) {
+				done++
+			} else {
+				deferred++
+			}
+		}
+	}
+	return json.NewEncoder(out).Encode(map[string]any{"plan_id": manifest.PlanID, "tasks": latest, "completed_names": done, "native_deferred_names": deferred, "pending_names": pending})
 }

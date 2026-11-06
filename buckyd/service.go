@@ -102,6 +102,8 @@ type ACL struct {
 }
 
 type Service struct {
+	nativeMu      sync.Mutex
+	nativeSources map[string]*nativeSourceSession
 	config        Config
 	store         *chunkstore.Store
 	whisperIO     *whisperio.Adapter
@@ -377,11 +379,13 @@ func (s *Service) changed() {
 func (s *Service) Stop() error {
 	resources := s.takeResources()
 	if resources.server == nil {
+		s.closeNativeSources()
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	err := shutdownServer(ctx, resources.server, &s.handlers)
+	s.closeNativeSources()
 	if s.storeCopy != nil {
 		err = firstError(err, s.storeCopy.Close())
 	}
@@ -473,6 +477,7 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc(storecopy.Endpoint, s.copyHandler)
 	mux.HandleFunc(storecopy.Endpoint+"/", s.copyHandler)
 	mux.HandleFunc("/v1/transfer/", s.bulk)
+	mux.HandleFunc("/v1/native/", s.native)
 	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phasecpu.Set(phasecpu.Buckyd)

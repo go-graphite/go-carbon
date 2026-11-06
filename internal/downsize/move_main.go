@@ -24,6 +24,8 @@ import (
 )
 
 type options struct {
+	engine                                                                           string
+	bulkOnly                                                                         bool
 	maxBatches                                                                       int64
 	localSources, localTarget                                                        string
 	plan, state, barrier, healthMap, tokenEnv, controlTokenEnv, replica, replicaSite string
@@ -72,6 +74,8 @@ func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
 	o := options{backlog: defaultBacklogPolicy()}
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
+	flags.StringVar(&o.engine, "engine", "metric", "metric or bulk (native absent-name SST engine; existing plan/journal)")
+	flags.BoolVar(&o.bulkOnly, "bulk-only", false, "finish native absence pass and leave deferred combines in the same journal")
 	flags.StringVar(&o.localSources, "local-sources", "", "experimental checkpoint-local comparison: JSON source-origin to verified-copy directory map; retains existing import limits")
 	flags.StringVar(&o.localTarget, "local-target", "", "loopback Buckyd origin for local checkpoint imports; checked against the plan's target identity")
 	flags.Int64Var(&o.maxBatches, "max-batches", 0, "stop after producing this many journal batches (0 runs the full plan)")
@@ -114,6 +118,12 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.engine == "bulk" {
+		return runNative(ctx, o)
+	}
+	if o.engine != "" && o.engine != "metric" {
+		return errors.New("unknown copy engine")
+	}
 	if o.maxBatches < 0 {
 		return errors.New("negative batch limit")
 	}
@@ -673,6 +683,9 @@ func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task, re
 	return nil
 }
 func (m *mover) execute(ctx context.Context, t task) error {
+	if t.Kind == "native-range" && t.Native != nil {
+		return m.executeNativeFallback(ctx, t)
+	}
 	return m.executeBatch(ctx, t, t)
 }
 func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
@@ -700,6 +713,18 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 		start := time.Now()
 		var proofs []chunkstore.TransferProof
 		_, byteBudget := m.tuner.batch(t.Source, t.Target)
+		if t.NativeParent != "" {
+			intent := t
+			intent.Kind = "bulk-intent"
+			intent.Phase = "verified"
+			intent.Proofs = nil
+			m.stateMu.Lock()
+			intentErr := m.journal.save(intent)
+			m.stateMu.Unlock()
+			if intentErr != nil {
+				return intentErr
+			}
+		}
 		headers, err := m.pull(ctx, t, names, byteBudget, &proofs)
 		if err != nil {
 			var api *apiError
@@ -732,6 +757,10 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 				left.Names = t.Names[:middle]
 				right.Start = left.End
 				right.Names = t.Names[middle:]
+				if len(t.NativeOrdinals) > 0 {
+					left.NativeOrdinals = t.NativeOrdinals[:middle]
+					right.NativeOrdinals = t.NativeOrdinals[middle:]
+				}
 				if err := m.executeBatch(ctx, left, batch); err != nil {
 					return err
 				}

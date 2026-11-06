@@ -207,9 +207,15 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
-	maintenanceWait func(context.Context, string) error
-	maintenanceCtx  context.Context
-	maintenanceStop context.CancelFunc
+	nativeCounters        nativeCounters
+	nativeReady           func() error // installed before listeners; native/shared ownership only
+	nativePendingSnapshot func() (map[string]struct{}, error)
+	nativeFailure         atomic.Pointer[ownershipError] // native write errors require owner recovery
+	nativeRanges          sync.Map                       // durable range identity -> import mutex
+	nativeTestHook        func(string) error             // private deterministic fault-injection tests
+	maintenanceWait       func(context.Context, string) error
+	maintenanceCtx        context.Context
+	maintenanceStop       context.CancelFunc
 	// Owner-driven maintenance lives until close, independently of StopBackground.
 	explicitMaintenance  operationState
 	coldPack             coldPackState
@@ -571,6 +577,9 @@ func Open(dir string, options Options) (*Store, error) {
 	}
 	if err := s.loadSidecars(); err != nil {
 		return nil, s.openFailure(db, fmt.Errorf("load sidecar catalog: %w", err))
+	}
+	if err := s.recoverNative(); err != nil {
+		return nil, s.openFailure(db, fmt.Errorf("recover native bulk: %w", err))
 	}
 	if options.IngestFileStages {
 		if s.incrementalSource == "" || s.continuation == nil {
