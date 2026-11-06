@@ -50,6 +50,8 @@ func BulkEvalMain(args []string) error {
 	native := flags.Bool("native", false, "measure the native owning-daemon SST engine; deferred combines are outside timing")
 	combine := flags.Bool("combine-existing", false, "include exact native combines of present names in native timing")
 	memory := flags.Bool("memory", false, "private in-memory Pebble fixtures (not physical-disk throughput)")
+	cacheBytes := flags.Int64("cache-bytes", 32<<20, "block cache bytes per private proof store")
+	cacheShards := flags.Int("cache-shards", 0, "block cache shards per private proof store (0 selects from cache size)")
 	epoch := flags.Int64("now", time.Now().Unix(), "fixed evaluation clock, Unix seconds")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -57,7 +59,7 @@ func BulkEvalMain(args []string) error {
 	if *combine && !*native {
 		return errors.New("--combine-existing requires --native")
 	}
-	if *sourceCache < 1 || *sourceShards < 0 || *sampleNames < 0 || (*sampleNames > 0 && *capturePath == "") || (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
+	if *cacheBytes <= 0 || *cacheShards < 0 || *sourceCache < 1 || *sourceShards < 0 || *sampleNames < 0 || (*sampleNames > 0 && *capturePath == "") || (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
 		return errors.New("invalid evaluation options")
 	}
 	var input []bulkEvalFixture
@@ -77,7 +79,7 @@ func BulkEvalMain(args []string) error {
 			return errors.New("invalid native capture metadata")
 		}
 		for _, name := range capture.Names {
-			input = append(input, bulkEvalFixture{Name: name})
+			input = append(input, bulkEvalFixture{Name: name, Target: capture.Targets[name]})
 		}
 	} else {
 		data, err := os.ReadFile(*fixtures)
@@ -107,7 +109,7 @@ func BulkEvalMain(args []string) error {
 	clock := func() time.Time { return time.Unix(*epoch, 0) }
 	ctx := context.Background()
 	open := func(name string) (*store.Store, error) {
-		directory, cacheBytes, cacheShards := root, int64(32<<20), 0
+		directory, cacheBytes, cacheShards := root, *cacheBytes, *cacheShards
 		if name == "donor" {
 			directory, cacheBytes, cacheShards = donorRoot, *sourceCache, *sourceShards
 		}
@@ -216,7 +218,7 @@ func BulkEvalMain(args []string) error {
 		input = nil
 		for _, name := range capture.Names {
 			if copied[name] {
-				input = append(input, bulkEvalFixture{Name: name})
+				input = append(input, bulkEvalFixture{Name: name, Target: capture.Targets[name]})
 			}
 		}
 		if len(input) == 0 {
@@ -268,7 +270,21 @@ func BulkEvalMain(args []string) error {
 			forced := rowIndex*100/len(input) < *overlapPercent
 			if row.Target != "" || forced {
 				overlap++
-				path := filepath.Join(filepath.Dir(*fixtures), row.Target)
+				targetBase := filepath.Dir(*fixtures)
+				if *capturePath != "" && !forced {
+					targetBase = filepath.Dir(*capturePath)
+					if !filepath.IsLocal(row.Target) || filepath.Base(row.Target) != row.Target {
+						return errors.New("native survivor fixture must be a private capture basename")
+					}
+					data, err := os.ReadFile(filepath.Join(targetBase, row.Target))
+					if err != nil {
+						return err
+					}
+					if hash := sha256.Sum256(data); capture.TargetSHA256[row.Name] != hex.EncodeToString(hash[:]) {
+						return errors.New("native survivor fixture integrity mismatch")
+					}
+				}
+				path := filepath.Join(targetBase, row.Target)
 				if forced {
 					path = source
 				}

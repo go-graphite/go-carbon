@@ -155,6 +155,16 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 				s.nativeCounters.combineCopiedBlocks.Add(uint64(p.Class.CopiedBlocks))
 				s.nativeCounters.combinePointBlocks.Add(uint64(p.Class.CombinedBlocks))
 				s.nativeCounters.combineMaterialized.Add(uint64(p.Class.MaterializedArchives))
+				if p.Old.ID != 0 {
+					if p.Class.IntersectingArchives > 0 {
+						s.nativeCounters.combineIntersectingNames.Add(1)
+					} else {
+						s.nativeCounters.combineDisjointNames.Add(1)
+					}
+					if p.Class.NormalizedArchives > 0 {
+						s.nativeCounters.combineNormalizedNames.Add(1)
+					}
+				}
 				if err := s.nativeStep("combine-name-published"); err != nil {
 					return receipt, err
 				}

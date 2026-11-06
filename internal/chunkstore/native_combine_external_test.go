@@ -216,3 +216,59 @@ func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T)
 		})
 	}
 }
+
+func TestNativeCombineSidecarDifferential(t *testing.T) {
+	for _, buckets := range []bool{false, true} {
+		t.Run(fmt.Sprintf("v7=%v", buckets), func(t *testing.T) {
+			ctx := context.Background()
+			source, target, reference := nativeMemoryStore(t, true, buckets), nativeMemoryStore(t, true, buckets), nativeMemoryStore(t, true, buckets)
+			name := "combine.sidecar"
+			var points []store.Point
+			for ts := int64(995000); ts < 999900; ts += 10 {
+				points = append(points, store.Point{Timestamp: ts, Value: float64(ts % 91)})
+			}
+			putTransferPoints(t, source, name, points)
+			putTransferPoints(t, source, name, []store.Point{{Timestamp: 996000, Value: 900}})
+			if source.Sidecars().Count != 1 {
+				t.Fatal("fixture has no sidecar", source.Sidecars())
+			}
+			for _, s := range []*store.Store{target, reference} {
+				putTransferPoints(t, s, name, []store.Point{{Timestamp: 999880, Value: 42}, {Timestamp: 999910, Value: 7}})
+			}
+			records, err := source.ExportTransfer(ctx, []string{name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reference.ImportTransfer(ctx, records); err != nil {
+				t.Fatal(err)
+			}
+			pin, err := source.PinNativeSource()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			var wire bytes.Buffer
+			if err := pin.Write(ctx, []string{name}, &wire); err != nil {
+				t.Fatal(err)
+			}
+			r := store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: 1, Names: []string{name}, Combine: true}
+			if _, err := target.NativeImport(ctx, r, &wire); err != nil {
+				t.Fatal(err)
+			}
+			want, err := reference.Snapshot(ctx, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := target.Snapshot(ctx, name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.EqualSnapshots(want, got); err != nil {
+				t.Fatal(err)
+			}
+			if target.Sidecars().Count != reference.Sidecars().Count {
+				t.Fatal("sidecar inventory diverged")
+			}
+		})
+	}
+}
