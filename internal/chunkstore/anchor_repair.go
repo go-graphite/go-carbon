@@ -41,22 +41,41 @@ type AnchorRepairResult struct {
 // transfer lock; a racing foreground update causes a fresh preparation. Cache
 // input remains with the sole live daemon and is never flushed or replayed here.
 func (s *Store) RepairArchiveAnchors(ctx context.Context, name string, apply bool) (AnchorRepairResult, error) {
+	if err := errors.Join(ctx.Err(), s.fileOwnershipError()); err != nil {
+		return AnchorRepairResult{}, err
+	}
 	codec, ok := s.continuation.(ContinuationAnchorRepairer)
 	if !ok {
 		return AnchorRepairResult{}, ErrFormat
 	}
 	for attempt := 0; attempt < 4; attempt++ {
 		preparedAt := time.Now()
-		records, err := s.ExportTransfer(ctx, []string{name})
+		// A census must inspect the main-file descriptor before reading its
+		// body. ExportTransfer would copy every cold compressed group merely
+		// to discover that it needs no classic-ring repair.
+		view := s.db.NewReadView()
+		m, err := metadataFrom(view, name)
+		if err == nil {
+			err = s.checkFileOwnership(m)
+		}
+		if err == nil && m.FileMigration == FileCleanupPending {
+			err = ErrConflict
+		}
 		if err != nil {
+			view.Close()
 			return AnchorRepairResult{}, err
 		}
-		r := records[0]
+		r := TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation}
 		result := AnchorRepairResult{Name: name, Version: r.Version, Retries: attempt}
-		if !r.Continuation {
+		if !m.Continuation {
+			view.Close()
 			return result, nil
 		}
-		plan, err := codec.PlanArchiveAnchors(ctx, transferRecordIO(r))
+		kv := s.newContinuationIO(ctx, view, nil, m).withIterator()
+		plan, err := codec.PlanArchiveAnchors(ctx, kv)
+		closeErr := kv.Close()
+		viewErr := view.Close()
+		err = errors.Join(err, closeErr, viewErr)
 		result.Archives = plan.Archives
 		result.PreparationNanos = time.Since(preparedAt).Nanoseconds()
 		if err != nil || !apply || len(plan.Writes)+len(plan.Deletes) == 0 {

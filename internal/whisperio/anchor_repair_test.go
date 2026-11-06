@@ -3,6 +3,7 @@ package whisperio
 import (
 	"context"
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"testing"
@@ -142,5 +143,51 @@ func TestAnchorRepairKeepsHealthyNonMinimumAnchor(t *testing.T) {
 	}
 	if len(plan.Writes)+len(plan.Deletes) != 0 {
 		t.Fatal("rewrote wrapped consistent ring")
+	}
+}
+
+type anchorHeaderOnlyIO struct{ store.ContinuationIO }
+
+func (k anchorHeaderOnlyIO) Get(key []byte) ([]byte, error) {
+	if (len(key) > 0 && key[0] == 'T') || (len(key) >= 10 && key[0] == 'f' && (key[9] == 'c' || key[9] == 'b')) {
+		return nil, fmt.Errorf("anchor census read compressed body")
+	}
+	return k.ContinuationIO.Get(key)
+}
+func (k anchorHeaderOnlyIO) Visit(key []byte, fn func([]byte, []byte) error) error {
+	if (len(key) > 0 && key[0] == 'T') || (len(key) >= 10 && key[0] == 'f' && (key[9] == 'c' || key[9] == 'b')) {
+		return fmt.Errorf("anchor census scanned compressed body")
+	}
+	return k.ContinuationIO.Visit(key, fn)
+}
+
+type anchorHeaderOnlyCodec struct{ *ContinuationCodec }
+
+func (c anchorHeaderOnlyCodec) PlanArchiveAnchors(ctx context.Context, kv store.ContinuationIO) (store.AnchorRepairPlan, error) {
+	return c.ContinuationCodec.PlanArchiveAnchors(ctx, anchorHeaderOnlyIO{kv})
+}
+
+func TestAnchorCensusSkipsCompressedHistory(t *testing.T) {
+	ctx := context.Background()
+	codec := anchorHeaderOnlyCodec{&ContinuationCodec{}}
+	db, err := store.Open(t.TempDir(), coldOptions(codec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.StopBackground()
+	snapshot := coldFixture(t, db)
+	coldSweep(t, db, "exact")
+	before := db.Stats().TransferExport
+	result, err := db.RepairArchiveAnchors(ctx, snapshot.Metadata.Name, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Archives) != 0 || result.Applied {
+		t.Fatalf("compressed file changed %+v", result)
+	}
+	after := db.Stats().TransferExport
+	if after.Requests != before.Requests || after.Metrics != before.Metrics {
+		t.Fatal("census exported compressed history")
 	}
 }
