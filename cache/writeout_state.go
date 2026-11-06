@@ -9,6 +9,9 @@ type WriteoutState struct {
 	Points, MaxPoints              int64
 	MaxDelay, MeanDelay, OldestAge time.Duration
 	Pressure, Recovering           bool
+	// RecoveryBlocked is a short lease refreshed by actual denied admissions,
+	// not a second cache-fill threshold. It also covers legacy recovery callers.
+	RecoveryBlocked bool
 	// Restored means all checkpoint metrics have been claimed, with the source
 	// still awaiting durable confirmations. It includes deferred saved history.
 	Restored bool
@@ -32,6 +35,7 @@ func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
 		MaxPoints: s.maxSize, MaxDelay: s.writeoutMaxDelay,
 		MeanDelay: time.Duration(float64(s.writeoutMaxDelay) * (1 - s.writeoutSpread/2)),
 		Pressure:  c.bytePressure(s), Recovering: c.recovering(s),
+		RecoveryBlocked: c.RecoveryBlocked(),
 	}
 	if pending := c.pending.Load(); pending != nil {
 		state.Restored = pending.remaining.Load() == 0
@@ -60,6 +64,9 @@ func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
 			}
 		}
 		shard.mu.RUnlock()
+	}
+	if state.RecoveryBlocked {
+		state.Eligible = state.Metrics
 	}
 	return state
 }

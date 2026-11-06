@@ -26,7 +26,7 @@ func TestAutoUpdateRateConfig(t *testing.T) {
 		{-1, 1, 0, time.Minute, true}, {-1, 10, 100, time.Minute, true},
 		{23000, 1, 0, 0, true}, {0, 1, 0, 0, true},
 		{-2, 1, 0, time.Minute, false}, {-1, 1, 0, 0, false},
-		{-1, 0, 0, time.Minute, false}, {-1, 10, 9, time.Minute, false}, {-1, 1, -1, time.Minute, false},
+		{-1, 0, 0, time.Minute, false}, {-1, 10, 9, time.Minute, false}, {-1, 1, -1, time.Minute, true}, {-1, 1, -2, time.Minute, false},
 	} {
 		cfg := NewConfig()
 		cfg.Whisper.MaxUpdatesPerSecond = tc.mode

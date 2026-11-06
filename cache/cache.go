@@ -55,9 +55,12 @@ type cacheSettings struct {
 // A "thread" safe map of type string:Anything.
 // To avoid lock bottlenecks this map is dived to several (shardCount) map shards.
 type Cache struct {
-	mu        sync.Mutex
-	pending   atomic.Pointer[pendingRecovery]
-	startupAt atomic.Pointer[time.Time]
+	mu                   sync.Mutex
+	pending              atomic.Pointer[pendingRecovery]
+	startupAt            atomic.Pointer[time.Time]
+	recoveryAdmission    atomic.Pointer[recoveryAdmission]
+	recoveryBlockedUntil atomic.Int64
+	recoveryRejections   atomic.Uint64
 
 	writeoutEpoch   time.Time
 	writeoutStateMu sync.Mutex

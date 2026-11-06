@@ -77,12 +77,31 @@ func (p *Whisper) ReloadSettings(next *Whisper) {
 	}
 	a := &p.autoUpdate
 	var state cache.WriteoutState
+	var capacity AutoCapacitySample
 	if settings.maxUpdatesPerSecond == -1 {
 		// Scan before locking: readers of autoUpdate.mu must not wait for it.
 		state = p.autoUpdateState(next.autoUpdate.state)
+		if next.autoUpdate.ceiling == -1 {
+			capacity = p.capacityState(next.autoUpdate.capacitySource)
+		}
 	}
 	a.mu.Lock()
+	previousCeiling := a.ceiling
+	a.generation++
 	a.state, a.floor, a.ceiling = next.autoUpdate.state, next.autoUpdate.floor, next.autoUpdate.ceiling
+	if a.ceiling == -1 && (previousCeiling != -1 || old.maxUpdatesPerSecond != -1) {
+		a.capacity.at = time.Time{}
+		a.capacity.limit = 0
+		seed := a.applied
+		if old.maxUpdatesPerSecond != -1 {
+			seed = max(0, old.maxUpdatesPerSecond)
+		}
+		if seed > 0 {
+			a.capacity.limit = max(a.floor, seed)
+		}
+	}
+	a.capacitySource, a.capacitySample = next.autoUpdate.capacitySource, capacity
+	a.observeTokens.Store(a.ceiling == -1)
 	// Publish rate mode and its token source together. The automatic sampler
 	// runs in every mode, so a fixed -> automatic switch needs no new worker.
 	if settings.maxUpdatesPerSecond == -1 {
@@ -141,6 +160,15 @@ func (p *Whisper) InheritRuntime(previous *Whisper) {
 	p.incrementalComplete.Store(previous.incrementalComplete.Load())
 	previous.autoUpdate.mu.Lock()
 	p.autoUpdate.controller = previous.autoUpdate.controller
+	p.autoUpdate.capacity = previous.autoUpdate.capacity
+	if p.autoUpdate.ceiling == -1 && (previous.autoUpdate.ceiling != -1 || previous.settings().maxUpdatesPerSecond != -1) {
+		seed := previous.autoUpdate.applied
+		if mode := previous.settings().maxUpdatesPerSecond; mode != -1 {
+			seed = max(0, mode)
+		}
+		p.autoUpdate.capacity.limit = seed
+		p.autoUpdate.capacity.at = time.Time{}
+	}
 	previous.autoUpdate.mu.Unlock()
 }
 

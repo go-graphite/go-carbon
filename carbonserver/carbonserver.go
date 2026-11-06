@@ -56,6 +56,7 @@ import (
 	"github.com/go-graphite/go-carbon/helper/grpcutil"
 	"github.com/go-graphite/go-carbon/helper/stat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/hostcapacity"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/internal/whisperpath"
 	"github.com/go-graphite/go-carbon/points"
@@ -309,6 +310,8 @@ type CarbonserverListener struct {
 	flock             bool
 	compressed        bool
 	removeEmptyFile   bool
+
+	capacityReadLatency *hostcapacity.Latency
 
 	maxMetricsGlobbed      int
 	maxMetricsRendered     int
@@ -2862,6 +2865,9 @@ func (listener *CarbonserverListener) bucketRequestTimesGRPC(payload, peer strin
 }
 
 func (listener *CarbonserverListener) bucketRequestTimes(t time.Duration) int {
+	if listener.capacityReadLatency != nil {
+		listener.capacityReadLatency.Observe(t)
+	}
 	listener.prometheus.duration(t)
 
 	ms := t.Nanoseconds() / int64(time.Millisecond)

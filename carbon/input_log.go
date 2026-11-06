@@ -165,12 +165,8 @@ func (app *App) replayInputLogStopped(core *cache.Cache, stop <-chan struct{}) e
 	stats, err := l.Replay(func(p *points.Points) {
 		// Like tail replay: these points were accepted already, so no live
 		// quota applies, but recovery must leave room for persistence.
-		for draining && !core.HasRecoveryCapacity(len(p.Data)) {
-			select {
-			case <-stop:
-				return
-			default:
-			}
+        for draining && !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
+            select { case <-stop: return; default: }
 			time.Sleep(time.Millisecond)
 		}
 		core.AddRecovered(p)

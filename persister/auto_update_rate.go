@@ -73,13 +73,16 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 	if c.restoredAt.IsZero() || now.Sub(c.restoredAt) >= s.MaxDelay {
 		c.equilibrium = max(float64(s.Points), c.equilibrium*math.Exp(-dt.Seconds()/max(1, 4*s.MaxDelay.Seconds())))
 	}
-	if s.Pressure || s.MaxPoints > 0 && float64(s.Points)/float64(s.MaxPoints) >= .70 {
+	if s.Pressure || s.RecoveryBlocked || s.MaxPoints > 0 && float64(s.Points)/float64(s.MaxPoints) >= .70 {
 		remaining := .05
-		if !s.Pressure {
+		if !s.Pressure && !s.RecoveryBlocked {
 			remaining = max(.05, 1-float64(s.Points)/float64(s.MaxPoints))
 		}
 		if pressure := need / remaining; pressure > target {
 			target, reason = pressure, "pressure"
+			if s.RecoveryBlocked {
+				reason = "recovery_blocked"
+			}
 		}
 	}
 	// The oldest arrival bounds the time left for all eligible work. This is
@@ -130,6 +133,12 @@ type autoUpdateRate struct {
 	stopping                bool
 	ticker                  atomic.Pointer[helper.ThrottleTicker]
 	metrics                 *autoUpdateMetrics
+	capacitySource          func() AutoCapacitySample
+	capacitySample          AutoCapacitySample
+	capacity                autoCapacityController
+	tokenWaiters            atomic.Int64
+	observeTokens           atomic.Bool
+	generation              uint64
 	observed                atomic.Pointer[autoUpdateObservation]
 }
 
@@ -141,6 +150,7 @@ type autoUpdateObservation struct {
 // SetAutoUpdateRate supplies cache state and limits for -1 mode before Start.
 func (p *Whisper) SetAutoUpdateRate(state func() cache.WriteoutState, floor, ceiling int) {
 	p.autoUpdate.state, p.autoUpdate.floor, p.autoUpdate.ceiling = state, floor, ceiling
+	p.autoUpdate.observeTokens.Store(ceiling == -1)
 }
 
 func (p *Whisper) sampleAutoUpdateRate() {
@@ -149,7 +159,7 @@ func (p *Whisper) sampleAutoUpdateRate() {
 	}
 	a := &p.autoUpdate
 	a.mu.Lock()
-	state, stopping := a.state, a.stopping
+	state, source, ceiling, generation, stopping := a.state, a.capacitySource, a.ceiling, a.generation, a.stopping
 	a.mu.Unlock()
 	if stopping {
 		return
@@ -157,11 +167,16 @@ func (p *Whisper) sampleAutoUpdateRate() {
 	// The cache scan can take seconds on a large cache. Metrics, the stats
 	// collector and restart pacing share autoUpdate.mu, so never scan under it.
 	s := p.autoUpdateState(state)
+	var capacity AutoCapacitySample
+	if ceiling == -1 {
+		capacity = p.capacityState(source)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.stopping || p.settings().maxUpdatesPerSecond != -1 {
+	if a.stopping || generation != a.generation || p.settings().maxUpdatesPerSecond != -1 {
 		return
 	}
+	a.capacitySample = capacity
 	p.sampleAutoUpdateRateLocked(s)
 }
 
@@ -178,6 +193,7 @@ func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
 	a := &p.autoUpdate
 	a.snapshot = s
 	a.ordinary = a.controller.step(time.Now(), s, a.floor, a.ceiling)
+	p.capacityLimitLocked(s)
 	p.applyAutoUpdateRateLocked()
 }
 
@@ -200,14 +216,15 @@ func (p *Whisper) applyAutoUpdateRateLocked() {
 	}
 	p.setAutoRestartRate(rate)
 	// Avoid rebuilding tickers for sub-percent measurement noise.
-	if a.ticker.Load() != nil && (previous == rate || previous >= a.floor && (a.ceiling <= 0 || previous <= a.ceiling) && previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01)) {
+	withinCeiling := (a.ceiling <= 0 || previous <= a.ceiling) && (a.ceiling != -1 || previous <= a.capacity.limit)
+	if a.ticker.Load() != nil && (previous == rate || previous >= a.floor && withinCeiling && previous > 0 && math.Abs(float64(rate-previous)) < max(1, float64(previous)*.01)) {
 		return
 	}
 	a.applied = rate
 	if a.metrics != nil {
 		a.metrics.adjust(a.reason)
 	}
-	if p.logger != nil && (previous == 0 || math.Abs(float64(rate-previous)) >= float64(previous)*.25) {
+	if p.logger != nil {
 		p.logger.Info("automatic writeout rate adjusted", zap.Int("updates_per_second", rate),
 			zap.Int("previous_updates_per_second", previous), zap.Float64("target_updates_per_second", a.target),
 			zap.String("reason", a.reason), zap.Int64("cached_metrics", s.Metrics), zap.Duration("oldest_age", s.OldestAge))

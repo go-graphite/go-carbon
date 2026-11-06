@@ -548,9 +548,19 @@ workers = 8
 max-updates-per-second = 0
 # Auto floor in updates/s (positive).
 max-updates-per-second-auto-min = 1
-# Auto ceiling in updates/s. 0 = unlimited. A low ceiling can exceed the maximum
-# delay; monitor oldest unpersisted age and cache growth.
-max-updates-per-second-auto-max = 0
+# Auto ceiling: -1 = Linux host/storage feedback; 0 = unlimited demand model (default);
+# positive = fixed operator override. Select -1 explicitly to replace an old
+# fixed 40000 cap; this does not silently reinterpret a positive override.
+# Feedback grows 10% after two healthy 5s samples with eligible work, confirmed
+# throughput near the token limit, token waiters and idle CPU/disk. Read p99
+# regression, stalls, growing debt, memory/GC/CPU/disk pressure cut it by 30%.
+# Hard bounds derive from workers, execution threads, measured CPU/update and
+# measured worker service time. The mandatory restart floor remains independent.
+# Blocked recovery admission counts as pressure immediately, even below 70%.
+# Values/reasons log at INFO; persister_auto_capacity_* and token-waiter metrics
+# expose the actuator. All modes are reloadable; this setting needs a binary
+# that understands -1 (do not send it to an older daemon).
+max-updates-per-second-auto-max = -1
 # Sparse file creation
 sparse-create = false
 # use flock on every file call (ensures consistency if there are concurrent read/writes to the same file)

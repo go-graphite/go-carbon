@@ -73,7 +73,7 @@ func (c *Cache) syncMemoryLocked(shard *Shard) {
 	shard.metrics.Store(int32(shard.items.len()))
 	shard.notConfirmedCount.Store(int32(shard.notConfirmedUsed))
 	s := c.settings.Load().(*cacheSettings)
-	if s.maxBytes <= 0 {
+	if s.maxBytes <= 0 && c.recoveryAdmission.Load() == nil {
 		return
 	}
 	shard.byteDelta += n - shard.byteSize
