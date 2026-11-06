@@ -2322,8 +2322,7 @@ func (listener *CarbonserverListener) Stat(send helper.StatCallback) {
 	}
 
 	// Computing response percentiles
-	if len(listener.percentiles) > 0 {
-		listener.requestsTimes.Lock()
+	if len(listener.percentiles) > 0 && listener.requestsTimes.TryLock() {
 		list := listener.requestsTimes.list
 		listener.requestsTimes.list = make([]int64, 0, len(list))
 		listener.requestsTimes.Unlock()

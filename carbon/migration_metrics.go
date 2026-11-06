@@ -3,6 +3,7 @@ package carbon
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
@@ -16,8 +17,11 @@ import (
 // read from the live migration, store and persister at scrape time. Migration
 // counters restart with each migration run; rate() and increase() handle that.
 type migrationCollector struct {
-	app *App
+	app     *App
+	skipped atomic.Uint64
 }
+
+var migrationSkippedDesc = prometheus.NewDesc("migration_metrics_skipped_total", "Scrapes skipped because application lifecycle or migration state was busy; other collectors remain available.", nil, nil)
 
 type metricSpec struct {
 	desc      *prometheus.Desc
@@ -50,6 +54,7 @@ type migrationSnapshot struct {
 	cacheMetrics                          int32
 	cacheBytes                            int64
 	cachePointBytes                       int64
+	storeSnapshotAge                      float64
 }
 
 type storeStatsView struct {
@@ -124,6 +129,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		return 0
 	}
 	specs := []metricSpec{
+		gauge("store_metrics_snapshot_age_seconds", "Age of the background Pebble/cache observation; grows if storage I/O stalls the sampler. Application counters remain live.", func(s *migrationSnapshot) float64 { return s.storeSnapshotAge }),
 		gauge("store_ooo_sidecars", "Sidecars currently present; complete when store_ooo_inventory_ready is 1.", func(s *migrationSnapshot) float64 { return float64(s.sidecars.Count) }),
 		gauge("store_ooo_sidecar_points", "Physical sidecar records, including expired slots.", func(s *migrationSnapshot) float64 { return float64(s.sidecars.Points) }),
 		gauge("store_ooo_sidecar_oldest_timestamp_seconds", "Oldest physical sidecar sample timestamp, or 0 when empty.", func(s *migrationSnapshot) float64 { return float64(s.sidecars.Oldest) }),
@@ -354,6 +360,7 @@ func persisterSpec(name, help string, v func(*migrationSnapshot) float64) metric
 }
 
 func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- migrationSkippedDesc
 	for _, spec := range migrationMetricSpecs {
 		ch <- spec.desc
 	}
@@ -380,10 +387,25 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
+	defer func() {
+		ch <- prometheus.MustNewConstMetric(migrationSkippedDesc, prometheus.CounterValue, float64(c.skipped.Load()))
+	}()
 	var s migrationSnapshot
-	c.app.RLock()
+	// Start/reload/Stop can hold this lock for minutes. Never queue scrapes
+	// behind them: this used to accumulate hundreds of blocked HTTP handlers.
+	if !c.app.TryRLock() {
+		c.skipped.Add(1)
+		return
+	}
 	db, p, cache := c.app.MetricStore, c.app.Persister, c.app.Cache
-	c.app.RUnlock()
+	// Pin the components until the snapshot is complete; Stop must not close
+	// Pebble while a scrape reads it. Release before sending metrics downstream.
+	locked := true
+	defer func() {
+		if locked {
+			c.app.RUnlock()
+		}
+	}()
 	if m := c.app.incrementalMigration.Load(); m != nil {
 		s.migration = true
 		s.converted, s.points, s.resumed = m.metrics.Load(), m.points.Load(), m.resumed.Load()
@@ -393,7 +415,10 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if m.budget != nil {
 			s.workers, s.inFlight, _ = m.budget.status()
 		}
-		m.mu.Lock()
+		if !m.mu.TryLock() {
+			c.skipped.Add(1)
+			return
+		}
 		s.failed = m.failure != ""
 		// The run object outlives the run: after it ends its counters stay
 		// reported, but nothing is converting any more.
@@ -403,10 +428,14 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.workingReserved = m.working.Load()
 	}
 	if p != nil {
+		pm, ok := p.MigrationMetrics()
+		if !ok {
+			c.skipped.Add(1)
+			return
+		}
 		s.persister = true
-		s.ioUsed, s.ioSlots = p.ConversionIOSlots()
-		s.reclaimQueued = p.DeferredReclaimQueued()
-		s.reclaim = p.DeferredReclaimStats()
+		s.ioUsed, s.ioSlots = pm.IOUsed, pm.IOSlots
+		s.reclaimQueued, s.reclaim = pm.ReclaimQueued, pm.Reclaim
 		s.pebble, s.whisper = p.WriteStats()
 		s.transferRequeued = p.TransferFlushRequeues()
 	}
@@ -416,9 +445,14 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.cachePointBytes = cache.PointBytes()
 	}
 	if db != nil {
-		st := db.Stats()
+		st, sidecars, ok := db.TelemetryStats()
+		if !ok {
+			c.skipped.Add(1)
+			return
+		}
 		s.store = true
-		s.sidecars = db.Sidecars()
+		s.storeSnapshotAge = db.TelemetryAge().Seconds()
+		s.sidecars = sidecars
 		s.stats = storeStatsView{coldPack: st.ColdPack, thaws: whisperio.ColdPackThaws(),
 			ingestTables: st.IngestTables, ingestEntries: st.IngestEntries, ingestBytes: st.IngestBytes,
 			ingestL0Bytes: st.IngestL0Bytes, ingestOverlaps: st.IngestMemtableOverlaps,
@@ -432,12 +466,14 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			l0Files: st.L0Files, l0Sublevels: st.L0Sublevels, compactionsInProgress: st.CompactionsInProgress,
 			cacheHits: st.CacheHits, cacheMisses: st.CacheMisses,
 			levelCompacted: st.LevelCompactedBytes, levelRead: st.LevelReadBytes, levelBytes: st.LevelBytes, levelTargets: st.LevelTargetBytes, levelScores: st.LevelScores,
-			relayout: db.RelayoutStats(), rangeDeletes: st.ContinuationRangeDeletes, invalidPoints: whisperio.InvalidContinuationPoints(), skippedBlockDeletes: whisperio.SkippedBlockDeletes(), unallocatedGroupSkips: whisperio.UnallocatedGroupSkips(), compactOnceRunning: st.CompactOnceRunning,
+			relayout: st.Relayout, rangeDeletes: st.ContinuationRangeDeletes, invalidPoints: whisperio.InvalidContinuationPoints(), skippedBlockDeletes: whisperio.SkippedBlockDeletes(), unallocatedGroupSkips: whisperio.UnallocatedGroupSkips(), compactOnceRunning: st.CompactOnceRunning,
 			purgeFound: st.PurgeFound, purgeRemoved: st.PurgeRemoved, purgeRunning: st.PurgeRunning,
 			blockCacheBytes: st.CacheBytes, tableCacheEntries: st.TableCacheEntries, stateCache: st.StateCache,
 			compactionKinds: st.CompactionKinds, fs: st.FS, importFolds: importSidecarFoldCounts(), fetch: db.FetchTimings(),
 		}
 	}
+	c.app.RUnlock()
+	locked = false
 	for _, spec := range migrationMetricSpecs {
 		if spec.store && !s.store || spec.persister && !s.persister || spec.migration && !s.migration || spec.cache && !s.cache {
 			continue

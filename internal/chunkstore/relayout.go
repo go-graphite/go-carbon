@@ -118,10 +118,15 @@ type relayoutItem struct {
 }
 
 func (s *Store) RelayoutStats() RelayoutStats {
+	stats := s.relayoutAtomicStats()
+	s.relayout.guard.stats(&stats)
+	s.relayout.reclaim.stats(&stats)
+	return stats
+}
+
+func (s *Store) relayoutAtomicStats() RelayoutStats {
 	r := &s.relayout
 	stats := RelayoutStats{Metrics: r.metrics.Load(), Blocks: r.blocks.Load(), Skipped: r.skipped.Load(), Bytes: r.bytes.Load(), Errors: r.errors.Load(), Cursor: r.cursor.Load(), Ceiling: r.ceiling.Load(), Done: r.done.Load(), Rate: r.rate.Load()}
-	r.guard.stats(&stats)
-	r.reclaim.stats(&stats)
 	if e := r.err.Load(); e != nil {
 		stats.Error = *e
 	}

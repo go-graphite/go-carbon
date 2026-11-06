@@ -33,6 +33,7 @@ type Collector struct {
 func RuntimeStat(send helper.StatCallback) {
 	send("GOMAXPROCS", float64(runtime.GOMAXPROCS(-1)))
 	send("NumGoroutine", float64(runtime.NumGoroutine()))
+	runtimeWaitStat(send)
 }
 
 func NewCollector(app *App) *Collector {

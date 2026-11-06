@@ -43,10 +43,9 @@ func (p *Whisper) initAutoUpdateMetrics(reg prometheus.Registerer) {
 }
 
 func (p *Whisper) autoUpdateObservation() (rate, target float64, reason string) {
-	a := &p.autoUpdate
-	a.mu.Lock()
-	rate, target, reason = float64(a.applied), a.target, a.reason
-	a.mu.Unlock()
+	if s := p.autoUpdate.observed.Load(); s != nil {
+		return s.rate, s.target, s.reason
+	}
 	return
 }
 

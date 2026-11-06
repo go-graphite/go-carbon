@@ -326,12 +326,16 @@ func (c *compactionController) stop() {
 func (c *compactionController) stats() compactionPacingStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	s := compactionPacingStats{rate: c.pacer.rateBytes(), target: c.target, auto: c.mode == -1,
+	return c.statsLocked(c.pacer.rateBytes(), c.flushPacer.rateBytes())
+}
+
+func (c *compactionController) statsLocked(rate, flushRate int64) compactionPacingStats {
+	s := compactionPacingStats{rate: rate, target: c.target, auto: c.mode == -1,
 		headroom: c.headroom, warmup: c.warmup, bypass: c.bypass, bypasses: make(map[string]uint64, len(c.bypasses))}
 	for reason, count := range c.bypasses {
 		s.bypasses[reason] = count
 	}
-	s.flush = flushPacingStats{rate: c.flushPacer.rateBytes(), target: c.flushTarget, auto: c.flushMode == -1,
+	s.flush = flushPacingStats{rate: flushRate, target: c.flushTarget, auto: c.flushMode == -1,
 		bypass: c.flushBypass, bypasses: make(map[string]uint64, len(c.flushBypasses))}
 	for reason, count := range c.flushBypasses {
 		s.flush.bypasses[reason] = count
@@ -366,6 +370,12 @@ func (s *Store) startCompactionController() {
 
 func (s *Store) compactionSample() compactionSample {
 	m := s.db.Metrics()
+	// Metrics() takes Pebble's manifest lock. Publish the existing background
+	// observation instead of letting HTTP/Graphite collectors enter that lock.
+	s.telemetryPebble.Store(m)
+	rangeCache := s.rangeCacheSnapshot()
+	s.telemetryRange.Store(&rangeCache)
+	s.telemetryAt.Store(time.Now().UnixNano())
 	var ingress uint64
 	for _, level := range m.Levels {
 		ingress += level.BytesFlushed + level.BytesIngested

@@ -52,9 +52,13 @@ func (s *Store) SetRelayoutReclaimBytes(n uint64) error {
 }
 
 func (m *relayoutReclaimState) stats(out *RelayoutStats) {
-	out.ReclaimBytes = m.limit.Load()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.statsLocked(out)
+}
+
+func (m *relayoutReclaimState) statsLocked(out *RelayoutStats) {
+	out.ReclaimBytes = m.limit.Load()
 	out.UnreclaimedBytes = m.pending
 	out.Reclaims, out.ReclaimedBytes = m.reclaims, m.reclaimed
 }
