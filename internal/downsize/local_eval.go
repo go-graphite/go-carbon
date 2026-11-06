@@ -48,10 +48,14 @@ func BulkEvalMain(args []string) error {
 	overlapPercent := flags.Int("overlap-percent", 0, "seed this percentage of survivor names from captured donor histories, then add survivor corrections (0 uses captured targets)")
 	profilePrefix := flags.String("profile-prefix", "", "write CPU/mutex/block profiles of the checkpoint phase under this local prefix")
 	native := flags.Bool("native", false, "measure the native owning-daemon SST engine; deferred combines are outside timing")
+	combine := flags.Bool("combine-existing", false, "include exact native combines of present names in native timing")
 	memory := flags.Bool("memory", false, "private in-memory Pebble fixtures (not physical-disk throughput)")
 	epoch := flags.Int64("now", time.Now().Unix(), "fixed evaluation clock, Unix seconds")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	if *combine && !*native {
+		return errors.New("--combine-existing requires --native")
 	}
 	if *sourceCache < 1 || *sourceShards < 0 || *sampleNames < 0 || (*sampleNames > 0 && *capturePath == "") || (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
 		return errors.New("invalid evaluation options")
@@ -377,7 +381,7 @@ func BulkEvalMain(args []string) error {
 	var local result
 	var nativeDeferred []string
 	if *native {
-		local, nativeDeferred, err = measureNative(ctx, donor, bulk, names, *batch, *workers)
+		local, nativeDeferred, err = measureNative(ctx, donor, bulk, names, *batch, *workers, *combine)
 	} else {
 		local, err = measure("checkpoint", source, bulk, *batch)
 	}

@@ -48,6 +48,28 @@ func nativeCombinePieceKey(identity string, position int) []byte {
 	return fmt.Appendf(nativeCombinePiecePrefix(identity), "%010d", position)
 }
 
+// ResumeNativeCombine needs no donor connection once the original checksum-
+// verified input is durable. In particular, expiry of the source pin cannot
+// prevent recovery after a survivor restart or a partially lost response.
+func (s *Store) ResumeNativeCombine(ctx context.Context, request NativeRange) (NativeReceipt, bool, error) {
+	if !request.Combine {
+		return NativeReceipt{}, false, nil
+	}
+	identity, _, err := request.Identity()
+	if err != nil {
+		return NativeReceipt{}, false, err
+	}
+	intent, err := s.readNativeCombineIntent(identity)
+	if errors.Is(err, pebble.ErrNotFound) {
+		return NativeReceipt{}, false, nil
+	}
+	if err != nil || !intent.Ready {
+		return NativeReceipt{}, false, err
+	}
+	receipt, err := s.nativeCombineImport(ctx, request, nil)
+	return receipt, true, err
+}
+
 func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
 	identity, namesHash, err := request.Identity()
 	if err != nil {

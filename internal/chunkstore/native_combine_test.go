@@ -3,13 +3,44 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/cockroachdb/pebble/vfs"
 )
+
+func TestNativeCombineDisjointChunksRetainValueBytes(t *testing.T) {
+	s := &Store{exactBlocks: true}
+	config := MetricConfig{Name: "native.blocks", Retentions: []Retention{{Step: 10, Count: 600}}, AggregationMethod: Sum}
+	var a, b chunk
+	a.set(0, Point{Timestamp: 996000, Value: math.Copysign(0, -1)})
+	b.set(0, Point{Timestamp: 997280, Value: math.Inf(1)})
+	left := TransferMetric{Config: config, Keys: []RelayoutKV{{Key: make([]byte, 6), Value: encodeExactChunk(&a)}}}
+	key := make([]byte, 6)
+	binary.BigEndian.PutUint32(key[2:], 1)
+	right := TransferMetric{Config: config, Keys: []RelayoutKV{{Key: key, Value: encodeExactChunk(&b)}}}
+	got, class, err := s.nativeCombineRecord(context.Background(), left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if class.CopiedBlocks != 2 || class.CombinedBlocks != 0 || class.IntersectingArchives != 0 || len(got.Keys) != 2 || !bytes.Equal(got.Keys[0].Value, left.Keys[0].Value) || !bytes.Equal(got.Keys[1].Value, right.Keys[0].Value) {
+		t.Fatal("disjoint encoded values changed", class, got)
+	}
+	// Raw-copy eligibility must follow the actual importer normalization.
+	a.set(0, Point{Timestamp: 996001, Value: math.Float64frombits(0x7ff8000000000042)})
+	left.Keys[0].Value = encodeExactChunk(&a)
+	got, class, err = s.nativeCombineRecord(context.Background(), left, right)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if class.NormalizedArchives != 1 || len(got.Keys) != 1 {
+		t.Fatal("NaN/off-grid normalization bypassed", class, got)
+	}
+}
 
 func combineTestRange(names []string) NativeRange {
 	return NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: int64(len(names)), Names: names, Combine: true}

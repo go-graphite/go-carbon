@@ -8,6 +8,7 @@ import (
 	"errors"
 	"math"
 	"slices"
+	"time"
 )
 
 // NativeCombineClass describes logical archive work, separately from the native
@@ -20,6 +21,11 @@ type NativeCombineClass struct {
 	CopiedBytes, CombinedBytes                         uint64
 }
 
+type ContinuationNativeClassic interface {
+	NativeClassicBlocks(context.Context, ContinuationIO, Metadata, func() time.Time) ([]RelayoutKV, bool, error)
+	RestoreNativeClassicBlocks(context.Context, ContinuationIO, Metadata, []RelayoutKV, func() time.Time) error
+}
+
 // nativeCombineRecord runs entirely outside writer locks. Keeping the exact
 // reference operations here is deliberate: coarse archives are independently
 // authoritative, and cannot be recreated by replaying the finest archive.
@@ -27,6 +33,45 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 	var class NativeCombineClass
 	if !samePolicy(source.Config, target.Config) || source.Continuation != target.Continuation {
 		return TransferMetric{}, class, ErrConflict
+	}
+	if !source.Continuation {
+		result, class, canonical, err := s.nativeCombineChunks(ctx, source, target)
+		if err != nil || canonical {
+			return result, class, err
+		}
+	} else if codec, ok := s.continuation.(ContinuationNativeClassic); ok {
+		a, ac, err := codec.NativeClassicBlocks(ctx, transferRecordIO(source), Metadata{MetricConfig: source.Config}, s.now)
+		if err != nil {
+			return TransferMetric{}, class, err
+		}
+		if ac {
+			b, bc, err := codec.NativeClassicBlocks(ctx, transferRecordIO(target), Metadata{MetricConfig: target.Config}, s.now)
+			if err != nil {
+				return TransferMetric{}, class, err
+			}
+			if bc {
+				left, right := source, target
+				left.Keys, right.Keys = a, b
+				result, c, canonical, err := s.nativeCombineChunks(ctx, left, right)
+				if err != nil {
+					return result, c, err
+				}
+				if canonical {
+					memory := nativeRecordMemory{values: make(map[string][]byte)}
+					if err := codec.RestoreNativeClassicBlocks(ctx, &memory, Metadata{MetricConfig: source.Config}, result.Keys, s.now); err != nil {
+						return TransferMetric{}, c, err
+					}
+					result.Keys, result.Continuation = nil, true
+					if err := memory.Visit(nil, func(k, v []byte) error {
+						result.Keys = append(result.Keys, RelayoutKV{bytes.Clone(k), v})
+						return nil
+					}); err != nil {
+						return result, c, err
+					}
+					return result, c, nil
+				}
+			}
+		}
 	}
 	a, err := s.nativeRecordSnapshot(ctx, source)
 	if err != nil {
