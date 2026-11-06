@@ -411,10 +411,13 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 	}
 	proofs := make([]TransferProof, 0, len(records))
-	// Sixteen-name groups reduce stripe intersections between concurrent
-	// streams and bound foreground lock waits and retirement tombstones.
-	for start := 0; start < len(records); start += 16 {
-		end := min(start+16, len(records))
+	// Publish one metric at a time. A retrying multi-stripe lock set avoids
+	// partial-set convoys but can starve behind continuously active writers
+	// on two of its stripes. One stripe joins the ordinary mutex queue and
+	// bounds both foreground fan-out and import starvation. Preparation still
+	// runs outside that stripe; the request shares one final WAL barrier.
+	for start := 0; start < len(records); start++ {
+		end := start + 1
 		group, err := s.publishTransfer(ctx, records[start:end], metas[start:end])
 		if err != nil {
 			return nil, err
