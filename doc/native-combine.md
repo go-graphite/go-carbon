@@ -74,7 +74,9 @@ There are no new runtime rate, cache, debt, name or p99 admission governors.
 `--engine bulk --combine-existing --bulk-only` revisits acknowledged native
 deferrals in the same journal. Phase-1 receipt identities remain byte-compatible.
 Combine requests use a separate identity domain; a deferred attempt also binds
-the original receipt and an immutable selected-ordinal bitmap. The receiver
+the preceding receipt and an immutable selected-ordinal bitmap. The first attempt
+links to the phase-1 receipt. This chain permits a fresh attempt when a cache-only
+target becomes committed, while lost acknowledgements reuse the same intent. The receiver
 exports only selected names, and advertises `NativeDeferredCombine` so older
 receivers fail the controller's capability check.
 

@@ -187,3 +187,58 @@ func TestNativeDeferredSameJournalRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeDeferredFreshAttemptAfterCacheFenceClears(t *testing.T) {
+	ctx := context.Background()
+	source, target := nativeControllerStore(t), nativeControllerStore(t)
+	name := "deferred.cache-only"
+	addPoints(t, source, name, 1)
+	var pending atomic.Bool
+	pending.Store(true)
+	target.SetTransferPending(func(string) bool { return pending.Load() })
+	donor := httptest.NewServer(nativeControllerService(t, source))
+	defer donor.Close()
+	survivor := httptest.NewServer(nativeControllerService(t, target))
+	defer survivor.Close()
+	o := testOptions(fixturePlan(t, donor.URL, survivor.URL, []string{name}))
+	o.engine, o.deleteMode = "bulk", "auto"
+	o.delete, o.bulkOnly = false, true
+	if err := run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	o.bulkCombine, o.deferredOnly = true, true
+	if err := run(ctx, o); err != nil {
+		t.Fatal(err)
+	} // Durable cache-only deferral.
+	pending.Store(false)
+	addPoints(t, target, name, 42)
+	if err := run(ctx, o); err != nil {
+		t.Fatal(err)
+	}
+	p, err := readPlan(o.plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := openJournal(o.state, p.PlanID+":delete=false:mode=auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.close()
+	parent := j.ranges(p.Streams[0].SHA256)[0]
+	if parent.Native == nil || parent.Phase != "done" || len(parent.Native.Combines) != 2 {
+		t.Fatal("deferral was not retried with a new receipt", parent)
+	}
+	a, b := parent.Native.Combines[0].Receipt, parent.Native.Combines[1].Receipt
+	if a == nil || b == nil || a.Identity == b.Identity || a.CopiedCount != 0 || b.CopiedCount != 1 || parent.Native.Receipt.CopiedCount != 0 {
+		t.Fatal("attempt receipts changed or aliased", a, b)
+	}
+	snapshot, err := target.Snapshot(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, point := range snapshot.Archives[0].Points {
+		if point.Timestamp == testMetricNow-10 && point.Value != 42 {
+			t.Fatal("lost survivor priority", point)
+		}
+	}
+}

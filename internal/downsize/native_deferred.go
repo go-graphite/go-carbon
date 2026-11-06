@@ -57,6 +57,13 @@ func (c *nativeController) executeDeferred(ctx context.Context, parent task, nam
 	attempt := &next.Combines[len(next.Combines)-1]
 	request := original
 	request.Combine, request.DeferredFrom, request.Selection = true, id, attempt.Selection
+	if len(next.Combines) > 1 {
+		previous := next.Combines[len(next.Combines)-2].Receipt
+		if previous == nil {
+			return errors.New("native deferred attempt has no preceding acknowledgement")
+		}
+		request.DeferredFrom = previous.Identity
+	}
 	identity, namesHash, err := request.Identity()
 	if err != nil {
 		return err
