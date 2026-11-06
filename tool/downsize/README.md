@@ -401,6 +401,15 @@ physical guards; `--delete-rate` paces actual conditional deletion, not these
 non-destructive markers.
 # Observing copy admission without transferring
 
+For a cross-cluster merge into an existing live store, set `cluster` to the
+source cluster and `target_cluster` to the destination cluster. Keep each ring's
+exact identities (including singleton jump index `000`). Matching jump instances
+in different clusters are independent: `plan` inventories the source and emits
+metric-range merges, never a whole-store replacement. The target keeps its own
+metrics. Routing and schema preparation must be reviewed separately; `config`
+rejects cross-cluster drafts because replacing one cluster cannot describe the
+combined routing and read-backend changes safely.
+
 `resize run --apply --observe-only 10m` runs the same admission and resource
 guards, persists observations, and exits without starting transfer workers.
 Use the same plan, state and health-map flags as the intended copy. This also

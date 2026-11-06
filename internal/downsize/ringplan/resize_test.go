@@ -166,6 +166,54 @@ func TestResizeSameIdentitySkipsInventory(t *testing.T) {
 	}
 }
 
+func TestResizeCrossClusterSingletonMergesEveryName(t *testing.T) {
+	root := t.TempDir()
+	s := fixtureSpec(root, 1)
+	s.Cluster, s.TargetCluster = "source", "destination"
+	s.New.Nodes = []member{{ID: "destination", Node: "10.0.0.2:2003=000", Endpoint: "http://10.0.0.2:4242"}}
+	s.Old.Nodes[0].Node = "10.0.0.1:2003=000"
+	names := "old.archive\nshared.live\nsource.expired\n"
+	if err := os.WriteFile(s.Inputs[0].Path, []byte(names), 0600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "spec.json")
+	blob, _ := json.Marshal(s)
+	if err := os.WriteFile(path, blob, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(root, "plan")
+	m, err := Resize(context.Background(), path, out, true, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Whole) != 0 || len(m.Streams) != 1 || m.Summary.Metrics != 3 || m.Summary.Copies != 3 || m.Summary.MovedFraction != 1 {
+		t.Fatalf("cross-cluster merge must inventory and move every source name: %+v", m)
+	}
+	if m.Streams[0].Source != s.Old.Nodes[0].ID || m.Streams[0].Destination != "destination" {
+		t.Fatal("wrong cross-cluster route", m.Streams)
+	}
+	data, err := os.ReadFile(filepath.Join(out, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateResize(data); err != nil {
+		t.Fatal(err)
+	}
+	// The cluster distinction is part of the immutable plan's identity.
+	m.Spec.TargetCluster = "other"
+	forged, _ := json.Marshal(m)
+	if err := ValidateResize(forged); err == nil {
+		t.Fatal("changed destination cluster accepted")
+	}
+	_, old, next, id, err := loadSpec(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := generateConfig(s, old, next, id, options{}, io.Discard); err == nil {
+		t.Fatal("same-cluster configuration drafts allowed for a cross-cluster merge")
+	}
+}
+
 func TestTransferInventoryPages(t *testing.T) {
 	var afters []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

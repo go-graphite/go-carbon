@@ -27,6 +27,7 @@ type specification struct {
 	Placements    map[string]ringplan.Placement `json:"placements,omitempty"`
 	Version       int
 	Cluster, Site string
+	TargetCluster string `json:"target_cluster,omitempty"`
 	Old, New      topology
 	AllowUnowned  bool `json:"allow_unowned"`
 }
