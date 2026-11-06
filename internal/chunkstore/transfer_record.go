@@ -23,11 +23,13 @@ func (r transferRecordIO) Get(key []byte) ([]byte, error) {
 	return nil, ErrNotFound
 }
 func (r transferRecordIO) Visit(prefix []byte, visit func([]byte, []byte) error) error {
-	for _, kv := range r.Keys {
-		if bytes.HasPrefix(kv.Key, prefix) {
-			if err := visit(kv.Key, kv.Value); err != nil {
-				return err
-			}
+	start, _ := slices.BinarySearchFunc(r.Keys, prefix, func(kv RelayoutKV, prefix []byte) int { return bytes.Compare(kv.Key, prefix) })
+	for _, kv := range r.Keys[start:] {
+		if !bytes.HasPrefix(kv.Key, prefix) {
+			break
+		}
+		if err := visit(kv.Key, kv.Value); err != nil {
+			return err
 		}
 	}
 	return nil
