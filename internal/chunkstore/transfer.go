@@ -544,7 +544,7 @@ func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, m
 			want := source
 			want.Archives = make([]Archive, len(source.Archives))
 			for j, a := range source.Archives {
-				points, err := fillArchive(a.Points, target.Archives[j].Points, a.Retention.Step)
+				points, _, _, err := nativeArchiveUnion(a, target.Archives[j])
 				if err != nil {
 					return nil, err
 				}
