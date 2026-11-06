@@ -56,8 +56,11 @@ func (s *Store) recoverNativeCombines() error {
 			return errors.Join(err, it.Close())
 		}
 		identity, names, err := intent.Request.Identity()
-		if err != nil || !bytes.Equal(it.Key(), nativeCombineIntentKey(identity)) || identity != intent.Receipt.Identity || names != intent.Receipt.NamesSHA256 || intent.Receipt.Count != len(intent.Request.Names) || len(intent.Raw) != len(intent.Positions) {
+		if err != nil || !bytes.Equal(it.Key(), nativeCombineIntentKey(identity)) || identity != intent.Receipt.Identity || names != intent.Receipt.NamesSHA256 || intent.Receipt.Count != len(intent.Request.Names) || len(intent.Raw) != len(intent.Positions) || len(intent.Raw) != len(intent.Origins) {
 			return errors.Join(ErrFormat, it.Close())
+		}
+		if err := validateNativeCombineIntent(identity, intent); err != nil {
+			return errors.Join(err, it.Close())
 		}
 		intents = append(intents, intent)
 	}

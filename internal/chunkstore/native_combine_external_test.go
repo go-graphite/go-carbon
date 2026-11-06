@@ -60,6 +60,22 @@ func TestNativeCombineDifferential(t *testing.T) {
 			if receipt.CopiedCount != len(names) || receipt.DeferredCount != 0 {
 				t.Fatal(receipt)
 			}
+			if len(receipt.Mappings) != len(names) {
+				t.Fatal("durable ID lineage missing", receipt)
+			}
+			for i, mapping := range receipt.Mappings {
+				donor, err := source.Metadata(ctx, names[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				survivor, err := target.Metadata(ctx, names[i])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mapping.Ordinal != i || mapping.SourceID != donor.ID || mapping.SourceGeneration != donor.Generation || mapping.SourceRevision != donor.Revision || mapping.TargetID != survivor.ID {
+					t.Fatal("incorrect native identity mapping", mapping, donor, survivor)
+				}
+			}
 			for _, name := range names {
 				want, err := reference.Snapshot(ctx, name)
 				if err != nil {

@@ -23,10 +23,13 @@ type nativeCombineIntent struct {
 	Receipt     NativeReceipt
 	Raw         []nativeCombineMetadata
 	Positions   []int
+	Origins     []nativeCombineOrigin
 	Spans       []nativeSpan
 	Directories []string
 	Ready       bool
 }
+
+type nativeCombineOrigin struct{ ID, Generation, Revision uint64 }
 
 type nativeCombinePiece struct {
 	Position int
@@ -176,10 +179,16 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 		return receipt, err
 	}
 	receipt = intent.Receipt
+	origins := make([]nativeCombineOrigin, receipt.Count)
+	for i, position := range intent.Positions {
+		origins[position] = intent.Origins[i]
+	}
 	for i, piece := range pieces {
 		if piece != nil {
 			receipt.Copied[i/8] |= 1 << uint(i%8)
 			receipt.CopiedCount++
+			origin := origins[i]
+			receipt.Mappings = append(receipt.Mappings, NativeMapping{Ordinal: i, SourceID: origin.ID, SourceGeneration: origin.Generation, SourceRevision: origin.Revision, TargetID: piece.Meta.ID, TargetGeneration: piece.Meta.Generation, TargetRevision: piece.Meta.Revision})
 		}
 	}
 	receipt.DeferredCount = receipt.Count - receipt.CopiedCount
@@ -221,8 +230,31 @@ func (s *Store) readNativeCombineIntent(identity string) (nativeCombineIntent, e
 	}
 	defer closer.Close()
 	var intent nativeCombineIntent
-	err = json.Unmarshal(value, &intent)
-	return intent, err
+	if err := json.Unmarshal(value, &intent); err != nil {
+		return intent, err
+	}
+	return intent, validateNativeCombineIntent(identity, intent)
+}
+
+func validateNativeCombineIntent(identity string, intent nativeCombineIntent) error {
+	id, names, err := intent.Request.Identity()
+	if err != nil || id != identity || intent.Receipt.Identity != identity || names != intent.Receipt.NamesSHA256 || intent.Receipt.Count != len(intent.Request.Names) || len(intent.Raw) != len(intent.Positions) || len(intent.Raw) != len(intent.Origins) {
+		return ErrFormat
+	}
+	if intent.Ready {
+		seen := make([]bool, intent.Receipt.Count)
+		for i, raw := range intent.Raw {
+			p := intent.Positions[i]
+			if p < 0 || p >= len(seen) || seen[p] {
+				return ErrFormat
+			}
+			seen[p] = true
+			if raw.ID != 0 && (raw.Name != intent.Request.Names[p] || raw.Generation == 0 || raw.Revision == 0 || intent.Origins[i].ID == 0 || intent.Origins[i].Generation == 0 || intent.Origins[i].Revision == 0) {
+				return ErrFormat
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) saveNativeCombineIntent(intent nativeCombineIntent) error {
@@ -291,7 +323,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if stream.Count != expected {
 		return errors.New("native combine stream differs from plan range")
 	}
-	intent.Raw, intent.Positions = make([]nativeCombineMetadata, expected), make([]int, expected)
+	intent.Raw, intent.Positions, intent.Origins = make([]nativeCombineMetadata, expected), make([]int, expected), make([]nativeCombineOrigin, expected)
 	if expected == 0 {
 		intent.Receipt.Digest, intent.Receipt.Bytes, err = stream.Finish()
 		if err != nil {
@@ -340,6 +372,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 			m.FileMigration = FileReclaimed
 		}
 		intent.Raw[i] = nativeCombineMetadata(m)
+		intent.Origins[i] = nativeCombineOrigin{record.Version.ID, record.Version.Generation, record.Version.Revision}
 		for _, kv := range record.Keys {
 			floatCodec = floatCodec || record.Continuation && newFloatGroup(kv.Key, kv.Value)
 			if err := tables.add(ctx, m, kv); err != nil {
@@ -362,6 +395,9 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 }
 
 func (s *Store) validateNativeCombineRecord(r TransferMetric) error {
+	if r.Version.ID == 0 || r.Version.Generation == 0 || r.Version.Revision == 0 || r.Version.Name != r.Config.Name {
+		return ErrFormat
+	}
 	if err := validate(r.Config); err != nil {
 		return err
 	}
