@@ -22,6 +22,7 @@ import (
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/ingestoracle"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
@@ -52,6 +53,9 @@ func counters() map[string]string {
 func run() error {
 	fixtures := flag.String("fixtures", "", "captured logical archive fixture JSON")
 	parent := flag.String("scratch", "", "existing private scratch root")
+	renderSamples := flag.Int("render-sample-names", 0, "Fetch oracle names; 0=all. Samples cover original histories across replicas")
+	cacheBytes := flag.Int64("cache-bytes", 32<<20, "private data cache bytes per store")
+	cacheShards := flag.Int("cache-shards", 0, "private data cache shards; 0=auto")
 	mode := flag.String("mode", "native", "native, legacy, or overlap")
 	repeat := flag.Int("repeat", 32, "explicit history replication under distinct names")
 	batch := flag.Int("batch", 128, "names per independent apply")
@@ -74,7 +78,7 @@ func run() error {
 		if e := os.MkdirAll(originals, 0700); e != nil {
 			return nil, e
 		}
-		return store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: func() time.Time { return time.Unix(*epoch, 0) }, CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}})
+		return store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: func() time.Time { return time.Unix(*epoch, 0) }, CacheSize: *cacheBytes, CacheShards: *cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}})
 	}
 	source, err := open("source")
 	if err != nil {
@@ -286,9 +290,30 @@ func run() error {
 	// just a logical rendering or sampled points. Overlap emits a logical-bit
 	// fingerprint for comparison with the baseline executable on the same input.
 	hash := sha256.New()
-	var keys, points int64
+	var keys, points, renderNames, renderArchives, renderPoints int64
+	selected := make(map[int]bool)
+	if *renderSamples > 0 && *renderSamples < len(allNames) {
+		for i := range *renderSamples {
+			selected[(i*(*repeat)/(*renderSamples))*len(originals)+i%len(originals)] = true
+		}
+	}
+	index := 0
 	for _, j := range jobs {
 		for _, want := range j.records {
+			if len(selected) == 0 || selected[index] {
+				snapshot, e := target.Snapshot(ctx, want.Config.Name)
+				if e != nil {
+					return e
+				}
+				a, p, e := ingestoracle.VerifyFetch(ctx, target, snapshot, *epoch)
+				if e != nil {
+					return e
+				}
+				renderNames++
+				renderArchives += a
+				renderPoints += p
+			}
+			index++
 			hash.Write([]byte(want.Config.Name))
 			hash.Write([]byte{0})
 			if *mode != "overlap" {
@@ -331,5 +356,5 @@ func run() error {
 	}
 	// Keep response identity independent of scheduling order.
 	stats := target.Stats()
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"foreground_control": control, "foreground_during_apply": foregroundLatency, "mode": *mode, "captured_histories": len(rows), "replication": *repeat, "names": len(allNames), "batch": *batch, "workers": *workers, "wire_bytes": wireBytes, "seconds": seconds, "MBps": float64(wireBytes) / seconds / 1e6, "output_sha256": hex.EncodeToString(hash.Sum(nil)), "equal_raw_keys": keys, "logical_point_bits": points, "mismatches": 0, "apply_before": applyBefore, "apply_after": applyAfter, "native_stats": target.NativeStats(), "ingest_l0_bytes": stats.IngestL0Bytes, "ingest_memtable_overlaps": stats.IngestMemtableOverlaps, "before": before, "after": after, "temporary_stores_removed_on_exit": true, "input_origin": "logical archives re-encoded by current codec, not native production layout"})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"render_checked_names": renderNames, "render_checked_archives": renderArchives, "render_checked_point_bits": renderPoints, "foreground_control": control, "foreground_during_apply": foregroundLatency, "mode": *mode, "captured_histories": len(rows), "replication": *repeat, "names": len(allNames), "batch": *batch, "workers": *workers, "wire_bytes": wireBytes, "seconds": seconds, "MBps": float64(wireBytes) / seconds / 1e6, "output_sha256": hex.EncodeToString(hash.Sum(nil)), "equal_raw_keys": keys, "logical_point_bits": points, "mismatches": 0, "apply_before": applyBefore, "apply_after": applyAfter, "native_stats": target.NativeStats(), "ingest_l0_bytes": stats.IngestL0Bytes, "ingest_memtable_overlaps": stats.IngestMemtableOverlaps, "before": before, "after": after, "temporary_stores_removed_on_exit": true, "input_origin": "logical archives re-encoded by current codec, not native production layout"})
 }

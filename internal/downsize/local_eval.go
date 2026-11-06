@@ -24,6 +24,7 @@ import (
 
 	"github.com/cockroachdb/pebble/vfs"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/ingestoracle"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
@@ -440,6 +441,7 @@ func BulkEvalMain(args []string) error {
 	}
 	fingerprint := sha256.New()
 	var archives, points, renderArchives, renderPoints, renderWindows int
+	var ingestRenderArchives, ingestRenderPoints int64
 	for _, name := range names {
 		want, err := baseline.Snapshot(ctx, name)
 		if err != nil {
@@ -462,6 +464,14 @@ func BulkEvalMain(args []string) error {
 		renderArchives += render.Archives
 		renderPoints += render.Points
 		renderWindows += render.Windows
+		for _, db := range []*store.Store{baseline, bulk} {
+			a, p, e := ingestoracle.VerifyFetch(ctx, db, got, *epoch)
+			if e != nil {
+				return e
+			}
+			ingestRenderArchives += a
+			ingestRenderPoints += p
+		}
 		fingerprint.Write([]byte(name))
 		fingerprint.Write([]byte{0})
 		for _, a := range got.Archives {
@@ -483,5 +493,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"render_checked_archives": ingestRenderArchives, "render_checked_point_bits": ingestRenderPoints, "output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }
