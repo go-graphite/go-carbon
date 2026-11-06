@@ -221,6 +221,10 @@ func TestTransferConvoyRealShape(t *testing.T) {
 	before = stagetime.Snapshot()
 	baseCount = count.Load()
 	statsBefore := target.TransferApplyStats()
+	beforeID, e := target.CatalogHighWatermark(ctx)
+	if e != nil {
+		t.Fatal(e)
+	}
 	at := time.Now()
 	var cpu *os.File
 	if prefix := os.Getenv("GO_CARBON_CONVOY_PROFILE"); prefix != "" {
@@ -289,11 +293,27 @@ func TestTransferConvoyRealShape(t *testing.T) {
 		t.Error(e)
 	}
 	sort.Float64s(latencies)
+	var publishedNames, publishedBytes int64
+	for _, group := range groups {
+		for _, r := range group {
+			m, e := target.Metadata(context.Background(), r.Config.Name)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if m.ID > beforeID {
+				publishedNames++
+				publishedBytes += store.TransferWireSize2([]store.TransferMetric{r}) - 44
+			}
+		}
+	}
 	output := map[string]any{"hotspot": hotspot, "fixture": "sparse 6000-point histories, 18000 minutes, two archives, time buckets, late corrections", "history_keys_per_name": len(template.Keys), "wire_bytes_per_name": wire, "batch_names": batch, "importers": imports, "persister_workers": workers, "distinct_stripes_per_hold_histogram": stripeCounts, "seconds": seconds, "persister_updates_per_second": float64(updates) / seconds, "persister_wait_seconds_per_second": wait / seconds, "import_MB_per_second": float64(wire) * float64(batch*imports) / 1e6 / seconds, "import_latency_p50_seconds": latencies[imports/2], "import_latency_max_seconds": latencies[imports-1], "baseline_updates_per_second": float64(baselineUpdates) / baselineSeconds, "baseline_wait_seconds_per_second": baselineWait / baselineSeconds, "apply_before": statsBefore, "apply_after": statsAfter}
 	var exactWire int64
 	for _, group := range groups {
 		exactWire += store.TransferWireSize2(group)
 	}
+	output["published_names"] = publishedNames
+	output["published_wire_record_bytes"] = publishedBytes
+	output["published_MB_per_second"] = float64(publishedBytes) / 1e6 / seconds
 	output["completed_imports"] = completed.Load()
 	output["completed_wire_bytes"] = completedBytes.Load()
 	output["completed_import_MB_per_second"] = float64(completedBytes.Load()) / 1e6 / seconds
