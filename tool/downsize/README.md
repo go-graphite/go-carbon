@@ -83,7 +83,12 @@ members. Set `BUCKYD_TOKEN` for authenticated inventories. Alternatively provide
 `inputs` with `source`, `path`, `format` (`lines`, `tsv`, `jsonl`) and optional
 `estimated_bytes`; file paths are relative to the specification. Legacy HTTP
 `buckyd` inventories remain readable. Inventories must be sorted, complete and
-reconciled with the writer cutover. An unchanged identity set on new hardware
+reconciled with the writer cutover. After cutover, a retained single-copy
+destination may already contain names assigned elsewhere by the old ring.
+The planner counts those placements in `summary.unowned`, but accepts them
+without `allow_unowned`: they are already at their sole desired owner and produce
+no transfer or deletion. Misplaced donor names still fail ownership validation.
+An unchanged identity set on new hardware
 needs no metric inventory: its whole-store checkpoints provide complete coverage.
 
 A new physical member retaining an old hash identity with unchanged hash settings
