@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +11,23 @@ import (
 
 	"github.com/cockroachdb/pebble/vfs"
 )
+
+func TestRetainTransferSlotsSparseAliases(t *testing.T) {
+	negativeZero := math.Copysign(0, -1)
+	// Fewer points than capacity can still alias; do not just truncate by count.
+	// The non-aliased old point must survive despite the wide timestamp span.
+	points := []Point{{Timestamp: 10, Value: 1}, {Timestamp: 20, Value: 2}, {Timestamp: 70, Value: negativeZero}, {Timestamp: 90, Value: math.Inf(1)}}
+	got := retainTransferSlots(points, Retention{Step: 10, Count: 6})
+	want := []Point{{Timestamp: 20, Value: 2}, {Timestamp: 70, Value: negativeZero}, {Timestamp: 90, Value: math.Inf(1)}}
+	if len(got) != len(want) {
+		t.Fatal(got)
+	}
+	for i, p := range want {
+		if got[i].Timestamp != p.Timestamp || math.Float64bits(got[i].Value) != math.Float64bits(p.Value) {
+			t.Fatalf("point %d changed: got=%+v want=%+v", i, got[i], p)
+		}
+	}
+}
 
 func TestTransferDurableAcrossUnsyncedForegroundCrash(t *testing.T) {
 	ctx := context.Background()

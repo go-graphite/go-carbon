@@ -19,19 +19,23 @@ func transferStore(t *testing.T, continuation, buckets bool, direct ...bool) *st
 }
 
 func transferStoreCached(t *testing.T, continuation, buckets bool, metadataBytes int64, direct ...bool) *store.Store {
+	return transferStoreCachedAt(t, continuation, buckets, metadataBytes, time.Unix(1000000, 0), direct...)
+}
+
+func transferStoreCachedAt(t *testing.T, continuation, buckets bool, metadataBytes int64, now time.Time, direct ...bool) *store.Store {
 	t.Helper()
 	root := t.TempDir()
 	source := filepath.Join(root, "originals")
 	if err := os.MkdirAll(source, 0750); err != nil {
 		t.Fatal(err)
 	}
-	options := store.Options{ExactBlocks: true, CacheSize: 1 << 20, MetadataCacheSize: metadataBytes, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return time.Unix(1000000, 0) }}
+	options := store.Options{ExactBlocks: true, CacheSize: 1 << 20, MetadataCacheSize: metadataBytes, MemTableSize: 1 << 20, SyncInterval: time.Hour, Now: func() time.Time { return now }}
 	if continuation {
 		options.Continuation = &whisperio.ContinuationCodec{DirectLateWrites: len(direct) == 0 || direct[0]}
 		options.IncrementalSource = source
 		options.TimeBuckets = buckets
 	}
-	s, err := store.Open(filepath.Join(root, "db"), options)
+	s, err := store.Open(filepath.Join(root, "pool-slow"), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +109,101 @@ func putTransferPoints(t *testing.T, s *store.Store, name string, points []store
 	}
 	if err := s.UpdateMany(ctx, name, points); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTransferMergeWrappedArchives(t *testing.T) {
+	for _, mode := range []struct {
+		name                  string
+		continuation, buckets bool
+	}{{"exact", false, false}, {"v6", true, false}, {"v7", true, true}} {
+		for _, cached := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/cached=%t", mode.name, cached), func(t *testing.T) {
+				ctx := context.Background()
+				source := transferStoreCachedAt(t, mode.continuation, mode.buckets, 0, time.Unix(999959, 0))
+				var budget int64
+				if cached {
+					budget = 8 << 20
+				}
+				target := transferStoreCachedAt(t, mode.continuation, mode.buckets, budget, time.Unix(1000079, 0))
+				config := store.MetricConfig{Name: "transfer.wrapped", Retentions: []store.Retention{{Step: 10, Count: 6}, {Step: 60, Count: 10}}, AggregationMethod: store.Sum}
+				for _, db := range []*store.Store{source, target} {
+					if _, err := db.Create(ctx, config); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var sourceFine, targetFine, sourceCoarse, targetCoarse []store.Point
+				for i := range 6 {
+					sourceFine = append(sourceFine, store.Point{Timestamp: 999900 + int64(i)*10, Value: float64(i)})
+					if i != 2 { // Preserve a non-aliased old point in an empty slot.
+						targetFine = append(targetFine, store.Point{Timestamp: 1000020 + int64(i)*10, Value: float64(100 + i)})
+					}
+				}
+				for i := range 10 {
+					sourceCoarse = append(sourceCoarse, store.Point{Timestamp: 999360 + int64(i)*60, Value: float64(i)})
+					if i != 4 {
+						targetCoarse = append(targetCoarse, store.Point{Timestamp: 999480 + int64(i)*60, Value: float64(1000 + i)})
+					}
+				}
+				for _, input := range []struct {
+					db     *store.Store
+					points []store.Point
+					age    int
+				}{{source, sourceFine, 60}, {target, targetFine, 60}, {source, sourceCoarse, 600}, {target, targetCoarse, 600}} {
+					if err := input.db.UpdateManyForArchive(ctx, config.Name, input.points, input.age); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := source.Snapshot(ctx, config.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				targetBefore, err := target.Snapshot(ctx, config.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				records, err := source.ExportTransfer(ctx, []string{config.Name})
+				if err != nil {
+					t.Fatal(err)
+				}
+				proofs, err := target.ImportTransfer(ctx, records)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := target.VerifyTransfer(ctx, proofs); err != nil {
+					t.Fatal(err)
+				}
+				want := before
+				want.Archives = []store.Archive{{Retention: config.Retentions[0], Points: []store.Point{{Timestamp: 999920, Value: 2}, {Timestamp: 1000020, Value: 100}, {Timestamp: 1000030, Value: 101}, {Timestamp: 1000050, Value: 103}, {Timestamp: 1000060, Value: 104}, {Timestamp: 1000070, Value: 105}}}, {Retention: config.Retentions[1]}}
+				// Compressed snapshots can expose an in-progress coarse rollup.
+				// Preserve the actual independent target archive, not input values.
+				targetValues := make(map[int64]float64)
+				for _, p := range targetBefore.Archives[1].Points {
+					targetValues[p.Timestamp] = p.Value
+				}
+				for i := range 10 {
+					timestamp := 999480 + int64(i)*60
+					value, present := targetValues[timestamp]
+					if i == 4 {
+						value = 6
+					} else if !present {
+						t.Fatalf("target fixture lacks coarse interval %d", timestamp)
+					}
+					want.Archives[1].Points = append(want.Archives[1].Points, store.Point{Timestamp: timestamp, Value: value})
+				}
+				got, err := target.Snapshot(ctx, config.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.EqualSnapshots(want, got); err != nil {
+					t.Fatal(err)
+				}
+				after, err := source.Snapshot(ctx, config.Name)
+				if err != nil || store.EqualSnapshots(before, after) != nil {
+					t.Fatal("merge changed source history", err)
+				}
+			})
+		}
 	}
 }
 
