@@ -3,6 +3,8 @@ package downsize
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
@@ -37,6 +39,9 @@ func measureCombineShape(ctx context.Context, donor, survivor *store.Store, name
 		a, err := donor.Snapshot(ctx, name)
 		if err != nil {
 			return nil, err
+		}
+		if !slices.Equal(a.Metadata.Retentions, b.Metadata.Retentions) || a.Metadata.AggregationMethod != b.Metadata.AggregationMethod || a.Metadata.XFilesFactor != b.Metadata.XFilesFactor {
+			return nil, fmt.Errorf("%w: paired archive policy for %s", store.ErrConflict, name)
 		}
 		result.PresentNames++
 		paired, after := false, true
