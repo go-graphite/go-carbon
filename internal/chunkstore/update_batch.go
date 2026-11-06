@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/cockroachdb/pebble"
+	"github.com/go-graphite/go-carbon/internal/lockset"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
 )
 
@@ -19,8 +20,9 @@ type MetricUpdate struct {
 // policy as UpdateMany. No caller may acknowledge any input until it returns.
 // Each metric keeps a small private index; combining their representations
 // avoids making every codec read and write search a group-sized index.
-// Stripes are taken in order; ordinary writers only hold one. Duplicate names
-// see preceding writes in the batch and advance their revision in input order.
+// Acquire the complete stripe set without sleeping on an incomplete set;
+// ordinary writers only hold one. Duplicate names see preceding writes in
+// the batch and advance their revision in input order.
 func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, maintenance *ContinuationMaintenance) error {
 	if err := s.fileOwnershipError(); err != nil {
 		return err
@@ -48,9 +50,7 @@ func (s *Store) UpdateBatch(ctx context.Context, updates []MetricUpdate, mainten
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	for _, stripe := range stripes {
-		s.metricMu[stripe].Lock()
-	}
+	lockset.Lock(s.metricMu[:], stripes)
 	for name := range names {
 		s.beginStateMutation(name)
 	}

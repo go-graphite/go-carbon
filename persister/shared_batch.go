@@ -9,6 +9,7 @@ import (
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/lockset"
 	"github.com/go-graphite/go-carbon/internal/stagetime"
 	"github.com/go-graphite/go-carbon/points"
 	"go.uber.org/zap"
@@ -58,9 +59,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	for _, stripe := range stripes {
-		p.storeMutex[stripe].Lock()
-	}
+	lockset.Lock(p.storeMutex[:], stripes)
 	unlock := func() {
 		for i := len(stripes) - 1; i >= 0; i-- {
 			p.storeMutex[stripes[i]].Unlock()

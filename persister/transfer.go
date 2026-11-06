@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/lockset"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -33,9 +34,7 @@ func (p *Whisper) FlushForTransfer(ctx context.Context, names []string) error {
 		}
 		slices.Sort(stripes)
 		stripes = slices.Compact(stripes)
-		for _, stripe := range stripes {
-			p.storeMutex[stripe].Lock()
-		}
+		lockset.Lock(p.storeMutex[:], stripes)
 		err := func() (result error) {
 			defer func() {
 				for i := len(stripes) - 1; i >= 0; i-- {
