@@ -37,22 +37,37 @@ with eligible work, token waiters, demand at the ceiling, and confirmed output
 near the installed token rate. CPU idle must exceed 25%, memory headroom 10%,
 disk idle time 30%, and GC CPU must remain below 10%.
 
-It decreases by 30% on CPU/memory/GC/device pressure, missing observations,
-insufficient disk space, write failures/stalls, excessive L0/debt growth, or
-interval read-p99 regression. Read p99 uses bounded doubling buckets and the
-best observed baseline (minimum 1 ms): the guard is `max(5 ms, 1.5 * baseline)`
-with a 100 ms absolute bound. It covers HTTP/gRPC requests recorded by
-carbonserver's existing request timing hook, independently of Prometheus.
-No completed reads means no read-latency observation, rather than a fabricated
-zero-latency baseline.
+CPU/GC/device pressure or missing observations reduce optional catch-up by 30%,
+while retaining at least the demand controller's smoothed steady need times
+its 1.03 margin. This protected minimum applies even when measured CPU/worker
+capacity estimates are lower. Only active/new write stalls, write failures,
+disk below max(1 GiB, 1%), valid memory headroom below 5%, or the L0 stop threshold
+may cut below steady demand, down to configured auto-min. High CPU use or slow
+reads alone must not starve writes needed to keep the cache steady.
 
-The hard envelope is at most 2 million updates/s, 10,000 per worker and 10,000
-per execution thread, refined using whole-process CPU per confirmed update and
-measured worker service time. Disk pressure takes the busiest visible device;
-this conservatively protects neighbours and stacked devices. Free space must
-exceed both 1 GiB and 1% of the filesystem. The configured automatic floor wins
-over this optional catch-up ceiling. The existing mandatory restart durability
-floor is independent and can also exceed it; do not configure an unsafe floor.
+Read p99 measures per-series storage fetches, excluding glob expansion,
+response assembly/network sends and separate point-cache waits. It works without
+Prometheus. Eight buckets per power of two bound quantization error to 12.5%.
+The reference is the median of quiet-write interval p99 samples over the last
+hour (at most one per minute, excluding the 30 seconds after a capacity increase).
+It can rise as well as fall; a single cheap interval cannot ratchet it down.
+The relative guard is `max(5 ms, 1.5 * reference)`, with no absolute 100 ms trip.
+No completed reads means no read-latency sample. A new pool discards the first
+histogram snapshot as history rather than treating it as a fresh interval.
+
+Read pressure holds increases by default. Within 30 seconds after an optional
+increase, it can undo that one probe if confirmed write rate rose by more than
+5% and read p99 rose 50% against both the pre-probe value and rolling reference.
+The protected steady minimum still applies, and that probe cannot trigger
+repeated cuts. This is a correlation guard, not proof of causation; a request
+mix change can still cause one bounded rollback.
+
+The runtime envelope is at most 2 million updates/s, 10,000 per worker and
+10,000 per execution thread, refined using whole-process CPU per confirmed
+update and measured worker service time, subject to the protected minimum above.
+Disk pressure takes the busiest visible device to protect neighbours and
+stacked devices. The existing mandatory restart durability floor remains
+independent and can also exceed the optional catch-up ceiling.
 
 Resource sampling and filesystem calls run outside the rate-controller lock.
 Reload discards samples from an obsolete configuration generation. Structural
@@ -97,14 +112,18 @@ owners must adopt it separately; no startup-capture/receiver code changed here.
 
 ## Observation and rollback
 
-Every changed admission window/ceiling and writer capacity/rate logs at INFO.
+Admission window/ceiling changes log at INFO. Writer rate logs require a 25%
+change relative to the last logged value. Rate and capacity logs each emit at
+most once per minute for a stable reason; reason transitions emit immediately.
+Metrics retain every actuator change, and structural reload retains log cooldowns.
 Metrics include:
 
 - `cache_recovery_admission_{window,ceiling,remaining}_bytes`
 - `cache_recovery_admission_blocked` and `cache_recovery_admission_rejections_total`
 - `persister_auto_capacity_updates_per_second`
 - `persister_auto_capacity_hard_ceiling_updates_per_second`
-- `persister_auto_capacity_read_p99_seconds` and `persister_update_token_waiters`
+- `persister_auto_capacity_read_p99_seconds` and `persister_auto_capacity_read_reference_seconds`
+- `persister_auto_capacity_minimum_updates_per_second` and `persister_update_token_waiters`
 - Existing `persister_auto_update_rate{,_target,_reason}` and adjustment counters
 
 Compare these with confirmed output, admission waits, backlog age/slope, read
@@ -118,3 +137,14 @@ keeps a 25% execution reserve, bounded debt and mandatory progress. Positive
 core settings retain the fixed/history policy. Continuous input-log replay reads
 frames on existing ordered partition workers; stream ordering and the 32-partition
 wire layout remain unchanged.
+
+## Ramp calibration
+
+With 96 workers the seed is 48,000 updates/s, or the protected minimum if higher.
+At 10% growth per ten seconds it reaches 66k at 40s, 72/75k at 50s, 80k at 60s,
+100k at 80s and at least 144k (3 times seed) at 120s, provided demand, token
+waiters, confirmed output and spare hardware persist. The test uses modeled
+CPU/service costs; those times are simulated, not a fleet throughput promise.
+The 2026-11-06 read-only canary cross-check confirmed operator/effective ceilings
+of 66k, 72k, 75k, 80k and 100k, with spare CPU/device capacity. Keep the modest
+seed and growth rate; a soft latency signal must not undo steady demand.

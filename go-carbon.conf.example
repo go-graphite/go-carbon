@@ -553,11 +553,16 @@ max-updates-per-second-auto-min = 1
 # fixed 40000 cap; this does not silently reinterpret a positive override.
 # Feedback grows 10% after two healthy 5s samples with eligible work, confirmed
 # throughput near the token limit, token waiters and idle CPU/disk. Read p99
-# regression, stalls, growing debt, memory/GC/CPU/disk pressure cut it by 30%.
+# regression holds growth; only a correlated post-increase regression undoes
+# that probe. CPU/GC/device pressure cuts optional catch-up by 30%. Steady
+# demand (need * 1.03) remains protected unless stalls, failures, disk full,
+# memory headroom below 5%, or L0 stop indicate hard pressure.
 # Hard bounds derive from workers, execution threads, measured CPU/update and
 # measured worker service time. The mandatory restart floor remains independent.
 # Blocked recovery admission counts as pressure immediately, even below 70%.
-# Values/reasons log at INFO; persister_auto_capacity_* and token-waiter metrics
+# Rate INFO logs require 25% change; each adjustment log is limited to once
+# per minute unless its reason changes. Metrics retain every adjustment.
+# persister_auto_capacity_* (including steady minimum/read reference) and token-waiter metrics
 # expose the actuator. All modes are reloadable; this setting needs a binary
 # that understands -1 (do not send it to an older daemon).
 max-updates-per-second-auto-max = -1
