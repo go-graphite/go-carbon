@@ -1,6 +1,7 @@
 package persister
 
 import (
+	"math"
 	"runtime"
 	"time"
 
@@ -25,12 +26,18 @@ type AutoCapacitySample struct {
 }
 
 type autoCapacityController struct {
-	limit, hardCeiling int
-	at                 time.Time
-	previous           AutoCapacitySample
-	baseline, p99      time.Duration
-	healthy            int
-	reason             string
+	limit, hardCeiling, minimum int
+	at                          time.Time
+	previous                    AutoCapacitySample
+	baseline, p99               time.Duration
+	reads                       capacityReadReference
+	increasedAt                 time.Time
+	probeUntil                  time.Time
+	probeLimit                  int
+	probeRate                   float64
+	probeP99                    time.Duration
+	healthy                     int
+	reason                      string
 }
 
 // SetAutoCapacity supplies local resource/latency observations before Start.
@@ -77,57 +84,97 @@ func (p *Whisper) capacityState(source func() AutoCapacitySample) AutoCapacitySa
 	return sample
 }
 
-func (c *autoCapacityController) step(now time.Time, s AutoCapacitySample, queue cache.WriteoutState, floor, workers, procs, applied int, waiting int64, demand float64) int {
+func (c *autoCapacityController) step(now time.Time, s AutoCapacitySample, queue cache.WriteoutState, floor, workers, procs, applied int, waiting int64, demand, need float64) int {
 	procs = max(1, procs)
+	floor = max(1, floor)
+	first := c.at.IsZero() || s.updates < c.previous.updates || s.failures < c.previous.failures || s.Stalls < c.previous.Stalls
+	// Only confirmed hard resource pressure may underfund steady demand.
+	// Busy CPUs and slow reads alone must not starve the cache's drain.
+	hardPressure := s.Stalled || !first && (s.Stalls > c.previous.Stalls || s.failures > c.previous.failures) ||
+		s.SpaceValid && s.FreeBytes < max(1<<30, s.DiskBytes/100) || s.Host.MemoryValid && s.Host.Memory < .05 || s.L0Stop > 0 && s.L0 >= s.L0Stop
+	minimum := floor
+	if !hardPressure {
+		minimum = max(minimum, int(math.Ceil(min(need, float64(int(^uint(0)>>1)/2)))))
+	}
+	c.minimum = minimum
 	// Hard safety envelope, refined by measured CPU/update and worker service
-	// time below. AIMD chooses an operating point inside it, not at this cap.
-	c.hardCeiling = max(floor, min(2_000_000, max(1, workers)*10000, procs*10000))
+	// time below. Required steady demand wins over optional capacity estimates,
+	// until actual hard pressure says the host cannot safely keep up.
+	c.hardCeiling = max(minimum, min(2_000_000, max(1, workers)*10000, procs*10000))
 	if c.limit == 0 {
 		c.limit = min(c.hardCeiling, max(floor, max(1, workers)*500))
 		c.reason = "initial"
 	}
-	c.limit = max(floor, min(c.limit, c.hardCeiling))
-	first := c.at.IsZero() || s.updates < c.previous.updates || s.failures < c.previous.failures || s.Stalls < c.previous.Stalls
+	c.limit = max(minimum, min(c.limit, c.hardCeiling))
 	dt := now.Sub(c.at).Seconds()
-	p99, reads := s.Reads.P99Since(c.previous.Reads)
-	c.p99 = p99
-	if reads > 0 && (c.baseline == 0 || p99 < c.baseline) {
-		c.baseline = max(time.Millisecond, p99)
-	}
-	readPressure := reads > 0 && (p99 > max(5*time.Millisecond, c.baseline*3/2) || p99 > 100*time.Millisecond)
 	if first || dt <= 0 {
+		// A new pool's first snapshot may contain old listener history. Begin
+		// with the next interval, rather than a lifetime read percentile.
+		c.p99 = 0
 		c.at, c.previous = now, s
 		return c.limit
 	}
+	p99, reads := s.Reads.P99Since(c.previous.Reads)
+	c.p99, c.baseline = p99, c.reads.value(now)
+	readPressure := reads > 0 && c.baseline > 0 && p99 > max(5*time.Millisecond, c.baseline*3/2)
 	count := s.updates - c.previous.updates
 	rate := float64(count) / dt
 	if count > 0 {
 		if cpu := s.Host.ProcessCPU - c.previous.Host.ProcessCPU; cpu > 0 {
-			c.hardCeiling = min(c.hardCeiling, max(floor, int(min(float64(c.hardCeiling), .75*float64(procs)*float64(count)/cpu))))
+			c.hardCeiling = min(c.hardCeiling, max(minimum, int(min(float64(c.hardCeiling), .75*float64(procs)*float64(count)/cpu))))
 		}
 		if seconds := s.writeSeconds - c.previous.writeSeconds; seconds > 0 {
-			c.hardCeiling = min(c.hardCeiling, max(floor, int(min(float64(c.hardCeiling), max(rate, .8*float64(max(1, workers))*float64(count)/seconds)))))
+			c.hardCeiling = min(c.hardCeiling, max(minimum, int(min(float64(c.hardCeiling), max(rate, .8*float64(max(1, workers))*float64(count)/seconds)))))
 		}
 	}
-	pressure := !s.Host.Valid || !s.Host.DiskValid || !s.SpaceValid || s.FreeBytes < max(1<<30, s.DiskBytes/100) || s.Host.Idle < .15 || s.Host.IOWait > .05 || s.Host.Memory < .05 || s.Host.GC > .25 || s.Host.DiskBusy > .85 || readPressure || s.Stalled || s.Stalls > c.previous.Stalls || s.failures > c.previous.failures || s.L0Stop > 0 && s.L0 >= s.L0Stop*3/4 || s.Debt > c.previous.Debt && s.Debt-c.previous.Debt > max(512<<20, c.previous.Debt/4)
+	resourcePressure := !s.Host.Valid || !s.Host.MemoryValid || !s.Host.DiskValid || !s.SpaceValid ||
+		s.Host.Idle < .15 || s.Host.IOWait > .05 || s.Host.GC > .25 || s.Host.DiskBusy > .85 ||
+		s.L0Stop > 0 && s.L0 >= s.L0Stop*3/4 || s.Debt > c.previous.Debt && s.Debt-c.previous.Debt > max(512<<20, c.previous.Debt/4)
+	if reads > 0 && !hardPressure && !resourcePressure && (c.increasedAt.IsZero() || now.Sub(c.increasedAt) >= capacityReadProbeWindow) {
+		c.reads.observe(now, p99)
+		c.baseline = c.reads.value(now)
+	}
 	switch {
-	case pressure:
+	case hardPressure:
 		c.limit = max(floor, int(float64(c.limit)*.7))
 		c.healthy = 0
-		c.reason = "pressure"
+		c.probeUntil = time.Time{}
+		c.reason = "hard pressure"
+	case resourcePressure:
+		c.limit = max(minimum, int(float64(c.limit)*.7))
+		c.healthy = 0
+		c.probeUntil = time.Time{}
+		c.reason = "resource pressure"
+	case readPressure:
+		c.healthy = 0
+		c.reason = "read hold"
+		// A slow interval alone only stops growth. Roll back one recent probe
+		// only if confirmed writes actually increased and latency rose versus
+		// both its pre-probe value and the rolling quiet-write reference.
+		if !c.probeUntil.IsZero() && !now.After(c.probeUntil) && c.probeP99 > 0 && rate > c.probeRate*1.05 && p99 > max(5*time.Millisecond, c.probeP99*3/2) {
+			c.limit = max(minimum, min(c.limit, c.probeLimit))
+			c.probeUntil = time.Time{}
+			c.reason = "read regression after increase"
+		}
 	case (queue.Eligible > 0 || queue.RecoveryBlocked) && waiting > 0 && demand >= float64(c.limit)*.95 && applied > 0 && rate >= float64(applied)*.8 && s.Host.Idle > .25 && s.Host.IOWait < .02 && s.Host.Memory > .10 && s.Host.GC < .10 && s.Host.DiskBusy < .70:
 		c.healthy++
 		c.reason = "observing"
 		if c.healthy >= 2 {
-			c.limit += max(1000, c.limit/10)
 			c.healthy = 0
-			c.reason = "token wait with idle hardware"
+			if next := min(c.hardCeiling, c.limit+max(1000, c.limit/10)); next > c.limit {
+				c.probeLimit, c.probeRate, c.probeP99 = c.limit, rate, p99
+				c.increasedAt, c.probeUntil = now, now.Add(capacityReadProbeWindow)
+				c.limit = next
+				c.reason = "token wait with idle hardware"
+			} else {
+				c.reason = "host ceiling"
+			}
 		}
 	default:
 		c.healthy = 0
 		c.reason = "hold"
 	}
-	c.limit = max(floor, min(c.limit, c.hardCeiling))
+	c.limit = max(minimum, min(c.limit, c.hardCeiling))
 	c.at, c.previous = now, s
 	return c.limit
 }
@@ -141,7 +188,7 @@ func (p *Whisper) capacityLimitLocked(s cache.WriteoutState) {
 	}
 	previous := a.capacity.limit
 	previousHard := a.capacity.hardCeiling
-	limit := a.capacity.step(time.Now(), a.capacitySample, s, a.floor, p.workersCount, min(runtime.NumCPU(), runtime.GOMAXPROCS(0)), a.applied, a.tokenWaiters.Load(), a.controller.target)
+	limit := a.capacity.step(time.Now(), a.capacitySample, s, a.floor, p.workersCount, min(runtime.NumCPU(), runtime.GOMAXPROCS(0)), a.applied, a.tokenWaiters.Load(), a.controller.target, a.controller.need*autoUpdateMargin)
 	if a.ordinary > limit {
 		a.ordinary = limit
 	}

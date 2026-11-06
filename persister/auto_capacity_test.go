@@ -51,7 +51,7 @@ func TestCapacityTokenDriverGrowsAndBacksOff(t *testing.T) {
 		p.SetWorkers(4)
 		p.SetMaxUpdatesPerSecond(-1)
 		p.SetAutoUpdateRate(func() cache.WriteoutState {
-			return cache.WriteoutState{Metrics: 1000000, Eligible: 1000000, Points: 10000000, MaxPoints: 20000000, MeanDelay: time.Second, MaxDelay: time.Second, RecoveryBlocked: true}
+			return cache.WriteoutState{Metrics: 1000, Eligible: 1000000, Points: 10000000, MaxPoints: 20000000, MeanDelay: time.Second, MaxDelay: time.Second, RecoveryBlocked: true}
 		}, 100, -1)
 		p.SetAutoCapacity(func() AutoCapacitySample {
 			s := healthyCapacity()
@@ -92,19 +92,23 @@ func TestAutoCapacityGrowsOnTokensThenBacksOff(t *testing.T) {
 	q := cache.WriteoutState{Eligible: 40_000_000, RecoveryBlocked: true}
 	c := autoCapacityController{limit: 40000} // retain the 40k operator ceiling on mode switch
 	now := time.Now()
-	rate := c.step(now, s, q, 1000, 96, 192, 40000, 81, 1e6)
+	rate := c.step(now, s, q, 1000, 96, 192, 40000, 81, 1e6, 0)
 	initial := rate
+	var reads hostcapacity.Latency
 	for i := 1; i <= 12; i++ {
+		for range 100 {
+			reads.Observe(time.Millisecond)
+		}
+		s.Reads = reads.Snapshot()
 		s.updates += uint64(rate * 5)
 		s.Host.ProcessCPU += float64(rate*5) * .0002
 		s.writeSeconds += float64(rate*5) * .0003
-		rate = c.step(now.Add(time.Duration(i)*5*time.Second), s, q, 1000, 96, 192, rate, 81, 1e6)
+		rate = c.step(now.Add(time.Duration(i)*5*time.Second), s, q, 1000, 96, 192, rate, 81, 1e6, 0)
 	}
 	peak := rate
 	if peak <= initial*15/10 {
 		t.Fatal("token-bound idle host stayed artificially capped", initial, peak)
 	}
-	var reads hostcapacity.Latency
 	for range 100 {
 		reads.Observe(time.Millisecond)
 	}
@@ -112,15 +116,15 @@ func TestAutoCapacityGrowsOnTokensThenBacksOff(t *testing.T) {
 	s.updates += uint64(rate * 5)
 	s.Host.ProcessCPU += float64(rate*5) * .0002
 	s.writeSeconds += float64(rate*5) * .0003
-	rate = c.step(now.Add(65*time.Second), s, q, 1000, 96, 192, rate, 81, 1e6)
+	rate = c.step(now.Add(65*time.Second), s, q, 1000, 96, 192, rate, 81, 1e6, 0)
 	for range 100 {
 		reads.Observe(50 * time.Millisecond)
 	}
 	s.Reads = reads.Snapshot()
 	s.updates += uint64(rate * 5)
 	before := rate
-	rate = c.step(now.Add(70*time.Second), s, q, 1000, 96, 192, rate, 81, 1e6)
-	if rate >= before || c.reason != "pressure" {
+	rate = c.step(now.Add(70*time.Second), s, q, 1000, 96, 192, rate, 81, 1e6, 0)
+	if rate >= before || c.reason != "read regression after increase" {
 		t.Fatal("read-p99 regression did not back off", before, rate, c.reason)
 	}
 	t.Logf("incident-shaped simulation: initial=%d/s healthy=%d/s read-pressure=%d/s", initial, peak, rate)
@@ -133,7 +137,7 @@ func TestAutoCapacityPressureAndNoDemand(t *testing.T) {
 			q := cache.WriteoutState{Eligible: 10000}
 			now := time.Now()
 			c := autoCapacityController{}
-			initial := c.step(now, s, q, 1, 80, 192, 40000, 81, 1e6)
+			initial := c.step(now, s, q, 1, 80, 192, 40000, 81, 1e6, 0)
 			waiting := int64(81)
 			switch reason {
 			case "stall":
@@ -158,7 +162,7 @@ func TestAutoCapacityPressureAndNoDemand(t *testing.T) {
 			rate := initial
 			for i := 1; i <= 4; i++ {
 				s.updates += uint64(rate * 5)
-				rate = c.step(now.Add(time.Duration(i)*5*time.Second), s, q, 1, 80, 192, rate, waiting, 1e6)
+				rate = c.step(now.Add(time.Duration(i)*5*time.Second), s, q, 1, 80, 192, rate, waiting, 1e6, 0)
 			}
 			if reason == "no demand" || reason == "no tokens" {
 				if rate != initial {
