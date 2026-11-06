@@ -36,6 +36,7 @@ type nativeCombinePiece struct {
 	Meta     nativeCombineMetadata
 	Old      nativeCombineMetadata
 	Class    NativeCombineClass
+	Deferred bool
 }
 
 type nativeCombinePrepared struct {
@@ -143,15 +144,17 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 			return receipt, err
 		}
 		for _, p := range prepared {
-			published, err := s.publishNativeCombineName(ctx, identity, p)
+			published, err := s.publishNativeCombineName(ctx, identity, &p)
 			if err != nil {
 				return receipt, err
 			}
 			if published {
 				piece := p.nativeCombinePiece
 				pieces[p.Position] = &piece
-				s.catalogChanged(p.Meta.Name)
-				s.invalidateReadCache()
+				if !p.Deferred {
+					s.catalogChanged(p.Meta.Name)
+					s.invalidateReadCache()
+				}
 				s.nativeCounters.combineCopiedBlocks.Add(uint64(p.Class.CopiedBlocks))
 				s.nativeCounters.combinePointBlocks.Add(uint64(p.Class.CombinedBlocks))
 				s.nativeCounters.combineMaterialized.Add(uint64(p.Class.MaterializedArchives))
@@ -194,7 +197,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 		origins[position] = intent.Origins[i]
 	}
 	for i, piece := range pieces {
-		if piece != nil {
+		if piece != nil && !piece.Deferred {
 			receipt.Copied[i/8] |= 1 << uint(i%8)
 			receipt.CopiedCount++
 			origin := origins[i]
@@ -541,7 +544,7 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 	return prepared, nil
 }
 
-func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p nativeCombinePrepared) (bool, error) {
+func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p *nativeCombinePrepared) (bool, error) {
 	encoded, err := s.encodeCatalog(Metadata(p.Meta))
 	if err != nil {
 		return false, err
@@ -574,6 +577,23 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	// A checkpoint/cache-only target is not an absent history. Preserve the
+	// phase1 creation fence, under the same creation lock, until its saved
+	// points have reached the catalog. The existing journal imports this
+	// exceptional absent name; present names still combine without a cache gate.
+	if p.Old.ID == 0 && s.pendingTransfer(p.Meta.Name) {
+		p.Deferred = true
+		data, err = json.Marshal(p.nativeCombinePiece)
+		if err != nil {
+			return false, err
+		}
+		if err := s.db.Set(nativeCombinePieceKey(identity, p.Position), data, pebble.NoSync); err != nil {
+			s.nativeWriteFailed(err)
+			return false, err
+		}
+		s.pendingSync.Store(true)
+		return true, nil
+	}
 	b := s.db.NewBatch()
 	defer b.Close()
 	for _, entry := range []struct{ key, value []byte }{{catalogKey(p.Meta.Name), encoded}, {revisionKey(Metadata(p.Meta)), revisionBytes(Metadata(p.Meta))}} {
@@ -605,7 +625,7 @@ func (s *Store) readNativeCombinePieces(intent nativeCombineIntent) ([]*nativeCo
 		if err := json.Unmarshal(it.Value(), &p); err != nil {
 			return nil, err
 		}
-		if p.Position < 0 || p.Position >= len(pieces) || p.Meta.ID == 0 || p.Meta.Name != intent.Request.Names[p.Position] || !bytes.Equal(it.Key(), nativeCombinePieceKey(intent.Receipt.Identity, p.Position)) {
+		if p.Position < 0 || p.Position >= len(pieces) || p.Meta.ID == 0 || p.Meta.Name != intent.Request.Names[p.Position] || p.Deferred && p.Old.ID != 0 || !bytes.Equal(it.Key(), nativeCombinePieceKey(intent.Receipt.Identity, p.Position)) {
 			return nil, ErrFormat
 		}
 		pieces[p.Position] = &p
@@ -622,7 +642,7 @@ func nativeCombineCleanup(b *pebble.Batch, intent nativeCombineIntent, pieces []
 		}
 		var keep [][]byte
 		for _, p := range pieces {
-			if p == nil {
+			if p == nil || p.Deferred {
 				continue
 			}
 			prefix := chunkPrefix(p.Meta.ID, p.Meta.Generation)
