@@ -27,6 +27,7 @@ type NativeRange struct {
 	Start, End                      int64
 	Names                           []string
 	Candidates                      []byte `json:",omitempty"`
+	Combine                         bool   `json:",omitempty"`
 }
 
 type NativeReceipt struct {
@@ -172,6 +173,9 @@ func (r NativeReceipt) Validate() error {
 // metric locks. IDs and hidden SSTs are prepared before the short creation lock.
 // Only names still absent at that atomic publication become visible.
 func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
+	if request.Combine {
+		return s.nativeCombineImport(ctx, request, input)
+	}
 	identity, namesHash, err := request.Identity()
 	if err != nil {
 		return receipt, err

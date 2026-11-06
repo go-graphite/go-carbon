@@ -581,6 +581,9 @@ func Open(dir string, options Options) (*Store, error) {
 	if err := s.recoverNative(); err != nil {
 		return nil, s.openFailure(db, fmt.Errorf("recover native bulk: %w", err))
 	}
+	if err := s.recoverNativeCombines(); err != nil {
+		return nil, s.openFailure(db, fmt.Errorf("recover native combine: %w", err))
+	}
 	if options.IngestFileStages {
 		if s.incrementalSource == "" || s.continuation == nil {
 			return nil, s.openFailure(db, errors.New("file stage ingestion requires incremental continuation migration"))
