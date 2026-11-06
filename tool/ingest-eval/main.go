@@ -78,7 +78,17 @@ func run() error {
 		if e := os.MkdirAll(originals, 0700); e != nil {
 			return nil, e
 		}
-		return store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: func() time.Time { return time.Unix(*epoch, 0) }, CacheSize: *cacheBytes, CacheShards: *cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}})
+		db, err := store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: func() time.Time { return time.Unix(*epoch, 0) }, CacheSize: *cacheBytes, CacheShards: *cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}})
+		if err != nil {
+			return nil, err
+		}
+		// Preserve the v9 format fence, but stop background rewrites before
+		// ingest so raw-layout equality measures the imported bytes alone.
+		if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "off", FloatCodec: true}); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return db, nil
 	}
 	source, err := open("source")
 	if err != nil {

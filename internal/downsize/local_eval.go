@@ -124,7 +124,17 @@ func BulkEvalMain(args []string) error {
 		if err := fs.MkdirAll(originals, 0700); err != nil {
 			return nil, err
 		}
-		return store.Open(filepath.Join(directory, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: cacheBytes, CacheShards: cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
+		db, err := store.Open(filepath.Join(directory, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: cacheBytes, CacheShards: cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
+		if err != nil {
+			return nil, err
+		}
+		// Preserve the v9 format fence, but stop background rewrites before
+		// ingest so raw-layout equality measures the imported bytes alone.
+		if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "off", FloatCodec: true}); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return db, nil
 	}
 	donor, err := open("donor")
 	if err != nil {
