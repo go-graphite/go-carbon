@@ -10,6 +10,7 @@ import (
 )
 
 type hostSample struct {
+	OldestUnpersistedAgeSeconds                                          *float64 `json:",omitempty"`
 	DiskFreeBytes, DiskBytes                                             uint64
 	StoragePhase                                                         string
 	CachePoints                                                          int64
@@ -24,7 +25,15 @@ type hostSample struct {
 	WriteErrors, Unlogged                                                uint64
 	WritePoints                                                          uint64
 	ForegroundMeasured                                                   bool
+	IngestPoints, IngestRelogged, IngestCycles                           uint64
+	IngestMeasured                                                       bool
 	ReadP99MS                                                            float64
+	ReadP99Rolling5mMS, ReadWindowSeconds                                float64
+	ReadRolling5mSamples                                                 int
+	ReadWindowReady                                                      bool
+	ReadP99Rolling1mMS, Read1mWindowSeconds, ProcessUptimeSeconds        float64
+	ReadRolling1mSamples                                                 int
+	ReadDiagnostics                                                      []string `json:",omitempty"`
 	ReadsBlocked, Offline                                                bool
 }
 type storageSample struct {
@@ -68,6 +77,7 @@ type hostLimit struct {
 	latencyStart              float64
 	latencyHigh               int
 	hard                      string
+	maxSpeed                  *maxSpeedHostState
 	foregroundReady           bool
 }
 type tuner struct {
@@ -79,6 +89,7 @@ type tuner struct {
 	backlog        backlogPolicy
 	collecting     bool
 	collectingDebt bool
+	maxSpeed       *maxSpeedGovernor
 }
 
 func newTuner(hosts []string, maximum capacity, auto bool, mbps, p99 float64) *tuner {
@@ -131,7 +142,7 @@ func (t *tuner) admit(ctx context.Context, source, target string) (func(), error
 		t.mu.Lock()
 		a, b := t.hosts[source], t.hosts[target]
 		for _, h := range []*hostLimit{a, b} {
-			if h.hard != "" || h.baseline == nil || h.debtBaseline == nil || h.latencyBaseline == nil || t.collectingDebt {
+			if t.maxSpeed == nil && (h.hard != "" || h.baseline == nil || h.debtBaseline == nil || h.latencyBaseline == nil || t.collectingDebt) {
 				t.mu.Unlock()
 				return nil, fmt.Errorf("copy admission unavailable: hard=%q; pre-copy backlog baseline required", h.hard)
 			}
@@ -268,6 +279,9 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	h := t.hosts[host]
+	if t.maxSpeed != nil {
+		return t.observeMaxSpeedLocked(host, sample, store)
+	}
 	readLimit := t.readP99
 	if h.readBaseline > 0 {
 		relative := max(2, h.readBaseline*1.5)
@@ -409,6 +423,13 @@ func (t *tuner) backoff(host string) {
 	defer t.mu.Unlock()
 	h := t.hosts[host]
 	if h == nil {
+		return
+	}
+	if t.maxSpeed != nil {
+		if h.Streams > 0 {
+			h.Streams = max(1, h.Streams/2)
+		}
+		h.healthy = 0
 		return
 	}
 	h.Streams = max(0, h.Streams/2)

@@ -30,25 +30,36 @@ type task struct {
 	Phase            string
 	Bytes            int64
 }
+type integritySkip struct {
+	Source, Target, Stream string
+	Start, End             int64
+	Name, Reason, At       string
+}
 type journal struct {
-	preserveRows bool // native handoff must preserve unknown fields from newer controllers
-	operation    string
-	lock         *os.File
-	path         string
-	sinceCompact int
-	file         *os.File
-	tasks        map[string]task
-	plan         string
-	admission    *admissionState
-	absent       map[string]absentSourceSkip
+	maxSpeed                bool
+	maxSpeedDecisionSHA     string
+	maxSpeedDecisionHistory []string
+	integritySkips          []integritySkip
+	preserveRows            bool // native handoff must preserve unknown fields from newer controllers
+	operation               string
+	lock                    *os.File
+	path                    string
+	sinceCompact            int
+	file                    *os.File
+	tasks                   map[string]task
+	plan                    string
+	admission               *admissionState
+	absent                  map[string]absentSourceSkip
 }
 
 type journalRow struct {
-	Operation           string
-	Plan                string
-	Task                task
-	Admission           *admissionState   `json:",omitempty"`
-	SkippedAbsentSource *absentSourceSkip `json:",omitempty"`
+	MaxSpeedDecisionSHA256 string         `json:",omitempty"`
+	SkippedIntegrity       *integritySkip `json:",omitempty"`
+	Operation              string
+	Plan                   string
+	Task                   task
+	Admission              *admissionState   `json:",omitempty"`
+	SkippedAbsentSource    *absentSourceSkip `json:",omitempty"`
 }
 
 func taskKey(t task) string { return fmt.Sprintf("%s:%d:%d", t.Stream, t.Start, t.End) }
@@ -94,6 +105,26 @@ func openJournal(path, plan string) (*journal, error) {
 		if err := json.Unmarshal(line, &row); err != nil {
 			return fail(err)
 		}
+		// Other campaign controllers have additional policy/audit fields. Keep
+		// their exact original JSON rows rather than silently compacting them away.
+		var rawFields map[string]json.RawMessage
+		if err := json.Unmarshal(line, &rawFields); err != nil {
+			return fail(err)
+		}
+		for key := range rawFields {
+			switch key {
+			case "Operation", "Plan", "Task", "Admission", "SkippedAbsentSource", "MaxSpeedDecisionSHA256", "SkippedIntegrity":
+			default:
+				j.preserveRows = true
+			}
+		}
+		if row.MaxSpeedDecisionSHA256 != "" {
+			j.recordMaxSpeedDecision(row.MaxSpeedDecisionSHA256)
+		}
+		if row.SkippedIntegrity != nil {
+			j.integritySkips = append(j.integritySkips, *row.SkippedIntegrity)
+		}
+
 		if len(row.Operation) != 64 {
 			return fail(errors.New("invalid checkpoint operation"))
 		}
@@ -173,6 +204,13 @@ func (j *journal) appendRow(row journalRow) error {
 	if row.Admission != nil {
 		j.admission = row.Admission
 	}
+	if row.MaxSpeedDecisionSHA256 != "" {
+		j.recordMaxSpeedDecision(row.MaxSpeedDecisionSHA256)
+	}
+	if row.SkippedIntegrity != nil {
+		j.integritySkips = append(j.integritySkips, *row.SkippedIntegrity)
+	}
+
 	j.sinceCompact++
 	if j.sinceCompact >= 256 && !j.preserveRows {
 		return j.compact()
@@ -200,12 +238,32 @@ func syncDirectory(path string) error {
 }
 func (j *journal) close() { _ = j.file.Close(); _ = j.lock.Close() }
 func (j *journal) compact() error {
+	if j.preserveRows {
+		j.sinceCompact = 0
+		return j.file.Sync()
+	}
+
 	temporary, err := os.OpenFile(j.path+".next", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
 	}
 	encoder := json.NewEncoder(temporary)
 	err = encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, Admission: j.admission})
+	if err == nil {
+		for _, sha := range j.maxSpeedDecisionHistory {
+			if err = encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, MaxSpeedDecisionSHA256: sha}); err != nil {
+				break
+			}
+		}
+	}
+	if err == nil {
+		for i := range j.integritySkips {
+			if err = encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, SkippedIntegrity: &j.integritySkips[i]}); err != nil {
+				break
+			}
+		}
+	}
+
 	if err == nil {
 		for _, t := range j.tasks {
 			if err = encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, Task: t}); err != nil {
@@ -244,4 +302,12 @@ func (j *journal) compact() error {
 	j.file = next
 	j.sinceCompact = 0
 	return nil
+}
+
+func (j *journal) recordMaxSpeedDecision(sha string) {
+	if j.maxSpeedDecisionSHA == sha {
+		return
+	}
+	j.maxSpeedDecisionHistory = append(j.maxSpeedDecisionHistory, sha)
+	j.maxSpeedDecisionSHA = sha
 }
