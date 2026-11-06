@@ -931,7 +931,7 @@ FilesLoop:
 		case "input":
 			// A stopping instance still appends to its tail; input opens only
 			// after the tail is complete and replayed (see loadInputTails).
-			if recovery.IsTail(file.Name()) && handoff.Locked(path.Join(dumpDir, file.Name())) {
+			if recovery.IsTail(file.Name()) && (app.startupInput != nil || handoff.Locked(path.Join(dumpDir, file.Name()))) {
 				continue FilesLoop
 			}
 			fileWithSortPrefix = fmt.Sprintf("%s_%s:%s", r[2], "2", file.Name())

@@ -46,74 +46,77 @@ database, and releases its supervisor. The successor takes the listening and
 accepted sockets immediately, before opening storage or validating the pending
 checkpoint. Its handlers restore decoder state and encode complete legacy
 records into connection-local batches, partitioned by metric hash. Each partition
-has an independent file, a bounded submission queue and one appender goroutine.
-The appender coalesces ready batches and publishes a complete-record byte frontier
-only after `write(2)` returns. Readers use atomics and `ReadAt`; they never acquire
-an appender lock. New connections follow the same path. Files are synced every
-second and at seal, and their directory entries are synced before capture starts.
+has one append owner and an independent FIFO. Appenders coalesce submissions,
+write independently checksummed zstd frames, and publish complete-frame byte
+frontiers atomically. Replay uses independent `ReadAt` calls and decoders; no
+producer mutex protects a reader or any file syscall. Directory entries are
+synced before accepting data; active files are synced once per second, on rotation,
+and before handing descriptors over. Independent final syncs run concurrently.
 
-Storage opening, checkpoint verification, and file-list/index loading run while
-capture drains input. Reads start after ordinary checkpoint/index validation.
-Recovery first applies the immutable predecessor tail, then decodes capture
-partitions in parallel. One metric always remains in one partition, preserving
-its recorded correction order, and claims its checkpoint history before applying
-tail corrections. Live sinks open only after all capture readers finish. This
-retains saved-history → predecessor-tail → capture → continuous-log → live order,
-including same-timestamp corrections.
+Storage and checkpoint validation run while receivers capture. `Start` attaches
+background replay and returns without detaching receivers. A partition reader
+replays to its applied frontier and submits a promotion through that partition's
+FIFO. The append owner verifies the frontier and begins applying new frames
+directly. Every point remains durably queued first. A denied cache reservation
+returns that partition to capture, while its reader waits; sockets keep draining.
+Same-metric records never bypass the partition, including across promotion,
+capacity pressure, and subsequent epochs with a different partition count.
 
-Capacity derives from GOMAXPROCS, Linux MemAvailable, the host/cgroup and Go memory
-limits, and available disk space. Up to 64 appenders/readers overlap CPU and I/O;
-reader/coalescing buffers scale with available memory. Separate bounded recovery
-headroom lets a full restored cache coexist with tail replay. Replay starts with
-a CPU-derived rate reservation and grows when runtime CPU metrics show idle
-capacity. The chosen sizes are logged as `startup capture capacity selected` and
-exported as `startup_capture_*` metrics.
+With a validated checkpoint, ordering is saved history, predecessor raw tail,
+predecessor continuous journal, older capture epochs, and current capture. Older
+epoch partitions replay concurrently, with a join between epochs and FIFO segment
+order within each partition. An ambiguous extra generation uses ordinary ordered
+recovery. Captured input continues while a single-generation fallback restores
+old cache/WAL history. Tags, other receiver protocols and mirrored-store paths
+retain their existing eligibility rules.
 
-Capture seals when readers approach their frontiers. It also seals on a duration,
-disk-space or recovery-capacity bound, logs ERROR, and sets
-`startup_capture_fallback = 1`. Duration adapts to measured write rate and disk
-budget with an absolute 120-second ceiling; spool size uses at most one eighth of
-initial free disk and never more than 128 GiB, plus bounded in-flight flushes.
-The fallback retains inherited descriptors, pauses input, and drains the finite
-spool before opening live sinks. It can backpressure relays, as ordinary ordered
-recovery does, but it cannot grow a spool indefinitely waiting for cache space.
-Files and socket handoff state remain available until the final flush has been
-replayed; decoder leftovers and partial frames retain existing semantics.
+Capacity uses the shared `internal/hostcapacity` sampler: Linux MemAvailable,
+cgroup remaining bytes, Go memory-limit remaining bytes and a physical reserve.
+The shared cache admission implementation reserves up to one quarter of current
+available memory per sample, prices observed bytes per point and distinct metric
+headers, and publishes denied admission as automatic writeout pressure. Explicit
+configured point/byte ceilings remain authoritative. Capture owns no second cache
+budget. Shards/readers are the next power of two above twice GOMAXPROCS, reduced
+for memory and disk safety. Initial decompression and coalescing arenas scale with
+available memory, within 64 KiB–4 MiB and 64 KiB–2 MiB bounds respectively.
 
-The source tail and capture partitions remain owned by pending recovery until
-all recovered points are persisted, including points captured before storage opened. With a valid
-checkpoint, the order is saved history, tail, newer continuous input-log replay,
-then live input. This preserves corrections if the successor crashes after
-accepting newer logged values. After a crash tears the final binary record,
-recovery keeps its complete point prefix and warns about the unfinished end;
-other structural decoding errors still fail startup. A failed startup retains
-the ordinary tail and all capture files for the next recovery; no new source format or handoff protocol is needed. This
-works when the predecessor supports the existing version 2 input-only offer.
+The spool budget is one quarter of (free disk + retained source bytes), resampled
+each second. Segment size scales with that budget. Catch-up duration is a measured
+ETA from backlog divided by replay-minus-capture rate, without an absolute deadline.
+A nonpositive margin logs ERROR and sets `startup_capture_continued=1`; intake
+continues durably. Only actual disk safety pressure or an I/O error may stop it.
+A disk safety stop logs ERROR, sets the fallback/paused metrics and reports expected
+pause duration (-1 when no defensible estimate exists). Stop can release its own
+disk quota fence instead of deadlocking behind an already-paused appender.
 
-Capture uses local disk space proportional to input received while storage and
-recovery catch up, rather than a RAM buffer or relay queue proportional to the
-cache. Its sustained write and replay rates must exceed the offered rate. A
-disk write/sync error stops capture and fails startup. Process crashes retain
-complete appended records; bytes still in socket/decoder/encoding buffers have
-the usual TCP delivery limitations below, and power loss has the one-second
-sync window. No application-level acknowledgement is introduced.
+Cache batch identities retain the earliest source reference in each stream,
+through pop, requeue, merging and confirmation. The finite checkpoint tracks its
+own claimed history, rather than every future captured point. Older checkpoint
+and journal sources gate current partition retirement. Files retire only as a
+confirmed contiguous prefix, with a directory sync between removals. This prevents
+an older correction reappearing after a newer source was removed. Shutdown during
+capture preserves the existing sources instead of publishing a newer checkpoint
+before an unreplayed suffix; input continues through store teardown and socket
+handover.
+
+Epoch files have names ending in `.capture-epoch-<epoch>.<partition>.<sequence>.tail.bin`
+and contain independent GCS2 frames. Ordinary recovery recognizes this format and
+recovers complete frames before a torn final write. **Recovery/rollback must use a
+binary containing the GCS2 reader while these files remain; e3c4fa4d cannot read
+them.** The socket handoff protocol itself remains version 2. Process-crash recovery
+protects completed appends; unread kernel/decoder buffers retain TCP's usual
+limitations. TCP ACK is not an application durability acknowledgement. Power-loss
+exposure is the periodic sync window and any outstanding filesystem sync.
 
 `input capture active before storage and checkpoint` marks intake readiness.
-`startup input capture sealed` reports captured points/bytes, replayed
-points, fallback status and capture duration. The following `input tail loaded` reports
-only the remaining suffix. Add prefix and suffix when checking recovered counts;
-add predecessor tail points and successor captured points for the input total.
-`restart_input_unavailable_seconds` includes both the initial gap to capture
-readiness and the final capture-to-live pause. The restart log also reports
-`input_capture_switch_seconds`, so the second pause is not hidden by early
-intake readiness. During startup `/metrics` skips store collection if the lifecycle lock is busy,
-reports `migration_collection_skipped = 1`, and continues exporting capture
-telemetry. `/debug/pprof` remains independent of the lifecycle lock.
+`input tail loaded` reports each finite predecessor/older source. Capture totals,
+raw bytes, retained bytes, live partitions, admission pressure, spool budget,
+convergence ETA and measured capture/replay rates remain available as metrics.
+`/metrics` skips busy lifecycle/control snapshots and increments the single
+`migration_metrics_skipped_total` counter from mutex-watch; `/debug/pprof` remains
+independent. There is no final capture-to-live socket pause.
 
-Snapshotting decoder state at that switch still scales with
-connection state; it does not wait for unrelated cache history.
-
-The brief final switch, and the existing mirrored-store handoff path, use RAM
+The existing mirrored-store and ordinary non-capture handoff paths use RAM
 read-ahead. It retains at most 8 MiB per connection plus a 64 KiB read block. A
 full buffer applies TCP backpressure; it never drops bytes. Memory grows with
 actual queued bytes, independently of packet sizes. At 280 connections the

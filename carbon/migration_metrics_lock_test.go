@@ -79,7 +79,7 @@ func TestMigrationMetricsScrapeDuringStartup(t *testing.T) {
 	}()
 	select {
 	case <-done:
-		if response.Code != 200 || !strings.Contains(response.Body.String(), "migration_collection_skipped 1\n") || !strings.Contains(response.Body.String(), "startup_capture_bytes 123\n") {
+		if response.Code != 200 || !strings.Contains(response.Body.String(), "migration_metrics_skipped_total 1\n") || !strings.Contains(response.Body.String(), "startup_capture_bytes 123\n") {
 			t.Fatal(response.Body.String())
 		}
 	case <-time.After(time.Second):

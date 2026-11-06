@@ -15,6 +15,10 @@ import (
 // capture segment, so preserve those sources and hand over the sockets directly.
 func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 	s := app.startupInput
+	if app.MetricStore != nil {
+		app.MetricStore.StopCompactionPacing()
+	}
+	<-app.stopStoreBackground()
 	s.pauseReplay()
 	app.stopPendingRecovery()
 	app.resolveSuccessor()
@@ -33,6 +37,7 @@ func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 	} else {
 		h.stop("capture queue stop without an input-capable successor")
 	}
+	h.stop("capture handoff complete")
 	if err := s.close(); err != nil {
 		return err
 	}

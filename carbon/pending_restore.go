@@ -111,6 +111,7 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	loadedDone := make(chan struct{})
 	app.storeRestoreLoaded = loadedDone
 	captureInput := app.startupInput
+	restoreRate := app.Config.Dump.RestorePerSecond
 	inputReady := make(chan struct{})
 	app.pendingInputReady = inputReady
 	go func() {
@@ -129,7 +130,7 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 				return
 			}
 		}
-		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
+		if err := core.RecoverPending(stop, restoreRate); err != nil {
 			logger.Warn("pending recovery stopped", zap.Error(err))
 			return
 		}

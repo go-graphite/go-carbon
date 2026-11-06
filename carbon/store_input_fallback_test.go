@@ -568,7 +568,13 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 				captured, _ = strconv.ParseInt(m[1], 10, 64)
 				prefix, _ = strconv.ParseInt(m[2], 10, 64)
 			}
-			if tailFor >= 0 && (tailPoints < 0 || tailPoints+captured != loaded+prefix || tailLost != 0) {
+			if capture := next.startupCaptureState.Load(); capture != nil && capture.replayStarted.Load() {
+				// The predecessor tail is finite; the new epoch stays open.
+				// The point/archive oracle above checks all accepted live data.
+				if tailFor >= 0 && (tailPoints != loaded || tailLost != 0) {
+					t.Errorf("predecessor tail wrote %d, loaded %d, lost %d", tailPoints, loaded, tailLost)
+				}
+			} else if tailFor >= 0 && (tailPoints < 0 || tailPoints+captured != loaded+prefix || tailLost != 0) {
 				t.Errorf("tail wrote %d points, capture added %d (%d lost), successor loaded %d + %d", tailPoints, captured, tailLost, prefix, loaded)
 			}
 			t.Logf("%s; accepted by stopping instance %d, by successor %d; input gap %v, input tail %.3f s (%d points); client reconnects %d, groups dropped %d",

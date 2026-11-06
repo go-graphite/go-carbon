@@ -805,7 +805,10 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	values.compact.appendPoints(p.Data)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
 
-	if recovered {
+	// Independently owned sources carry their own confirmation references.
+	// Continuously adding them to the finite checkpoint would prevent its
+	// retirement forever. Saved history is already tracked by claimForWrite.
+	if recovered && source == nil {
 		if r := c.pending.Load(); r != nil {
 			before := values.extraMemory()
 			r.track(shard.itemIdentity(values))

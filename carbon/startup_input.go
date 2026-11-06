@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -44,11 +46,22 @@ func (app *App) startStartupInput() error {
 	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
 		return nil
 	}
-	existing, err := filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
+	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {
 		return err
 	}
-	_ = existing
+	entries, scanErr := os.ReadDir(c.Dump.Path)
+	if scanErr != nil {
+		return scanErr
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		generation := strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, recovery.CompactPrefix) || strings.HasPrefix(name, recovery.BlocksPrefix) || strings.HasPrefix(name, "input.") || strings.HasPrefix(name, recovery.CompactInputPrefix)
+		if generation && name != manifest.Cache.Name && name != manifest.WAL.Name && !recovery.IsGenerationTail(name, manifest.WAL.Name) {
+			zapwriter.Logger("app").Error("startup capture requires a single ordered recovery generation; using ordinary recovery", zap.String("filename", name))
+			return nil
+		}
+	}
 	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
 	policy.log()
 	if policy.available < 64<<20 || policy.spoolBytes < 64<<20 {
@@ -97,7 +110,7 @@ func (app *App) startStartupInput() error {
 		return err
 	}
 	spool.receiver = r
-	spool.startMonitor(spool.policy.limit, spool.policy.spoolBytes)
+	spool.startMonitor(spool.policy.spoolBytes)
 	app.startupCaptureState.Store(spool)
 	app.startupInput = spool
 	app.Receivers = []*NamedReceiver{{Name: "tcp", Receiver: r}}
@@ -113,7 +126,8 @@ func (app *App) finishStartupInput(core *cache.Cache) error {
 	if s == nil {
 		return nil
 	}
-	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, canRetire: func() bool { return !core.HasPendingRecovery() }}
+	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
+	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
 	s.startReplay(sink, func() error {
 		// Older epochs precede the current stream, including after a crash during
 		// partially completed startup. Current files stay exclusively locked.
@@ -139,39 +153,162 @@ func (app *App) finishStartupInput(core *cache.Cache) error {
 				return false
 			}
 		}
-		admit := func(p *points.Points) {
-			for !core.HasRecoveryCapacity(len(p.Data)) {
-				if cancelled() {
-					return
+		tail := s.legacy.current.Load()
+		add := func(source *cache.RecoverySource) func(*points.Points) {
+			return func(p *points.Points) {
+				for !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
+					if cancelled() {
+						return
+					}
+					time.Sleep(time.Millisecond)
 				}
-				time.Sleep(time.Millisecond)
-			}
-			if !cancelled() {
-				core.AddRecovered(p)
+				if !cancelled() {
+					core.AddRecoveredFrom(p, source)
+				}
 			}
 		}
-		for _, path := range paths {
-			if cancelled() {
-				return errors.New("startup tail replay stopped")
+		replayLog := func() error {
+			if s.historyLog.Load() != nil {
+				return nil
 			}
+			seg := &startupSegment{source: s.legacy.stream.Next()}
+			tail.next.Store(seg)
+			tail = seg
+			s.historyLog.Store(seg)
+			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+			seg.sealed.Store(true)
+			seg.replayed.Store(true)
+			return err
+		}
+		openSegment := func(path string) (*startupSegment, error) {
 			if path == s.path {
-				_, err = replayInputTailReader(io.NewSectionReader(s.file, 0, s.legacy.size.Load()), min(s.policy.shards, runtime.GOMAXPROCS(0)), admit)
-				if err == nil {
-					s.legacy.offset.Store(s.legacy.size.Load())
-				}
-			} else if recovery.IsCaptureSegment(filepath.Base(path)) {
-				_, err = recovery.ReadCaptureFile(path, admit)
+				seg := s.legacy.current.Load()
+				seg.source = s.legacy.stream.Next()
+				return seg, nil
+			}
+			f, e := os.OpenFile(path, os.O_RDWR, 0600)
+			if e != nil {
+				return nil, e
+			}
+			unlock, e := handoff.LockExclusive(path)
+			if e != nil {
+				f.Close()
+				return nil, e
+			}
+			info, e := f.Stat()
+			if e != nil {
+				f.Close()
+				unlock()
+				return nil, e
+			}
+			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.Next()}
+			seg.size.Store(info.Size())
+			s.size.Add(info.Size())
+			tail.next.Store(seg)
+			tail = seg
+			return seg, nil
+		}
+		replaySegment := func(seg *startupSegment, framed bool) error {
+			reader := startupStoppedReader{reader: io.NewSectionReader(seg.file, 0, seg.size.Load()), stop: s.replayStop}
+			started := time.Now()
+			var loaded int
+			var e error
+			if framed {
+				worker := &startupShard{owner: s}
+				loaded, e = recovery.ReadCaptureFrames(reader, func(raw []byte, n int) error {
+					cost, e := captureMetricBytes(raw)
+					if e != nil {
+						return e
+					}
+					for !core.HasRecoveryCapacityBatch(n, cost) {
+						if cancelled() {
+							return errStartupReplayStopped
+						}
+						time.Sleep(time.Millisecond)
+					}
+					return worker.apply(raw, seg.source, sink)
+				})
 			} else {
-				_, err = replayInputTail(path, min(s.policy.shards, runtime.GOMAXPROCS(0)), admit)
+				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
 			}
-			if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
-				return err
+			if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, io.ErrUnexpectedEOF) {
+				return e
+			}
+			if seg.path == s.path {
+				s.legacy.offset.Store(seg.size.Load())
+			}
+			seg.sealed.Store(true)
+			seg.replayed.Store(true)
+			zapwriter.Logger("app").Info("input tail loaded", zap.String("filename", seg.path), zap.Int("points", loaded), zap.Duration("runtime", time.Since(started)), zap.Bool("input_capturing", true))
+			return nil
+		}
+		for i := 0; i < len(paths); {
+			if cancelled() {
+				return errStartupReplayStopped
+			}
+			if !recovery.IsCaptureSegment(filepath.Base(paths[i])) {
+				seg, e := openSegment(paths[i])
+				if e != nil {
+					return e
+				}
+				if e = replaySegment(seg, false); e != nil {
+					return e
+				}
+				i++
+				continue
+			}
+			if e := replayLog(); e != nil {
+				return e
+			}
+			// Epoch first, partition second, segment sequence last. Readers
+			// overlap partitions only, joining before the next epoch begins.
+			epochKey := func(path string) string {
+				prefix, suffix, _ := strings.Cut(path, ".capture-epoch-")
+				epoch, _, _ := strings.Cut(suffix, ".")
+				return prefix + ".capture-epoch-" + epoch
+			}
+			epoch := epochKey(paths[i])
+			groups := make(map[string][]*startupSegment)
+			for i < len(paths) && recovery.IsCaptureSegment(filepath.Base(paths[i])) && epochKey(paths[i]) == epoch {
+				seg, e := openSegment(paths[i])
+				if e != nil {
+					return e
+				}
+				_, suffix, _ := strings.Cut(paths[i], ".capture-epoch-")
+				fields := strings.Split(suffix, ".")
+				groups[fields[1]] = append(groups[fields[1]], seg)
+				i++
+			}
+			jobs := make(chan []*startupSegment, len(groups))
+			for _, segments := range groups {
+				jobs <- segments
+			}
+			close(jobs)
+			failures := make(chan error, len(groups))
+			var wg sync.WaitGroup
+			for range min(len(groups), max(1, runtime.GOMAXPROCS(0))) {
+				wg.Go(func() {
+					for segments := range jobs {
+						for _, seg := range segments {
+							if e := replaySegment(seg, true); e != nil {
+								failures <- e
+								break
+							}
+						}
+					}
+				})
+			}
+			wg.Wait()
+			close(failures)
+			for e := range failures {
+				return e
 			}
 		}
+
 		if cancelled() {
-			return errors.New("startup tail replay stopped")
+			return errStartupReplayStopped
 		}
-		return app.replayInputLogStopped(core, s.replayStop)
+		return replayLog()
 
 	})
 	zapwriter.Logger("app").Info("startup input replay running without pausing receivers", zap.Int("partitions", len(s.shards)))
@@ -182,5 +319,21 @@ func closeTCPHandoff(h *tcp.Handoff) {
 	_ = h.Listener.Close()
 	for _, conn := range h.Conns {
 		handoff.CloseInputConn(conn.File, len(conn.Leftover), zapwriter.Logger("app"), "inherited_start_failed")
+	}
+}
+
+var errStartupReplayStopped = errors.New("startup input replay stopped")
+
+type startupStoppedReader struct {
+	reader io.Reader
+	stop   <-chan struct{}
+}
+
+func (r startupStoppedReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.stop:
+		return 0, errStartupReplayStopped
+	default:
+		return r.reader.Read(p)
 	}
 }

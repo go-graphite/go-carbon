@@ -73,7 +73,7 @@ func visitCapture(s *startupInput, visit func(*points.Points)) error {
 
 type testAdmission struct{ allowed atomic.Bool }
 
-func (a *testAdmission) HasRecoveryCapacity(int) bool { return a.allowed.Load() }
+func (a *testAdmission) HasRecoveryCapacityBatch(int, int64) bool { return a.allowed.Load() }
 func awaitCapture(t testing.TB, condition func() bool) {
 	t.Helper()
 	end := time.Now().Add(10 * time.Second)
@@ -182,9 +182,10 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	perClient := (rate*seconds + clients - 1) / clients
 	total := perClient * clients
 	s, address := captureFixture(t)
-	s.startMonitor(time.Hour, 1<<40)
+	s.startMonitor(1 << 40)
 	core := cache.New()
 	core.SetMaxSize(limit)
+	core.SetRecoveryMemory(func() (uint64, bool) { return 4 << 30, true })
 	keys := make([]string, 0, clients*slots+1000)
 	for i := range 1000 {
 		name := fmt.Sprintf("restored.%d", i)
@@ -411,13 +412,12 @@ func TestStartupCaptureReplayMargin(t *testing.T) {
 	wg.Wait()
 	seed := s.points.Load()
 	core := cache.New()
-	core.SetMaxSize(1000000)
+	core.SetMaxSize(0)
+	core.SetRecoveryMemory(func() (uint64, bool) { return uint64(s.policy.available), true })
 	core.AddRecovered(&points.Points{Metric: "restored.full", Data: make([]points.Point, 1000000)})
-	admission := &testAdmission{}
-	admission.allowed.Store(true)
 	start := time.Now().Add(100 * time.Millisecond)
 	before := mutexWaitSeconds()
-	s.startReplay(&startupSink{admission: admission, add: core.AddRecoveredFrom, canRetire: func() bool { return false }}, func() error { time.Sleep(time.Until(start)); return nil })
+	s.startReplay(&startupSink{admission: core, add: core.AddRecoveredFrom, canRetire: func() bool { return false }}, func() error { time.Sleep(time.Until(start)); return nil })
 	for worker := range writers {
 		wg.Go(func() {
 			for seq := 0; seq < rate/writers; seq += batch {
@@ -496,5 +496,101 @@ func TestStartupCaptureRawBandwidth(t *testing.T) {
 	}
 	if count != s.points.Load() {
 		t.Fatal(count, s.points.Load())
+	}
+}
+
+func TestStartupCaptureRepeatedEpochsPreserveOrder(t *testing.T) {
+	defer zapwriter.Test()()
+	path := filepath.Join(t.TempDir(), "input.1.2.tail.bin")
+	if err := os.WriteFile(path, points.OnePoint("same.metric", 0, 1).AppendBinary(nil), 0600); err != nil {
+		t.Fatal(err)
+	}
+	p := chooseStartupPolicy(1, 128<<20, 1<<30)
+	p.shards = 2
+	p.segmentBytes = 64
+	old, err := openStartupInputWithPolicy(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < 20; i++ {
+		if err := old.shards[0].Write(points.OnePoint("same.metric", float64(i), 1).AppendBinary(nil), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := old.close(); err != nil {
+		t.Fatal(err)
+	}
+	p.shards = 4
+	next, err := openStartupInputWithPolicy(path, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.close()
+	for i := 20; i < 40; i++ {
+		if err := next.shards[0].Write(points.OnePoint("same.metric", float64(i), 1).AppendBinary(nil), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	core := cache.New()
+	app := New("")
+	app.Config = NewConfig()
+	app.startupInput = next
+	if err := app.finishStartupInput(core); err != nil {
+		t.Fatal(err)
+	}
+	awaitCapture(t, func() bool { return next.replayedPoints.Load() == 20 })
+	got := core.Get("same.metric")
+	if len(got) != 40 {
+		t.Fatal(len(got))
+	}
+	for i, d := range got {
+		if d.Value != float64(i) || d.Timestamp != 1 {
+			t.Fatal("epoch correction order", i, d)
+		}
+	}
+	// An older history file can contain a persisted correction and a still
+	// unconfirmed metric. Hold every newer prefix until the whole history retires.
+	next.reclaim()
+	paths, _ := filepath.Glob(path + ".capture-*.tail.bin")
+	before := len(paths)
+	batch, _ := core.PopNotConfirmed("same.metric")
+	core.Confirm(batch)
+	next.reclaim()
+	paths, _ = filepath.Glob(path + ".capture-*.tail.bin")
+	if len(paths) >= before {
+		t.Fatal("confirmed history did not retire", len(paths), before)
+	}
+	if next.legacy.first.Load() != nil {
+		t.Fatal("history prefix not retired")
+	}
+	for i := range next.shards {
+		if next.shards[i].first.Load() != next.shards[i].current.Load() {
+			t.Fatal("partition prefix not retired")
+		}
+	}
+}
+
+func TestStartupCaptureDiskSafetyDoesNotDeadlockStop(t *testing.T) {
+	defer zapwriter.Test()()
+	s, _ := captureFixture(t)
+	denied := &testAdmission{}
+	s.startReplay(&startupSink{admission: denied, add: func(*points.Points, *cache.RecoverySource) {}, canRetire: func() bool { return false }}, func() error { return nil })
+	// Force a genuine safety-budget crossing without filling the physical disk.
+	s.startMonitor(1)
+	written := make(chan error, 1)
+	go func() { written <- s.shards[0].Write(points.OnePoint("disk.safety", 1, 1).AppendBinary(nil), 1) }()
+	awaitCapture(t, func() bool { return s.paused.Load() })
+	stopped := make(chan struct{})
+	go func() { s.pauseReplay(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stop fenced behind the disk quota it must release")
+	}
+	if err := <-written; err == nil {
+		t.Fatal("disk safety stop acknowledged unwritten input")
+	}
+	if s.points.Load() != 0 || !s.fallback.Load() {
+		t.Fatal("disk safety accounting")
 	}
 }

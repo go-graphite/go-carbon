@@ -44,6 +44,13 @@ func (r recoverySourceRefs) each(visit func(*RecoverySource)) {
 		visit(s)
 	}
 }
+
+// AddCapturedFrom keeps the normal batching clock for an owner already at
+// its live frontier. Its record is already durable; shared admission has
+// reserved capacity, so applying live drop quotas again would lose that record.
+func (c *Cache) AddCapturedFrom(p *points.Points, source *RecoverySource) {
+	c.addWithRestore(p, false, true, false, nil, source)
+}
 func (s *Shard) trackSource(p *points.Points, source *RecoverySource) {
 	if source == nil {
 		return
@@ -52,17 +59,18 @@ func (s *Shard) trackSource(p *points.Points, source *RecoverySource) {
 		s.recoverySources = make(map[*points.Points]recoverySourceRefs)
 	}
 	refs := s.recoverySources[p]
-	if refs.first == nil {
+	switch {
+	case refs.first == nil:
 		refs.first = source
 		source.pending.Add(1)
-	} else if refs.first.stream == source.stream {
+	case refs.first.stream == source.stream:
 		if refs.first.sequence <= source.sequence {
 			return
 		}
 		refs.first.pending.Add(-1)
 		refs.first = source
 		source.pending.Add(1)
-	} else {
+	default:
 		for i, old := range refs.rest {
 			if old.stream == source.stream {
 				if old.sequence <= source.sequence {

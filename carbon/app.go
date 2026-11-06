@@ -885,7 +885,7 @@ func (app *App) Start() (err error) {
 	app.beginRestart()
 	app.inputTailOffsets = nil
 	app.startupCapturedPoints = 0
-	app.startupCaptureState.Store(nil)
+	app.startupCaptureState.Store(app.startupInput)
 	app.startupInputPauseAt = time.Time{}
 	if err = app.startStartupInput(); err != nil {
 		return err

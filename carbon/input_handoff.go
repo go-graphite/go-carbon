@@ -152,6 +152,8 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		h.closed = time.Now()
 		moved, err := h.capture.receiver.Detach()
 		if err != nil {
+			h.capture.receiver.Stop()
+			_ = h.capture.close()
 			return nil, err
 		}
 		in := &handoff.Input{Receivers: []handoff.InputReceiver{{Name: "tcp", Listener: moved.Listener}}}

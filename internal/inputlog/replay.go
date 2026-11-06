@@ -40,6 +40,11 @@ type replayFrame struct {
 // frame that fails verification is skipped and counted, with the rest of its
 // stream in that segment; an I/O error stops replay.
 func (l *Log) Replay(apply func(*points.Points)) (ReplayStats, error) {
+	return l.ReplayStopped(apply, nil)
+}
+
+// ReplayStopped joins all partition workers before returning on cancellation.
+func (l *Log) ReplayStopped(apply func(*points.Points), stop <-chan struct{}) (ReplayStats, error) {
 	phasecpu.Set(phasecpu.Restore)
 	defer phasecpu.Set(phasecpu.Other)
 	started := time.Now()
@@ -79,7 +84,14 @@ func (l *Log) Replay(apply func(*points.Points)) (ReplayStats, error) {
 		})
 	}
 	var readErr error
+frames:
 	for i, f := range slices.Concat(l.prefix, l.pending) {
+		select {
+		case <-stop:
+			readErr = errors.New("input log replay stopped")
+			break frames
+		default:
+		}
 		replayed := i >= len(l.prefix)
 		if !replayed && f.h.codec != codecStream {
 			continue
@@ -95,7 +107,12 @@ func (l *Log) Replay(apply func(*points.Points)) (ReplayStats, error) {
 		} else {
 			stats.DictionaryFrames++
 		}
-		queues[int(f.h.partition)%workers] <- replayFrame{payload: payload, h: f.h, seq: f.seg.seq, apply: replayed}
+		select {
+		case queues[int(f.h.partition)%workers] <- replayFrame{payload: payload, h: f.h, seq: f.seg.seq, apply: replayed}:
+		case <-stop:
+			readErr = errors.New("input log replay stopped")
+			break frames
+		}
 	}
 	for _, q := range queues {
 		close(q)

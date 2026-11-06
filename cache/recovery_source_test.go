@@ -1,8 +1,9 @@
 package cache
 
 import (
-	"github.com/go-graphite/go-carbon/points"
 	"testing"
+
+	"github.com/go-graphite/go-carbon/points"
 )
 
 func TestRecoverySourceTracksMergedAndInFlightBatches(t *testing.T) {
@@ -37,5 +38,40 @@ func TestRecoverySourceTracksMergedAndInFlightBatches(t *testing.T) {
 	c.Pop("metric")
 	if b.Pending() != 0 {
 		t.Fatal("discarded batch retained source")
+	}
+}
+
+func TestCapturedStreamDoesNotPinFiniteCheckpoint(t *testing.T) {
+	c := New()
+	if err := c.AttachPendingRecovery(pendingFixture(t)); err != nil {
+		t.Fatal(err)
+	}
+	var stream RecoveryStream
+	source := stream.Next()
+	c.AddRecoveredFrom(points.OnePoint("metric", 9, 1), source)
+	c.AddCapturedFrom(points.OnePoint("fresh", 10, 1), source)
+	if err := c.RecoverPending(make(chan struct{}), 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"metric", "other"} {
+		p, ok := c.PopNotConfirmed(name)
+		if !ok {
+			t.Fatal(name)
+		}
+		c.Confirm(p)
+	}
+	if c.PendingOutstanding() != 0 {
+		t.Fatal("ongoing capture pinned old checkpoint", c.PendingOutstanding())
+	}
+	if err := c.FinishPendingRecovery(); err != nil {
+		t.Fatal(err)
+	}
+	if c.HasPendingRecovery() || source.Pending() != 1 {
+		t.Fatal("independent authority lost")
+	}
+	p, _ := c.PopNotConfirmed("fresh")
+	c.Confirm(p)
+	if source.Pending() != 0 {
+		t.Fatal(source.Pending())
 	}
 }

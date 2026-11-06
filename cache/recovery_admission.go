@@ -119,20 +119,6 @@ func (c *Cache) refreshRecoveryMemory(a *recoveryAdmission, now time.Time) {
 }
 
 func (c *Cache) admitRecovery(a *recoveryAdmission, name string, count int) bool {
-	now := time.Now()
-	c.refreshRecoveryMemory(a, now)
-	now = time.Now()
-	l := a.limits.Load()
-	allowed := false
-	defer func() { c.recordRecoveryAdmission(allowed) }()
-	if count < 0 || l == nil || now.Sub(l.at) > 2*recoveryMemoryInterval {
-		return false
-	}
-	s := c.settings.Load().(*cacheSettings)
-	upper := c.approxSize() + shardCount*sizeSlackFor(0)
-	if s.maxSize > 0 && upper+int64(count) > s.maxSize && c.Size()+int64(count) > s.maxSize {
-		return false
-	}
 	// Existing series need point capacity, not another item/name allocation on
 	// every one-point batch. Only check the active map: treating an in-flight or
 	// pending-only item as new is conservative and avoids scanning recovery state.
@@ -146,6 +132,35 @@ func (c *Cache) admitRecovery(a *recoveryAdmission, name string, count int) bool
 	if !exists {
 		overhead = int64(len(name)) + 1024
 	}
+	return c.admitRecoveryBytes(a, count, overhead)
+}
+
+// HasRecoveryCapacityBatch reserves a complete capture frame atomically. The
+// caller supplies a conservative total of distinct name/header allocations;
+// points, physical memory, hard settings and blocked pressure use the same
+// policy as named admission. No capture-specific budget or sampler is created.
+func (c *Cache) HasRecoveryCapacityBatch(count int, metricBytes int64) bool {
+	if a := c.recoveryAdmission.Load(); a != nil {
+		return c.admitRecoveryBytes(a, count, metricBytes)
+	}
+	return c.HasRecoveryCapacity(count)
+}
+func (c *Cache) admitRecoveryBytes(a *recoveryAdmission, count int, overhead int64) bool {
+	now := time.Now()
+	c.refreshRecoveryMemory(a, now)
+	now = time.Now()
+	l := a.limits.Load()
+	allowed := false
+	defer func() { c.recordRecoveryAdmission(allowed) }()
+	if count < 0 || overhead < 0 || l == nil || now.Sub(l.at) > 2*recoveryMemoryInterval {
+		return false
+	}
+	s := c.settings.Load().(*cacheSettings)
+	upper := c.approxSize() + shardCount*sizeSlackFor(0)
+	if s.maxSize > 0 && upper+int64(count) > s.maxSize && c.Size()+int64(count) > s.maxSize {
+		return false
+	}
+
 	if int64(count) > (math.MaxInt64-overhead)/l.bytesPerPoint {
 		return false
 	}

@@ -73,6 +73,27 @@ func ReadCaptureFileBorrowed(path string, visit func([]byte, []points.Point)) (i
 		return 0, err
 	}
 	defer f.Close()
+	return ReadCaptureReaderBorrowed(f, visit)
+}
+func ReadCaptureReader(reader io.Reader, visit func(*points.Points)) (int, error) {
+	return ReadCaptureReaderBorrowed(reader, func(name []byte, data []points.Point) {
+		visit(&points.Points{Metric: string(name), Data: append([]points.Point(nil), data...)})
+	})
+}
+func ReadCaptureReaderBorrowed(reader io.Reader, visit func([]byte, []points.Point)) (int, error) {
+	return ReadCaptureFrames(reader, func(raw []byte, n int) error {
+		actual := 0
+		err := points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) { actual += len(data); visit(name, data) })
+		if err == nil && actual != n {
+			return fmt.Errorf("capture frame point count: got %d want %d", actual, n)
+		}
+		return err
+	})
+}
+
+// ReadCaptureFrames lends complete, checksum-verified frames until visit returns.
+// A torn final frame is never delivered. Each caller owns its decoder and reader.
+func ReadCaptureFrames(reader io.Reader, visit func([]byte, int) error) (int, error) {
 	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(maxCaptureRaw))
 	if err != nil {
 		return 0, err
@@ -82,8 +103,8 @@ func ReadCaptureFileBorrowed(path string, visit func([]byte, []points.Point)) (i
 	var frame, raw []byte
 	count := 0
 	for {
-		_, err := io.ReadFull(f, header[:])
-		if err == io.EOF {
+		_, err := io.ReadFull(reader, header[:])
+		if errors.Is(err, io.EOF) {
 			return count, nil
 		}
 		if err != nil {
@@ -99,7 +120,7 @@ func ReadCaptureFileBorrowed(path string, visit func([]byte, []points.Point)) (i
 			frame = frame[:size]
 		}
 		copy(frame, header[:])
-		if _, err = io.ReadFull(f, frame[CaptureHeaderSize:]); err != nil {
+		if _, err = io.ReadFull(reader, frame[CaptureHeaderSize:]); err != nil {
 			return count, err
 		}
 		var n int
@@ -107,13 +128,8 @@ func ReadCaptureFileBorrowed(path string, visit func([]byte, []points.Point)) (i
 		if err != nil {
 			return count, err
 		}
-		actual := 0
-		err = points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) { actual += len(data); visit(name, data) })
-		if err != nil {
+		if err = visit(raw, n); err != nil {
 			return count, err
-		}
-		if actual != n {
-			return count, fmt.Errorf("capture frame point count: got %d want %d", actual, n)
 		}
 		count += n
 	}

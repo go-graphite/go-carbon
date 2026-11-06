@@ -66,11 +66,13 @@ type startupAppend struct {
 
 // RecoveryAdmission is deliberately structural: adaptive-caps owns allocation
 // policy and blocked-pressure publication. Capture only asks for a batch grant.
-type captureAdmission interface{ HasRecoveryCapacity(int) bool }
+type captureAdmission interface{ HasRecoveryCapacityBatch(int, int64) bool }
 type startupSink struct {
-	admission captureAdmission
-	add       func(*points.Points, *cache.RecoverySource)
-	canRetire func() bool
+	admission   captureAdmission
+	add         func(*points.Points, *cache.RecoverySource)
+	liveAdd     func(*points.Points, *cache.RecoverySource)
+	canRetire   func() bool
+	syncHistory func() error
 }
 type startupInput struct {
 	file                                                                *os.File
@@ -83,22 +85,25 @@ type startupInput struct {
 	observe                                                             func(*points.Points)
 	started                                                             time.Time
 	stop, done, sealed                                                  chan struct{}
-	catching, fallback, paused                                          atomic.Bool
+	catching, fallback, paused, continued                               atomic.Bool
 	writeRate, replayRate, idleCPUs, effectiveLimit, effectiveBytes     atomic.Int64
 	pauseExpected                                                       atomic.Int64
 	pressure                                                            chan struct{}
 	inherited                                                           *tcp.Handoff
 	sealErr                                                             error
 	sealedAt                                                            time.Time
-	monitored                                                           bool
+	monitored                                                           atomic.Bool
 	syncWG                                                              sync.WaitGroup
 	syncing                                                             atomic.Bool
 	closeOnce                                                           sync.Once
+	stopOnce                                                            sync.Once
 	closeErr                                                            error
 	sink                                                                atomic.Pointer[startupSink]
 	replayStop, replayDone, legacyDone                                  chan struct{}
 	replayOnce                                                          sync.Once
 	replayStarted                                                       atomic.Bool
+	historyReady                                                        atomic.Bool
+	historyLog                                                          atomic.Pointer[startupSegment]
 	epoch                                                               int64
 }
 
@@ -107,7 +112,7 @@ func openStartupInput(path string) (*startupInput, error) {
 }
 func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startupInput, err error) {
 	s := &startupInput{path: path, policy: p, started: time.Now(), stop: make(chan struct{}), done: make(chan struct{}), sealed: make(chan struct{}), pressure: make(chan struct{}, 1), replayStop: make(chan struct{}), replayDone: make(chan struct{}), legacyDone: make(chan struct{}), epoch: time.Now().UnixNano()}
-	s.replayRate.Store(p.replayRate)
+
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
@@ -319,8 +324,12 @@ func (s *startupShard) appendLoop() {
 					}
 					if s.live.Load() {
 						sink := s.owner.sink.Load()
-						if sink != nil && sink.admission.HasRecoveryCapacity(count) {
-							err = s.apply(buf, cur.source, sink)
+						if sink != nil && s.admit(sink, buf, count) {
+							liveSink := *sink
+							if sink.liveAdd != nil {
+								liveSink.add = sink.liveAdd
+							}
+							err = s.apply(buf, cur.source, &liveSink)
 							if err == nil {
 								s.commit(cur, cur.size.Load(), count, int64(n))
 							}
@@ -340,6 +349,28 @@ func (s *startupShard) appendLoop() {
 	cur := s.current.Load()
 	cur.sealed.Store(true)
 	s.fail(cur.file.Sync())
+}
+
+// One reservation covers the complete frame, including conservative name
+// ownership for distinct metrics; failed admission never enters the cache.
+func captureMetricBytes(raw []byte) (int64, error) {
+	names := make(map[string]struct{})
+	var cost int64
+	err := points.ReadBinaryBytesBorrowed(raw, func(name []byte, _ []points.Point) {
+		if _, ok := names[string(name)]; !ok {
+			names[string(name)] = struct{}{}
+			cost += int64(len(name)) + 1024
+		}
+	})
+	return cost, err
+}
+func (s *startupShard) admit(sink *startupSink, raw []byte, count int) bool {
+	cost, err := captureMetricBytes(raw)
+	if err != nil {
+		s.fail(err)
+		return false
+	}
+	return sink.admission.HasRecoveryCapacityBatch(count, cost)
 }
 func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *startupSink) error {
 	if s.names == nil {
@@ -361,14 +392,7 @@ func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *sta
 		sink.add(&p, source)
 	})
 }
-func replayCaptureRaw(raw []byte, add func(*points.Points)) error {
-	// Names must own storage if retained by cache. The existing borrowed parser
-	// handles exact value bits and all legacy multi-point record shapes.
-	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
-		p := points.Points{Metric: string(name), Data: data}
-		add(&p)
-	})
-}
+
 func (s *startupShard) commit(seg *startupSegment, end int64, count int, physical int64) {
 	s.applied.Store(&startupPosition{seg, end})
 	s.offset.Add(physical)
@@ -385,11 +409,11 @@ func (s *startupInput) requestFallback() {
 	}
 }
 func (s *startupInput) diskDanger(n int64) bool {
-	if !s.monitored {
+	if !s.monitored.Load() {
 		return false
 	}
 	limit := s.effectiveBytes.Load()
-	return limit > 0 && s.size.Load()-s.retiredBytes.Load()+n > limit
+	return s.size.Load()-s.retiredBytes.Load()+n > max(0, limit)
 }
 func (s *startupInput) notePause() {
 	if s.paused.CompareAndSwap(false, true) {
@@ -402,8 +426,8 @@ func (s *startupInput) notePause() {
 // No duration or cache-capacity event stops capture. A measured negative
 // convergence margin reports continued capture; only a disk safety reserve or
 // an I/O failure can backpressure sockets.
-func (s *startupInput) startMonitor(_ time.Duration, maxBytes int64) {
-	s.monitored = true
+func (s *startupInput) startMonitor(maxBytes int64) {
+	s.monitored.Store(true)
 	s.effectiveBytes.Store(maxBytes)
 	go func() {
 		defer close(s.done)
@@ -425,12 +449,23 @@ func (s *startupInput) startMonitor(_ time.Duration, maxBytes int64) {
 				elapsed := now.Sub(at).Seconds()
 				raw, points, replay := s.rawBytes.Load(), s.points.Load(), s.replayedPoints.Load()
 				s.writeRate.Store(int64(float64(raw-previousBytes) / elapsed))
+				s.replayRate.Store(int64(float64(replay-previousReplay) / elapsed))
 				margin := float64((replay-previousReplay)-(points-previousPoints)) / elapsed
-				eta := int64(-1)
-				if margin > 0 {
-					eta = int64(float64(max(0, points-replay)) / margin * float64(time.Second))
+				backlog := max(0, points-replay)
+				eta := captureTimeLimit(backlog, int64(margin))
+				if backlog == 0 {
+					eta = 0
+				} else if eta < 0 {
+					eta = -time.Second
 				}
-				s.effectiveLimit.Store(eta)
+				s.effectiveLimit.Store(int64(eta))
+				continuing := s.replayStarted.Load() && backlog > 0 && margin <= 0
+				if continuing && s.continued.CompareAndSwap(false, true) {
+					zapwriter.Logger("app").Error("startup replay has no convergence margin; continuing durable capture without pausing input", zap.Int64("backlog_points", backlog), zap.Int64("spool_budget_bytes", s.effectiveBytes.Load()), zap.Float64("net_replay_points_per_second", margin))
+				} else if !continuing {
+					s.continued.Store(false)
+				}
+
 				previousBytes, previousPoints, previousReplay, at = raw, points, replay, now
 				metrics.Read(cpu)
 				idle := max(0, (cpu[0].Value.Float64()-idleBefore)/elapsed)
@@ -444,9 +479,11 @@ func (s *startupInput) startMonitor(_ time.Duration, maxBytes int64) {
 				if s.syncing.CompareAndSwap(false, true) {
 					s.syncWG.Go(func() {
 						defer s.syncing.Store(false)
+						var wg sync.WaitGroup
 						for _, sh := range s.shards {
-							sh.fail(sh.sync())
+							wg.Go(func() { sh.fail(sh.sync()) })
 						}
+						wg.Wait()
 						s.reclaim()
 					})
 				}
@@ -461,37 +498,52 @@ func (s *startupShard) sync() error {
 	}
 	return cur.file.Sync()
 }
+
+// Delete only a durably retired contiguous prefix. A directory sync between
+// removals prevents an older correction reappearing after a newer segment was
+// removed in a crash. The history stream gates all current partition retirement.
 func (s *startupInput) reclaim() {
 	sink := s.sink.Load()
-	if sink == nil || !sink.canRetire() {
+	if sink == nil || !sink.canRetire() || !s.historyReady.Load() {
 		return
 	}
-	for _, sh := range s.shards {
-		for seg := sh.first.Load(); seg != nil; seg = seg.next.Load() {
-			if seg.retired.Load() {
-				continue
-			}
+	retire := func(sh *startupShard) bool {
+		for seg := sh.first.Load(); seg != nil; seg = sh.first.Load() {
 			if !seg.sealed.Load() || !seg.replayed.Load() || seg.source.Pending() != 0 {
-				break
+				return false
 			}
-			if !seg.retired.CompareAndSwap(false, true) {
-				continue
-			}
-			// Retire only a contiguous, applied, confirmed prefix, after the older
-			// checkpoint is retired. Otherwise replay could restore an older correction.
-			err := errors.Join(seg.file.Close(), seg.unlock())
-			if err == nil {
+			var err error
+			if seg.file == nil {
+				if sink.syncHistory != nil {
+					err = sink.syncHistory()
+				}
+			} else {
 				err = os.Remove(seg.path)
+				if err == nil {
+					err = syncDir(filepath.Dir(seg.path))
+				}
+				if err == nil {
+					err = errors.Join(seg.file.Close(), seg.unlock())
+				}
 			}
 			if err != nil {
 				sh.fail(err)
-				break
+				return false
 			}
+			seg.retired.Store(true)
 			s.retiredBytes.Add(seg.size.Load())
 			sh.first.CompareAndSwap(seg, seg.next.Load())
 		}
+		return true
+	}
+	if !retire(s.legacy) {
+		return
+	}
+	for _, sh := range s.shards {
+		retire(sh)
 	}
 }
+
 func (s *startupInput) startReplay(sink *startupSink, legacy func() error) {
 	s.replayOnce.Do(func() {
 		s.replayStarted.Store(true)
@@ -499,11 +551,22 @@ func (s *startupInput) startReplay(sink *startupSink, legacy func() error) {
 		go func() {
 			defer close(s.replayDone)
 			if err := legacy(); err != nil {
-				s.sealErr = err
-				s.requestFallback()
+				select {
+				case <-s.replayStop:
+				default:
+					s.sealErr = err
+					s.requestFallback()
+				}
 				close(s.legacyDone)
 				return
 			}
+			root := s.legacy.current.Load()
+			if root.source == nil {
+				root.source = s.legacy.stream.Next()
+			}
+			root.sealed.Store(true)
+			root.replayed.Store(true)
+			s.historyReady.Store(true)
 			close(s.legacyDone)
 			s.catching.Store(true)
 			var wg sync.WaitGroup
@@ -591,7 +654,12 @@ func (s *startupShard) replay(sink *startupSink) {
 			s.fail(err)
 			return
 		}
-		for !sink.admission.HasRecoveryCapacity(count) {
+		cost, e := captureMetricBytes(raw)
+		if e != nil {
+			s.fail(e)
+			return
+		}
+		for !sink.admission.HasRecoveryCapacityBatch(count, cost) {
 			select {
 			case <-s.owner.replayStop:
 				return
@@ -608,6 +676,25 @@ func (s *startupShard) replay(sink *startupSink) {
 	}
 }
 func (s *startupInput) pauseReplay() {
+	// A disk safety stop can block an append owner behind this control fence.
+	// Abort that already-paused intake so shutdown cannot wait on its own quota.
+	watcherDone := make(chan struct{})
+	defer close(watcherDone)
+	go func() {
+		tick := time.NewTicker(10 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-watcherDone:
+				return
+			case <-tick.C:
+				if s.paused.Load() {
+					s.stopOnce.Do(func() { close(s.stop) })
+					return
+				}
+			}
+		}
+	}()
 	s.sink.Store(nil)
 	select {
 	case <-s.replayStop:
@@ -628,14 +715,16 @@ func (s *startupInput) pauseReplay() {
 }
 func (s *startupInput) close() error {
 	s.closeOnce.Do(func() {
-		close(s.stop)
+		s.stopOnce.Do(func() { close(s.stop) })
 		s.pauseReplay()
-		if s.monitored {
+		if s.monitored.Load() {
 			<-s.done
 		}
 		s.syncWG.Wait()
 		for _, sh := range s.shards {
 			close(sh.requests)
+		}
+		for _, sh := range s.shards {
 			<-sh.written
 		}
 		var errs []error
@@ -644,8 +733,13 @@ func (s *startupInput) close() error {
 				continue
 			}
 			for seg := sh.first.Load(); seg != nil; seg = seg.next.Load() {
-				if !seg.retired.Load() {
-					errs = append(errs, seg.file.Sync(), seg.file.Close(), seg.unlock())
+				if !seg.retired.Load() && seg.file != nil {
+					// Append owners have already joined after their final Sync;
+					// history files were immutable before this process opened them.
+					if seg == s.legacy.current.Load() {
+						errs = append(errs, seg.file.Sync())
+					}
+					errs = append(errs, seg.file.Close(), seg.unlock())
 				}
 			}
 		}
@@ -654,30 +748,4 @@ func (s *startupInput) close() error {
 		close(s.sealed)
 	})
 	return s.closeErr
-}
-
-// Legacy replay helpers remain shared with ordinary tail recovery.
-func replayCaptureShard(reader io.Reader, add func(*points.Points)) (int, error) {
-	return replayCaptureShardBuffer(reader, add, 1<<20)
-}
-func replayCaptureShardBuffer(reader io.Reader, add func(*points.Points), buffer int) (int, error) {
-	memo := make(map[string]string)
-	retained, count := 0, 0
-	var p points.Points
-	err := points.ReadBinaryBorrowedSize(reader, buffer, func(name []byte, data []points.Point) {
-		canonical, ok := memo[string(name)]
-		if !ok {
-			if retained+len(name) > 4<<20 || len(memo) >= 4096 {
-				clear(memo)
-				retained = 0
-			}
-			canonical = string(name)
-			memo[canonical] = canonical
-			retained += len(canonical)
-		}
-		p.Metric, p.Data = canonical, data
-		add(&p)
-		count += len(data)
-	})
-	return count, err
 }

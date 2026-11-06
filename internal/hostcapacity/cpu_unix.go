@@ -4,8 +4,9 @@ package hostcapacity
 
 import (
 	"errors"
-	"golang.org/x/sys/unix"
 	"path/filepath"
+
+	"golang.org/x/sys/unix"
 )
 
 func DiskSpace(path string) (free, total uint64, err error) {

@@ -427,6 +427,9 @@ func (b *Bundle) Close() error {
 // Mappings held by readers remain valid after unlink.
 func (b *Bundle) Retire() error {
 	for _, file := range []File{b.manifest.Cache, b.manifest.WAL, b.manifest.Index, {Name: TailName(b.manifest.WAL.Name)}} {
+		if IsTail(file.Name) && handoff.Locked(filepath.Join(b.dir, file.Name)) {
+			continue
+		}
 		if err := os.Remove(filepath.Join(b.dir, file.Name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
