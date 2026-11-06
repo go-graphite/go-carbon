@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,6 +24,8 @@ import (
 )
 
 type options struct {
+	maxBatches                                                                       int64
+	localSources, localTarget                                                        string
 	plan, state, barrier, healthMap, tokenEnv, controlTokenEnv, replica, replicaSite string
 	deleteMode                                                                       string
 	apply, delete, auto, localLab, blockReads, reconcile                             bool
@@ -41,6 +44,9 @@ type apiError struct {
 func (e *apiError) Error() string { return e.Message }
 
 type mover struct {
+	batchesSent  atomic.Int64
+	localSources map[string]*chunkstore.TransferSource
+	localTargets map[string]string
 	binaryProofs sync.Map
 	options
 	planData *manifest
@@ -66,6 +72,9 @@ func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
 	o := options{backlog: defaultBacklogPolicy()}
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
+	flags.StringVar(&o.localSources, "local-sources", "", "experimental checkpoint-local comparison: JSON source-origin to verified-copy directory map; retains existing import limits")
+	flags.StringVar(&o.localTarget, "local-target", "", "loopback Buckyd origin for local checkpoint imports; checked against the plan's target identity")
+	flags.Int64Var(&o.maxBatches, "max-batches", 0, "stop after producing this many journal batches (0 runs the full plan)")
 	flags.StringVar(&o.state, "state", "move-state.jsonl", "durable checkpoint journal")
 	flags.StringVar(&o.barrier, "barrier", "", "fresh cutover/drain/reconciliation proof; required for --delete")
 	flags.StringVar(&o.healthMap, "health-map", "", "JSON map of buckyd origins to host.py origins")
@@ -105,6 +114,9 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.maxBatches < 0 {
+		return errors.New("negative batch limit")
+	}
 	if o.observeOnly < 0 || o.observeOnly > 0 && (!o.apply || o.delete || o.reconcile || o.blockReads) {
 		return errors.New("--observe-only requires --apply and copy-only flags without --block-reads")
 	}
@@ -248,6 +260,10 @@ func run(ctx context.Context, o options) error {
 	}
 	defer j.close()
 	m.journal = j
+	if err := m.openLocalSources(ctx); err != nil {
+		return err
+	}
+	defer m.closeLocalSources()
 	event("operation", map[string]any{"operation": j.operation, "state": o.state})
 	if err := m.prepareAdmission(ctx, origins); err != nil {
 		return err
@@ -394,7 +410,11 @@ func run(ctx context.Context, o options) error {
 			return err
 		}
 	}
-	event("complete", map[string]any{"plan_id": p.PlanID})
+	if o.maxBatches > 0 {
+		event("bounded_run_complete", map[string]any{"plan_id": p.PlanID, "max_batches": o.maxBatches})
+	} else {
+		event("complete", map[string]any{"plan_id": p.PlanID})
+	}
 	return nil
 }
 func loopbackOrigin(raw string) bool {
@@ -436,12 +456,17 @@ func (m *mover) request(ctx context.Context, endpoint, path string, body any, ou
 	}
 }
 func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any, out any) (http.Header, error) {
+	if local := m.localTargets[endpoint]; local != "" && (path == "/v1/transfer/import" || path == "/v1/transfer/verify") {
+		endpoint = local
+	}
 	var reader io.Reader
 	contentType := "application/json"
 	if body != nil {
 		var data []byte
 		var err error
-		if proofs, ok := body.([]chunkstore.TransferProof); ok && path == "/v1/transfer/verify" {
+		if raw, ok := body.(transferBody); ok {
+			data, contentType = raw, "application/vnd.go-carbon.transfer-v2"
+		} else if proofs, ok := body.([]chunkstore.TransferProof); ok && path == "/v1/transfer/verify" {
 			if _, negotiated := m.binaryProofs.Load(endpoint); negotiated {
 				data, err = chunkstore.EncodeTransferProofs(proofs)
 				contentType = chunkstore.TransferProofContentType
@@ -545,6 +570,9 @@ func (m *mover) produce(ctx context.Context, tasks chan<- task, onlySource strin
 			defer workers.Done()
 			for r := range routes {
 				if err := m.produceRoute(ctx, r, tasks, onlySource != ""); err != nil {
+					if errors.Is(err, errBatchLimit) {
+						continue
+					}
 					once.Do(func() { first = err; cancel() })
 					return
 				}
@@ -570,6 +598,9 @@ func (m *mover) produce(ctx context.Context, tasks chan<- task, onlySource strin
 }
 func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task, reconcile bool) error {
 	send := func(t task) error {
+		if m.maxBatches > 0 && m.batchesSent.Add(1) > m.maxBatches {
+			return errBatchLimit
+		}
 		select {
 		case tasks <- t:
 			return nil
@@ -645,6 +676,9 @@ func (m *mover) execute(ctx context.Context, t task) error {
 	return m.executeBatch(ctx, t, t)
 }
 func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
+	if t.Kind == "bulk-intent" && len(t.Proofs) == 0 {
+		return errors.New("uncertain bulk import: durable intent has no response; refusing to import twice (retain journal and inspect target receipts before recovery)")
+	}
 	names, err := m.sourceNames(t)
 	if err != nil {
 		return err
@@ -666,11 +700,7 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 		start := time.Now()
 		var proofs []chunkstore.TransferProof
 		_, byteBudget := m.tuner.batch(t.Source, t.Target)
-		headers, err := m.request(ctx, t.Target, "/v1/transfer/pull", struct {
-			Source   string
-			Names    []string
-			MaxBytes int64
-		}{t.Source, names, byteBudget}, &proofs)
+		headers, err := m.pull(ctx, t, names, byteBudget, &proofs)
 		if err != nil {
 			var api *apiError
 			if errors.As(err, &api) && api.Status == 404 {
@@ -717,9 +747,6 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 				return errors.New("import proof name/digest mismatch")
 			}
 		}
-		if _, err := m.request(ctx, t.Target, "/v1/transfer/verify", proofs, &map[string]int{}); err != nil {
-			return err
-		}
 		t.Bytes, _ = strconv.ParseInt(headers.Get("X-Transfer-Bytes"), 10, 64)
 		m.tuner.charge(t.Source, t.Target, t.Bytes, start)
 		t.Proofs = proofs
@@ -728,6 +755,9 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 		err = m.journal.save(t)
 		m.stateMu.Unlock()
 		if err != nil {
+			return err
+		}
+		if _, err := m.request(ctx, t.Target, "/v1/transfer/verify", proofs, &map[string]int{}); err != nil {
 			return err
 		}
 		event("verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": t.Bytes, "seconds": time.Since(start).Seconds()})
