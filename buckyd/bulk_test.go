@@ -116,3 +116,28 @@ func TestBulkRequiresExplicitRootWildcard(t *testing.T) {
 		}
 	}
 }
+
+func TestTransferDebtLimit(t *testing.T) {
+	s, _ := testService(t)
+	if s.config.TransferMaxCompactionDebt != 8<<30 {
+		t.Fatalf("default debt limit %d", s.config.TransferMaxCompactionDebt)
+	}
+	for _, c := range []struct {
+		limit, debt int64
+		paused      bool
+	}{
+		{8 << 30, 8 << 30, false},
+		{8 << 30, 8<<30 + 1, true},
+		{64 << 30, 12 << 30, false},
+		{-1, 1 << 40, false},
+	} {
+		s.config.TransferMaxCompactionDebt = c.limit
+		if got := s.storagePressure(chunkstore.Stats{CompactionDebt: uint64(c.debt)}); got != c.paused {
+			t.Errorf("limit %d debt %d: paused %v, want %v", c.limit, c.debt, got, c.paused)
+		}
+	}
+	s.config.TransferMaxCompactionDebt = -1
+	if !s.storagePressure(chunkstore.Stats{WriteStallActive: true}) {
+		t.Error("write stall must pause transfers with the debt check disabled")
+	}
+}

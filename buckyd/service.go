@@ -44,7 +44,11 @@ type Config struct {
 	MaxBodyBytes     int64  `toml:"max_body_bytes"`
 	MaxTransfers     int    `toml:"max_transfers"`
 	CopyMinFreeBytes int64  `toml:"copy-min-free-bytes"`
-	JWTSecretFile    string `toml:"auth-jwt-secret-file"`
+	// TransferMaxCompactionDebt pauses transfer imports, pulls and deletes (429)
+	// while Pebble's compaction-debt estimate exceeds it. Zero selects 8 GiB;
+	// negative disables the debt check (write stalls and L0 still pause).
+	TransferMaxCompactionDebt int64  `toml:"transfer-max-compaction-debt"`
+	JWTSecretFile             string `toml:"auth-jwt-secret-file"`
 	// WaitForJWTSecret keeps ingestion running when boot-time secret delivery
 	// is late. Management requests return 503 until the file can be loaded.
 	WaitForJWTSecret bool     `toml:"wait-for-auth-secret"`
@@ -173,6 +177,9 @@ func validateConfig(config Config) error {
 func normalizeConfig(config *Config) {
 	if config.CopyMinFreeBytes == 0 {
 		config.CopyMinFreeBytes = 32 << 30
+	}
+	if config.TransferMaxCompactionDebt == 0 {
+		config.TransferMaxCompactionDebt = 8 << 30
 	}
 	if config.Hash == "" {
 		config.Hash = "carbon"
@@ -349,6 +356,16 @@ func (s *Service) SetStoreCopy(manager *storecopy.Manager) {
 }
 
 func (s *Service) StoreCopyActive() bool { return s.storeCopy != nil && s.storeCopy.Active() }
+
+// storagePressure reports whether transfer writes and reads should back off.
+func (s *Service) storagePressure(stats chunkstore.Stats) bool {
+	if stats.WriteStallActive || stats.L0Sublevels >= s.store.TransferL0StopWrites()*3/4 {
+		return true
+	}
+	limit := s.config.TransferMaxCompactionDebt
+	return limit > 0 && stats.CompactionDebt > uint64(limit)
+}
+
 func (s *Service) changed() {
 	s.mu.Lock()
 	callback := s.onChange

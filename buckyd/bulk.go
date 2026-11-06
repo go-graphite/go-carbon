@@ -54,7 +54,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/v1/transfer/import" || r.URL.Path == "/v1/transfer/pull" {
 		stats := s.store.Stats()
-		if stats.WriteStallActive || stats.L0Sublevels >= s.store.TransferL0StopWrites()*3/4 || stats.CompactionDebt > 8<<30 {
+		if s.storagePressure(stats) {
 			writeError(w, errors.New("target storage pressure; import paused"), 429)
 			return
 		}
@@ -343,7 +343,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		stats := s.store.Stats()
-		if stats.WriteStallActive || stats.L0Sublevels >= s.store.TransferL0StopWrites()*3/4 || stats.CompactionDebt > 8<<30 {
+		if s.storagePressure(stats) {
 			writeError(w, errors.New("source storage pressure; deletion paused"), 429)
 			return
 		}
