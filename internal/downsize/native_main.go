@@ -246,6 +246,12 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 	c.stateMu.Lock()
 	completed := c.journal.ranges(r.SHA256)
 	c.stateMu.Unlock()
+	// A prior importer already verified these immutable plan ordinals. No
+	// new data operation needs their names, and parsing tens of millions of
+	// completed rows delays a resumed native canary without verifying new work.
+	if nativeStreamCovered(completed, r.Metrics) {
+		return nil
+	}
 	var names []string
 	if err := c.planData.walk(r, func(_ int64, row planRow) error { names = append(names, row.Metric); return nil }); err != nil {
 		return err
@@ -339,4 +345,23 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	}
 	event("native_verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "receipt": receipt.Identity})
 	return nil
+}
+
+// ranges is sorted by journal.ranges; acknowledged native deferrals are also
+// covered for this baseline. An unresolved native intent still needs its names
+// to query the durable receiver receipt and must not be skipped.
+func nativeStreamCovered(ranges []task, count int64) bool {
+	var end int64
+	for _, t := range ranges {
+		if t.Native != nil && t.Native.Intent {
+			return false
+		}
+		if t.Start > end {
+			return false
+		}
+		if t.End > end {
+			end = t.End
+		}
+	}
+	return end >= count
 }

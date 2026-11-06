@@ -245,3 +245,21 @@ func TestNativeControllerLostAckCannotReplayThroughMetricPath(t *testing.T) {
 		t.Fatal("lost ack caused a second import")
 	}
 }
+
+func TestNativeCompletedStreamDoesNotReadPlanRows(t *testing.T) {
+	// A fully covered stream needs neither its rows nor any network access.
+	// Deliberately omit planData/client: attempting the old walk would fail.
+	c := &nativeController{mover: &mover{journal: &journal{tasks: map[string]task{
+		"first":  {Stream: "stream", Start: 0, End: 5, Phase: "done"},
+		"second": {Stream: "stream", Start: 5, End: 10, Kind: "native-range", Phase: "verified", Native: &nativeRangeState{}},
+	}}}}
+	if err := c.route(context.Background(), route{SHA256: "stream", Metrics: 10}); err != nil {
+		t.Fatal(err)
+	}
+	if nativeStreamCovered([]task{{Start: 0, End: 5}, {Start: 6, End: 10}}, 10) {
+		t.Fatal("skipped ordinal gap")
+	}
+	if nativeStreamCovered([]task{{Start: 0, End: 10, Native: &nativeRangeState{Intent: true}}}, 10) {
+		t.Fatal("skipped unresolved native acknowledgement")
+	}
+}
