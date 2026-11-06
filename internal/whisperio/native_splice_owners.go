@@ -1,26 +1,23 @@
 package whisperio
 
 import (
-	"cmp"
 	"context"
 	"math"
-	"math/bits"
-	"slices"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-type rankedSplicePart struct {
-	part  splicePart
-	epoch int64
-	order int
+type spliceSlotOwner struct {
+	fragment  *spliceFragment
+	ordinal   int
+	timestamp int64
 }
 type spliceOwnerChunk struct {
 	single   splicePart
 	fragment *spliceFragment
 	epoch    int64
 	mask     [2]uint64
-	parts    []rankedSplicePart
+	owners   *[128]spliceSlotOwner
 }
 
 func spliceRankAfter(epoch int64, f *spliceFragment, oldEpoch int64, old *spliceFragment) bool {
@@ -36,14 +33,14 @@ func spliceRankAfter(epoch int64, f *spliceFragment, oldEpoch int64, old *splice
 func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoch int64, r store.Retention) bool {
 	mask := spliceMask(slot%128, count)
 	intersects := mask[0]&c.mask[0] != 0 || mask[1]&c.mask[1] != 0
-	if c.fragment == nil && c.parts == nil {
+	if c.fragment == nil && c.owners == nil {
 		c.single = splicePart{*f, slot, ordinal, count}
 		c.fragment = f
 		c.epoch = epoch
 		c.mask = mask
 		return false
 	}
-	if c.parts == nil {
+	if c.owners == nil {
 		if mask[0]&c.mask[0] == c.mask[0] && mask[1]&c.mask[1] == c.mask[1] && spliceRankAfter(epoch, f, c.epoch, c.fragment) {
 			c.single = splicePart{*f, slot, ordinal, count}
 			c.fragment = f
@@ -54,10 +51,21 @@ func (c *spliceOwnerChunk) add(f *spliceFragment, slot, ordinal, count int, epoc
 		if c.mask[0]&mask[0] == mask[0] && c.mask[1]&mask[1] == mask[1] && !spliceRankAfter(epoch, f, c.epoch, c.fragment) {
 			return intersects
 		}
-		c.parts = append(c.parts, rankedSplicePart{part: c.single, epoch: c.epoch})
+		c.owners = new([128]spliceSlotOwner)
+		for i := 0; i < c.single.count; i++ {
+			o := c.single.ordinal + i
+			c.owners[(c.single.slot+i)%128] = spliceSlotOwner{c.fragment, o, spliceOrdinalTime(c.fragment, o, r.Step)}
+		}
 		c.fragment = nil
 	}
-	c.parts = append(c.parts, rankedSplicePart{part: splicePart{*f, slot, ordinal, count}, epoch: epoch, order: len(c.parts)})
+	for i := 0; i < count; i++ {
+		o := ordinal + i
+		ts := spliceOrdinalTime(f, o, r.Step)
+		old := &c.owners[(slot+i)%128]
+		if old.fragment == nil || ts > old.timestamp || ts == old.timestamp && spliceRankAfter(epoch, f, epoch, old.fragment) {
+			*old = spliceSlotOwner{f, o, ts}
+		}
+	}
 	c.mask[0] |= mask[0]
 	c.mask[1] |= mask[1]
 	return intersects
@@ -70,9 +78,9 @@ func spliceOrdinalTime(f *spliceFragment, ordinal, step int) int64 {
 	return f.first + int64(ordinal-f.ordinal)*int64(step)
 }
 
-// Dense nonintersecting chunks retain one interval descriptor. Conflicts are
-// resolved as ranked masks within each 128-slot chunk, without expanding dense
-// intervals into individual owners. Sparse fragments enter as single-slot masks.
+// Dense nonintersecting chunks retain one interval descriptor. Only a chunk
+// requiring per-slot comparisons allocates the fixed 128-slot winner table.
+// This avoids point-sized fragment lists and sorting in sparse histories.
 func selectSpliceOwners(ctx context.Context, a, b []spliceFragment, r store.Retention) ([]splicePart, int64, bool, error) {
 	chunks := make(map[int]*spliceOwnerChunk)
 	intersects := false
@@ -119,43 +127,30 @@ func selectSpliceOwners(ctx context.Context, a, b []spliceFragment, r store.Rete
 		}
 	}
 	for index, chunk := range chunks {
-		if chunk.parts == nil {
+		if chunk.owners == nil {
 			result = append(result, chunk.single)
 			include(spliceOrdinalTime(chunk.fragment, chunk.single.ordinal, r.Step))
 			continue
 		}
-		slices.SortFunc(chunk.parts, func(a, b rankedSplicePart) int {
-			if order := cmp.Compare(b.epoch, a.epoch); order != 0 {
-				return order
+		for slot := 0; slot < 128; {
+			o := chunk.owners[slot]
+			if o.fragment == nil {
+				slot++
+				continue
 			}
-			if order := cmp.Compare(b.part.fragment.priority, a.part.fragment.priority); order != 0 {
-				return order
-			}
-			if order := cmp.Compare(b.part.fragment.sequence, a.part.fragment.sequence); order != 0 {
-				return order
-			}
-			return b.order - a.order
-		})
-		var claimed [2]uint64
-		for _, ranked := range chunk.parts {
-			part := ranked.part
-			mask := spliceMask(part.slot%128, part.count)
-			for word := range mask {
-				remaining := mask[word] &^ claimed[word]
-				claimed[word] |= mask[word]
-				for remaining != 0 {
-					first := bits.TrailingZeros64(remaining)
-					count := min(bits.TrailingZeros64(^(remaining >> uint(first))), 64-first)
-					offset := word*64 + first - part.slot%128
-					selected := part
-					selected.slot = index*128 + word*64 + first
-					selected.ordinal += offset
-					selected.count = count
-					result = append(result, selected)
-					include(spliceOrdinalTime(&selected.fragment, selected.ordinal, r.Step))
-					remaining &^= spliceWordMask(first, count)
+			count := 1
+			for slot+count < 128 {
+				next := chunk.owners[slot+count]
+				if next.fragment != o.fragment || next.ordinal != o.ordinal+count {
+					break
 				}
+				count++
 			}
+			result = append(result, splicePart{*o.fragment, index*128 + slot, o.ordinal, count})
+			for i := 0; i < count; i++ {
+				include(chunk.owners[slot+i].timestamp)
+			}
+			slot += count
 		}
 	}
 	return result, base, intersects, nil
