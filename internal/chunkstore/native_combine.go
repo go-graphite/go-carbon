@@ -21,7 +21,7 @@ import (
 type nativeCombineIntent struct {
 	Request     NativeRange
 	Receipt     NativeReceipt
-	Raw         []Metadata
+	Raw         []nativeCombineMetadata
 	Positions   []int
 	Spans       []nativeSpan
 	Directories []string
@@ -30,8 +30,8 @@ type nativeCombineIntent struct {
 
 type nativeCombinePiece struct {
 	Position int
-	Meta     Metadata
-	Old      Metadata
+	Meta     nativeCombineMetadata
+	Old      nativeCombineMetadata
 	Class    NativeCombineClass
 }
 
@@ -168,7 +168,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 		if piece == nil || piece.Old.ID == 0 {
 			continue
 		}
-		if err := s.retireTransfer(ctx, b, piece.Old); err != nil {
+		if err := s.retireTransfer(ctx, b, Metadata(piece.Old)); err != nil {
 			return receipt, err
 		}
 	}
@@ -291,7 +291,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if stream.Count != expected {
 		return errors.New("native combine stream differs from plan range")
 	}
-	intent.Raw, intent.Positions = make([]Metadata, expected), make([]int, expected)
+	intent.Raw, intent.Positions = make([]nativeCombineMetadata, expected), make([]int, expected)
 	if expected == 0 {
 		intent.Receipt.Digest, intent.Receipt.Bytes, err = stream.Finish()
 		if err != nil {
@@ -339,7 +339,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 		if s.incrementalSource != "" {
 			m.FileMigration = FileReclaimed
 		}
-		intent.Raw[i] = m
+		intent.Raw[i] = nativeCombineMetadata(m)
 		for _, kv := range record.Keys {
 			floatCodec = floatCodec || record.Continuation && newFloatGroup(kv.Key, kv.Value)
 			if err := tables.add(ctx, m, kv); err != nil {
@@ -439,13 +439,13 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 			return nil, err
 		}
 		walk.arena.free = walk.arena.slab
-		raw := intent.Raw[i]
+		raw := Metadata(intent.Raw[i])
 		source, err := s.transferFromLimit(ctx, view, raw, math.MaxInt64, walk)
 		if err != nil {
 			return nil, err
 		}
 		old, err := walk.metadata(raw.Name)
-		p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: intent.Positions[i], Meta: raw}}
+		p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: intent.Positions[i], Meta: nativeCombineMetadata(raw)}}
 		if err == nil {
 			if err := nativeCompatibleTarget(s, old, source); err != nil {
 				return nil, err
@@ -458,12 +458,12 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 			if err != nil {
 				return nil, err
 			}
-			p.Old, p.Class = old, class
+			p.Old, p.Class = nativeCombineMetadata(old), class
 			p.Meta.ID = first + uint64(j)
 			p.Meta.LastUpdate = s.nextActivity(old.LastUpdate)
 			for _, kv := range result.Keys {
 				floatCodec = floatCodec || result.Continuation && newFloatGroup(kv.Key, kv.Value)
-				if err := tables.add(ctx, p.Meta, kv); err != nil {
+				if err := tables.add(ctx, Metadata(p.Meta), kv); err != nil {
 					return nil, err
 				}
 			}
@@ -493,7 +493,7 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 }
 
 func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p nativeCombinePrepared) (bool, error) {
-	encoded, err := s.encodeCatalog(p.Meta)
+	encoded, err := s.encodeCatalog(Metadata(p.Meta))
 	if err != nil {
 		return false, err
 	}
@@ -519,7 +519,7 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 		}
 	} else if err != nil {
 		return false, err
-	} else if transferVersion(old) != transferVersion(p.Old) || !samePolicy(old.MetricConfig, p.Old.MetricConfig) || old.Continuation != p.Old.Continuation || old.FileMigration != p.Old.FileMigration {
+	} else if transferVersion(old) != transferVersion(Metadata(p.Old)) || !samePolicy(old.MetricConfig, p.Old.MetricConfig) || old.Continuation != p.Old.Continuation || old.FileMigration != p.Old.FileMigration {
 		return false, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -527,7 +527,7 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
-	for _, entry := range []struct{ key, value []byte }{{catalogKey(p.Meta.Name), encoded}, {revisionKey(p.Meta), revisionBytes(p.Meta)}} {
+	for _, entry := range []struct{ key, value []byte }{{catalogKey(p.Meta.Name), encoded}, {revisionKey(Metadata(p.Meta)), revisionBytes(Metadata(p.Meta))}} {
 		if err := b.Set(entry.key, entry.value, nil); err != nil {
 			return false, err
 		}

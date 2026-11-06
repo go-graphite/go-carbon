@@ -3,12 +3,16 @@ package chunkstore_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/cockroachdb/pebble/vfs"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
 func TestNativeCombineDifferential(t *testing.T) {
@@ -79,6 +83,119 @@ func TestNativeCombineDifferential(t *testing.T) {
 			after, _ := target.Metadata(ctx, names[0])
 			if before.ID != after.ID || before.Generation != after.Generation || before.Revision != after.Revision {
 				t.Fatal("durable retry changed foreground history", before, after)
+			}
+		})
+	}
+}
+
+func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T) {
+	for _, stage := range []string{"combine-ingested", "combine-prepared", "combine-name-published", "combine-published"} {
+		t.Run(stage, func(t *testing.T) {
+			ctx := context.Background()
+			source := nativeMemoryStore(t, true, true)
+			names := []string{"combine.buckets.a", "combine.buckets.b"}
+			for _, name := range names {
+				var points []store.Point
+				for ts := int64(995000); ts < 999900; ts += 10 {
+					points = append(points, store.Point{Timestamp: ts, Value: float64(ts % 71)})
+				}
+				putTransferPoints(t, source, name, points)
+			}
+			pin, err := source.PinNativeSource()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			var wire bytes.Buffer
+			if err := pin.Write(ctx, names, &wire); err != nil {
+				t.Fatal(err)
+			}
+			fs := vfs.NewStrictMem()
+			if err := fs.MkdirAll("/originals", 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.MkdirAll("/db", 0700); err != nil {
+				t.Fatal(err)
+			}
+			root, err := fs.OpenDir("/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := root.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			if err := root.Close(); err != nil {
+				t.Fatal(err)
+			}
+			open := func() *store.Store {
+				s, err := store.Open("/db", store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: "/originals", Now: func() time.Time { return time.Unix(1000000, 0) }, SyncInterval: time.Hour, CacheSize: 1 << 20, MemTableSize: 1 << 20}.WithFS(fs))
+				if err != nil {
+					t.Fatal(err)
+				}
+				return s
+			}
+			target := open()
+			// The first name stays absent, so its original bucketed ID is
+			// published directly; the second name needs a new combined ID.
+			putTransferPoints(t, target, names[1], []store.Point{{Timestamp: 999880, Value: 42}})
+			if err := target.NativeCombineSyncForTest(); err != nil {
+				t.Fatal(err)
+			}
+			var publishedID uint64
+			target.NativeCombineHookForTest(func(got string) error {
+				if got != stage {
+					return nil
+				}
+				if stage == "combine-name-published" {
+					m, err := target.Metadata(ctx, names[0])
+					if err != nil {
+						return err
+					}
+					publishedID = m.ID
+					if err := target.UpdateMany(ctx, names[0], []store.Point{{Timestamp: 999930, Value: 99}}); err != nil {
+						return err
+					}
+					if err := target.NativeCombineSyncForTest(); err != nil {
+						return err
+					}
+				}
+				fs.SetIgnoreSyncs(true)
+				return errors.New("crash")
+			})
+			request := store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: 2, Names: names, Combine: true}
+			if _, err := target.NativeImport(ctx, request, bytes.NewReader(wire.Bytes())); err == nil {
+				t.Fatal("crash not injected")
+			}
+			if err := target.Close(); err != nil {
+				t.Fatal(err)
+			}
+			fs.ResetToSyncedState()
+			fs.SetIgnoreSyncs(false)
+			target = open()
+			defer target.Close()
+			if stage == "combine-prepared" || stage == "combine-name-published" {
+				if _, ready, err := target.ResumeNativeCombine(ctx, request); err != nil || !ready {
+					t.Fatal("original donor stage not resumable without source", ready, err)
+				}
+			} else if _, err := target.NativeImport(ctx, request, bytes.NewReader(wire.Bytes())); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range names {
+				snap, err := target.Snapshot(ctx, name)
+				if err != nil || len(snap.Archives[0].Points) == 0 {
+					t.Fatal("published history lost", name, err)
+				}
+			}
+			if publishedID != 0 {
+				m, _ := target.Metadata(ctx, names[0])
+				if m.ID != publishedID {
+					t.Fatal("committed bucketed ID imported twice")
+				}
+				snap, _ := target.Snapshot(ctx, names[0])
+				last := snap.Archives[0].Points[len(snap.Archives[0].Points)-1]
+				if last.Timestamp != 999930 || last.Value != 99 {
+					t.Fatal("live point after partial publish lost", last)
+				}
 			}
 		})
 	}
