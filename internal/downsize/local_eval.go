@@ -331,7 +331,7 @@ func BulkEvalMain(args []string) error {
 		seconds := time.Since(began).Seconds()
 		return result{mode, int64(len(names)), wire.Load(), seconds, float64(exportNanos.Load()) / 1e9, float64(importNanos.Load()) / 1e9, float64(len(names)) / seconds, float64(wire.Load()) / seconds / 1e6}, first
 	}
-	oracleBatch := *batch
+	oracleBatch := min(*batch, store.MaxTransferMetrics)
 	if *single {
 		oracleBatch = 1
 	}
@@ -379,8 +379,9 @@ func BulkEvalMain(args []string) error {
 		return err
 	}
 	// Keep reviewed deferred-combine work outside native throughput/profile.
-	for start := 0; start < len(nativeDeferred); start += *batch {
-		group := nativeDeferred[start:min(start+*batch, len(nativeDeferred))]
+	reviewedBatch := min(*batch, store.MaxTransferMetrics)
+	for start := 0; start < len(nativeDeferred); start += reviewedBatch {
+		group := nativeDeferred[start:min(start+reviewedBatch, len(nativeDeferred))]
 		records, e := donor.ExportTransferLimit(ctx, group, 160<<20)
 		if e != nil {
 			return e
