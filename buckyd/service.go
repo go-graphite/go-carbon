@@ -115,6 +115,7 @@ type Service struct {
 	server        *http.Server
 	listener      net.Listener
 	transfers     chan struct{}
+	maintenance   chan struct{}
 	transferPool  sync.Pool
 	mu            sync.Mutex
 	handlers      sync.WaitGroup
@@ -151,7 +152,7 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, authPending: waiting, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}
+	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, authPending: waiting, transfers: make(chan struct{}, config.MaxTransfers), maintenance: make(chan struct{}, 2), nodes: nodes}
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
 	return s, nil
 }

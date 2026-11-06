@@ -46,11 +46,15 @@ func (s *Service) archiveAnchors(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !s.acquireTransfer() {
-		writeError(w, errors.New("too many concurrent transfers"), 429)
+	// Resize controllers can occupy every transfer slot continuously. Keep
+	// repair admission independent and bounded, including while replying.
+	select {
+	case s.maintenance <- struct{}{}:
+	default:
+		writeError(w, errors.New("too many concurrent maintenance requests"), 429)
 		return
 	}
-	defer s.releaseTransfer()
+	defer func() { <-s.maintenance }()
 	type row struct {
 		chunkstore.AnchorRepairResult
 		Error string `json:"error,omitempty"`
