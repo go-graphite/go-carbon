@@ -20,7 +20,7 @@ runtime bucket midpoints. Graphite exports the same cumulative distribution as
 `runtime.schedulerLatencyBuckets.le<nanoseconds>Ns`, plus
 `schedulerLatencySamplesTotal` and `schedulerLatencySecondsTotal`.
 
-`[pprof].mutex-profile-fraction` defaults to **1000**, sampling one in 1000
+`[pprof].mutex-profile-fraction` defaults to **10000**, sampling one in 10000
 contention events. `[pprof].block-profile-rate` defaults to **0** (disabled);
 its unit is average nanoseconds blocked per sample, not a fraction. Both existing
 knobs apply on start and configuration reload, even if the pprof listener is
