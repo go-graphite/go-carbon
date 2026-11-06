@@ -87,6 +87,27 @@ func TestNativeDifferentialPinnedAndDeferred(t *testing.T) {
 			if _, _, err := stream.Finish(); err != nil {
 				t.Fatal(err)
 			}
+			// Independently compare the new pinned exporter with the existing
+			// donor exporter before using its capture as the import oracle.
+			legacy, err := source.ExportTransfer(ctx, names)
+			if err != nil {
+				t.Fatal(err)
+			}
+			byName := make(map[string]store.TransferMetric, len(legacy))
+			for _, r := range legacy {
+				byName[r.Config.Name] = r
+			}
+			for _, r := range records {
+				old := byName[r.Config.Name]
+				if r.Version != old.Version || len(r.Keys) != len(old.Keys) {
+					t.Fatal("native donor differs from reviewed export", r.Config.Name)
+				}
+				for i, kv := range r.Keys {
+					if !bytes.Equal(kv.Key, old.Keys[i].Key) || !bytes.Equal(kv.Value, old.Keys[i].Value) {
+						t.Fatal("native donor changed raw block bytes", r.Config.Name, i)
+					}
+				}
+			}
 			for _, r := range records {
 				if _, err := reference.ImportTransfer(ctx, []store.TransferMetric{r}); err != nil {
 					t.Fatal(err)
