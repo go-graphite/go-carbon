@@ -397,6 +397,7 @@ func BulkEvalMain(args []string) error {
 		runtime.SetBlockProfileRate(1)
 	}
 	applyBefore := bulk.TransferApplyStats()
+	systemBefore := ingestSystemCounters()
 	var local result
 	var nativeDeferred []string
 	if *native {
@@ -404,6 +405,8 @@ func BulkEvalMain(args []string) error {
 	} else {
 		local, err = measure("checkpoint", source, bulk, *batch)
 	}
+	systemAfter := ingestSystemCounters()
+	applyAfter := bulk.TransferApplyStats()
 	if cpu != nil {
 		pprof.StopCPUProfile()
 		_ = cpu.Close()
@@ -480,5 +483,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": bulk.TransferApplyStats(), "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }
