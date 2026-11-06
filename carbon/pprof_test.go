@@ -14,8 +14,8 @@ func TestRuntimeProfilingReload(t *testing.T) {
 	defer runtime.SetMutexProfileFraction(previous)
 	defer runtime.SetBlockProfileRate(0)
 	path, cfg := sharedAppConfig(t)
-	if cfg.Pprof.MutexProfileFraction != 1000 || cfg.Pprof.BlockProfileRate != 0 {
-		t.Fatal("mutex profiling must default to 1/1000; block profiling must default off")
+	if cfg.Pprof.MutexProfileFraction != 10000 || cfg.Pprof.BlockProfileRate != 0 {
+		t.Fatal("mutex profiling must default to 1/10000; block profiling must default off")
 	}
 	cfg.Pprof.MutexProfileFraction = 5
 	cfg.Pprof.BlockProfileRate = 0
