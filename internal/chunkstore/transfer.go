@@ -355,7 +355,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			}
 		}
 	}
+	began := time.Now()
 	first, err := s.reserveFileMetricIDs(uint64(len(records)))
+	s.transferApply.reserve.Add(uint64(time.Since(began)))
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +368,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			metas[i].FileMigration = FileReclaimed
 		}
 	}
+	began = time.Now()
 	paths, err := s.writeTransferTables(ctx, first, records, metas)
+	s.transferApply.build.Add(uint64(time.Since(began)))
 	defer func() {
 		for _, p := range paths {
 			_ = s.fs.Remove(p)
@@ -384,7 +388,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 				return nil, err
 			}
 		}
+		began = time.Now()
 		stats, err := s.db.IngestWithStats(paths)
+		s.transferApply.ingest.Add(uint64(time.Since(began)))
 		if err != nil {
 			return nil, err
 		}
@@ -408,9 +414,11 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	// The per-stripe commits already published their receipts and catalogs.
 	// One coalesced barrier covers all of them without holding writer stripes
 	// across a filesystem sync, regardless of the foreground sync policy.
+	began = time.Now()
 	if err := s.syncWAL(); err != nil {
 		return nil, err
 	}
+	s.transferApply.sync.Add(uint64(time.Since(began)))
 	s.invalidateReadCache()
 	return proofs, nil
 }
@@ -469,8 +477,11 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 	if s.stateCache != nil {
 		states = make([]*metricState, len(records))
 	}
+	wait := time.Now()
 	unlock := s.lockTransfer(names, states)
-	defer unlock()
+	locked := time.Now()
+	s.transferApply.wait.Add(uint64(locked.Sub(wait)))
+	defer func() { unlock(); s.transferApply.recordHold(time.Since(locked)) }()
 	b := s.db.NewIndexedBatch()
 	defer b.Close()
 	walk := &transferReader{reader: s.db}

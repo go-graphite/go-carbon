@@ -392,6 +392,11 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			return receipt, err
 		} else {
 			s.nativeCounters.sst.Add(stats.Bytes)
+			s.ingestStats.tables.Add(uint64(len(tables.paths)))
+			s.ingestStats.entries.Add(uint64(len(metas)))
+			s.ingestStats.bytes.Add(stats.Bytes)
+			s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
+			s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 		}
 	}
 	s.nativeCounters.ingest.Add(uint64(time.Since(ingestBegan)))

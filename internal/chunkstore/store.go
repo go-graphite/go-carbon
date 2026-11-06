@@ -222,6 +222,7 @@ type Store struct {
 	transferPendingAny   func() bool
 	transferPending      func(string) bool
 	transferExport       transferExportCounters
+	transferApply        transferApplyCounters
 	sidecars             sidecarCatalog
 	transferDeleteRanges atomic.Uint64
 	compactOnce          compactOnceState
