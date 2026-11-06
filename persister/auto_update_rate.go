@@ -23,7 +23,7 @@ func autoUpdateSlack(delay time.Duration) time.Duration {
 }
 
 type autoUpdateController struct {
-	at, started                     time.Time
+	at, started, restoredAt         time.Time
 	need, equilibrium, rate, target float64
 	reason                          string
 }
@@ -49,18 +49,30 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 		c.need += alpha * (need - c.need)
 	}
 	target, reason := c.need*autoUpdateMargin, "steady"
+	// Restored arrivals intentionally get a new batching clock. The saved
+	// backlog still distinguishes this workload from an empty cache filling,
+	// even after the urgent recovery flag clears at startup release.
+	if s.Restored && !s.Recovering && s.Points > 0 && c.restoredAt.IsZero() {
+		c.restoredAt = now
+		c.equilibrium = float64(s.Points)
+	}
 	if first {
 		c.equilibrium = float64(s.Points)
 	}
 	// Do not mistake the initial filling of an empty cache for overload.
-	if now.Sub(c.started) >= s.MaxDelay && c.equilibrium > 0 {
+	if (!c.restoredAt.IsZero() || now.Sub(c.started) >= s.MaxDelay) && c.equilibrium > 0 {
 		if growth := target * float64(s.Points) / (1.2 * c.equilibrium); growth > target {
 			target, reason = growth, "growth"
 		}
 	}
 	// Compare with recent peaks, not the mean of the batching sawtooth. Normal
 	// filling can exceed that mean by nearly 2x even at constant input.
-	c.equilibrium = max(float64(s.Points), c.equilibrium*math.Exp(-dt.Seconds()/max(1, 4*s.MaxDelay.Seconds())))
+	// Until the first restored deadline, compare with the complete restore,
+	// rather than accepting every growing five-second sample as equilibrium.
+	// After that window the ordinary age/deadline signal is available again.
+	if c.restoredAt.IsZero() || now.Sub(c.restoredAt) >= s.MaxDelay {
+		c.equilibrium = max(float64(s.Points), c.equilibrium*math.Exp(-dt.Seconds()/max(1, 4*s.MaxDelay.Seconds())))
+	}
 	if s.Pressure || s.MaxPoints > 0 && float64(s.Points)/float64(s.MaxPoints) >= .70 {
 		remaining := .05
 		if !s.Pressure {

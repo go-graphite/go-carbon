@@ -9,6 +9,9 @@ type WriteoutState struct {
 	Points, MaxPoints              int64
 	MaxDelay, MeanDelay, OldestAge time.Duration
 	Pressure, Recovering           bool
+	// Restored means all checkpoint metrics have been claimed, with the source
+	// still awaiting durable confirmations. It includes deferred saved history.
+	Restored bool
 }
 
 // WriteoutState queries per-shard counts without visiting cached metrics.
@@ -29,6 +32,9 @@ func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
 		MaxPoints: s.maxSize, MaxDelay: s.writeoutMaxDelay,
 		MeanDelay: time.Duration(float64(s.writeoutMaxDelay) * (1 - s.writeoutSpread/2)),
 		Pressure:  c.bytePressure(s), Recovering: c.recovering(s),
+	}
+	if pending := c.pending.Load(); pending != nil {
+		state.Restored = pending.remaining.Load() == 0
 	}
 	if !s.writeoutPhase.IsZero() {
 		state.MeanDelay = s.writeoutMaxDelay
