@@ -41,6 +41,9 @@ func BulkEvalMain(args []string) error {
 	repeat := flags.Int("repeat", 1, "repeat captured histories under distinct names (reported as replication)")
 	batch := flags.Int("batch", 512, "metrics per measured import")
 	workers := flags.Int("workers", 1, "bounded parallel export/import workers")
+	sourceCache := flags.Int64("source-cache-bytes", 1<<30, "private donor block-cache bytes; use production-sized shards for native export")
+	sourceShards := flags.Int("source-cache-shards", 128, "private donor block-cache shards (0=store size-based default)")
+	sourceScratch := flags.String("source-scratch", "", "optional existing private directory on a separate donor disk")
 	single := flags.Bool("single-oracle", false, "reference imports one name at a time")
 	overlapPercent := flags.Int("overlap-percent", 0, "seed this percentage of survivor names from captured donor histories, then add survivor corrections (0 uses captured targets)")
 	profilePrefix := flags.String("profile-prefix", "", "write CPU/mutex/block profiles of the checkpoint phase under this local prefix")
@@ -50,7 +53,7 @@ func BulkEvalMain(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *sampleNames < 0 || (*sampleNames > 0 && *capturePath == "") || (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
+	if *sourceCache < 1 || *sourceShards < 0 || *sampleNames < 0 || (*sampleNames > 0 && *capturePath == "") || (*fixtures == "" && *capturePath == "") || (*fixtures != "" && *capturePath != "") || *parent == "" || *repeat < 1 || *batch < 1 || *workers < 1 || *overlapPercent < 0 || *overlapPercent > 100 {
 		return errors.New("invalid evaluation options")
 	}
 	var input []bulkEvalFixture
@@ -89,10 +92,22 @@ func BulkEvalMain(args []string) error {
 		return err
 	}
 	defer os.RemoveAll(root)
+	donorRoot := root
+	if *sourceScratch != "" {
+		donorRoot, err = os.MkdirTemp(*sourceScratch, "bulk-eval-source-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(donorRoot)
+	}
 	clock := func() time.Time { return time.Unix(*epoch, 0) }
 	ctx := context.Background()
 	open := func(name string) (*store.Store, error) {
-		originals := filepath.Join(root, name+"-originals")
+		directory, cacheBytes, cacheShards := root, int64(32<<20), 0
+		if name == "donor" {
+			directory, cacheBytes, cacheShards = donorRoot, *sourceCache, *sourceShards
+		}
+		originals := filepath.Join(directory, name+"-originals")
 		fs := vfs.Default
 		if *memory {
 			fs = vfs.NewMem()
@@ -100,7 +115,7 @@ func BulkEvalMain(args []string) error {
 		if err := fs.MkdirAll(originals, 0700); err != nil {
 			return nil, err
 		}
-		return store.Open(filepath.Join(root, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: 32 << 20, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
+		return store.Open(filepath.Join(directory, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: cacheBytes, CacheShards: cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
 	}
 	donor, err := open("donor")
 	if err != nil {
@@ -415,5 +430,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }

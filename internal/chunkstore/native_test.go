@@ -253,6 +253,13 @@ func TestNativeReceiptWaitsForPublicationSync(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("publication did not reach WAL Sync")
 	}
+	// Publication is already serialized and visible. The physical sync must
+	// not prevent unrelated metric creation or another range's publication.
+	if !target.mu.TryLock() {
+		close(gate.release)
+		t.Fatal("publication held the creation lock across WAL Sync")
+	}
+	target.mu.Unlock()
 	queried := make(chan error, 1)
 	go func() { _, err := target.NativeReceipt(ctx, request); queried <- err }()
 	duplicate := make(chan error, 1)
@@ -277,6 +284,52 @@ func TestNativeReceiptWaitsForPublicationSync(t *testing.T) {
 		if err := <-ch; err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func TestNativeReservationsReleaseCreationLockBeforeSync(t *testing.T) {
+	fs := &nativeSyncFS{FS: vfs.NewMem()}
+	target, _ := openTestStore(t, "/target", Options{fs: fs, ExactBlocks: true, SyncInterval: time.Hour, CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	defer closeTestStore(t, target)
+	gate := &nativeSyncGate{entered: make(chan struct{}), release: make(chan struct{})}
+	fs.gate.Store(gate)
+	type result struct {
+		intent nativeIntent
+		err    error
+	}
+	done := make(chan result, 2)
+	for _, id := range []string{strings.Repeat("1", 64), strings.Repeat("2", 64)} {
+		go func() { intent, err := target.reserveNativeIDs(id, 16); done <- result{intent, err} }()
+	}
+	select {
+	case <-gate.entered:
+	case <-time.After(5 * time.Second):
+		close(gate.release)
+		t.Fatal("reservation did not reach WAL Sync")
+	}
+	deadline := time.Now().Add(time.Second)
+	for !target.mu.TryLock() {
+		if time.Now().After(deadline) {
+			close(gate.release)
+			t.Fatal("ID reservation held the creation lock across WAL Sync")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	target.mu.Unlock()
+	select {
+	case <-done:
+		close(gate.release)
+		t.Fatal("reservation acknowledged before durable Sync")
+	default:
+	}
+	close(gate.release)
+	first, second := <-done, <-done
+	if first.err != nil || second.err != nil || first.intent.First == second.intent.First {
+		t.Fatal("concurrent reservations failed or overlap", first, second)
+	}
+	high, err := target.CatalogHighWatermark(context.Background())
+	if err != nil || high != 32 {
+		t.Fatal("sequence lost a reservation", high, err)
 	}
 }
 

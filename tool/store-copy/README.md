@@ -37,6 +37,19 @@ normal creation lock. Existing/live-created names remain deferred. The atomic
 range receipt binds the plan/name digest, copied bitmap, reserved ID mapping,
 stream digest and SST bounds/size/entry identities. Ordinary live writes continue.
 
+Native sessions become ready when restart recovery finishes loading, without
+waiting for saved-history writeout. Receiver presence includes restored,
+queued and in-flight cache names as well as the catalog, checked both before
+export and again under the creation lock at publication. These names remain
+for the existing importer/phase 2. Whole-store checkpoint and expiration
+readiness still wait for their original recovery boundary.
+
+ID reservation and catalog/receipt publication release the creation lock after
+Pebble applies the atomic batch, then wait for WAL sync before acknowledging.
+The per-range lock keeps receipt queries and duplicate imports behind that
+durability wait. `PublishHoldSeconds` excludes this sync;
+`PublishSyncSeconds` reports the separate wait.
+
 Durable native receipts, not client responses alone, authorize completion. A lost
 acknowledgement is resolved by receipt query without importing history twice.
 Unpublished reserved IDs and private SST directories recover on daemon open.
@@ -78,6 +91,21 @@ outside native timing. `--memory` uses virtual Pebble files and must not be repo
 as physical disk/NIC performance. Classic `--fixtures` inputs retain real archive
 values but do not prove original production native layout. `--repeat` is reported
 as replication and is allowed only for classic fixtures.
+
+The private donor defaults to a 1 GiB block cache with 128 data shards, matching
+production export concurrency rather than the old 32 MiB / seven-shard fixture.
+`--source-cache-bytes` and `--source-cache-shards` permit matched controls.
+`--source-scratch` places the donor on a separate disk when available. Native
+daemon sessions use the owning daemon's configured cache directly.
+
+An opt-in Linux diagnostic compares both cache topologies on synthetic native
+histories and checks every point bit; it does not qualify production throughput:
+
+```sh
+GRAPHITE_NATIVE_CACHE_EVAL=/private/evidence TMPDIR=/private/scratch \
+  GOTOOLCHAIN=go1.27.0 go test -mod=vendor ./internal/downsize \
+  -run '^TestNativeExportCacheScaling$' -v -count=1
+```
 
 `GET /v1/native/stats` reports native wire/SST bytes, build/ingest time and creation
 lock wait/hold/max-hold. CPU/mutex/block profiles and Linux device/NIC/CPU counters

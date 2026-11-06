@@ -397,7 +397,12 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 
 func (s *Store) reserveNativeIDs(identity string, count int) (nativeIntent, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
 	high, err := s.CatalogHighWatermark(context.Background())
 	if err != nil {
 		return nativeIntent{}, err
@@ -418,7 +423,15 @@ func (s *Store) reserveNativeIDs(identity string, count int) (nativeIntent, erro
 	if err := b.Set(nativeIntentKey(identity), data, nil); err != nil {
 		return intent, err
 	}
-	err = b.Commit(pebble.Sync)
+	// The sequence and intent must be visible before the next allocator runs,
+	// but its fsync need not hold the creation lock. Wait before using the IDs;
+	// concurrent reservations can share Pebble's WAL sync.
+	err = s.db.ApplyNoSyncWait(b, pebble.Sync)
+	s.mu.Unlock()
+	locked = false
+	if err == nil {
+		err = b.SyncWait()
+	}
 	s.nativeWriteFailed(err)
 	return intent, err
 }
@@ -530,7 +543,7 @@ func (s *Store) publishNative(ctx context.Context, request NativeRange, metas []
 	if err := b.Delete(nativeIntentKey(receipt.Identity), nil); err != nil {
 		return err
 	}
-	if err := s.commitSidecarRecords(b, sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.Sync) }); err != nil {
+	if err := s.commitSidecarRecords(b, sidecars, func(b *pebble.Batch) error { return s.db.ApplyNoSyncWait(b, pebble.Sync) }); err != nil {
 		s.nativeWriteFailed(err)
 		return err
 	}
@@ -542,6 +555,16 @@ func (s *Store) publishNative(ctx context.Context, request NativeRange, metas []
 		if s.nativeCounters.maxPublishHold.CompareAndSwap(old, held) {
 			break
 		}
+	}
+	// Catalogs, sidecar inventory and the receipt became visible together
+	// under the creation lock. Keep the per-range lock until fsync completes:
+	// neither this import nor a duplicate/receipt query can acknowledge early.
+	syncBegan := time.Now()
+	err = b.SyncWait()
+	s.nativeCounters.publishSync.Add(uint64(time.Since(syncBegan)))
+	if err != nil {
+		s.nativeWriteFailed(err)
+		return err
 	}
 	s.nativeCatalogChanged(visible)
 	s.invalidateReadCache()
