@@ -152,7 +152,8 @@ func (app *App) openInputLog(core *cache.Cache) error {
 // Without a checkpoint it precedes ordinary ordered dump restoration.
 // Replayed points precede live points in each cache item, so they need not
 // drain before receivers open, even for compressed whisper.
-func (app *App) replayInputLog(core *cache.Cache) error {
+func (app *App) replayInputLog(core *cache.Cache) error { return app.replayInputLogStopped(core, nil) }
+func (app *App) replayInputLogStopped(core *cache.Cache, stop <-chan struct{}) error {
 	l := app.inputLog.Load()
 	if l == nil || !l.NeedsReplay() {
 		return nil
@@ -165,10 +166,20 @@ func (app *App) replayInputLog(core *cache.Cache) error {
 		// Like tail replay: these points were accepted already, so no live
 		// quota applies, but recovery must leave room for persistence.
 		for draining && !core.HasRecoveryCapacity(len(p.Data)) {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			time.Sleep(time.Millisecond)
 		}
 		core.AddRecovered(p)
 	})
+	select {
+	case <-stop:
+		return errors.New("input log replay stopped")
+	default:
+	}
 	logger.Info("input log replayed", zap.Int64("points", stats.Points), zap.Int64("frames", stats.Frames),
 		zap.Int64("bytes", stats.Bytes), zap.Int64("corrupt_frames", stats.Corrupt), zap.Duration("runtime", stats.Duration), zap.Error(err))
 	if err != nil {

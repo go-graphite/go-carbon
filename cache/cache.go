@@ -119,8 +119,9 @@ type Shard struct {
 	items            itemMap
 	sizePublished    int64
 	writeout         writeoutSummary
-	notConfirmed     []*points.Points    // linear search for value/slot
-	flightPeak       int                 // maximum simultaneous in-flight batches since a capacity reset
+	notConfirmed     []*points.Points // linear search for value/slot
+	flightPeak       int              // maximum simultaneous in-flight batches since a capacity reset
+	recoverySources  map[*points.Points]recoverySourceRefs
 	notConfirmedUsed int                 // search value in notConfirmed[:notConfirmedUsed]
 	adds             map[string]struct{} // map to maintain all the new metric names
 	// Only in-flight batches need a map; queued items hold their arrival.
@@ -392,6 +393,7 @@ func (c *Cache) Confirm(p *points.Points) {
 	removeNotConfirmed(shard, p)
 	delete(shard.firstArrival, p)
 	shard.log.untrack(p)
+	shard.releaseSource(p)
 	shard.releaseDrainedTracking()
 	c.syncMemoryLocked(shard)
 	shard.mu.Unlock()
@@ -441,6 +443,7 @@ func (c *Cache) Requeue(p *points.Points) {
 		if r != nil {
 			r.moved(shard.itemIdentity(current), values.identity())
 		}
+		shard.moveSource(shard.itemIdentity(current), values.identity())
 		values.compact.appendPoints(current.compact.appendDecoded(nil))
 		// A missing arrival marks restored or previously unbatched data ready.
 		other := current.firstArrival
@@ -452,6 +455,7 @@ func (c *Cache) Requeue(p *points.Points) {
 	if r != nil {
 		r.moved(p, values.identity())
 	}
+	shard.moveSource(p, values.identity())
 	values.firstArrival = first
 	shard.log.mergeFlight(values, p)
 	shard.log.trackItem(values)
@@ -665,7 +669,7 @@ func (c *Cache) addRestored(p *points.Points, immediate bool) {
 		}
 		return
 	}
-	for wait := c.addWithRestore(p, true, false, immediate, nil); wait != nil; wait = c.addWithRestore(p, true, false, immediate, nil) {
+	for wait := c.addWithRestore(p, true, false, immediate, nil, nil); wait != nil; wait = c.addWithRestore(p, true, false, immediate, nil, nil) {
 		<-wait
 	}
 }
@@ -678,10 +682,10 @@ func (c *Cache) AddRecovered(p *points.Points) {
 }
 
 func (c *Cache) add(p *points.Points, restored, recovered bool) {
-	c.addWithRestore(p, restored, recovered, false, nil)
+	c.addWithRestore(p, restored, recovered, false, nil, nil)
 }
 
-func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *StreamSeries) <-chan struct{} {
+func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *StreamSeries, source *RecoverySource) <-chan struct{} {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
@@ -790,6 +794,10 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		}
 	}
 	metadataChanged := shard.setItemThrottle(values, throttleState)
+	if source != nil {
+		shard.trackSource(shard.itemIdentity(values), source)
+		metadataChanged = true
+	}
 	capacity, logCapacity := cap(values.compact.buf), shard.log.stagingBytes()
 	values.compact.appendPoints(p.Data)
 	shard.items.bytes += int64(cap(values.compact.buf) - capacity)
@@ -888,6 +896,9 @@ func (c *Cache) Pop(key string) (p *points.Points, exists bool) {
 		shard.items.removeHashed(hash, key)
 		values.firstArrival = time.Time{}
 		shard.log.untrackItem(values)
+		if values.pending != nil {
+			shard.releaseSource(values.pending)
+		}
 		shard.notePopped(len(values.compact.buf))
 		s := c.settings.Load().(*cacheSettings)
 		shard.noteWritten(values, s)

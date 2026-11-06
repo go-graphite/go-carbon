@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/blevesearch/mmap-go"
+	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -142,11 +143,14 @@ func TailName(wal string) string {
 }
 
 // IsGenerationTail includes the successor's independent capture shards. Their
-// names sort after the predecessor tail and retain the legacy binary format.
+// names sort after the predecessor tail. Epoch segments use independent frames.
 func IsGenerationTail(name, wal string) bool {
 	tail := TailName(wal)
 	if name == tail {
 		return true
+	}
+	if suffix, ok := strings.CutPrefix(name, tail+".capture-epoch-"); ok {
+		return IsCaptureSegment(name) && len(suffix) == len("00000000000000000000.000000.000000000000.tail.bin")
 	}
 	suffix, ok := strings.CutPrefix(name, tail+".capture-")
 	return ok && len(suffix) == len("00.tail.bin") && suffix[0] >= '0' && suffix[0] <= '9' && suffix[1] >= '0' && suffix[1] <= '9' && suffix[2:] == ".tail.bin"
@@ -433,6 +437,9 @@ func (b *Bundle) Retire() error {
 	}
 	for _, entry := range entries {
 		if !entry.IsDir() && IsGenerationTail(entry.Name(), b.manifest.WAL.Name) {
+			if handoff.Locked(filepath.Join(b.dir, entry.Name())) {
+				continue
+			}
 			if err := os.Remove(filepath.Join(b.dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
@@ -446,3 +453,23 @@ func (b *Bundle) Retire() error {
 func (b *Bundle) Count(slot uint64) uint64 { defer runtime.KeepAlive(b); return b.index.Count(slot) }
 
 func (b *Bundle) ReadIndexID() string { return b.manifest.ReadIndexID }
+
+// IsCaptureSegment reports independently compressed startup spool segments.
+func IsCaptureSegment(name string) bool {
+	_, suffix, ok := strings.Cut(name, ".tail.bin.capture-epoch-")
+	if !ok {
+		return false
+	}
+	fields := strings.Split(suffix, ".")
+	if len(fields) != 5 || len(fields[0]) != 20 || len(fields[1]) != 6 || len(fields[2]) != 12 || fields[3] != "tail" || fields[4] != "bin" {
+		return false
+	}
+	for _, field := range fields[:3] {
+		for _, c := range field {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}

@@ -152,7 +152,7 @@ func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
 
 	// The ordinary insertion path preserves quota, recovery, tags, throttling and
 	// graceful diversion, while passing the existing immutable name allocation.
-	c.addWithRestore(points.OnePoint(series.name, value, ts), false, false, false, series)
+	c.addWithRestore(points.OnePoint(series.name, value, ts), false, false, false, series, nil)
 }
 
 // StreamSeriesIndexBytes reports the fixed-width weak index capacity. Series

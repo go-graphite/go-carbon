@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -26,6 +25,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
+	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/zapwriter"
 	"github.com/zeebo/xxh3"
 )
@@ -129,18 +129,17 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	counts := map[string]int{}
-	for _, shard := range append([]*startupShard{spool.legacy}, spool.shards...) {
-		if _, err := replayInputTailReader(io.NewSectionReader(shard.file, 0, shard.size.Load()), 1, func(p *points.Points) {
-			for _, d := range p.Data {
-				if int(d.Value) != counts[p.Metric] {
-					t.Error("capture lost, duplicated, or reordered points")
-				}
-				counts[p.Metric]++
+	if err := visitCapture(spool, func(p *points.Points) {
+		for _, d := range p.Data {
+			if int(d.Value) != counts[p.Metric] {
+				t.Error("capture lost, duplicated, or reordered points")
 			}
-		}); err != nil {
-			t.Fatal(err)
+			counts[p.Metric]++
 		}
+	}); err != nil {
+		t.Fatal(err)
 	}
+
 	if len(counts) != clients {
 		t.Fatal(counts)
 	}
@@ -203,6 +202,9 @@ func TestStartupInputCrashProcess(t *testing.T) {
 		shard := s.shards[xxh3.HashString(p.Metric)%uint64(len(s.shards))]
 		raw := p.AppendBinary(nil)
 		if stage == "during_append" && i == 1 {
+			enc, _ := zstd.NewWriter(nil)
+			raw = recovery.EncodeCaptureFrame(enc, raw, nil, len(p.Data))
+			enc.Close()
 			if _, err := shard.file.Write(raw[:len(raw)-1]); err != nil {
 				t.Fatal(err)
 			}
@@ -228,10 +230,8 @@ func TestStartupInputCrashProcess(t *testing.T) {
 	}
 	if stage == "during_replay" {
 		core := cache.New()
-		for _, shard := range s.shards {
-			if _, err := replayCaptureShard(io.NewSectionReader(shard.file, 0, shard.size.Load()), core.AddRecovered); err != nil {
-				t.Fatal(err)
-			}
+		if err := visitCapture(s, core.AddRecovered); err != nil {
+			t.Fatal(err)
 		}
 		os.Exit(99)
 	}

@@ -633,6 +633,9 @@ func (app *App) stopAll() {
 	if app.MetricStore != nil {
 		app.MetricStore.StopCompactionPacing()
 	}
+	if app.startupInput != nil {
+		app.startupInput.pauseReplay()
+	}
 	app.stopPendingRecovery()
 	app.stopHeartbeat()
 	app.stopMallocTrim()
@@ -1531,8 +1534,14 @@ func (g *tailGate) pass() bool {
 
 func (app *App) startReceivers(core *cache.Cache) (err error) {
 	conf := app.Config
-	if err = app.finishStartupInput(core); err != nil {
-		return err
+	if app.startupInput != nil {
+		if err = app.finishStartupInput(core); err != nil {
+			return err
+		}
+		if conf.Prometheus.Enabled {
+			app.startupInput.receiver.InitPrometheus(app.PromRegisterer)
+		}
+		return nil
 	}
 	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver

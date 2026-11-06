@@ -61,6 +61,9 @@ func (app *App) DumpStop() (err error) {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	if app.startupInput != nil && app.startupInput.replayStarted.Load() {
+		return app.stopStreamingInputForHandoff(stopStarted)
+	}
 	if app.MetricStore != nil {
 		app.MetricStore.StopCompactionPacing()
 	}
@@ -869,6 +872,10 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 	visit := func(p *points.Points) {
 		pointsCount += len(p.Data)
 		storeFunc(p)
+	}
+	if recovery.IsCaptureSegment(path.Base(filename)) {
+		_, err := recovery.ReadCaptureFile(filename, visit)
+		return err
 	}
 	switch recovery.CacheFormat(path.Base(filename)) {
 	case recovery.FormatCompact:

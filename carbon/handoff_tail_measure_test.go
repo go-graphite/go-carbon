@@ -183,17 +183,15 @@ func TestMeasureHandoffTCPRate(t *testing.T) {
 			t.Logf("points=%d rate=%.0f/s drained=%v durable=%v bytes=%d", count, float64(count)/duration.Seconds(), duration, time.Since(start), size)
 			// Verify the persisted record count, independent of the receiver's counter.
 			var records int64
-			paths := []string{path}
+			visit := func(p *points.Points) { records += int64(len(p.Data)) }
 			if spool != nil {
-				for _, shard := range spool.shards {
-					paths = append(paths, shard.path)
-				}
-			}
-			for _, path := range paths {
-				if err := points.ReadFromFile(path, func(p *points.Points) { records += int64(len(p.Data)) }); err != nil {
+				if err := visitCapture(spool, visit); err != nil {
 					t.Fatal(err)
 				}
+			} else if err := points.ReadFromFile(path, visit); err != nil {
+				t.Fatal(err)
 			}
+
 			if records != count {
 				t.Fatal("disk records", records, count)
 			}

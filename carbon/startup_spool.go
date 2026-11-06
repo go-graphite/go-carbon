@@ -12,161 +12,250 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
+	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
 )
 
-// Each metric has one appender, file and decoder. Complete-record frontiers
-// are published after write(2), and each file is fsynced periodically and at seal.
-// Files use the ordinary legacy recovery format and sort after the predecessor
-// tail. Process crashes recover every complete written record. TCP ACK itself
-// is not a durability acknowledgement: unread kernel bytes and unsynced data on
-// power loss have the same limitations as ordinary TCP input.
+// Capture and replay never share a mutex. The append owner is also the live
+// FIFO sink after its reader reaches the applied frontier. If admission closes,
+// it keeps writing durable frames and wakes its reader; sockets never detach.
 type startupShard struct {
-	file     *os.File
-	path     string
-	err      atomic.Pointer[startupWriteError]
-	requests chan startupAppend
-	written  chan struct{}
-	size     atomic.Int64
-	offset   atomic.Int64
-	owner    *startupInput
-	unlock   func() error
+	owner        *startupInput
+	file         *os.File // first segment; compatibility with crash fixtures
+	path         string
+	requests     chan startupAppend
+	written      chan struct{}
+	err          atomic.Pointer[startupWriteError]
+	size, offset atomic.Int64
+	first        atomic.Pointer[startupSegment]
+	current      atomic.Pointer[startupSegment]
+	applied      atomic.Pointer[startupPosition]
+	live         atomic.Bool
+	promoted     atomic.Uint64
+	stream       cache.RecoveryStream
+	names        map[string]string
+	nameBytes    int
+}
+type startupSegment struct {
+	file                      *os.File
+	path                      string
+	unlock                    func() error
+	source                    *cache.RecoverySource
+	next                      atomic.Pointer[startupSegment]
+	size                      atomic.Int64
+	sealed, replayed, retired atomic.Bool
+}
+type startupPosition struct {
+	segment *startupSegment
+	offset  int64
+}
+type startupWriteError struct{ err error }
+type startupAppend struct {
+	data     []byte
+	count    int
+	done     chan error
+	promote  *startupPosition
+	promoted chan bool
 }
 
+// RecoveryAdmission is deliberately structural: adaptive-caps owns allocation
+// policy and blocked-pressure publication. Capture only asks for a batch grant.
+type captureAdmission interface{ HasRecoveryCapacity(int) bool }
+type startupSink struct {
+	admission captureAdmission
+	add       func(*points.Points, *cache.RecoverySource)
+	canRetire func() bool
+}
 type startupInput struct {
-	file           *os.File // immutable predecessor tail; retained for legacy recovery tests
-	path           string
-	policy         startupCapturePolicy
-	legacy         *startupShard
-	shards         []*startupShard
-	size           atomic.Int64
-	points         atomic.Int64
-	replayedPoints atomic.Int64
-	receiver       *tcp.TCP
-	observe        func(*points.Points) // installed before handlers; tests only
-	started        time.Time
-	stop           chan struct{}
-	done           chan struct{}
-	sealed         chan struct{}
-	catching       atomic.Bool
-	fallback       atomic.Bool
-	writeRate      atomic.Int64
-	replayRate     atomic.Int64
-	idleCPUs       atomic.Int64
-	effectiveLimit atomic.Int64
-	effectiveBytes atomic.Int64
-	pressure       chan struct{}
-	inherited      *tcp.Handoff // published by closing sealed
-	sealErr        error
-	sealedAt       time.Time
-	monitored      bool
-	syncWG         sync.WaitGroup
-	syncing        atomic.Bool
-	closeOnce      sync.Once
-	closeErr       error
+	file                                                                *os.File
+	path                                                                string
+	policy                                                              startupCapturePolicy
+	legacy                                                              *startupShard
+	shards                                                              []*startupShard
+	size, rawBytes, points, replayedPoints, replayedBytes, retiredBytes atomic.Int64
+	receiver                                                            *tcp.TCP
+	observe                                                             func(*points.Points)
+	started                                                             time.Time
+	stop, done, sealed                                                  chan struct{}
+	catching, fallback, paused                                          atomic.Bool
+	writeRate, replayRate, idleCPUs, effectiveLimit, effectiveBytes     atomic.Int64
+	pauseExpected                                                       atomic.Int64
+	pressure                                                            chan struct{}
+	inherited                                                           *tcp.Handoff
+	sealErr                                                             error
+	sealedAt                                                            time.Time
+	monitored                                                           bool
+	syncWG                                                              sync.WaitGroup
+	syncing                                                             atomic.Bool
+	closeOnce                                                           sync.Once
+	closeErr                                                            error
+	sink                                                                atomic.Pointer[startupSink]
+	replayStop, replayDone, legacyDone                                  chan struct{}
+	replayOnce                                                          sync.Once
+	replayStarted                                                       atomic.Bool
+	epoch                                                               int64
 }
 
 func openStartupInput(path string) (*startupInput, error) {
 	return openStartupInputWithPolicy(path, startupPolicy(path))
 }
-func openStartupInputWithPolicy(path string, policy startupCapturePolicy) (_ *startupInput, err error) {
-	s := &startupInput{policy: policy, path: path, started: time.Now(), stop: make(chan struct{}), done: make(chan struct{}), sealed: make(chan struct{}), pressure: make(chan struct{}, 1)}
-	open := func(path string, flags int) (*startupShard, error) {
-		f, err := os.OpenFile(path, flags, 0600)
-		if err != nil {
-			return nil, err
-		}
-		unlock, err := handoff.LockExclusive(path)
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
-		info, err := f.Stat()
-		if err != nil {
-			_ = f.Close()
-			_ = unlock()
-			return nil, err
-		}
-		shard := &startupShard{file: f, path: path, owner: s, unlock: unlock, requests: make(chan startupAppend, 256), written: make(chan struct{})}
-		go shard.appendLoop()
-		shard.size.Store(info.Size())
-		s.size.Add(info.Size())
-		return shard, nil
-	}
-	s.legacy, err = open(path, os.O_RDWR|os.O_APPEND)
+func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startupInput, err error) {
+	s := &startupInput{path: path, policy: p, started: time.Now(), stop: make(chan struct{}), done: make(chan struct{}), sealed: make(chan struct{}), pressure: make(chan struct{}, 1), replayStop: make(chan struct{}), replayDone: make(chan struct{}), legacyDone: make(chan struct{}), epoch: time.Now().UnixNano()}
+	s.replayRate.Store(p.replayRate)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
-	s.file = s.legacy.file
-	s.replayRate.Store(s.policy.replayRate)
+	unlock, err := handoff.LockExclusive(path)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		unlock()
+		return nil, err
+	}
+	s.file = f
+	s.legacy = &startupShard{owner: s, file: f, path: path}
+	s.legacy.size.Store(info.Size())
+	s.size.Store(info.Size())
+	legacy := &startupSegment{file: f, path: path, unlock: unlock}
+	legacy.size.Store(info.Size())
+	s.legacy.first.Store(legacy)
+	s.legacy.current.Store(legacy)
 	defer func() {
 		if err != nil {
 			_ = s.close()
 		}
 	}()
-	for i := range s.policy.shards {
-		shard, e := open(fmt.Sprintf("%s.capture-%02d.tail.bin", path, i), os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_APPEND)
+	for i := range p.shards {
+		sh := &startupShard{owner: s, requests: make(chan startupAppend, 256), written: make(chan struct{})}
+		sh.path = fmt.Sprintf("%s.capture-epoch-%020d.%06d", path, s.epoch, i)
+		seg, e := sh.newSegment(0)
 		if e != nil {
 			return nil, e
 		}
-		s.shards = append(s.shards, shard)
+		sh.first.Store(seg)
+		sh.file = seg.file
+		sh.current.Store(seg)
+		sh.applied.Store(&startupPosition{seg, 0})
+		s.shards = append(s.shards, sh)
+		go sh.appendLoop()
 	}
-	// Directory entries must survive a crash too, not only the file contents.
 	if err = syncDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
-
+func (s *startupShard) newSegment(index uint64) (*startupSegment, error) {
+	path := fmt.Sprintf("%s.%012d.tail.bin", s.path, index)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := handoff.LockExclusive(path)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	// Sync the directory before publishing/acknowledging any record in this file.
+	if err = syncDir(filepath.Dir(path)); err != nil {
+		f.Close()
+		unlock()
+		return nil, err
+	}
+	return &startupSegment{file: f, path: path, unlock: unlock, source: s.stream.Next()}, nil
+}
 func (s *startupInput) CaptureShards() []tcp.Capture {
 	out := make([]tcp.Capture, len(s.shards))
-	for i, v := range s.shards {
-		out[i] = v
+	for i, sh := range s.shards {
+		out[i] = sh
 	}
 	return out
 }
 
-// Write is the single-stream compatibility sink used by direct legacy tests.
-// The TCP receiver always uses CaptureShards instead.
-func (s *startupInput) Write(data []byte, count int) error { return s.legacy.Write(data, count) }
-
-type startupWriteError struct{ err error }
-type startupAppend struct {
-	data  []byte
-	count int
-	done  chan error
+// Direct legacy writes are used only by immutable-tail compatibility fixtures.
+func (s *startupInput) Write(raw []byte, n int) error {
+	written, err := s.file.Write(raw)
+	if err == nil && written != len(raw) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		s.legacy.size.Add(int64(written))
+		s.legacy.first.Load().size.Add(int64(written))
+		s.size.Add(int64(written))
+		s.rawBytes.Add(int64(written))
+		s.points.Add(int64(n))
+	}
+	return err
 }
-
-// Each file has exactly one owner. Producers enqueue borrowed batches and wait
-// for write completion. No application mutex covers file I/O, and replay uses
-// only the atomic complete-record frontier. Opportunistic coalescing amortizes
-// writes from many connections without a timer or an unbounded queue.
-func (s *startupShard) BeginWrite(data []byte, count int) func() error {
+func (s *startupShard) BeginWrite(raw []byte, n int) func() error {
 	if failure := s.err.Load(); failure != nil {
 		return func() error { return failure.err }
 	}
 	done := make(chan error, 1)
-	s.requests <- startupAppend{data, count, done}
+	s.requests <- startupAppend{data: raw, count: n, done: done}
 	return func() error { return <-done }
 }
-func (s *startupShard) Write(data []byte, count int) error { return s.BeginWrite(data, count)() }
+func (s *startupShard) Write(raw []byte, n int) error { return s.BeginWrite(raw, n)() }
+func (s *startupShard) fail(err error) {
+	if err != nil {
+		s.err.CompareAndSwap(nil, &startupWriteError{err})
+		s.owner.requestFallback()
+	}
+}
 func (s *startupShard) appendLoop() {
 	defer close(s.written)
-	var buf []byte
+	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(false))
+	defer enc.Close()
+	var buf, frame []byte
+	var held *startupAppend
+	var index uint64
 	pending := make([]startupAppend, 0, 256)
-	for first := range s.requests {
+	for {
+		var first startupAppend
+		var ok bool
+		if held != nil {
+			first = *held
+			held = nil
+			ok = true
+		} else {
+			first, ok = <-s.requests
+		}
+		if !ok {
+			break
+		}
+		if first.promoted != nil {
+			cur := s.current.Load()
+			applied := s.applied.Load()
+			promote := s.owner.sink.Load() != nil && applied.segment == cur && applied.offset == cur.size.Load() && first.promote != nil && first.promote.segment == cur && first.promote.offset == applied.offset
+			if promote {
+				s.live.Store(true)
+				s.promoted.Add(1)
+			}
+			first.promoted <- promote
+			continue
+		}
 		pending = append(pending[:0], first)
 		buf = append(buf[:0], first.data...)
 		count := first.count
 	drain:
 		for len(buf) < s.owner.policy.writeBuffer {
 			select {
-			case next, ok := <-s.requests:
-				if !ok {
+			case next, open := <-s.requests:
+				if !open {
+					break drain
+				}
+				if next.promoted != nil {
+					held = &next
 					break drain
 				}
 				pending = append(pending, next)
@@ -180,216 +269,394 @@ func (s *startupShard) appendLoop() {
 		if failure := s.err.Load(); failure != nil {
 			err = failure.err
 		} else {
-			n, e := s.file.Write(buf)
-			err = e
-			if err == nil && n != len(buf) {
-				err = io.ErrShortWrite
-			}
-			if err == nil {
-				s.size.Add(int64(n))
-				s.owner.size.Add(int64(n))
-				s.owner.points.Add(int64(count))
-				if s.owner.observe != nil {
-					err = points.ReadBinary(bytes.NewReader(buf), s.owner.observe)
+			frame = recovery.EncodeCaptureFrame(enc, buf, frame, count)
+			cur := s.current.Load()
+			if cur.size.Load() > 0 && cur.size.Load()+int64(len(frame)) > s.owner.policy.segmentBytes {
+				// Sealing rotates the append file, never the socket or the input stream.
+				err = cur.file.Sync()
+				if err == nil {
+					next, e := s.newSegment(index + 1)
+					err = e
+					if err == nil {
+						index++
+						if s.live.Load() {
+							cur.replayed.Store(true)
+						}
+						cur.next.Store(next)
+						s.current.Store(next)
+						cur.sealed.Store(true)
+						cur = next
+					}
 				}
 			}
-			if err != nil {
-				s.err.CompareAndSwap(nil, &startupWriteError{err})
+			if err == nil {
+				for s.owner.diskDanger(int64(len(frame))) {
+					s.owner.notePause()
+					select {
+					case <-s.owner.stop:
+						err = errors.New("capture stopped at disk safety reserve")
+					case <-time.After(10 * time.Millisecond):
+					}
+					if err != nil {
+						break
+					}
+				}
 			}
+			if err == nil {
+				n, e := cur.file.Write(frame)
+				err = e
+				if err == nil && n != len(frame) {
+					err = io.ErrShortWrite
+				}
+				if err == nil {
+					cur.size.Add(int64(n))
+					s.size.Add(int64(n))
+					s.owner.size.Add(int64(n))
+					s.owner.rawBytes.Add(int64(len(buf)))
+					s.owner.points.Add(int64(count))
+					if s.owner.observe != nil {
+						err = points.ReadBinary(bytes.NewReader(buf), s.owner.observe)
+					}
+					if s.live.Load() {
+						sink := s.owner.sink.Load()
+						if sink != nil && sink.admission.HasRecoveryCapacity(count) {
+							err = s.apply(buf, cur.source, sink)
+							if err == nil {
+								s.commit(cur, cur.size.Load(), count, int64(n))
+							}
+						} else {
+							s.live.Store(false)
+						}
+					}
+				}
+			}
+			s.fail(err)
 		}
 		for i := range pending {
 			pending[i].done <- err
 			pending[i] = startupAppend{}
 		}
 	}
+	cur := s.current.Load()
+	cur.sealed.Store(true)
+	s.fail(cur.file.Sync())
 }
-func (s *startupShard) sync() error {
-	if err := s.file.Sync(); err != nil {
-		s.err.CompareAndSwap(nil, &startupWriteError{err})
+func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *startupSink) error {
+	if s.names == nil {
+		s.names = make(map[string]string)
 	}
-	if failure := s.err.Load(); failure != nil {
-		return failure.err
-	}
-	return nil
+	var p points.Points
+	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
+		canonical, ok := s.names[string(name)]
+		if !ok {
+			if len(s.names) >= 4096 || s.nameBytes+len(name) > 4<<20 {
+				clear(s.names)
+				s.nameBytes = 0
+			}
+			canonical = string(name)
+			s.names[canonical] = canonical
+			s.nameBytes += len(name)
+		}
+		p.Metric, p.Data = canonical, data
+		sink.add(&p, source)
+	})
 }
-
+func replayCaptureRaw(raw []byte, add func(*points.Points)) error {
+	// Names must own storage if retained by cache. The existing borrowed parser
+	// handles exact value bits and all legacy multi-point record shapes.
+	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
+		p := points.Points{Metric: string(name), Data: data}
+		add(&p)
+	})
+}
+func (s *startupShard) commit(seg *startupSegment, end int64, count int, physical int64) {
+	s.applied.Store(&startupPosition{seg, end})
+	s.offset.Add(physical)
+	s.owner.replayedPoints.Add(int64(count))
+	s.owner.replayedBytes.Add(physical)
+	if seg.sealed.Load() && end == seg.size.Load() {
+		seg.replayed.Store(true)
+	}
+}
 func (s *startupInput) requestFallback() {
 	select {
 	case s.pressure <- struct{}{}:
 	default:
 	}
 }
+func (s *startupInput) diskDanger(n int64) bool {
+	if !s.monitored {
+		return false
+	}
+	limit := s.effectiveBytes.Load()
+	return limit > 0 && s.size.Load()-s.retiredBytes.Load()+n > limit
+}
+func (s *startupInput) notePause() {
+	if s.paused.CompareAndSwap(false, true) {
+		s.fallback.Store(true)
+		s.pauseExpected.Store(-1)
+		zapwriter.Logger("app").Error("startup input reached actual disk safety reserve; capture backpressured", zap.Int64("retained_bytes", s.size.Load()-s.retiredBytes.Load()), zap.Int64("budget_bytes", s.effectiveBytes.Load()), zap.Int64("expected_pause_seconds", -1))
+	}
+}
 
-// This monitor runs even while Start holds the lifecycle lock opening storage.
-// Detach stops socket reads and flushes all connection-local buffers. Holding
-// inherited descriptors preserves the ordinary ordered drain fallback.
-func (s *startupInput) startMonitor(limit time.Duration, maxBytes int64) {
+// No duration or cache-capacity event stops capture. A measured negative
+// convergence margin reports continued capture; only a disk safety reserve or
+// an I/O failure can backpressure sockets.
+func (s *startupInput) startMonitor(_ time.Duration, maxBytes int64) {
 	s.monitored = true
-	s.effectiveLimit.Store(int64(limit))
 	s.effectiveBytes.Store(maxBytes)
 	go func() {
 		defer close(s.done)
-		tick := time.NewTicker(10 * time.Millisecond)
+		tick := time.NewTicker(time.Second)
 		defer tick.Stop()
-		syncTick := time.NewTicker(time.Second)
-		lastSize := s.size.Load()
-		lastSample := time.Now()
-		cpuSamples := []metrics.Sample{{Name: "/cpu/classes/idle:cpu-seconds"}}
-		metrics.Read(cpuSamples)
-		lastIdle := cpuSamples[0].Value.Float64()
-		defer syncTick.Stop()
-		seal := func(reason string) {
-			if reason != "" {
-				s.fallback.Store(true)
-				zapwriter.Logger("app").Error("startup capture limit reached; falling back to ordered input drain", zap.String("reason", reason), zap.Int64("bytes", s.size.Load()), zap.Duration("runtime", time.Since(s.started)))
-			}
-			s.sealedAt = time.Now()
-			s.inherited, s.sealErr = s.receiver.Detach()
-			var wg sync.WaitGroup
-			errs := make([]error, len(s.shards))
-			for i, shard := range s.shards {
-				wg.Go(func() { errs[i] = shard.sync() })
-			}
-			wg.Wait()
-			s.sealErr = errors.Join(append(errs, s.sealErr)...)
-			close(s.sealed)
-		}
+		previousBytes, previousPoints, previousReplay := s.rawBytes.Load(), s.points.Load(), s.replayedPoints.Load()
+		at := time.Now()
+		cpu := []metrics.Sample{{Name: "/cpu/classes/idle:cpu-seconds"}}
+		metrics.Read(cpu)
+		idleBefore := cpu[0].Value.Float64()
 		for {
 			select {
 			case <-s.stop:
 				return
 			case <-s.pressure:
-				seal("recovery_budget_or_reader_error")
-				return
-			case <-syncTick.C:
+				s.fallback.Store(true) // I/O errors are surfaced; capacity denial never sends this.
+			case <-tick.C:
 				now := time.Now()
-				size := s.size.Load()
-				rate := int64(float64(size-lastSize) / now.Sub(lastSample).Seconds())
-				s.writeRate.Store(rate)
-				elapsed := now.Sub(lastSample).Seconds()
-				metrics.Read(cpuSamples)
-				idle := max(0, (cpuSamples[0].Value.Float64()-lastIdle)/elapsed)
-				lastIdle = cpuSamples[0].Value.Float64()
+				elapsed := now.Sub(at).Seconds()
+				raw, points, replay := s.rawBytes.Load(), s.points.Load(), s.replayedPoints.Load()
+				s.writeRate.Store(int64(float64(raw-previousBytes) / elapsed))
+				margin := float64((replay-previousReplay)-(points-previousPoints)) / elapsed
+				eta := int64(-1)
+				if margin > 0 {
+					eta = int64(float64(max(0, points-replay)) / margin * float64(time.Second))
+				}
+				s.effectiveLimit.Store(eta)
+				previousBytes, previousPoints, previousReplay, at = raw, points, replay, now
+				metrics.Read(cpu)
+				idle := max(0, (cpu[0].Value.Float64()-idleBefore)/elapsed)
+				idleBefore = cpu[0].Value.Float64()
 				s.idleCPUs.Store(int64(idle * 1000))
-				// Reclaim unused CPU for replay without competing at startup
-				// with the receiver's line-rate work. Raise only on observed
-				// idle capacity; a full CPU is a reason to keep the reservation.
-				if s.catching.Load() {
-					current := s.replayRate.Load()
-					if idle > float64(s.policy.cpus)/5 {
-						s.replayRate.Store(min(int64(s.policy.cpus)*8000000, current*5/4))
-					} else if idle < float64(s.policy.cpus)/20 && current > s.policy.replayRate {
-						s.replayRate.Store(max(s.policy.replayRate, current*4/5))
-					}
+
+				retained := s.size.Load() - s.retiredBytes.Load()
+				if free, err := migrationDiskFree(filepath.Dir(s.path)); err == nil {
+					s.effectiveBytes.Store((int64(min(free, 1<<62)) + retained) / 4)
 				}
-				lastSize, lastSample = size, now
-				// Test monitors can set stricter bounds; only the production policy adapts.
-				if limit == s.policy.limit && maxBytes == s.policy.spoolBytes {
-					s.effectiveLimit.Store(int64(captureTimeLimit(maxBytes, rate)))
-				}
-				// A slow fsync must not stop the independent safety monitor.
 				if s.syncing.CompareAndSwap(false, true) {
 					s.syncWG.Go(func() {
 						defer s.syncing.Store(false)
-						var wg sync.WaitGroup
-						for _, shard := range s.shards {
-							wg.Go(func() {
-								if shard.sync() != nil {
-									s.requestFallback()
-								}
-							})
+						for _, sh := range s.shards {
+							sh.fail(sh.sync())
 						}
-						wg.Wait()
+						s.reclaim()
 					})
-				}
-				if limit == s.policy.limit && maxBytes == s.policy.spoolBytes {
-					if free, err := migrationDiskFree(filepath.Dir(s.path)); err == nil {
-						s.effectiveBytes.Store(min(maxBytes, size+int64(min(free, 1<<60))/8))
-					}
-				}
-			case <-tick.C:
-				switch {
-				case time.Since(s.started) >= time.Duration(s.effectiveLimit.Load()):
-					seal("duration")
-					return
-				case s.size.Load() >= s.effectiveBytes.Load():
-					seal("bytes")
-					return
-				case s.catching.Load():
-					var left int64
-					for _, shard := range s.shards {
-						left += shard.size.Load() - shard.offset.Load()
-					}
-					if left <= 1<<20 {
-						seal("")
-						return
-					}
 				}
 			}
 		}
 	}()
 }
-
+func (s *startupShard) sync() error {
+	cur := s.current.Load()
+	if cur == nil {
+		return nil
+	}
+	return cur.file.Sync()
+}
+func (s *startupInput) reclaim() {
+	sink := s.sink.Load()
+	if sink == nil || !sink.canRetire() {
+		return
+	}
+	for _, sh := range s.shards {
+		for seg := sh.first.Load(); seg != nil; seg = seg.next.Load() {
+			if seg.retired.Load() {
+				continue
+			}
+			if !seg.sealed.Load() || !seg.replayed.Load() || seg.source.Pending() != 0 {
+				break
+			}
+			if !seg.retired.CompareAndSwap(false, true) {
+				continue
+			}
+			// Retire only a contiguous, applied, confirmed prefix, after the older
+			// checkpoint is retired. Otherwise replay could restore an older correction.
+			err := errors.Join(seg.file.Close(), seg.unlock())
+			if err == nil {
+				err = os.Remove(seg.path)
+			}
+			if err != nil {
+				sh.fail(err)
+				break
+			}
+			s.retiredBytes.Add(seg.size.Load())
+			sh.first.CompareAndSwap(seg, seg.next.Load())
+		}
+	}
+}
+func (s *startupInput) startReplay(sink *startupSink, legacy func() error) {
+	s.replayOnce.Do(func() {
+		s.replayStarted.Store(true)
+		s.sink.Store(sink)
+		go func() {
+			defer close(s.replayDone)
+			if err := legacy(); err != nil {
+				s.sealErr = err
+				s.requestFallback()
+				close(s.legacyDone)
+				return
+			}
+			close(s.legacyDone)
+			s.catching.Store(true)
+			var wg sync.WaitGroup
+			for _, sh := range s.shards {
+				wg.Go(func() { sh.replay(sink) })
+			}
+			wg.Wait()
+		}()
+	})
+}
+func (s *startupShard) replay(sink *startupSink) {
+	dec, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(64<<20))
+	if err != nil {
+		s.fail(err)
+		return
+	}
+	defer dec.Close()
+	frame := make([]byte, 0, s.owner.policy.readBuffer)
+	raw := make([]byte, 0, s.owner.policy.readBuffer)
+	var header [recovery.CaptureHeaderSize]byte
+	for {
+		select {
+		case <-s.owner.replayStop:
+			return
+		case <-s.owner.stop:
+			return
+		default:
+		}
+		if s.live.Load() {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		pos := s.applied.Load()
+		seg := pos.segment
+		if pos.offset == seg.size.Load() {
+			if next := seg.next.Load(); next != nil {
+				seg.replayed.Store(true)
+				s.applied.Store(&startupPosition{next, 0})
+				continue
+			}
+			reply := make(chan bool, 1)
+			request := startupAppend{promote: pos, promoted: reply}
+			select {
+			case s.requests <- request:
+			case <-s.owner.replayStop:
+				return
+			case <-s.owner.stop:
+				return
+			}
+			select {
+			case <-reply:
+			case <-s.owner.replayStop:
+				return
+			case <-s.owner.stop:
+				return
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		if _, err = seg.file.ReadAt(header[:], pos.offset); err != nil {
+			s.fail(err)
+			return
+		}
+		size, e := recovery.CaptureFrameSize(header[:])
+		if e != nil {
+			s.fail(e)
+			return
+		}
+		if pos.offset+int64(size) > seg.size.Load() {
+			s.fail(io.ErrUnexpectedEOF)
+			return
+		}
+		if cap(frame) < size {
+			frame = make([]byte, size)
+		} else {
+			frame = frame[:size]
+		}
+		if _, err = seg.file.ReadAt(frame, pos.offset); err != nil {
+			s.fail(err)
+			return
+		}
+		var count int
+		raw, count, err = recovery.DecodeCaptureFrame(dec, frame, raw)
+		if err != nil {
+			s.fail(err)
+			return
+		}
+		for !sink.admission.HasRecoveryCapacity(count) {
+			select {
+			case <-s.owner.replayStop:
+				return
+			case <-s.owner.stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+		if err = s.apply(raw, seg.source, sink); err != nil {
+			s.fail(err)
+			return
+		}
+		s.commit(seg, pos.offset+int64(size), count, int64(size))
+	}
+}
+func (s *startupInput) pauseReplay() {
+	s.sink.Store(nil)
+	select {
+	case <-s.replayStop:
+	default:
+		close(s.replayStop)
+	}
+	if s.replayStarted.Load() {
+		<-s.replayDone
+		// Fence any live apply already in progress. The append owners remain active
+		// and durable throughout shutdown preparation, but can no longer touch cache.
+		for _, sh := range s.shards {
+			reply := make(chan bool, 1)
+			sh.requests <- startupAppend{promoted: reply}
+			<-reply
+			sh.live.Store(false)
+		}
+	}
+}
 func (s *startupInput) close() error {
 	s.closeOnce.Do(func() {
 		close(s.stop)
+		s.pauseReplay()
 		if s.monitored {
 			<-s.done
 		}
 		s.syncWG.Wait()
-		var wg sync.WaitGroup
-		shards := append([]*startupShard{s.legacy}, s.shards...)
-		errs := make([]error, len(shards))
-		for i, shard := range shards {
-			wg.Go(func() {
-				close(shard.requests)
-				<-shard.written
-				errs[i] = errors.Join(shard.sync(), shard.file.Close(), shard.unlock())
-			})
+		for _, sh := range s.shards {
+			close(sh.requests)
+			<-sh.written
 		}
-		wg.Wait()
+		var errs []error
+		for _, sh := range append([]*startupShard{s.legacy}, s.shards...) {
+			if sh == nil {
+				continue
+			}
+			for seg := sh.first.Load(); seg != nil; seg = seg.next.Load() {
+				if !seg.retired.Load() {
+					errs = append(errs, seg.file.Sync(), seg.file.Close(), seg.unlock())
+				}
+			}
+		}
 		s.closeErr = errors.Join(errs...)
+		s.sealedAt = time.Now()
+		close(s.sealed)
 	})
 	return s.closeErr
 }
 
-type startupShardReader struct {
-	s     *startupInput
-	shard *startupShard
-}
-
-func (r *startupShardReader) Read(buf []byte) (int, error) {
-	if len(buf) == 0 {
-		return 0, nil
-	}
-	for {
-		select {
-		case <-r.s.stop:
-			return 0, errors.New("startup capture stopped")
-		default:
-		}
-		left := r.shard.size.Load() - r.shard.offset.Load()
-		if left > 0 {
-			n, err := r.shard.file.ReadAt(buf[:min(int64(len(buf)), left)], r.shard.offset.Load())
-			r.shard.offset.Add(int64(n))
-			return n, err
-		}
-		select {
-		case <-r.s.sealed:
-			// Detach's final flush precedes sealed. Recheck its frontier.
-			if r.shard.size.Load() == r.shard.offset.Load() {
-				return 0, io.EOF
-			}
-		case <-r.s.stop:
-			return 0, errors.New("startup capture stopped")
-		default:
-			time.Sleep(time.Millisecond)
-		}
-	}
-}
-
-// One decoder adds each shard directly, without a shared dispatch goroutine.
-// A bounded canonical-name memo keeps borrowed names safe if cache retains them.
+// Legacy replay helpers remain shared with ordinary tail recovery.
 func replayCaptureShard(reader io.Reader, add func(*points.Points)) (int, error) {
 	return replayCaptureShardBuffer(reader, add, 1<<20)
 }
@@ -413,38 +680,4 @@ func replayCaptureShardBuffer(reader io.Reader, add func(*points.Points), buffer
 		count += len(data)
 	})
 	return count, err
-}
-
-// Rate-limit only the CPU-heavy replay sink, independently for each shard.
-// Sleeping occurs outside cache/file ownership. Available idle CPU raises the
-// shared target; capture never waits for a replay permit or a recovery lock.
-func (s *startupInput) pacedReplay(add func(*points.Points)) func(*points.Points) {
-	start := time.Now()
-	var count int64
-	nextCheck := int64(4096)
-	return func(p *points.Points) {
-		add(p)
-		count += int64(len(p.Data))
-		if count >= nextCheck {
-			select {
-			case <-s.sealed:
-				return
-			default:
-			}
-			nextCheck = count + 4096
-			target := s.replayRate.Load() / int64(len(s.shards))
-			if target > 0 {
-				delay := time.Until(start.Add(time.Duration(float64(count) / float64(target) * float64(time.Second))))
-				if delay > 0 {
-					time.Sleep(min(delay, 10*time.Millisecond))
-				}
-			}
-			// A bounded window avoids retaining catch-up credit after an I/O stall.
-			if time.Since(start) >= 100*time.Millisecond {
-				start = time.Now()
-				count = 0
-				nextCheck = 4096
-			}
-		}
-	}
 }
