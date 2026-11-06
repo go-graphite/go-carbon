@@ -28,3 +28,17 @@ func Lock(mutexes []sync.Mutex, indices []uint64) {
 		first = (first + acquired) % len(indices)
 	}
 }
+
+// TryLock acquires the complete set immediately, or releases the acquired
+// prefix before returning false. Indices must be unique and not already held.
+func TryLock(mutexes []sync.Mutex, indices []uint64) bool {
+	for i, index := range indices {
+		if !mutexes[index].TryLock() {
+			for j := i - 1; j >= 0; j-- {
+				mutexes[indices[j]].Unlock()
+			}
+			return false
+		}
+	}
+	return true
+}

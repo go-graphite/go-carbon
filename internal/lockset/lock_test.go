@@ -106,3 +106,25 @@ func BenchmarkConvoy(b *testing.B) {
 		})
 	}
 }
+
+func TestTryLockReleasesIncompleteSet(t *testing.T) {
+	var mus [3]sync.Mutex
+	mus[1].Lock()
+	if TryLock(mus[:], []uint64{0, 1, 2}) {
+		t.Fatal("acquired an occupied stripe")
+	}
+	if !mus[0].TryLock() {
+		t.Fatal("retained an incomplete prefix")
+	}
+	mus[0].Unlock()
+	mus[1].Unlock()
+	if !TryLock(mus[:], []uint64{0, 1, 2}) {
+		t.Fatal("uncontended set failed")
+	}
+	for i := range mus {
+		mus[i].Unlock()
+	}
+	if !TryLock(mus[:], nil) {
+		t.Fatal("empty set failed")
+	}
+}

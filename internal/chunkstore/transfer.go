@@ -411,13 +411,10 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 	}
 	proofs := make([]TransferProof, 0, len(records))
-	// Publish one metric at a time. A retrying multi-stripe lock set avoids
-	// partial-set convoys but can starve behind continuously active writers
-	// on two of its stripes. One stripe joins the ordinary mutex queue and
-	// bounds both foreground fan-out and import starvation. Preparation still
-	// runs outside that stripe; the request shares one final WAL barrier.
-	for start := 0; start < len(records); start++ {
-		end := start + 1
+	// Uncontended groups share one commit. A contended group falls back to
+	// per-name publication, which joins each ordinary single-stripe queue.
+	for start := 0; start < len(records); start += 16 {
+		end := min(start+16, len(records))
 		group, err := s.publishTransfer(ctx, records[start:end], metas[start:end])
 		if err != nil {
 			return nil, err
@@ -437,13 +434,24 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 }
 
 func (s *Store) lockTransfer(names []string) func() {
+	unlock, _ := s.acquireTransfer(names, false)
+	return unlock
+}
+
+func (s *Store) acquireTransfer(names []string, try bool) (func(), int) {
 	stripes := make([]uint64, 0, len(names))
 	for _, name := range names {
 		stripes = append(stripes, s.metricStripe(name))
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	lockset.Lock(s.metricMu[:], stripes)
+	if try {
+		if !lockset.TryLock(s.metricMu[:], stripes) {
+			return nil, 0
+		}
+	} else {
+		lockset.Lock(s.metricMu[:], stripes)
+	}
 	for _, name := range names {
 		s.beginStateMutation(name)
 	}
@@ -460,7 +468,7 @@ func (s *Store) lockTransfer(names []string) func() {
 		for i := len(stripes) - 1; i >= 0; i-- {
 			s.metricMu[stripes[i]].Unlock()
 		}
-	}
+	}, len(stripes)
 }
 
 // ContinuationArchiveRestorer reconstructs independent authoritative archives.

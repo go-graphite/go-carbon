@@ -140,9 +140,9 @@ func TestTransferConvoyRealShape(t *testing.T) {
 			r.Version.Name = r.Config.Name
 			groups[w][i] = r
 		}
-		for start := 0; start < batch; start += 1 {
+		for start := 0; start < batch; start += 16 {
 			set := map[uint64]bool{}
-			for _, r := range groups[w][start:min(start+1, batch)] {
+			for _, r := range groups[w][start:min(start+16, batch)] {
 				set[(helper.HashString(r.Config.Name)>>32)%4096] = true
 			}
 			stripeCounts[len(set)]++

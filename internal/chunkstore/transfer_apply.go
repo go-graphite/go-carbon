@@ -8,6 +8,8 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
+var errTransferSplit = errors.New("transfer publication needs single-name queues")
+
 type preparedTransfer struct {
 	batch           *pebble.Batch
 	expected, metas []Metadata
@@ -36,6 +38,18 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		}
 		committed, err := s.commitPreparedTransfer(ctx, prepared)
 		_ = prepared.batch.Close()
+		if errors.Is(err, errTransferSplit) {
+			s.transferApply.splits.Add(1)
+			proofs := make([]TransferProof, 0, len(records))
+			for i := range records {
+				group, e := s.publishTransfer(ctx, records[i:i+1], metas[i:i+1])
+				if e != nil {
+					return nil, e
+				}
+				proofs = append(proofs, group...)
+			}
+			return proofs, nil
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -53,7 +67,11 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 		absent = absent || p.expected[i].ID == 0
 	}
 	wait := time.Now()
-	unlock := s.lockTransfer(names)
+	unlock, stripes := s.acquireTransfer(names, len(names) > 1)
+	if unlock == nil {
+		return false, errTransferSplit
+	}
+	s.transferApply.stripeHolds[stripes].Add(1)
 	locked := time.Now()
 	s.transferApply.wait.Add(uint64(locked.Sub(wait)))
 	defer func() { unlock(); s.transferApply.recordHold(time.Since(locked)) }()
@@ -71,11 +89,17 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			if p.expected[i].ID != 0 {
+				if len(names) > 1 {
+					return false, errTransferSplit
+				}
 				return false, nil
 			}
 		case err != nil:
 			return false, err
 		case !sameTransferTarget(current, p.expected[i]):
+			if len(names) > 1 {
+				return false, errTransferSplit
+			}
 			return false, nil
 		}
 	}
