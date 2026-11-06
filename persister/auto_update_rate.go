@@ -139,6 +139,7 @@ type autoUpdateRate struct {
 	tokenWaiters            atomic.Int64
 	observeTokens           atomic.Bool
 	generation              uint64
+	rateLog, capacityLog    autoAdjustmentLog
 	observed                atomic.Pointer[autoUpdateObservation]
 }
 
@@ -224,7 +225,7 @@ func (p *Whisper) applyAutoUpdateRateLocked() {
 	if a.metrics != nil {
 		a.metrics.adjust(a.reason)
 	}
-	if p.logger != nil {
+	if p.logger != nil && a.rateLog.allow(time.Now(), a.reason, rate, .25) {
 		p.logger.Info("automatic writeout rate adjusted", zap.Int("updates_per_second", rate),
 			zap.Int("previous_updates_per_second", previous), zap.Float64("target_updates_per_second", a.target),
 			zap.String("reason", a.reason), zap.Int64("cached_metrics", s.Metrics), zap.Duration("oldest_age", s.OldestAge))

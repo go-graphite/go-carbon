@@ -192,9 +192,9 @@ func (p *Whisper) capacityLimitLocked(s cache.WriteoutState) {
 	if a.ordinary > limit {
 		a.ordinary = limit
 	}
-	if (previous != limit || previousHard != a.capacity.hardCeiling) && p.logger != nil {
+	if (previous != limit || previousHard != a.capacity.hardCeiling) && p.logger != nil && a.capacityLog.allow(time.Now(), capacityLogReason(a.capacity.reason), limit, 0) {
 		sample := a.capacitySample
-		p.logger.Info("automatic writeout capacity adjusted", zap.Int("updates_per_second", limit), zap.Int("previous_updates_per_second", previous), zap.Int("hard_ceiling_updates_per_second", a.capacity.hardCeiling), zap.String("reason", a.capacity.reason), zap.Duration("read_p99", a.capacity.p99), zap.Bool("recovery_blocked", s.RecoveryBlocked),
+		p.logger.Info("automatic writeout capacity adjusted", zap.Int("updates_per_second", limit), zap.Int("previous_updates_per_second", previous), zap.Int("hard_ceiling_updates_per_second", a.capacity.hardCeiling), zap.Int("minimum_updates_per_second", a.capacity.minimum), zap.String("reason", a.capacity.reason), zap.Duration("read_p99", a.capacity.p99), zap.Duration("read_reference", a.capacity.baseline), zap.Bool("recovery_blocked", s.RecoveryBlocked),
 			zap.Bool("host_valid", sample.Host.Valid), zap.Bool("disk_valid", sample.Host.DiskValid && sample.SpaceValid), zap.Float64("cpu_idle", sample.Host.Idle), zap.Float64("io_wait", sample.Host.IOWait), zap.Float64("memory_headroom", sample.Host.Memory), zap.Float64("gc_cpu", sample.Host.GC), zap.Float64("disk_busy", sample.Host.DiskBusy), zap.Uint64("disk_free_bytes", sample.FreeBytes), zap.Bool("write_stalled", sample.Stalled), zap.Uint64("compaction_debt_bytes", sample.Debt), zap.Int64("l0_sublevels", sample.L0))
 	}
 	// The effective reason distinguishes a capacity cap from ordinary demand.

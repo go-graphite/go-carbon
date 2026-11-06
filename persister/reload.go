@@ -161,6 +161,7 @@ func (p *Whisper) InheritRuntime(previous *Whisper) {
 	previous.autoUpdate.mu.Lock()
 	p.autoUpdate.controller = previous.autoUpdate.controller
 	p.autoUpdate.capacity = previous.autoUpdate.capacity
+	p.autoUpdate.rateLog, p.autoUpdate.capacityLog = previous.autoUpdate.rateLog, previous.autoUpdate.capacityLog
 	if p.autoUpdate.ceiling == -1 && (previous.autoUpdate.ceiling != -1 || previous.settings().maxUpdatesPerSecond != -1) {
 		seed := previous.autoUpdate.applied
 		if mode := previous.settings().maxUpdatesPerSecond; mode != -1 {
