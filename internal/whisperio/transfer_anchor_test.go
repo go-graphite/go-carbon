@@ -3,6 +3,7 @@ package whisperio
 import (
 	"context"
 	"math"
+	"math/rand/v2"
 	"slices"
 	"testing"
 	"time"
@@ -73,5 +74,107 @@ func TestRestoreArchiveRejectsUnrepresentableImages(t *testing.T) {
 		if len(kv) != 0 {
 			t.Fatal("invalid restore wrote keys")
 		}
+	}
+}
+
+func TestRestoreAnchorFromColdRepresentations(t *testing.T) {
+	for _, floating := range []bool{false, true} {
+		t.Run(map[bool]string{false: "v9", true: "v11"}[floating], func(t *testing.T) {
+			ctx := context.Background()
+			options := coldOptions(&ContinuationCodec{})
+			source, err := store.Open(t.TempDir(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer source.Close()
+			source.StopBackground()
+			var want store.Snapshot
+			if !floating {
+				want = coldFixture(t, source)
+			} else {
+				cfg := store.MetricConfig{Name: "float.metric", Retentions: []store.Retention{{Step: 60, Count: 10080}}, AggregationMethod: store.Average}
+				if _, err := source.Create(ctx, cfg); err != nil {
+					t.Fatal(err)
+				}
+				random := rand.New(rand.NewPCG(42, 17))
+				points := make([]store.Point, 1800)
+				for i := range points {
+					points[i] = store.Point{Timestamp: coldBase + int64(i*60), Value: float64(random.IntN(16)) / 3}
+				}
+				if err := source.UpdateMany(ctx, cfg.Name, points); err != nil {
+					t.Fatal(err)
+				}
+				want, err = source.Snapshot(ctx, cfg.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			floatSweep(t, source, "exact", false)
+			if floating {
+				floatSweep(t, source, "float-repack", true)
+			}
+			expectedFormat := 9
+			if floating {
+				expectedFormat = 11
+			}
+			if source.TransferFormat() != expectedFormat {
+				t.Fatalf("source format %d", source.TransferFormat())
+			}
+			records, err := source.ExportTransfer(ctx, []string{want.Metadata.Name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, cached := range []bool{false, true} {
+				targetOptions := options
+				if !cached {
+					targetOptions.MetadataCacheSize = 0
+				}
+				target, err := store.Open(t.TempDir(), targetOptions)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer target.Close()
+				target.StopBackground()
+				if err := target.ConfigureColdPack(store.ColdPackOptions{Mode: "exact", FloatCodec: floating}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := target.Create(ctx, want.Metadata.MetricConfig); err != nil {
+					t.Fatal(err)
+				}
+				proofs, err := target.ImportTransfer(ctx, records)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(proofs) != 1 || !proofs[0].Merged {
+					t.Fatal("did not restore overlap")
+				}
+				got, err := target.Snapshot(ctx, want.Metadata.Name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.EqualSnapshots(want, got); err != nil {
+					t.Fatal(err)
+				}
+				now := int(options.Now().Unix())
+				for _, a := range got.Archives {
+					series, err := target.Fetch(ctx, want.Metadata.Name, now-a.Retention.Step*a.Retention.Count+2*a.Retention.Step, now-1)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if series.Step != a.Retention.Step {
+						t.Fatalf("selected wrong archive: %d", series.Step)
+					}
+					for _, p := range a.Points {
+						if int(p.Timestamp) < series.FromTime || int(p.Timestamp) >= series.UntilTime {
+							continue
+						}
+						index := (int(p.Timestamp) - series.FromTime) / series.Step
+						if math.Float64bits(series.Values[index]) != math.Float64bits(p.Value) {
+							t.Fatalf("cold source point missing %+v", p)
+						}
+					}
+				}
+			}
+		})
 	}
 }
