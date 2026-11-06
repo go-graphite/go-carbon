@@ -37,12 +37,21 @@ func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.Contin
 	f := file.(*continuationFile)
 	layout := w.StorageLayout()
 	for ai, archive := range snapshot.Archives {
+		// Classic Fetch uses physical slot zero as the ring's timestamp anchor.
+		// An absolute epoch slot can leave that slot empty in a sparse archive.
+		var base int64
+		if len(archive.Points) > 0 {
+			base = archive.Points[0].Timestamp
+			for _, p := range archive.Points[1:] {
+				base = min(base, p.Timestamp)
+			}
+		}
 		groups := make(map[int]*store.PointBlock)
 		for _, p := range archive.Points {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			slot := int(p.Timestamp/int64(archive.Retention.Step)) % archive.Retention.Count
+			slot := int((p.Timestamp-base)/int64(archive.Retention.Step)) % archive.Retention.Count
 			block := groups[slot/128]
 			if block == nil {
 				block = &store.PointBlock{}
