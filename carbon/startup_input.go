@@ -172,6 +172,57 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		return
 	}
 	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
+	if app.MetricStore != nil {
+		sink.syncStore = app.MetricStore.Sync
+	}
+	add, addPoint := core.Add, core.AddPoint
+	if receiverStoreHook != nil {
+		add, addPoint = receiverStoreHook(add, addPoint)
+	}
+	sink.directAdd = add
+	if s.receiver != nil {
+		s.receiver.SetPointOut(addPoint)
+		if receiverStoreHook == nil {
+			s.receiver.SetPointsOut(core.AddPoints)
+			s.receiver.SetPointBatchOut(core.AddPointBatch)
+		}
+	}
+	if log := app.inputLog.Load(); log != nil && app.Config.InputLog.Enabled {
+		sink.startLog = func() (func() error, error) {
+			if !core.InputLogIdle() {
+				return nil, errors.New("earlier journalled points have not persisted")
+			}
+			log := app.inputLog.Load()
+			if log == nil {
+				return nil, errors.New("input log unavailable after reset failure")
+			}
+			// Do not retire files belonging to an active store-copy session.
+			if _, err := log.PinCopy(); err != nil {
+				return nil, err
+			}
+			if sink.syncStore != nil {
+				if err := sink.syncStore(); err != nil {
+					_ = log.ReleaseCopy()
+					return nil, err
+				}
+			}
+			// Input is still fenced into capture. Old journal values have all
+			// persisted; discard their replay eligibility before placing a new
+			// epoch boundary, including the truncate-lag grace period.
+			app.inputLog.Store(nil)
+			if err := log.Retire(); err != nil {
+				return nil, err
+			}
+			core.DisableInputLog()
+			core.EnableInputLogFromNow()
+			if err := app.openInputLog(core); err != nil {
+				return nil, err
+			}
+			log = app.inputLog.Load()
+			_, err := log.PinCopy()
+			return log.ReleaseCopy, err
+		}
+	}
 	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
 	s.startReplay(sink, func() error {
 		// Older epochs precede the current stream, including after a crash during
@@ -188,6 +239,12 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			}
 		}
 		slices.Sort(paths)
+		fencedEpoch := ""
+		for _, path := range paths {
+			if isStartupDirectFence(path) {
+				fencedEpoch = strings.TrimSuffix(path, startupDirectSuffix)
+			}
+		}
 		cancelled := func() bool {
 			select {
 			case <-s.replayStop:
@@ -309,8 +366,10 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				i++
 				continue
 			}
-			if e := replayLog(); e != nil {
-				return e
+			if fencedEpoch == "" {
+				if e := replayLog(); e != nil {
+					return e
+				}
 			}
 			// Epoch first, partition second, segment sequence last. Readers
 			// overlap partitions only, joining before the next epoch begins.
@@ -356,6 +415,11 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			close(failures)
 			for e := range failures {
 				return e
+			}
+			if epoch == fencedEpoch {
+				if e := replayLog(); e != nil {
+					return e
+				}
 			}
 		}
 

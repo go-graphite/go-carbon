@@ -160,3 +160,50 @@ func TestCaptureShardsPreservePerMetricOrder(t *testing.T) {
 		t.Fatal(seen)
 	}
 }
+
+func TestSwitchCaptureFencesSubmissionsAndDrainsLocalBuffers(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := &TCP{}
+	b := newCaptureBuffer(captureFunc(func([]byte, int) error {
+		close(entered)
+		<-release
+		return nil
+	}))
+	b.sink = &r.captureSink
+	b.point([]byte("same"), 1, 1)
+	flushed := make(chan error, 1)
+	go func() { flushed <- b.flush() }()
+	<-entered
+	sealed := make(chan struct{})
+	switched := make(chan error, 1)
+	var values []float64
+	go func() {
+		switched <- r.SwitchCapture(func(p *points.Points) {
+			for _, d := range p.Data {
+				values = append(values, d.Value)
+			}
+		}, func() error { close(sealed); return nil })
+	}()
+	select {
+	case <-sealed:
+		t.Fatal("sealed ahead of an in-flight capture submission")
+	default:
+	}
+	close(release)
+	if err := <-flushed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-switched; err != nil {
+		t.Fatal(err)
+	}
+	// A handler that buffered this record before publication flushes it to
+	// ordinary Add before its next direct point, with no further spool write.
+	b.point([]byte("same"), 2, 1)
+	if err := b.flush(); err != nil {
+		t.Fatal(err)
+	}
+	(*r.captureSink.direct.Load())(points.OnePoint("same", 3, 1))
+	if len(values) != 2 || values[0] != 2 || values[1] != 3 {
+		t.Fatal("buffered/direct order", values)
+	}
+}

@@ -76,6 +76,18 @@ type copyReply struct {
 	err   error
 }
 
+// RetainReplay pins the recovered journal before Start can recycle it. A
+// capture prefix may still contain older corrections even after their newer
+// journal values have persisted. The caller releases retention after retiring
+// that prefix. Call before Start, including when NeedsReplay is false.
+func (l *Log) RetainReplay() {
+	from := Position{Segment: l.nextSeq, Offset: segmentHeaderSize}
+	if len(l.pending) > 0 {
+		from = Position{Segment: l.pending[0].seg.seq, Offset: l.pending[0].off}
+	}
+	l.copyPin = &from
+}
+
 // PinCopy syncs accepted input and prevents segment recycling. Only one copy
 // may own retention. The caller must release it, including on checkpoint failure.
 func (l *Log) PinCopy() (CopyState, error) { return l.requestCopy("pin") }

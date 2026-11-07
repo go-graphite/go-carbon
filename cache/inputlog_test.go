@@ -495,3 +495,34 @@ func TestInputLogRequeueMovesTracking(t *testing.T) {
 		t.Fatalf("tracking left after pop: %v %v", shard.log.first, shard.log.items)
 	}
 }
+
+func TestInputLogFromNowRetainsIndependentSpoolSource(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	var stream RecoveryStream
+	source := stream.Next()
+	c.AddRecoveredFrom(points.OnePoint("spooled", 1, 1), source)
+	c.EnableInputLogFromNow()
+	if !c.InputLogIdle() || source.Pending() != 1 {
+		t.Fatal("fresh journal adopted independent recovery authority")
+	}
+	c.Add(points.OnePoint("spooled", 2, 1))
+	if c.InputLogIdle() {
+		t.Fatal("live input did not enter journal staging/tracking")
+	}
+	var n int
+	for i := range ShardCount {
+		n += len(c.TakeLogEntries(i, 1, nil))
+	}
+	if n != 1 || c.InputLogIdle() {
+		t.Fatal("journal point count or in-flight protection", n)
+	}
+	p, ok := c.PopNotConfirmed("spooled")
+	if !ok || source.Pending() != 1 {
+		t.Fatal("spool authority lost during pop")
+	}
+	c.Confirm(p)
+	if !c.InputLogIdle() || source.Pending() != 0 {
+		t.Fatal("persisted authorities did not release")
+	}
+}

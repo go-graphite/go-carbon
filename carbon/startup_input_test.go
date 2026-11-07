@@ -279,6 +279,10 @@ func TestStartupInputCrashProcess(t *testing.T) {
 		return
 	}
 	stamp, _ := strconv.ParseInt(os.Getenv("HANDOFF_CRASH_STAMP"), 10, 64)
+	if strings.HasPrefix(stage, "direct_") {
+		startupDirectCrashChild(t, stage, stamp)
+		return
+	}
 	s, err := openStartupInput(os.Getenv("HANDOFF_CRASH_TAIL"))
 	if err != nil {
 		t.Fatal(err)
@@ -490,7 +494,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 	if isolatedTestProcessSerial(t) {
 		return
 	}
-	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement"} {
+	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement", "direct_before_switch", "direct_during_seal", "direct_after_fence", "direct_after_switch", "direct_partial_retirement", "direct_full_retirement", "direct_next_epoch"} {
 		t.Run(stage, func(t *testing.T) {
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
@@ -503,6 +507,11 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			cfg.InputLog.SegmentSize = 16 << 20
 			if stage == "after_pending_retirement" {
 				cfg.Whisper.StoreSyncInterval = &Duration{time.Hour}
+			}
+			if strings.HasPrefix(stage, "direct_") {
+				cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
+				cfg.Dump.StoreInputHandoff = true
+				cfg.InputLog.TruncateLag = Duration{0}
 			}
 			writeSharedConfig(t, path, cfg)
 			old := startIncrementalApp(t, path)
@@ -549,7 +558,10 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				t.Fatal(err, zapwriter.TestString())
 			}
 			defer actual.Stop()
-			if stage != "after_live" && stage != "after_pending_retirement" {
+			if strings.HasPrefix(stage, "direct_") && actual.startupInput != nil {
+				awaitCapture(t, func() bool { return allCaptureLive(actual.startupInput) })
+			}
+			if stage != "after_live" && stage != "after_pending_retirement" && !directCrashHasInput(stage) {
 				for _, p := range startupPoints(stamp, 2) {
 					actual.Cache.Add(p)
 				}
@@ -571,6 +583,11 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 					if phase == 1 && stage == "during_append" && p.Metric == "tail.only" {
 						continue
 					}
+					ref.Cache.Add(p)
+				}
+			}
+			if stage == "direct_next_epoch" {
+				for _, p := range directNextEpochPoints(stamp) {
 					ref.Cache.Add(p)
 				}
 			}

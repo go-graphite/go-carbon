@@ -61,8 +61,11 @@ func (app *App) DumpStop() (err error) {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
-	if app.startupInput != nil && app.startupInput.replayStarted.Load() {
-		return app.stopStreamingInputForHandoff(stopStarted)
+	if s := app.startupInput; s != nil && s.replayStarted.Load() {
+		if !s.stopDirectSwitch() {
+			return app.stopStreamingInputForHandoff(stopStarted)
+		}
+		s.pauseReplay()
 	}
 	if app.MetricStore != nil {
 		app.MetricStore.StopCompactionPacing()
@@ -383,6 +386,12 @@ func (app *App) DumpStop() (err error) {
 	}
 	// The durable dump and WAL hold every point the input log protects, and
 	// no input reaches the cache anymore. The successor must not replay it.
+	if s := app.startupInput; s != nil && s.direct.Load() {
+		if err = s.retireAfterDump(); err != nil {
+			return err
+		}
+		app.startupInput = nil
+	}
 	app.retireInputLog(logger)
 	logger.Info("dump finished", zap.Duration("input_stop_runtime", time.Since(inputStopped)), zap.Duration("cache_sync_runtime", waitStart.Sub(syncStart)+syncWait), zap.Duration("cache_sync_wait", syncWait), zap.Bool("input_handoff", handover != nil))
 	// Every cached and diverted point is now in the dump and WAL (later input

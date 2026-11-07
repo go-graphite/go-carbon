@@ -64,6 +64,8 @@ type startupAppend struct {
 	done     chan error
 	promote  *startupPosition
 	promoted chan bool
+	fenced   chan error
+	seal     bool
 }
 
 // RecoveryAdmission is deliberately structural: adaptive-caps owns allocation
@@ -78,6 +80,9 @@ type startupSink struct {
 	liveAdd     func(*points.Points, *cache.RecoverySource)
 	canRetire   func() bool
 	syncHistory func() error
+	syncStore   func() error
+	directAdd   func(*points.Points)
+	startLog    func() (func() error, error)
 }
 type startupInput struct {
 	file                                                                *os.File
@@ -112,6 +117,12 @@ type startupInput struct {
 	replayYields                                                        atomic.Int64
 	historyPoints                                                       atomic.Int64
 	epoch                                                               int64
+	direct                                                              atomic.Bool
+	transition                                                          sync.Mutex
+	switchStopped                                                       bool
+	liveSince, refusedAt                                                time.Time
+	directFence                                                         *startupSegment
+	releaseLog                                                          func() error
 }
 
 func openStartupInput(path string) (*startupInput, error) {
@@ -287,6 +298,24 @@ func (s *startupShard) appendLoop() {
 		if !ok {
 			break
 		}
+		if first.fenced != nil {
+			cur, applied := s.current.Load(), s.applied.Load()
+			var err error
+			if failure := s.err.Load(); failure != nil {
+				err = failure.err
+			} else if !s.live.Load() || applied.segment != cur || applied.offset != cur.size.Load() {
+				err = errors.New("partition is behind its append frontier")
+			} else if first.seal {
+				err = s.syncFile(cur.file)
+				if err == nil {
+					cur.replayed.Store(true)
+					cur.sealed.Store(true)
+				}
+				s.fail(err)
+			}
+			first.fenced <- err
+			continue
+		}
 		if first.promoted != nil {
 			cur := s.current.Load()
 			applied := s.applied.Load()
@@ -309,7 +338,7 @@ func (s *startupShard) appendLoop() {
 				if !open {
 					break drain
 				}
-				if next.promoted != nil {
+				if next.promoted != nil || next.fenced != nil {
 					held = next
 					haveHeld = true
 					break drain
@@ -322,7 +351,9 @@ func (s *startupShard) appendLoop() {
 			}
 		}
 		var err error
-		if failure := s.err.Load(); failure != nil {
+		if s.current.Load().sealed.Load() {
+			err = errors.New("startup capture partition is sealed")
+		} else if failure := s.err.Load(); failure != nil {
 			err = failure.err
 		} else {
 			encodedAt := time.Now()
@@ -389,7 +420,9 @@ func (s *startupShard) appendLoop() {
 	}
 	cur := s.current.Load()
 	cur.sealed.Store(true)
-	s.fail(s.syncFile(cur.file))
+	if !cur.retired.Load() {
+		s.fail(s.syncFile(cur.file))
+	}
 }
 
 // One reservation covers the complete frame, including conservative name
@@ -526,6 +559,7 @@ func (s *startupInput) startMonitor(maxBytes int64) {
 							wg.Go(func() { sh.fail(sh.sync()) })
 						}
 						wg.Wait()
+						s.maybeDirect(time.Now())
 						s.reclaim()
 					})
 				}
@@ -535,7 +569,7 @@ func (s *startupInput) startMonitor(maxBytes int64) {
 }
 func (s *startupShard) sync() error {
 	cur := s.current.Load()
-	if cur == nil {
+	if cur == nil || cur.retired.Load() {
 		return nil
 	}
 	return s.syncFile(cur.file)
@@ -555,6 +589,12 @@ func (s *startupInput) reclaim() {
 				return false
 			}
 			var err error
+			if sink.syncStore != nil {
+				if err = sink.syncStore(); err != nil {
+					sh.fail(err)
+					return false
+				}
+			}
 			if seg.file == nil {
 				if sink.syncHistory != nil {
 					err = sink.syncHistory()
@@ -581,8 +621,32 @@ func (s *startupInput) reclaim() {
 	if !retire(s.legacy) {
 		return
 	}
+	all := true
 	for _, sh := range s.shards {
-		retire(sh)
+		if !retire(sh) {
+			all = false
+		}
+	}
+	if all && s.directFence != nil && !s.directFence.retired.Load() {
+		seg := s.directFence
+		if err := os.Remove(seg.path); err != nil {
+			s.legacy.fail(err)
+			return
+		}
+		if err := syncDir(filepath.Dir(seg.path)); err != nil {
+			s.legacy.fail(err)
+			return
+		}
+		_ = seg.file.Close()
+		_ = seg.unlock()
+		seg.retired.Store(true)
+	}
+	if s.releaseLog != nil && (s.directFence == nil || s.directFence.retired.Load()) {
+		if err := s.releaseLog(); err != nil {
+			s.legacy.fail(err)
+			return
+		}
+		s.releaseLog = nil
 	}
 }
 
@@ -635,6 +699,9 @@ func (s *startupShard) replay(sink *startupSink) {
 		case <-s.owner.stop:
 			return
 		default:
+		}
+		if s.owner.direct.Load() {
+			return
 		}
 		pos := s.applied.Load()
 		seg := pos.segment
@@ -714,6 +781,9 @@ func (s *startupShard) replay(sink *startupSink) {
 	}
 }
 func (s *startupInput) pauseReplay() {
+	s.transition.Lock()
+	s.switchStopped = true
+	s.transition.Unlock()
 	// A disk safety stop can block an append owner behind this control fence.
 	// Abort that already-paused intake so shutdown cannot wait on its own quota.
 	watcherDone := make(chan struct{})
@@ -780,6 +850,9 @@ func (s *startupInput) close() error {
 					errs = append(errs, seg.file.Close(), seg.unlock())
 				}
 			}
+		}
+		if seg := s.directFence; seg != nil && !seg.retired.Load() {
+			errs = append(errs, seg.file.Close(), seg.unlock())
 		}
 		s.closeErr = errors.Join(errs...)
 		s.sealedAt = time.Now()
