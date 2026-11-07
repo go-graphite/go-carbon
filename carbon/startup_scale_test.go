@@ -93,6 +93,7 @@ func visitCapture(s *startupInput, visit func(*points.Points)) error {
 type testAdmission struct{ allowed atomic.Bool }
 
 func (a *testAdmission) HasRecoveryCapacityBatch(int, int64) bool { return a.allowed.Load() }
+func (a *testAdmission) RecoveryMetricBytes(name []byte) int64    { return int64(len(name)) + 1024 }
 func awaitCapture(t testing.TB, condition func() bool) {
 	t.Helper()
 	end := time.Now().Add(10 * time.Second)

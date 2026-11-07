@@ -216,7 +216,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			if framed {
 				worker := &startupShard{owner: s}
 				loaded, e = recovery.ReadCaptureFramesBuffer(reader, s.policy.readBuffer, func(raw []byte, n int) error {
-					cost, e := captureMetricBytes(raw)
+					cost, e := captureMetricBytes(raw, core)
 					if e != nil {
 						return e
 					}

@@ -67,7 +67,10 @@ type startupAppend struct {
 
 // RecoveryAdmission is deliberately structural: adaptive-caps owns allocation
 // policy and blocked-pressure publication. Capture only asks for a batch grant.
-type captureAdmission interface{ HasRecoveryCapacityBatch(int, int64) bool }
+type captureAdmission interface {
+	HasRecoveryCapacityBatch(int, int64) bool
+	RecoveryMetricBytes([]byte) int64
+}
 type startupSink struct {
 	admission   captureAdmission
 	add         func(*points.Points, *cache.RecoverySource)
@@ -369,19 +372,23 @@ func (s *startupShard) appendLoop() {
 
 // One reservation covers the complete frame, including conservative name
 // ownership for distinct metrics; failed admission never enters the cache.
-func captureMetricBytes(raw []byte) (int64, error) {
+func captureMetricBytes(raw []byte, admission captureAdmission) (int64, error) {
 	names := make(map[string]struct{})
 	var cost int64
 	err := points.ReadBinaryBytesBorrowed(raw, func(name []byte, _ []points.Point) {
+		overhead := admission.RecoveryMetricBytes(name)
+		if overhead == 0 {
+			return
+		}
 		if _, ok := names[string(name)]; !ok {
 			names[string(name)] = struct{}{}
-			cost += int64(len(name)) + 1024
+			cost += overhead
 		}
 	})
 	return cost, err
 }
 func (s *startupShard) admit(sink *startupSink, raw []byte, count int) bool {
-	cost, err := captureMetricBytes(raw)
+	cost, err := captureMetricBytes(raw, sink.admission)
 	if err != nil {
 		s.fail(err)
 		return false
@@ -653,7 +660,7 @@ func (s *startupShard) replay(sink *startupSink) {
 			s.fail(err)
 			return
 		}
-		cost, e := captureMetricBytes(raw)
+		cost, e := captureMetricBytes(raw, sink.admission)
 		if e != nil {
 			s.fail(e)
 			return
