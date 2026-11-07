@@ -87,6 +87,12 @@ type Source interface {
 	LogDropped() uint64
 }
 
+// PressureSource optionally requests early group commit when restore is
+// blocked on bounded staging space. Notifications must be coalesced.
+type PressureSource interface {
+	LogPressure() <-chan struct{}
+}
+
 type Options struct {
 	// SyncInterval is the group commit period. A crash loses at most the
 	// input of one interval plus one cycle's encode and write time.
@@ -212,13 +218,14 @@ type Log struct {
 	dirty        []*segment
 	enc          *zstd.Encoder
 
-	syncs   chan chan error
-	copies  chan copyRequest
-	copyPin *Position
-	stop    chan struct{}
-	done    chan struct{}
-	started bool
-	closed  bool
+	syncs    chan chan error
+	pressure <-chan struct{}
+	copies   chan copyRequest
+	copyPin  *Position
+	stop     chan struct{}
+	done     chan struct{}
+	started  bool
+	closed   bool
 
 	stat  stats
 	total totals
@@ -464,6 +471,9 @@ func (l *Log) NeedsReplay() bool { return len(l.pending) > 0 }
 // kept until src reports them persisted at generation zero.
 func (l *Log) Start(src Source, shards int) {
 	l.src = src
+	if source, ok := src.(PressureSource); ok {
+		l.pressure = source.LogPressure()
+	}
 	l.shardsPer = max(shards/partitions, 1)
 	if source, ok := src.(BatchSource); ok {
 		l.batchSource = source
@@ -509,6 +519,7 @@ func (l *Log) run() {
 		var reply chan error
 		select {
 		case <-ticker.C:
+		case <-l.pressure:
 		case reply = <-l.syncs:
 		case request := <-l.copies:
 			l.copyRequest(request)

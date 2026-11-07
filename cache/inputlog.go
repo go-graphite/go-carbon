@@ -20,6 +20,10 @@ const maxShardLogEntries = 1 << 17
 // buffer for live input, and wait for a drain before admitting more old data.
 const maxShardRestoredLogEntries = maxShardLogEntries / 2
 
+// LogPressure wakes group commit when restored data exhausts its bounded
+// staging allowance. Ordinary live input retains its periodic commit policy.
+func (c *Cache) LogPressure() <-chan struct{} { return c.logPressure }
+
 // shardLog is a shard's part of the input log, guarded by the shard lock.
 // Points are recorded at generation gen. Every cached or in-flight item is
 // tracked with the generation of its oldest point not yet persisted, so the

@@ -74,6 +74,7 @@ type Cache struct {
 
 	writeStrategy WriteStrategy
 	writeoutQueue *WriteoutQueue
+	logPressure   chan struct{} // bounded wake for restore waiting on journal space
 
 	// Keep read-mostly settings off the cache lines written by counters and
 	// queue bookkeeping, including machines with 128-byte cache lines.
@@ -193,6 +194,7 @@ func New() *Cache {
 		data:          make([]*Shard, shardCount),
 		writeoutEpoch: time.Now(),
 		writeStrategy: Noop,
+		logPressure:   make(chan struct{}, 1),
 	}
 
 	for i := 0; i < shardCount; i++ {
@@ -676,6 +678,13 @@ func (c *Cache) addRestored(p *points.Points, immediate bool) {
 		return
 	}
 	for wait := c.addWithRestore(p, true, false, immediate, nil, nil); wait != nil; wait = c.addWithRestore(p, true, false, immediate, nil, nil) {
+		// Adjacent dump records can fill one shard, even for short metrics. Ask
+		// the journal owner to collect now, rather than one buffer per
+		// periodic sync tick. No I/O runs under a cache shard lock.
+		select {
+		case c.logPressure <- struct{}{}:
+		default:
+		}
 		<-wait
 	}
 }
