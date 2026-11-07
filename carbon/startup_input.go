@@ -261,9 +261,13 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			return err
 		}
 		paths := []string{s.path}
+		currentEpoch := fmt.Sprintf("%s.capture-epoch-%020d.", s.path, s.epoch)
 		for _, entry := range entries {
 			path := filepath.Join(filepath.Dir(s.path), entry.Name())
-			if path != s.path && recovery.IsTail(entry.Name()) && !handoff.Locked(path) {
+			// Only this owner's epoch is live capture. A predecessor may still
+			// be releasing older files: include them and wait in openSegment,
+			// rather than silently declaring history complete without them.
+			if path != s.path && !entry.IsDir() && recovery.IsTail(entry.Name()) && !strings.HasPrefix(path, currentEpoch) {
 				paths = append(paths, path)
 			}
 		}
@@ -321,6 +325,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			if e != nil {
 				return nil, e
 			}
+			started := time.Now()
 			unlock, e := handoff.LockExclusive(path)
 			if e != nil {
 				f.Close()
@@ -333,6 +338,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				return nil, e
 			}
 			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.Next()}
+			zapwriter.Logger("app").Info("historical input tail opened", zap.String("filename", path), zap.Duration("lock_wait", time.Since(started)))
 			seg.size.Store(info.Size())
 			s.size.Add(info.Size())
 			tail.next.Store(seg)
