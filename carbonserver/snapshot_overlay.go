@@ -324,6 +324,22 @@ func (u *fileListUpdate) insertPendingMetric(name string) error {
 	return u.trieIdx.insertPendingMetric(name)
 }
 
+// A retained point checkpoint can outlive several catalog rebuilds. Its old
+// "new names" list cannot describe a different base, so reconcile all its names
+// through ordinary membership checks before publishing the new read index.
+func (u *fileListUpdate) reconcilePendingMetric(name string) error {
+	if !u.listener.pendingMetricStorable(name) {
+		return nil
+	}
+	if found, err := u.trieIdx.snapshot.containsMetric(name, u.trieIdx.fileExt); err != nil || found {
+		return err
+	}
+	if _, isNew := u.trieIdx.metricPathMutable(name, nil); !isNew {
+		return nil
+	}
+	return u.trieIdx.insertPendingMetric(name)
+}
+
 // PendingMetricStorableBytes checks a borrowed name without copying it. The
 // read-only predicate does not retain the buffer or its string view.
 func (l *CarbonserverListener) PendingMetricStorableBytes(name []byte) bool {

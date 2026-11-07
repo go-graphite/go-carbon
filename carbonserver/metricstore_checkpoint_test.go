@@ -80,7 +80,7 @@ func TestMetricStoreCheckpointPreservesCatalogAndPendingNames(t *testing.T) {
 				t.Fatalf("checkpoint overlay has %d names, want %d", overlay.Records, want)
 			}
 			next := listener()
-			next.WarmupIndexWithPending(func(got string, visit func(string) error) error {
+			next.WarmupIndexWithPending(func(got string, visit func(string) error, _ func(string) error) error {
 				if got != id {
 					t.Fatalf("checkpoint ID %q want %q", got, id)
 				}
@@ -96,7 +96,7 @@ func TestMetricStoreCheckpointPreservesCatalogAndPendingNames(t *testing.T) {
 				}
 			}
 			rejected := listener()
-			rejected.WarmupIndexWithPending(func(string, func(string) error) error { return errors.New("invalid checkpoint") })
+			rejected.WarmupIndexWithPending(func(string, func(string) error, func(string) error) error { return errors.New("invalid checkpoint") })
 			rejected.WaitForWarmup()
 			if rejected.CurrentFileIndex() != nil {
 				t.Fatal("invalid checkpoint published a catalog")

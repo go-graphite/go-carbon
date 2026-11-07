@@ -34,19 +34,32 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	var err, prepareErr error
 	preparedNames := 0
 	prepared := false
+	matchedIndex := false
 	var prepareTime time.Duration
 	open := app.takeCheckpointOpen()
-	cs.WarmupIndexWithPending(func(indexID string, visit func(string) error) error {
+	cs.WarmupIndexWithPending(func(indexID string, visit, reconcile func(string) error) error {
 		<-checkpointLoaded
-		if err != nil || bundle.ReadIndexID() == "" || bundle.ReadIndexID() != indexID {
+		if err != nil {
 			if cs.UsesSharedCatalogIndex() {
-				return errors.New("pending checkpoint does not match the saved read index")
+				return err
 			}
 			return nil
 		}
 		prepareStart := time.Now()
-		preparedNames = int(bundle.NewNameCount())
-		prepareErr = bundle.FilterNewNames(cs.PendingMetricStorableBytes, visit)
+		matchedIndex = bundle.ReadIndexID() != "" && bundle.ReadIndexID() == indexID
+		if matchedIndex {
+			preparedNames = int(bundle.NewNameCount())
+			prepareErr = bundle.FilterNewNames(cs.PendingMetricStorableBytes, visit)
+		} else {
+			// Streaming shutdown deliberately keeps the old point sources so a
+			// newer dump cannot reorder corrections ahead of an older suffix.
+			// The discovery catalog may have advanced independently. Validate
+			// every saved name against it; never trust the old new-name flags.
+			prepareErr = bundle.VisitMetrics(func(_ uint64, name string) error {
+				preparedNames++
+				return reconcile(name)
+			})
+		}
 		prepareTime = time.Since(prepareStart)
 		prepared = prepareErr == nil
 		return prepareErr
@@ -68,12 +81,18 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		_ = bundle.Close()
 		return false, prepareErr
 	}
-	if !prepared || !cs.HasMappedIndex() || cs.RecoveryIndexID() != bundle.ReadIndexID() {
+	if !prepared || !cs.HasMappedIndex() || matchedIndex && cs.RecoveryIndexID() != bundle.ReadIndexID() {
 		_ = bundle.Close()
 		logger.Info("pending read checkpoint does not match read index; using ordered restore")
 		return false, nil
 	}
-	if err = core.AttachPendingRecoveryWithPreparedNames(bundle); err != nil {
+	attach := core.AttachPendingRecoveryWithPreparedNames
+	if !matchedIndex {
+		// Conservatively treat all slots as urgent: their old classification
+		// no longer proves which names the current store already contains.
+		attach = core.AttachPendingRecovery
+	}
+	if err = attach(bundle); err != nil {
 		_ = bundle.Close()
 		return false, err
 	}
@@ -101,7 +120,8 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	logger.Info("serving reads from pending checkpoint", zap.Duration("runtime", time.Since(started)),
 		zap.Duration("checkpoint_open_time", opened.Sub(started)), zap.Duration("checkpoint_verify_time", open.runtime),
 		zap.Duration("checkpoint_opened_early", open.early), zap.Duration("index_wait_time", indexReady.Sub(opened)),
-		zap.Duration("pending_names_time", prepareTime), zap.Int("pending_new_names", preparedNames),
+		zap.Duration("pending_names_time", prepareTime), zap.Int("pending_new_names", int(bundle.NewNameCount())),
+		zap.Int("pending_names_checked", preparedNames), zap.Bool("read_index_matched", matchedIndex),
 		zap.Uint64("points", bundle.Points()), zap.Uint64("metrics", bundle.Metrics()))
 	// Tail and live writes claim their own saved history first. Leave unrelated
 	// checkpoint work until the tail has opened intake, so its decoding and

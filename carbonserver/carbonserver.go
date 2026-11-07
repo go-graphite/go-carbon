@@ -947,12 +947,14 @@ func (listener *CarbonserverListener) WarmupIndex() {
 
 // WarmupIndexWithPending incorporates validated saved names before the first
 // quota refresh and publication. prepare may wait for parallel checkpoint I/O;
-// it must finish even when that checkpoint cannot be used.
-func (listener *CarbonserverListener) WarmupIndexWithPending(prepare func(string, func(string) error) error) {
+// it must finish even when that checkpoint cannot be used. The first visitor
+// inserts names known to be absent from this exact generation. The second
+// checks membership first, for reconciling every name from an older checkpoint.
+func (listener *CarbonserverListener) WarmupIndexWithPending(prepare func(string, func(string) error, func(string) error) error) {
 	listener.warmupIndex(prepare)
 }
 
-func (listener *CarbonserverListener) warmupIndex(prepare func(string, func(string) error) error) {
+func (listener *CarbonserverListener) warmupIndex(prepare func(string, func(string) error, func(string) error) error) {
 	if listener.getMetricIndexStore() != nil && prepare == nil || !listener.trieIndex || listener.scanFrequency == 0 || listener.fileListCache == "" {
 		return
 	}
@@ -1422,7 +1424,7 @@ func (listener *CarbonserverListener) updateFileListWithCache(dir string, cacheM
 	return listener.updateFileListWithPending(dir, cacheMetricNames, quotaAndUsageStatTicker, cacheOnly, nil)
 }
 
-func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error) error) (readFromCache bool) {
+func (listener *CarbonserverListener) updateFileListWithPending(dir string, cacheMetricNames map[string]struct{}, quotaAndUsageStatTicker <-chan time.Time, cacheOnly bool, prepare func(string, func(string) error, func(string) error) error) (readFromCache bool) {
 	metricStore := listener.getMetricIndexStore()
 	if metricStore != nil && !(cacheOnly && prepare != nil) {
 		if err := listener.updateMetricStoreIndex(metricStore); err != nil {
@@ -1453,7 +1455,7 @@ func (listener *CarbonserverListener) updateFileListWithPending(dir string, cach
 		return false
 	}
 	if prepare != nil && u.trieIdx != nil && u.trieIdx.snapshot != nil {
-		if err := prepare(u.trieIdx.recoveryID, u.insertPendingMetric); err != nil {
+		if err := prepare(u.trieIdx.recoveryID, u.insertPendingMetric, u.reconcilePendingMetric); err != nil {
 			logger.Warn("saved metric names unavailable", zap.Error(err))
 			return false
 		}
