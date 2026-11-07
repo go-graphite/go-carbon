@@ -72,6 +72,9 @@ func (s *startupInput) maybeDirect(now time.Time) {
 		// Recovery owns this pin for a previous direct epoch. Reusing it as
 		// the new switch's pin would move that earlier journal after newer
 		// captured corrections. Its history must retire first.
+		if sink.drain != nil {
+			sink.drain(true)
+		}
 		s.refuseDirect(now, "earlier direct journal remains pinned by history")
 		return
 	}
@@ -84,6 +87,9 @@ func (s *startupInput) maybeDirect(now time.Time) {
 		return
 	}
 	s.direct.Store(true)
+	if sink.drain != nil {
+		sink.drain(false)
+	}
 	frontiers := make([]string, 0, len(s.shards))
 	for i, sh := range s.shards {
 		p := sh.applied.Load()

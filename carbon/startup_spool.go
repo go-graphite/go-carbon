@@ -83,6 +83,7 @@ type startupSink struct {
 	syncStore   func() error
 	directAdd   func(*points.Points)
 	startLog    func() (func() error, error)
+	drain       func(bool)
 }
 type startupInput struct {
 	file                                                                *os.File

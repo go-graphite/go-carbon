@@ -197,6 +197,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		add, addPoint = receiverStoreHook(add, addPoint)
 	}
 	sink.directAdd = add
+	sink.drain = core.SetRecoveryDrain
 	if s.receiver != nil {
 		s.receiver.SetPointOut(addPoint)
 		if receiverStoreHook == nil {
@@ -223,6 +224,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			}
 			if s.legacy.first.Load() != nil || !core.InputLogIdle() {
 				_ = log.ReleaseCopy()
+				// These finite older sources gate a new journal boundary. At
+				// low input, metrics/max-delay would only decay toward zero.
+				core.SetRecoveryDrain(true)
 				return nil, errors.New("earlier journal/history sources have not persisted")
 			}
 			if sink.syncStore != nil {

@@ -843,6 +843,9 @@ func TestStartupDirectDoesNotReuseEarlierEpochPin(t *testing.T) {
 	if next.direct.Load() || next.directFence != nil {
 		t.Fatal("reused a previous epoch's journal pin for a new boundary")
 	}
+	if !core2.WriteoutState().Draining {
+		t.Fatal("earlier pinned epoch did not request a persistence drain")
+	}
 	p, ok := core2.PopNotConfirmed("pin.metric")
 	if !ok || len(p.Data) != 3 || p.Data[0].Value != 1 || p.Data[1].Value != 2 || p.Data[2].Value != 3 {
 		t.Fatal("capture/journal/capture FIFO", p)
@@ -854,6 +857,9 @@ func TestStartupDirectDoesNotReuseEarlierEpochPin(t *testing.T) {
 	}
 	next.liveSince = time.Time{}
 	goDirect(t, next)
+	if core2.WriteoutState().Draining {
+		t.Fatal("direct input retained the temporary recovery drain")
+	}
 }
 
 func TestStartupDirectHysteresisDetectsPromotionBetweenSamples(t *testing.T) {
