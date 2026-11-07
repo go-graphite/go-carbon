@@ -61,6 +61,7 @@ type Cache struct {
 	recoveryAdmission    atomic.Pointer[recoveryAdmission]
 	recoveryBlockedUntil atomic.Int64
 	recoveryRejections   atomic.Uint64
+	recoveryDrain        atomic.Bool
 
 	writeoutEpoch   time.Time
 	writeoutStateMu sync.Mutex

@@ -1462,6 +1462,8 @@ func (app *App) configureCarbonserverCache(core *cache.Cache, listener *carbonse
 
 func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	conf := app.Config
+	core.SetRecoveryDrain(true)
+	defer core.SetRecoveryDrain(false)
 
 	logger := zapwriter.Logger("app")
 	logger.Info("restoring dump before starting receivers",
