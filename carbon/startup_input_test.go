@@ -452,8 +452,8 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 				}
 			} else {
 				out, err := cmd.CombinedOutput()
-				var exit *exec.ExitError
-				if !errors.As(err, &exit) || exit.ExitCode() != 99 {
+				var processExit *exec.ExitError
+				if !errors.As(err, &processExit) || processExit.ExitCode() != 99 {
 					t.Fatalf("child: %v\n%s", err, out)
 				}
 			}
@@ -537,8 +537,8 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartupInputCrashProcess$")
 			cmd.Env = append(os.Environ(), "HANDOFF_CRASH_STAGE="+stage, "HANDOFF_CRASH_STAMP="+strconv.FormatInt(stamp, 10), "HANDOFF_CRASH_TAIL="+tail, "HANDOFF_CRASH_CONFIG="+path)
 			out, err := cmd.CombinedOutput()
-			var exit *exec.ExitError
-			if !errors.As(err, &exit) || exit.ExitCode() != 99 {
+			var processExit *exec.ExitError
+			if !errors.As(err, &processExit) || processExit.ExitCode() != 99 {
 				t.Fatalf("crash child: %v\n%s", err, out)
 			}
 			actual := New(path)
