@@ -663,7 +663,8 @@ func (c *Cache) AddRestored(p *points.Points) {
 }
 
 // AddRestoredBeforeInput keeps dump points durably logged but immediately
-// eligible when startup must drain old history before opening receivers.
+// eligible when startup must drain old history before opening receivers. It
+// waits for cache capacity and bypasses live drop rules for accepted history.
 func (c *Cache) AddRestoredBeforeInput(p *points.Points) {
 	c.addRestored(p, true)
 }
@@ -676,6 +677,14 @@ func (c *Cache) addRestored(p *points.Points, immediate bool) {
 			c.addRestored(&batch, immediate)
 		}
 		return
+	}
+	for immediate && !c.HasRecoveryCapacity(len(p.Data)) {
+		// Graceful stop may divert this accepted record to the dump WAL
+		// after persistence stops. Do not hold it behind cache capacity then.
+		if c.settings.Load().(*cacheSettings).xlog != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
 	for wait := c.addWithRestore(p, true, false, immediate, nil, nil); wait != nil; wait = c.addWithRestore(p, true, false, immediate, nil, nil) {
 		// Adjacent dump records can fill one shard, even for short metrics. Ask
@@ -764,7 +773,8 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		shard.bindStreamSeries(series, values, slot)
 	}
 	var throttleState any
-	if !recovered && c.throttleWithHash != nil {
+	liveAdmission := !recovered && (!restored || !immediate)
+	if liveAdmission && c.throttleWithHash != nil {
 		if exists {
 			shard.throttleScratch = values.throttleState()
 		}
@@ -777,7 +787,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 
 	count := len(p.Data)
-	if !recovered && c.overflows(s, count) {
+	if liveAdmission && c.overflows(s, count) {
 		return nil
 	}
 

@@ -3,12 +3,89 @@ package cache
 import (
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/points"
 )
+
+// Previously the second chunk of an oversized restored record could take the
+// live overflow/drop branch. Restore must wait for persistence and keep bits.
+func TestRestoredCapacityWaitsWithoutDropping(t *testing.T) {
+	c := New()
+	c.SetMaxSize(4)
+	var quotaCalls atomic.Int64
+	c.SetThrottleWithHash(func(*points.Points, bool, uint64, *any) bool {
+		quotaCalls.Add(1)
+		return true
+	})
+	const total = maxShardRestoredLogEntries + 16
+	data := make([]points.Point, total)
+	for i := range data {
+		data[i] = points.Point{Value: math.Float64frombits(uint64(i) * 0x9e3779b97f4a7c15), Timestamp: int64(i / 3)}
+	}
+	done := make(chan struct{})
+	go func() {
+		c.AddRestoredBeforeInput(&points.Points{Metric: "accepted.restore", Data: data})
+		close(done)
+	}()
+	got := 0
+	deadline := time.Now().Add(5 * time.Second)
+	for got < total && time.Now().Before(deadline) {
+		if batch, ok := c.PopNotConfirmed("accepted.restore"); ok {
+			for _, p := range batch.Data {
+				if got >= total || p.Timestamp != data[got].Timestamp || math.Float64bits(p.Value) != math.Float64bits(data[got].Value) {
+					t.Fatal("restored capacity changed bits/order", got)
+				}
+				got++
+			}
+			c.Confirm(batch)
+		} else {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("restore remained blocked after capacity drained")
+	}
+	if got != total || quotaCalls.Load() != 0 || c.stat.overflowCnt != 0 {
+		t.Fatal("already accepted restoration dropped", got, quotaCalls.Load(), c.stat.overflowCnt)
+	}
+}
+
+func TestRestoredCapacityAllowsGracefulDiversion(t *testing.T) {
+	c := New()
+	c.SetMaxSize(4)
+	c.AddRecovered(&points.Points{Metric: "full", Data: make([]points.Point, 4)})
+	done := make(chan struct{})
+	go func() {
+		c.AddRestoredBeforeInput(points.OnePoint("accepted", 42, 7))
+		close(done)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for !c.RecoveryBlocked() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	var diverted atomic.Int64
+	c.DivertToPointWriter(func(p *points.Points) error {
+		if p.Metric != "accepted" || len(p.Data) != 1 || p.Data[0].Value != 42 || p.Data[0].Timestamp != 7 {
+			t.Error("diverted record changed", p)
+		}
+		diverted.Add(int64(len(p.Data)))
+		return nil
+	})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("graceful diversion held behind stopped persistence")
+	}
+	if diverted.Load() != 1 || c.Size() != 4 {
+		t.Fatal("diverted restore entered cache or was lost", diverted.Load(), c.Size())
+	}
+}
 
 // A concentrated metric used to advance by only 65,536 points per periodic
 // commit. Exercise the real journal with its timer deliberately an hour away.
