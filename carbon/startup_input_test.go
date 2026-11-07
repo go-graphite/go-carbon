@@ -512,12 +512,16 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 				cfg.Dump.StoreInputHandoff = true
 				cfg.InputLog.TruncateLag = Duration{0}
+				primeStartupDirectIndex(t, cfg)
 			}
 			writeSharedConfig(t, path, cfg)
 			old := startIncrementalApp(t, path)
 			if !old.Carbonserver.HasMappedIndex() {
 				old.Stop()
 				old = startIncrementalApp(t, path)
+			}
+			if strings.HasPrefix(stage, "direct_") {
+				convertStartupDirectIndex(t, old)
 			}
 			old.Persister.Stop()
 			old.Persister = nil
@@ -572,9 +576,15 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			if err := os.WriteFile(refCfg.Whisper.SchemasFilename, []byte("[all]\npattern = .*\nretentions = 1s:2m,5s:10m,30s:1h\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			if strings.HasPrefix(stage, "direct_") {
+				primeStartupDirectIndex(t, refCfg)
+			}
 			writeSharedConfig(t, refPath, refCfg)
 			ref := startIncrementalApp(t, refPath)
 			defer ref.Stop()
+			if strings.HasPrefix(stage, "direct_") {
+				convertStartupDirectIndex(t, ref)
+			}
 			for phase := range 3 {
 				if phase == 1 && stage == "before_append" {
 					continue
@@ -604,13 +614,9 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				// Store confirmation can precede asynchronous publication of a
 				// newly created name to the read index. Join that boundary before
 				// comparing HTTP readback, especially under race-suite load.
-				deadline := time.Now().Add(5 * time.Second)
-				for !actual.Carbonserver.MetricExists(name) || !ref.Carbonserver.MetricExists(name) {
-					if time.Now().After(deadline) {
-						t.Fatalf("%s was not published to both read indexes after %s", name, stage)
-					}
-					time.Sleep(time.Millisecond)
-				}
+				awaitCapture(t, func() bool {
+					return actual.Carbonserver.MetricExists(name) && ref.Carbonserver.MetricExists(name)
+				})
 				want, err := ref.MetricStore.Snapshot(context.Background(), name)
 				if err != nil {
 					t.Fatal(err)

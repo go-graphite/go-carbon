@@ -29,7 +29,7 @@ func TestStartupDirectProductionShape(t *testing.T) {
 	if os.Getenv("CAPTURE_LIVE_SCALE") != "1" {
 		t.Skip("set CAPTURE_LIVE_SCALE=1")
 	}
-	keys, rate, seconds := 25000000, 4000000, 7
+	keys, rate, seconds := 25000000, 4000000, 30
 	for key, target := range map[string]*int{"CAPTURE_LIVE_KEYS": &keys, "CAPTURE_LIVE_RATE": &rate, "CAPTURE_LIVE_SECONDS": &seconds} {
 		if v, err := strconv.Atoi(os.Getenv(key)); err == nil && v > 0 {
 			*target = v
@@ -77,7 +77,7 @@ func TestStartupDirectProductionShape(t *testing.T) {
 	app.Config = NewConfig()
 	app.Config.InputLog.Enabled = true
 	app.Config.InputLog.Path = filepath.Join(t.TempDir(), "journal")
-	app.Config.InputLog.SegmentSize = 64 << 20
+	app.Config.InputLog.SegmentSize = 4 << 30
 	// The seed models independent checkpoint-owned history, not journal input.
 	core.EnableInputLogFromNow()
 	if err := app.openInputLog(core); err != nil {
@@ -95,16 +95,30 @@ func TestStartupDirectProductionShape(t *testing.T) {
 		}
 		return float64(r.Utime.Sec+r.Stime.Sec) + float64(r.Utime.Usec+r.Stime.Usec)/1e6
 	}
+	t.Logf("GOGC=%s GOMEMLIMIT=%s gomaxprocs=%d log_segment_bytes=%d", os.Getenv("GOGC"), os.Getenv("GOMEMLIMIT"), runtime.GOMAXPROCS(0), app.Config.InputLog.SegmentSize)
 	total := int64(keys) * 32
+	var inherited []net.Conn
 	phase := func(label, addr string) (float64, float64) {
-		conns := make([]net.Conn, clients)
-		for i := range conns {
-			var err error
-			conns[i], err = net.Dial("tcp", addr)
-			if err != nil {
-				t.Fatal(err)
+		conns := inherited
+		if label != "direct" {
+			conns = make([]net.Conn, clients)
+			for i := range conns {
+				var err error
+				conns[i], err = net.Dial("tcp", addr)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 		}
+		if label == "spool" {
+			inherited = conns
+		}
+		// Settle fixture/previous-phase garbage outside the measured interval,
+		// as testing.B does. Keep the same TCP streams across the actual cut.
+		runtime.GC()
+		var settled runtime.MemStats
+		runtime.ReadMemStats(&settled)
+		t.Logf("phase_start=%s heap_alloc=%d heap_objects=%d gc=%d", label, settled.HeapAlloc, settled.HeapObjects, settled.NumGC)
 		var profile *os.File
 		if dir := os.Getenv("CAPTURE_LIVE_PROFILE_DIR"); dir != "" {
 			var err error
@@ -116,6 +130,23 @@ func TestStartupDirectProductionShape(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+		progressStop, progressDone := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(progressDone)
+			tick := time.NewTicker(5 * time.Second)
+			defer tick.Stop()
+			for {
+				select {
+				case <-progressStop:
+					return
+				case <-tick.C:
+					var mem runtime.MemStats
+					runtime.ReadMemStats(&mem)
+					t.Logf("progress phase=%s cache_points=%d logged=%d heap_alloc=%d heap_sys=%d heap_objects=%d gc=%d", label, core.Size(), app.inputLog.Load().Metrics().PointsWritten, mem.HeapAlloc, mem.HeapSys, mem.HeapObjects, mem.NumGC)
+				}
+			}
+		}()
+		defer func() { close(progressStop); <-progressDone }()
 		loops := max(1, rate*seconds/(clients*batch))
 		count := int64(loops * clients * batch)
 		beforeCPU, beforeBytes := cpuSeconds(), s.size.Load()
@@ -125,7 +156,9 @@ func TestStartupDirectProductionShape(t *testing.T) {
 		var lagMu sync.Mutex
 		for worker := range clients {
 			wg.Go(func() {
-				defer conns[worker].Close()
+				if label != "spool" {
+					defer conns[worker].Close()
+				}
 				for seq := range loops {
 					target := start.Add(time.Duration(float64(seq*clients*batch+worker*batch) / float64(rate) * float64(time.Second)))
 					if d := time.Until(target); d > 0 {

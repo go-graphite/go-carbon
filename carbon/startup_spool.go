@@ -120,7 +120,9 @@ type startupInput struct {
 	direct                                                              atomic.Bool
 	transition                                                          sync.Mutex
 	switchStopped                                                       bool
+	disabledWarned                                                      bool
 	liveSince, refusedAt                                                time.Time
+	livePromotions                                                      uint64
 	directFence                                                         *startupSegment
 	releaseLog                                                          func() error
 }

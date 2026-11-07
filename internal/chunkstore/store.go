@@ -1113,11 +1113,6 @@ func (s *Store) close(forExit bool) error {
 func (s *Store) Sync() error { return s.syncWAL() }
 
 // Flush writes the memtables at full speed: its caller waits for them.
-// Sync makes completed mutations durable without flushing the memtables.
-// Recovery sources may be retired only after this boundary, even when ordinary
-// mutations use periodic WAL syncing.
-func (s *Store) Sync() error { return s.syncWAL() }
-
 func (s *Store) Flush() error {
 	s.compactionControl.urgentFlush(1)
 	defer s.compactionControl.urgentFlush(-1)

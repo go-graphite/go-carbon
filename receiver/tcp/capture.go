@@ -3,9 +3,11 @@ package tcp
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/zeebo/xxh3"
@@ -37,13 +39,36 @@ type captureSubmission interface {
 // the ordinary sink before their connection accepts its next direct point.
 type captureSink struct {
 	sync.RWMutex
-	direct atomic.Pointer[func(*points.Points)]
+	direct  atomic.Pointer[func(*points.Points)]
+	fencing atomic.Bool
 }
 
 func (rcv *TCP) SwitchCapture(out func(*points.Points), seal func() error) error {
 	s := &rcv.captureSink
-	s.Lock()
-	defer s.Unlock()
+	if !s.fencing.CompareAndSwap(false, true) {
+		return errors.New("capture submissions are still joining a previous direct fence")
+	}
+	joined, cancelled := make(chan struct{}), make(chan struct{})
+	go func() {
+		s.Lock()
+		select {
+		case joined <- struct{}{}: // Transfer the exclusive lock to this caller.
+		case <-cancelled:
+			s.Unlock()
+			s.fencing.Store(false)
+		}
+	}()
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-joined:
+		defer func() { s.Unlock(); s.fencing.Store(false) }()
+	case <-timer.C:
+		// Do not hold the spool monitor behind a disk-reserve writer: it
+		// must continue retiring prefixes so that writer can acknowledge.
+		close(cancelled)
+		return errors.New("capture submissions did not quiesce before direct switch")
+	}
 	if s.direct.Load() != nil {
 		return nil
 	}

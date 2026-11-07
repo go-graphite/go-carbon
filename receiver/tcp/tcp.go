@@ -502,7 +502,7 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 						if capture.flush() != nil {
 							return
 						}
-						capture.out, directOut = nil, *out
+						capture, directOut = captureBuffer{}, *out
 					}
 				}
 				if rcv.cacheLookupBatch && pointBatchOut == nil && rcv.buffer == nil {

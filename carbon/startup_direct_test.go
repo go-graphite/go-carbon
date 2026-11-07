@@ -17,8 +17,11 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
+	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/zapwriter"
 	"github.com/zeebo/xxh3"
 )
@@ -70,6 +73,75 @@ func goDirect(t testing.TB, s *startupInput) {
 	s.maybeDirect(now.Add(startupDirectDelay))
 	if !s.direct.Load() {
 		t.Fatal("capture did not switch", zapwriter.TestString())
+	}
+}
+
+// Count the actual writeout receipts before comparing closed/reopened archives:
+// archive snapshots alone cannot reveal duplicate corrections at one timestamp.
+func assertDirectStoreDifferential(t *testing.T, captured, ordinary *cache.Cache, name string, want []points.Point) {
+	t.Helper()
+	ctx := context.Background()
+	options := store.Options{ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20, Now: func() time.Time { return time.Unix(1700001000, 0) }}
+	write := func(core *cache.Cache) store.Snapshot {
+		path := t.TempDir()
+		db, err := store.Open(path, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if db != nil {
+				_ = db.Close()
+			}
+		}()
+		if _, err := db.Create(ctx, store.MetricConfig{Name: name, Retentions: []store.Retention{{Step: 1, Count: 4096}}, AggregationMethod: store.Average}); err != nil {
+			t.Fatal(err)
+		}
+		batch, ok := core.PopNotConfirmed(name)
+		if !ok || len(batch.Data) != len(want) {
+			t.Fatal("missing/duplicate store receipt", ok)
+		}
+		for i, p := range batch.Data {
+			if p.Timestamp != want[i].Timestamp || math.Float64bits(p.Value) != math.Float64bits(want[i].Value) {
+				t.Fatal("store receipt bit/order mismatch", i)
+			}
+		}
+		if err := db.UpdateMany(ctx, name, batch.Data); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Sync(); err != nil {
+			t.Fatal(err)
+		}
+		core.Confirm(batch)
+		if _, ok := core.PopNotConfirmed(name); ok {
+			t.Fatal("duplicate store batch")
+		}
+		err = db.Close()
+		db = nil
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := store.Open(path, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer reopened.Close()
+		snapshot, err := reopened.Snapshot(ctx, name)
+		if err != nil || len(snapshot.Archives) != 1 || len(snapshot.Archives[0].Points) == 0 {
+			t.Fatal("missing stored archive", err)
+		}
+		return snapshot
+	}
+	got, reference := write(captured), write(ordinary)
+	for i, archive := range got.Archives {
+		other := reference.Archives[i]
+		if archive.Retention != other.Retention || len(archive.Points) != len(other.Points) {
+			t.Fatal("stored archive shape differs")
+		}
+		for j, p := range archive.Points {
+			if p.Timestamp != other.Points[j].Timestamp || math.Float64bits(p.Value) != math.Float64bits(other.Points[j].Value) {
+				t.Fatal("reopened store bits differ", i, j)
+			}
+		}
 	}
 }
 
@@ -156,11 +228,7 @@ func TestStartupDirectBitDifferential(t *testing.T) {
 	if len(paths) < 2 || s.directFence.retired.Load() {
 		t.Fatal("unpersisted source/fence retired")
 	}
-	p, ok := core.PopNotConfirmed(metric)
-	if !ok {
-		t.Fatal("missing batch")
-	}
-	core.Confirm(p)
+	assertDirectStoreDifferential(t, core, ordinary, metric, want)
 	s.reclaim()
 	paths, _ = filepath.Glob(s.path + ".capture-*.tail.bin")
 	if len(paths) != 0 || s.releaseLog != nil {
@@ -254,6 +322,7 @@ func TestStartupDirectRefusesUnappliedFrontier(t *testing.T) {
 	// On the original append-applies-live path it is already applied. Make
 	// the observed applied frontier stale; the fence must inspect the owner.
 	sh.applied.Store(&startupPosition{segment: sh.current.Load()})
+	s.maybeDirect(time.Now())
 	s.liveSince = time.Now().Add(-startupDirectDelay)
 	s.maybeDirect(time.Now())
 	if s.direct.Load() {
@@ -280,7 +349,7 @@ func directNextEpochPoints(stamp int64) []*points.Points {
 // This child exits without defers at each boundary. The existing seven-stage
 // archive/readback oracle drives it through the real cold App.Start path.
 func startupDirectCrashChild(t *testing.T, stage string, stamp int64) {
-	defer zapwriter.Test()()
+	zapwriter.Test()
 	app := startIncrementalApp(t, os.Getenv("HANDOFF_CRASH_CONFIG"))
 	if app.pendingDone != nil {
 		select {
@@ -334,6 +403,7 @@ func startupDirectCrashChild(t *testing.T, stage string, stamp int64) {
 			t.Fatal(err)
 		}
 	}
+	s.maybeDirect(time.Now()) // Establish the stable-promotion observation.
 	if stage == "direct_before_switch" {
 		os.Exit(99)
 	}
@@ -521,5 +591,320 @@ func TestStartupDirectBinaryBitDifferential(t *testing.T) {
 	}
 	if app.inputLog.Load().Metrics().PointsWritten != 256 {
 		t.Fatal("binary direct points were not journalled")
+	}
+	assertDirectStoreDifferential(t, core, ordinary, name, want)
+}
+
+func TestStartupDirectKeepsPendingHistory(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, _ := directCaptureFixture(t)
+	const name = "pending.history.straddles"
+	if err := s.Write(points.OnePoint(name, 0, 1).AppendBinary(nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	sh := s.shards[xxh3.HashString(name)%uint64(len(s.shards))]
+	if err := sh.Write(points.OnePoint(name, 1, 1).AppendBinary(nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	awaitCapture(t, func() bool { return core.Size() == 2 && allCaptureLive(s) })
+	if s.legacy.first.Load() == nil {
+		t.Fatal("history fixture retired too early")
+	}
+	goDirect(t, s)
+	s.sink.Load().directAdd(points.OnePoint(name, 2, 1))
+	if err := app.syncInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	if s.legacy.first.Load() == nil || s.directFence.retired.Load() {
+		t.Fatal("direct transition lost unpersisted history authority")
+	}
+	got := core.Get(name)
+	if len(got) != 3 || got[0].Value != 0 || got[1].Value != 1 || got[2].Value != 2 {
+		t.Fatal("history/capture/direct order", got)
+	}
+	p, ok := core.PopNotConfirmed(name)
+	if !ok {
+		t.Fatal("missing pending batch")
+	}
+	core.Confirm(p)
+	s.reclaim()
+	if s.legacy.first.Load() != nil || !s.directFence.retired.Load() || s.releaseLog != nil {
+		t.Fatal("confirmed history/capture did not retire")
+	}
+}
+
+func TestStartupDirectMonitorSwitchesWithoutManualControl(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, _ := directCaptureFixture(t)
+	app.finishStartupInput(core)
+	s.startMonitor(1 << 30)
+	t.Cleanup(func() { s.receiver.Stop(); _ = s.close() })
+	awaitCapture(t, func() bool { return s.direct.Load() })
+	if time.Since(s.started) < startupDirectDelay {
+		t.Fatal("monitor skipped hysteresis")
+	}
+}
+
+func TestStartupDirectFenceRefusesUnsupportedRecovery(t *testing.T) {
+	app := New("")
+	app.Config = NewConfig()
+	app.Config.Dump.Path = t.TempDir()
+	path := filepath.Join(app.Config.Dump.Path, "input.1.2.tail.bin.capture-epoch-00000000000000000001"+startupDirectSuffix)
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.startStartupInput(); err == nil {
+		t.Fatal("disabled journal silently ignored a sealed direct epoch")
+	}
+	app.Config.InputLog.Enabled = true
+	app.Config.Tcp.Enabled = false
+	if err := app.startStartupInput(); err == nil {
+		t.Fatal("unsupported recovery silently reordered journal and capture")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("refused recovery changed the retained boundary", err)
+	}
+}
+
+func TestStartupDirectEmptyFenceAdoptsLegacyTail(t *testing.T) {
+	app := New("")
+	app.Config = NewConfig()
+	cfg := app.Config
+	cfg.Dump.Enabled, cfg.Dump.StoreInputHandoff, cfg.Dump.Path = true, true, t.TempDir()
+	cfg.InputLog.Enabled = true
+	cfg.Whisper.StorageBackend = "pebble-chunk"
+	cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
+	cfg.Udp.Enabled, cfg.Pickle.Enabled = false, false
+	manifest := []byte(`{"cache":{"name":"cache.1.2.bin"},"wal":{"name":"input.1.2.bin"}}`)
+	if err := os.WriteFile(filepath.Join(cfg.Dump.Path, recovery.ManifestName), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	tail := filepath.Join(cfg.Dump.Path, "input.1.2.tail.bin")
+	if err := os.WriteFile(tail, points.OnePoint("legacy", 1, 1).AppendBinary(nil), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tail+".capture-epoch-00000000000000000001"+startupDirectSuffix, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.startStartupInput(); err != nil {
+		t.Fatal(err)
+	}
+	if app.startupInput == nil {
+		t.Fatal("empty direct fence ignored despite a retained legacy tail")
+	}
+	app.startupInput.receiver.Stop()
+	if err := app.startupInput.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStartupDirectResetsEarlierJournalBeforeNextBoundary(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	first, app, core, _ := directCaptureFixture(t)
+	app.Config.InputLog.TruncateLag = Duration{time.Hour}
+	app.finishStartupInput(core)
+	goDirect(t, first)
+	for _, name := range []string{"reset.a", "reset.b"} {
+		first.sink.Load().directAdd(points.OnePoint(name, 2, 1))
+	}
+	if err := app.syncInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"reset.a", "reset.b"} {
+		p, _ := core.PopNotConfirmed(name)
+		core.Confirm(p)
+	}
+	first.reclaim()
+	first.receiver.Stop()
+	if err := first.close(); err != nil {
+		t.Fatal(err)
+	}
+	app.closeInputLog()
+
+	next, app2, core2, _ := directCaptureFixture(t)
+	app2.closeInputLog()
+	app2.Config.InputLog.Path = app.Config.InputLog.Path
+	app2.Config.InputLog.TruncateLag = Duration{time.Hour}
+	if err := app2.openInputLog(core2); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"reset.a", "reset.b"} {
+		sh := next.shards[xxh3.HashString(name)%uint64(len(next.shards))]
+		if err := sh.Write(points.OnePoint(name, 3, 1).AppendBinary(nil), 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app2.finishStartupInput(core2)
+	awaitCapture(t, func() bool { return allCaptureLive(next) && core2.Size() == 4 })
+	for _, name := range []string{"reset.a", "reset.b"} {
+		p, ok := core2.PopNotConfirmed(name)
+		if !ok || len(p.Data) != 2 || p.Data[0].Value != 2 || p.Data[1].Value != 3 {
+			t.Fatal("journal/new capture order", name, p)
+		}
+		core2.Confirm(p)
+	}
+	next.reclaim()
+	goDirect(t, next)
+	// No new direct update to b: replaying the earlier journal after the
+	// new capture would otherwise roll its stored value back from 3 to 2.
+	next.sink.Load().directAdd(points.OnePoint("reset.a", 4, 1))
+	if err := app2.syncInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	next.receiver.Stop()
+	if err := next.close(); err != nil {
+		t.Fatal(err)
+	}
+	app2.closeInputLog()
+	log, err := inputlog.Open(app2.Config.InputLog.Path, inputlog.Options{SyncInterval: time.Second, SegmentSize: 16 << 20, MaxAge: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	var got []*points.Points
+	if _, err := log.ReplayStopped(func(p *points.Points) { got = append(got, p.Copy()) }, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Metric != "reset.a" || len(got[0].Data) != 1 || got[0].Data[0].Value != 4 {
+		t.Fatal("new boundary retained stale earlier corrections", got)
+	}
+}
+
+func TestStartupDirectDoesNotReuseEarlierEpochPin(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	first, app, core, _ := directCaptureFixture(t)
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(first) })
+	if err := first.shards[0].Write(points.OnePoint("pin.metric", 1, 1).AppendBinary(nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	awaitCapture(t, func() bool { return core.Size() == 1 && allCaptureLive(first) })
+	goDirect(t, first)
+	first.sink.Load().directAdd(points.OnePoint("pin.metric", 2, 1))
+	if err := app.syncInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	first.receiver.Stop()
+	if err := first.close(); err != nil {
+		t.Fatal(err)
+	}
+	app.closeInputLog()
+
+	next, err := openStartupInputWithPolicy(first.path, first.policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := tcp.NewOptions()
+	opts.Listen = "127.0.0.1:0"
+	h, bound, err := listenStartupCapture(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.receiver, err = tcp.NewInheritedCapture("tcp", bound, h, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { next.receiver.Stop(); _ = next.close() })
+	core2 := cache.New()
+	core2.SetMaxSize(0)
+	app2 := New("")
+	app2.Config = NewConfig()
+	app2.Config.InputLog = app.Config.InputLog
+	app2.startupInput = next
+	if err := app2.openInputLog(core2); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app2.closeInputLog)
+	if err := next.shards[0].Write(points.OnePoint("pin.metric", 3, 1).AppendBinary(nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	app2.finishStartupInput(core2)
+	awaitCapture(t, func() bool { return allCaptureLive(next) && core2.Size() == 3 })
+	if next.releaseLog == nil {
+		t.Fatal("reopen did not retain the earlier journal")
+	}
+	now := time.Now()
+	next.maybeDirect(now)
+	next.maybeDirect(now.Add(startupDirectDelay))
+	if next.direct.Load() || next.directFence != nil {
+		t.Fatal("reused a previous epoch's journal pin for a new boundary")
+	}
+	p, ok := core2.PopNotConfirmed("pin.metric")
+	if !ok || len(p.Data) != 3 || p.Data[0].Value != 1 || p.Data[1].Value != 2 || p.Data[2].Value != 3 {
+		t.Fatal("capture/journal/capture FIFO", p)
+	}
+	core2.Confirm(p)
+	next.reclaim()
+	if next.releaseLog != nil || next.legacy.first.Load() != nil {
+		t.Fatal("confirmed earlier epoch did not release its pin")
+	}
+	next.liveSince = time.Time{}
+	goDirect(t, next)
+}
+
+func TestStartupDirectHysteresisDetectsPromotionBetweenSamples(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, _ := directCaptureFixture(t)
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	s.reclaim()
+	now := time.Now()
+	s.maybeDirect(now)
+	sh := s.shards[0]
+	before := sh.promoted.Load()
+	sh.live.Store(false)
+	awaitCapture(t, func() bool { return sh.live.Load() && sh.promoted.Load() > before })
+	s.maybeDirect(now.Add(startupDirectDelay))
+	if s.direct.Load() {
+		t.Fatal("a new promotion between monitor samples bypassed hysteresis")
+	}
+	s.maybeDirect(now.Add(2 * startupDirectDelay))
+	if !s.direct.Load() {
+		t.Fatal("stable promotion did not permit transition")
+	}
+}
+
+// Recovery-only writes need names in the saved file index when Buckyd/catalog
+// discovery is disabled. Keep the crash oracle about durability and ordering.
+func primeStartupDirectIndex(t *testing.T, cfg *Config) {
+	t.Helper()
+	for _, name := range []string{"handoff/metric.wsp", "tail/only.wsp"} {
+		path := filepath.Join(cfg.Whisper.DataDir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+			t.Fatal(err)
+		}
+		w, err := whisper.CreateWithOptions(path, whisper.NewRetentionsNoPointer([]whisper.Retention{whisper.NewRetention(1, 120), whisper.NewRetention(5, 120), whisper.NewRetention(30, 120)}), whisper.Average, .5, &whisper.Options{Compressed: true, OutOfOrder: true, FLock: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func convertStartupDirectIndex(t *testing.T, app *App) {
+	t.Helper()
+	for _, name := range []string{"handoff.metric", "tail.only"} {
+		if _, err := app.Persister.ConvertFile(t.Context(), name); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

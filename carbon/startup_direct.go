@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -21,11 +22,13 @@ const startupDirectSuffix = ".999999.999999999999.tail.bin"
 
 func isStartupDirectFence(path string) bool { return strings.HasSuffix(path, startupDirectSuffix) }
 
-func (s *startupInput) refuseDirect(now time.Time, reason string) {
+func (s *startupInput) refuseDirect(now time.Time, reason string) bool {
 	if s.refusedAt.IsZero() || now.Sub(s.refusedAt) >= time.Minute {
 		s.refusedAt = now
 		zapwriter.Logger("app").Warn("startup capture direct switch deferred", zap.String("reason", reason), zap.Duration("since_start", now.Sub(s.started)))
+		return true
 	}
+	return false
 }
 
 // The monitor owns attempts; shutdown takes the same mutex before choosing its
@@ -43,30 +46,33 @@ func (s *startupInput) maybeDirect(now time.Time) {
 	}
 	if sink.startLog == nil || sink.directAdd == nil {
 		// A disabled journal cannot protect ordinary input after the switch.
-		if s.liveSince.IsZero() {
-			s.refuseDirect(now, "input log is disabled; retaining durable capture")
-			s.liveSince = now
+		if !s.disabledWarned {
+			s.disabledWarned = s.refuseDirect(now, "input log is disabled; retaining durable capture")
 		}
 		return
 	}
+	var promotions uint64
 	for _, sh := range s.shards {
 		if !sh.live.Load() {
 			s.liveSince = time.Time{}
 			s.refuseDirect(now, "not every partition is live")
 			return
 		}
+		promotions += sh.promoted.Load()
 	}
-	if s.liveSince.IsZero() {
+	if s.liveSince.IsZero() || promotions != s.livePromotions {
 		s.liveSince = now
+		s.livePromotions = promotions
 		return
 	}
 	if now.Sub(s.liveSince) < startupDirectDelay {
 		return
 	}
-	// A previous journal boundary must disappear before creating another one.
-	// Its final retirement sync makes old corrections ineligible for replay.
-	if s.legacy.first.Load() != nil {
-		s.refuseDirect(now, "previous history sources have not retired")
+	if s.releaseLog != nil && s.directFence == nil {
+		// Recovery owns this pin for a previous direct epoch. Reusing it as
+		// the new switch's pin would move that earlier journal after newer
+		// captured corrections. Its history must retire first.
+		s.refuseDirect(now, "earlier direct journal remains pinned by history")
 		return
 	}
 	if s.receiver == nil {
@@ -94,12 +100,29 @@ func (s *startupShard) fence(seal bool) error {
 
 // Called only with the receiver's exclusive submission fence held. No append
 // can arrive between the all-partition check and the seals. Replay can only
-// advance the applied positions, so refusal cannot leave a partially sealed set.
+// advance the applied positions; a frontier refusal cannot partially seal them.
 func (s *startupInput) sealForDirect() error {
+	// With submissions fenced, a small final reader suffix can drain without
+	// competing with more input. Bound the pause well below a relay queue.
+	deadline := time.Now().Add(250 * time.Millisecond)
 	for _, sh := range s.shards {
-		if err := sh.fence(false); err != nil {
-			return err
+		for {
+			err := sh.fence(false)
+			if err == nil {
+				break
+			}
+			if sh.err.Load() != nil || time.Now().After(deadline) {
+				return err
+			}
+			time.Sleep(time.Millisecond)
 		}
+	}
+	var promotions uint64
+	for _, sh := range s.shards {
+		promotions += sh.promoted.Load()
+	}
+	if promotions != s.livePromotions {
+		return errors.New("a partition was promoted during the direct fence")
 	}
 	if s.releaseLog == nil {
 		release, err := s.sink.Load().startLog()
@@ -108,10 +131,14 @@ func (s *startupInput) sealForDirect() error {
 		}
 		s.releaseLog = release
 	}
-	for _, sh := range s.shards {
-		if err := sh.fence(true); err != nil {
-			return err
-		}
+	var wg sync.WaitGroup
+	errs := make([]error, len(s.shards))
+	for i, sh := range s.shards {
+		wg.Go(func() { errs[i] = sh.fence(true) })
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return err
 	}
 	path := fmt.Sprintf("%s.capture-epoch-%020d%s", s.path, s.epoch, startupDirectSuffix)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)

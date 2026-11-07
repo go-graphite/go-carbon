@@ -27,6 +27,23 @@ import (
 // existing protocol, including when upgrading from a predecessor that does not
 // know about startup capture. Mirrored read handoff retains its existing path.
 func (app *App) startStartupInput() error {
+	fences, err := filepath.Glob(filepath.Join(app.Config.Dump.Path, "input.*.tail.bin.capture-epoch-*"+startupDirectSuffix))
+	if err != nil {
+		return err
+	}
+	if len(fences) > 0 && !app.Config.InputLog.Enabled {
+		return errors.New("retained direct capture requires its input log; preserve recovery sources and reenable input logging")
+	}
+	if err := app.tryStartupInput(); err != nil {
+		return err
+	}
+	if len(fences) > 0 && app.startupInput == nil {
+		return errors.New("retained direct capture requires ordered startup recovery; preserve sources and restore compatible configuration, manifest and headroom")
+	}
+	return nil
+}
+
+func (app *App) tryStartupInput() error {
 	if app.startupInput != nil {
 		return nil
 	}
@@ -70,7 +87,7 @@ func (app *App) startStartupInput() error {
 			if err != nil {
 				return err
 			}
-			orphanedCapture = info.Size() > 0
+			orphanedCapture = info.Size() > 0 || isStartupDirectFence(name)
 		}
 	}
 	if app.handoffClaim == nil && !orphanedCapture {
@@ -189,9 +206,6 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 	}
 	if log := app.inputLog.Load(); log != nil && app.Config.InputLog.Enabled {
 		sink.startLog = func() (func() error, error) {
-			if !core.InputLogIdle() {
-				return nil, errors.New("earlier journalled points have not persisted")
-			}
 			log := app.inputLog.Load()
 			if log == nil {
 				return nil, errors.New("input log unavailable after reset failure")
@@ -199,6 +213,17 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			// Do not retire files belonging to an active store-copy session.
 			if _, err := log.PinCopy(); err != nil {
 				return nil, err
+			}
+			stats := log.Metrics()
+			if stats.PointsWritten == 0 && stats.ReplayedPoints == 0 {
+				// The usual handoff has a fresh journal. Its first records are
+				// the new direct suffix, so checkpoint/tail sources can remain
+				// pending and retire behind this retention pin.
+				return log.ReleaseCopy, nil
+			}
+			if s.legacy.first.Load() != nil || !core.InputLogIdle() {
+				_ = log.ReleaseCopy()
+				return nil, errors.New("earlier journal/history sources have not persisted")
 			}
 			if sink.syncStore != nil {
 				if err := sink.syncStore(); err != nil {
