@@ -9,6 +9,9 @@ import (
 func TestStartupCapacityAdaptsWithinCeilings(t *testing.T) {
 	small := chooseStartupPolicy(2, 128<<20, 8<<30)
 	large := chooseStartupPolicy(192, 1280<<30, 13<<40)
+	if large.shards != 64 {
+		t.Fatal("large-host socket fanout exceeds the measured coalescing budget", large)
+	}
 	if large.shards <= small.shards || large.readBuffer <= small.readBuffer || large.recoveryPoints <= small.recoveryPoints || large.spoolBytes <= small.spoolBytes {
 		t.Fatal(small, large)
 	}

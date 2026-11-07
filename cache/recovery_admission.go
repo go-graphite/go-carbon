@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lomik/zapwriter"
+	"github.com/zeebo/xxh3"
 	"go.uber.org/zap"
 )
 
@@ -130,9 +131,10 @@ func (c *Cache) RecoveryMetricBytes(name []byte) int64 {
 	// pending-only item as new is conservative and avoids scanning recovery state.
 	// A concurrent eviction may still create one extra header per caller; the
 	// unspent three quarters of headroom cover this bounded check/add race.
-	shard := c.GetShard(string(name))
+	hash := xxh3.Hash(name)
+	shard := c.data[hash&(shardCount-1)]
 	shard.mu.RLock()
-	exists := shard.items.get(string(name)) != nil
+	exists := shard.items.getBytesHashed(hash, name) != nil
 	shard.mu.RUnlock()
 	if exists {
 		return 0

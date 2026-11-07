@@ -44,9 +44,11 @@ func startupCapacityBytes(value uint64) int64 {
 func chooseStartupPolicy(cpus int, available, free int64) startupCapturePolicy {
 	cpus = max(1, cpus)
 	shards := 1
-	// One FIFO per runnable core keeps parallelism without multiplying every
-	// socket flush into excessive tiny submissions. Each FIFO has its own reader.
-	for shards < cpus {
+	// Bound socket fanout on large hosts. At 192 CPUs, 256 partitions turn
+	// ordinary flushes into tiny compression frames and delay acknowledgements.
+	// 64 leaves parallel capacity for both append and replay while coalescing
+	// enough input per frame. Smaller hosts retain one FIFO per runnable core.
+	for shards < min(cpus, 64) {
 		shards *= 2
 	}
 	// Reserve most available memory for the restored cache and normal runtime.

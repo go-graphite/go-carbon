@@ -261,6 +261,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			if framed {
 				worker := &startupShard{owner: s}
 				loaded, e = recovery.ReadCaptureFramesBuffer(reader, s.policy.readBuffer, func(raw []byte, n int) error {
+					if e := s.waitCapture(); e != nil {
+						return e
+					}
 					cost, e := captureMetricBytes(raw, core)
 					if e != nil {
 						return e
@@ -271,7 +274,11 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 						}
 						time.Sleep(time.Millisecond)
 					}
-					return worker.apply(raw, seg.source, sink)
+					if e := worker.apply(raw, seg.source, sink); e != nil {
+						return e
+					}
+					s.historyPoints.Add(int64(n))
+					return nil
 				})
 			} else {
 				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
@@ -331,7 +338,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			close(jobs)
 			failures := make(chan error, len(groups))
 			var wg sync.WaitGroup
-			for range min(len(groups), max(1, runtime.GOMAXPROCS(0))) {
+			// Capture appenders and socket readers need runnable capacity while
+			// old epochs are backlogged. Queue feedback handles transient bursts.
+			for range min(len(groups), max(1, runtime.GOMAXPROCS(0)/2)) {
 				wg.Go(func() {
 					for segments := range jobs {
 						for _, seg := range segments {

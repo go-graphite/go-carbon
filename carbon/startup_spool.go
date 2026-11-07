@@ -22,15 +22,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// Capture and replay never share a mutex. The append owner is also the live
-// FIFO sink after its reader reaches the applied frontier. If admission closes,
-// it keeps writing durable frames and wakes its reader; sockets never detach.
+// One reader applies each metric-hash FIFO, including after it catches up.
+// The append owner only writes frames, so cache admission and application
+// cannot hold acknowledgements to the plaintext TCP receiver.
 type startupShard struct {
 	owner        *startupInput
 	file         *os.File // first segment; compatibility with crash fixtures
 	path         string
 	requests     chan startupAppend
 	written      chan struct{}
+	pending      atomic.Int64 // queued, blocked submitters and the batch being encoded/written
 	err          atomic.Pointer[startupWriteError]
 	size, offset atomic.Int64
 	first        atomic.Pointer[startupSegment]
@@ -108,6 +109,8 @@ type startupInput struct {
 	replayStarted                                                       atomic.Bool
 	historyReady                                                        atomic.Bool
 	historyLog                                                          atomic.Pointer[startupSegment]
+	replayYields                                                        atomic.Int64
+	historyPoints                                                       atomic.Int64
 	epoch                                                               int64
 }
 
@@ -213,6 +216,7 @@ func (s *startupShard) SubmitCapture(raw []byte, n int, done chan error) {
 		done <- failure.err
 		return
 	}
+	s.pending.Add(1)
 	s.requests <- startupAppend{data: raw, count: n, done: done}
 }
 func (s *startupShard) BeginWrite(raw []byte, n int) func() error {
@@ -228,20 +232,54 @@ func (s *startupShard) fail(err error) {
 		s.owner.requestFallback()
 	}
 }
+
+// A socket flush fans out to the capture queues before it can acknowledge its
+// input. Let append owners clear a burst before replay consumes more CPU/cache
+// capacity. The per-shard request count includes encoding/writes and blocked
+// submitters; an empty channel alone can hide a stalled coalesced batch.
+func (s *startupInput) waitCapture() error {
+	for {
+		// At the disk reserve capture needs replay/persistence to retire sources.
+		// Yielding to its blocked writer would create a circular wait.
+		if s.paused.Load() {
+			return nil
+		}
+		busy := false
+		for _, shard := range s.shards {
+			if shard.pending.Load() > 4 {
+				busy = true
+				break
+			}
+		}
+		if !busy {
+			return nil
+		}
+		s.replayYields.Add(1)
+		select {
+		case <-s.stop:
+			return errStartupReplayStopped
+		case <-s.replayStop:
+			return errStartupReplayStopped
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
 func (s *startupShard) appendLoop() {
 	defer close(s.written)
 	enc, _ := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1), zstd.WithEncoderLevel(zstd.SpeedFastest), zstd.WithEncoderCRC(false))
 	defer enc.Close()
 	var buf, frame []byte
-	var held *startupAppend
+	var held startupAppend
+	haveHeld := false
 	var index uint64
 	pending := make([]startupAppend, 0, 256)
 	for {
 		var first startupAppend
 		var ok bool
-		if held != nil {
-			first = *held
-			held = nil
+		if haveHeld {
+			first = held
+			haveHeld = false
 			ok = true
 		} else {
 			first, ok = <-s.requests
@@ -272,7 +310,8 @@ func (s *startupShard) appendLoop() {
 					break drain
 				}
 				if next.promoted != nil {
-					held = &next
+					held = next
+					haveHeld = true
 					break drain
 				}
 				pending = append(pending, next)
@@ -299,9 +338,6 @@ func (s *startupShard) appendLoop() {
 					err = e
 					if err == nil {
 						index++
-						if s.live.Load() {
-							cur.replayed.Store(true)
-						}
 						cur.next.Store(next)
 						s.current.Store(next)
 						cur.sealed.Store(true)
@@ -341,25 +377,11 @@ func (s *startupShard) appendLoop() {
 					if s.owner.observe != nil {
 						err = points.ReadBinary(bytes.NewReader(buf), s.owner.observe)
 					}
-					if s.live.Load() {
-						sink := s.owner.sink.Load()
-						if sink != nil && s.admit(sink, buf, count) {
-							liveSink := *sink
-							if sink.liveAdd != nil {
-								liveSink.add = sink.liveAdd
-							}
-							err = s.apply(buf, cur.source, &liveSink)
-							if err == nil {
-								s.commit(cur, cur.size.Load(), count, int64(n))
-							}
-						} else {
-							s.live.Store(false)
-						}
-					}
 				}
 			}
 			s.fail(err)
 		}
+		s.pending.Add(-int64(len(pending)))
 		for i := range pending {
 			pending[i].done <- err
 			pending[i] = startupAppend{}
@@ -387,19 +409,12 @@ func captureMetricBytes(raw []byte, admission captureAdmission) (int64, error) {
 	})
 	return cost, err
 }
-func (s *startupShard) admit(sink *startupSink, raw []byte, count int) bool {
-	cost, err := captureMetricBytes(raw, sink.admission)
-	if err != nil {
-		s.fail(err)
-		return false
-	}
-	return sink.admission.HasRecoveryCapacityBatch(count, cost)
-}
 func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *startupSink) error {
 	if s.names == nil {
 		s.names = make(map[string]string)
 	}
 	var p points.Points
+	namer, _ := sink.admission.(interface{ RecoveryMetricName([]byte) string })
 	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
 		canonical, ok := s.names[string(name)]
 		if !ok {
@@ -407,7 +422,11 @@ func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *sta
 				clear(s.names)
 				s.nameBytes = 0
 			}
-			canonical = string(name)
+			if namer != nil {
+				canonical = namer.RecoveryMetricName(name)
+			} else {
+				canonical = string(name)
+			}
 			s.names[canonical] = canonical
 			s.nameBytes += len(name)
 		}
@@ -617,16 +636,21 @@ func (s *startupShard) replay(sink *startupSink) {
 			return
 		default:
 		}
-		if s.live.Load() {
-			time.Sleep(time.Millisecond)
-			continue
-		}
 		pos := s.applied.Load()
 		seg := pos.segment
 		if pos.offset == seg.size.Load() {
 			if next := seg.next.Load(); next != nil {
+				// Loading next acquires the final segment frontier. An append
+				// may have completed after the first size comparison.
+				if pos.offset != seg.size.Load() {
+					continue
+				}
 				seg.replayed.Store(true)
 				s.applied.Store(&startupPosition{next, 0})
+				continue
+			}
+			if s.live.Load() {
+				time.Sleep(time.Millisecond)
 				continue
 			}
 			reply := make(chan bool, 1)
@@ -660,12 +684,16 @@ func (s *startupShard) replay(sink *startupSink) {
 			s.fail(err)
 			return
 		}
+		if err := s.owner.waitCapture(); err != nil {
+			return
+		}
 		cost, e := captureMetricBytes(raw, sink.admission)
 		if e != nil {
 			s.fail(e)
 			return
 		}
 		for !sink.admission.HasRecoveryCapacityBatch(count, cost) {
+			s.live.Store(false)
 			select {
 			case <-s.owner.replayStop:
 				return
@@ -674,7 +702,11 @@ func (s *startupShard) replay(sink *startupSink) {
 			case <-time.After(time.Millisecond):
 			}
 		}
-		if err = s.apply(raw, seg.source, sink); err != nil {
+		applySink := *sink
+		if s.live.Load() && sink.liveAdd != nil {
+			applySink.add = sink.liveAdd
+		}
+		if err = s.apply(raw, seg.source, &applySink); err != nil {
 			s.fail(err)
 			return
 		}
@@ -709,8 +741,8 @@ func (s *startupInput) pauseReplay() {
 	}
 	if s.replayStarted.Load() {
 		<-s.replayDone
-		// Fence any live apply already in progress. The append owners remain active
-		// and durable throughout shutdown preparation, but can no longer touch cache.
+		// Fence queued frontier observations before clearing live state. The
+		// reader has stopped; append owners continue writing durable frames.
 		for _, sh := range s.shards {
 			reply := make(chan bool, 1)
 			sh.requests <- startupAppend{promoted: reply}
