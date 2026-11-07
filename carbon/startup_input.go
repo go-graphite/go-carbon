@@ -27,8 +27,11 @@ import (
 // existing protocol, including when upgrading from a predecessor that does not
 // know about startup capture. Mirrored read handoff retains its existing path.
 func (app *App) startStartupInput() error {
+	if app.startupInput != nil {
+		return nil
+	}
 	c := app.Config
-	if app.handoffClaim == nil || !c.Dump.StoreInputHandoff || !c.Dump.Enabled ||
+	if !c.Dump.StoreInputHandoff || !c.Dump.Enabled ||
 		c.Whisper.StorageBackend != "pebble-chunk" || c.Whisper.StoreMirrorFiles ||
 		c.Tags.Enabled || !c.Tcp.Enabled || c.Tcp.BufferSize != 0 || c.Tcp.Compression != "" ||
 		c.Udp.Enabled || c.Pickle.Enabled || len(c.Receiver) != 0 {
@@ -54,6 +57,7 @@ func (app *App) startStartupInput() error {
 	if scanErr != nil {
 		return scanErr
 	}
+	orphanedCapture := false
 	for _, entry := range entries {
 		name := entry.Name()
 		generation := strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, recovery.CompactPrefix) || strings.HasPrefix(name, recovery.BlocksPrefix) || strings.HasPrefix(name, "input.") || strings.HasPrefix(name, recovery.CompactInputPrefix)
@@ -61,6 +65,16 @@ func (app *App) startStartupInput() error {
 			zapwriter.Logger("app").Error("startup capture requires a single ordered recovery generation; using ordinary recovery", zap.String("filename", name))
 			return nil
 		}
+		if !orphanedCapture && app.handoffClaim == nil && !entry.IsDir() && recovery.IsGenerationTail(name, manifest.WAL.Name) && recovery.IsCaptureSegment(name) && !handoff.Locked(filepath.Join(c.Dump.Path, name)) {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			orphanedCapture = info.Size() > 0
+		}
+	}
+	if app.handoffClaim == nil && !orphanedCapture {
+		return nil
 	}
 	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
 	policy.log()
@@ -74,27 +88,39 @@ func (app *App) startStartupInput() error {
 	}
 	claim := app.handoffClaim
 	app.handoffClaim = nil
-	ln, _, err := claim.Take(&net.TCPAddr{})
-	if ln != nil {
-		_ = ln.Close()
-		_ = claim.Close()
-		return errors.New("expected an input-only store handoff")
-	}
-	if err != nil {
-		_ = claim.Close()
-		return fmt.Errorf("take early input offer: %w", err)
-	}
-	in, err := claim.TakeInput()
-	if err != nil {
-		return fmt.Errorf("take early store input: %w", err)
-	}
-	if in == nil {
-		return nil
-	}
-	defer in.Close()
-	h := takeInputReceiver(in, "tcp")
-	if h == nil {
-		return errors.New("store input handoff has no TCP receiver")
+	var h *tcp.Handoff
+	tcpOptions := c.Tcp
+	if claim == nil {
+		// A crashed capture owner has no sockets to transfer. Start a new
+		// capture receiver so its retained epochs use the same parallel,
+		// ordered replay path as a normal handoff.
+		h, tcpOptions, err = listenStartupCapture(c.Tcp)
+		if err != nil {
+			return err
+		}
+	} else {
+		ln, _, err := claim.Take(&net.TCPAddr{})
+		if ln != nil {
+			_ = ln.Close()
+			_ = claim.Close()
+			return errors.New("expected an input-only store handoff")
+		}
+		if err != nil {
+			_ = claim.Close()
+			return fmt.Errorf("take early input offer: %w", err)
+		}
+		in, err := claim.TakeInput()
+		if err != nil {
+			return fmt.Errorf("take early store input: %w", err)
+		}
+		if in == nil {
+			return nil
+		}
+		defer in.Close()
+		h = takeInputReceiver(in, "tcp")
+		if h == nil {
+			return errors.New("store input handoff has no TCP receiver")
+		}
 	}
 	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
 	if err != nil {
@@ -104,7 +130,7 @@ func (app *App) startStartupInput() error {
 	if receiverStoreHook != nil {
 		spool.observe, _ = receiverStoreHook(func(*points.Points) {}, func([]byte, float64, int64) {})
 	}
-	r, err := tcp.NewInheritedCapture("tcp", c.Tcp, h, spool)
+	r, err := tcp.NewInheritedCapture("tcp", tcpOptions, h, spool)
 	if err != nil {
 		_ = spool.close()
 		return err
@@ -117,6 +143,25 @@ func (app *App) startStartupInput() error {
 	app.restart.noteInputOpened()
 	zapwriter.Logger("app").Info("input capture active before storage and checkpoint", zap.String("filename", spool.path), zap.Int("connections", len(h.Conns)))
 	return nil
+}
+
+func listenStartupCapture(options *tcp.Options) (*tcp.Handoff, *tcp.Options, error) {
+	addr, err := net.ResolveTCPAddr("tcp", options.Listen)
+	if err != nil {
+		return nil, nil, err
+	}
+	listener, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	bound := *options
+	bound.Listen = listener.Addr().String()
+	file, err := listener.File()
+	_ = listener.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &tcp.Handoff{Listener: file}, &bound, nil
 }
 
 // Attach replay without replacing or detaching any receiver. Startup returns
