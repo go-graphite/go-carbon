@@ -1479,7 +1479,7 @@ func (app *App) restoreBeforeReceivers(core *cache.Cache) {
 	app.Restore(core.AddRestoredBeforeInput, conf.Dump.Path, conf.Dump.RestorePerSecond)
 	restoreLoaded := time.Now()
 	// The persister already writes what is loaded; prewarm the rest.
-	app.startMetadataPrewarm("restored dump", core.MetricNames())
+	app.startMetadataPrewarmWithCheckpointGate("restored dump", core.MetricNames(), nil)
 	for !core.IsEmpty() {
 		time.Sleep(10 * time.Millisecond)
 	}

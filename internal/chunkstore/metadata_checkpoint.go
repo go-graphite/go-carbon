@@ -25,8 +25,8 @@ const checkpointMagic = "GCSTATE2"
 const checkpointLegacyMagic = "GCSTATE1"
 const maxCheckpointRecordSize = 16 << 20
 
-// MetadataCheckpointLoadTimeout bounds the accelerator attempt after input is
-// ready. A partial load is safe: missing or provisional records use the store.
+// MetadataCheckpointLoadTimeout bounds the accelerator attempt after its
+// caller's readiness gate. Missing or provisional records use the store.
 // This bounds CPU admission waits, not an uninterruptible filesystem read.
 const MetadataCheckpointLoadTimeout = 10 * time.Minute
 const provisionalState = uint64(1) << 63
@@ -119,7 +119,7 @@ func (c *metadataCheckpoint) matches(header []byte) bool {
 		binary.LittleEndian.Uint64(header[40:48]) == c.sequence && binary.LittleEndian.Uint32(header[48:]) == crc32.ChecksumIEEE(header[:48])
 }
 
-// LoadMetadataCheckpoint streams raw slab records after input readiness. It
+// LoadMetadataCheckpoint streams raw slab records after caller readiness. It
 // never evicts live entries and shares the existing metadata budget. A v2
 // record for an unchanged name is authoritative under the clean fence.
 // Legacy records stay provisional until a bounded validation window proves
