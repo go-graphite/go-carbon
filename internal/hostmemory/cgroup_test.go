@@ -3,6 +3,7 @@ package hostmemory
 import (
 	"math"
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -32,6 +33,64 @@ func TestHeadroomUsesAncestorAndHighLimits(t *testing.T) {
 	delete(files, "/cg/parent/memory.current")
 	if _, err := Headroom(groups, mounts, read); err == nil {
 		t.Fatal("missing usage authorized growth")
+	}
+}
+
+func TestAvailableCreditsOnlyInactiveFile(t *testing.T) {
+	const limit, usage, inactive = uint64(1613978664960), uint64(1521699209216), uint64(1144494227456)
+	for _, v1 := range []bool{false, true} {
+		t.Run(strconv.FormatBool(v1), func(t *testing.T) {
+			groups, mounts := "0::/job", "1 0 0:1 / /cg rw - cgroup2 cgroup rw"
+			limitFile, usageFile, key := "memory.max", "memory.current", "inactive_file"
+			if v1 {
+				groups, mounts = "4:memory:/parent/job", "1 0 0:1 /parent /cg rw - cgroup cgroup rw,memory"
+				limitFile, usageFile, key = "memory.limit_in_bytes", "memory.usage_in_bytes", "total_inactive_file"
+			}
+			files := map[string]string{
+				"/cg/job/" + limitFile: strconv.FormatUint(limit, 10),
+				"/cg/job/" + usageFile: strconv.FormatUint(usage, 10),
+				"/cg/job/memory.stat":  key + " " + strconv.FormatUint(inactive, 10) + "\nfile 1282333937664\nactive_file 137836941312\n",
+			}
+			read := func(path string) ([]byte, error) {
+				if s, ok := files[path]; ok {
+					return []byte(s), nil
+				}
+				return nil, os.ErrNotExist
+			}
+			got, err := Available(1260000000000, groups, mounts, read)
+			want := limit - (usage - inactive) - limit/20
+			if err != nil || got != want {
+				t.Fatal("reclaimable page cache charged as working set", got, want, err)
+			}
+			got, err = Available(400000000000, groups, mounts, read)
+			if err != nil || got != 400000000000 {
+				t.Fatal("host/Go bound exceeded", got, err)
+			}
+			// Both hard and high boundaries must use their own working set.
+			if !v1 {
+				files["/cg/job/memory.high"] = strconv.FormatUint(limit-100000000000, 10)
+				got, err = Available(1260000000000, groups, mounts, read)
+				high := limit - 100000000000
+				if err != nil || got != high-(usage-inactive)-high/20 {
+					t.Fatal("high boundary lost", got, err)
+				}
+				delete(files, "/cg/job/memory.high")
+			}
+			files["/cg/job/memory.stat"] = "file 1282333937664\n"
+			got, err = Available(1260000000000, groups, mounts, read)
+			if err != nil || got != limit-usage-limit/20 {
+				t.Fatal("missing stat authorized growth", got, err)
+			}
+			files["/cg/job/memory.stat"] = key + " -1\n"
+			if _, err = Available(1260000000000, groups, mounts, read); err == nil {
+				t.Fatal("invalid stat authorized growth")
+			}
+			files["/cg/job/memory.stat"] = key + " " + strconv.FormatUint(usage+1, 10) + "\n"
+			got, err = Available(limit, groups, mounts, read)
+			if err != nil || got != limit-limit/20 {
+				t.Fatal("working set underflow", got, err)
+			}
+		})
 	}
 }
 

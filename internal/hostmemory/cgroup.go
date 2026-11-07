@@ -97,6 +97,12 @@ func reduce(host uint64, groups, mounts string, read func(string) ([]byte, error
 					if err != nil {
 						return 0, err
 					}
+					if mode == 2 {
+						used, err = workingSet(path, kind, used, read)
+						if err != nil {
+							return 0, err
+						}
+					}
 					host = min(host, reduceHeadroom(n, used, mode))
 				}
 			}
@@ -118,6 +124,12 @@ func reduce(host uint64, groups, mounts string, read func(string) ([]byte, error
 					if err != nil {
 						return 0, err
 					}
+					if mode == 2 {
+						used, err = workingSet(path, kind, used, read)
+						if err != nil {
+							return 0, err
+						}
+					}
 					host = min(host, reduceHeadroom(high, used, mode))
 				}
 			}
@@ -132,6 +144,38 @@ func reduce(host uint64, groups, mounts string, read func(string) ([]byte, error
 		}
 	}
 	return host, nil
+}
+
+// Inactive file pages are reclaimable under the same cgroup boundary. Do not
+// credit active file pages, slab or anonymous memory. Missing statistics retain
+// the conservative usage-only calculation, including on older kernels.
+func workingSet(path, kind string, used uint64, read func(string) ([]byte, error)) (uint64, error) {
+	data, err := read(filepath.Join(path, "memory.stat"))
+	if os.IsNotExist(err) {
+		return used, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	key := "inactive_file"
+	if kind == "cgroup" {
+		key = "total_inactive_file"
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != key {
+			continue
+		}
+		if len(fields) != 2 {
+			return 0, fmt.Errorf("invalid %s in %s", key, path)
+		}
+		inactive, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		return used - min(used, inactive), nil
+	}
+	return used, nil
 }
 
 func reduceHeadroom(limit, used uint64, mode int) uint64 {
