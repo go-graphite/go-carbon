@@ -11,6 +11,14 @@ requires root read authorization; apply requires root update authorization and i
 fenced while whole-store copy is active. Each result reports archive point count,
 misplaced slots, changed archives and any blocked layout. No input flush occurs.
 
+One request prepares up to `[buckyd] maintenance-workers` names at once
+(default 8, at most 32) and replies in request order; at most
+`max-maintenance-requests` requests (default 2, at most 64) are admitted, else
+429. Each name still reads its own snapshot and applies under its own transfer
+stripe; a repeated name runs in request order. A request lasts as long as its
+slowest name, so a census client gains most by keeping several requests in
+flight (raise `max-maintenance-requests` to match).
+
 The daemon reads immutable committed bytes and prepares an exact classic-slot
 rotation outside writer locks. Under its existing transfer stripe, it compares
 ID, generation, revision, policy and migration ownership before atomically
