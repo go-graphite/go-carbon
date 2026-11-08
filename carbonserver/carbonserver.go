@@ -161,11 +161,13 @@ var statusCodes = map[string][]uint64{
 	"capabilities": make([]uint64, 5),
 }
 
-// interface to retrieve retention and aggregation
-// schema from persister.
+// configRetriever reports the storage settings a new series for a metric is
+// created with (storage-schemas.conf and storage-aggregation.conf).
 type configRetriever interface {
-	MetricRetentionPeriod(string) (int, bool)
-	MetricAggrConf(string) (string, float64, bool)
+	// MetricRetentions returns the matching schema's archives, finest first.
+	MetricRetentions(string) (whisper.Retentions, bool)
+	// MetricAggrConf returns the matching aggregation method and xFilesFactor.
+	MetricAggrConf(string) (whisper.AggregationMethod, float64, bool)
 }
 
 type responseWriterWithStatus struct {

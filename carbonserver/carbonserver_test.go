@@ -70,16 +70,34 @@ func TestMetricFileSizesIncludesOutOfOrderSidecar(t *testing.T) {
 }
 
 type wspConfigTestRetriever struct {
-	getRetentionFunc func(string) (int, bool)
-	getAggrNameFunc  func(string) (string, float64, bool)
+	getRetentionsFunc func(string) (whisper.Retentions, bool)
+	getAggrConfFunc   func(string) (whisper.AggregationMethod, float64, bool)
 }
 
-func (r *wspConfigTestRetriever) MetricRetentionPeriod(metric string) (int, bool) {
-	return r.getRetentionFunc(metric)
+func (r *wspConfigTestRetriever) MetricRetentions(metric string) (whisper.Retentions, bool) {
+	return r.getRetentionsFunc(metric)
 }
 
-func (r *wspConfigTestRetriever) MetricAggrConf(metric string) (string, float64, bool) {
-	return r.getAggrNameFunc(metric)
+func (r *wspConfigTestRetriever) MetricAggrConf(metric string) (whisper.AggregationMethod, float64, bool) {
+	return r.getAggrConfFunc(metric)
+}
+
+// newTestConfigRetriever answers like carbon's retriever from the given
+// schemas and aggregation rules.
+func newTestConfigRetriever(schemas persister.WhisperSchemas, aggregation *persister.WhisperAggregation) *wspConfigTestRetriever {
+	return &wspConfigTestRetriever{
+		getRetentionsFunc: func(metric string) (whisper.Retentions, bool) {
+			schema, ok := schemas.Match(metric)
+			return schema.Retentions, ok && len(schema.Retentions) > 0
+		},
+		getAggrConfFunc: func(metric string) (whisper.AggregationMethod, float64, bool) {
+			aggr := aggregation.Match(metric)
+			if aggr == nil {
+				return 0, 0, false
+			}
+			return aggr.AggregationMethod(), aggr.XFilesFactor(), true
+		},
+	}
 }
 
 type FetchTest struct {
@@ -129,7 +147,7 @@ func TestExtractTrigrams(t *testing.T) {
 	}
 }
 
-func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper {
+func getTestSchemas() persister.WhisperSchemas {
 	retentionStr := "60s:90d,300s:30d"
 	pattern := regexp.MustCompile(".*")
 	retentions, _ := persister.ParseRetentionDefs(retentionStr)
@@ -145,18 +163,7 @@ func getTestPersister(dataDir string, cache *cache.Cache) *persister.Whisper {
 
 	var testSchemas persister.WhisperSchemas
 	testSchemas = append(testSchemas, schema)
-
-	testPersister := persister.NewWhisper(
-		dataDir,
-		testSchemas,
-		persister.NewWhisperAggregation(),
-		cache.WriteoutQueue().Get,
-		cache.PopNotConfirmed,
-		cache.Confirm,
-		cache.Pop,
-	)
-
-	return testPersister
+	return testSchemas
 }
 
 func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache, carbonserver *CarbonserverListener) error {
@@ -200,12 +207,7 @@ func generalFetchSingleMetricInit(testData *FetchTest, cache *cache.Cache, carbo
 	if testData.fillCacheIndex {
 		// enable cache-scan to support queries for cache-only metrics
 		carbonserver.SetCacheGetMetricsFunc(cache.GetRecentNewMetrics)
-		testPersister := getTestPersister(testData.path, cache)
-		retriever := &wspConfigTestRetriever{
-			getRetentionFunc: testPersister.GetRetentionPeriod,
-			getAggrNameFunc:  testPersister.GetAggrConf,
-		}
-		carbonserver.SetConfigRetriever(retriever)
+		carbonserver.SetConfigRetriever(newTestConfigRetriever(getTestSchemas(), persister.NewWhisperAggregation()))
 	}
 
 	return nil

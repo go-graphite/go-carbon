@@ -9,6 +9,9 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
+// Now is the clock Fetch chooses archives and clamps ranges by.
+func (s *Store) Now() time.Time { return s.now() }
+
 func (s *Store) Fetch(ctx context.Context, name string, fromTime, untilTime int) (*Series, error) {
 	return s.fetch(ctx, name, fromTime, untilTime, nil)
 }
