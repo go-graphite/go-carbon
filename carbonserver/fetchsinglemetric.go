@@ -152,19 +152,21 @@ func (listener *CarbonserverListener) fetchSingleMetric(metric string, pathExpre
 		}
 
 		return resp, nil
-	case os.IsNotExist(err) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
-		// Failed to fetch from disk, try to fetch from cache
+	case errors.Is(err, os.ErrNotExist) && (listener.cacheGetRecentMetrics != nil || listener.realtimeIndex > 0):
+		// No stored series (no Whisper file, or not in the shared store,
+		// which wraps os.ErrNotExist): answer from the cache as the series
+		// created from it would.
 		resp := response{
-			Name:           metric,
-			PathExpression: pathExpression,
+			Name:             metric,
+			PathExpression:   pathExpression,
+			RequestStartTime: int64(fromTime),
+			RequestStopTime:  int64(untilTime),
 		}
-		cacheData, cerr := listener.fetchFromCache(metric, fromTime, untilTime, &resp)
-		if cerr != nil {
+		if cerr := listener.fetchFromCache(metric, fromTime, untilTime, &resp); cerr != nil {
 			log(zap.WarnLevel, "metric not found even in Cache", zap.Error(err))
 			// Metric has no Whisper file and/or has no datapoints in Cache
 			return response{}, cerr
 		}
-		resp.enrichFromCache(listener, cacheData)
 		if listener.logger.Core().Enabled(zap.DebugLevel) {
 			log(zap.DebugLevel, "fetched cache-only", zap.Any("response", resp))
 		}

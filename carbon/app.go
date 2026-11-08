@@ -34,6 +34,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver"
 	"github.com/go-graphite/go-carbon/tags"
+	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/zapwriter"
 
 	// receivers
@@ -54,20 +55,20 @@ type wspConfigRetriever struct {
 	config *atomic.Pointer[Config]
 }
 
-func (r *wspConfigRetriever) MetricRetentionPeriod(metric string) (int, bool) {
+func (r *wspConfigRetriever) MetricRetentions(metric string) (whisper.Retentions, bool) {
 	schema, ok := r.config.Load().Whisper.Schemas.Match(metric)
-	if !ok {
-		return 0, false
+	if !ok || len(schema.Retentions) == 0 {
+		return nil, false
 	}
-	return schema.Retentions[0].SecondsPerPoint(), true
+	return schema.Retentions, true
 }
 
-func (r *wspConfigRetriever) MetricAggrConf(metric string) (string, float64, bool) {
+func (r *wspConfigRetriever) MetricAggrConf(metric string) (whisper.AggregationMethod, float64, bool) {
 	aggr := r.config.Load().Whisper.Aggregation.Match(metric)
 	if aggr == nil {
-		return "", 0, false
+		return 0, 0, false
 	}
-	return aggr.Name(), aggr.XFilesFactor(), true
+	return aggr.AggregationMethod(), aggr.XFilesFactor(), true
 }
 
 type App struct {
