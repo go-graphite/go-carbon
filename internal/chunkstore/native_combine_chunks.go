@@ -20,7 +20,7 @@ func (s *Store) nativeCombineChunks(ctx context.Context, source, target Transfer
 		if err := ctx.Err(); err != nil {
 			return result, class, false, err
 		}
-		order := 0
+		var order int
 		switch {
 		case i == len(source.Keys):
 			order = 1
