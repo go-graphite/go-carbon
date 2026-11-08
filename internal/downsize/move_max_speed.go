@@ -97,7 +97,7 @@ func maximumSpeedBackpressureHost(endpoint, path string, body any, api *apiError
 	return request.Source
 }
 
-func readMaxSpeedDecision(path, expectedSHA string) error {
+func verifyMaxSpeedDecision(path, expectedSHA string) error {
 	var decision maxSpeedDecision
 	decoded, err := hex.DecodeString(expectedSHA)
 	if err != nil || len(decoded) != sha256.Size {
