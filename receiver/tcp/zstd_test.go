@@ -128,7 +128,7 @@ func TestZstdFailureIsLoud(t *testing.T) {
 	r.InitPrometheus(reg)
 	r.Stat(func(string, float64) {})
 	families, err := reg.Gather()
-	if err != nil || len(families) != 6 {
+	if err != nil || len(families) != 9 {
 		t.Fatalf("metrics: %d %v", len(families), err)
 	}
 }

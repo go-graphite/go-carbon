@@ -5,9 +5,12 @@ package carbon
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -58,6 +61,15 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 	}
 	relays, rate, seconds := number("ZERO_RELAYS", 1), number("ZERO_RATE", 160000), number("ZERO_SECONDS", 12)
 	names := number("ZERO_NAMES", 1024)
+	nameBytes := number("ZERO_NAME_BYTES", 1)
+	streamMaxNames := number("ZERO_STREAM_MAX_NAMES", codec.DefaultMaxNames)
+	tailHold, tailHoldErr := time.ParseDuration(os.Getenv("ZERO_TAIL_HOLD"))
+	if os.Getenv("ZERO_TAIL_HOLD") != "" && (tailHoldErr != nil || tailHold < 0 || tailHold > 8*time.Second) {
+		t.Fatal("ZERO_TAIL_HOLD must be between 0s and 8s", tailHoldErr)
+	}
+	if nameBytes > 2048 {
+		t.Fatal("fixture metric name limit exceeded")
+	}
 	reclaim := os.Getenv("ZERO_RECLAIM") == "1"
 	pause, pauseErr := time.ParseDuration(os.Getenv("ZERO_SENDER_PAUSE"))
 	if os.Getenv("ZERO_SENDER_PAUSE") != "" && pauseErr != nil {
@@ -101,12 +113,22 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 	cfg.Cache.WriteoutMaxDelay = Duration{960 * time.Second}
 	cfg.Dump.Format = "blocks"
 	cfg.Dump.StoreInputHandoff = true
+	if os.Getenv("ZERO_READ_AHEAD_BYTES") != "" {
+		cfg.Tcp.HandoffReadAheadBytes = number("ZERO_READ_AHEAD_BYTES", 8<<20)
+	}
 	cfg.InputLog.Enabled = os.Getenv("ZERO_INPUT_LOG") != "0"
 	cfg.InputLog.Path = filepath.Join(root, "input-log")
 	cfg.InputLog.SegmentSize = 16 << 20
 	cfg.InputLog.SyncInterval = Duration{time.Second}
 	cfg.InputLog.MaxAge = Duration{time.Hour}
 	cfg.Buckyd.Enabled = false
+	missingSecret := os.Getenv("ZERO_MISSING_JWT") == "1"
+	if missingSecret {
+		cfg.Buckyd.Enabled = true
+		cfg.Buckyd.Bind = "127.0.0.1:0"
+		cfg.Buckyd.JWTSecretFile = filepath.Join(root, "late-buckyd.secret")
+		cfg.Buckyd.WaitForJWTSecret = true
+	}
 	cfg.Carbonserver.ScanFrequency = &Duration{time.Hour}
 	horizon := max(3600, rate*seconds/names+120)
 	if err := os.WriteFile(cfg.Whisper.SchemasFilename, []byte(fmt.Sprintf("[all]\npattern = .*\nretentions = 1s:%ds\n", horizon+120)), 0600); err != nil {
@@ -123,8 +145,33 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 	}
 	cfg = startHandoffTestApp(t, first)
 	defer first.Stop()
+	checkMissingSecret := func(app *App) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		app.Buckyd.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+		if w.Code != http.StatusServiceUnavailable || app.Buckyd.AuthSecretReady() {
+			t.Fatal("missing management secret must return 503 while input remains available", w.Code)
+		}
+	}
+	if missingSecret {
+		checkMissingSecret(first)
+	}
 	firstCache, firstLog := first.Cache, first.inputLog.Load()
-	name := func(r, m int) string { return fmt.Sprintf("gate.relay%02d.metric%04d", r, m) }
+	metricNames := make([][]string, relays)
+	for r := range metricNames {
+		metricNames[r] = make([]string, names)
+		for m := range names {
+			n := fmt.Sprintf("gate.relay%02d.metric%04d", r, m)
+			// Stable, distinct long names model the wire bytes of busy stores.
+			// Generate outside the offer clock; avoid a compressible padding run.
+			for len(n) < nameBytes {
+				sum := sha256.Sum256([]byte(n))
+				n += fmt.Sprintf(".%x", sum)
+			}
+			metricNames[r][m] = n
+		}
+	}
+	name := func(r, m int) string { return metricNames[r][m] }
 	// Production restarts receive established series. Create their catalog
 	// entries before the timed offer, including the trailing sentinels: startup
 	// discovery may be gated while recovery drains, independently of intake.
@@ -189,7 +236,7 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 			var compressor *zstd.Encoder
 			var err error
 			if mode == "stream" {
-				encoder, err = codec.NewEncoder(codec.Options{})
+				encoder, err = codec.NewEncoder(codec.Options{MaxNames: streamMaxNames})
 				if err == nil {
 					var pre []byte
 					pre, err = codec.AppendPreamble(nil, 0)
@@ -463,6 +510,38 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 		time.Sleep(time.Duration(seconds) * time.Second / 6)
 	}
 	stopAt := time.Now()
+	if tailHold > 0 {
+		// An earlier empty tail, locked by this fixture, holds the real ordered
+		// replay after inherited handlers and read-ahead start. The sender keeps
+		// offering independently, just as when production replays a large tail.
+		tailPath := filepath.Join(cfg.Dump.Path, "input.0.0.tail.bin")
+		if err := os.WriteFile(tailPath, nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		unlock, err := handoff.LockExclusive(tailPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release := sync.OnceFunc(func() { _ = unlock() })
+		cancel, done := make(chan struct{}), make(chan struct{})
+		t.Cleanup(func() { close(cancel); release(); <-done })
+		go func() {
+			defer close(done)
+			deadline := time.Now().Add(15 * time.Second)
+			for !strings.Contains(zapwriter.TestString(), "took over input from stopping instance") && time.Now().Before(deadline) {
+				select {
+				case <-cancel:
+					return
+				case <-time.After(time.Millisecond):
+				}
+			}
+			select {
+			case <-cancel:
+			case <-time.After(tailHold):
+			}
+			release()
+		}()
+	}
 	stopped := make(chan error, 1)
 	go func() {
 		err := first.DumpStop()
@@ -481,6 +560,17 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 	}
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
+	}
+	if missingSecret {
+		checkMissingSecret(next)
+		if err := os.WriteFile(cfg.Buckyd.JWTSecretFile, []byte("fixture-secret"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		next.Buckyd.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+		if w.Code != http.StatusForbidden || !next.Buckyd.AuthSecretReady() {
+			t.Fatal("delivered management secret must enable authentication", w.Code)
+		}
 	}
 	stopTime := time.Since(stopAt)
 	sampleMu.Lock()
@@ -584,6 +674,10 @@ func TestZeroMissedWritesRelayGate(t *testing.T) {
 		"offered_at_deadline":         offeredAtDeadline.Load(), "socket_sent_at_deadline": sentAtDeadline.Load(),
 		"receiver_counter_at_deadline_including_probe": receivedAtDeadline.Load(),
 		"positive_control_pause_seconds":               pause.Seconds(),
+		"ordered_tail_hold_seconds":                    tailHold.Seconds(),
+		"handoff_read_ahead_config_bytes":              cfg.Tcp.HandoffReadAheadBytes,
+		"metric_name_bytes":                            len(name(0, 0)),
+		"missing_buckyd_secret_during_restart":         missingSecret,
 	}
 	b, err := json.Marshal(result)
 	if err != nil {

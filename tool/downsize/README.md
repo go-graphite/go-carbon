@@ -83,7 +83,12 @@ members. Set `BUCKYD_TOKEN` for authenticated inventories. Alternatively provide
 `inputs` with `source`, `path`, `format` (`lines`, `tsv`, `jsonl`) and optional
 `estimated_bytes`; file paths are relative to the specification. Legacy HTTP
 `buckyd` inventories remain readable. Inventories must be sorted, complete and
-reconciled with the writer cutover. An unchanged identity set on new hardware
+reconciled with the writer cutover. After cutover, a retained single-copy
+destination may already contain names assigned elsewhere by the old ring.
+The planner counts those placements in `summary.unowned`, but accepts them
+without `allow_unowned`: they are already at their sole desired owner and produce
+no transfer or deletion. Misplaced donor names still fail ownership validation.
+An unchanged identity set on new hardware
 needs no metric inventory: its whole-store checkpoints provide complete coverage.
 
 A new physical member retaining an old hash identity with unchanged hash settings
@@ -322,7 +327,11 @@ Disjoint records become prepared SSTs with reserved target IDs. Full independent
 SST read-back compares every key/value before Pebble Ingest and grouped durable
 catalog/receipt publication. Independent source/target sampled point checks remain.
 Overlaps use the verified target-wins merge: target values win equal timestamps,
-source fills holes; policies and archival values are checked. Committed target
+source fills holes; policies and archival values are checked. Merged images
+spanning circular archive rotations keep the newest timestamp in each
+physical retention slot; non-aliased sparse points and independent coarse
+archives remain intact. Full read-back verifies this finite merged image.
+Committed target
 cache state is captured under writer locks before invalidation, with a database
 fallback when it is unavailable. Receipt encoding reuses scratch within each batch
 while preserving the existing JSON bytes and receipt hashes. Fresh source versions

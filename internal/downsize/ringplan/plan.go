@@ -482,9 +482,13 @@ func planInput(ctx context.Context, s specification, old, next *ring, id string,
 				break
 			}
 		}
+		// After writer cutover, a retained single-copy destination can already
+		// contain newly created names owned elsewhere by the old ring. They need
+		// no transfer or deletion. Keep checking every other source strictly.
+		alreadyDesired := len(newOwners) == 1 && next.members[newOwners[0]].ID == in.Source
 		if !owned {
 			state.Summary.Unowned++
-			if !s.AllowUnowned {
+			if !s.AllowUnowned && !alreadyDesired {
 				return state, fmt.Errorf("metric %q is not owned by source %s under old ring", name, in.Source)
 			}
 		}

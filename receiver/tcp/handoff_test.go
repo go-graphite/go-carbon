@@ -47,10 +47,11 @@ func (s *sequenceStore) count() int {
 // TestDetachKeepsEveryPoint moves a receiver's connections to a new receiver
 // while clients keep writing lines split at arbitrary byte boundaries. Each
 // point must arrive exactly once and in order, across both receivers.
-func TestDetachKeepsEveryPoint(t *testing.T)        { testDetachKeepsEveryPoint(t, false) }
-func TestDetachBatchedKeepsEveryPoint(t *testing.T) { testDetachKeepsEveryPoint(t, true) }
-func testDetachKeepsEveryPoint(t *testing.T, batched bool) {
-	options := &Options{Listen: "127.0.0.1:0", Enabled: true}
+func TestDetachKeepsEveryPoint(t *testing.T)            { testDetachKeepsEveryPoint(t, false, false) }
+func TestDetachBatchedKeepsEveryPoint(t *testing.T)     { testDetachKeepsEveryPoint(t, true, false) }
+func TestDetachLookupBatchKeepsEveryPoint(t *testing.T) { testDetachKeepsEveryPoint(t, false, true) }
+func testDetachKeepsEveryPoint(t *testing.T, batched, lookup bool) {
+	options := &Options{Listen: "127.0.0.1:0", Enabled: true, CacheLookupBatch: lookup}
 	wake := make(chan struct{}, 1)
 	before, after := sequenceStore{wake: wake}, sequenceStore{wake: wake}
 	old, err := newTCP("tcp", options, before.add)
@@ -62,6 +63,13 @@ func testDetachKeepsEveryPoint(t *testing.T, batched bool) {
 	}
 	if batched {
 		old.SetPointsOut(func(name []byte, data []points.Point) { before.add(&points.Points{Metric: string(name), Data: data}) })
+	}
+	if lookup {
+		old.SetPointBatchOut(func(names [][]byte, data []points.Point) {
+			for i, p := range data {
+				before.add(points.OnePoint(string(names[i]), p.Value, p.Timestamp))
+			}
+		})
 	}
 	defer old.Stop()
 	addr := old.Addr().String()
@@ -161,12 +169,19 @@ func testDetachKeepsEveryPoint(t *testing.T, batched bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := NewInherited("tcp", &Options{Listen: addr, Enabled: true}, after.add, h)
+	next, err := NewInherited("tcp", &Options{Listen: addr, Enabled: true, CacheLookupBatch: lookup}, after.add, h)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if batched {
 		next.SetPointsOut(func(name []byte, data []points.Point) { after.add(&points.Points{Metric: string(name), Data: data}) })
+	}
+	if lookup {
+		next.SetPointBatchOut(func(names [][]byte, data []points.Point) {
+			for i, p := range data {
+				after.add(points.OnePoint(string(names[i]), p.Value, p.Timestamp))
+			}
+		})
 	}
 	defer next.Stop()
 	close(inherited)

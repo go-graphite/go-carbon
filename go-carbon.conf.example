@@ -720,9 +720,19 @@ listen = ":2003"
 enabled = true
 # Optional internal queue between receiver and cache
 buffer-size = 0
+# Experimental, default off; unbuffered TCP plaintext (including compression).
+# Warm exact cache-name lookups in bounded batches, then admit points in order.
+# Intended for cold individual names; repeated-name runs may use more CPU.
+# Restart the receiver to change this setting.
+cache-lookup-batch = false
 # Empty compression autodetects plaintext, independent zstd frames or stream.
 # Explicit "gzip", "snappy", or "zstd" selects that format without autodetection.
 compression = ""
+# Per-connection wire buffer while handoff tail/dictionaries replay; zero keeps
+# the 8 MiB default. Opt in to e.g. 268435456 for long recovery at high wire rates.
+# Restart to apply. Lazy allocation; allow limit times peak connections plus
+# 64 KiB per connection and ring-growth overlap in the process memory budget.
+handoff-read-ahead-bytes = 0
 # Maximum decompressed frame size and advertised window, in bytes; zero uses
 # 16 MiB. Compressed frames are bounded by this + this/128 + 1024 bytes.
 zstd-max-frame-size = 16777216
@@ -890,6 +900,11 @@ bind = "0.0.0.0:4242"
 # Empty tmpdir uses the operating system temporary directory.
 tmpdir = ""
 auth-jwt-secret-file = ""
+# Keep ingestion running if this configured file is absent at boot. Management
+# returns 503 until a request loads a nonempty secret, then normal JWT checks
+# apply. Requires a secret path. Other initial errors remain fatal. Restart to
+# apply; the default preserves strict startup on missing secrets.
+wait-for-auth-secret = false
 # Whole-store checkpoint/copy API: /admin/store-copy on this listener, protected
 # by the same JWT header with namespaces=["*"] and ops=["admin"] (or root "*").
 # Requires input-log.enabled; refuses incomplete conversion, tags, expiration

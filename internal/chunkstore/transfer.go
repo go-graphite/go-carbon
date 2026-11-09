@@ -550,6 +550,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 				if err != nil {
 					return nil, err
 				}
+				points = retainTransferSlots(points, a.Retention)
 				want.Archives[j] = Archive{a.Retention, points}
 			}
 			if m.Continuation {
@@ -650,6 +651,31 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 		s.catalogChanged(m.Name)
 	}
 	return proofs, nil
+}
+
+// retainTransferSlots applies the same finite archive capacity as an ordinary
+// writer. fillArchive has already resolved equal timestamps in the target's
+// favor and sorted them. Different timestamps can still alias a circular slot
+// after the target has advanced past the source's last write; keep the newer
+// interval while preserving every non-aliased point, even in sparse archives.
+func retainTransferSlots(points []Point, retention Retention) []Point {
+	if len(points) < 2 || (points[len(points)-1].Timestamp-points[0].Timestamp)/int64(retention.Step) < int64(retention.Count) {
+		return points
+	}
+	// Allocate only for slots actually present in the validated transfer; the
+	// archive capacity comes from the sender and must not size an allocation.
+	seen := make(map[int64]struct{})
+	start := len(points)
+	for i := len(points) - 1; i >= 0; i-- {
+		slot := points[i].Timestamp / int64(retention.Step) % int64(retention.Count)
+		if _, exists := seen[slot]; exists {
+			continue
+		}
+		seen[slot] = struct{}{}
+		start--
+		points[start] = points[i]
+	}
+	return points[start:]
 }
 
 func (s *Store) transferSidecarSummary(ctx context.Context, b *pebble.Batch, m Metadata) (SidecarSummary, error) {

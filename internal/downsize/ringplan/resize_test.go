@@ -79,6 +79,63 @@ func TestResizeMixedPlanAndReplacementDigest(t *testing.T) {
 	}
 }
 
+func TestResizePostCutoverSurvivorNames(t *testing.T) {
+	for _, misplaced := range []bool{false, true} {
+		t.Run(fmt.Sprint("misplaced=", misplaced), func(t *testing.T) {
+			root := t.TempDir()
+			s := fixtureSpec(root, 3)
+			old, err := newRing(&s.Old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names [3][]string
+			var copied uint64
+			for i := range 300 {
+				name := fmt.Sprintf("resize.metric.%04d", i)
+				owner := old.compiled.Lookup(name, nil)[0]
+				names[owner] = append(names[owner], name)
+				if owner != 0 {
+					copied++
+					// Simulate fresh writes received by the survivor after cutover,
+					// including overlap with histories still on a donor.
+					names[0] = append(names[0], name)
+					if misplaced {
+						names[1+owner%2] = append(names[1+owner%2], name)
+					}
+				}
+			}
+			for i, in := range s.Inputs {
+				if err := os.WriteFile(in.Path, []byte(strings.Join(names[i], "\n")+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			blob, _ := json.Marshal(s)
+			path := filepath.Join(root, "spec.json")
+			if err := os.WriteFile(path, blob, 0600); err != nil {
+				t.Fatal(err)
+			}
+			m, err := Resize(context.Background(), path, filepath.Join(root, "plan"), true, 2)
+			if misplaced {
+				if err == nil || !strings.Contains(err.Error(), "not owned by source") {
+					t.Fatalf("misplaced donor history accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.Summary.Unowned != copied || m.Summary.Copies != copied || m.Spec.AllowUnowned {
+				t.Fatalf("incorrect post-cutover plan: %+v", m.Summary)
+			}
+			for _, route := range m.Streams {
+				if route.Source == s.Old.Nodes[0].ID || route.Destination != s.Old.Nodes[0].ID {
+					t.Fatalf("unexpected route: %+v", route)
+				}
+			}
+		})
+	}
+}
+
 func TestResizeSameIdentitySkipsInventory(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("unchanged identities should not inventory")

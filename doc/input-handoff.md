@@ -58,6 +58,42 @@ maximum ring allocation is 2.19 GiB. Once the tail is applied, each handler drai
 its buffered bytes, frees the ring and returns to direct socket reads. A slow
 recovery or input beyond this byte budget can still backpressure senders.
 
+For busy connections, opt in to a larger buffer on the **successor**:
+
+```toml
+[tcp]
+handoff-read-ahead-bytes = 268435456 # 256 MiB per connection
+```
+
+Zero retains the 8 MiB default. Explicit limits must be between 64 KiB and
+1 GiB, and require a receiver restart. Inherited sockets and connections
+accepted during recovery use the same limit, for all three wire protocols.
+This changes no handoff protocol or on-disk format. SIGHUP validates the value
+but does not resize running receivers.
+
+Size from **wire bytes per second per connection**, including dictionary/name
+churn, multiplied by the measured ordered-recovery interval, with margin.
+The relay queue must also cover detach/snapshot/descriptor transfer before the
+successor can pump sockets. An 8 MiB buffer covers only 0.26 seconds at
+32 MB/s; a seven-second tail can exhaust a five-second sender queue even with
+successful socket inheritance. A larger byte buffer covers that finite pause;
+it does not compensate for sustained intake below the offered rate or an
+unavailable host.
+
+Allocation is lazy and capped separately on **each** connection. Budget the
+limit times peak concurrent connections (including new connections during
+recovery), plus 64 KiB read blocks, decoder snapshots and temporary ring-growth
+copies. There is no aggregate reservation limit. With 80 connections at
+256 MiB, the final ring capacities alone can reach 20 GiB. Watch:
+
+- `tcp_handoff_read_ahead_limit_bytes`: effective limit on the running receiver.
+- `tcp_handoff_read_ahead_buffered_bytes`: queued wire bytes across connections.
+- `tcp_handoff_read_ahead_max_connection_buffered_bytes`: largest connection queue.
+
+These byte queues are transient; a crash still needs sender-side durable
+retention/acknowledgements. Repeated planned handoff preserves queued bytes in
+the existing connection snapshots, and a full buffer still applies backpressure.
+
 Input handoff protocol version 2 sends a small JSON header containing 64-bit
 connection-state lengths, followed by raw state bytes and batched descriptors.
 Dictionary snapshots reserve their raw output capacity and transfer their owned
@@ -130,6 +166,35 @@ application acknowledgements. Handoff prevents this planned-restart loss by
 preserving the same sockets, unread kernel bytes, partial lines/frames, and
 stream state. Unexpected read and decode errors remain errors; locally closed
 connections during planned shutdown log at INFO without decode-error counts.
+
+## Boot-time management credentials
+
+The embedded Buckyd management API normally fails startup if its configured
+JWT secret is missing. Because that configuration runs after input recovery,
+a late boot-time secret can repeatedly close freshly recovered input sockets.
+For hosts whose secret delivery can lag store startup, opt in:
+
+```toml
+[buckyd]
+auth-jwt-secret-file = "/path/to/managed/secret"
+wait-for-auth-secret = true
+```
+
+Only an initially missing file may defer startup; invalid configuration,
+permissions, an initially empty secret, and bind errors still fail. Input and
+reads start normally. All management requests return HTTP 503, with
+`Retry-After: 1`, until a request successfully loads a nonempty secret. Requests
+retry file delivery; no background worker or unauthenticated management mode is
+introduced. After publication the secret remains immutable and ordinary JWT
+authorization applies, including the existing public discovery endpoint.
+`buckyd_auth_secret_ready` is zero during the wait and one after loading. It
+changes on a management request, so probe a protected endpoint when checking
+delivery. The startup warning names the deferred setting. Default is false;
+changing it requires restart, as with other Buckyd settings.
+
+Restore the managed secret delivery/order in configuration management too.
+Neither this option nor socket handoff can preserve input through a period
+where the store host itself is absent.
 
 ## Local reproduction
 
