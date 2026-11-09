@@ -148,7 +148,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 	case "/v1/transfer/export":
 		accepted, _ := strconv.Atoi(r.URL.Query().Get("store_format"))
 		if s.store.TransferFormat() > 7 && accepted < s.store.TransferFormat() {
-			writeError(w, errors.New("export requires a peer accepting store format 9"), http.StatusConflict)
+			writeError(w, fmt.Errorf("export requires a peer accepting store format %d", s.store.TransferFormat()), http.StatusConflict)
 			return
 		}
 		var names []string
@@ -179,7 +179,7 @@ func (s *Service) bulk(w http.ResponseWriter, r *http.Request) {
 		// records precede this final capability check, so an old peer cannot receive
 		// new blocks through a request admitted before the marker upgrade.
 		if s.store.TransferFormat() > 7 && accepted < s.store.TransferFormat() {
-			writeError(w, errors.New("export requires a peer accepting store format 9"), http.StatusConflict)
+			writeError(w, fmt.Errorf("export requires a peer accepting store format %d", s.store.TransferFormat()), http.StatusConflict)
 			return
 		}
 		w.Header().Set("X-Store-Format", strconv.Itoa(s.store.TransferFormat()))
@@ -402,7 +402,7 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 	query := u.Query()
 	query.Set("max_bytes", strconv.FormatInt(maxBytes, 10))
 	query.Set("wire", "2")
-	query.Set("store_format", strconv.Itoa(s.store.TransferFormat()))
+	query.Set("store_format", strconv.Itoa(s.store.AcceptTransferFormat()))
 	u.RawQuery = query.Encode()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
@@ -425,7 +425,7 @@ func (s *Service) pullTransfer(ctx context.Context, source string, names []strin
 		return nil, 0, &transferUpstreamError{response.StatusCode, fmt.Sprintf("source export: %s", response.Status)}
 	}
 	required, _ := strconv.Atoi(response.Header.Get("X-Store-Format"))
-	if required > s.store.TransferFormat() {
+	if required > s.store.AcceptTransferFormat() {
 		return nil, 0, errors.New("source store format exceeds target capability")
 	}
 	input := &transferCountReader{Reader: response.Body}

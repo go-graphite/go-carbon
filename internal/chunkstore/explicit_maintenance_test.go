@@ -127,6 +127,9 @@ func TestExplicitCompactCloseAfterStopBackground(t *testing.T) {
 			if err := s.Compact(); !errors.Is(err, context.Canceled) {
 				t.Fatal("compaction admitted after close", err)
 			}
+			if err := s.DowngradeFloatCodec(context.Background()); !errors.Is(err, context.Canceled) {
+				t.Fatal("float downgrade admitted after close", err)
+			}
 		})
 	}
 }
@@ -216,6 +219,9 @@ func TestCloseJoinsExplicitColdPack(t *testing.T) {
 			}
 			if err := s.DowngradeColdPack(ctx); !errors.Is(err, context.Canceled) {
 				t.Fatal("DowngradeColdPack admitted after close", err)
+			}
+			if err := s.DowngradeFloatCodec(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatal("DowngradeFloatCodec admitted after close", err)
 			}
 			if _, err := s.PurgeInvalidNames(ctx); !errors.Is(err, context.Canceled) {
 				t.Fatal("PurgeInvalidNames admitted after close", err)

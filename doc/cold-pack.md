@@ -390,3 +390,16 @@ transfer and unpack using backups before upgrading additional hosts. Turn off on
 read regressions, new errors or reserve pressure; stopping maintenance does not
 require downgrading the binary. Qualify decimal mode separately against the
 application's numeric requirements and longer-history/churn workloads.
+
+### Exhaustive float selection
+
+`store-cold-pack-float-exhaustive = true` requires
+`store-cold-pack-float-codec = true` and defaults to false. It compares all
+existing v11 value codecs on each eligible complete group, retaining the
+smaller original frame when repacking. It also revisits existing v11 frames
+in `float-repack` mode. Selection runs only in the paced maintenance worker;
+`store-cold-pack-cpu-fraction` charges the extra encode time to that worker's
+duty budget. Normal updates and decoders are unchanged. Changing the selector
+invalidates the saved sweep cursor. The offline tool accepts
+`-float-codec -float-exhaustive`. Disable the selector to restore prefix
+selection for future packing; existing v11 frames require no conversion.

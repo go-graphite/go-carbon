@@ -122,7 +122,7 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 	// so this deliberately also protects the sample interval crossing the cutoff.
 	heads := map[int]int{}
 	coldArchives := map[int]bool{}
-	if r.PackTails && r.Mode != "unpack" {
+	if r.PackTails && r.Mode != "unpack" && r.Mode != "float-downgrade" || r.Mode == "float-repack" {
 		headerFS := newContinuationFiles(kv, true)
 		source, err := whisper.OpenWithOptions(headerFS.main(), continuationOptions(headerFS, func() time.Time { return r.Cutoff }))
 		if err != nil {
@@ -193,10 +193,17 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 		activeHead := knownHead && head == index && !coldArchives[archive]
 		tail := !desc.bucketed && knownHead && head == index && coldArchives[archive]
 		eligible := (desc.bucketed && desc.count > 128 || tail && desc.count > 0) && desc.packed == 0
+		if r.Mode == "float-repack" {
+			// Re-encode sealed tails while preserving the active head.
+			eligible = desc.bucketed && desc.packed != 0
+		}
 		// A resumed packed tail keeps its bucket after thawing. Protect that
 		// now-active head too, even if a finer buffer has not propagated yet.
 		if activeHead {
 			eligible = false
+		}
+		if r.Mode == "float-downgrade" {
+			eligible = desc.bucketed && desc.packed != 0
 		}
 		if r.Mode == "unpack" {
 			eligible = desc.packed != 0
@@ -206,6 +213,17 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 			eligible = false
 		}
 		if eligible {
+			if r.Mode == "float-repack" || r.Mode == "float-downgrade" {
+				changed, err := repackSealedFloats(ctx, kv, desc.groupPrefix(d.id, archive, index), a.Step, r)
+				if err != nil {
+					return stats, next, false, err
+				}
+				if changed.Blocks != 0 {
+					changed.Observed, changed.ObservedPoints = stats.Observed, stats.ObservedPoints
+					return changed, next, false, nil
+				}
+				continue
+			}
 			block := whisper.ContinuationBlock{Archive: archive, Index: index, Offset: a.Offset + index*a.BlockSize, Size: a.BlockSize, Step: a.Step}
 			if r.Mode == "unpack" {
 				if err := f.thawBlock(block, &desc, thawUnpack); err != nil {
@@ -236,6 +254,16 @@ func (c *ContinuationCodec) Repack(ctx context.Context, kv store.ContinuationIO,
 					value, err := encode(input, a.Step)
 					if err != nil {
 						return stats, next, false, err
+					}
+					if r.FloatCodec && store.IsLegacySealedFloat(value) {
+						floatEncode := store.EncodeSealedPointsFloat
+						if r.FloatExhaustive {
+							floatEncode = store.EncodeSealedPointsFloatMin
+						}
+						value, err = floatEncode(input, a.Step)
+						if err != nil {
+							return stats, next, false, err
+						}
 					}
 					encoded = append(encoded, value)
 				}

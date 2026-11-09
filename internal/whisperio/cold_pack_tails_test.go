@@ -55,6 +55,9 @@ func tailSeed(t *testing.T, codec *tailSeedCodec, cfg store.MetricConfig, now ti
 			if family == 1 {
 				value = float64(state>>11) * 0x1p-53 * 1000
 			}
+			if family == 3 {
+				value = float64(state%4) / 3
+			}
 			if family == 2 {
 				value = 42
 			}

@@ -321,6 +321,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		return nil, err
 	}
 	seen := make(map[string]bool, len(records))
+	needsFloatFormat := false
 	for _, r := range records {
 		if err := errors.Join(validateName(r.Config.Name), validate(r.Config)); err != nil {
 			return nil, err
@@ -333,6 +334,12 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			return nil, ErrFormat
 		}
 		for i, kv := range r.Keys {
+			if r.Continuation && newFloatGroup(kv.Key, kv.Value) {
+				if s.AcceptTransferFormat() < 11 {
+					return nil, fmt.Errorf("%w: float codec blocks require v11 destination capability", ErrFormat)
+				}
+				needsFloatFormat = true
+			}
 			if r.Continuation && !s.coldPack.format.Load() && sealedTransferKey(kv) {
 				return nil, fmt.Errorf("%w: cold blocks require v9 destination", ErrFormat)
 			}
@@ -372,6 +379,11 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		return nil, err
 	}
 	if len(paths) > 0 {
+		if needsFloatFormat {
+			if err := s.fenceFloatCodec(); err != nil {
+				return nil, err
+			}
+		}
 		stats, err := s.db.IngestWithStats(paths)
 		if err != nil {
 			return nil, err

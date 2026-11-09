@@ -16,14 +16,16 @@ import (
 	"go.uber.org/zap"
 )
 
-// ColdPackOptions controls low-priority workers. Mode is off, exact, decimal,
-// or unpack. Decimal rounding occurs only while sealing, never in hot writes.
+// ColdPackOptions controls low-priority workers. Float rewrite modes reuse the
+// same pacing/checkpoint/publication path as exact, decimal and unpack.
 type ColdPackOptions struct {
-	Mode           string
-	PackTails      bool // opt-in whole-range v9 packing of cold non-bucketed native heads
-	Workers        int  // default 1; at most 64
-	BytesPerSecond int64
-	MinFreeBytes   uint64
+	Mode            string
+	FloatCodec      bool // opt-in writer; readers always understand the format
+	FloatExhaustive bool
+	PackTails       bool // opt-in whole-range v9 packing of cold non-bucketed native heads
+	Workers         int  // default 1; at most 64
+	BytesPerSecond  int64
+	MinFreeBytes    uint64
 	// CPUFraction bounds the duty fraction of the worker group (up to Workers *
 	// CPUFraction cores). Charging the slowest worker's IO wait to the whole
 	// group is conservative; asynchronous flush/compaction CPU is separate.
@@ -63,8 +65,14 @@ func NormalizeColdPack(o ColdPackOptions) (ColdPackOptions, error) {
 	if o.MaxCompactionDebt == 0 {
 		o.MaxCompactionDebt = 64 << 20
 	}
-	if o.Mode != "off" && o.Mode != "exact" && o.Mode != "decimal" && o.Mode != "unpack" {
-		return o, errors.New("cold pack mode must be off, exact, decimal or unpack")
+	if o.Mode != "off" && o.Mode != "exact" && o.Mode != "decimal" && o.Mode != "unpack" && o.Mode != "float-repack" && o.Mode != "float-downgrade" {
+		return o, errors.New("cold pack mode must be off, exact, decimal, unpack, float-repack or float-downgrade")
+	}
+	if o.FloatExhaustive && !o.FloatCodec {
+		return o, errors.New("exhaustive float selection requires float-codec on")
+	}
+	if o.Mode == "float-repack" && !o.FloatCodec || o.Mode == "float-downgrade" && o.FloatCodec {
+		return o, errors.New("float-repack requires float-codec on; float-downgrade requires it off")
 	}
 	if o.BytesPerSecond < 1 || math.IsNaN(o.CPUFraction) || o.CPUFraction < .001 || o.CPUFraction > 1 || o.WriteWindow < 0 || o.Interval < time.Second {
 		return o, errors.New("invalid cold pack byte/CPU budget, window or interval")
@@ -86,7 +94,7 @@ var ErrColdPackBudget = errors.New("cold pack operation exceeds bounded budget")
 
 type RepackStats struct {
 	Metrics, Blocks, Points, InputBytes, OutputBytes, Skipped uint64
-	// Repacked is the subset of sealing work on previously thawed ranges.
+	// Repacked includes float rewrites and sealing previously thawed ranges.
 	RepackedBlocks, RepackedPoints, RepackedInputBytes, RepackedOutputBytes uint64
 	// ObservedPoints counts only descriptors consumed before the returned
 	// cursor, even when a page reads ahead. Observed is false for unsupported
@@ -96,10 +104,12 @@ type RepackStats struct {
 }
 
 type ColdPackRequest struct {
-	Cursor    uint64 // codec-owned descriptor seek position
-	Cutoff    time.Time
-	Mode      string
-	PackTails bool
+	Cursor          uint64 // codec-owned descriptor seek position
+	Cutoff          time.Time
+	Mode            string
+	FloatExhaustive bool
+	PackTails       bool
+	FloatCodec      bool
 }
 
 // ContinuationRepacker examines at most 32 descriptors and rewrites at most one
@@ -142,6 +152,8 @@ type coldPackState struct {
 	stats                   ColdPackStats
 	run                     sync.Mutex
 	format                  atomic.Bool
+	floatFormat             atomic.Bool
+	formatMu                sync.Mutex
 	cleanUnpack             bool
 	passFailed              bool
 	passPoints, passMetrics uint64
@@ -193,7 +205,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 			return err
 		}
 	}
-	if o.Mode != "off" && o.Mode != "unpack" && !c.format.Load() {
+	if (o.Mode == "exact" || o.Mode == "decimal" || o.Mode == "float-repack") && !c.format.Load() {
 		if err := replaceFormatMarker(s.fs, s.dir, formatMarkerColdPack); err != nil {
 			return fmt.Errorf("fence cold pack format: %w", err)
 		}
@@ -205,7 +217,7 @@ func (s *Store) ConfigureColdPack(options ColdPackOptions) error {
 		c.mu.Unlock()
 		return nil
 	}
-	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow || c.options.PackTails != o.PackTails
+	reset := c.options.Mode != o.Mode || c.options.WriteWindow != o.WriteWindow || c.options.PackTails != o.PackTails || c.options.FloatCodec != o.FloatCodec || c.options.FloatExhaustive != o.FloatExhaustive
 	if reset {
 		c.stats.Cursor, c.stats.BlockCursor = "", 0
 		c.stats.MetricsVisited = 0
@@ -368,7 +380,7 @@ func (s *Store) coldPackStep(ctx context.Context) (finished bool, failure error)
 				c.stats.StoredPoints, c.stats.StoredMetrics = c.passPoints, c.passMetrics
 				c.stats.StoredAt = s.now().Unix()
 				c.passPoints, c.passMetrics = 0, 0
-				c.cleanUnpack = o.Mode == "unpack" && !c.passFailed
+				c.cleanUnpack = (o.Mode == "unpack" || o.Mode == "float-downgrade") && !c.passFailed
 				c.passFailed = false
 				c.mu.Unlock()
 				return true, nil
@@ -451,7 +463,7 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 	c.stats.ActiveWorkers++
 	c.mu.Unlock()
 	started := time.Now()
-	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode, PackTails: o.PackTails})
+	stats, next, done, read, written, lockTime, conflict, err := s.coldPackMetric(ctx, work.name, ColdPackRequest{Cursor: work.block, Cutoff: s.now().Add(-o.WriteWindow), Mode: o.Mode, PackTails: o.PackTails, FloatCodec: o.FloatCodec, FloatExhaustive: o.FloatExhaustive})
 	if err == nil && !done && next <= work.block {
 		err = errors.New("cold pack codec did not advance")
 	}
@@ -519,9 +531,10 @@ func (s *Store) coldPackWork(ctx context.Context, work *coldPackWork, o ColdPack
 // part of this planning contract.
 type limitedRepackIO struct {
 	ContinuationIO
-	batch *pebble.Batch
-	base  *continuationIO
-	read  uint64
+	batch       *pebble.Batch
+	base        *continuationIO
+	read        uint64
+	floatFormat bool
 }
 
 func (p *limitedRepackIO) account(n int) error {
@@ -561,6 +574,9 @@ func (p *limitedRepackIO) Visit(k []byte, f func([]byte, []byte) error) error {
 func (p *limitedRepackIO) Set(k, v []byte) error {
 	if p.batch.Len()+len(k)+len(v)+32 > coldPackBatchLimit {
 		return ErrColdPackBudget
+	}
+	if newFloatGroup(k, v) {
+		p.floatFormat = true
 	}
 	return p.base.Set(k, v)
 }
@@ -692,6 +708,13 @@ func (s *Store) coldPackMetric(ctx context.Context, name string, request ColdPac
 	}
 	if err = ctx.Err(); err != nil {
 		return
+	}
+	// Sync the reader fence before any new-format WAL entry can be published.
+	// A crash between the fence and commit leaves a conservative marker.
+	if plan.floatFormat {
+		if err = s.fenceFloatCodec(); err != nil {
+			return
+		}
 	}
 	if err = s.commit(batch); err != nil {
 		return
