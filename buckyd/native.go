@@ -102,7 +102,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/v1/native/capabilities" && r.Method == http.MethodGet {
-		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "DurableRangeReceipt": true})
+		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "DurableRangeReceipt": true})
 		return
 	}
 	if strings.HasPrefix(path, "/v1/native/source/") && r.Method == http.MethodDelete {
@@ -231,10 +231,23 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			fail(err)
 			return
 		}
+		if receipt, ready, err := s.store.ResumeNativeCombine(r.Context(), request.Range); err != nil {
+			fail(err)
+			return
+		} else if ready {
+			s.changed()
+			writeNativeJSON(w, receipt)
+			return
+		}
 		candidates, err := s.store.NativeCandidates(r.Context(), request.Range.Names)
 		if err != nil {
 			fail(err)
 			return
+		}
+		if request.Range.Combine {
+			for i := range request.Range.Names {
+				candidates[i/8] |= 1 << uint(i%8)
+			}
 		}
 		request.Range.Candidates = candidates
 		var names []string

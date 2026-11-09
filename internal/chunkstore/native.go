@@ -27,6 +27,7 @@ type NativeRange struct {
 	Start, End                      int64
 	Names                           []string
 	Candidates                      []byte `json:",omitempty"`
+	Combine                         bool   `json:",omitempty"`
 }
 
 type NativeReceipt struct {
@@ -39,6 +40,15 @@ type NativeReceipt struct {
 	FirstID                           uint64
 	ReservedIDs                       int
 	Tables                            []NativeSSTReceipt `json:",omitempty"`
+	Mappings                          []NativeMapping    `json:",omitempty"`
+}
+
+// Ordinal plus the immutable stream hash resolves the source name. Keeping
+// numeric identities avoids repeating long metric names in durable receipts.
+type NativeMapping struct {
+	Ordinal                                    int
+	SourceID, SourceGeneration, SourceRevision uint64
+	TargetID, TargetGeneration, TargetRevision uint64
 }
 
 func (r NativeReceipt) IsCopied(index int) bool {
@@ -165,6 +175,18 @@ func (r NativeReceipt) Validate() error {
 			return ErrFormat
 		}
 	}
+	if len(r.Mappings) != 0 {
+		if len(r.Mappings) != r.CopiedCount {
+			return ErrFormat
+		}
+		previous := -1
+		for _, m := range r.Mappings {
+			if m.Ordinal <= previous || !r.IsCopied(m.Ordinal) || m.SourceID == 0 || m.SourceGeneration == 0 || m.SourceRevision == 0 || m.TargetID == 0 || m.TargetGeneration == 0 || m.TargetRevision == 0 {
+				return ErrFormat
+			}
+			previous = m.Ordinal
+		}
+	}
 	return nil
 }
 
@@ -172,6 +194,9 @@ func (r NativeReceipt) Validate() error {
 // metric locks. IDs and hidden SSTs are prepared before the short creation lock.
 // Only names still absent at that atomic publication become visible.
 func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
+	if request.Combine {
+		return s.nativeCombineImport(ctx, request, input)
+	}
 	identity, namesHash, err := request.Identity()
 	if err != nil {
 		return receipt, err

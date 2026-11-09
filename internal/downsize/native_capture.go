@@ -22,6 +22,8 @@ type nativeCapture struct {
 	StoreFormat              int
 	Bytes                    int64
 	Captured                 time.Time
+	Targets                  map[string]string `json:",omitempty"`
+	TargetSHA256             map[string]string `json:",omitempty"`
 }
 
 func NativeCaptureMain(ctx context.Context, args []string) error {

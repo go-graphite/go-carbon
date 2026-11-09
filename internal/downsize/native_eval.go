@@ -13,7 +13,8 @@ import (
 
 // The same NativeSource/NativeImport methods used by Buckyd, connected by a
 // streaming pipe. The entire export/import/publish is timed, with no wire buffer.
-func measureNative(ctx context.Context, source, target *store.Store, names []string, batch, workers int) (result, []string, error) {
+func measureNative(ctx context.Context, source, target *store.Store, names []string, batch, workers int, combine ...bool) (result, []string, error) {
+	exactCombine := len(combine) > 0 && combine[0]
 	began := time.Now()
 	pin, err := source.PinNativeSource()
 	if err != nil {
@@ -35,7 +36,7 @@ func measureNative(ctx context.Context, source, target *store.Store, names []str
 			for start := range jobs {
 				end := min(start+batch, len(names))
 				group := names[start:end]
-				request := store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "fixture", Start: int64(start), End: int64(end), Names: group}
+				request := store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "fixture", Start: int64(start), End: int64(end), Names: group, Combine: exactCombine}
 				candidates, e := target.NativeCandidates(ctx, group)
 				if e != nil {
 					mu.Lock()
@@ -47,6 +48,11 @@ func measureNative(ctx context.Context, source, target *store.Store, names []str
 					continue
 				}
 				request.Candidates = candidates
+				if exactCombine {
+					for i := range group {
+						candidates[i/8] |= 1 << uint(i%8)
+					}
+				}
 				var selected []string
 				for i, name := range group {
 					if candidates[i/8]&(1<<uint(i%8)) != 0 {

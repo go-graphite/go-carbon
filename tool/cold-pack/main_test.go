@@ -127,12 +127,8 @@ func (c *retryColdCodec) Repack(ctx context.Context, io store.ContinuationIO, r 
 	}
 	if c.failures > 0 {
 		if c.revise != nil {
-			stats, next, done, err := c.ContinuationCodec.Repack(ctx, io, r)
-			if err == nil && stats.Blocks > 0 {
-				c.failures--
-				err = c.revise()
-			}
-			return stats, next, done, err
+			c.failures--
+			return store.RepackStats{Blocks: 1}, 0, true, c.revise()
 		}
 		c.failures--
 		if c.conflict != nil {
@@ -208,9 +204,17 @@ func testColdPackDowngradeRetries(t *testing.T, mode string) {
 				WriteWindow: time.Second, CPUFraction: 1, BytesPerSecond: 1 << 40, MinFreeBytes: 1}); err != nil {
 				t.Fatal(err)
 			}
-			if err := db.RunColdPack(ctx); err != nil || db.TransferFormat() != packedFormat {
-				t.Fatalf("packed fixture: %v format=%d", err, db.TransferFormat())
+			prepareRetryFixture(t, ctx, db, "exact", packedFormat)
+			if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: mode, CPUFraction: 1, BytesPerSecond: 1 << 40, MinFreeBytes: 1}); err != nil {
+				t.Fatal(err)
 			}
+			// Use the valid state after physical unpacking but before lowering
+			// the reader fence. The retry subject then exercises real Store pass,
+			// checkpoint and fence state without depending on an uncontended
+			// physical publication finishing within2ms on a shared CI runner.
+			// TestColdPackOfflineUnpackDowngrade covers the actual rewrite and
+			// exact snapshots through the CLI, including close/reopen.
+			prepareRetryFixture(t, ctx, db, mode, packedFormat)
 			// Inject dirty sweeps only after constructing the packed fixture.
 			codec.failures = tc.failures
 			if tc.conflict {
@@ -229,17 +233,17 @@ func testColdPackDowngradeRetries(t *testing.T, mode string) {
 			if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: mode, CPUFraction: 1, BytesPerSecond: 1 << 40, MinFreeBytes: 1}); err != nil {
 				t.Fatal(err)
 			}
-			beforePasses := db.ColdPackStats().Passes
+			before := db.ColdPackStats()
 			err = runColdPack(ctx, db, tc.downgrade)
 			stats := db.ColdPackStats()
-			if (err == nil) != (tc.format == 7) || db.TransferFormat() != wantFormat || stats.Passes-beforePasses != tc.passes {
+			if (err == nil) != (tc.format == 7) || db.TransferFormat() != wantFormat || stats.Passes-before.Passes != tc.passes {
 				t.Fatalf("run: %v; format=%d; stats=%+v", err, db.TransferFormat(), stats)
 			}
 			if tc.downgrade && tc.format == 9 && !tc.cancel && !tc.metricErr && !errors.Is(err, store.ErrColdPackIncomplete) {
 				t.Fatalf("lost downgrade refusal: %v", err)
 			}
 			if tc.conflict {
-				if stats.Conflicts == 0 || !strings.Contains(stats.LastIncomplete, "metric changed during planning") {
+				if stats.Conflicts <= before.Conflicts || !strings.Contains(stats.LastIncomplete, "metric changed during planning") {
 					t.Fatalf("lost conflict reason: %+v", stats)
 				}
 				if refusal := coldPackFailure(store.ErrColdPackIncomplete, 3, stats); !strings.Contains(refusal.Error(), "metric changed during planning") {
@@ -255,7 +259,7 @@ func testColdPackDowngradeRetries(t *testing.T, mode string) {
 			}
 			if tc.metricConflict {
 				incomplete = "metric changed during planning"
-				if stats.Conflicts != uint64(tc.failures) {
+				if stats.Conflicts-before.Conflicts != uint64(tc.failures) {
 					t.Errorf("missing conflicts: %+v", stats)
 				}
 			}
@@ -277,6 +281,24 @@ func testColdPackDowngradeRetries(t *testing.T, mode string) {
 			}
 		})
 	}
+}
+
+func prepareRetryFixture(t *testing.T, ctx context.Context, db *store.Store, mode string, format int) {
+	t.Helper()
+	for attempt := 0; attempt < 3; attempt++ {
+		before := db.ColdPackStats()
+		if err := db.RunColdPack(ctx); err != nil {
+			t.Fatalf("prepare %s fixture: %v", mode, err)
+		}
+		after := db.ColdPackStats()
+		if db.TransferFormat() == format && after.Conflicts == before.Conflicts && after.Skipped == before.Skipped {
+			return
+		}
+		if after.Errors != before.Errors || !strings.Contains(after.LastIncomplete, "publication validation exceeded 2ms") {
+			t.Fatalf("unexpected %s fixture failure: %+v", mode, after)
+		}
+	}
+	t.Fatalf("%s fixture never reached a clean physical pass: %+v", mode, db.ColdPackStats())
 }
 
 func TestColdPackFailureReportsBothReasons(t *testing.T) {

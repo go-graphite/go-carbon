@@ -76,6 +76,7 @@ func runNative(ctx context.Context, o options) error {
 		var capability struct {
 			Protocol                              int
 			NativeAbsentOnly, DurableRangeReceipt bool
+			NativeExactCombine                    bool
 			CPULimit                              int
 			Node                                  string
 		}
@@ -84,6 +85,9 @@ func runNative(ctx context.Context, o options) error {
 		}
 		if capability.Protocol != 1 || !capability.NativeAbsentOnly || !capability.DurableRangeReceipt {
 			return fmt.Errorf("unsupported native capability on %s", host)
+		}
+		if o.bulkCombine && targets[host] && !capability.NativeExactCombine {
+			return fmt.Errorf("native exact combine build required on %s", host)
 		}
 		if !o.localLab {
 			matched := false
@@ -173,6 +177,7 @@ enqueue:
 	c.release()
 	j.close()
 	o.engine = "metric"
+	o.bulkCombine = false
 	return run(ctx, o)
 }
 
@@ -295,7 +300,7 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 	return nil
 }
 func (c *nativeController) executeRange(ctx context.Context, t task, names []string) error {
-	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names}
+	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names, Combine: c.bulkCombine}
 	session, err := c.session(ctx, t.Source)
 	if err != nil {
 		return err
