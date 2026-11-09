@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,8 +120,8 @@ func TestBulkRequiresExplicitRootWildcard(t *testing.T) {
 
 func TestTransferDebtLimit(t *testing.T) {
 	s, _ := testService(t)
-	if s.config.TransferMaxCompactionDebt != 8<<30 {
-		t.Fatalf("default debt limit %d", s.config.TransferMaxCompactionDebt)
+	if s.TransferMaxCompactionDebt() != 8<<30 {
+		t.Fatalf("default debt limit %d", s.TransferMaxCompactionDebt())
 	}
 	for _, c := range []struct {
 		limit, debt int64
@@ -128,16 +129,46 @@ func TestTransferDebtLimit(t *testing.T) {
 	}{
 		{8 << 30, 8 << 30, false},
 		{8 << 30, 8<<30 + 1, true},
-		{64 << 30, 12 << 30, false},
+		{24 << 30, 12 << 30, false},
+		{8 << 30, 12 << 30, true},
+		{0, 8<<30 + 1, true},
 		{-1, 1 << 40, false},
 	} {
-		s.config.TransferMaxCompactionDebt = c.limit
+		s.SetTransferMaxCompactionDebt(c.limit)
 		if got := s.storagePressure(chunkstore.Stats{CompactionDebt: uint64(c.debt)}); got != c.paused {
 			t.Errorf("limit %d debt %d: paused %v, want %v", c.limit, c.debt, got, c.paused)
 		}
 	}
-	s.config.TransferMaxCompactionDebt = -1
+	if s.config.TransferMaxCompactionDebt != 8<<30 {
+		t.Fatal("live updates changed immutable startup config")
+	}
+	s.SetTransferMaxCompactionDebt(-1)
+	if !s.storagePressure(chunkstore.Stats{L0Sublevels: s.store.TransferL0StopWrites() * 3 / 4}) {
+		t.Error("L0 must pause transfers with the debt check disabled")
+	}
 	if !s.storagePressure(chunkstore.Stats{WriteStallActive: true}) {
 		t.Error("write stall must pause transfers with the debt check disabled")
 	}
+}
+
+func TestTransferDebtReloadConcurrentAdmission(t *testing.T) {
+	s, _ := testService(t)
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for range 1000 {
+				s.SetTransferMaxCompactionDebt(24 << 30)
+				s.SetTransferMaxCompactionDebt(0)
+			}
+		})
+		wg.Go(func() {
+			for range 1000 {
+				s.storagePressure(chunkstore.Stats{CompactionDebt: 12 << 30})
+				if !s.storagePressure(chunkstore.Stats{WriteStallActive: true}) {
+					t.Error("reload bypassed write-stall guard")
+				}
+			}
+		})
+	}
+	wg.Wait()
 }
