@@ -21,11 +21,12 @@ func (s *Store) nativeCombineChunks(ctx context.Context, source, target Transfer
 			return result, class, false, err
 		}
 		order := 0
-		if i == len(source.Keys) {
+		switch {
+		case i == len(source.Keys):
 			order = 1
-		} else if j == len(target.Keys) {
+		case j == len(target.Keys):
 			order = -1
-		} else {
+		default:
 			order = bytes.Compare(source.Keys[i].Key, target.Keys[j].Key)
 		}
 		var kv RelayoutKV

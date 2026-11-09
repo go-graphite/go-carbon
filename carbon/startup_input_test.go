@@ -273,18 +273,6 @@ func TestPredecessorCrashProcess(t *testing.T) {
 			app.Cache.Add(p)
 		}
 	}
-	if stage == "during_dump" {
-		// Enough legacy output to stop the process after file creation and
-		// before publication. These repeated points compress in memory/logs.
-		p := &points.Points{Data: make([]points.Point, 10000)}
-		for j := range p.Data {
-			p.Data[j] = points.Point{Value: 1, Timestamp: stamp}
-		}
-		for i := range 1000 {
-			p.Metric = fmt.Sprintf("filler.m%d", i)
-			app.Cache.Add(p)
-		}
-	}
 	if err := app.syncInputLog(); err != nil {
 		t.Fatal(err)
 	}
@@ -295,17 +283,10 @@ func TestPredecessorCrashProcess(t *testing.T) {
 		checkpointWarmHook = func() { os.Exit(99) }
 	}
 	if stage == "during_dump" {
-		go func() {
-			for {
-				names, _ := filepath.Glob(filepath.Join(app.Config.Dump.Path, "cache.*.bin"))
-				if len(names) > 0 {
-					fmt.Println("CRASH_READY")
-					_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
-					return
-				}
-				time.Sleep(100 * time.Microsecond)
-			}
-		}()
+		checkpointDumpHook = func() {
+			fmt.Println("CRASH_READY")
+			_ = syscall.Kill(os.Getpid(), syscall.SIGSTOP)
+		}
 	}
 	if err := app.DumpStop(); err != nil {
 		t.Fatal(err)
