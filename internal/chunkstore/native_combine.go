@@ -566,7 +566,7 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 		return false, err
 	}
 	wait := time.Now()
-	unlock := s.lockTransfer([]string{p.Meta.Name}, nil)
+	unlock := s.lockTransfer([]string{p.Meta.Name})
 	locked := time.Now()
 	s.nativeCounters.combineWait.Add(uint64(locked.Sub(wait)))
 	defer func() { unlock(); s.nativeCounters.recordCombineHold(time.Since(locked)) }()

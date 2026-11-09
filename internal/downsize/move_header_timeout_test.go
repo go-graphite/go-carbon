@@ -20,7 +20,7 @@ func TestMaxSpeedAllowsHealthyWorkPastTheSeparateHeaderDeadline(t *testing.T) {
 		t.Fatal("slow healthy work did not reproduce legacy header timeout")
 	}
 	old.CloseIdleConnections()
-	m, _, approval := nativeMaxPolicyFixture(t)
+	m, approval := nativeMaxPolicyFixture(t)
 	path, sum := maxDecisionFixture(t)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION", path)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION_SHA256", sum)

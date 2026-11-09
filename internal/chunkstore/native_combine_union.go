@@ -87,7 +87,8 @@ func nativeSlotsIntersect(a, b []Point, r Retention) bool {
 		if len(a) > len(b) {
 			a, b = b, a
 		}
-		slots := make(map[int64]struct{}, min(len(a), r.Count))
+		// Grow from validated points rather than sender-controlled archive capacity.
+		slots := make(map[int64]struct{})
 		for _, p := range a {
 			slots[p.Timestamp/step%count] = struct{}{}
 		}

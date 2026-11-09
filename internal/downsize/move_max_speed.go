@@ -97,46 +97,46 @@ func maximumSpeedBackpressureHost(endpoint, path string, body any, api *apiError
 	return request.Source
 }
 
-func readMaxSpeedDecision(path, expectedSHA string) (maxSpeedDecision, error) {
+func readMaxSpeedDecision(path, expectedSHA string) error {
 	var decision maxSpeedDecision
 	decoded, err := hex.DecodeString(expectedSHA)
 	if err != nil || len(decoded) != sha256.Size {
-		return decision, errors.New("maximum-speed decision requires its explicit SHA256")
+		return errors.New("maximum-speed decision requires its explicit SHA256")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return decision, err
+		return err
 	}
 	sum := sha256.Sum256(raw)
 	if hex.EncodeToString(sum[:]) != expectedSHA {
-		return decision, errors.New("maximum-speed raw decision SHA256 mismatch")
+		return errors.New("maximum-speed raw decision SHA256 mismatch")
 	}
 	if json.Unmarshal(raw, &decision) != nil || decision.Decision != "resize-MAX-SPEED" || decision.Owner != "operator" || decision.UserInstruction == "" {
-		return decision, errors.New("missing explicit maximum-speed owner decision")
+		return errors.New("missing explicit maximum-speed owner decision")
 	}
 	for key, text := range map[string]string{"write_errors": "auto-resume 2 min", "process": "process is up 2 min", "disk": "free < 15%", "read_p99": "1-min read p99 > max(25 ms, 2.5x the cluster's pre-resize 30-min p99) for 3 consecutive minutes", "integrity": "skip and record the name"} {
 		if !strings.Contains(decision.HardStops[key], text) {
-			return decision, errors.New("maximum-speed owner hard-stop decision differs")
+			return errors.New("maximum-speed owner hard-stop decision differs")
 		}
 	}
 	for key, text := range map[string]string{"read_p99": "below max(8 ms, 1.0x baseline) for 2 min", "cpu": "> 85%", "unlogged": "REMOVED 15:45"} {
 		if !strings.Contains(decision.Throttle[key], text) {
-			return decision, errors.New("maximum-speed owner throttle decision differs")
+			return errors.New("maximum-speed owner throttle decision differs")
 		}
 	}
 	if !strings.Contains(decision.Throttle["read_p99"], "> max(15 ms, 1.5x the cluster's pre-resize p99)") ||
 		!strings.Contains(decision.HardStops["read_p99"], "auto-resume below max(15 ms, 1.5x baseline) for 2 min") ||
 		!strings.Contains(decision.Throttle["unlogged"], "do not throttle on it") {
-		return decision, errors.New("maximum-speed amended read/unlogged decision differs")
+		return errors.New("maximum-speed amended read/unlogged decision differs")
 	}
 	for _, text := range []string{"cache_points > 12B -> halve", "> 16B or input_log_oldest_unpersisted_age_seconds > 3000 -> pause", "resume full speed below 10B and 2400 s"} {
 		if !strings.Contains(decision.Throttle["cache_headroom"], text) {
-			return decision, errors.New("maximum-speed cache headroom decision differs")
+			return errors.New("maximum-speed cache headroom decision differs")
 		}
 	}
 	debt := decision.Throttle["compaction_debt"]
 	if !strings.HasPrefix(debt, "REMOVED 14:50:") || !strings.Contains(debt, "compaction debt alone is not a throttle signal") || !strings.Contains(debt, "L0 sublevels >= half of the store's stop-writes or an active write stall") {
-		return decision, errors.New("maximum-speed debt removal requires the explicit amended owner decision")
+		return errors.New("maximum-speed debt removal requires the explicit amended owner decision")
 	}
 	amended, relativeRead, cacheHeadroom := false, false, false
 	for _, amendment := range decision.Amendments {
@@ -151,12 +151,12 @@ func readMaxSpeedDecision(path, expectedSHA string) (maxSpeedDecision, error) {
 		}
 	}
 	if !amended {
-		return decision, errors.New("maximum-speed debt removal lacks its exact amendment provenance")
+		return errors.New("maximum-speed debt removal lacks its exact amendment provenance")
 	}
 	if !relativeRead || !cacheHeadroom {
-		return decision, errors.New("maximum-speed requires the explicit 15:20 read and 15:45 cache-headroom amendments")
+		return errors.New("maximum-speed requires the explicit 15:20 read and 15:45 cache-headroom amendments")
 	}
-	return decision, nil
+	return nil
 }
 
 func (t *tuner) enableMaxSpeed(destinations []string, decisionSHA string) {

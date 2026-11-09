@@ -53,7 +53,7 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 		absent = absent || p.expected[i].ID == 0
 	}
 	wait := time.Now()
-	unlock := s.lockTransfer(names, nil)
+	unlock := s.lockTransfer(names)
 	locked := time.Now()
 	s.transferApply.wait.Add(uint64(locked.Sub(wait)))
 	defer func() { unlock(); s.transferApply.recordHold(time.Since(locked)) }()
@@ -68,13 +68,14 @@ func (s *Store) commitPreparedTransfer(ctx context.Context, p *preparedTransfer)
 	}
 	for i, name := range names {
 		current, err := metadataFrom(s.db, name)
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			if p.expected[i].ID != 0 {
 				return false, nil
 			}
-		} else if err != nil {
+		case err != nil:
 			return false, err
-		} else if !sameTransferTarget(current, p.expected[i]) {
+		case !sameTransferTarget(current, p.expected[i]):
 			return false, nil
 		}
 	}

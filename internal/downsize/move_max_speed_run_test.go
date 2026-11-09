@@ -31,7 +31,7 @@ func maxDecisionFixture(t *testing.T) (string, string) {
 }
 
 func TestMaximumSpeedBootstrapPreservesJournalAndFrozenBaselines(t *testing.T) {
-	m, _, original := nativeMaxPolicyFixture(t)
+	m, original := nativeMaxPolicyFixture(t)
 	path, sum := maxDecisionFixture(t)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION", path)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION_SHA256", sum)

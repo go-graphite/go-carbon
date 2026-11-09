@@ -112,7 +112,7 @@ func (s *Store) publishArchiveAnchors(ctx context.Context, r TransferMetric, pla
 			return false, false, err
 		}
 	}
-	unlock := s.lockTransfer([]string{r.Config.Name}, nil)
+	unlock := s.lockTransfer([]string{r.Config.Name})
 	lockedAt := time.Now()
 	release := func() { result.LockNanos += time.Since(lockedAt).Nanoseconds(); unlock() }
 	m, err := metadataFrom(s.db, r.Config.Name)

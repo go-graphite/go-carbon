@@ -423,7 +423,7 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	return proofs, nil
 }
 
-func (s *Store) lockTransfer(names []string, states []*metricState) func() {
+func (s *Store) lockTransfer(names []string) func() {
 	stripes := make([]uint64, 0, len(names))
 	for _, name := range names {
 		stripes = append(stripes, s.metricStripe(name))
@@ -432,16 +432,6 @@ func (s *Store) lockTransfer(names []string, states []*metricState) func() {
 	stripes = slices.Compact(stripes)
 	for _, stripe := range stripes {
 		s.metricMu[stripe].Lock()
-	}
-	// Capture committed target state before mutation invalidates the cache.
-	// Writer stripes keep it consistent with the snapshot used by the merge.
-	if states != nil && s.stateCache != nil {
-		for i, name := range names {
-			if s.catalogMembership.mayContain(name) {
-				stripe := s.metricStripe(name)
-				states[i] = s.stateCache.get(stripe, name, s.stateCache.epoch(stripe))
-			}
-		}
 	}
 	for _, name := range names {
 		s.beginStateMutation(name)
@@ -839,7 +829,7 @@ func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) 
 	for i, v := range versions {
 		names[i] = v.Name
 	}
-	unlock := s.lockTransfer(names, nil)
+	unlock := s.lockTransfer(names)
 	defer unlock()
 	ranges := &transferRanges{}
 	var sidecars []SidecarRecord

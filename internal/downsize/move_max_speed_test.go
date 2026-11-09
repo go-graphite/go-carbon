@@ -324,16 +324,16 @@ func TestMaxSpeedDecisionRequiresExactRawSHAAndOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(raw)
-	if _, err := readMaxSpeedDecision(path, hex.EncodeToString(sum[:])); err != nil {
+	if err := readMaxSpeedDecision(path, hex.EncodeToString(sum[:])); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readMaxSpeedDecision(path, ""); err == nil {
+	if err := readMaxSpeedDecision(path, ""); err == nil {
 		t.Fatal("missing SHA accepted")
 	}
 	if err := os.WriteFile(path, append(raw, ' '), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readMaxSpeedDecision(path, hex.EncodeToString(sum[:])); err == nil {
+	if err := readMaxSpeedDecision(path, hex.EncodeToString(sum[:])); err == nil {
 		t.Fatal("changed raw decision accepted")
 	}
 }
@@ -435,7 +435,7 @@ func TestMaxSpeedDebtRemovalRequiresAmendedRawAuthority(t *testing.T) {
 			t.Fatal(err)
 		}
 		sum := sha256.Sum256(raw)
-		if _, err := readMaxSpeedDecision(path, hex.EncodeToString(sum[:])); err == nil {
+		if err := readMaxSpeedDecision(path, hex.EncodeToString(sum[:])); err == nil {
 			t.Fatal("unamended authority enabled debt-free policy", mode)
 		}
 	}

@@ -12,7 +12,7 @@ import (
 
 // A small immutable plan/approval binding shared by the original MAX tests.
 // It creates no donor-floor or other superseded admission policy.
-func nativeMaxPolicyFixture(t *testing.T) (*mover, string, struct{ ApprovalSHA256 string }) {
+func nativeMaxPolicyFixture(t *testing.T) (*mover, struct{ ApprovalSHA256 string }) {
 	t.Helper()
 	root := t.TempDir()
 	p := &manifest{PlanID: strings.Repeat("a", 64), root: root,
@@ -35,5 +35,5 @@ func nativeMaxPolicyFixture(t *testing.T) (*mover, string, struct{ ApprovalSHA25
 	}
 	t.Cleanup(func() { j.close() })
 	m := &mover{planData: p, journal: j, tuner: newTestTuner([]string{"http://drop:4242", "http://keep:4242"}, capacity{8, 32, 1 << 20, 100}, true, 0, 2)}
-	return m, "", struct{ ApprovalSHA256 string }{hex.EncodeToString(sum[:])}
+	return m, struct{ ApprovalSHA256 string }{hex.EncodeToString(sum[:])}
 }

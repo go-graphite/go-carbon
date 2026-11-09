@@ -182,7 +182,7 @@ func TestMaxSpeedOwnerReadBaselineIsIndependentOfSavedAdmission(t *testing.T) {
 }
 
 func TestMaxSpeedCacheStateSurvivesResumeAndCompaction(t *testing.T) {
-	m, _, original := nativeMaxPolicyFixture(t)
+	m, original := nativeMaxPolicyFixture(t)
 	decision, sha := maxDecisionFixture(t)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION", decision)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION_SHA256", sha)
@@ -267,14 +267,14 @@ func TestMaxSpeedLatestAmendmentsRequired(t *testing.T) {
 			t.Fatal(err)
 		}
 		sum := sha256.Sum256(raw)
-		if _, err := readMaxSpeedDecision(path, fmt.Sprintf("%x", sum)); err == nil {
+		if err := readMaxSpeedDecision(path, fmt.Sprintf("%x", sum)); err == nil {
 			t.Fatal("outdated authority accepted", mode)
 		}
 	}
 }
 
 func TestMaxSpeedOperatorCachePauseHandoffIsDurableAndNotRearmed(t *testing.T) {
-	m, _, original := nativeMaxPolicyFixture(t)
+	m, original := nativeMaxPolicyFixture(t)
 	decision, sha := maxDecisionFixture(t)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION", decision)
 	t.Setenv("RESIZE_MAX_SPEED_DECISION_SHA256", sha)
@@ -333,7 +333,7 @@ func TestMaxSpeedOperatorCachePauseHandoffIsDurableAndNotRearmed(t *testing.T) {
 func TestMaxSpeedCachePauseStartupRequiresExplicitValidMode(t *testing.T) {
 	for _, mode := range []string{"no MAX", "bad value"} {
 		t.Run(mode, func(t *testing.T) {
-			m, _, _ := nativeMaxPolicyFixture(t)
+			m, _ := nativeMaxPolicyFixture(t)
 			t.Setenv("RESIZE_CACHE_PAUSED_ON_START", "1")
 			t.Setenv("RESIZE_MAX_SPEED_DECISION", "")
 			if mode == "bad value" {
