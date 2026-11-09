@@ -27,6 +27,7 @@ type options struct {
 	engine                                                                           string
 	bulkOnly                                                                         bool
 	bulkCombine                                                                      bool
+	mergeSession                                                                     string
 	maxBatches                                                                       int64
 	localSources, localTarget                                                        string
 	plan, state, barrier, healthMap, tokenEnv, controlTokenEnv, replica, replicaSite string
@@ -80,6 +81,7 @@ func MoveMain(args []string) error {
 	flags.StringVar(&o.engine, "engine", "metric", "metric or bulk (native absent-name SST engine; existing plan/journal)")
 	flags.BoolVar(&o.bulkOnly, "bulk-only", false, "finish native absence pass and leave deferred combines in the same journal")
 	flags.BoolVar(&o.bulkCombine, "combine-existing", false, "combine present names natively with optimistic publication (requires --engine bulk)")
+	flags.StringVar(&o.mergeSession, "merge-session", "", "explicit pinned donor snapshot for absent-only pre-cutover merge; requires --engine bulk --bulk-only")
 	flags.StringVar(&o.localSources, "local-sources", "", "experimental checkpoint-local comparison: JSON source-origin to verified-copy directory map; retains existing import limits")
 	flags.StringVar(&o.localTarget, "local-target", "", "loopback Buckyd origin for local checkpoint imports; checked against the plan's target identity")
 	flags.Int64Var(&o.maxBatches, "max-batches", 0, "stop after producing this many journal batches (0 runs the full plan)")
@@ -122,6 +124,9 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.mergeSession != "" && (o.engine != "bulk" || !o.bulkOnly || o.bulkCombine || o.delete || o.reconcile || len(o.mergeSession) > 128 || strings.ContainsAny(o.mergeSession, "\r\n")) {
+		return errors.New("--merge-session requires --engine bulk --bulk-only without delete or reconcile modes")
+	}
 	if o.engine == "bulk" {
 		return runNative(ctx, o)
 	}

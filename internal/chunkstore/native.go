@@ -13,6 +13,7 @@ import (
 	"math"
 	"math/bits"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,7 @@ type NativeRange struct {
 	Names                           []string
 	Candidates                      []byte `json:",omitempty"`
 	Combine                         bool   `json:",omitempty"`
+	MergeSession                    string `json:",omitempty"`
 }
 
 type NativeReceipt struct {
@@ -56,6 +58,9 @@ func (r NativeReceipt) IsCopied(index int) bool {
 }
 
 func (r NativeRange) Identity() (string, string, error) {
+	if r.MergeSession != "" && (r.Combine || len(r.MergeSession) > 128 || strings.ContainsAny(r.MergeSession, "\r\n")) {
+		return "", "", ErrFormat
+	}
 	for _, value := range []string{r.Operation, r.Plan, r.Stream} {
 		if len(value) != 64 {
 			return "", "", ErrFormat
@@ -83,7 +88,11 @@ func (r NativeRange) Identity() (string, string, error) {
 		_, _ = h.Write([]byte(name))
 	}
 	names := hex.EncodeToString(h.Sum(nil))
-	identity := sha256.Sum256([]byte(fmt.Sprintf("native-v1/%s/%s/%s/%s/%d/%d/%s", r.Operation, r.Plan, r.Stream, r.Source, r.Start, r.End, names)))
+	domain := "native-v1"
+	if r.MergeSession != "" {
+		domain += "/merge/" + r.MergeSession
+	}
+	identity := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%s/%d/%d/%s", domain, r.Operation, r.Plan, r.Stream, r.Source, r.Start, r.End, names)))
 	return hex.EncodeToString(identity[:]), names, nil
 }
 
@@ -194,6 +203,9 @@ func (r NativeReceipt) Validate() error {
 // metric locks. IDs and hidden SSTs are prepared before the short creation lock.
 // Only names still absent at that atomic publication become visible.
 func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
+	if request.MergeSession != "" && request.Combine {
+		return receipt, ErrFormat
+	}
 	if request.Combine {
 		return s.nativeCombineImport(ctx, request, input)
 	}
