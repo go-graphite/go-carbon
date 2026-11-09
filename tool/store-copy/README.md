@@ -515,7 +515,9 @@ deferred combine, deletion and reconciliation are refused in this mode.
 
 The controller fsyncs a `NativeSource` journal row before the first pull from each
 pin. It contains the donor origin, merge session, source pin ID,
-`SnapshotStartedAt` (before the pin) and `SnapshotPinnedAt` (after the pin).
+`SnapshotStartedAt` (before the pin), `SnapshotPinnedAt` (after the pin),
+`BackfillFromUnix: 0` and `BackfillFullRetention: true`. The explicit safe event
+lower bound is Unix 0, so no queued or historical timestamp can fall before it.
 Retain every row across resumes and use the earliest start per donor for the
 post-cutover delta. This is a **commit boundary**, not an event-time watermark:
 queued points and late input can carry earlier timestamps. Backfill all retained

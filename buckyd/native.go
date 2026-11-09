@@ -185,7 +185,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		session.timer = time.AfterFunc(15*time.Minute, func() { s.expireNativeSource(id) })
 		s.nativeSources[id] = session
 		s.nativeMu.Unlock()
-		writeNativeJSON(w, map[string]any{"ID": id, "StoreFormat": s.store.TransferFormat(), "Expires": time.Now().Add(15 * time.Minute), "MergeSession": pin.MergeSession, "SnapshotStartedAt": pin.SnapshotStartedAt, "SnapshotPinnedAt": pin.SnapshotPinnedAt})
+		writeNativeJSON(w, map[string]any{"ID": id, "StoreFormat": s.store.TransferFormat(), "Expires": time.Now().Add(15 * time.Minute), "MergeSession": pin.MergeSession, "SnapshotStartedAt": pin.SnapshotStartedAt, "SnapshotPinnedAt": pin.SnapshotPinnedAt, "BackfillFromUnix": int64(0), "BackfillFullRetention": pin.MergeSession != ""})
 	case "/v1/native/export":
 		var request nativeExportRequest
 		if !decode(&request) {

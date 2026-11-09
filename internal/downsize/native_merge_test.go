@@ -99,7 +99,7 @@ func TestNativeMergeController100PinnedAndDurableBoundary(t *testing.T) {
 		}
 		if b := row.NativeSource; b != nil {
 			boundaries++
-			if b.Source != donor.URL || b.MergeSession != o.mergeSession || len(b.ID) != 32 || b.SnapshotStartedAt.IsZero() || b.SnapshotPinnedAt.Before(b.SnapshotStartedAt) {
+			if b.Source != donor.URL || b.MergeSession != o.mergeSession || len(b.ID) != 32 || b.SnapshotStartedAt.IsZero() || b.SnapshotPinnedAt.Before(b.SnapshotStartedAt) || b.BackfillFromUnix != 0 || !b.BackfillFullRetention {
 				t.Fatal("bad durable boundary", b)
 			}
 		}

@@ -233,6 +233,8 @@ type nativeRemoteSession struct {
 type nativeSourceCheckpoint struct {
 	ID, Source, MergeSession            string
 	SnapshotStartedAt, SnapshotPinnedAt time.Time
+	BackfillFromUnix                    int64
+	BackfillFullRetention               bool
 }
 
 func (c *nativeController) session(ctx context.Context, source string) (string, error) {
@@ -257,7 +259,7 @@ func (c *nativeController) session(ctx context.Context, source string) (string, 
 	}
 	entry.id = response.ID
 	if c.mergeSession != "" {
-		if response.MergeSession != c.mergeSession || response.SnapshotStartedAt.IsZero() || response.SnapshotPinnedAt.Before(response.SnapshotStartedAt) {
+		if response.MergeSession != c.mergeSession || response.SnapshotStartedAt.IsZero() || response.SnapshotPinnedAt.Before(response.SnapshotStartedAt) || response.BackfillFromUnix != 0 || !response.BackfillFullRetention {
 			return "", errors.New("invalid pinned merge snapshot boundary")
 		}
 		response.Source = source

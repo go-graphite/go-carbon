@@ -44,11 +44,13 @@ func TestNativeMergeHTTPBoundaryAndCombineFence(t *testing.T) {
 	var pin struct {
 		ID, MergeSession                    string
 		SnapshotStartedAt, SnapshotPinnedAt time.Time
+		BackfillFromUnix                    int64
+		BackfillFullRetention               bool
 	}
 	if err := json.Unmarshal(r.Body.Bytes(), &pin); err != nil {
 		t.Fatal(err)
 	}
-	if pin.MergeSession != "http-history" || pin.SnapshotStartedAt.IsZero() || pin.SnapshotPinnedAt.Before(pin.SnapshotStartedAt) {
+	if pin.MergeSession != "http-history" || pin.SnapshotStartedAt.IsZero() || pin.SnapshotPinnedAt.Before(pin.SnapshotStartedAt) || pin.BackfillFromUnix != 0 || !pin.BackfillFullRetention {
 		t.Fatal(pin)
 	}
 	remote := httptest.NewServer(source.Handler())
