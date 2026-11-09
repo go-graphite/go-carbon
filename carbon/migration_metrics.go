@@ -34,31 +34,34 @@ type metricSpec struct {
 }
 
 type migrationSnapshot struct {
-	sidecars                              store.SidecarInventory
-	migration, running                    bool
-	converted, points, reclaimed, resumed uint64
-	skipped                               uint64
-	inFlight, workers, maxWorkers         int
-	failed, waitingForSpace               bool
-	ioUsed, ioSlots                       int
-	reclaimQueued                         int64
-	reclaim                               persister.DeferredReclaimStats
-	persister                             bool
-	pebble, whisper                       persister.BackendWrites
-	transferRequeued                      map[string]uint64
-	store                                 bool
-	stats                                 storeStatsView
-	workingReserved                       int64
-	cache                                 bool
-	cachePoints                           int64
-	cacheMetrics                          int32
-	cacheBytes                            int64
-	cachePointBytes                       int64
-	recoveryWindow, recoveryRemaining     int64
-	recoveryCeiling                       int64
-	recoveryRejections                    uint64
-	recoveryBlocked                       bool
-	storeSnapshotAge                      float64
+	sidecars                               store.SidecarInventory
+	migration, running                     bool
+	converted, points, reclaimed, resumed  uint64
+	skipped                                uint64
+	inFlight, workers, maxWorkers          int
+	failed, waitingForSpace                bool
+	ioUsed, ioSlots                        int
+	reclaimQueued                          int64
+	reclaim                                persister.DeferredReclaimStats
+	persister                              bool
+	pebble, whisper                        persister.BackendWrites
+	transferRequeued                       map[string]uint64
+	store                                  bool
+	stats                                  storeStatsView
+	workingReserved                        int64
+	cache                                  bool
+	cachePoints                            int64
+	cacheMetrics                           int32
+	cacheBytes                             int64
+	cachePointBytes                        int64
+	recoveryPending                        uint64
+	recoveryReady                          bool
+	writeoutMaxDelay, receiverStatInterval float64
+	recoveryWindow, recoveryRemaining      int64
+	recoveryCeiling                        int64
+	recoveryRejections                     uint64
+	recoveryBlocked                        bool
+	storeSnapshotAge                       float64
 }
 
 type storeStatsView struct {
@@ -306,6 +309,19 @@ var migrationMetricSpecs = func() []metricSpec {
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheBytes) }},
 		metricSpec{desc: prometheus.NewDesc("cache_point_bytes", "Allocated capacity of queued compact point buffers in bytes, including spare capacity. Excludes inline codec state, names, item headers and in-flight batches.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePointBytes) }},
+		metricSpec{desc: prometheus.NewDesc("restart_recovery_ready", "One after restore and metadata warming finish, saved writes are durable, and startup capture has switched and retired its sources. Deployment also requires a sustained input/persistence window.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 {
+				if s.recoveryReady {
+					return 1
+				}
+				return 0
+			}},
+		metricSpec{desc: prometheus.NewDesc("restart_recovery_pending_metrics", "Saved metrics not yet confirmed durable; live buffered metrics are excluded.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 { return float64(s.recoveryPending) }},
+		metricSpec{desc: prometheus.NewDesc("cache_writeout_max_delay_seconds", "Configured coalescing cycle used by the deployment recovery observation window.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 { return s.writeoutMaxDelay }},
+		metricSpec{desc: prometheus.NewDesc("receiver_stat_interval_seconds", "Receiver accounting publication interval; deployment observations span both endpoint ticks.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 { return s.receiverStatInterval }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_window_bytes", "Bytes reserved from measured memory headroom for the current five-second recovery window.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryWindow) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_ceiling_bytes", "Cache-owned byte ceiling derived from existing allocations and reserved memory headroom; configured max-bytes also applies.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryCeiling) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_remaining_bytes", "Unspent recovery memory reservation; abandoned checks expire at the next memory sample.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRemaining) }},
@@ -568,6 +584,14 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
 		s.cacheBytes = cache.EstimatedBytes()
 		s.cachePointBytes = cache.PointBytes()
+		s.recoveryPending = cache.PendingOutstanding()
+		s.recoveryReady = p != nil && restartRecoveryReady(cache, c.app.storeRestoreDone, c.app.metadataPrewarmGate, c.app.startupCaptureState.Load())
+		if conf := c.app.Config; conf != nil {
+			s.writeoutMaxDelay = conf.Cache.WriteoutMaxDelay.Value().Seconds()
+			if conf.Common.MetricInterval != nil {
+				s.receiverStatInterval = conf.Common.MetricInterval.Value().Seconds()
+			}
+		}
 		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()
 		s.recoveryCeiling = cache.RecoveryByteCeiling()
 		s.recoveryBlocked = cache.RecoveryBlocked()
