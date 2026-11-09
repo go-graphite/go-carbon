@@ -127,3 +127,45 @@ func TestNativeMergeRefusesUnsafeModes(t *testing.T) {
 		}
 	}
 }
+
+// Waiters must not reuse an ID retained only for cleanup after boundary
+// validation or fsync fails. Otherwise another range can import without a ledger.
+func TestNativeMergeFailedBoundaryIsNeverReusable(t *testing.T) {
+	ctx := context.Background()
+	for _, stage := range []string{"invalid-boundary", "journal-write"} {
+		t.Run(stage, func(t *testing.T) {
+			var pins int
+			peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodDelete {
+					return
+				}
+				pins++
+				bound := nativeSourceCheckpoint{ID: "0123456789abcdef0123456789abcdef", MergeSession: "history", SnapshotStartedAt: time.Now().UTC(), SnapshotPinnedAt: time.Now().UTC(), BackfillFullRetention: true}
+				if stage == "invalid-boundary" {
+					bound.BackfillFullRetention = false
+				}
+				_ = json.NewEncoder(w).Encode(bound)
+			}))
+			defer peer.Close()
+			j, err := openJournal(filepath.Join(t.TempDir(), "state"), "plan")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer j.close()
+			if stage == "journal-write" {
+				_ = j.file.Close()
+			}
+			c := &nativeController{mover: &mover{options: options{mergeSession: "history"}, journal: j, client: http.DefaultClient}, sessions: map[string]*nativeRemoteSession{}}
+			defer c.release()
+			// The first worker fails; every waiter must fail, with no usable ID.
+			for range 100 {
+				if id, err := c.session(ctx, peer.URL); err == nil || id != "" {
+					t.Fatalf("unsafe pin reused: %q %v", id, err)
+				}
+			}
+			if pins != 1 {
+				t.Fatal("unexpected pins", pins)
+			}
+		})
+	}
+}
