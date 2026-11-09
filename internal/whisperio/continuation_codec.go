@@ -44,6 +44,9 @@ type ContinuationCodec struct {
 	keepImportedSidecars bool
 	// keepDuplicatePlanning retains the reference path for differential tests.
 	keepDuplicatePlanning bool
+	// keepTailReads retains the previous read-per-propagation path as an
+	// oracle for tests and benchmarks.
+	keepTailReads bool
 }
 
 // foldsImportedSidecars is disabled only by legacy-oracle tests.
@@ -630,8 +633,9 @@ func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO,
 		return err
 	}
 	var buffer *continuationPointBuffer
-	if coalescePointWrites && len(m.Retentions) > 1 && len(input) >= 2*(m.Retentions[1].Step/m.Retentions[0].Step) {
-		buffer = &continuationPointBuffer{ContinuationIO: kv}
+	coalesce := coalescePointWrites && len(m.Retentions) > 1 && len(input) >= 2*(m.Retentions[1].Step/m.Retentions[0].Step)
+	if coalesce || !c.keepTailReads {
+		buffer = &continuationPointBuffer{ContinuationIO: kv, cacheReads: !c.keepTailReads, writeThrough: !coalesce}
 		kv = buffer
 	}
 	timer := stagetime.FromContext(ctx)

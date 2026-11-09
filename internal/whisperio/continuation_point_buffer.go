@@ -13,6 +13,11 @@ import (
 type continuationPointBuffer struct {
 	store.ContinuationIO
 	blocks map[string]*store.PointBlock
+	// reads belongs to this metric update's indexed batch, never a later
+	// revision or snapshot. Keep unchanged rollup/base groups too: unlike
+	// blocks, these must not be written by flush.
+	reads                    map[string]*store.PointBlock
+	cacheReads, writeThrough bool
 }
 
 var coalescePointWrites = true
@@ -41,15 +46,22 @@ func (b *continuationPointBuffer) Get(key []byte) ([]byte, error) {
 
 func (b *continuationPointBuffer) Set(key, value []byte) error {
 	delete(b.blocks, string(key))
+	delete(b.reads, string(key))
 	return b.ContinuationIO.Set(key, value)
 }
 
 func (b *continuationPointBuffer) Delete(key []byte) error {
 	delete(b.blocks, string(key))
+	delete(b.reads, string(key))
 	return b.ContinuationIO.Delete(key)
 }
 
 func (b *continuationPointBuffer) DeletePrefix(prefix []byte) error {
+	for key := range b.reads {
+		if bytes.HasPrefix([]byte(key), prefix) {
+			delete(b.reads, key)
+		}
+	}
 	for key := range b.blocks {
 		if bytes.HasPrefix([]byte(key), prefix) {
 			delete(b.blocks, key)
@@ -66,6 +78,14 @@ func (b *continuationPointBuffer) Visit(prefix []byte, visit func([]byte, []byte
 }
 
 func (b *continuationPointBuffer) set(key []byte, block *store.PointBlock) error {
+	delete(b.reads, string(key))
+	if b.writeThrough {
+		if err := b.Set(key, store.EncodePointBlock(block)); err != nil {
+			return err
+		}
+		b.remember(key, block)
+		return nil
+	}
 	// Bound scratch memory even during a whole-file rewrite.
 	if len(b.blocks) >= 64 {
 		if err := b.flush(nil); err != nil {
@@ -77,6 +97,36 @@ func (b *continuationPointBuffer) set(key []byte, block *store.PointBlock) error
 	}
 	b.blocks[string(key)] = block
 	return nil
+}
+
+// point returns an owned copy: callers may patch it before set succeeds.
+func (b *continuationPointBuffer) point(key []byte) *store.PointBlock {
+	block := b.blocks[string(key)]
+	if block == nil {
+		block = b.reads[string(key)]
+	}
+	if block == nil {
+		return nil
+	}
+	owned := *block
+	return &owned
+}
+
+func (b *continuationPointBuffer) remember(key []byte, block *store.PointBlock) {
+	if !b.cacheReads {
+		return
+	}
+	// At most 64 decoded groups (~132KiB) per active update, independent of
+	// metric cardinality or the length of a rewrite. Clearing only reads
+	// cannot flush or discard pending writes.
+	if len(b.reads) >= 64 {
+		clear(b.reads)
+	}
+	if b.reads == nil {
+		b.reads = make(map[string]*store.PointBlock)
+	}
+	owned := *block
+	b.reads[string(key)] = &owned
 }
 
 func (b *continuationPointBuffer) flush(prefix []byte) error {
