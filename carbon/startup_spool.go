@@ -126,6 +126,8 @@ type startupInput struct {
 	livePromotions                                                      uint64
 	directFence                                                         *startupSegment
 	releaseLog                                                          func() error
+	preparingDirect                                                     bool                 // transition owns a new journal pin, not an older epoch's pin
+	fileSync                                                            func(*os.File) error // nil uses File.Sync; injected by slow-I/O tests before replay
 }
 
 func openStartupInput(path string) (*startupInput, error) {

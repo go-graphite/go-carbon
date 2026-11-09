@@ -35,48 +35,58 @@ type captureSubmission interface {
 }
 
 // The exclusive fence joins every submitted batch, including connection-local
-// flushes, before sealing the spool. Buffered but unsubmitted records then use
+// flushes, before publishing the direct sink. Buffered but unsubmitted records use
 // the ordinary sink before their connection accepts its next direct point.
 type captureSink struct {
 	sync.RWMutex
-	direct  atomic.Pointer[func(*points.Points)]
-	fencing atomic.Bool
+	direct atomic.Pointer[func(*points.Points)]
+	gate   atomic.Pointer[captureGate]
 }
 
-func (rcv *TCP) SwitchCapture(out func(*points.Points), seal func() error) error {
+type captureGate struct{ done chan struct{} }
+
+// SwitchCapture joins submissions and checks their applied frontiers. Prepare
+// durable authority before calling it and finalize old sources afterward: ready
+// must only inspect memory, never wait for a worker or perform filesystem I/O.
+func (rcv *TCP) SwitchCapture(out func(*points.Points), ready func() error) error {
 	s := &rcv.captureSink
-	if !s.fencing.CompareAndSwap(false, true) {
+	gate := &captureGate{done: make(chan struct{})}
+	if !s.gate.CompareAndSwap(nil, gate) {
 		return errors.New("capture submissions are still joining a previous direct fence")
 	}
-	joined, cancelled := make(chan struct{}), make(chan struct{})
-	go func() {
-		s.Lock()
-		select {
-		case joined <- struct{}{}: // Transfer the exclusive lock to this caller.
-		case <-cancelled:
-			s.Unlock()
-			s.fencing.Store(false)
+	defer func() { s.gate.Store(nil); close(gate.done) }()
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for !s.TryLock() {
+		if !time.Now().Before(deadline) {
+			// A queued RWMutex writer would keep blocking new readers after
+			// this timeout until a stalled existing submission finally exits.
+			return errors.New("capture submissions did not quiesce before direct switch")
 		}
-	}()
-	timer := time.NewTimer(250 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-joined:
-		defer func() { s.Unlock(); s.fencing.Store(false) }()
-	case <-timer.C:
-		// Do not hold the spool monitor behind a disk-reserve writer: it
-		// must continue retiring prefixes so that writer can acknowledge.
-		close(cancelled)
-		return errors.New("capture submissions did not quiesce before direct switch")
+		time.Sleep(time.Millisecond)
 	}
+	defer s.Unlock()
 	if s.direct.Load() != nil {
 		return nil
 	}
-	if err := seal(); err != nil {
+	if err := ready(); err != nil {
 		return err
 	}
 	s.direct.Store(&out)
 	return nil
+}
+
+func (s *captureSink) enter() {
+	for {
+		if gate := s.gate.Load(); gate != nil {
+			<-gate.done
+			continue
+		}
+		s.RLock()
+		if s.gate.Load() == nil {
+			return
+		}
+		s.RUnlock()
+	}
 }
 
 type captureBuffer struct {
@@ -122,7 +132,7 @@ func (b *captureBuffer) point(name []byte, value float64, timestamp int64) {
 
 func (b *captureBuffer) flush() error {
 	if b.sink != nil {
-		b.sink.RLock()
+		b.sink.enter()
 		defer b.sink.RUnlock()
 		if out := b.sink.direct.Load(); out != nil {
 			for i := range b.shards {

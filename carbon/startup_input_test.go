@@ -494,7 +494,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 	if isolatedTestProcessSerial(t) {
 		return
 	}
-	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement", "direct_before_switch", "direct_during_seal", "direct_after_fence", "direct_after_switch", "direct_partial_retirement", "direct_full_retirement", "direct_next_epoch"} {
+	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement", "direct_before_switch", "direct_during_seal", "direct_after_fence", "direct_before_capture_sync", "direct_after_switch", "direct_partial_retirement", "direct_full_retirement", "direct_next_epoch"} {
 		t.Run(stage, func(t *testing.T) {
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)

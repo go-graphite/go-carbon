@@ -231,7 +231,7 @@ func TestSwitchCaptureTimeoutDoesNotSealAfterReturning(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Second)
-	for r.captureSink.fencing.Load() && time.Now().Before(deadline) {
+	for r.captureSink.gate.Load() != nil && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
 	if err := r.SwitchCapture(func(*points.Points) {}, seal); err != nil {
@@ -239,5 +239,33 @@ func TestSwitchCaptureTimeoutDoesNotSealAfterReturning(t *testing.T) {
 	}
 	if seals.Load() != 1 {
 		t.Fatal("cancelled switch ran its seal callback later", seals.Load())
+	}
+}
+
+func TestSwitchCaptureTimeoutReleasesNewSubmissions(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := &TCP{}
+	blocked := newCaptureBuffer(captureFunc(func([]byte, int) error { close(entered); <-release; return nil }))
+	blocked.sink = &r.captureSink
+	blocked.point([]byte("blocked"), 1, 1)
+	flushed := make(chan error, 1)
+	go func() { flushed <- blocked.flush() }()
+	<-entered
+	defer func() { close(release); <-flushed }()
+	if err := r.SwitchCapture(func(*points.Points) {}, func() error { return nil }); err == nil {
+		t.Fatal("accepted an in-flight capture submission")
+	}
+	next := newCaptureBuffer(captureFunc(func([]byte, int) error { return nil }))
+	next.sink = &r.captureSink
+	next.point([]byte("unblocked"), 2, 2)
+	done := make(chan error, 1)
+	go func() { done <- next.flush() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed-out switch still blocks new capture submissions")
 	}
 }

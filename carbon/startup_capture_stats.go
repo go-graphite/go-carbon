@@ -31,7 +31,12 @@ func (t *captureTiming) observe(start time.Time) {
 }
 func (s *startupShard) syncFile(file *os.File) error {
 	started := time.Now()
-	err := file.Sync()
+	var err error
+	if sync := s.owner.fileSync; sync != nil {
+		err = sync(file)
+	} else {
+		err = file.Sync()
+	}
 	s.timings[captureSync].observe(started)
 	return err
 }
