@@ -546,6 +546,9 @@ func (app *App) ReloadConfig() error {
 
 	app.Collector = NewCollector(app)
 
+	if app.Buckyd != nil {
+		app.Buckyd.SetTransferMaxCompactionDebt(app.Config.Buckyd.TransferMaxCompactionDebt)
+	}
 	return nil
 }
 
@@ -1784,6 +1787,10 @@ func (app *App) startBuckyd() (err error) {
 		}
 		if conf.Prometheus.Enabled {
 			service := app.Buckyd
+			app.PromRegisterer.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+				Name: "buckyd_transfer_max_compaction_debt_bytes",
+				Help: "Effective live transfer compaction debt cap in bytes; negative disables only the debt check.",
+			}, func() float64 { return float64(service.TransferMaxCompactionDebt()) }))
 			app.PromRegisterer.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
 				Name: "buckyd_auth_secret_ready",
 				Help: "One when Buckyd has loaded its authentication secret; zero while management requests return 503 and retry delivery.",

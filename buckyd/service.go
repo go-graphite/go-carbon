@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
@@ -47,6 +48,7 @@ type Config struct {
 	// TransferMaxCompactionDebt pauses transfer imports, pulls and deletes (429)
 	// while Pebble's compaction-debt estimate exceeds it. Zero selects 8 GiB;
 	// negative disables the debt check (write stalls and L0 still pause).
+	// Reloadable with SIGHUP.
 	TransferMaxCompactionDebt int64  `toml:"transfer-max-compaction-debt"`
 	JWTSecretFile             string `toml:"auth-jwt-secret-file"`
 	// WaitForJWTSecret keeps ingestion running when boot-time secret delivery
@@ -105,6 +107,7 @@ type Service struct {
 	nativeMu      sync.Mutex
 	nativeSources map[string]*nativeSourceSession
 	config        Config
+	transferDebt  atomic.Int64
 	store         *chunkstore.Store
 	whisperIO     *whisperio.Adapter
 	secret        []byte
@@ -148,7 +151,9 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	return &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, authPending: waiting, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}, nil
+	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, authPending: waiting, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}
+	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
+	return s, nil
 }
 
 func validateConfig(config Config) error {
@@ -359,12 +364,27 @@ func (s *Service) SetStoreCopy(manager *storecopy.Manager) {
 
 func (s *Service) StoreCopyActive() bool { return s.storeCopy != nil && s.storeCopy.Active() }
 
+// SetTransferMaxCompactionDebt updates transfer admission without restarting the
+// service. Zero restores the default 8 GiB cap; negative disables only the debt
+// check. In-flight requests finish under their already admitted policy.
+func (s *Service) SetTransferMaxCompactionDebt(limit int64) {
+	if limit == 0 {
+		limit = 8 << 30
+	}
+	s.transferDebt.Store(limit)
+}
+
+// TransferMaxCompactionDebt returns the effective live admission cap.
+func (s *Service) TransferMaxCompactionDebt() int64 {
+	return s.transferDebt.Load()
+}
+
 // storagePressure reports whether transfer writes and reads should back off.
 func (s *Service) storagePressure(stats chunkstore.Stats) bool {
 	if stats.WriteStallActive || stats.L0Sublevels >= s.store.TransferL0StopWrites()*3/4 {
 		return true
 	}
-	limit := s.config.TransferMaxCompactionDebt
+	limit := s.TransferMaxCompactionDebt()
 	return limit > 0 && stats.CompactionDebt > uint64(limit)
 }
 
