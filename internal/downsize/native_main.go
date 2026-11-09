@@ -266,6 +266,12 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 			if pending.Start < 0 || pending.End > int64(len(names)) {
 				return errors.New("native intent outside plan stream")
 			}
+			// A retry is still an attempted range in the approved bounded run.
+			// Resolving a durable lost acknowledgement conservatively consumes
+			// one too, so max1 cannot recover an intent and import a new gap.
+			if c.maxBatches > 0 && c.issued.Add(1) > c.maxBatches {
+				return nil
+			}
 			if err := c.executeRange(ctx, pending, names[pending.Start:pending.End]); err != nil {
 				return err
 			}

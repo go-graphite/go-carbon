@@ -355,7 +355,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			}
 		}
 	}
+	began := time.Now()
 	first, err := s.reserveFileMetricIDs(uint64(len(records)))
+	s.transferApply.reserve.Add(uint64(time.Since(began)))
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +368,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			metas[i].FileMigration = FileReclaimed
 		}
 	}
+	began = time.Now()
 	paths, err := s.writeTransferTables(ctx, first, records, metas)
+	s.transferApply.build.Add(uint64(time.Since(began)))
 	defer func() {
 		for _, p := range paths {
 			_ = s.fs.Remove(p)
@@ -384,7 +388,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 				return nil, err
 			}
 		}
+		began = time.Now()
 		stats, err := s.db.IngestWithStats(paths)
+		s.transferApply.ingest.Add(uint64(time.Since(began)))
 		if err != nil {
 			return nil, err
 		}
@@ -408,14 +414,16 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	// The per-stripe commits already published their receipts and catalogs.
 	// One coalesced barrier covers all of them without holding writer stripes
 	// across a filesystem sync, regardless of the foreground sync policy.
+	began = time.Now()
 	if err := s.syncWAL(); err != nil {
 		return nil, err
 	}
+	s.transferApply.sync.Add(uint64(time.Since(began)))
 	s.invalidateReadCache()
 	return proofs, nil
 }
 
-func (s *Store) lockTransfer(names []string, states []*metricState) func() {
+func (s *Store) lockTransfer(names []string) func() {
 	stripes := make([]uint64, 0, len(names))
 	for _, name := range names {
 		stripes = append(stripes, s.metricStripe(name))
@@ -424,16 +432,6 @@ func (s *Store) lockTransfer(names []string, states []*metricState) func() {
 	stripes = slices.Compact(stripes)
 	for _, stripe := range stripes {
 		s.metricMu[stripe].Lock()
-	}
-	// Capture committed target state before mutation invalidates the cache.
-	// Writer stripes keep it consistent with the snapshot used by the merge.
-	if states != nil && s.stateCache != nil {
-		for i, name := range names {
-			if s.catalogMembership.mayContain(name) {
-				stripe := s.metricStripe(name)
-				states[i] = s.stateCache.get(stripe, name, s.stateCache.epoch(stripe))
-			}
-		}
 	}
 	for _, name := range names {
 		s.beginStateMutation(name)
@@ -460,39 +458,29 @@ type ContinuationArchiveRestorer interface {
 	RestoreArchives(context.Context, ContinuationIO, Snapshot, func() time.Time) error
 }
 
-func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, metas []Metadata) ([]TransferProof, error) {
-	names := make([]string, len(records))
-	for i, r := range records {
-		names[i] = r.Config.Name
-	}
-	var states []*metricState
-	if s.stateCache != nil {
-		states = make([]*metricState, len(records))
-	}
-	unlock := s.lockTransfer(names, states)
-	defer unlock()
+// prepareTransfer preserves the reviewed archive/slot operations, but reads
+// the target from one immutable view. Only private reserved IDs are read through
+// the indexed batch. The caller validates every target revision before commit.
+func (s *Store) prepareTransfer(ctx context.Context, records []TransferMetric, metas []Metadata, view pebble.Reader) (prepared *preparedTransfer, err error) {
 	b := s.db.NewIndexedBatch()
-	defer b.Close()
-	walk := &transferReader{reader: s.db}
+	defer func() {
+		if prepared == nil {
+			_ = b.Close()
+		}
+	}()
+	walk := &transferReader{reader: view, native: true}
 	defer walk.close()
 	proofs := make([]TransferProof, len(records))
 	var receiptEncoder transferProofEncoder
 	var sidecars []SidecarRecord
+	expected := make([]Metadata, len(records))
 	for i, r := range records {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		m := metas[i]
-		var state *metricState
-		if states != nil {
-			state = states[i]
-		}
-		old, err := Metadata{}, ErrNotFound
-		if state != nil {
-			old, err = state.meta, nil
-		} else if s.catalogMembership.mayContain(m.Name) {
-			old, err = walk.metadata(m.Name)
-		}
+		old, err := walk.metadata(m.Name)
+		expected[i] = old
 		merged := err == nil
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			return nil, err
@@ -539,14 +527,26 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			if err != nil {
 				return nil, err
 			}
-			target, err := s.transferSnapshotCached(ctx, s.db, old, state)
+			// Materialize the immutable target's encoded keys with one ordered
+			// walk. Codec point/block reads then use the private record, avoiding
+			// repeated live LSM/cache lookups for every archive block.
+			var target Snapshot
+			if old.Continuation {
+				var raw TransferMetric
+				raw, err = s.transferFromLimit(ctx, view, old, math.MaxInt64, walk)
+				if err == nil {
+					target, err = s.continuation.Snapshot(ctx, transferRecordIO(raw), old, s.now)
+				}
+			} else {
+				target, err = s.transferSnapshot(ctx, view, old)
+			}
 			if err != nil {
 				return nil, err
 			}
 			want := source
 			want.Archives = make([]Archive, len(source.Archives))
 			for j, a := range source.Archives {
-				points, err := fillArchive(a.Points, target.Archives[j].Points, a.Retention.Step)
+				points, _, _, err := nativeArchiveUnion(a, target.Archives[j])
 				if err != nil {
 					return nil, err
 				}
@@ -598,7 +598,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 				}
 			}
 			p.Digest, p.Counts = snapshotDigest(want)
-			if err := s.retireTransfer(ctx, b, old); err != nil {
+			if err := s.retireTransferFrom(ctx, b, view, old); err != nil {
 				return nil, err
 			}
 		}
@@ -640,17 +640,7 @@ func (s *Store) publishTransfer(ctx context.Context, records []TransferMetric, m
 			return nil, err
 		}
 	}
-	walk.close()
-	// ImportTransfer performs the durability barrier after every group has
-	// committed and released its stripes. Failed requests never authorize delete.
-	if err := s.commitSidecarRecords(b, sidecars, func(b *pebble.Batch) error { return b.Commit(pebble.NoSync) }); err != nil {
-		return nil, err
-	}
-	s.pendingSync.Store(true)
-	for _, m := range metas {
-		s.catalogChanged(m.Name)
-	}
-	return proofs, nil
+	return &preparedTransfer{batch: b, expected: expected, metas: metas, proofs: proofs, sidecars: sidecars}, nil
 }
 
 // retainTransferSlots applies the same finite archive capacity as an ordinary
@@ -699,6 +689,12 @@ func (s *Store) transferSidecarSummary(ctx context.Context, b *pebble.Batch, m M
 
 func (s *Store) retireTransfer(ctx context.Context, b *pebble.Batch, m Metadata) error {
 	s.canonicalRun(m.ID).Clear(m.ID)
+	return s.retireTransferFrom(ctx, b, b, m)
+}
+
+// Snapshot-based preparation only stages tombstones. The publication revision
+// fence proves these are still all the retired generation's keys at commit.
+func (s *Store) retireTransferFrom(ctx context.Context, b *pebble.Batch, reader pebble.Reader, m Metadata) error {
 	if err := b.Delete(transferReceiptKey(m), nil); err != nil {
 		return err
 	}
@@ -708,14 +704,14 @@ func (s *Store) retireTransfer(ctx context.Context, b *pebble.Batch, m Metadata)
 	if m.Continuation {
 		// The indexed batch observes its own writes, so the continuation IO uses
 		// point deletes. Per-metric ranges here would fragment every live read.
-		if err := s.dropContinuation(ctx, b, b, m); err != nil {
+		if err := s.dropContinuation(ctx, reader, b, m); err != nil {
 			return err
 		}
-		kv := s.newContinuationIO(ctx, b, b, m)
+		kv := s.newContinuationIO(ctx, reader, b, m)
 		return kv.DeletePrefix(nil)
 	}
 	prefix := chunkPrefix(m.ID, 0)[:9]
-	it, err := s.db.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+	it, err := reader.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
 	if err != nil {
 		return err
 	}
@@ -833,7 +829,7 @@ func (s *Store) DeleteTransfer(ctx context.Context, versions []TransferVersion) 
 	for i, v := range versions {
 		names[i] = v.Name
 	}
-	unlock := s.lockTransfer(names, nil)
+	unlock := s.lockTransfer(names)
 	defer unlock()
 	ranges := &transferRanges{}
 	var sidecars []SidecarRecord

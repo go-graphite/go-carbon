@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"strings"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 )
@@ -136,7 +138,7 @@ func (m *mover) executeNativeFallback(ctx context.Context, parent task) error {
 		return errors.New("native handoff receipt differs")
 	}
 	if parent.Native.Pending != nil {
-		if err := m.execute(ctx, *parent.Native.Pending); err != nil {
+		if err := m.executeMetricPolicy(ctx, *parent.Native.Pending); err != nil {
 			return err
 		}
 	}
@@ -169,7 +171,7 @@ func (m *mover) executeNativeFallback(ctx context.Context, parent task) error {
 		}
 		child.Start = parent.Start + int64(child.NativeOrdinals[0])
 		child.End = child.Start + int64(len(child.Names))
-		if err := m.execute(ctx, child); err != nil {
+		if err := m.executeMetricPolicy(ctx, child); err != nil {
 			return err
 		}
 	}
@@ -188,4 +190,33 @@ func (j *journal) nativeOnlyWork() bool {
 		}
 	}
 	return true
+}
+
+func (m *mover) executeMetricPolicy(ctx context.Context, t task) error {
+	if m.tuner != nil && m.tuner.maxSpeed != nil {
+		return m.executeMaximumSpeed(ctx, t)
+	}
+	return m.execute(ctx, t)
+}
+
+// The existing pull API returns these definitive rejection statuses before
+// importing any point. Preserve that distinction from a lost import response:
+// the child may retry without bypassing its parent's durable copied bitmap.
+func (m *mover) saveNativeDeclinedPull(t task) error {
+	t.Kind, t.Phase, t.Proofs = "", "", nil
+	m.stateMu.Lock()
+	defer m.stateMu.Unlock()
+	return m.journal.save(t)
+}
+
+func nativeDefinitivePullRejection(api *apiError) bool {
+	switch api.Status {
+	case 401, 403, 429:
+		return true // Authentication and transfer admission precede ImportTransfer.
+	case 404, 413:
+		// Do not infer that an importer-side metadata/limit error happened
+		// before publication. Only an explicit upstream source rejection proves it.
+		return strings.HasSuffix(strings.TrimSpace(api.Message), fmt.Sprintf(": HTTP %d source export: %d %s", api.Status, api.Status, http.StatusText(api.Status)))
+	}
+	return false
 }

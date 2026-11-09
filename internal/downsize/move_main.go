@@ -47,10 +47,12 @@ type apiError struct {
 func (e *apiError) Error() string { return e.Message }
 
 type mover struct {
-	batchesSent  atomic.Int64
-	localSources map[string]*chunkstore.TransferSource
-	localTargets map[string]string
-	binaryProofs sync.Map
+	hostToken        hostTokenCache
+	absentProofSlots sync.Map
+	batchesSent      atomic.Int64
+	localSources     map[string]*chunkstore.TransferSource
+	localTargets     map[string]string
+	binaryProofs     sync.Map
 	options
 	planData *manifest
 	client   *http.Client
@@ -280,8 +282,14 @@ func run(ctx context.Context, o options) error {
 	}
 	defer m.closeLocalSources()
 	event("operation", map[string]any{"operation": j.operation, "state": o.state})
-	if err := m.prepareAdmission(ctx, origins); err != nil {
+	maximumSpeed, err := m.configureMaximumSpeed(ctx, origins)
+	if err != nil {
 		return err
+	}
+	if !maximumSpeed {
+		if err := m.prepareAdmission(ctx, origins); err != nil {
+			return err
+		}
 	}
 	if o.observeOnly > 0 {
 		event("observation_started", map[string]any{"duration": o.observeOnly.String(), "transfers": false})
@@ -381,31 +389,7 @@ func run(ctx context.Context, o options) error {
 		}
 		m.tuner.captureReadBaselines()
 	}
-	tasks := make(chan task, 2*o.streams)
-	var workers sync.WaitGroup
-	for range min(64, o.streams*len(hosts)) {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case t, ok := <-tasks:
-					if !ok {
-						return
-					}
-					if err := m.execute(ctx, t); err != nil {
-						report(err)
-						return
-					}
-				}
-			}
-		}()
-	}
-	produceErr := m.produce(ctx, tasks, "")
-	close(tasks)
-	workers.Wait()
+	produceErr := m.runCopyWorkers(ctx, report)
 	select {
 	case err := <-errorsOut:
 		return err
@@ -461,10 +445,18 @@ func (m *mover) request(ctx context.Context, endpoint, path string, body any, ou
 		if !errors.As(err, &api) || api.Status != 429 {
 			return headers, err
 		}
-		event("backpressure", map[string]any{"host": endpoint, "path": path, "attempt": attempt + 1})
-		if m.tuner != nil {
-			m.tuner.backoff(endpoint)
+		backoffHost := endpoint
+		maximumSpeed := m.tuner != nil && m.tuner.maxSpeed != nil
+		if maximumSpeed {
+			backoffHost = maximumSpeedBackpressureHost(endpoint, path, body, api)
 		}
+		event("backpressure", map[string]any{"host": backoffHost, "via_endpoint": endpoint, "path": path, "attempt": attempt + 1})
+		if m.tuner != nil {
+			m.tuner.backoff(backoffHost)
+		}
+		if maximumSpeed {
+			return headers, err
+		} // Release pair admission before outer retry pacing.
 		if err := sleepContext(ctx, m.tick); err != nil {
 			return nil, err
 		}
@@ -506,7 +498,15 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 	}
 	r.Header.Set("Content-Type", contentType)
 	r.Header.Set("Accept", chunkstore.TransferProofContentType)
-	if token := os.Getenv(m.tokenEnv); token != "" {
+	token := os.Getenv(m.tokenEnv)
+	if m.engine != "bulk" && m.tuner != nil {
+		var err error
+		token, err = m.authorizationToken()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if token != "" {
 		r.Header.Set("X-Buckyd-Authorization", token)
 	}
 	response, err := m.client.Do(r)
@@ -514,6 +514,9 @@ func (m *mover) requestOnce(ctx context.Context, endpoint, path string, body any
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized && m.engine != "bulk" {
+		m.invalidateHostToken()
+	}
 	if response.StatusCode != 200 {
 		if contentType == chunkstore.TransferProofContentType && (response.StatusCode == 400 || response.StatusCode == 415) {
 			// Verification is read-only. A target downgraded after negotiation
@@ -573,6 +576,9 @@ func (m *mover) checkBarrier() error {
 	return nil
 }
 func (m *mover) produce(ctx context.Context, tasks chan<- task, onlySource string) error {
+	return m.produceFiltered(ctx, tasks, onlySource, onlySource != "")
+}
+func (m *mover) produceFiltered(ctx context.Context, tasks chan<- task, onlySource string, reconcile bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	routes := make(chan route)
@@ -584,7 +590,7 @@ func (m *mover) produce(ctx context.Context, tasks chan<- task, onlySource strin
 		go func() {
 			defer workers.Done()
 			for r := range routes {
-				if err := m.produceRoute(ctx, r, tasks, onlySource != ""); err != nil {
+				if err := m.produceRoute(ctx, r, tasks, reconcile); err != nil {
 					if errors.Is(err, errBatchLimit) {
 						continue
 					}
@@ -733,6 +739,15 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 		headers, err := m.pull(ctx, t, names, byteBudget, &proofs)
 		if err != nil {
 			var api *apiError
+			if errors.As(err, &api) && t.NativeParent != "" && nativeDefinitivePullRejection(api) {
+				// These responses occur before import in the reviewed Buckyd
+				// handler: auth, source absence, size rejection, or admission.
+				// Keep the pending child retryable after a definitive rejection.
+				// Transport failures and generic500 leave the uncertain intent.
+				if saveErr := m.saveNativeDeclinedPull(t); saveErr != nil {
+					return saveErr
+				}
+			}
 			if errors.As(err, &api) && api.Status == 404 {
 				if skipErr := m.skipAbsentSource(ctx, batch, names); skipErr != nil {
 					return skipErr
@@ -771,14 +786,14 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 				}
 				return m.executeBatch(ctx, right, batch)
 			}
-			return err
+			return transferIntegrityError(err)
 		}
 		if len(proofs) != len(names) {
-			return errors.New("import proof count mismatch")
+			return copyIntegrityError(errors.New("import proof count mismatch"))
 		}
 		for i, p := range proofs {
 			if p.Source.Name != names[i] || p.Target.Name != names[i] || p.Digest == "" {
-				return errors.New("import proof name/digest mismatch")
+				return copyIntegrityError(errors.New("import proof name/digest mismatch"))
 			}
 		}
 		t.Bytes, _ = strconv.ParseInt(headers.Get("X-Transfer-Bytes"), 10, 64)
@@ -792,13 +807,13 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 			return err
 		}
 		if _, err := m.request(ctx, t.Target, "/v1/transfer/verify", proofs, &map[string]int{}); err != nil {
-			return err
+			return transferIntegrityError(err)
 		}
 		event("verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": t.Bytes, "seconds": time.Since(start).Seconds()})
 	} else {
 		// A resumed cleanup must still find its durable target generation.
 		if _, err := m.request(ctx, t.Target, "/v1/transfer/verify", t.Proofs, &map[string]int{}); err != nil {
-			return err
+			return transferIntegrityError(err)
 		}
 	}
 	if m.delete || m.reconcile {
@@ -883,7 +898,13 @@ func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
 func (m *mover) poll(ctx context.Context, hosts []string) error {
 	for _, h := range hosts {
 		if err := m.pollHost(ctx, h); err != nil {
-			return err
+			if m.tuner.maxSpeed == nil {
+				return err
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			m.tuner.maxSpeedUnavailable(h, err)
 		}
 	}
 	if !m.tuner.collecting && !m.tuner.collectingDebt {
@@ -912,16 +933,17 @@ func (m *mover) pollHost(ctx context.Context, h string) error {
 			if store.Hostname != hostname {
 				return errors.New("local-lab backend is not on this machine")
 			}
-			sample = hostSample{Time: float64(time.Now().UnixNano()) / 1e9, Generation: "local-lab", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, ReadSamples: 100, PhysicalCores: 16, MemoryBytes: 16 << 30, AvailableBytes: 8 << 30, NICCapacityBytes: 1e10}
+			age := float64(0)
+			sample = hostSample{Time: float64(time.Now().UnixNano()) / 1e9, Generation: "local-lab", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, ReadSamples: 100, PhysicalCores: 16, MemoryBytes: 16 << 30, AvailableBytes: 8 << 30, NICCapacityBytes: 1e10, ProcessUptimeSeconds: 3600, OldestUnpersistedAgeSeconds: &age}
 		} else {
 			if err := m.helper(ctx, h, "/sample", nil, &sample); err != nil {
 				return fmt.Errorf("%w: %s: %w", errGuards, h, err)
 			}
-			if !sample.Offline && !sample.ForegroundMeasured {
+			if m.tuner.maxSpeed == nil && !sample.Offline && !sample.ForegroundMeasured {
 				return fmt.Errorf("%w: %s: helper must report committed foreground points", errGuards, h)
 			}
 		}
-		if sample.Offline && !m.wholeOffline(h) {
+		if m.tuner.maxSpeed == nil && sample.Offline && !m.wholeOffline(h) {
 			return fmt.Errorf("%w: ready target requires live application telemetry", errGuards)
 		}
 		if err := m.tuner.observe(h, sample, store); err != nil {

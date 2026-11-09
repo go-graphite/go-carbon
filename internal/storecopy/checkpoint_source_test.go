@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckpointSourceRequiresCompletedUnchangedPull(t *testing.T) {
@@ -42,7 +43,16 @@ func TestCheckpointSourceRequiresCompletedUnchangedPull(t *testing.T) {
 			case "partial":
 				delete(state.Files, "store/CURRENT")
 			case "modified":
-				if err := os.WriteFile(filepath.Join(root, "store/CURRENT"), []byte("changed"), 0600); err != nil {
+				path := filepath.Join(root, "store/CURRENT")
+				if err := os.WriteFile(path, []byte("changed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				// CURRENT and changed have the same size. A filesystem may use
+				// the same timestamp for consecutive writes within one clock tick.
+				// Make the intended identity change explicit, without a sleep.
+				before := state.Files["store/CURRENT"]
+				mtime := time.Unix(0, before.Mtime).Add(time.Second)
+				if err := os.Chtimes(path, mtime, mtime); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink":

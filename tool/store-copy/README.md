@@ -27,6 +27,8 @@ skipped; an incomplete native intent resolves its daemon receipt before replay.
 receiver CPUs and the existing independent plan streams; `--streams` can specify
 concurrency explicitly. Batch bytes/name pacing, transfer slots, tuner, debt,
 cache-age and read-p99 guards do not govern native work.
+Pending-intent retries and resolution of a durable lost acknowledgement each
+consume that same range budget; a max1 retry cannot also import a new gap.
 
 A pinned donor snapshot exports native stored blocks through the existing v2
 framing. Queued/recovery source names and revisions changed since the pin are
@@ -69,6 +71,63 @@ Phase 1 is copy-only. Retirement and a writer-drained final delta reconciliation
 still require the campaign's separate existing approval. Overlap combining is
 currently the reviewed importer and retains its existing admission policy;
 phase 2 will replace that combine stage with exact native unions.
+
+### Preserve the campaign's maximum-speed metric policy
+
+The native baseline and deferred metric importer have separate admission paths.
+`--engine bulk --bulk-only` remains governor-free and does not inspect metric
+policy or host-JWT-renewal environment variables. For a campaign already using
+the owner's maximum-speed amendments, a compatible `--engine metric` handoff
+must explicitly restore that same policy instead of falling back to the older
+metric governor. Preserve the original plan, state, operation, metric flags and
+health map; set these bindings to the existing immutable host-local artifacts:
+
+```sh
+export RESIZE_MAX_SPEED_DECISION=/campaign/resize-MAX-SPEED-DECISION-v3.json
+export RESIZE_MAX_SPEED_DECISION_SHA256=EXACT_RAW_DECISION_SHA256
+export RESIZE_MAX_SPEED_WRITE_OK=/campaign/existing-WRITE-OK.json
+export RESIZE_MAX_SPEED_WRITE_OK_SHA256=EXACT_EXISTING_WRITE_OK_SHA256
+export RESIZE_HOST_JWT_REFRESH=1
+store-copy run --engine metric --plan SAME_PLAN --state SAME_STATE \
+  --health-map SAME_HEALTH_MAP --apply # retain the original metric arguments
+```
+
+The decision requires the explicit 14:50 debt removal, 15:20 relative read
+thresholds and 15:45 cache-headroom amendments. Its existing copy-only WRITE-OK
+must bind the actual manifest ID and SHA256. Host JWT renewal is optional; when
+enabled, it reads only the fixed host secret path, keeps key/JWT material in
+memory, renews hourly or after401, and grants only read/update. Delete, read
+isolation, whole-store and checkpoint-local modes cannot use this override.
+There is no new admission baseline or warm-up. Saved normal envelopes and MAX
+cache/read/write/process state survive resumes. A real inherited destination
+cache pause can be adopted once with `RESIZE_CACHE_PAUSED_ON_START=1`; an already
+initialized recovered guard is never rearmed by a retained startup flag.
+
+Metric work retains the exact MAXv3 behavior: pair-local write/process pauses,
+destination free-disk and sustained one-minute read guards, cache/age hysteresis,
+CPU/NIC/disk/L0/write-stall throttles, no compaction-debt or unlogged throttle,
+and measured server transfer limits. Independent source pools and releasing
+admission before a429 retry keep a busy source from starving other pairs. The
+former90-second response-header deadline is disabled only in this explicit
+metric mode; the ten-minute overall request bound and contexts remain.
+
+Only native-deferred bitmap ordinals reach the metric importer. Native-copied
+names are never replayed as ordinary empty-proof tasks. An acknowledged native
+range resolves its exact durable receipt first; a missing/mismatched receipt
+requires native recovery. A deferred child's known proof is checkpointed before
+verification and reused after a transient verification failure. If a crash or
+lost response leaves only its `bulk-intent` without a proof, metric retry/resume
+fails closed instead of importing it twice. Integrity splits retain exact native
+ordinals; every permitted skip is separately journaled. Source absence still
+requires authenticated HEAD404 plus a fresh exact-prefix catalog absence proof,
+bounded to eight concurrent proofs per source, with no MAX count/ratio budget.
+
+Old policy/decision rows, original baselines and unknown campaign audit fields
+remain byte-preserved. Mixed/MAX journals therefore retain their history instead
+of compacting unknown fields away. This controller changes no daemon API or
+storage behavior and includes no optional receipt-reuse or initial-copy-marker
+accelerator. Normal metric behavior is unchanged when MAX has never been enabled;
+an audited MAX metric resume cannot silently drop its explicit decision.
 
 ## Proof input and profiles
 

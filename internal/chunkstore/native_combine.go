@@ -284,7 +284,12 @@ func (s *Store) reserveNativeCombineIDs(intent *nativeCombineIntent, count int) 
 	began := time.Now()
 	defer func() { s.nativeCounters.reserve.Add(uint64(time.Since(began))) }()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			s.mu.Unlock()
+		}
+	}()
 	high, err := s.CatalogHighWatermark(context.Background())
 	if err != nil {
 		return 0, err
@@ -310,7 +315,14 @@ func (s *Store) reserveNativeCombineIDs(intent *nativeCombineIntent, count int) 
 	if err := b.Set(nativeCombineIntentKey(intent.Receipt.Identity), data, nil); err != nil {
 		return 0, err
 	}
-	err = b.Commit(pebble.Sync)
+	// Publish the sequence and intent before another allocator runs, then
+	// release creation before waiting for their durable WAL boundary.
+	err = s.db.ApplyNoSyncWait(b, pebble.Sync)
+	s.mu.Unlock()
+	locked = false
+	if err == nil {
+		err = b.SyncWait()
+	}
 	s.nativeWriteFailed(err)
 	return first, err
 }
@@ -554,7 +566,7 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 		return false, err
 	}
 	wait := time.Now()
-	unlock := s.lockTransfer([]string{p.Meta.Name}, nil)
+	unlock := s.lockTransfer([]string{p.Meta.Name})
 	locked := time.Now()
 	s.nativeCounters.combineWait.Add(uint64(locked.Sub(wait)))
 	defer func() { unlock(); s.nativeCounters.recordCombineHold(time.Since(locked)) }()

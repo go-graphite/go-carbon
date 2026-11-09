@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/cockroachdb/pebble/vfs"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/ingestoracle"
 	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
@@ -49,6 +52,7 @@ func BulkEvalMain(args []string) error {
 	profilePrefix := flags.String("profile-prefix", "", "write CPU/mutex/block profiles of the checkpoint phase under this local prefix")
 	native := flags.Bool("native", false, "measure the native owning-daemon SST engine; deferred combines are outside timing")
 	combine := flags.Bool("combine-existing", false, "include exact native combines of present names in native timing")
+	shapeOnly := flags.Bool("shape-only", false, "report captured donor/survivor archive time ranges without running the copy")
 	memory := flags.Bool("memory", false, "private in-memory Pebble fixtures (not physical-disk throughput)")
 	cacheBytes := flags.Int64("cache-bytes", 32<<20, "block cache bytes per private proof store")
 	cacheShards := flags.Int("cache-shards", 0, "block cache shards per private proof store (0 selects from cache size)")
@@ -121,7 +125,17 @@ func BulkEvalMain(args []string) error {
 		if err := fs.MkdirAll(originals, 0700); err != nil {
 			return nil, err
 		}
-		return store.Open(filepath.Join(directory, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: cacheBytes, CacheShards: cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
+		db, err := store.Open(filepath.Join(directory, name), store.Options{ExactBlocks: true, TimeBuckets: true, Continuation: &whisperio.ContinuationCodec{}, IncrementalSource: originals, Now: clock, CacheSize: cacheBytes, CacheShards: cacheShards, MemTableSize: 16 << 20, SyncInterval: time.Second, ColdPack: store.ColdPackOptions{Mode: "exact", FloatCodec: true}}.WithFS(fs))
+		if err != nil {
+			return nil, err
+		}
+		// Preserve the v9 format fence, but stop background rewrites before
+		// ingest so raw-layout equality measures the imported bytes alone.
+		if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: "off", FloatCodec: true}); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return db, nil
 	}
 	donor, err := open("donor")
 	if err != nil {
@@ -319,6 +333,16 @@ func BulkEvalMain(args []string) error {
 			}
 		}
 	}
+	var shape *combineShape
+	if *combine || *shapeOnly {
+		shape, err = measureCombineShape(ctx, donor, bulk, names)
+		if err != nil {
+			return err
+		}
+		if *shapeOnly {
+			return json.NewEncoder(os.Stdout).Encode(shape)
+		}
+	}
 	var source *store.TransferSource
 	if !*native {
 		checkpoint := filepath.Join(root, "checkpoint")
@@ -394,6 +418,8 @@ func BulkEvalMain(args []string) error {
 		runtime.SetMutexProfileFraction(1)
 		runtime.SetBlockProfileRate(1)
 	}
+	applyBefore := bulk.TransferApplyStats()
+	systemBefore := ingestSystemCounters()
 	var local result
 	var nativeDeferred []string
 	if *native {
@@ -401,6 +427,8 @@ func BulkEvalMain(args []string) error {
 	} else {
 		local, err = measure("checkpoint", source, bulk, *batch)
 	}
+	systemAfter := ingestSystemCounters()
+	applyAfter := bulk.TransferApplyStats()
 	if cpu != nil {
 		pprof.StopCPUProfile()
 		_ = cpu.Close()
@@ -432,7 +460,9 @@ func BulkEvalMain(args []string) error {
 			return e
 		}
 	}
+	fingerprint := sha256.New()
 	var archives, points, renderArchives, renderPoints, renderWindows int
+	var ingestRenderArchives, ingestRenderPoints int64
 	for _, name := range names {
 		want, err := baseline.Snapshot(ctx, name)
 		if err != nil {
@@ -455,10 +485,34 @@ func BulkEvalMain(args []string) error {
 		renderArchives += render.Archives
 		renderPoints += render.Points
 		renderWindows += render.Windows
+		for _, db := range []*store.Store{baseline, bulk} {
+			a, p, e := ingestoracle.VerifyFetch(ctx, db, got, *epoch)
+			if e != nil {
+				return e
+			}
+			ingestRenderArchives += a
+			ingestRenderPoints += p
+		}
+		fingerprint.Write([]byte(name))
+		fingerprint.Write([]byte{0})
+		for _, a := range got.Archives {
+			var word [8]byte
+			binary.BigEndian.PutUint64(word[:], uint64(a.Retention.Step))
+			fingerprint.Write(word[:])
+			binary.BigEndian.PutUint64(word[:], uint64(a.Retention.Count))
+			fingerprint.Write(word[:])
+			for _, p := range a.Points {
+				binary.BigEndian.PutUint64(word[:], uint64(p.Timestamp))
+				fingerprint.Write(word[:])
+				binary.BigEndian.PutUint64(word[:], math.Float64bits(p.Value))
+				fingerprint.Write(word[:])
+			}
+			fingerprint.Write([]byte{0xff})
+		}
 		archives += len(want.Archives)
 		for _, a := range want.Archives {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"time_range_shape": shape, "render_checked_archives": ingestRenderArchives, "render_checked_point_bits": ingestRenderPoints, "output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }

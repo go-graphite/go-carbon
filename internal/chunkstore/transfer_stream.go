@@ -24,6 +24,7 @@ type TransferStream struct {
 	arena  transferArena
 	err    error
 	bytes  int64
+	word   [8]byte // parsing is sequential; avoid one escaping slice per integer
 }
 
 func NewTransferStream(input io.Reader) (*TransferStream, error) {
@@ -51,14 +52,18 @@ func (s *TransferStream) read(out []byte) {
 	}
 }
 func (s *TransferStream) u32() uint32 {
-	var b [4]byte
-	s.read(b[:])
-	return binary.BigEndian.Uint32(b[:])
+	s.read(s.word[:4])
+	if s.err != nil {
+		return 0
+	}
+	return binary.BigEndian.Uint32(s.word[:4])
 }
 func (s *TransferStream) u64() uint64 {
-	var b [8]byte
-	s.read(b[:])
-	return binary.BigEndian.Uint64(b[:])
+	s.read(s.word[:])
+	if s.err != nil {
+		return 0
+	}
+	return binary.BigEndian.Uint64(s.word[:])
 }
 func (s *TransferStream) blob(limit uint32) []byte {
 	n := s.u32()
@@ -111,8 +116,11 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 		r.Counts[i] = int(s.u32())
 	}
 	n = s.u32()
-	// Grow only as bytes arrive: a corrupt count cannot allocate an entire
-	// purported multi-gigabyte metric before the first truncated key is read.
+	// Reserve a small bounded metadata vector, then grow only as bytes arrive.
+	// A forged count cannot reserve a purported multi-gigabyte metric. Real
+	// histories commonly have hundreds of keys; avoid nine growing vectors and
+	// their copies per metric without trusting an unbounded wire count.
+	r.Keys = make([]RelayoutKV, 0, min(n, 256))
 	for range n {
 		key, value := s.blob(4096), s.blob(16<<20)
 		if s.err != nil {

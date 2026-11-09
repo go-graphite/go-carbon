@@ -392,6 +392,11 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			return receipt, err
 		} else {
 			s.nativeCounters.sst.Add(stats.Bytes)
+			s.ingestStats.tables.Add(uint64(len(tables.paths)))
+			s.ingestStats.entries.Add(uint64(len(metas)))
+			s.ingestStats.bytes.Add(stats.Bytes)
+			s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
+			s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 		}
 	}
 	s.nativeCounters.ingest.Add(uint64(time.Since(ingestBegan)))
@@ -584,8 +589,11 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 	// Catalogs, sidecar inventory and the receipt became visible together
 	// under the creation lock. Keep the per-range lock until fsync completes:
 	// neither this import nor a duplicate/receipt query can acknowledge early.
+	// ApplyNoSyncWait retains the batch until SyncWait, including when a
+	// crash hook fails. Closing it early can recycle its pending sync state.
+	hookErr := s.nativeStep("publish-committed")
 	syncBegan := time.Now()
-	err = b.SyncWait()
+	err = errors.Join(hookErr, b.SyncWait())
 	s.nativeCounters.publishSync.Add(uint64(time.Since(syncBegan)))
 	if err != nil {
 		s.nativeWriteFailed(err)

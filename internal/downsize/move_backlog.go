@@ -51,6 +51,7 @@ func (b *backlogBaseline) valid(window time.Duration, synthetic bool) bool {
 // Last observations and trend survive controller restart as well as the immutable
 // baseline. This preserves counter-reset checks and a partly observed rise.
 type hostAdmission struct {
+	MaxSpeed                     *maxSpeedHostState `json:",omitempty"`
 	Baseline                     *backlogBaseline
 	Previous                     hostSample
 	StorePrevious                storageSample
@@ -119,7 +120,20 @@ func (t *tuner) snapshotAdmission(synthetic bool) *admissionState {
 	defer t.mu.Unlock()
 	state := &admissionState{Policy: t.backlog, Synthetic: synthetic, Hosts: map[string]hostAdmission{}}
 	for host, h := range t.hosts {
-		state.Hosts[host] = hostAdmission{Baseline: h.baseline, Previous: *h.previous, StorePrevious: *h.storePrevious,
+		var previous hostSample
+		var store storageSample
+		if h.previous != nil {
+			previous = *h.previous
+		}
+		if h.storePrevious != nil {
+			store = *h.storePrevious
+		}
+		var speed *maxSpeedHostState
+		if h.maxSpeed != nil {
+			copy := *h.maxSpeed
+			speed = &copy
+		}
+		state.Hosts[host] = hostAdmission{MaxSpeed: speed, Baseline: h.baseline, Previous: previous, StorePrevious: store,
 			Growth: h.growth, ForegroundRate: h.foregroundRate, ReadBaseline: h.readBaseline, BackgroundCPU: h.backgroundCPU,
 			DebtBaseline: h.debtBaseline, DebtHigh: h.debtHigh, DebtGrowth: h.debtGrowth, LatencyBaseline: h.latencyBaseline, LatencyHigh: h.latencyHigh}
 	}
