@@ -55,7 +55,9 @@ type planRow struct {
 	EstimatedBytes              int64 `json:"estimated_bytes"`
 }
 
-func readPlan(dir string) (*manifest, error) {
+func readPlan(dir string) (*manifest, error) { return readPlanStructure(dir, true) }
+
+func readPlanStructure(dir string, verifyStreams bool) (*manifest, error) {
 	data, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
 	if err != nil {
 		return nil, fmt.Errorf("committed manifest required: %w", err)
@@ -155,8 +157,10 @@ func readPlan(dir string) (*manifest, error) {
 		if _, err := p.streamPath(*r); err != nil {
 			return nil, err
 		}
-		if err := p.walk(*r, func(_ int64, _ planRow) error { return nil }); err != nil {
-			return nil, err
+		if verifyStreams {
+			if err := p.walk(*r, func(_ int64, _ planRow) error { return nil }); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return &p, nil

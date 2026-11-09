@@ -27,6 +27,10 @@ func WriteTransfer2(w io.Writer, records []TransferMetric) error {
 			return ErrFormat
 		}
 	}
+	return writeTransferStream2(w, len(records), func(i int) (TransferMetric, error) { return records[i], nil })
+}
+
+func writeTransferStream2(w io.Writer, count int, next func(int) (TransferMetric, error)) error {
 	h := sha256.New()
 	// Sparse records contain many tiny lengths and descriptors. Coalesce them
 	// before both hashing and writing, rather than updating SHA for each field.
@@ -42,8 +46,15 @@ func WriteTransfer2(w io.Writer, records []TransferMetric) error {
 	u64 := func(n uint64) { binary.BigEndian.PutUint64(data[:], n); write(data[:]) }
 	blob := func(v []byte) { u32(uint32(len(v))); write(v) }
 	write([]byte("BKTFR002"))
-	u32(uint32(len(records)))
-	for _, r := range records {
+	u32(uint32(count))
+	for i := range count {
+		r, nextErr := next(i)
+		if nextErr != nil {
+			return nextErr
+		}
+		if r.Version.Name != r.Config.Name {
+			return ErrFormat
+		}
 		blob([]byte(r.Config.Name))
 		u64(r.Version.ID)
 		u64(r.Version.Generation)

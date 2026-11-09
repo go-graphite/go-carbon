@@ -117,6 +117,7 @@ type TCP struct {
 	name                     string // name for store metrics
 	maxMessageSize           uint32
 	metricsReceived          uint32
+	startupReceived          atomic.Uint64
 	promMetricsReceived      prometheus.Counter
 	errors                   uint32 // read and framing failures
 	parseErrors              uint32 // rejected metric lines or framed messages
@@ -145,6 +146,7 @@ type TCP struct {
 	handoff                  handoffState
 	handoffReadAheadBytes    int
 	pointOut                 atomic.Pointer[func(name []byte, value float64, timestamp int64)]
+	capture                  Capture
 	pointsOut                atomic.Pointer[func(name []byte, data []points.Point)]
 	streamNameResolver       atomic.Pointer[func([]byte) any]
 	streamPointOut           atomic.Pointer[func(name []byte, value float64, timestamp int64, slot *any)]
@@ -360,6 +362,14 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	// connection incrementing the shared counter per point serializes them.
 	var received uint32
 	defer func() { atomic.AddUint32(&rcv.metricsReceived, received) }()
+	capture := captureBuffer{out: rcv.capture}
+	if capture.out != nil {
+		defer func() {
+			if err := capture.flush(); err != nil {
+				rcv.logger.Error("input capture failed", zap.Error(err))
+			}
+		}()
+	}
 
 	var pointOut func(name []byte, value float64, timestamp int64)
 	if out := rcv.pointOut.Load(); out != nil {
@@ -414,6 +424,11 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 			}
 		}
 		if received != 0 && (reader.Buffered() == 0 || received >= 1024) {
+			if capture.out != nil {
+				if capture.flush() != nil {
+					return
+				}
+			}
 			atomic.AddUint32(&rcv.metricsReceived, received)
 			received = 0
 		}
@@ -493,6 +508,8 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 					}
 				}
 				switch {
+				case capture.out != nil:
+					capture.point(name, value, timestamp)
 				case pointBatchOut != nil:
 					lookupNames = append(lookupNames, name)
 					lookupData = append(lookupData, points.Point{Value: value, Timestamp: timestamp})
@@ -603,7 +620,7 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	rcv.zstdStats.stat(send)
 	metricsReceived := atomic.LoadUint32(&rcv.metricsReceived)
 	atomic.AddUint32(&rcv.metricsReceived, -metricsReceived)
-	send("metricsReceived", float64(metricsReceived))
+	send("metricsReceived", float64(metricsReceived)+float64(rcv.startupReceived.Swap(0)))
 	if rcv.promMetricsReceived != nil {
 		rcv.promMetricsReceived.Add(float64(metricsReceived))
 	}
@@ -624,6 +641,15 @@ func (rcv *TCP) Stat(send helper.StatCallback) {
 	if rcv.buffer != nil {
 		send("bufferLen", float64(len(rcv.buffer)))
 		send("bufferCap", float64(cap(rcv.buffer)))
+	}
+}
+
+// SeedCapturedPoints carries startup capture's successful input count into the
+// ordinary receiver. Call after InitPrometheus, before the collector starts.
+func (rcv *TCP) SeedCapturedPoints(n uint64) {
+	rcv.startupReceived.Add(n)
+	if rcv.promMetricsReceived != nil {
+		rcv.promMetricsReceived.Add(float64(n))
 	}
 }
 

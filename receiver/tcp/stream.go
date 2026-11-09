@@ -145,6 +145,14 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		streamOut = *out
 	}
 	sinkReady := false
+	capture := captureBuffer{out: rcv.capture}
+	if capture.out != nil {
+		defer func() {
+			if err := capture.flush(); err != nil {
+				rcv.logger.Error("input capture failed", zap.Error(err))
+			}
+		}()
+	}
 	visit := func(_ uint32, name []byte, value float64, ts int64, slot *any) {
 		if !sinkReady {
 			if streamOut == nil {
@@ -160,6 +168,8 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 			sinkReady = true
 		}
 		switch {
+		case capture.out != nil:
+			capture.point(name, value, ts)
 		case streamOut != nil:
 			streamOut(name, value, ts, slot)
 		case pointOut != nil:
@@ -184,6 +194,11 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 
 		tracked.setReadDeadline(conn, time.Now().Add(2*time.Minute))
 		info, err := d.ReadFrame(r, visit)
+		if capture.out != nil {
+			if capture.flush() != nil {
+				return false
+			}
+		}
 		if err != nil {
 			if tracked.detaching() {
 				return rcv.detachStream(conn, r, rest, tracked, d, flags)

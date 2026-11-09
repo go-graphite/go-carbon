@@ -66,6 +66,28 @@ func (c *Cache) DumpBinary(w io.Writer) error {
 // ShardCount is the number of independent cache shards for DumpShards.
 const ShardCount = shardCount
 
+// NativePendingNames is a conservative source-copy exclusion set. Recovery
+// names are visited before cache shards so a concurrent claim cannot move a
+// name behind the scan. A caller pins the store first and checks revisions
+// afterward, covering points confirmed while these shards are visited.
+func (c *Cache) NativePendingNames() (map[string]struct{}, error) {
+	names := make(map[string]struct{})
+	if pending := c.pending.Load(); pending != nil && pending.remaining.Load() != 0 {
+		if err := pending.bundle.VisitMetrics(func(slot uint64, name string) error {
+			if !pending.isClaimed(slot) {
+				names[name] = struct{}{}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if err := c.VisitMetricNames(func(name string) error { names[name] = struct{}{}; return nil }); err != nil {
+		return nil, err
+	}
+	return names, nil
+}
+
 // VisitMetricNames visits currently cached and in-flight names while input and
 // persistence may continue. Names can repeat or disappear after the visit; this
 // is a warmup hint, not an authoritative snapshot. visit runs under a shard's

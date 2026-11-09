@@ -191,6 +191,16 @@ func (rcv *TCP) Detach() (*Handoff, error) {
 // Call FinishInputReplay once ordered recovery is complete to release startup
 // read-ahead; handlers finish restoring their dictionaries before switching.
 func NewInherited(name string, options *Options, store func(*points.Points), h *Handoff) (*TCP, error) {
+	return newInherited(name, options, store, h, nil)
+}
+
+// NewInheritedCapture drains inherited input into a durable startup queue before
+// storage and its checkpoint are ready. It never calls a cache sink.
+func NewInheritedCapture(name string, options *Options, h *Handoff, capture Capture) (*TCP, error) {
+	return newInherited(name, options, nil, h, capture)
+}
+
+func newInherited(name string, options *Options, store func(*points.Points), h *Handoff, capture Capture) (*TCP, error) {
 	closeAll := func() {
 		_ = h.Listener.Close()
 		for _, c := range h.Conns {
@@ -215,7 +225,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		closeAll()
 		return nil, err
 	}
-	r := &TCP{out: store, name: name, logger: zapwriter.Logger(name), decompressor: newDecompressor("")}
+	r := &TCP{out: store, name: name, logger: zapwriter.Logger(name), decompressor: newDecompressor(""), capture: capture}
 	r.cacheLookupBatch = options.CacheLookupBatch
 	r.handoffReadAheadBytes = readAheadBytes
 	r.zstdMaxFrameSize = options.ZstdMaxFrameSize
@@ -224,7 +234,7 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		return nil, err
 	}
 	r.handoff.enabled = true
-	r.handoff.replaying.Store(true)
+	r.handoff.replaying.Store(capture == nil)
 	conns := make([]Conn, 0, len(h.Conns))
 	for _, c := range h.Conns {
 		conn, err := net.FileConn(c.File)
@@ -237,7 +247,11 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 		// The pump starts before the tracked handler configures its deadline.
 		// Give its initial read an explicitly unexpired deadline.
 		_ = conn.SetReadDeadline(time.Time{})
-		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn, ahead: newReadAheadConnLimit(conn, readAheadBytes)})
+		var ahead *readAheadConn
+		if capture == nil {
+			ahead = newReadAheadConnLimit(conn, readAheadBytes)
+		}
+		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn, ahead: ahead})
 	}
 	err = r.listen(func() (*net.TCPListener, error) {
 		ln, err := net.FileListener(h.Listener)
@@ -254,7 +268,10 @@ func NewInherited(name string, options *Options, store func(*points.Points), h *
 	}, conns)
 	if err != nil {
 		for _, c := range conns {
-			pending := c.ahead.pending(nil)
+			var pending []byte
+			if c.ahead != nil {
+				pending = c.ahead.pending(nil)
+			}
 			handoff.CloseInputConn(c.conn, len(c.Leftover)+len(pending), r.logger, "inherited_start_failed")
 		}
 		return nil, err

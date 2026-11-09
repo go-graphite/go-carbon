@@ -88,7 +88,7 @@ func newRestartMetrics() *restartMetrics {
 		return prometheus.NewGauge(prometheus.GaugeOpts{Name: name, Help: help})
 	}
 	return &restartMetrics{
-		inputUnavailable: gauge("restart_input_unavailable_seconds", "Last restart: from the previous process closing input to this one opening its receivers. Without a handoff record, from the previous process's last write to the input log or dump."),
+		inputUnavailable: gauge("restart_input_unavailable_seconds", "Last restart: seconds without input intake, including the gap to startup capture and its final switch to live receivers. Without a handoff record, measured from the previous process's last write to the input log or dump."),
 		readsUnavailable: gauge("restart_reads_unavailable_seconds", "Last restart: from the previous process stopping reads to this one serving them; zero when reads were handed over. Without a handoff record, measured like the input gap."),
 		stop:             gauge("restart_stop_seconds", "Last restart: the previous process's stop, from the stop signal to its exit."),
 		start:            gauge("restart_start_seconds", "This process's start, from process start to ready."),
@@ -119,6 +119,7 @@ type restartState struct {
 	replayed     bool
 	readsServing time.Time
 	inputOpened  time.Time
+	inputPause   time.Duration
 	out          *restartRecord
 }
 
@@ -144,6 +145,8 @@ func (s *restartState) noteInputOpened() {
 	}
 	s.mu.Unlock()
 }
+
+func (s *restartState) noteInputPause(d time.Duration) { s.mu.Lock(); s.inputPause = d; s.mu.Unlock() }
 
 // restartRecordWait bounds how long a successor waits for its predecessor's
 // final record, written just before that process exits.
@@ -244,7 +247,7 @@ func (app *App) finishRestart() {
 	if prev == nil && s.replayed {
 		kind = "replay"
 	}
-	reads, input := s.readsServing, s.inputOpened
+	reads, input, pause := s.readsServing, s.inputOpened, s.inputPause.Seconds()
 	s.mu.Unlock()
 	m.restarts.WithLabelValues(kind).Inc()
 	if prev == nil {
@@ -253,11 +256,12 @@ func (app *App) finishRestart() {
 		if lastAlive.IsZero() {
 			lastAlive = processStarted
 		}
-		m.inputUnavailable.Set(restartGap(lastAlive, input))
+		m.inputUnavailable.Set(restartGap(lastAlive, input) + pause)
 		m.readsUnavailable.Set(restartGap(lastAlive, reads))
 		zapwriter.Logger("restart").Info("previous process left no handoff record", zap.String("kind", kind),
 			zap.Time("last_alive", lastAlive),
-			zap.Float64("input_unavailable_seconds", restartGap(lastAlive, input)),
+			zap.Float64("input_unavailable_seconds", restartGap(lastAlive, input)+pause),
+			zap.Float64("input_capture_switch_seconds", pause),
 			zap.Float64("reads_unavailable_seconds", restartGap(lastAlive, reads)),
 			zap.Float64("start_seconds", time.Since(processStarted).Seconds()))
 		return
@@ -277,16 +281,17 @@ func (app *App) finishRestart() {
 			_ = os.Remove(filepath.Join(dir, restartRecordName))
 		}
 		s.mu.Lock()
-		reads, input := s.readsServing, s.inputOpened
+		reads, input, pause := s.readsServing, s.inputOpened, s.inputPause.Seconds()
 		s.mu.Unlock()
 		gap := restartGap
-		m.inputUnavailable.Set(gap(prev.InputClosed, input))
+		m.inputUnavailable.Set(gap(prev.InputClosed, input) + pause)
 		m.readsUnavailable.Set(gap(prev.ReadsStopped, reads))
 		if !prev.Exited.IsZero() {
 			m.stop.Set(gap(prev.StopStarted, prev.Exited))
 		}
 		zapwriter.Logger("restart").Info("previous process handed over",
-			zap.Float64("input_unavailable_seconds", gap(prev.InputClosed, input)),
+			zap.Float64("input_unavailable_seconds", gap(prev.InputClosed, input)+pause),
+			zap.Float64("input_capture_switch_seconds", pause),
 			zap.Float64("reads_unavailable_seconds", gap(prev.ReadsStopped, reads)),
 			zap.Float64("previous_stop_seconds", gap(prev.StopStarted, prev.Exited)),
 			zap.Float64("start_seconds", time.Since(processStarted).Seconds()),

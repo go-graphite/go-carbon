@@ -19,6 +19,27 @@ const maxStoreMigrationWorkers = 65536
 
 func (app *App) configureStoreCopy() error {
 	cfg := app.Config
+	app.MetricStore.SetNativeReady(func() error {
+		if !app.TryLock() {
+			return errors.New("application lifecycle is busy; retry native copy")
+		}
+		defer app.Unlock()
+		current := app.Config
+		if app.copyInputSealed || current.Tags.Enabled || current.Whisper.StoreMirrorFiles || current.Whisper.StoreLiveMigration {
+			return errors.New("native copy requires unsealed completed shared storage without tags or rollback mirroring")
+		}
+		if app.storeRestoreLoaded != nil {
+			select {
+			case <-app.storeRestoreLoaded:
+			default:
+				return errors.New("store recovery has not finished")
+			}
+		}
+		if m := app.incrementalMigration.Load(); m != nil && m.receipt()["phase"] != "shared" {
+			return errors.New("incremental conversion has not finished")
+		}
+		return checkStoreConversion(sharedStorePath(cfg))
+	})
 	ready := func() error {
 		if !app.TryLock() {
 			return errors.New("application lifecycle is busy; retry checkpoint")
@@ -430,6 +451,7 @@ func (s *storeStats) Stat(send helper.StatCallback) {
 func (app *App) configureTransferCache() {
 	core := app.Cache
 	app.MetricStore.SetTransferPending(core.Has, func() bool { return !core.IsEmpty() })
+	app.MetricStore.SetNativePendingSnapshot(core.NativePendingNames)
 	app.Buckyd.SetTransferFlush(func(ctx context.Context, names []string) error {
 		// Stop can hold App's lock while waiting for Buckyd handlers.
 		if !app.TryRLock() {

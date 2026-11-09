@@ -42,16 +42,56 @@ setting. Enabling the supervisor itself requires starting under that supervisor.
 
 On USR2, the worker keeps receiving while it checkpoints the cache and finishes
 store flushes. It then diverts input to a tail log, closes reads and the shared
-database, and releases its supervisor. The successor opens the database,
-receives the listening and accepted sockets plus their decoder state/buffered
-bytes, and starts the inherited handlers before replaying the tail. Each handler
-restores its own dictionary in parallel. A lazy raw-byte buffer drains each
-inherited socket (and connections accepted during recovery) while restoration
-and tail replay run. Every live point sink waits until tail replay completes:
-tail corrections for a metric always precede newer socket points for that metric.
-Reads still restart; input connections survive.
+database, and releases its supervisor. The successor takes the listening and
+accepted sockets immediately, before opening storage or validating the pending
+checkpoint. Its handlers restore decoder state and append complete legacy
+records to the **same tail file**, encoding in private 64 KiB batches rather
+than serializing an allocation and writer lock per point. New connections use
+the same capture path. The tail is synced every second and when sealed.
 
-Read-ahead retains at most 8 MiB per connection plus a 64 KiB read block. A
+Storage opening, checkpoint verification, and file-list/index loading run while
+capture drains input. Reads start only after the ordinary checkpoint/index
+validation, and continue to merge saved history with recovered cache points.
+Recovery follows complete-record file frontiers while capture continues. FIFO
+workers receive batches of up to 128 points; each metric keeps its recorded
+order and claims its checkpoint history before tail corrections. Once the
+unreplayed suffix is at most 1 MiB, capture handlers detach and flush. The same
+decoder and worker pool finish that bounded suffix, and the synced tail stays
+available for crash recovery. The ordinary inherited receiver resumes the same
+sockets. Decoder leftovers and partial frames retain their existing handoff
+semantics. Reads still restart; input connections survive.
+
+The source tail remains owned by pending recovery until all recovered points
+are persisted, including points captured before storage opened. With a valid
+checkpoint, the order is saved history, tail, newer continuous input-log replay,
+then live input. This preserves corrections if the successor crashes after
+accepting newer logged values. After a crash tears the final binary record,
+recovery keeps its complete point prefix and warns about the unfinished end;
+other structural decoding errors still fail startup. A failed startup retains the ordinary tail for
+the next recovery; no new source format or handoff protocol is needed. This
+works when the predecessor supports the existing version 2 input-only offer.
+
+Capture uses local disk space proportional to input received while storage and
+recovery catch up, rather than a RAM buffer or relay queue proportional to the
+cache. Its sustained write and replay rates must exceed the offered rate. A
+disk write/sync error stops capture and fails startup. Process crashes retain
+complete appended records; bytes still in socket/decoder/encoding buffers have
+the usual TCP delivery limitations below, and power loss has the one-second
+sync window. No application-level acknowledgement is introduced.
+
+`input capture active before storage and checkpoint` marks intake readiness.
+`startup input capture sealed` reports captured points/bytes, replayed prefix
+points/bytes, and capture duration. The following `input tail loaded` reports
+only the remaining suffix. Add prefix and suffix when checking recovered counts;
+add predecessor tail points and successor captured points for the input total.
+`restart_input_unavailable_seconds` includes both the initial gap to capture
+readiness and the final capture-to-live pause. The restart log also reports
+`input_capture_switch_seconds`, so the second pause is not hidden by early
+intake readiness. Snapshotting decoder state at that switch still scales with
+connection state; it does not wait for unrelated cache history.
+
+The brief final switch, and the existing mirrored-store handoff path, use RAM
+read-ahead. It retains at most 8 MiB per connection plus a 64 KiB read block. A
 full buffer applies TCP backpressure; it never drops bytes. Memory grows with
 actual queued bytes, independently of packet sizes. At 280 connections the
 maximum ring allocation is 2.19 GiB. Once the tail is applied, each handler drains

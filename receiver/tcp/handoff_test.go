@@ -47,10 +47,13 @@ func (s *sequenceStore) count() int {
 // TestDetachKeepsEveryPoint moves a receiver's connections to a new receiver
 // while clients keep writing lines split at arbitrary byte boundaries. Each
 // point must arrive exactly once and in order, across both receivers.
-func TestDetachKeepsEveryPoint(t *testing.T)            { testDetachKeepsEveryPoint(t, false, false) }
-func TestDetachBatchedKeepsEveryPoint(t *testing.T)     { testDetachKeepsEveryPoint(t, true, false) }
-func TestDetachLookupBatchKeepsEveryPoint(t *testing.T) { testDetachKeepsEveryPoint(t, false, true) }
-func testDetachKeepsEveryPoint(t *testing.T, batched, lookup bool) {
+func TestDetachKeepsEveryPoint(t *testing.T)        { testDetachKeepsEveryPoint(t, false, false, false) }
+func TestDetachBatchedKeepsEveryPoint(t *testing.T) { testDetachKeepsEveryPoint(t, true, false, false) }
+func TestDetachLookupBatchKeepsEveryPoint(t *testing.T) {
+	testDetachKeepsEveryPoint(t, false, true, false)
+}
+func TestCaptureDetachKeepsEveryPoint(t *testing.T) { testDetachKeepsEveryPoint(t, false, false, true) }
+func testDetachKeepsEveryPoint(t *testing.T, batched, lookup, capture bool) {
 	options := &Options{Listen: "127.0.0.1:0", Enabled: true, CacheLookupBatch: lookup}
 	wake := make(chan struct{}, 1)
 	before, after := sequenceStore{wake: wake}, sequenceStore{wake: wake}
@@ -169,7 +172,7 @@ func testDetachKeepsEveryPoint(t *testing.T, batched, lookup bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	next, err := NewInherited("tcp", &Options{Listen: addr, Enabled: true, CacheLookupBatch: lookup}, after.add, h)
+	next, err := inheritTestInput(capture, &Options{Listen: addr, Enabled: true, CacheLookupBatch: lookup}, after.add, h)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,7 +17,10 @@ import (
 )
 
 type task struct {
-	Kind, Checkpoint string `json:",omitempty"`
+	Native           *nativeRangeState `json:",omitempty"`
+	NativeParent     string            `json:",omitempty"`
+	NativeOrdinals   []int             `json:",omitempty"`
+	Kind, Checkpoint string            `json:",omitempty"`
 	Retries          int
 	Stream           string
 	Start, End       int64
@@ -28,6 +31,7 @@ type task struct {
 	Bytes            int64
 }
 type journal struct {
+	preserveRows bool // native handoff must preserve unknown fields from newer controllers
 	operation    string
 	lock         *os.File
 	path         string
@@ -103,6 +107,9 @@ func openJournal(path, plan string) (*journal, error) {
 		}
 		if row.Task.End > row.Task.Start {
 			j.tasks[taskKey(row.Task)] = row.Task
+			if row.Task.Native != nil || row.Task.Kind == "native-range" {
+				j.preserveRows = true
+			}
 		}
 		if row.Admission != nil {
 			j.admission = row.Admission
@@ -136,6 +143,12 @@ func openJournal(path, plan string) (*journal, error) {
 	return j, nil
 }
 func (j *journal) save(t task) error {
+	if t.NativeParent != "" {
+		return j.saveNativeChild(t)
+	}
+	if t.Native != nil || t.Kind == "native-range" {
+		j.preserveRows = true
+	}
 	return j.appendRow(journalRow{Operation: j.operation, Plan: j.plan, Task: t})
 }
 
@@ -161,7 +174,7 @@ func (j *journal) appendRow(row journalRow) error {
 		j.admission = row.Admission
 	}
 	j.sinceCompact++
-	if j.sinceCompact >= 256 {
+	if j.sinceCompact >= 256 && !j.preserveRows {
 		return j.compact()
 	}
 	return nil

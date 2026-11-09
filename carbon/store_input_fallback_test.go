@@ -563,8 +563,13 @@ func testStoreInputFallbackKeepsEveryPoint(t *testing.T) {
 			if m := regexp.MustCompile(`input tail loaded .*"points": ([0-9]+)`).FindStringSubmatch(logs); m != nil {
 				loaded, _ = strconv.ParseInt(m[1], 10, 64)
 			}
-			if tailFor >= 0 && (tailPoints <= 0 || tailPoints != loaded || tailLost != 0) {
-				t.Errorf("tail wrote %d points (%d lost), successor loaded %d", tailPoints, tailLost, loaded)
+			var captured, prefix int64
+			if m := regexp.MustCompile(`startup input capture sealed .*"points": ([0-9]+),.*"replayed_points": ([0-9]+)`).FindStringSubmatch(logs); m != nil {
+				captured, _ = strconv.ParseInt(m[1], 10, 64)
+				prefix, _ = strconv.ParseInt(m[2], 10, 64)
+			}
+			if tailFor >= 0 && (tailPoints < 0 || tailPoints+captured != loaded+prefix || tailLost != 0) {
+				t.Errorf("tail wrote %d points, capture added %d (%d lost), successor loaded %d + %d", tailPoints, captured, tailLost, prefix, loaded)
 			}
 			t.Logf("%s; accepted by stopping instance %d, by successor %d; input gap %v, input tail %.3f s (%d points); client reconnects %d, groups dropped %d",
 				result, accepted.accepted[0].Load(), accepted.accepted[1].Load(), accepted.gap().Round(time.Millisecond), tailFor, tailPoints, reconnects, dropped)

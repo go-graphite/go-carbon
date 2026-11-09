@@ -87,3 +87,24 @@ func (s *Store) CatalogChanges(ctx context.Context, after uint64) (entries []Met
 	}
 	return entries, cursor, reset, ctx.Err()
 }
+
+// Batch publication takes the discovery journal lock once, after releasing the
+// creation lock; readers before this notification retain the previous cursor.
+func (s *Store) nativeCatalogChanged(metas []Metadata) {
+	c := s.catalogChanges.Load()
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, m := range metas {
+		c.version++
+		if c.bytes+len(m.Name)+32 > catalogChangeBytes {
+			c.entries, c.bytes, c.floor = nil, 0, c.version
+		}
+		if len(m.Name)+32 <= catalogChangeBytes {
+			c.entries = append(c.entries, catalogChange{c.version, strings.Clone(m.Name)})
+			c.bytes += len(m.Name) + 32
+		}
+	}
+}

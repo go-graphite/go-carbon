@@ -2,6 +2,8 @@ package whisperio
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"os"
 	"time"
 
@@ -16,6 +18,29 @@ import (
 func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.ContinuationIO, snapshot store.Snapshot, clock func() time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	// The importer canonicalizes timestamps and ring aliases before calling
+	// us. Fail closed if a different caller cannot fit its exact image in a
+	// classic ring; truncating an off-grid distance silently moves points.
+	if len(snapshot.Archives) != len(snapshot.Metadata.Retentions) {
+		return fmt.Errorf("restore archive count differs from metadata")
+	}
+	for ai, archive := range snapshot.Archives {
+		r := archive.Retention
+		if r != snapshot.Metadata.Retentions[ai] || r.Step <= 0 || r.Count <= 0 {
+			return fmt.Errorf("restore archive %d invalid retention", ai)
+		}
+		seen := make(map[int64]bool, len(archive.Points))
+		for _, p := range archive.Points {
+			if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(r.Step) != 0 {
+				return fmt.Errorf("restore archive %d timestamp %d is not on its grid", ai, p.Timestamp)
+			}
+			slot := p.Timestamp / int64(r.Step) % int64(r.Count)
+			if seen[slot] {
+				return fmt.Errorf("restore archive %d has aliased ring slots", ai)
+			}
+			seen[slot] = true
+		}
 	}
 	fs := newContinuationFiles(kv, false).withClock(clock)
 	options := continuationOptions(fs, clock)
@@ -37,12 +62,21 @@ func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.Contin
 	f := file.(*continuationFile)
 	layout := w.StorageLayout()
 	for ai, archive := range snapshot.Archives {
+		// Classic Fetch uses physical slot zero as the ring's timestamp anchor.
+		// An absolute epoch slot can leave that slot empty in a sparse archive.
+		var base int64
+		if len(archive.Points) > 0 {
+			base = archive.Points[0].Timestamp
+			for _, p := range archive.Points[1:] {
+				base = min(base, p.Timestamp)
+			}
+		}
 		groups := make(map[int]*store.PointBlock)
 		for _, p := range archive.Points {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			slot := int(p.Timestamp/int64(archive.Retention.Step)) % archive.Retention.Count
+			slot := int((p.Timestamp-base)/int64(archive.Retention.Step)) % archive.Retention.Count
 			block := groups[slot/128]
 			if block == nil {
 				block = &store.PointBlock{}

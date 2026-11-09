@@ -1,0 +1,109 @@
+package points
+
+import (
+	"bufio"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+)
+
+// ReadBinaryBorrowed has ReadBinary's record and partial-record semantics, but
+// lends its name and point buffers only until visit returns. A batching caller
+// can copy into a reusable arena instead of allocating three objects per row.
+func ReadBinaryBorrowed(r io.Reader, visit func([]byte, []Point)) error {
+	reader := bufio.NewReaderSize(r, MB)
+	names := make([]byte, MB)
+	var scratch [64]Point
+	data := scratch[:0]
+	for {
+		if reader.Buffered() == 0 {
+			if _, err := reader.Peek(1); err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
+				}
+				return err
+			}
+		}
+		// Capture writes single-point records. Decode complete buffered ones
+		// directly: ReadVarint's ByteReader interface dispatch per byte was
+		// the serial bottleneck even with allocation-free worker batches.
+		raw, _ := reader.Peek(reader.Buffered())
+		if name, p, size, ok := singleBinaryPoint(raw); ok {
+			scratch[0] = p
+			visit(name, scratch[:1])
+			_, _ = reader.Discard(size)
+			continue
+		}
+		length, err := binary.ReadVarint(reader)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if length < 0 || length > MB {
+			return fmt.Errorf("invalid metric name length: %d", length)
+		}
+		if _, err := io.ReadFull(reader, names[:length]); err != nil {
+			return err
+		}
+		count, err := binary.ReadVarint(reader)
+		if err != nil {
+			return err
+		}
+		if count < 0 {
+			return fmt.Errorf("invalid point count: %d", count)
+		}
+		data = data[:0]
+		var value, stamp int64
+		for range count {
+			v, err := binary.ReadVarint(reader)
+			if err != nil {
+				if len(data) > 0 {
+					visit(names[:length], data)
+				}
+				return err
+			}
+			ts, err := binary.ReadVarint(reader)
+			if err != nil {
+				if len(data) > 0 {
+					visit(names[:length], data)
+				}
+				return err
+			}
+			value += v
+			stamp += ts
+			data = append(data, Point{Value: math.Float64frombits(uint64(value)), Timestamp: stamp})
+		}
+		if len(data) > 0 {
+			visit(names[:length], data)
+		}
+	}
+}
+
+func singleBinaryPoint(raw []byte) ([]byte, Point, int, bool) {
+	length, n := binary.Varint(raw)
+	if n <= 0 || length < 0 || length > MB || length > int64(len(raw)-n) {
+		return nil, Point{}, 0, false
+	}
+	name := raw[n : n+int(length)]
+	off := n + int(length)
+	count, n := binary.Varint(raw[off:])
+	if n <= 0 || count != 1 {
+		return nil, Point{}, 0, false
+	}
+	off += n
+	value, n := binary.Varint(raw[off:])
+	if n <= 0 {
+		return nil, Point{}, 0, false
+	}
+	off += n
+	stamp, n := binary.Varint(raw[off:])
+	if n <= 0 {
+		return nil, Point{}, 0, false
+	}
+	off += n
+	return name, Point{Value: math.Float64frombits(uint64(value)), Timestamp: stamp}, off, true
+}

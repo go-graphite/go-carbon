@@ -249,9 +249,11 @@ func (m *mover) prepareAdmission(ctx context.Context, hosts []string) error {
 		}
 		return m.poll(ctx, hosts)
 	}
-	if len(m.journal.tasks) > 0 {
+	if len(m.journal.tasks) > 0 && !m.journal.nativeOnlyWork() {
 		return errors.New("missing saved pre-copy backlog baseline in existing run; cannot re-baseline after copy work")
 	}
+	// Native-only work never enters the cache/persister. Observe the legacy
+	// envelope before its first deferred metric import, without governing SSTs.
 	m.tuner.collecting = true
 	m.tuner.collectingDebt = true
 	return m.observeAdmission(ctx, hosts)
