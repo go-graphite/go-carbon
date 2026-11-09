@@ -32,12 +32,12 @@ import (
 // Delay all storage/index work after the real input-only offer. More than the
 // default RAM read-ahead budget must still drain durably on each connection.
 func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
-	if isolatedTestProcess(t) {
+	if isolatedTestProcessSerial(t) {
 		return
 	}
 	defer zapwriter.Test()()
 	path, cfg := incrementalAppFixture(t)
-	short, err := os.MkdirTemp("/tmp", "hs-")
+	short, err := os.MkdirTemp("", "hs-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +317,7 @@ func TestPredecessorCrashProcess(t *testing.T) {
 }
 
 func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
-	if isolatedTestProcess(t) {
+	if isolatedTestProcessSerial(t) {
 		return
 	}
 	for _, stage := range []string{"before_dump", "during_warm", "during_dump", "after_dump"} {
@@ -404,7 +404,7 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 }
 
 func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
-	if isolatedTestProcess(t) {
+	if isolatedTestProcessSerial(t) {
 		return
 	}
 	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live"} {
