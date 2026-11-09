@@ -36,7 +36,7 @@ require (
 
 require (
 	github.com/blevesearch/mmap-go v1.2.0
-	github.com/blevesearch/vellum v1.2.0
+	github.com/blevesearch/vellum v1.2.1
 	github.com/cockroachdb/pebble v1.1.5
 	github.com/go-faster/city v1.0.1
 	github.com/greatroar/blobloom v0.8.1
@@ -95,7 +95,7 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.31 // indirect
 	github.com/prometheus/client_model v0.6.3
 	github.com/prometheus/common v0.72.0 // indirect
-	github.com/prometheus/procfs v0.22.0 // indirect
+	github.com/prometheus/procfs v0.22.0
 	github.com/rcrowley/go-metrics v0.0.0-20250401214520-65e299d6c5c9 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	go.einride.tech/aip v0.83.0 // indirect

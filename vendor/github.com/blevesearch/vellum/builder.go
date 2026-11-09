@@ -154,6 +154,8 @@ func (b *Builder) compileFrom(iState int) error {
 }
 
 func (b *Builder) compile(node *builderNode) (int, error) {
+	// Every path that does not hand the node to the registry returns it to
+	// the pool; otherwise each final leaf and each registry hit is garbage.
 	if node.final && len(node.trans) == 0 &&
 		node.finalOutput == 0 {
 		b.builderNodePool.Put(node)
@@ -170,7 +172,12 @@ func (b *Builder) compile(node *builderNode) (int, error) {
 	}
 
 	b.lastAddr = addr
-	entry.addr = addr
+	if entry != nil {
+		entry.addr = addr
+	} else {
+		// RegistryTableSize 0: no suffix sharing, nothing keeps the node
+		b.builderNodePool.Put(node)
+	}
 	return addr, nil
 }
 
@@ -183,8 +190,7 @@ type unfinishedNodes struct {
 	// same access pattern, and don't track items separately
 	// this means calls get() and pushXYZ() must be paired,
 	// as well as calls put() and popXYZ()
-	cache    []builderNodeUnfinished
-	overflow []*builderNodeUnfinished
+	cache []builderNodeUnfinished
 
 	builderNodePool *builderNodePool
 }
@@ -193,9 +199,6 @@ func (u *unfinishedNodes) Reset() {
 	u.stack = u.stack[:0]
 	for i := 0; i < len(u.cache); i++ {
 		u.cache[i] = builderNodeUnfinished{}
-	}
-	for _, node := range u.overflow {
-		*node = builderNodeUnfinished{}
 	}
 	u.pushEmpty(false)
 }
@@ -215,18 +218,15 @@ func (u *unfinishedNodes) get() *builderNodeUnfinished {
 	if len(u.stack) < len(u.cache) {
 		return &u.cache[len(u.stack)]
 	}
-	i := len(u.stack) - len(u.cache)
-	if i == len(u.overflow) {
-		u.overflow = append(u.overflow, &builderNodeUnfinished{})
-	}
-	return u.overflow[i]
+	// full now allocate a new one
+	return &builderNodeUnfinished{}
 }
 
 // return builderNodeUnfinished, clearing it for reuse
 func (u *unfinishedNodes) put() {
 	if len(u.stack) >= len(u.cache) {
-		*u.overflow[len(u.stack)-len(u.cache)] = builderNodeUnfinished{}
 		return
+		// do nothing, not part of cache
 	}
 	u.cache[len(u.stack)] = builderNodeUnfinished{}
 }
