@@ -14,6 +14,68 @@ spec.loader.exec_module(host_module)
 
 
 class HostTests(unittest.TestCase):
+    def test_delayed_http_does_not_inflate_proc_rates(self):
+        clock = [100.0]
+        delays = iter((.99, .01))
+        def read(path, *args, **kwargs):
+            p = str(path)
+            if p == '/pid': return '123'
+            if p.endswith('/123/stat'): return '123 (worker) ' + ' '.join(['1'] * 30)
+            if p.endswith('/123/status'): return 'VmRSS: 1000 kB\nThreads: 10\n'
+            if p == '/proc/meminfo': return 'MemTotal: 100000 kB\nMemAvailable: 50000 kB\n'
+            if p == '/proc/stat': return 'cpu ' + ' '.join([str(int(clock[0]*100))]*8)
+            if p.endswith('/nvme0n1/stat'):
+                row = [0]*17; row[0] = int(clock[0]*100); row[6] = int(clock[0]*1000)
+                return ' '.join(map(str,row))
+            if p.endswith('_bytes'): return str(int(clock[0]*100000))
+            raise AssertionError(p)
+        def metrics(_):
+            clock[0] += next(delays)
+            return {'input_log_write_errors_total':0,'persister_pebble_write_failures_total':0,
+                    'input_log_unlogged_points_total':0,'persister_pebble_points_total':123}
+        with tempfile.TemporaryDirectory() as root:
+            h = self.host(root); h.previous=None; h.histogram=None; h.cores=96
+            h.args = types.SimpleNamespace(pid_file='/pid',devices='nvme0n1',nic='bond0',
+                metrics_url='metrics',admin_url='admin',store_dir='store',nic_mbps=1000,
+                nic_gbps=25,disk_write_mbps=1100,write_error_metric='persister_pebble_write_failures_total',apply=False)
+            admin={'storage':{'migration':{'phase':'shared'}},'cache':{'size':0}}
+            volume=types.SimpleNamespace(f_blocks=1000000,f_frsize=4096,f_bavail=900000)
+            with mock.patch.object(host_module.Path,'read_text',read), mock.patch.object(host_module.time,'time',side_effect=lambda:clock[0]), mock.patch.object(host_module,'metrics',side_effect=metrics), mock.patch.object(host_module,'fetch_json',return_value=admin), mock.patch.object(host_module,'read_p99',return_value=(0,0)), mock.patch.object(host_module.os,'statvfs',return_value=volume):
+                first=h.sample(); clock[0]=101.0; second=h.sample()
+            self.assertEqual(first['Time'],100.0)
+            self.assertEqual(second['Time'],101.0)
+            self.assertEqual(second['DiskWriteBytes'],512000)
+            self.assertEqual(second['NICIngressBytes'],100000)
+
+    def test_foreground_counter_contract_and_missing_data(self):
+        values = {'input_log_write_errors_total': 0.0,
+                  'persister_pebble_write_failures_total': 0.0,
+                  'input_log_unlogged_points_total': 0.0,
+                  'persister_pebble_points_total': 12345.0}
+        result = host_module.foreground_counters(values, 'persister_pebble_write_failures_total')
+        self.assertTrue(result['ForegroundMeasured'])
+        for field in ('WriteErrors', 'Unlogged', 'WritePoints'):
+            self.assertIs(type(result[field]), int)
+        self.assertEqual(result['WritePoints'], 12345)
+        del values['persister_pebble_points_total']
+        with self.assertRaises(ValueError):
+            host_module.foreground_counters(values, 'persister_pebble_write_failures_total')
+        offline = host_module.foreground_counters({}, 'unused', offline=True)
+        self.assertFalse(offline['ForegroundMeasured'])
+        self.assertEqual(offline['WritePoints'], 0)
+
+    def test_write_ceiling_defaults_to_metal_budget_and_accepts_override(self):
+        argv = ['serve', '--pid-file', '/run/store.pid', '--devices', 'nvme0n1',
+                '--nic', 'eth0', '--cluster', 'metrics', '--site', 'region-a',
+                '--store-dir', '/var/lib/carbon/store']
+        args = host_module.parse_args(argv)
+        self.assertEqual(args.disk_write_mbps, 770)
+        self.assertLessEqual(args.disk_write_mbps * .98, 1100 * .7)
+        self.assertEqual(host_module.parse_args(argv + ['--disk-write-mbps', '400']).disk_write_mbps, 400)
+        for value in ('0', '-1', 'nan', 'inf'):
+            with self.subTest(value=value), mock.patch('sys.stderr'), self.assertRaises(SystemExit):
+                host_module.parse_args(argv + ['--disk-write-mbps', value])
+
     def host(self, root, apply=False):
         host = host_module.Host.__new__(host_module.Host)
         host.args = types.SimpleNamespace(cluster='metrics', site='region-a', apply=apply, read_port=8080)

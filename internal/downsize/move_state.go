@@ -35,6 +35,16 @@ type journal struct {
 	file         *os.File
 	tasks        map[string]task
 	plan         string
+	admission    *admissionState
+	absent       map[string]absentSourceSkip
+}
+
+type journalRow struct {
+	Operation           string
+	Plan                string
+	Task                task
+	Admission           *admissionState   `json:",omitempty"`
+	SkippedAbsentSource *absentSourceSkip `json:",omitempty"`
 }
 
 func taskKey(t task) string { return fmt.Sprintf("%s:%d:%d", t.Stream, t.Start, t.End) }
@@ -59,7 +69,7 @@ func openJournal(path, plan string) (*journal, error) {
 		lock.Close()
 		return fail(errors.New("state file is already locked"))
 	}
-	j := &journal{file: f, lock: lock, path: path, plan: plan, tasks: map[string]task{}}
+	j := &journal{file: f, lock: lock, path: path, plan: plan, tasks: map[string]task{}, absent: map[string]absentSourceSkip{}}
 	reader := bufio.NewReader(f)
 	var offset int64
 	var operation string
@@ -76,11 +86,7 @@ func openJournal(path, plan string) (*journal, error) {
 		if err != nil {
 			return fail(err)
 		}
-		var row struct {
-			Operation string
-			Plan      string
-			Task      task
-		}
+		var row journalRow
 		if err := json.Unmarshal(line, &row); err != nil {
 			return fail(err)
 		}
@@ -97,6 +103,13 @@ func openJournal(path, plan string) (*journal, error) {
 		}
 		if row.Task.End > row.Task.Start {
 			j.tasks[taskKey(row.Task)] = row.Task
+		}
+		if row.Admission != nil {
+			j.admission = row.Admission
+		}
+		if row.SkippedAbsentSource != nil {
+			s := *row.SkippedAbsentSource
+			j.absent[s.key()] = s
 		}
 		offset += int64(len(line))
 	}
@@ -123,11 +136,15 @@ func openJournal(path, plan string) (*journal, error) {
 	return j, nil
 }
 func (j *journal) save(t task) error {
-	data, err := json.Marshal(struct {
-		Operation string
-		Plan      string
-		Task      task
-	}{j.operation, j.plan, t})
+	return j.appendRow(journalRow{Operation: j.operation, Plan: j.plan, Task: t})
+}
+
+func (j *journal) saveAdmission(state *admissionState) error {
+	return j.appendRow(journalRow{Operation: j.operation, Plan: j.plan, Admission: state})
+}
+
+func (j *journal) appendRow(row journalRow) error {
+	data, err := json.Marshal(row)
 	if err != nil {
 		return err
 	}
@@ -137,8 +154,11 @@ func (j *journal) save(t task) error {
 	if err = j.file.Sync(); err != nil {
 		return err
 	}
-	if t.End > t.Start {
-		j.tasks[taskKey(t)] = t
+	if row.Task.End > row.Task.Start {
+		j.tasks[taskKey(row.Task)] = row.Task
+	}
+	if row.Admission != nil {
+		j.admission = row.Admission
 	}
 	j.sinceCompact++
 	if j.sinceCompact >= 256 {
@@ -172,18 +192,20 @@ func (j *journal) compact() error {
 		return err
 	}
 	encoder := json.NewEncoder(temporary)
-	err = encoder.Encode(struct {
-		Operation string
-		Plan      string
-		Task      task
-	}{j.operation, j.plan, task{}})
+	err = encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, Admission: j.admission})
 	if err == nil {
 		for _, t := range j.tasks {
+			if err = encoder.Encode(journalRow{Operation: j.operation, Plan: j.plan, Task: t}); err != nil {
+				break
+			}
+		}
+	}
+	if err == nil {
+		for _, skip := range j.absent {
 			if err = encoder.Encode(struct {
-				Operation string
-				Plan      string
-				Task      task
-			}{j.operation, j.plan, t}); err != nil {
+				Operation, Plan     string
+				SkippedAbsentSource absentSourceSkip
+			}{j.operation, j.plan, skip}); err != nil {
 				break
 			}
 		}

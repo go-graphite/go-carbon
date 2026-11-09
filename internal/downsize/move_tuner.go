@@ -22,6 +22,8 @@ type hostSample struct {
 	RSS, MemoryBytes, AvailableBytes                                     uint64
 	Threads                                                              int
 	WriteErrors, Unlogged                                                uint64
+	WritePoints                                                          uint64
+	ForegroundMeasured                                                   bool
 	ReadP99MS                                                            float64
 	ReadsBlocked, Offline                                                bool
 }
@@ -34,6 +36,8 @@ type storageSample struct {
 	L0Sublevels                 int64
 	CompactionDebt, WriteStalls uint64
 	WriteStallActive            bool
+	PendingDeleteBatches        bool
+	StagedCopyVerification      bool
 }
 type capacity struct {
 	Streams, Batch int
@@ -44,23 +48,41 @@ type hostLimit struct {
 	readBaseline float64
 	deleteAt     time.Time
 	capacity
-	active              int
-	previous            *hostSample
-	storePrevious       *storageSample
-	healthy             int
-	ingressAt, egressAt time.Time
-	backgroundCPU       float64
+	active                    int
+	previous                  *hostSample
+	storePrevious             *storageSample
+	healthy                   int
+	ingressAt, egressAt       time.Time
+	backgroundCPU             float64
+	writeRate, foregroundRate float64
+	baseline                  *backlogBaseline
+	backlogSamples            []int64
+	backlogStart              float64
+	growth                    int
+	debtBaseline              *backlogBaseline
+	debtSamples               []int64
+	debtStart                 float64
+	debtGrowth, debtHigh      int
+	latencyBaseline           *backlogBaseline
+	latencySamples            []int64
+	latencyStart              float64
+	latencyHigh               int
+	hard                      string
+	foregroundReady           bool
 }
 type tuner struct {
-	mu            sync.Mutex
-	changed       chan struct{}
-	hosts         map[string]*hostLimit
-	maximum       capacity
-	mbps, readP99 float64
+	mu             sync.Mutex
+	changed        chan struct{}
+	hosts          map[string]*hostLimit
+	maximum        capacity
+	mbps, readP99  float64
+	backlog        backlogPolicy
+	collecting     bool
+	collectingDebt bool
 }
 
 func newTuner(hosts []string, maximum capacity, auto bool, mbps, p99 float64) *tuner {
-	t := &tuner{changed: make(chan struct{}), hosts: map[string]*hostLimit{}, maximum: maximum, mbps: mbps, readP99: p99}
+	t := &tuner{changed: make(chan struct{}), hosts: map[string]*hostLimit{}, maximum: maximum, mbps: mbps, readP99: p99, backlog: defaultBacklogPolicy()}
 	for _, h := range hosts {
 		c := maximum
 		if auto {
@@ -76,10 +98,44 @@ func (t *tuner) batch(source, target string) (int, int64) {
 	a, b := t.hosts[source], t.hosts[target]
 	return min(a.Batch, b.Batch), min(a.BatchBytes, b.BatchBytes)
 }
+
+// A single metric cannot be split. Wait for healthy observations to grow the
+// adaptive byte budget, without exceeding either server's configured ceiling.
+func (t *tuner) waitLargerBatch(ctx context.Context, source, target string, previous int64) (bool, error) {
+	for {
+		t.mu.Lock()
+		ceiling := t.maximum.BatchBytes
+		for _, host := range []string{source, target} {
+			if store := t.hosts[host].storePrevious; store != nil && store.MaxBodyBytes > 0 {
+				ceiling = min(ceiling, store.MaxBodyBytes)
+			}
+		}
+		budget := min(t.hosts[source].BatchBytes, t.hosts[target].BatchBytes)
+		changed := t.changed
+		t.mu.Unlock()
+		if previous >= ceiling {
+			return false, nil
+		}
+		if budget > previous {
+			return true, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-changed:
+		}
+	}
+}
 func (t *tuner) admit(ctx context.Context, source, target string) (func(), error) {
 	for {
 		t.mu.Lock()
 		a, b := t.hosts[source], t.hosts[target]
+		for _, h := range []*hostLimit{a, b} {
+			if h.hard != "" || h.baseline == nil || h.debtBaseline == nil || h.latencyBaseline == nil || t.collectingDebt {
+				t.mu.Unlock()
+				return nil, fmt.Errorf("copy admission unavailable: hard=%q; pre-copy backlog baseline required", h.hard)
+			}
+		}
 		now := time.Now()
 		delay := max(a.egressAt.Sub(now), b.ingressAt.Sub(now))
 		if a.active < a.Streams && b.active < b.Streams && delay <= 0 {
@@ -134,7 +190,7 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 func guard(sample hostSample, store storageSample, previous *hostSample, old *storageSample, p99 float64) (hard, soft string) {
-	if math.IsNaN(sample.Time) || time.Since(time.UnixMilli(int64(sample.Time*1000))) > 30*time.Second || sample.Time > float64(time.Now().Unix())+5 {
+	if math.IsNaN(sample.Time) || math.IsInf(sample.Time, 0) || time.Since(time.UnixMilli(int64(sample.Time*1000))) > 30*time.Second || sample.Time > float64(time.Now().Unix())+5 {
 		return "stale host telemetry", ""
 	}
 	if sample.StoragePhase != "shared" {
@@ -143,8 +199,8 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 	if sample.DiskBytes == 0 || sample.DiskFreeBytes < max(sample.DiskBytes/100, uint64(8<<30)) {
 		return "hard data-drive free-space reserve", ""
 	}
-	if sample.CachePoints > 500000000 {
-		return "hard ingest backlog", ""
+	if sample.CachePoints < 0 {
+		return "invalid negative cache points", ""
 	}
 	if sample.PhysicalCores < 1 || sample.MemoryBytes == 0 || sample.NICCapacityBytes <= 0 {
 		return "incomplete host telemetry", ""
@@ -153,11 +209,14 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 		return "hard memory/thread reserve", ""
 	}
 	if previous != nil {
-		if sample.Generation != previous.Generation || sample.WriteErrors < previous.WriteErrors || sample.Unlogged < previous.Unlogged {
+		if sample.Generation != previous.Generation || sample.WriteErrors < previous.WriteErrors || sample.Unlogged < previous.Unlogged || sample.WritePoints < previous.WritePoints || sample.ForegroundMeasured != previous.ForegroundMeasured {
 			return "host restart/counter reset", ""
 		}
 		if sample.WriteErrors > previous.WriteErrors || sample.Unlogged > previous.Unlogged {
 			return "write errors or unlogged input points", ""
+		}
+		if sample.Time <= previous.Time {
+			return "non-advancing host telemetry", ""
 		}
 	}
 	if old != nil && store.WriteStalls < old.WriteStalls {
@@ -171,7 +230,7 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 		return "hard storage pressure", ""
 	}
 	if store.WriteStallActive || (old != nil && store.WriteStalls > old.WriteStalls) {
-		return "", "write stall"
+		return "write stall", ""
 	}
 	if sample.Threads > 6000 && previous != nil && sample.Threads-previous.Threads > 64 {
 		return "", "OS thread growth"
@@ -179,31 +238,25 @@ func guard(sample hostSample, store storageSample, previous *hostSample, old *st
 	if sample.DiskFreeBytes < max(sample.DiskBytes/10, uint64(64<<30)) {
 		return "", "data-drive free-space reserve"
 	}
-	if previous != nil && sample.Time > previous.Time && (float64(sample.CachePoints-previous.CachePoints)/(sample.Time-previous.Time)) > 100000 && sample.CachePoints > previous.CachePoints*3/2+1000000 {
-		return "", "ingest backlog growth"
-	}
 	if sample.CPUCores > float64(sample.PhysicalCores)-cpuReserve(sample.PhysicalCores) {
 		return "", "CPU reserve"
-	}
-	if sample.DiskUtil > 90 && sample.DiskAwaitMS > 2 || sample.DiskAwaitMS > 10 {
-		return "", "data-drive latency"
 	}
 	if sample.DiskWriteCapacity > 0 && sample.DiskWriteBytes >= sample.DiskWriteCapacity*.98 {
 		return "", "disk write bandwidth"
 	}
-	if sample.NICIngressBytes >= min(1e9, sample.NICCapacityBytes)*.98 {
+	if sample.NICIngressBytes >= sample.NICCapacityBytes*.98 {
 		return "", "NIC ingress"
 	}
-	if sample.NICEgressBytes >= min(1e9, sample.NICCapacityBytes)*.98 {
+	if sample.NICEgressBytes >= sample.NICCapacityBytes*.98 {
 		return "", "NIC egress"
 	}
-	if sample.NICIngressBytes == 0 && sample.NICEgressBytes == 0 && sample.NICBytesPerSecond >= min(1e9, sample.NICCapacityBytes)*.98 {
+	if sample.NICIngressBytes == 0 && sample.NICEgressBytes == 0 && sample.NICBytesPerSecond >= sample.NICCapacityBytes*.98 {
 		return "", "NIC bandwidth"
 	}
 	if sample.RSS > sample.MemoryBytes*7/10 || sample.AvailableBytes < sample.MemoryBytes/10 {
 		return "", "memory reserve"
 	}
-	if store.L0Sublevels >= max(2, stopL0/2) || store.CompactionDebt > 8<<30 {
+	if store.L0Sublevels >= max(2, stopL0/2) {
 		return "", "compaction pressure"
 	}
 	if !sample.ReadsBlocked && p99 > 0 && (math.IsNaN(sample.ReadP99MS) || sample.ReadP99MS > p99) {
@@ -223,6 +276,53 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 		}
 	}
 	hard, soft := guard(sample, store, h.previous, h.storePrevious, readLimit)
+	debt := h.observeDebt(sample, store, t.backlog.GrowthSamples, t.collectingDebt || t.collecting)
+	latency := h.observeLatency(sample, t.collectingDebt || t.collecting)
+	if latency.Soft != "" && soft == "" {
+		soft = latency.Soft
+	}
+	if !t.collectingDebt && !t.collecting && h.debtBaseline == nil && hard == "" {
+		hard = "missing pre-copy compaction debt baseline; run --observe-only before copying"
+	}
+	if !t.collectingDebt && !t.collecting && h.latencyBaseline == nil && hard == "" {
+		hard = "missing pre-copy disk latency baseline; run --observe-only before copying"
+	}
+	if debt.Soft != "" && soft == "" {
+		soft = debt.Soft
+	}
+	if hard == "" && h.previous != nil && sample.ForegroundMeasured && sample.Time > h.previous.Time {
+		h.writeRate = float64(sample.WritePoints-h.previous.WritePoints) / (sample.Time - h.previous.Time)
+	}
+	if beyondBacklogSwing(sample.CachePoints, h.baseline) {
+		if h.previous != nil && beyondBacklogSwing(h.previous.CachePoints, h.baseline) && sample.CachePoints > h.previous.CachePoints {
+			h.growth++
+		} else {
+			h.growth = 1
+		}
+	} else {
+		h.growth = 0
+	}
+	backlogHard, backlogSoft, backlog := backlogGuard(sample, h.baseline, t.backlog, h.growth)
+	if t.collecting && h.baseline == nil {
+		// Collection runs the other guards but cannot admit any copy work.
+		// The memory-derived bound applies even before an envelope exists.
+		backlogHard = ""
+		if backlog.EstimatedBytes > backlog.MemoryLimit {
+			backlogHard = "hard estimated cache memory reserve"
+		}
+		if hard == "" && backlogHard == "" {
+			if len(h.backlogSamples) == 0 {
+				h.backlogStart = sample.Time
+			}
+			h.backlogSamples = append(h.backlogSamples, sample.CachePoints)
+		}
+	}
+	if hard == "" {
+		hard = backlogHard
+	}
+	if backlogSoft != "" {
+		soft = backlogSoft
+	}
 	if h.previous == nil {
 		h.backgroundCPU = sample.CPUCores
 	}
@@ -256,12 +356,19 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 		reason = binding
 	}
 	if hard != "" {
-		return fmt.Errorf("%s: %s", host, hard)
+		h.hard, h.Streams = hard, 0
+		event("tune", map[string]any{"host": host, "decision": "hard", "reason": hard, "binding_resource": hard, "limits": h.capacity, "backlog": backlog, "debt": debt, "latency": latency, "sample": sample, "storage": store})
+		close(t.changed)
+		t.changed = make(chan struct{})
+		return fmt.Errorf("%s: %s (baseline=%+v current=%d ratio=%.4f soft_ratio=%.4f hard_ratio=%.4f)", host, hard, h.baseline, sample.CachePoints, backlog.Ratio, t.backlog.SoftRatio, t.backlog.HardRatio)
 	}
 	if soft != "" {
 		reason = soft
 		h.healthy = 0
 		h.Streams = max(0, h.Streams/2)
+		if soft == "foreground write floor" || soft == "ingest backlog ratio" || soft == "ingest backlog growth" || soft == "write stall" {
+			h.Streams = 0
+		}
 		h.Batch = max(1, h.Batch/2)
 		h.BatchBytes = max(64<<10, h.BatchBytes/2)
 		h.DeleteRate = max(1, h.DeleteRate/2)
@@ -275,7 +382,11 @@ func (t *tuner) observe(host string, sample hostSample, store storageSample) err
 			h.DeleteRate = min(ceiling.DeleteRate, h.DeleteRate*2)
 		}
 	}
-	event("tune", map[string]any{"host": host, "limits": h.capacity, "reason": reason, "binding_resource": reason, "ceiling": ceiling, "background_cpu_cores": h.backgroundCPU, "sample": sample, "storage": store})
+	decision := "healthy"
+	if soft != "" {
+		decision = "soft"
+	}
+	event("tune", map[string]any{"host": host, "decision": decision, "limits": h.capacity, "reason": reason, "binding_resource": reason, "ceiling": ceiling, "background_cpu_cores": h.backgroundCPU, "backlog": backlog, "debt": debt, "latency": latency, "sample": sample, "storage": store})
 	close(t.changed)
 	t.changed = make(chan struct{})
 	return nil

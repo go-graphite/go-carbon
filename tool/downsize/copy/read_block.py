@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -56,14 +57,78 @@ def remove(rows):
         subprocess.run([binary, '-D', *rule], capture_output=True, timeout=10)
 
 
+def retained_block(cluster, ports, state_path):
+    """Keep explicit operator isolation until a separate release, with no lease."""
+    tag = 'store-copy-' + hashlib.sha256((cluster + str(ports[0])).encode()).hexdigest()[:12]
+    rows = rules(tag, ports)
+    state = Path(state_path)
+    # Exclusive creation prevents taking ownership of another operator's block.
+    record = dict(version=1, cluster=cluster, ports=ports, tag=tag, status='installing')
+    with state.open('x') as stream:
+        json.dump(record, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    installed = []
+    try:
+        for binary, *rule in rows:
+            result = subprocess.run([binary, '-C', *rule], capture_output=True, timeout=10)
+            if result.returncode != 1:
+                raise ValueError('rule already exists or firewall check failed; retained state kept')
+            subprocess.run([binary, '-I', rule[0], '1', *rule[1:]], check=True, timeout=10)
+            installed.append([binary, *rule])
+        for binary, *rule in rows:
+            subprocess.run([binary, '-C', *rule], check=True, timeout=10)
+        record['status'] = 'active'
+        temporary = state.with_suffix(state.suffix + '.next')
+        with temporary.open('x') as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, state)
+    except BaseException:
+        # A partial failure happens before any copy is admitted. Never delete a
+        # pre-existing rule. Keep the state so failures remain inspectable.
+        remove(installed)
+        raise
+    return dict(action='reads_blocked_retained', tag=tag, state=str(state), ports=ports,
+                release='python3 read_block.py --release-state ' + str(state))
+
+
+def release_retained(state_path):
+    state = Path(state_path)
+    record = json.loads(state.read_text())
+    if record.get('status') != 'active':
+        raise ValueError('incomplete retained installation; inspect ownership before manual cleanup')
+    ports = record['ports']
+    if record.get('version') != 1 or not isinstance(record.get('cluster'), str) or not 1 <= len(ports) <= 2 or any(type(p) is not int or not 1 <= p <= 65535 for p in ports):
+        raise ValueError('invalid retained block state')
+    tag = 'store-copy-' + hashlib.sha256((record['cluster'] + str(ports[0])).encode()).hexdigest()[:12]
+    if record.get('tag') != tag:
+        raise ValueError('retained block tag mismatch')
+    for binary, *rule in rules(tag, ports):
+        result = subprocess.run([binary, '-C', *rule], capture_output=True, timeout=10)
+        if result.returncode == 0:
+            subprocess.run([binary, '-D', *rule], check=True, timeout=10)
+        elif result.returncode != 1:
+            raise ValueError('firewall check failed; retained state kept')
+        result = subprocess.run([binary, '-C', *rule], capture_output=True, timeout=10)
+        if result.returncode != 1:
+            raise ValueError('retained rule still present or check failed')
+    state.unlink()
+    return dict(action='reads_restored', tag=tag)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--source', required=True)
-    parser.add_argument('--peer', required=True)
-    parser.add_argument('--source-site', required=True)
-    parser.add_argument('--peer-site', required=True)
-    parser.add_argument('--cluster', required=True)
-    parser.add_argument('--probes', required=True, help='JSON array of representative metric names for this cluster, including cold history')
+    parser.add_argument('--source')
+    parser.add_argument('--peer')
+    parser.add_argument('--source-site')
+    parser.add_argument('--peer-site')
+    parser.add_argument('--cluster')
+    parser.add_argument('--probes', help='JSON array of representative metric names for this cluster, including cold history')
+    parser.add_argument('--retain-block', action='store_true', help='explicit operator hold: no expiry or exit cleanup; requires --apply and --state')
+    parser.add_argument('--state', help='exclusive retained-block state file')
+    parser.add_argument('--release-state', help='release a retained block ONLY after copied names are removed or current')
     parser.add_argument('--port', type=int, default=8080)
     parser.add_argument('--grpc-port', type=int)
     parser.add_argument('--seconds', type=int, default=3600)
@@ -72,6 +137,16 @@ def main():
     parser.add_argument('--until', type=int, help='exclusive end of parity window, unix seconds; default now-120 for cross-site validation')
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
+    if args.release_state:
+        if args.retain_block or args.apply or args.parity_only:
+            parser.error('--release-state is a standalone action')
+        print(json.dumps(release_retained(args.release_state)), flush=True)
+        return
+    for field in ('source', 'peer', 'source_site', 'peer_site', 'cluster', 'probes'):
+        if not getattr(args, field):
+            parser.error('--' + field.replace('_', '-') + ' is required')
+    if args.retain_block and (not args.apply or not args.state or args.parity_only or args.ready_file):
+        parser.error('--retain-block requires --apply --state and cannot use --parity-only or --ready-file')
     if not 1 <= args.seconds <= 21600 or not 1 <= args.port <= 65535 or args.grpc_port is not None and not 1 <= args.grpc_port <= 65535:
         parser.error('invalid timeout or port')
     probes = json.loads(Path(args.probes).read_text())
@@ -80,6 +155,11 @@ def main():
     points = check_peer(args.source, args.peer, probes, args.source_site, args.peer_site, args.parity_only, args.until)
     if args.parity_only:
         print(json.dumps(dict(action='parity', passed=True, verified_points=points, source=args.source, target=args.peer, cluster=args.cluster)))
+        return
+    if args.retain_block:
+        result = retained_block(args.cluster, [args.port] + ([args.grpc_port] if args.grpc_port else []), args.state)
+        result['verified_points'] = points
+        print(json.dumps(result), flush=True)
         return
     tag = 'store-copy-' + hashlib.sha256((args.cluster + str(args.port)).encode()).hexdigest()[:12]
     rows = rules(tag, [args.port] + ([args.grpc_port] if args.grpc_port else []))

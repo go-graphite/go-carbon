@@ -25,11 +25,13 @@ import (
 type options struct {
 	plan, state, barrier, healthMap, tokenEnv, controlTokenEnv, replica, replicaSite string
 	deleteMode                                                                       string
-	apply, delete, auto, localLab, blockReads                                        bool
+	apply, delete, auto, localLab, blockReads, reconcile                             bool
 	streams, batch, deleteRate                                                       int
 	maxBytes                                                                         int64
 	tick                                                                             time.Duration
+	observeOnly                                                                      time.Duration
 	mbps, p99                                                                        float64
+	backlog                                                                          backlogPolicy
 }
 type apiError struct {
 	Status  int
@@ -49,6 +51,8 @@ type mover struct {
 	stateMu  sync.Mutex
 }
 
+var errCopyFence = errors.New("baseline staged; resume the same --reconcile run with a fresh writer-drain barrier")
+
 var outputMu sync.Mutex
 
 func event(kind string, fields map[string]any) {
@@ -60,7 +64,7 @@ func event(kind string, fields map[string]any) {
 }
 func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
-	var o options
+	o := options{backlog: defaultBacklogPolicy()}
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
 	flags.StringVar(&o.state, "state", "move-state.jsonl", "durable checkpoint journal")
 	flags.StringVar(&o.barrier, "barrier", "", "fresh cutover/drain/reconciliation proof; required for --delete")
@@ -69,6 +73,7 @@ func MoveMain(args []string) error {
 	flags.StringVar(&o.controlTokenEnv, "control-token-env", "MOVE_CONTROL_TOKEN", "environment variable holding host helper secret")
 	flags.BoolVar(&o.apply, "apply", false, "execute transfers (default prints all planned batches)")
 	flags.StringVar(&o.deleteMode, "delete-mode", "auto", "retire stages versions then deletes the whole retired node; batch deletes immediately")
+	flags.BoolVar(&o.reconcile, "reconcile", false, "stage versions, gate on writer drain, reconcile and verify complete coverage while retaining sources")
 	flags.BoolVar(&o.delete, "delete", false, "delete retired source copies after verification; requires barrier")
 	flags.BoolVar(&o.auto, "auto", true, "adapt parallelism, batch size and deletion pacing to host headroom")
 	flags.BoolVar(&o.localLab, "local-lab", false, "loopback-only synthetic host telemetry for local tests")
@@ -80,8 +85,14 @@ func MoveMain(args []string) error {
 	flags.IntVar(&o.deleteRate, "delete-rate", 65536, "maximum deleted metrics/s per source")
 	flags.Int64Var(&o.maxBytes, "batch-bytes", 64<<20, "maximum estimated bytes per transfer; server max_body_bytes still applies")
 	flags.DurationVar(&o.tick, "tick", 10*time.Second, "host guard and tuner tick")
-	flags.Float64Var(&o.mbps, "max-mbps", 1000, "transfer MB/s ceiling in each direction per host; zero disables pacing")
+	flags.DurationVar(&o.observeOnly, "observe-only", 0, "run admission guards for this duration without starting transfer workers; also learn missing debt baselines with copying off")
+	flags.Float64Var(&o.mbps, "max-mbps", 0, "optional transfer MB/s ceiling per host direction; zero uses physical host guards without a fixed rate cap")
 	flags.Float64Var(&o.p99, "read-p99-ms", 100, "read p99 guard while reads are enabled")
+	flags.DurationVar(&o.backlog.Window, "backlog-baseline-window", o.backlog.Window, "pre-copy backlog observation window (minimum 3m); persisted with run")
+	flags.Float64Var(&o.backlog.SoftRatio, "backlog-soft-ratio", o.backlog.SoftRatio, "pause admission above this multiple of pre-copy maximum backlog")
+	flags.Float64Var(&o.backlog.HardRatio, "backlog-hard-ratio", o.backlog.HardRatio, "abort above this multiple of pre-copy maximum backlog")
+	flags.IntVar(&o.backlog.GrowthSamples, "backlog-growth-samples", o.backlog.GrowthSamples, "pause on consecutive rising samples beyond baseline maximum plus observed swing")
+	flags.Float64Var(&o.backlog.BytesPerPoint, "cache-bytes-per-point", o.backlog.BytesPerPoint, "estimated cache bytes/point for 90% host-memory safety ceiling (minimum 16)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -94,6 +105,15 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if o.observeOnly < 0 || o.observeOnly > 0 && (!o.apply || o.delete || o.reconcile || o.blockReads) {
+		return errors.New("--observe-only requires --apply and copy-only flags without --block-reads")
+	}
+	if o.backlog == (backlogPolicy{}) {
+		o.backlog = defaultBacklogPolicy()
+	}
+	if err := o.backlog.validate(); err != nil {
+		return err
+	}
 	if o.deleteMode == "" {
 		o.deleteMode = "auto"
 	}
@@ -106,9 +126,15 @@ func run(ctx context.Context, o options) error {
 	if o.streams < 1 || o.streams > 64 || o.batch < 1 || o.batch > 10000 || o.maxBytes < 65536 || o.maxBytes > 160<<20 || o.deleteRate < 1 || o.tick < time.Second || o.tick > 20*time.Second || o.mbps < 0 || math.IsNaN(o.mbps) || math.IsInf(o.mbps, 0) || math.IsNaN(o.p99) || math.IsInf(o.p99, 0) || o.p99 < 0 {
 		return errors.New("invalid resource limit")
 	}
+	if o.reconcile && (o.delete || o.deleteMode == "batch") {
+		return errors.New("--reconcile retains sources; do not combine it with --delete or batch deletion")
+	}
 	p, err := readPlan(o.plan)
 	if err != nil {
 		return err
+	}
+	if o.reconcile && (len(p.Whole) > 0 || p.Spec.AllowUnowned || p.Spec.Old.Replicas > 1 || p.Spec.New.Replicas > 1) {
+		return errors.New("--reconcile requires a single-copy retired-source range plan")
 	}
 	hosts := map[string]bool{}
 	for _, r := range p.Streams {
@@ -133,7 +159,30 @@ func run(ctx context.Context, o options) error {
 	if o.blockReads && (o.replica == "" || o.replicaSite == "" || o.replicaSite == p.Spec.Site) {
 		return errors.New("read isolation requires a replica in a different site")
 	}
-	event("plan", map[string]any{"plan_id": p.PlanID, "streams": len(p.Streams), "apply": o.apply, "delete": o.delete, "limits": capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, "block_reads": o.blockReads})
+	if o.reconcile {
+		planned := make(map[string]bool)
+		for _, r := range p.Streams {
+			planned[r.Source] = true
+			if !m.stagedDelete(r.sourceURL) {
+				return errors.New("--reconcile requires physically retired sources")
+			}
+			for _, member := range p.Spec.New.Nodes {
+				if member.ID == r.Source {
+					return errors.New("--reconcile cannot use a retained physical source")
+				}
+			}
+		}
+		for _, old := range p.Spec.Old.Nodes {
+			retained := false
+			for _, member := range p.Spec.New.Nodes {
+				retained = retained || member.ID == old.ID
+			}
+			if !retained && !planned[old.ID] {
+				return errors.New("--reconcile requires planned routes for every retired source; verify empty sources separately")
+			}
+		}
+	}
+	event("plan", map[string]any{"plan_id": p.PlanID, "streams": len(p.Streams), "apply": o.apply, "delete": o.delete, "limits": capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, "block_reads": o.blockReads, "reconcile": o.reconcile})
 	if !o.apply {
 		for _, job := range p.Whole {
 			event("would_replace", map[string]any{"source": job.SourceURL, "target": job.TargetURL, "worker": job.Placement.Worker, "directory": job.Placement.Directory, "then": "checkpoint; baseline; fenced input-log seal; verified prepare; replay/readiness; dependent metric ranges"})
@@ -141,7 +190,7 @@ func run(ctx context.Context, o options) error {
 		for _, r := range p.Streams {
 			event("would_transfer", map[string]any{"stream": r.Path, "sha256": r.SHA256, "source": r.sourceURL, "target": r.targetURL, "metrics": r.Metrics, "estimated_bytes": r.EstimatedBytes, "then": m.previewActions(r.sourceURL)})
 		}
-		return nil
+		return errors.New("dry run has no pre-copy backlog baseline; admission is unverified; --apply observes and persists a baseline before copying")
 	}
 	if o.localLab {
 		for h := range hosts {
@@ -188,24 +237,45 @@ func run(ctx context.Context, o options) error {
 		return errors.New("use the lab read workload toggle to benchmark isolation")
 	}
 	m.tuner = newTuner(origins, capacity{o.streams, o.batch, o.maxBytes, o.deleteRate}, o.auto, o.mbps, o.p99)
-	j, err := openJournal(o.state, p.PlanID+fmt.Sprintf(":delete=%t:mode=%s", o.delete, o.deleteMode))
+	m.tuner.backlog = o.backlog
+	journalID := p.PlanID + fmt.Sprintf(":delete=%t:mode=%s", o.delete, o.deleteMode)
+	if o.reconcile {
+		journalID += ":reconcile=true"
+	}
+	j, err := openJournal(o.state, journalID)
 	if err != nil {
 		return err
 	}
 	defer j.close()
 	m.journal = j
 	event("operation", map[string]any{"operation": j.operation, "state": o.state})
-	if err := m.poll(ctx, origins); err != nil {
+	if err := m.prepareAdmission(ctx, origins); err != nil {
 		return err
 	}
-	if !o.localLab {
-		if err := sleepContext(ctx, o.tick); err != nil {
-			return err
+	if o.observeOnly > 0 {
+		event("observation_started", map[string]any{"duration": o.observeOnly.String(), "transfers": false})
+		deadline := time.Now().Add(o.observeOnly)
+		for time.Now().Before(deadline) {
+			if err := sleepContext(ctx, min(o.tick, time.Until(deadline))); err != nil {
+				return err
+			}
+			if err := m.poll(ctx, origins); err != nil {
+				return err
+			}
 		}
-		if err := m.poll(ctx, origins); err != nil {
-			return err
+		event("observation_complete", map[string]any{"transfers": false})
+		return nil
+	}
+	if o.reconcile {
+		m.tuner.mu.Lock()
+		for _, r := range p.Streams {
+			store := m.tuner.hosts[r.sourceURL].storePrevious
+			if store == nil || !store.PendingDeleteBatches || !store.StagedCopyVerification {
+				m.tuner.mu.Unlock()
+				return errors.New("--reconcile requires updated source batch/coverage capabilities")
+			}
 		}
-		m.tuner.captureReadBaselines()
+		m.tuner.mu.Unlock()
 	}
 	if o.blockReads {
 		if err := m.readLeases(ctx, origins, false); err != nil {
@@ -302,7 +372,7 @@ func run(ctx context.Context, o options) error {
 			}
 		}()
 	}
-	produceErr := m.produce(ctx, tasks)
+	produceErr := m.produce(ctx, tasks, "")
 	close(tasks)
 	workers.Wait()
 	select {
@@ -313,7 +383,13 @@ func run(ctx context.Context, o options) error {
 	if produceErr != nil {
 		return produceErr
 	}
-	if o.delete && o.deleteMode != "batch" {
+	if o.reconcile {
+		if err := m.checkBarrier(); err != nil {
+			event("needs_writer_fence", map[string]any{"state": o.state, "action": "switch writers, drain old input, reconcile catalogs and resume with --barrier"})
+			return fmt.Errorf("%w: %w", errCopyFence, err)
+		}
+	}
+	if o.reconcile || o.delete && o.deleteMode != "batch" {
 		if err := m.retireSources(ctx); err != nil {
 			return err
 		}
@@ -456,7 +532,7 @@ func (m *mover) checkBarrier() error {
 	}
 	return nil
 }
-func (m *mover) produce(ctx context.Context, tasks chan<- task) error {
+func (m *mover) produce(ctx context.Context, tasks chan<- task, onlySource string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	routes := make(chan route)
@@ -468,7 +544,7 @@ func (m *mover) produce(ctx context.Context, tasks chan<- task) error {
 		go func() {
 			defer workers.Done()
 			for r := range routes {
-				if err := m.produceRoute(ctx, r, tasks); err != nil {
+				if err := m.produceRoute(ctx, r, tasks, onlySource != ""); err != nil {
 					once.Do(func() { first = err; cancel() })
 					return
 				}
@@ -476,6 +552,9 @@ func (m *mover) produce(ctx context.Context, tasks chan<- task) error {
 		}()
 	}
 	for _, r := range m.planData.Streams {
+		if onlySource != "" && r.sourceURL != onlySource {
+			continue
+		}
 		select {
 		case routes <- r:
 		case <-ctx.Done():
@@ -489,7 +568,7 @@ func (m *mover) produce(ctx context.Context, tasks chan<- task) error {
 	}
 	return ctx.Err()
 }
-func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task) error {
+func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task, reconcile bool) error {
 	send := func(t task) error {
 		select {
 		case tasks <- t:
@@ -498,9 +577,12 @@ func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task) er
 			return ctx.Err()
 		}
 	}
-	m.stateMu.Lock()
-	completed := m.journal.ranges(r.SHA256)
-	m.stateMu.Unlock()
+	var completed []task
+	if !reconcile {
+		m.stateMu.Lock()
+		completed = m.journal.ranges(r.SHA256)
+		m.stateMu.Unlock()
+	}
 	for _, old := range completed {
 		if old.Phase != "done" {
 			if old.Source != r.sourceURL || old.Target != r.targetURL {
@@ -560,6 +642,20 @@ func (m *mover) produceRoute(ctx context.Context, r route, tasks chan<- task) er
 	return nil
 }
 func (m *mover) execute(ctx context.Context, t task) error {
+	return m.executeBatch(ctx, t, t)
+}
+func (m *mover) executeBatch(ctx context.Context, t, batch task) error {
+	names, err := m.sourceNames(t)
+	if err != nil {
+		return err
+	}
+	if len(names) == 0 && t.Phase != "verified" {
+		t.Phase = "done"
+		t.Names = nil
+		m.stateMu.Lock()
+		defer m.stateMu.Unlock()
+		return m.journal.save(t)
+	}
 	release, err := m.tuner.admit(ctx, t.Source, t.Target)
 	if err != nil {
 		return err
@@ -574,9 +670,29 @@ func (m *mover) execute(ctx context.Context, t task) error {
 			Source   string
 			Names    []string
 			MaxBytes int64
-		}{t.Source, t.Names, byteBudget}, &proofs)
+		}{t.Source, names, byteBudget}, &proofs)
 		if err != nil {
 			var api *apiError
+			if errors.As(err, &api) && api.Status == 404 {
+				if skipErr := m.skipAbsentSource(ctx, batch, names); skipErr != nil {
+					return skipErr
+				}
+				release()
+				release = func() {}
+				return m.executeBatch(ctx, t, batch)
+			}
+			if errors.As(err, &api) && api.Status == 413 && len(t.Names) == 1 {
+				release()
+				release = func() {}
+				larger, waitErr := m.tuner.waitLargerBatch(ctx, t.Source, t.Target, byteBudget)
+				if waitErr != nil {
+					return waitErr
+				}
+				if larger {
+					event("retry_single_metric", map[string]any{"metric": t.Names[0], "previous_byte_budget": byteBudget})
+					return m.executeBatch(ctx, t, batch)
+				}
+			}
 			if errors.As(err, &api) && api.Status == 413 && len(t.Names) > 1 {
 				release()
 				release = func() {}
@@ -586,18 +702,18 @@ func (m *mover) execute(ctx context.Context, t task) error {
 				left.Names = t.Names[:middle]
 				right.Start = left.End
 				right.Names = t.Names[middle:]
-				if err := m.execute(ctx, left); err != nil {
+				if err := m.executeBatch(ctx, left, batch); err != nil {
 					return err
 				}
-				return m.execute(ctx, right)
+				return m.executeBatch(ctx, right, batch)
 			}
 			return err
 		}
-		if len(proofs) != len(t.Names) {
+		if len(proofs) != len(names) {
 			return errors.New("import proof count mismatch")
 		}
 		for i, p := range proofs {
-			if p.Source.Name != t.Names[i] || p.Target.Name != t.Names[i] || p.Digest == "" {
+			if p.Source.Name != names[i] || p.Target.Name != names[i] || p.Digest == "" {
 				return errors.New("import proof name/digest mismatch")
 			}
 		}
@@ -621,34 +737,47 @@ func (m *mover) execute(ctx context.Context, t task) error {
 			return err
 		}
 	}
-	if m.delete {
-		if err := m.checkBarrier(); err != nil {
-			return err
+	if m.delete || m.reconcile {
+		if m.delete {
+			if err := m.checkBarrier(); err != nil {
+				return err
+			}
 		}
 		versions := make([]chunkstore.TransferVersion, len(t.Proofs))
 		for i, p := range t.Proofs {
 			versions[i] = p.Source
 		}
+		staged := m.reconcile || m.stagedDelete(t.Source)
 		step := 128
-		if m.stagedDelete(t.Source) {
+		if staged {
 			step = len(versions)
 		}
 		for start := 0; start < len(versions); start += step {
 			end := min(start+step, len(versions))
 			kind := "delete"
-			if m.stagedDelete(t.Source) {
+			if staged {
 				kind = "stage_delete"
+				if m.reconcile {
+					kind = "stage_copy"
+				}
 			}
 			event(kind, map[string]any{"source": t.Source, "stream": t.Stream, "start": t.Start + int64(start), "end": t.Start + int64(end), "conditional_versions": len(versions[start:end])})
 			path := "/v1/transfer/delete"
-			if m.stagedDelete(t.Source) {
+			if staged {
 				path = "/v1/transfer/stage-delete"
+				if m.reconcile {
+					path = "/v1/transfer/stage-copy"
+				}
 			}
-			if err := m.tuner.paceDelete(ctx, t.Source, end-start); err != nil {
-				return err
+			// Version markers are bounded copy bookkeeping, not deletion. A
+			// name/s delete cap here silently limits sparse copy throughput.
+			if !staged {
+				if err := m.tuner.paceDelete(ctx, t.Source, end-start); err != nil {
+					return err
+				}
 			}
 			var body any = versions[start:end]
-			if m.stagedDelete(t.Source) {
+			if staged {
 				body = struct {
 					Operation string
 					Versions  []chunkstore.TransferVersion
@@ -656,7 +785,7 @@ func (m *mover) execute(ctx context.Context, t task) error {
 			}
 			if _, err := m.request(ctx, t.Source, path, body, &map[string]int{}); err != nil {
 				var api *apiError
-				if m.stagedDelete(t.Source) && errors.As(err, &api) && api.Status == 409 {
+				if staged && errors.As(err, &api) && api.Status == 409 {
 					// Nothing has been deleted in retire mode: refresh the final delta
 					// from the still-present source rather than replaying a stale receipt.
 					if t.Retries >= 3 {
@@ -693,6 +822,9 @@ func (m *mover) poll(ctx context.Context, hosts []string) error {
 			return err
 		}
 	}
+	if !m.tuner.collecting && !m.tuner.collectingDebt {
+		return m.saveAdmission()
+	}
 	return nil
 }
 func (m *mover) pollHost(ctx context.Context, h string) error {
@@ -716,10 +848,13 @@ func (m *mover) pollHost(ctx context.Context, h string) error {
 			if store.Hostname != hostname {
 				return errors.New("local-lab backend is not on this machine")
 			}
-			sample = hostSample{Time: float64(time.Now().Unix()), Generation: "local-lab", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, ReadSamples: 100, PhysicalCores: 16, MemoryBytes: 16 << 30, AvailableBytes: 8 << 30, NICCapacityBytes: 1e10}
+			sample = hostSample{Time: float64(time.Now().UnixNano()) / 1e9, Generation: "local-lab", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, ReadSamples: 100, PhysicalCores: 16, MemoryBytes: 16 << 30, AvailableBytes: 8 << 30, NICCapacityBytes: 1e10}
 		} else {
 			if err := m.helper(ctx, h, "/sample", nil, &sample); err != nil {
 				return fmt.Errorf("%w: %s: %w", errGuards, h, err)
+			}
+			if !sample.Offline && !sample.ForegroundMeasured {
+				return fmt.Errorf("%w: %s: helper must report committed foreground points", errGuards, h)
 			}
 		}
 		if sample.Offline && !m.wholeOffline(h) {
@@ -808,52 +943,164 @@ func (m *mover) retireSources(ctx context.Context) error {
 			sources[r.sourceURL] = true
 		}
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var workers sync.WaitGroup
+	var once sync.Once
+	var first error
 	for source := range sources {
-		for attempt := 0; ; attempt++ {
-			if err := m.checkBarrier(); err != nil {
-				return err
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := m.retireSource(ctx, source); err != nil {
+				once.Do(func() { first = err; cancel() })
 			}
-			var pending []string
-			if _, err := m.request(ctx, source, "/v1/transfer/pending-delete", struct{ Operation string }{m.journal.operation}, &pending); err != nil {
-				return err
-			}
-			if len(pending) == 0 {
-				break
-			}
-			if attempt >= 64 {
-				return errors.New("source continues changing at retirement barrier")
-			}
-			needed := map[string]bool{}
-			for _, name := range pending {
-				needed[name] = true
-			}
-			for _, r := range m.planData.Streams {
-				if r.sourceURL != source {
-					continue
-				}
-				if err := m.planData.walk(r, func(ordinal int64, row planRow) error {
-					if !needed[row.Metric] {
-						return nil
-					}
-					delete(needed, row.Metric)
-					return m.execute(ctx, task{Stream: r.SHA256, Start: ordinal, End: ordinal + 1, Source: r.sourceURL, Target: r.targetURL, Names: []string{row.Metric}})
-				}); err != nil {
-					return err
-				}
-			}
-			if len(needed) > 0 {
-				return fmt.Errorf("source has %d unplanned metrics; refusing retirement", len(needed))
-			}
-		}
-		event("retire_source", map[string]any{"source": source, "action": "atomically recheck every catalog version, then range-delete the verified whole store"})
-		if _, err := m.request(ctx, source, "/v1/transfer/retire", struct {
-			Confirm   bool
-			Operation string
-		}{true, m.journal.operation}, &map[string]int64{}); err != nil {
+		}()
+	}
+	workers.Wait()
+	return first
+}
+
+func (m *mover) retireSource(ctx context.Context, source string) error {
+	m.tuner.mu.Lock()
+	previous := m.tuner.hosts[source].storePrevious
+	batched := previous != nil && previous.PendingDeleteBatches
+	m.tuner.mu.Unlock()
+	if batched {
+		if err := m.reconcileSource(ctx, source); err != nil {
 			return err
 		}
 	}
+	for attempt := 0; !batched; attempt++ {
+		if err := m.checkBarrier(); err != nil {
+			return err
+		}
+		var pending []string
+		if _, err := m.request(ctx, source, "/v1/transfer/pending-delete", struct{ Operation string }{m.journal.operation}, &pending); err != nil {
+			return err
+		}
+		if len(pending) == 0 {
+			break
+		}
+		if attempt >= 64 {
+			return errors.New("source continues changing at retirement barrier")
+		}
+		needed := map[string]bool{}
+		for _, name := range pending {
+			needed[name] = true
+		}
+		for _, r := range m.planData.Streams {
+			if r.sourceURL != source {
+				continue
+			}
+			if err := m.planData.walk(r, func(ordinal int64, row planRow) error {
+				if !needed[row.Metric] {
+					return nil
+				}
+				delete(needed, row.Metric)
+				return m.execute(ctx, task{Stream: r.SHA256, Start: ordinal, End: ordinal + 1, Source: r.sourceURL, Target: r.targetURL, Names: []string{row.Metric}})
+			}); err != nil {
+				return err
+			}
+		}
+		if len(needed) > 0 {
+			return fmt.Errorf("source has %d unplanned metrics; refusing retirement", len(needed))
+		}
+	}
+	if m.reconcile {
+		if err := m.checkBarrier(); err != nil {
+			return err
+		}
+		event("verify_source", map[string]any{"source": source, "action": "recheck full catalog/version coverage; retain source history"})
+		_, err := m.request(ctx, source, "/v1/transfer/check-staged", struct{ Operation string }{m.journal.operation}, &map[string]int64{})
+		return err
+	}
+	event("retire_source", map[string]any{"source": source, "action": "atomically recheck every catalog version, then range-delete the verified whole store"})
+	if _, err := m.request(ctx, source, "/v1/transfer/retire", struct {
+		Confirm   bool
+		Operation string
+	}{true, m.journal.operation}, &map[string]int64{}); err != nil {
+		return err
+	}
 	return nil
+}
+
+// Follow the immutable plan once, checking current source revisions in bounded
+// batches. Only changed names are recopied; the final retirement transaction
+// rejects new/unplanned names or a source that was not actually fenced.
+func (m *mover) reconcileSource(ctx context.Context, source string) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tasks := make(chan task, 2*m.streams)
+	var workers sync.WaitGroup
+	var first error
+	var once sync.Once
+	fail := func(err error) {
+		if err != nil {
+			once.Do(func() { first = err; cancel() })
+		}
+	}
+	for range min(64, max(1, 2*m.streams)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for batch := range tasks {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := m.reconcileBatch(ctx, batch); err != nil {
+					fail(err)
+					return
+				}
+			}
+		}()
+	}
+	fail(m.produce(ctx, tasks, source))
+	close(tasks)
+	workers.Wait()
+	return first
+}
+
+func (m *mover) reconcileBatch(ctx context.Context, batch task) error {
+	if err := m.checkBarrier(); err != nil {
+		return err
+	}
+	release, err := m.tuner.admit(ctx, batch.Source, batch.Target)
+	if err != nil {
+		return err
+	}
+	var pending []string
+	_, err = m.request(ctx, batch.Source, "/v1/transfer/pending-delete", struct {
+		Operation string
+		Names     []string
+	}{m.journal.operation, batch.Names}, &pending)
+	release()
+	if err != nil {
+		return err
+	}
+	needed := make(map[string]bool, len(pending))
+	for _, name := range pending {
+		needed[name] = true
+	}
+	var changed []string
+	for _, name := range batch.Names {
+		if needed[name] {
+			changed = append(changed, name)
+			delete(needed, name)
+		}
+	}
+	if len(needed) != 0 {
+		return errors.New("source returned an unrequested delta name")
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	event("delta", map[string]any{"source": batch.Source, "target": batch.Target, "checked": len(batch.Names), "changed": len(changed)})
+	batch.Names = changed
+	// Filtered deltas need not have contiguous ordinals. Keep their proofs
+	// outside baseline ranges: resume must never skip plan rows on this basis.
+	batch.Stream += ":delta"
+	return m.execute(ctx, batch)
 }
 
 func (m *mover) stagedDelete(source string) bool {
@@ -876,6 +1123,9 @@ func (m *mover) stagedDelete(source string) bool {
 
 func (m *mover) previewActions(source string) string {
 	actions := "copy raw history; target-wins merge; verify; checkpoint"
+	if m.reconcile {
+		actions += "; stage versions; require writer fence; reconcile and verify full coverage; retain source history"
+	}
 	if m.delete {
 		if m.stagedDelete(source) {
 			actions += "; stage exported versions; recheck full catalog; retire entire verified store"

@@ -12,6 +12,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,11 +242,83 @@ func TestDryRunNeverContactsHosts(t *testing.T) {
 	root := fixturePlan(t, "http://127.0.0.1:1", "http://127.0.0.1:2", []string{"dry"})
 	o := testOptions(root)
 	o.apply = false
-	if err := run(context.Background(), o); err != nil {
-		t.Fatal(err)
+	if err := run(context.Background(), o); err == nil || !strings.Contains(err.Error(), "no pre-copy backlog baseline") {
+		t.Fatal("dry run did not report unverified admission", err)
 	}
 	if _, err := os.Stat(o.state); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("dry run created journal")
+	}
+}
+
+func TestForegroundWriteFloorPausesAndRecovers(t *testing.T) {
+	tune := newTestTuner([]string{"a", "b"}, capacity{Streams: 16, Batch: 8192, BatchBytes: 64 << 20, DeleteRate: 10000}, false, 0, 100)
+	tune.collecting = true
+	tune.hosts["a"].baseline = nil
+	sample := hostSample{Time: float64(time.Now().Unix()) - 2, Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 3e9, ForegroundMeasured: true, WritePoints: 100000, CachePoints: 100000}
+	observe := func() {
+		t.Helper()
+		if err := tune.observe("a", sample, storageSample{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	observe()
+	sample.Time++
+	sample.WritePoints += 100000
+	observe()
+	if err := tune.finishBacklogObservation(true); err != nil {
+		t.Fatal(err)
+	}
+	tune.captureReadBaselines()
+	// Offered traffic can fall without pressure; a rate drop alone is safe.
+	sample.Time++
+	sample.WritePoints += 50000
+	observe()
+	if tune.hosts["a"].Streams == 0 {
+		t.Fatal("lower offered load paused the copy")
+	}
+	sample.CachePoints += 40000
+	sample.Time += .1
+	sample.WritePoints += 5000
+	observe()
+	if tune.hosts["a"].Streams != 0 {
+		t.Fatal("foreground regression did not stop admission immediately")
+	}
+	paused, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if _, err := tune.admit(paused, "a", "b"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("paused host admitted another transfer", err)
+	}
+	// Recovery requires two healthy observations; never lower the baseline to
+	// the impaired write rate. Isolation only bypasses the read guard.
+	sample.ReadsBlocked = true
+	sample.CachePoints = 100000
+	sample.Time += .1
+	sample.WritePoints += 10000
+	observe()
+	if tune.hosts["a"].Streams != 0 {
+		t.Fatal("copy resumed before two healthy observations")
+	}
+	sample.Time += .1
+	sample.WritePoints += 10000
+	observe()
+	if tune.hosts["a"].Streams != 1 {
+		t.Fatal("copy did not recover conservatively")
+	}
+	release, err := tune.admit(context.Background(), "a", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	sample.Time += .1
+	sample.WritePoints += 10000
+	sample.CachePoints = 140000
+	observe()
+	if tune.hosts["a"].Streams != 0 {
+		t.Fatal("backlog did not pause copy at a healthy committed rate")
+	}
+	sample.WritePoints--
+	if err := tune.observe("a", sample, storageSample{}); err == nil {
+		t.Fatal("committed foreground counter reset accepted")
 	}
 }
 func TestJournalLockTruncationAndCompaction(t *testing.T) {
@@ -281,9 +355,10 @@ func TestJournalLockTruncationAndCompaction(t *testing.T) {
 	}
 }
 func TestTunerRampBackoffAndHardStop(t *testing.T) {
-	tune := newTuner([]string{"a", "b"}, capacity{8, 2048, 64 << 20, 65536}, true, 0, 100)
+	tune := newTestTuner([]string{"a", "b"}, capacity{8, 2048, 64 << 20, 65536}, true, 0, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100}
 	for range 4 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
@@ -293,6 +368,7 @@ func TestTunerRampBackoffAndHardStop(t *testing.T) {
 	}
 	sample.CPUCores = 90
 	previous := tune.hosts["a"].Streams
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
@@ -306,6 +382,7 @@ func TestTunerRampBackoffAndHardStop(t *testing.T) {
 		t.Fatal("static high thread count throttles", hard, soft)
 	}
 	sample.Unlogged = 1
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err == nil {
 		t.Fatal("unlogged points did not hard stop")
 	}
@@ -349,6 +426,174 @@ func TestMoverRetireAndRefreshLateSourceDelta(t *testing.T) {
 	}
 	if err := run(ctx, o); err != nil {
 		t.Fatal("retired resume", err)
+	}
+}
+
+func TestMoverBatchesSparseDeltasAndResumesLostRetirement(t *testing.T) {
+	ctx := context.Background()
+	source, target := localStore(t), localStore(t)
+	var names []string
+	for i := range 300 {
+		name := fmt.Sprintf("delta.%04d", i)
+		names = append(names, name)
+		addPoints(t, source, name, 2)
+	}
+	sourceHandler := localService(t, source)
+	var mutation sync.Once
+	var changed, lost atomic.Bool
+	src := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/transfer/pending-delete" {
+			mutation.Do(func() {
+				for i, name := range names {
+					if i%3 == 0 {
+						if err := source.UpdateMany(ctx, name, []store.Point{{Timestamp: testMetricNow, Value: 777}}); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+				changed.Store(true)
+			})
+		}
+		if r.URL.Path == "/v1/transfer/retire" && !lost.Swap(true) {
+			recorder := httptest.NewRecorder()
+			sourceHandler.ServeHTTP(recorder, r)
+			if recorder.Code != http.StatusOK {
+				t.Error("retirement", recorder.Body.String())
+			}
+			http.Error(w, "lost retirement response", 500)
+			return
+		}
+		sourceHandler.ServeHTTP(w, r)
+	}))
+	defer src.Close()
+	targetHandler := localService(t, target)
+	var deltaPulls, deltaNames atomic.Int64
+	dst := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/transfer/pull" && changed.Load() {
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			var request struct{ Names []string }
+			if err := json.Unmarshal(data, &request); err != nil {
+				t.Error(err)
+				return
+			}
+			deltaPulls.Add(1)
+			deltaNames.Add(int64(len(request.Names)))
+			r.Body = io.NopCloser(bytes.NewReader(data))
+		}
+		targetHandler.ServeHTTP(w, r)
+	}))
+	defer dst.Close()
+	o := testOptions(fixturePlan(t, src.URL, dst.URL, names))
+	o.deleteMode, o.batch = "retire", 128
+	if err := run(ctx, o); err == nil {
+		t.Fatal("lost retirement response did not interrupt")
+	}
+	if deltaNames.Load() != 100 || deltaPulls.Load() > 3 {
+		t.Fatal("delta was not filtered and batched", deltaNames.Load(), deltaPulls.Load())
+	}
+	if err := run(ctx, o); err != nil {
+		t.Fatal("retirement resume", err)
+	}
+	for i, name := range names {
+		snapshot, err := target.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 2
+		if i%3 == 0 {
+			want = 3
+		}
+		if len(snapshot.Archives[0].Points) != want || want == 3 && snapshot.Archives[0].Points[2].Value != 777 {
+			t.Fatal("delta/history missing", name)
+		}
+	}
+}
+
+func TestCopyOnlyReconciliationFencesAndRetainsHistory(t *testing.T) {
+	ctx := context.Background()
+	source, target := localStore(t), localStore(t)
+	names := []string{"copy.a", "copy.b", "copy.c"}
+	for _, name := range names {
+		addPoints(t, source, name, 2)
+	}
+	src := httptest.NewServer(localService(t, source))
+	defer src.Close()
+	dst := httptest.NewServer(localService(t, target))
+	defer dst.Close()
+	o := testOptions(fixturePlan(t, src.URL, dst.URL, names))
+	o.delete, o.reconcile = false, true
+	o.deleteMode = "auto"
+	barrier := o.barrier
+	o.barrier = ""
+	if err := run(ctx, o); !errors.Is(err, errCopyFence) {
+		t.Fatal("copy did not stop at writer fence", err)
+	}
+	// A very small delete rate must not pace non-destructive version staging.
+	o.deleteRate = 1
+	if err := source.UpdateMany(ctx, names[0], []store.Point{{Timestamp: testMetricNow, Value: 777}}); err != nil {
+		t.Fatal(err)
+	}
+	o.barrier = barrier
+	if err := run(ctx, o); err != nil {
+		t.Fatal("copy-only reconciliation", err)
+	}
+	for _, name := range names {
+		want, err := source.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal("source history removed", err)
+		}
+		got, err := target.Snapshot(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EqualSnapshots(want, got); err != nil {
+			t.Fatal("final copy differs", err)
+		}
+	}
+	if err := run(ctx, o); err != nil {
+		t.Fatal("completed copy-only resume", err)
+	}
+	addPoints(t, source, "copy.unplanned", 9)
+	if err := run(ctx, o); err == nil {
+		t.Fatal("unplanned name accepted by final coverage check")
+	}
+	if page, err := source.List(ctx, ""); err != nil || len(page) != 4 {
+		t.Fatal("source changed on failed final check", page, err)
+	}
+}
+
+func TestCopyOnlyReconciliationRejectsRetainedSourcesBeforeContact(t *testing.T) {
+	for _, endpoint := range []string{"http://127.0.0.1:1", "http://127.0.0.1:3"} {
+		root := fixturePlan(t, "http://127.0.0.1:1", "http://127.0.0.1:2", []string{"copy.only"})
+		path := filepath.Join(root, "manifest.json")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var p manifest
+		if err := json.Unmarshal(data, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.Spec.New.Nodes = append(p.Spec.New.Nodes, member{ID: "old", Endpoint: endpoint})
+		data, err = json.Marshal(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		o := testOptions(root)
+		o.delete, o.reconcile, o.deleteMode = false, true, "auto"
+		if err := run(context.Background(), o); err == nil {
+			t.Fatal("retained source not rejected", err)
+		}
+		if _, err := os.Stat(o.state); !os.IsNotExist(err) {
+			t.Fatal("contacted execution path before source validation", err)
+		}
 	}
 }
 
@@ -405,13 +650,15 @@ func TestMoverSplitsOversizedBatches(t *testing.T) {
 }
 
 func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
-	tune := newTuner([]string{"a", "b"}, capacity{8, 8192, 64 << 20, 65536}, true, 0, 100)
+	tune := newTestTuner([]string{"a", "b"}, capacity{8, 8192, 64 << 20, 65536}, true, 0, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, ReadSamples: 100, ReadP99MS: 2}
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
 	tune.captureReadBaselines()
 	sample.ReadP99MS = 50
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +672,7 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 	}
 	sample.ReadP99MS = 2
 	for range 2 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
@@ -435,9 +683,10 @@ func TestTunerReadBaselineAndParkedAdmission(t *testing.T) {
 }
 
 func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
-	tune := newTuner([]string{"a", "b", "c"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
-	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 24, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 3.125e9, DiskWriteCapacity: 2e9}
+	tune := newTestTuner([]string{"a", "b", "c"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
+	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 24, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9, DiskWriteCapacity: 2e9}
 	for range 30 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{MaxTransfers: 64}); err != nil {
 			t.Fatal(err)
 		}
@@ -452,6 +701,7 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 		func(s *hostSample) { s.CPUCores = 90 },
 	} {
 		current := sample
+		current.Time += .01
 		change(&current)
 		if hard, soft := guard(current, storageSample{}, &sample, nil, 100); hard != "" || soft == "" {
 			t.Fatal("binding resource missed", hard, soft)
@@ -461,6 +711,28 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 	sample.NICIngressBytes, sample.NICEgressBytes = .6e9, .6e9
 	if hard, soft := guard(sample, storageSample{}, nil, nil, 100); hard != "" || soft != "" {
 		t.Fatal("duplex traffic was summed", hard, soft)
+	}
+	// An explicit helper --nic-mbps override must set the guard, including the
+	// legacy single-direction sample. The helper still defaults to 1000 MB/s.
+	sample.NICCapacityBytes = 2e9
+	sample.NICIngressBytes, sample.NICEgressBytes = 1.4e9, .1e9
+	if hard, soft := guard(sample, storageSample{}, nil, nil, 100); hard != "" || soft != "" {
+		t.Fatal("configured NIC headroom ignored", hard, soft)
+	}
+	for _, direction := range []string{"ingress", "egress", "legacy"} {
+		current := sample
+		current.NICIngressBytes, current.NICEgressBytes = 0, 0
+		switch direction {
+		case "ingress":
+			current.NICIngressBytes = 1.97e9
+		case "egress":
+			current.NICEgressBytes = 1.97e9
+		default:
+			current.NICBytesPerSecond = 1.97e9
+		}
+		if hard, soft := guard(current, storageSample{}, nil, nil, 100); hard != "" || soft == "" {
+			t.Fatal("configured NIC limit missed", direction, hard, soft)
+		}
 	}
 	started := time.Now()
 	tune.charge("a", "b", 1e9, started)
@@ -474,9 +746,10 @@ func TestTunerBindingResourcesAndDuplexPacing(t *testing.T) {
 }
 
 func TestTunerReadIsolationReleasesCPUCeiling(t *testing.T) {
-	tune := newTuner([]string{"a"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
+	tune := newTestTuner([]string{"a"}, capacity{64, 8192, 64 << 20, 65536}, true, 1000, 100)
 	sample := hostSample{Time: float64(time.Now().Unix()), Generation: "one", StoragePhase: "shared", DiskFreeBytes: 500 << 30, DiskBytes: 1 << 40, PhysicalCores: 96, CPUCores: 75, MemoryBytes: 128 << 30, AvailableBytes: 64 << 30, NICCapacityBytes: 1e9}
 	for range 30 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}
@@ -485,11 +758,13 @@ func TestTunerReadIsolationReleasesCPUCeiling(t *testing.T) {
 		t.Fatal("foreground CPU not reserved", tune.hosts["a"].Streams)
 	}
 	sample.CPUCores, sample.ReadsBlocked = 10, true
+	sample.Time += .01
 	if err := tune.observe("a", sample, storageSample{}); err != nil {
 		t.Fatal(err)
 	}
 	tune.captureReadBaselines()
 	for range 30 {
+		sample.Time += .01
 		if err := tune.observe("a", sample, storageSample{}); err != nil {
 			t.Fatal(err)
 		}

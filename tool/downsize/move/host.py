@@ -41,6 +41,14 @@ def total(values, name, required=True):
     return sum(found)
 
 
+def foreground_counters(values, write_error_metric, offline=False):
+    # Go's uint64 decoder requires integer JSON tokens, including for zero.
+    return {'WriteErrors': 0 if offline else int(total(values, 'input_log_write_errors_total') + total(values, write_error_metric)),
+            'Unlogged': 0 if offline else int(total(values, 'input_log_unlogged_points_total')),
+            'WritePoints': 0 if offline else int(total(values, 'persister_pebble_points_total')),
+            'ForegroundMeasured': not offline}
+
+
 def read_p99(previous, current):
     if not previous:
         return 0, 0
@@ -136,6 +144,10 @@ class Host:
             cpu = [int(v) for v in Path('/proc/stat').read_text().splitlines()[0].split()[1:9]]
             disk = {d: [int(v) for v in Path('/sys/class/block/%s/stat' % d).read_text().split()] for d in self.args.devices.split(',')}
             nic = tuple(int(Path('/sys/class/net/%s/statistics/%s_bytes' % (self.args.nic, direction)).read_text()) for direction in ('rx', 'tx'))
+            # Timestamp the proc/sys counter snapshot, before HTTP collection.
+            # A slow previous HTTP request followed by a fast one must not
+            # divide a full counter interval by the tiny response-time gap.
+            now = time.time()
             offline = getattr(self.args, 'offline', False)
             values = {} if offline else metrics(self.args.metrics_url)
             admin = {} if offline else fetch_json(self.args.admin_url + '/admin/info?scopes=storage,cache')
@@ -144,7 +156,6 @@ class Host:
             volume = os.statvfs(self.args.store_dir)
             p99, samples = read_p99(self.histogram, values)
             self.histogram = values
-            now = time.time()
             sample = {'Time': now, 'Generation': generation, 'StoragePhase': phase, 'CachePoints': cached,
                       'DiskBytes': volume.f_blocks*volume.f_frsize, 'DiskFreeBytes': volume.f_bavail*volume.f_frsize, 'PhysicalCores': self.cores,
                       'CPUCores': 0, 'DiskUtil': 0, 'DiskAwaitMS': 0, 'NICBytesPerSecond': 0,
@@ -152,9 +163,8 @@ class Host:
                       'NICIngressBytes': 0, 'NICEgressBytes': 0, 'DiskWriteBytes': 0, 'DiskWriteCapacity': self.args.disk_write_mbps * 1e6,
                       'RSS': int(status['VmRSS'].split()[0])*1024, 'Threads': int(status['Threads']),
                       'MemoryBytes': mem['MemTotal'], 'AvailableBytes': mem['MemAvailable'],
-                      'WriteErrors': 0 if offline else total(values, 'input_log_write_errors_total') + total(values, self.args.write_error_metric),
-                      'Unlogged': 0 if offline else total(values, 'input_log_unlogged_points_total'),
-                      'ReadP99MS': p99, 'ReadSamples': samples,
+                      **foreground_counters(values, self.args.write_error_metric, offline),
+                      'ReadP99MS': p99, 'ReadSamples': int(samples),
                       'Offline': offline, 'ReadsBlocked': offline or bool(self.lease and self.lease['expires_at'] > now and self.args.apply)}
             if self.previous:
                 old_time, old_cpu, old_disk, old_nic = self.previous
@@ -264,7 +274,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     server = sub.add_parser('serve')
@@ -275,7 +285,8 @@ def main():
     server.add_argument('--nic', required=True)
     server.add_argument('--nic-gbps', type=float, default=25)
     server.add_argument('--nic-mbps', type=float, default=1000, help='usable MB/s in each direction')
-    server.add_argument('--disk-write-mbps', type=float, default=2000)
+    server.add_argument('--disk-write-mbps', type=float, default=770,
+                        help='total foreground + copy write ceiling in decimal MB/s (default: 70%% of 1100 MB/s; governor backs off at 98%%)')
     server.add_argument('--cluster', required=True)
     server.add_argument('--site', required=True)
     server.add_argument('--store-dir', required=True)
@@ -289,9 +300,15 @@ def main():
     restore = sub.add_parser('unblock')
     restore.add_argument('--read-port', type=int, required=True)
     restore.add_argument('--tag', required=True)
-    args = parser.parse_args()
-    if args.command == 'serve' and (args.nic_gbps <= 0 or args.nic_mbps <= 0 or args.disk_write_mbps <= 0):
-        parser.error('host bandwidth capacities must be positive')
+    args = parser.parse_args(argv)
+    if args.command == 'serve' and any(not math.isfinite(v) or v <= 0 for v in
+                                      (args.nic_gbps, args.nic_mbps, args.disk_write_mbps)):
+        parser.error('host bandwidth capacities must be finite and positive')
+    return args
+
+
+def main():
+    args = parse_args()
     if args.command == 'unblock':
         unblock(args.read_port, args.tag); return
     address, port = args.bind.rsplit(':', 1)
