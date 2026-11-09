@@ -71,7 +71,7 @@ func explicitTransferIntegrity500(message string) bool {
 		return false
 	}
 	switch body {
-	case "transfer checksum mismatch", "staged transfer key verification failed", "staged transfer value verification failed", "unexpected staged transfer key":
+	case "metric name too long", "transfer checksum mismatch", "staged transfer key verification failed", "staged transfer value verification failed", "unexpected staged transfer key":
 		return true
 	}
 	for _, shape := range [][2]string{{"source point verification ", " failed"}, {"staged point verification ", " failed"}, {"verify ", " receipt differs"}} {
