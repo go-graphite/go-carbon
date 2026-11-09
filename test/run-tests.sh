@@ -58,6 +58,13 @@ while IFS= read -r name; do
                 done
             done
             ;;
+        TestContinuationTailReadReuseParity)
+            # Give each aggregation family its own package timeout; retain all
+            # x-files-factor values and future numeric method names.
+            for prefix in '[0-1]' '2' '3' '4' '5' '[^0-5]'; do
+                patterns+=("^${name}$/^${prefix}")
+            done
+            ;;
         TestContinuationStoreMatchesCWhisperAfterImport)
             # Complementary prefixes include new configurations automatically.
             for prefix in '[A-Ga-g0-2_]' '[H-Nh-n3-5]' '[O-Uo-u6-8]' '[^A-Ua-u0-8_]'; do
