@@ -710,7 +710,7 @@ func (c *Cache) add(p *points.Points, restored, recovered bool) {
 	c.addWithRestore(p, restored, recovered, false, nil, nil)
 }
 
-func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *StreamSeries, source *RecoverySource) <-chan struct{} {
+func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate bool, series *streamPointHint, source *RecoverySource) <-chan struct{} {
 	s := c.settings.Load().(*cacheSettings)
 
 	if s.xlog != nil {
@@ -771,7 +771,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	// Even a rejected point can refresh a stale hint for an existing item,
 	// just as the old post-insertion lookup did.
 	if series != nil && exists && hash == series.hash && p.Metric == series.name {
-		shard.bindStreamSeries(series, values, slot)
+		shard.bindStreamHint(series.hint, values, slot)
 	}
 	var throttleState any
 	liveAdmission := !recovered && (!restored || !immediate)
@@ -855,7 +855,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 	c.addedLocked(shard, s, values, count, exists, restored && !spreadRestore)
 	if series != nil && !exists && hash == series.hash && p.Metric == series.name {
-		shard.bindStreamSeries(series, values, slot)
+		shard.bindStreamHint(series.hint, values, slot)
 	}
 	return nil
 }

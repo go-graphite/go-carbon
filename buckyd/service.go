@@ -45,6 +45,13 @@ type Config struct {
 	MaxBodyBytes     int64  `toml:"max_body_bytes"`
 	MaxTransfers     int    `toml:"max_transfers"`
 	CopyMinFreeBytes int64  `toml:"copy-min-free-bytes"`
+	// MaxMaintenanceRequests bounds concurrent maintenance requests (archive
+	// anchor census and repair), admitted independently of MaxTransfers.
+	// Zero selects 2.
+	MaxMaintenanceRequests int `toml:"max-maintenance-requests"`
+	// MaintenanceWorkers is the number of names one maintenance request
+	// prepares concurrently; replies keep request order. Zero selects 8.
+	MaintenanceWorkers int `toml:"maintenance-workers"`
 	// TransferMaxCompactionDebt pauses transfer imports, pulls and deletes (429)
 	// while Pebble's compaction-debt estimate exceeds it. Zero selects 8 GiB;
 	// negative disables the debt check (write stalls and L0 still pause).
@@ -152,7 +159,7 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, transfers: make(chan struct{}, config.MaxTransfers), maintenance: make(chan struct{}, 2), nodes: nodes}
+	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, transfers: make(chan struct{}, config.MaxTransfers), maintenance: make(chan struct{}, config.MaxMaintenanceRequests), nodes: nodes}
 	s.authPending.Store(waiting)
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
 	return s, nil
@@ -164,6 +171,12 @@ func validateConfig(config Config) error {
 	}
 	if config.CopyMinFreeBytes < 0 {
 		return errors.New("copy-min-free-bytes must not be negative")
+	}
+	if config.MaxMaintenanceRequests < 0 || config.MaxMaintenanceRequests > maxMaintenanceRequests {
+		return fmt.Errorf("max-maintenance-requests must be 0..%d (0 selects %d)", maxMaintenanceRequests, defaultMaintenanceRequests)
+	}
+	if config.MaintenanceWorkers < 0 || config.MaintenanceWorkers > maxAnchorNames {
+		return fmt.Errorf("maintenance-workers must be 0..%d (0 selects %d)", maxAnchorNames, defaultMaintenanceWorkers)
 	}
 	if config.Backend != "" && config.Backend != "shared" {
 		return fmt.Errorf("unsupported buckyd backend %q", config.Backend)
@@ -210,6 +223,12 @@ func normalizeConfig(config *Config) {
 	}
 	if config.MaxTransfers <= 0 {
 		config.MaxTransfers = min(64, max(1, runtime.NumCPU()-max(2, runtime.NumCPU()/12)))
+	}
+	if config.MaxMaintenanceRequests == 0 {
+		config.MaxMaintenanceRequests = defaultMaintenanceRequests
+	}
+	if config.MaintenanceWorkers == 0 {
+		config.MaintenanceWorkers = defaultMaintenanceWorkers
 	}
 }
 
