@@ -37,7 +37,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	defer zapwriter.Test()()
 	path, cfg := incrementalAppFixture(t)
-	short, err := os.MkdirTemp("", "hs-")
+	short, err := os.MkdirTemp(os.TempDir(), "h-")
 	if err != nil {
 		t.Fatal(err)
 	}
