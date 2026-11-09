@@ -252,7 +252,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		if e = s.nativeStep("before-publish"); e != nil {
 			return receipt, e
 		}
-		if e = s.publishNative(ctx, request, nil, nil, nil, &receipt, nil); e != nil {
+		if e = s.publishNative(ctx, nil, nil, nil, &receipt, nil); e != nil {
 			return receipt, e
 		}
 		s.recordNativeReceipt(receipt)
@@ -409,7 +409,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 	if err := s.nativeStep("before-publish"); err != nil {
 		return receipt, err
 	}
-	if err := s.publishNative(ctx, request, metas, positions, summaries, &receipt, tables); err != nil {
+	if err := s.publishNative(ctx, metas, positions, summaries, &receipt, tables); err != nil {
 		return receipt, err
 	}
 	published = true
@@ -506,7 +506,7 @@ func (s *Store) cleanupNativeIntent(identity string) error {
 	return nil
 }
 
-func (s *Store) publishNative(ctx context.Context, request NativeRange, metas []Metadata, positions []int, summaries []SidecarSummary, receipt *NativeReceipt, tables *nativeTables) error {
+func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions []int, summaries []SidecarSummary, receipt *NativeReceipt, tables *nativeTables) error {
 	waitBegan := time.Now()
 	s.mu.Lock()
 	lockedBegan := time.Now()
