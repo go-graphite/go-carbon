@@ -21,15 +21,18 @@ func TestReloadConfigUpdatesQuotasWithoutRestart(t *testing.T) {
 		return
 	}
 	defer zapwriter.Test()()
-	app, quota := newQuotaReloadApp(t)
+	app, quota := newQuotaReloadApp(t, func(cfg *Config) {
+		// Quota usage is sampled independently of realtime name publication.
+		cfg.Carbonserver.QuotaUsageReportFrequency = &Duration{25 * time.Millisecond}
+	})
 	defer app.Stop()
 	server := app.Carbonserver
 	cache := app.Cache
 	cache.Add(points.OnePoint("namespace.existing", 1, time.Now().Unix()-2))
 	deadline := time.Now().Add(5 * time.Second)
-	for !server.MetricExists("namespace.existing") {
+	for !server.MetricExists("namespace.existing") || !server.ShouldThrottleMetric(points.OnePoint("namespace.new", 1, 1), false) {
 		if time.Now().After(deadline) {
-			t.Fatal("metric did not appear")
+			t.Fatal("initial metric and quota usage did not become ready")
 		}
 		time.Sleep(time.Millisecond)
 	}
