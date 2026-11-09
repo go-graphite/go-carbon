@@ -133,8 +133,11 @@ func (s *Store) publishArchiveAnchors(ctx context.Context, m Metadata, epoch uin
 		if mutating {
 			s.finishStateMutation(m.Name)
 		}
+		// Capture while still owning the stripe: a scheduling delay after
+		// Unlock is not lock hold time and must not trip the client's bound.
+		held := time.Since(lockedAt).Nanoseconds()
 		unlock()
-		result.LockNanos = max(result.LockNanos, time.Since(lockedAt).Nanoseconds())
+		result.LockNanos = max(result.LockNanos, held)
 	}
 	// Equality proves that no mutation (including delete/recreate, policy,
 	// generation or revision-neutral maintenance) started or ended since the
