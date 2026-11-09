@@ -1049,7 +1049,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 		if app.PromRegisterer != nil {
 			app.restartBudget.InitPrometheus(app.PromRegisterer)
 		}
-		app.storeMaintenance = newStoreMaintenanceGate(app.metadataPrewarmGate, app.restartBudget.Active, storeMaintenanceMaxWait)
+		app.storeMaintenance = newStoreMaintenanceGate(app.metadataPrewarmGate, app.restartBudget.Active, storeMaintenanceWarnAfter)
 		budget := app.restartBudget
 		app.restartBudgetStop = func() {
 			cancel()

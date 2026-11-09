@@ -24,7 +24,7 @@ func TestStoreMaintenanceWaitsForWarmAndPacing(t *testing.T) {
 		warmed := make(chan struct{})
 		var paced atomic.Bool
 		paced.Store(true)
-		g := newStoreMaintenanceGate(warmed, paced.Load, storeMaintenanceMaxWait)
+		g := newStoreMaintenanceGate(warmed, paced.Load, storeMaintenanceWarnAfter)
 		done := make(chan error, 1)
 		go func() { done <- g.wait(context.Background(), "test") }()
 		synctest.Wait()
@@ -57,10 +57,13 @@ func assertMaintenancePending(t *testing.T, done <-chan error) {
 	}
 }
 
-func TestStoreMaintenanceBoundAndReload(t *testing.T) {
+func TestStoreMaintenanceDeadlineDoesNotBypassRecovery(t *testing.T) {
 	defer zapwriter.Test()()
 	synctest.Test(t, func(t *testing.T) {
-		g := newStoreMaintenanceGate(make(chan struct{}), func() bool { return true }, 5*time.Second)
+		warmed := make(chan struct{})
+		var paced atomic.Bool
+		paced.Store(true)
+		g := newStoreMaintenanceGate(warmed, paced.Load, 5*time.Second)
 		ctx, cancel := context.WithCancel(context.Background())
 		first := make(chan error, 1)
 		go func() { first <- g.wait(ctx, "old-policy") }()
@@ -70,20 +73,39 @@ func TestStoreMaintenanceBoundAndReload(t *testing.T) {
 		if err := <-first; !errors.Is(err, context.Canceled) {
 			t.Fatal(err)
 		}
-		// Replacement policy uses the same store gate and original deadline.
+		// Replacement policy uses the same store gate and original warning time.
 		next := make(chan error, 1)
 		go func() { next <- g.wait(context.Background(), "new-policy") }()
 		synctest.Wait()
 		time.Sleep(time.Second)
 		assertMaintenancePending(t, next)
 		time.Sleep(time.Second)
+		synctest.Wait()
+		assertMaintenancePending(t, next)
+		// A cache-sized recovery can exceed any elapsed-time estimate. Keep
+		// optional work paused even after that warning, including on reload.
+		time.Sleep(time.Hour)
+		assertMaintenancePending(t, next)
+		lateCtx, lateCancel := context.WithCancel(context.Background())
+		late := make(chan error, 1)
+		go func() { late <- g.wait(lateCtx, "cancel-after-warning") }()
+		synctest.Wait()
+		lateCancel()
+		if err := <-late; !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+		close(warmed)
+		time.Sleep(time.Second)
+		assertMaintenancePending(t, next)
+		paced.Store(false)
+		time.Sleep(time.Second)
 		if err := <-next; err != nil {
 			t.Fatal(err)
 		}
-		t.Log("maintenance released at original 5s bound across policy reload")
+		t.Log("maintenance released only after recovery, beyond the original warning time")
 	})
 	logs := zapwriter.TestString()
-	if !strings.Contains(logs, "WARN") || !strings.Contains(logs, "store maintenance restart wait expired") {
+	if !strings.Contains(logs, "WARN") || strings.Count(logs, "store maintenance still waiting for restart recovery") != 1 {
 		t.Fatal(logs)
 	}
 }
@@ -248,7 +270,7 @@ func TestExpirationWaitsForMaintenanceAndRestore(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				db := &maintenanceExpirationStore{scanned: make(chan struct{}, 1)}
 				restored, warmed := make(chan struct{}), make(chan struct{})
-				gate := newStoreMaintenanceGate(warmed, func() bool { return false }, storeMaintenanceMaxWait)
+				gate := newStoreMaintenanceGate(warmed, func() bool { return false }, storeMaintenanceWarnAfter)
 				r := &metricExpirer{db: db, now: time.Now, expiration: time.Hour,
 					interval: time.Hour, stats: &expirationStats{}, restored: restored,
 					maintenanceWait: gate.wait,
@@ -258,13 +280,20 @@ func TestExpirationWaitsForMaintenanceAndRestore(t *testing.T) {
 				synctest.Wait()
 				if release == "timeout" {
 					// The maintenance safety bound cannot bypass restoration.
-					time.Sleep(storeMaintenanceMaxWait)
+					time.Sleep(storeMaintenanceWarnAfter)
 					select {
 					case <-db.scanned:
 						t.Fatal("maintenance timeout bypassed restoration")
 					default:
 					}
 					close(restored)
+					synctest.Wait()
+					select {
+					case <-db.scanned:
+						t.Fatal("elapsed warning bypassed checkpoint warming")
+					default:
+					}
+					close(warmed)
 				} else {
 					close(restored)
 					synctest.Wait()

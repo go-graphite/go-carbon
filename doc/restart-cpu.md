@@ -79,12 +79,12 @@ filesystem syscall. No writeout gate is added.
 Deferrable store maintenance waits for both the warming attempt (including any
 fallback scan) to finish and restart pacing to end. This covers history relayout,
 cold-pack, expiration sweeps, compact-once, catalog membership construction and
-invalid-name purging. The wait is bounded to 35 minutes from store startup,
-including store opening and restoration. A timeout starts maintenance with a
-warning even if warming or backlog drain is stuck. The checkpoint's mandatory
-share still applies if the two overlap. Each worker logs when waiting and when
-starting, including its release reason; shutdown cancels pending waiters.
-SIGHUP keeps the original gate and deadline when changing maintenance policy.
+invalid-name purging. After35minutes from store startup, including store opening
+and restoration, the gate warns once and keeps waiting. Elapsed time cannot
+release optional maintenance while warming or backlog drain remains active;
+otherwise a cache-sized recovery could lose its CPU and I/O to that work.
+Each worker logs when waiting and when starting; shutdown cancels pending
+waiters. SIGHUP keeps the original gate and warning time when changing policy.
 Expiration additionally waits for pending-point restoration before scanning.
 Mandatory WAL/flush work, ordinary Pebble compaction, foreground operations and
 explicit offline maintenance calls keep their existing behavior. With metadata

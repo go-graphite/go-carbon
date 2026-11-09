@@ -9,24 +9,25 @@ import (
 	"go.uber.org/zap"
 )
 
-// Restart admission normally lasts at least 30 minutes and may extend while a
-// backlog drains. Maintenance cannot be held forever by broken warming/drain.
-const storeMaintenanceMaxWait = 35 * time.Minute
+// Recovery can outlast any cache-independent estimate. Warn after this time;
+// optional maintenance must still wait for warming and pacing to finish.
+const storeMaintenanceWarnAfter = 35 * time.Minute
 
 // One gate belongs to the store lifetime, including SIGHUP policy changes.
 // Waiters own their cancellation; no goroutine or timer survives shutdown.
 type storeMaintenanceGate struct {
-	warmed <-chan struct{}
-	paced  func() bool
-	until  time.Time
-	limit  time.Duration
-	done   chan struct{}
-	once   sync.Once
-	reason string // published by closing done
+	warmed    <-chan struct{}
+	paced     func() bool
+	warnAt    time.Time
+	warnAfter time.Duration
+	done      chan struct{}
+	once      sync.Once
+	warned    sync.Once
+	reason    string // published by closing done
 }
 
-func newStoreMaintenanceGate(warmed <-chan struct{}, paced func() bool, limit time.Duration) *storeMaintenanceGate {
-	return &storeMaintenanceGate{warmed: warmed, paced: paced, until: time.Now().Add(limit), limit: limit, done: make(chan struct{})}
+func newStoreMaintenanceGate(warmed <-chan struct{}, paced func() bool, warnAfter time.Duration) *storeMaintenanceGate {
+	return &storeMaintenanceGate{warmed: warmed, paced: paced, warnAt: time.Now().Add(warnAfter), warnAfter: warnAfter, done: make(chan struct{})}
 }
 
 func (g *storeMaintenanceGate) wait(ctx context.Context, name string) error {
@@ -38,7 +39,7 @@ func (g *storeMaintenanceGate) wait(ctx context.Context, name string) error {
 	select {
 	case <-g.done:
 	default:
-		logger.Info("store maintenance waiting for restart warm-up", zap.String("maintenance", name), zap.Duration("maximum_wait_remaining", max(0, time.Until(g.until))))
+		logger.Info("store maintenance waiting for restart warm-up", zap.String("maintenance", name), zap.Duration("warning_after", max(0, time.Until(g.warnAt))))
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -50,17 +51,23 @@ func (g *storeMaintenanceGate) wait(ctx context.Context, name string) error {
 			ready = g.paced == nil || !g.paced()
 		default:
 		}
-		if ready || !time.Now().Before(g.until) {
+		if ready {
 			g.once.Do(func() {
 				g.reason = "restart warming and pacing complete"
-				if !ready {
-					g.reason = "maximum wait exceeded"
-					logger.Warn("store maintenance restart wait expired", zap.Duration("maximum_wait", g.limit))
-				}
 				close(g.done)
 			})
+		} else if !time.Now().Before(g.warnAt) {
+			g.warned.Do(func() {
+				logger.Warn("store maintenance still waiting for restart recovery", zap.Duration("warning_after", g.warnAfter))
+			})
 		}
-		timer := time.NewTimer(max(0, min(time.Second, time.Until(g.until))))
+		// Keep a bounded polling interval after the warning too. An expired
+		// warning time must neither release maintenance nor create a busy loop.
+		delay := time.Second
+		if left := time.Until(g.warnAt); left > 0 {
+			delay = min(delay, left)
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
