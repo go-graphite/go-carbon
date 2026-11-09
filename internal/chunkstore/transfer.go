@@ -1081,11 +1081,11 @@ func (b *TransferBuffer) Read(r io.Reader, maxBytes, size int64) ([]TransferMetr
 		if err := json.Unmarshal(data, &head); err != nil {
 			return nil, err
 		}
-		if head.Keys < 0 || int64(head.Keys)*8 > int64(len(body)) {
+		if head.Keys < 0 || head.Keys > len(body)/8 {
 			return nil, errors.New("invalid key count")
 		}
-		record := TransferMetric{Config: head.Config, Version: head.Version, Continuation: head.Continuation, PointDigest: head.PointDigest, Counts: head.Counts, Keys: make([]RelayoutKV, head.Keys)}
-		for j := range record.Keys {
+		record := TransferMetric{Config: head.Config, Version: head.Version, Continuation: head.Continuation, PointDigest: head.PointDigest, Counts: head.Counts, Keys: make([]RelayoutKV, 0)}
+		for range head.Keys {
 			k, err := readBytes(4096)
 			if err != nil {
 				return nil, err
@@ -1094,7 +1094,7 @@ func (b *TransferBuffer) Read(r io.Reader, maxBytes, size int64) ([]TransferMetr
 			if err != nil {
 				return nil, err
 			}
-			record.Keys[j] = RelayoutKV{k, v}
+			record.Keys = append(record.Keys, RelayoutKV{k, v})
 		}
 		records[i] = record
 	}
