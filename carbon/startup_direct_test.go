@@ -167,6 +167,44 @@ func TestStartupDirectJournalSyncKeepsCapturing(t *testing.T) {
 	}
 }
 
+func TestStartupDirectPreparesWhileAnAppendIsOutstanding(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, _ := directCaptureFixture(t)
+	entered, release, prepared, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	s.observe = func(*points.Points) { close(entered); <-release }
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	s.reclaim()
+	now := time.Now()
+	s.maybeDirect(now)
+	// Submit through the real append queue. Hold its acknowledgement while the
+	// cutover prepares durable journal authority; input need not be globally idle.
+	startLog := s.sink.Load().startLog
+	s.sink.Load().startLog = func() (func() error, error) { close(prepared); return startLog() }
+	ack := make(chan error, 1)
+	s.shards[0].SubmitCapture(points.OnePoint("busy.cutover", 1, 1700000000).AppendBinary(nil), 1, ack)
+	<-entered
+	go func() { s.maybeDirect(now.Add(startupDirectDelay)); close(done) }()
+	defer func() { resume(); <-done }()
+	select {
+	case <-prepared:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cutover required an unforced globally idle append instant before preparing")
+	}
+	resume()
+	if err := <-ack; err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if !s.direct.Load() || len(core.Get("busy.cutover")) != 1 {
+		t.Fatal("cutover failed to join the acknowledged replay frontier")
+	}
+}
+
 func TestStartupDirectCaptureSyncKeepsReceiving(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return
@@ -472,8 +510,21 @@ func TestStartupDirectRefusesUnappliedFrontier(t *testing.T) {
 			t.Fatal("refusal partially sealed the capture")
 		}
 	}
-	if _, err := os.Stat(s.path + fmt.Sprintf(".capture-epoch-%020d%s", s.epoch, startupDirectSuffix)); !os.IsNotExist(err) {
-		t.Fatal("refusal published a fence", err)
+	// Durable preparation may precede quiescence. Its journal pin and empty
+	// terminal marker stay retained, while ordinary capture remains writable.
+	if s.directFence == nil || s.directFence.retired.Load() || s.releaseLog == nil || !s.preparingDirect {
+		t.Fatal("refusal lost the prepared authority/retention pin")
+	}
+	if err := sh.Write(points.OnePoint("frontier", 2, 2).AppendBinary(nil), 1); err != nil {
+		t.Fatal("refusal stopped capture", err)
+	}
+	var values []float64
+	if _, err := recovery.ReadCaptureFile(sh.current.Load().path, func(p *points.Points) {
+		for _, point := range p.Data {
+			values = append(values, point.Value)
+		}
+	}); err != nil || len(values) != 2 || values[0] != 1 || values[1] != 2 {
+		t.Fatal("refusal lost or reordered captured points", values, err)
 	}
 }
 

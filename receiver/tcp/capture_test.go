@@ -22,6 +22,56 @@ type testCapture struct {
 
 type captureFunc func([]byte, int) error
 
+func TestSwitchCaptureJoinsReplayPublicationWithinDeadline(t *testing.T) {
+	r := &TCP{}
+	observed := make(chan struct{})
+	var replayed atomic.Bool
+	first := true
+	go func() {
+		<-observed
+		time.Sleep(5 * time.Millisecond)
+		replayed.Store(true)
+	}()
+	if err := r.SwitchCapture(func(*points.Points) {}, func() error {
+		if replayed.Load() {
+			return nil
+		}
+		if first {
+			first = false
+			close(observed)
+		}
+		return errors.New("append acknowledged; replay publication is still catching up")
+	}); err != nil {
+		t.Fatal("a bounded publication lag prevented cutover", err)
+	}
+	if !replayed.Load() || r.captureSink.direct.Load() == nil {
+		t.Fatal("published ahead of the replay frontier")
+	}
+}
+
+func TestSwitchCaptureUnreadyReplayReleasesSubmissionGate(t *testing.T) {
+	r := &TCP{}
+	done := make(chan error, 1)
+	go func() {
+		done <- r.SwitchCapture(func(*points.Points) {}, func() error { return errors.New("replay is stopped") })
+	}()
+	select {
+	case err := <-done:
+		if err == nil || r.captureSink.direct.Load() != nil || r.captureSink.gate.Load() != nil {
+			t.Fatal("unready cutover published or retained the gate", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("replay publication wait exceeded the cutover deadline")
+	}
+	sink := new(testCapture)
+	buffer := newCaptureBuffer(sink)
+	buffer.sink = &r.captureSink
+	buffer.point([]byte("still.capturing"), 1, 1)
+	if err := buffer.flush(); err != nil || sink.count != 1 {
+		t.Fatal("failed cutover stopped subsequent input", err, sink.count)
+	}
+}
+
 func (f captureFunc) Write(data []byte, n int) error { return f(data, n) }
 
 // Reuse the existing byte-boundary/protocol oracle with the capture encoder in

@@ -68,8 +68,19 @@ func (rcv *TCP) SwitchCapture(out func(*points.Points), ready func() error) erro
 	if s.direct.Load() != nil {
 		return nil
 	}
-	if err := ready(); err != nil {
-		return err
+	for {
+		if err := ready(); err != nil {
+			if !time.Now().Before(deadline) {
+				return err
+			}
+			// Append acknowledgements and replay-frontier publication are
+			// independent. With submissions joined, allow the replay owner
+			// to publish within the same bounded cutover deadline. ready
+			// only reads memory; filesystem preparation stays outside.
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		break
 	}
 	s.direct.Store(&out)
 	return nil

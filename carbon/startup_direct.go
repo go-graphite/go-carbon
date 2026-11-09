@@ -53,6 +53,10 @@ func (s *startupInput) maybeDirect(now time.Time) {
 	}
 	var promotions uint64
 	for _, sh := range s.shards {
+		if failure := sh.err.Load(); failure != nil {
+			s.refuseDirect(now, failure.err.Error())
+			return
+		}
 		if !sh.live.Load() {
 			s.liveSince = time.Time{}
 			s.refuseDirect(now, "not every partition is live")
@@ -81,12 +85,10 @@ func (s *startupInput) maybeDirect(now time.Time) {
 	if s.receiver == nil {
 		return
 	}
-	if err := s.checkDirectFrontiers(); err != nil {
-		s.refuseDirect(now, err.Error())
-		return
-	}
 	// Journal pin/reset and the terminal ordering marker may synchronize disk.
 	// Capture stays open during all preparation, including a failed attempt.
+	// Do not require an unforced globally idle instant before closing the
+	// submission gate: continuous input can keep at least one append pending.
 	if err := s.prepareDirect(); err != nil {
 		s.refuseDirect(now, err.Error())
 		return
