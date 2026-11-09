@@ -223,8 +223,9 @@ enqueue:
 }
 
 type nativeRemoteSession struct {
-	mu sync.Mutex
-	id string
+	mu    sync.Mutex
+	id    string
+	ready bool
 }
 
 // These fsynced rows survive successful range completion and controller restarts.
@@ -248,6 +249,9 @@ func (c *nativeController) session(ctx context.Context, source string) (string, 
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if entry.id != "" {
+		if !entry.ready {
+			return "", errors.New("native source snapshot boundary is not durable")
+		}
 		return entry.id, nil
 	}
 	var response nativeSourceCheckpoint
@@ -271,6 +275,7 @@ func (c *nativeController) session(ctx context.Context, source string) (string, 
 		}
 		event("native_merge_snapshot", map[string]any{"boundary": response, "state": c.state})
 	}
+	entry.ready = true
 	return response.ID, nil
 }
 func (c *nativeController) release() {
