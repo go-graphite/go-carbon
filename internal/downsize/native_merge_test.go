@@ -156,6 +156,7 @@ func TestNativeMergeRefusesUnsafeModes(t *testing.T) {
 	for _, o := range []options{
 		{mergeSession: "merge", engine: "metric", bulkOnly: true},
 		{mergeSession: "merge", engine: "bulk"},
+		{mergeSession: "merge", engine: "bulk", bulkOnly: true, bulkCombine: true},
 		{mergeSession: "merge", engine: "bulk", bulkOnly: true, delete: true},
 	} {
 		if err := run(context.Background(), o); err == nil {

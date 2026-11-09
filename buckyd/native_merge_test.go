@@ -59,8 +59,8 @@ func TestNativeMergeHTTPBoundaryAndCombineFence(t *testing.T) {
 	for _, mode := range []struct {
 		merge   string
 		combine bool
-	}{{"", true}, {"", false}, {"wrong-history", false}} {
-		request.Range.MergeSession = mode.merge
+	}{{"", true}, {"http-history", true}, {"", false}, {"wrong-history", false}} {
+		request.Range.MergeSession, request.Range.Combine = mode.merge, mode.combine
 		if r := invoke(destination, "/v1/native/pull", request); r.Code == 200 {
 			t.Fatal("unsafe mode accepted", mode, r.Body.String())
 		}
@@ -68,7 +68,7 @@ func TestNativeMergeHTTPBoundaryAndCombineFence(t *testing.T) {
 			t.Fatal("unsafe request published metric")
 		}
 	}
-	request.Range.MergeSession = "http-history"
+	request.Range.MergeSession, request.Range.Combine = "http-history", false
 	if r := invoke(destination, "/v1/native/pull", request); r.Code != 200 {
 		t.Fatal(r.Code, r.Body.String())
 	}

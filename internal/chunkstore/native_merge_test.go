@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -57,6 +58,11 @@ func TestNativeMergePinnedCachedAndRevisedBitExact(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: 3, Names: names, MergeSession: pin.MergeSession}
+	request.Combine = true
+	if _, err := target.NativeImport(ctx, request, bytes.NewReader(wire.Bytes())); !errors.Is(err, ErrFormat) {
+		t.Fatal("merge entered combine path", err)
+	}
+	request.Combine = false
 	receipt, err := target.NativeImport(ctx, request, bytes.NewReader(wire.Bytes()))
 	if err != nil {
 		t.Fatal(err)
