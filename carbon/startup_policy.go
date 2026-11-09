@@ -23,13 +23,23 @@ func startupPolicy(path string) startupCapturePolicy {
 	// siblings, and a physical reserve. Non-Linux local fixtures use host RAM.
 	available := int64(0)
 	if memory, valid := hostcapacity.ReadMemory(); valid {
-		available = int64(min(memory, math.MaxInt64))
+		if memory > math.MaxInt64 {
+			memory = math.MaxInt64
+		}
+		available = int64(memory)
 	} else if host, err := availableMemory(); runtime.GOOS != "linux" && err == nil {
-		available = int64(min(host/8, math.MaxInt64))
+		host /= 8
+		if host > math.MaxInt64 {
+			host = math.MaxInt64
+		}
+		available = int64(host)
 	}
 
 	free, _ := migrationDiskFree(filepath.Dir(path))
-	return chooseStartupPolicy(runtime.GOMAXPROCS(0), available, int64(min(free, math.MaxInt64)))
+	if free > math.MaxInt64 {
+		free = math.MaxInt64
+	}
+	return chooseStartupPolicy(runtime.GOMAXPROCS(0), available, int64(free))
 }
 
 func chooseStartupPolicy(cpus int, available, free int64) startupCapturePolicy {

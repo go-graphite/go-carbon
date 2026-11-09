@@ -121,10 +121,10 @@ func (app *App) startStartupInput() error {
 
 // Attach replay without replacing or detaching any receiver. Startup returns
 // while constrained partitions keep accepting durable input in the background.
-func (app *App) finishStartupInput(core *cache.Cache) error {
+func (app *App) finishStartupInput(core *cache.Cache) {
 	s := app.startupInput
 	if s == nil {
-		return nil
+		return
 	}
 	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
 	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
@@ -312,7 +312,6 @@ func (app *App) finishStartupInput(core *cache.Cache) error {
 
 	})
 	zapwriter.Logger("app").Info("startup input replay running without pausing receivers", zap.Int("partitions", len(s.shards)))
-	return nil
 }
 
 func closeTCPHandoff(h *tcp.Handoff) {

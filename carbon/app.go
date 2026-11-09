@@ -1542,9 +1542,7 @@ func (g *tailGate) pass() bool {
 func (app *App) startReceivers(core *cache.Cache) (err error) {
 	conf := app.Config
 	if app.startupInput != nil {
-		if err = app.finishStartupInput(core); err != nil {
-			return err
-		}
+		app.finishStartupInput(core)
 		if conf.Prometheus.Enabled {
 			app.startupInput.receiver.InitPrometheus(app.PromRegisterer)
 		}
