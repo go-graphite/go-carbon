@@ -109,7 +109,15 @@ func anchorLockFixture(t testing.TB, name string) store.TransferMetric {
 
 type anchorLockCodec struct {
 	*whisperio.ContinuationCodec
-	afterPlan func()
+	afterPlan    func()
+	beforeUpdate func()
+}
+
+func (c *anchorLockCodec) Update(ctx context.Context, kv store.ContinuationIO, m store.Metadata, p []store.Point, r int, now func() time.Time, maintenance *store.ContinuationMaintenance) error {
+	if c.beforeUpdate != nil {
+		c.beforeUpdate()
+	}
+	return c.ContinuationCodec.Update(ctx, kv, m, p, r, now, maintenance)
 }
 
 func (c *anchorLockCodec) PlanArchiveAnchors(ctx context.Context, kv store.ContinuationIO) (store.AnchorRepairPlan, error) {
@@ -360,5 +368,46 @@ func TestAnchorLockRetriesDeleteRecreate(t *testing.T) {
 	probe, err := s.RepairArchiveAnchors(ctx, r.Config.Name, false)
 	if err != nil || probe.Archives[0].Changed {
 		t.Fatalf("recreated generation not repaired: %+v %v", probe, err)
+	}
+}
+
+func TestAnchorLockWriterActiveBeforePreparation(t *testing.T) {
+	ctx := context.Background()
+	c := &anchorLockCodec{ContinuationCodec: &whisperio.ContinuationCodec{}}
+	s := anchorLockStore(t, c, false)
+	r := anchorLockFixture(t, "anchor.active")
+	if _, err := s.ImportTransfer(ctx, []store.TransferMetric{r}); err != nil {
+		t.Fatal(err)
+	}
+	entered, resume := make(chan struct{}), make(chan struct{})
+	writeDone := make(chan error, 1)
+	c.beforeUpdate = func() { close(entered); <-resume }
+	go func() {
+		writeDone <- s.UpdateManyForArchive(ctx, r.Config.Name, []store.Point{{Timestamp: anchorLockBase + 10*60, Value: 3.125}}, 36000)
+	}()
+	<-entered // beginStateMutation already ran, but its commit has not.
+	c.afterPlan = func() {
+		c.afterPlan = nil
+		close(resume)
+		if err := <-writeDone; err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.RepairArchiveAnchors(ctx, r.Config.Name, true)
+	if err != nil || !got.Applied || got.Retries != 1 {
+		t.Fatalf("active writer not retried: %+v: %v", got, err)
+	}
+	after, err := s.Snapshot(ctx, r.Config.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range after.Archives[0].Points {
+		if p.Timestamp == anchorLockBase+10*60 && math.Float64bits(p.Value) == math.Float64bits(3.125) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("active writer's point lost")
 	}
 }
