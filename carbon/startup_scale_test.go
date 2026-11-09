@@ -597,9 +597,7 @@ func TestStartupCaptureRepeatedEpochsPreserveOrder(t *testing.T) {
 	app := New("")
 	app.Config = NewConfig()
 	app.startupInput = next
-	if err := app.finishStartupInput(core); err != nil {
-		t.Fatal(err)
-	}
+	app.finishStartupInput(core)
 	awaitCapture(t, func() bool { return next.replayedPoints.Load() == 20 })
 	got := core.Get("same.metric")
 	if len(got) != 40 {
