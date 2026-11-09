@@ -66,6 +66,9 @@ func runNative(ctx context.Context, o options) error {
 	if o.nativeWindow != nil {
 		journalPlan += fmt.Sprintf(":window=%d,%d", o.nativeWindow.From, o.nativeWindow.Until)
 	}
+	if o.mergeSession != "" {
+		journalPlan += ":merge=" + o.mergeSession
+	}
 	j, err := openJournal(o.state, journalPlan)
 	if err != nil {
 		return err
@@ -105,6 +108,7 @@ func runNative(ctx context.Context, o options) error {
 			NativeExactCombine                    bool
 			NativeTimeWindow                      bool
 			NativeDeferredCombine                 bool
+			NativePinnedMerge                     bool
 			CPULimit                              int
 			Node                                  string
 		}
@@ -116,6 +120,9 @@ func runNative(ctx context.Context, o options) error {
 		}
 		if o.nativeWindow != nil && !capability.NativeTimeWindow {
 			return fmt.Errorf("native time-window build required on %s", host)
+		}
+		if o.mergeSession != "" && !capability.NativePinnedMerge {
+			return fmt.Errorf("pinned merge build required on %s; upgrade hosts before copying", host)
 		}
 		if o.bulkCombine && targets[host] && !capability.NativeExactCombine {
 			return fmt.Errorf("native exact combine build required on %s", host)
@@ -220,6 +227,14 @@ type nativeRemoteSession struct {
 	id string
 }
 
+// These fsynced rows survive successful range completion and controller restarts.
+// Backfill uses the earliest boundary for each donor and also covers cache/late
+// points; SnapshotStartedAt is not an event-time lower bound.
+type nativeSourceCheckpoint struct {
+	ID, Source, MergeSession            string
+	SnapshotStartedAt, SnapshotPinnedAt time.Time
+}
+
 func (c *nativeController) session(ctx context.Context, source string) (string, error) {
 	c.mu.Lock()
 	entry := c.sessions[source]
@@ -233,14 +248,27 @@ func (c *nativeController) session(ctx context.Context, source string) (string, 
 	if entry.id != "" {
 		return entry.id, nil
 	}
-	var response struct{ ID string }
-	if _, err := c.requestOnce(ctx, source, "/v1/native/source", struct{}{}, &response); err != nil {
+	var response nativeSourceCheckpoint
+	if _, err := c.requestOnce(ctx, source, "/v1/native/source", struct{ MergeSession string }{c.mergeSession}, &response); err != nil {
 		return "", err
 	}
 	if len(response.ID) != 32 {
 		return "", errors.New("invalid native source session")
 	}
 	entry.id = response.ID
+	if c.mergeSession != "" {
+		if response.MergeSession != c.mergeSession || response.SnapshotStartedAt.IsZero() || response.SnapshotPinnedAt.Before(response.SnapshotStartedAt) {
+			return "", errors.New("invalid pinned merge snapshot boundary")
+		}
+		response.Source = source
+		c.stateMu.Lock()
+		err := c.journal.appendRow(journalRow{Operation: c.journal.operation, Plan: c.journal.plan, NativeSource: &response})
+		c.stateMu.Unlock()
+		if err != nil {
+			return "", err
+		}
+		event("native_merge_snapshot", map[string]any{"boundary": response, "state": c.state})
+	}
 	return response.ID, nil
 }
 func (c *nativeController) release() {
@@ -372,7 +400,7 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 	return nil
 }
 func (c *nativeController) executeRange(ctx context.Context, t task, names []string) error {
-	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names, Combine: c.bulkCombine, Window: c.nativeWindow}
+	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names, Combine: c.bulkCombine, Window: c.nativeWindow, MergeSession: c.mergeSession}
 	if t.Native != nil && t.Native.Intent {
 		request.Combine = t.Native.Combine
 	}
