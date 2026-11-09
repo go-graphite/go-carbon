@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -52,6 +53,9 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}
 	address := old.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
 	nextCfg := *cfg
+	// This test measures durable input capture, not cache pressure. Leave
+	// room for the conservative unpublished shard count during tail replay.
+	nextCfg.Cache.MaxSize = handoffRecoveryCacheSize
 	nextTCP := *cfg.Tcp
 	nextTCP.Listen = address
 	nextCfg.Tcp = &nextTCP
@@ -365,7 +369,8 @@ func TestPredecessorCrashKeepsLoggedInput(t *testing.T) {
 				}
 			} else {
 				out, err := cmd.CombinedOutput()
-				if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 99 {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 99 {
 					t.Fatalf("child: %v\n%s", err, out)
 				}
 			}
@@ -446,7 +451,8 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStartupInputCrashProcess$")
 			cmd.Env = append(os.Environ(), "HANDOFF_CRASH_STAGE="+stage, "HANDOFF_CRASH_STAMP="+strconv.FormatInt(stamp, 10), "HANDOFF_CRASH_TAIL="+tail, "HANDOFF_CRASH_CONFIG="+path)
 			out, err := cmd.CombinedOutput()
-			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 99 {
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 99 {
 				t.Fatalf("crash child: %v\n%s", err, out)
 			}
 			actual := New(path)

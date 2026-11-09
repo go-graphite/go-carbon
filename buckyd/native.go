@@ -11,7 +11,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"runtime"
 	"strconv"
 	"strings"
@@ -278,12 +277,9 @@ func writeNativeJSON(w http.ResponseWriter, value any) {
 }
 
 func (s *Service) nativeExport(ctx context.Context, source, session string, names []string) (*http.Response, error) {
-	u, err := url.Parse(source)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
-		return nil, errors.New("invalid native source origin")
-	}
-	if !s.allowedTransferSource(u.Hostname()) {
-		return nil, fmt.Errorf("native source %s is not an allowed transfer source", u.Hostname())
+	u, err := s.transferSourceOrigin(source)
+	if err != nil {
+		return nil, err
 	}
 	u.Path = "/v1/native/export"
 	data, err := json.Marshal(nativeExportRequest{Session: session, Names: names})

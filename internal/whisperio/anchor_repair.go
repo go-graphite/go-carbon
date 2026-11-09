@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -175,7 +176,7 @@ func (c *ContinuationCodec) PlanArchiveAnchors(ctx context.Context, kv store.Con
 		if err == nil && bytes.Equal(old, v) {
 			continue
 		}
-		if err != nil && err != store.ErrNotFound {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return plan, err
 		}
 		plan.Writes = append(plan.Writes, store.RelayoutKV{Key: []byte(k), Value: v})
