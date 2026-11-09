@@ -662,7 +662,9 @@ func retainTransferSlots(points []Point, retention Retention) []Point {
 	if len(points) < 2 || (points[len(points)-1].Timestamp-points[0].Timestamp)/int64(retention.Step) < int64(retention.Count) {
 		return points
 	}
-	seen := make(map[int64]struct{}, min(len(points), retention.Count))
+	// Allocate only for slots actually present in the validated transfer; the
+	// archive capacity comes from the sender and must not size an allocation.
+	seen := make(map[int64]struct{})
 	start := len(points)
 	for i := len(points) - 1; i >= 0; i-- {
 		slot := points[i].Timestamp / int64(retention.Step) % int64(retention.Count)
