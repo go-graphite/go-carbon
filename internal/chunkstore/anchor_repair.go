@@ -32,8 +32,9 @@ type AnchorRepairResult struct {
 	Archives         []AnchorArchive `json:"archives"`
 	Applied          bool            `json:"applied"`
 	PreparationNanos int64           `json:"preparation_ns"`
-	LockNanos        int64           `json:"lock_ns"`
-	Retries          int             `json:"retries"`
+	// LockNanos is the maximum hold across attempts, including cache cleanup.
+	LockNanos int64 `json:"lock_ns"`
+	Retries   int   `json:"retries"`
 }
 
 // RepairArchiveAnchors prepares from immutable committed bytes outside writer
@@ -48,11 +49,16 @@ func (s *Store) RepairArchiveAnchors(ctx context.Context, name string, apply boo
 	if !ok {
 		return AnchorRepairResult{}, ErrFormat
 	}
+	var maxLock int64
+	var result AnchorRepairResult
 	for attempt := 0; attempt < 4; attempt++ {
 		preparedAt := time.Now()
 		// A census must inspect the main-file descriptor before reading its
 		// body. ExportTransfer would copy every cold compressed group merely
 		// to discover that it needs no classic-ring repair.
+		// Read before opening the view, including when a writer is currently
+		// active. Its end increment will force a retry after we get the stripe.
+		epoch := s.mutationEpoch[s.metricStripe(name)].Load()
 		view := s.db.NewReadView()
 		m, err := metadataFrom(view, name)
 		if err == nil {
@@ -66,7 +72,7 @@ func (s *Store) RepairArchiveAnchors(ctx context.Context, name string, apply boo
 			return AnchorRepairResult{}, err
 		}
 		r := TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation}
-		result := AnchorRepairResult{Name: name, Version: r.Version, Retries: attempt}
+		result = AnchorRepairResult{Name: name, Version: r.Version, Retries: attempt, LockNanos: maxLock}
 		if !m.Continuation {
 			view.Close()
 			return result, nil
@@ -86,22 +92,22 @@ func (s *Store) RepairArchiveAnchors(ctx context.Context, name string, apply boo
 				return result, errors.New("anchor repair requires source-aware reconciliation: " + a.Blocked)
 			}
 		}
-		applied, retry, err := s.publishArchiveAnchors(ctx, r, plan, &result)
+		applied, retry, err := s.publishArchiveAnchors(ctx, m, epoch, plan, &result)
+		maxLock = max(maxLock, result.LockNanos)
 		if retry {
 			continue
 		}
 		result.Applied = applied
 		return result, err
 	}
-	return AnchorRepairResult{}, ErrConflict
+	return result, ErrConflict
 }
 
-func (s *Store) publishArchiveAnchors(ctx context.Context, r TransferMetric, plan AnchorRepairPlan, result *AnchorRepairResult) (bool, bool, error) {
+func (s *Store) publishArchiveAnchors(ctx context.Context, m Metadata, epoch uint64, plan AnchorRepairPlan, result *AnchorRepairResult) (bool, bool, error) {
 	// Encoding and batch allocation also stay outside the writer stripe.
 	b := s.db.NewIndexedBatch()
 	defer b.Close()
-	identity := Metadata{MetricConfig: r.Config, ID: r.Version.ID, Generation: r.Version.Generation, Continuation: true}
-	kv := s.newContinuationIO(ctx, b, b, identity)
+	kv := s.newContinuationIO(ctx, b, b, m)
 	for _, k := range plan.Deletes {
 		if err := kv.Delete(k); err != nil {
 			return false, false, err
@@ -112,31 +118,36 @@ func (s *Store) publishArchiveAnchors(ctx context.Context, r TransferMetric, pla
 			return false, false, err
 		}
 	}
-	unlock := s.lockTransfer([]string{r.Config.Name})
+	if m.Revision == math.MaxUint64 {
+		return false, false, errors.New("metric revision exhausted")
+	}
+	m.Revision++
+	err := b.Set(revisionKey(m), revisionBytes(m), nil)
+	if err != nil {
+		return false, false, err
+	}
+	unlock := s.lockMetric(m.Name)
 	lockedAt := time.Now()
-	release := func() { result.LockNanos += time.Since(lockedAt).Nanoseconds(); unlock() }
-	m, err := metadataFrom(s.db, r.Config.Name)
-	if err == nil && (transferVersion(m) != r.Version || !samePolicy(m.MetricConfig, r.Config) || !m.Continuation) {
+	mutating := false
+	release := func() {
+		if mutating {
+			s.finishStateMutation(m.Name)
+		}
+		unlock()
+		result.LockNanos = max(result.LockNanos, time.Since(lockedAt).Nanoseconds())
+	}
+	// Equality proves that no mutation (including delete/recreate, policy,
+	// generation or revision-neutral maintenance) started or ended since the
+	// view was opened. This is stronger than rereading Revision/Generation,
+	// and avoids two potentially cold LSM reads while excluding writers.
+	if epoch == math.MaxUint64 || s.mutationEpoch[s.metricStripe(m.Name)].Load() != epoch {
 		release()
 		return false, true, nil
 	}
+	err = errors.Join(ctx.Err(), s.checkFileOwnership(m))
 	if err == nil {
-		err = s.checkFileOwnership(m)
-	}
-	if err == nil && m.FileMigration == FileCleanupPending {
-		err = ErrConflict
-	}
-	if err == nil {
-		err = ctx.Err()
-	}
-	if err == nil && m.Revision == math.MaxUint64 {
-		err = errors.New("metric revision exhausted")
-	}
-	if err == nil {
-		m.Revision++
-		err = b.Set(revisionKey(m), revisionBytes(m), nil)
-	}
-	if err == nil {
+		s.beginStateMutation(m.Name)
+		mutating = true
 		err = b.Commit(pebble.NoSync)
 		if err == nil {
 			s.pendingSync.Store(true)
