@@ -60,6 +60,7 @@ type options struct {
 	retries            int
 	backoff, maxBack   time.Duration
 	writeRate, flushPt int
+	maxWritePoints     int64
 	writeRetries       int
 	cachePause         float64
 	cacheResume        float64
@@ -145,6 +146,7 @@ func parseFlags(args []string) (*options, error) {
 	fs.DurationVar(&o.maxBack, "max-backoff", 30*time.Second, "retry delay cap")
 	fs.IntVar(&o.writeRate, "write-rate", 100000, "points per second sent to -ingest (0: unlimited)")
 	fs.IntVar(&o.flushPt, "flush-points", 5000, "points per write to -ingest")
+	fs.Int64Var(&o.maxWritePoints, "max-write-points", 0, "maximum points attempted on the receiver socket, including retries (0: unlimited)")
 	fs.IntVar(&o.writeRetries, "write-retries", 20, "reconnect attempts per write to -ingest before giving up (backoff as for requests)")
 	fs.Float64Var(&o.cachePause, "cache-pause", 0.5, "pause writes while the local cache is above this fraction of max-size (needs -heartbeat-file; 0 disables)")
 	fs.Float64Var(&o.cacheResume, "cache-resume", 0, "resume below this fraction (default 80% of -cache-pause)")
@@ -170,6 +172,8 @@ func parseFlags(args []string) (*options, error) {
 		return nil, errors.New("-since-unclean-start excludes -from, -since and -until")
 	case !o.uncleanStart && (o.from == "") == (o.since <= 0):
 		return nil, errors.New("give exactly one of -from, -since or -since-unclean-start")
+	case o.maxWritePoints < 0:
+		return nil, errors.New("-max-write-points must be nonnegative")
 	case o.cachePause < 0 || o.cachePause > 1 || o.cacheResume < 0 || o.cacheResume > 1:
 		return nil, errors.New("-cache-pause and -cache-resume are fractions in [0, 1]")
 	}
@@ -374,7 +378,8 @@ func (e *engine) report(from, until int64, began time.Time, err error) report {
 	if e.out != nil {
 		w := &e.out.stats
 		r.Write = map[string]int64{
-			"points_sent": w.points.Load(), "bytes": w.bytes.Load(), "flushes": w.flushes.Load(),
+			"points_attempted": w.attempted.Load(),
+			"points_sent":      w.points.Load(), "bytes": w.bytes.Load(), "flushes": w.flushes.Load(),
 			"reconnects": w.reconnects.Load(), "cache_pauses": w.pauses.Load(),
 			"paused_seconds": int64(time.Duration(w.pausedNanos.Load()).Seconds()),
 		}
@@ -438,6 +443,7 @@ func run(ctx context.Context, o *options, now time.Time) (report, error) {
 			log.Printf("no -heartbeat-file: local cache fill is not watched; only -write-rate limits writes")
 		}
 		e.out = newWriter(o.ingest, o.writeRate, o.flushPt, gate, o.writeRetries, o.backoff, o.maxBack)
+		e.out.maxPoints = o.maxWritePoints
 		go func() {
 			err := e.out.run(runCtx)
 			writerDone <- err

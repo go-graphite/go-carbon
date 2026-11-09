@@ -29,6 +29,7 @@ type writeReq struct {
 
 type writerStats struct {
 	points, bytes, flushes, reconnects, pauses atomic.Int64
+	attempted                                  atomic.Int64
 	pausedNanos                                atomic.Int64
 }
 
@@ -51,6 +52,7 @@ type writer struct {
 	bufPts     int
 	waiters    []chan error
 	stats      writerStats
+	maxPoints  int64 // immutable cap on wire attempts, including reconnect retries
 }
 
 func newWriter(addr string, pointsPerSecond, flushPts int, gate *cacheGate, retries int, backoff, maxBackoff time.Duration) *writer {
@@ -166,6 +168,13 @@ func (w *writer) flush(ctx context.Context) error {
 	}
 	delay := w.backoff
 	for attempt := 0; ; attempt++ {
+		attempted := w.stats.attempted.Load()
+		if w.maxPoints > 0 && int64(w.bufPts) > w.maxPoints-attempted {
+			return fmt.Errorf("max-write-points %d reached: attempted=%d next=%d", w.maxPoints, attempted, w.bufPts)
+		}
+		// Reserve the whole flush before touching the socket. Partial or
+		// ambiguous sends consume their allowance, as do reconnect retries.
+		w.stats.attempted.Add(int64(w.bufPts))
 		err := w.send()
 		if err == nil {
 			break
