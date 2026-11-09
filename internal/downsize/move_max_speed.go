@@ -207,13 +207,14 @@ func (t *tuner) maxSpeedUnavailable(host string, cause error) {
 		confirmedDown = confirmedDown || strings.Contains(reason, text)
 	}
 	decision, binding := "soft", "missing/stale telemetry"
-	if confirmedDown {
+	switch {
+	case confirmedDown:
 		h.maxSpeed.ProcessDown = true
 		h.Streams = 0
 		decision, binding = "paused", "confirmed pair process unavailable"
-	} else if h.Streams > 0 {
+	case h.Streams > 0:
 		h.Streams = max(1, h.Streams/2)
-	} else {
+	default:
 		decision, binding = "paused", "existing pair safety pause"
 	}
 	h.hard, h.healthy = "", 0
@@ -388,13 +389,14 @@ func (t *tuner) observeMaxSpeedLocked(host string, sample hostSample, store stor
 		if cacheRecovered {
 			h.Streams = ceiling.Streams
 		}
-		if len(throttles) > 0 {
+		switch {
+		case len(throttles) > 0:
 			h.Streams = max(1, h.Streams/2)
 			decision, reason = "soft", strings.Join(throttles, ", ")
-		} else if readBoost && !cacheRecoveryWaiting {
+		case readBoost && !cacheRecoveryWaiting:
 			h.Streams = min(ceiling.Streams, h.Streams*2)
 			state.ReadBoostSince = now
-		} else if raise && !cacheRecoveryWaiting {
+		case raise && !cacheRecoveryWaiting:
 			h.Streams = min(ceiling.Streams, h.Streams+max(1, h.Streams/2))
 		}
 	}

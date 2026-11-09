@@ -106,7 +106,10 @@ func TestMaximumSpeedSourcePauseCannotStarveOtherSources(t *testing.T) {
 		}
 	}))
 	defer dst.Close()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &manifest{root: root, PlanID: strings.Repeat("a", 64)}
 	for sourceIndex, source := range []string{"http://source-a:4242", "http://source-b:4242"} {
 		var data bytes.Buffer
@@ -141,6 +144,8 @@ func TestMaximumSpeedSourcePauseCannotStarveOtherSources(t *testing.T) {
 		if !strings.HasPrefix(name, "source1.") {
 			t.Fatal("paused source copied", name)
 		}
+	case err := <-done:
+		t.Fatalf("copy workers exited: %v", err)
 	case <-time.After(3 * time.Second):
 		t.Fatal("healthy source starved behind paused source")
 	}
@@ -179,7 +184,10 @@ func TestMaximumSpeedUpstream429ReleasesDestinationForOtherSources(t *testing.T)
 		}
 	}))
 	defer dst.Close()
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := &manifest{root: root, PlanID: strings.Repeat("a", 64)}
 	for i, source := range []string{"http://source-a:4242", "http://source-b:4242"} {
 		var data bytes.Buffer
@@ -208,6 +216,8 @@ func TestMaximumSpeedUpstream429ReleasesDestinationForOtherSources(t *testing.T)
 	go func() { done <- m.runCopyWorkers(ctx, func(error) { cancel() }) }()
 	select {
 	case <-copied:
+	case err := <-done:
+		t.Fatalf("copy workers exited: %v", err)
 	case <-time.After(time.Second):
 		t.Fatal("source429 retained sole destination admission and starved healthy source")
 	}

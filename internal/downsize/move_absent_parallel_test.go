@@ -166,12 +166,13 @@ func TestParallelAbsentProofsErrorsDoNotJournalPartialProofs(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			m, server := parallelAbsentFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				if r.Method == http.MethodHead {
-					if mode == "head503" {
+					switch mode {
+					case "head503":
 						w.WriteHeader(503)
-					} else if mode == "redirect" {
+					case "redirect":
 						w.Header().Set("Location", "/other")
 						w.WriteHeader(302)
-					} else {
+					default:
 						w.WriteHeader(404)
 					}
 					return
