@@ -577,13 +577,14 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 		defer s.mu.Unlock()
 	}
 	old, err := metadataFrom(s.db, p.Meta.Name)
-	if errors.Is(err, ErrNotFound) {
+	switch {
+	case errors.Is(err, ErrNotFound):
 		if p.Old.ID != 0 {
 			return false, nil
 		}
-	} else if err != nil {
+	case err != nil:
 		return false, err
-	} else if transferVersion(old) != transferVersion(Metadata(p.Old)) || !samePolicy(old.MetricConfig, p.Old.MetricConfig) || old.Continuation != p.Old.Continuation || old.FileMigration != p.Old.FileMigration {
+	case transferVersion(old) != transferVersion(Metadata(p.Old)) || !samePolicy(old.MetricConfig, p.Old.MetricConfig) || old.Continuation != p.Old.Continuation || old.FileMigration != p.Old.FileMigration:
 		return false, nil
 	}
 	if err := ctx.Err(); err != nil {

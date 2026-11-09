@@ -255,11 +255,20 @@ func TestNativeReceiptWaitsForPublicationSync(t *testing.T) {
 	}
 	// Publication is already serialized and visible. The physical sync must
 	// not prevent unrelated metric creation or another range's publication.
-	if !target.mu.TryLock() {
+	// The WAL goroutine can enter Sync before ApplyNoSyncWait returns to
+	// the publisher. Wait for lock progress while physical Sync stays gated.
+	creationAvailable := make(chan struct{})
+	go func() {
+		target.mu.Lock()
+		target.mu.Unlock()
+		close(creationAvailable)
+	}()
+	select {
+	case <-creationAvailable:
+	case <-time.After(5 * time.Second):
 		close(gate.release)
 		t.Fatal("publication held the creation lock across WAL Sync")
 	}
-	target.mu.Unlock()
 	queried := make(chan error, 1)
 	go func() { _, err := target.NativeReceipt(ctx, request); queried <- err }()
 	duplicate := make(chan error, 1)

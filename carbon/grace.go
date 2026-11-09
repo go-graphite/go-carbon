@@ -196,6 +196,9 @@ func (app *App) DumpStop() (err error) {
 		return err
 	}
 	defer dump.Close()
+	if checkpointDumpHook != nil {
+		checkpointDumpHook()
+	}
 	xlog, err := recovery.NewWriterFormat(xlogFilename, 1, recovery.InputFileBuffer, builder, walFormat)
 	if err != nil {
 		return err
@@ -553,6 +556,10 @@ var earlyPersisterStop = true
 // checkpointWarmHook, if set, runs as the checkpoint warmup starts; tests use
 // it to observe what runs alongside the warmup.
 var checkpointWarmHook func()
+
+// checkpointDumpHook runs after creating the unpublished dump file. Tests
+// stop a real process here without filling the cache to race file creation.
+var checkpointDumpHook func()
 
 // startStopFlush starts the first flush. Assumes we are holding app.Lock().
 func (app *App) startStopFlush() *stopFlush {
