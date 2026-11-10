@@ -641,6 +641,12 @@ func ReadConfig(filename string) (*Config, error) {
 			log.Print(message)
 		}
 	}
+	// Existing shared-store handoff users get safe admission with the capable
+	// binary, without relying on a new Puppet/config key reaching an older
+	// process. An explicit false retains the documented legacy opt-out.
+	if !defined.IsDefined("dump", "require-startup-capture") {
+		cfg.Dump.RequireStartupCapture = cfg.Dump.StoreInputHandoff
+	}
 	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {
 		return nil, err
 	}

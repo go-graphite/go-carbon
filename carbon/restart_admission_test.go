@@ -18,6 +18,31 @@ import (
 	"github.com/lomik/zapwriter"
 )
 
+func TestExistingHandoffConfigEnablesAdmissionWithoutANewKey(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"ordinary config", "[dump]\nhandoff-supervisor=true\n", false},
+		{"existing handoff opt-in", "[dump]\nhandoff-supervisor=true\nstore-input-handoff=true\n", true},
+		{"explicit legacy opt-out", "[dump]\nstore-input-handoff=true\nrequire-startup-capture=false\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config")
+			if err := os.WriteFile(path, []byte(tc.body), 0600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := ReadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Dump.RequireStartupCapture != tc.want || len(cfg.unknownKeys) != 0 {
+				t.Fatalf("admission=%v expected=%v unknown=%v", cfg.Dump.RequireStartupCapture, tc.want, cfg.unknownKeys)
+			}
+		})
+	}
+}
+
 func TestDumpStopUnsupportedSuccessorKeepsNativeWriterAndMigration(t *testing.T) {
 	if isolatedTestProcess(t) {
 		return

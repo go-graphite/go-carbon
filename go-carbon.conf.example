@@ -1289,15 +1289,17 @@ handoff-supervisor = false
 # writes are not delivery acknowledgements: unread input can be lost at close.
 # See doc/input-handoff.md for the complete configuration and a local check.
 store-input-handoff = false
+# When this key is omitted, store-input-handoff=true also requires admission.
 # Refuse SIGUSR2 before cancelling workers or stopping persistence when early
 # durable startup capture is unavailable. Requires the shared pebble-chunk TCP
 # path above, an input log and a checkpoint-capable read index. The actual next
 # executable must pass -check-startup-capture with the installed configuration
 # and current memory/disk headroom. A refused stop leaves this worker active;
-# it does not release the supervisor. Default false preserves legacy stop/rebind.
+# it does not release the supervisor. An explicit false permits legacy
+# stop/rebind and cannot provide lossless planned restarts under input.
 # This admission checks known fallback prerequisites; it is not a throughput
 # certificate or permission to ignore a later checkpoint or device failure.
-require-startup-capture = false
+# require-startup-capture = true
 # Record format of the dump a stop writes: "legacy", "compact", or "blocks".
 # "compact" writes each metric's points in the cache's in-memory encoding,
 # copied without decoding, with a third of the dump CPU of "legacy", and
