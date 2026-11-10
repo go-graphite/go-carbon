@@ -57,6 +57,24 @@ func TestWriteStrategyChangeDiscardsInFlightBuild(t *testing.T) {
 	}
 }
 
+func TestStopDrainRefreshesExistingMaxQueue(t *testing.T) {
+	c := New()
+	if err := c.SetWriteStrategy("max"); err != nil {
+		t.Fatal(err)
+	}
+	c.AddPoint([]byte("a.light"), 1, 1)
+	c.writeoutQueue.update()
+	for i := range 8 {
+		c.AddPoint([]byte("z.heavy"), 1, int64(i+1))
+	}
+	c.RefreshWriteoutQueue()
+	abort := make(chan bool)
+	defer close(abort)
+	if got := c.WriteoutQueue().Get(abort); got != "z.heavy" {
+		t.Fatal("existing max order survived drain refresh", got)
+	}
+}
+
 // Opt in: INGEST_BENCH_METRICS=28000000 go test ./cache -run '^$'
 // -bench BenchmarkStopDrainQueue -benchtime=1x -benchmem. Fixture generation
 // is outside the timer; varied batch lengths exercise the max sort.

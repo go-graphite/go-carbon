@@ -552,6 +552,7 @@ func (app *App) drainBeforeDump() {
 	logger.Info("stop drain started", zap.Int64("points", before), zap.Int64("target_points", target), zap.Duration("timeout", budget))
 	_ = app.Cache.SetWriteStrategy("max")
 	_ = app.Cache.SetWriteoutBatching(0, 0)
+	app.Cache.RefreshWriteoutQueue()
 	app.Persister.SetStopDrain(true)
 	defer app.Persister.SetStopDrain(false)
 	timer := time.NewTimer(time.Until(started.Add(budget)))

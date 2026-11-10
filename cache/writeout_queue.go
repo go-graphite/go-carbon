@@ -35,6 +35,12 @@ func (q *WriteoutQueue) invalidate() {
 	q.notifyAt(time.Now())
 }
 
+// RefreshWriteoutQueue rebuilds the order from current arrivals and eligibility,
+// even when the strategy is unchanged. Existing cached points stay queued.
+func (c *Cache) RefreshWriteoutQueue() {
+	c.writeoutQueue.invalidate()
+}
+
 func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
 	q := &WriteoutQueue{
 		cache: cache,
