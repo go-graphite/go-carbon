@@ -58,6 +58,7 @@ func TestSwitchWriterJoinsEveryPreviousWriter(t *testing.T) {
 
 func TestSwitchWriterConcurrentSwitchesKeepAllPoints(t *testing.T) {
 	var calls atomic.Int64
+	//nolint:unparam // switchWriter requires an error result; this test counts successful writes.
 	write := func(*points.Points) error { calls.Add(1); return nil }
 	s := &switchWriter{write: write}
 	var wg sync.WaitGroup
