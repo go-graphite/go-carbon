@@ -70,5 +70,8 @@ func (app *App) checkRestartAdmission() error {
 	if !handoff.StartupCaptureSupported(app.readSuccessor, app.ConfigFilename) {
 		return refuse(errors.New("successor rejected startup capture configuration/capacity admission"))
 	}
+	if !handoff.StartupGenerationSupported(app.readSuccessor) {
+		return refuse(errors.New("successor cannot capture input if the optional read checkpoint fails"))
+	}
 	return nil
 }

@@ -139,6 +139,12 @@ func StoreInputSupported(binary string) bool {
 
 const StartupCaptureProtocol = "go-carbon-startup-capture/1"
 
+const StartupGenerationProtocol = "go-carbon-startup-generation/1"
+
+func StartupGenerationSupported(binary string) bool {
+	return protocolSupported(binary, "-startup-generation-protocol", StartupGenerationProtocol)
+}
+
 // StartupCaptureSupported probes the actual successor configuration and local
 // resource fallback conditions without opening storage or claiming sockets.
 func StartupCaptureSupported(binary, config string) bool {

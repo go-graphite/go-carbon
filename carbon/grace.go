@@ -60,6 +60,20 @@ func (app *App) DumpStop() (err error) {
 	defer app.migrationLifecycle.Unlock()
 	app.Lock()
 	admissionErr := app.checkRestartAdmission()
+	filenamePostfix := ""
+	captureGeneration := false
+	if admissionErr == nil && app.Config.Dump.RequireStartupCapture {
+		filenamePostfix = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+		format, err := app.Config.Dump.cacheFormat()
+		if err == nil {
+			err = publishStartupGeneration(app.Config.Dump.Path, format, filenamePostfix+".bin")
+		}
+		if err != nil {
+			admissionErr = fmt.Errorf("%w: prepare independent input generation: %w", ErrRestartRefused, err)
+		} else {
+			captureGeneration = true
+		}
+	}
 	app.Unlock()
 	if admissionErr != nil {
 		return admissionErr
@@ -182,7 +196,9 @@ func (app *App) DumpStop() (err error) {
 
 	logger.Info("grace stop with dump inited", zap.Duration("since_stop", time.Since(stopStarted)))
 
-	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+	if filenamePostfix == "" {
+		filenamePostfix = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+	}
 	format, err := app.Config.Dump.cacheFormat()
 	if err != nil {
 		return err
@@ -355,7 +371,7 @@ func (app *App) DumpStop() (err error) {
 	wantHandover := readsHandoff && builder != nil && app.inputHandoffPossible() && handoff.InputSupported(app.readSuccessor)
 	// A shared store's reads need its database, which the successor opens
 	// only once this instance closed it, so reads cannot move. Input can.
-	storeInputEligible := !readsHandoff && builder != nil && app.storeInputHandoffPossible() && app.inputHandoffPossible()
+	storeInputEligible := !readsHandoff && (builder != nil || captureGeneration) && app.storeInputHandoffPossible() && app.inputHandoffPossible()
 	storeInputConfigured := storeInputEligible && app.Config.Dump.StoreInputHandoff
 	if storeInputEligible && !storeInputConfigured {
 		logger.Info("store input handoff disabled; stopping input", zap.String("setting", "dump.store-input-handoff"))
@@ -436,7 +452,7 @@ func (app *App) DumpStop() (err error) {
 		switch {
 		case checkpointErr != nil:
 			logger.Warn("pending read checkpoint unavailable; saved legacy dump", zap.Error(checkpointErr))
-			if handover != nil {
+			if handover != nil && !captureGeneration {
 				// The successor restores in order, which takes far longer
 				// than input may stay in the tail.
 				handover.stop("checkpoint unavailable")
@@ -498,7 +514,7 @@ func (app *App) DumpStop() (err error) {
 	// waits for the final one, written just before this process exits.
 	app.recordStop(func(*restartRecord) {})
 	var readsTaken, readsStopped time.Time
-	if storeInput && checkpointPublished {
+	if storeInput && (checkpointPublished || captureGeneration) {
 		readsStopped = app.handOffStoreInput(logger, handover)
 	} else {
 		readsTaken = app.handOffReads(logger, readsHandoff, handover)

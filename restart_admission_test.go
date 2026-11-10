@@ -30,8 +30,20 @@ func TestRestartMainProcess(_ *testing.T) {
 	if os.Getenv("GO_CARBON_TEST_CAPTURE_PROBE") == "1" {
 		os.Args = append(os.Args, "-check-startup-capture")
 	}
+	if os.Getenv("GO_CARBON_TEST_CAPTURE_PROBE") == "generation" {
+		os.Args = append(os.Args, "-startup-generation-protocol")
+	}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	main()
+}
+
+func TestStartupGenerationCapabilityDoesNotOpenConfig(t *testing.T) {
+	child := exec.Command(os.Args[0], "-test.run=^TestRestartMainProcess$")
+	child.Env = append(os.Environ(), restartMainConfigEnv+"=/does-not-exist", "GO_CARBON_TEST_CAPTURE_PROBE=generation")
+	out, err := child.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != handoff.StartupGenerationProtocol+"\nPASS" {
+		t.Fatalf("successor generation capability opened configuration: %v: %s", err, out)
+	}
 }
 
 func TestStartupCaptureProbeDoesNotOpenStorageOrListeners(t *testing.T) {

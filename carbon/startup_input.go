@@ -57,15 +57,20 @@ func (app *App) tryStartupInput() error {
 	}
 	// Only the name is needed here; full checksum/root/index validation remains
 	// on the ordinary startup path, before a point can enter the cache.
-	f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
+	manifest, generation, err := startupGenerationManifest(c.Dump.Path)
 	if err != nil {
-		return nil
+		return err
 	}
-	var manifest recovery.Manifest
-	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
-	_ = f.Close()
-	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
-		return nil
+	if !generation {
+		f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
+		if err != nil {
+			return nil
+		}
+		err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
+		_ = f.Close()
+		if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
+			return nil
+		}
 	}
 	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {

@@ -83,8 +83,14 @@ func main() {
 	sharedStoreHandoffProtocol := flag.Bool("shared-store-handoff-protocol", false, "Print the supported mirrored storage handoff protocol and exit")
 	storeInputHandoffProtocol := flag.Bool("store-input-handoff-protocol", false, "Print the supported shared-store input handoff protocol and exit")
 	checkStartupCapture := flag.Bool("check-startup-capture", false, "Check early durable input capture configuration/capacity without opening storage or listeners")
+	startupGenerationProtocol := flag.Bool("startup-generation-protocol", false, "Print support for early capture without the optional read checkpoint")
 
 	flag.Parse()
+
+	if *startupGenerationProtocol {
+		fmt.Println(handoff.StartupGenerationProtocol)
+		return
+	}
 
 	if *handoffProtocol {
 		fmt.Println(handoff.Protocol)

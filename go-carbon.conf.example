@@ -1294,7 +1294,10 @@ store-input-handoff = false
 # durable startup capture is unavailable. Requires the shared pebble-chunk TCP
 # path above, an input log and a checkpoint-capable read index. The actual next
 # executable must pass -check-startup-capture with the installed configuration
-# and current memory/disk headroom. A refused stop leaves this worker active;
+# and current memory/disk headroom, plus -startup-generation-protocol. A durable
+# generation hint is prepared before teardown so an optional read-checkpoint
+# failure can keep early capture during ordinary ordered restore.
+# A refused stop leaves this worker active;
 # it does not release the supervisor. An explicit false permits legacy
 # stop/rebind and cannot provide lossless planned restarts under input.
 # This admission checks known fallback prerequisites; it is not a throughput
