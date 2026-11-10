@@ -137,6 +137,14 @@ func StoreInputSupported(binary string) bool {
 	return protocolSupported(binary, "-store-input-handoff-protocol", StoreInputProtocol)
 }
 
+const StartupCaptureProtocol = "go-carbon-startup-capture/1"
+
+// StartupCaptureSupported probes the actual successor configuration and local
+// resource fallback conditions without opening storage or claiming sockets.
+func StartupCaptureSupported(binary, config string) bool {
+	return protocolSupported(binary, "-check-startup-capture", StartupCaptureProtocol, "-config", config)
+}
+
 func SharedStoreSupported(binary, config string) bool {
 	return protocolSupported(binary, "-shared-store-handoff-protocol", SharedStoreProtocol, "-config", config)
 }

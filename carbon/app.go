@@ -1034,7 +1034,10 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.storeHandoffInputStarted = false
 	app.metadataPrewarmDone.Store(nil)
 	app.metadataPrewarmReady = make(chan struct{})
-	app.metadataPrewarmGate = make(chan struct{})
+	app.metadataPrewarmGate = nil
+	if conf.Whisper.StorageBackend == "pebble-chunk" && conf.Whisper.StoreMetadataCachePrewarm && conf.Whisper.StoreMetadataCacheSize > 0 {
+		app.metadataPrewarmGate = make(chan struct{})
+	}
 	app.metadataPrewarmGateOnce = new(sync.Once)
 	app.metadataPrewarmProgress = new(store.PrewarmProgress)
 	if app.restartBudgetStop != nil {

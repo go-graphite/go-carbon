@@ -352,6 +352,9 @@ type dumpConfig struct {
 	// its input sockets to a capable successor although reads cannot move;
 	// see go-carbon.conf.example.
 	StoreInputHandoff bool `toml:"store-input-handoff"`
+	// RequireStartupCapture refuses a planned stop before changing the live
+	// worker when either side cannot use early durable input capture.
+	RequireStartupCapture bool `toml:"require-startup-capture"`
 	// Format of the cache dump a stop writes: "legacy" (the default),
 	// "compact", or "blocks" (compact points with compressed names).
 	// Restore reads every format. Releases without a format ignore its dump; see

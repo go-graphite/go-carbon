@@ -14,13 +14,15 @@ const Protocol = "go-carbon-read-handoff/1"
 const InputProtocol = "go-carbon-input-handoff/2"
 const SharedStoreProtocol = "go-carbon-shared-store-handoff/2"
 const StoreInputProtocol = "go-carbon-store-input-handoff/2"
+const StartupCaptureProtocol = "go-carbon-startup-capture/1"
 
 var RegisterTimeout = 10 * time.Second
 
-func SuccessorSupported(string) bool           { return false }
-func InputSupported(string) bool               { return false }
-func SharedStoreSupported(string, string) bool { return false }
-func StoreInputSupported(string) bool          { return false }
+func SuccessorSupported(string) bool              { return false }
+func InputSupported(string) bool                  { return false }
+func SharedStoreSupported(string, string) bool    { return false }
+func StoreInputSupported(string) bool             { return false }
+func StartupCaptureSupported(string, string) bool { return false }
 
 type Input struct{ Receivers []InputReceiver }
 

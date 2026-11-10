@@ -58,6 +58,12 @@ func (app *App) DumpStop() (err error) {
 	stopStarted := time.Now()
 	app.migrationLifecycle.Lock()
 	defer app.migrationLifecycle.Unlock()
+	app.Lock()
+	admissionErr := app.checkRestartAdmission()
+	app.Unlock()
+	if admissionErr != nil {
+		return admissionErr
+	}
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
@@ -704,19 +710,27 @@ func (app *App) SetSuccessorResolver(resolve func() string) {
 }
 
 // resolveSuccessor replaces the next binary by the service manager's, if it
-// can tell. Assumes we are holding app.Lock().
-func (app *App) resolveSuccessor() {
-	if app.successorResolver == nil || app.readRelease == nil {
-		return
+// can tell. False distinguishes an unresolved service-manager lookup from an
+// explicitly configured standalone successor. Assumes we hold app.Lock().
+func (app *App) resolveSuccessor() bool {
+	if app.readRelease == nil {
+		return false
+	}
+	if app.successorResolver == nil {
+		return app.readSuccessor != ""
 	}
 	started := time.Now()
 	next := app.successorResolver()
-	if next == "" || next == app.readSuccessor {
-		return
+	if next == "" {
+		return false
+	}
+	if next == app.readSuccessor {
+		return true
 	}
 	zapwriter.Logger("dump").Info("service manager starts another binary next", zap.String("invoked_as", app.readSuccessor),
 		zap.String("next_binary", next), zap.Duration("runtime", time.Since(started)))
 	app.readSuccessor = next
+	return true
 }
 
 // readHandoffPossible reports whether this instance can hand reads over.
