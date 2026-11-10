@@ -3,12 +3,10 @@ package chunkstore
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"strconv"
-	"time"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -127,71 +125,10 @@ func (s *Store) PatchFinite(ctx context.Context, p FinitePatch, fence FiniteCach
 	if len(plan.Writes) > 1 || (!plan.Noop && len(plan.Writes) != 1) {
 		return result, ErrConflict
 	}
-	b := s.db.NewIndexedBatch()
-	defer b.Close()
-	out := s.newContinuationIO(ctx, b, b, m)
-	for _, w := range plan.Writes {
-		if err = out.Set(w.Key, w.Value); err != nil {
-			return result, err
-		}
-	}
-	if m.Revision == math.MaxUint64 {
-		return result, ErrConflict
-	}
-	if !plan.Noop {
-		receipt, encodeErr := json.Marshal(p)
-		if encodeErr != nil {
-			return result, encodeErr
-		}
-		if err = b.Set(receiptKey, receipt, nil); err != nil {
-			return result, err
-		}
-	}
-	if !plan.Noop {
-		m.Revision++
-		if err = b.Set(revisionKey(m), revisionBytes(m), nil); err != nil {
-			return result, err
-		}
-	}
-	// Refuse a busy stripe; do not wait behind a foreground writer or retry.
-	mu := &s.metricMu[s.metricStripe(m.Name)]
-	if !mu.TryLock() {
-		return result, ErrConflict
-	}
-	lockedAt := time.Now()
-	lockCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
-	err = fence(lockCtx, m.Name, func() error {
-		if epoch == math.MaxUint64 || s.mutationEpoch[s.metricStripe(m.Name)].Load() != epoch {
-			return ErrConflict
-		}
-		if err := errors.Join(lockCtx.Err(), s.checkFileOwnership(m)); err != nil {
-			return err
-		}
-		if plan.Noop {
-			return nil
-		}
-		s.beginStateMutation(m.Name)
-		defer s.finishStateMutation(m.Name)
-		if err := b.Commit(pebble.NoSync); err != nil {
-			return err
-		}
-		s.pendingSync.Store(true)
-		result.Applied = true
+	published, err := s.publishPointPatch(ctx, m, epoch, plan.Writes, plan.Noop, receiptKey, p, fence)
+	published.PlanSHA256, published.Nonce = p.PlanSHA256, p.Nonce
+	if published.Applied {
 		s.nativeCounters.finitePatches.Add(1)
-		result.Version = transferVersion(m)
-		return nil
-	})
-	cancel()
-	result.LockNanos = time.Since(lockedAt).Nanoseconds()
-	mu.Unlock()
-	if result.Applied {
-		s.invalidateReadCache()
-		err = errors.Join(err, s.syncWAL())
 	}
-	// An overrun is an explicit receipt, never permission to replay or undo a
-	// committed correction. The caller must stop and reconcile actual state.
-	if result.LockNanos > int64(10*time.Millisecond) {
-		err = errors.Join(err, errors.New("finite patch stripe exceeded 10ms; reconcile, never retry"))
-	}
-	return result, err
+	return published, err
 }
