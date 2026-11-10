@@ -53,7 +53,7 @@ func (api *Api) Stat(send helper.StatCallback) {
 func (api *Api) Listen(addr *net.TCPAddr) error {
 	return api.StartFunc(func() error {
 
-		tcpListener, err := net.ListenTCP("tcp", addr)
+		tcpListener, err := helper.ListenTCP("tcp", addr)
 		if err != nil {
 			return err
 		}

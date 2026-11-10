@@ -28,6 +28,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/carbon"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/points"
 )
@@ -43,7 +44,7 @@ func httpServe(addr string) (func(), error) {
 		return nil, err
 	}
 
-	listener, err := net.ListenTCP("tcp", tcpAddr)
+	listener, err := helper.ListenTCP("tcp", tcpAddr)
 	if err != nil {
 		return nil, err
 	}

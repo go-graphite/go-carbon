@@ -23,6 +23,7 @@ import (
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/helper/heartbeat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/handoff"
@@ -429,7 +430,7 @@ func (app *App) ParseConfig() error {
 			Name: "config_unknown_keys",
 			Help: "Unknown TOML keys in the currently loaded configuration.",
 		})
-		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics(), runtimeWaitCollector{})
+		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics(), helper.ListenerBindMetrics(), runtimeWaitCollector{})
 	}
 	app.configUnknownKeys.Set(float64(len(app.Config.unknownKeys)))
 
