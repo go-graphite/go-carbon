@@ -55,7 +55,7 @@ func Inspect(ctx context.Context, input io.Reader, limits InspectLimits, visit f
 		}
 		header = header[:frameHeaderSize]
 		n, err := io.ReadFull(input, header)
-		if err == io.EOF && n == 0 {
+		if errors.Is(err, io.EOF) && n == 0 {
 			if stats.Frames == 0 {
 				return stats, errors.New("snapshot contains no frames")
 			}
@@ -88,8 +88,11 @@ func Inspect(ctx context.Context, input io.Reader, limits InspectLimits, visit f
 				visitErr = visit(p)
 			}
 		})
-		if err != nil || count != int(frame.points) {
-			return stats, fmt.Errorf("snapshot frame did not verify at %d: decoded=%d declared=%d error=%v", stats.Bytes, count, frame.points, err)
+		if err != nil {
+			return stats, fmt.Errorf("snapshot frame did not verify at %d: decoded=%d declared=%d: %w", stats.Bytes, count, frame.points, err)
+		}
+		if count != int(frame.points) {
+			return stats, fmt.Errorf("snapshot frame count differs at %d: decoded=%d declared=%d", stats.Bytes, count, frame.points)
 		}
 		if visitErr != nil {
 			return stats, visitErr
