@@ -237,7 +237,16 @@ path = "input-log"
             target = (8448 if enabled else 8447 if mode == 'plaintext' else 8192) - accepted_before
             eventually(lambda: float(metrics(prom).get('metrics_received_tcp_total', 0)) == target)
         elif experiment == 'continuous':
-            for data in chunks[16:]:
+            pending = chunks[16:]
+            for i, data in enumerate(pending):
+                if input_log_only and restart_thread.is_alive():
+                    # Stretch the finite fixture as takeover progresses. A fixed
+                    # sender duration can end before a slow relog finishes,
+                    # leaving no actual input for the successor to receive.
+                    remaining = len(pending)-i
+                    restart_thread.join(min(1, .005*(len(pending)/remaining)**2))
+                else:
+                    time.sleep(.005 if input_log_only else .0005)
                 try:
                     conn.sendall(data)
                     sent += 256
@@ -246,7 +255,6 @@ path = "input-log"
                     reconnects += 1
                     conn.close()
                     conn = eventually(connect)
-                time.sleep(.005 if input_log_only else .0005)
             restart_thread.join(40)
         else:
             restart_thread.join(40)
