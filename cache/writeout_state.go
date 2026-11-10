@@ -9,6 +9,9 @@ type WriteoutState struct {
 	Points, MaxPoints              int64
 	MaxDelay, MeanDelay, OldestAge time.Duration
 	Pressure, Recovering           bool
+	// Draining requests completion at the automatic ceiling, within restart CPU
+	// admission, while a finite recovery prefix gates startup or direct input.
+	Draining bool
 	// RecoveryBlocked is a short lease refreshed by actual denied admissions,
 	// not a second cache-fill threshold. It also covers legacy recovery callers.
 	RecoveryBlocked bool
@@ -36,6 +39,7 @@ func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
 		MeanDelay: time.Duration(float64(s.writeoutMaxDelay) * (1 - s.writeoutSpread/2)),
 		Pressure:  c.bytePressure(s), Recovering: c.recovering(s),
 		RecoveryBlocked: c.RecoveryBlocked(),
+		Draining:        c.recoveryDrain.Load(),
 	}
 	if pending := c.pending.Load(); pending != nil {
 		state.Restored = pending.remaining.Load() == 0
@@ -65,7 +69,7 @@ func (c *Cache) writeoutStateAt(now time.Time) WriteoutState {
 		}
 		shard.mu.RUnlock()
 	}
-	if state.RecoveryBlocked {
+	if state.RecoveryBlocked || state.Draining {
 		state.Eligible = state.Metrics
 	}
 	return state

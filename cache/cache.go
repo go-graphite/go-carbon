@@ -61,6 +61,7 @@ type Cache struct {
 	recoveryAdmission    atomic.Pointer[recoveryAdmission]
 	recoveryBlockedUntil atomic.Int64
 	recoveryRejections   atomic.Uint64
+	recoveryDrain        atomic.Bool
 
 	writeoutEpoch   time.Time
 	writeoutStateMu sync.Mutex
@@ -74,6 +75,7 @@ type Cache struct {
 
 	writeStrategy WriteStrategy
 	writeoutQueue *WriteoutQueue
+	logPressure   chan struct{} // bounded wake for restore waiting on journal space
 
 	// Keep read-mostly settings off the cache lines written by counters and
 	// queue bookkeeping, including machines with 128-byte cache lines.
@@ -193,6 +195,7 @@ func New() *Cache {
 		data:          make([]*Shard, shardCount),
 		writeoutEpoch: time.Now(),
 		writeStrategy: Noop,
+		logPressure:   make(chan struct{}, 1),
 	}
 
 	for i := 0; i < shardCount; i++ {
@@ -661,7 +664,8 @@ func (c *Cache) AddRestored(p *points.Points) {
 }
 
 // AddRestoredBeforeInput keeps dump points durably logged but immediately
-// eligible when startup must drain old history before opening receivers.
+// eligible when startup must drain old history before opening receivers. It
+// waits for cache capacity and bypasses live drop rules for accepted history.
 func (c *Cache) AddRestoredBeforeInput(p *points.Points) {
 	c.addRestored(p, true)
 }
@@ -675,7 +679,22 @@ func (c *Cache) addRestored(p *points.Points, immediate bool) {
 		}
 		return
 	}
+	for immediate && !c.HasRecoveryCapacity(len(p.Data)) {
+		// Graceful stop may divert this accepted record to the dump WAL
+		// after persistence stops. Do not hold it behind cache capacity then.
+		if c.settings.Load().(*cacheSettings).xlog != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
 	for wait := c.addWithRestore(p, true, false, immediate, nil, nil); wait != nil; wait = c.addWithRestore(p, true, false, immediate, nil, nil) {
+		// Adjacent dump records can fill one shard, even for short metrics. Ask
+		// the journal owner to collect now, rather than one buffer per
+		// periodic sync tick. No I/O runs under a cache shard lock.
+		select {
+		case c.logPressure <- struct{}{}:
+		default:
+		}
 		<-wait
 	}
 }
@@ -755,7 +774,8 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 		shard.bindStreamSeries(series, values, slot)
 	}
 	var throttleState any
-	if !recovered && c.throttleWithHash != nil {
+	liveAdmission := !recovered && (!restored || !immediate)
+	if liveAdmission && c.throttleWithHash != nil {
 		if exists {
 			shard.throttleScratch = values.throttleState()
 		}
@@ -768,7 +788,7 @@ func (c *Cache) addWithRestore(p *points.Points, restored, recovered, immediate 
 	}
 
 	count := len(p.Data)
-	if !recovered && c.overflows(s, count) {
+	if liveAdmission && c.overflows(s, count) {
 		return nil
 	}
 

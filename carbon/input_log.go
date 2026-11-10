@@ -135,6 +135,16 @@ func (app *App) openInputLog(core *cache.Cache) error {
 	zapwriter.Logger("input-log").Info("input log opened", zap.String("path", conf.Path), zap.Int64("segment_size", conf.SegmentSize),
 		zap.Duration("max_age", inputLogMaxAge(app.Config)), zap.Bool("needs_replay", l.NeedsReplay()))
 	app.inputLog.Store(l)
+	if s := app.startupInput; s != nil {
+		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
+		if err != nil {
+			return err
+		}
+		if len(paths) != 0 {
+			l.RetainReplay()
+			s.releaseLog = l.ReleaseCopy
+		}
+	}
 	core.EnableInputLog()
 	if !l.NeedsReplay() {
 		l.Start(core, cache.ShardCount)
@@ -154,13 +164,23 @@ func (app *App) openInputLog(core *cache.Cache) error {
 // drain before receivers open, even for compressed whisper.
 func (app *App) replayInputLog(core *cache.Cache) error {
 	if s := app.startupInput; s != nil {
+		paths, err := filepath.Glob(s.path + ".capture-epoch-*" + startupDirectSuffix)
+		if err != nil {
+			return err
+		}
+		if len(paths) != 0 {
+			// A sealed capture epoch precedes this journal even when the
+			// optional pending checkpoint is unavailable. finishStartupInput
+			// restores that ordered boundary before starting current replay.
+			return nil
+		}
 		// Ordinary fallback restores the journal before ordered dump files. Retain
 		// that boundary as the first history token, ahead of the locked raw tail.
 		seg := &startupSegment{source: s.legacy.stream.NextJournal()}
 		seg.next.Store(s.legacy.first.Load())
 		s.legacy.first.Store(seg)
 		s.historyLog.Store(seg)
-		err := app.replayInputLogWith(core, nil, app.Config.InputLog.Path, app.Persister != nil, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+		err = app.replayInputLogWith(core, nil, app.Config.InputLog.Path, app.Persister != nil, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
 		seg.sealed.Store(true)
 		seg.replayed.Store(true)
 		return err

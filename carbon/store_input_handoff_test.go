@@ -107,17 +107,19 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 		name       string
 		enabled    bool
 		storeInput bool
+		direct     bool
 		// successor: "start" runs the next instance; "abandon" registers,
 		// asks for the listener and goes away; "silent" registers and never
 		// asks. The last two start the real successor afterwards.
 		successor  string
 		handedOver bool
 	}{
-		{"store input handoff", true, true, "start", true},
-		{"disabled", false, true, "start", false},
-		{"successor without support", true, false, "start", false},
-		{"successor gone before taking input", true, true, "abandon", false},
-		{"successor never asks", true, true, "silent", false},
+		{"store input handoff", true, true, false, "start", true},
+		{"direct capture then store input handoff", true, true, true, "start", true},
+		{"disabled", false, true, false, "start", false},
+		{"successor without support", true, false, false, "start", false},
+		{"successor gone before taking input", true, true, false, "abandon", false},
+		{"successor never asks", true, true, false, "silent", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if isolatedTestProcess(t) {
@@ -150,6 +152,10 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 			}
 			incrementalLease(t, cfg, 1, 0)
 			cfg.Dump.StoreInputHandoff = tc.enabled
+			if tc.direct {
+				cfg.InputLog.Enabled = true
+				cfg.InputLog.Path = filepath.Join(root, "journal")
+			}
 
 			first := New(filepath.Join(root, "go-carbon.conf"))
 			first.Config = cfg
@@ -168,6 +174,10 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 					t.Fatal("initial index did not complete", zapwriter.TestString())
 				}
 				time.Sleep(10 * time.Millisecond)
+			}
+			var directCapture *startupInput
+			if tc.direct {
+				directCapture = installDirectCaptureForTest(t, first)
 			}
 
 			next := New(filepath.Join(root, "go-carbon.conf"))
@@ -296,6 +306,12 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 			}
 			if err := <-stopped; err != nil {
 				t.Fatal("dump stop", err)
+			}
+			if directCapture != nil {
+				paths, _ := filepath.Glob(directCapture.path + ".capture-*.tail.bin")
+				if len(paths) != 0 || strings.Contains(zapwriter.TestString(), "capture sources retained across restart") {
+					t.Fatal("direct stop retained/replayed the old capture epoch", paths)
+				}
 			}
 			if tc.handedOver && first.MetricStore != nil {
 				t.Fatal("predecessor kept the database")

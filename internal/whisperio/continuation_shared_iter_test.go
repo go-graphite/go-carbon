@@ -144,6 +144,10 @@ func TestContinuationSharedUpdateIteratorMatchesPointLookups(t *testing.T) {
 				now = time.Unix(stamp+2, 0)
 				name := fmt.Sprintf("m%d", seq%metrics)
 				input := []store.Point{{Timestamp: stamp - 3, Value: float64(seq)}, {Timestamp: stamp - 2, Value: .25}, {Timestamp: stamp - 1, Value: -1}}
+				// Compare raw reads and mutations with the point-lookup oracle,
+				// including payload NaNs, signed zero and duplicate/late timestamps.
+				bits := [...]uint64{0, 1 << 63, 0x7ff8000000000012, 0x7ff0000000000001, 1, 0x3ff0000000000001}
+				input[0].Value = math.Float64frombits(bits[seq%len(bits)])
 				if seq%5 == 2 {
 					// Late points fill the sidecar; some collide with stored slots.
 					input = append(input, store.Point{Timestamp: stamp - 40 - int64(seq%7), Value: 111}, store.Point{Timestamp: stamp - 290, Value: 222})

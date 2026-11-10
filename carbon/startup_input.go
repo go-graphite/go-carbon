@@ -27,8 +27,28 @@ import (
 // existing protocol, including when upgrading from a predecessor that does not
 // know about startup capture. Mirrored read handoff retains its existing path.
 func (app *App) startStartupInput() error {
+	fences, err := filepath.Glob(filepath.Join(app.Config.Dump.Path, "input.*.tail.bin.capture-epoch-*"+startupDirectSuffix))
+	if err != nil {
+		return err
+	}
+	if len(fences) > 0 && !app.Config.InputLog.Enabled {
+		return errors.New("retained direct capture requires its input log; preserve recovery sources and reenable input logging")
+	}
+	if err := app.tryStartupInput(); err != nil {
+		return err
+	}
+	if len(fences) > 0 && app.startupInput == nil {
+		return errors.New("retained direct capture requires ordered startup recovery; preserve sources and restore compatible configuration, manifest and headroom")
+	}
+	return nil
+}
+
+func (app *App) tryStartupInput() error {
+	if app.startupInput != nil {
+		return nil
+	}
 	c := app.Config
-	if app.handoffClaim == nil || !c.Dump.StoreInputHandoff || !c.Dump.Enabled ||
+	if !c.Dump.StoreInputHandoff || !c.Dump.Enabled ||
 		c.Whisper.StorageBackend != "pebble-chunk" || c.Whisper.StoreMirrorFiles ||
 		c.Tags.Enabled || !c.Tcp.Enabled || c.Tcp.BufferSize != 0 || c.Tcp.Compression != "" ||
 		c.Udp.Enabled || c.Pickle.Enabled || len(c.Receiver) != 0 {
@@ -54,6 +74,7 @@ func (app *App) startStartupInput() error {
 	if scanErr != nil {
 		return scanErr
 	}
+	orphanedCapture := false
 	for _, entry := range entries {
 		name := entry.Name()
 		generation := strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, recovery.CompactPrefix) || strings.HasPrefix(name, recovery.BlocksPrefix) || strings.HasPrefix(name, "input.") || strings.HasPrefix(name, recovery.CompactInputPrefix)
@@ -61,6 +82,16 @@ func (app *App) startStartupInput() error {
 			zapwriter.Logger("app").Error("startup capture requires a single ordered recovery generation; using ordinary recovery", zap.String("filename", name))
 			return nil
 		}
+		if !orphanedCapture && app.handoffClaim == nil && !entry.IsDir() && recovery.IsGenerationTail(name, manifest.WAL.Name) && recovery.IsCaptureSegment(name) && !handoff.Locked(filepath.Join(c.Dump.Path, name)) {
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			orphanedCapture = info.Size() > 0 || isStartupDirectFence(name)
+		}
+	}
+	if app.handoffClaim == nil && !orphanedCapture {
+		return nil
 	}
 	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
 	policy.log()
@@ -74,27 +105,39 @@ func (app *App) startStartupInput() error {
 	}
 	claim := app.handoffClaim
 	app.handoffClaim = nil
-	ln, _, err := claim.Take(&net.TCPAddr{})
-	if ln != nil {
-		_ = ln.Close()
-		_ = claim.Close()
-		return errors.New("expected an input-only store handoff")
-	}
-	if err != nil {
-		_ = claim.Close()
-		return fmt.Errorf("take early input offer: %w", err)
-	}
-	in, err := claim.TakeInput()
-	if err != nil {
-		return fmt.Errorf("take early store input: %w", err)
-	}
-	if in == nil {
-		return nil
-	}
-	defer in.Close()
-	h := takeInputReceiver(in, "tcp")
-	if h == nil {
-		return errors.New("store input handoff has no TCP receiver")
+	var h *tcp.Handoff
+	tcpOptions := c.Tcp
+	if claim == nil {
+		// A crashed capture owner has no sockets to transfer. Start a new
+		// capture receiver so its retained epochs use the same parallel,
+		// ordered replay path as a normal handoff.
+		h, tcpOptions, err = listenStartupCapture(c.Tcp)
+		if err != nil {
+			return err
+		}
+	} else {
+		ln, _, err := claim.Take(&net.TCPAddr{})
+		if ln != nil {
+			_ = ln.Close()
+			_ = claim.Close()
+			return errors.New("expected an input-only store handoff")
+		}
+		if err != nil {
+			_ = claim.Close()
+			return fmt.Errorf("take early input offer: %w", err)
+		}
+		in, err := claim.TakeInput()
+		if err != nil {
+			return fmt.Errorf("take early store input: %w", err)
+		}
+		if in == nil {
+			return nil
+		}
+		defer in.Close()
+		h = takeInputReceiver(in, "tcp")
+		if h == nil {
+			return errors.New("store input handoff has no TCP receiver")
+		}
 	}
 	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
 	if err != nil {
@@ -104,7 +147,7 @@ func (app *App) startStartupInput() error {
 	if receiverStoreHook != nil {
 		spool.observe, _ = receiverStoreHook(func(*points.Points) {}, func([]byte, float64, int64) {})
 	}
-	r, err := tcp.NewInheritedCapture("tcp", c.Tcp, h, spool)
+	r, err := tcp.NewInheritedCapture("tcp", tcpOptions, h, spool)
 	if err != nil {
 		_ = spool.close()
 		return err
@@ -119,6 +162,25 @@ func (app *App) startStartupInput() error {
 	return nil
 }
 
+func listenStartupCapture(options *tcp.Options) (*tcp.Handoff, *tcp.Options, error) {
+	addr, err := net.ResolveTCPAddr("tcp", options.Listen)
+	if err != nil {
+		return nil, nil, err
+	}
+	listener, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
+	bound := *options
+	bound.Listen = listener.Addr().String()
+	file, err := listener.File()
+	_ = listener.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	return &tcp.Handoff{Listener: file}, &bound, nil
+}
+
 // Attach replay without replacing or detaching any receiver. Startup returns
 // while constrained partitions keep accepting durable input in the background.
 func (app *App) finishStartupInput(core *cache.Cache) {
@@ -127,6 +189,69 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		return
 	}
 	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
+	if app.MetricStore != nil {
+		sink.syncStore = app.MetricStore.Sync
+	}
+	add, addPoint := core.Add, core.AddPoint
+	if receiverStoreHook != nil {
+		add, addPoint = receiverStoreHook(add, addPoint)
+	}
+	sink.directAdd = add
+	sink.drain = core.SetRecoveryDrain
+	if s.receiver != nil {
+		s.receiver.SetPointOut(addPoint)
+		if receiverStoreHook == nil {
+			s.receiver.SetPointsOut(core.AddPoints)
+			s.receiver.SetPointBatchOut(core.AddPointBatch)
+		}
+	}
+	if log := app.inputLog.Load(); log != nil && app.Config.InputLog.Enabled {
+		sink.startLog = func() (func() error, error) {
+			log := app.inputLog.Load()
+			if log == nil {
+				return nil, errors.New("input log unavailable after reset failure")
+			}
+			// Do not retire files belonging to an active store-copy session.
+			if _, err := log.PinCopy(); err != nil {
+				return nil, err
+			}
+			stats := log.Metrics()
+			if stats.PointsWritten == 0 && stats.ReplayedPoints == 0 {
+				// The usual handoff has a fresh journal. Its first records are
+				// the new direct suffix, so checkpoint/tail sources can remain
+				// pending and retire behind this retention pin.
+				return log.ReleaseCopy, nil
+			}
+			if s.legacy.first.Load() != nil || !core.InputLogIdle() {
+				_ = log.ReleaseCopy()
+				// These finite older sources gate a new journal boundary. At
+				// low input, metrics/max-delay would only decay toward zero.
+				core.SetRecoveryDrain(true)
+				return nil, errors.New("earlier journal/history sources have not persisted")
+			}
+			if sink.syncStore != nil {
+				if err := sink.syncStore(); err != nil {
+					_ = log.ReleaseCopy()
+					return nil, err
+				}
+			}
+			// Input is still fenced into capture. Old journal values have all
+			// persisted; discard their replay eligibility before placing a new
+			// epoch boundary, including the truncate-lag grace period.
+			app.inputLog.Store(nil)
+			if err := log.Retire(); err != nil {
+				return nil, err
+			}
+			core.DisableInputLog()
+			core.EnableInputLogFromNow()
+			if err := app.openInputLog(core); err != nil {
+				return nil, err
+			}
+			log = app.inputLog.Load()
+			_, err := log.PinCopy()
+			return log.ReleaseCopy, err
+		}
+	}
 	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
 	s.startReplay(sink, func() error {
 		// Older epochs precede the current stream, including after a crash during
@@ -136,13 +261,23 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			return err
 		}
 		paths := []string{s.path}
+		currentEpoch := fmt.Sprintf("%s.capture-epoch-%020d.", s.path, s.epoch)
 		for _, entry := range entries {
 			path := filepath.Join(filepath.Dir(s.path), entry.Name())
-			if path != s.path && recovery.IsTail(entry.Name()) && !handoff.Locked(path) {
+			// Only this owner's epoch is live capture. A predecessor may still
+			// be releasing older files: include them and wait in openSegment,
+			// rather than silently declaring history complete without them.
+			if path != s.path && !entry.IsDir() && recovery.IsTail(entry.Name()) && !strings.HasPrefix(path, currentEpoch) {
 				paths = append(paths, path)
 			}
 		}
 		slices.Sort(paths)
+		fencedEpoch := ""
+		for _, path := range paths {
+			if isStartupDirectFence(path) {
+				fencedEpoch = strings.TrimSuffix(path, startupDirectSuffix)
+			}
+		}
 		cancelled := func() bool {
 			select {
 			case <-s.replayStop:
@@ -190,6 +325,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			if e != nil {
 				return nil, e
 			}
+			started := time.Now()
 			unlock, e := handoff.LockExclusive(path)
 			if e != nil {
 				f.Close()
@@ -202,6 +338,7 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				return nil, e
 			}
 			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.Next()}
+			zapwriter.Logger("app").Info("historical input tail opened", zap.String("filename", path), zap.Duration("lock_wait", time.Since(started)))
 			seg.size.Store(info.Size())
 			s.size.Add(info.Size())
 			tail.next.Store(seg)
@@ -216,7 +353,10 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			if framed {
 				worker := &startupShard{owner: s}
 				loaded, e = recovery.ReadCaptureFramesBuffer(reader, s.policy.readBuffer, func(raw []byte, n int) error {
-					cost, e := captureMetricBytes(raw)
+					if e := s.waitCapture(); e != nil {
+						return e
+					}
+					cost, e := captureMetricBytes(raw, core)
 					if e != nil {
 						return e
 					}
@@ -226,7 +366,11 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 						}
 						time.Sleep(time.Millisecond)
 					}
-					return worker.apply(raw, seg.source, sink)
+					if e := worker.apply(raw, seg.source, sink); e != nil {
+						return e
+					}
+					s.historyPoints.Add(int64(n))
+					return nil
 				})
 			} else {
 				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
@@ -257,8 +401,10 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 				i++
 				continue
 			}
-			if e := replayLog(); e != nil {
-				return e
+			if fencedEpoch == "" {
+				if e := replayLog(); e != nil {
+					return e
+				}
 			}
 			// Epoch first, partition second, segment sequence last. Readers
 			// overlap partitions only, joining before the next epoch begins.
@@ -286,7 +432,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			close(jobs)
 			failures := make(chan error, len(groups))
 			var wg sync.WaitGroup
-			for range min(len(groups), max(1, runtime.GOMAXPROCS(0))) {
+			// Capture appenders and socket readers need runnable capacity while
+			// old epochs are backlogged. Queue feedback handles transient bursts.
+			for range min(len(groups), max(1, runtime.GOMAXPROCS(0)/2)) {
 				wg.Go(func() {
 					for segments := range jobs {
 						for _, seg := range segments {
@@ -302,6 +450,11 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 			close(failures)
 			for e := range failures {
 				return e
+			}
+			if epoch == fencedEpoch {
+				if e := replayLog(); e != nil {
+					return e
+				}
 			}
 		}
 

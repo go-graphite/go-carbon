@@ -1,16 +1,22 @@
 package tcp
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"math"
+	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/go-graphite/go-carbon/points"
 	"github.com/zeebo/xxh3"
 )
 
 // Capture receives complete legacy binary point records borrowed until Write
 // returns. Each connection encodes privately and submits bounded batches, so
 // draining input does not serialize a lock and allocation for every point.
-// Capture is installed before handlers start and remains until Detach returns.
+// Capture is installed before handlers start; SwitchCapture can retire it.
 type Capture interface {
 	Write([]byte, int) error
 }
@@ -28,6 +34,51 @@ type captureSubmission interface {
 	BeginWrite([]byte, int) func() error
 }
 
+// The exclusive fence joins every submitted batch, including connection-local
+// flushes, before sealing the spool. Buffered but unsubmitted records then use
+// the ordinary sink before their connection accepts its next direct point.
+type captureSink struct {
+	sync.RWMutex
+	direct  atomic.Pointer[func(*points.Points)]
+	fencing atomic.Bool
+}
+
+func (rcv *TCP) SwitchCapture(out func(*points.Points), seal func() error) error {
+	s := &rcv.captureSink
+	if !s.fencing.CompareAndSwap(false, true) {
+		return errors.New("capture submissions are still joining a previous direct fence")
+	}
+	joined, cancelled := make(chan struct{}), make(chan struct{})
+	go func() {
+		s.Lock()
+		select {
+		case joined <- struct{}{}: // Transfer the exclusive lock to this caller.
+		case <-cancelled:
+			s.Unlock()
+			s.fencing.Store(false)
+		}
+	}()
+	timer := time.NewTimer(250 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-joined:
+		defer func() { s.Unlock(); s.fencing.Store(false) }()
+	case <-timer.C:
+		// Do not hold the spool monitor behind a disk-reserve writer: it
+		// must continue retiring prefixes so that writer can acknowledge.
+		close(cancelled)
+		return errors.New("capture submissions did not quiesce before direct switch")
+	}
+	if s.direct.Load() != nil {
+		return nil
+	}
+	if err := seal(); err != nil {
+		return err
+	}
+	s.direct.Store(&out)
+	return nil
+}
+
 type captureBuffer struct {
 	pending   func() error
 	done      chan error
@@ -37,6 +88,7 @@ type captureBuffer struct {
 	buf       []byte
 	n         int
 	err       error
+	sink      *captureSink
 }
 
 func newCaptureBuffer(out Capture) captureBuffer {
@@ -69,6 +121,31 @@ func (b *captureBuffer) point(name []byte, value float64, timestamp int64) {
 }
 
 func (b *captureBuffer) flush() error {
+	if b.sink != nil {
+		b.sink.RLock()
+		defer b.sink.RUnlock()
+		if out := b.sink.direct.Load(); out != nil {
+			for i := range b.shards {
+				part := &b.shards[i]
+				if part.err == nil && part.n > 0 {
+					part.err = points.ReadBinary(bytes.NewReader(part.buf), *out)
+				}
+				part.buf, part.n = part.buf[:0], 0
+				if b.err == nil {
+					b.err = part.err
+				}
+			}
+			if b.err == nil && b.n > 0 {
+				b.err = points.ReadBinary(bytes.NewReader(b.buf), *out)
+			}
+			b.buf, b.n = b.buf[:0], 0
+			return b.err
+		}
+	}
+	return b.flushCaptured()
+}
+
+func (b *captureBuffer) flushCaptured() error {
 	// Submit all shards before waiting for disk. Serially waiting for shard 0,
 	// then 1, across every connection creates avoidable head-of-line blocking.
 	for i := range b.shards {

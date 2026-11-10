@@ -20,6 +20,12 @@ import (
 // A bounded persister wait lets the entire scan finish first. The store
 // cancels and joins it on shutdown.
 func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, names iter.Seq[string], ready <-chan struct{}, progress *store.PrewarmProgress, warmed func(), budget *restartcpu.Budget) chan struct{} {
+	return startMetadataPrewarmWithCheckpointGate(db, conf, source, names, ready, ready, progress, warmed, budget)
+}
+
+// The checkpoint is an independent, fenced accelerator. Receiver-gating
+// restore may load it before input readiness; catalog scans still wait for it.
+func startMetadataPrewarmWithCheckpointGate(db *store.Store, conf whisperConfig, source string, names iter.Seq[string], ready, checkpointReady <-chan struct{}, progress *store.PrewarmProgress, warmed func(), budget *restartcpu.Budget) chan struct{} {
 	if !conf.StoreMetadataCachePrewarm || db == nil {
 		return nil
 	}
@@ -44,6 +50,7 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 		// credit. Cold metadata can keep writeout below its floor, so loading
 		// must not wait behind the writes that the checkpoint accelerates.
 		checkpointOptions := options
+		checkpointOptions.StartAfter = checkpointReady
 		if budget != nil && budget.Cores() > 0 {
 			checkpointOptions.Wait = budget.WaitCheckpoint
 			checkpointOptions.Workers = budget.CheckpointWorkers(conf.StoreMetadataCachePrewarmWorkers)
@@ -60,6 +67,7 @@ func startMetadataPrewarm(db *store.Store, conf whisperConfig, source string, na
 		if checkpoint.Valid && checkpoint.Validated+checkpoint.Fenced < checkpoint.Entries {
 			ctx, cancel := context.WithTimeout(context.Background(), max(0, store.MetadataCheckpointLoadTimeout-checkpoint.Duration))
 			validationOptions := options
+			validationOptions.StartAfter = checkpointReady
 			// These records are needed by dependent cold writes. Optional
 			// admission could wait behind the shortfall it is meant to cure.
 			validationOptions.Wait = checkpointOptions.Wait
@@ -136,7 +144,11 @@ func reportMetadataCheckpoint(logger *zap.Logger, source string, checkpoint stor
 // startMetadataPrewarm starts the prewarm for the shared store and records
 // its end. Assumes we are holding app.Lock().
 func (app *App) startMetadataPrewarm(source string, names iter.Seq[string]) {
-	if done := startMetadataPrewarm(app.MetricStore, app.Config.Whisper, source, names, app.metadataPrewarmReady, app.metadataPrewarmProgress, app.metadataPrewarmComplete(), app.restartBudget); done != nil {
+	app.startMetadataPrewarmWithCheckpointGate(source, names, app.metadataPrewarmReady)
+}
+
+func (app *App) startMetadataPrewarmWithCheckpointGate(source string, names iter.Seq[string], checkpointReady <-chan struct{}) {
+	if done := startMetadataPrewarmWithCheckpointGate(app.MetricStore, app.Config.Whisper, source, names, app.metadataPrewarmReady, checkpointReady, app.metadataPrewarmProgress, app.metadataPrewarmComplete(), app.restartBudget); done != nil {
 		app.metadataPrewarmDone.Store(&done)
 	}
 }

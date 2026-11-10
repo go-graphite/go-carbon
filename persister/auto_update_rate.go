@@ -26,6 +26,7 @@ type autoUpdateController struct {
 	at, started, restoredAt         time.Time
 	need, equilibrium, rate, target float64
 	reason                          string
+	draining                        bool
 }
 
 func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor, ceiling int) int {
@@ -100,6 +101,15 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 			target, reason = recovery, "recovery"
 		}
 	}
+	// Receiver-gating restoration must finish rather than decay at metrics /
+	// max-delay. Spend the configured catch-up budget; capacity mode (-1) still
+	// applies its hardware ceiling below, and restart CPU admission is unchanged.
+	if s.Draining && s.Metrics > 0 {
+		target, reason = max(target, float64(s.Metrics)/autoUpdateInterval.Seconds()), "recovery"
+		if ceiling > 0 {
+			target = float64(ceiling)
+		}
+	}
 	if target < float64(floor) {
 		target, reason = float64(floor), "floor"
 	}
@@ -108,11 +118,12 @@ func (c *autoUpdateController) step(now time.Time, s cache.WriteoutState, floor,
 	}
 	c.target = target
 	c.reason = reason
-	if first || target >= c.rate {
+	if first || target >= c.rate || c.draining && !s.Draining {
 		c.rate = target
 	} else {
 		c.rate += alpha * (target - c.rate)
 	}
+	c.draining = s.Draining
 	if ceiling > 0 {
 		c.rate = min(c.rate, float64(ceiling))
 	}
@@ -141,6 +152,7 @@ type autoUpdateRate struct {
 	generation              uint64
 	rateLog, capacityLog    autoAdjustmentLog
 	observed                atomic.Pointer[autoUpdateObservation]
+	draining                atomic.Bool
 }
 
 type autoUpdateObservation struct {
@@ -193,6 +205,7 @@ func (p *Whisper) autoUpdateState(state func() cache.WriteoutState) cache.Writeo
 func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
 	a := &p.autoUpdate
 	a.snapshot = s
+	a.draining.Store(s.Draining)
 	a.ordinary = a.controller.step(time.Now(), s, a.floor, a.ceiling)
 	p.capacityLimitLocked(s)
 	p.applyAutoUpdateRateLocked()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -22,11 +23,15 @@ import (
 
 func testPendingReadFormats(t *testing.T) {
 	for _, format := range []string{"legacy", "compact", "blocks"} {
-		t.Run(format, func(t *testing.T) { testPendingReadsBeforePersistenceAndInput(t, format) })
+		t.Run(format, func(t *testing.T) { testPendingReadsBeforePersistenceAndInput(t, format, false) })
 	}
 }
 
-func testPendingReadsBeforePersistenceAndInput(t *testing.T, format string) {
+func TestPendingReadsAfterSavedIndexAdvance(t *testing.T) {
+	testPendingReadsBeforePersistenceAndInput(t, "blocks", true)
+}
+
+func testPendingReadsBeforePersistenceAndInput(t *testing.T, format string, advanceIndex bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -92,6 +97,12 @@ func testPendingReadsBeforePersistenceAndInput(t *testing.T, format string) {
 	first.Unlock()
 	first.Cache.Add(points.OnePoint("existing.metric", 2, stamp+1))
 	first.Cache.Add(points.OnePoint("cache.only", 3, stamp+1))
+	var wantBits []points.Point
+	for i, bits := range []uint64{0, 1 << 63, 0x7ff8000000000012, 0x7ff0000000000001, 1, 0x3ff0000000000001} {
+		p := points.Point{Timestamp: stamp + int64(i/2), Value: math.Float64frombits(bits)}
+		wantBits = append(wantBits, p)
+		first.Cache.Add(points.OnePoint("raw.bits", p.Value, p.Timestamp))
+	}
 	// These are diverted after the cache dump, including a later value for the
 	// same timestamp. Cache-before-WAL order must survive recovery and reads.
 	first.FlushTraces = func() {
@@ -120,6 +131,28 @@ func testPendingReadsBeforePersistenceAndInput(t *testing.T, format string) {
 	}
 	if got := recovery.InputFormat(saved.WAL.Name).String(); got != wantInput {
 		t.Fatal("checkpoint input format", got, saved.WAL.Name)
+	}
+	if advanceIndex {
+		// Capture-preserving shutdown keeps this point checkpoint while catalog
+		// rebuilds replace the saved read generation. Advance the base identity
+		// without changing either its checksums or any point-source bytes.
+		path := filepath.Join(filepath.Dir(cfg.Carbonserver.FileListCache), "."+filepath.Base(cfg.Carbonserver.FileListCache)+".snapshot.json")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		manifest["ScanStarted"] = json.RawMessage("1")
+		raw, err = json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, raw, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	tail := filepath.Join(cfg.Dump.Path, recovery.TailName(saved.WAL.Name))
 	if err := os.WriteFile(tail, points.OnePoint("existing.metric", 9, stamp+2).AppendBinary(nil), 0600); err != nil {
@@ -206,6 +239,15 @@ func testPendingReadsBeforePersistenceAndInput(t *testing.T, format string) {
 		}
 	}
 	check(nil)
+	gotBits := next.Cache.Get("raw.bits")
+	if len(gotBits) != len(wantBits) {
+		t.Fatal("pending history changed float-bit record count", len(gotBits), len(wantBits))
+	}
+	for i, p := range gotBits {
+		if p.Timestamp != wantBits[i].Timestamp || math.Float64bits(p.Value) != math.Float64bits(wantBits[i].Value) {
+			t.Fatal("pending history changed float bits or order", i)
+		}
+	}
 	// The old worker still owns the tail lock. Unrelated checkpoint metrics
 	// must remain in the immutable source, without starting persistence while
 	// foreground intake waits. Reads continue to see their complete history.

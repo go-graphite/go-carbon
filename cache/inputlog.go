@@ -20,6 +20,10 @@ const maxShardLogEntries = 1 << 17
 // buffer for live input, and wait for a drain before admitting more old data.
 const maxShardRestoredLogEntries = maxShardLogEntries / 2
 
+// LogPressure wakes group commit when restored data exhausts its bounded
+// staging allowance. Ordinary live input retains its periodic commit policy.
+func (c *Cache) LogPressure() <-chan struct{} { return c.logPressure }
+
 // shardLog is a shard's part of the input log, guarded by the shard lock.
 // Points are recorded at generation gen. Every cached or in-flight item is
 // tracked with the generation of its oldest point not yet persisted, so the
@@ -215,23 +219,50 @@ func (l *shardLog) relog(gen uint64, budget int, queued *itemMap) int {
 // takes them through the inputlog.Source methods. Items already cached count
 // as recorded at generation zero. Call it before input starts.
 func (c *Cache) EnableInputLog() {
+	c.enableInputLog(true)
+}
+
+// EnableInputLogFromNow starts a fresh journal after all earlier journalled
+// points have persisted. Existing cache points retain independent spool sources;
+// they must not be adopted/relogged into this new journal. Input is fenced.
+func (c *Cache) EnableInputLogFromNow() {
+	c.enableInputLog(false)
+}
+
+func (c *Cache) enableInputLog(adopt bool) {
 	for _, shard := range c.data {
 		shard.mu.Lock()
 		if shard.log.first == nil {
 			shard.log = shardLog{first: make(map[*points.Points]uint64), items: make(map[uint64]int32)}
-			for _, values := range shard.items.all {
-				values.setFlag(itemLogTracked, false)
-				shard.log.trackItem(values)
-			}
-			for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
-				if p != nil {
-					shard.log.track(p)
+			if adopt {
+				for _, values := range shard.items.all {
+					values.setFlag(itemLogTracked, false)
+					shard.log.trackItem(values)
+				}
+				for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+					if p != nil {
+						shard.log.track(p)
+					}
 				}
 			}
 		}
 		c.syncMemoryLocked(shard)
 		shard.mu.Unlock()
 	}
+}
+
+// InputLogIdle is used with live input fenced and history replay joined. No
+// producer can add journal entries then, and persistence only releases items.
+func (c *Cache) InputLogIdle() bool {
+	for _, shard := range c.data {
+		shard.mu.Lock()
+		busy := shard.log.entries.Len() != 0 || len(shard.log.items) != 0
+		shard.mu.Unlock()
+		if busy {
+			return false
+		}
+	}
+	return true
 }
 
 // DisableInputLog stops recording once the log is closed.

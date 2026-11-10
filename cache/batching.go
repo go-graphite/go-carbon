@@ -309,7 +309,17 @@ func (c *Cache) recovering(s *cacheSettings) bool {
 }
 
 func (c *Cache) batchWrites(s *cacheSettings) bool {
-	return s.batching() && !s.underPressure(c.approxSize()) && !c.bytePressure(s) && !c.RecoveryBlocked()
+	return s.batching() && !c.recoveryDrain.Load() && !s.underPressure(c.approxSize()) && !c.bytePressure(s) && !c.RecoveryBlocked()
+}
+
+// SetRecoveryDrain requests completion of a finite recovery prefix instead of
+// steady-state buffering. The startup owner serializes its restore and capture
+// phases and clears the request once their durability gate opens. Rate tokens
+// and restart CPU admission still bound persistence; point order is unchanged.
+func (c *Cache) SetRecoveryDrain(on bool) {
+	if c.recoveryDrain.Swap(on) != on {
+		c.writeoutQueue.notifyAt(time.Now())
+	}
 }
 
 func (s *cacheSettings) underPressure(size int64) bool {

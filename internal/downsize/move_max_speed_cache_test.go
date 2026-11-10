@@ -267,7 +267,7 @@ func TestMaxSpeedLatestAmendmentsRequired(t *testing.T) {
 			t.Fatal(err)
 		}
 		sum := sha256.Sum256(raw)
-		if err := readMaxSpeedDecision(path, fmt.Sprintf("%x", sum)); err == nil {
+		if err := verifyMaxSpeedDecision(path, fmt.Sprintf("%x", sum)); err == nil {
 			t.Fatal("outdated authority accepted", mode)
 		}
 	}

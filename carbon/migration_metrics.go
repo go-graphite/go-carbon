@@ -392,9 +392,13 @@ var startupCaptureDescs = []*prometheus.Desc{
 var captureStreamDescs = []*prometheus.Desc{
 	prometheus.NewDesc("startup_capture_retained_bytes", "Physical durable queue bytes still retained.", nil, nil),
 	prometheus.NewDesc("startup_capture_raw_bytes_total", "Uncompressed point record bytes captured.", nil, nil),
-	prometheus.NewDesc("startup_capture_live_partitions", "Partitions whose append owner applies directly at the FIFO frontier.", nil, nil),
+	prometheus.NewDesc("startup_capture_live_partitions", "Partitions whose replay reader has reached the current FIFO frontier.", nil, nil),
 	prometheus.NewDesc("startup_capture_expected_pause_seconds", "Expected disk safety pause; -1 means no defensible drain estimate.", nil, nil),
 	prometheus.NewDesc("startup_capture_continued", "1 when replay has no positive convergence margin and intake continues durably.", nil, nil),
+	prometheus.NewDesc("startup_capture_pending_appends", "Capture requests queued, submitting, encoding or writing across partitions.", nil, nil),
+	prometheus.NewDesc("startup_capture_replay_yields_total", "Replay waits for capture append pressure to clear.", nil, nil),
+	prometheus.NewDesc("startup_capture_history_replayed_points_total", "Captured frame points replayed from older startup epochs.", nil, nil),
+	prometheus.NewDesc("startup_capture_direct", "1 after startup capture permanently switches to ordinary cache admission and input logging; spool files may still await persistence.", nil, nil),
 }
 
 var captureIODescs = []*prometheus.Desc{
@@ -447,7 +451,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(captureIODescs[2], prometheus.GaugeValue, float64(timing.maximum)/1e9, captureOperations[i])
 		}
 		live := 0
+		var pending int64
 		for _, sh := range capture.shards {
+			pending += sh.pending.Load()
 			if sh.live.Load() {
 				live++
 			}
@@ -456,15 +462,22 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if capture.continued.Load() {
 			continuing = 1
 		}
-		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing}
+		direct := float64(0)
+		if capture.direct.Load() {
+			direct = 1
+		}
+		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing, float64(pending), float64(capture.replayYields.Load()), float64(capture.historyPoints.Load()), direct}
 		for i, v := range extra {
 			kind := prometheus.GaugeValue
-			if i == 1 {
+			if i == 1 || i == 6 || i == 7 {
 				kind = prometheus.CounterValue
 			}
 			ch <- prometheus.MustNewConstMetric(captureStreamDescs[i], kind, v)
 		}
 		values := []float64{float64(capture.size.Load()), float64(capture.points.Load()), float64(capture.replayedPoints.Load()), 0, 1}
+		if capture.direct.Load() {
+			values[4] = 0
+		}
 		if capture.fallback.Load() {
 			values[3] = 1
 		}

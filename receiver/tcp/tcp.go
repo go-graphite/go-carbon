@@ -147,6 +147,7 @@ type TCP struct {
 	handoffReadAheadBytes    int
 	pointOut                 atomic.Pointer[func(name []byte, value float64, timestamp int64)]
 	capture                  Capture
+	captureSink              captureSink
 	pointsOut                atomic.Pointer[func(name []byte, data []points.Point)]
 	streamNameResolver       atomic.Pointer[func([]byte) any]
 	streamPointOut           atomic.Pointer[func(name []byte, value float64, timestamp int64, slot *any)]
@@ -363,6 +364,11 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 	var received uint32
 	defer func() { atomic.AddUint32(&rcv.metricsReceived, received) }()
 	capture := newCaptureBuffer(rcv.capture)
+	capture.sink = &rcv.captureSink
+	for i := range capture.shards {
+		capture.shards[i].sink = &rcv.captureSink
+	}
+	var directOut func(*points.Points)
 	if capture.out != nil {
 		defer func() {
 			if err := capture.flush(); err != nil {
@@ -491,6 +497,14 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 				)
 			} else {
 				received++
+				if capture.out != nil {
+					if out := rcv.captureSink.direct.Load(); out != nil {
+						if capture.flush() != nil {
+							return
+						}
+						capture, directOut = captureBuffer{}, *out
+					}
+				}
 				if rcv.cacheLookupBatch && pointBatchOut == nil && rcv.buffer == nil {
 					flush()
 					adoptPointBatch()
@@ -524,6 +538,8 @@ func (rcv *TCP) handlePlain(conn net.Conn, leftover []byte, tracked *handoffConn
 					batch = append(batch, points.Point{Value: value, Timestamp: timestamp})
 				case pointOut != nil:
 					pointOut(name, value, timestamp)
+				case directOut != nil:
+					directOut(points.OnePoint(string(name), value, timestamp))
 				default:
 					rcv.out(points.OnePoint(string(name), value, timestamp))
 				}

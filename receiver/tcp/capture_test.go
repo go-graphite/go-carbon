@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -158,5 +159,85 @@ func TestCaptureShardsPreservePerMetricOrder(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Fatal(seen)
+	}
+}
+
+func TestSwitchCaptureFencesSubmissionsAndDrainsLocalBuffers(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := &TCP{}
+	b := newCaptureBuffer(captureFunc(func([]byte, int) error {
+		close(entered)
+		<-release
+		return nil
+	}))
+	b.sink = &r.captureSink
+	b.point([]byte("same"), 1, 1)
+	flushed := make(chan error, 1)
+	go func() { flushed <- b.flush() }()
+	<-entered
+	sealed := make(chan struct{})
+	switched := make(chan error, 1)
+	var values []float64
+	go func() {
+		switched <- r.SwitchCapture(func(p *points.Points) {
+			for _, d := range p.Data {
+				values = append(values, d.Value)
+			}
+		}, func() error { close(sealed); return nil })
+	}()
+	select {
+	case <-sealed:
+		t.Fatal("sealed ahead of an in-flight capture submission")
+	default:
+	}
+	close(release)
+	if err := <-flushed; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-switched; err != nil {
+		t.Fatal(err)
+	}
+	// A handler that buffered this record before publication flushes it to
+	// ordinary Add before its next direct point, with no further spool write.
+	b.point([]byte("same"), 2, 1)
+	if err := b.flush(); err != nil {
+		t.Fatal(err)
+	}
+	(*r.captureSink.direct.Load())(points.OnePoint("same", 3, 1))
+	if len(values) != 2 || values[0] != 2 || values[1] != 3 {
+		t.Fatal("buffered/direct order", values)
+	}
+}
+
+func TestSwitchCaptureTimeoutDoesNotSealAfterReturning(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := &TCP{}
+	b := newCaptureBuffer(captureFunc(func([]byte, int) error { close(entered); <-release; return nil }))
+	b.sink = &r.captureSink
+	b.point([]byte("quota.blocked"), 1, 1)
+	flushed := make(chan error, 1)
+	go func() { flushed <- b.flush() }()
+	<-entered
+	var seals atomic.Int64
+	seal := func() error { seals.Add(1); return nil }
+	if err := r.SwitchCapture(func(*points.Points) {}, seal); err == nil {
+		t.Fatal("switch waited indefinitely behind capture")
+	}
+	if seals.Load() != 0 {
+		t.Fatal("timed-out switch sealed input")
+	}
+	close(release)
+	if err := <-flushed; err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for r.captureSink.fencing.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := r.SwitchCapture(func(*points.Points) {}, seal); err != nil {
+		t.Fatal(err)
+	}
+	if seals.Load() != 1 {
+		t.Fatal("cancelled switch ran its seal callback later", seals.Load())
 	}
 }

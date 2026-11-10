@@ -50,7 +50,7 @@ func TestPendingNamesGateInitialPublicationAndQuota(t *testing.T) {
 	next := unstartedOverlayListener(t, cache, root)
 	next.SetQuotas([]*Quota{{Pattern: "/", Metrics: int64(before + 1)}})
 	entered, release := make(chan struct{}), make(chan struct{})
-	next.WarmupIndexWithPending(func(gotID string, visit func(string) error) error {
+	next.WarmupIndexWithPending(func(gotID string, visit func(string) error, _ func(string) error) error {
 		close(entered)
 		<-release
 		if gotID != id {
@@ -121,6 +121,92 @@ func TestSnapshotOverlayCheckpoint(t *testing.T) {
 	last := overlayListener(t, cache, root)
 	if last.RecoveryIndexID() != again || !last.MetricExists("wal.only") {
 		t.Fatal("second checkpoint incomplete")
+	}
+}
+
+func TestPendingNamesReconcileAcrossCatalogGenerations(t *testing.T) {
+	t.Parallel()
+	cache, root, _ := snapshotFixture(t)
+	first := overlayListener(t, cache, root)
+	first.insertRealtimeMetric(first.CurrentFileIndex().trieIdx, "old.overlay")
+	id, err := first.CheckpointReadIndex()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model an independently rebuilt catalog that no longer contains a name
+	// the retained checkpoint classified as known. Its old overlay also cannot
+	// be installed on this new base. Every pending name must be reconsidered.
+	if err := os.Remove(filepath.Join(root, "a", "value.wsp")); err != nil {
+		t.Fatal(err)
+	}
+	w, err := newIndexSnapshotWriter(cache, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.abort()
+	flc, err := NewFileListCache(cache, FLCVersion2, 'w')
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"/current/only.wsp", "/still/known.wsp"} {
+		entry := &FLCEntry{Path: name}
+		if err := flc.Write(entry); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.append(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := flc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.finish(); err != nil {
+		t.Fatal(err)
+	}
+	next := unstartedOverlayListener(t, cache, root)
+	next.WarmupIndexWithPending(func(got string, _ func(string) error, reconcile func(string) error) error {
+		if got == id {
+			return fmt.Errorf("stale generation accepted as identical")
+		}
+		for _, name := range []string{"a.value", "old.overlay", "still.known", "new.pending", strings.Repeat("x", 8000)} {
+			if err := reconcile(name); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	next.WaitForWarmup()
+	if !next.HasMappedIndex() {
+		t.Fatal("reconciled index not published")
+	}
+	for _, name := range []string{"a.value", "old.overlay", "still.known", "new.pending", "current.only"} {
+		if !next.MetricExists(name) {
+			t.Fatalf("reconciliation hid %q", name)
+		}
+	}
+	if next.MetricExists(strings.Repeat("x", 8000)) || next.CurrentFileIndex().trieIdx.getFileCount() != 3 {
+		t.Fatal("reconciliation inserted an unstorable or already mapped name")
+	}
+}
+
+func BenchmarkPendingNameReconciliation(b *testing.B) {
+	const count = 100000
+	paths, names := make([]string, count), make([]string, count)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("/metrics/service%04d/host%04d/requests/count.wsp", i/1000, i%1000)
+		names[i] = strings.ReplaceAll(strings.TrimSuffix(paths[i][1:], ".wsp"), "/", ".")
+	}
+	l := NewCarbonserverListener(nil)
+	l.SetWhisperData("/data")
+	ti := newTrie(".wsp", 0, nil)
+	ti.snapshot = buildFastPathSnapshot(b, paths, true)
+	u := &fileListUpdate{listener: l, trieIdx: ti}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := range b.N {
+		if err := u.reconcilePendingMetric(names[i%count]); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

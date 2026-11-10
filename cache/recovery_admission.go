@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/lomik/zapwriter"
+	"github.com/zeebo/xxh3"
 	"go.uber.org/zap"
 )
 
@@ -119,20 +120,26 @@ func (c *Cache) refreshRecoveryMemory(a *recoveryAdmission, now time.Time) {
 }
 
 func (c *Cache) admitRecovery(a *recoveryAdmission, name string, count int) bool {
+	return c.admitRecoveryBytes(a, count, c.RecoveryMetricBytes([]byte(name)))
+}
+
+// RecoveryMetricBytes prices the name/header allocation for recovery. Capture
+// batches use the same active-map-only lookup as single-metric admission.
+func (c *Cache) RecoveryMetricBytes(name []byte) int64 {
 	// Existing series need point capacity, not another item/name allocation on
 	// every one-point batch. Only check the active map: treating an in-flight or
 	// pending-only item as new is conservative and avoids scanning recovery state.
 	// A concurrent eviction may still create one extra header per caller; the
 	// unspent three quarters of headroom cover this bounded check/add race.
-	overhead := int64(0)
-	shard := c.GetShard(name)
+	hash := xxh3.Hash(name)
+	shard := c.data[hash&(shardCount-1)]
 	shard.mu.RLock()
-	exists := shard.items.get(name) != nil
+	exists := shard.items.getBytesHashed(hash, name) != nil
 	shard.mu.RUnlock()
-	if !exists {
-		overhead = int64(len(name)) + 1024
+	if exists {
+		return 0
 	}
-	return c.admitRecoveryBytes(a, count, overhead)
+	return int64(len(name)) + 1024
 }
 
 // HasRecoveryCapacityBatch reserves a complete capture frame atomically. The

@@ -111,3 +111,34 @@ func TestStartupHTTPMetricsAndPprof(t *testing.T) {
 		}
 	}
 }
+
+func TestStartupCaptureDirectGauge(t *testing.T) {
+	app := &App{}
+	s := &startupInput{sealed: make(chan struct{})}
+	app.startupCaptureState.Store(s)
+	registry := prometheus.NewPedanticRegistry()
+	registry.MustRegister(&migrationCollector{app: app})
+	for _, direct := range []bool{false, true} {
+		s.direct.Store(direct)
+		families, err := registry.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, family := range families {
+			if family.GetName() == "startup_capture_direct" {
+				want := float64(0)
+				if direct {
+					want = 1
+				}
+				if family.Metric[0].GetGauge().GetValue() != want || !strings.Contains(family.GetHelp(), "ordinary cache admission and input logging") {
+					t.Fatal("direct gauge/help", family)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("missing direct gauge")
+		}
+	}
+}

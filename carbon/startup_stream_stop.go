@@ -28,6 +28,10 @@ func (app *App) stopStreamingInputForHandoff(started time.Time) error {
 		app.Persister.Stop()
 		app.Persister = nil
 	}
+	// Keep the advisory metadata accelerator current even though point-source
+	// ordering requires retaining the original dump. Reads and capture input
+	// remain available during this bounded preparation, as in ordinary shutdown.
+	app.prepareMetadataCheckpoint(logger)
 	flush := app.startStopFlush()
 	flush.settle(preCloseFlushTimeout)
 	h := &inputHandover{receivers: app.Receivers, logger: logger, started: started, path: s.path, capture: s}

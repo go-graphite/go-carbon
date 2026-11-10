@@ -37,7 +37,7 @@ func (m *mover) configureMaximumSpeed(ctx context.Context, origins []string) (bo
 		return false, errors.New("maximum-speed decision is copy-only without read isolation")
 	}
 	sum := os.Getenv("RESIZE_MAX_SPEED_DECISION_SHA256")
-	if err := readMaxSpeedDecision(path, sum); err != nil {
+	if err := verifyMaxSpeedDecision(path, sum); err != nil {
 		return false, err
 	}
 	// Controller changes need no new approval, but the existing WRITE-OK must

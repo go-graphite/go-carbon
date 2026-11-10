@@ -880,7 +880,9 @@ LOOP:
 					ready = false
 				}
 			}
-			if ready {
+			// An explicit ordered drain uses the automatic catch-up ceiling
+			// even before intake opens, so CPU admission must start there too.
+			if ready || p.settings().maxUpdatesPerSecond == -1 && p.autoUpdate.draining.Load() {
 				if !p.restartBudget.WaitWriteoutBatch(exit, len(metrics)) {
 					return
 				}
