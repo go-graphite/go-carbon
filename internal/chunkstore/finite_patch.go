@@ -70,8 +70,11 @@ func (p FinitePatch) Validate() error {
 // There is one publication attempt. WAL durability follows stripe release.
 func (s *Store) PatchFinite(ctx context.Context, p FinitePatch, fence FiniteCacheFence) (result FinitePatchResult, err error) {
 	result = FinitePatchResult{Version: p.Expected, PlanSHA256: p.PlanSHA256, Nonce: p.Nonce}
-	if err = errors.Join(p.Validate(), ctx.Err(), s.fileOwnershipError()); err != nil {
+	if err = errors.Join(p.Validate(), ctx.Err(), s.fileOwnershipError(), s.checkNativeReady()); err != nil {
 		return
+	}
+	if failure := s.nativeFailure.Load(); failure != nil {
+		return result, failure.err
 	}
 	// A durable plan receipt plus a separate admission mutex enforce cap one
 	// across requests and across metrics, without holding any writer stripe

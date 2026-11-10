@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -29,6 +30,11 @@ func finiteFixtureCodec(t *testing.T, codec store.ContinuationCodec) (*store.Sto
 	opts := coldOptions(codec)
 	opts.Now = func() time.Time { return time.Unix(1793976840, 0) }
 	dir := t.TempDir()
+	// The real survivors have the v12 store marker with flattened classic
+	// main-file continuation images. Exercise that same reader/writer format.
+	if err := os.WriteFile(filepath.Join(dir, "CHUNKSTORE"), []byte("go-carbon-chunks-v12\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	db, err := store.Open(dir, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +45,9 @@ func finiteFixtureCodec(t *testing.T, codec store.ContinuationCodec) (*store.Sto
 		}
 	})
 	db.StopBackground()
+	if db.TransferFormat() != 12 {
+		t.Fatal("fixture is not the survivor storage format12")
+	}
 	finiteDirs.Store(db, dir)
 	r := []store.Retention{{Step: 60, Count: 20160}, {Step: 1800, Count: 35040}}
 	snapshot := store.Snapshot{Metadata: store.Metadata{MetricConfig: store.MetricConfig{Name: "finite.metric", Retentions: r, AggregationMethod: store.Average}}, Archives: []store.Archive{
@@ -304,6 +313,23 @@ func TestFinitePatchInvalidAndAbsentPreimagesRefuse(t *testing.T) {
 		if _, err := db.PatchFinite(context.Background(), request, nil); err == nil {
 			t.Fatalf("accepted %+v", request)
 		}
+	}
+	after, err := db.Snapshot(context.Background(), p.Expected.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EqualSnapshots(before, after); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFinitePatchRequiresCompletedUnmirroredNativeOwnership(t *testing.T) {
+	db, before, p := finiteFixture(t)
+	p.Apply = true
+	db.SetNativeReady(func() error { return errors.New("conversion or recovery incomplete") })
+	core := cache.New()
+	if _, err := db.PatchFinite(context.Background(), p, core.FenceEmptyMetric); err == nil {
+		t.Fatal("ignored daemon ownership readiness")
 	}
 	after, err := db.Snapshot(context.Background(), p.Expected.Name)
 	if err != nil {
