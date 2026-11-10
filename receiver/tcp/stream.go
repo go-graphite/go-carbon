@@ -145,6 +145,7 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		streamOut = *out
 	}
 	sinkReady := false
+	var directOut func(*points.Points)
 	capture := newCaptureBuffer(rcv.capture)
 	capture.sink = &rcv.captureSink
 	for i := range capture.shards {
@@ -158,6 +159,17 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 		}()
 	}
 	visit := func(_ uint32, name []byte, value float64, ts int64, slot *any) {
+		if capture.out != nil {
+			if out := rcv.captureSink.direct.Load(); out != nil {
+				// Publication follows the exclusive durable fence. Drain any
+				// connection-local prefix before using ordinary sinks, retaining
+				// its order ahead of the first direct dictionary-slot point.
+				if capture.flush() != nil {
+					return
+				}
+				capture, directOut = captureBuffer{}, *out
+			}
+		}
 		if !sinkReady {
 			if streamOut == nil {
 				if out := rcv.streamPointOut.Load(); out != nil {
@@ -178,6 +190,8 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 			streamOut(name, value, ts, slot)
 		case pointOut != nil:
 			pointOut(name, value, ts)
+		case directOut != nil:
+			directOut(points.OnePoint(string(name), value, ts))
 		default:
 			rcv.out(points.OnePoint(string(name), value, ts))
 		}
