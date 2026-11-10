@@ -1273,9 +1273,11 @@ func (s *Store) VerifyStagedTransfer(ctx context.Context, operation string) (int
 func (s *Store) lockTransferWriters() func() {
 	for i := range s.metricMu {
 		s.metricMu[i].Lock()
+		s.advanceMutationEpoch(uint64(i))
 	}
 	return func() {
 		for i := len(s.metricMu) - 1; i >= 0; i-- {
+			s.advanceMutationEpoch(uint64(i))
 			s.metricMu[i].Unlock()
 		}
 	}
