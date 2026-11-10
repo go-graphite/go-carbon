@@ -21,7 +21,7 @@ type migrationCollector struct {
 	skipped atomic.Uint64
 }
 
-var migrationSkippedDesc = prometheus.NewDesc("migration_metrics_skipped_total", "Scrapes skipped because application lifecycle or migration state was busy; other collectors remain available.", nil, nil)
+var migrationSkippedDesc = prometheus.NewDesc("migration_metrics_skipped_total", "Scrapes missing optional details because lifecycle or control state was busy; live recovery health remains available when the lifecycle snapshot can be acquired.", nil, nil)
 
 type metricSpec struct {
 	desc      *prometheus.Desc
@@ -30,6 +30,7 @@ type metricSpec struct {
 	persister bool // reported only when a persister runs
 	migration bool // reported only while a migration run exists, including after it finished
 	cache     bool // reported only when the write cache exists
+	essential bool // live facts independent of optional control/statistics locks
 	value     func(*migrationSnapshot) float64
 }
 
@@ -121,7 +122,8 @@ func importSidecarFoldCounts() []importFoldCount {
 
 var migrationMetricSpecs = func() []metricSpec {
 	spec := func(kind prometheus.ValueType, name, help string, v func(*migrationSnapshot) float64) metricSpec {
-		return metricSpec{desc: prometheus.NewDesc(name, help, nil, nil), kind: kind, store: strings.HasPrefix(name, "pebble_") || strings.HasPrefix(name, "store_") && !strings.HasPrefix(name, "store_migration_"), value: v}
+		return metricSpec{desc: prometheus.NewDesc(name, help, nil, nil), kind: kind, store: strings.HasPrefix(name, "pebble_") || strings.HasPrefix(name, "store_") && !strings.HasPrefix(name, "store_migration_"), value: v,
+			essential: name == "pebble_write_stalls_total" || name == "pebble_continuation_invalid_points_total"}
 	}
 	counter := func(name, help string, v func(*migrationSnapshot) float64) metricSpec {
 		return spec(prometheus.CounterValue, name, help, v)
@@ -226,12 +228,16 @@ var migrationMetricSpecs = func() []metricSpec {
 		{"whisper", func(s *migrationSnapshot) *persister.BackendWrites { return &s.whisper }},
 	} {
 		get := backend.get
+		first := len(specs)
 		specs = append(specs,
 			persisterSpec("persister_"+backend.name+"_updates_total", "Committed persister updates to the "+backend.name+" backend (Pebble store or original whisper files).", func(s *migrationSnapshot) float64 { return float64(get(s).Updates) }),
 			persisterSpec("persister_"+backend.name+"_points_total", "Points committed to the "+backend.name+" backend.", func(s *migrationSnapshot) float64 { return float64(get(s).Points) }),
 			persisterSpec("persister_"+backend.name+"_write_failures_total", "Failed persister updates to the "+backend.name+" backend.", func(s *migrationSnapshot) float64 { return float64(get(s).Failures) }),
 			persisterSpec("persister_"+backend.name+"_write_seconds_total", "Seconds spent in successful "+backend.name+" backend updates.", func(s *migrationSnapshot) float64 { return get(s).Seconds }),
 		)
+		for i := first; i < len(specs); i++ {
+			specs[i].essential = true // Backend write statistics are atomic.
+		}
 	}
 	for _, reason := range []string{"canceled", "deadline", "absent", "storage_error"} {
 		item := persisterSpec("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", func(s *migrationSnapshot) float64 { return float64(s.transferRequeued[reason]) })
@@ -301,7 +307,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("store_metadata_cache_prewarm_failed_total", "Metrics the start's prewarm could not read.", func(s *migrationSnapshot) float64 { return float64(s.stats.stateCache.PrewarmFailed) }),
 		metricSpec{desc: prometheus.NewDesc("store_migration_working_bytes_reserved", "Conversion working bytes currently reserved.", nil, nil), kind: prometheus.GaugeValue, migration: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.workingReserved) }},
-		metricSpec{desc: prometheus.NewDesc("cache_points", "Points held in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+		metricSpec{desc: prometheus.NewDesc("cache_points", "Points held in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true, essential: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePoints) }},
 		metricSpec{desc: prometheus.NewDesc("cache_metrics", "Metrics with points in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheMetrics) }},
@@ -309,18 +315,18 @@ var migrationMetricSpecs = func() []metricSpec {
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheBytes) }},
 		metricSpec{desc: prometheus.NewDesc("cache_point_bytes", "Allocated capacity of queued compact point buffers in bytes, including spare capacity. Excludes inline codec state, names, item headers and in-flight batches.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePointBytes) }},
-		metricSpec{desc: prometheus.NewDesc("restart_recovery_ready", "One after restore and metadata warming finish, saved writes are durable, and startup capture has switched and retired its sources. Deployment also requires a sustained input/persistence window.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+		metricSpec{desc: prometheus.NewDesc("restart_recovery_ready", "One after restore and metadata warming finish, saved writes are durable, and startup capture has switched and retired its sources. Deployment also requires a sustained input/persistence window.", nil, nil), kind: prometheus.GaugeValue, cache: true, essential: true,
 			value: func(s *migrationSnapshot) float64 {
 				if s.recoveryReady {
 					return 1
 				}
 				return 0
 			}},
-		metricSpec{desc: prometheus.NewDesc("restart_recovery_pending_metrics", "Saved metrics not yet confirmed durable; live buffered metrics are excluded.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+		metricSpec{desc: prometheus.NewDesc("restart_recovery_pending_metrics", "Saved metrics not yet confirmed durable; live buffered metrics are excluded.", nil, nil), kind: prometheus.GaugeValue, cache: true, essential: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.recoveryPending) }},
-		metricSpec{desc: prometheus.NewDesc("cache_writeout_max_delay_seconds", "Configured coalescing cycle used by the deployment recovery observation window.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+		metricSpec{desc: prometheus.NewDesc("cache_writeout_max_delay_seconds", "Configured coalescing cycle used by the deployment recovery observation window.", nil, nil), kind: prometheus.GaugeValue, cache: true, essential: true,
 			value: func(s *migrationSnapshot) float64 { return s.writeoutMaxDelay }},
-		metricSpec{desc: prometheus.NewDesc("receiver_stat_interval_seconds", "Receiver accounting publication interval; deployment observations span both endpoint ticks.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+		metricSpec{desc: prometheus.NewDesc("receiver_stat_interval_seconds", "Receiver accounting publication interval; deployment observations span both endpoint ticks.", nil, nil), kind: prometheus.GaugeValue, cache: true, essential: true,
 			value: func(s *migrationSnapshot) float64 { return s.receiverStatInterval }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_window_bytes", "Bytes reserved from measured memory headroom for the current five-second recovery window.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryWindow) }},
 		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_ceiling_bytes", "Cache-owned byte ceiling derived from existing allocations and reserved memory headroom; configured max-bytes also applies.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryCeiling) }},
@@ -459,6 +465,15 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- persisterUpdateMaxDesc
 }
 
+func emitMigrationSpecs(ch chan<- prometheus.Metric, s *migrationSnapshot, essential bool) {
+	for _, spec := range migrationMetricSpecs {
+		if spec.essential != essential || spec.store && !s.store || spec.persister && !s.persister || spec.migration && !s.migration || spec.cache && !s.cache {
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(spec.desc, spec.kind, spec.value(s))
+	}
+}
+
 func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	if capture := c.app.startupCaptureState.Load(); capture != nil {
 		for i, timing := range capture.ioTimings() {
@@ -546,7 +561,36 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		if locked {
 			c.app.RUnlock()
 		}
+		emitMigrationSpecs(ch, &s, true)
 	}()
+	// Recovery health must not disappear because an unrelated maintenance,
+	// inventory or pacing detail was busy. These observations are live atomics
+	// or bounded cache/channel reads and need only the lifecycle pin above.
+	if p != nil {
+		s.persister = true
+		s.pebble, s.whisper = p.WriteStats()
+	}
+	if cache != nil {
+		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
+		s.cacheBytes = cache.EstimatedBytes()
+		s.cachePointBytes = cache.PointBytes()
+		s.recoveryPending = cache.PendingOutstanding()
+		s.recoveryReady = p != nil && restartRecoveryReady(cache, c.app.storeRestoreDone, c.app.metadataPrewarmGate, c.app.startupCaptureState.Load())
+		if conf := c.app.Config; conf != nil {
+			s.writeoutMaxDelay = conf.Cache.WriteoutMaxDelay.Value().Seconds()
+			if conf.Common.MetricInterval != nil {
+				s.receiverStatInterval = conf.Common.MetricInterval.Value().Seconds()
+			}
+		}
+		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()
+		s.recoveryCeiling = cache.RecoveryByteCeiling()
+		s.recoveryBlocked = cache.RecoveryBlocked()
+	}
+	if db != nil {
+		s.store = true
+		s.stats.writeStalls = db.WriteStalls()
+		s.stats.invalidPoints = whisperio.InvalidContinuationPoints()
+	}
 	if m := c.app.incrementalMigration.Load(); m != nil {
 		s.migration = true
 		s.converted, s.points, s.resumed = m.metrics.Load(), m.points.Load(), m.resumed.Load()
@@ -574,27 +618,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 			c.skipped.Add(1)
 			return
 		}
-		s.persister = true
 		s.ioUsed, s.ioSlots = pm.IOUsed, pm.IOSlots
 		s.reclaimQueued, s.reclaim = pm.ReclaimQueued, pm.Reclaim
-		s.pebble, s.whisper = p.WriteStats()
 		s.transferRequeued = p.TransferFlushRequeues()
-	}
-	if cache != nil {
-		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
-		s.cacheBytes = cache.EstimatedBytes()
-		s.cachePointBytes = cache.PointBytes()
-		s.recoveryPending = cache.PendingOutstanding()
-		s.recoveryReady = p != nil && restartRecoveryReady(cache, c.app.storeRestoreDone, c.app.metadataPrewarmGate, c.app.startupCaptureState.Load())
-		if conf := c.app.Config; conf != nil {
-			s.writeoutMaxDelay = conf.Cache.WriteoutMaxDelay.Value().Seconds()
-			if conf.Common.MetricInterval != nil {
-				s.receiverStatInterval = conf.Common.MetricInterval.Value().Seconds()
-			}
-		}
-		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()
-		s.recoveryCeiling = cache.RecoveryByteCeiling()
-		s.recoveryBlocked = cache.RecoveryBlocked()
 	}
 	if db != nil {
 		st, sidecars, ok := db.TelemetryStats()
@@ -626,12 +652,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	c.app.RUnlock()
 	locked = false
-	for _, spec := range migrationMetricSpecs {
-		if spec.store && !s.store || spec.persister && !s.persister || spec.migration && !s.migration || spec.cache && !s.cache {
-			continue
-		}
-		ch <- prometheus.MustNewConstMetric(spec.desc, spec.kind, spec.value(&s))
-	}
+	emitMigrationSpecs(ch, &s, false)
 	if s.persister {
 		for _, stage := range stagetime.Snapshot() {
 			name := stage.Stage.String()

@@ -5,8 +5,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/cockroachdb/pebble/vfs"
 )
+
+func TestWriteStallsRemainLiveWhileOptionalTelemetryIsBusy(t *testing.T) {
+	s, err := Open("store", Options{fs: vfs.NewMem(), CacheSize: 1 << 20, MemTableSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.StopBackground()
+	s.writeStallBegin(pebble.WriteStallBeginInfo{Reason: "test"})
+	s.stallMu.Lock()
+	done := make(chan uint64, 1)
+	go func() { done <- s.WriteStalls() }()
+	select {
+	case count := <-done:
+		s.stallMu.Unlock()
+		if count != 1 {
+			t.Fatalf("live stall count %d, want1", count)
+		}
+	case <-time.After(time.Second):
+		s.stallMu.Unlock()
+		<-done
+		t.Fatal("essential stall count waited for optional telemetry")
+	}
+	s.writeStallEnd()
+	s.writeStallBegin(pebble.WriteStallBeginInfo{Reason: "second"})
+	s.writeStallEnd()
+	if s.WriteStalls() != 2 || s.Stats().WriteStalls != 2 {
+		t.Fatal("live and detailed counters disagree")
+	}
+}
 
 func TestTelemetryNeverWaitsForControlLocks(t *testing.T) {
 	s, err := Open("store", Options{fs: vfs.NewMem(), CacheSize: 1 << 20, MemTableSize: 1 << 20})
