@@ -153,20 +153,24 @@ type App struct {
 	restartBudgetStop       context.CancelFunc
 	storeMaintenance        *storeMaintenanceGate
 
-	quotaEstimateConfig atomic.Value // *Config, immutable estimator snapshot
-	readPolicyConfig    atomic.Pointer[Config]
-	quotaReloader       *quotaReloader
-	metricStoreIndex    *metricIndexRefresher
-	expirer             *metricExpirer
-	expirationStats     *expirationStats
-	storeRestoreDone    <-chan struct{}
-	storeRestoreLoaded  <-chan struct{} // native copy waits for loading, not saved-history writeout
-	inputLog            atomic.Pointer[inputlog.Log]
-	copyInputSealed     bool
-	restart             restartState
-	restartMetrics      *restartMetrics
-	inputLogMetricsOnce sync.Once
-	inputLogCollector   *inputLogCollector
+	quotaEstimateConfig   atomic.Value // *Config, immutable estimator snapshot
+	readPolicyConfig      atomic.Pointer[Config]
+	quotaReloader         *quotaReloader
+	metricStoreIndex      *metricIndexRefresher
+	expirer               *metricExpirer
+	expirationStats       *expirationStats
+	storeRestoreDone      <-chan struct{}
+	storeRestoreLoaded    <-chan struct{} // native copy waits for loading, not saved-history writeout
+	inputLog              atomic.Pointer[inputlog.Log]
+	inputReplay           *backgroundInputReplay // lifecycle lock; metrics use atomic flags below
+	inputReplayActive     atomic.Bool
+	inputReplayFailed     atomic.Bool
+	inputReplayBeforeRead func() // optional instrumentation; set before Start
+	copyInputSealed       bool
+	restart               restartState
+	restartMetrics        *restartMetrics
+	inputLogMetricsOnce   sync.Once
+	inputLogCollector     *inputLogCollector
 }
 
 var registerPluginsOnce sync.Once
@@ -628,6 +632,7 @@ func (app *App) stopReadListeners() <-chan struct{} {
 }
 
 func (app *App) stopAll() {
+	app.stopInputReplay()
 	if app.restartBudgetStop != nil {
 		app.restartBudgetStop()
 		app.restartBudgetStop = nil
@@ -675,6 +680,10 @@ func (app *App) stopAll() {
 		app.Persister.Stop()
 		app.Persister = nil
 		logger.Debug("persister stopped")
+	}
+	if app.inputReplay != nil {
+		app.inputReplay.history.Stop()
+		app.inputReplay = nil
 	}
 
 	if app.Tags != nil {
@@ -883,6 +892,8 @@ func (app *App) Start() (err error) {
 	app.applyRuntimeProfiling()
 	app.applyMallocTrim()
 	app.beginRestart()
+	app.inputReplayActive.Store(false)
+	app.inputReplayFailed.Store(false)
 	app.inputTailOffsets = nil
 	app.startupCapturedPoints = 0
 	app.startupCaptureState.Store(app.startupInput)
@@ -937,13 +948,13 @@ func (app *App) Start() (err error) {
 	lap("pending_checkpoint")
 	// A validated checkpoint's tail precedes the newer continuous log. Keep
 	// both ahead of live sinks; ordered legacy restoration retains its own order.
-	if app.pendingDone == nil {
+	if app.pendingDone == nil && app.inputReplay == nil {
 		if err = app.replayInputLog(core); err != nil {
 			return err
 		}
 	}
 	lap("input_log_replay")
-	if restoreBeforeReceivers && !readsStarted && !pendingReads {
+	if restoreBeforeReceivers && !readsStarted && !pendingReads && app.inputReplay == nil {
 		app.restoreBeforeReceivers(core)
 	}
 	lap("ordered_restore")
@@ -973,6 +984,7 @@ func (app *App) Start() (err error) {
 		return err
 	}
 	app.heartbeatReady()
+	app.startInputReplay()
 	lap("background")
 	zapwriter.Logger("app").Info("start phases", append(phases, zap.Duration("since_process_start", time.Since(processStarted)))...)
 	app.finishRestart()
@@ -983,7 +995,7 @@ func (app *App) startBackgroundWorkers(core *cache.Cache, restoreBeforeReceivers
 	// Receivers and inherited input are ready before metadata scanning runs.
 	close(app.metadataPrewarmReady)
 	conf := app.Config
-	if conf.Dump.Enabled && !restoreBeforeReceivers {
+	if conf.Dump.Enabled && !restoreBeforeReceivers && app.inputReplay == nil {
 		restored := make(chan struct{})
 		app.storeRestoreDone = restored
 		app.storeRestoreLoaded = restored
@@ -1088,6 +1100,12 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	app.Cache = core
 	if err = app.openInputLog(core); err != nil {
 		return nil, err
+	}
+	if app.inputReplay != nil {
+		if err = app.startReceivers(core); err != nil {
+			return nil, err
+		}
+		app.storeHandoffInputStarted = true
 	}
 	if conf.Whisper.StorageBackend == "pebble-chunk" {
 		if err := checkStoreStartup(conf); err != nil {
