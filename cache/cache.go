@@ -241,6 +241,7 @@ func (c *Cache) InitCacheScanAdds() {
 func (c *Cache) SetWriteStrategy(s string) (err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	previous := c.writeStrategy
 
 	switch s {
 	case "max":
@@ -253,6 +254,9 @@ func (c *Cache) SetWriteStrategy(s string) (err error) {
 		c.writeStrategy = MetricNameOrder
 	default:
 		return fmt.Errorf("Unknown write strategy '%s', should be one of: max, sorted, noop, lexical", s)
+	}
+	if previous != c.writeStrategy {
+		c.writeoutQueue.invalidate()
 	}
 	return nil
 }

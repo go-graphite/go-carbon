@@ -344,10 +344,12 @@ type pprofConfig struct {
 }
 
 type dumpConfig struct {
-	Enabled           bool   `toml:"enabled"`
-	Path              string `toml:"path"`
-	RestorePerSecond  int    `toml:"restore-per-second"`
-	HandoffSupervisor bool   `toml:"handoff-supervisor"`
+	StopDrainTimeout      Duration `toml:"stop-drain-timeout"`
+	StopDrainTargetPoints int64    `toml:"stop-drain-target-points"`
+	Enabled               bool     `toml:"enabled"`
+	Path                  string   `toml:"path"`
+	RestorePerSecond      int      `toml:"restore-per-second"`
+	HandoffSupervisor     bool     `toml:"handoff-supervisor"`
 	// StoreInputHandoff lets a shared-store instance (no mirrored files) hand
 	// its input sockets to a capable successor although reads cannot move;
 	// see go-carbon.conf.example.
@@ -640,6 +642,9 @@ func ReadConfig(filename string) (*Config, error) {
 	}
 	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {
 		return nil, err
+	}
+	if cfg.Dump.StopDrainTimeout.Value() < 0 || cfg.Dump.StopDrainTargetPoints < 0 {
+		return nil, fmt.Errorf("dump.stop-drain-timeout and dump.stop-drain-target-points must be nonnegative")
 	}
 
 	if cfg.Logging == nil {

@@ -20,8 +20,19 @@ type WriteoutQueue struct {
 	rebuild   func(abort chan bool) chan bool // return chan waiting for complete
 	wake      chan struct{}
 	// Nonnegative nanoseconds relative to epoch, plus one (zero means unset).
-	wakeAt atomic.Int64
-	epoch  time.Time
+	wakeAt     atomic.Int64
+	generation atomic.Uint64
+	epoch      time.Time
+}
+
+// Discard the preceding order, including a build already in progress. Names
+// remain in the cache, so a new order never loses queued work.
+func (q *WriteoutQueue) invalidate() {
+	q.Lock()
+	q.generation.Add(1)
+	q.queue = nil
+	q.Unlock()
+	q.notifyAt(time.Now())
 }
 
 func NewWriteoutQueue(cache *Cache) *WriteoutQueue {
@@ -133,6 +144,7 @@ func (q *WriteoutQueue) update() {
 	defer phasecpu.Set(phasecpu.Other)
 	// Clear hints before scanning so concurrent arrivals cannot lose a wake-up.
 	q.wakeAt.Store(0)
+	generation := q.generation.Load()
 	queue, next, hasCold := q.cache.makeQueuePlan(time.Now())
 	notBefore := time.Now().Add(100 * time.Millisecond)
 	if queue != nil || !q.cache.settings.Load().(*cacheSettings).batching() {
@@ -140,6 +152,9 @@ func (q *WriteoutQueue) update() {
 	}
 
 	q.Lock()
+	if generation != q.generation.Load() {
+		queue, next = nil, notBefore
+	}
 	q.queue = queue
 	q.refreshAt = time.Time{}
 	if hasCold && queue != nil {

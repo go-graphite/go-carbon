@@ -105,6 +105,7 @@ func (app *App) DumpStop() (err error) {
 	app.resolveSuccessor()
 	lateStoreClose := app.Config.Whisper.StoreMirrorFiles && app.Config.Whisper.StoreLiveMigration &&
 		!app.Config.Tags.Enabled && app.readHandoffPossible() && handoff.SharedStoreSupported(app.readSuccessor, app.ConfigFilename)
+	app.drainBeforeDump()
 	// Once input is diverted to xlog, pending writes are no longer visible to
 	// expiration's cache check. Finish cleanup before entering the dump phase.
 	app.stopExpiration()
@@ -532,6 +533,44 @@ func (app *App) DumpStop() (err error) {
 	// app.stopAll()
 
 	return nil
+}
+
+// Caller owns App's lifecycle lock. Receiver and read callbacks do not need
+// that lock; persistence remains live until the ordinary dump sequence below.
+// The target counts queued points. In-flight writes are joined by Stop before
+// the dump, and their unconfirmed points retain the existing recovery path.
+func (app *App) drainBeforeDump() {
+	budget, target := app.Config.Dump.StopDrainTimeout.Value(), app.Config.Dump.StopDrainTargetPoints
+	if budget <= 0 || app.Cache == nil || app.Persister == nil || app.Cache.Size() <= target {
+		return
+	}
+	started := time.Now()
+	cpu := restartcpu.CPU()
+	sharedBefore, filesBefore := app.Persister.WriteStats()
+	before := app.Cache.Size()
+	logger := zapwriter.Logger("dump")
+	logger.Info("stop drain started", zap.Int64("points", before), zap.Int64("target_points", target), zap.Duration("timeout", budget))
+	_ = app.Cache.SetWriteStrategy("max")
+	_ = app.Cache.SetWriteoutBatching(0, 0)
+	app.Persister.SetStopDrain(true)
+	defer app.Persister.SetStopDrain(false)
+	timer := time.NewTimer(time.Until(started.Add(budget)))
+	defer timer.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	reason := "target"
+drain:
+	for app.Cache.Size() > target {
+		select {
+		case <-timer.C:
+			reason = "timeout"
+			break drain
+		case <-poll.C:
+		}
+	}
+	sharedAfter, filesAfter := app.Persister.WriteStats()
+	logger.Info("stop drain finished", zap.String("reason", reason), zap.Int64("before_points", before), zap.Int64("points", app.Cache.Size()), zap.Duration("runtime", time.Since(started)),
+		zap.Uint64("updates", sharedAfter.Updates-sharedBefore.Updates+filesAfter.Updates-filesBefore.Updates), zap.Float64("cpu_seconds", restartcpu.CPU()-cpu))
 }
 
 // stopFlush flushes the shared store during a dump stop. The successor

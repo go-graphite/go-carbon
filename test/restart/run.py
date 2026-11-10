@@ -32,6 +32,10 @@ def main():
     ap.add_argument("--min-points", type=int, default=0)
     ap.add_argument("--max-delay", default="0s")
     ap.add_argument("--max-updates", type=int, default=0)
+    ap.add_argument("--stop-drain-timeout", default="0s")
+    ap.add_argument("--stop-drain-target-points", type=int, default=0)
+    ap.add_argument("--seed-metrics", action="store_true",
+                    help="persist one initial point per metric before enabling long batching")
     ap.add_argument("--drain-before-restart", action="store_true")
     ap.add_argument("--require-snapshot", action="store_true")
     ap.add_argument("--crash-recovery", action="store_true", help="kill and reopen during pending-point recovery")
@@ -100,6 +104,8 @@ do-not-log-404s = true
 enabled = true
 path = "/data/dump"
 restore-per-second = 0
+stop-drain-timeout = "STOP_DRAIN_TIMEOUT"
+stop-drain-target-points = STOP_DRAIN_TARGET
 [pprof]
 enabled = true
 listen = ":7007"
@@ -115,7 +121,12 @@ encoding-duration = "seconds"
 [[logging]]
 logger = "access"
 file = "none"
-''').replace("MAX_UPDATES", str(args.max_updates)))
+''').replace("MAX_UPDATES", str(args.max_updates))
+        .replace("STOP_DRAIN_TIMEOUT", args.stop_drain_timeout)
+        .replace("STOP_DRAIN_TARGET", str(args.stop_drain_target_points)))
+    load_config = (config / "go-carbon.conf").read_text()
+    if args.seed_metrics:
+        (config / "go-carbon.conf").write_text(load_config.replace(batch, "") if batch else load_config)
     env = dict(os.environ, CARBON_BINARY=str(args.binary.resolve()), LAB_CONFIG=str(config),
                LAB_GOGC=str(args.gogc))
     base = ["docker", "compose", "-p", "carbon-restart-lab", "-f", str(HERE / "compose.yaml")]
@@ -204,7 +215,7 @@ print(json.dumps({'cpu_seconds': (int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'
         actual = {}
         for start in range(0, len(names), 50):
             params = [("target", name) for name in names[start:start + 50]]
-            params += [("from", epoch - 1), ("until", epoch + args.seconds + 3), ("format", "json")]
+            params += [("from", epoch - 2), ("until", epoch + args.seconds + 3), ("format", "json")]
             query = urllib.parse.urlencode(params)
             actual.update(samples(fetch("/render/?" + query, timeout=10)))
         missing = [k for k in expected if k not in actual]
@@ -215,6 +226,8 @@ print(json.dumps({'cpu_seconds': (int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'
     summary = {"label": args.label, "metrics": args.metrics, "seconds": args.seconds,
                "batch_min_points": args.min_points, "batch_max_delay": args.max_delay,
                "max_updates": args.max_updates,
+               "stop_drain_timeout": args.stop_drain_timeout,
+               "stop_drain_target_points": args.stop_drain_target_points,
                "gogc": args.gogc,
                "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(), "passed": False}
 
@@ -228,6 +241,20 @@ print(json.dumps({'cpu_seconds': (int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'
         compose("run", "--rm", "--no-deps", "--entrypoint", "mkdir", "store", "-p", "/data/whisper", "/data/dump")
         compose("up", "-d", "store")
         wait_for(ready)
+        if args.seed_metrics:
+            # Files must exist for cache-only render checks during long
+            # batching. Include these points in the same exact-value oracle.
+            with socket.create_connection(("127.0.0.1", 12003), timeout=10) as sock:
+                sock.sendall("".join(f"{name} {i * 1000 - 1} {epoch - 1}\n"
+                                     for i, name in enumerate(names)).encode())
+            sent += len(names)
+            for i, name in enumerate(names):
+                expected[name, epoch - 1] = float(i * 1000 - 1)
+            boundary = time.time()
+            wait_for(lambda: drained_after(boundary))
+            (config / "go-carbon.conf").write_text(load_config)
+            compose("kill", "-s", "SIGHUP", "store")
+            wait_for(lambda: 'config successfully reloaded' in compose("logs", "--no-color", "store").stdout)
         summary["initial_resources"] = resources()
         workers = [threading.Thread(target=reader, args=(i,), daemon=True) for i in range(args.readers)]
         for w in workers:
@@ -285,6 +312,14 @@ print(json.dumps({'cpu_seconds': (int(s[13])+int(s[14]))/os.sysconf('SC_CLK_TCK'
             summary["snapshot_startup_verified"] = True
         phase[0] = "recovered"
         summary["after_restart_values"] = check_values()
+        with urllib.request.urlopen("http://127.0.0.1:17007/metrics", timeout=10) as response:
+            restart_metrics = {}
+            for line in response.read().decode().splitlines():
+                if line.startswith("restart_") and " " in line:
+                    key, value = line.split(" ", 1)
+                    if "{" not in key:
+                        restart_metrics[key] = float(value)
+            summary["restart_metrics"] = restart_metrics
         if args.crash_recovery:
             log = compose("logs", "--no-color", "store").stdout
             assert "serving reads from pending checkpoint" in log, "pending checkpoint path was not exercised"

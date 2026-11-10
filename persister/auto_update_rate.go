@@ -142,6 +142,7 @@ type autoUpdateRate struct {
 	target                  float64
 	reason                  string
 	stopping                bool
+	stopDrain               bool
 	ticker                  atomic.Pointer[helper.ThrottleTicker]
 	metrics                 *autoUpdateMetrics
 	capacitySource          func() AutoCapacitySample
@@ -164,6 +165,19 @@ type autoUpdateObservation struct {
 func (p *Whisper) SetAutoUpdateRate(state func() cache.WriteoutState, floor, ceiling int) {
 	p.autoUpdate.state, p.autoUpdate.floor, p.autoUpdate.ceiling = state, floor, ceiling
 	p.autoUpdate.observeTokens.Store(ceiling == -1)
+}
+
+// SetStopDrain spends the existing automatic ceiling during a bounded planned
+// stop. Safe with active workers and sampling; the lifecycle owner serializes
+// this with reload and stop. Fixed-rate configurations are unchanged.
+func (p *Whisper) SetStopDrain(on bool) {
+	a := &p.autoUpdate
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopDrain = on
+	if p.settings().maxUpdatesPerSecond == -1 {
+		p.applyAutoUpdateRateLocked()
+	}
 }
 
 func (p *Whisper) sampleAutoUpdateRate() {
@@ -224,6 +238,16 @@ func (p *Whisper) applyAutoUpdateRateLocked() {
 	s := a.snapshot
 	previous, rate := a.applied, a.ordinary
 	a.target, a.reason = a.controller.target, a.controller.reason
+	if a.stopDrain {
+		ceiling := a.ceiling
+		if ceiling == -1 {
+			ceiling = a.capacity.hardCeiling
+		}
+		if ceiling > 0 {
+			rate = ceiling
+			a.target, a.reason = float64(ceiling), "stop_drain"
+		}
+	}
 	if floor := p.mandatoryRestartRate(); float64(rate) < floor {
 		rate = int(math.Ceil(min(floor, float64(int(^uint(0)>>1)/2))))
 		a.target, a.reason = max(a.target, floor), "restart"
