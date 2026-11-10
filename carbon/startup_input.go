@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -256,6 +257,18 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 	}
 	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
 	s.startReplay(sink, func() error {
+		ctx, cancel := context.WithCancel(context.Background())
+		watchDone := make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			select {
+			case <-s.stop:
+			case <-s.replayStop:
+			case <-ctx.Done():
+			}
+			cancel()
+		}()
+		defer func() { cancel(); <-watchDone }()
 		// Older epochs precede the current stream, including after a crash during
 		// partially completed startup. Current files stay exclusively locked.
 		entries, err := os.ReadDir(filepath.Dir(s.path))
@@ -375,7 +388,12 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 					return nil
 				})
 			} else {
-				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
+				workers := min(s.policy.shards, runtime.GOMAXPROCS(0))
+				if app.restartBudget != nil {
+					loaded, e = replayInputTailBatchesWithBudget(ctx, reader, workers, add(seg.source), app.restartBudget)
+				} else {
+					loaded, e = replayInputTailReader(reader, workers, add(seg.source))
+				}
 			}
 			if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, io.ErrUnexpectedEOF) {
 				return e

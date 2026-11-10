@@ -69,6 +69,19 @@ time. Already admitted bounded batches can briefly overlap writes; admission doe
 running work. Estimated work costs are reserved immediately and reconciled
 against whole-process CPU every 5 ms, with at most 5 ms of saved CPU credit.
 
+Once early durable capture owns live intake, historical legacy-tail replay also
+uses the restart allowance. Its decoder and worker pool share one eighth of
+that allowance, using at most the rounded-up share in workers and no more than
+GOMAXPROCS. Each participant duty-paces its active batches; queue waits bank no
+CPU credit. This keeps historical cache insertion from launching an unpaced
+GOMAXPROCS-sized pool alongside cold writeout. The share retains progress under
+mandatory CPU debt while live capture continues independently. It does not
+change the configured CPU minimum, claim metadata-checkpoint ownership, reset
+checkpoint byte progress, or count as a checkpoint-load grant. Cancellation
+joins all replay workers and leaves the unreplayed source retained; it cannot
+be mistaken for an accepted torn-tail EOF. Current live-capture replay keeps
+its existing admission and ordering.
+
 The checkpoint accelerator attempt has a ten-minute deadline after input
 readiness, including admission waits. A timed-out partial load remains safe:
 missing metadata uses ordinary durable-store lookups and provisional legacy

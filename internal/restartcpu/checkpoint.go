@@ -16,6 +16,21 @@ type Checkpoint struct {
 	last     time.Time
 	owed     time.Duration
 	progress func() (uint64, uint64)
+	history  bool
+	maximum  float64
+}
+
+// ReplayWorkers bounds historical tail concurrency independently of live
+// capture. Its reader and workers share one eighth of the restart allowance.
+func (b *Budget) ReplayWorkers(requested int) int {
+	return max(1, min(requested, runtime.GOMAXPROCS(0), int(math.Ceil(b.cores/8))))
+}
+
+// NewReplay duty-paces one participant in historical tail replay. Capture is
+// already receiving, so history can yield without closing intake. Unlike an
+// accelerator load, this must not reset or mark metadata checkpoint progress.
+func (b *Budget) NewReplay(participants int) *Checkpoint {
+	return &Checkpoint{budget: b, history: true, maximum: b.cores / 8 / float64(max(1, participants))}
 }
 
 // CheckpointWorkers leaves at least half the allowance for mandatory input,
@@ -57,7 +72,9 @@ func (p *Checkpoint) report() {
 
 func (p *Checkpoint) Finish() {
 	p.report()
-	p.budget.checkpoints.Add(-1)
+	if !p.history {
+		p.budget.checkpoints.Add(-1)
+	}
 }
 
 // checkpointShareLocked lends up to half the allowance to the worker pool. When
@@ -86,9 +103,12 @@ func (p *Checkpoint) accountWindow(ctx context.Context) (float64, error) {
 		work = time.Since(p.last).Seconds()
 	}
 	p.last = time.Time{}
-	b.mu.Lock()
-	share := b.checkpointShareLocked() / float64(max(1, b.checkpoints.Load()))
-	b.mu.Unlock()
+	share := p.maximum
+	if !p.history {
+		b.mu.Lock()
+		share = b.checkpointShareLocked() / float64(max(1, b.checkpoints.Load()))
+		b.mu.Unlock()
+	}
 	if b.Active() && share > 0 && work > 0 {
 		// Coalesce tiny delays: a timer per 32-record window would round up
 		// on coarse clocks and make the stream much slower than its share.
@@ -141,7 +161,9 @@ func (p *Checkpoint) Wait(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	b.checkpointGrants.Add(1)
+	if !p.history {
+		b.checkpointGrants.Add(1)
+	}
 	p.last = time.Now()
 	return nil
 }
