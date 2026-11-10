@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/cache"
 	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
@@ -83,15 +84,18 @@ type inputHandover struct {
 	logger      *zap.Logger
 	started     time.Time
 
-	mu         sync.Mutex
-	done       bool
-	closed     time.Time // when input stopped being read here
-	releasedAt time.Time // when the successor was released, or zero
-	tail       *recovery.Writer
-	path       string
-	unlock     func() error
-	timer      *time.Timer
-	detached   *handoff.Input
+	mu          sync.Mutex
+	done        bool
+	closed      time.Time // when input stopped being read here
+	releasedAt  time.Time // when the successor was released, or zero
+	tail        *recovery.Writer
+	journal     *inputlog.Log
+	journalErr  error
+	cachePoints func() int64
+	path        string
+	unlock      func() error
+	timer       *time.Timer
+	detached    *handoff.Input
 
 	// lost counts points accepted while the tail could not take them; the
 	// first failure stops input.
@@ -272,6 +276,9 @@ func (h *inputHandover) stop(reason string) {
 // checkpoint, which the successor replays before it applies live input.
 // Assumes we are holding h.mu, after completeTail.
 func (h *inputHandover) tailFields(tail recovery.File) []zap.Field {
+	if h.journal != nil {
+		return []zap.Field{zap.Duration("input_log_for", time.Since(h.started)), zap.Int64("cached_points", h.cachePoints())}
+	}
 	fields := []zap.Field{
 		zap.Duration("tail_for", time.Since(h.started)),
 		zap.Int64("tail_points", h.tail.Points()),
@@ -296,6 +303,10 @@ func (h *inputHandover) closedAt() time.Time {
 func (h *inputHandover) completeTail() (recovery.File, error) {
 	if h.flushTraces != nil {
 		h.flushTraces()
+	}
+	if h.journal != nil {
+		h.journalErr = h.journal.Close()
+		return recovery.File{}, h.journalErr
 	}
 	f, err := h.tail.Close()
 	err = errors.Join(err, syncDir(filepath.Dir(h.path)))

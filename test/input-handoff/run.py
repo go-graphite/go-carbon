@@ -70,7 +70,7 @@ def stored(http, fixture, max_index):
     return seen
 
 
-def run(root, binary, fixtures, mode, enabled, experiment):
+def run(root, binary, fixtures, mode, enabled, experiment, input_log_only=False):
     root.mkdir()
     for d in ['data', 'store', 'dump', 'input-log']:
         (root/d).mkdir()
@@ -136,7 +136,8 @@ enabled = true
 enabled = false
 listen = "127.0.0.1:{prom}"
 [dump]
-enabled = true
+enabled = {str(not input_log_only).lower()}
+input-log-only = {str(input_log_only).lower()}
 path = "dump"
 format = "compact"
 restore-per-second = 0
@@ -144,6 +145,7 @@ handoff-supervisor = true
 store-input-handoff = {str(enabled).lower()}
 [input-log]
 enabled = true
+background-replay = {str(input_log_only).lower()}
 path = "input-log"
 '''
     (root/'carbon.conf').write_text(config)
@@ -244,7 +246,7 @@ path = "input-log"
                     reconnects += 1
                     conn.close()
                     conn = eventually(connect)
-                time.sleep(.0005)
+                time.sleep(.005 if input_log_only else .0005)
             restart_thread.join(40)
         else:
             restart_thread.join(40)
@@ -253,12 +255,13 @@ path = "input-log"
         if restart_thread.is_alive() or restart_errors:
             raise RuntimeError(f'restart failed: {restart_errors}')
         conn.close()
+        eventually(lambda: float(metrics(prom).get('input_log_background_replay_active', 0)) == 0)
         time.sleep(.5)
         last = 33*256 if experiment == 'partial' else fixture['batches']*256
         seen = stored(http, fixture, last)
         next_received = int(float(metrics(prom).get('metrics_received_tcp_total', 0)))
         combined = entries(root/'old.log') + entries(root/'next.log')
-        dump = next(e for e in combined if e.get('message') == 'dump finished')
+        dump = next(e for e in combined if e.get('message') == ('input log stop finished' if input_log_only else 'dump finished'))
         gap = next(e for e in combined if e.get('message') == 'previous process handed over')
         result = dict(protocol=mode, enabled=enabled, experiment=experiment,
                       attempted=sent+failed, socket_written_complete_points=sent,
@@ -269,12 +272,25 @@ path = "input-log"
                       receiver_after=next_received,
                       reconnects=reconnects, input_handoff=dump['input_handoff'],
                       input_gap_seconds=gap['input_unavailable_seconds'],
-                      input_stop_runtime=dump['input_stop_runtime'],
+                      input_stop_runtime=dump.get('input_stop_runtime', 0),
+                      input_log_only=input_log_only, lost_points=sent-len(seen),
+                      dump_files_written=sum(e.get('message') == 'start cache dump' for e in combined),
+                      recovery_files=[p.name for p in (root/'dump').iterdir() if not p.name.startswith('.')],
+                      replayed_points=int(float(metrics(prom).get('input_log_replayed_points_total', 0))),
                       planned_close_logs=sum(e.get('message') == 'input connection closed during shutdown' for e in combined),
                       errors=[e for e in combined if e.get('level', '').upper() == 'ERROR'])
         if experiment == 'partial':
             assert accepted_before+next_received == len(seen), result
             assert len(seen) == (8448 if enabled else 8447 if mode == 'plaintext' else 8192), result
+        if input_log_only:
+            handed = next(e for e in combined if e.get('message') == 'input handed over')
+            result['cached_points_at_handoff'] = handed['cached_points']
+            result['replay_cache_ratio'] = result['replayed_points']/max(1, handed['cached_points'])
+            assert result['replay_cache_ratio'] <= 1.1, result
+            assert result['dump_files_written'] == 0 and not result['recovery_files'], result
+            assert result['input_gap_seconds'] <= 1, result
+            if experiment == 'continuous':
+                assert next_received > 0, 'continuous sender must cross the handoff'
         if enabled:
             assert dump['input_handoff'] and reconnects == 0 and len(seen) == sent, result
             assert not result['errors'], result
@@ -314,17 +330,22 @@ def main():
     ap.add_argument('--scratch', type=Path, required=True)
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--enabled', choices=['false', 'true', 'both'], default='both')
+    ap.add_argument('--input-log-only', action='store_true', help='experimental journal-only stop; requires --enabled true')
+    ap.add_argument('--iterations', type=int, default=1)
     args = ap.parse_args()
+    if args.input_log_only and args.enabled != 'true':
+        ap.error('--input-log-only requires --enabled true')
     results = []
     with tempfile.TemporaryDirectory(prefix='ih-', dir=args.scratch.resolve()) as temporary:
         root = Path(temporary)
         fixtures = root/'fixtures'; fixtures.mkdir()
         subprocess.run([str(args.wire.resolve()), str(fixtures)], check=True)
-        for enabled in ([False, True] if args.enabled == 'both' else [args.enabled == 'true']):
-            for experiment in ['partial', 'continuous', 'queued']:
-                for mode in ['plaintext', 'zstd', 'stream']:
-                    results.append(run(root/f'{int(enabled)}-{experiment}-{mode}', args.carbon.resolve(), fixtures, mode, enabled, experiment))
-                    args.output.write_text(json.dumps(results, indent=2)+'\n')
+        for iteration in range(args.iterations):
+            for enabled in ([False, True] if args.enabled == 'both' else [args.enabled == 'true']):
+                for experiment in ['partial', 'continuous', 'queued']:
+                    for mode in ['plaintext', 'zstd', 'stream']:
+                        results.append(run(root/f'{iteration}-{int(enabled)}-{experiment}-{mode}', args.carbon.resolve(), fixtures, mode, enabled, experiment, args.input_log_only))
+                        args.output.write_text(json.dumps(results, indent=2)+'\n')
     args.output.write_text(json.dumps(results, indent=2)+'\n')
 
 

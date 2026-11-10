@@ -82,8 +82,16 @@ func main() {
 	inputHandoffProtocol := flag.Bool("input-handoff-protocol", false, "Print the supported input handoff protocol and exit")
 	sharedStoreHandoffProtocol := flag.Bool("shared-store-handoff-protocol", false, "Print the supported mirrored storage handoff protocol and exit")
 	storeInputHandoffProtocol := flag.Bool("store-input-handoff-protocol", false, "Print the supported shared-store input handoff protocol and exit")
+	inputLogHandoffProtocol := flag.Bool("input-log-handoff-protocol", false, "Print the supported input-log-only handoff protocol for this configuration and exit")
 
 	flag.Parse()
+	if *inputLogHandoffProtocol {
+		probe := carbon.New(*configFile)
+		if err := probe.ParseConfig(); err == nil && carbon.InputLogHandoffSupported(probe.Config) {
+			fmt.Println(carbon.InputLogHandoffProtocol)
+		}
+		return
+	}
 
 	if *handoffProtocol {
 		fmt.Println(handoff.Protocol)
@@ -303,7 +311,7 @@ func main() {
 		}
 		released = true
 	}
-	if release != nil && cfg.Dump.Enabled {
+	if release != nil && (cfg.Dump.Enabled || cfg.Dump.InputLogOnly) {
 		// DumpStop switches mirrored readers to the original files and closes
 		// the shared handle before releasing its exclusive lock to a successor.
 		app.SetReadHandoff(successorBinary(), releaseToSupervisor)
@@ -312,7 +320,12 @@ func main() {
 	go func() {
 		for {
 			<-stopSignals
-			if err := app.DumpStop(); err == nil && release != nil && cfg.Dump.Enabled && !released {
+			err := app.DumpStop()
+			if err != nil && cfg.Dump.InputLogOnly {
+				mainLogger.Error("input-log-only stop failed; keeping recovery journal", zap.Error(err))
+				os.Exit(1)
+			}
+			if err == nil && release != nil && (cfg.Dump.Enabled || cfg.Dump.InputLogOnly) && !released {
 				app.ReleaseForHandoff()
 				releaseToSupervisor()
 			}

@@ -64,6 +64,9 @@ func (app *App) DumpStop() (err error) {
 	if app.MetricStore != nil {
 		app.MetricStore.CancelNativeTransfers()
 	}
+	if app.Config.Dump.InputLogOnly {
+		return app.stopWithInputLog(stopStarted)
+	}
 	if s := app.startupInput; s != nil && s.replayStarted.Load() {
 		if !s.stopDirectSwitch() {
 			return app.stopStreamingInputForHandoff(stopStarted)
@@ -587,7 +590,7 @@ var checkpointDumpHook func()
 // startStopFlush starts the first flush. Assumes we are holding app.Lock().
 func (app *App) startStopFlush() *stopFlush {
 	f := &stopFlush{app: app, started: time.Now()}
-	if earlyStopFlush && app.Config.Dump.Enabled {
+	if earlyStopFlush && (app.Config.Dump.Enabled || app.Config.Dump.InputLogOnly) {
 		f.again()
 	}
 	return f
@@ -657,7 +660,7 @@ func (f *stopFlush) done() <-chan struct{} {
 func (app *App) stopStoreBackground() <-chan struct{} {
 	stopped := make(chan struct{})
 	db := app.MetricStore
-	if db == nil || !app.Config.Dump.Enabled {
+	if db == nil || (!app.Config.Dump.Enabled && !app.Config.Dump.InputLogOnly) {
 		close(stopped)
 		return stopped
 	}

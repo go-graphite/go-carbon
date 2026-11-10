@@ -31,8 +31,9 @@ type restartRecord struct {
 	PID     int
 	// Dump is the cache dump file the stop wrote. The successor trusts a
 	// record only while that file is still there to restore.
-	Dump        string
-	StopStarted time.Time
+	Dump         string
+	InputLogOnly bool
+	StopStarted  time.Time
 	// InputClosed is when the process stopped reading input: input
 	// listeners closed, or handed to the successor.
 	InputClosed time.Time
@@ -164,13 +165,13 @@ func (app *App) beginRestart() {
 		m.register(app.PromRegisterer)
 	}
 	kind := "unclean"
-	if dir := app.Config.Dump.Path; app.Config.Dump.Enabled && dir != "" {
+	if dir := app.Config.Dump.Path; (app.Config.Dump.Enabled || app.Config.Dump.InputLogOnly || app.Config.InputLog.Enabled) && dir != "" {
 		prev, err := readRestartRecord(dir)
 		if err == nil && prev.Dump != "" {
 			if _, statErr := os.Stat(filepath.Join(dir, prev.Dump)); statErr != nil {
 				prev = nil // left by a start that already restored its dump
 			}
-		} else {
+		} else if err != nil || !prev.InputLogOnly || !app.Config.InputLog.Enabled {
 			prev = nil
 		}
 		switch {
@@ -277,7 +278,7 @@ func (app *App) finishRestart() {
 		}
 		// Remove the predecessor's record only: a stop of this process may
 		// have replaced it by its own already.
-		if r, err := readRestartRecord(dir); err == nil && r.Dump == prev.Dump {
+		if r, err := readRestartRecord(dir); err == nil && r.PID == prev.PID && r.Dump == prev.Dump {
 			_ = os.Remove(filepath.Join(dir, restartRecordName))
 		}
 		s.mu.Lock()

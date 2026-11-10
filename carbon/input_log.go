@@ -87,6 +87,8 @@ func validateInputLogConfig(cfg *Config) error {
 // longer than the running log's max-age.
 func inputLogReloadError(old, next *Config) error {
 	switch {
+	case old.Dump.InputLogOnly != next.Dump.InputLogOnly:
+		return errors.New("dump.input-log-only requires a restart")
 	case old.InputLog != next.InputLog:
 		return errors.New("input-log settings require a restart")
 	case old.InputLog.Enabled && next.Cache.WriteoutMaxDelay.Value() >= inputLogMaxAge(old):

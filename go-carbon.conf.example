@@ -1289,6 +1289,13 @@ handoff-supervisor = false
 # writes are not delivery acknowledgements: unread input can be lost at close.
 # See doc/input-handoff.md for the complete configuration and a local check.
 store-input-handoff = false
+# Experimental: relog the remaining cache at stop and transfer sockets without
+# writing a dump, tail or capture spool. Requires input-log.enabled and the
+# supervised shared-store TCP handoff above; default off, including when dump
+# enabled is false. Successors receive into cache plus journal before opening
+# storage. Reads can omit history until background replay finishes. Requires
+# background input-log replay; qualify that dependency before a canary.
+input-log-only = false
 # Record format of the dump a stop writes: "legacy", "compact", or "blocks".
 # "compact" writes each metric's points in the cache's in-memory encoding,
 # copied without decoding, with a third of the dump CPU of "legacy", and

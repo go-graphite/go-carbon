@@ -139,6 +139,7 @@ type App struct {
 	storeHandoffMetrics      chan string
 	storeHandoffInputStarted bool
 	inheritedInput           *handoff.Input
+	inputLogHandoff          bool
 	storeInfoMu              sync.RWMutex
 	storeInfoDB              *store.Store
 	// metadataPrewarmDone holds the channel that closes when the start's
@@ -887,6 +888,9 @@ func (app *App) Start() (err error) {
 	if err = validateInputLogConfig(conf); err != nil {
 		return err
 	}
+	if err = validateInputLogOnlyConfig(conf); err != nil {
+		return err
+	}
 
 	runtime.GOMAXPROCS(conf.Common.MaxCPU)
 	conf.applyMemoryBudget()
@@ -1102,7 +1106,7 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	if err = app.openInputLog(core); err != nil {
 		return nil, err
 	}
-	if app.inputReplay != nil {
+	if app.inputReplay != nil || conf.Dump.InputLogOnly || app.inputLogHandoff {
 		if err = app.startReceivers(core); err != nil {
 			return nil, err
 		}
