@@ -3,8 +3,6 @@ package buckyd
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,11 +21,13 @@ import (
 )
 
 type nativeSourceSession struct {
-	source *chunkstore.NativeSource
-	timer  *time.Timer
-	ctx    context.Context
-	cancel context.CancelFunc
-	active int
+	source     *chunkstore.NativeSource
+	timer      *time.Timer
+	ctx        context.Context
+	cancel     context.CancelFunc
+	active     int
+	createdAt  time.Time
+	closeError string
 }
 type nativeExportRequest struct {
 	Window  *chunkstore.NativeWindow `json:",omitempty"`
@@ -49,16 +49,21 @@ func nativeTransport() *http.Transport {
 	return t
 }
 
-func (s *Service) closeNativeSource(id string) {
+func (s *Service) closeNativeSource(id string) error {
 	s.nativeMu.Lock()
 	session := s.nativeSources[id]
-	delete(s.nativeSources, id)
-	s.nativeMu.Unlock()
-	if session != nil {
-		session.timer.Stop()
-		session.cancel()
-		_ = session.source.Close()
+	if session == nil {
+		pending := s.nativeClosing[id] != nil || !s.nativeCreating[id].IsZero()
+		s.nativeMu.Unlock()
+		if pending {
+			return errors.New("native source creation or close still pending")
+		}
+		return nil
 	}
+	delete(s.nativeSources, id)
+	s.trackNativeClosingLocked(id, session)
+	s.nativeMu.Unlock()
+	return s.finishNativeClose(id, session)
 }
 func (s *Service) expireNativeSource(id string) {
 	s.nativeMu.Lock()
@@ -68,24 +73,25 @@ func (s *Service) expireNativeSource(id string) {
 		return
 	}
 	delete(s.nativeSources, id)
+	s.trackNativeClosingLocked(id, session)
 	s.nativeMu.Unlock()
-	session.cancel()
-	_ = session.source.Close()
+	_ = s.finishNativeClose(id, session)
 }
-
 func (s *Service) closeNativeSources() {
 	s.nativeMu.Lock()
+	s.nativeSourceStopped = true
 	sessions := s.nativeSources
 	s.nativeSources = nil
+	for id, session := range sessions {
+		s.trackNativeClosingLocked(id, session)
+	}
 	s.nativeMu.Unlock()
 	for _, session := range sessions {
 		session.timer.Stop()
 		session.cancel()
 	}
-	for _, session := range sessions {
-		session.timer.Stop()
-		session.cancel()
-		_ = session.source.Close()
+	for id, session := range sessions {
+		_ = s.finishNativeClose(id, session)
 	}
 }
 
@@ -106,16 +112,23 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err, http.StatusForbidden)
 		return
 	}
+	if path == "/v1/native/sources" && r.Method == http.MethodGet {
+		writeNativeJSON(w, s.nativeSourceCensus())
+		return
+	}
 	if path == "/v1/native/stats" && r.Method == http.MethodGet {
 		writeNativeJSON(w, s.store.NativeStats())
 		return
 	}
 	if path == "/v1/native/capabilities" && r.Method == http.MethodGet {
-		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeTimeWindow": true, "NativeDeferredCombine": true, "NativePinnedMerge": true, "DurableRangeReceipt": true, "AtomicMissingOnlyNonNaN": s.finiteCacheFence != nil, "AtomicMissingOnly": s.finiteCacheFence != nil, "AtomicMissingOnlyProtocol": 1, "AtomicMissingOnlyMaxPoints": chunkstore.MissingOnlyMaxPoints, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
+		writeNativeJSON(w, map[string]any{"NativeSourceCensus": true, "NativeSourceCensusProtocol": 1, "Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeTimeWindow": true, "NativeDeferredCombine": true, "NativePinnedMerge": true, "DurableRangeReceipt": true, "AtomicMissingOnlyNonNaN": s.finiteCacheFence != nil, "AtomicMissingOnly": s.finiteCacheFence != nil, "AtomicMissingOnlyProtocol": 1, "AtomicMissingOnlyMaxPoints": chunkstore.MissingOnlyMaxPoints, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
 		return
 	}
 	if strings.HasPrefix(path, "/v1/native/source/") && r.Method == http.MethodDelete {
-		s.closeNativeSource(strings.TrimPrefix(path, "/v1/native/source/"))
+		if err := s.closeNativeSource(strings.TrimPrefix(path, "/v1/native/source/")); err != nil {
+			writeError(w, err, http.StatusConflict)
+			return
+		}
 		writeNativeJSON(w, map[string]bool{"released": true})
 		return
 	}
@@ -158,33 +171,17 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}
-		var pin *chunkstore.NativeSource
-		var err error
-		if request.MergeSession == "" {
-			pin, err = s.store.PinNativeSource()
-		} else {
-			pin, err = s.store.PinNativeMergeSource(request.MergeSession)
-		}
+		id, session, err := s.openNativeSource(r.Context(), func() (*chunkstore.NativeSource, error) {
+			if request.MergeSession == "" {
+				return s.store.PinNativeSource()
+			}
+			return s.store.PinNativeMergeSource(request.MergeSession)
+		})
 		if err != nil {
 			fail(err)
 			return
 		}
-		var nonce [16]byte
-		if _, err := rand.Read(nonce[:]); err != nil {
-			pin.Close()
-			fail(err)
-			return
-		}
-		id := hex.EncodeToString(nonce[:])
-		s.nativeMu.Lock()
-		if s.nativeSources == nil {
-			s.nativeSources = make(map[string]*nativeSourceSession)
-		}
-		sessionCtx, cancelSession := context.WithCancel(context.Background())
-		session := &nativeSourceSession{source: pin, ctx: sessionCtx, cancel: cancelSession}
-		session.timer = time.AfterFunc(15*time.Minute, func() { s.expireNativeSource(id) })
-		s.nativeSources[id] = session
-		s.nativeMu.Unlock()
+		pin := session.source
 		writeNativeJSON(w, map[string]any{"ID": id, "StoreFormat": s.store.TransferFormat(), "Expires": time.Now().Add(15 * time.Minute), "MergeSession": pin.MergeSession, "SnapshotStartedAt": pin.SnapshotStartedAt, "SnapshotPinnedAt": pin.SnapshotPinnedAt, "BackfillFromUnix": int64(0), "BackfillFullRetention": pin.MergeSession != ""})
 	case "/v1/native/export":
 		var request nativeExportRequest
