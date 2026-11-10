@@ -130,6 +130,12 @@ type autoUpdateRate struct {
 	stopping                bool
 	ticker                  atomic.Pointer[helper.ThrottleTicker]
 	metrics                 *autoUpdateMetrics
+	observed                atomic.Pointer[autoUpdateObservation]
+}
+
+type autoUpdateObservation struct {
+	rate, target float64
+	reason       string
 }
 
 // SetAutoUpdateRate supplies cache state and limits for -1 mode before Start.
@@ -179,6 +185,9 @@ func (p *Whisper) sampleAutoUpdateRateLocked(s cache.WriteoutState) {
 // Caller holds autoUpdate.mu, including during reload before mode publication.
 func (p *Whisper) applyAutoUpdateRateLocked() {
 	a := &p.autoUpdate
+	defer func() {
+		a.observed.Store(&autoUpdateObservation{float64(a.applied), a.target, a.reason})
+	}()
 	if a.stopping || a.ordinary <= 0 {
 		return
 	}

@@ -401,7 +401,11 @@ type storeStats struct {
 }
 
 func (s *storeStats) Stat(send helper.StatCallback) {
-	stats := s.db.Stats()
+	stats, _, ok := s.db.TelemetryStats()
+	if !ok {
+		return
+	}
+	send("metricsSnapshotAgeSeconds", s.db.TelemetryAge().Seconds())
 	send("diskBytes", float64(stats.DiskBytes))
 	send("walBytes", float64(stats.WALBytes))
 	send("memTableBytes", float64(stats.MemTableBytes))

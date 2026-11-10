@@ -984,7 +984,9 @@ func (l *Log) Stat(send func(metric string, value float64)) {
 	send("spareSegments", float64(l.stat.spareSegments.Load()))
 	send("pinnedCycles", float64(l.stat.pinned.Load()))
 	if l.src != nil {
-		dropped := int64(l.src.LogDropped())
+		// The log cycle already samples the source into this counter. Source
+		// callbacks may take every cache shard lock; statistics must not.
+		dropped := l.total.unlogged.Load()
 		send("dropped", float64(dropped-l.stat.lastDropped.Swap(dropped)))
 	}
 }

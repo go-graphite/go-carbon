@@ -142,6 +142,21 @@ func (b *Budget) State() State {
 	active := b.Active()
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	return b.stateLocked(active)
+}
+
+// Metrics do not run the drain callback or wait for a CPU sampler's lock.
+// Admission updates the drain state; a scrape reports the last known state.
+func (b *Budget) tryState() (State, bool) {
+	if b == nil || !b.mu.TryLock() {
+		return State{}, false
+	}
+	defer b.mu.Unlock()
+	active := b.cores > 0 && (b.until.IsZero() || time.Now().Before(b.until) || !b.warmed.Load() || b.drained.Load() != nil && !b.drainDone.Load())
+	return b.stateLocked(active), true
+}
+
+func (b *Budget) stateLocked(active bool) State {
 	s := State{Allowance: b.cores, Process: b.process, Floor: b.floor, Rate: b.rate,
 		Ceiling: math.Float64frombits(b.rateCeiling.Load()),
 		Stalled: b.stalled && active, Stalls: b.stalls, FloorGrants: b.floorGrants,
@@ -211,7 +226,10 @@ func (m *metrics) Describe(ch chan<- *prometheus.Desc) {
 
 func (m *metrics) Collect(ch chan<- prometheus.Metric) {
 	b := m.budget.Load()
-	s := b.State()
+	s, ok := b.tryState()
+	if !ok {
+		return
+	}
 	ch <- prometheus.MustNewConstMetric(checkpointFailuresDesc, prometheus.CounterValue, float64(b.checkpointFailures.Load()))
 	ch <- prometheus.MustNewConstMetric(checkpointTimeoutsDesc, prometheus.CounterValue, float64(b.checkpointTimeouts.Load()))
 	ch <- prometheus.MustNewConstMetric(grantDesc, prometheus.GaugeValue, s.Warming, "warming")

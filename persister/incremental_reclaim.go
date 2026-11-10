@@ -175,14 +175,18 @@ type DeferredReclaimStats struct {
 
 func (p *Whisper) DeferredReclaimStats() DeferredReclaimStats {
 	if r := p.reclaimer(); r != nil {
-		return DeferredReclaimStats{
-			Completed: r.completed.Load(), InlineFallback: r.inlineFallback.Load(),
-			Batches: r.batches.Load(), Jobs: r.jobs.Load(), BatchNanos: r.batchNanos.Load(),
-			UnlinkNanos: r.unlinkNanos.Load(), SyncNanos: r.syncNanos.Load(), CleanupNanos: r.cleanupNanos.Load(),
-			Workers: r.workers,
-		}
+		return r.stats()
 	}
 	return DeferredReclaimStats{}
+}
+
+func (r *deferredReclaim) stats() DeferredReclaimStats {
+	return DeferredReclaimStats{
+		Completed: r.completed.Load(), InlineFallback: r.inlineFallback.Load(),
+		Batches: r.batches.Load(), Jobs: r.jobs.Load(), BatchNanos: r.batchNanos.Load(),
+		UnlinkNanos: r.unlinkNanos.Load(), SyncNanos: r.syncNanos.Load(), CleanupNanos: r.cleanupNanos.Load(),
+		Workers: r.workers,
+	}
 }
 
 // push reserves capacity under the queue lock, including jobs already being

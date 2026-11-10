@@ -559,8 +559,9 @@ func NewConfig() *Config {
 			LocalDir:            "/var/lib/graphite/tagging/",
 		},
 		Pprof: pprofConfig{
-			Listen:  "127.0.0.1:7007",
-			Enabled: false,
+			MutexProfileFraction: 1000,
+			Listen:               "127.0.0.1:7007",
+			Enabled:              false,
 		},
 		Dump: dumpConfig{
 			Path: "/var/lib/graphite/dump/",

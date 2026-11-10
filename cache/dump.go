@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"slices"
 	"sync"
 	"sync/atomic"
 
@@ -90,15 +91,16 @@ func (c *Cache) NativePendingNames() (map[string]struct{}, error) {
 
 // VisitMetricNames visits currently cached and in-flight names while input and
 // persistence may continue. Names can repeat or disappear after the visit; this
-// is a warmup hint, not an authoritative snapshot. visit runs under a shard's
-// read lock and must not write to the cache.
+// is a warmup hint, not an authoritative snapshot. Copy one shard's names before
+// calling visit: storage warmup can block on disk and must not stop ingestion.
 func (c *Cache) VisitMetricNames(visit func(string) error) error {
+	var names []string
 	for _, shard := range c.data {
-		shard.mu.RLock()
-		err := shard.visitNamesLocked(visit)
-		shard.mu.RUnlock()
-		if err != nil {
-			return err
+		names = shard.snapshotNames(names[:0])
+		for _, name := range names {
+			if err := visit(name); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -114,21 +116,44 @@ func (c *Cache) VisitMetricNamesParallel(workers int, visit func(string) error) 
 	var wg sync.WaitGroup
 	for w := range workers {
 		wg.Go(func() {
+			var names []string
 			for i := int(next.Add(1) - 1); i < shardCount; i = int(next.Add(1) - 1) {
 				shard := c.data[i]
-				shard.mu.RLock()
-				err := shard.visitNamesLocked(visit)
-				shard.mu.RUnlock()
-				if err != nil {
-					errs[w] = err
-					next.Store(shardCount)
-					return
+				names = shard.snapshotNames(names[:0])
+				for _, name := range names {
+					if err := visit(name); err != nil {
+						errs[w] = err
+						next.Store(shardCount)
+						return
+					}
 				}
 			}
 		})
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+func (shard *Shard) snapshotNames(names []string) []string {
+	for {
+		shard.mu.RLock()
+		n := shard.notConfirmedUsed + shard.items.len()
+		if cap(names) >= n {
+			break
+		}
+		shard.mu.RUnlock()
+		names = slices.Grow(names, n)
+	}
+	defer shard.mu.RUnlock()
+	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
+		if p != nil {
+			names = append(names, p.Metric)
+		}
+	}
+	for name := range shard.items.all {
+		names = append(names, name)
+	}
+	return names
 }
 
 // MetricNames returns the names of the metrics the cache holds, shard by
@@ -173,23 +198,6 @@ func (c *Cache) PendingNames() iter.Seq[string] {
 }
 
 var errStopNames = errors.New("names no longer wanted")
-
-// visitNamesLocked visits names like visitLocked, without decoding points.
-func (shard *Shard) visitNamesLocked(visit func(string) error) error {
-	for _, p := range shard.notConfirmed[:shard.notConfirmedUsed] {
-		if p != nil {
-			if err := visit(p.Metric); err != nil {
-				return err
-			}
-		}
-	}
-	for name := range shard.items.all {
-		if err := visit(name); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 // DumpShardsCompact visits shards [lo, hi) like DumpShards, passing each
 // record in the existing recovery.FormatCompact byte encoding. The bit-packed

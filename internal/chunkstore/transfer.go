@@ -14,8 +14,11 @@ import (
 	"io"
 	"math"
 	"slices"
+
 	"strings"
 	"time"
+
+	"github.com/go-graphite/go-carbon/internal/lockset"
 
 	"github.com/cockroachdb/pebble"
 )
@@ -430,9 +433,7 @@ func (s *Store) lockTransfer(names []string) func() {
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	for _, stripe := range stripes {
-		s.metricMu[stripe].Lock()
-	}
+	lockset.Lock(s.metricMu[:], stripes)
 	for _, name := range names {
 		s.beginStateMutation(name)
 	}
@@ -1338,13 +1339,13 @@ func (s *Store) RetireTransferredStore(ctx context.Context, operation string) (i
 			}
 		}()
 	}
-	s.sidecars.mu.Lock()
-	defer s.sidecars.mu.Unlock()
 	if err := b.Commit(pebble.Sync); err != nil {
 		return 0, err
 	}
+	s.sidecars.mu.Lock()
 	s.sidecars.entries, s.sidecars.oldest, s.sidecars.points = nil, nil, 0
 	s.sidecars.ready = true
+	s.sidecars.mu.Unlock()
 	s.resetCatalogChanges()
 	for i := range s.metadataCache {
 		s.metadataCache[i] = metadataRing{}

@@ -25,6 +25,7 @@ type Queue struct {
 	changed   chan struct{}
 	send      func([]string) error
 	sendChunk int
+	lagNanos  atomic.Int64 // sampled by the queue worker; Stat must not enter LevelDB
 
 	stat struct {
 		putErrors    uint32
@@ -106,6 +107,7 @@ func NewQueue(rootPath string, send func([]string) error, sendChunk int) (*Queue
 	}
 
 	q.Start()
+	q.lagNanos.Store(int64(q.Lag()))
 
 	q.Go(q.sendWorker)
 
@@ -243,6 +245,7 @@ func (q *Queue) sendWorker(exit chan bool) {
 			// pass
 		}
 		q.sendAll(exit)
+		q.lagNanos.Store(int64(q.Lag()))
 	}
 }
 

@@ -112,6 +112,7 @@ type Heartbeat struct {
 	// in unix nanoseconds.
 	writeErrors atomic.Int64
 	lastBeat    atomic.Int64
+	recorded    atomic.Pointer[Window]
 }
 
 // Start reads the previous state, records an unclean stop if the previous
@@ -157,6 +158,7 @@ func Start(o Options) (*Heartbeat, error) {
 		readErr = nil
 	}
 	h.sampleLocked()
+	h.publishRecorded()
 	if err := write(o.Path, &h.state); err != nil {
 		return nil, err
 	}
@@ -217,6 +219,7 @@ func (h *Heartbeat) beat(change func(now time.Time), final bool) error {
 		h.stopped = true
 		close(h.stop)
 	}
+	h.publishRecorded()
 	if err := write(h.opts.Path, &h.state); err != nil {
 		h.writeErrors.Add(1)
 		return err
@@ -234,13 +237,21 @@ func (h *Heartbeat) LastBeat() time.Time { return time.Unix(0, h.lastBeat.Load()
 // Recorded returns the unclean stop window kept in the file, detected by this
 // start or carried from an earlier one, or nil.
 func (h *Heartbeat) Recorded() *Window {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.state.Unclean == nil {
+	recorded := h.recorded.Load()
+	if recorded == nil {
 		return nil
 	}
-	w := *h.state.Unclean
+	w := *recorded
 	return &w
+}
+
+// Publish a detached copy before filesystem I/O. Scrapes must never queue
+// behind the heartbeat's write/fsync/rename, or call its cache sampler.
+func (h *Heartbeat) publishRecorded() {
+	if h.state.Unclean != nil {
+		w := *h.state.Unclean
+		h.recorded.Store(&w)
+	}
 }
 
 // Ready records that input is accepted again.

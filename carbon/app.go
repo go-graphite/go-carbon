@@ -422,7 +422,7 @@ func (app *App) ParseConfig() error {
 			Name: "config_unknown_keys",
 			Help: "Unknown TOML keys in the currently loaded configuration.",
 		})
-		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics())
+		app.PromRegisterer.MustRegister(app.configUnknownKeys, handoff.InputCloseMetrics(), runtimeWaitCollector{})
 	}
 	app.configUnknownKeys.Set(float64(len(app.Config.unknownKeys)))
 

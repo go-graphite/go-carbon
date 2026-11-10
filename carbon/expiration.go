@@ -47,9 +47,15 @@ func (s *expirationStats) Stat(send helper.StatCallback) {
 	send("wouldExpireLogicalBytes", float64(s.wouldBytes.Swap(0)))
 	send("guarded", float64(s.guarded.Swap(0)))
 	send("limited", float64(s.limited.Swap(0)))
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	if !s.mu.TryLock() {
+		return
+	}
+	rules := make(map[string]*expirationRuleStats, len(s.rules))
 	for name, rule := range s.rules {
+		rules[name] = rule
+	}
+	s.mu.Unlock()
+	for name, rule := range rules {
 		rule.Stat(func(key string, value float64) { send("rules."+name+"."+key, value) })
 	}
 }

@@ -55,6 +55,10 @@ func (s *Store) SetRelayoutLimits(minFreeBytes, maxCompactionDebt uint64) error 
 func (g *relayoutGuard) stats(stats *RelayoutStats) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.statsLocked(stats)
+}
+
+func (g *relayoutGuard) statsLocked(stats *RelayoutStats) {
 	stats.Paused, stats.PauseReason = g.paused, g.reason
 	stats.Pauses = maps.Clone(g.pauses)
 	stats.MinFreeBytes, stats.MaxCompactionDebt = g.minFree, g.maxDebt

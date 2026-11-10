@@ -112,7 +112,9 @@ func overlapUpdateCounts() map[whisper.OverlapKind]uint64 {
 // sendOverlapUpdates reports the replays since the previous call, one stat
 // per kind, as persister.overlapUpdates.<kind>.
 func (p *Whisper) sendOverlapUpdates(send func(string, float64)) {
-	p.overlapMu.Lock()
+	if !p.overlapMu.TryLock() {
+		return
+	}
 	defer p.overlapMu.Unlock()
 	if p.overlapSeen == nil {
 		p.overlapSeen = make(map[whisper.OverlapKind]uint64)

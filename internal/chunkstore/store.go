@@ -282,6 +282,9 @@ type Store struct {
 	operands           atomic.Uint64
 	readCacheEpoch     atomic.Uint64
 	compactionWorkers  atomic.Int64
+	telemetryPebble    atomic.Pointer[pebble.Metrics]
+	telemetryRange     atomic.Pointer[rangeCacheSnapshot]
+	telemetryAt        atomic.Int64
 	closeTimings       CloseTimings
 	openTimings        OpenTimings
 	stallMu            sync.Mutex
@@ -1194,6 +1197,18 @@ type Stats struct {
 func (s *Store) Stats() Stats {
 	m := s.db.Metrics()
 	pacing := s.compactionControl.stats()
+	s.stallMu.Lock()
+	stalls, duration, reason := s.stallCount, s.stallDuration, s.stallReason
+	active := !s.stallSince.IsZero()
+	if active {
+		duration += time.Since(s.stallSince)
+	}
+	s.stallMu.Unlock()
+	return s.statsFrom(m, pacing, s.ColdPackStats(), s.RelayoutStats(), stalls, duration, reason, active, s.rangeCacheSnapshot())
+}
+
+func (s *Store) statsFrom(m *pebble.Metrics, pacing compactionPacingStats, cold ColdPackStats, relayout RelayoutStats,
+	stalls uint64, duration time.Duration, reason string, active bool, rangeCache rangeCacheSnapshot) Stats {
 	var read, written, flushed uint64
 	var levelCompacted, levelRead [7]uint64
 	var levelBytes [7]int64
@@ -1204,14 +1219,7 @@ func (s *Store) Stats() Stats {
 		flushed += level.BytesFlushed
 		levelCompacted[i], levelRead[i], levelBytes[i], levelScores[i] = level.BytesCompacted, level.BytesRead, level.Size, level.Score
 	}
-	s.stallMu.Lock()
-	stalls, duration, reason := s.stallCount, s.stallDuration, s.stallReason
-	active := !s.stallSince.IsZero()
-	if active {
-		duration += time.Since(s.stallSince)
-	}
-	s.stallMu.Unlock()
-	stats := Stats{ColdPack: s.ColdPackStats(),
+	stats := Stats{ColdPack: cold,
 		MirrorCanonicalBatches: s.mirrorCanonical.Load(), MirrorBlindBatches: s.mirrorBlind.Load(),
 		DiskBytes: uint64(m.DiskSpaceUsage()), WALBytes: m.WAL.Size, MemTableBytes: m.MemTable.Size,
 		Materializations: s.materializations.Load(), Operands: s.operands.Load(),
@@ -1226,7 +1234,7 @@ func (s *Store) Stats() Stats {
 		CompactionReadBytes: read, CompactionWriteBytes: written, FlushWriteBytes: flushed,
 		WriteStalls: stalls, WriteStallNanos: int64(duration), WriteStallReason: reason, WriteStallActive: active,
 		TableCacheEntries: m.TableCache.Count, TableCacheHits: m.TableCache.Hits, TableCacheMisses: m.TableCache.Misses,
-		LevelCompactedBytes: levelCompacted, LevelReadBytes: levelRead, LevelBytes: levelBytes, Relayout: s.RelayoutStats(),
+		LevelCompactedBytes: levelCompacted, LevelReadBytes: levelRead, LevelBytes: levelBytes, Relayout: relayout,
 		LevelTargetBytes: levelTargets(levelBytes, s.levelBase, s.levelMultiplier), LevelScores: levelScores,
 		PurgeFound: s.purgeFound.Load(), PurgeRemoved: s.purgeRemoved.Load(), PurgeRunning: s.purgeRunning.Load(),
 		ReconcileComparedChunks: s.reconcileCompared.Load(), ReconcileWrittenChunks: s.reconcileWritten.Load(), ReconcileDeletedChunks: s.reconcileDeleted.Load(), ReconcileUnchangedMetrics: s.reconcileUnchanged.Load(),
@@ -1242,8 +1250,7 @@ func (s *Store) Stats() Stats {
 	stats.UpdatePointLookups = s.updatePointLookups.Load()
 	if s.rangeDelCache != nil {
 		stats.RangeDelCacheShards = 4
-		r := s.rangeDelCache.Metrics()
-		stats.RangeDelCacheBytes, stats.RangeDelCacheHits, stats.RangeDelCacheMisses = uint64(r.Size), uint64(r.Hits), uint64(r.Misses)
+		stats.RangeDelCacheBytes, stats.RangeDelCacheHits, stats.RangeDelCacheMisses = rangeCache.bytes, rangeCache.hits, rangeCache.misses
 		stats.CacheBytes += stats.RangeDelCacheBytes
 		stats.CacheHits += stats.RangeDelCacheHits
 		stats.CacheMisses += stats.RangeDelCacheMisses

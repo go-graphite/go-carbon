@@ -1351,11 +1351,28 @@ truncate-lag = "1m"
 listen = "localhost:7007"
 enabled = false
 # Process-wide sampling, applied at start and on SIGHUP (also with pprof disabled).
-# Mutex: sample one in N contention events; 0 disables. Start with 100.
-mutex-profile-fraction = 0
+# Mutex: sample one in N contention events; 0 disables. Default 1000 keeps
+# holder call sites available without a restart. Use 100 or 1 temporarily for
+# sparse contention. See tool/fleet-rollout/contention for read-only triage.
+mutex-profile-fraction = 1000
 # Block: average nanoseconds of blocking per sample; 0 disables.
 # Start with 1000000 (1ms); this is a duration in ns, not a sampling fraction.
 block-profile-rate = 0
+# Both exporters read runtime counters independently of application locks:
+# Prometheus go_sync_mutex_wait_seconds_total: rate(...[5m]) is goroutine wait
+# seconds per wall second per host; it can exceed the CPU count. Includes Go
+# runtime locks and sampled estimates, not just cache/storage mutexes.
+# Graphite <graph-prefix>.runtime.mutexWaitSecondsTotal is cumulative; use
+# nonNegativeDerivative(...). Prometheus go_sched_latency_seconds is the sampled
+# runnable-to-running latency histogram (sum estimated from bucket midpoints).
+# Graphite runtime.schedulerLatencyBuckets.le<nanoseconds>Ns exports cumulative
+# buckets; schedulerLatencySamplesTotal / schedulerLatencySecondsTotal are count
+# and estimated sum. Apply nonNegativeDerivative to cumulative values.
+# migration_metrics_skipped_total increments when lifecycle/migration state is
+# busy; affected series are omitted from that scrape, never fabricated as zero.
+# Pebble/cache backend gauges use the existing 1s background observation;
+# store_metrics_snapshot_age_seconds (Graphite storage.metricsSnapshotAgeSeconds)
+# grows if the sampler is blocked. Scrapes never enter Pebble's manifest lock.
 
 #[prometheus]
 #enabled = true

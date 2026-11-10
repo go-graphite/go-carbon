@@ -111,10 +111,11 @@ type Service struct {
 	store         *chunkstore.Store
 	whisperIO     *whisperio.Adapter
 	secret        []byte
-	authPending   bool // protected by mu; no handler runs until secret is set
+	authPending   atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
 	server        *http.Server
 	listener      net.Listener
 	transfers     chan struct{}
+	maintenance   chan struct{}
 	transferPool  sync.Pool
 	mu            sync.Mutex
 	handlers      sync.WaitGroup
@@ -151,7 +152,8 @@ func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
 	if err != nil && !waiting {
 		return nil, err
 	}
-	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, authPending: waiting, transfers: make(chan struct{}, config.MaxTransfers), nodes: nodes}
+	s := &Service{config: config, store: metricStore, whisperIO: whisperio.New(metricStore), secret: secret, transfers: make(chan struct{}, config.MaxTransfers), maintenance: make(chan struct{}, 2), nodes: nodes}
+	s.authPending.Store(waiting)
 	s.SetTransferMaxCompactionDebt(config.TransferMaxCompactionDebt)
 	return s, nil
 }
@@ -512,7 +514,7 @@ func (s *Service) Handler() http.Handler {
 		// A missing secret must never select the legacy unauthenticated path.
 		// Each management request retries delivery; publication under mu happens
 		// before the first handler, after which the secret is immutable.
-		if s.authPending {
+		if s.authPending.Load() {
 			secret, err := readSecret(s.config.JWTSecretFile)
 			if err != nil {
 				s.mu.Unlock()
@@ -520,7 +522,8 @@ func (s *Service) Handler() http.Handler {
 				http.Error(w, "buckyd authentication secret is not ready", http.StatusServiceUnavailable)
 				return
 			}
-			s.secret, s.authPending = secret, false
+			s.secret = secret
+			s.authPending.Store(false)
 		}
 		s.handlers.Add(1)
 		s.mu.Unlock()
@@ -532,9 +535,7 @@ func (s *Service) Handler() http.Handler {
 // AuthSecretReady is false while management requests are unavailable because
 // the configured secret has not been delivered. The next request retries it.
 func (s *Service) AuthSecretReady() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return !s.authPending
+	return !s.authPending.Load()
 }
 
 func (s *Service) allowed(metric, op string, r *http.Request) error {
