@@ -102,7 +102,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/v1/native/capabilities" && r.Method == http.MethodGet {
-		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeDeferredCombine": true, "DurableRangeReceipt": true})
+		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeDeferredCombine": true, "DurableRangeReceipt": true, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
 		return
 	}
 	if strings.HasPrefix(path, "/v1/native/source/") && r.Method == http.MethodDelete {

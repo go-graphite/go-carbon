@@ -7,6 +7,7 @@ import (
 )
 
 type nativeCounters struct {
+	finitePatches                                                          atomic.Uint64
 	publishSync                                                            atomic.Uint64
 	ranges, copied, deferred, wire, sst, errors                            atomic.Uint64
 	reserve, build, ingest, publishWait, publishHold, maxPublishHold       atomic.Uint64
@@ -16,6 +17,7 @@ type nativeCounters struct {
 	combineIntersectingNames, combineDisjointNames, combineNormalizedNames atomic.Uint64
 }
 type NativeStats struct {
+	FinitePatches                                                                                              uint64
 	PublishSyncSeconds                                                                                         float64
 	Ranges, CopiedNames, DeferredNames, WireBytes, SSTBytes, Errors                                            uint64
 	ReserveSeconds, BuildSeconds, IngestSeconds, PublishWaitSeconds, PublishHoldSeconds, MaxPublishHoldSeconds float64
@@ -51,5 +53,5 @@ func (s *Store) NativeStats() NativeStats {
 			break
 		}
 	}
-	return NativeStats{PublishSyncSeconds: seconds(c.publishSync.Load()), Ranges: c.ranges.Load(), CopiedNames: c.copied.Load(), DeferredNames: c.deferred.Load(), WireBytes: c.wire.Load(), SSTBytes: c.sst.Load(), Errors: c.errors.Load(), ReserveSeconds: seconds(c.reserve.Load()), BuildSeconds: seconds(c.build.Load()), IngestSeconds: seconds(c.ingest.Load()), PublishWaitSeconds: seconds(c.publishWait.Load()), PublishHoldSeconds: seconds(c.publishHold.Load()), MaxPublishHoldSeconds: seconds(c.maxPublishHold.Load()), CombineRetries: c.combineRetries.Load(), CombineWaitSeconds: seconds(c.combineWait.Load()), CombineHoldSeconds: seconds(c.combineHold.Load()), CombineMaxHoldSeconds: seconds(c.combineMaxHold.Load()), CombineP99HoldSeconds: seconds(p99), CombineCopiedBlocks: c.combineCopiedBlocks.Load(), CombinePointBlocks: c.combinePointBlocks.Load(), CombineMaterializedArchives: c.combineMaterialized.Load(), CombineIntersectingNames: c.combineIntersectingNames.Load(), CombineDisjointNames: c.combineDisjointNames.Load(), CombineNormalizedNames: c.combineNormalizedNames.Load()}
+	return NativeStats{FinitePatches: c.finitePatches.Load(), PublishSyncSeconds: seconds(c.publishSync.Load()), Ranges: c.ranges.Load(), CopiedNames: c.copied.Load(), DeferredNames: c.deferred.Load(), WireBytes: c.wire.Load(), SSTBytes: c.sst.Load(), Errors: c.errors.Load(), ReserveSeconds: seconds(c.reserve.Load()), BuildSeconds: seconds(c.build.Load()), IngestSeconds: seconds(c.ingest.Load()), PublishWaitSeconds: seconds(c.publishWait.Load()), PublishHoldSeconds: seconds(c.publishHold.Load()), MaxPublishHoldSeconds: seconds(c.maxPublishHold.Load()), CombineRetries: c.combineRetries.Load(), CombineWaitSeconds: seconds(c.combineWait.Load()), CombineHoldSeconds: seconds(c.combineHold.Load()), CombineMaxHoldSeconds: seconds(c.combineMaxHold.Load()), CombineP99HoldSeconds: seconds(p99), CombineCopiedBlocks: c.combineCopiedBlocks.Load(), CombinePointBlocks: c.combinePointBlocks.Load(), CombineMaterializedArchives: c.combineMaterialized.Load(), CombineIntersectingNames: c.combineIntersectingNames.Load(), CombineDisjointNames: c.combineDisjointNames.Load(), CombineNormalizedNames: c.combineNormalizedNames.Load()}
 }
