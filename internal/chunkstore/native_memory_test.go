@@ -292,22 +292,39 @@ func TestNativeLegacyReadyRangeUsesMetadataBudget(t *testing.T) {
 	}
 	// Legacy intent values are checked before JSON decoding, even when the
 	// new-request name count is valid. A huge old value must fail explicitly.
-	if err := s.db.Set(nativeCombineIntentKey(id), bytes.Repeat([]byte(" "), nativeRangeMetadataBytes+1), pebble.NoSync); err != nil {
-		t.Fatal(err)
+	legacyIDs := []string{id, strings.Repeat("a", 64), strings.Repeat("b", 64)}
+	oversized := bytes.Repeat([]byte(" "), nativeRangeMetadataBytes+1)
+	for _, legacyID := range legacyIDs {
+		if err := s.db.Set(nativeCombineIntentKey(legacyID), oversized, pebble.NoSync); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := s.readNativeCombineIntent(id); !errors.Is(err, ErrTransferLimit) {
 		t.Fatal("decoded oversized legacy metadata", err)
 	}
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	errorsBefore := s.nativeCounters.errors.Load()
 	if err := s.recoverNativeCombines(); err != nil {
 		t.Fatal("oversized legacy state prevented startup", err)
 	}
-	value, closer, err := s.db.Get(nativeCombineIntentKey(id))
-	if err != nil {
-		t.Fatal("startup discarded legacy evidence", err)
+	runtime.ReadMemStats(&peak)
+	if peak.HeapAlloc > before.HeapAlloc+128<<20 {
+		t.Fatal("startup exceeded fixed metadata heap budget", peak.HeapAlloc-before.HeapAlloc)
 	}
-	defer closer.Close()
-	if len(value) != nativeRangeMetadataBytes+1 {
-		t.Fatal("startup rewrote oversized legacy intent")
+	if s.nativeCounters.errors.Load()-errorsBefore != uint64(len(legacyIDs)) {
+		t.Fatal("startup did not report every oversized legacy intent")
+	}
+	for _, legacyID := range legacyIDs {
+		value, closer, err := s.db.Get(nativeCombineIntentKey(legacyID))
+		if err != nil {
+			t.Fatal("startup discarded legacy evidence", err)
+		}
+		size := len(value)
+		closer.Close()
+		if size != nativeRangeMetadataBytes+1 {
+			t.Fatal("startup rewrote oversized legacy intent")
+		}
 	}
 }
 
