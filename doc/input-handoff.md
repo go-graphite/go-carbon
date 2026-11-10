@@ -123,9 +123,12 @@ convergence ETA and measured capture/replay rates remain available as metrics.
 `migration_metrics_skipped_total` counter from mutex-watch; `/debug/pprof` remains
 independent. There is no final capture-to-live socket pause.
 
-The existing mirrored-store and ordinary non-capture handoff paths use RAM
-read-ahead. It retains at most 8 MiB per connection plus a 64 KiB read block. A
-full buffer applies TCP backpressure; it never drops bytes. Memory grows with
+Every inherited socket uses RAM read-ahead while its protocol prefix is replayed,
+including successors writing to startup capture. Capture handlers drain and
+release this buffer at their first read beyond the inherited prefix. Ordinary
+non-capture recovery also buffers newly accepted connections until ordered
+input-tail replay finishes. Read-ahead retains at most 8 MiB per connection plus
+a 64 KiB read block. A full buffer applies TCP backpressure; it never drops bytes. Memory grows with
 actual queued bytes, independently of packet sizes. At 280 connections the
 maximum ring allocation is 2.19 GiB. Once the tail is applied, each handler drains
 its buffered bytes, frees the ring and returns to direct socket reads. A slow

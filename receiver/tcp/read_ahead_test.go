@@ -6,12 +6,113 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+func TestInheritedCaptureReadsSocketWhilePrefixIsBusy(t *testing.T) {
+	listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	addr := listener.Addr().(*net.TCPAddr)
+	client, err := net.DialTCP("tcp", nil, addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := listener.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	if err := server.SetReadBuffer(64 << 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetWriteBuffer(64 << 10); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := listener.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lf.Close()
+	cf, err := server.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cf.Close()
+	_ = server.Close()
+	_ = listener.Close()
+
+	const prefixPoints, wirePoints = 4096, 40000
+	var prefix, wire []byte
+	for i := range prefixPoints + wirePoints {
+		if i < prefixPoints {
+			prefix = fmt.Appendf(prefix, "client.metric %d 1700000000\n", i)
+		} else {
+			wire = fmt.Appendf(wire, "client.metric %d 1700000000\n", i)
+		}
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	var got sequenceStore
+	first := true
+	sink := captureFunc(func(data []byte, _ int) error {
+		if first {
+			first = false
+			close(entered)
+			<-release
+		}
+		return points.ReadBinary(bytes.NewReader(data), got.add)
+	})
+	opts := NewOptions()
+	opts.Listen = addr.String()
+	opts.HandoffReadAheadBytes = 2 << 20
+	next, err := NewInheritedCapture("tcp", opts, &Handoff{
+		Listener: lf,
+		Conns:    []Conn{{File: cf, Leftover: prefix}},
+	}, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { unblock(); next.Stop() }()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("inherited prefix did not reach its blocked sink")
+	}
+	// The inherited prefix owns the decoder. This exceeds the explicitly
+	// small kernel buffers, so only independent wire intake can finish it.
+	if err := client.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Write(wire); err != nil {
+		t.Fatal("busy inherited capture stopped wire intake", err)
+	}
+	unblock()
+	_ = client.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for got.count() < prefixPoints+wirePoints && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	next.Stop()
+	if got.count() != prefixPoints+wirePoints {
+		t.Fatalf("captured %d of %d points", got.count(), prefixPoints+wirePoints)
+	}
+	for i, seq := range got.seqs["client"] {
+		if seq != i {
+			t.Fatalf("point %d: got %d", i, seq)
+		}
+	}
+}
 
 func TestHandoffReadAheadConfiguration(t *testing.T) {
 	for _, size := range []int{0, handoffReadBlock, 3*handoffReadBlock + 23, 256 << 20, -1, handoffReadBlock - 1, 1<<30 + 1} {
