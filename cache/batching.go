@@ -297,6 +297,9 @@ func (c *Cache) Backlogged() bool {
 // Recovering reports urgent restoration that bypasses ordinary writeout pacing.
 // It shares Backlogged's recovery rule without conflating it with pressure.
 func (c *Cache) Recovering() bool {
+	if c.inputReplay.Load() != nil {
+		return true
+	}
 	return c.recovering(c.settings.Load().(*cacheSettings))
 }
 
@@ -385,6 +388,9 @@ func writeoutDeadlineClock(values *item, s *cacheSettings) time.Time {
 // WriteoutReady must also be checked by the persister under its per-metric
 // store lock: a queue entry can outlive the batch that originally made it ready.
 func (c *Cache) WriteoutReady(metric string) bool {
+	if r := c.inputReplay.Load(); r != nil {
+		return r.history.Has(metric) && r.history.WriteoutReady(metric)
+	}
 	s := c.settings.Load().(*cacheSettings)
 	if !c.batchWrites(s) {
 		return true

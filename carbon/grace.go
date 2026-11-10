@@ -92,6 +92,14 @@ func (app *App) DumpStop() (err error) {
 			zapwriter.Logger("input-log").Error("input log not synced after the failed dump", zap.Error(syncErr))
 		}
 	}()
+	if r := app.inputReplay; r != nil && r.started {
+		// Keep input and persistence active until all predecessor history is
+		// accounted for. A dump must never retire a partially replayed journal.
+		<-r.done
+		if r.err != nil {
+			return r.err
+		}
+	}
 
 	if !app.Config.Dump.Enabled {
 		// The input log is then the only copy of unpersisted points: stop

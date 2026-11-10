@@ -1316,11 +1316,16 @@ store-input-handoff = false
 format = "legacy"
 
 [input-log]
+# Experimental crash recovery: accept and log live input before storage opens,
+# persist a bounded history window before any live batch. Off by default.
+# Existing dump/capture recovery continues to use its ordered startup path.
+background-replay = false
 # Continuous log of the points accepted into the cache, so that an unclean
 # exit (kill -9, OOM kill, power loss) loses only about sync-interval of input
 # instead of every point not yet persisted, which with writeout batching can
-# be minutes. On start the log is replayed before any receiver opens, after a
-# pending dump checkpoint and before legacy dump files.
+# be minutes. By default the log is replayed before any receiver opens, after
+# a pending dump checkpoint and before legacy dump files. The experimental
+# background-replay option above changes standalone crash recovery only.
 #
 # Points are recorded in per-shard buffers under the cache shard lock, then
 # written once per sync-interval as zstd-compressed frames: one large write

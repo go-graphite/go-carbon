@@ -255,7 +255,15 @@ path = "input-log"
         conn.close()
         time.sleep(.5)
         last = 33*256 if experiment == 'partial' else fixture['batches']*256
+        oracle_start = time.monotonic()
         seen = stored(http, fixture, last)
+        # A render sweep is not an atomic snapshot of the asynchronous saved
+        # history. Wait for the complete handoff set, checking every value and
+        # duplicate on every sweep, rather than declaring loss after one sleep.
+        while enabled and len(seen) != sent and time.monotonic()-oracle_start < 30:
+            time.sleep(.05)
+            seen = stored(http, fixture, last)
+        oracle_wait = time.monotonic()-oracle_start
         next_received = int(float(metrics(prom).get('metrics_received_tcp_total', 0)))
         combined = entries(root/'old.log') + entries(root/'next.log')
         dump = next(e for e in combined if e.get('message') == 'dump finished')
@@ -267,6 +275,7 @@ path = "input-log"
                       receiver_before_source=('complete prefix, checked against render' if experiment == 'partial'
                                               else 'stored identities minus successor receiver counter'),
                       receiver_after=next_received,
+                      oracle_wait_seconds=oracle_wait,
                       reconnects=reconnects, input_handoff=dump['input_handoff'],
                       input_gap_seconds=gap['input_unavailable_seconds'],
                       input_stop_runtime=dump['input_stop_runtime'],

@@ -150,10 +150,12 @@ func (q *WriteoutQueue) update() {
 	q.Unlock()
 }
 
-func (q *WriteoutQueue) get(abort chan bool) string {
+func (q *WriteoutQueue) get(abort chan bool, until <-chan struct{}) string {
 QueueLoop:
 	for {
 		select {
+		case <-until:
+			return ""
 		case <-abort:
 			return ""
 		default:
@@ -174,6 +176,8 @@ QueueLoop:
 		}
 
 		select {
+		case <-until:
+			return ""
 		case metric := <-queue:
 			if !q.cache.WriteoutReady(metric) {
 				continue QueueLoop
@@ -185,6 +189,8 @@ QueueLoop:
 		default:
 			// queue is empty, create new
 			select {
+			case <-until:
+				return ""
 			case <-rebuild(abort):
 				// wait for rebuild
 				continue QueueLoop
@@ -196,12 +202,20 @@ QueueLoop:
 }
 
 func (q *WriteoutQueue) Get(abort chan bool) string { // skipcq: RVV-B0001
-	return q.get(abort)
+	if r := q.cache.inputReplay.Load(); r != nil {
+		if metric := r.history.WriteoutQueue().get(abort, r.done); metric != "" {
+			return metric
+		}
+	}
+	return q.get(abort, nil)
 }
 
 // TryGet takes an already queued, ready metric without waiting for a rebuild.
 // Persister workers use it to fill a commit from work that is available now.
 func (q *WriteoutQueue) TryGet() string {
+	if r := q.cache.inputReplay.Load(); r != nil {
+		return r.history.WriteoutQueue().TryGet()
+	}
 	q.RLock()
 	queue := q.queue
 	q.RUnlock()
