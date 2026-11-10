@@ -34,7 +34,7 @@ func (s *Shard) memoryBytes() int64 {
 		int64(cap(s.notConfirmed))*8 + int64(cap(s.sparseLast))*4 +
 		int64(cap(s.claimData))*int64(unsafe.Sizeof(points.Point{})) +
 		s.log.stagingBytes() +
-		int64(len(s.log.first)+len(s.log.items)+len(s.adds))*48 + int64(len(s.firstArrival))*64
+		int64(len(s.log.first)+len(s.log.items)+len(s.adds))*48 + int64(len(s.firstArrival))*64 + int64(len(s.recoverySources))*96
 }
 
 func byteSlackFor(limit int64) int64 {
@@ -73,7 +73,7 @@ func (c *Cache) syncMemoryLocked(shard *Shard) {
 	shard.metrics.Store(int32(shard.items.len()))
 	shard.notConfirmedCount.Store(int32(shard.notConfirmedUsed))
 	s := c.settings.Load().(*cacheSettings)
-	if s.maxBytes <= 0 {
+	if s.maxBytes <= 0 && c.recoveryAdmission.Load() == nil {
 		return
 	}
 	shard.byteDelta += n - shard.byteSize

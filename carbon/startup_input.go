@@ -1,7 +1,6 @@
 package carbon
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,8 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
@@ -22,97 +22,6 @@ import (
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
 )
-
-// startupInput keeps the predecessor's tail as the recovery authority while the
-// successor opens storage and validates its checkpoint. Socket handlers append
-// complete records in connection-local batches; recovery follows a published
-// complete-record frontier. Neither cache size nor the RAM read-ahead limit can
-// stop socket draining. Sources remain owned by ordinary pending recovery.
-type startupInput struct {
-	mu             sync.Mutex
-	file           *os.File
-	path           string
-	err            error
-	size           atomic.Int64
-	points         atomic.Int64
-	offset         int64 // replayed prefix; only the startup goroutine changes it
-	replayedPoints int64
-	unlock         func() error
-	stop           chan struct{}
-	done           chan struct{}
-	receiver       *tcp.TCP
-	started        time.Time
-	observe        func(*points.Points) // receiverStoreHook, tests only
-}
-
-func openStartupInput(path string) (*startupInput, error) {
-	unlock, err := handoff.LockExclusive(path)
-	if err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0600)
-	if err != nil {
-		_ = unlock()
-		return nil, err
-	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		_ = unlock()
-		return nil, err
-	}
-	s := &startupInput{file: f, path: path, unlock: unlock, stop: make(chan struct{}), done: make(chan struct{}), started: time.Now()}
-	s.size.Store(info.Size())
-	go func() {
-		defer close(s.done)
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-s.stop:
-				return
-			case <-ticker.C:
-				err := s.file.Sync()
-				s.mu.Lock()
-				s.err = errors.Join(s.err, err)
-				s.mu.Unlock()
-			}
-		}
-	}()
-	return s, nil
-}
-
-func (s *startupInput) Write(data []byte, count int) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.err != nil {
-		return s.err
-	}
-	n, err := s.file.Write(data)
-	if err == nil && n != len(data) {
-		err = io.ErrShortWrite
-	}
-	s.err = err
-	if err == nil {
-		s.size.Add(int64(n))
-		s.points.Add(int64(count))
-		if s.observe != nil {
-			s.err = points.ReadBinary(bytes.NewReader(data), s.observe)
-		}
-	}
-	return s.err
-}
-
-// close runs after all capture handlers have stopped. A failed startup retains
-// the very same tail the ordinary crash/ordered recovery already understands.
-func (s *startupInput) close() error {
-	close(s.stop)
-	<-s.done
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.err = errors.Join(s.err, s.file.Sync(), s.file.Close(), s.unlock())
-	return s.err
-}
 
 // Take the input-only offer before ANY cache-sized startup work. This uses the
 // existing protocol, including when upgrading from a predecessor that does not
@@ -135,6 +44,32 @@ func (app *App) startStartupInput() error {
 	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
 	_ = f.Close()
 	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
+		return nil
+	}
+	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
+	if err != nil {
+		return err
+	}
+	entries, scanErr := os.ReadDir(c.Dump.Path)
+	if scanErr != nil {
+		return scanErr
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		generation := strings.HasPrefix(name, "cache.") || strings.HasPrefix(name, recovery.CompactPrefix) || strings.HasPrefix(name, recovery.BlocksPrefix) || strings.HasPrefix(name, "input.") || strings.HasPrefix(name, recovery.CompactInputPrefix)
+		if generation && name != manifest.Cache.Name && name != manifest.WAL.Name && !recovery.IsGenerationTail(name, manifest.WAL.Name) {
+			zapwriter.Logger("app").Error("startup capture requires a single ordered recovery generation; using ordinary recovery", zap.String("filename", name))
+			return nil
+		}
+	}
+	policy := startupPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
+	policy.log()
+	if policy.available < 64<<20 || policy.spoolBytes < 64<<20 {
+		state := &startupInput{policy: policy, sealed: make(chan struct{})}
+		close(state.sealed)
+		state.fallback.Store(true)
+		app.startupCaptureState.Store(state)
+		zapwriter.Logger("app").Error("startup capture lacks safe headroom; using ordered input recovery", zap.Int64("available_memory_bytes", policy.available), zap.Int64("spool_limit_bytes", policy.spoolBytes))
 		return nil
 	}
 	claim := app.handoffClaim
@@ -161,7 +96,7 @@ func (app *App) startStartupInput() error {
 	if h == nil {
 		return errors.New("store input handoff has no TCP receiver")
 	}
-	spool, err := openStartupInput(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)))
+	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
 	if err != nil {
 		closeTCPHandoff(h)
 		return err
@@ -175,6 +110,8 @@ func (app *App) startStartupInput() error {
 		return err
 	}
 	spool.receiver = r
+	spool.startMonitor(spool.policy.spoolBytes)
+	app.startupCaptureState.Store(spool)
 	app.startupInput = spool
 	app.Receivers = []*NamedReceiver{{Name: "tcp", Receiver: r}}
 	app.restart.noteInputOpened()
@@ -182,90 +119,220 @@ func (app *App) startStartupInput() error {
 	return nil
 }
 
-// startupInputReader follows the append frontier with one persistent decoder
-// and worker pool. Recreating recovery for successive snapshots has a fixed
-// cost: at high input rates that alone can keep a small backlog from converging.
-// When at most 1 MiB remains, detach capture once, then read its final flush.
-type startupInputReader struct {
-	s         *startupInput
-	app       *App
-	inherited *tcp.Handoff
-	detached  bool
-}
-
-func (r *startupInputReader) Read(buf []byte) (int, error) {
-	if len(buf) == 0 {
-		return 0, nil
-	}
-	s := r.s
-	s.mu.Lock()
-	err := s.err
-	s.mu.Unlock()
-	if err != nil {
-		return 0, err
-	}
-	if !r.detached && s.size.Load()-s.offset <= 1<<20 {
-		r.detached = true
-		r.app.startupInputPauseAt = time.Now()
-		r.inherited, err = s.receiver.Detach()
-		if err != nil {
-			return 0, err
-		}
-		r.app.Receivers = nil
-	}
-	remaining := s.size.Load() - s.offset
-	if remaining == 0 {
-		return 0, io.EOF
-	}
-	n, err := s.file.ReadAt(buf[:min(int64(len(buf)), remaining)], s.offset)
-	s.offset += int64(n)
-	return n, err
-}
-
-// Catch up while capture continues. Pending recovery owns both the immutable
-// checkpoint and this tail until all recovered cache items have persisted.
-func (app *App) finishStartupInput(core *cache.Cache) error {
+// Attach replay without replacing or detaching any receiver. Startup returns
+// while constrained partitions keep accepting durable input in the background.
+func (app *App) finishStartupInput(core *cache.Cache) {
 	s := app.startupInput
 	if s == nil {
-		return nil
+		return
 	}
-	reader := &startupInputReader{s: s, app: app}
-	count, err := replayInputTailReader(reader, min(32, runtime.GOMAXPROCS(0)), func(p *points.Points) {
-		for !core.HasRecoveryCapacity(len(p.Data)) {
-			time.Sleep(time.Millisecond)
+	sink := &startupSink{admission: core, add: core.AddRecoveredFrom, liveAdd: core.AddCapturedFrom, canRetire: func() bool { return !core.HasPendingRecovery() }, syncHistory: app.syncInputLog}
+	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
+	s.startReplay(sink, func() error {
+		// Older epochs precede the current stream, including after a crash during
+		// partially completed startup. Current files stay exclusively locked.
+		entries, err := os.ReadDir(filepath.Dir(s.path))
+		if err != nil {
+			return err
 		}
-		core.AddRecovered(p)
-	})
-	if err != nil {
-		if reader.inherited != nil {
-			closeTCPHandoff(reader.inherited)
+		paths := []string{s.path}
+		for _, entry := range entries {
+			path := filepath.Join(filepath.Dir(s.path), entry.Name())
+			if path != s.path && recovery.IsTail(entry.Name()) && !handoff.Locked(path) {
+				paths = append(paths, path)
+			}
 		}
-		return fmt.Errorf("replay startup input: %w", err)
-	}
-	s.replayedPoints = int64(count)
-	err = s.close()
-	app.startupInput = nil
-	h := reader.inherited
-	if err != nil {
-		if h != nil {
-			closeTCPHandoff(h)
+		slices.Sort(paths)
+		cancelled := func() bool {
+			select {
+			case <-s.replayStop:
+				return true
+			case <-s.stop:
+				return true
+			default:
+				return false
+			}
 		}
-		return err
-	}
+		tail := s.legacy.current.Load()
+		add := func(source *cache.RecoverySource) func(*points.Points) {
+			return func(p *points.Points) {
+				for !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
+					if cancelled() {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if !cancelled() {
+					core.AddRecoveredFrom(p, source)
+				}
+			}
+		}
+		replayLog := func() error {
+			if s.historyLog.Load() != nil {
+				return nil
+			}
+			seg := &startupSegment{source: s.legacy.stream.NextJournal()}
+			tail.next.Store(seg)
+			tail = seg
+			s.historyLog.Store(seg)
+			err := app.replayInputLogWith(core, s.replayStop, logPath, draining, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+			seg.sealed.Store(true)
+			seg.replayed.Store(true)
+			return err
+		}
+		openSegment := func(path string) (*startupSegment, error) {
+			if path == s.path {
+				seg := s.legacy.current.Load()
+				seg.source = s.legacy.stream.Next()
+				return seg, nil
+			}
+			f, e := os.OpenFile(path, os.O_RDWR, 0600)
+			if e != nil {
+				return nil, e
+			}
+			unlock, e := handoff.LockExclusive(path)
+			if e != nil {
+				f.Close()
+				return nil, e
+			}
+			info, e := f.Stat()
+			if e != nil {
+				f.Close()
+				unlock()
+				return nil, e
+			}
+			seg := &startupSegment{file: f, path: path, unlock: unlock, source: s.legacy.stream.Next()}
+			seg.size.Store(info.Size())
+			s.size.Add(info.Size())
+			tail.next.Store(seg)
+			tail = seg
+			return seg, nil
+		}
+		replaySegment := func(seg *startupSegment, framed bool) error {
+			reader := startupStoppedReader{reader: io.NewSectionReader(seg.file, 0, seg.size.Load()), stop: s.replayStop}
+			started := time.Now()
+			var loaded int
+			var e error
+			if framed {
+				worker := &startupShard{owner: s}
+				loaded, e = recovery.ReadCaptureFramesBuffer(reader, s.policy.readBuffer, func(raw []byte, n int) error {
+					cost, e := captureMetricBytes(raw)
+					if e != nil {
+						return e
+					}
+					for !core.HasRecoveryCapacityBatch(n, cost) {
+						if cancelled() {
+							return errStartupReplayStopped
+						}
+						time.Sleep(time.Millisecond)
+					}
+					return worker.apply(raw, seg.source, sink)
+				})
+			} else {
+				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
+			}
+			if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, io.ErrUnexpectedEOF) {
+				return e
+			}
+			if seg.path == s.path {
+				s.legacy.offset.Store(seg.size.Load())
+			}
+			seg.sealed.Store(true)
+			seg.replayed.Store(true)
+			zapwriter.Logger("app").Info("input tail loaded", zap.String("filename", seg.path), zap.Int("points", loaded), zap.Duration("runtime", time.Since(started)), zap.Bool("input_capturing", true))
+			return nil
+		}
+		for i := 0; i < len(paths); {
+			if cancelled() {
+				return errStartupReplayStopped
+			}
+			if !recovery.IsCaptureSegment(filepath.Base(paths[i])) {
+				seg, e := openSegment(paths[i])
+				if e != nil {
+					return e
+				}
+				if e = replaySegment(seg, false); e != nil {
+					return e
+				}
+				i++
+				continue
+			}
+			if e := replayLog(); e != nil {
+				return e
+			}
+			// Epoch first, partition second, segment sequence last. Readers
+			// overlap partitions only, joining before the next epoch begins.
+			epochKey := func(path string) string {
+				prefix, suffix, _ := strings.Cut(path, ".capture-epoch-")
+				epoch, _, _ := strings.Cut(suffix, ".")
+				return prefix + ".capture-epoch-" + epoch
+			}
+			epoch := epochKey(paths[i])
+			groups := make(map[string][]*startupSegment)
+			for i < len(paths) && recovery.IsCaptureSegment(filepath.Base(paths[i])) && epochKey(paths[i]) == epoch {
+				seg, e := openSegment(paths[i])
+				if e != nil {
+					return e
+				}
+				_, suffix, _ := strings.Cut(paths[i], ".capture-epoch-")
+				fields := strings.Split(suffix, ".")
+				groups[fields[1]] = append(groups[fields[1]], seg)
+				i++
+			}
+			jobs := make(chan []*startupSegment, len(groups))
+			for _, segments := range groups {
+				jobs <- segments
+			}
+			close(jobs)
+			failures := make(chan error, len(groups))
+			var wg sync.WaitGroup
+			for range min(len(groups), max(1, runtime.GOMAXPROCS(0))) {
+				wg.Go(func() {
+					for segments := range jobs {
+						for _, seg := range segments {
+							if e := replaySegment(seg, true); e != nil {
+								failures <- e
+								break
+							}
+						}
+					}
+				})
+			}
+			wg.Wait()
+			close(failures)
+			for e := range failures {
+				return e
+			}
+		}
 
-	app.inheritedInput = &handoff.Input{Receivers: []handoff.InputReceiver{{Name: "tcp", Listener: h.Listener}}}
-	for _, conn := range h.Conns {
-		app.inheritedInput.Receivers[0].Conns = append(app.inheritedInput.Receivers[0].Conns, handoff.InputConn{File: conn.File, Leftover: conn.Leftover})
-	}
-	app.inputTailOffsets = map[string]int64{s.path: s.offset}
-	app.startupCapturedPoints = uint64(s.points.Load())
-	zapwriter.Logger("app").Info("startup input capture sealed", zap.Int64("points", s.points.Load()), zap.Int64("bytes", s.size.Load()), zap.Int64("replayed_bytes", s.offset), zap.Int64("replayed_points", s.replayedPoints), zap.Duration("runtime", time.Since(s.started)))
-	return nil
+		if cancelled() {
+			return errStartupReplayStopped
+		}
+		return replayLog()
+
+	})
+	zapwriter.Logger("app").Info("startup input replay running without pausing receivers", zap.Int("partitions", len(s.shards)))
 }
 
 func closeTCPHandoff(h *tcp.Handoff) {
 	_ = h.Listener.Close()
 	for _, conn := range h.Conns {
 		handoff.CloseInputConn(conn.File, len(conn.Leftover), zapwriter.Logger("app"), "inherited_start_failed")
+	}
+}
+
+var errStartupReplayStopped = errors.New("startup input replay stopped")
+
+type startupStoppedReader struct {
+	reader io.Reader
+	stop   <-chan struct{}
+}
+
+func (r startupStoppedReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.stop:
+		return 0, errStartupReplayStopped
+	default:
+		return r.reader.Read(p)
 	}
 }

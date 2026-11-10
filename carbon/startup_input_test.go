@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -26,7 +25,9 @@ import (
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
+	"github.com/klauspost/compress/zstd"
 	"github.com/lomik/zapwriter"
+	"github.com/zeebo/xxh3"
 )
 
 // Delay all storage/index work after the real input-only offer. More than the
@@ -52,14 +53,16 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		old = startIncrementalApp(t, path)
 	}
 	address := old.Receivers[0].Receiver.(*tcp.TCP).Addr().String()
-	nextCfg := *cfg
-	// This test measures durable input capture, not cache pressure. Leave
-	// room for the conservative unpublished shard count during tail replay.
+	next := New(path)
+	if err := next.ParseConfig(); err != nil {
+		t.Fatal(err)
+	}
+	nextCfg := *next.Config
+	// This test measures capture, leaving room for unpublished shards.
 	nextCfg.Cache.MaxSize = handoffRecoveryCacheSize
-	nextTCP := *cfg.Tcp
+	nextTCP := *next.Config.Tcp
 	nextTCP.Listen = address
 	nextCfg.Tcp = &nextTCP
-	next := New(path)
 	next.Config = &nextCfg
 	defer next.Stop()
 	captured := make(chan *startupInput, 1)
@@ -97,6 +100,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		t.Fatal("capture waited for storage")
 	}
 	const clients, records = 2, 100000
+	stamp := time.Now().Unix() - 5
 	var writers sync.WaitGroup
 	for client := range clients {
 		writers.Go(func() {
@@ -109,7 +113,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 			_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			var data []byte
 			for seq := range records {
-				data = fmt.Appendf(data, "client%d.%s %d 1700000000\n", client, strings.Repeat("longsegment.", 12)+"value", seq)
+				data = fmt.Appendf(data, "client%d.%s %d %d\n", client, strings.Repeat("longsegment.", 12)+"value", seq, stamp)
 			}
 			if len(data) <= 8<<20 {
 				t.Error("fixture must exceed per-connection RAM budget")
@@ -128,7 +132,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	counts := map[string]int{}
-	if _, err := replayInputTailReader(io.NewSectionReader(spool.file, 0, spool.size.Load()), 1, func(p *points.Points) {
+	if err := visitCapture(spool, func(p *points.Points) {
 		for _, d := range p.Data {
 			if int(d.Value) != counts[p.Metric] {
 				t.Error("capture lost, duplicated, or reordered points")
@@ -138,6 +142,7 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
 	if len(counts) != clients {
 		t.Fatal(counts)
 	}
@@ -153,6 +158,91 @@ func TestStartupInputDrainsBeforeCheckpoint(t *testing.T) {
 	if err := <-stopped; err != nil {
 		t.Fatal(err)
 	}
+	// Restart the continuous queue again after the initial checkpoint may have
+	// retired. The third process must inherit input while older epoch files
+	// replay, preserving a correction captured before storage opens.
+	third := New(path)
+	third.Config = &nextCfg
+	defer third.Stop()
+	thirdCaptured := make(chan *startupInput, 1)
+	thirdStart := make(chan struct{})
+	thirdRelease := sync.OnceFunc(func() { close(thirdStart) })
+	defer thirdRelease()
+	thirdReady := make(chan error, 1)
+	next.SetReadHandoff(storeHandoffSuccessor(t, true), func() {
+		go func() {
+			third.RegisterReadHandoff()
+			third.beginRestart()
+			if err := third.startStartupInput(); err != nil {
+				thirdReady <- err
+				return
+			}
+			thirdCaptured <- third.startupInput
+			<-thirdStart
+			thirdReady <- third.Start()
+		}()
+	})
+	stoppedAgain := make(chan error, 1)
+	go func() { stoppedAgain <- next.DumpStop() }()
+	var thirdSpool *startupInput
+	select {
+	case thirdSpool = <-thirdCaptured:
+	case err := <-thirdReady:
+		t.Fatal(err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("streaming successor never took input", zapwriter.TestString())
+	}
+	if thirdSpool == nil {
+		t.Fatal("streaming restart fell back to closed input")
+	}
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "client0." + strings.Repeat("longsegment.", 12) + "value"
+	if _, err = fmt.Fprintf(conn, "%s 100001 %d\n", name, stamp); err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	awaitCapture(t, func() bool { return thirdSpool.points.Load() == 1 })
+	thirdRelease()
+	select {
+	case err := <-thirdReady:
+		if err != nil {
+			t.Fatal(err, zapwriter.TestString())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("second streaming restart stalled", zapwriter.TestString())
+	}
+	if err := <-stoppedAgain; err != nil {
+		t.Fatal(err, zapwriter.TestString())
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for thirdSpool.replayedPoints.Load() != 1 || !third.Cache.IsEmpty() {
+		if time.Now().After(deadline) {
+			t.Fatalf("third replay=%d captured=%d cache=%d flights=%d pending=%d failure=%v logs=%s", thirdSpool.replayedPoints.Load(), thirdSpool.points.Load(), third.Cache.Size(), third.Cache.NotConfirmedLength(), third.Cache.PendingOutstanding(), thirdSpool.sealErr, zapwriter.TestString())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	snap, err := third.MetricStore.Snapshot(context.Background(), name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, archive := range snap.Archives {
+		for _, p := range archive.Points {
+			if p.Timestamp == stamp {
+				found = true
+				if p.Value != 100001 {
+					t.Fatal("second restart reverted a correction", p)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("second restart lost the captured correction")
+	}
+
 }
 
 func startupPoints(stamp int64, phase int) []*points.Points {
@@ -196,38 +286,39 @@ func TestStartupInputCrashProcess(t *testing.T) {
 	if stage == "before_append" {
 		os.Exit(99)
 	}
-	var raw []byte
-	n := 0
-	for _, p := range startupPoints(stamp, 1) {
-		raw = p.AppendBinary(raw)
-		n += len(p.Data)
-	}
-	if stage == "during_append" {
-		// Model SIGKILL during the final write: all earlier records are
-		// complete; the last point's timestamp is torn.
-		if _, err := s.file.Write(raw[:len(raw)-1]); err != nil {
+	for i, p := range startupPoints(stamp, 1) {
+		shard := s.shards[xxh3.HashString(p.Metric)%uint64(len(s.shards))]
+		raw := p.AppendBinary(nil)
+		if stage == "during_append" && i == 1 {
+			enc, _ := zstd.NewWriter(nil)
+			raw = recovery.EncodeCaptureFrame(enc, raw, nil, len(p.Data))
+			enc.Close()
+			if _, err := shard.file.Write(raw[:len(raw)-1]); err != nil {
+				t.Fatal(err)
+			}
+			if err := shard.sync(); err != nil {
+				t.Fatal(err)
+			}
+			os.Exit(99)
+		}
+		if err := shard.Write(raw, len(p.Data)); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.file.Sync(); err != nil {
-			t.Fatal(err)
-		}
-		os.Exit(99)
-	}
-	if err := s.Write(raw, n); err != nil {
-		t.Fatal(err)
 	}
 	if stage == "after_write" {
 		os.Exit(99)
 	}
-	if err := s.file.Sync(); err != nil {
-		t.Fatal(err)
+	for _, shard := range s.shards {
+		if err := shard.sync(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if stage == "after_sync" {
 		os.Exit(99)
 	}
 	if stage == "during_replay" {
 		core := cache.New()
-		if _, err := replayInputTailReader(io.NewSectionReader(s.file, 0, s.size.Load()), 8, core.AddRecovered); err != nil {
+		if err := visitCapture(s, core.AddRecovered); err != nil {
 			t.Fatal(err)
 		}
 		os.Exit(99)
@@ -244,6 +335,17 @@ func TestStartupInputCrashProcess(t *testing.T) {
 	}
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
+	}
+	if stage == "after_pending_retirement" {
+		// Force the handoff source to retire while periodic WAL sync is
+		// deliberately far away. A real crash must still preserve its points.
+		deadline := time.Now().Add(5 * time.Second)
+		for app.Cache.HasPendingRecovery() {
+			if time.Now().After(deadline) {
+				t.Fatal("pending checkpoint did not retire")
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	app.Persister.Stop()
 	for _, p := range startupPoints(stamp, 2) {
@@ -388,7 +490,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 	if isolatedTestProcessSerial(t) {
 		return
 	}
-	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live"} {
+	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement"} {
 		t.Run(stage, func(t *testing.T) {
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
@@ -399,6 +501,9 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			}
 			cfg.InputLog.Enabled, cfg.InputLog.Path = true, filepath.Join(t.TempDir(), "log")
 			cfg.InputLog.SegmentSize = 16 << 20
+			if stage == "after_pending_retirement" {
+				cfg.Whisper.StoreSyncInterval = &Duration{time.Hour}
+			}
 			writeSharedConfig(t, path, cfg)
 			old := startIncrementalApp(t, path)
 			if !old.Carbonserver.HasMappedIndex() {
@@ -444,7 +549,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				t.Fatal(err, zapwriter.TestString())
 			}
 			defer actual.Stop()
-			if stage != "after_live" {
+			if stage != "after_live" && stage != "after_pending_retirement" {
 				for _, p := range startupPoints(stamp, 2) {
 					actual.Cache.Add(p)
 				}

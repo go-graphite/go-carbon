@@ -54,6 +54,10 @@ type migrationSnapshot struct {
 	cacheMetrics                          int32
 	cacheBytes                            int64
 	cachePointBytes                       int64
+	recoveryWindow, recoveryRemaining     int64
+	recoveryCeiling                       int64
+	recoveryRejections                    uint64
+	recoveryBlocked                       bool
 	storeSnapshotAge                      float64
 }
 
@@ -302,6 +306,11 @@ var migrationMetricSpecs = func() []metricSpec {
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheBytes) }},
 		metricSpec{desc: prometheus.NewDesc("cache_point_bytes", "Allocated capacity of queued compact point buffers in bytes, including spare capacity. Excludes inline codec state, names, item headers and in-flight batches.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePointBytes) }},
+		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_window_bytes", "Bytes reserved from measured memory headroom for the current five-second recovery window.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryWindow) }},
+		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_ceiling_bytes", "Cache-owned byte ceiling derived from existing allocations and reserved memory headroom; configured max-bytes also applies.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryCeiling) }},
+		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_remaining_bytes", "Unspent recovery memory reservation; abandoned checks expire at the next memory sample.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRemaining) }},
+		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_blocked", "One while recovery admission was denied in the last ten seconds; feeds automatic writeout pressure immediately.", nil, nil), kind: prometheus.GaugeValue, cache: true, value: func(s *migrationSnapshot) float64 { return b(s.recoveryBlocked) }},
+		metricSpec{desc: prometheus.NewDesc("cache_recovery_admission_rejections_total", "Recovery admission checks denied by memory reservation or configured cache ceilings.", nil, nil), kind: prometheus.CounterValue, cache: true, value: func(s *migrationSnapshot) float64 { return float64(s.recoveryRejections) }},
 	)
 	return specs
 }()
@@ -359,7 +368,51 @@ func persisterSpec(name, help string, v func(*migrationSnapshot) float64) metric
 	return metricSpec{desc: prometheus.NewDesc(name, help, nil, nil), kind: prometheus.CounterValue, persister: true, value: v}
 }
 
+var startupCaptureDescs = []*prometheus.Desc{
+	prometheus.NewDesc("startup_capture_bytes", "Total physical source bytes opened or written in this startup epoch, including retired prefixes.", nil, nil),
+	prometheus.NewDesc("startup_capture_points_total", "Points captured during startup.", nil, nil),
+	prometheus.NewDesc("startup_capture_replayed_points_total", "Points replayed during startup.", nil, nil),
+	prometheus.NewDesc("startup_capture_fallback", "1 after a genuine I/O or disk safety event; cache admission and elapsed time never seal intake.", nil, nil),
+	prometheus.NewDesc("startup_capture_active", "Startup capture is draining sockets into spool files.", nil, nil),
+	prometheus.NewDesc("startup_capture_paused", "1 if actual disk safety pressure has backpressured capture.", nil, nil),
+	prometheus.NewDesc("startup_capture_spool_shards", "Independent startup spool appenders.", nil, nil),
+	prometheus.NewDesc("startup_capture_replay_readers", "Independent startup replay readers.", nil, nil),
+	prometheus.NewDesc("startup_capture_reader_buffer_bytes", "Initial decompression arena bytes per replay reader.", nil, nil),
+	prometheus.NewDesc("startup_capture_appender_buffer_bytes", "Target coalescing bytes per appender.", nil, nil),
+	prometheus.NewDesc("startup_capture_recovery_headroom_bytes", "Shared admission reservation window in bytes; initial host-derived estimate before replay.", nil, nil),
+	prometheus.NewDesc("startup_capture_recovery_headroom_points", "Initial recovery point headroom estimate at 64 bytes per point; admission prices actual batches.", nil, nil),
+	prometheus.NewDesc("startup_capture_write_bytes_per_second", "Most recent measured raw capture write rate.", nil, nil),
+	prometheus.NewDesc("startup_capture_convergence_seconds", "Measured catch-up ETA; -1 when no positive convergence margin exists.", nil, nil),
+	prometheus.NewDesc("startup_capture_size_limit_bytes", "Current bounded startup capture size.", nil, nil),
+	prometheus.NewDesc("startup_capture_gomaxprocs", "Runnable CPU capacity used to size startup capture.", nil, nil),
+	prometheus.NewDesc("startup_capture_replay_points_per_second", "Most recent measured replay rate in points per second.", nil, nil),
+	prometheus.NewDesc("startup_capture_idle_cpus", "Most recent runtime idle CPU capacity.", nil, nil),
+}
+
+var captureStreamDescs = []*prometheus.Desc{
+	prometheus.NewDesc("startup_capture_retained_bytes", "Physical durable queue bytes still retained.", nil, nil),
+	prometheus.NewDesc("startup_capture_raw_bytes_total", "Uncompressed point record bytes captured.", nil, nil),
+	prometheus.NewDesc("startup_capture_live_partitions", "Partitions whose append owner applies directly at the FIFO frontier.", nil, nil),
+	prometheus.NewDesc("startup_capture_expected_pause_seconds", "Expected disk safety pause; -1 means no defensible drain estimate.", nil, nil),
+	prometheus.NewDesc("startup_capture_continued", "1 when replay has no positive convergence margin and intake continues durably.", nil, nil),
+}
+
+var captureIODescs = []*prometheus.Desc{
+	prometheus.NewDesc("startup_capture_operation_seconds_total", "Capture operation elapsed time, summed over independent owners.", []string{"operation"}, nil),
+	prometheus.NewDesc("startup_capture_operation_calls_total", "Capture operation calls.", []string{"operation"}, nil),
+	prometheus.NewDesc("startup_capture_operation_max_seconds", "Longest observed capture operation.", []string{"operation"}, nil),
+}
+
 func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
+	for _, desc := range captureIODescs {
+		ch <- desc
+	}
+	for _, desc := range captureStreamDescs {
+		ch <- desc
+	}
+	for _, desc := range startupCaptureDescs {
+		ch <- desc
+	}
 	ch <- migrationSkippedDesc
 	for _, spec := range migrationMetricSpecs {
 		ch <- spec.desc
@@ -387,6 +440,65 @@ func (c *migrationCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
+	if capture := c.app.startupCaptureState.Load(); capture != nil {
+		for i, timing := range capture.ioTimings() {
+			ch <- prometheus.MustNewConstMetric(captureIODescs[0], prometheus.CounterValue, float64(timing.total)/1e9, captureOperations[i])
+			ch <- prometheus.MustNewConstMetric(captureIODescs[1], prometheus.CounterValue, float64(timing.calls), captureOperations[i])
+			ch <- prometheus.MustNewConstMetric(captureIODescs[2], prometheus.GaugeValue, float64(timing.maximum)/1e9, captureOperations[i])
+		}
+		live := 0
+		for _, sh := range capture.shards {
+			if sh.live.Load() {
+				live++
+			}
+		}
+		continuing := float64(0)
+		if capture.continued.Load() {
+			continuing = 1
+		}
+		extra := []float64{float64(capture.size.Load() - capture.retiredBytes.Load()), float64(capture.rawBytes.Load()), float64(live), float64(capture.pauseExpected.Load()), continuing}
+		for i, v := range extra {
+			kind := prometheus.GaugeValue
+			if i == 1 {
+				kind = prometheus.CounterValue
+			}
+			ch <- prometheus.MustNewConstMetric(captureStreamDescs[i], kind, v)
+		}
+		values := []float64{float64(capture.size.Load()), float64(capture.points.Load()), float64(capture.replayedPoints.Load()), 0, 1}
+		if capture.fallback.Load() {
+			values[3] = 1
+		}
+		select {
+		case <-capture.sealed:
+			values[4] = 0
+		case <-capture.stop:
+			values[4] = 0
+		default:
+		}
+		paused := float64(0)
+		if capture.paused.Load() {
+			paused = 1
+		}
+		ch <- prometheus.MustNewConstMetric(startupCaptureDescs[5], prometheus.GaugeValue, paused)
+		policy := capture.policy
+		if sink := capture.sink.Load(); sink != nil {
+			if admission, ok := sink.admission.(interface{ RecoveryCapacity() (int64, int64, uint64) }); ok {
+				window, _, _ := admission.RecoveryCapacity()
+				policy.recoveryBytes = window
+			}
+		}
+		chosen := []float64{float64(policy.shards), float64(policy.shards), float64(policy.readBuffer), float64(policy.writeBuffer), float64(policy.recoveryBytes), float64(policy.recoveryPoints), float64(capture.writeRate.Load()), float64(capture.effectiveLimit.Load()) / 1e9, float64(capture.effectiveBytes.Load()), float64(policy.cpus), float64(capture.replayRate.Load()), float64(capture.idleCPUs.Load()) / 1000}
+		for i, value := range chosen {
+			ch <- prometheus.MustNewConstMetric(startupCaptureDescs[6+i], prometheus.GaugeValue, value)
+		}
+		for i, value := range values {
+			kind := prometheus.GaugeValue
+			if i == 1 || i == 2 {
+				kind = prometheus.CounterValue
+			}
+			ch <- prometheus.MustNewConstMetric(startupCaptureDescs[i], kind, value)
+		}
+	}
 	defer func() {
 		ch <- prometheus.MustNewConstMetric(migrationSkippedDesc, prometheus.CounterValue, float64(c.skipped.Load()))
 	}()
@@ -443,6 +555,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
 		s.cacheBytes = cache.EstimatedBytes()
 		s.cachePointBytes = cache.PointBytes()
+		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()
+		s.recoveryCeiling = cache.RecoveryByteCeiling()
+		s.recoveryBlocked = cache.RecoveryBlocked()
 	}
 	if db != nil {
 		st, sidecars, ok := db.TelemetryStats()

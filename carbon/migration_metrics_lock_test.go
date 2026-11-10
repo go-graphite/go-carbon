@@ -1,7 +1,10 @@
 package carbon
 
 import (
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"net/http/pprof"
 	"strings"
 	"sync"
 	"testing"
@@ -53,5 +56,58 @@ func TestMigrationMetricsScrapeDoesNotWaitForShard(t *testing.T) {
 				t.Fatal("metrics scrape waited for a cache shard write lock")
 			}
 		})
+	}
+}
+
+// Startup holds the lifecycle write lock across storage/checkpoint recovery.
+// The actual HTTP handler must still complete, including startup telemetry.
+func TestMigrationMetricsScrapeDuringStartup(t *testing.T) {
+	app := &App{}
+	s := &startupInput{sealed: make(chan struct{})}
+	s.size.Store(123)
+	s.fallback.Store(true)
+	app.startupCaptureState.Store(s)
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(&migrationCollector{app: app})
+	app.Lock()
+	defer app.Unlock()
+	done := make(chan struct{})
+	response := httptest.NewRecorder()
+	go func() {
+		defer close(done)
+		promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	}()
+	select {
+	case <-done:
+		if response.Code != 200 || !strings.Contains(response.Body.String(), "migration_metrics_skipped_total 1\n") || !strings.Contains(response.Body.String(), "startup_capture_bytes 123\n") {
+			t.Fatal(response.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("scrape blocked on startup lifecycle lock")
+	}
+}
+
+func TestStartupHTTPMetricsAndPprof(t *testing.T) {
+	app := &App{}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(&migrationCollector{app: app})
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux.Handle("/debug/pprof/goroutine", pprof.Handler("goroutine"))
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	app.Lock()
+	defer app.Unlock()
+	client := &http.Client{Timeout: time.Second}
+	for _, path := range []string{"/metrics", "/debug/pprof/goroutine?debug=1"} {
+		response, err := client.Get(server.URL + path)
+		if err != nil {
+			t.Fatal(path, err)
+		}
+		_, err = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != 200 {
+			t.Fatal(path, response.StatusCode, err)
+		}
 	}
 }

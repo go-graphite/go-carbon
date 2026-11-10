@@ -309,7 +309,7 @@ func (c *Cache) recovering(s *cacheSettings) bool {
 }
 
 func (c *Cache) batchWrites(s *cacheSettings) bool {
-	return s.batching() && !s.underPressure(c.approxSize()) && !c.bytePressure(s)
+	return s.batching() && !s.underPressure(c.approxSize()) && !c.bytePressure(s) && !c.RecoveryBlocked()
 }
 
 func (s *cacheSettings) underPressure(size int64) bool {

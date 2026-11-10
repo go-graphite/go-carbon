@@ -42,7 +42,7 @@ func TestMeasureHandoffRestart(t *testing.T) {
 	cfg.Tcp.Enabled, cfg.Tcp.Listen = true, "127.0.0.1:0"
 	cfg.Dump.Enabled, cfg.Dump.Path, cfg.Dump.Format = true, t.TempDir(), "blocks"
 	// A short path is needed for the actual Unix descriptor transfer.
-	short, err := os.MkdirTemp("/tmp", "hr-")
+	short, err := os.MkdirTemp(os.TempDir(), "hr-")
 	if err != nil {
 		t.Fatal(err)
 	}

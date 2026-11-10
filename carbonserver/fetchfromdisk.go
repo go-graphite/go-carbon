@@ -140,6 +140,9 @@ func (listener *CarbonserverListener) fetchFromDisk(metric string, fromTime, unt
 
 	res.DiskStartTime = time.Now()
 	points, err := w.Fetch(int(fromTime), int(untilTime))
+	if listener.capacityReadLatency != nil {
+		listener.capacityReadLatency.Observe(time.Since(res.DiskStartTime))
+	}
 	w.Close()
 	if err != nil {
 		logger.Warn("failed to fetch points", zap.Error(err))

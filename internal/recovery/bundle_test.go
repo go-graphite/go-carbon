@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -230,5 +231,34 @@ func TestBundleAcceptsItsTail(t *testing.T) {
 	}
 	if _, err = OpenBundle(dir, root); err == nil || !strings.Contains(err.Error(), "unindexed") {
 		t.Fatal("opened next to another generation's tail", err)
+	}
+}
+
+func TestCaptureTailsShareCheckpointAuthority(t *testing.T) {
+	dir, root := bundleFixture(t)
+	tail := TailName("input.123.1234.bin")
+	for i := range 32 {
+		name := fmt.Sprintf("%s.capture-%02d.tail.bin", tail, i)
+		if !IsTail(name) || !IsGenerationTail(name, "input.123.1234.bin") {
+			t.Fatal(name)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), points.OnePoint("known", float64(i), 2).AppendBinary(nil), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b, err := OpenBundle(dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := b.Retire(); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(dir, tail+"*"))
+	if err != nil || len(files) != 0 {
+		t.Fatal(files, err)
+	}
+	if IsGenerationTail(tail+".capture-00.tail.bin", "input.999.1234.bin") {
+		t.Fatal("another generation matched")
 	}
 }

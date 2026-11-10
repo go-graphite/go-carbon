@@ -302,13 +302,24 @@ func testSharedStoreRestartHandsInputOver(t *testing.T) {
 			}
 			wg.Wait()
 
+			if capture := next.startupCaptureState.Load(); capture != nil && capture.replayStarted.Load() {
+				select {
+				case <-capture.legacyDone:
+				case <-time.After(5 * time.Second):
+					t.Fatal("tail replay did not complete")
+				}
+			}
 			logs := zapwriter.TestString()
 			if !tc.enabled && !strings.Contains(logs, "store input handoff disabled; stopping input") {
 				t.Fatal("disabled handoff was not diagnosed", logs)
 			}
 			if tc.handedOver {
 				failed.Range(func(c, err any) bool { t.Fatalf("client %v write failed: %v\n%s", c, err, logs); return false })
-				for _, want := range []string{"input handed over", "input handed off to successor", "took over input from stopping instance", "input tail loaded", "persister stopped with input active"} {
+				takeover := "took over input from stopping instance"
+				if next.startupCaptureState.Load() != nil {
+					takeover = "input capture active before storage and checkpoint"
+				}
+				for _, want := range []string{"input handed over", "input handed off to successor", takeover, "input tail loaded", "persister stopped with input active"} {
 					if !strings.Contains(logs, want) {
 						t.Fatalf("missing %q: %s", want, logs)
 					}
@@ -405,6 +416,7 @@ func testDumpStopStopsPersisterAlongsideWarmup(t *testing.T) {
 			if stoppedDuringWarmup != early {
 				t.Fatalf("persister stopped during warmup = %v, want %v", stoppedDuringWarmup, early)
 			}
+
 			logs := zapwriter.TestString()
 			for _, want := range []string{"persister stopped with input active", "pending checkpoint names warmed with input active", "grace stop with dump inited"} {
 				if !strings.Contains(logs, want) {

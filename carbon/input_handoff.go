@@ -77,6 +77,7 @@ func (app *App) inputHandoffPossible() bool {
 // appending to a tail log, until the successor takes the input sockets or
 // input stops. It implements handoff.InputSource.
 type inputHandover struct {
+	capture     *startupInput
 	receivers   []*NamedReceiver
 	flushTraces func()
 	logger      *zap.Logger
@@ -146,6 +147,25 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		h.detached = nil
 		return in, nil
 	}
+	if h.capture != nil {
+		h.done = true
+		h.closed = time.Now()
+		moved, err := h.capture.receiver.Detach()
+		if err != nil {
+			h.capture.receiver.Stop()
+			_ = h.capture.close()
+			return nil, err
+		}
+		in := &handoff.Input{Receivers: []handoff.InputReceiver{{Name: "tcp", Listener: moved.Listener}}}
+		for _, c := range moved.Conns {
+			in.Receivers[0].Conns = append(in.Receivers[0].Conns, handoff.InputConn{File: c.File, Leftover: c.Leftover})
+		}
+		if err = h.capture.close(); err != nil {
+			in.Close()
+			return nil, err
+		}
+		return in, nil
+	}
 	h.done = true
 	h.closed = time.Now()
 	h.timer.Stop()
@@ -210,7 +230,7 @@ func (h *inputHandover) released() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.releasedAt = time.Now()
-	if !h.done {
+	if !h.done && h.timer != nil {
 		h.timer.Reset(inputHandoffTimeout)
 	}
 }
@@ -224,6 +244,15 @@ func (h *inputHandover) stop(reason string) {
 		h.detached = nil
 	}
 	if h.done {
+		return
+	}
+	if h.capture != nil {
+		h.done = true
+		h.closed = time.Now()
+		h.capture.receiver.Stop()
+		if err := h.capture.close(); err != nil {
+			h.logger.Error("capture queue stop failed", zap.Error(err))
+		}
 		return
 	}
 	h.done = true
@@ -332,7 +361,7 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 				return err
 			}
 		}
-		count, err := replayInputTailReader(file, workers, func(p *points.Points) {
+		admit := func(p *points.Points) {
 			// These points were accepted before the checkpoint. Never apply
 			// live quotas again or discard them because recovery filled cache.
 			// Reserve space before admitting another record; a single metric
@@ -341,7 +370,13 @@ func (app *App) loadInputTails(core *cache.Cache) error {
 				time.Sleep(time.Millisecond)
 			}
 			core.AddRecovered(p)
-		})
+		}
+		var count int
+		if recovery.IsCaptureSegment(name) {
+			count, err = recovery.ReadCaptureFile(path, admit)
+		} else {
+			count, err = replayInputTailReader(file, workers, admit)
+		}
 		_ = file.Close()
 		delete(app.inputTailOffsets, path)
 		_ = release()

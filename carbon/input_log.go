@@ -153,29 +153,56 @@ func (app *App) openInputLog(core *cache.Cache) error {
 // Replayed points precede live points in each cache item, so they need not
 // drain before receivers open, even for compressed whisper.
 func (app *App) replayInputLog(core *cache.Cache) error {
+	if s := app.startupInput; s != nil {
+		// Ordinary fallback restores the journal before ordered dump files. Retain
+		// that boundary as the first history token, ahead of the locked raw tail.
+		seg := &startupSegment{source: s.legacy.stream.NextJournal()}
+		seg.next.Store(s.legacy.first.Load())
+		s.legacy.first.Store(seg)
+		s.historyLog.Store(seg)
+		err := app.replayInputLogWith(core, nil, app.Config.InputLog.Path, app.Persister != nil, func(p *points.Points) { core.AddRecoveredFrom(p, seg.source) })
+		seg.sealed.Store(true)
+		seg.replayed.Store(true)
+		return err
+	}
+	return app.replayInputLogStopped(core, nil)
+}
+func (app *App) replayInputLogStopped(core *cache.Cache, stop <-chan struct{}) error {
+	return app.replayInputLogWith(core, stop, app.Config.InputLog.Path, app.Persister != nil, core.AddRecovered)
+}
+func (app *App) replayInputLogWith(core *cache.Cache, stop <-chan struct{}, logPath string, draining bool, add func(*points.Points)) error {
 	l := app.inputLog.Load()
 	if l == nil || !l.NeedsReplay() {
 		return nil
 	}
 	app.restart.noteReplayed()
 	logger := zapwriter.Logger("input-log")
-	logger.Info("replaying input log before starting receivers", zap.String("path", app.Config.InputLog.Path))
-	draining := app.Persister != nil
-	stats, err := l.Replay(func(p *points.Points) {
+	logger.Info("replaying input log before starting receivers", zap.String("path", logPath))
+	stats, err := l.ReplayStopped(func(p *points.Points) {
 		// Like tail replay: these points were accepted already, so no live
 		// quota applies, but recovery must leave room for persistence.
-		for draining && !core.HasRecoveryCapacity(len(p.Data)) {
+		for draining && !core.HasRecoveryCapacityFor(p.Metric, len(p.Data)) {
+			select {
+			case <-stop:
+				return
+			default:
+			}
 			time.Sleep(time.Millisecond)
 		}
-		core.AddRecovered(p)
-	})
+		add(p)
+	}, stop)
+	select {
+	case <-stop:
+		return errors.New("input log replay stopped")
+	default:
+	}
 	logger.Info("input log replayed", zap.Int64("points", stats.Points), zap.Int64("frames", stats.Frames),
 		zap.Int64("bytes", stats.Bytes), zap.Int64("corrupt_frames", stats.Corrupt), zap.Duration("runtime", stats.Duration), zap.Error(err))
 	if err != nil {
 		return fmt.Errorf("replay input log: %w", err)
 	}
 	strictCopy := false
-	if _, err := os.Stat(filepath.Join(app.Config.InputLog.Path, inputlog.CopyMarkerName)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(logPath, inputlog.CopyMarkerName)); !errors.Is(err, os.ErrNotExist) {
 		if err != nil {
 			return err
 		}

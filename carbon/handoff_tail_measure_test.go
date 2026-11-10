@@ -75,7 +75,7 @@ func TestMeasureHandoffTCPRate(t *testing.T) {
 	if seconds <= 0 {
 		t.Skip("set HANDOFF_TCP_SECONDS")
 	}
-	tcp.Register()
+	_ = New("")
 	for _, mode := range []string{"before", "capture"} {
 		t.Run(mode, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "input.1.2.tail.bin")
@@ -176,11 +176,24 @@ func TestMeasureHandoffTCPRate(t *testing.T) {
 				t.Fatal(err)
 			}
 			info, _ := os.Stat(path)
-			t.Logf("points=%d rate=%.0f/s drained=%v durable=%v bytes=%d", count, float64(count)/duration.Seconds(), duration, time.Since(start), info.Size())
+			size := info.Size()
+			if spool != nil {
+				size = spool.size.Load()
+			}
+			t.Logf("points=%d rate=%.0f/s drained=%v durable=%v bytes=%d", count, float64(count)/duration.Seconds(), duration, time.Since(start), size)
 			// Verify the persisted record count, independent of the receiver's counter.
 			var records int64
-			if err := points.ReadFromFile(path, func(p *points.Points) { records += int64(len(p.Data)) }); err != nil || records != count {
-				t.Fatal("disk records", records, count, err)
+			visit := func(p *points.Points) { records += int64(len(p.Data)) }
+			if spool != nil {
+				if err := visitCapture(spool, visit); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := points.ReadFromFile(path, visit); err != nil {
+				t.Fatal(err)
+			}
+
+			if records != count {
+				t.Fatal("disk records", records, count)
 			}
 		})
 	}

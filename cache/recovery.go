@@ -204,6 +204,12 @@ func (c *Cache) attachPendingRecovery(bundle *recovery.Bundle, namesPrepared boo
 // needs an exact count. An empty cache can admit one oversized record so that
 // recovery always has a way to make progress.
 func (c *Cache) HasRecoveryCapacity(count int) bool {
+	allowed := c.hasLegacyRecoveryCapacity(count)
+	c.recordRecoveryAdmission(allowed)
+	return allowed
+}
+
+func (c *Cache) hasLegacyRecoveryCapacity(count int) bool {
 	s := c.settings.Load().(*cacheSettings)
 	if s.maxBytes > 0 && c.stat.bytes.Load()+shardCount*byteSlackFor(0)+c.queueMemory() > s.maxBytes/2 {
 		if (c.Size() > 0 || c.NotConfirmedLength() > 0) && c.EstimatedBytes() > s.maxBytes/2 {

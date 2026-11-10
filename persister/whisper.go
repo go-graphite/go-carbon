@@ -822,13 +822,12 @@ func (p *Whisper) worker(exit chan bool) {
 LOOP:
 	for {
 		if p.throttleUpdates() {
-			select {
-			case _, open := <-p.updateTokens():
-				if !open && p.settings().maxUpdatesPerSecond == -1 {
-					continue LOOP
-				}
-			case <-exit:
+			open, stopped := p.waitUpdateToken(exit)
+			if stopped {
 				return
+			}
+			if !open && p.settings().maxUpdatesPerSecond == -1 {
+				continue LOOP
 			}
 		}
 

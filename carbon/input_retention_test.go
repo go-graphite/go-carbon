@@ -39,7 +39,7 @@ func TestStoreInputRetentionExpiresAndExits(t *testing.T) {
 	defer zapwriter.Test()()
 	handoff.InputRetentionTimeout = 100 * time.Millisecond
 	handoff.PeerExecutable = func(*net.UnixConn) (string, error) { return "", errors.ErrUnsupported }
-	dir, err := os.MkdirTemp("/tmp", "gc-retain-")
+	dir, err := os.MkdirTemp(os.TempDir(), "r-")
 	if err != nil {
 		t.Fatal(err)
 	}

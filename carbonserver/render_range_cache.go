@@ -236,6 +236,10 @@ func (c *renderRangeCache) fetch(ctx context.Context, db *store.Store, name stri
 }
 
 func (listener *CarbonserverListener) fetchMetricStoreSeries(ctx context.Context, db *store.Store, name string, from, until int) (*store.Series, error) {
+	if listener.capacityReadLatency != nil {
+		started := time.Now()
+		defer func() { listener.capacityReadLatency.Observe(time.Since(started)) }()
+	}
 	c := listener.queryRangeCache.Load()
 	if c == nil {
 		return db.Fetch(ctx, name, from, until)

@@ -110,3 +110,53 @@ func TestCapturedPointStatsCarryExactlyOnce(t *testing.T) {
 	}
 	t.Fatal("missing receiver counter")
 }
+
+type shardTestCapture struct{ sinks [8]testCapture }
+
+func (s *shardTestCapture) Write([]byte, int) error { panic("global capture writer used") }
+func (s *shardTestCapture) CaptureShards() []Capture {
+	out := make([]Capture, len(s.sinks))
+	for i := range s.sinks {
+		out[i] = &s.sinks[i]
+	}
+	return out
+}
+
+func TestCaptureShardsPreservePerMetricOrder(t *testing.T) {
+	s := new(shardTestCapture)
+	a, b := newCaptureBuffer(s), newCaptureBuffer(s)
+	// Same timestamp corrections must retain the recorded order across handlers.
+	for i := range 1000 {
+		for _, name := range []string{"shared.metric", "other.metric", "third.metric"} {
+			c := &a
+			if i%2 != 0 {
+				c = &b
+			}
+			c.point([]byte(name), float64(i), 1700000000)
+			if err := c.flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	seen := make(map[string]int)
+	for i := range s.sinks {
+		if err := points.ReadBinary(bytes.NewReader(s.sinks[i].data), func(p *points.Points) {
+			for _, point := range p.Data {
+				if point.Value != float64(seen[p.Metric]) {
+					t.Fatalf("%s correction %v; want %d", p.Metric, point.Value, seen[p.Metric])
+				}
+				seen[p.Metric]++
+			}
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, count := range seen {
+		if count != 1000 {
+			t.Fatal(name, count)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatal(seen)
+	}
+}

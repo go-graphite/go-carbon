@@ -26,6 +26,7 @@ import (
 	"github.com/go-graphite/go-carbon/helper/heartbeat"
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/handoff"
+	"github.com/go-graphite/go-carbon/internal/hostcapacity"
 	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 	"github.com/go-graphite/go-carbon/internal/restartcpu"
@@ -126,6 +127,7 @@ type App struct {
 	// storage; restoreWithPendingReads takes it.
 	checkpointOpen        *checkpointOpen
 	startupInput          *startupInput
+	startupCaptureState   atomic.Pointer[startupInput]
 	inputTailOffsets      map[string]int64
 	startupCapturedPoints uint64
 	startupInputPauseAt   time.Time
@@ -147,6 +149,7 @@ type App struct {
 	metadataPrewarmGateOnce *sync.Once
 	metadataPrewarmProgress *store.PrewarmProgress
 	restartBudget           *restartcpu.Budget
+	capacityReadLatency     hostcapacity.Latency
 	restartBudgetStop       context.CancelFunc
 	storeMaintenance        *storeMaintenanceGate
 
@@ -373,9 +376,9 @@ func validateCacheConfig(cfg *Config) error {
 		return fmt.Errorf("cache.writeout-max-delay-spread must be within [0, 0.5]")
 	}
 	if cfg.Whisper.MaxUpdatesPerSecond < -1 || cfg.Whisper.MaxUpdatesPerSecondAutoMin < 1 ||
-		cfg.Whisper.MaxUpdatesPerSecondAutoMax < 0 ||
+		cfg.Whisper.MaxUpdatesPerSecondAutoMax < -1 ||
 		cfg.Whisper.MaxUpdatesPerSecondAutoMax > 0 && cfg.Whisper.MaxUpdatesPerSecondAutoMax < cfg.Whisper.MaxUpdatesPerSecondAutoMin {
-		return fmt.Errorf("whisper update rate must be -1, zero or positive; auto-min must be positive and auto-max zero or at least auto-min")
+		return fmt.Errorf("whisper update rate must be -1, zero or positive; auto-min must be positive and auto-max -1 (capacity), zero (unlimited) or at least auto-min")
 	}
 	if cfg.Whisper.MaxUpdatesPerSecond == -1 && cfg.Cache.WriteoutMaxDelay.Value() <= 0 {
 		return fmt.Errorf("automatic writeout rate requires cache.writeout-max-delay")
@@ -632,6 +635,9 @@ func (app *App) stopAll() {
 	if app.MetricStore != nil {
 		app.MetricStore.StopCompactionPacing()
 	}
+	if app.startupInput != nil {
+		app.startupInput.pauseReplay()
+	}
 	app.stopPendingRecovery()
 	app.stopHeartbeat()
 	app.stopMallocTrim()
@@ -655,6 +661,9 @@ func (app *App) stopAll() {
 	if app.startupInput != nil {
 		if err := app.startupInput.close(); err != nil {
 			zapwriter.Logger("app").Error("startup input capture failed", zap.Error(err))
+		}
+		if app.startupInput.inherited != nil {
+			closeTCPHandoff(app.startupInput.inherited)
 		}
 		app.startupInput = nil
 	}
@@ -768,6 +777,7 @@ func (app *App) newPersister() (*persister.Whisper, error) {
 		}
 		return state
 	}, app.Config.Whisper.MaxUpdatesPerSecondAutoMin, app.Config.Whisper.MaxUpdatesPerSecondAutoMax)
+	app.configureAutoCapacity(p)
 	p.SetSparse(app.Config.Whisper.Sparse)
 	p.SetFLock(app.Config.Whisper.FLock)
 	p.SetCompressed(app.Config.Whisper.Compressed)
@@ -875,6 +885,7 @@ func (app *App) Start() (err error) {
 	app.beginRestart()
 	app.inputTailOffsets = nil
 	app.startupCapturedPoints = 0
+	app.startupCaptureState.Store(app.startupInput)
 	app.startupInputPauseAt = time.Time{}
 	if err = app.startStartupInput(); err != nil {
 		return err
@@ -1054,6 +1065,9 @@ func (app *App) startStorage() (core *cache.Cache, err error) {
 	core = cache.New()
 	core.SetMaxSize(conf.Cache.MaxSize)
 	core.SetMaxBytes(conf.Cache.MaxBytes)
+	if runtime.GOOS == "linux" {
+		core.SetRecoveryMemory(hostcapacity.ReadMemory)
+	}
 	store.SetStatePacking(conf.Whisper.StoreMetadataCachePack)
 	core.SetWriteStrategy(conf.Cache.WriteStrategy)
 	core.SetTagsEnabled(conf.Tags.Enabled)
@@ -1226,6 +1240,7 @@ func (app *App) configureCarbonserver(core *cache.Cache) (newMetricsChan chan st
 
 	// TODO: refactor: do not use var name the same as pkg name
 	carbonserver := carbonserver.NewCarbonserverListener(core.Get)
+	carbonserver.SetCapacityReadLatency(&app.capacityReadLatency)
 	carbonserver.SetWhisperData(conf.Whisper.DataDir)
 	if app.MetricStore != nil && !conf.Whisper.StoreMirrorFiles && !conf.Whisper.StoreIncrementalMigration {
 		carbonserver.SetWhisperData(sharedStorePath(conf))
@@ -1526,8 +1541,12 @@ func (g *tailGate) pass() bool {
 
 func (app *App) startReceivers(core *cache.Cache) (err error) {
 	conf := app.Config
-	if err = app.finishStartupInput(core); err != nil {
-		return err
+	if app.startupInput != nil {
+		app.finishStartupInput(core)
+		if conf.Prometheus.Enabled {
+			app.startupInput.receiver.InitPrometheus(app.PromRegisterer)
+		}
+		return nil
 	}
 	app.Receivers = make([]*NamedReceiver, 0)
 	var rcv receiver.Receiver

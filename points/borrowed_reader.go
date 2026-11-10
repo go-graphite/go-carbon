@@ -2,6 +2,7 @@ package points
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,7 +14,13 @@ import (
 // lends its name and point buffers only until visit returns. A batching caller
 // can copy into a reusable arena instead of allocating three objects per row.
 func ReadBinaryBorrowed(r io.Reader, visit func([]byte, []Point)) error {
-	reader := bufio.NewReaderSize(r, MB)
+	return ReadBinaryBorrowedSize(r, MB, visit)
+}
+
+// ReadBinaryBorrowedSize adapts read-ahead memory to the number of independent
+// startup replay streams. Record limits and partial-record behavior are unchanged.
+func ReadBinaryBorrowedSize(r io.Reader, bufferSize int, visit func([]byte, []Point)) error {
+	reader := bufio.NewReaderSize(r, max(4096, bufferSize))
 	names := make([]byte, MB)
 	var scratch [64]Point
 	data := scratch[:0]
@@ -106,4 +113,21 @@ func singleBinaryPoint(raw []byte) ([]byte, Point, int, bool) {
 	}
 	off += n
 	return name, Point{Value: math.Float64frombits(uint64(value)), Timestamp: stamp}, off, true
+}
+
+// ReadBinaryBytesBorrowed decodes a complete in-memory frame without allocating
+// bufio/name arenas for each frame. The reference decoder handles uncommon
+// multi-point records and preserves its exact partial-record semantics.
+func ReadBinaryBytesBorrowed(raw []byte, visit func([]byte, []Point)) error {
+	var scratch [1]Point
+	for len(raw) > 0 {
+		name, p, n, ok := singleBinaryPoint(raw)
+		if !ok {
+			return ReadBinaryBorrowedSize(bytes.NewReader(raw), 64<<10, visit)
+		}
+		scratch[0] = p
+		visit(name, scratch[:])
+		raw = raw[n:]
+	}
+	return nil
 }

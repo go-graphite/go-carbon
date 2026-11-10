@@ -110,6 +110,8 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
 	loadedDone := make(chan struct{})
 	app.storeRestoreLoaded = loadedDone
+	captureInput := app.startupInput
+	restoreRate := app.Config.Dump.RestorePerSecond
 	inputReady := make(chan struct{})
 	app.pendingInputReady = inputReady
 	go func() {
@@ -121,7 +123,14 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 		case <-stop:
 			return
 		}
-		if err := core.RecoverPending(stop, app.Config.Dump.RestorePerSecond); err != nil {
+		if capture := captureInput; capture != nil {
+			select {
+			case <-capture.legacyDone:
+			case <-stop:
+				return
+			}
+		}
+		if err := core.RecoverPending(stop, restoreRate); err != nil {
 			logger.Warn("pending recovery stopped", zap.Error(err))
 			return
 		}
@@ -149,6 +158,15 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 			case <-stop:
 				return
 			case <-time.After(10 * time.Millisecond):
+			}
+		}
+		// Persistence confirmation can precede the periodic store WAL sync.
+		// Keep the checkpoint as recovery authority until every completed
+		// native mutation is durable, including points claimed from its tail.
+		if app.MetricStore != nil {
+			if err := app.MetricStore.Sync(); err != nil {
+				logger.Error("pending recovery not synced; checkpoint retained", zap.Error(err))
+				return
 			}
 		}
 		if err := core.FinishPendingRecovery(); err != nil {

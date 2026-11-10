@@ -61,6 +61,9 @@ func (app *App) DumpStop() (err error) {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	if app.startupInput != nil && app.startupInput.replayStarted.Load() {
+		return app.stopStreamingInputForHandoff(stopStarted)
+	}
 	if app.MetricStore != nil {
 		app.MetricStore.StopCompactionPacing()
 	}
@@ -870,6 +873,10 @@ func (app *App) RestoreFromFile(filename string, storeFunc func(*points.Points))
 		pointsCount += len(p.Data)
 		storeFunc(p)
 	}
+	if recovery.IsCaptureSegment(path.Base(filename)) {
+		_, err := recovery.ReadCaptureFile(filename, visit)
+		return err
+	}
 	switch recovery.CacheFormat(path.Base(filename)) {
 	case recovery.FormatCompact:
 		return recovery.ReadCompactFile(filename, visit)
@@ -924,7 +931,7 @@ FilesLoop:
 		case "input":
 			// A stopping instance still appends to its tail; input opens only
 			// after the tail is complete and replayed (see loadInputTails).
-			if recovery.IsTail(file.Name()) && handoff.Locked(path.Join(dumpDir, file.Name())) {
+			if recovery.IsTail(file.Name()) && (app.startupInput != nil || handoff.Locked(path.Join(dumpDir, file.Name()))) {
 				continue FilesLoop
 			}
 			fileWithSortPrefix = fmt.Sprintf("%s_%s:%s", r[2], "2", file.Name())
