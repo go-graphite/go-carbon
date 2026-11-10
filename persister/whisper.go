@@ -819,6 +819,10 @@ func (p *Whisper) worker(exit chan bool) {
 	}
 
 	startupPassed := p.startupGate == nil
+	// A nonblocking batch dequeue can find work before its rate permit is
+	// available. Keep at most one name for the next ordinary worker iteration;
+	// its points remain owned by the cache until the store call claims them.
+	var pending string
 LOOP:
 	for {
 		if p.throttleUpdates() {
@@ -831,7 +835,11 @@ LOOP:
 			}
 		}
 
-		metric := p.recv(exit)
+		metric := pending
+		pending = ""
+		if metric == "" {
+			metric = p.recv(exit)
+		}
 		if metric == "" {
 			// exit closed
 			break LOOP
@@ -859,7 +867,7 @@ LOOP:
 		var metrics []string
 		if p.mockStore == nil && p.canBatchShared() {
 			metrics = []string{metric}
-			for len(metrics) < p.settings().storeUpdateBatchSize && p.takeBatchToken() {
+			for len(metrics) < p.settings().storeUpdateBatchSize {
 				next := p.tryRecv()
 				if next == "" {
 					break
@@ -867,6 +875,12 @@ LOOP:
 				if p.writeoutReady != nil && !p.writeoutReady(next) {
 					p.finishWarmName(next)
 					continue
+				}
+				// Empty or stale queue entries are not store updates. Charging
+				// them first silently lowers the effective writeout allowance.
+				if !p.takeBatchToken() {
+					pending = next
+					break
 				}
 				metrics = append(metrics, next)
 			}
