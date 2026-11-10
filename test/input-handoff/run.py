@@ -70,7 +70,7 @@ def stored(http, fixture, max_index):
     return seen
 
 
-def run(root, binary, fixtures, mode, enabled, experiment, input_log_only=False):
+def run(root, binary, fixtures, mode, enabled, experiment, input_log_only=False, dump_enabled=None):
     root.mkdir()
     for d in ['data', 'store', 'dump', 'input-log']:
         (root/d).mkdir()
@@ -136,7 +136,7 @@ enabled = true
 enabled = false
 listen = "127.0.0.1:{prom}"
 [dump]
-enabled = {str(not input_log_only).lower()}
+enabled = {str(not input_log_only if dump_enabled is None else dump_enabled).lower()}
 input-log-only = {str(input_log_only).lower()}
 path = "dump"
 format = "compact"
@@ -273,7 +273,9 @@ path = "input-log"
                       reconnects=reconnects, input_handoff=dump['input_handoff'],
                       input_gap_seconds=gap['input_unavailable_seconds'],
                       input_stop_runtime=dump.get('input_stop_runtime', 0),
-                      input_log_only=input_log_only, lost_points=sent-len(seen),
+                      input_log_only=input_log_only, dump_enabled=(not input_log_only if dump_enabled is None else dump_enabled),
+                      background_replay=any(e.get('message') == 'replaying input log behind live receivers' for e in entries(root/'next.log')),
+                      lost_points=sent-len(seen),
                       dump_files_written=sum(e.get('message') == 'start cache dump' for e in combined),
                       recovery_files=[p.name for p in (root/'dump').iterdir() if not p.name.startswith('.')],
                       replayed_points=int(float(metrics(prom).get('input_log_replayed_points_total', 0))),
@@ -283,6 +285,7 @@ path = "input-log"
             assert accepted_before+next_received == len(seen), result
             assert len(seen) == (8448 if enabled else 8447 if mode == 'plaintext' else 8192), result
         if input_log_only:
+            assert result['background_replay'], 'journal-only handoff requires background replay dependency'
             handed = next(e for e in combined if e.get('message') == 'input handed over')
             result['cached_points_at_handoff'] = handed['cached_points']
             result['replay_cache_ratio'] = result['replayed_points']/max(1, handed['cached_points'])
@@ -332,9 +335,13 @@ def main():
     ap.add_argument('--enabled', choices=['false', 'true', 'both'], default='both')
     ap.add_argument('--input-log-only', action='store_true', help='experimental journal-only stop; requires --enabled true')
     ap.add_argument('--iterations', type=int, default=1)
+    ap.add_argument('--dump-enabled', choices=['auto', 'false', 'true'], default='auto')
     args = ap.parse_args()
     if args.input_log_only and args.enabled != 'true':
         ap.error('--input-log-only requires --enabled true')
+    if args.iterations <= 0:
+        ap.error('--iterations must be positive')
+    dump_enabled = None if args.dump_enabled == 'auto' else args.dump_enabled == 'true'
     results = []
     with tempfile.TemporaryDirectory(prefix='ih-', dir=args.scratch.resolve()) as temporary:
         root = Path(temporary)
@@ -344,7 +351,7 @@ def main():
             for enabled in ([False, True] if args.enabled == 'both' else [args.enabled == 'true']):
                 for experiment in ['partial', 'continuous', 'queued']:
                     for mode in ['plaintext', 'zstd', 'stream']:
-                        results.append(run(root/f'{iteration}-{int(enabled)}-{experiment}-{mode}', args.carbon.resolve(), fixtures, mode, enabled, experiment, args.input_log_only))
+                        results.append(run(root/f'{iteration}-{int(enabled)}-{experiment}-{mode}', args.carbon.resolve(), fixtures, mode, enabled, experiment, args.input_log_only, dump_enabled))
                         args.output.write_text(json.dumps(results, indent=2)+'\n')
     args.output.write_text(json.dumps(results, indent=2)+'\n')
 
