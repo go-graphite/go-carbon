@@ -27,6 +27,8 @@ a time, without competing load on the Docker VM. The store has two CPUs and
 an independent GC experiment. Ports bind only to localhost (18080, 12003,
 17007 and 18090). Each run removes only this Compose project's containers and
 data volume, preserving its result JSON, effective configuration, and logs.
+Use `--project NAME --port-offset N` to isolate concurrent runs; N offsets
+all four ports. Baseline and candidate comparisons should still run sequentially.
 
 For recovery with a disk-write backlog, omit `--drain-before-restart` and set
 `--max-updates 1000`. Verify the saved store log reports a nonempty dump/restore;
@@ -48,8 +50,8 @@ RSS high-water and cgroup peak memory are separate measurements: the latter
 includes filesystem page cache. The read workload continues during restart;
 connection failures from a single unavailable process are expected and reported.
 
-The test validates graceful recovery, not crash durability or multi-replica
-availability. Batching deliberately keeps points in memory longer; a successful
+The ordinary run validates graceful recovery. Use the SIGKILL mode below for
+crash recovery. Neither mode validates multi-replica availability. Batching deliberately keeps points in memory longer; a successful
 SIGUSR2 test does not prove those points survive SIGKILL or a machine failure.
 Likewise a faster local restart does not prove a production deployment can restart
 all replicas together. Keep readiness and replica-availability gates in the rollout.
@@ -63,3 +65,28 @@ Add `--crash-recovery` with a nonempty backlog and `--require-snapshot` to
 kill the new process while it is serving saved points but intake is still closed.
 The test verifies the recovery gate was still active, starts another process on
 the same volume, and checks every value again before and after persistence.
+
+Use `--sigkill` for a real crash under continuous input, with input logging,
+a 30-minute writeout delay and out-of-order writes disabled. Run the same command
+without `--background-replay` for the blocking baseline, then with it for the
+candidate. `--points-per-second` is a target rate; the result records achieved
+throughput as well as the longest sender gap and the application's input-gap
+metric. For example:
+
+```sh
+python3 test/restart/run.py --binary /tmp/carbon-candidate \
+  --output /tmp/carbon-crash-background --label crash-background \
+  --sigkill --background-replay --metrics 10000 --seconds 4 \
+  --points-per-second 2000000
+```
+
+The sender keeps retrying failed batches with identical values through SIGKILL.
+Every completed-send sample remains in the oracle: TCP has no durable
+acknowledgement, so unread socket bytes and unsynced journal data can be lost.
+The result reports `lost_points` separately from incorrect retained values
+(`changed_points`, which fails the run), plus replay count/time and resource
+peaks. Zero changed values does not mean zero crash loss. Compare baseline and
+candidate loss counts as well as the input gap. The run requires a nonempty
+journal replay and drains both history and live input before checking all values.
+The deterministic ordering and double-crash Go tests additionally cover writes
+at the same timestamp, including out-of-order writes disabled.

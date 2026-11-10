@@ -22,12 +22,13 @@ import (
 // exit lose about one sync interval of input instead of the whole cache. Its
 // settings take effect on restart only.
 type inputLogConfig struct {
-	Enabled      bool     `toml:"enabled"`
-	Path         string   `toml:"path"`
-	SyncInterval Duration `toml:"sync-interval"`
-	SegmentSize  int64    `toml:"segment-size"`
-	MaxAge       Duration `toml:"max-age"`
-	TruncateLag  Duration `toml:"truncate-lag"`
+	Enabled          bool     `toml:"enabled"`
+	BackgroundReplay bool     `toml:"background-replay"`
+	Path             string   `toml:"path"`
+	SyncInterval     Duration `toml:"sync-interval"`
+	SegmentSize      int64    `toml:"segment-size"`
+	MaxAge           Duration `toml:"max-age"`
+	TruncateLag      Duration `toml:"truncate-lag"`
 }
 
 func newInputLogConfig() inputLogConfig {
@@ -95,7 +96,8 @@ func inputLogReloadError(old, next *Config) error {
 }
 
 // openInputLog runs before anything can reach the cache. A log that holds
-// points to replay starts only after replayInputLog.
+// points to replay normally starts after replayInputLog; standalone background
+// replay starts live group commit immediately and retains the predecessor log.
 func (app *App) openInputLog(core *cache.Cache) error {
 	conf := app.Config.InputLog
 	if !conf.Enabled {
@@ -146,6 +148,15 @@ func (app *App) openInputLog(core *cache.Cache) error {
 		}
 	}
 	core.EnableInputLog()
+	if l.NeedsReplay() && conf.BackgroundReplay && app.Config.Whisper.Enabled && !copyRecovery && app.startupInput == nil && app.handoffClaim == nil {
+		// A dump/tail has its own ordering authority. Keep that path intact;
+		// this experiment handles standalone journal recovery after a crash.
+		entries, readErr := os.ReadDir(app.Config.Dump.Path)
+		if (readErr == nil && len(entries) == 0) || errors.Is(readErr, os.ErrNotExist) {
+			app.prepareInputReplay(core, l)
+			return nil
+		}
+	}
 	if !l.NeedsReplay() {
 		l.Start(core, cache.ShardCount)
 		if copyRecovery {
@@ -291,9 +302,11 @@ type inputLogCollector struct {
 }
 
 var inputLogDescs = struct {
-	bytes, points, syncCount, segments, disk, oldest, relogged, unlogged, errors, replayed, replay, cycleCount, stages *prometheus.Desc
+	bytes, points, syncCount, segments, disk, oldest, relogged, unlogged, errors, replayed, replay, cycleCount, stages, replayActive, replayFailed *prometheus.Desc
 }{
-	cycleCount: prometheus.NewDesc("input_log_cycles_total", "Input log group commit cycles, one per sync interval or forced sync.", nil, nil),
+	replayActive: prometheus.NewDesc("input_log_background_replay_active", "Crash history still decoding or awaiting persistence ahead of live writeout.", nil, nil),
+	replayFailed: prometheus.NewDesc("input_log_background_replay_failed", "Background replay failed; predecessor segments and the writeout fence remain retained.", nil, nil),
+	cycleCount:   prometheus.NewDesc("input_log_cycles_total", "Input log group commit cycles, one per sync interval or forced sync.", nil, nil),
 	stages: prometheus.NewDesc("input_log_stage_seconds_total", "Seconds input log cycles spent in each stage; collect, encode and compress are summed across encoding workers.",
 		[]string{"stage"}, nil),
 	bytes:     prometheus.NewDesc("input_log_bytes_written_total", "Bytes the input log wrote, frames and segment headers.", nil, nil),
@@ -311,7 +324,7 @@ var inputLogDescs = struct {
 
 func (c *inputLogCollector) Describe(ch chan<- *prometheus.Desc) {
 	d := inputLogDescs
-	for _, desc := range []*prometheus.Desc{d.bytes, d.points, d.syncCount, d.segments, d.disk, d.oldest, d.relogged, d.unlogged, d.errors, d.replayed, d.replay, d.cycleCount, d.stages} {
+	for _, desc := range []*prometheus.Desc{d.bytes, d.points, d.syncCount, d.segments, d.disk, d.oldest, d.relogged, d.unlogged, d.errors, d.replayed, d.replay, d.cycleCount, d.stages, d.replayActive, d.replayFailed} {
 		ch <- desc
 	}
 }
@@ -339,6 +352,18 @@ func (c *inputLogCollector) Collect(ch chan<- prometheus.Metric) {
 	gauge(d.disk, float64(m.DiskBytes))
 	gauge(d.oldest, m.OldestUnpersisted.Seconds())
 	gauge(d.replay, m.ReplayDuration.Seconds())
+	for _, status := range []struct {
+		desc   *prometheus.Desc
+		active bool
+	}{
+		{d.replayActive, c.app.inputReplayActive.Load()}, {d.replayFailed, c.app.inputReplayFailed.Load()},
+	} {
+		value := 0.0
+		if status.active {
+			value = 1
+		}
+		gauge(status.desc, value)
+	}
 	counter(d.cycleCount, m.Cycles)
 	for i, name := range inputlog.StageNames {
 		ch <- prometheus.MustNewConstMetric(d.stages, prometheus.CounterValue, m.Stages[i].Seconds(), name)
