@@ -89,6 +89,11 @@ func (s *Service) closeNativeSources() {
 // whole-store replacement readiness. The store owns hard integrity/disk stops.
 func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	if path == "/v1/native/pull" || path == "/v1/native/export" {
+		ctx, cancel := s.store.NativeTransferContext(r.Context())
+		defer cancel()
+		r = r.WithContext(ctx)
+	}
 	op := "read"
 	if path == "/v1/native/pull" || path == "/v1/native/import" {
 		op = "update"
@@ -114,6 +119,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errors.New("POST required"), http.StatusMethodNotAllowed)
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
 	decode := func(out any) bool {
 		if err := json.NewDecoder(r.Body).Decode(out); err != nil {
 			writeError(w, err, 400)
@@ -125,6 +131,9 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		status := http.StatusInternalServerError
 		if errors.Is(err, pebble.ErrNotFound) || errors.Is(err, chunkstore.ErrNotFound) {
 			status = 404
+		}
+		if errors.Is(err, chunkstore.ErrTransferLimit) {
+			status = http.StatusRequestEntityTooLarge
 		}
 		if errors.Is(err, chunkstore.ErrFormat) {
 			status = 400
@@ -220,6 +229,21 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			writeError(w, errors.New("whole-store replacement active"), 409)
 			return
 		}
+		// Acquire before decoding or opening the donor response: queued pulls
+		// retain neither range metadata nor donor history.
+		s.nativePullOnce.Do(func() { s.nativePullAdmission = make(chan struct{}, 1) })
+		select {
+		case s.nativePullAdmission <- struct{}{}:
+			defer func() { <-s.nativePullAdmission }()
+		case <-r.Context().Done():
+			fail(r.Context().Err())
+			return
+		}
+		if err := r.Context().Err(); err != nil {
+			fail(err)
+			return
+		}
+
 		var request nativePullRequest
 		if !decode(&request) {
 			return
@@ -237,6 +261,10 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		} else if ready {
 			s.changed()
 			writeNativeJSON(w, receipt)
+			return
+		}
+		if err := chunkstore.ValidateNativeNames(request.Range.Names); err != nil {
+			fail(err)
 			return
 		}
 		candidates, err := s.store.NativeCandidates(r.Context(), request.Range.Names)

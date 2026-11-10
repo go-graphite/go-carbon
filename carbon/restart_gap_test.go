@@ -254,10 +254,15 @@ func TestDumpStopStopsStoreBackgroundBeforeInputCloses(t *testing.T) {
 	writeSharedConfig(t, path, cfg)
 	app := startIncrementalApp(t, path)
 	db := app.MetricStore
+	nativeCtx, cancelNative := db.NativeTransferContext(context.Background())
+	defer cancelNative()
 	var stoppedAtClose atomic.Int32
 	stoppedAtClose.Store(-1)
 	app.FlushTraces = func() {
 		stoppedAtClose.Store(0)
+		if nativeCtx.Err() == nil {
+			t.Error("native transfer still active when dump closed input")
+		}
 		if db.BackgroundStopped() {
 			stoppedAtClose.Store(1)
 		}

@@ -46,7 +46,7 @@ func (c *parallelCombineCodec) CombineNative(ctx context.Context, a, b store.Con
 }
 
 func TestNativeCombinePreparesIndependentNamesConcurrently(t *testing.T) {
-	oldProcs := runtime.GOMAXPROCS(2)
+	oldProcs := runtime.GOMAXPROCS(192)
 	defer runtime.GOMAXPROCS(oldProcs)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -89,6 +89,11 @@ func TestNativeCombinePreparesIndependentNamesConcurrently(t *testing.T) {
 	select {
 	case second = <-codec.started:
 	case <-time.After(2 * time.Second):
+	}
+	select {
+	case third := <-codec.started:
+		t.Fatalf("CPU count exceeded memory worker cap: %s", third)
+	case <-time.After(25 * time.Millisecond):
 	}
 	close(codec.release)
 	if err := <-done; err != nil {

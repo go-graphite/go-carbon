@@ -182,6 +182,9 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 	}
 	add := func(k, v []byte) error {
 		used += int64(len(k) + len(v) + 8)
+		if len(shared) > 0 && shared[0].native {
+			used += 48
+		}
 		if used > budget {
 			return ErrTransferLimit
 		}

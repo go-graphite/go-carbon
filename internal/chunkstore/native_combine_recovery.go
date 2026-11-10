@@ -49,8 +49,14 @@ func (s *Store) recoverNativeCombines() error {
 	if err != nil {
 		return err
 	}
-	var intents []nativeCombineIntent
 	for it.First(); it.Valid(); it.Next() {
+		if len(it.Value()) > nativeRangeMetadataBytes {
+			// Preserve legacy state and any published pieces. Starting the
+			// store must not decode an oversized intent or silently abandon it.
+			s.pebbleOptions.Logger.Infof("native combine %s retained: metadata %d bytes exceeds %d-byte budget", it.Key(), len(it.Value()), nativeRangeMetadataBytes)
+			s.nativeCounters.errors.Add(1)
+			continue
+		}
 		var intent nativeCombineIntent
 		if err := json.Unmarshal(it.Value(), &intent); err != nil {
 			return errors.Join(err, it.Close())
@@ -62,24 +68,20 @@ func (s *Store) recoverNativeCombines() error {
 		if err := validateNativeCombineIntent(identity, intent); err != nil {
 			return errors.Join(err, it.Close())
 		}
-		intents = append(intents, intent)
-	}
-	if err := errors.Join(it.Error(), it.Close()); err != nil {
-		return err
-	}
-	for _, intent := range intents {
+		// Process one intent at a time rather than retaining every range's
+		// decoded metadata until the scan ends. The iterator pins its view.
 		if !intent.Ready {
 			if err := s.discardNativeCombine(intent.Receipt.Identity, intent); err != nil {
-				return err
+				return errors.Join(err, it.Close())
 			}
 		} else {
 			if _, err := s.readNativeCombinePieces(intent); err != nil {
-				return err
+				return errors.Join(err, it.Close())
 			}
 			if err := s.removeNativeCombineDirectories(intent); err != nil {
-				return err
+				return errors.Join(err, it.Close())
 			}
 		}
 	}
-	return nil
+	return errors.Join(it.Error(), it.Close())
 }

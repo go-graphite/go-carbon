@@ -61,6 +61,9 @@ func (app *App) DumpStop() (err error) {
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
+	if app.MetricStore != nil {
+		app.MetricStore.CancelNativeTransfers()
+	}
 	if s := app.startupInput; s != nil && s.replayStarted.Load() {
 		if !s.stopDirectSwitch() {
 			return app.stopStreamingInputForHandoff(stopStarted)
