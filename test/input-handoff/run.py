@@ -70,7 +70,7 @@ def stored(http, fixture, max_index):
     return seen
 
 
-def run(root, binary, fixtures, mode, enabled, experiment):
+def run(root, binary, fixtures, mode, enabled, experiment, args):
     root.mkdir()
     for d in ['data', 'store', 'dump', 'input-log']:
         (root/d).mkdir()
@@ -92,6 +92,8 @@ level = "error"
 file = "stderr"
 [cache]
 max-size = 1000000
+writeout-min-points = {args.min_points}
+writeout-max-delay = "{args.max_delay}"
 [whisper]
 enabled = true
 storage-backend = "pebble-chunk"
@@ -140,6 +142,8 @@ enabled = true
 path = "dump"
 format = "compact"
 restore-per-second = 0
+stop-drain-timeout = "{args.stop_drain_timeout}"
+stop-drain-target-points = {args.stop_drain_target_points}
 handoff-supervisor = true
 store-input-handoff = {str(enabled).lower()}
 [input-log]
@@ -260,6 +264,7 @@ path = "input-log"
         combined = entries(root/'old.log') + entries(root/'next.log')
         dump = next(e for e in combined if e.get('message') == 'dump finished')
         gap = next(e for e in combined if e.get('message') == 'previous process handed over')
+        cache_dump = next(e for e in combined if e.get('message') == 'cache dump finished')
         result = dict(protocol=mode, enabled=enabled, experiment=experiment,
                       attempted=sent+failed, socket_written_complete_points=sent,
                       failed_or_incomplete_points=failed, unique_stored=len(seen),
@@ -269,6 +274,12 @@ path = "input-log"
                       receiver_after=next_received,
                       reconnects=reconnects, input_handoff=dump['input_handoff'],
                       input_gap_seconds=gap['input_unavailable_seconds'],
+                      stop_drain_timeout=args.stop_drain_timeout,
+                      dump_bytes=cache_dump['bytes'], dump_points=cache_dump['records'],
+                      restored_dump_bytes=float(metrics(prom).get('restart_dump_bytes', 0)),
+                      stop_seconds=gap['previous_stop_seconds'],
+                      restore_seconds=float(metrics(prom).get('restart_restore_seconds', 0)),
+                      drain=[e for e in combined if e.get('message') == 'stop drain finished'],
                       input_stop_runtime=dump['input_stop_runtime'],
                       planned_close_logs=sum(e.get('message') == 'input connection closed during shutdown' for e in combined),
                       errors=[e for e in combined if e.get('level', '').upper() == 'ERROR'])
@@ -314,6 +325,10 @@ def main():
     ap.add_argument('--scratch', type=Path, required=True)
     ap.add_argument('--output', type=Path, required=True)
     ap.add_argument('--enabled', choices=['false', 'true', 'both'], default='both')
+    ap.add_argument('--stop-drain-timeout', default='0s')
+    ap.add_argument('--stop-drain-target-points', type=int, default=0)
+    ap.add_argument('--min-points', type=int, default=0)
+    ap.add_argument('--max-delay', default='0s')
     args = ap.parse_args()
     results = []
     with tempfile.TemporaryDirectory(prefix='ih-', dir=args.scratch.resolve()) as temporary:
@@ -323,7 +338,7 @@ def main():
         for enabled in ([False, True] if args.enabled == 'both' else [args.enabled == 'true']):
             for experiment in ['partial', 'continuous', 'queued']:
                 for mode in ['plaintext', 'zstd', 'stream']:
-                    results.append(run(root/f'{int(enabled)}-{experiment}-{mode}', args.carbon.resolve(), fixtures, mode, enabled, experiment))
+                    results.append(run(root/f'{int(enabled)}-{experiment}-{mode}', args.carbon.resolve(), fixtures, mode, enabled, experiment, args))
                     args.output.write_text(json.dumps(results, indent=2)+'\n')
     args.output.write_text(json.dumps(results, indent=2)+'\n')
 

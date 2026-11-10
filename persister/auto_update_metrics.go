@@ -7,7 +7,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-var autoUpdateReasons = [...]string{"steady", "growth", "pressure", "deadline", "floor", "ceiling", "restart", "recovery", "recovery_blocked", "capacity"}
+var autoUpdateReasons = [...]string{"steady", "growth", "pressure", "deadline", "floor", "ceiling", "restart", "recovery", "recovery_blocked", "capacity", "stop_drain"}
 
 type autoUpdateMetrics struct {
 	owner                                                                atomic.Pointer[Whisper]

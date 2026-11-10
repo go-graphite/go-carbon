@@ -35,6 +35,17 @@ acknowledgement: the runner observes receiver counters after quiescing the sende
 before initiating the restart. It rejects cache overflow and realtime-index
 enqueue failures rather than silently treating those as accepted data.
 
+For the optional USR2 drain, compare identical runs with
+`--stop-drain-timeout 0s` and `--stop-drain-timeout 10s`, and set
+`--stop-drain-target-points 1000`. Use `--seed-metrics` with a long batching
+window (for example `--min-points 960 --max-delay 1800s`): it persists one
+oracle-checked point per metric before enabling batching through SIGHUP, so
+the file backend can render the later cached backlog before the restart.
+`restart_metrics` records dump bytes, restore time and input unavailability;
+the `stop drain finished` log records whole-process CPU seconds and committed
+updates during the drain. The target applies before the ordinary dump sequence:
+continuing input may increase the final dumped count afterward.
+
 `--names-file PATH` accepts one unique metric name per line, allowing a private
 production name-shape fixture. Keep such fixtures, logs, configurations and raw
 profiles outside public source control. Values and arrival cadence are synthetic;

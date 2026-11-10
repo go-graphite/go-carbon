@@ -1241,6 +1241,15 @@ stats-percentiles = [99, 98, 95, 75, 50]
 [dump]
 # Enable dump/restore function on USR2 signal
 enabled = false
+# Before dumping on USR2, persist heaviest cached metrics first while input
+# and reads keep running. 0s disables this step. For example, use "120s" to
+# bound the drain; the ordinary dump and shutdown still need additional time.
+# Automatic writeout uses its hard capacity ceiling; fixed limits stay fixed.
+stop-drain-timeout = "0s"
+# Stop draining once the queued point count reaches this target (0 = empty).
+# Input continues, so the target may be unreachable: timeout then runs the
+# ordinary dump of the remainder. Already under target skips the drain.
+stop-drain-target-points = 0
 # Directory for store dump data. Should be writeable for carbon
 path = "/var/lib/graphite/dump/"
 # Restore speed. 0 - unlimited
