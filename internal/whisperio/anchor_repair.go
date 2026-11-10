@@ -73,20 +73,45 @@ func (c *ContinuationCodec) PlanArchiveAnchors(ctx context.Context, kv store.Con
 		}
 		base := positions[0].Timestamp
 		minimum := int64(math.MaxInt64)
-		seen := make(map[int64]bool, len(positions))
-		for slot, p := range positions {
+		seen := make(map[int64]store.Point, len(positions))
+		var duplicates []store.Point
+		var invalid, aliased, conflicting bool
+		for _, p := range positions {
 			minimum = min(minimum, p.Timestamp)
 			if p.Timestamp <= 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(a.Step) != 0 {
-				status.Blocked = "off-grid or invalid timestamp"
+				invalid = true
 				continue
 			}
 			absolute := p.Timestamp / int64(a.Step) % int64(a.Count)
-			if seen[absolute] {
-				status.Blocked = "distinct physical points alias one ring slot"
+			if previous, ok := seen[absolute]; ok {
+				switch {
+				case previous.Timestamp != p.Timestamp:
+					aliased = true
+				case math.Float64bits(previous.Value) != math.Float64bits(p.Value):
+					conflicting = true
+				default:
+					duplicates = append(duplicates, p)
+				}
+			} else {
+				seen[absolute] = p
 			}
-			seen[absolute] = true
+		}
+		switch {
+		case invalid:
+			status.Blocked = "off-grid or invalid timestamp"
+		case conflicting:
+			status.Blocked = "conflicting physical values at one timestamp"
+		case aliased:
+			status.Blocked = "distinct physical timestamps alias one ring slot"
+		}
+		status.DuplicatePoints = len(duplicates)
+		// Extra identical copies are inactive in classic Fetch: their timestamp
+		// differs from the interval assigned to that physical slot. Every unique
+		// timestamp still requires one exact copy in its canonical position.
+		for _, p := range seen {
 			relative := ((p.Timestamp-base)/int64(a.Step)%int64(a.Count) + int64(a.Count)) % int64(a.Count)
-			if base == 0 || int64(slot) != relative {
+			current, ok := positions[int(relative)]
+			if base == 0 || !ok || current.Timestamp != p.Timestamp || math.Float64bits(current.Value) != math.Float64bits(p.Value) {
 				status.Misplaced++
 			}
 		}
@@ -95,8 +120,8 @@ func (c *ContinuationCodec) PlanArchiveAnchors(ctx context.Context, kv store.Con
 			continue
 		}
 		fresh := make(map[int]*store.PointBlock)
-		for _, p := range positions {
-			slot := int((p.Timestamp - minimum) / int64(a.Step) % int64(a.Count))
+		claimed := make(map[int]bool, len(positions))
+		put := func(slot int, p store.Point) {
 			block := fresh[slot/128]
 			if block == nil {
 				block = &store.PointBlock{}
@@ -105,7 +130,33 @@ func (c *ContinuationCodec) PlanArchiveAnchors(ctx context.Context, kv store.Con
 			offset := slot % 128
 			block.Present[offset/64] |= uint64(1) << uint(offset%64)
 			block.Points[offset] = p
+			claimed[slot] = true
 			f.allocateClassicPages(a.Offset+slot*12, a.Offset+slot*12+12)
+		}
+		for _, p := range seen {
+			slot := int((p.Timestamp - minimum) / int64(a.Step) % int64(a.Count))
+			put(slot, p)
+		}
+		// Keep all physical multiplicities. Reserve every unique canonical slot
+		// before placing identical extras deterministically in unclaimed slots.
+		slices.SortFunc(duplicates, func(a, b store.Point) int {
+			if a.Timestamp < b.Timestamp {
+				return -1
+			}
+			if a.Timestamp > b.Timestamp {
+				return 1
+			}
+			return 0
+		})
+		free := 0
+		for _, p := range duplicates {
+			for claimed[free] {
+				free++
+			}
+			if free >= a.Count {
+				return plan, fmt.Errorf("identical physical copies exceed archive capacity")
+			}
+			put(free, p)
 		}
 		// This compares the complete physical point multiset, including NaN
 		// payloads and signed zeros, before any rewrite can reach the caller.

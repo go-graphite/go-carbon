@@ -111,32 +111,33 @@ type ACL struct {
 }
 
 type Service struct {
-	nativeMu      sync.Mutex
-	nativeSources map[string]*nativeSourceSession
-	config        Config
-	transferDebt  atomic.Int64
-	store         *chunkstore.Store
-	whisperIO     *whisperio.Adapter
-	secret        []byte
-	authPending   atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
-	server        *http.Server
-	listener      net.Listener
-	transfers     chan struct{}
-	maintenance   chan struct{}
-	transferPool  sync.Pool
-	mu            sync.Mutex
-	handlers      sync.WaitGroup
-	serveErr      chan error
-	nodes         []Node
-	onChange      func()
-	flushTransfer func(context.Context, []string) error
-	pyroscope     *pyroscope.Profiler
-	pprofServer   *http.Server
-	pprofListener net.Listener
-	pprofErr      chan error
-	stopped       bool
-	copyMu        sync.RWMutex
-	storeCopy     *storecopy.Manager
+	nativeMu         sync.Mutex
+	nativeSources    map[string]*nativeSourceSession
+	config           Config
+	transferDebt     atomic.Int64
+	store            *chunkstore.Store
+	whisperIO        *whisperio.Adapter
+	secret           []byte
+	authPending      atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
+	server           *http.Server
+	listener         net.Listener
+	transfers        chan struct{}
+	maintenance      chan struct{}
+	transferPool     sync.Pool
+	mu               sync.Mutex
+	handlers         sync.WaitGroup
+	serveErr         chan error
+	nodes            []Node
+	onChange         func()
+	flushTransfer    func(context.Context, []string) error
+	finiteCacheFence chunkstore.FiniteCacheFence
+	pyroscope        *pyroscope.Profiler
+	pprofServer      *http.Server
+	pprofListener    net.Listener
+	pprofErr         chan error
+	stopped          bool
+	copyMu           sync.RWMutex
+	storeCopy        *storecopy.Manager
 }
 
 func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
@@ -521,6 +522,8 @@ func (s *Service) Handler() http.Handler {
 	mux.HandleFunc("/v1/native/", s.native)
 	mux.HandleFunc("/v1/activity-backfill", s.activityBackfill)
 	mux.HandleFunc("/v1/maintenance/archive-anchors", s.archiveAnchors)
+	mux.HandleFunc("/v1/maintenance/finite-point", s.finitePoint)
+	mux.HandleFunc("/v1/maintenance/missing-only", s.missingOnly)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		phasecpu.Set(phasecpu.Buckyd)
 		defer phasecpu.Set(phasecpu.Other)
