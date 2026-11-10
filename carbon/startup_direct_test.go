@@ -20,6 +20,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/inputlog"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
+	"github.com/go-graphite/go-carbon/receiver/stream/codec"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	whisper "github.com/go-graphite/go-whisper"
 	"github.com/lomik/zapwriter"
@@ -593,6 +594,63 @@ func TestStartupDirectBinaryBitDifferential(t *testing.T) {
 		t.Fatal("binary direct points were not journalled")
 	}
 	assertDirectStoreDifferential(t, core, ordinary, name, want)
+}
+
+func TestStartupDirectStreamBitDifferential(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, address := directCaptureFixture(t)
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	encoder, err := codec.NewEncoder(codec.Options{Flags: codec.FlagZstd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encoder.Close()
+	wire, err := codec.AppendPreamble(nil, codec.FlagZstd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary := cache.New()
+	ordinary.SetMaxSize(0)
+	bits := []uint64{0, 1 << 63, 0x7ff8000000000042, 0x7ff8000000000001, 0x7ff0000000000000, 0xfff0000000000000, 1, 0x7fefffffffffffff}
+	const name = "stream.bits.straddle"
+	for phase := range 2 {
+		if phase == 1 {
+			goDirect(t, s)
+		}
+		for i := phase * 256; i < (phase+1)*256; i++ {
+			value, ts := math.Float64frombits(bits[i%len(bits)]), int64(1700000000+i/3-i%5)
+			ordinary.Add(points.OnePoint(name, value, ts))
+			if err := encoder.Add([]byte(name), value, ts); err != nil {
+				t.Fatal(err)
+			}
+		}
+		wire, err = encoder.Flush(wire)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(3 * time.Second))
+		if _, err := conn.Write(wire); err != nil {
+			t.Fatal(err)
+		}
+		wire = wire[:0]
+		awaitCapture(t, func() bool { return core.Size() == int64((phase+1)*256) })
+	}
+	if err := app.syncInputLog(); err != nil {
+		t.Fatal(err)
+	}
+	if app.inputLog.Load().Metrics().PointsWritten != 256 {
+		t.Fatal("direct stream points were not journalled exactly once")
+	}
+	assertDirectStoreDifferential(t, core, ordinary, name, ordinary.Get(name))
 }
 
 func TestStartupDirectKeepsPendingHistory(t *testing.T) {

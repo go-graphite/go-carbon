@@ -12,11 +12,12 @@ import (
 // AnchorArchive records physical classic-ring consistency, independently of
 // Fetch (which cannot diagnose an empty anchor) and logical snapshot export.
 type AnchorArchive struct {
-	Index     int    `json:"index"`
-	Points    int    `json:"points"`
-	Misplaced int    `json:"misplaced"`
-	Changed   bool   `json:"changed"`
-	Blocked   string `json:"blocked,omitempty"`
+	Index           int    `json:"index"`
+	Points          int    `json:"points"`
+	Misplaced       int    `json:"misplaced"`
+	DuplicatePoints int    `json:"duplicate_points,omitempty"`
+	Changed         bool   `json:"changed"`
+	Blocked         string `json:"blocked,omitempty"`
 }
 type AnchorRepairPlan struct {
 	Archives []AnchorArchive `json:"archives"`
