@@ -18,6 +18,9 @@ func TransferWireSize2(records []TransferMetric) int64 {
 		for _, kv := range r.Keys {
 			n += int64(8 + len(kv.Key) + len(kv.Value))
 		}
+		if r.NativeSkip != nil {
+			n += int64(36 + len(r.NativeSkip.Reason))
+		}
 	}
 	return n
 }
@@ -63,6 +66,9 @@ func writeTransferStream2(w io.Writer, count int, next func(int) (TransferMetric
 		if r.Continuation {
 			flags = 1
 		}
+		if r.NativeSkip != nil {
+			flags |= 2
+		}
 		u32(flags)
 		u32(uint32(r.Config.AggregationMethod))
 		u32(math.Float32bits(r.Config.XFilesFactor))
@@ -80,6 +86,13 @@ func writeTransferStream2(w io.Writer, count int, next func(int) (TransferMetric
 		for _, kv := range r.Keys {
 			blob(kv.Key)
 			blob(kv.Value)
+		}
+		if skip := r.NativeSkip; skip != nil {
+			u64(uint64(skip.Bytes))
+			u64(uint64(skip.PhysicalPoints))
+			u64(uint64(skip.ArchiveSlots))
+			u64(uint64(skip.MemoryBytes))
+			blob([]byte(skip.Reason))
 		}
 	}
 	if err != nil {
@@ -150,10 +163,10 @@ func readTransfer2(data []byte, count uint32) ([]TransferMetric, error) {
 		r.Version.Generation = d.u64()
 		r.Version.Revision = d.u64()
 		flags := d.u32()
-		if flags > 1 {
+		if flags > 3 {
 			return nil, ErrFormat
 		}
-		r.Continuation = flags == 1
+		r.Continuation = flags&1 != 0
 		r.Config.AggregationMethod = AggregationMethod(d.u32())
 		r.Config.XFilesFactor = math.Float32frombits(d.u32())
 		n := d.count(8)
@@ -177,6 +190,9 @@ func readTransfer2(data []byte, count uint32) ([]TransferMetric, error) {
 		}
 		for j := range r.Keys {
 			r.Keys[j] = RelayoutKV{d.blob(4096), d.blob(16 << 20)}
+		}
+		if flags&2 != 0 {
+			r.NativeSkip = &NativeSkip{Name: r.Config.Name, Bytes: int64(d.u64()), PhysicalPoints: int64(d.u64()), ArchiveSlots: int64(d.u64()), MemoryBytes: int64(d.u64()), Reason: string(d.blob(128))}
 		}
 		if d.err != nil {
 			return nil, d.err

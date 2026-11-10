@@ -46,6 +46,7 @@ type TransferMetric struct {
 	Keys         []RelayoutKV
 	PointDigest  string
 	Counts       []int
+	NativeSkip   *NativeSkip `json:",omitempty"`
 }
 
 // TransferProof describes the complete staged result before durable publication.
@@ -197,65 +198,8 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 		record.Keys = append(record.Keys, RelayoutKV{data[:len(k):len(k)], data[len(k):]})
 		return nil
 	}
-	if m.Continuation {
-		kv := s.newContinuationIO(ctx, reader, nil, m).withIterator()
-		if len(shared) > 0 {
-			it, err := shared[0].iterator(&shared[0].continuation, continuationLower, continuationUpper)
-			if err != nil {
-				return TransferMetric{}, err
-			}
-			kv.withBorrowedIterator(it)
-		}
-		defer kv.Close()
-		if len(shared) > 0 {
-			prefix := continuationPrefix(m.ID, m.Generation)
-			if err := shared[0].visit(ctx, &shared[0].continuation, continuationLower, continuationUpper, prefix, func(key, value []byte) error { return add(key[len(prefix):], value) }); err != nil {
-				return TransferMetric{}, err
-			}
-		} else if err := kv.Visit(nil, add); err != nil {
-			return TransferMetric{}, err
-		}
-		if dropper, ok := s.continuation.(ContinuationDropper); ok {
-			b := &transferBuckets{ContinuationIO: transferRecordIO(record)}
-			if err := dropper.Drop(ctx, b); err != nil {
-				return TransferMetric{}, err
-			}
-			for _, prefix := range b.prefixes {
-				visit := func() error { return kv.Visit(prefix, add) }
-				if len(shared) > 0 {
-					visit = func() error {
-						start := kv.key(prefix)
-						return shared[0].visitBucket(ctx, start, func(key, value []byte) error { return add(kv.suffix(key), value) })
-					}
-				}
-				if err := visit(); err != nil {
-					return TransferMetric{}, err
-				}
-			}
-		} else if s.timeBuckets {
-			return TransferMetric{}, ErrFormat
-		}
-	} else {
-		prefix := chunkPrefix(m.ID, m.Generation)
-		if len(shared) > 0 {
-			if err := shared[0].visit(ctx, &shared[0].chunks, []byte{'c'}, []byte{'d'}, prefix, func(key, value []byte) error { return add(key[len(prefix):], value) }); err != nil {
-				return TransferMetric{}, err
-			}
-		} else {
-			it, err := reader.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
-			if err != nil {
-				return TransferMetric{}, err
-			}
-			defer it.Close()
-			for it.First(); it.Valid(); it.Next() {
-				if err := add(it.Key()[len(prefix):], it.Value()); err != nil {
-					return TransferMetric{}, err
-				}
-			}
-			if err := it.Error(); err != nil {
-				return TransferMetric{}, err
-			}
-		}
+	if err := s.visitTransferKeys(ctx, reader, m, add, shared...); err != nil {
+		return TransferMetric{}, err
 	}
 	slices.SortFunc(record.Keys, func(a, b RelayoutKV) int { return bytes.Compare(a.Key, b.Key) })
 	if (len(shared) == 0 || !shared[0].native) && crc32.ChecksumIEEE([]byte(m.Name))%64 == 0 {
@@ -270,6 +214,72 @@ func (s *Store) transferFromLimit(ctx context.Context, reader pebble.Reader, m M
 		record.PointDigest, record.Counts = snapshotDigest(snapshot)
 	}
 	return record, nil
+}
+
+// visitTransferKeys borrows one stored group at a time. Bucket discovery uses
+// the codec's descriptors directly, so size admission never retains history.
+func (s *Store) visitTransferKeys(ctx context.Context, reader pebble.Reader, m Metadata, add func([]byte, []byte) error, shared ...*transferReader) error {
+	if m.Continuation {
+		kv := s.newContinuationIO(ctx, reader, nil, m).withIterator()
+		if len(shared) > 0 {
+			it, err := shared[0].iterator(&shared[0].continuation, continuationLower, continuationUpper)
+			if err != nil {
+				return err
+			}
+			kv.withBorrowedIterator(it)
+		}
+		defer kv.Close()
+		if len(shared) > 0 {
+			prefix := continuationPrefix(m.ID, m.Generation)
+			if err := shared[0].visit(ctx, &shared[0].continuation, continuationLower, continuationUpper, prefix, func(key, value []byte) error { return add(key[len(prefix):], value) }); err != nil {
+				return err
+			}
+		} else if err := kv.Visit(nil, add); err != nil {
+			return err
+		}
+		if dropper, ok := s.continuation.(ContinuationDropper); ok {
+			b := &transferBuckets{ContinuationIO: kv}
+			if err := dropper.Drop(ctx, b); err != nil {
+				return err
+			}
+			for _, prefix := range b.prefixes {
+				visit := func() error { return kv.Visit(prefix, add) }
+				if len(shared) > 0 {
+					visit = func() error {
+						start := kv.key(prefix)
+						return shared[0].visitBucket(ctx, start, func(key, value []byte) error { return add(kv.suffix(key), value) })
+					}
+				}
+				if err := visit(); err != nil {
+					return err
+				}
+			}
+		} else if s.timeBuckets {
+			return ErrFormat
+		}
+	} else {
+		prefix := chunkPrefix(m.ID, m.Generation)
+		if len(shared) > 0 {
+			if err := shared[0].visit(ctx, &shared[0].chunks, []byte{'c'}, []byte{'d'}, prefix, func(key, value []byte) error { return add(key[len(prefix):], value) }); err != nil {
+				return err
+			}
+		} else {
+			it, err := reader.NewIter(&pebble.IterOptions{LowerBound: prefix, UpperBound: prefixEnd(prefix)})
+			if err != nil {
+				return err
+			}
+			defer it.Close()
+			for it.First(); it.Valid(); it.Next() {
+				if err := add(it.Key()[len(prefix):], it.Value()); err != nil {
+					return err
+				}
+			}
+			if err := it.Error(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func transferDigest(record TransferMetric) string {
@@ -330,6 +340,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	needsFloatFormat := false
 	needsReferences := false
 	for _, r := range records {
+		if r.NativeSkip != nil {
+			return nil, ErrFormat // size skips are only meaningful to native receipts
+		}
 		if err := errors.Join(validateName(r.Config.Name), validate(r.Config)); err != nil {
 			return nil, err
 		}
@@ -942,6 +955,9 @@ func headerForTransfer(r TransferMetric) transferHeader {
 func TransferWireSize(records []TransferMetric) (int64, error) {
 	n := int64(12 + sha256.Size)
 	for _, r := range records {
+		if r.NativeSkip != nil {
+			return 0, ErrFormat // v1 cannot preserve a native size skip
+		}
 		header, err := json.Marshal(headerForTransfer(r))
 		if err != nil {
 			return 0, err
@@ -955,6 +971,11 @@ func TransferWireSize(records []TransferMetric) (int64, error) {
 }
 
 func WriteTransfer(w io.Writer, records []TransferMetric) error {
+	for _, r := range records {
+		if r.NativeSkip != nil {
+			return ErrFormat
+		}
+	}
 	h := sha256.New()
 	out := io.MultiWriter(w, h)
 	var size [4]byte

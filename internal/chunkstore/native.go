@@ -44,6 +44,7 @@ type NativeReceipt struct {
 	ReservedIDs                       int
 	Tables                            []NativeSSTReceipt `json:",omitempty"`
 	Mappings                          []NativeMapping    `json:",omitempty"`
+	Skipped                           []NativeSkip       `json:",omitempty"`
 }
 
 // Ordinal plus the immutable stream hash resolves the source name. Keeping
@@ -172,6 +173,11 @@ func (s *Store) readNativeReceipt(ctx context.Context, request NativeRange) (Nat
 	if err := receipt.Validate(); err != nil {
 		return receipt, err
 	}
+	for _, skip := range receipt.Skipped {
+		if skip.Name != request.Names[skip.Ordinal] {
+			return receipt, ErrFormat
+		}
+	}
 	return receipt, nil
 }
 
@@ -194,6 +200,13 @@ func (r NativeReceipt) Validate() error {
 		if _, err := hex.DecodeString(h); err != nil {
 			return ErrFormat
 		}
+	}
+	previous := -1
+	for _, skip := range r.Skipped {
+		if skip.Ordinal <= previous || skip.Ordinal >= r.Count || r.IsCopied(skip.Ordinal) || skip.Name == "" || skip.Bytes < 0 || skip.PhysicalPoints < 0 || skip.ArchiveSlots < 0 || skip.MemoryBytes < 0 || skip.Reason == "" {
+			return ErrFormat
+		}
+		previous = skip.Ordinal
 	}
 	if len(r.Mappings) != 0 {
 		if len(r.Mappings) != r.CopiedCount {
@@ -328,6 +341,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 	seen := make([]bool, len(request.Names))
 	metadataBytes := int64(0)
 	needsFloatFormat := false
+	var skipped []NativeSkip
 	for i := range stream.Count {
 		if err := ctx.Err(); err != nil {
 			return receipt, err
@@ -347,6 +361,15 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		}
 		seen[position] = true
 		positions[i] = position
+		if record.NativeSkip != nil {
+			if err := validateNativeSkipRecord(record); err != nil {
+				return receipt, err
+			}
+			skip := *record.NativeSkip
+			skip.Ordinal = position
+			skipped = append(skipped, skip)
+			continue
+		}
 		// A zero-version empty record is an explicit snapshot absence marker.
 		// It remains deferred to the existing source-absence/verification policy;
 		// it never creates a catalog or silently counts as copied history.
@@ -357,7 +380,13 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			return receipt, err
 		}
 		if err := validateNativeMemory(record); err != nil {
-			return receipt, err
+			var skip *NativeSkip
+			if !errors.As(err, &skip) {
+				return receipt, err
+			}
+			skip.Ordinal = position
+			skipped = append(skipped, *skip)
+			continue
 		}
 		if record.Continuation != (s.continuation != nil) {
 			return receipt, ErrFormat
@@ -445,7 +474,8 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 	if err != nil {
 		return receipt, err
 	}
-	receipt = NativeReceipt{FirstID: intent.First, ReservedIDs: intent.Count, Tables: tableReceipts, Identity: identity, NamesSHA256: namesHash, Count: len(request.Names), Copied: make([]byte, (len(request.Names)+7)/8), Digest: digest, Bytes: wireBytes}
+	slices.SortFunc(skipped, func(a, b NativeSkip) int { return a.Ordinal - b.Ordinal })
+	receipt = NativeReceipt{Skipped: skipped, FirstID: intent.First, ReservedIDs: intent.Count, Tables: tableReceipts, Identity: identity, NamesSHA256: namesHash, Count: len(request.Names), Copied: make([]byte, (len(request.Names)+7)/8), Digest: digest, Bytes: wireBytes}
 	if err := s.nativeStep("before-publish"); err != nil {
 		return receipt, err
 	}

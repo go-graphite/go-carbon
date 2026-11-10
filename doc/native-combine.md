@@ -113,12 +113,27 @@ Each store admits one native import and one native export at a time, with
 separate slots so reciprocal copies cannot deadlock. HTTP pulls acquire admission
 before decoding metadata or opening a donor response. New requests above 4096 names or 1 MiB of name bytes
 fail with HTTP 413; range metadata is limited to 16 MiB. Per-history encoded bytes
-(including key-vector overhead) are limited to 64 MiB. Archive capacity and
-physical history are conservatively limited to 1,048,576 points per input and
-result, before archive decoding. Oversized histories are rejected, not truncated.
+(including key-vector overhead) are limited to 128 MiB. Archive capacity and
+physical history are conservatively limited to 33,554,432 points per input and
+result, before archive decoding. A descriptor/group scan measures source sizes
+without retaining history. Names above these limits become explicit skip records
+in the checksummed v2 stream; the remaining names still copy. Such streams require
+an updated receiver (old receivers reject the new skip flag).
+
+`Skipped` in the durable receipt reports each uncopied ordinal/name, encoded bytes,
+physical point bound, archive slots, reason and estimated worker bytes when the
+combine budget is binding. These ordinals remain deferred, never completed.
+`store-copy` prints a `native_skipped` event per name after journaling the receipt,
+including on acknowledgement recovery. A retry keeps the original receipt;
+retrying a size skip with different receiver limits needs a new range identity.
 
 Preparation reserves a conservative 1 GiB per worker from a 2 GiB scratch budget,
-and publishes at most 32 names before preparing the next batch. This is a static
+and publishes at most 32 names before preparing the next batch. Before combining,
+admission charges input arenas, vector growth, encoded output and codec scratch.
+Dense native groups retain implicit timestamps; irregular groups and the snapshot
+fallback are charged for point materialization before allocation. A name whose
+estimate exceeds 1 GiB is skipped durably, leaving its existing catalog intact.
+All other range, SST, metadata and cancellation bounds remain unchanged. This is a static
 allocation estimate, not a process RSS limit: foreground writes, Pebble caches,
 native allocations and old range-tombstone fragmentation require separate
 headroom. Increasing server CPU count cannot increase native combine concurrency.

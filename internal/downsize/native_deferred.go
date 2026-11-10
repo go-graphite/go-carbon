@@ -118,6 +118,9 @@ func (c *nativeController) executeDeferred(ctx context.Context, parent task, nam
 	if err != nil {
 		return err
 	}
+	for _, skip := range receipt.Skipped {
+		nativeSkipEvent(receipt.Identity, skip)
+	}
 	event("native_deferred_verified", map[string]any{"stream": parent.Stream, "start": parent.Start, "end": parent.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "parent_receipt": id, "receipt": identity})
 	return nil
 }
