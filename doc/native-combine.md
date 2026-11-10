@@ -69,8 +69,40 @@ crash recovery and controlled Linux throughput are separate checks. Rates must
 include input/output bytes, CPU, disk/NIC, peak memory and publication locks.
 There are no new runtime rate, cache, debt, name or p99 admission governors.
 
-The engine alone does not revisit phase1 deferrals in an existing campaign:
-`nativeStreamCovered` treats an acknowledged phase1 range as covered. An integrated
-controller needs a separately tested deferred-ordinal path that preserves the
-old receipt and completed ordinals. Do not treat `--combine-existing` alone as
-that integration or as live canary readiness.
+## Continuing a phase-1 campaign
+
+`--engine bulk --combine-existing --bulk-only` revisits acknowledged native
+deferrals in the same journal. Phase-1 receipt identities remain byte-compatible.
+Combine requests use a separate identity domain; a deferred attempt also binds
+the preceding receipt and an immutable selected-ordinal bitmap. The first attempt
+links to the phase-1 receipt. This chain permits a fresh attempt when a cache-only
+target becomes committed, while lost acknowledgements reuse the same intent. The receiver
+exports only selected names, and advertises `NativeDeferredCombine` so older
+receivers fail the controller's capability check.
+
+The controller fsyncs the selection before sending the pull. A lost response
+reuses that selection and checks the durable receipt before opening a donor pin.
+Acknowledgement merges copied bits into the parent's completion bitmap and
+retains the original receipt and every combine receipt, including after completion.
+No overlapping journal ranges are created. Already completed ordinals are neither
+exported nor republished. Selected names that remain absent stay unfinished.
+
+Use `--deferred-only` to exclude unissued plan gaps. Unacknowledged phase-1 intents
+must be resolved first. `--deferred-range STREAM:START:END` restricts work to one
+acknowledged journal range; it also excludes gaps. Both scope flags require
+`--combine-existing --bulk-only`. `--max-batches` counts attempted parent ranges,
+including recovery, and remains a canary scope bound rather than a rate governor.
+
+For example, from the existing campaign directory, using its original plan and
+journal (the stream/ordinals below must come from that journal):
+
+```sh
+store-copy run --plan refresh1-plan --state copy-refresh1-state.jsonl \
+  --engine bulk --combine-existing --bulk-only --deferred-only \
+  --deferred-range STREAM:START:END --max-batches 1 --apply
+```
+
+Each combine receipt covers the original ordinal count: its unset bits include
+previously completed phase-1 names. Remaining work is the parent's merged `Done`
+bitmap, not the new receipt's `DeferredCount`. Canary readiness additionally
+requires the final integrated build, real native-pair oracle and owner rollout.

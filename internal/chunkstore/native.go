@@ -28,6 +28,10 @@ type NativeRange struct {
 	Names                           []string
 	Candidates                      []byte `json:",omitempty"`
 	Combine                         bool   `json:",omitempty"`
+	// Selection is an immutable phase-2 ordinal bitmap. Candidates is the
+	// receiver's transient export filter and deliberately does not identify work.
+	DeferredFrom string `json:",omitempty"`
+	Selection    []byte `json:",omitempty"`
 }
 
 type NativeReceipt struct {
@@ -83,7 +87,23 @@ func (r NativeRange) Identity() (string, string, error) {
 		_, _ = h.Write([]byte(name))
 	}
 	names := hex.EncodeToString(h.Sum(nil))
-	identity := sha256.Sum256([]byte(fmt.Sprintf("native-v1/%s/%s/%s/%s/%d/%d/%s", r.Operation, r.Plan, r.Stream, r.Source, r.Start, r.End, names)))
+	domain := "native-v1"
+	if r.Combine {
+		domain = "native-combine-v1"
+	}
+	if r.DeferredFrom != "" || r.Selection != nil {
+		if !r.Combine || len(r.DeferredFrom) != 64 || len(r.Selection) != (len(r.Names)+7)/8 {
+			return "", "", ErrFormat
+		}
+		if _, err := hex.DecodeString(r.DeferredFrom); err != nil {
+			return "", "", ErrFormat
+		}
+		if n := len(r.Names) % 8; n != 0 && r.Selection[len(r.Selection)-1]>>uint(n) != 0 {
+			return "", "", ErrFormat
+		}
+		domain += "/" + r.DeferredFrom + "/" + hex.EncodeToString(r.Selection)
+	}
+	identity := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%s/%s/%s/%d/%d/%s", domain, r.Operation, r.Plan, r.Stream, r.Source, r.Start, r.End, names)))
 	return hex.EncodeToString(identity[:]), names, nil
 }
 

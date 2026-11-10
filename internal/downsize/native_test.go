@@ -247,6 +247,10 @@ func TestNativeControllerLostAckCannotReplayThroughMetricPath(t *testing.T) {
 }
 
 func TestNativeCompletedStreamDoesNotReadPlanRows(t *testing.T) {
+	deferred := []task{{Start: 0, End: 1, Native: &nativeRangeState{Receipt: store.NativeReceipt{Count: 1}, Done: []byte{0}}}}
+	if !nativeStreamCovered(deferred, 1, false) || nativeStreamCovered(deferred, 1, true) {
+		t.Fatal("phase-1 coverage hid phase-2 deferrals")
+	}
 	// A fully covered stream needs neither its rows nor any network access.
 	// Deliberately omit planData/client: attempting the old walk would fail.
 	c := &nativeController{mover: &mover{journal: &journal{tasks: map[string]task{
@@ -256,10 +260,10 @@ func TestNativeCompletedStreamDoesNotReadPlanRows(t *testing.T) {
 	if err := c.route(context.Background(), route{SHA256: "stream", Metrics: 10}); err != nil {
 		t.Fatal(err)
 	}
-	if nativeStreamCovered([]task{{Start: 0, End: 5}, {Start: 6, End: 10}}, 10) {
+	if nativeStreamCovered([]task{{Start: 0, End: 5}, {Start: 6, End: 10}}, 10, false) {
 		t.Fatal("skipped ordinal gap")
 	}
-	if nativeStreamCovered([]task{{Start: 0, End: 10, Native: &nativeRangeState{Intent: true}}}, 10) {
+	if nativeStreamCovered([]task{{Start: 0, End: 10, Native: &nativeRangeState{Intent: true}}}, 10, false) {
 		t.Fatal("skipped unresolved native acknowledgement")
 	}
 }

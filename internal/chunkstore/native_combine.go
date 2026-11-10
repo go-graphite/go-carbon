@@ -75,6 +75,9 @@ func (s *Store) ResumeNativeCombine(ctx context.Context, request NativeRange) (N
 }
 
 func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
+	if request.Selection != nil {
+		request.Candidates = request.Selection
+	}
 	identity, namesHash, err := request.Identity()
 	if err != nil {
 		return receipt, err

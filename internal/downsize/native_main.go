@@ -59,6 +59,19 @@ func runNative(ctx context.Context, o options) error {
 	}
 	defer j.close()
 	j.preserveRows = true
+	if o.deferredOnly {
+		for _, t := range j.tasks {
+			if t.Native != nil && t.Native.Intent {
+				return errors.New("resolve unacknowledged native ranges before --deferred-only")
+			}
+		}
+	}
+	if o.deferredRange != "" {
+		t, ok := j.tasks[o.deferredRange]
+		if !ok || t.Kind != "native-range" || t.Native == nil || t.Native.Intent {
+			return errors.New("--deferred-range must identify an acknowledged native journal range")
+		}
+	}
 	client := &http.Client{Transport: &http.Transport{MaxIdleConns: runtime.NumCPU() * 4, MaxIdleConnsPerHost: runtime.NumCPU() * 2}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	defer client.CloseIdleConnections()
 	m := &mover{options: o, planData: p, journal: j, client: client}
@@ -77,6 +90,7 @@ func runNative(ctx context.Context, o options) error {
 			Protocol                              int
 			NativeAbsentOnly, DurableRangeReceipt bool
 			NativeExactCombine                    bool
+			NativeDeferredCombine                 bool
 			CPULimit                              int
 			Node                                  string
 		}
@@ -88,6 +102,9 @@ func runNative(ctx context.Context, o options) error {
 		}
 		if o.bulkCombine && targets[host] && !capability.NativeExactCombine {
 			return fmt.Errorf("native exact combine build required on %s", host)
+		}
+		if o.bulkCombine && targets[host] && !capability.NativeDeferredCombine {
+			return fmt.Errorf("native deferred combine build required on %s", host)
 		}
 		if !o.localLab {
 			matched := false
@@ -251,10 +268,22 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 	c.stateMu.Lock()
 	completed := c.journal.ranges(r.SHA256)
 	c.stateMu.Unlock()
+	if c.deferredRange != "" {
+		var selected []task
+		for _, t := range completed {
+			if taskKey(t) == c.deferredRange {
+				selected = append(selected, t)
+			}
+		}
+		completed = selected
+		if len(completed) == 0 {
+			return nil
+		}
+	}
 	// A prior importer already verified these immutable plan ordinals. No
 	// new data operation needs their names, and parsing tens of millions of
 	// completed rows delays a resumed native canary without verifying new work.
-	if nativeStreamCovered(completed, r.Metrics) {
+	if nativeStreamCovered(completed, r.Metrics, c.bulkCombine) {
 		return nil
 	}
 	var names []string
@@ -276,6 +305,23 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 				return err
 			}
 		}
+		c.stateMu.Lock()
+		pending = c.journal.tasks[taskKey(pending)]
+		c.stateMu.Unlock()
+		if c.bulkCombine && pending.Native != nil && !pending.Native.complete() {
+			if pending.Start < 0 || pending.End > int64(len(names)) {
+				return errors.New("native deferred range outside plan stream")
+			}
+			if c.maxBatches > 0 && c.issued.Add(1) > c.maxBatches {
+				return nil
+			}
+			if err := c.executeDeferred(ctx, pending, names[pending.Start:pending.End]); err != nil {
+				return err
+			}
+		}
+	}
+	if c.deferredOnly || c.deferredRange != "" {
+		return nil
 	}
 	var cursor int64
 	skip := 0
@@ -307,6 +353,9 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 }
 func (c *nativeController) executeRange(ctx context.Context, t task, names []string) error {
 	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names, Combine: c.bulkCombine}
+	if t.Native != nil && t.Native.Intent {
+		request.Combine = t.Native.Combine
+	}
 	session, err := c.session(ctx, t.Source)
 	if err != nil {
 		return err
@@ -320,7 +369,7 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	intent.Phase = "verified"
 	intent.Proofs = nil
 	intent.Names = nil
-	intent.Native = &nativeRangeState{Intent: true, Receipt: chunkstore.NativeReceipt{Identity: identity, NamesSHA256: namesHash, Count: len(names)}}
+	intent.Native = &nativeRangeState{Intent: true, Combine: request.Combine, Receipt: chunkstore.NativeReceipt{Identity: identity, NamesSHA256: namesHash, Count: len(names)}}
 	c.stateMu.Lock()
 	err = c.journal.save(intent)
 	c.stateMu.Unlock()
@@ -342,7 +391,7 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 		return errors.New("native durable ack differs from plan range")
 	}
 	t.Bytes = receipt.Bytes
-	t.Native = &nativeRangeState{Receipt: receipt, Done: bytes.Clone(receipt.Copied)}
+	t.Native = &nativeRangeState{Combine: request.Combine, Receipt: receipt, Done: bytes.Clone(receipt.Copied)}
 	t.Phase = "verified"
 	if t.Native.complete() {
 		t.Phase = "done"
@@ -358,13 +407,12 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	return nil
 }
 
-// ranges is sorted by journal.ranges; acknowledged native deferrals are also
-// covered for this baseline. An unresolved native intent still needs its names
-// to query the durable receiver receipt and must not be skipped.
-func nativeStreamCovered(ranges []task, count int64) bool {
+// Phase 1 covers acknowledged deferrals only for its absence pass. Phase 2
+// must revisit them, including any durable selection with a lost response.
+func nativeStreamCovered(ranges []task, count int64, combine bool) bool {
 	var end int64
 	for _, t := range ranges {
-		if t.Native != nil && t.Native.Intent {
+		if t.Native != nil && (t.Native.Intent || combine && !t.Native.complete()) {
 			return false
 		}
 		if t.Start > end {
