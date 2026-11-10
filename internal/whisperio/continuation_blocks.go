@@ -34,9 +34,8 @@ func (f *continuationFile) archiveAt(offset int) (int, whisper.StorageArchiveLay
 // ago, so sidecar groups are probed; a main file's are rewritten as it fills.
 func (f *continuationFile) pointBlock(key []byte) (*store.PointBlock, error) {
 	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
-		if block := buffer.blocks[string(key)]; block != nil {
-			owned := *block
-			return &owned, nil
+		if block := buffer.point(key); block != nil {
+			return block, nil
 		}
 	}
 	var block store.PointBlock
@@ -48,6 +47,9 @@ func (f *continuationFile) pointBlock(key []byte) (*store.PointBlock, error) {
 	value, err := read(key)
 	f.fs.timer.Unnest(stagetime.TailRead, start)
 	if errors.Is(err, store.ErrNotFound) {
+		if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
+			buffer.remember(key, &block)
+		}
 		return &block, nil
 	}
 	if err != nil {
@@ -55,6 +57,9 @@ func (f *continuationFile) pointBlock(key []byte) (*store.PointBlock, error) {
 	}
 	if err := store.DecodePointBlock(value, &block); err != nil {
 		return nil, err
+	}
+	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
+		buffer.remember(key, &block)
 	}
 	return &block, nil
 }
