@@ -1849,12 +1849,33 @@ func (u *fileListUpdate) pruneRealtimeMetrics() {
 		// already maintains the compressed radix shape, so pruning adds a full
 		// traversal without changing this private tree.
 		if u.trieIdx.builder == nil && !u.scanFailed {
-			if u.trieIdx.snapshot != nil && u.listener.cacheGet != nil {
-				// A queued metric may still be awaiting its first disk write.
-				// Preserve those overlay entries even if this scan saw no file.
+			metricStore := u.listener.getMetricStore()
+			if metricStore != nil && metricStore.IncrementalSource() == "" {
+				metricStore = nil
+			}
+			if u.trieIdx.snapshot != nil && (u.listener.cacheGet != nil || metricStore != nil) {
+				// An overlay name can commit after the scan's catalog view was
+				// read and leave cache before prune. Recheck that small delta
+				// against current durable ownership, as well as pending points.
 				names, nodes, _, _, _ := u.trieIdx.allMetricsNodeMutable(u.trieIdx.root, '.', "", int(^uint(0)>>1), false)
 				for i, name := range names {
-					if nodes[i].gen != u.trieIdx.root.gen && len(u.listener.cacheGet(name)) > 0 {
+					if nodes[i].gen == u.trieIdx.root.gen {
+						continue
+					}
+					if u.cancelled() {
+						return
+					}
+					keep := u.listener.cacheGet != nil && len(u.listener.cacheGet(name)) > 0
+					if !keep && metricStore != nil {
+						_, err := metricStore.Metadata(context.Background(), name)
+						if err != nil && !errors.Is(err, store.ErrNotFound) {
+							u.scanFailed = true
+							u.logger.Error("reconcile native discovery before pruning", zap.String("metric", name), zap.Error(err))
+							return
+						}
+						keep = err == nil
+					}
+					if keep {
 						u.listener.insertRealtimeMetric(u.trieIdx, name)
 					}
 				}
