@@ -95,7 +95,7 @@ func TestSoftThrottleAccountsForCoalescedTicks(t *testing.T) {
 		permits := make(chan bool, 40)
 		exit, done := make(chan bool), make(chan struct{})
 		go func() {
-			softThrottleTicks(permits, 1000, 40, ticks, now, exit)
+			softThrottleTicks(permits, 1000, 40, 1, ticks, now, exit)
 			close(done)
 		}()
 		defer func() { close(exit); <-done }()
@@ -123,7 +123,7 @@ func TestSoftThrottleDelayedPublisherCannotExceedBurst(t *testing.T) {
 		ticks, permits := make(chan time.Time), make(chan bool, 40)
 		exit, done := make(chan bool), make(chan struct{})
 		go func() {
-			softThrottleTicks(permits, 1000, 40, ticks, now, exit)
+			softThrottleTicks(permits, 1000, 40, 1, ticks, now, exit)
 			close(done)
 		}()
 		defer func() { close(exit); <-done }()
@@ -154,7 +154,7 @@ func TestSoftThrottleStopsWhileConsumerBlocked(t *testing.T) {
 		ticks := make(chan time.Time)
 		exit, done := make(chan bool), make(chan struct{})
 		go func() {
-			softThrottleTicks(make(chan bool), 1000, 40, ticks, now, exit)
+			softThrottleTicks(make(chan bool), 1000, 40, 1, ticks, now, exit)
 			close(done)
 		}()
 		synctest.Wait()
@@ -178,7 +178,7 @@ func TestSoftThrottleOldBufferAndDelayedCreditShareBurst(t *testing.T) {
 		ticks, permits := make(chan time.Time), make(chan bool, 40)
 		exit, done := make(chan bool), make(chan struct{})
 		go func() {
-			softThrottleTicks(permits, 1000, 40, ticks, now, exit)
+			softThrottleTicks(permits, 1000, 40, 1, ticks, now, exit)
 			close(done)
 		}()
 		defer func() { close(exit); <-done }()
@@ -202,4 +202,28 @@ func TestSoftThrottleOldBufferAndDelayedCreditShareBurst(t *testing.T) {
 			t.Fatalf("old buffer and delayed publisher double-banked credit: got=%d want=20", got)
 		}
 	})
+}
+
+func TestSoftThrottleSinglePermitBurstKeepsConfiguredRate(t *testing.T) {
+	for _, rate := range []int{17, 27, 31} {
+		t.Run(fmt.Sprint(rate), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				ticker := NewThrottleTickerWithBurst(rate, 1)
+				defer ticker.Stop()
+				end := time.After(time.Second)
+				count := 0
+				for {
+					select {
+					case <-ticker.C:
+						count++
+					case <-end:
+						if count < rate-1 || count > rate+1 {
+							t.Fatalf("single-permit burst lost configured rate: got=%d want~%d", count, rate)
+						}
+						return
+					}
+				}
+			})
+		})
+	}
 }

@@ -64,6 +64,7 @@ func softThrottle(throttle chan bool, ratePerSec, burst int) func(chan bool) {
 		defer close(throttle)
 
 		delimeter := ratePerSec
+		chunk := 1
 
 		if ratePerSec > 1000 {
 			minRemainder := ratePerSec
@@ -74,21 +75,23 @@ func softThrottle(throttle chan bool, ratePerSec, burst int) func(chan bool) {
 					minRemainder = ratePerSec % delimeter
 				}
 			}
+			chunk = ratePerSec / delimeter
 		}
 
 		step := time.Duration(1e9/delimeter) * time.Nanosecond
 
 		ticker := time.NewTicker(step)
 		defer ticker.Stop()
-		softThrottleTicks(throttle, ratePerSec, burst, ticker.C, time.Now, exit)
+		softThrottleTicks(throttle, ratePerSec, burst, chunk, ticker.C, time.Now, exit)
 	}
 }
 
 // The explicit clock/tick boundary lets tests reproduce a delayed publisher
 // without depending on host CPU scheduling or a wall-clock throughput gate.
-func softThrottleTicks(throttle chan bool, rate, burst int, ticks <-chan time.Time, now func() time.Time, exit chan bool) {
-	last, credit := now(), 0.
-	space := max(0, burst-len(throttle))
+func softThrottleTicks(throttle chan bool, rate, burst, chunk int, ticks <-chan time.Time, now func() time.Time, exit chan bool) {
+	last := now()
+	credit, fraction := 0, 0.
+	space := max(chunk, burst-len(throttle))
 	for {
 		select {
 		case <-ticks:
@@ -97,9 +100,14 @@ func softThrottleTicks(throttle chan bool, rate, burst int, ticks <-chan time.Ti
 		}
 		at := now()
 		// Keep the pre-wait free capacity: permits already buffered at that
-		// boundary and catch-up credit together cannot exceed burst, even if
-		// the consumer drains the old buffer before this publisher resumes.
-		credit = math.Min(float64(space), credit+at.Sub(last).Seconds()*float64(rate))
+		// boundary and catch-up credit together cannot exceed burst plus one
+		// in-flight scheduling chunk. Retain that chunk when the last buffered
+		// permit has not yet been consumed, including at low rates/burst=1.
+		// Keep sub-permit time separately when whole credit hits the cap.
+		// Dropping that fraction at burst=1 can halve an indivisible rate.
+		whole, remainder := math.Modf(fraction + at.Sub(last).Seconds()*float64(rate))
+		fraction = remainder
+		credit = int(math.Min(float64(space), float64(credit)+whole))
 		last = at
 		for credit >= 1 {
 			select {
@@ -119,7 +127,7 @@ func softThrottleTicks(throttle chan bool, rate, burst int, ticks <-chan time.Ti
 				return
 			}
 		}
-		space = max(0, burst-len(throttle))
+		space = max(chunk, burst-len(throttle))
 	}
 }
 
