@@ -271,9 +271,10 @@ func (q *expireCache) getQueryItem(k string, size uint64, expire int32) *QueryIt
 }
 
 type CarbonserverListener struct {
-	indexStopOnce   sync.Once
-	indexPaused     atomic.Bool
-	startupScanGate <-chan struct{}
+	indexStopOnce     sync.Once
+	indexPaused       atomic.Bool
+	startupScanGate   <-chan struct{}
+	scanRecoveryReady func() bool
 	grpcv2.UnimplementedCarbonV2Server
 	helper.Stoppable
 	cacheGet          func(key string) []points.Point
@@ -1115,6 +1116,10 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, scanFrequency 
 	cacheMetricNames := make(map[string]struct{})
 	knownMetricsStatTicker, quotaAndUsageStatTicker, stopTickers := listener.fileListStatTickers()
 	defer stopTickers()
+	retryScan := time.NewTimer(time.Hour)
+	retryScan.Stop()
+	defer retryScan.Stop()
+	var retry <-chan time.Time
 
 uloop:
 	for {
@@ -1129,6 +1134,8 @@ uloop:
 			return
 		case <-scanFrequency:
 		case <-force:
+		case <-retry:
+			retry = nil
 		case <-knownMetricsStatTicker:
 			// It's only useful when using realtime index as the
 			// scanFrequency should be a long interval/duration
@@ -1157,6 +1164,16 @@ uloop:
 
 			continue uloop
 		}
+		// A validated checkpoint already serves reads. Defer reconciliation
+		// until capture, warming and restored durability finish, while keeping
+		// realtime name insertion and cancellation responsive in this loop.
+		if listener.scanRecoveryReady != nil && !listener.scanRecoveryReady() {
+			retryScan.Reset(time.Second)
+			retry = retryScan.C
+			continue
+		}
+		retryScan.Stop()
+		retry = nil
 
 		if listener.cacheGetRecentMetrics != nil {
 			// cacheMetricNames maintains all new metric names added in cache
@@ -3200,6 +3217,12 @@ func (listener *CarbonserverListener) PauseIndexUpdates() {
 // immutable index reads can already be served while disk history catches up.
 func (listener *CarbonserverListener) SetStartupScanGate(gate <-chan struct{}) {
 	listener.startupScanGate = gate
+}
+
+// SetScanRecoveryReady defers scans of an already validated read index without
+// blocking realtime metric names. Configure before starting index workers.
+func (listener *CarbonserverListener) SetScanRecoveryReady(ready func() bool) {
+	listener.scanRecoveryReady = ready
 }
 func (listener *CarbonserverListener) WaitForWarmup() {
 	if listener.indexWarmupDone != nil {

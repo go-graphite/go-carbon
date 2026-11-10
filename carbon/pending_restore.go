@@ -108,6 +108,11 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 			zap.Duration("limit", pendingScanGateLimit), zap.Uint64("outstanding", core.PendingOutstanding()))
 	})
 	cs.SetStartupScanGate(gate)
+	stop, done := make(chan struct{}), make(chan struct{})
+	warmed := app.metadataPrewarmGate
+	cs.SetScanRecoveryReady(func() bool {
+		return restartRecoveryReady(core, done, warmed, app.startupCaptureState.Load())
+	})
 	defer func() {
 		if app.pendingDone == nil {
 			stopGateLimit()
@@ -126,7 +131,6 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 	// Tail and live writes claim their own saved history first. Leave unrelated
 	// checkpoint work until the tail has opened intake, so its decoding and
 	// persistence do not compete with the work keeping fresh input closed.
-	stop, done := make(chan struct{}), make(chan struct{})
 	app.pendingStop, app.pendingDone, app.storeRestoreDone = stop, done, done
 	loadedDone := make(chan struct{})
 	app.storeRestoreLoaded = loadedDone
