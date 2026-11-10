@@ -247,10 +247,11 @@ func newInherited(name string, options *Options, store func(*points.Points), h *
 		// The pump starts before the tracked handler configures its deadline.
 		// Give its initial read an explicitly unexpired deadline.
 		_ = conn.SetReadDeadline(time.Time{})
-		var ahead *readAheadConn
-		if capture == nil {
-			ahead = newReadAheadConnLimit(conn, readAheadBytes)
-		}
+		// Capture cannot consume socket bytes until the inherited protocol
+		// prefix has replayed. Pump the wire independently during that work.
+		// Capture handlers are already marked ready: their first post-prefix
+		// read drains this bounded buffer and returns to direct socket reads.
+		ahead := newReadAheadConnLimit(conn, readAheadBytes)
 		conns = append(conns, Conn{Leftover: c.Leftover, conn: conn, ahead: ahead})
 	}
 	err = r.listen(func() (*net.TCPListener, error) {
