@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"math"
 	"time"
 )
 
@@ -37,8 +38,9 @@ func newThrottleTicker(ratePerSec int, hard bool) *ThrottleTicker {
 }
 
 func newThrottleTickerBurst(ratePerSec int, hard bool, burst int) *ThrottleTicker {
+	burst = min(ratePerSec, max(1, burst))
 	t := &ThrottleTicker{
-		C: make(chan bool, min(ratePerSec, max(1, burst))),
+		C: make(chan bool, burst),
 	}
 
 	t.Start()
@@ -51,18 +53,17 @@ func newThrottleTickerBurst(ratePerSec int, hard bool, burst int) *ThrottleTicke
 	if hard {
 		t.Go(hardThrottle(t.C, ratePerSec))
 	} else {
-		t.Go(softThrottle(t.C, ratePerSec))
+		t.Go(softThrottle(t.C, ratePerSec, burst))
 	}
 
 	return t
 }
 
-func softThrottle(throttle chan bool, ratePerSec int) func(chan bool) {
+func softThrottle(throttle chan bool, ratePerSec, burst int) func(chan bool) {
 	return func(exit chan bool) {
 		defer close(throttle)
 
 		delimeter := ratePerSec
-		chunk := 1
 
 		if ratePerSec > 1000 {
 			minRemainder := ratePerSec
@@ -73,31 +74,52 @@ func softThrottle(throttle chan bool, ratePerSec int) func(chan bool) {
 					minRemainder = ratePerSec % delimeter
 				}
 			}
-
-			chunk = ratePerSec / delimeter
 		}
 
 		step := time.Duration(1e9/delimeter) * time.Nanosecond
 
 		ticker := time.NewTicker(step)
 		defer ticker.Stop()
+		softThrottleTicks(throttle, ratePerSec, burst, ticker.C, time.Now, exit)
+	}
+}
 
-	LOOP:
-		for {
+// The explicit clock/tick boundary lets tests reproduce a delayed publisher
+// without depending on host CPU scheduling or a wall-clock throughput gate.
+func softThrottleTicks(throttle chan bool, rate, burst int, ticks <-chan time.Time, now func() time.Time, exit chan bool) {
+	last, credit := now(), 0.
+	space := max(0, burst-len(throttle))
+	for {
+		select {
+		case <-ticks:
+		case <-exit:
+			return
+		}
+		at := now()
+		// Keep the pre-wait free capacity: permits already buffered at that
+		// boundary and catch-up credit together cannot exceed burst, even if
+		// the consumer drains the old buffer before this publisher resumes.
+		credit = math.Min(float64(space), credit+at.Sub(last).Seconds()*float64(rate))
+		last = at
+		for credit >= 1 {
 			select {
-			case <-ticker.C:
-				for i := 0; i < chunk; i++ {
-					select {
-					case throttle <- true:
-					// pass
-					case <-exit:
-						break LOOP
-					}
-				}
+			case throttle <- true:
+				credit--
+				continue
 			case <-exit:
-				break LOOP
+				return
+			default:
+			}
+			// Consumer backpressure must not earn scheduling catch-up credit.
+			select {
+			case throttle <- true:
+				credit--
+				last = now()
+			case <-exit:
+				return
 			}
 		}
+		space = max(0, burst-len(throttle))
 	}
 }
 
