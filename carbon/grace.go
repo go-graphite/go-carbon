@@ -386,6 +386,10 @@ func (app *App) DumpStop() (err error) {
 		if err != nil {
 			logger.Warn("input handoff unavailable", zap.Error(err))
 			storeInput = false
+		} else {
+			handover.mu.Lock()
+			handover.asyncSeal = storeInput && app.Config.Dump.RequireStartupCapture
+			handover.mu.Unlock()
 		}
 	}
 	inputStopped := time.Now()
@@ -528,6 +532,9 @@ func (app *App) DumpStop() (err error) {
 	}
 	if handover != nil {
 		handover.stop("successor did not take input")
+		if err := handover.waitSeal(); err != nil {
+			return fmt.Errorf("seal input tail after socket transfer: %w", err)
+		}
 	}
 	app.recordStop(func(r *restartRecord) {
 		r.ReadsStopped = readsTaken

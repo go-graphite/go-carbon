@@ -109,6 +109,15 @@ func (app *App) tryStartupInput() error {
 		zapwriter.Logger("app").Error("startup capture lacks safe headroom; using ordered input recovery", zap.Int64("available_memory_bytes", policy.available), zap.Int64("spool_limit_bytes", policy.spoolBytes))
 		return nil
 	}
+	spool, err := openStartupInputWithLegacyLock(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy, false)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if spool.receiver == nil {
+			_ = spool.close()
+		}
+	}()
 	claim := app.handoffClaim
 	app.handoffClaim = nil
 	var h *tcp.Handoff
@@ -144,11 +153,6 @@ func (app *App) tryStartupInput() error {
 		if h == nil {
 			return errors.New("store input handoff has no TCP receiver")
 		}
-	}
-	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
-	if err != nil {
-		closeTCPHandoff(h)
-		return err
 	}
 	if receiverStoreHook != nil {
 		spool.observe, _ = receiverStoreHook(func(*points.Points) {}, func([]byte, float64, int64) {})
@@ -337,6 +341,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		}
 		openSegment := func(path string) (*startupSegment, error) {
 			if path == s.path {
+				if err := s.lockLegacy(); err != nil {
+					return nil, err
+				}
 				seg := s.legacy.current.Load()
 				seg.source = s.legacy.stream.Next()
 				return seg, nil

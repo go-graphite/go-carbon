@@ -141,6 +141,12 @@ const StartupCaptureProtocol = "go-carbon-startup-capture/1"
 
 const StartupGenerationProtocol = "go-carbon-startup-generation/1"
 
+const AsyncTailSealProtocol = "go-carbon-async-tail-seal/1"
+
+func AsyncTailSealSupported(binary string) bool {
+	return protocolSupported(binary, "-async-tail-seal-protocol", AsyncTailSealProtocol)
+}
+
 func StartupGenerationSupported(binary string) bool {
 	return protocolSupported(binary, "-startup-generation-protocol", StartupGenerationProtocol)
 }

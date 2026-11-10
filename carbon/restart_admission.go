@@ -73,5 +73,8 @@ func (app *App) checkRestartAdmission() error {
 	if !handoff.StartupGenerationSupported(app.readSuccessor) {
 		return refuse(errors.New("successor cannot capture input if the optional read checkpoint fails"))
 	}
+	if !handoff.AsyncTailSealSupported(app.readSuccessor) {
+		return refuse(errors.New("successor cannot capture input while the predecessor seals its tail"))
+	}
 	return nil
 }

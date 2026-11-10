@@ -16,6 +16,7 @@ const SharedStoreProtocol = "go-carbon-shared-store-handoff/2"
 const StoreInputProtocol = "go-carbon-store-input-handoff/2"
 const StartupCaptureProtocol = "go-carbon-startup-capture/1"
 const StartupGenerationProtocol = "go-carbon-startup-generation/1"
+const AsyncTailSealProtocol = "go-carbon-async-tail-seal/1"
 
 var RegisterTimeout = 10 * time.Second
 
@@ -25,6 +26,7 @@ func SharedStoreSupported(string, string) bool    { return false }
 func StoreInputSupported(string) bool             { return false }
 func StartupCaptureSupported(string, string) bool { return false }
 func StartupGenerationSupported(string) bool      { return false }
+func AsyncTailSealSupported(string) bool          { return false }
 
 type Input struct{ Receivers []InputReceiver }
 
@@ -64,8 +66,11 @@ func (*Claim) Take(*net.TCPAddr) (net.Listener, func() error, error) {
 func (*Claim) InputOffered() bool                { return false }
 func (*Claim) TakeInput() (*Input, error)        { return nil, nil }
 func LockExclusive(string) (func() error, error) { return func() error { return nil }, nil }
-func LockShared(string) (func() error, error)    { return func() error { return nil }, nil }
-func Locked(string) bool                         { return false }
+func LockExclusiveUntil(string, <-chan struct{}) (func() error, error) {
+	return func() error { return nil }, nil
+}
+func LockShared(string) (func() error, error) { return func() error { return nil }, nil }
+func Locked(string) bool                      { return false }
 
 var ErrSuccessorCannotTakeInput = errors.New("successor binary cannot take input")
 

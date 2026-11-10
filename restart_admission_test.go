@@ -33,6 +33,9 @@ func TestRestartMainProcess(_ *testing.T) {
 	if os.Getenv("GO_CARBON_TEST_CAPTURE_PROBE") == "generation" {
 		os.Args = append(os.Args, "-startup-generation-protocol")
 	}
+	if os.Getenv("GO_CARBON_TEST_CAPTURE_PROBE") == "async-seal" {
+		os.Args = append(os.Args, "-async-tail-seal-protocol")
+	}
 	flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	main()
 }
@@ -43,6 +46,15 @@ func TestStartupGenerationCapabilityDoesNotOpenConfig(t *testing.T) {
 	out, err := child.CombinedOutput()
 	if err != nil || strings.TrimSpace(string(out)) != handoff.StartupGenerationProtocol+"\nPASS" {
 		t.Fatalf("successor generation capability opened configuration: %v: %s", err, out)
+	}
+}
+
+func TestAsyncTailSealCapabilityDoesNotOpenConfig(t *testing.T) {
+	child := exec.Command(os.Args[0], "-test.run=^TestRestartMainProcess$")
+	child.Env = append(os.Environ(), restartMainConfigEnv+"=/does-not-exist", "GO_CARBON_TEST_CAPTURE_PROBE=async-seal")
+	out, err := child.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != handoff.AsyncTailSealProtocol+"\nPASS" {
+		t.Fatalf("successor async seal capability opened configuration: %v: %s", err, out)
 	}
 }
 

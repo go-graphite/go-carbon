@@ -64,7 +64,17 @@ On USR2, the worker keeps receiving while it checkpoints the cache and finishes
 store flushes. It then diverts input to a tail log, closes reads and the shared
 database, and releases its supervisor. The successor takes the listening and
 accepted sockets immediately, before opening storage or validating the pending
-checkpoint. Its handlers restore decoder state and encode complete legacy
+checkpoint. Before requesting sockets it creates and syncs its independent
+capture shards while the predecessor still reads. With a successor advertising
+`go-carbon-async-tail-seal/1`, the predecessor flushes all accepted tail bytes
+before transferring sockets, then completes final file and directory syncs
+while the successor captures. The predecessor joins that seal before exiting.
+Historical replay waits for the old tail's exclusive lock and samples its final
+size after acquiring it; live capture never waits for that lock. Strict restart
+admission probes the actual successor's `-async-tail-seal-protocol` before any
+stop mutation. Older non-strict handoffs retain their synchronous seal.
+
+Its handlers restore decoder state and encode complete legacy
 records into connection-local batches, partitioned by metric hash. Each partition
 has one append owner and an independent FIFO. Connection-local acknowledgements
 are reused across flushes. Appenders coalesce submissions, write independently

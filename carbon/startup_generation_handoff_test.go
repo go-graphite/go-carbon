@@ -22,6 +22,14 @@ import (
 )
 
 func TestCheckpointPublicationFailureKeepsEarlyIntake(t *testing.T) {
+	testGenerationEarlyIntake(t, true, false)
+}
+
+func TestHandoffTailSealKeepsEarlyIntake(t *testing.T) {
+	testGenerationEarlyIntake(t, false, true)
+}
+
+func testGenerationEarlyIntake(t *testing.T, poisonCheckpoint, blockSeal bool) {
 	if isolatedTestProcessSerial(t) {
 		return
 	}
@@ -78,8 +86,12 @@ func TestCheckpointPublicationFailureKeepsEarlyIntake(t *testing.T) {
 	release := sync.OnceFunc(func() { close(start) })
 	defer release()
 	started := make(chan error, 1)
+	startDone := make(chan struct{})
+	successorReleased := false // read only after joining DumpStop
 	old.SetReadHandoff(probe, func() {
+		successorReleased = true
 		go func() {
+			defer close(startDone)
 			next.RegisterReadHandoff()
 			next.beginRestart()
 			if err := next.startStartupInput(); err != nil {
@@ -94,18 +106,47 @@ func TestCheckpointPublicationFailureKeepsEarlyIntake(t *testing.T) {
 	saved := handoff.PeerExecutable
 	handoff.PeerExecutable = func(*net.UnixConn) (string, error) { return probe, nil }
 	defer func() { handoff.PeerExecutable = saved }()
-	if err := os.Mkdir(filepath.Join(short, recovery.ManifestName), 0700); err != nil {
-		t.Fatal(err)
+	if poisonCheckpoint {
+		if err := os.Mkdir(filepath.Join(short, recovery.ManifestName), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sealEntered, sealRelease := make(chan struct{}, 1), make(chan struct{})
+	unblockSeal := sync.OnceFunc(func() { close(sealRelease) })
+	savedSeal := handoverSealHook
+	if blockSeal {
+		handoverSealHook = func() { sealEntered <- struct{}{}; <-sealRelease }
 	}
 	stopped := make(chan error, 1)
-	go func() { stopped <- old.DumpStop() }()
+	stopDone := make(chan struct{})
+	go func() { defer close(stopDone); stopped <- old.DumpStop() }()
+	defer func() {
+		unblockSeal()
+		release()
+		<-stopDone
+		if successorReleased {
+			<-startDone
+		}
+		handoverSealHook = savedSeal
+	}()
+	captureTimeout := 10 * time.Second
+	if blockSeal {
+		select {
+		case <-sealEntered:
+		case err := <-started:
+			t.Fatal(err)
+		case <-time.After(10 * time.Second):
+			t.Fatal("handoff did not reach the final tail seal", zapwriter.TestString())
+		}
+		captureTimeout = time.Second
+	}
 	var spool *startupInput
 	select {
 	case spool = <-captured:
 	case err := <-started:
 		t.Fatal(err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("checkpoint publication failure blocked early intake", zapwriter.TestString())
+	case <-time.After(captureTimeout):
+		t.Fatal("handoff blocked early intake", zapwriter.TestString())
 	}
 	if spool == nil || next.Cache != nil || next.MetricStore != nil {
 		t.Fatal("fallback waited for storage/checkpoint restore")
@@ -130,6 +171,7 @@ func TestCheckpointPublicationFailureKeepsEarlyIntake(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitCapture(t, func() bool { return spool.points.Load() == live })
+	unblockSeal()
 	release()
 	select {
 	case err := <-started:
@@ -189,9 +231,10 @@ case "$1" in
 -store-input-handoff-protocol) echo '%s';;
 -check-startup-capture) echo '%s';;
 -startup-generation-protocol) echo '%s';;
+-async-tail-seal-protocol) echo '%s';;
 *) exit 2;;
 esac
-`, handoff.Protocol, handoff.InputProtocol, handoff.StoreInputProtocol, handoff.StartupCaptureProtocol, handoff.StartupGenerationProtocol)
+`, handoff.Protocol, handoff.InputProtocol, handoff.StoreInputProtocol, handoff.StartupCaptureProtocol, handoff.StartupGenerationProtocol, handoff.AsyncTailSealProtocol)
 	if err := os.WriteFile(probe, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
