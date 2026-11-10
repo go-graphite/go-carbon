@@ -20,6 +20,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/lomik/zapwriter"
+	"github.com/zeebo/xxh3"
 )
 
 // inputHandoffTimeout bounds how long a stopping instance keeps appending
@@ -39,20 +40,35 @@ var receiverStoreHook func(add func(*points.Points), addPoint func(name []byte, 
 // switchWriter lets diverted input move from one log to another. When Switch
 // returns, no write to the previous log is in flight, so it can be closed.
 type switchWriter struct {
-	mu    sync.RWMutex
+	// Independent metric lanes keep every input connection from updating the
+	// same reader-count cache line for every point. Switch joins every lane
+	// before replacing the writer, retaining the original close-after-join rule.
+	lanes [256]switchWriterLane
 	write func(*points.Points) error
 }
 
+type switchWriterLane struct {
+	mu sync.RWMutex
+	// Leave a full cache line between locks, including on 128-byte machines.
+	_ [128]byte
+}
+
 func (s *switchWriter) Write(p *points.Points) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	lane := &s.lanes[xxh3.HashString(p.Metric)&255]
+	lane.mu.RLock()
+	defer lane.mu.RUnlock()
 	return s.write(p)
 }
 
 func (s *switchWriter) Switch(write func(*points.Points) error) {
-	s.mu.Lock()
+	// Taking every lane in the same order also serializes concurrent switches.
+	for i := range s.lanes {
+		s.lanes[i].mu.Lock()
+	}
 	s.write = write
-	s.mu.Unlock()
+	for i := len(s.lanes) - 1; i >= 0; i-- {
+		s.lanes[i].mu.Unlock()
+	}
 }
 
 // handoffReceiver is a receiver whose connections can move to the successor.
