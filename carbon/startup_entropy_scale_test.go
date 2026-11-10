@@ -64,6 +64,7 @@ func TestStartupCaptureEntropyBandwidth(t *testing.T) {
 	durableTime := time.Since(started)
 	seen := make([]int, batch)
 	invalid := false
+	readbackStarted := time.Now()
 	err := visitCapture(s, func(p *points.Points) {
 		if invalid {
 			return
@@ -82,13 +83,15 @@ func TestStartupCaptureEntropyBandwidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	readbackTime := time.Since(readbackStarted)
 	for i, count := range seen {
 		if count != repeats*len(s.shards) {
 			t.Fatalf("record%d count%d, want%d", i, count, repeats*len(s.shards))
 		}
 	}
-	t.Logf("scope=IO-stage shards=%d raw_bytes_per_point=%.1f raw_bytes=%d physical_bytes=%d append_GB_s=%.3f through_sync_GB_s=%.3f records=%d repeats=%d append=%v through_sync=%v",
+	t.Logf("scope=IO-stage shards=%d raw_bytes_per_point=%.1f raw_bytes=%d physical_bytes=%d append_GB_s=%.3f through_sync_GB_s=%.3f physical_sync_GB_s=%.3f validated_readback_GB_s=%.3f records=%d repeats=%d append=%v through_sync=%v readback=%v",
 		len(s.shards), float64(len(raw))/batch, s.rawBytes.Load(), s.size.Load(),
 		float64(s.rawBytes.Load())/appendTime.Seconds()/1e9, float64(s.rawBytes.Load())/durableTime.Seconds()/1e9,
-		int64(batch*repeats*len(s.shards)), repeats, appendTime, durableTime)
+		float64(s.size.Load())/durableTime.Seconds()/1e9, float64(s.rawBytes.Load())/readbackTime.Seconds()/1e9,
+		int64(batch*repeats*len(s.shards)), repeats, appendTime, durableTime, readbackTime)
 }
