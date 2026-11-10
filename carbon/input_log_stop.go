@@ -31,11 +31,11 @@ func validateInputLogOnlyConfig(c *Config) error {
 	if c.Dump.Path == "" {
 		return errors.New("dump.path is required for input-log-only socket offers and restart timings")
 	}
-	if !c.InputLog.Enabled || !c.Dump.HandoffSupervisor || !c.Dump.StoreInputHandoff ||
+	if !c.InputLog.Enabled || !c.InputLog.BackgroundReplay || !c.Dump.HandoffSupervisor || !c.Dump.StoreInputHandoff ||
 		c.Whisper.StorageBackend != "pebble-chunk" || !c.Whisper.Enabled || c.Whisper.StoreMirrorFiles ||
 		c.Tags.Enabled || !c.Carbonserver.Enabled || !c.Tcp.Enabled || c.Tcp.BufferSize != 0 || c.Tcp.Compression != "" ||
 		c.Udp.Enabled || c.Pickle.Enabled || len(c.Receiver) != 0 {
-		return errors.New("dump.input-log-only requires the input log, supervised shared-store TCP handoff, carbonserver, and no tags or other receivers")
+		return errors.New("dump.input-log-only requires background input-log replay, supervised shared-store TCP handoff, carbonserver, and no tags or other receivers")
 	}
 	if hasDump(c.Dump.Path) {
 		return errors.New("dump.input-log-only requires earlier dump recovery to finish first")
@@ -55,6 +55,14 @@ func (app *App) inputLogSuccessorSupported() bool {
 // every socket, before allowing the successor to open that journal.
 func (app *App) stopWithInputLog(started time.Time) error {
 	logger := zapwriter.Logger("dump")
+	if r := app.inputReplay; r != nil && r.started {
+		// Relog only after the older history has been confirmed to storage.
+		// Receivers and persistence stay active while this replay finishes.
+		<-r.done
+		if r.err != nil {
+			return r.err
+		}
+	}
 	if app.startupInput != nil || app.Cache.HasPendingRecovery() {
 		return errors.New("input-log-only stop requires previous dump/capture recovery to finish")
 	}
@@ -104,8 +112,14 @@ func (app *App) stopWithInputLog(started time.Time) error {
 	h.stop("successor did not take input")
 	app.inputLog.Store(nil) // the handover synced and closed it
 	app.recordStop(func(r *restartRecord) { r.InputClosed, r.ReadsStopped = h.closedAt(), readsStopped })
-	logger.Info("input log stop finished", zap.Bool("input_handoff", len(h.receivers) != 0), zap.Duration("runtime", time.Since(started)))
-	return h.journalErr
+	logger.Info("input log stop finished", zap.Bool("input_handoff", h.transferred), zap.Duration("runtime", time.Since(started)))
+	if h.journalErr != nil {
+		return h.journalErr
+	}
+	if !h.transferred {
+		return errors.New("input-log-only successor did not take input")
+	}
+	return nil
 }
 
 // The journal handoff has no dump manifest or capture spool. Claim the

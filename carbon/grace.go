@@ -833,6 +833,7 @@ func (app *App) handOffStoreInput(logger *zap.Logger, handover *inputHandover) t
 	}
 	switch {
 	case taken:
+		handover.transferred = true
 		logger.Info("input handed off to successor", fields...)
 	case errors.Is(err, handoff.ErrSuccessorCannotTakeInput):
 		// The caller stops input at once: every second more is tail the

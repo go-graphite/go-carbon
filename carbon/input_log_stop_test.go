@@ -12,7 +12,7 @@ func TestInputLogOnlyConfig(t *testing.T) {
 		c := NewConfig()
 		c.Dump.InputLogOnly, c.Dump.Enabled = true, false
 		c.Dump.Path = t.TempDir()
-		c.InputLog.Enabled = true
+		c.InputLog.Enabled, c.InputLog.BackgroundReplay = true, true
 		c.Dump.HandoffSupervisor, c.Dump.StoreInputHandoff = true, true
 		c.Whisper.StorageBackend = "pebble-chunk"
 		c.Tags.Enabled, c.Udp.Enabled, c.Pickle.Enabled = false, false, false
@@ -23,6 +23,7 @@ func TestInputLogOnlyConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*Config){
+		"blocking replay":   func(c *Config) { c.InputLog.BackgroundReplay = false },
 		"no log":            func(c *Config) { c.InputLog.Enabled = false },
 		"no supervisor":     func(c *Config) { c.Dump.HandoffSupervisor = false },
 		"no socket handoff": func(c *Config) { c.Dump.StoreInputHandoff = false },

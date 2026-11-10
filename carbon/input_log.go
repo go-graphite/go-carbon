@@ -151,8 +151,13 @@ func (app *App) openInputLog(core *cache.Cache) error {
 	}
 	core.EnableInputLog()
 	if l.NeedsReplay() && conf.BackgroundReplay && app.Config.Whisper.Enabled && !copyRecovery && app.startupInput == nil && app.handoffClaim == nil {
-		// A dump/tail has its own ordering authority. Keep that path intact;
-		// this experiment handles standalone journal recovery after a crash.
+		// A dump/tail has its own ordering authority. Journal-only handoff
+		// has only control files here (timings and the socket offer), so its
+		// nonempty directory must not select the blocking dump recovery path.
+		if app.inputLogHandoff || app.Config.Dump.InputLogOnly {
+			app.prepareInputReplay(core, l)
+			return nil
+		}
 		entries, readErr := os.ReadDir(app.Config.Dump.Path)
 		if (readErr == nil && len(entries) == 0) || errors.Is(readErr, os.ErrNotExist) {
 			app.prepareInputReplay(core, l)

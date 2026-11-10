@@ -96,6 +96,7 @@ type inputHandover struct {
 	unlock      func() error
 	timer       *time.Timer
 	detached    *handoff.Input
+	transferred bool // set after the offer commits a successor
 
 	// lost counts points accepted while the tail could not take them; the
 	// first failure stops input.
