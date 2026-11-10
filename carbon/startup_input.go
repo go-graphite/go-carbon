@@ -203,6 +203,8 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		if receiverStoreHook == nil {
 			s.receiver.SetPointsOut(core.AddPoints)
 			s.receiver.SetPointBatchOut(core.AddPointBatch)
+			s.receiver.SetStreamPointOut(core.AddStreamPoint)
+			s.receiver.SetStreamNameResolver(core.ResolveStreamName)
 		}
 	}
 	if log := app.inputLog.Load(); log != nil && app.Config.InputLog.Enabled {
