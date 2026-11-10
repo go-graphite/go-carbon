@@ -93,6 +93,7 @@ func (app *App) stopWithInputLog(started time.Time) error {
 	if err := app.MetricStore.Sync(); err != nil {
 		return fmt.Errorf("sync store before input log snapshot: %w", err)
 	}
+	dropped := app.Cache.LogDropped()
 	cached := app.Cache.Size()
 	before := log.Metrics().PointsWritten
 	if err := log.Relog(); err != nil {
@@ -105,7 +106,7 @@ func (app *App) stopWithInputLog(started time.Time) error {
 	app.restart.out = &restartRecord{Version: 1, PID: os.Getpid(), InputLogOnly: true, StopStarted: started}
 	app.restart.mu.Unlock()
 	app.recordStop(func(*restartRecord) {})
-	h := &inputHandover{receivers: app.Receivers, flushTraces: app.FlushTraces, logger: logger, started: time.Now(), journal: log, cachePoints: app.Cache.Size}
+	h := &inputHandover{receivers: app.Receivers, flushTraces: app.FlushTraces, logger: logger, started: time.Now(), journal: log, cachePoints: app.Cache.Size, logDropped: app.Cache.LogDropped, startDrops: dropped}
 	app.Receivers = nil
 	h.timer = time.AfterFunc(inputHandoffTimeout, func() { h.stop("successor did not take input in time") })
 	readsStopped := app.handOffStoreInput(logger, h)

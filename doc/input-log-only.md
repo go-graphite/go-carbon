@@ -32,7 +32,9 @@ The predecessor closes the store and releases its supervisor while its receivers
 keep writing to the cache and journal. Detaching those receivers preserves
 accepted sockets, partial lines, compressed frame prefixes and stream decoder
 state. The predecessor then syncs and closes the journal, and transfers the
-sockets. The successor opens the journal and ordinary cache sinks before opening
+sockets. If bounded live staging overflowed during the stop, it first takes a
+final snapshot with input frozen so those accepted points survive too. This
+exceptional path adds snapshot time to the input gap. The successor opens the journal and ordinary cache sinks before opening
 Pebble. Background replay must preserve old history ahead of live writeout.
 No dump, input tail, pending checkpoint or capture spool is written in this mode.
 

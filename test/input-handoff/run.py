@@ -285,6 +285,7 @@ path = "input-log"
                       background_replay=any(e.get('message') == 'replaying input log behind live receivers' for e in entries(root/'next.log')),
                       lost_points=sent-len(seen),
                       dump_files_written=sum(e.get('message') == 'start cache dump' for e in combined),
+                      overflow_relogs=sum(e.get('message') == 'input log staging overflowed during stop; relogging frozen cache before transfer' for e in combined),
                       recovery_files=[p.name for p in (root/'dump').iterdir() if not p.name.startswith('.')],
                       replayed_points=int(float(metrics(prom).get('input_log_replayed_points_total', 0))),
                       planned_close_logs=sum(e.get('message') == 'input connection closed during shutdown' for e in combined),

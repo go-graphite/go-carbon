@@ -91,6 +91,8 @@ type inputHandover struct {
 	tail        *recovery.Writer
 	journal     *inputlog.Log
 	journalErr  error
+	logDropped  func() uint64
+	startDrops  uint64
 	cachePoints func() int64
 	path        string
 	unlock      func() error
@@ -306,7 +308,14 @@ func (h *inputHandover) completeTail() (recovery.File, error) {
 		h.flushTraces()
 	}
 	if h.journal != nil {
-		h.journalErr = h.journal.Close()
+		// Live staging is bounded. A hot shard may overflow after its stop
+		// snapshot while the remaining shards and store are being closed.
+		// With input now detached, a final snapshot cannot race new arrivals.
+		if h.logDropped != nil && h.logDropped() != h.startDrops {
+			h.logger.Warn("input log staging overflowed during stop; relogging frozen cache before transfer")
+			h.journalErr = h.journal.Relog()
+		}
+		h.journalErr = errors.Join(h.journalErr, h.journal.Close())
 		return recovery.File{}, h.journalErr
 	}
 	f, err := h.tail.Close()

@@ -1,7 +1,15 @@
 package carbon
 
 import (
+	"slices"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/internal/inputlog"
+	"github.com/go-graphite/go-carbon/points"
+	"go.uber.org/zap"
 )
 
 func TestInputLogOnlyConfig(t *testing.T) {
@@ -46,5 +54,53 @@ func TestInputLogOnlyRequiresRestart(t *testing.T) {
 	next.Dump.InputLogOnly = true
 	if err := inputLogReloadError(old, next); err == nil {
 		t.Fatal("changed recovery mode through reload")
+	}
+}
+
+// A single hot metric can fill live staging after its initial snapshot. Socket
+// detach must account for those cached-but-unlogged arrivals before transfer.
+func TestInputLogOnlyHandoffRepairsStagingOverflow(t *testing.T) {
+	core := cache.New()
+	defer core.Stop()
+	core.EnableInputLog()
+	dir := t.TempDir()
+	log, err := inputlog.Open(dir, inputlog.Options{SyncInterval: time.Hour, SegmentSize: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log.Start(core, cache.ShardCount)
+	defer log.Close()
+	core.Add(points.OnePoint("hot", -1, -1))
+	if err := log.Relog(); err != nil {
+		t.Fatal(err)
+	}
+	startDrops := core.LogDropped()
+	data := make([]points.Point, 1<<18)
+	for i := range data {
+		data[i] = points.Point{Value: float64(i) + .125, Timestamp: int64(i)}
+	}
+	core.Add(&points.Points{Metric: "hot", Data: data})
+	if core.LogDropped() == startDrops {
+		t.Fatal("fixture did not overflow live staging after the first snapshot")
+	}
+	h := &inputHandover{journal: log, logger: zap.NewNop(), logDropped: core.LogDropped, startDrops: startDrops}
+	if _, err := h.completeTail(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := inputlog.Open(dir, inputlog.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var got []points.Point
+	var mu sync.Mutex
+	stats, err := reader.Replay(func(p *points.Points) {
+		mu.Lock()
+		got = append(got, p.Data...)
+		mu.Unlock()
+	})
+	want := append([]points.Point{{Value: -1, Timestamp: -1}}, data...)
+	if err != nil || stats.Corrupt != 0 || stats.Points != int64(len(want)) || !slices.Equal(got, want) {
+		t.Fatalf("overflow recovery: points=%d want=%d stats=%+v err=%v", len(got), len(want), stats, err)
 	}
 }
