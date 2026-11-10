@@ -56,6 +56,30 @@ func TestBudgetedTailPreservesCorrectionsAndTornPrefix(t *testing.T) {
 	}
 }
 
+func TestBudgetedTailSplitsLargeLegacyRecordBeforeApplying(t *testing.T) {
+	p := &points.Points{Metric: "tail.large"}
+	for i := range 16513 {
+		p.Add(float64(i), int64(i%3))
+	}
+	raw := points.OnePoint(p.Metric, -1, -1).AppendBinary(nil)
+	raw = p.AppendBinary(raw)
+	var got []points.Point
+	maxBatch := 0
+	count, err := replayInputTailBatches(bytes.NewReader(raw), 4, func(next *points.Points) {
+		// One metric always uses one FIFO, including across record boundaries.
+		maxBatch = max(maxBatch, len(next.Data))
+		got = append(got, next.Data...)
+	})
+	want := append([]points.Point{{Value: -1, Timestamp: -1}}, p.Data...)
+	if err != nil || count != len(want) || !reflect.DeepEqual(got, want) {
+		t.Fatalf("large-record replay changed points: count=%d/%d error=%v", count, len(want), err)
+	}
+	// At most one almost-full queue window plus one decoded window.
+	if maxBatch > 255 {
+		t.Fatalf("legacy record escaped bounded replay: batch=%d", maxBatch)
+	}
+}
+
 func TestBudgetedTailCancellationJoinsQueuesWithoutAcceptableEOF(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())

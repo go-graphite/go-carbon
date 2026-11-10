@@ -20,10 +20,33 @@ func ReadBinaryBorrowed(r io.Reader, visit func([]byte, []Point)) error {
 // ReadBinaryBorrowedSize adapts read-ahead memory to the number of independent
 // startup replay streams. Record limits and partial-record behavior are unchanged.
 func ReadBinaryBorrowedSize(r io.Reader, bufferSize int, visit func([]byte, []Point)) error {
+	return readBinaryBorrowed(r, bufferSize, 0, visit)
+}
+
+// ReadBinaryBorrowedBatches preserves point order and complete partial-record
+// recovery, but visits at most batchPoints points at a time. It does not retain
+// an entire legacy record before the caller can apply admission or pacing.
+// The name and points are borrowed until visit returns; one record may produce
+// several visits. ReadBinaryBorrowedSize retains its whole-record semantics.
+func ReadBinaryBorrowedBatches(r io.Reader, bufferSize, batchPoints int, visit func([]byte, []Point)) error {
+	if batchPoints <= 0 {
+		return fmt.Errorf("binary batch size must be positive")
+	}
+	return readBinaryBorrowed(r, bufferSize, batchPoints, visit)
+}
+
+func readBinaryBorrowed(r io.Reader, bufferSize, batchPoints int, visit func([]byte, []Point)) error {
 	reader := bufio.NewReaderSize(r, max(4096, bufferSize))
 	names := make([]byte, MB)
 	var scratch [64]Point
 	data := scratch[:0]
+	if batchPoints > 0 {
+		if batchPoints <= len(scratch) {
+			data = scratch[:0:batchPoints]
+		} else {
+			data = make([]Point, 0, batchPoints)
+		}
+	}
 	for {
 		if reader.Buffered() == 0 {
 			if _, err := reader.Peek(1); err != nil {
@@ -83,6 +106,10 @@ func ReadBinaryBorrowedSize(r io.Reader, bufferSize int, visit func([]byte, []Po
 			value += v
 			stamp += ts
 			data = append(data, Point{Value: math.Float64frombits(uint64(value)), Timestamp: stamp})
+			if batchPoints > 0 && len(data) == batchPoints {
+				visit(names[:length], data)
+				data = data[:0]
+			}
 		}
 		if len(data) > 0 {
 			visit(names[:length], data)
@@ -119,11 +146,24 @@ func singleBinaryPoint(raw []byte) ([]byte, Point, int, bool) {
 // bufio/name arenas for each frame. The reference decoder handles uncommon
 // multi-point records and preserves its exact partial-record semantics.
 func ReadBinaryBytesBorrowed(raw []byte, visit func([]byte, []Point)) error {
+	return readBinaryBytesBorrowed(raw, 0, visit)
+}
+
+// ReadBinaryBytesBorrowedBatches also bounds scratch space for multi-point
+// records inside a complete frame. Single-point records retain the fast path.
+func ReadBinaryBytesBorrowedBatches(raw []byte, batchPoints int, visit func([]byte, []Point)) error {
+	if batchPoints <= 0 {
+		return fmt.Errorf("binary batch size must be positive")
+	}
+	return readBinaryBytesBorrowed(raw, batchPoints, visit)
+}
+
+func readBinaryBytesBorrowed(raw []byte, batchPoints int, visit func([]byte, []Point)) error {
 	var scratch [1]Point
 	for len(raw) > 0 {
 		name, p, n, ok := singleBinaryPoint(raw)
 		if !ok {
-			return ReadBinaryBorrowedSize(bytes.NewReader(raw), 64<<10, visit)
+			return readBinaryBorrowed(bytes.NewReader(raw), 64<<10, batchPoints, visit)
 		}
 		scratch[0] = p
 		visit(name, scratch[:])

@@ -471,7 +471,7 @@ func (s *startupShard) appendLoop() {
 func captureMetricBytes(raw []byte, admission captureAdmission) (int64, error) {
 	names := make(map[string]struct{})
 	var cost int64
-	err := points.ReadBinaryBytesBorrowed(raw, func(name []byte, _ []points.Point) {
+	err := points.ReadBinaryBytesBorrowedBatches(raw, 128, func(name []byte, _ []points.Point) {
 		overhead := admission.RecoveryMetricBytes(name)
 		if overhead == 0 {
 			return
@@ -489,7 +489,7 @@ func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *sta
 	}
 	var p points.Points
 	namer, _ := sink.admission.(interface{ RecoveryMetricName([]byte) string })
-	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
+	return points.ReadBinaryBytesBorrowedBatches(raw, 128, func(name []byte, data []points.Point) {
 		canonical, ok := s.names[string(name)]
 		if !ok {
 			if len(s.names) >= 4096 || s.nameBytes+len(name) > 4<<20 {

@@ -106,7 +106,9 @@ func replayInputTailBatchesWithBudget(ctx context.Context, reader io.Reader, wor
 	if readerPacer != nil {
 		readerPacingError = readerPacer.Wait(ctx)
 	}
-	err := points.ReadBinaryBorrowed(reader, func(name []byte, data []points.Point) {
+	// A single legacy record can contain billions of points. Decode only one
+	// queue window before handing control back to admission and CPU pacing.
+	err := points.ReadBinaryBorrowedBatches(reader, 1<<20, 128, func(name []byte, data []points.Point) {
 		if readerPacingError != nil || ctx.Err() != nil {
 			return
 		}
