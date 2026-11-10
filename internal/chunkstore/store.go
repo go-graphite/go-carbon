@@ -275,8 +275,12 @@ type Store struct {
 	syncDone                       chan struct{}
 	// mu serializes metric ID allocation from the catalog sequence. Mutations
 	// of one metric hold its metricMu stripe; readers use consistent read views.
-	mu                 sync.Mutex
-	metricMu           [metricStripes]sync.Mutex
+	mu       sync.Mutex
+	metricMu [metricStripes]sync.Mutex
+	// mutationEpoch advances at both ends of every mutation, even without a
+	// metadata cache. Optimistic maintenance can validate its immutable view
+	// under the stripe without an LSM read. Saturation disables that shortcut.
+	mutationEpoch      [metricStripes]atomic.Uint64
 	metadataCache      [metricStripes]metadataRing
 	catalogMembership  *catalogMembership
 	catalogChanges     atomic.Pointer[catalogChanges]

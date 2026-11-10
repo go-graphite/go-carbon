@@ -1,6 +1,9 @@
 package chunkstore
 
-import "strings"
+import (
+	"math"
+	"strings"
+)
 
 // A small ring retains the metadata shared by consecutive preparation, policy
 // and update calls. It is protected by the corresponding metricMu stripe.
@@ -69,6 +72,7 @@ func (s *Store) finishStateMutation(name string) {
 // beginStateMutation and endStateMutation bracket every mutation of name in
 // the metadata cache (see stateCache), under name's stripe.
 func (s *Store) beginStateMutation(name string) {
+	s.advanceMutationEpoch(s.metricStripe(name))
 	if c := s.stateCache; c != nil {
 		c.beginMutation(s.metricStripe(name), name)
 	}
@@ -77,6 +81,16 @@ func (s *Store) beginStateMutation(name string) {
 func (s *Store) endStateMutation(name string) {
 	if c := s.stateCache; c != nil {
 		c.endMutation(s.metricStripe(name), name)
+	}
+	s.advanceMutationEpoch(s.metricStripe(name))
+}
+
+// Called only while holding the stripe. Never wrap: a saturated epoch must
+// not make an old prepared batch appear current again.
+func (s *Store) advanceMutationEpoch(stripe uint64) {
+	e := &s.mutationEpoch[stripe]
+	if v := e.Load(); v != math.MaxUint64 {
+		e.Store(v + 1)
 	}
 }
 
