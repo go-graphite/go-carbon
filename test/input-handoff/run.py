@@ -271,12 +271,13 @@ path = "input-log"
                       input_gap_seconds=gap['input_unavailable_seconds'],
                       input_stop_runtime=dump['input_stop_runtime'],
                       planned_close_logs=sum(e.get('message') == 'input connection closed during shutdown' for e in combined),
-                      errors=[e for e in combined if e.get('level') == 'ERROR'])
+                      errors=[e for e in combined if e.get('level', '').upper() == 'ERROR'])
         if experiment == 'partial':
             assert accepted_before+next_received == len(seen), result
             assert len(seen) == (8448 if enabled else 8447 if mode == 'plaintext' else 8192), result
         if enabled:
             assert dump['input_handoff'] and reconnects == 0 and len(seen) == sent, result
+            assert not result['errors'], result
         print(json.dumps(result), flush=True)
         return result
     except BaseException:
