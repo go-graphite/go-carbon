@@ -430,6 +430,7 @@ func NewConfig() *Config {
 			Bind: "0.0.0.0:4242", Hash: "carbon", Replicas: 1,
 			TmpDir: os.TempDir(), Timeout: 3600,
 			MaxBodyBytes: 160 << 20, MaxTransfers: 0,
+			MaxMaintenanceRequests: 2, MaintenanceWorkers: 8,
 		},
 		Common: commonConfig{
 			GraphPrefix: "carbon.agents.{host}",

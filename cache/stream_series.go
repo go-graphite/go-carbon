@@ -129,30 +129,56 @@ func (sh *Shard) putStreamSeries(slot seriesSlot) {
 }
 
 func (c *Cache) addStreamSeries(series *StreamSeries, value float64, ts int64) {
-	settings := c.settings.Load().(*cacheSettings)
-	if settings.xlog != nil || settings.tagsEnabled || series.cache != c {
+	if series.cache != c {
 		c.AddPoint(series.StreamName(), value, ts)
 		return
 	}
-	sh := c.data[series.hash&(shardCount-1)]
-	if hint := series.hint.Load(); hint != 0 {
-		slot := uint32(hint&0xffffff) - 1
-		generation := hint >> 24
+	if !c.tryStreamPoint(series.hash, &series.hint, value, ts) {
+		c.refreshStreamPoint(series.name, series.hash, &series.hint, value, ts)
+	}
+}
+
+// Dictionary points enter one warm path. Resolution owns the
+// canonical name; a point only validates the numeric item hint under the shard
+// lock, with no name load, registry lookup or reference-count update. True means
+// the point was handled (including quota refusal); false needs cold admission.
+func (c *Cache) tryStreamPoint(hash uint64, hint *atomic.Uint64, value float64, ts int64) bool {
+	sh := c.data[hash&(shardCount-1)]
+	if h := hint.Load(); h != 0 {
+		slot := uint32(h&0xffffff) - 1
+		generation := h >> 24
 		sh.mu.Lock()
 		if int(slot) < len(sh.items.slots) {
 			it := sh.items.slots[slot].item
-			if it != nil && it.streamGeneration == generation && c.settings.Load().(*cacheSettings).xlog == nil {
-				c.addPointLocked(sh, settings, it, series.hash, value, ts)
-				sh.mu.Unlock()
-				return
+			if it != nil && it.streamGeneration == generation {
+				// One current snapshot covers admission and the diversion/dump
+				// boundary. A second pre-lock settings load is unnecessary.
+				s := c.settings.Load().(*cacheSettings)
+				if s.xlog == nil && !s.tagsEnabled {
+					c.addPointLocked(sh, s, it, hash, value, ts)
+					sh.mu.Unlock()
+					return true
+				}
 			}
 		}
 		sh.mu.Unlock()
 	}
+	return false
+}
 
-	// The ordinary insertion path preserves quota, recovery, tags, throttling and
-	// graceful diversion, while passing the existing immutable name allocation.
-	c.addWithRestore(points.OnePoint(series.name, value, ts), false, false, false, series, nil)
+// A cold admission borrows either identity type's hint without changing its
+// layout or retaining cache items. The name/hash guard excludes normalized tags.
+type streamPointHint struct {
+	name string
+	hash uint64
+	hint *atomic.Uint64
+}
+
+// Keep cold admission outside the warm frame. Ordinary insertion claims recovery
+// and publishes the hint before unlocking, including for an existing rejected item.
+func (c *Cache) refreshStreamPoint(name string, hash uint64, hint *atomic.Uint64, value float64, ts int64) {
+	binding := streamPointHint{name: name, hash: hash, hint: hint}
+	c.addWithRestore(points.OnePoint(name, value, ts), false, false, false, &binding, nil)
 }
 
 // StreamSeriesIndexBytes reports the fixed-width weak index capacity. Series
@@ -175,13 +201,13 @@ func (sh *Shard) streamIdentity(it *item) uint64 {
 	return it.streamGeneration
 }
 
-// bindStreamSeries publishes an insertion/lookup result while the owning shard
+// bindStreamHint publishes an insertion/lookup result while the owning shard
 // is still locked. A rehash or eviction later invalidates the generation check.
-func (sh *Shard) bindStreamSeries(series *StreamSeries, it *item, slot int) {
+func (sh *Shard) bindStreamHint(hint *atomic.Uint64, it *item, slot int) {
 	generation := sh.streamIdentity(it)
 	if generation != 0 && generation < 1<<40 && slot < 0xffffff {
-		series.hint.Store(generation<<24 | uint64(slot+1))
+		hint.Store(generation<<24 | uint64(slot+1))
 	} else {
-		series.hint.Store(0)
+		hint.Store(0)
 	}
 }

@@ -173,3 +173,24 @@ func TestStreamSeriesRejectedFallbackRefreshesHint(t *testing.T) {
 		}
 	}
 }
+
+// A resolved dictionary name must still follow current tag normalization.
+func TestResolvedStreamNormalizesNameBeforeUsingIdentity(t *testing.T) {
+	c := New()
+	c.SetMaxSize(0)
+	c.SetTagsEnabled(true)
+	const raw, normalized = "example.tags;z=2;a=1", "example.tags;a=1;z=2"
+	slot := c.ResolveStreamName([]byte(raw))
+	for i := range 3 {
+		c.AddStreamPoint(nil, float64(i), int64(i+1), &slot)
+	}
+	got := c.Get(normalized)
+	if len(got) != 3 || len(c.Get(raw)) != 0 || c.Size() != 3 {
+		t.Fatal("resolved identity bypassed normalization", got, c.Size())
+	}
+	for i, point := range got {
+		if point.Value != float64(i) || point.Timestamp != int64(i+1) {
+			t.Fatal("normalization changed points", got)
+		}
+	}
+}

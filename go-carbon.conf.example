@@ -947,6 +947,13 @@ pyroscope = ""
 # Bounds concurrent exports/imports and encoded/decoded import size.
 max_transfers = 0 # auto: available CPU concurrency, capped at 64; explicit positive values remain ceilings
 max_body_bytes = 167772160
+# Archive-anchor maintenance (/v1/maintenance/archive-anchors) is admitted
+# separately from transfers: at most max-maintenance-requests requests at once
+# (1..64, 0 selects 2), each preparing up to maintenance-workers of its at most
+# 32 names concurrently (1..32, 0 selects 8). Replies keep request order; each
+# name still reads its own snapshot and applies under its own transfer stripe.
+max-maintenance-requests = 2
+maintenance-workers = 8
 # Legacy catalog-cache TTL in seconds; shared catalog reads have no TTL cache.
 timeout = 3600
 # Filesystem-only flags below must retain these values in shared mode.
