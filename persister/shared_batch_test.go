@@ -137,6 +137,138 @@ func TestSharedBatchRateTokens(t *testing.T) {
 	}
 }
 
+func TestSharedBatchOnlySpendsTokensOnReadyNames(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		t.Run(map[bool]string{false: "empty", true: "stale_then_empty"}[stale], func(t *testing.T) {
+			c := cache.New()
+			names := []string{"permit.a", "permit.b"}
+			for _, name := range names {
+				c.Add(points.OnePoint(name, 3, time.Now().Unix()))
+			}
+			exit, done := make(chan bool), make(chan struct{})
+			var calls []string
+			g := &gatedBatchStore{failedSharedStore: failedSharedStore{calls: &calls}, entered: make(chan []store.MetricUpdate), commit: make(chan error, 1)}
+			received := false
+			recv := func(abort chan bool) string {
+				if !received {
+					received = true
+					return names[0]
+				}
+				<-abort
+				return ""
+			}
+			p := NewWhisper(t.TempDir(), nil, NewWhisperAggregation(), recv, c.PopNotConfirmed, c.Confirm, c.Pop)
+			p.SetRequeue(c.Requeue)
+			p.SetMetricStore(g)
+			p.SetStoreUpdateBatchSize(8)
+			p.SetMaxUpdatesPerSecond(-1)
+			p.SetWriteoutReady(func(name string) bool { return name != "permit.stale" })
+			extra := []string{names[1], ""}
+			if stale {
+				extra = append([]string{"permit.stale"}, extra...)
+			}
+			p.SetWriteoutBatchReceiver(func() string {
+				next := extra[0]
+				extra = extra[1:]
+				return next
+			})
+			const permits = 6
+			tokens := &helper.ThrottleTicker{C: make(chan bool, permits)}
+			for range permits {
+				tokens.C <- true
+			}
+			p.autoUpdate.ticker.Store(tokens)
+			go func() { p.worker(exit); close(done) }()
+			defer func() {
+				close(exit)
+				g.commit <- nil
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("worker did not stop")
+				}
+			}()
+			select {
+			case updates := <-g.entered:
+				if len(updates) != len(names) {
+					t.Fatalf("updates %+v", updates)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("worker never committed the ready names")
+			}
+			// The worker is gated inside the actual store call, so no later
+			// loop can reserve a permit for the next batch during this check.
+			if remaining := len(tokens.C); remaining != permits-len(names) {
+				t.Fatalf("empty/stale queue consumed write permits: remaining=%d want=%d", remaining, permits-len(names))
+			}
+		})
+	}
+}
+
+func TestSharedBatchKeepsDequeuedNameUntilNextPermit(t *testing.T) {
+	c := cache.New()
+	names := []string{"deferred.permit.a", "deferred.permit.b", "deferred.permit.c"}
+	queue := make(chan string, len(names))
+	for _, name := range names {
+		c.Add(points.OnePoint(name, 3, time.Now().Unix()))
+		queue <- name
+	}
+	exit, done := make(chan bool), make(chan struct{})
+	var calls []string
+	g := &gatedBatchStore{failedSharedStore: failedSharedStore{calls: &calls}}
+	confirmed := make(chan string, len(names))
+	p := NewWhisper(t.TempDir(), nil, NewWhisperAggregation(), func(abort chan bool) string {
+		select {
+		case name := <-queue:
+			return name
+		case <-abort:
+			return ""
+		}
+	}, c.PopNotConfirmed, func(batch *points.Points) { c.Confirm(batch); confirmed <- batch.Metric }, c.Pop)
+	p.SetMetricStore(g)
+	p.SetRequeue(c.Requeue)
+	p.SetStoreUpdateBatchSize(8)
+	p.SetMaxUpdatesPerSecond(-1)
+	p.SetWriteoutBatchReceiver(func() string {
+		select {
+		case name := <-queue:
+			return name
+		default:
+			return ""
+		}
+	})
+	tokens := &helper.ThrottleTicker{C: make(chan bool, 1)}
+	p.autoUpdate.ticker.Store(tokens)
+	go func() { p.worker(exit); close(done) }()
+	defer func() {
+		close(exit)
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("worker did not stop while waiting for permits")
+		}
+	}()
+	for _, name := range names {
+		// Give exactly one store update at a time. A name removed by the
+		// batch probe must survive without a permit and remain cache-owned.
+		if len(c.Get(name)) != 1 {
+			t.Fatal("unfunded name lost its cached point", name)
+		}
+		tokens.C <- true
+		select {
+		case got := <-confirmed:
+			if got != name {
+				t.Fatalf("confirmed %s, want %s", got, name)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("dequeued name did not resume with its permit", name)
+		}
+	}
+	if !c.IsEmpty() || len(calls) != len(names) {
+		t.Fatalf("cache=%d store calls=%v", c.Size(), calls)
+	}
+}
+
 func TestSharedBatchDisabledForOtherRoutes(t *testing.T) {
 	var calls []string
 	g := &gatedBatchStore{failedSharedStore: failedSharedStore{calls: &calls}}

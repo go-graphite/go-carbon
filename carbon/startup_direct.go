@@ -53,6 +53,10 @@ func (s *startupInput) maybeDirect(now time.Time) {
 	}
 	var promotions uint64
 	for _, sh := range s.shards {
+		if failure := sh.err.Load(); failure != nil {
+			s.refuseDirect(now, failure.err.Error())
+			return
+		}
 		if !sh.live.Load() {
 			s.liveSince = time.Time{}
 			s.refuseDirect(now, "not every partition is live")
@@ -68,7 +72,7 @@ func (s *startupInput) maybeDirect(now time.Time) {
 	if now.Sub(s.liveSince) < startupDirectDelay {
 		return
 	}
-	if s.releaseLog != nil && s.directFence == nil {
+	if s.releaseLog != nil && s.directFence == nil && !s.preparingDirect {
 		// Recovery owns this pin for a previous direct epoch. Reusing it as
 		// the new switch's pin would move that earlier journal after newer
 		// captured corrections. Its history must retire first.
@@ -81,12 +85,27 @@ func (s *startupInput) maybeDirect(now time.Time) {
 	if s.receiver == nil {
 		return
 	}
-	if err := s.receiver.SwitchCapture(sink.directAdd, s.sealForDirect); err != nil {
+	// Journal pin/reset and the terminal ordering marker may synchronize disk.
+	// Capture stays open during all preparation, including a failed attempt.
+	// Do not require an unforced globally idle instant before closing the
+	// submission gate: continuous input can keep at least one append pending.
+	if err := s.prepareDirect(); err != nil {
+		s.refuseDirect(now, err.Error())
+		return
+	}
+	if err := s.receiver.SwitchCapture(sink.directAdd, s.checkDirectFrontiers); err != nil {
 		s.liveSince = time.Time{}
 		s.refuseDirect(now, err.Error())
 		return
 	}
 	s.direct.Store(true)
+	// No receiver can append to the old files now. Sync/seal them without the
+	// receiver fence; direct input is protected by the pinned journal. Until
+	// sync succeeds these files remain unsealed and cannot be retired.
+	if err := s.sealForDirect(); err != nil {
+		s.legacy.fail(err)
+		zapwriter.Logger("app").Error("direct input active; retaining capture sources after seal failure", zap.Error(err))
+	}
 	if sink.drain != nil {
 		sink.drain(false)
 	}
@@ -104,23 +123,17 @@ func (s *startupShard) fence(seal bool) error {
 	return <-reply
 }
 
-// Called only with the receiver's exclusive submission fence held. No append
-// can arrive between the all-partition check and the seals. Replay can only
-// advance the applied positions; a frontier refusal cannot partially seal them.
-func (s *startupInput) sealForDirect() error {
-	// With submissions fenced, a small final reader suffix can drain without
-	// competing with more input. Bound the pause well below a relay queue.
-	deadline := time.Now().Add(250 * time.Millisecond)
+// Called with submissions joined. Append acknowledgements already published
+// the file frontiers. A busy replay simply refuses this attempt; there are no
+// channel waits, syncs or sleeps inside the receiver's exclusive fence.
+func (s *startupInput) checkDirectFrontiers() error {
 	for _, sh := range s.shards {
-		for {
-			err := sh.fence(false)
-			if err == nil {
-				break
-			}
-			if sh.err.Load() != nil || time.Now().After(deadline) {
-				return err
-			}
-			time.Sleep(time.Millisecond)
+		if failure := sh.err.Load(); failure != nil {
+			return failure.err
+		}
+		cur, applied := sh.current.Load(), sh.applied.Load()
+		if sh.pending.Load() != 0 || !sh.live.Load() || applied.segment != cur || applied.offset != cur.size.Load() {
+			return errors.New("partition is behind its append frontier")
 		}
 	}
 	var promotions uint64
@@ -130,21 +143,23 @@ func (s *startupInput) sealForDirect() error {
 	if promotions != s.livePromotions {
 		return errors.New("a partition was promoted during the direct fence")
 	}
+	return nil
+}
+
+// Publish the journal's ordering marker before the direct sink is visible.
+// While preparation runs, further capture records still precede that marker.
+// On retry, retain our own pin without confusing it with an older direct epoch.
+func (s *startupInput) prepareDirect() error {
 	if s.releaseLog == nil {
 		release, err := s.sink.Load().startLog()
 		if err != nil {
 			return err
 		}
 		s.releaseLog = release
+		s.preparingDirect = true
 	}
-	var wg sync.WaitGroup
-	errs := make([]error, len(s.shards))
-	for i, sh := range s.shards {
-		wg.Go(func() { errs[i] = sh.fence(true) })
-	}
-	wg.Wait()
-	if err := errors.Join(errs...); err != nil {
-		return err
+	if seg := s.directFence; seg != nil {
+		return errors.Join(seg.file.Sync(), syncDir(filepath.Dir(seg.path)))
 	}
 	path := fmt.Sprintf("%s.capture-epoch-%020d%s", s.path, s.epoch, startupDirectSuffix)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
@@ -158,6 +173,19 @@ func (s *startupInput) sealForDirect() error {
 	}
 	s.directFence = &startupSegment{file: f, path: path, unlock: unlock}
 	return errors.Join(f.Sync(), syncDir(filepath.Dir(path)))
+}
+
+func (s *startupInput) sealForDirect() error {
+	if err := s.prepareDirect(); err != nil {
+		return err
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, len(s.shards))
+	for i, sh := range s.shards {
+		wg.Go(func() { errs[i] = sh.fence(true) })
+	}
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
 func (s *startupInput) stopDirectSwitch() bool {

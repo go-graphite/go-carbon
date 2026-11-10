@@ -20,6 +20,7 @@ import (
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/go-graphite/go-carbon/receiver/tcp"
 	"github.com/lomik/zapwriter"
+	"github.com/zeebo/xxh3"
 )
 
 // inputHandoffTimeout bounds how long a stopping instance keeps appending
@@ -28,6 +29,10 @@ import (
 // handoff, and the successor replays the tail before opening its own input.
 var inputHandoffTimeout = 20 * time.Second
 
+// Fault injection at the final immutable-tail seal, after readers detached.
+// Tests set this only in an isolated process and join the stopping worker.
+var handoverSealHook func()
+
 // receiverStoreHook, when set by a test, wraps what TCP receivers pass their
 // points to, so the test sees every point a receiver accepted.
 var receiverStoreHook func(add func(*points.Points), addPoint func(name []byte, value float64, timestamp int64)) (func(*points.Points), func(name []byte, value float64, timestamp int64))
@@ -35,20 +40,35 @@ var receiverStoreHook func(add func(*points.Points), addPoint func(name []byte, 
 // switchWriter lets diverted input move from one log to another. When Switch
 // returns, no write to the previous log is in flight, so it can be closed.
 type switchWriter struct {
-	mu    sync.RWMutex
+	// Independent metric lanes keep every input connection from updating the
+	// same reader-count cache line for every point. Switch joins every lane
+	// before replacing the writer, retaining the original close-after-join rule.
+	lanes [256]switchWriterLane
 	write func(*points.Points) error
 }
 
+type switchWriterLane struct {
+	mu sync.RWMutex
+	// Leave a full cache line between locks, including on 128-byte machines.
+	_ [128]byte
+}
+
 func (s *switchWriter) Write(p *points.Points) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	lane := &s.lanes[xxh3.HashString(p.Metric)&255]
+	lane.mu.RLock()
+	defer lane.mu.RUnlock()
 	return s.write(p)
 }
 
 func (s *switchWriter) Switch(write func(*points.Points) error) {
-	s.mu.Lock()
+	// Taking every lane in the same order also serializes concurrent switches.
+	for i := range s.lanes {
+		s.lanes[i].mu.Lock()
+	}
 	s.write = write
-	s.mu.Unlock()
+	for i := len(s.lanes) - 1; i >= 0; i-- {
+		s.lanes[i].mu.Unlock()
+	}
 }
 
 // handoffReceiver is a receiver whose connections can move to the successor.
@@ -92,6 +112,10 @@ type inputHandover struct {
 	unlock     func() error
 	timer      *time.Timer
 	detached   *handoff.Input
+	asyncSeal  bool // verified successor captures before waiting for the tail lock
+	sealDone   chan struct{}
+	sealErr    error // published by closing sealDone
+	flushOnce  sync.Once
 
 	// lost counts points accepted while the tail could not take them; the
 	// first failure stops input.
@@ -185,8 +209,26 @@ func (h *inputHandover) Detach() (*handoff.Input, error) {
 		conns += len(ir.Conns)
 		in.Receivers = append(in.Receivers, ir)
 	}
-	// The successor replays the tail before applying newer socket points.
-	tail, err := h.completeTail()
+	// Flush every accepted byte before transferring sockets. The immutable
+	// prefix is already in the kernel if this process dies during final Sync.
+	// A capable successor captures newer points while waiting for durability.
+	var tail recovery.File
+	var err error
+	if h.asyncSeal {
+		tail, err = h.flushTail()
+		if err == nil {
+			h.sealDone = make(chan struct{})
+			go func() {
+				_, h.sealErr = h.completeTail()
+				close(h.sealDone)
+			}()
+		} else {
+			_, sealErr := h.completeTail()
+			err = errors.Join(err, sealErr)
+		}
+	} else {
+		tail, err = h.completeTail()
+	}
 	if err != nil {
 		in.Close()
 		return nil, err
@@ -292,14 +334,36 @@ func (h *inputHandover) closedAt() time.Time {
 	return h.closed
 }
 
+// waitSeal keeps the predecessor alive until its immutable prefix is durable.
+// The offer has stopped before this call, so no new Detach can start a seal.
+func (h *inputHandover) waitSeal() error {
+	h.mu.Lock()
+	done := h.sealDone
+	h.mu.Unlock()
+	if done != nil {
+		<-done
+		return h.sealErr
+	}
+	return nil
+}
+
 // completeTail runs once no receiver writes anymore.
 func (h *inputHandover) completeTail() (recovery.File, error) {
-	if h.flushTraces != nil {
-		h.flushTraces()
+	f, err := h.flushTail()
+	if handoverSealHook != nil {
+		handoverSealHook()
 	}
-	f, err := h.tail.Close()
-	err = errors.Join(err, syncDir(filepath.Dir(h.path)))
+	err = errors.Join(err, h.tail.Sync(), syncDir(filepath.Dir(h.path)))
 	return f, errors.Join(err, h.unlock())
+}
+
+func (h *inputHandover) flushTail() (recovery.File, error) {
+	h.flushOnce.Do(func() {
+		if h.flushTraces != nil {
+			h.flushTraces()
+		}
+	})
+	return h.tail.Flush()
 }
 
 func syncDir(path string) error {

@@ -69,6 +69,19 @@ time. Already admitted bounded batches can briefly overlap writes; admission doe
 running work. Estimated work costs are reserved immediately and reconciled
 against whole-process CPU every 5 ms, with at most 5 ms of saved CPU credit.
 
+Once early durable capture owns live intake, historical legacy-tail replay also
+uses the restart allowance. Its decoder and worker pool share one eighth of
+that allowance, using at most the rounded-up share in workers and no more than
+GOMAXPROCS. Each participant duty-paces its active batches; queue waits bank no
+CPU credit. This keeps historical cache insertion from launching an unpaced
+GOMAXPROCS-sized pool alongside cold writeout. The share retains progress under
+mandatory CPU debt while live capture continues independently. It does not
+change the configured CPU minimum, claim metadata-checkpoint ownership, reset
+checkpoint byte progress, or count as a checkpoint-load grant. Cancellation
+joins all replay workers and leaves the unreplayed source retained; it cannot
+be mistaken for an accepted torn-tail EOF. Current live-capture replay keeps
+its existing admission and ordering.
+
 The checkpoint accelerator attempt has a ten-minute deadline after input
 readiness, including admission waits. A timed-out partial load remains safe:
 missing metadata uses ordinary durable-store lookups and provisional legacy
@@ -79,12 +92,12 @@ filesystem syscall. No writeout gate is added.
 Deferrable store maintenance waits for both the warming attempt (including any
 fallback scan) to finish and restart pacing to end. This covers history relayout,
 cold-pack, expiration sweeps, compact-once, catalog membership construction and
-invalid-name purging. The wait is bounded to 35 minutes from store startup,
-including store opening and restoration. A timeout starts maintenance with a
-warning even if warming or backlog drain is stuck. The checkpoint's mandatory
-share still applies if the two overlap. Each worker logs when waiting and when
-starting, including its release reason; shutdown cancels pending waiters.
-SIGHUP keeps the original gate and deadline when changing maintenance policy.
+invalid-name purging. After35minutes from store startup, including store opening
+and restoration, the gate warns once and keeps waiting. Elapsed time cannot
+release optional maintenance while warming or backlog drain remains active;
+otherwise a cache-sized recovery could lose its CPU and I/O to that work.
+Each worker logs when waiting and when starting; shutdown cancels pending
+waiters. SIGHUP keeps the original gate and warning time when changing policy.
 Expiration additionally waits for pending-point restoration before scanning.
 Mandatory WAL/flush work, ordinary Pebble compaction, foreground operations and
 explicit offline maintenance calls keep their existing behavior. With metadata

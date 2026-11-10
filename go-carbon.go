@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"expvar"
 	"flag"
 	"fmt"
@@ -81,8 +82,21 @@ func main() {
 	inputHandoffProtocol := flag.Bool("input-handoff-protocol", false, "Print the supported input handoff protocol and exit")
 	sharedStoreHandoffProtocol := flag.Bool("shared-store-handoff-protocol", false, "Print the supported mirrored storage handoff protocol and exit")
 	storeInputHandoffProtocol := flag.Bool("store-input-handoff-protocol", false, "Print the supported shared-store input handoff protocol and exit")
+	checkStartupCapture := flag.Bool("check-startup-capture", false, "Check early durable input capture configuration/capacity without opening storage or listeners")
+	startupGenerationProtocol := flag.Bool("startup-generation-protocol", false, "Print support for early capture without the optional read checkpoint")
+	asyncTailSealProtocol := flag.Bool("async-tail-seal-protocol", false, "Print support for capture while the predecessor seals its immutable tail")
 
 	flag.Parse()
+
+	if *asyncTailSealProtocol {
+		fmt.Println(handoff.AsyncTailSealProtocol)
+		return
+	}
+
+	if *startupGenerationProtocol {
+		fmt.Println(handoff.StartupGenerationProtocol)
+		return
+	}
 
 	if *handoffProtocol {
 		fmt.Println(handoff.Protocol)
@@ -94,6 +108,17 @@ func main() {
 	}
 	if *storeInputHandoffProtocol {
 		fmt.Println(handoff.StoreInputProtocol)
+		return
+	}
+	if *checkStartupCapture {
+		probe := carbon.New(*configFile)
+		if err := probe.ParseConfig(); err != nil {
+			log.Fatal(err)
+		}
+		if err := carbon.CheckStartupCaptureAdmission(probe.Config); err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(handoff.StartupCaptureProtocol)
 		return
 	}
 	if *sharedStoreHandoffProtocol {
@@ -306,12 +331,19 @@ func main() {
 		// DumpStop switches mirrored readers to the original files and closes
 		// the shared handle before releasing its exclusive lock to a successor.
 		app.SetReadHandoff(successorBinary(), releaseToSupervisor)
-		app.SetSuccessorResolver(serviceManagerBinary)
+		if os.Getenv("INVOCATION_ID") != "" {
+			app.SetSuccessorResolver(serviceManagerBinary)
+		}
 	}
 	go func() {
 		for {
 			<-stopSignals
-			if err := app.DumpStop(); err == nil && release != nil && cfg.Dump.Enabled && !released {
+			err := app.DumpStop()
+			if errors.Is(err, carbon.ErrRestartRefused) {
+				mainLogger.Error("restart admission refused; incumbent remains active", zap.Error(err))
+				continue
+			}
+			if err == nil && release != nil && cfg.Dump.Enabled && !released {
 				app.ReleaseForHandoff()
 				releaseToSupervisor()
 			}

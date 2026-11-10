@@ -14,6 +14,87 @@ import (
 	"go.uber.org/zap"
 )
 
+func TestStreamCaptureSwitchRetiresOldSink(t *testing.T) {
+	for _, flags := range []byte{0, codec.FlagZstd} {
+		t.Run(fmt.Sprint(flags), func(t *testing.T) {
+			var sealed atomic.Bool
+			captured, direct := make(chan float64, 4), make(chan float64, 4)
+			listener, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := NewOptions()
+			options.Listen = listener.Addr().String()
+			file, err := listener.File()
+			_ = listener.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := NewInheritedCapture("tcp", options, &Handoff{Listener: file}, captureFunc(func(data []byte, _ int) error {
+				if sealed.Load() {
+					return fmt.Errorf("capture sink was already retired")
+				}
+				return points.ReadBinary(bytes.NewReader(data), func(p *points.Points) { captured <- p.Data[0].Value })
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Stop()
+			conn, err := net.Dial("tcp", r.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			e, err := codec.NewEncoder(codec.Options{Flags: flags})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer e.Close()
+			preamble, _ := codec.AppendPreamble(nil, flags)
+			send := func(value float64, wire []byte) {
+				t.Helper()
+				if err := e.Add([]byte("stream.direct"), value, 1700000000); err != nil {
+					t.Fatal(err)
+				}
+				wire, err := e.Flush(wire)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := conn.Write(wire); err != nil {
+					t.Fatal(err)
+				}
+			}
+			send(1, preamble)
+			select {
+			case <-captured:
+			case <-time.After(3 * time.Second):
+				t.Fatal("first frame did not enter capture")
+			}
+			if err := r.SwitchCapture(func(p *points.Points) { direct <- p.Data[0].Value }, func() error { sealed.Store(true); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			send(2, nil)
+			select {
+			case value := <-direct:
+				if value != 2 {
+					t.Fatal(value)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("native stream kept the retired capture sink")
+			}
+			send(3, nil)
+			select {
+			case value := <-direct:
+				if value != 3 {
+					t.Fatal(value)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("next frame did not adopt direct intake")
+			}
+		})
+	}
+}
+
 // observedStreamConn lets the test interrupt after the old handler has actually
 // read a chosen prefix, including a partial header or payload. The tracked
 // connection remains the real TCP socket so its descriptor can be handed over.

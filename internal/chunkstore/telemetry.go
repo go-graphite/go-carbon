@@ -39,7 +39,7 @@ func (s *Store) TelemetryStats() (Stats, SidecarInventory, bool) {
 	cold, relayout := s.coldPack.stats, s.relayoutAtomicStats()
 	s.relayout.guard.statsLocked(&relayout)
 	s.relayout.reclaim.statsLocked(&relayout)
-	stalls, duration, reason := s.stallCount, s.stallDuration, s.stallReason
+	stalls, duration, reason := s.stallCount.Load(), s.stallDuration, s.stallReason
 	active := !s.stallSince.IsZero()
 	if active {
 		duration += time.Since(s.stallSince)
@@ -57,6 +57,10 @@ func (s *Store) TelemetryStats() (Stats, SidecarInventory, bool) {
 	}
 	return s.statsFrom(m, pacing, cold, relayout, stalls, duration, reason, active, r), inv, true
 }
+
+// WriteStalls reports the live cumulative stall count without waiting for
+// optional telemetry/control locks or entering Pebble.
+func (s *Store) WriteStalls() uint64 { return s.stallCount.Load() }
 
 // TelemetryAge makes a stalled background observation visible without making
 // collectors wait for it. Counters read from atomics remain current.

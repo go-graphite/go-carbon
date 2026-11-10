@@ -352,6 +352,9 @@ type dumpConfig struct {
 	// its input sockets to a capable successor although reads cannot move;
 	// see go-carbon.conf.example.
 	StoreInputHandoff bool `toml:"store-input-handoff"`
+	// RequireStartupCapture refuses a planned stop before changing the live
+	// worker when either side cannot use early durable input capture.
+	RequireStartupCapture bool `toml:"require-startup-capture"`
 	// Format of the cache dump a stop writes: "legacy" (the default),
 	// "compact", or "blocks" (compact points with compressed names).
 	// Restore reads every format. Releases without a format ignore its dump; see
@@ -637,6 +640,12 @@ func ReadConfig(filename string) (*Config, error) {
 			// deprecation warnings below, use stderr so these cannot be lost.
 			log.Print(message)
 		}
+	}
+	// Existing shared-store handoff users get safe admission with the capable
+	// binary, without relying on a new Puppet/config key reaching an older
+	// process. An explicit false retains the documented legacy opt-out.
+	if !defined.IsDefined("dump", "require-startup-capture") {
+		cfg.Dump.RequireStartupCapture = cfg.Dump.StoreInputHandoff
 	}
 	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {
 		return nil, err

@@ -126,23 +126,37 @@ type startupInput struct {
 	livePromotions                                                      uint64
 	directFence                                                         *startupSegment
 	releaseLog                                                          func() error
+	preparingDirect                                                     bool                 // transition owns a new journal pin, not an older epoch's pin
+	fileSync                                                            func(*os.File) error // nil uses File.Sync; injected by slow-I/O tests before replay
+	legacyLockPending                                                   bool                 // owned by the historical replay worker, joined before close
 }
 
 func openStartupInput(path string) (*startupInput, error) {
 	return openStartupInputWithPolicy(path, startupPolicy(path))
 }
 func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startupInput, err error) {
+	return openStartupInputWithLegacyLock(path, p, true)
+}
+
+// Capture shards and their directory must be ready while the predecessor is
+// still reading. Its legacy tail stays locked through final Sync; only the
+// historical replay worker waits for that lock, after live capture is active.
+func openStartupInputWithLegacyLock(path string, p startupCapturePolicy, lockLegacy bool) (_ *startupInput, err error) {
 	s := &startupInput{path: path, policy: p, started: time.Now(), stop: make(chan struct{}), done: make(chan struct{}), sealed: make(chan struct{}), pressure: make(chan struct{}, 1), replayStop: make(chan struct{}), replayDone: make(chan struct{}), legacyDone: make(chan struct{}), epoch: time.Now().UnixNano()}
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0600)
 	if err != nil {
 		return nil, err
 	}
-	unlock, err := handoff.LockExclusive(path)
-	if err != nil {
-		f.Close()
-		return nil, err
+	unlock := func() error { return nil }
+	if lockLegacy {
+		unlock, err = handoff.LockExclusive(path)
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
+	s.legacyLockPending = !lockLegacy
 	info, err := f.Stat()
 	if err != nil {
 		f.Close()
@@ -180,6 +194,30 @@ func openStartupInputWithPolicy(path string, p startupCapturePolicy) (_ *startup
 		return nil, err
 	}
 	return s, nil
+}
+
+func (s *startupInput) lockLegacy() error {
+	if !s.legacyLockPending {
+		return nil
+	}
+	unlock, err := handoff.LockExclusiveUntil(s.path, s.replayStop)
+	if err != nil {
+		return err
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		_ = unlock()
+		return err
+	}
+	seg := s.legacy.current.Load()
+	// The predecessor can append after capture preparation. Sample the final
+	// extent only after its lock is ours, or those accepted bytes disappear.
+	s.size.Add(info.Size() - seg.size.Load())
+	s.legacy.size.Store(info.Size())
+	seg.size.Store(info.Size())
+	seg.unlock = unlock
+	s.legacyLockPending = false
+	return nil
 }
 func (s *startupShard) newSegment(index uint64, syncDirectory bool) (*startupSegment, error) {
 	path := fmt.Sprintf("%s.%012d.tail.bin", s.path, index)
@@ -433,7 +471,7 @@ func (s *startupShard) appendLoop() {
 func captureMetricBytes(raw []byte, admission captureAdmission) (int64, error) {
 	names := make(map[string]struct{})
 	var cost int64
-	err := points.ReadBinaryBytesBorrowed(raw, func(name []byte, _ []points.Point) {
+	err := points.ReadBinaryBytesBorrowedBatches(raw, 128, func(name []byte, _ []points.Point) {
 		overhead := admission.RecoveryMetricBytes(name)
 		if overhead == 0 {
 			return
@@ -451,7 +489,7 @@ func (s *startupShard) apply(raw []byte, source *cache.RecoverySource, sink *sta
 	}
 	var p points.Points
 	namer, _ := sink.admission.(interface{ RecoveryMetricName([]byte) string })
-	return points.ReadBinaryBytesBorrowed(raw, func(name []byte, data []points.Point) {
+	return points.ReadBinaryBytesBorrowedBatches(raw, 128, func(name []byte, data []points.Point) {
 		canonical, ok := s.names[string(name)]
 		if !ok {
 			if len(s.names) >= 4096 || s.nameBytes+len(name) > 4<<20 {
@@ -847,7 +885,7 @@ func (s *startupInput) close() error {
 				if !seg.retired.Load() && seg.file != nil {
 					// Append owners have already joined after their final Sync;
 					// history files were immutable before this process opened them.
-					if seg == s.legacy.current.Load() {
+					if seg == s.legacy.current.Load() && !s.legacyLockPending {
 						errs = append(errs, seg.file.Sync())
 					}
 					errs = append(errs, seg.file.Close(), seg.unlock())

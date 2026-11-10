@@ -1,6 +1,7 @@
 package carbon
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,15 +57,20 @@ func (app *App) tryStartupInput() error {
 	}
 	// Only the name is needed here; full checksum/root/index validation remains
 	// on the ordinary startup path, before a point can enter the cache.
-	f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
+	manifest, generation, err := startupGenerationManifest(c.Dump.Path)
 	if err != nil {
-		return nil
+		return err
 	}
-	var manifest recovery.Manifest
-	err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
-	_ = f.Close()
-	if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
-		return nil
+	if !generation {
+		f, err := os.Open(filepath.Join(c.Dump.Path, recovery.ManifestName))
+		if err != nil {
+			return nil
+		}
+		err = json.NewDecoder(io.LimitReader(f, 1<<20)).Decode(&manifest)
+		_ = f.Close()
+		if err != nil || filepath.Base(manifest.WAL.Name) != manifest.WAL.Name || manifest.WAL.Name == "." {
+			return nil
+		}
 	}
 	_, err = filepath.Glob(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)+".capture-*.tail.bin"))
 	if err != nil {
@@ -103,6 +109,15 @@ func (app *App) tryStartupInput() error {
 		zapwriter.Logger("app").Error("startup capture lacks safe headroom; using ordered input recovery", zap.Int64("available_memory_bytes", policy.available), zap.Int64("spool_limit_bytes", policy.spoolBytes))
 		return nil
 	}
+	spool, err := openStartupInputWithLegacyLock(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy, false)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if spool.receiver == nil {
+			_ = spool.close()
+		}
+	}()
 	claim := app.handoffClaim
 	app.handoffClaim = nil
 	var h *tcp.Handoff
@@ -138,11 +153,6 @@ func (app *App) tryStartupInput() error {
 		if h == nil {
 			return errors.New("store input handoff has no TCP receiver")
 		}
-	}
-	spool, err := openStartupInputWithPolicy(filepath.Join(c.Dump.Path, recovery.TailName(manifest.WAL.Name)), policy)
-	if err != nil {
-		closeTCPHandoff(h)
-		return err
 	}
 	if receiverStoreHook != nil {
 		spool.observe, _ = receiverStoreHook(func(*points.Points) {}, func([]byte, float64, int64) {})
@@ -256,6 +266,18 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 	}
 	logPath, draining := app.Config.InputLog.Path, app.Persister != nil
 	s.startReplay(sink, func() error {
+		ctx, cancel := context.WithCancel(context.Background())
+		watchDone := make(chan struct{})
+		go func() {
+			defer close(watchDone)
+			select {
+			case <-s.stop:
+			case <-s.replayStop:
+			case <-ctx.Done():
+			}
+			cancel()
+		}()
+		defer func() { cancel(); <-watchDone }()
 		// Older epochs precede the current stream, including after a crash during
 		// partially completed startup. Current files stay exclusively locked.
 		entries, err := os.ReadDir(filepath.Dir(s.path))
@@ -319,6 +341,9 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 		}
 		openSegment := func(path string) (*startupSegment, error) {
 			if path == s.path {
+				if err := s.lockLegacy(); err != nil {
+					return nil, err
+				}
 				seg := s.legacy.current.Load()
 				seg.source = s.legacy.stream.Next()
 				return seg, nil
@@ -375,7 +400,12 @@ func (app *App) finishStartupInput(core *cache.Cache) {
 					return nil
 				})
 			} else {
-				loaded, e = replayInputTailReader(reader, min(s.policy.shards, runtime.GOMAXPROCS(0)), add(seg.source))
+				workers := min(s.policy.shards, runtime.GOMAXPROCS(0))
+				if app.restartBudget != nil {
+					loaded, e = replayInputTailBatchesWithBudget(ctx, reader, workers, add(seg.source), app.restartBudget)
+				} else {
+					loaded, e = replayInputTailReader(reader, workers, add(seg.source))
+				}
 			}
 			if e != nil && !errors.Is(e, io.EOF) && !errors.Is(e, io.ErrUnexpectedEOF) {
 				return e

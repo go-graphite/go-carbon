@@ -3,9 +3,11 @@
 package handoff
 
 import (
+	"context"
 	"errors"
 	"os"
 	"syscall"
+	"time"
 )
 
 // LockExclusive holds an exclusive advisory lock on path until release. A
@@ -13,6 +15,39 @@ import (
 // successor neither replays nor removes the log early.
 func LockExclusive(path string) (release func() error, err error) {
 	return lock(path, syscall.LOCK_EX)
+}
+
+// LockExclusiveUntil waits for a predecessor's immutable tail without making
+// cancellation of the successor's historical replay depend on predecessor IO.
+func LockExclusiveUntil(path string, stop <-chan struct{}) (func() error, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		select {
+		case <-stop:
+			_ = f.Close()
+			return nil, context.Canceled
+		default:
+		}
+		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f.Close, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+			_ = f.Close()
+			return nil, err
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-stop:
+			timer.Stop()
+			_ = f.Close()
+			return nil, context.Canceled
+		case <-timer.C:
+		}
+	}
 }
 
 // LockShared waits until no process holds an exclusive lock on path, then holds

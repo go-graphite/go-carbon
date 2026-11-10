@@ -317,3 +317,63 @@ func TestCheckpointValidationProgressWithoutWriteoutFloor(t *testing.T) {
 		}
 	})
 }
+
+func TestTailReplayDutyAndMetadataOwnershipUnderCPUDebt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		b := NewWithCPU(2, func() float64 { return 3 * time.Since(start).Seconds() })
+		metadata := b.NewCheckpoint(func() (uint64, uint64) { return 32, 64 })
+		if err := metadata.Wait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		metadata.Idle(context.Background())
+		before := b.State()
+		// One worker and the decoder must share a quarter core, including when
+		// mandatory receivers have exhausted the process credit.
+		time.Sleep(time.Second)
+		p := b.NewReplay(2)
+		if err := p.Wait(context.Background()); err != nil {
+			t.Fatal("historical recovery starved under mandatory CPU debt", err)
+		}
+		time.Sleep(time.Millisecond)
+		at := time.Now()
+		if err := p.Idle(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if elapsed := time.Since(at); elapsed != 7*time.Millisecond {
+			t.Fatal("tail participant escaped shared quarter-core duty", elapsed)
+		}
+		p.Finish()
+		after := b.State()
+		if !after.CheckpointLoading || after.CheckpointWork != before.CheckpointWork || after.CheckpointTotal != before.CheckpointTotal || after.CheckpointGrants != before.CheckpointGrants {
+			t.Fatalf("tail replay corrupted accelerator ownership/progress: before %+v, after %+v", before, after)
+		}
+		// Idle queue time must not become CPU debt on the next batch.
+		time.Sleep(time.Second)
+		q := b.NewReplay(2)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
+		defer cancel()
+		if err := q.Wait(ctx); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(time.Millisecond)
+		if err := q.Idle(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("duty delay ignored cancellation", err)
+		}
+		q.Finish()
+		metadata.Finish()
+		if b.State().CheckpointLoading {
+			t.Fatal("tail replay leaked metadata checkpoint ownership")
+		}
+	})
+}
+
+func TestTailReplayWorkersBoundInFlightRecovery(t *testing.T) {
+	for _, cores := range []float64{.25, 1, 6, 23, 96} {
+		b := NewWithCPU(cores, func() float64 { return 0 })
+		workers := b.ReplayWorkers(1024)
+		if workers < 1 || workers > runtime.GOMAXPROCS(0) || workers > int(math.Ceil(cores/8)) || b.ReplayWorkers(1) != 1 {
+			t.Fatal("tail concurrency exceeds its restart share", cores, workers)
+		}
+	}
+}

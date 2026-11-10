@@ -40,11 +40,41 @@ with SIGHUP and verify `config successfully reloaded` before the planned restart
 Editing only the next instance's configuration leaves the first stop on the old
 setting. Enabling the supervisor itself requires starting under that supervisor.
 
+When `require-startup-capture` is omitted, `store-input-handoff = true` also
+enables strict restart admission. Before stopping any component, the incumbent
+checks its recovery state and the actual successor's configuration, capacity
+probe and `-startup-generation-protocol` capability. It then synchronizes a
+small `.startup-input-generation.json` record while intake and persistence
+remain active. Failure to prepare that record refuses the stop and keeps the
+incumbent running. An explicit `require-startup-capture = false` selects the
+legacy fallback and cannot provide the same planned-restart guarantee.
+
+The generation record supplies only cache/WAL names for early intake routing.
+It is not a point source or a read checkpoint. Once the actual cache dump and
+WAL are durable, an unavailable optional read index or failed checkpoint
+publication no longer closes input: the successor captures into its ordinary
+sharded spool before restoring the authoritative dump/WAL in order. Malformed
+or ambiguous generation names are refused; other generations still fail the
+single-generation check. Keep the record with its recovery files when moving
+or restoring a dump directory. Actual dump/WAL I/O errors, insufficient resource
+headroom and an unsuccessful socket transfer remain separate failure cases;
+admission is not a throughput certificate.
+
 On USR2, the worker keeps receiving while it checkpoints the cache and finishes
 store flushes. It then diverts input to a tail log, closes reads and the shared
 database, and releases its supervisor. The successor takes the listening and
 accepted sockets immediately, before opening storage or validating the pending
-checkpoint. Its handlers restore decoder state and encode complete legacy
+checkpoint. Before requesting sockets it creates and syncs its independent
+capture shards while the predecessor still reads. With a successor advertising
+`go-carbon-async-tail-seal/1`, the predecessor flushes all accepted tail bytes
+before transferring sockets, then completes final file and directory syncs
+while the successor captures. The predecessor joins that seal before exiting.
+Historical replay waits for the old tail's exclusive lock and samples its final
+size after acquiring it; live capture never waits for that lock. Strict restart
+admission probes the actual successor's `-async-tail-seal-protocol` before any
+stop mutation. Older non-strict handoffs retain their synchronous seal.
+
+Its handlers restore decoder state and encode complete legacy
 records into connection-local batches, partitioned by metric hash. Each partition
 has one append owner and an independent FIFO. Connection-local acknowledgements
 are reused across flushes. Appenders coalesce submissions, write independently

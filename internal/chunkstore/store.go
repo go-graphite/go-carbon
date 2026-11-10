@@ -295,7 +295,7 @@ type Store struct {
 	closeTimings       CloseTimings
 	openTimings        OpenTimings
 	stallMu            sync.Mutex
-	stallCount         uint64
+	stallCount         atomic.Uint64
 	stallDuration      time.Duration
 	stallSince         time.Time
 	stallReason        string
@@ -1219,7 +1219,7 @@ func (s *Store) Stats() Stats {
 	m := s.db.Metrics()
 	pacing := s.compactionControl.stats()
 	s.stallMu.Lock()
-	stalls, duration, reason := s.stallCount, s.stallDuration, s.stallReason
+	stalls, duration, reason := s.stallCount.Load(), s.stallDuration, s.stallReason
 	active := !s.stallSince.IsZero()
 	if active {
 		duration += time.Since(s.stallSince)
@@ -1366,7 +1366,7 @@ func (s *Store) writeStallBegin(info pebble.WriteStallBeginInfo) {
 	s.compactionControl.stall(true)
 	s.stallMu.Lock()
 	defer s.stallMu.Unlock()
-	s.stallCount++
+	s.stallCount.Add(1)
 	s.stallSince = time.Now()
 	s.stallReason = info.Reason
 }

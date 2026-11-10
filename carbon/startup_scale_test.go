@@ -198,7 +198,15 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 	if seconds > 180 {
 		t.Fatal("local disk safety: maximum 180 seconds")
 	}
-	const clients, slots, batch, rate, limit, persistRate = 190, 16, 512, 10000000, 2000000, 1000000
+	const clients, slots, batch, limit, persistRate = 190, 16, 512, 2000000, 1000000
+	rate := 10000000
+	if raw := os.Getenv("CAPTURE_SCALE_RATE"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1000 || n > 100000000 {
+			t.Fatal("CAPTURE_SCALE_RATE must be between 1000 and 100000000 points/s")
+		}
+		rate = n
+	}
 	perClient := (rate*seconds + clients - 1) / clients
 	total := perClient * clients
 	s, address := captureFixture(t)
@@ -334,7 +342,7 @@ func TestStartupCaptureProductionRate(t *testing.T) {
 			_ = conn.SetWriteDeadline(start.Add(time.Duration(seconds+30) * time.Second))
 			raw := make([]byte, 0, batch*128)
 			for seq := 0; seq < perClient; {
-				target := start.Add(time.Duration(float64(seq) * clients / rate * float64(time.Second)))
+				target := start.Add(time.Duration(float64(seq) * clients / float64(rate) * float64(time.Second)))
 				if d := time.Until(target); d > 0 {
 					time.Sleep(d)
 				}

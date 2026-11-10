@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +68,10 @@ func goDirect(t testing.TB, s *startupInput) {
 	if s.direct.Load() {
 		t.Fatal("transition ignored hysteresis")
 	}
+	// Live append acknowledgements can precede the replay worker's frontier
+	// publication. Production retries a busy frontier instead of waiting under
+	// the receiver fence; make this deterministic fixture await that publication.
+	awaitCapture(t, func() bool { return s.checkDirectFrontiers() == nil })
 	s.maybeDirect(now.Add(startupDirectDelay - time.Millisecond))
 	if s.direct.Load() {
 		t.Fatal("transition ignored stable-live delay")
@@ -74,6 +79,177 @@ func goDirect(t testing.TB, s *startupInput) {
 	s.maybeDirect(now.Add(startupDirectDelay))
 	if !s.direct.Load() {
 		t.Fatal("capture did not switch", zapwriter.TestString())
+	}
+}
+
+// The staging IO test holds the injected sync beyond the shortest feeder
+// deadline while requiring every new point to reach the real cache promptly.
+func exerciseDirectIOWait(t *testing.T, conn net.Conn, core *cache.Cache, name string) {
+	t.Helper()
+	raw := os.Getenv("STARTUP_DIRECT_IO_DELAY")
+	if raw == "" {
+		return
+	}
+	delay, err := time.ParseDuration(raw)
+	if err != nil || delay <= 0 || delay > 30*time.Second {
+		t.Fatal("STARTUP_DIRECT_IO_DELAY must be positive and at most 30s")
+	}
+	started, count := time.Now(), 0
+	for time.Since(started) < delay {
+		before := core.Size()
+		if _, err := fmt.Fprintf(conn, "%s %d 1700000000\n", name, count+10); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(time.Second)
+		for core.Size() <= before && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		if core.Size() <= before {
+			t.Fatal("input stopped while sync remained blocked")
+		}
+		count++
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Logf("blocked_sync=%v new_points_applied=%d without releasing IO", time.Since(started), count)
+}
+
+// PinCopy synchronizes the journal and can block on storage. A direct switch
+// must leave the capture receivers running throughout that preparation.
+func TestStartupDirectJournalSyncKeepsCapturing(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, address := directCaptureFixture(t)
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	s.reclaim()
+	now := time.Now()
+	s.maybeDirect(now)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	startLog := s.sink.Load().startLog
+	s.sink.Load().startLog = func() (func() error, error) {
+		close(entered)
+		<-release
+		return startLog()
+	}
+	go func() {
+		s.maybeDirect(now.Add(startupDirectDelay))
+		close(done)
+	}()
+	defer func() { resume(); <-done }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("journal preparation was not reached")
+	}
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintln(conn, "during.sync 1 1700000000"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for s.points.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.points.Load() != 1 {
+		t.Fatal("journal preparation stopped capture intake")
+	}
+	awaitCapture(t, func() bool { return core.Size() == 1 })
+	exerciseDirectIOWait(t, conn, core, "while.journal.sync")
+	resume()
+	if got := core.Get("during.sync"); len(got) != 1 || got[0].Value != 1 {
+		t.Fatal("point received during sync was lost or changed", got)
+	}
+}
+
+func TestStartupDirectPreparesWhileAnAppendIsOutstanding(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, _ := directCaptureFixture(t)
+	entered, release, prepared, done := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	s.observe = func(*points.Points) { close(entered); <-release }
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	s.reclaim()
+	now := time.Now()
+	s.maybeDirect(now)
+	// Submit through the real append queue. Hold its acknowledgement while the
+	// cutover prepares durable journal authority; input need not be globally idle.
+	startLog := s.sink.Load().startLog
+	s.sink.Load().startLog = func() (func() error, error) { close(prepared); return startLog() }
+	ack := make(chan error, 1)
+	s.shards[0].SubmitCapture(points.OnePoint("busy.cutover", 1, 1700000000).AppendBinary(nil), 1, ack)
+	<-entered
+	go func() { s.maybeDirect(now.Add(startupDirectDelay)); close(done) }()
+	defer func() { resume(); <-done }()
+	select {
+	case <-prepared:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cutover required an unforced globally idle append instant before preparing")
+	}
+	resume()
+	if err := <-ack; err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if !s.direct.Load() || len(core.Get("busy.cutover")) != 1 {
+		t.Fatal("cutover failed to join the acknowledged replay frontier")
+	}
+}
+
+func TestStartupDirectCaptureSyncKeepsReceiving(t *testing.T) {
+	if isolatedTestProcess(t) {
+		return
+	}
+	defer zapwriter.Test()()
+	s, app, core, address := directCaptureFixture(t)
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	resume := sync.OnceFunc(func() { close(release) })
+	once := sync.OnceFunc(func() { close(entered) })
+	s.fileSync = func(f *os.File) error { once(); <-release; return f.Sync() }
+	app.finishStartupInput(core)
+	awaitCapture(t, func() bool { return allCaptureLive(s) })
+	s.reclaim()
+	now := time.Now()
+	s.maybeDirect(now)
+	go func() { s.maybeDirect(now.Add(startupDirectDelay)); close(done) }()
+	defer func() { resume(); <-done }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture file sync was not reached")
+	}
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintln(conn, "during.capture.sync 2 1700000000"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for core.Size() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := core.Get("during.capture.sync"); len(got) != 1 || got[0].Value != 2 {
+		t.Fatal("capture file sync stopped direct intake", got)
+	}
+	if !s.direct.Load() {
+		t.Fatal("input was not published before old-file sync")
+	}
+	exerciseDirectIOWait(t, conn, core, "while.capture.sync")
+	for _, sh := range s.shards {
+		if sh.current.Load().sealed.Load() {
+			t.Fatal("unsynced capture source was made eligible for retirement")
+		}
 	}
 }
 
@@ -334,13 +510,26 @@ func TestStartupDirectRefusesUnappliedFrontier(t *testing.T) {
 			t.Fatal("refusal partially sealed the capture")
 		}
 	}
-	if _, err := os.Stat(s.path + fmt.Sprintf(".capture-epoch-%020d%s", s.epoch, startupDirectSuffix)); !os.IsNotExist(err) {
-		t.Fatal("refusal published a fence", err)
+	// Durable preparation may precede quiescence. Its journal pin and empty
+	// terminal marker stay retained, while ordinary capture remains writable.
+	if s.directFence == nil || s.directFence.retired.Load() || s.releaseLog == nil || !s.preparingDirect {
+		t.Fatal("refusal lost the prepared authority/retention pin")
+	}
+	if err := sh.Write(points.OnePoint("frontier", 2, 2).AppendBinary(nil), 1); err != nil {
+		t.Fatal("refusal stopped capture", err)
+	}
+	var values []float64
+	if _, err := recovery.ReadCaptureFile(sh.current.Load().path, func(p *points.Points) {
+		for _, point := range p.Data {
+			values = append(values, point.Value)
+		}
+	}); err != nil || len(values) != 2 || values[0] != 1 || values[1] != 2 {
+		t.Fatal("refusal lost or reordered captured points", values, err)
 	}
 }
 
 func directCrashHasInput(stage string) bool {
-	return stage == "direct_after_switch" || stage == "direct_partial_retirement" || stage == "direct_full_retirement" || stage == "direct_next_epoch"
+	return stage == "direct_before_capture_sync" || stage == "direct_after_switch" || stage == "direct_partial_retirement" || stage == "direct_full_retirement" || stage == "direct_next_epoch"
 }
 
 func directNextEpochPoints(stamp int64) []*points.Points {
@@ -381,6 +570,19 @@ func startupDirectCrashChild(t *testing.T, stage string, stamp int64) {
 	s, err := openStartupInputWithPolicy(os.Getenv("HANDOFF_CRASH_TAIL"), p)
 	if err != nil {
 		t.Fatal(err)
+	}
+	sealEntered := make(chan struct{})
+	if stage == "direct_before_capture_sync" {
+		entered := sync.OnceFunc(func() { close(sealEntered) })
+		// Installed before replay starts. Crash after journalled input becomes
+		// visible, while the old capture sources have not completed final sync.
+		s.fileSync = func(file *os.File) error {
+			if s.direct.Load() {
+				entered()
+				select {}
+			}
+			return file.Sync()
+		}
 	}
 	opts := *app.Config.Tcp
 	opts.Listen = address
@@ -431,7 +633,17 @@ func startupDirectCrashChild(t *testing.T, stage string, stamp int64) {
 			return nil
 		})
 	}
-	goDirect(t, s)
+	if stage == "direct_before_capture_sync" {
+		awaitCapture(t, func() bool { return s.checkDirectFrontiers() == nil })
+		go s.maybeDirect(time.Now().Add(startupDirectDelay))
+		select {
+		case <-sealEntered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("direct switch did not reach final capture sync")
+		}
+	} else {
+		goDirect(t, s)
+	}
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		t.Fatal(err)
@@ -448,7 +660,7 @@ func startupDirectCrashChild(t *testing.T, stage string, stamp int64) {
 	if err := app.syncInputLog(); err != nil {
 		t.Fatal(err)
 	}
-	if stage == "direct_after_switch" {
+	if stage == "direct_after_switch" || stage == "direct_before_capture_sync" {
 		os.Exit(99)
 	}
 	if stage == "direct_next_epoch" {

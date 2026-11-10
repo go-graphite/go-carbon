@@ -58,6 +58,26 @@ func (app *App) DumpStop() (err error) {
 	stopStarted := time.Now()
 	app.migrationLifecycle.Lock()
 	defer app.migrationLifecycle.Unlock()
+	app.Lock()
+	admissionErr := app.checkRestartAdmission()
+	filenamePostfix := ""
+	captureGeneration := false
+	if admissionErr == nil && app.Config.Dump.RequireStartupCapture {
+		filenamePostfix = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+		format, err := app.Config.Dump.cacheFormat()
+		if err == nil {
+			err = publishStartupGeneration(app.Config.Dump.Path, format, filenamePostfix+".bin")
+		}
+		if err != nil {
+			admissionErr = fmt.Errorf("%w: prepare independent input generation: %w", ErrRestartRefused, err)
+		} else {
+			captureGeneration = true
+		}
+	}
+	app.Unlock()
+	if admissionErr != nil {
+		return admissionErr
+	}
 	app.stopLiveStoreMigration()
 	app.Lock()
 	defer app.Unlock()
@@ -176,7 +196,9 @@ func (app *App) DumpStop() (err error) {
 
 	logger.Info("grace stop with dump inited", zap.Duration("since_stop", time.Since(stopStarted)))
 
-	filenamePostfix := fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+	if filenamePostfix == "" {
+		filenamePostfix = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
+	}
 	format, err := app.Config.Dump.cacheFormat()
 	if err != nil {
 		return err
@@ -349,7 +371,7 @@ func (app *App) DumpStop() (err error) {
 	wantHandover := readsHandoff && builder != nil && app.inputHandoffPossible() && handoff.InputSupported(app.readSuccessor)
 	// A shared store's reads need its database, which the successor opens
 	// only once this instance closed it, so reads cannot move. Input can.
-	storeInputEligible := !readsHandoff && builder != nil && app.storeInputHandoffPossible() && app.inputHandoffPossible()
+	storeInputEligible := !readsHandoff && (builder != nil || captureGeneration) && app.storeInputHandoffPossible() && app.inputHandoffPossible()
 	storeInputConfigured := storeInputEligible && app.Config.Dump.StoreInputHandoff
 	if storeInputEligible && !storeInputConfigured {
 		logger.Info("store input handoff disabled; stopping input", zap.String("setting", "dump.store-input-handoff"))
@@ -364,6 +386,10 @@ func (app *App) DumpStop() (err error) {
 		if err != nil {
 			logger.Warn("input handoff unavailable", zap.Error(err))
 			storeInput = false
+		} else {
+			handover.mu.Lock()
+			handover.asyncSeal = storeInput && app.Config.Dump.RequireStartupCapture
+			handover.mu.Unlock()
 		}
 	}
 	inputStopped := time.Now()
@@ -430,7 +456,7 @@ func (app *App) DumpStop() (err error) {
 		switch {
 		case checkpointErr != nil:
 			logger.Warn("pending read checkpoint unavailable; saved legacy dump", zap.Error(checkpointErr))
-			if handover != nil {
+			if handover != nil && !captureGeneration {
 				// The successor restores in order, which takes far longer
 				// than input may stay in the tail.
 				handover.stop("checkpoint unavailable")
@@ -492,7 +518,7 @@ func (app *App) DumpStop() (err error) {
 	// waits for the final one, written just before this process exits.
 	app.recordStop(func(*restartRecord) {})
 	var readsTaken, readsStopped time.Time
-	if storeInput && checkpointPublished {
+	if storeInput && (checkpointPublished || captureGeneration) {
 		readsStopped = app.handOffStoreInput(logger, handover)
 	} else {
 		readsTaken = app.handOffReads(logger, readsHandoff, handover)
@@ -506,6 +532,9 @@ func (app *App) DumpStop() (err error) {
 	}
 	if handover != nil {
 		handover.stop("successor did not take input")
+		if err := handover.waitSeal(); err != nil {
+			return fmt.Errorf("seal input tail after socket transfer: %w", err)
+		}
 	}
 	app.recordStop(func(r *restartRecord) {
 		r.ReadsStopped = readsTaken
@@ -704,19 +733,27 @@ func (app *App) SetSuccessorResolver(resolve func() string) {
 }
 
 // resolveSuccessor replaces the next binary by the service manager's, if it
-// can tell. Assumes we are holding app.Lock().
-func (app *App) resolveSuccessor() {
-	if app.successorResolver == nil || app.readRelease == nil {
-		return
+// can tell. False distinguishes an unresolved service-manager lookup from an
+// explicitly configured standalone successor. Assumes we hold app.Lock().
+func (app *App) resolveSuccessor() bool {
+	if app.readRelease == nil {
+		return false
+	}
+	if app.successorResolver == nil {
+		return app.readSuccessor != ""
 	}
 	started := time.Now()
 	next := app.successorResolver()
-	if next == "" || next == app.readSuccessor {
-		return
+	if next == "" {
+		return false
+	}
+	if next == app.readSuccessor {
+		return true
 	}
 	zapwriter.Logger("dump").Info("service manager starts another binary next", zap.String("invoked_as", app.readSuccessor),
 		zap.String("next_binary", next), zap.Duration("runtime", time.Since(started)))
 	app.readSuccessor = next
+	return true
 }
 
 // readHandoffPossible reports whether this instance can hand reads over.

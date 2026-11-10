@@ -11,10 +11,56 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/persister"
 	"github.com/go-graphite/go-carbon/points"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
+
+func TestRecoveryHealthSurvivesUnavailableOptionalMetrics(t *testing.T) {
+	for _, busyMigration := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unpublished backend sample", true: "busy migration details"}[busyMigration], func(t *testing.T) {
+			core := cache.New()
+			core.Add(points.OnePoint("health.metric", 1, 1))
+			// No background sample has been published yet. TelemetryStats must
+			// refuse it, just as it refuses any busy optional control lock.
+			app := &App{Config: NewConfig(), Cache: core, MetricStore: &store.Store{},
+				Persister: persister.NewWhisper(t.TempDir(), nil, nil, nil, nil, nil, nil)}
+			if busyMigration {
+				migration := &incrementalStoreMigration{}
+				migration.mu.Lock()
+				defer migration.mu.Unlock()
+				app.incrementalMigration.Store(migration)
+			}
+			registry := prometheus.NewPedanticRegistry()
+			registry.MustRegister(&migrationCollector{app: app})
+			response := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("recovery health waited for optional telemetry")
+			}
+			body := response.Body.String()
+			for _, text := range []string{"restart_recovery_ready 1\n", "restart_recovery_pending_metrics 0\n", "cache_points 1\n",
+				"persister_pebble_points_total 0\n", "persister_whisper_points_total 0\n", "persister_pebble_write_failures_total 0\n",
+				"pebble_write_stalls_total 0\n", "pebble_continuation_invalid_points_total ", "cache_writeout_max_delay_seconds ", "receiver_stat_interval_seconds ",
+				"migration_metrics_skipped_total 1\n"} {
+				if response.Code != 200 || !strings.Contains(body, text) {
+					t.Fatalf("missing live health %q: status=%d body=%s", text, response.Code, body)
+				}
+			}
+			if strings.Contains(body, "pebble_disk_bytes ") {
+				t.Fatal("unavailable optional backend sample was fabricated")
+			}
+		})
+	}
+}
 
 func TestMigrationMetricsScrapeDoesNotWaitForShard(t *testing.T) {
 	for _, query := range []string{"", "?name[]=cache_points"} {
