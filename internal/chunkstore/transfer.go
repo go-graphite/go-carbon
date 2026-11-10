@@ -411,8 +411,8 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 		s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 	}
 	proofs := make([]TransferProof, 0, len(records))
-	// Sixteen-name groups reduce stripe intersections between concurrent
-	// streams and bound foreground lock waits and retirement tombstones.
+	// Uncontended groups share one commit. A contended group falls back to
+	// per-name publication, which joins each ordinary single-stripe queue.
 	for start := 0; start < len(records); start += 16 {
 		end := min(start+16, len(records))
 		group, err := s.publishTransfer(ctx, records[start:end], metas[start:end])
@@ -434,13 +434,41 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 }
 
 func (s *Store) lockTransfer(names []string) func() {
+	unlock, _ := s.acquireTransfer(names, false)
+	return unlock
+}
+
+func (s *Store) transferStripes(names []string) []uint64 {
 	stripes := make([]uint64, 0, len(names))
 	for _, name := range names {
 		stripes = append(stripes, s.metricStripe(name))
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	lockset.Lock(s.metricMu[:], stripes)
+	return stripes
+}
+
+// A hint only: publication rechecks the complete set after preparation.
+func (s *Store) transferBusy(names []string) bool {
+	stripes := s.transferStripes(names)
+	if !lockset.TryLock(s.metricMu[:], stripes) {
+		return true
+	}
+	for i := len(stripes) - 1; i >= 0; i-- {
+		s.metricMu[stripes[i]].Unlock()
+	}
+	return false
+}
+
+func (s *Store) acquireTransfer(names []string, try bool) (func(), int) {
+	stripes := s.transferStripes(names)
+	if try {
+		if !lockset.TryLock(s.metricMu[:], stripes) {
+			return nil, 0
+		}
+	} else {
+		lockset.Lock(s.metricMu[:], stripes)
+	}
 	for _, name := range names {
 		s.beginStateMutation(name)
 	}
@@ -457,7 +485,7 @@ func (s *Store) lockTransfer(names []string) func() {
 		for i := len(stripes) - 1; i >= 0; i-- {
 			s.metricMu[stripes[i]].Unlock()
 		}
-	}
+	}, len(stripes)
 }
 
 // ContinuationArchiveRestorer reconstructs independent authoritative archives.

@@ -24,6 +24,7 @@ type nativeCapture struct {
 	Captured                 time.Time
 	Targets                  map[string]string `json:",omitempty"`
 	TargetSHA256             map[string]string `json:",omitempty"`
+	TargetNative             *nativeCapture    `json:",omitempty"`
 }
 
 func NativeCaptureMain(ctx context.Context, args []string) error {

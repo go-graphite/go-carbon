@@ -246,6 +246,11 @@ recover original values rounded during earlier decimal sealing.
 
 ## Compatibility, transfers and downgrade
 
+Native exact combine can raise the minimum reader to v12 for immutable encoded
+history references. That fence cannot be lowered by cold-pack or float-codec
+unpack/downgrade. Keep a reference-capable reader for serving and recovery after
+such a publication; see [Native history combine](native-combine.md).
+
 Enabling exact or decimal packing synchronously upgrades `CHUNKSTORE` to
 `go-carbon-chunks-v9` before any new block can publish. Upstream v6/v7 and
 experimental v8 builds refuse this marker. Upgrade all readers, recovery tools and

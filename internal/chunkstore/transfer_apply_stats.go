@@ -9,16 +9,24 @@ import (
 // owner-side stage from donor export and controller/RPC scheduling.
 type transferApplyCounters struct {
 	reserve, build, ingest, wait, hold, maxHold, prepare, retire, sync atomic.Uint64
+	splits                                                             atomic.Uint64
+	stripeHolds                                                        [17]atomic.Uint64
 }
 
 type TransferApplyStats struct {
+	SplitGroups                                                                                                                                   uint64
+	StripeHolds                                                                                                                                   [17]uint64
 	ReserveSeconds, BuildSeconds, IngestSeconds, LockWaitSeconds, LockHoldSeconds, MaxLockHoldSeconds, PrepareSeconds, RetireSeconds, SyncSeconds float64
 }
 
 func (s *Store) TransferApplyStats() TransferApplyStats {
 	c := &s.transferApply
 	sec := func(v *atomic.Uint64) float64 { return time.Duration(v.Load()).Seconds() }
-	return TransferApplyStats{sec(&c.reserve), sec(&c.build), sec(&c.ingest), sec(&c.wait), sec(&c.hold), sec(&c.maxHold), sec(&c.prepare), sec(&c.retire), sec(&c.sync)}
+	out := TransferApplyStats{ReserveSeconds: sec(&c.reserve), BuildSeconds: sec(&c.build), IngestSeconds: sec(&c.ingest), LockWaitSeconds: sec(&c.wait), LockHoldSeconds: sec(&c.hold), MaxLockHoldSeconds: sec(&c.maxHold), PrepareSeconds: sec(&c.prepare), RetireSeconds: sec(&c.retire), SyncSeconds: sec(&c.sync), SplitGroups: c.splits.Load()}
+	for i := range out.StripeHolds {
+		out.StripeHolds[i] = c.stripeHolds[i].Load()
+	}
+	return out
 }
 
 func (c *transferApplyCounters) recordHold(d time.Duration) {

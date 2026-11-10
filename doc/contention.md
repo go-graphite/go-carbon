@@ -20,7 +20,7 @@ runtime bucket midpoints. Graphite exports the same cumulative distribution as
 `runtime.schedulerLatencyBuckets.le<nanoseconds>Ns`, plus
 `schedulerLatencySamplesTotal` and `schedulerLatencySecondsTotal`.
 
-`[pprof].mutex-profile-fraction` defaults to **1000**, sampling one in 1000
+`[pprof].mutex-profile-fraction` defaults to **10000**, sampling one in 10000
 contention events. `[pprof].block-profile-rate` defaults to **0** (disabled);
 its unit is average nanoseconds blocked per sample, not a fraction. Both existing
 knobs apply on start and configuration reload, even if the pprof listener is
@@ -90,3 +90,25 @@ GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor go test ./persister -run '^$' \
 It alternates off/on/on/off and reports process CPU per point and allocations,
 using 256 producers and bounded cached data. Compare paired blocks, not a single
 wall-time sample from a shared host.
+
+## Transfer publication under continuous writers
+
+Reviewed bulk imports prepare archive merges against a snapshot outside the
+writer stripes. Uncontended groups of up to 16 names share a commit. A busy
+stripe, or a revision change in a prepared group, switches that group to
+one-name publication. Each name then joins the ordinary mutex queue; imports
+never wait for a complete multi-stripe set while foreground writers continually
+reacquire its members. A nonblocking preflight avoids decoding a group that is
+already known to require the single-name path. Publication always checks again.
+The request retains its final shared WAL barrier and per-metric revision and
+receipt checks.
+
+`TransferApplyStats.SplitGroups` counts these fallbacks. `StripeHolds[n]` counts
+publication acquisitions of exactly n distinct stripes, including acquisitions
+that subsequently discover a changed revision. Failed partial acquisitions own
+no mutation state and are excluded. The opt-in `TestTransferConvoyRealShape`
+uses 96 single-stripe writers and 16 imports, sparse historical partitions and
+late corrections. Set `GO_CARBON_CONVOY=1`; add
+`GO_CARBON_CONVOY_HOTSPOT=1` for deliberately colliding stripes. Its default
+three-minute deadline makes import starvation a failing result rather than an
+unbounded benchmark; `GO_CARBON_CONVOY_LIMIT` accepts another bounded duration.

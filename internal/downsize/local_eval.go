@@ -3,7 +3,6 @@
 package downsize
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -12,12 +11,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -68,6 +67,7 @@ func BulkEvalMain(args []string) error {
 	}
 	var input []bulkEvalFixture
 	var capture nativeCapture
+	nativeLayouts := make(map[string]string)
 	if *capturePath != "" {
 		if !*native || *repeat != 1 {
 			return errors.New("native capture requires --native --repeat 1")
@@ -135,6 +135,7 @@ func BulkEvalMain(args []string) error {
 			db.Close()
 			return nil, err
 		}
+		db.StopBackground()
 		return db, nil
 	}
 	donor, err := open("donor")
@@ -153,90 +154,47 @@ func BulkEvalMain(args []string) error {
 	}
 	defer bulk.Close()
 	if *capturePath != "" {
-		file, err := os.Open(filepath.Join(filepath.Dir(*capturePath), capture.WireFile))
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		hash := sha256.New()
-		stream, err := store.NewTransferStream(io.TeeReader(file, hash))
-		if err != nil {
-			return err
-		}
-		if stream.Count != len(capture.Names) {
-			return errors.New("native capture name count differs")
-		}
-		planned := make(map[string]bool, len(capture.Names))
-		for _, name := range capture.Names {
-			if planned[name] {
-				return errors.New("duplicate capture name")
-			}
-			planned[name] = true
-		}
-		selected := make(map[string]bool)
+		var selected map[string]bool
 		if *sampleNames > 0 && *sampleNames < len(capture.Names) {
+			selected = make(map[string]bool, *sampleNames)
 			for i := range *sampleNames {
 				selected[capture.Names[i*len(capture.Names) / *sampleNames]] = true
 			}
 		}
-		seen := make(map[string]bool, len(capture.Names))
-		copied := make(map[string]bool, len(capture.Names))
-		var records []store.TransferMetric
-		var bytesBuffered int
-		flush := func() error {
-			if len(records) == 0 {
-				return nil
-			}
-			_, err := donor.ImportTransfer(ctx, records)
-			records = nil
-			bytesBuffered = 0
-			return err
-		}
-		// Seed with the reviewed importer, not the engine under test: a shared
-		// native seeding bug must not erase the same points from both oracle sides.
-		for range stream.Count {
-			record, err := stream.Next()
-			if err != nil {
-				return err
-			}
-			name := record.Config.Name
-			if !planned[name] || seen[name] {
-				return errors.New("native capture names differ")
-			}
-			seen[name] = true
-			if record.Version.ID == 0 || (len(selected) > 0 && !selected[name]) {
-				continue
-			}
-			copied[name] = true
-			for i, kv := range record.Keys {
-				record.Keys[i] = store.RelayoutKV{Key: bytes.Clone(kv.Key), Value: bytes.Clone(kv.Value)}
-				bytesBuffered += len(kv.Key) + len(kv.Value)
-			}
-			records = append(records, record)
-			if len(records) >= 512 || bytesBuffered >= 4<<20 {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-		}
-		_, count, err := stream.Finish()
+		nativeLayouts, err = importEvalCapture(ctx, filepath.Dir(*capturePath), capture, selected, func(records []store.TransferMetric) error { _, err := donor.ImportTransfer(ctx, records); return err })
 		if err != nil {
-			return err
-		}
-		if count != capture.Bytes || hex.EncodeToString(hash.Sum(nil)) != capture.SHA256 {
-			return errors.New("native capture integrity mismatch")
-		}
-		if err := flush(); err != nil {
 			return err
 		}
 		input = nil
 		for _, name := range capture.Names {
-			if copied[name] {
+			if _, ok := nativeLayouts[name]; ok {
 				input = append(input, bulkEvalFixture{Name: name, Target: capture.Targets[name]})
 			}
 		}
 		if len(input) == 0 {
 			return errors.New("native capture contains no committed history")
+		}
+	}
+	targetLayouts := make(map[string]string)
+	if capture.TargetNative != nil {
+		target := *capture.TargetNative
+		if *overlapPercent != 0 || len(capture.Targets) > 0 || target.TargetNative != nil || !slices.Equal(target.Names, capture.Names) {
+			return errors.New("native survivor capture requires the same names, no logical targets and no forced overlap")
+		}
+		selected := make(map[string]bool, len(input))
+		for _, row := range input {
+			selected[row.Name] = true
+		}
+		targetLayouts, err = importEvalCapture(ctx, filepath.Dir(*capturePath), target, selected, func(records []store.TransferMetric) error {
+			for _, db := range []*store.Store{baseline, bulk} {
+				if _, err := db.ImportTransfer(ctx, records); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("native survivor capture: %w", err)
 		}
 	}
 	seed := func(db *store.Store, name, path string) error {
@@ -280,6 +238,12 @@ func BulkEvalMain(args []string) error {
 				for _, a := range snapshot.Archives {
 					capturedPoints += len(a.Points)
 				}
+			}
+			if capture.TargetNative != nil {
+				if _, present := targetLayouts[name]; present {
+					overlap++
+				}
+				continue
 			}
 			forced := rowIndex*100/len(input) < *overlapPercent
 			if row.Target != "" || forced {
@@ -331,6 +295,20 @@ func BulkEvalMain(args []string) error {
 					}
 				}
 			}
+		}
+	}
+	layoutsVerified, err := verifyEvalLayouts(ctx, donor, names, nativeLayouts)
+	if err != nil {
+		return err
+	}
+	targetLayoutsVerified := 0
+	if capture.TargetNative != nil {
+		for _, db := range []*store.Store{baseline, bulk} {
+			verified, err := verifyEvalLayouts(ctx, db, names, targetLayouts)
+			if err != nil {
+				return err
+			}
+			targetLayoutsVerified = verified
 		}
 	}
 	var shape *combineShape
@@ -528,5 +506,5 @@ func BulkEvalMain(args []string) error {
 			points += len(a.Points)
 		}
 	}
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"time_range_shape": shape, "render_checked_archives": ingestRenderArchives, "render_checked_point_bits": ingestRenderPoints, "output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"native_survivor_capture": capture.TargetNative != nil, "native_survivor_layouts_verified": targetLayoutsVerified, "now_unix": *epoch, "gomaxprocs": runtime.GOMAXPROCS(0), "original_native_layouts_verified": layoutsVerified, "background_maintenance_stopped": donor.BackgroundStopped() && baseline.BackgroundStopped() && bulk.BackgroundStopped(), "time_range_shape": shape, "render_checked_archives": ingestRenderArchives, "render_checked_point_bits": ingestRenderPoints, "output_sha256": hex.EncodeToString(fingerprint.Sum(nil)), "apply_before": applyBefore, "apply_after": applyAfter, "system_before": systemBefore, "system_after": systemAfter, "ingest_l0_bytes": bulk.Stats().IngestL0Bytes, "ingest_memtable_overlaps": bulk.Stats().IngestMemtableOverlaps, "source_cache_bytes": *sourceCache, "source_cache_shards": *sourceShards, "source_scratch": *sourceScratch, "captured_histories": len(input), "captured_points": capturedPoints, "replication": *repeat, "overlap_names": overlap, "workers": *workers, "batch": *batch, "single_name_oracle": *single, "reference": reference, "candidate": local, "native": *native, "memory_filesystem": *memory, "native_deferred_names": len(nativeDeferred), "native_capture": *capturePath, "native_stats": bulk.NativeStats(), "native_capture_names": len(capture.Names), "sample_names": *sampleNames, "equal_archives": archives, "equal_point_bits": points, "fetch_archives": renderArchives, "fetch_point_bits": renderPoints, "fetch_windows": renderWindows, "mismatches": 0, "temporary_stores_removed_on_exit": true})
 }

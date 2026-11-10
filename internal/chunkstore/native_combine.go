@@ -492,63 +492,19 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 	defer func() { err = errors.Join(err, tables.close()); _ = s.fs.RemoveAll(tables.directory) }()
 	view := s.db.NewSnapshot()
 	defer view.Close()
-	sourceWalk := &transferReader{reader: view, native: true, ordered: true}
-	targetWalk := &transferReader{reader: view, native: true}
-	defer sourceWalk.close()
-	defer targetWalk.close()
 	floatCodec := false
-	for j, i := range pending {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		sourceWalk.arena.free = sourceWalk.arena.slab
-		targetWalk.arena.free = targetWalk.arena.slab
-		raw := Metadata(intent.Raw[i])
-		source, err := s.transferFromLimit(ctx, view, raw, math.MaxInt64, sourceWalk)
-		if err != nil {
-			return nil, err
-		}
-		old, err := targetWalk.metadata(raw.Name)
-		p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: intent.Positions[i], Meta: nativeCombineMetadata(raw)}}
-		if err == nil {
-			if err := nativeCompatibleTarget(s, old, source); err != nil {
-				return nil, err
-			}
-			target, err := s.transferFromLimit(ctx, view, old, math.MaxInt64, targetWalk)
-			if err != nil {
-				return nil, err
-			}
-			result, class, err := s.nativeCombineRecord(ctx, source, target)
-			if err != nil {
-				return nil, err
-			}
-			p.Old, p.Class = nativeCombineMetadata(old), class
-			p.Meta.ID = first + uint64(j)
-			p.Meta.LastUpdate = s.nextActivity(old.LastUpdate)
-			for _, kv := range result.Keys {
-				floatCodec = floatCodec || result.Continuation && newFloatGroup(kv.Key, kv.Value)
-				if err := tables.add(ctx, Metadata(p.Meta), kv); err != nil {
-					return nil, err
-				}
-			}
-			source = result
-		} else if !errors.Is(err, ErrNotFound) {
-			return nil, err
-		}
-		if source.Continuation {
-			kv := transferRecordIO(source)
-			if value, e := kv.Get(SidecarSummaryKey); e == nil {
-				p.Summary, err = DecodeSidecarSummary(value)
-			} else if inspector, ok := s.continuation.(ContinuationSidecars); ok {
-				p.Summary, err = inspector.InspectSidecar(kv)
-			} else if !errors.Is(e, ErrNotFound) {
-				err = e
-			}
-			if err != nil {
-				return nil, err
+	err = s.prepareNativeCombineRecords(ctx, view, intent, first, pending, func(p nativeCombinePrepared, keys []RelayoutKV) error {
+		for _, kv := range keys {
+			floatCodec = floatCodec || p.Meta.Continuation && newFloatGroup(kv.Key, kv.Value)
+			if err := tables.add(ctx, Metadata(p.Meta), kv); err != nil {
+				return err
 			}
 		}
 		prepared = append(prepared, p)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if err := s.ingestNativeCombineTables(intent, tables, floatCodec, buildBegan); err != nil {
 		return nil, err

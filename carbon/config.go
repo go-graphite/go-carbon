@@ -559,7 +559,7 @@ func NewConfig() *Config {
 			LocalDir:            "/var/lib/graphite/tagging/",
 		},
 		Pprof: pprofConfig{
-			MutexProfileFraction: 1000,
+			MutexProfileFraction: 10000,
 			Listen:               "127.0.0.1:7007",
 			Enabled:              false,
 		},

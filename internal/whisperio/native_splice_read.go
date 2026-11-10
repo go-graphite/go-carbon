@@ -19,20 +19,31 @@ var errSpliceUnsupported = errors.New("unsupported native splice group")
 func appendSplicePoints(dst []spliceFragment, points []store.Point, payload *splicePayload, priority int, r store.Retention, sequence *int) ([]spliceFragment, bool) {
 	dense := payload != nil && len(points) > 0
 	first := int64(0)
+	valid, runs := 0, 0
+	var previous int64
 	for i, p := range points {
+		if p.Timestamp < 0 || p.Timestamp > math.MaxUint32 {
+			return nil, false
+		}
 		if p.Timestamp > 0 && (math.IsNaN(p.Value) || math.IsInf(p.Value, 0)) {
 			return nil, false
 		}
 		if p.Timestamp == 0 || math.IsNaN(p.Value) {
 			dense = false
+			previous = 0
 			continue
 		}
-		if p.Timestamp < 0 || p.Timestamp > math.MaxUint32 || p.Timestamp%int64(r.Step) != 0 {
+		if p.Timestamp%int64(r.Step) != 0 {
 			return nil, false
 		}
 		if first == 0 {
 			first = p.Timestamp
 		}
+		valid++
+		if previous == 0 || p.Timestamp != previous+int64(r.Step) {
+			runs++
+		}
+		previous = p.Timestamp
 		if p.Timestamp != points[0].Timestamp+int64(i)*int64(r.Step) {
 			dense = false
 		}
@@ -41,6 +52,25 @@ func appendSplicePoints(dst []spliceFragment, points []store.Point, payload *spl
 		return dst, true
 	}
 	if payload != nil {
+		// A few holes must not turn an otherwise dense 8192-point history
+		// into thousands of individual owner comparisons. Keep a bounded
+		// number of implicit-time intervals over the same original payload.
+		if !dense && runs <= 32 && valid >= 16*runs {
+			for i := 0; i < len(points); {
+				if points[i].Timestamp == 0 {
+					i++
+					continue
+				}
+				end := i + 1
+				for end < len(points) && points[end].Timestamp == points[end-1].Timestamp+int64(r.Step) {
+					end++
+				}
+				(*sequence)++
+				dst = append(dst, spliceFragment{first: points[i].Timestamp, ordinal: i, count: end - i, payload: payload, priority: priority, sequence: *sequence})
+				i = end
+			}
+			return dst, true
+		}
 		// Dense timestamps are implicit. Borrow decoder scratch for the
 		// validation pass; only sparse groups retain points for slot selection.
 		if !dense && payload.points == nil {

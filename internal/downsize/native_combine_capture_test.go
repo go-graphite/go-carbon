@@ -98,6 +98,8 @@ func TestNativeCombineCaptureWithRealSurvivorArchives(t *testing.T) {
 	var result struct {
 		EqualBits int          `json:"equal_point_bits"`
 		Shape     combineShape `json:"time_range_shape"`
+		Layouts   int          `json:"original_native_layouts_verified"`
+		Stopped   bool         `json:"background_maintenance_stopped"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
 		t.Fatal(err)
@@ -105,9 +107,23 @@ func TestNativeCombineCaptureWithRealSurvivorArchives(t *testing.T) {
 	if result.EqualBits != originalPoints+1 || len(result.Shape.Archives) != 1 || result.Shape.Archives[0].SurvivorPoints != originalPoints+1 || result.Shape.Archives[0].SurvivorMax != last.Timestamp+int64(snap.Archives[0].Retention.Step) {
 		t.Fatalf("survivor image was replaced by donor history: %+v", result)
 	}
+	if result.Layouts != 1 || !result.Stopped {
+		t.Fatalf("capture layout was not fenced: %+v", result)
+	}
 	capture.TargetSHA256[name] = strings.Repeat("0", 64)
 	save()
 	if err := BulkEvalMain(args); err == nil || !strings.Contains(err.Error(), "survivor fixture integrity mismatch") {
 		t.Fatal("unverified survivor fixture accepted", err)
+	}
+	records, err := source.ExportTransfer(ctx, []string{name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]string{name: evalRecordLayoutDigest(records[0])}
+	if err := source.UpdateMany(ctx, name, []store.Point{{Timestamp: last.Timestamp + int64(snap.Archives[0].Retention.Step), Value: 99}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyEvalLayouts(ctx, source, []string{name}, expected); err == nil || !strings.Contains(err.Error(), "native donor layout changed") {
+		t.Fatal("changed encoded input accepted", err)
 	}
 }

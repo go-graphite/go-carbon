@@ -1351,10 +1351,10 @@ truncate-lag = "1m"
 listen = "localhost:7007"
 enabled = false
 # Process-wide sampling, applied at start and on SIGHUP (also with pprof disabled).
-# Mutex: sample one in N contention events; 0 disables. Default 1000 keeps
+# Mutex: sample one in N contention events; 0 disables. Default 10000 keeps
 # holder call sites available without a restart. Use 100 or 1 temporarily for
 # sparse contention. See tool/fleet-rollout/contention for read-only triage.
-mutex-profile-fraction = 1000
+mutex-profile-fraction = 10000
 # Block: average nanoseconds of blocking per sample; 0 disables.
 # Start with 1000000 (1ms); this is a duration in ns, not a sampling fraction.
 block-profile-rate = 0
