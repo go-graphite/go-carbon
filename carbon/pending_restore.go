@@ -160,6 +160,15 @@ func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan strin
 			case <-time.After(10 * time.Millisecond):
 			}
 		}
+		// Persistence confirmation can precede the periodic store WAL sync.
+		// Keep the checkpoint as recovery authority until every completed
+		// native mutation is durable, including points claimed from its tail.
+		if app.MetricStore != nil {
+			if err := app.MetricStore.Sync(); err != nil {
+				logger.Error("pending recovery not synced; checkpoint retained", zap.Error(err))
+				return
+			}
+		}
 		if err := core.FinishPendingRecovery(); err != nil {
 			logger.Error("pending recovery not retired", zap.Error(err))
 			return

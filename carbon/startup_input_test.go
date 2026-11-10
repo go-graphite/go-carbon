@@ -336,6 +336,17 @@ func TestStartupInputCrashProcess(t *testing.T) {
 	if err := app.Start(); err != nil {
 		t.Fatal(err)
 	}
+	if stage == "after_pending_retirement" {
+		// Force the handoff source to retire while periodic WAL sync is
+		// deliberately far away. A real crash must still preserve its points.
+		deadline := time.Now().Add(5 * time.Second)
+		for app.Cache.HasPendingRecovery() {
+			if time.Now().After(deadline) {
+				t.Fatal("pending checkpoint did not retire")
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
 	app.Persister.Stop()
 	for _, p := range startupPoints(stamp, 2) {
 		app.Cache.Add(p)
@@ -479,7 +490,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 	if isolatedTestProcessSerial(t) {
 		return
 	}
-	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live"} {
+	for _, stage := range []string{"before_append", "during_append", "after_write", "after_sync", "during_replay", "after_seal", "after_live", "after_pending_retirement"} {
 		t.Run(stage, func(t *testing.T) {
 			defer zapwriter.Test()()
 			path, cfg := incrementalAppFixture(t)
@@ -490,6 +501,9 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 			}
 			cfg.InputLog.Enabled, cfg.InputLog.Path = true, filepath.Join(t.TempDir(), "log")
 			cfg.InputLog.SegmentSize = 16 << 20
+			if stage == "after_pending_retirement" {
+				cfg.Whisper.StoreSyncInterval = &Duration{time.Hour}
+			}
 			writeSharedConfig(t, path, cfg)
 			old := startIncrementalApp(t, path)
 			if !old.Carbonserver.HasMappedIndex() {
@@ -535,7 +549,7 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				t.Fatal(err, zapwriter.TestString())
 			}
 			defer actual.Stop()
-			if stage != "after_live" {
+			if stage != "after_live" && stage != "after_pending_retirement" {
 				for _, p := range startupPoints(stamp, 2) {
 					actual.Cache.Add(p)
 				}
