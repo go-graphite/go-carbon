@@ -52,7 +52,7 @@ func TestMissingOnlyAuthorizationLimitsAndCapabilities(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &caps); err != nil {
 		t.Fatal(err)
 	}
-	if caps["AtomicMissingOnly"] != false || caps["AtomicMissingOnlyProtocol"] != float64(1) || caps["AtomicMissingOnlyMaxPoints"] != float64(128) {
+	if caps["AtomicMissingOnlyNonNaN"] != false || caps["AtomicMissingOnly"] != false || caps["AtomicMissingOnlyProtocol"] != float64(1) || caps["AtomicMissingOnlyMaxPoints"] != float64(128) {
 		t.Fatalf("incorrect unfenced capability: %v", caps)
 	}
 }

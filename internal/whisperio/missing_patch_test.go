@@ -272,3 +272,96 @@ func TestMissingOnlyEmptyExistingArchiveAndMaxBatch(t *testing.T) {
 		}
 	})
 }
+
+func TestMissingOnlyInfinitiesBitExactAndDurable(t *testing.T) {
+	db, before, p := finiteFixture(t)
+	r := missingRequest(p)
+	// Exercise an exact NaN replacement, an absent slot and a coarse archive.
+	r.Points[0].DonorBits = "7ff0000000000000"
+	r.Points[1].DonorBits = "fff0000000000000"
+	r.Points[2].DonorBits = "7ff0000000000000"
+	r.BatchSHA256 = store.MissingPointHash(r.Points, "requested")
+	ctx := context.Background()
+	fence := cache.New().FenceEmptyMetric
+	if result, err := db.PatchMissing(ctx, r, fence); err != nil || result.Applied {
+		t.Fatalf("infinity dry-run: %+v %v", result, err)
+	}
+	unchanged, err := db.Snapshot(ctx, p.Expected.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EqualSnapshots(before, unchanged); err != nil {
+		t.Fatal(err)
+	}
+	r.Apply = true
+	result, err := db.PatchMissing(ctx, r, fence)
+	if err != nil || !result.Applied || result.PointsApplied != 3 || result.AppliedSHA256 != store.MissingPointHash(r.Points, "applied") {
+		t.Fatalf("infinity apply: %+v %v", result, err)
+	}
+	before.Archives[0].Points[0].Value = math.Inf(1)
+	before.Archives[0].Points = append(before.Archives[0].Points, store.Point{Timestamp: 1793976660, Value: math.Inf(-1)})
+	before.Archives[1].Points = append(before.Archives[1].Points, store.Point{Timestamp: 1793973600, Value: math.Inf(1)})
+	for i := range before.Archives {
+		sort.Slice(before.Archives[i].Points, func(a, b int) bool {
+			return before.Archives[i].Points[a].Timestamp < before.Archives[i].Points[b].Timestamp
+		})
+	}
+	after, err := db.Snapshot(ctx, p.Expected.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EqualSnapshots(before, after); err != nil {
+		t.Fatal(err)
+	}
+	dir, _ := finiteDirs.LoadAndDelete(db)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := store.Open(dir.(string), coldOptions(&ContinuationCodec{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reopened.StopBackground()
+	after, err = reopened.Snapshot(ctx, p.Expected.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EqualSnapshots(before, after); err != nil {
+		t.Fatal(err)
+	}
+	r.Expected = result.Version
+	if _, err := reopened.PatchMissing(ctx, r, fence); err == nil {
+		t.Fatal("consumed infinity batch replayed")
+	}
+}
+
+func TestMissingOnlyNaNDonorsRemainAbsentAndOccupiedInfinityProtected(t *testing.T) {
+	for _, bits := range []string{"7ff8000000000042", "fff8000000000042", "7ff0000000000001"} {
+		db, before, p := finiteFixture(t)
+		r := missingRequest(p)
+		r.Points = r.Points[:1]
+		r.Points[0].DonorBits = bits
+		r.BatchSHA256 = store.MissingPointHash(r.Points, "requested")
+		r.Apply = true
+		if _, err := db.PatchMissing(context.Background(), r, cache.New().FenceEmptyMetric); err == nil {
+			t.Fatalf("accepted NaN donor %s", bits)
+		}
+		after, err := db.Snapshot(context.Background(), p.Expected.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EqualSnapshots(before, after); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, bits := range []string{"7ff0000000000000", "fff0000000000000"} {
+		_, _, p := finiteFixture(t)
+		r := missingRequest(p)
+		r.Points[0].BeforeBits = bits
+		r.BatchSHA256 = store.MissingPointHash(r.Points, "requested")
+		if err := r.Validate(); err == nil {
+			t.Fatalf("infinity target accepted as absent: %s", bits)
+		}
+	}
+}

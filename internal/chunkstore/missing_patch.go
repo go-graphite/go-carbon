@@ -90,8 +90,8 @@ func (p MissingPatch) Validate() error {
 			}
 		}
 		u, _ := strconv.ParseUint(v.DonorBits, 16, 64)
-		if !exactHex(v.DonorBits, 8) || math.IsNaN(math.Float64frombits(u)) || math.IsInf(math.Float64frombits(u), 0) {
-			return errors.New("MissingOnly readable finite donor bits required")
+		if !exactHex(v.DonorBits, 8) || math.IsNaN(math.Float64frombits(u)) {
+			return errors.New("MissingOnly readable non-NaN donor bits required")
 		}
 	}
 	if p.BatchSHA256 != MissingPointHash(p.Points, "requested") {
