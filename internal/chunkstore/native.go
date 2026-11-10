@@ -13,7 +13,6 @@ import (
 	"math"
 	"math/bits"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -139,10 +138,11 @@ func (s *Store) NativeReceipt(ctx context.Context, request NativeRange) (NativeR
 	if err != nil {
 		return NativeReceipt{}, err
 	}
-	lockAny, _ := s.nativeRanges.LoadOrStore(identity, new(sync.Mutex))
-	lock := lockAny.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockNativeRange(ctx, identity)
+	if err != nil {
+		return NativeReceipt{}, err
+	}
+	defer unlock()
 	if failure := s.nativeFailure.Load(); failure != nil {
 		return NativeReceipt{}, failure.err
 	}
@@ -210,27 +210,39 @@ func (r NativeReceipt) Validate() error {
 	return nil
 }
 
-// NativeImport has no transfer slots, tuner, compaction-debt/read/cache gates or
-// metric locks. IDs and hidden SSTs are prepared before the short creation lock.
+// NativeImport uses its own memory admission, independent of legacy transfer
+// slots, tuner, compaction-debt/read/cache gates. IDs and hidden SSTs are
+// prepared before the short creation lock.
 // Only names still absent at that atomic publication become visible.
 func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
+	ctx, cancel := s.NativeTransferContext(ctx)
+	defer cancel()
 	if request.Combine {
 		return s.nativeCombineImport(ctx, request, input)
 	}
+	release, err := s.admitNative(ctx)
+	if err != nil {
+		return receipt, err
+	}
+	defer release()
 	identity, namesHash, err := request.Identity()
 	if err != nil {
 		return receipt, err
 	}
-	lockAny, _ := s.nativeRanges.LoadOrStore(identity, new(sync.Mutex))
-	lock := lockAny.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+	unlock, err := s.lockNativeRange(ctx, identity)
+	if err != nil {
+		return NativeReceipt{}, err
+	}
+	defer unlock()
 	if failure := s.nativeFailure.Load(); failure != nil {
 		return receipt, failure.err
 	}
 	if receipt, err = s.readNativeReceipt(ctx, request); err == nil {
 		return receipt, nil
 	} else if !errors.Is(err, pebble.ErrNotFound) {
+		return receipt, err
+	}
+	if err := ValidateNativeNames(request.Names); err != nil {
 		return receipt, err
 	}
 	defer func() {
@@ -248,6 +260,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 	if err != nil {
 		return receipt, err
 	}
+	stream.metricLimit = nativeMetricBytes
 	expected := len(request.Names)
 	if request.Candidates != nil {
 		if len(request.Candidates) != (len(request.Names)+7)/8 {
@@ -313,6 +326,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		planPositions[name] = i
 	}
 	seen := make([]bool, len(request.Names))
+	metadataBytes := int64(0)
 	needsFloatFormat := false
 	for i := range stream.Count {
 		if err := ctx.Err(); err != nil {
@@ -322,6 +336,11 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		if err != nil {
 			return receipt, err
 		}
+		metadataBytes += nativeMetadataSize(record.Config)
+		if metadataBytes > nativeRangeMetadataBytes {
+			return receipt, ErrTransferLimit
+		}
+
 		position, ok := planPositions[record.Config.Name]
 		if !ok || seen[position] || record.Version.Name != record.Config.Name || (request.Candidates != nil && !nativeBit(request.Candidates, position)) {
 			return receipt, errors.New("native stream names differ from plan")
@@ -335,6 +354,9 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			continue
 		}
 		if err := validate(record.Config); err != nil {
+			return receipt, err
+		}
+		if err := validateNativeMemory(record); err != nil {
 			return receipt, err
 		}
 		if record.Continuation != (s.continuation != nil) {
@@ -407,17 +429,10 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 				return receipt, err
 			}
 		}
-		if stats, err := s.db.IngestWithStats(tables.paths); err != nil {
-			s.nativeWriteFailed(err)
+		if err := s.ingestNativeFiles(ctx, tables.paths); err != nil {
 			return receipt, err
-		} else {
-			s.nativeCounters.sst.Add(stats.Bytes)
-			s.ingestStats.tables.Add(uint64(len(tables.paths)))
-			s.ingestStats.entries.Add(uint64(len(metas)))
-			s.ingestStats.bytes.Add(stats.Bytes)
-			s.ingestStats.l0Bytes.Add(stats.ApproxIngestedIntoL0Bytes)
-			s.ingestStats.memtableOverlaps.Add(uint64(stats.MemtableOverlappingFiles))
 		}
+		s.ingestStats.entries.Add(uint64(len(metas)))
 	}
 	s.nativeCounters.ingest.Add(uint64(time.Since(ingestBegan)))
 	if err := s.nativeStep("ingested"); err != nil {

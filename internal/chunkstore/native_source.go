@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"math"
 	"slices"
 	"sync"
 
@@ -64,13 +63,20 @@ func (s *NativeSource) Close() error {
 	return s.view.Close()
 }
 func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer) error {
+	ctx, cancel := s.store.NativeTransferContext(ctx)
+	defer cancel()
+	release, err := s.store.admitNativeExport(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.closed {
 		return errors.New("native source session is closed")
 	}
-	if uint64(len(names)) > math.MaxUint32 {
-		return ErrFormat
+	if err := ValidateNativeNames(names); err != nil {
+		return err
 	}
 	walk := &transferReader{reader: s.view, ordered: true, native: true, export: &s.store.transferExport}
 	defer walk.close()
@@ -78,6 +84,7 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 	copy(order, names)
 	slices.Sort(order)
 	metas := make([]Metadata, len(names))
+	metadataBytes := int64(0)
 	for i, name := range order {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -96,6 +103,10 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 		m, err := decodeCatalog(name, value)
 		if err != nil {
 			return err
+		}
+		metadataBytes += nativeMetadataSize(m.MetricConfig)
+		if metadataBytes > nativeRangeMetadataBytes {
+			return ErrTransferLimit
 		}
 		metas[i] = m
 	}
@@ -144,6 +155,6 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 			return TransferMetric{Config: metas[i].MetricConfig, Version: TransferVersion{Name: metas[i].Name}}, nil
 		}
 		walk.arena.free = walk.arena.slab
-		return s.store.transferFromLimit(ctx, s.view, metas[i], math.MaxInt64, walk)
+		return s.store.transferFromLimit(ctx, s.view, metas[i], nativeMetricBytes, walk)
 	})
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"testing"
@@ -111,7 +112,7 @@ func TestNativeCombineDifferential(t *testing.T) {
 }
 
 func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T) {
-	for _, stage := range []string{"combine-ingested", "combine-prepared", "combine-name-published", "combine-published"} {
+	for _, stage := range []string{"combine-ingested", "combine-prepared", "combine-name-published", "combine-retire-batch", "combine-name-retired", "combine-published"} {
 		t.Run(stage, func(t *testing.T) {
 			ctx := context.Background()
 			source := nativeMemoryStore(t, true, true)
@@ -207,7 +208,7 @@ func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T)
 			fs.SetIgnoreSyncs(false)
 			target = open()
 			defer target.Close()
-			if stage == "combine-prepared" || stage == "combine-name-published" {
+			if stage == "combine-prepared" || stage == "combine-name-published" || stage == "combine-retire-batch" || stage == "combine-name-retired" {
 				if _, ready, err := target.ResumeNativeCombine(ctx, request); err != nil || !ready {
 					t.Fatal("original donor stage not resumable without source", ready, err)
 				}
@@ -366,6 +367,57 @@ func TestNativeCombineSeveralBucketedHistories(t *testing.T) {
 		}
 		if _, err := target.VerifyTransferFetch(ctx, got); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestNativeCombineLargeRangePublishesBeforePreparingNextBatch(t *testing.T) {
+	ctx := context.Background()
+	source, target := nativeMemoryStore(t, true, true), nativeMemoryStore(t, true, true)
+	names := make([]string, 1024)
+	for i := range names {
+		names[i] = fmt.Sprintf("bounded.%04d", i)
+		putTransferPoints(t, source, names[i], []store.Point{{Timestamp: 999800, Value: 1}})
+		putTransferPoints(t, target, names[i], []store.Point{{Timestamp: 999900, Value: 2}})
+	}
+	pin, err := source.PinNativeSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	// Export and receive concurrently so the test itself does not retain a range.
+	input, output := io.Pipe()
+	defer input.Close()
+	exported := make(chan error, 1)
+	go func() { err := pin.Write(ctx, names, output); output.CloseWithError(err); exported <- err }()
+	published, batches := 0, 0
+	target.NativeCombineHookForTest(func(stage string) error {
+		switch stage {
+		case "combine-before-publish":
+			if published != batches*32 {
+				return fmt.Errorf("prepared next batch before publication: %d/%d", published, batches)
+			}
+			batches++
+		case "combine-name-published":
+			published++
+		}
+		return nil
+	})
+	request := store.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", End: int64(len(names)), Names: names, Combine: true}
+	receipt, err := target.NativeImport(ctx, request, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := <-exported; err != nil {
+		t.Fatal(err)
+	}
+	if receipt.CopiedCount != len(names) || batches != 32 {
+		t.Fatal("range was not published in bounded batches", receipt.CopiedCount, batches)
+	}
+	for _, name := range names {
+		snapshot, err := target.Snapshot(ctx, name)
+		if err != nil || len(snapshot.Archives[0].Points) != 2 {
+			t.Fatal("batched combine lost history", name, err)
 		}
 	}
 }

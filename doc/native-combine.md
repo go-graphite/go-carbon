@@ -28,7 +28,7 @@ histories can serve as input for another donor.
 
 ## Publication and reader compatibility
 
-Preparation uses one immutable database snapshot and CPU-sized workers with
+Preparation uses one immutable database snapshot and at most two workers with
 separate readers and arenas. Each worker retains at most one completed result
 until the ordered SST writer consumes it. An error cancels and joins all workers
 before the snapshot closes. SST key order and reserved-ID order remain unchanged.
@@ -67,7 +67,7 @@ policy mismatch and modified capture hashes fail before measurement.
 Snapshot equality, the independent Fetch oracle, future writes, revision races,
 crash recovery and controlled Linux throughput are separate checks. Rates must
 include input/output bytes, CPU, disk/NIC, peak memory and publication locks.
-There are no new runtime rate, cache, debt, name or p99 admission governors.
+Receiver memory limits below apply independently of controller rate, batch and worker flags.
 
 ## Continuing a phase-1 campaign
 
@@ -106,3 +106,52 @@ Each combine receipt covers the original ordinal count: its unset bits include
 previously completed phase-1 names. Remaining work is the parent's merged `Done`
 bitmap, not the new receipt's `DeferredCount`. Canary readiness additionally
 requires the final integrated build, real native-pair oracle and owner rollout.
+
+## Receiver memory limits and cancellation
+
+Each store admits one native import and one native export at a time, with
+separate slots so reciprocal copies cannot deadlock. HTTP pulls acquire admission
+before decoding metadata or opening a donor response. New requests above 4096 names or 1 MiB of name bytes
+fail with HTTP 413; range metadata is limited to 16 MiB. Per-history encoded bytes
+(including key-vector overhead) are limited to 64 MiB. Archive capacity and
+physical history are conservatively limited to 1,048,576 points per input and
+result, before archive decoding. Oversized histories are rejected, not truncated.
+
+Preparation reserves a conservative 1 GiB per worker from a 2 GiB scratch budget,
+and publishes at most 32 names before preparing the next batch. This is a static
+allocation estimate, not a process RSS limit: foreground writes, Pebble caches,
+native allocations and old range-tombstone fragmentation require separate
+headroom. Increasing server CPU count cannot increase native combine concurrency.
+
+SST builders rotate after 8 MiB of aggregate input or eight active namespaces.
+An individual key/value can overshoot the byte threshold by its admitted size.
+Closed SST receipts and cumulative cleanup spans each have a 16 MiB metadata
+budget; exceeding either rejects the range before further staging or ingestion.
+The bucket-reader cache holds at most eight cursors plus one reusable overflow
+cursor per history reader. Old histories are retired with point tombstones in
+1 MiB WAL batches. Durable intents and pieces survive partial retirement so
+recovery repeats cleanup safely without a donor connection.
+
+The complete original stream is still checksum-verified before publication;
+only bounded writer state, per-name data and range metadata stay in memory.
+Dump-stop cancels native transfers before flushing or draining persistence; service
+stop cancels before waiting for HTTP handlers. Cancellation stops admission,
+range-lock waits, decoding, publication and work
+between ingest groups of at most eight bounded SSTs. Pebble's synchronous ingest
+has no context API and can still block the shared commit pipeline until the
+current group returns. No background import is detached on client cancellation.
+
+Existing receipt identities are unchanged. Preserve old journals and resolve
+receipts before planning new ranges. An unfinished legacy range above these
+limits fails closed; do not shrink or rewrite its identity in place. Reconcile
+its already published pieces before authorizing a separate immutable plan.
+Names exceeding the per-history limits need a future streaming combine path.
+
+Existing checksum-ready combine intents can resume under their original identity
+without the new name-count limit, provided their complete encoded intent fits
+the 16 MiB metadata budget. This limit is checked before JSON decoding; history
+limits and bounded preparation/retirement still apply. A large legacy intent
+that exceeds this budget fails explicitly. The existing monolithic intent
+format cannot resume arbitrary-size metadata within that budget; doing so needs
+a separately reviewed paged intent format. Unready legacy requests still use
+new-request admission. Completed receipts remain readable.

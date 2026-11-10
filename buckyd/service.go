@@ -111,33 +111,35 @@ type ACL struct {
 }
 
 type Service struct {
-	nativeMu         sync.Mutex
-	nativeSources    map[string]*nativeSourceSession
-	config           Config
-	transferDebt     atomic.Int64
-	store            *chunkstore.Store
-	whisperIO        *whisperio.Adapter
-	secret           []byte
-	authPending      atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
-	server           *http.Server
-	listener         net.Listener
-	transfers        chan struct{}
-	maintenance      chan struct{}
-	transferPool     sync.Pool
-	mu               sync.Mutex
-	handlers         sync.WaitGroup
-	serveErr         chan error
-	nodes            []Node
-	onChange         func()
-	flushTransfer    func(context.Context, []string) error
-	finiteCacheFence chunkstore.FiniteCacheFence
-	pyroscope        *pyroscope.Profiler
-	pprofServer      *http.Server
-	pprofListener    net.Listener
-	pprofErr         chan error
-	stopped          bool
-	copyMu           sync.RWMutex
-	storeCopy        *storecopy.Manager
+	nativePullOnce      sync.Once
+	nativePullAdmission chan struct{}
+	nativeMu            sync.Mutex
+	nativeSources       map[string]*nativeSourceSession
+	config              Config
+	transferDebt        atomic.Int64
+	store               *chunkstore.Store
+	whisperIO           *whisperio.Adapter
+	secret              []byte
+	authPending         atomic.Bool // no handler runs until secret is set; readiness scrapes never enter mu
+	server              *http.Server
+	listener            net.Listener
+	transfers           chan struct{}
+	maintenance         chan struct{}
+	transferPool        sync.Pool
+	mu                  sync.Mutex
+	handlers            sync.WaitGroup
+	serveErr            chan error
+	nodes               []Node
+	onChange            func()
+	flushTransfer       func(context.Context, []string) error
+	finiteCacheFence    chunkstore.FiniteCacheFence
+	pyroscope           *pyroscope.Profiler
+	pprofServer         *http.Server
+	pprofListener       net.Listener
+	pprofErr            chan error
+	stopped             bool
+	copyMu              sync.RWMutex
+	storeCopy           *storecopy.Manager
 }
 
 func New(config Config, metricStore *chunkstore.Store) (*Service, error) {
@@ -419,6 +421,9 @@ func (s *Service) changed() {
 	}
 }
 func (s *Service) Stop() error {
+	if s.store != nil {
+		s.store.CancelNativeTransfers()
+	}
 	resources := s.takeResources()
 	if resources.server == nil {
 		s.closeNativeSources()

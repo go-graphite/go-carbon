@@ -212,8 +212,13 @@ type Store struct {
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
 	nativeFailure         atomic.Pointer[ownershipError] // native write errors require owner recovery
-	nativeRanges          sync.Map                       // durable range identity -> import mutex
-	nativeTestHook        func(string) error             // private deterministic fault-injection tests
+	nativeRanges          sync.Map                       // durable range identity -> context-aware publication lock
+	nativeContextOnce     sync.Once
+	nativeContext         context.Context
+	nativeCancel          context.CancelFunc
+	nativeAdmission       chan struct{}
+	nativeExportAdmission chan struct{}
+	nativeTestHook        func(string) error // private deterministic fault-injection tests
 	maintenanceWait       func(context.Context, string) error
 	maintenanceCtx        context.Context
 	maintenanceStop       context.CancelFunc

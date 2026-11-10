@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/cockroachdb/pebble"
@@ -75,6 +74,8 @@ func (s *Store) ResumeNativeCombine(ctx context.Context, request NativeRange) (N
 }
 
 func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, input io.Reader) (receipt NativeReceipt, err error) {
+	ctx, cancel := s.NativeTransferContext(ctx)
+	defer cancel()
 	if request.Selection != nil {
 		request.Candidates = request.Selection
 	}
@@ -82,10 +83,16 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 	if err != nil {
 		return receipt, err
 	}
-	lockAny, _ := s.nativeRanges.LoadOrStore(identity, new(sync.Mutex))
-	lock := lockAny.(*sync.Mutex)
-	lock.Lock()
-	defer lock.Unlock()
+	release, err := s.admitNative(ctx)
+	if err != nil {
+		return receipt, err
+	}
+	defer release()
+	unlock, err := s.lockNativeRange(ctx, identity)
+	if err != nil {
+		return NativeReceipt{}, err
+	}
+	defer unlock()
 	if failure := s.nativeFailure.Load(); failure != nil {
 		return receipt, failure.err
 	}
@@ -104,6 +111,9 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 	}
 	intent, err := s.readNativeCombineIntent(identity)
 	if errors.Is(err, pebble.ErrNotFound) || err == nil && !intent.Ready {
+		if err := ValidateNativeNames(request.Names); err != nil {
+			return receipt, err
+		}
 		if err == nil {
 			if err := s.discardNativeCombine(identity, intent); err != nil {
 				return receipt, err
@@ -136,6 +146,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 		if len(pending) == 0 {
 			break
 		}
+		pending = pending[:min(len(pending), nativeCombineBatch)]
 		if err := errors.Join(ctx.Err(), s.nativeDiskCheck()); err != nil {
 			return receipt, err
 		}
@@ -181,16 +192,16 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 	}
 	// Neither history retirement nor the durability barrier holds a writer
 	// stripe. Published IDs are excluded from all hidden-ID cleanup ranges.
-	b := s.db.NewIndexedBatch()
-	defer b.Close()
 	for _, piece := range pieces {
 		if piece == nil || piece.Old.ID == 0 {
 			continue
 		}
-		if err := s.retireTransfer(ctx, b, Metadata(piece.Old)); err != nil {
+		if err := s.retireNativeCombine(ctx, Metadata(piece.Old)); err != nil {
 			return receipt, err
 		}
 	}
+	b := s.db.NewBatch()
+	defer b.Close()
 	if err := nativeCombineCleanup(b, intent, pieces); err != nil {
 		return receipt, err
 	}
@@ -245,6 +256,9 @@ func (s *Store) readNativeCombineIntent(identity string) (nativeCombineIntent, e
 		return nativeCombineIntent{}, err
 	}
 	defer closer.Close()
+	if len(value) > nativeRangeMetadataBytes {
+		return nativeCombineIntent{}, fmt.Errorf("native ready intent exceeds %d metadata bytes: %w", nativeRangeMetadataBytes, ErrTransferLimit)
+	}
 	var intent nativeCombineIntent
 	if err := json.Unmarshal(value, &intent); err != nil {
 		return intent, err
@@ -274,13 +288,21 @@ func validateNativeCombineIntent(identity string, intent nativeCombineIntent) er
 }
 
 func (s *Store) saveNativeCombineIntent(intent nativeCombineIntent) error {
-	data, err := json.Marshal(intent)
+	data, err := marshalNativeCombineIntent(intent)
 	if err != nil {
 		return err
 	}
 	err = s.db.Set(nativeCombineIntentKey(intent.Receipt.Identity), data, pebble.Sync)
 	s.nativeWriteFailed(err)
 	return err
+}
+
+func marshalNativeCombineIntent(intent nativeCombineIntent) ([]byte, error) {
+	data, err := json.Marshal(intent)
+	if err == nil && len(data) > nativeRangeMetadataBytes {
+		err = fmt.Errorf("native intent exceeds %d metadata bytes: %w", nativeRangeMetadataBytes, ErrTransferLimit)
+	}
+	return data, err
 }
 
 func (s *Store) reserveNativeCombineIDs(intent *nativeCombineIntent, count int) (uint64, error) {
@@ -306,7 +328,7 @@ func (s *Store) reserveNativeCombineIDs(intent *nativeCombineIntent, count int) 
 		intent.Receipt.FirstID = first
 	}
 	intent.Directories = append(intent.Directories, s.fs.PathJoin(s.dir, nativeDirectory(intent.Receipt.Identity, first)))
-	data, err := json.Marshal(intent)
+	data, err := marshalNativeCombineIntent(*intent)
 	if err != nil {
 		return 0, err
 	}
@@ -335,6 +357,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if err != nil {
 		return err
 	}
+	stream.metricLimit = nativeMetricBytes
 	request := intent.Request
 	expected := len(request.Names)
 	if request.Candidates != nil {
@@ -378,12 +401,18 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 		positions[name] = i
 	}
 	seen := make([]bool, len(request.Names))
+	metadataBytes := int64(0)
 	floatCodec := false
 	for i := range expected {
 		record, err := stream.Next()
 		if err != nil {
 			return err
 		}
+		metadataBytes += nativeMetadataSize(record.Config)
+		if metadataBytes > nativeRangeMetadataBytes {
+			return ErrTransferLimit
+		}
+
 		position, ok := positions[record.Config.Name]
 		if !ok || seen[position] || record.Version.Name != record.Config.Name || request.Candidates != nil && !nativeBit(request.Candidates, position) {
 			return ErrFormat
@@ -412,7 +441,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if err != nil {
 		return err
 	}
-	if err := s.ingestNativeCombineTables(intent, tables, floatCodec, buildBegan); err != nil {
+	if err := s.ingestNativeCombineTables(ctx, intent, tables, floatCodec, buildBegan); err != nil {
 		return err
 	}
 	if err := s.nativeStep("combine-ingested"); err != nil {
@@ -423,6 +452,9 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 }
 
 func (s *Store) validateNativeCombineRecord(r TransferMetric) error {
+	if err := validateNativeMemory(r); err != nil {
+		return err
+	}
 	if r.Version.ID == 0 || r.Version.Generation == 0 || r.Version.Revision == 0 || r.Version.Name != r.Config.Name {
 		return ErrFormat
 	}
@@ -443,12 +475,22 @@ func (s *Store) validateNativeCombineRecord(r TransferMetric) error {
 	return nil
 }
 
-func (s *Store) ingestNativeCombineTables(intent *nativeCombineIntent, tables *nativeTables, floatCodec bool, buildBegan time.Time) error {
+func (s *Store) ingestNativeCombineTables(ctx context.Context, intent *nativeCombineIntent, tables *nativeTables, floatCodec bool, buildBegan time.Time) error {
 	if err := tables.close(); err != nil {
 		s.nativeWriteFailed(err)
 		return err
 	}
 	s.nativeCounters.build.Add(uint64(time.Since(buildBegan)))
+	metadataBytes := int64(0)
+	for _, span := range intent.Spans {
+		metadataBytes += int64(256 + len(span.Lower) + len(span.Upper))
+	}
+	for _, table := range tables.completed {
+		metadataBytes += int64(256 + len(table.Lower) + len(table.Upper))
+	}
+	if metadataBytes > nativeRangeMetadataBytes {
+		return fmt.Errorf("native cleanup metadata exceeds %d bytes: %w", nativeRangeMetadataBytes, ErrTransferLimit)
+	}
 	intent.Spans = append(intent.Spans, tables.spans()...)
 	if err := s.saveNativeCombineIntent(*intent); err != nil {
 		return err
@@ -466,13 +508,11 @@ func (s *Store) ingestNativeCombineTables(intent *nativeCombineIntent, tables *n
 	}
 	if len(tables.paths) != 0 {
 		began := time.Now()
-		stats, err := s.db.IngestWithStats(tables.paths)
+		err := s.ingestNativeFiles(ctx, tables.paths)
 		s.nativeCounters.ingest.Add(uint64(time.Since(began)))
 		if err != nil {
-			s.nativeWriteFailed(err)
 			return err
 		}
-		s.nativeCounters.sst.Add(stats.Bytes)
 	}
 	receipts, err := tables.receipts()
 	if err != nil {
@@ -509,7 +549,7 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 	if err != nil {
 		return nil, err
 	}
-	if err := s.ingestNativeCombineTables(intent, tables, floatCodec, buildBegan); err != nil {
+	if err := s.ingestNativeCombineTables(ctx, intent, tables, floatCodec, buildBegan); err != nil {
 		return nil, err
 	}
 	return prepared, nil

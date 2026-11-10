@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -146,5 +149,80 @@ func TestNativeHTTPBypassesLegacyLimitsAndRecoversReceipt(t *testing.T) {
 	response = invoke(source, http.MethodPost, "/v1/native/export", nativeExportRequest{Session: session.ID, Names: []string{"native.new"}}, root)
 	if response.Code != http.StatusGone {
 		t.Fatal("released pin retained", response.Code)
+	}
+}
+
+func TestNativePullCancellationClosesDonorAndReceiver(t *testing.T) {
+	for _, mode := range []string{"client", "service-stop", "dump-stop"} {
+		t.Run(mode, func(t *testing.T) { testNativePullCancellation(t, mode) })
+	}
+}
+func testNativePullCancellation(t *testing.T, mode string) {
+	destination, target := newNativeTestService(t)
+	started, stopped := make(chan struct{}), make(chan struct{})
+	donor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Store-Format", strconv.Itoa(target.TransferFormat()))
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done()
+		close(stopped)
+	}))
+	defer donor.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := nativePullRequest{Range: chunkstore.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: donor.URL, End: 1, Names: []string{"cancelled"}, Combine: true}, Session: "pin"}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/native/pull", bytes.NewReader(body)).WithContext(ctx)
+	r.Header.Set(authHeader, token(t, destination.secret, []string{"*"}, []string{"*"}))
+	done := make(chan struct{})
+	go func() { defer close(done); destination.Handler().ServeHTTP(httptest.NewRecorder(), r) }()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("donor not reached")
+	}
+	switch mode {
+	case "client":
+		cancel()
+	case "service-stop":
+		if err := destination.Stop(); err != nil {
+			t.Fatal(err)
+		}
+	case "dump-stop":
+		target.CancelNativeTransfers()
+	}
+
+	for _, ch := range []<-chan struct{}{stopped, done} {
+		select {
+		case <-ch:
+		case <-time.After(3 * time.Second):
+			t.Fatal("native work outlived cancelled client")
+		}
+	}
+	if _, err := target.Metadata(context.Background(), "cancelled"); !errors.Is(err, chunkstore.ErrNotFound) {
+		t.Fatal("cancelled input published", err)
+	}
+}
+
+func TestNativePullRejectsOversizedRangeBeforeDonor(t *testing.T) {
+	destination, _ := newNativeTestService(t)
+	names := make([]string, 10000)
+	for i := range names {
+		names[i] = fmt.Sprintf("old.%d", i)
+	}
+	body, err := json.Marshal(nativePullRequest{Range: chunkstore.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "donor", Start: 0, End: int64(len(names)), Names: names}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/v1/native/pull", bytes.NewReader(body))
+	r.Header.Set(authHeader, token(t, destination.secret, []string{"*"}, []string{"*"}))
+	response := httptest.NewRecorder()
+	destination.Handler().ServeHTTP(response, r)
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatal(response.Code, response.Body.String())
 	}
 }

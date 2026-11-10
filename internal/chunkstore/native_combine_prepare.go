@@ -3,7 +3,6 @@ package chunkstore
 import (
 	"context"
 	"errors"
-	"math"
 	"runtime"
 	"sync"
 
@@ -23,7 +22,7 @@ type nativePreparedRecord struct {
 // until the ordered SST writer consumes it. No work or sync runs under a name
 // stripe; publication still performs the original revision check afterward.
 func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Snapshot, intent *nativeCombineIntent, first uint64, pending []int, consume func(nativeCombinePrepared, []RelayoutKV) error) error {
-	workers := min(len(pending), runtime.GOMAXPROCS(0))
+	workers := min(len(pending), runtime.GOMAXPROCS(0), nativeCombineMemory/nativeCombineWorkerMemory)
 	if workers == 0 {
 		return nil
 	}
@@ -118,8 +117,11 @@ func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Sn
 
 func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Snapshot, raw Metadata, position int, destination uint64, sourceWalk, targetWalk *transferReader) (nativeCombinePrepared, []RelayoutKV, error) {
 	p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: position, Meta: nativeCombineMetadata(raw)}}
-	source, err := s.transferFromLimit(ctx, view, raw, math.MaxInt64, sourceWalk)
+	source, err := s.transferFromLimit(ctx, view, raw, nativeMetricBytes, sourceWalk)
 	if err != nil {
+		return p, nil, err
+	}
+	if err := validateNativeMemory(source); err != nil {
 		return p, nil, err
 	}
 	old, err := targetWalk.metadata(raw.Name)
@@ -128,12 +130,18 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 		if err := nativeCompatibleTarget(s, old, source); err != nil {
 			return p, nil, err
 		}
-		target, err := s.transferFromLimit(ctx, view, old, math.MaxInt64, targetWalk)
+		target, err := s.transferFromLimit(ctx, view, old, nativeMetricBytes, targetWalk)
 		if err != nil {
+			return p, nil, err
+		}
+		if err := validateNativeMemory(target); err != nil {
 			return p, nil, err
 		}
 		result, class, err := s.nativeCombineRecord(ctx, source, target)
 		if err != nil {
+			return p, nil, err
+		}
+		if err := validateNativeMemory(result); err != nil {
 			return p, nil, err
 		}
 		p.Old, p.Class = nativeCombineMetadata(old), class

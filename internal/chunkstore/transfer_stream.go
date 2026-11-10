@@ -16,15 +16,16 @@ import (
 // values are valid until Next; SST writers consume them before advancing. The
 // complete stream checksum must pass before any catalog is published.
 type TransferStream struct {
-	Count  int
-	index  int
-	input  *bufio.Reader
-	reader io.Reader
-	hash   hash.Hash
-	arena  transferArena
-	err    error
-	bytes  int64
-	word   [8]byte // parsing is sequential; avoid one escaping slice per integer
+	Count                                    int
+	index                                    int
+	input                                    *bufio.Reader
+	reader                                   io.Reader
+	hash                                     hash.Hash
+	arena                                    transferArena
+	err                                      error
+	bytes                                    int64
+	word                                     [8]byte // parsing is sequential; avoid one escaping slice per integer
+	metricLimit, metricStart, metricOverhead int64
 }
 
 func NewTransferStream(input io.Reader) (*TransferStream, error) {
@@ -74,6 +75,10 @@ func (s *TransferStream) blob(limit uint32) []byte {
 		s.err = ErrFormat
 		return nil
 	}
+	if s.metricLimit > 0 && s.bytes-s.metricStart+int64(n)+s.metricOverhead > s.metricLimit {
+		s.err = ErrTransferLimit
+		return nil
+	}
 	b := s.arena.alloc(int(n))
 	s.read(b)
 	return b
@@ -83,6 +88,7 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 		return TransferMetric{}, io.EOF
 	}
 	s.arena.free = s.arena.slab
+	s.metricStart, s.metricOverhead = s.bytes, 0
 	r := TransferMetric{}
 	r.Config.Name = string(s.blob(4096))
 	r.Version.Name = r.Config.Name
@@ -122,6 +128,7 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 	// their copies per metric without trusting an unbounded wire count.
 	r.Keys = make([]RelayoutKV, 0, min(n, 256))
 	for range n {
+		s.metricOverhead += 48 // two slice headers, even for empty values
 		key, value := s.blob(4096), s.blob(16<<20)
 		if s.err != nil {
 			return r, s.err

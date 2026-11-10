@@ -185,7 +185,11 @@ func (r *transferReader) visitBucket(ctx context.Context, prefix []byte, visit f
 	bucket := binary.BigEndian.Uint32(prefix[1:5])
 	reader := r.bucketReaders[bucket]
 	if reader == nil {
-		if !r.native && len(r.bucketReaders) >= 64 {
+		limit := 64
+		if r.native {
+			limit = nativeTableWriters
+		}
+		if len(r.bucketReaders) >= limit {
 			return r.visit(ctx, &r.buckets, []byte{'t'}, []byte{'u'}, prefix, visit)
 		}
 		if r.bucketReaders == nil {
