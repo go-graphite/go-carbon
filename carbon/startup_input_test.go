@@ -479,6 +479,16 @@ func TestStartupInputCrashArchivesMatchUninterrupted(t *testing.T) {
 				}
 			}
 			for _, name := range []string{"handoff.metric", "tail.only"} {
+				// Store confirmation can precede asynchronous publication of a
+				// newly created name to the read index. Join that boundary before
+				// comparing HTTP readback, especially under race-suite load.
+				deadline := time.Now().Add(5 * time.Second)
+				for !actual.Carbonserver.MetricExists(name) || !ref.Carbonserver.MetricExists(name) {
+					if time.Now().After(deadline) {
+						t.Fatalf("%s was not published to both read indexes after %s", name, stage)
+					}
+					time.Sleep(time.Millisecond)
+				}
 				want, err := ref.MetricStore.Snapshot(context.Background(), name)
 				if err != nil {
 					t.Fatal(err)

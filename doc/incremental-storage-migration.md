@@ -70,6 +70,14 @@ replace the mapped generation from the catalog. Per-metric details are retained
 only when internal stats are enabled. Graceful shutdown reuses this generation
 and saves only its mutable overlay, including pending cache names.
 
+During an incomplete migration, a scan can read the native catalog before a
+new realtime name commits. If that name leaves cache before pruning, its absence
+from the older scan is not evidence of deletion. Before pruning unseen mapped
+overlay entries, reconciliation checks both pending cache points and current
+committed native metadata. Names absent from both the source and those owners
+still disappear. A failed metadata read or cancellation preserves the prior
+discovery entries and prevents publishing a replacement compact snapshot.
+
 Configurations without a v2 file-list cache retain the compatibility heap-based
 builder; its full-node startup/RSS needs separate qualification before disabling
 the compatibility index path.
