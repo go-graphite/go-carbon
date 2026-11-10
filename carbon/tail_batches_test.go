@@ -89,3 +89,35 @@ func TestBudgetedTailCancellationJoinsQueuesWithoutAcceptableEOF(t *testing.T) {
 		}
 	})
 }
+
+func TestBudgetedTailBoundsAppliedWorkUnderCPUDebt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var raw []byte
+		for n := range 512 {
+			p := points.OnePoint("tail", float64(n), int64(n))
+			raw = p.AppendBinary(raw)
+		}
+		run := func(budget *restartcpu.Budget) time.Duration {
+			started := time.Now()
+			applied := 0
+			count, err := replayInputTailBatchesWithBudget(context.Background(), bytes.NewReader(raw), 32, func(p *points.Points) {
+				applied += len(p.Data) // All records hash to the same FIFO.
+				time.Sleep(50 * time.Microsecond)
+			}, budget)
+			if err != nil || count != 512 || applied != 512 {
+				t.Fatalf("replay lost work: decoded=%d applied=%d error=%v", count, applied, err)
+			}
+			return time.Since(started)
+		}
+		unpaced := run(nil)
+		started := time.Now()
+		budget := restartcpu.NewWithCPU(2, func() float64 { return 3 * time.Since(started).Seconds() })
+		time.Sleep(time.Second) // Mandatory work has exhausted the CPU credit.
+		paced := run(budget)
+		// The worker and decoder share a quarter core, at most one eighth each.
+		// One uncharged 5ms duty remainder is allowed; no wall-clock CPU burn.
+		if paced < 8*unpaced-5*time.Millisecond {
+			t.Fatalf("historical insertion escaped its duty share: paced=%v unpaced=%v", paced, unpaced)
+		}
+	})
+}
