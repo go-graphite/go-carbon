@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -304,7 +305,7 @@ func (s *Service) Start() error {
 	if bind == "" {
 		bind = ":4242"
 	}
-	listener, err := net.Listen("tcp", bind)
+	listener, err := helper.ListenTCPAddress("tcp", bind)
 	if err != nil {
 		return fmt.Errorf("listen buckyd %s: %w", bind, err)
 	}
@@ -312,7 +313,7 @@ func (s *Service) Start() error {
 	s.stopped = false
 	s.server = newHTTPServer(bind, s.Handler())
 	if s.config.Pprof != "" {
-		pprofListener, err := net.Listen("tcp", s.config.Pprof)
+		pprofListener, err := helper.ListenTCPAddress("tcp", s.config.Pprof)
 		if err != nil {
 			_ = listener.Close()
 			s.listener = nil

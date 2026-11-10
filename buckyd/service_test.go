@@ -312,10 +312,11 @@ func TestLifecycleBindsSynchronouslyAndMutationCallbackRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	s.config.Bind = listener.Addr().String()
+	s.config.Bind = "127.0.0.1:invalid"
 	if err := s.Start(); err == nil {
-		t.Fatal("Start succeeded on occupied port")
+		t.Fatal("Start succeeded with an invalid address")
 	}
+	s.config.Bind = listener.Addr().String()
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -386,16 +387,11 @@ func TestPprofUsesSeparateListenerAndClosesOnStop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	occupied, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer occupied.Close()
 	blocked, _ := testService(t)
 	blocked.config.Bind = "127.0.0.1:0"
-	blocked.config.Pprof = occupied.Addr().String()
+	blocked.config.Pprof = "127.0.0.1:invalid"
 	if err := blocked.Start(); err == nil {
-		t.Fatal("Start succeeded with an occupied pprof listener")
+		t.Fatal("Start succeeded with an invalid pprof listener")
 	}
 	if blocked.server != nil || blocked.listener != nil {
 		t.Fatal("failed pprof bind left the main listener running")

@@ -69,7 +69,7 @@ func newHTTP(name string, options *Options, store func(*points.Points)) (*HTTP, 
 		return nil, err
 	}
 
-	tcpListener, err := net.ListenTCP("tcp", addr)
+	tcpListener, err := helper.ListenTCP("tcp", addr)
 	if err != nil {
 		return nil, err
 	}

@@ -297,7 +297,7 @@ func (listener *CarbonlinkListener) Addr() net.Addr {
 // Listen bind port. Receive messages and send to out channel
 func (listener *CarbonlinkListener) Listen(addr *net.TCPAddr) error {
 	return listener.StartFunc(func() error {
-		tcpListener, err := net.ListenTCP("tcp", addr)
+		tcpListener, err := helper.ListenTCP("tcp", addr)
 		if err != nil {
 			return err
 		}

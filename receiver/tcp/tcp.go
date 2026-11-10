@@ -671,7 +671,7 @@ func (rcv *TCP) SeedCapturedPoints(n uint64) {
 
 // Listen bind port. Receive messages and send to out channel
 func (rcv *TCP) Listen(addr *net.TCPAddr) error {
-	return rcv.listen(func() (*net.TCPListener, error) { return net.ListenTCP("tcp", addr) }, nil)
+	return rcv.listen(func() (*net.TCPListener, error) { return helper.ListenTCP("tcp", addr) }, nil)
 }
 
 // listen serves the listener open returns, after the inherited connections.

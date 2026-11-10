@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/handoff"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/points"
@@ -167,7 +168,7 @@ func listenStartupCapture(options *tcp.Options) (*tcp.Handoff, *tcp.Options, err
 	if err != nil {
 		return nil, nil, err
 	}
-	listener, err := net.ListenTCP("tcp", addr)
+	listener, err := helper.ListenTCP("tcp", addr)
 	if err != nil {
 		return nil, nil, err
 	}
