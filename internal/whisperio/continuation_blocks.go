@@ -102,10 +102,18 @@ func (f *continuationFile) classicGroup(archive int, a whisper.StorageArchiveLay
 		}
 		return &emptyPointBlock, nil
 	}
+	if f.data.references {
+		return f.referencedClassicGroup(archive, groupIndex)
+	}
 	return f.pointBlock(continuationBodyKey(f.data.id, 'p', archive, 0, groupIndex))
 }
 
 func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) error {
+	if f.data.references && !f.data.layout.Compressed {
+		if err := f.retireReferences(key); err != nil {
+			return err
+		}
+	}
 	if f.sidecar && !f.data.layout.Compressed {
 		if err := f.initSidecarIndex(); err != nil {
 			return err
@@ -116,6 +124,9 @@ func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) er
 		f.fs.sidecarDirty = true
 	}
 	if block.Present == [2]uint64{} {
+		if f.data.references && !f.data.layout.Compressed {
+			return f.fs.kv.Set(key, store.EncodePointBlock(block))
+		}
 		return f.fs.kv.Delete(key)
 	}
 	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {

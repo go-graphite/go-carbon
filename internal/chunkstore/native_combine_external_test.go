@@ -160,6 +160,15 @@ func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T)
 			// The first name stays absent, so its original bucketed ID is
 			// published directly; the second name needs a new combined ID.
 			putTransferPoints(t, target, names[1], []store.Point{{Timestamp: 999880, Value: 42}})
+			reference := nativeMemoryStore(t, true, true)
+			putTransferPoints(t, reference, names[1], []store.Point{{Timestamp: 999880, Value: 42}})
+			records, err := source.ExportTransfer(ctx, names)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reference.ImportTransfer(ctx, records); err != nil {
+				t.Fatal(err)
+			}
 			if err := target.NativeCombineSyncForTest(); err != nil {
 				t.Fatal(err)
 			}
@@ -175,6 +184,9 @@ func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T)
 					}
 					publishedID = m.ID
 					if err := target.UpdateMany(ctx, names[0], []store.Point{{Timestamp: 999930, Value: 99}}); err != nil {
+						return err
+					}
+					if err := reference.UpdateMany(ctx, names[0], []store.Point{{Timestamp: 999930, Value: 99}}); err != nil {
 						return err
 					}
 					if err := target.NativeCombineSyncForTest(); err != nil {
@@ -207,6 +219,19 @@ func TestNativeCombineV7CrashKeepsPublishedBucketsAndOriginalInput(t *testing.T)
 				if err != nil || len(snap.Archives[0].Points) == 0 {
 					t.Fatal("published history lost", name, err)
 				}
+				want, err := reference.Snapshot(ctx, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.EqualSnapshots(want, snap); err != nil {
+					t.Fatal("recovered archive differs", err)
+				}
+				if _, err := target.VerifyTransferFetch(ctx, snap); err != nil {
+					t.Fatal("recovered Fetch differs", err)
+				}
+			}
+			if target.TransferFormat() != 12 {
+				t.Fatal("crash proof did not exercise referenced output", target.TransferFormat())
 			}
 			if publishedID != 0 {
 				m, _ := target.Metadata(ctx, names[0])

@@ -53,7 +53,8 @@ type continuationFiles struct {
 	// verifiedBlocks is local to physical verification and its visible
 	// snapshot over the same immutable Pebble reader. It is never used by
 	// imports, updates or writable OOO snapshot overlays.
-	verifiedBlocks map[verifiedBlockKey][]whisper.TimeSeriesPoint
+	verifiedBlocks   map[verifiedBlockKey][]whisper.TimeSeriesPoint
+	referencedPoints map[string][]store.Point
 }
 
 type verifiedBlockKey struct {
@@ -62,6 +63,7 @@ type verifiedBlockKey struct {
 }
 
 type continuationFileData struct {
+	references   bool
 	sidecarCount *uint64
 	id           uint64
 	layout       whisper.StorageFileLayout
@@ -670,6 +672,9 @@ func encodeContinuationManifest(d *continuationFileData) ([]byte, error) {
 	if d.headerPaged {
 		b[0] = 2
 	}
+	if d.references {
+		b[0] += 2
+	}
 	if d.layout.Compressed {
 		b[1] = 1
 	}
@@ -702,10 +707,10 @@ func encodeContinuationManifest(d *continuationFileData) ([]byte, error) {
 // header is shared with the database or with another metric operation.
 func decodeContinuationManifest(data []byte) (*continuationFileData, error) {
 	capacity := cap(data)
-	if len(data) < 2 || data[0] < 1 || data[0] > 2 || data[1] > 1 {
+	if len(data) < 2 || data[0] < 1 || data[0] > 4 || data[1] > 1 || data[0] > 2 && data[1] != 0 {
 		return nil, errors.New("invalid continuation manifest")
 	}
-	d := &continuationFileData{layout: whisper.StorageFileLayout{Compressed: data[1] == 1}, pages: make(map[uint32]bool), headerPaged: data[0] == 2}
+	d := &continuationFileData{layout: whisper.StorageFileLayout{Compressed: data[1] == 1}, pages: make(map[uint32]bool), headerPaged: data[0]%2 == 0, references: data[0] > 2}
 	data = data[2:]
 	read := func() (int, error) {
 		value, size := binary.Uvarint(data)

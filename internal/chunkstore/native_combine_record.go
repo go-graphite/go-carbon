@@ -27,6 +27,10 @@ type ContinuationNativeClassic interface {
 	RestoreNativeClassicBlocks(context.Context, ContinuationIO, Metadata, []RelayoutKV, func() time.Time) (bool, error)
 }
 
+type ContinuationNativeCombiner interface {
+	CombineNative(context.Context, ContinuationIO, ContinuationIO, Metadata, func() time.Time) ([]RelayoutKV, NativeCombineClass, bool, error)
+}
+
 // nativeCombineRecord runs entirely outside writer locks. Keeping the exact
 // reference operations here is deliberate: coarse archives are independently
 // authoritative, and cannot be recreated by replaying the finest archive.
@@ -40,38 +44,49 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 		if err != nil || canonical {
 			return result, class, err
 		}
-	} else if codec, ok := s.continuation.(ContinuationNativeClassic); ok {
-		a, ac, err := codec.NativeClassicBlocks(ctx, transferRecordIO(source), Metadata{MetricConfig: source.Config}, s.now)
-		if err != nil {
-			return TransferMetric{}, class, err
+	} else {
+		if codec, ok := s.continuation.(ContinuationNativeCombiner); ok {
+			keys, c, handled, err := codec.CombineNative(ctx, transferRecordIO(source), transferRecordIO(target), Metadata{MetricConfig: source.Config}, s.now)
+			if err != nil || handled {
+				return TransferMetric{Config: source.Config, Version: source.Version, Continuation: true, Keys: keys}, c, err
+			}
 		}
-		if ac {
-			b, bc, err := codec.NativeClassicBlocks(ctx, transferRecordIO(target), Metadata{MetricConfig: target.Config}, s.now)
+	}
+	if source.Continuation {
+		codec, ok := s.continuation.(ContinuationNativeClassic)
+		if ok {
+			a, ac, err := codec.NativeClassicBlocks(ctx, transferRecordIO(source), Metadata{MetricConfig: source.Config}, s.now)
 			if err != nil {
 				return TransferMetric{}, class, err
 			}
-			if bc {
-				left, right := source, target
-				left.Keys, right.Keys = a, b
-				result, c, canonical, err := s.nativeCombineChunks(ctx, left, right)
+			if ac {
+				b, bc, err := codec.NativeClassicBlocks(ctx, transferRecordIO(target), Metadata{MetricConfig: target.Config}, s.now)
 				if err != nil {
-					return result, c, err
+					return TransferMetric{}, class, err
 				}
-				if canonical {
-					memory := nativeRecordMemory{values: make(map[string][]byte)}
-					compatible, err := codec.RestoreNativeClassicBlocks(ctx, &memory, Metadata{MetricConfig: source.Config}, result.Keys, s.now)
+				if bc {
+					left, right := source, target
+					left.Keys, right.Keys = a, b
+					result, c, canonical, err := s.nativeCombineChunks(ctx, left, right)
 					if err != nil {
-						return TransferMetric{}, c, err
+						return result, c, err
 					}
-					if compatible {
-						result.Keys, result.Continuation = nil, true
-						if err := memory.Visit(nil, func(k, v []byte) error {
-							result.Keys = append(result.Keys, RelayoutKV{bytes.Clone(k), v})
-							return nil
-						}); err != nil {
-							return result, c, err
+					if canonical {
+						memory := nativeRecordMemory{values: make(map[string][]byte)}
+						compatible, err := codec.RestoreNativeClassicBlocks(ctx, &memory, Metadata{MetricConfig: source.Config}, result.Keys, s.now)
+						if err != nil {
+							return TransferMetric{}, c, err
 						}
-						return result, c, nil
+						if compatible {
+							result.Keys, result.Continuation = nil, true
+							if err := memory.Visit(nil, func(k, v []byte) error {
+								result.Keys = append(result.Keys, RelayoutKV{bytes.Clone(k), v})
+								return nil
+							}); err != nil {
+								return result, c, err
+							}
+							return result, c, nil
+						}
 					}
 				}
 			}
