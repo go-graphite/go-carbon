@@ -1135,7 +1135,6 @@ uloop:
 		case <-scanFrequency:
 		case <-force:
 		case <-retry:
-			retry = nil
 		case <-knownMetricsStatTicker:
 			// It's only useful when using realtime index as the
 			// scanFrequency should be a long interval/duration
