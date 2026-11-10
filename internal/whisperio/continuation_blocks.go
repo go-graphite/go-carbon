@@ -33,8 +33,14 @@ func (f *continuationFile) archiveAt(offset int) (int, whisper.StorageArchiveLay
 // its points map to, which mostly hold nothing or late points written long
 // ago, so sidecar groups are probed; a main file's are rewritten as it fills.
 func (f *continuationFile) pointBlock(key []byte) (*store.PointBlock, error) {
+	return f.pointBlockAccess(key, true)
+}
+
+// Read-only callers may borrow a cached block until the next mutation in this
+// update. Mutable callers retain the owned-block contract of pointBlock.
+func (f *continuationFile) pointBlockAccess(key []byte, mutable bool) (*store.PointBlock, error) {
 	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
-		if block := buffer.point(key); block != nil {
+		if block := buffer.point(key, mutable); block != nil {
 			return block, nil
 		}
 	}
@@ -108,9 +114,9 @@ func (f *continuationFile) classicGroup(archive int, a whisper.StorageArchiveLay
 		return &emptyPointBlock, nil
 	}
 	if f.data.references {
-		return f.referencedClassicGroup(archive, groupIndex)
+		return f.referencedClassicGroup(archive, groupIndex, mutable)
 	}
-	return f.pointBlock(continuationBodyKey(f.data.id, 'p', archive, 0, groupIndex))
+	return f.pointBlockAccess(continuationBodyKey(f.data.id, 'p', archive, 0, groupIndex), mutable)
 }
 
 func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) error {

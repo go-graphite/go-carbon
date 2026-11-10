@@ -95,14 +95,22 @@ func (f *continuationFile) referencePoints(archive int, r pointReference) ([]sto
 	return points, nil
 }
 
-func (f *continuationFile) referencedClassicGroup(archive, index int) (*store.PointBlock, error) {
+func (f *continuationFile) referencedClassicGroup(archive, index int, mutable bool) (*store.PointBlock, error) {
 	key := continuationBodyKey(f.data.id, 'p', archive, 0, index)
-	if buffer, ok := f.fs.kv.(*continuationPointBuffer); ok {
-		if block := buffer.blocks[string(key)]; block != nil {
-			owned := *block
-			return &owned, nil
+	buffer, _ := f.fs.kv.(*continuationPointBuffer)
+	if buffer != nil {
+		if block := buffer.point(key, mutable); block != nil {
+			return block, nil
 		}
 	}
+	group, err := f.readReferencedClassicGroup(archive, index, key)
+	if err == nil && buffer != nil {
+		buffer.remember(key, group)
+	}
+	return group, err
+}
+
+func (f *continuationFile) readReferencedClassicGroup(archive, index int, key []byte) (*store.PointBlock, error) {
 	data, err := f.fs.kv.Get(key)
 	group := new(store.PointBlock)
 	if err == nil {

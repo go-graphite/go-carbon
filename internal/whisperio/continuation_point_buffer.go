@@ -99,14 +99,18 @@ func (b *continuationPointBuffer) set(key []byte, block *store.PointBlock) error
 	return nil
 }
 
-// point returns an owned copy: callers may patch it before set succeeds.
-func (b *continuationPointBuffer) point(key []byte) *store.PointBlock {
+// point borrows read-only blocks for this update. Writers get an owned copy so
+// a patch cannot change cached state before set succeeds.
+func (b *continuationPointBuffer) point(key []byte, mutable bool) *store.PointBlock {
 	block := b.blocks[string(key)]
 	if block == nil {
 		block = b.reads[string(key)]
 	}
 	if block == nil {
 		return nil
+	}
+	if !mutable {
+		return block
 	}
 	owned := *block
 	return &owned
