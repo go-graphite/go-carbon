@@ -1,0 +1,15 @@
+{
+  "Version": 1,
+  "Snapshot": "/var/tmp/inputlog-recovery-snapshot/0000000000000001.log",
+  "SHA256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "Bytes": 1048576,
+  "MaxNames": 2000000,
+  "MaxDictionaryBytes": 268435456,
+  "Windows": [
+    {
+      "Name": "diversion",
+      "From": 1794268800,
+      "Until": 1794272400
+    }
+  ]
+}
