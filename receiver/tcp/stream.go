@@ -146,6 +146,10 @@ func (rcv *TCP) handleStream(conn net.Conn, r *bufio.Reader, rest *bytes.Reader,
 	}
 	sinkReady := false
 	capture := newCaptureBuffer(rcv.capture)
+	capture.sink = &rcv.captureSink
+	for i := range capture.shards {
+		capture.shards[i].sink = &rcv.captureSink
+	}
 	if capture.out != nil {
 		defer func() {
 			if err := capture.flush(); err != nil {
