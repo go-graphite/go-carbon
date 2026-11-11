@@ -96,10 +96,10 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 	r.Version.Generation = s.u64()
 	r.Version.Revision = s.u64()
 	flags := s.u32()
-	if flags > 1 {
+	if flags > 3 {
 		return r, ErrFormat
 	}
-	r.Continuation = flags == 1
+	r.Continuation = flags&1 != 0
 	r.Config.AggregationMethod = AggregationMethod(s.u32())
 	r.Config.XFilesFactor = math.Float32frombits(s.u32())
 	n := s.u32()
@@ -134,6 +134,9 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 			return r, s.err
 		}
 		r.Keys = append(r.Keys, RelayoutKV{key, value})
+	}
+	if flags&2 != 0 {
+		r.NativeSkip = &NativeSkip{Name: r.Config.Name, Bytes: int64(s.u64()), PhysicalPoints: int64(s.u64()), ArchiveSlots: int64(s.u64()), MemoryBytes: int64(s.u64()), Reason: string(s.blob(128))}
 	}
 	if s.err != nil {
 		return r, s.err

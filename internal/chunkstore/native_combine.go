@@ -36,6 +36,7 @@ type nativeCombinePiece struct {
 	Old      nativeCombineMetadata
 	Class    NativeCombineClass
 	Deferred bool
+	Skipped  *NativeSkip `json:",omitempty"`
 }
 
 type nativeCombinePrepared struct {
@@ -211,6 +212,9 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 		origins[position] = intent.Origins[i]
 	}
 	for i, piece := range pieces {
+		if piece != nil && piece.Skipped != nil {
+			receipt.Skipped = append(receipt.Skipped, *piece.Skipped)
+		}
 		if piece != nil && !piece.Deferred {
 			receipt.Copied[i/8] |= 1 << uint(i%8)
 			receipt.CopiedCount++
@@ -218,6 +222,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 			receipt.Mappings = append(receipt.Mappings, NativeMapping{Ordinal: i, SourceID: origin.ID, SourceGeneration: origin.Generation, SourceRevision: origin.Revision, TargetID: piece.Meta.ID, TargetGeneration: piece.Meta.Generation, TargetRevision: piece.Meta.Revision})
 		}
 	}
+	slices.SortFunc(receipt.Skipped, func(a, b NativeSkip) int { return a.Ordinal - b.Ordinal })
 	receipt.DeferredCount = receipt.Count - receipt.CopiedCount
 	data, err := json.Marshal(receipt)
 	if err != nil {
@@ -424,8 +429,23 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 		if record.Version.ID == 0 && record.Version.Generation == 0 && record.Version.Revision == 0 && len(record.Keys) == 0 && len(record.Config.Retentions) == 0 {
 			continue
 		}
+		if record.NativeSkip != nil {
+			if err := validateNativeSkipRecord(record); err != nil {
+				return err
+			}
+			skip := *record.NativeSkip
+			skip.Ordinal = position
+			intent.Receipt.Skipped = append(intent.Receipt.Skipped, skip)
+			continue
+		}
 		if err := s.validateNativeCombineRecord(record); err != nil {
-			return err
+			var skip *NativeSkip
+			if !errors.As(err, &skip) {
+				return err
+			}
+			skip.Ordinal = position
+			intent.Receipt.Skipped = append(intent.Receipt.Skipped, *skip)
+			continue
 		}
 		m := Metadata{MetricConfig: record.Config, ID: first + uint64(i), Generation: 1, Revision: 1, LastUpdate: s.nextActivity(time.Time{}), Continuation: record.Continuation}
 		if s.incrementalSource != "" {
@@ -559,6 +579,15 @@ func (s *Store) prepareNativeCombine(ctx context.Context, intent *nativeCombineI
 }
 
 func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p *nativeCombinePrepared) (bool, error) {
+	if p.Skipped != nil {
+		data, err := json.Marshal(p.nativeCombinePiece)
+		if err != nil {
+			return false, err
+		}
+		err = s.db.Set(nativeCombinePieceKey(identity, p.Position), data, pebble.NoSync)
+		s.nativeWriteFailed(err)
+		return err == nil, err
+	}
 	encoded, err := s.encodeCatalog(Metadata(p.Meta))
 	if err != nil {
 		return false, err
@@ -641,6 +670,9 @@ func (s *Store) readNativeCombinePieces(intent nativeCombineIntent) ([]*nativeCo
 			return nil, err
 		}
 		if p.Position < 0 || p.Position >= len(pieces) || p.Meta.ID == 0 || p.Meta.Name != intent.Request.Names[p.Position] || p.Deferred && p.Old.ID != 0 || !bytes.Equal(it.Key(), nativeCombinePieceKey(intent.Receipt.Identity, p.Position)) {
+			return nil, ErrFormat
+		}
+		if p.Skipped != nil && (!p.Deferred || p.Skipped.Ordinal != p.Position || p.Skipped.Name != p.Meta.Name || p.Skipped.MemoryBytes < 0) {
 			return nil, ErrFormat
 		}
 		pieces[p.Position] = &p

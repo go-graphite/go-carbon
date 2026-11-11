@@ -39,6 +39,9 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 	if !samePolicy(source.Config, target.Config) || source.Continuation != target.Continuation {
 		return TransferMetric{}, class, ErrConflict
 	}
+	if err := s.admitNativeCombineRecords(source, target, false); err != nil {
+		return TransferMetric{}, class, err
+	}
 	if !source.Continuation {
 		result, class, canonical, err := s.nativeCombineChunks(ctx, source, target)
 		if err != nil || canonical {
@@ -51,6 +54,9 @@ func (s *Store) nativeCombineRecord(ctx context.Context, source, target Transfer
 				return TransferMetric{Config: source.Config, Version: source.Version, Continuation: true, Keys: keys}, c, err
 			}
 		}
+	}
+	if err := s.admitNativeCombineRecords(source, target, true); err != nil {
+		return TransferMetric{}, class, err
 	}
 	if source.Continuation {
 		codec, ok := s.continuation.(ContinuationNativeClassic)

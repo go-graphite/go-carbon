@@ -403,6 +403,9 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	if err != nil {
 		return err
 	}
+	for _, skip := range receipt.Skipped {
+		nativeSkipEvent(receipt.Identity, skip)
+	}
 	event("native_verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "receipt": receipt.Identity})
 	return nil
 }
