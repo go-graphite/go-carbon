@@ -251,8 +251,8 @@ func (c *Cache) pendingPoints(key string) ([]points.Point, error) {
 }
 
 // RecoverPending loads one complete metric at a time. It bypasses live quotas
-// because these points were already accepted before the restart. Receivers stay
-// closed until the returned work and all in-flight persistence have drained.
+// because these points were already accepted before the restart. Live writes
+// may claim saved history while the loader waits for capacity.
 func (c *Cache) RecoverPending(stop <-chan struct{}, pointsPerSecond int) error {
 	phasecpu.Set(phasecpu.Restore)
 	defer phasecpu.Set(phasecpu.Other)
@@ -271,9 +271,14 @@ func (c *Cache) RecoverPending(stop <-chan struct{}, pointsPerSecond int) error 
 				return errors.New("pending recovery stopped")
 			default:
 			}
-			// Reserve half the configured cache for in-flight work. One large metric
-			// can always progress once the cache has drained.
-			if c.HasRecoveryCapacity(int(count)) {
+			// A live write may have loaded this history already, even while
+			// admission was blocked. A completed claim needs no more capacity.
+			if r.isClaimed(slot) {
+				return nil
+			}
+			// Use the same bounded memory reservation as accepted input replay.
+			// Without a memory sampler this retains the half-cache policy.
+			if c.HasRecoveryCapacityFor(name, int(count)) {
 				break
 			}
 			select {
