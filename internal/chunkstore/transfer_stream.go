@@ -16,6 +16,7 @@ import (
 // values are valid until Next; SST writers consume them before advancing. The
 // complete stream checksum must pass before any catalog is published.
 type TransferStream struct {
+	Window                                   *NativeWindow
 	Count                                    int
 	index                                    int
 	input                                    *bufio.Reader
@@ -36,7 +37,12 @@ func NewTransferStream(input io.Reader) (*TransferStream, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	if string(magic[:]) != "BKTFR002" {
+	if string(magic[:]) == "BKTFR003" {
+		s.Window = &NativeWindow{From: int64(s.u64()), Until: int64(s.u64())}
+		if err := s.Window.Validate(); err != nil {
+			return nil, err
+		}
+	} else if string(magic[:]) != "BKTFR002" {
 		return nil, ErrFormat
 	}
 	s.Count = int(s.u32())
@@ -137,6 +143,19 @@ func (s *TransferStream) Next() (TransferMetric, error) {
 	}
 	if flags&2 != 0 {
 		r.NativeSkip = &NativeSkip{Name: r.Config.Name, Bytes: int64(s.u64()), PhysicalPoints: int64(s.u64()), ArchiveSlots: int64(s.u64()), MemoryBytes: int64(s.u64()), Reason: string(s.blob(128))}
+	}
+	if s.Window != nil {
+		n := s.u32()
+		if n > uint32(2*len(r.Config.Retentions)) {
+			return r, ErrFormat
+		}
+		for range n {
+			skip := NativeWindowSkip{Archive: int(s.u32()), Timestamp: int64(s.u64()), Reason: string(s.blob(128))}
+			if skip.Archive >= len(r.Config.Retentions) || skip.Timestamp < 0 || skip.Reason == "" {
+				return r, ErrFormat
+			}
+			r.WindowSkipped = append(r.WindowSkipped, skip)
+		}
 	}
 	if s.err != nil {
 		return r, s.err

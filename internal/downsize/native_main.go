@@ -34,12 +34,18 @@ func runNative(ctx context.Context, o options) error {
 	if err != nil {
 		return err
 	}
+	if err := resolveNativeWindow(&o, p); err != nil {
+		return err
+	}
+	if o.nativeWindow != nil && !o.bulkOnly {
+		return errors.New("windowed plans require --bulk-only; metric fallback cannot preserve a time window")
+	}
 	if len(p.Whole) > 0 {
 		return errors.New("native phase1 is combine/resize, not whole-store replacement")
 	}
 	if !o.apply {
 		for _, r := range p.Streams {
-			event("would_native_copy", map[string]any{"plan_id": p.PlanID, "stream": r.Path, "source": r.sourceURL, "target": r.targetURL, "metrics": r.Metrics, "then": "native snapshot; streaming SST; create-if-absent; durable receipt; same-journal deferred combine"})
+			event("would_native_copy", map[string]any{"plan_id": p.PlanID, "stream": r.Path, "source": r.sourceURL, "target": r.targetURL, "metrics": r.Metrics, "window": o.nativeWindow, "then": "native snapshot; streaming SST; create-if-absent; durable receipt; same-journal deferred combine"})
 		}
 		return nil
 	}
@@ -53,7 +59,11 @@ func runNative(ctx context.Context, o options) error {
 	if o.deleteMode == "" {
 		o.deleteMode = "auto"
 	}
-	j, err := openJournal(o.state, p.PlanID+fmt.Sprintf(":delete=false:mode=%s", o.deleteMode))
+	journalPlan := p.PlanID + fmt.Sprintf(":delete=false:mode=%s", o.deleteMode)
+	if o.nativeWindow != nil {
+		journalPlan += fmt.Sprintf(":window=%d,%d", o.nativeWindow.From, o.nativeWindow.Until)
+	}
+	j, err := openJournal(o.state, journalPlan)
 	if err != nil {
 		return err
 	}
@@ -90,6 +100,7 @@ func runNative(ctx context.Context, o options) error {
 			Protocol                              int
 			NativeAbsentOnly, DurableRangeReceipt bool
 			NativeExactCombine                    bool
+			NativeTimeWindow                      bool
 			NativeDeferredCombine                 bool
 			CPULimit                              int
 			Node                                  string
@@ -99,6 +110,9 @@ func runNative(ctx context.Context, o options) error {
 		}
 		if capability.Protocol != 1 || !capability.NativeAbsentOnly || !capability.DurableRangeReceipt {
 			return fmt.Errorf("unsupported native capability on %s", host)
+		}
+		if o.nativeWindow != nil && !capability.NativeTimeWindow {
+			return fmt.Errorf("native time-window build required on %s", host)
 		}
 		if o.bulkCombine && targets[host] && !capability.NativeExactCombine {
 			return fmt.Errorf("native exact combine build required on %s", host)
@@ -352,7 +366,7 @@ func (c *nativeController) route(ctx context.Context, r route) error {
 	return nil
 }
 func (c *nativeController) executeRange(ctx context.Context, t task, names []string) error {
-	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names, Combine: c.bulkCombine}
+	request := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: t.Stream, Source: t.Source, Start: t.Start, End: t.End, Names: names, Combine: c.bulkCombine, Window: c.nativeWindow}
 	if t.Native != nil && t.Native.Intent {
 		request.Combine = t.Native.Combine
 	}
@@ -395,7 +409,9 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	t.Phase = "verified"
 	if t.Native.complete() {
 		t.Phase = "done"
-		t.Native = nil
+		if c.nativeWindow == nil {
+			t.Native = nil
+		}
 	}
 	c.stateMu.Lock()
 	err = c.journal.save(t)
@@ -406,7 +422,7 @@ func (c *nativeController) executeRange(ctx context.Context, t task, names []str
 	for _, skip := range receipt.Skipped {
 		nativeSkipEvent(receipt.Identity, skip)
 	}
-	event("native_verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "receipt": receipt.Identity})
+	event("native_verified", map[string]any{"stream": t.Stream, "start": t.Start, "end": t.End, "bytes": receipt.Bytes, "copied_names": receipt.CopiedCount, "deferred_names": receipt.DeferredCount, "receipt": receipt.Identity, "window": c.nativeWindow, "boundary_skipped": receipt.WindowSkipped})
 	return nil
 }
 

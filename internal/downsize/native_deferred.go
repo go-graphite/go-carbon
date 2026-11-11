@@ -20,7 +20,7 @@ func (c *nativeController) executeDeferred(ctx context.Context, parent task, nam
 	if s.Receipt.Count != len(names) || len(s.Done) != len(s.Receipt.Copied) {
 		return errors.New("native deferred bitmap differs from plan")
 	}
-	original := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: parent.Stream, Source: parent.Source, Start: parent.Start, End: parent.End, Names: names, Combine: s.Combine}
+	original := chunkstore.NativeRange{Operation: c.journal.operation, Plan: c.planData.PlanID, Stream: parent.Stream, Source: parent.Source, Start: parent.Start, End: parent.End, Names: names, Combine: s.Combine, Window: c.nativeWindow}
 	id, hash, err := original.Identity()
 	if err != nil || id != s.Receipt.Identity || hash != s.Receipt.NamesSHA256 {
 		return errors.New("native deferred parent differs from plan")

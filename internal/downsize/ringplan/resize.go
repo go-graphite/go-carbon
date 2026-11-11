@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	hashing "github.com/go-graphite/go-carbon/internal/downsize/buckyhash"
 )
 
@@ -49,9 +50,21 @@ func identity(m member, hash string) string {
 // Resize plans hardware replacements and ownership changes together. An exact
 // identity-set replacement needs no metric inventory. Mixed changes inventory
 // with bounded catalog pages unless immutable input files were supplied.
-func Resize(ctx context.Context, path, out string, apply bool, workers int) (Manifest, error) {
+func Resize(ctx context.Context, path, out string, apply bool, workers int, windows ...*chunkstore.NativeWindow) (Manifest, error) {
 	s, old, next, _, err := loadSpec(path)
 	if err != nil {
+		return manifest{}, err
+	}
+	if len(windows) > 1 {
+		return manifest{}, fmt.Errorf("one native window required")
+	}
+	if len(windows) == 1 && windows[0] != nil {
+		if s.NativeWindow != nil && !chunkstore.SameNativeWindow(s.NativeWindow, windows[0]) {
+			return manifest{}, fmt.Errorf("native window differs from specification")
+		}
+		s.NativeWindow = windows[0]
+	}
+	if err := s.NativeWindow.Validate(); err != nil {
 		return manifest{}, err
 	}
 	for _, ring := range []*topology{&s.Old, &s.New} {
@@ -62,6 +75,9 @@ func Resize(ctx context.Context, path, out string, apply bool, workers int) (Man
 	whole, sameIdentities, err := replacements(s)
 	if err != nil {
 		return manifest{}, err
+	}
+	if s.NativeWindow != nil && len(whole) > 0 {
+		return manifest{}, fmt.Errorf("time window requires a range copy, not whole-store replacement")
 	}
 	if sameIdentities {
 		s.Inputs = nil
@@ -109,6 +125,9 @@ type Specification = specification
 func ValidateResize(data []byte) error {
 	var m manifest
 	if err := json.Unmarshal(data, &m); err != nil {
+		return err
+	}
+	if err := m.Spec.NativeWindow.Validate(); err != nil {
 		return err
 	}
 	blob, err := json.Marshal(m.Spec)

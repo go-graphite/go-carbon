@@ -29,6 +29,7 @@ type nativeSourceSession struct {
 	active int
 }
 type nativeExportRequest struct {
+	Window  *chunkstore.NativeWindow `json:",omitempty"`
 	Session string
 	Names   []string
 }
@@ -107,7 +108,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/v1/native/capabilities" && r.Method == http.MethodGet {
-		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeDeferredCombine": true, "DurableRangeReceipt": true, "AtomicMissingOnlyNonNaN": s.finiteCacheFence != nil, "AtomicMissingOnly": s.finiteCacheFence != nil, "AtomicMissingOnlyProtocol": 1, "AtomicMissingOnlyMaxPoints": chunkstore.MissingOnlyMaxPoints, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
+		writeNativeJSON(w, map[string]any{"Protocol": 1, "Node": s.config.Node, "CPULimit": runtime.GOMAXPROCS(0), "StoreFormat": s.store.TransferFormat(), "AcceptStoreFormat": s.store.AcceptTransferFormat(), "NativeAbsentOnly": true, "NativeExactCombine": true, "NativeTimeWindow": true, "NativeDeferredCombine": true, "DurableRangeReceipt": true, "AtomicMissingOnlyNonNaN": s.finiteCacheFence != nil, "AtomicMissingOnly": s.finiteCacheFence != nil, "AtomicMissingOnlyProtocol": 1, "AtomicMissingOnlyMaxPoints": chunkstore.MissingOnlyMaxPoints, "AtomicFinitePoint": s.finiteCacheFence != nil, "AtomicFinitePointProtocol": 1, "AtomicFinitePointMaxPoints": 1})
 		return
 	}
 	if strings.HasPrefix(path, "/v1/native/source/") && r.Method == http.MethodDelete {
@@ -197,10 +198,14 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			}
 			s.nativeMu.Unlock()
 		}()
-		w.Header().Set("Content-Type", "application/vnd.go-carbon.transfer-v2")
+		contentType := "application/vnd.go-carbon.transfer-v2"
+		if request.Window != nil {
+			contentType = "application/vnd.go-carbon.transfer-v3"
+		}
+		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("X-Store-Format", strconv.Itoa(s.store.TransferFormat()))
 		out := &nativeResponseWriter{ResponseWriter: w}
-		if err := session.source.Write(ctx, request.Names, out); err != nil {
+		if err := session.source.WriteWindow(ctx, request.Names, out, request.Window); err != nil {
 			if out.bytes == 0 {
 				fail(err)
 			} else {
@@ -288,7 +293,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 				names = append(names, name)
 			}
 		}
-		response, err := s.nativeExport(r.Context(), request.Range.Source, request.Session, names)
+		response, err := s.nativeExport(r.Context(), request.Range.Source, request.Session, names, request.Range.Window)
 		if err != nil {
 			fail(err)
 			return
@@ -321,13 +326,13 @@ func writeNativeJSON(w http.ResponseWriter, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func (s *Service) nativeExport(ctx context.Context, source, session string, names []string) (*http.Response, error) {
+func (s *Service) nativeExport(ctx context.Context, source, session string, names []string, window *chunkstore.NativeWindow) (*http.Response, error) {
 	u, err := s.transferSourceOrigin(source)
 	if err != nil {
 		return nil, err
 	}
 	u.Path = "/v1/native/export"
-	data, err := json.Marshal(nativeExportRequest{Session: session, Names: names})
+	data, err := json.Marshal(nativeExportRequest{Session: session, Names: names, Window: window})
 	if err != nil {
 		return nil, err
 	}

@@ -22,6 +22,7 @@ import (
 // NativeRange retains the existing controller's operation, stream and ordinals.
 // Source identifies the physical donor, not its ephemeral pinned-view session.
 type NativeRange struct {
+	Window                          *NativeWindow `json:",omitempty"`
 	Operation, Plan, Stream, Source string
 	Start, End                      int64
 	Names                           []string
@@ -34,6 +35,7 @@ type NativeRange struct {
 }
 
 type NativeReceipt struct {
+	WindowSkipped                     []NativeWindowSkip `json:",omitempty"`
 	Identity                          string
 	NamesSHA256                       string
 	Count, CopiedCount, DeferredCount int
@@ -87,9 +89,15 @@ func (r NativeRange) Identity() (string, string, error) {
 		_, _ = h.Write([]byte(name))
 	}
 	names := hex.EncodeToString(h.Sum(nil))
+	if err := r.Window.Validate(); err != nil {
+		return "", "", err
+	}
 	domain := "native-v1"
 	if r.Combine {
 		domain = "native-combine-v1"
+	}
+	if r.Window != nil {
+		domain += fmt.Sprintf("/window/%d/%d", r.Window.From, r.Window.Until)
 	}
 	if r.DeferredFrom != "" || r.Selection != nil {
 		if !r.Combine || len(r.DeferredFrom) != 64 || len(r.Selection) != (len(r.Names)+7)/8 {
@@ -208,6 +216,11 @@ func (r NativeReceipt) Validate() error {
 		}
 		previous = skip.Ordinal
 	}
+	for _, skip := range r.WindowSkipped {
+		if skip.Ordinal < 0 || skip.Ordinal >= r.Count || skip.Archive < 0 || skip.Timestamp < 0 || skip.Reason == "" || len(skip.Reason) > 128 {
+			return ErrFormat
+		}
+	}
 	if len(r.Mappings) != 0 {
 		if len(r.Mappings) != r.CopiedCount {
 			return ErrFormat
@@ -272,6 +285,9 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 	stream, err := NewTransferStream(input)
 	if err != nil {
 		return receipt, err
+	}
+	if !SameNativeWindow(stream.Window, request.Window) {
+		return receipt, ErrFormat
 	}
 	stream.metricLimit = nativeMetricBytes
 	expected := len(request.Names)
@@ -342,6 +358,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 	metadataBytes := int64(0)
 	needsFloatFormat := false
 	var skipped []NativeSkip
+	var windowSkipped []NativeWindowSkip
 	for i := range stream.Count {
 		if err := ctx.Err(); err != nil {
 			return receipt, err
@@ -358,6 +375,10 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		position, ok := planPositions[record.Config.Name]
 		if !ok || seen[position] || record.Version.Name != record.Config.Name || (request.Candidates != nil && !nativeBit(request.Candidates, position)) {
 			return receipt, errors.New("native stream names differ from plan")
+		}
+		for _, skip := range record.WindowSkipped {
+			skip.Ordinal = position
+			windowSkipped = append(windowSkipped, skip)
 		}
 		seen[position] = true
 		positions[i] = position
@@ -387,6 +408,9 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			skip.Ordinal = position
 			skipped = append(skipped, *skip)
 			continue
+		}
+		if err := s.validateNativeWindowRecord(ctx, record, request.Window); err != nil {
+			return receipt, err
 		}
 		if record.Continuation != (s.continuation != nil) {
 			return receipt, ErrFormat
@@ -475,7 +499,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		return receipt, err
 	}
 	slices.SortFunc(skipped, func(a, b NativeSkip) int { return a.Ordinal - b.Ordinal })
-	receipt = NativeReceipt{Skipped: skipped, FirstID: intent.First, ReservedIDs: intent.Count, Tables: tableReceipts, Identity: identity, NamesSHA256: namesHash, Count: len(request.Names), Copied: make([]byte, (len(request.Names)+7)/8), Digest: digest, Bytes: wireBytes}
+	receipt = NativeReceipt{WindowSkipped: windowSkipped, Skipped: skipped, FirstID: intent.First, ReservedIDs: intent.Count, Tables: tableReceipts, Identity: identity, NamesSHA256: namesHash, Count: len(request.Names), Copied: make([]byte, (len(request.Names)+7)/8), Digest: digest, Bytes: wireBytes}
 	if err := s.nativeStep("before-publish"); err != nil {
 		return receipt, err
 	}
