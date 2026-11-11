@@ -226,3 +226,65 @@ func TestNativePullRejectsOversizedRangeBeforeDonor(t *testing.T) {
 		t.Fatal(response.Code, response.Body.String())
 	}
 }
+
+func TestNativeAbandonHTTPRequiresRootAndNeverPublishes(t *testing.T) {
+	s, target := newNativeTestService(t)
+	ctx := context.Background()
+	name := "abandon.http"
+	config := chunkstore.MetricConfig{Name: name, AggregationMethod: chunkstore.Sum, Retentions: []chunkstore.Retention{{Step: 1, Count: 10000}}}
+	if _, err := target.Create(ctx, config); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.UpdateMany(ctx, name, []chunkstore.Point{{Timestamp: 9990, Value: 42}}); err != nil {
+		t.Fatal(err)
+	}
+	request := chunkstore.NativeRange{Operation: strings.Repeat("1", 64), Plan: strings.Repeat("2", 64), Stream: strings.Repeat("3", 64), Source: "unreachable.invalid", End: 1, Names: []string{name}, Combine: true}
+	// Stage a real range locally; interrupt before publication. The HTTP
+	// abandon command needs only identity, never opens its unreachable donor.
+	pin, err := target.PinNativeSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	var wire bytes.Buffer
+	if err := pin.Write(ctx, request.Names, &wire); err != nil {
+		t.Fatal(err)
+	}
+	// Truncate the stream checksum after the durable reservation, leaving an
+	// unprepared intent without relying on cross-package fault hooks.
+	if _, err := target.NativeImport(ctx, request, bytes.NewReader(wire.Bytes()[:wire.Len()-1])); err == nil {
+		t.Fatal("not interrupted")
+	}
+	id, _, _ := request.Identity()
+	invoke := func(signed string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(struct{ Identity string }{id})
+		r := httptest.NewRequest("POST", "/v1/native/abandon", bytes.NewReader(body))
+		r.Header.Set(authHeader, signed)
+		w := httptest.NewRecorder()
+		s.Handler().ServeHTTP(w, r)
+		return w
+	}
+	for _, signed := range []string{token(t, s.secret, []string{"*"}, []string{"read"}), token(t, s.secret, []string{"*"}, []string{"update"}), token(t, s.secret, []string{"abandon.*"}, []string{"*"})} {
+		if r := invoke(signed); r.Code != 403 {
+			t.Fatal("scoped token accepted", r.Code, r.Body.String())
+		}
+	}
+	root := token(t, s.secret, []string{"*"}, []string{"*"})
+	for range 2 {
+		r := invoke(root)
+		if r.Code != 200 {
+			t.Fatal(r.Code, r.Body.String())
+		}
+		var out chunkstore.NativeAbandonReceipt
+		if err := json.Unmarshal(r.Body.Bytes(), &out); err != nil || out.State != "abandoned" {
+			t.Fatal(out, err)
+		}
+	}
+	if _, _, err := target.ResumeNativeCombine(ctx, request); !errors.Is(err, chunkstore.ErrConflict) {
+		t.Fatal("identity resumed", err)
+	}
+	got, err := target.Snapshot(ctx, name)
+	if err != nil || len(got.Archives[0].Points) != 1 || got.Archives[0].Points[0].Value != 42 {
+		t.Fatal("target data changed", got, err)
+	}
+}

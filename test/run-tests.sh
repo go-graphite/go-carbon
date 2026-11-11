@@ -3,6 +3,7 @@ set -eo pipefail
 
 go_command=$1
 shift
+chunkstore=github.com/go-graphite/go-carbon/internal/chunkstore
 whisperio=github.com/go-graphite/go-carbon/internal/whisperio
 whisper=github.com/go-graphite/go-whisper
 
@@ -22,10 +23,14 @@ shift
 package_list=$("$go_command" list ./...)
 packages=()
 while IFS= read -r package; do
-    if [[ $package != "$whisperio" ]]; then
+    if [[ $package != "$whisperio" && $package != "$chunkstore" ]]; then
         packages+=("$package")
     fi
 done <<< "$package_list"
+# Keep the mandatory >1M-point native-copy oracles in CI. Only their exhaustive
+# 20M-point scale variants use -short; other packages keep their normal coverage.
+# An explicit -short=false overrides this default, as do selected-test commands.
+"$go_command" test -short "$@" "$chunkstore"
 "$go_command" test "$@" -p 2 "${packages[@]}" "$whisper"
 
 # Each invocation owns a bounded part of the matrix and its timeout. Do not
