@@ -104,7 +104,8 @@ func TestNativeTwentyMillionPointsBoundedHeap(t *testing.T) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				runtime.GC()
+				// Include uncollected garbage: this conservatively bounds retained
+				// heap without forcing a global collection every 20ms.
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
 				for old := peak.Load(); ms.HeapAlloc > old; old = peak.Load() {
@@ -134,6 +135,9 @@ func TestNativeTwentyMillionPointsBoundedHeap(t *testing.T) {
 		t.Fatalf("retained heap grew %d bytes (worker budget %d)", retained, nativeCombineWorkerMemory)
 	}
 	t.Logf("%d points: peak retained heap delta %d bytes; worker budget %d", count, retained, nativeCombineWorkerMemory)
+	// Keep process-wide heap sampling isolated, then let the exhaustive
+	// readback run alongside the other parallel correctness tests.
+	t.Parallel()
 	copied, err := target.Metadata(ctx, cfg.Name)
 	if err != nil {
 		t.Fatal(err)

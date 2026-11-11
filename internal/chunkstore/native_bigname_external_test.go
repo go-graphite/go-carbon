@@ -66,7 +66,8 @@ func TestNativeContinuationTwentyMillionPointsBoundedHeap(t *testing.T) {
 			case <-stop:
 				return
 			case <-ticker.C:
-				runtime.GC()
+				// Include uncollected garbage: this conservatively bounds retained
+				// heap without forcing a global collection every 20ms.
 				var ms runtime.MemStats
 				runtime.ReadMemStats(&ms)
 				for old := peak.Load(); ms.HeapAlloc > old; old = peak.Load() {
@@ -97,6 +98,9 @@ func TestNativeContinuationTwentyMillionPointsBoundedHeap(t *testing.T) {
 		t.Fatalf("20M continuation points retained %d bytes (1 GiB worker budget)", retained)
 	}
 	t.Logf("%d continuation points: peak retained heap delta %d bytes", count, retained)
+	// Keep process-wide heap sampling isolated, then let the exhaustive
+	// readback run alongside the other parallel correctness tests.
+	t.Parallel()
 	// Snapshot and Fetch remain the independent read oracles. Check every bit in
 	// the snapshot, then query bounded windows at both ends and in the middle.
 	snap, err := target.Snapshot(ctx, cfg.Name)
