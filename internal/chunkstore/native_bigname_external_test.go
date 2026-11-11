@@ -19,10 +19,25 @@ import (
 
 // Exercise the real continuation combiner as well as the ordinary exact-block
 // path. The large fixture is physical history, not just a retention declaration.
+func TestNativeContinuationLargeHistoryBoundedHeap(t *testing.T) {
+	// Twice the former 1,048,576-point per-name cap, with the same oracle.
+	testNativeContinuationLargeHistoryBoundedHeap(t, 2<<20)
+}
+
 func TestNativeContinuationTwentyMillionPointsBoundedHeap(t *testing.T) {
-	const count = 20_000_000
+	if testing.Short() {
+		t.Skip("exhaustive scale variant; the large-history proof still runs")
+	}
+	testNativeContinuationLargeHistoryBoundedHeap(t, 20_000_000)
+}
+
+func testNativeContinuationLargeHistoryBoundedHeap(t *testing.T, count int) {
+	t.Helper()
+	if count <= 1<<20 || count%128 != 0 {
+		t.Fatal("fixture must exceed the former name cap and fill its point blocks")
+	}
 	ctx := context.Background()
-	clock := func() time.Time { return time.Unix(2*count, 0) }
+	clock := func() time.Time { return time.Unix(int64(2*count), 0) }
 	open := func() *store.Store {
 		s, err := store.Open(t.TempDir(), store.Options{ExactBlocks: true, Continuation: &whisperio.ContinuationCodec{}, Now: clock, CacheSize: 1 << 20, MemTableSize: 1 << 20})
 		if err != nil {
@@ -44,7 +59,7 @@ func TestNativeContinuationTwentyMillionPointsBoundedHeap(t *testing.T) {
 	if _, err := target.Create(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if err := target.UpdateMany(ctx, cfg.Name, []store.Point{{Timestamp: count, Value: 42}}); err != nil {
+	if err := target.UpdateMany(ctx, cfg.Name, []store.Point{{Timestamp: int64(count), Value: 42}}); err != nil {
 		t.Fatal(err)
 	}
 	pin, err := source.PinNativeSource()
@@ -95,7 +110,7 @@ func TestNativeContinuationTwentyMillionPointsBoundedHeap(t *testing.T) {
 	}
 	retained := int64(peak.Load()) - int64(before.HeapAlloc)
 	if retained > 1<<30 {
-		t.Fatalf("20M continuation points retained %d bytes (1 GiB worker budget)", retained)
+		t.Fatalf("%d continuation points retained %d bytes (1 GiB worker budget)", count, retained)
 	}
 	t.Logf("%d continuation points: peak retained heap delta %d bytes", count, retained)
 	// Keep process-wide heap sampling isolated, then let the exhaustive
@@ -174,7 +189,7 @@ func (m largeContinuationMemory) Visit(prefix []byte, fn func([]byte, []byte) er
 }
 
 func seedLargeContinuation(s *store.Store, cfg store.MetricConfig, clock func() time.Time) error {
-	const count = 20_000_000
+	count := cfg.Retentions[0].Count
 	groups := make([]store.RelayoutKV, count/128)
 	for index := range groups {
 		var block store.PointBlock

@@ -40,8 +40,23 @@ func TestNativeSkipCannotBecomeEmptyOrdinaryTransfer(t *testing.T) {
 
 // The fixture and wire live on disk/in a pipe: the test cannot hide an archive
 // allocation in its input buffer. Every physical point is checked after copy.
+func TestNativeLargeHistoryBoundedHeap(t *testing.T) {
+	// Twice the former 1,048,576-point per-name cap, with the same oracle.
+	testNativeLargeHistoryBoundedHeap(t, 2<<20)
+}
+
 func TestNativeTwentyMillionPointsBoundedHeap(t *testing.T) {
-	const count = 20_000_000
+	if testing.Short() {
+		t.Skip("exhaustive scale variant; the large-history proof still runs")
+	}
+	testNativeLargeHistoryBoundedHeap(t, 20_000_000)
+}
+
+func testNativeLargeHistoryBoundedHeap(t *testing.T, count int) {
+	t.Helper()
+	if count <= 1<<20 || count%128 != 0 {
+		t.Fatal("fixture must exceed the former name cap and fill its point blocks")
+	}
 	ctx := context.Background()
 	opts := Options{fs: nativeTestDiskFS{vfs.Default}, ExactBlocks: true, CacheSize: 1 << 20, MemTableSize: 1 << 20}
 	source, _ := openTestStore(t, t.TempDir(), opts)
@@ -57,7 +72,7 @@ func TestNativeTwentyMillionPointsBoundedHeap(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A present survivor forces a real combine, including target-wins ties.
-	if err := target.UpdateMany(ctx, cfg.Name, []Point{{Timestamp: count, Value: 42}}); err != nil {
+	if err := target.UpdateMany(ctx, cfg.Name, []Point{{Timestamp: int64(count), Value: 42}}); err != nil {
 		t.Fatal(err)
 	}
 	batch := source.db.NewBatch()
