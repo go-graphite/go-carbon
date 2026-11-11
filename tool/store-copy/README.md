@@ -180,7 +180,7 @@ second RFC3339. Use the target-wins engine for existing names:
 store-copy plan --spec gap-spec.json --out gap-plan --apply \
   --from 2026-01-01T00:00:00Z --until 2026-01-01T01:00:00Z
 store-copy run --plan gap-plan --state gap-window.jsonl \
-  --engine bulk --bulk-only --bulk-combine --apply
+  --engine bulk --bulk-only --combine-existing --apply
 ```
 
 Alternatively supply `--from` and `--until` on `run` with an existing range plan
