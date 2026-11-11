@@ -3,9 +3,10 @@ package whisperio
 import (
 	"context"
 	"fmt"
-	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"math"
 	"time"
+
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 // Frozen pre-fix oracle from upstream bfe8cd566. Keep independent of the production guard
