@@ -65,10 +65,11 @@ func TestIncrementalRejectedNameMatchesOriginalPolicy(t *testing.T) {
 					t.Fatal("rejected metric remained queued")
 				}
 			}
-			if drops != 3 || strings.Count(logs.String(), `"msg":"metric name exceeds limit"`) != 3 || strings.Contains(logs.String(), `"level":"error"`) {
+			if drops != 3 || p.NameTooLongDroppedPoints() != 3 || strings.Count(logs.String(), `"msg":"metric name exceeds limit"`) != 3 || strings.Count(logs.String(), `"level":"error"`) < 3 {
 				t.Fatalf("rejection changed: drops=%d logs=%s", drops, logs.String())
 			}
 			// A real source-open failure must still be reported and retain data.
+			logs.Reset()
 			if err := os.WriteFile(filepath.Join(p.rootPath, "blocked"), []byte("not a directory"), 0600); err != nil {
 				t.Fatal(err)
 			}

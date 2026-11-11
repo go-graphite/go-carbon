@@ -600,7 +600,7 @@ func TestSharedWriteDropsNamesTooLong(t *testing.T) {
 	p, cache, db, _ := incrementalPersisterFixture(t)
 	defer db.Close()
 	p.SetIncrementalMigrationComplete()
-	name := "general.flink." + strings.Repeat("x", 300) + ".count"
+	name := "general.flink." + strings.Repeat("x", 1<<20) + ".count"
 	now := time.Now().Unix()
 	cache.add(name, now-2, 1)
 	cache.add(name, now-1, 2)
@@ -610,6 +610,9 @@ func TestSharedWriteDropsNamesTooLong(t *testing.T) {
 	}
 	if got := atomic.LoadUint32(&p.nameTooLong); got != 2 {
 		t.Fatalf("dropped points counted %d, want 2", got)
+	}
+	if got := p.NameTooLongDroppedPoints(); got != 2 {
+		t.Fatalf("cumulative dropped points counted %d, want 2", got)
 	}
 	if _, err := db.Metadata(context.Background(), name); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("refused name reached the catalog: %v", err)

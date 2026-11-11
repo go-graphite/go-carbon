@@ -423,9 +423,10 @@ func (p *Whisper) dropNameTooLong(metric string) {
 
 func (p *Whisper) countNameTooLong(metric string, points int) {
 	atomic.AddUint32(&p.nameTooLong, uint32(points))
+	p.nameTooLongTotal.Add(uint64(points))
 	now := time.Now().Unix()
 	if last := p.nameTooLongLogged.Load(); now-last >= 60 && p.nameTooLongLogged.CompareAndSwap(last, now) {
-		p.logger.Warn("metric name too long for the store; points dropped", zap.Int("length", len(metric)), zap.String("prefix", metric[:min(len(metric), 200)]))
+		p.logger.Error("metric name too long for the store; points dropped", zap.Int("length", len(metric)), zap.String("prefix", metric[:min(len(metric), 200)]))
 	}
 }
 

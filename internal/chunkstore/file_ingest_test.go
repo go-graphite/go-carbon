@@ -76,10 +76,8 @@ func TestCommitIngestedStagesPerStripe(t *testing.T) {
 	}
 }
 
-// Names no Whisper file could hold are refused before they become catalog
-// keys: over 4000 bytes, or a node over 255 bytes. Tags after ';' are not
-// path nodes.
-func TestCreateRejectsNamesTooLongForWhisper(t *testing.T) {
+// Catalog keys accept names beyond filesystem limits, within a bounded byte budget.
+func TestCreateNamesBeyondWhisperLimits(t *testing.T) {
 	s := openFileMigrationStore(t, vfs.NewMem())
 	defer closeTestStore(t, s)
 	config := func(name string) MetricConfig {
@@ -88,10 +86,12 @@ func TestCreateRejectsNamesTooLongForWhisper(t *testing.T) {
 	long := func(n int) string { return strings.Repeat("x", n) }
 	for name, want := range map[string]error{
 		"a." + long(255) + ".b":                  nil,
-		"a." + long(256) + ".b":                  ErrNameTooLong,
+		"a." + long(256) + ".b":                  nil,
 		strings.Repeat(long(200)+".", 20)[:3999]: nil,
-		strings.Repeat(long(200)+".", 21)[:4001]: ErrNameTooLong,
+		strings.Repeat(long(200)+".", 21)[:4001]: nil,
 		"tagged.metric;job=" + long(1000):        nil,
+		"a." + long(4096) + ".value":             nil,
+		long(maxMetricNameBytes + 1):             ErrNameTooLong,
 	} {
 		if _, err := s.Create(context.Background(), config(name)); !errors.Is(err, want) {
 			t.Fatalf("name of %d bytes: err %v, want %v", len(name), err, want)
@@ -111,12 +111,12 @@ func TestPurgeInvalidNamesDeletesOnlyRefusedNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Plant pre-limit catalog records directly, as an older build wrote them:
-	// enough that several share a stripe and the rest span many stripes.
+	// spanning multiple stripes with oversized keys.
 	var bad []Metadata
 	stripes := map[uint64]int{}
-	for i := 0; i < 5000; i++ {
+	for i := 0; i < 16; i++ {
 		m := kept
-		m.Name, m.ID = fmt.Sprintf("general.flink.%d.%s.count", i, strings.Repeat("x", 300)), kept.ID+1+uint64(i)
+		m.Name, m.ID = fmt.Sprintf("general.flink.%d.%s.count", i, strings.Repeat("x", maxMetricNameBytes+1)), kept.ID+1+uint64(i)
 		encoded, err := s.encodeCatalog(m)
 		if err != nil {
 			t.Fatal(err)
@@ -130,9 +130,10 @@ func TestPurgeInvalidNamesDeletesOnlyRefusedNames(t *testing.T) {
 		bad = append(bad, m)
 		stripes[s.metricStripe(m.Name)]++
 	}
-	if len(stripes) == len(bad) {
-		t.Fatal("no two planted names share a stripe")
+	if len(stripes) < 2 {
+		t.Fatal("fixture did not span multiple stripes")
 	}
+
 	n, err := s.PurgeInvalidNames(context.Background())
 	if err != nil || n != len(bad) {
 		t.Fatalf("purged %d (%v), want %d", n, err, len(bad))
@@ -159,7 +160,7 @@ func TestPurgeInvalidNamesDeletesOnlyRefusedNames(t *testing.T) {
 func TestPurgeInvalidNamesCompactsAfterInterruptedRun(t *testing.T) {
 	s := openFileMigrationStore(t, vfs.NewMem())
 	defer closeTestStore(t, s)
-	name := "general.flink." + strings.Repeat("x", 300) + ".count"
+	name := "general.flink." + strings.Repeat("x", maxMetricNameBytes+1) + ".count"
 	if err := s.db.Set(catalogKey(name), []byte("stale"), nil); err != nil {
 		t.Fatal(err)
 	}

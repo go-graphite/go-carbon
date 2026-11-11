@@ -32,7 +32,7 @@ func TestStopBackgroundThenPurgeInvalidNames(t *testing.T) {
 	defer closeTestStore(t, s)
 	s.StopBackground()
 	m := createTestMetric(t, s, "owner.metric")
-	m.Name = strings.Repeat("x", 256)
+	m.Name = strings.Repeat("x", maxMetricNameBytes+1)
 	encoded, err := s.encodeCatalog(m)
 	if err != nil {
 		t.Fatal(err)
