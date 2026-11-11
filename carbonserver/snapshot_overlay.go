@@ -17,6 +17,7 @@ import (
 	"unsafe"
 
 	"github.com/go-graphite/go-carbon/helper"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
 type snapshotOverlayManifest struct {
@@ -351,6 +352,9 @@ func (l *CarbonserverListener) PendingMetricStorableBytes(name []byte) bool {
 // startup pass; only admitted names need a path for insertion. Preserve the
 // ordinary path check for aliases and platform-specific path spellings.
 func (l *CarbonserverListener) pendingMetricStorable(name string) bool {
+	if l.getMetricStore() != nil {
+		return store.ValidateMetricName(name) == nil
+	}
 	if strings.IndexByte(name, ';') >= 0 {
 		return true
 	}

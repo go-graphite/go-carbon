@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -19,6 +18,8 @@ import (
 	"github.com/cockroachdb/pebble"
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/lomik/zapwriter"
+	"go.uber.org/zap"
 )
 
 type nativeSourceSession struct {
@@ -122,17 +123,19 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
 	decode := func(out any) bool {
 		if err := json.NewDecoder(r.Body).Decode(out); err != nil {
+			s.recordNativeRejection(r.URL.Path, err)
 			writeError(w, err, 400)
 			return false
 		}
 		return true
 	}
 	fail := func(err error) {
+		s.recordNativeRejection(r.URL.Path, err)
 		status := http.StatusInternalServerError
 		if errors.Is(err, pebble.ErrNotFound) || errors.Is(err, chunkstore.ErrNotFound) {
 			status = 404
 		}
-		if errors.Is(err, chunkstore.ErrTransferLimit) {
+		if errors.Is(err, chunkstore.ErrTransferLimit) || errors.Is(err, chunkstore.ErrNameTooLong) {
 			status = http.StatusRequestEntityTooLarge
 		}
 		if errors.Is(err, chunkstore.ErrFormat) {
@@ -204,7 +207,7 @@ func (s *Service) native(w http.ResponseWriter, r *http.Request) {
 			if out.bytes == 0 {
 				fail(err)
 			} else {
-				log.Printf("native export interrupted: session=%s bytes=%d error=%v", request.Session, out.bytes, err)
+				s.recordNativeRejection(r.URL.Path, err)
 			}
 		}
 	case "/v1/native/receipt":
@@ -371,4 +374,12 @@ func (s *Service) nativeExport(ctx context.Context, source, session string, name
 		return nil, errors.New("native source format exceeds target capability")
 	}
 	return response, nil
+}
+
+// NativeRejectedRequests includes admission and decoding failures before import starts.
+func (s *Service) NativeRejectedRequests() uint64 { return s.nativeRejectedRequests.Load() }
+
+func (s *Service) recordNativeRejection(path string, err error) {
+	s.nativeRejectedRequests.Add(1)
+	zapwriter.Logger("buckyd").Error("native request rejected", zap.String("path", path), zap.Error(err))
 }

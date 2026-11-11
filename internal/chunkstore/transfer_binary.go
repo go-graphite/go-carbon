@@ -157,7 +157,7 @@ func readTransfer2(data []byte, count uint32) ([]TransferMetric, error) {
 	records := make([]TransferMetric, count)
 	for i := range records {
 		r := &records[i]
-		r.Config.Name = string(d.blob(4096))
+		r.Config.Name = string(d.blob(maxMetricNameBytes))
 		r.Version.Name = r.Config.Name
 		r.Version.ID = d.u64()
 		r.Version.Generation = d.u64()

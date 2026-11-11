@@ -46,6 +46,7 @@ type migrationSnapshot struct {
 	persister                             bool
 	pebble, whisper                       persister.BackendWrites
 	transferRequeued                      map[string]uint64
+	nameTooLongDropped, nativeRejected    uint64
 	store                                 bool
 	stats                                 storeStatsView
 	workingReserved                       int64
@@ -230,6 +231,10 @@ var migrationMetricSpecs = func() []metricSpec {
 			persisterSpec("persister_"+backend.name+"_write_seconds_total", "Seconds spent in successful "+backend.name+" backend updates.", func(s *migrationSnapshot) float64 { return get(s).Seconds }),
 		)
 	}
+	specs = append(specs,
+		persisterSpec("persister_name_too_long_dropped_points_total", "Points discarded because metric names exceed the store byte budget or Whisper filesystem limits.", func(s *migrationSnapshot) float64 { return float64(s.nameTooLongDropped) }),
+		counter("store_native_rejected_requests_total", "Native requests rejected, including admission and decoding before import starts.", func(s *migrationSnapshot) float64 { return float64(s.nativeRejected) }),
+	)
 	for _, reason := range []string{"canceled", "deadline", "absent", "storage_error"} {
 		item := persisterSpec("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", func(s *migrationSnapshot) float64 { return float64(s.transferRequeued[reason]) })
 		item.desc = prometheus.NewDesc("persister_transfer_flush_requeued_total", "Transfer flush groups requeued after an error, once per group; storage_error also increments backend write failures.", nil, prometheus.Labels{"reason": reason})
@@ -523,6 +528,9 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 	db, p, cache := c.app.MetricStore, c.app.Persister, c.app.Cache
+	if c.app.Buckyd != nil {
+		s.nativeRejected = c.app.Buckyd.NativeRejectedRequests()
+	}
 	// Pin the components until the snapshot is complete; Stop must not close
 	// Pebble while a scrape reads it. Release before sending metrics downstream.
 	locked := true
@@ -563,6 +571,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 		s.reclaimQueued, s.reclaim = pm.ReclaimQueued, pm.Reclaim
 		s.pebble, s.whisper = p.WriteStats()
 		s.transferRequeued = p.TransferFlushRequeues()
+		s.nameTooLongDropped = p.NameTooLongDroppedPoints()
 	}
 	if cache != nil {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
