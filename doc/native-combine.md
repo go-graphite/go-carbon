@@ -28,7 +28,7 @@ histories can serve as input for another donor.
 
 ## Publication and reader compatibility
 
-Preparation uses one immutable database snapshot and at most two workers with
+Preparation uses one immutable database snapshot and, by default, at most two workers with
 separate readers and arenas. Each worker retains at most one completed result
 until the ordered SST writer consumes it. An error cancels and joins all workers
 before the snapshot closes. SST key order and reserved-ID order remain unchanged.
@@ -127,16 +127,35 @@ combine budget is binding. These ordinals remain deferred, never completed.
 including on acknowledgement recovery. A retry keeps the original receipt;
 retrying a size skip with different receiver limits needs a new range identity.
 
-Preparation reserves a conservative 1 GiB per worker from a 2 GiB scratch budget,
+Preparation defaults to a conservative 1 GiB per worker from a 2 GiB scratch budget,
 and publishes at most 32 names before preparing the next batch. Before combining,
 admission charges input arenas, vector growth, encoded output and codec scratch.
 Dense native groups retain implicit timestamps; irregular groups and the snapshot
 fallback are charged for point materialization before allocation. A name whose
-estimate exceeds 1 GiB is skipped durably, leaving its existing catalog intact.
+estimate exceeds its worker's memory share is skipped durably, leaving its existing catalog intact.
 All other range, SST, metadata and cancellation bounds remain unchanged. This is a static
 allocation estimate, not a process RSS limit: foreground writes, Pebble caches,
 native allocations and old range-tombstone fragmentation require separate
-headroom. Increasing server CPU count cannot increase native combine concurrency.
+headroom. Increasing server CPU count alone cannot exceed the configured worker cap.
+
+The receiver can increase preparation parallelism with these restart-only TOML
+settings (shown with an explicit 8 GiB total budget):
+
+```toml
+[whisper]
+store-native-combine-workers = 8
+store-native-combine-memory = 8589934592
+```
+
+Defaults remain 2 workers and 2147483648 bytes. Workers must be 1..32 and
+memory/workers must be at least 1 GiB, even if `max-cpu` or a short batch uses
+fewer workers. Increases above 2 GiB must fit within 25% of the smaller of host
+RAM and the Linux cgroup limit; inability to detect RAM rejects an increase.
+The existing 2 GiB default remains valid on smaller hosts. One import per store
+keeps the aggregate worker scratch inside that single budget. Export, staging,
+Pebble and foreground memory are additional. SIGHUP rejects budget changes;
+reopening the store avoids overlapping old and new worker allowances. A durable
+size skip still requires a new range identity after increasing the allowance.
 
 SST builders rotate after 8 MiB of aggregate input or eight active namespaces.
 An individual key/value can overshoot the byte threshold by its admitted size.

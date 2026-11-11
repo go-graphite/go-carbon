@@ -170,7 +170,7 @@ func (m largeContinuationMemory) Visit(prefix []byte, fn func([]byte, []byte) er
 }
 
 func seedLargeContinuation(s *store.Store, cfg store.MetricConfig, clock func() time.Time) error {
-	const count = 20_000_000
+	count := cfg.Retentions[0].Count
 	groups := make([]store.RelayoutKV, count/128)
 	for index := range groups {
 		var block store.PointBlock
