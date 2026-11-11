@@ -66,7 +66,11 @@ func (s *Store) writeTransferTables(ctx context.Context, first uint64, records [
 			} else {
 				key = append(append(key, prefix...), kv.Key...)
 			}
-			keys = append(keys, RelayoutKV{key, kv.Value})
+			value := kv.Value
+			if r.Continuation {
+				value = s.bindContinuationIndex(kv.Key, value, metas[i].Revision)
+			}
+			keys = append(keys, RelayoutKV{key, value})
 		}
 	}
 	slices.SortFunc(keys, func(a, b RelayoutKV) int { return bytes.Compare(a.Key, b.Key) })

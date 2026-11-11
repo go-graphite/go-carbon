@@ -203,7 +203,7 @@ func seedLargeContinuation(s *store.Store, cfg store.MetricConfig, clock func() 
 	}
 	kv := largeContinuationMemory{}
 	codec := &whisperio.ContinuationCodec{}
-	ok, err := codec.RestoreNativeClassicBlocks(context.Background(), kv, store.Metadata{MetricConfig: cfg}, groups, clock)
+	ok, err := codec.RestoreNativeClassicBlocks(context.Background(), kv, store.Metadata{MetricConfig: cfg, Revision: 1}, groups, clock)
 	if err != nil {
 		return err
 	}

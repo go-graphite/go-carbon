@@ -50,6 +50,9 @@ func (s *Store) newNativeTables(identity string, first uint64) (*nativeTables, e
 	return &nativeTables{store: s, directory: directory, writers: make(map[string]*nativeTable), namespaces: make(map[string]struct{})}, nil
 }
 func (t *nativeTables) add(ctx context.Context, m Metadata, kv RelayoutKV) error {
+	if m.Continuation {
+		kv.Value = t.store.bindContinuationIndex(kv.Key, kv.Value, m.Revision)
+	}
 	if t.closed {
 		return errors.New("native tables are closed")
 	}

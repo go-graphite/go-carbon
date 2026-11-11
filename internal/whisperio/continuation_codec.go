@@ -356,6 +356,9 @@ func importContinuationFile(ctx context.Context, fs *continuationFiles, name str
 				group = &store.PointBlock{}
 				groups[slot/128] = group
 			}
+			if slot == 0 {
+				f.data.windowIndex.archives[ai].base = int64(p.Time)
+			}
 			within := slot % 128
 			group.Present[within/64] |= uint64(1) << uint(within%64)
 			group.Points[within] = store.Point{Timestamp: int64(p.Time), Value: p.Value}

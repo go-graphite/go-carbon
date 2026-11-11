@@ -173,6 +173,40 @@ type ContinuationWindowCombiner interface {
 	CombineNativeWindow(context.Context, ContinuationIO, ContinuationIO, Metadata, func() time.Time, NativeWindow) ([]RelayoutKV, NativeCombineClass, bool, error)
 }
 
+// A patch is prepared against an immutable view and published atomically with
+// the name's piece, after checking that its generation and revision still match.
+type ContinuationWindowPatcher interface {
+	PlanNativeWindowPatch(context.Context, ContinuationIO, Snapshot, func() time.Time, NativeWindow) ([]RelayoutKV, bool, error)
+}
+
+// Optional indexes are bound to the owning revision. An older writer may
+// preserve unknown keys, but its revision advance makes their bounds unusable.
+type ContinuationIndexBinder interface {
+	BindIndex(key, value []byte, revision uint64) []byte
+	CheckIndex(key, value []byte, revision uint64) []byte
+}
+
+func (s *Store) checkContinuationIndexes(record *TransferMetric) {
+	if !record.Continuation {
+		return
+	}
+	if codec, ok := s.continuation.(ContinuationIndexBinder); ok {
+		for i := range record.Keys {
+			kv := &record.Keys[i]
+			kv.Value = codec.CheckIndex(kv.Key, kv.Value, record.Version.Revision)
+		}
+	}
+}
+
+type ContinuationRevision interface{ ContinuationRevision() uint64 }
+
+func (s *Store) bindContinuationIndex(key, value []byte, revision uint64) []byte {
+	if codec, ok := s.continuation.(ContinuationIndexBinder); ok {
+		return codec.BindIndex(key, value, revision)
+	}
+	return value
+}
+
 // Window combine never normalizes a survivor point outside the window, even
 // an explicit NaN. A ring alias that would evict such a point fails closed.
 func (s *Store) nativeCombineWindowRecord(ctx context.Context, source, target TransferMetric, w NativeWindow) (TransferMetric, NativeCombineClass, error) {
@@ -268,6 +302,25 @@ func (s *Store) validateNativeWindowRecord(ctx context.Context, record TransferM
 				return fmt.Errorf("native payload point outside window: %w", ErrFormat)
 			}
 		}
+	}
+	return nil
+}
+
+// Charge only the target groups the patch can read, alongside the bounded
+// donor snapshot. Keep the existing worker budget without measuring history.
+func (s *Store) admitNativeWindowPatch(source TransferMetric, target MetricConfig, w NativeWindow) error {
+	n, err := nativeRecordSize(source)
+	if err != nil {
+		return err
+	}
+	memory := 4*n.Bytes + 512*n.PhysicalPoints + (16 << 20)
+	for _, r := range target.Retentions {
+		slots := min(int64(r.Count), (w.Until-w.From+int64(r.Step)-1)/int64(r.Step)+1)
+		memory += ((slots+127)/128 + 1) * 32768
+	}
+	if memory > s.nativeWorkerMemory() {
+		n.MemoryBytes, n.Reason = memory, "window patch worker memory"
+		return &n
 	}
 	return nil
 }

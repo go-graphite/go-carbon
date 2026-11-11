@@ -63,11 +63,13 @@ type verifiedBlockKey struct {
 }
 
 type continuationFileData struct {
-	references   bool
-	sidecarCount *uint64
-	id           uint64
-	layout       whisper.StorageFileLayout
-	header       []byte
+	windowIndex               *classicWindowIndex
+	windowLoaded, windowDirty bool
+	references                bool
+	sidecarCount              *uint64
+	id                        uint64
+	layout                    whisper.StorageFileLayout
+	header                    []byte
 	// pages is the virtual classic-file allocation (4096-byte pages), used by
 	// the OOO policy and to skip reading classic groups (see classicGroup).
 	// Invariant: every stored classic point group lies on allocated pages.
@@ -517,6 +519,12 @@ func (fs *continuationFiles) flush() error {
 			// A v7 store moves each file to a paged header on its next write.
 			d.headerPaged, d.dirty = true, true
 		}
+		if d.windowDirty {
+			if err := fs.kv.Set(classicWindowKey(id), encodeClassicWindowIndex(d.windowIndex)); err != nil {
+				return err
+			}
+			d.windowDirty = false
+		}
 		if d.dirty {
 			encoded, err := encodeContinuationManifest(d)
 			if err != nil {
@@ -581,6 +589,13 @@ func (f *continuationFile) ConfigureStorage(layout whisper.StorageFileLayout) er
 	f.data.layout.Archives = append([]whisper.StorageArchiveLayout(nil), layout.Archives...)
 	f.data.header = make([]byte, layout.HeaderSize)
 	f.data.dirty = true
+	if !layout.Compressed {
+		f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(layout.Archives))}
+		if v, ok := f.fs.kv.(store.ContinuationRevision); ok {
+			f.data.windowIndex.revision = v.ContinuationRevision()
+		}
+		f.data.windowLoaded, f.data.windowDirty = true, true
+	}
 	return nil
 }
 func (f *continuationFile) Truncate(size int64) error {

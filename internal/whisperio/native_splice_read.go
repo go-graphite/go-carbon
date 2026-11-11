@@ -113,7 +113,7 @@ func splicePayloadPoints(payload *splicePayload) ([]store.Point, error) {
 	return payload.points, nil
 }
 
-func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.ContinuationIO, m store.Metadata, clock func() time.Time, priority int) ([][]spliceFragment, bool, error) {
+func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.ContinuationIO, m store.Metadata, clock func() time.Time, priority int, selection ...store.NativeWindow) ([][]spliceFragment, bool, error) {
 	fs := newContinuationFiles(kv, true).withClock(clock)
 	if err := fs.prefetchNames(); err != nil {
 		return nil, false, err
@@ -139,6 +139,17 @@ func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.Contin
 	if err != nil {
 		return nil, false, nil
 	}
+	if len(selection) != 0 {
+		// A newer ring owner may invalidate an old window. Let the complete
+		// reference path decide when the physical bounds cannot rule that out
+		// (a block's final value could itself normalize away).
+		for _, block := range physical.Blocks {
+			r := m.Retentions[block.Archive]
+			if int64(block.Last) >= selection[0].From+int64(r.Step)*int64(r.Count) {
+				return c.nativeFragments(ctx, kv, m, clock, priority)
+			}
+		}
+	}
 	slices.SortFunc(physical.Blocks, func(a, b whisper.ContinuationBlock) int {
 		if order := cmp.Compare(a.First, b.First); order != 0 {
 			return order
@@ -149,6 +160,14 @@ func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.Contin
 	var group store.PointBlock
 	for _, block := range physical.Blocks {
 		r := m.Retentions[block.Archive]
+		if len(selection) != 0 {
+			maxStep := int64(m.Retentions[len(m.Retentions)-1].Step)
+			from := selection[0].From / maxStep * maxStep
+			until := (selection[0].Until + maxStep - 1) / maxStep * maxStep
+			if int64(block.Last) < from || int64(block.First) >= until {
+				continue
+			}
+		}
 		desc, err := f.descriptor(block.Archive, block.Index)
 		if err != nil {
 			return nil, false, err
@@ -226,7 +245,7 @@ func (c *ContinuationCodec) nativeFragments(ctx context.Context, kv store.Contin
 			return nil, false, store.ErrFormat
 		}
 	}
-	// Only buffers and the bounded coarse windows they expose need decoding.
+	// Only buffers and the bounded coarse selection they expose need decoding.
 	if len(physical.Header) < 63+128*len(result) || physical.Header[18] != 1 {
 		return nil, false, nil
 	}

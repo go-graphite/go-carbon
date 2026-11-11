@@ -377,6 +377,9 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			}
 		}
 	}
+	for i := range records {
+		s.checkContinuationIndexes(&records[i])
+	}
 	if needsReferences {
 		if err := s.fenceReferences(); err != nil {
 			return nil, err

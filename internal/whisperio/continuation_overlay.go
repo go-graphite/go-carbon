@@ -28,6 +28,13 @@ func (o *continuationOverlay) TimeBuckets() bool {
 	return ok && b.TimeBuckets()
 }
 
+func (o *continuationOverlay) ContinuationRevision() uint64 {
+	if v, ok := o.base.(store.ContinuationRevision); ok {
+		return v.ContinuationRevision()
+	}
+	return 0
+}
+
 func (o *continuationOverlay) hidden(key []byte) bool {
 	if o.deleted[string(key)] {
 		return true

@@ -114,6 +114,9 @@ func (f *continuationFile) classicGroup(archive int, a whisper.StorageArchiveLay
 }
 
 func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) error {
+	if err := f.trackClassicWindow(key, block); err != nil {
+		return err
+	}
 	if f.data.references && !f.data.layout.Compressed {
 		if err := f.retireReferences(key); err != nil {
 			return err

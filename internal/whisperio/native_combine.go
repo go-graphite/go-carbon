@@ -73,7 +73,7 @@ func (c *ContinuationCodec) NativeClassicBlocks(ctx context.Context, kv store.Co
 		if len(key) < 10 {
 			return store.ErrFormat
 		}
-		if key[9] == 'h' || key[9] == 'H' {
+		if key[9] == 'h' || key[9] == 'H' || key[9] == 'w' {
 			return nil
 		}
 		if len(key) != 20 || key[9] != 'p' || binary.BigEndian.Uint32(key[12:16]) != 0 {
@@ -136,6 +136,7 @@ func (c *ContinuationCodec) RestoreNativeClassicBlocks(ctx context.Context, kv s
 	}
 	positions := make([]groupPosition, len(groups))
 	bases := make([]int64, len(m.Retentions))
+	highs := make([]int64, len(m.Retentions))
 	seen := make(map[string]bool, len(groups))
 	// Validate and determine anchors before creating any output. Absolute
 	// chunks stay absolute; only classic file positions rotate around base.
@@ -169,6 +170,7 @@ func (c *ContinuationCodec) RestoreNativeClassicBlocks(ctx context.Context, kv s
 			if bases[archive] == 0 || p.Timestamp < bases[archive] {
 				bases[archive] = p.Timestamp
 			}
+			highs[archive] = max(highs[archive], p.Timestamp)
 		}
 		positions[i] = groupPosition{archive, index, block.Present}
 	}
@@ -210,6 +212,11 @@ func (c *ContinuationCodec) RestoreNativeClassicBlocks(ctx context.Context, kv s
 	defer file.Close()
 	f := file.(*continuationFile)
 	layout := w.StorageLayout()
+	f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(bases)), revision: m.Revision}
+	f.data.windowLoaded, f.data.windowDirty = true, true
+	for ai := range bases {
+		f.data.windowIndex.archives[ai] = classicWindowArchive{bases[ai], highs[ai]}
+	}
 	for i, group := range groups {
 		if err := ctx.Err(); err != nil {
 			return false, err

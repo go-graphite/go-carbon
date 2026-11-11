@@ -120,13 +120,15 @@ func isContinuationBucketSuffix(suffix []byte) bool {
 }
 
 type continuationIO struct {
-	sidecar *SidecarSummary
-	ctx     context.Context
-	reader  pebble.Reader
-	batch   *pebble.Batch
-	prefix  [17]byte
-	changed bool
-	buckets bool
+	revision, indexRevision uint64
+	indexBinder             ContinuationIndexBinder
+	sidecar                 *SidecarSummary
+	ctx                     context.Context
+	reader                  pebble.Reader
+	batch                   *pebble.Batch
+	prefix                  [17]byte
+	changed                 bool
+	buckets                 bool
 	// Non-nil only for a new ID/generation whose publication still has a
 	// catalog conflict check. Its visible state is entirely in this batch.
 	pendingKeys map[string]struct{}
@@ -273,7 +275,7 @@ func (io *continuationIO) batchLen() int {
 }
 
 func newContinuationIO(ctx context.Context, reader pebble.Reader, batch *pebble.Batch, metric Metadata) *continuationIO {
-	io := &continuationIO{ctx: ctx, reader: reader, batch: batch}
+	io := &continuationIO{ctx: ctx, reader: reader, batch: batch, revision: metric.Revision, indexRevision: metric.Revision}
 	copy(io.prefix[:], continuationPrefix(metric.ID, metric.Generation))
 	return io
 }
@@ -287,16 +289,20 @@ func newFreshContinuationIO(ctx context.Context, batch *pebble.Batch, metric Met
 func (s *Store) newContinuationIO(ctx context.Context, reader pebble.Reader, batch *pebble.Batch, metric Metadata) *continuationIO {
 	io := newContinuationIO(ctx, reader, batch, metric)
 	io.buckets = s.timeBuckets
+	io.indexBinder, _ = s.continuation.(ContinuationIndexBinder)
 	return io
 }
 
 func (s *Store) newFreshContinuationIO(ctx context.Context, batch *pebble.Batch, metric Metadata) *continuationIO {
 	io := newFreshContinuationIO(ctx, batch, metric)
 	io.buckets = s.timeBuckets
+	io.indexBinder, _ = s.continuation.(ContinuationIndexBinder)
 	return io
 }
 
 func (io *continuationIO) TimeBuckets() bool { return io.buckets }
+
+func (io *continuationIO) ContinuationRevision() uint64 { return io.revision }
 
 // dropContinuation deletes the generation's time-partitioned keys into batch;
 // the caller deletes its metric-prefixed range. reader must observe the
@@ -454,6 +460,9 @@ func (io *continuationIO) writable() error {
 func (io *continuationIO) Set(key, value []byte) error {
 	if err := io.writable(); err != nil {
 		return err
+	}
+	if io.indexBinder != nil {
+		value = io.indexBinder.BindIndex(key, value, io.indexRevision)
 	}
 	if bytes.Equal(key, SidecarSummaryKey) {
 		summary, err := DecodeSidecarSummary(value)
