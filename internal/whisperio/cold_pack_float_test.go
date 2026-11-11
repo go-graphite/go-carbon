@@ -32,7 +32,7 @@ func finishFloatSweep(t *testing.T, db *store.Store) {
 			t.Fatal(err)
 		}
 		after := db.ColdPackStats()
-		if after.Errors == before.Errors && after.Conflicts == before.Conflicts && after.Skipped == before.Skipped {
+		if before.Cursor == "" && before.BlockCursor == 0 && after.Errors == before.Errors && after.Conflicts == before.Conflicts && after.Skipped == before.Skipped {
 			return
 		}
 	}

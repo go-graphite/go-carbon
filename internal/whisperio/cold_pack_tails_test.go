@@ -88,9 +88,7 @@ func tailSweep(t *testing.T, db *store.Store, tails bool, mode string) {
 	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: mode, PackTails: tails, WriteWindow: 24 * time.Hour, CPUFraction: 1, BytesPerSecond: 1 << 40, MaxCompactionDebt: 1 << 40, MinFreeBytes: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.RunColdPack(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	finishFloatSweep(t, db)
 	if st := db.ColdPackStats(); st.Errors != 0 || st.Skipped != 0 {
 		t.Fatalf("sweep: %+v", st)
 	}
