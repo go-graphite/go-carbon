@@ -43,6 +43,12 @@ type ContinuationSidecars interface {
 	InspectSidecar(ContinuationIO) (SidecarSummary, error)
 }
 
+// ContinuationSidecarReader inventories physical sidecar slots without writing
+// summary/index metadata to an immutable transfer record or snapshot.
+type ContinuationSidecarReader interface {
+	ReadSidecar(ContinuationIO) (SidecarSummary, error)
+}
+
 type SidecarInventory struct {
 	Count  uint64 `json:"count"`
 	Points uint64 `json:"points"`

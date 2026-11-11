@@ -124,6 +124,12 @@ func (fs *continuationFiles) flushSidecarSummary() error {
 	return fs.kv.Set(store.SidecarSummaryKey, summary.Encode())
 }
 
+// ReadSidecar uses the same physical inventory as InspectSidecar, keeping any
+// missing summary and legacy group indexes in a private metadata overlay.
+func (c *ContinuationCodec) ReadSidecar(kv store.ContinuationIO) (store.SidecarSummary, error) {
+	return c.InspectSidecar(newContinuationOverlay(kv))
+}
+
 // InspectSidecar indexes legacy sidecars once and returns their physical slot
 // inventory, including expired records. It never changes their metric values.
 func (c *ContinuationCodec) InspectSidecar(kv store.ContinuationIO) (store.SidecarSummary, error) {
