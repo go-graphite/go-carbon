@@ -3,6 +3,7 @@ package chunkstore_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -368,7 +369,7 @@ func TestNativeWindowRejectsRingEviction(t *testing.T) {
 				return store.Snapshot{Metadata: store.Metadata{MetricConfig: cfg}, Archives: []store.Archive{{Retention: cfg.Retentions[0], Points: []store.Point{{Timestamp: ts, Value: 42}}}}}
 			}
 			seedWindowSnapshot(t, source, makeSnap(1200), continuation, clock)
-			seedWindowSnapshot(t, target, makeSnap(1100), continuation, clock)
+			seedWindowSnapshot(t, target, makeSnap(1300), continuation, clock)
 			before, err := target.Snapshot(ctx, cfg.Name)
 			if err != nil {
 				t.Fatal(err)
@@ -383,8 +384,8 @@ func TestNativeWindowRejectsRingEviction(t *testing.T) {
 			if err := pin.WriteWindow(ctx, []string{cfg.Name}, &wire, w); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := target.NativeImport(ctx, windowRange([]string{cfg.Name}, w), &wire); err == nil {
-				t.Fatal("outside ring owner evicted")
+			if _, err := target.NativeImport(ctx, windowRange([]string{cfg.Name}, w), &wire); !errors.Is(err, store.ErrConflict) {
+				t.Fatal("newer outside ring owner must conflict", err)
 			}
 			after, err := target.Snapshot(ctx, cfg.Name)
 			if err != nil {

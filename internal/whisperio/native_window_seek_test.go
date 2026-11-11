@@ -132,7 +132,7 @@ func TestNativeWindowSeekReferencedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	patch, handled, err := codec.PlanNativeWindowPatch(ctx, kv, source, clock, window)
+	patch, _, handled, err := codec.PlanNativeWindowPatch(ctx, kv, source, clock, window)
 	if err != nil || !handled {
 		t.Fatal(handled, err)
 	}

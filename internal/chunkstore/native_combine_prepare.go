@@ -147,7 +147,7 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 					return p, nil, err
 				}
 				kv := s.newContinuationIO(ctx, view, nil, old).withIterator()
-				writes, handled, err := codec.PlanNativeWindowPatch(ctx, kv, snap, s.now, *window)
+				writes, class, handled, err := codec.PlanNativeWindowPatch(ctx, kv, snap, s.now, *window)
 				err = errors.Join(err, kv.Close())
 				if err != nil {
 					return p, nil, err
@@ -163,7 +163,7 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 					p.Meta.Revision++
 					p.Meta.LastUpdate = s.nextActivity(old.LastUpdate)
 					p.InPlace, p.Patch = true, writes
-					p.Class = NativeCombineClass{Archives: len(old.Retentions), CombinedBlocks: len(writes)}
+					p.Class = class
 					return p, nil, nil
 				}
 			}

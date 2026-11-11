@@ -175,6 +175,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 				s.nativeCounters.combineCopiedBlocks.Add(uint64(p.Class.CopiedBlocks))
 				s.nativeCounters.combinePointBlocks.Add(uint64(p.Class.CombinedBlocks))
 				s.nativeCounters.combineMaterialized.Add(uint64(p.Class.MaterializedArchives))
+				s.nativeCounters.combineStaleEvictedPoints.Add(uint64(p.Class.StaleEvictedPoints))
 				if p.Old.ID != 0 {
 					if p.Class.IntersectingArchives > 0 {
 						s.nativeCounters.combineIntersectingNames.Add(1)
