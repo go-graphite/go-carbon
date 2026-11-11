@@ -16,6 +16,14 @@ import (
 // A real dump/restart leaves a large saved set unconfirmed, with most names
 // absent from Pebble. Native copy must start after loading and defer that set.
 func TestNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T) {
+	testNativeCopyAfterRestoreBeforeSavedWriteout(t, false)
+}
+
+func TestNativeCopyAfterLiveClaimsAboveRecoveryLimit(t *testing.T) {
+	testNativeCopyAfterRestoreBeforeSavedWriteout(t, true)
+}
+
+func testNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T, liveClaims bool) {
 	if isolatedTestProcess(t) {
 		return
 	}
@@ -54,6 +62,12 @@ func TestNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T) {
 	first.ReleaseForHandoff()
 	first.Stop()
 	cfg.Whisper.MaxUpdatesPerSecond = 1
+	if liveClaims {
+		// Accepted input can claim saved history above either admission
+		// ceiling. The loader must notice those claims without allocating
+		// them again or waiting for writeout to drain below the limit.
+		cfg.Cache.MaxSize = 1
+	}
 	next := New(path)
 	next.Config = cfg
 	if err := next.Start(); err != nil {
@@ -63,6 +77,16 @@ func TestNativeCopyAfterRestoreBeforeSavedWriteout(t *testing.T) {
 	// Freeze writeout, not restore loading. This makes the saved-set assertion
 	// deterministic without a multi-minute test or a scheduling race.
 	next.Persister.Stop()
+	if liveClaims {
+		correction := points.Point{Timestamp: stamp, Value: 123}
+		for _, name := range names[:metrics] {
+			next.Cache.AddRecovered(&points.Points{Metric: name, Data: []points.Point{correction}})
+		}
+		saved = append(saved, correction)
+		if next.Cache.Size() <= int64(cfg.Cache.MaxSize) {
+			t.Fatal("fixture did not exceed recovery admission")
+		}
+	}
 	if next.storeRestoreLoaded == nil {
 		t.Fatal("restart did not use pending checkpoint recovery")
 	}

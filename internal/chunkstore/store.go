@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -860,12 +861,12 @@ func checkFormatMarker(fs vfs.FS, dir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("%w: missing marker; migrate legacy data through buckyd", ErrFormat)
 	}
-	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(formatMarkerFloatCodec)+1)))
+	data, readErr := io.ReadAll(io.LimitReader(f, int64(len(nativeAbandonFormatPrefix)+len(formatMarkerFloatCodec)+1)))
 	closeErr := f.Close()
 	if err := errors.Join(readErr, closeErr); err != nil {
 		return 0, fmt.Errorf("read store marker: %w", err)
 	}
-	switch string(data) {
+	switch strings.TrimPrefix(string(data), nativeAbandonFormatPrefix) {
 	case formatMarkerV1:
 		return 1, nil
 	case formatMarkerV2:
@@ -937,6 +938,19 @@ func upgradeFormatMarker(fs vfs.FS, dir string) error {
 }
 
 func replaceFormatMarker(fs vfs.FS, dir, marker string) error {
+	// A cleanup fence is permanent even when a later codec upgrades the base
+	// format. Readers predating ABANDON must never resume its partial cleanup.
+	fence, err := fs.Open(fs.PathJoin(dir, "CHUNKSTORE"))
+	if err != nil {
+		return err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(fence, int64(len(nativeAbandonFormatPrefix))))
+	if err := errors.Join(readErr, fence.Close()); err != nil {
+		return err
+	}
+	if string(data) == nativeAbandonFormatPrefix && !strings.HasPrefix(marker, nativeAbandonFormatPrefix) {
+		marker = nativeAbandonFormatPrefix + marker
+	}
 	temporary := fs.PathJoin(dir, "CHUNKSTORE.upgrade")
 	f, err := fs.Create(temporary)
 	if err != nil {

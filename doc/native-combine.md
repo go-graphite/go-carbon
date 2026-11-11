@@ -189,3 +189,51 @@ that exceeds this budget fails explicitly. The existing monolithic intent
 format cannot resume arbitrary-size metadata within that budget; doing so needs
 a separately reviewed paged intent format. Unready legacy requests still use
 new-request admission. Completed receipts remain readable.
+
+### Abandon an oversized legacy combine
+
+An intent that exceeds the receiver's metadata limit remains preserved at
+startup. Explicit reconciliation can abandon its **original identity** without
+publishing another name or contacting a donor:
+
+```sh
+store-copy native-abandon --target http://TARGET:PORT --identity OLD_IDENTITY
+store-copy native-abandon --target http://TARGET:PORT --identity OLD_IDENTITY --apply
+```
+
+The first command is a local dry run. The second uses the root read/update token
+from `BUCKYD_TOKEN` (override with `--token-env`) and posts `{ "Identity": "..." }`
+to `/v1/native/abandon`. It does not modify the old plan or journal. `abandoned`
+is a cleanup receipt, **not** a completed-copy receipt. A completed identity
+returns `completed` and its existing durable copy receipt is untouched. Unknown
+identities return 404. Retry the exact abandon command after interruption.
+
+The receiver serializes cleanup with native imports, validates the entire
+encoded document before changing anything, durably blocks the old identity,
+and streams its spans through point-delete WAL batches of at most 1 MiB plus
+one key and the small cleanup receipt. It keeps every ID/generation from a
+published piece, including after subsequent foreground writes, and never changes
+catalogs. Hidden rows and private staging directories are removed first; a
+durable phase transition then permits bounded piece deletion. Finally the intent
+is deleted and a permanent abandon receipt prevents accidental identity reuse.
+Previously published old-history orphans outside the staged spans are retained.
+
+Decoder strings are limited to 1 MiB, nesting to 64, piece metadata to 1 MiB,
+and the published-ID protection set to 131,072 entries (a conservative 16 MiB
+allowance including map growth). Larger protection sets fail before cleanup.
+The legacy intent is one Pebble value: Pebble still reads/pins that **encoded**
+value. Cleanup does not make a decoded copy of its full Names/Raw/Origins arrays,
+but it cannot promise an OS RSS limit smaller than that legacy value or existing
+Pebble cache and allocator memory. Cleanup does not physically unlink shared
+Pebble SSTs; compaction reclaims deleted rows.
+
+The first abandon permanently wraps `CHUNKSTORE` with a reader capability fence.
+The underlying data format stays the same and later format upgrades preserve
+the fence. **Older binaries refuse to open this store.** Rollback must retain an
+ABANDON-aware reader; removing the fence is unsafe because an older binary could
+resume a partially deleted legacy intent.
+
+After a separately authorized reconciliation, create a fresh immutable plan
+with admitted ranges (at most 4096 names), keeping the old journal as evidence.
+Target-wins combine makes re-copying already published names idempotent. A new
+plan must use a new identity; an abandoned identity always returns conflict.

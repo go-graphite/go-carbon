@@ -57,3 +57,6 @@ func (p *Whisper) TransferFlushRequeues() map[string]uint64 {
 	}
 	return result
 }
+
+// NameTooLongDroppedPoints reports cumulative points discarded by name or path limits.
+func (p *Whisper) NameTooLongDroppedPoints() uint64 { return p.nameTooLongTotal.Load() }

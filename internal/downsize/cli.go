@@ -26,6 +26,8 @@ func Main(args []string) error {
 		return MoveMain(args[1:])
 	case "capture-native":
 		return NativeCaptureMain(ctx, args[1:])
+	case "native-abandon":
+		return nativeAbandonMain(ctx, args[1:], os.Stdout)
 	case "bulk-eval":
 		return BulkEvalMain(args[1:])
 	case "snapshot":

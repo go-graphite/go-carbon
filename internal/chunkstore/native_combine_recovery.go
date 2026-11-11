@@ -50,6 +50,12 @@ func (s *Store) recoverNativeCombines() error {
 		return err
 	}
 	for it.First(); it.Valid(); it.Next() {
+		identity := strings.TrimPrefix(string(it.Key()), string(prefix))
+		if err := s.nativeCombineNotAbandoned(identity); errors.Is(err, ErrConflict) {
+			continue // Explicit cleanup owns this intent, including after a crash.
+		} else if err != nil {
+			return errors.Join(err, it.Close())
+		}
 		if len(it.Value()) > nativeRangeMetadataBytes {
 			// Preserve legacy state and any published pieces. Starting the
 			// store must not decode an oversized intent or silently abandon it.

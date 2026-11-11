@@ -111,6 +111,8 @@ type ACL struct {
 }
 
 type Service struct {
+	nativeRejectedRequests atomic.Uint64
+
 	nativePullOnce      sync.Once
 	nativePullAdmission chan struct{}
 	nativeMu            sync.Mutex
