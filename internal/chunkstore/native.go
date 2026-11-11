@@ -420,12 +420,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 			}
 		}
 		if record.Continuation {
-			kv := transferRecordIO(record)
-			if value, getErr := kv.Get(SidecarSummaryKey); getErr == nil {
-				summaries[i], err = DecodeSidecarSummary(value)
-			} else if inspector, ok := s.continuation.(ContinuationSidecars); ok {
-				summaries[i], err = inspector.InspectSidecar(kv)
-			}
+			summaries[i], err = s.nativeSidecarSummary(record)
 			if err != nil {
 				return receipt, err
 			}

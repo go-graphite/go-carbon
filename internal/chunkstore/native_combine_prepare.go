@@ -158,14 +158,7 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 		return p, nil, err
 	}
 	if source.Continuation {
-		kv := transferRecordIO(source)
-		if value, e := kv.Get(SidecarSummaryKey); e == nil {
-			p.Summary, err = DecodeSidecarSummary(value)
-		} else if inspector, ok := s.continuation.(ContinuationSidecars); ok {
-			p.Summary, err = inspector.InspectSidecar(kv)
-		} else if !errors.Is(e, ErrNotFound) {
-			err = e
-		}
+		p.Summary, err = s.nativeSidecarSummary(source)
 		if err != nil {
 			return p, nil, err
 		}
