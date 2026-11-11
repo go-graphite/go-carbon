@@ -44,6 +44,12 @@ const (
 )
 
 type Options struct {
+	// NativeCombineWorkers and NativeCombineMemory bound one admitted import's
+	// preparation workers and aggregate estimated scratch, including results
+	// waiting for the SST consumer. Zero selects 2 workers / 2 GiB. Each worker
+	// receives total/workers (at least 1 GiB). Changes require reopening.
+	NativeCombineWorkers int
+	NativeCombineMemory  int64
 	// MaintenanceWait defers optional scans/rewrites until restart warming and
 	// pacing end. The caller supplies a bounded, cancellation-aware lifetime
 	// gate. Nil keeps offline tools' immediate maintenance behavior.
@@ -223,6 +229,10 @@ type Store struct {
 	maintenanceWait       func(context.Context, string) error
 	maintenanceCtx        context.Context
 	maintenanceStop       context.CancelFunc
+
+	nativeCombineWorkers      int
+	nativeCombineWorkerMemory int64
+
 	// Owner-driven maintenance lives until close, independently of StopBackground.
 	explicitMaintenance   operationState
 	coldPack              coldPackState
@@ -341,6 +351,15 @@ var storeComparer = func() *pebble.Comparer {
 // Open accepts only a new directory or an explicitly identified chunk store.
 // A legacy Pebble directory is rejected before Pebble can modify its manifest.
 func Open(dir string, options Options) (*Store, error) {
+	if options.NativeCombineWorkers == 0 {
+		options.NativeCombineWorkers = DefaultNativeCombineWorkers
+	}
+	if options.NativeCombineMemory == 0 {
+		options.NativeCombineMemory = DefaultNativeCombineMemory
+	}
+	if err := ValidateNativeCombineBudget(options.NativeCombineWorkers, options.NativeCombineMemory); err != nil {
+		return nil, err
+	}
 	if options.RelayoutWorkers < 0 || options.RelayoutWorkers > 32 {
 		return nil, errors.New("relayout workers must be 1..32 (zero selects one)")
 	}
@@ -450,6 +469,8 @@ func Open(dir string, options Options) (*Store, error) {
 	s.compactionControl.setDebtBypass(!options.CompactionKeepPacingOnDebt)
 	s.compactionControl.setWarmup(warmup)
 	s.continuation = options.Continuation
+	s.nativeCombineWorkers = options.NativeCombineWorkers
+	s.nativeCombineWorkerMemory = options.NativeCombineMemory / int64(options.NativeCombineWorkers)
 	s.fetchSharedIterator = options.FetchSharedIterator
 	stateKeys, _ := options.Continuation.(ContinuationStateKeys)
 	if size := options.MetadataCacheSize; size > 0 {

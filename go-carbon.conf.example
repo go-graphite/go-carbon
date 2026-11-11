@@ -59,6 +59,16 @@ store-dir = ""
 # memtables for block-cache reads. It is not an RSS limit.
 store-cache-size = 268435456
 store-memtable-size = 67108864
+# Native import preparation: 1..32 workers, capped by max-cpu and pending names.
+# One import per store; each worker (including its queued result) receives
+# total memory / configured workers, at least 1 GiB. These are conservative
+# scratch estimates, not an RSS cap: Pebble, SST writers, staging, GC and the
+# rest of the application need additional headroom. Both require a restart.
+# Memory is bytes; increases above the 2 GiB default must fit within 25% of the
+# smaller of host RAM and Linux cgroup memory limit. Detection failure rejects
+# an increase. For example, 8 workers need at least 8589934592 bytes (8 GiB).
+store-native-combine-workers = 2
+store-native-combine-memory = 2147483648
 # Background compaction budget. Zero preserves Pebble's default of one worker.
 # L0 concurrency adds a compactor for each multiple of this sublevel count,
 # capped by the worker budget; zero preserves Pebble's default of ten.

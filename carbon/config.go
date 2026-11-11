@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-graphite/go-carbon/buckyd"
 	"github.com/go-graphite/go-carbon/carbonserver"
+	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/go-graphite/go-carbon/internal/restartcpu"
 	"github.com/go-graphite/go-carbon/persister"
@@ -105,6 +106,8 @@ type whisperConfig struct {
 	StoreColdPackInterval        *Duration `toml:"store-cold-pack-interval"`
 	StoreColdPackMaxDebt         uint64    `toml:"store-cold-pack-max-compaction-debt"`
 	StoreTimeBuckets             bool      `toml:"store-time-buckets"`
+	StoreNativeCombineWorkers    int       `toml:"store-native-combine-workers"`
+	StoreNativeCombineMemory     int64     `toml:"store-native-combine-memory"`
 	StoreTimeBucketsRelayoutRate int64     `toml:"store-time-buckets-relayout-rate"`
 
 	StoreTimeBucketsRelayoutWorkers      int   `toml:"store-time-buckets-relayout-workers"`
@@ -445,6 +448,8 @@ func NewConfig() *Config {
 			},
 		},
 		Whisper: whisperConfig{
+			StoreNativeCombineWorkers:            store.DefaultNativeCombineWorkers,
+			StoreNativeCombineMemory:             store.DefaultNativeCombineMemory,
 			StoreTimeBucketsRelayoutWorkers:      1,
 			StoreTimeBucketsRelayoutMinFree:      200 << 30,
 			StoreTimeBucketsRelayoutMaxDebt:      32 << 30,
@@ -639,6 +644,9 @@ func ReadConfig(filename string) (*Config, error) {
 		}
 	}
 	if err := cfg.resolveMemoryBudget(defined, availableMemory, os.Getenv("GOMEMLIMIT")); err != nil {
+		return nil, err
+	}
+	if err := cfg.validateNativeCombineBudget(availableMemory); err != nil {
 		return nil, err
 	}
 

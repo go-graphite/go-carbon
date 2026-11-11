@@ -25,6 +25,30 @@ const (
 	nativeCombineWorkerMemory = 1 << 30
 )
 
+const (
+	DefaultNativeCombineWorkers = 2
+	DefaultNativeCombineMemory  = nativeCombineMemory
+)
+
+// ValidateNativeCombineBudget keeps at least the original 1 GiB allowance per
+// worker. The application additionally caps increases against available RAM.
+func ValidateNativeCombineBudget(workers int, memory int64) error {
+	if workers < 1 || workers > 32 {
+		return fmt.Errorf("native combine workers must be 1..32")
+	}
+	if memory/int64(workers) < nativeCombineWorkerMemory {
+		return fmt.Errorf("native combine memory must provide at least 1 GiB per worker")
+	}
+	return nil
+}
+
+func (s *Store) nativeWorkerMemory() int64 {
+	if s.nativeCombineWorkerMemory == 0 {
+		return nativeCombineWorkerMemory
+	}
+	return s.nativeCombineWorkerMemory
+}
+
 // ValidateNativeNames rejects oversized new requests before import/export work.
 // It does not change durable range identities or prevent receipt recovery.
 func ValidateNativeNames(names []string) error {
@@ -182,7 +206,7 @@ func (s *Store) admitNativeCombineRecords(source, target TransferMetric, materia
 		}
 		memory += scratch
 	}
-	if memory > nativeCombineWorkerMemory {
+	if memory > s.nativeWorkerMemory() {
 		a.Bytes += b.Bytes
 		a.PhysicalPoints += b.PhysicalPoints
 		a.MemoryBytes, a.Reason = memory, "worker memory budget"

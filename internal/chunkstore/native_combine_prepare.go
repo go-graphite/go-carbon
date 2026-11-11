@@ -22,7 +22,7 @@ type nativePreparedRecord struct {
 // until the ordered SST writer consumes it. No work or sync runs under a name
 // stripe; publication still performs the original revision check afterward.
 func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Snapshot, intent *nativeCombineIntent, first uint64, pending []int, consume func(nativeCombinePrepared, []RelayoutKV) error) error {
-	workers := min(len(pending), runtime.GOMAXPROCS(0), nativeCombineMemory/nativeCombineWorkerMemory)
+	workers := min(len(pending), runtime.GOMAXPROCS(0), s.nativeCombineWorkers)
 	if workers == 0 {
 		return nil
 	}

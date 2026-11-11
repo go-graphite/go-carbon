@@ -355,6 +355,8 @@ func storageSettingsChanged(old, next *Config) bool {
 		return false
 	}
 	return sharedStorePath(old) != sharedStorePath(next) ||
+		old.Whisper.StoreNativeCombineWorkers != next.Whisper.StoreNativeCombineWorkers ||
+		old.Whisper.StoreNativeCombineMemory != next.Whisper.StoreNativeCombineMemory ||
 		old.Whisper.StoreMigrationArchiveDir != next.Whisper.StoreMigrationArchiveDir ||
 		old.Whisper.StoreIncrementalMigration != next.Whisper.StoreIncrementalMigration ||
 		((old.Whisper.StoreIncrementalMigration || next.Whisper.StoreIncrementalMigration) && old.Whisper.DataDir != next.Whisper.DataDir) ||
