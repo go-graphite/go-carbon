@@ -139,9 +139,15 @@ func (m *mover) executeNativeFallback(ctx context.Context, parent task) error {
 		if err != nil {
 			return err
 		}
+		for _, skip := range durable.Skipped {
+			nativeSkipEvent(durable.Identity, skip)
+		}
 		if parent.Phase == "done" {
 			return nil
 		}
+	}
+	if len(durable.Skipped) > 0 {
+		return fmt.Errorf("native range has %d size skips; inspect the journal before choosing a fallback", len(durable.Skipped))
 	}
 	if durable.Identity != parent.Native.Receipt.Identity || durable.Digest != parent.Native.Receipt.Digest || !bytes.Equal(durable.Copied, parent.Native.Receipt.Copied) {
 		return errors.New("native handoff receipt differs")
@@ -228,4 +234,8 @@ func nativeDefinitivePullRejection(api *apiError) bool {
 		return strings.HasSuffix(strings.TrimSpace(api.Message), fmt.Sprintf(": HTTP %d source export: %d %s", api.Status, api.Status, http.StatusText(api.Status)))
 	}
 	return false
+}
+
+func nativeSkipEvent(identity string, skip chunkstore.NativeSkip) {
+	event("native_skipped", map[string]any{"receipt": identity, "ordinal": skip.Ordinal, "name": skip.Name, "bytes": skip.Bytes, "physical_points": skip.PhysicalPoints, "archive_slots": skip.ArchiveSlots, "worker_bytes": skip.MemoryBytes, "reason": skip.Reason})
 }

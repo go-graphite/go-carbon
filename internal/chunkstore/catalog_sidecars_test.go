@@ -14,7 +14,7 @@ func TestPurgeUpdatesCatalogAndSidecarInventory(t *testing.T) {
 	db, _ := openTestStore(t, t.TempDir(), Options{CacheSize: 1 << 20, MemTableSize: 1 << 20})
 	defer closeTestStore(t, db)
 	m := createTestMetric(t, db, "kept.metric")
-	m.Name = strings.Repeat("x", 300)
+	m.Name = strings.Repeat("x", maxMetricNameBytes+1)
 	m.ID++
 	value, err := db.encodeCatalog(m)
 	if err != nil {

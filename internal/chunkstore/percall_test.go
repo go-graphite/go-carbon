@@ -71,7 +71,7 @@ func TestPerCallMiscRejectedNameShape(t *testing.T) {
 			name := fmt.Sprintf("sparse.%d", i)
 			var want error
 			if i >= 93 {
-				name = "general.flink." + strings.Repeat("x", 300) + fmt.Sprintf(".%d.count", i)
+				name = "general.flink." + strings.Repeat("x", maxMetricNameBytes+1) + fmt.Sprintf(".%d.count", i)
 				want = ErrNameTooLong
 			}
 			if err := db.UpdateMany(ctx, name, []Point{{Timestamp: int64(now - 60), Value: 1}}); !errors.Is(err, want) {

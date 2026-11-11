@@ -1195,12 +1195,13 @@ func (listener *CarbonserverListener) insertRealtimeMetric(trie *trieIndex, metr
 	return node
 }
 
-// storableMetricPath returns the index path of metric and whether the persister
-// can create its whisper file. The persister drops longer names, so indexing one
-// would only list points that never leave the cache, and each scan would carry
-// it over again. Tagged names are stored under a different path and kept.
+// storableMetricPath returns a virtual index path and checks the active
+// backend's name limits. Only the Whisper backend creates a file at this path.
 func (listener *CarbonserverListener) storableMetricPath(metric string) (string, bool) {
 	path := "/" + filepath.Clean(strings.ReplaceAll(metric, ".", "/")+".wsp")
+	if listener.getMetricStore() != nil {
+		return path, store.ValidateMetricName(metric) == nil
+	}
 	return path, strings.IndexByte(metric, ';') >= 0 || helper.WhisperPathFits(listener.whisperData+path)
 }
 
@@ -2135,10 +2136,15 @@ func (listener *CarbonserverListener) matchGlobFilesystem(globs []string) []stri
 
 func (listener *CarbonserverListener) normalizeGlobFiles(files []string) ([]string, []bool) {
 	leafs := make([]bool, len(files))
+	virtual := listener.getMetricIndexStore() != nil
 	for i, path := range files {
-		info, err := os.Stat(path)
-		if err != nil && !os.IsNotExist(err) {
-			continue
+		var info os.FileInfo
+		if !virtual {
+			var err error
+			info, err = os.Stat(path)
+			if err != nil && !os.IsNotExist(err) {
+				continue
+			}
 		}
 		path, leafs[i] = listener.normalizeGlobFile(path, info)
 		files[i] = path

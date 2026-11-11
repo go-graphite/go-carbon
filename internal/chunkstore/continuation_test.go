@@ -49,7 +49,10 @@ func testTypedExactLargeCWhisperContinuation(t *testing.T, group int) {
 	for _, integers := range []bool{false, true} {
 		t.Run(fmt.Sprintf("integers=%t", integers), func(t *testing.T) {
 			t.Parallel()
-			exerciseCWhisperContinuationMethods(t, true, true, "1s:2d,60s:28d,3600s:2y", 1000, 7200, integers, methods[group*2:group*2+2])
+			// Keep the 7,200-point block size and all 1,000 seeded points.
+			// Each archive retains its original physical block size. Shorter
+			// empty windows still select every archive on every update.
+			exerciseCWhisperContinuationMethods(t, true, true, "1s:6h,60s:15d,3600s:2y", 1000, 7200, integers, methods[group*2:group*2+2])
 		})
 	}
 }

@@ -80,6 +80,8 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 	}
 	walk := &transferReader{reader: s.view, ordered: true, native: true, export: &s.store.transferExport}
 	defer walk.close()
+	measure := &transferReader{reader: s.view, native: true, ordered: true}
+	defer measure.close()
 	order := make([]string, len(names))
 	copy(order, names)
 	slices.Sort(order)
@@ -154,7 +156,16 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 		if metas[i].ID == 0 {
 			return TransferMetric{Config: metas[i].MetricConfig, Version: TransferVersion{Name: metas[i].Name}}, nil
 		}
+		m := metas[i]
+		size := nativeSize(m.MetricConfig)
+		if err := s.store.visitTransferKeys(ctx, s.view, m, size.add, measure); err != nil {
+			return TransferMetric{}, err
+		}
+		if size.exceedsLimit() {
+			size.Reason = "name limit"
+			return TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation, NativeSkip: &size}, nil
+		}
 		walk.arena.free = walk.arena.slab
-		return s.store.transferFromLimit(ctx, s.view, metas[i], nativeMetricBytes, walk)
+		return s.store.transferFromLimit(ctx, s.view, m, nativeMetricBytes, walk)
 	})
 }

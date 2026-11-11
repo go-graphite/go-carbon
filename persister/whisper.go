@@ -94,6 +94,7 @@ type Whisper struct {
 	created             uint32 // counter
 	nameTooLong         uint32 // counter: points dropped for metric names the store refuses
 	nameTooLongLogged   atomic.Int64
+	nameTooLongTotal    atomic.Uint64
 	updateOperations    uint32 // counter
 	committedPoints     uint32 // counter
 	oooDiscardedPoints  uint32 // counter
@@ -596,20 +597,20 @@ func (p *Whisper) whisperPath(metric string) (string, bool) {
 	}
 
 	if len(path) > maxPathLength {
-		p.logger.Debug("metric name exceeds limit",
+		p.logger.Error("metric name exceeds limit",
 			zap.String("path", path),
 			zap.Error(errors.New("path too long")))
-		p.popConfirm(metric)
+		p.dropNameTooLong(metric)
 		return "", false
 	}
 	filenames := strings.Split(path, "/")
 	for _, filename := range filenames {
 		if len(filename) > maxFilenameLength {
-			p.logger.Debug("metric name exceeds limit",
+			p.logger.Error("metric name exceeds limit",
 				zap.String("path", path),
 				zap.String("filename", filename),
 				zap.Error(errors.New("filename too long")))
-			p.popConfirm(metric)
+			p.dropNameTooLong(metric)
 			return "", false
 		}
 	}

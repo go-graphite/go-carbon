@@ -67,6 +67,12 @@ func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Sn
 				sourceWalk.arena.free = sourceWalk.arena.slab
 				targetWalk.arena.free = targetWalk.arena.slab
 				p, keys, err := s.prepareNativeCombineRecord(workctx, view, Metadata(intent.Raw[task.input]), intent.Positions[task.input], first+uint64(task.index), sourceWalk, targetWalk)
+				var skip *NativeSkip
+				if errors.As(err, &skip) {
+					skip.Ordinal = p.Position
+					p.Deferred, p.Skipped, p.Old = true, skip, nativeCombineMetadata{}
+					keys, err = nil, nil
+				}
 				result := nativePreparedRecord{task.index, p, keys, err, release}
 				select {
 				case results <- result:
@@ -117,7 +123,7 @@ func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Sn
 
 func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Snapshot, raw Metadata, position int, destination uint64, sourceWalk, targetWalk *transferReader) (nativeCombinePrepared, []RelayoutKV, error) {
 	p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: position, Meta: nativeCombineMetadata(raw)}}
-	source, err := s.transferFromLimit(ctx, view, raw, nativeMetricBytes, sourceWalk)
+	source, err := s.nativeTransferRecord(ctx, view, raw, sourceWalk)
 	if err != nil {
 		return p, nil, err
 	}
@@ -130,7 +136,7 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 		if err := nativeCompatibleTarget(s, old, source); err != nil {
 			return p, nil, err
 		}
-		target, err := s.transferFromLimit(ctx, view, old, nativeMetricBytes, targetWalk)
+		target, err := s.nativeTransferRecord(ctx, view, old, targetWalk)
 		if err != nil {
 			return p, nil, err
 		}
@@ -158,4 +164,18 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 		}
 	}
 	return p, keys, nil
+}
+
+func (s *Store) nativeTransferRecord(ctx context.Context, view *pebble.Snapshot, m Metadata, walk *transferReader) (TransferMetric, error) {
+	n := nativeSize(m.MetricConfig)
+	measure := &transferReader{reader: view, native: true}
+	defer measure.close()
+	if err := s.visitTransferKeys(ctx, view, m, n.add, measure); err != nil {
+		return TransferMetric{}, err
+	}
+	if n.exceedsLimit() {
+		n.Reason = "name limit"
+		return TransferMetric{}, &n
+	}
+	return s.transferFromLimit(ctx, view, m, nativeMetricBytes, walk)
 }

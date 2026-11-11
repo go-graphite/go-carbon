@@ -8,15 +8,15 @@ import (
 )
 
 // These are receiver limits, independent of a controller's range/batch flags or
-// the machine's CPU count. Oversized names fail before decoding their archives.
+// the machine's CPU count. Oversized names are reported before decoding their archives.
 // Ready intents within the metadata budget retain their original identity;
 // oversized legacy metadata fails closed rather than allocating without a limit.
 const (
 	// NativeMaxRangeNames bounds range metadata independently of history size.
 	NativeMaxRangeNames       = 4096
 	nativeRangeMetadataBytes  = 16 << 20
-	nativeMetricBytes         = 64 << 20
-	nativeMetricPoints        = 1 << 20
+	nativeMetricBytes         = 128 << 20
+	nativeMetricPoints        = 32 << 20
 	nativeTableBytes          = 8 << 20
 	nativeTableWriters        = 8
 	nativeIngestFiles         = 8
@@ -90,37 +90,103 @@ func nativeMetadataSize(c MetricConfig) int64 {
 	return int64(512 + 2*len(c.Name) + 32*len(c.Retentions))
 }
 
-func validateNativeMemory(r TransferMetric) error {
-	if transferSize(r)+int64(len(r.Keys))*48 > nativeMetricBytes {
-		return fmt.Errorf("native metric %q exceeds %d bytes: %w", r.Config.Name, nativeMetricBytes, ErrTransferLimit)
+// NativeSkip records a name left uncopied by size admission. Sizes are measured
+// without decoding history. DeferredCount includes these ordinals; they must
+// never be mistaken for completed work or sent to the metric fallback silently.
+type NativeSkip struct {
+	Ordinal                                          int
+	Name                                             string
+	Bytes, PhysicalPoints, ArchiveSlots, MemoryBytes int64
+	Reason                                           string
+}
+
+func (n *NativeSkip) add(k, v []byte) error {
+	n.Bytes += int64(len(k) + len(v) + 56)
+	if isContinuationBucketSuffix(k) {
+		k = k[5:]
 	}
-	var capacity int64
-	for _, retention := range r.Config.Retentions {
-		if retention.Count < 0 || int64(retention.Count) > nativeMetricPoints-capacity {
-			return fmt.Errorf("native metric %q exceeds %d archive slots: %w", r.Config.Name, nativeMetricPoints, ErrTransferLimit)
+	points := int64(128) // conservatively include classic groups and metadata
+	if len(k) == 20 && k[0] == 'f' && (k[9] == 'c' || k[9] == 'r') && len(v) > 0 && v[0] >= 3 {
+		_, _, count, err := sealedHeaderFields(v)
+		if err != nil {
+			return err
 		}
-		capacity += int64(retention.Count)
+		points = int64(count)
 	}
-	// Physical history can exceed the current retention (OOO files and old
-	// rings). Count its groups too, before invoking any archive decoder.
-	var points int64
+	n.PhysicalPoints += points
+	return nil
+}
+func nativeSize(c MetricConfig) NativeSkip {
+	n := NativeSkip{Name: c.Name, Bytes: nativeMetadataSize(c)}
+	for _, r := range c.Retentions {
+		n.ArchiveSlots += int64(r.Count)
+	}
+	return n
+}
+func (n NativeSkip) exceedsLimit() bool {
+	return n.Bytes > nativeMetricBytes || n.PhysicalPoints > nativeMetricPoints || n.ArchiveSlots > nativeMetricPoints
+}
+func (n *NativeSkip) Error() string {
+	return fmt.Sprintf("native metric %q: %s (%d bytes, %d physical points, %d archive slots, %d estimated worker bytes): %v", n.Name, n.Reason, n.Bytes, n.PhysicalPoints, n.ArchiveSlots, n.MemoryBytes, ErrTransferLimit)
+}
+func (n *NativeSkip) Unwrap() error { return ErrTransferLimit }
+func nativeRecordSize(r TransferMetric) (NativeSkip, error) {
+	n := nativeSize(r.Config)
 	for _, kv := range r.Keys {
-		key := kv.Key
-		if isContinuationBucketSuffix(key) {
-			key = key[5:]
+		if err := n.add(kv.Key, kv.Value); err != nil {
+			return n, err
 		}
-		n := int64(128) // classic groups; conservatively charge metadata too
-		if len(key) == 20 && key[0] == 'f' && (key[9] == 'c' || key[9] == 'r') && len(kv.Value) > 0 && kv.Value[0] >= 3 {
-			_, _, count, err := sealedHeaderFields(kv.Value)
-			if err != nil {
-				return err
-			}
-			n = int64(count)
+	}
+	return n, nil
+}
+func validateNativeMemory(r TransferMetric) error {
+	n, err := nativeRecordSize(r)
+	if err != nil {
+		return err
+	}
+	if n.exceedsLimit() {
+		n.Reason = "name limit"
+		return &n
+	}
+	return nil
+}
+
+// Input arenas, vector growth, encoded output and codec bookkeeping all belong
+// to the worker until its ordered SST consumer releases it. A codec must supply
+// an estimate before it can use the large-name path; reference materialization
+// has a separate conservative charge before any whole-archive allocation.
+type ContinuationNativeMemory interface {
+	NativeCombineMemory(TransferMetric, TransferMetric) (int64, error)
+}
+
+func (s *Store) admitNativeCombineRecords(source, target TransferMetric, materialize bool) error {
+	a, err := nativeRecordSize(source)
+	if err != nil {
+		return err
+	}
+	b, err := nativeRecordSize(target)
+	if err != nil {
+		return err
+	}
+	memory := 4*(a.Bytes+b.Bytes) + int64(len(source.Keys)+len(target.Keys))*256
+	if materialize {
+		memory += 512 * (a.PhysicalPoints + b.PhysicalPoints + a.ArchiveSlots)
+	} else if source.Continuation {
+		codec, ok := s.continuation.(ContinuationNativeMemory)
+		if !ok {
+			return s.admitNativeCombineRecords(source, target, true)
 		}
-		points += n
-		if points > nativeMetricPoints {
-			return fmt.Errorf("native metric %q exceeds %d physical points: %w", r.Config.Name, nativeMetricPoints, ErrTransferLimit)
+		scratch, err := codec.NativeCombineMemory(source, target)
+		if err != nil {
+			return err
 		}
+		memory += scratch
+	}
+	if memory > nativeCombineWorkerMemory {
+		a.Bytes += b.Bytes
+		a.PhysicalPoints += b.PhysicalPoints
+		a.MemoryBytes, a.Reason = memory, "worker memory budget"
+		return &a
 	}
 	return nil
 }
@@ -242,4 +308,12 @@ func (s *Store) ingestNativeFiles(ctx context.Context, paths []string) error {
 		paths = paths[n:]
 	}
 	return ctx.Err()
+}
+
+func validateNativeSkipRecord(r TransferMetric) error {
+	n := r.NativeSkip
+	if n == nil || len(r.Keys) != 0 || n.Name != r.Config.Name || n.Bytes < 0 || n.PhysicalPoints < 0 || n.ArchiveSlots < 0 || n.MemoryBytes != 0 || !n.exceedsLimit() || n.Reason != "name limit" {
+		return ErrFormat
+	}
+	return nil
 }
