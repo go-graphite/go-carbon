@@ -176,7 +176,7 @@ type ContinuationWindowCombiner interface {
 // A patch is prepared against an immutable view and published atomically with
 // the name's piece, after checking that its generation and revision still match.
 type ContinuationWindowPatcher interface {
-	PlanNativeWindowPatch(context.Context, ContinuationIO, Snapshot, func() time.Time, NativeWindow) ([]RelayoutKV, bool, error)
+	PlanNativeWindowPatch(context.Context, ContinuationIO, Snapshot, func() time.Time, NativeWindow) ([]RelayoutKV, NativeCombineClass, bool, error)
 }
 
 // Optional indexes are bound to the owning revision. An older writer may
@@ -207,8 +207,8 @@ func (s *Store) bindContinuationIndex(key, value []byte, revision uint64) []byte
 	return value
 }
 
-// Window combine never normalizes a survivor point outside the window, even
-// an explicit NaN. A ring alias that would evict such a point fails closed.
+// Window combine preserves survivor points outside the window, including NaN
+// payloads, except stale ring owners displaced by newer in-window points.
 func (s *Store) nativeCombineWindowRecord(ctx context.Context, source, target TransferMetric, w NativeWindow) (TransferMetric, NativeCombineClass, error) {
 	var class NativeCombineClass
 	if !samePolicy(source.Config, target.Config) || source.Continuation != target.Continuation {
@@ -258,19 +258,27 @@ func (s *Store) nativeCombineWindowRecord(ctx context.Context, source, target Tr
 			slots[p.Timestamp/int64(r.Step)%int64(r.Count)] = p
 		}
 		outsideSlots := make(map[int64]bool, len(outside))
+		keptOutside := outside[:0]
 		for _, p := range outside {
 			slot := p.Timestamp / int64(r.Step) % int64(r.Count)
 			if outsideSlots[slot] {
 				return TransferMetric{}, class, fmt.Errorf("out-of-window archive %d has ring aliases: %w", ai, ErrConflict)
 			}
 			outsideSlots[slot] = true
-			if incoming, ok := slots[slot]; ok && incoming.Timestamp > p.Timestamp {
-				return TransferMetric{}, class, fmt.Errorf("window would evict out-of-window archive %d point %d: %w", ai, p.Timestamp, ErrConflict)
+			if incoming, ok := slots[slot]; ok {
+				if p.Timestamp > incoming.Timestamp {
+					return TransferMetric{}, class, fmt.Errorf("window would evict newer out-of-window archive %d point %d: %w", ai, p.Timestamp, ErrConflict)
+				}
+				// Sharing a slot puts this older point at least one retention
+				// behind the incoming owner, just like a normal ring write.
+				class.StaleEvictedPoints++
+				continue
 			}
 			slots[slot] = p
+			keptOutside = append(keptOutside, p)
 		}
 		union = slices.DeleteFunc(union, func(p Point) bool { return slots[p.Timestamp/int64(r.Step)%int64(r.Count)].Timestamp != p.Timestamp })
-		union = append(union, outside...)
+		union = append(union, keptOutside...)
 		a.Archives[ai].Points = union
 		slices.SortFunc(a.Archives[ai].Points, func(a, b Point) int {
 			if a.Timestamp < b.Timestamp {

@@ -20,6 +20,7 @@ type NativeCombineClass struct {
 	MaterializedArchives                               int
 	CopiedBlocks, CombinedBlocks                       int
 	CopiedBytes, CombinedBytes                         uint64
+	StaleEvictedPoints                                 int // Older out-of-window ring owners displaced by a window copy.
 }
 
 type ContinuationNativeClassic interface {

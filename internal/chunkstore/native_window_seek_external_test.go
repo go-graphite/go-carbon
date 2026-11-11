@@ -16,8 +16,8 @@ import (
 
 type windowOracleCodec struct{ *whisperio.ContinuationCodec }
 
-func (c windowOracleCodec) PlanNativeWindowPatch(context.Context, store.ContinuationIO, store.Snapshot, func() time.Time, store.NativeWindow) ([]store.RelayoutKV, bool, error) {
-	return nil, false, nil
+func (c windowOracleCodec) PlanNativeWindowPatch(context.Context, store.ContinuationIO, store.Snapshot, func() time.Time, store.NativeWindow) ([]store.RelayoutKV, store.NativeCombineClass, bool, error) {
+	return nil, store.NativeCombineClass{}, false, nil
 }
 
 func windowSeekFixture(t testing.TB, s *store.Store, clock func() time.Time, donor bool) {

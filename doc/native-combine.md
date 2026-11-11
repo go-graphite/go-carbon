@@ -50,6 +50,15 @@ the reference reader. No vendor format or go-whisper writer was modified.
 required decoding for eligibility. `CombineMaterializedArchives` counts the
 whole-archive fallback; zero does not mean zero decoded input groups.
 
+Window copies preserve out-of-window points unless a newer in-window point
+shares their circular slot. Such an older owner is at least one archive
+retention behind and is evicted as it would be by a normal write or full copy.
+`CombineStaleEvictedPoints` counts these points on successful publication;
+revision retries, refused plans and receipt replays do not increment it.
+A newer out-of-window owner still causes a conflict. The reference union also
+continues to reject two out-of-window points sharing a slot: the window cannot
+preserve both, and choosing between them is outside the requested operation.
+
 ## Qualification
 
 `store-copy bulk-eval` imports the actual captured survivor, stops private
