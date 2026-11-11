@@ -251,6 +251,9 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 }
 
 func (s *Store) readNativeCombineIntent(identity string) (nativeCombineIntent, error) {
+	if err := s.nativeCombineNotAbandoned(identity); err != nil {
+		return nativeCombineIntent{}, err
+	}
 	value, closer, err := s.db.Get(nativeCombineIntentKey(identity))
 	if err != nil {
 		return nativeCombineIntent{}, err
