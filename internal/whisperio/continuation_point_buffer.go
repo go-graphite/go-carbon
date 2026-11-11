@@ -27,6 +27,13 @@ func (b *continuationPointBuffer) TimeBuckets() bool {
 	return ok && v.TimeBuckets()
 }
 
+func (b *continuationPointBuffer) ContinuationRevision() uint64 {
+	if v, ok := b.ContinuationIO.(store.ContinuationRevision); ok {
+		return v.ContinuationRevision()
+	}
+	return 0
+}
+
 func (b *continuationPointBuffer) Probe(key []byte) ([]byte, error) {
 	if block := b.blocks[string(key)]; block != nil {
 		return store.EncodePointBlock(block), nil

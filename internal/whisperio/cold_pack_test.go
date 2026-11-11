@@ -44,13 +44,24 @@ func coldSweep(t *testing.T, db *store.Store, mode string) {
 	if err := db.ConfigureColdPack(store.ColdPackOptions{Mode: mode, WriteWindow: time.Second, CPUFraction: 1, BytesPerSecond: 1 << 40}); err != nil {
 		t.Fatal(err)
 	}
+	before, passes := db.ColdPackStats(), 0
 	for n := 0; n < 1000; n++ {
 		done, err := db.ColdPackStep(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if done {
-			return
+			after := db.ColdPackStats()
+			// A validation conflict defers publication until a later full pass.
+			// Keep returning planned failures to the failure-counter tests.
+			if before.Cursor == "" && before.BlockCursor == 0 && after.Conflicts == before.Conflicts {
+				return
+			}
+			passes++
+			if passes == 3 {
+				t.Fatalf("no conflict-free sweep: %+v", after)
+			}
+			before = after
 		}
 	}
 	t.Fatal("bounded sweep failed to finish")

@@ -3,6 +3,7 @@ package chunkstore
 import (
 	"context"
 	"errors"
+	"math"
 	"runtime"
 	"sync"
 
@@ -135,6 +136,37 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 	if err == nil {
 		if err := nativeCompatibleTarget(s, old, source); err != nil {
 			return p, nil, err
+		}
+		if window != nil && source.Continuation {
+			if codec, ok := s.continuation.(ContinuationWindowPatcher); ok {
+				if err := s.admitNativeWindowPatch(source, old.MetricConfig, *window); err != nil {
+					return p, nil, err
+				}
+				snap, err := s.nativeRecordSnapshot(ctx, source)
+				if err != nil {
+					return p, nil, err
+				}
+				kv := s.newContinuationIO(ctx, view, nil, old).withIterator()
+				writes, handled, err := codec.PlanNativeWindowPatch(ctx, kv, snap, s.now, *window)
+				err = errors.Join(err, kv.Close())
+				if err != nil {
+					return p, nil, err
+				}
+				if handled {
+					if old.Revision == math.MaxUint64 {
+						return p, nil, ErrConflict
+					}
+					if err := validateNativeMemory(TransferMetric{Config: old.MetricConfig, Continuation: true, Keys: writes}); err != nil {
+						return p, nil, err
+					}
+					p.Old, p.Meta = nativeCombineMetadata(old), nativeCombineMetadata(old)
+					p.Meta.Revision++
+					p.Meta.LastUpdate = s.nextActivity(old.LastUpdate)
+					p.InPlace, p.Patch = true, writes
+					p.Class = NativeCombineClass{Archives: len(old.Retentions), CombinedBlocks: len(writes)}
+					return p, nil, nil
+				}
+			}
 		}
 		target, err := s.nativeTransferRecord(ctx, view, old, targetWalk)
 		if err != nil {

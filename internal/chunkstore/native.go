@@ -412,6 +412,7 @@ func (s *Store) NativeImport(ctx context.Context, request NativeRange, input io.
 		if err := s.validateNativeWindowRecord(ctx, record, request.Window); err != nil {
 			return receipt, err
 		}
+		s.checkContinuationIndexes(&record)
 		if record.Continuation != (s.continuation != nil) {
 			return receipt, ErrFormat
 		}

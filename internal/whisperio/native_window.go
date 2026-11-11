@@ -14,7 +14,10 @@ import (
 // groups intersecting the window (plus finer contributors at its boundaries).
 // Noncanonical images use the same Snapshot oracle as the full native copy.
 func (c *ContinuationCodec) NativeWindowSnapshot(ctx context.Context, kv store.ContinuationIO, m store.Metadata, clock func() time.Time, window store.NativeWindow) (store.Snapshot, []store.NativeWindowSkip, error) {
-	fragments, ok, err := c.nativeFragments(ctx, kv, m, clock, 0)
+	if snap, skips, handled, err := c.seekNativeWindow(ctx, kv, m, clock, window); handled || err != nil {
+		return snap, skips, err
+	}
+	fragments, ok, err := c.nativeFragments(ctx, kv, m, clock, 0, window)
 	if err != nil {
 		return store.Snapshot{}, nil, err
 	}

@@ -60,6 +60,16 @@ func (c *ContinuationCodec) RestoreArchives(ctx context.Context, kv store.Contin
 	}
 	defer file.Close()
 	f := file.(*continuationFile)
+	f.data.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(snapshot.Archives)), revision: snapshot.Metadata.Revision}
+	f.data.windowLoaded, f.data.windowDirty = true, true
+	for ai, archive := range snapshot.Archives {
+		for _, p := range archive.Points {
+			a := &f.data.windowIndex.archives[ai]
+			if a.base == 0 || p.Timestamp < a.base {
+				a.base = p.Timestamp
+			}
+		}
+	}
 	layout := w.StorageLayout()
 	for ai, archive := range snapshot.Archives {
 		// Classic Fetch uses physical slot zero as the ring's timestamp anchor.

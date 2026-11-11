@@ -27,6 +27,8 @@ func (c *ContinuationCodec) writeReferencedArchives(ctx context.Context, m store
 		return nil, err
 	}
 	fdata.dirty = true
+	fdata.windowIndex = &classicWindowIndex{archives: make([]classicWindowArchive, len(archives))}
+	fdata.windowLoaded, fdata.windowDirty = true, true
 	f := &continuationFile{fs: fs, data: fdata}
 	type group struct {
 		parts  []splicePart
@@ -34,9 +36,17 @@ func (c *ContinuationCodec) writeReferencedArchives(ctx context.Context, m store
 	}
 	for ai, parts := range archives {
 		r := m.Retentions[ai]
+		fdata.windowIndex.archives[ai].base = bases[ai]
 		groups := make(map[int]*group)
 		baseSlot := int(bases[ai] / int64(r.Step) % int64(r.Count))
 		for _, part := range parts {
+			if part.fragment.irregular {
+				for i := part.ordinal; i < part.ordinal+part.count; i++ {
+					fdata.windowIndex.archives[ai].high = max(fdata.windowIndex.archives[ai].high, spliceOrdinalTime(&part.fragment, i, r.Step))
+				}
+			} else {
+				fdata.windowIndex.archives[ai].high = max(fdata.windowIndex.archives[ai].high, spliceOrdinalTime(&part.fragment, part.ordinal+part.count-1, r.Step))
+			}
 			for offset := 0; offset < part.count; {
 				destination := (part.slot + offset - baseSlot + r.Count) % r.Count
 				count := min(part.count-offset, 128-destination%128, r.Count-destination)

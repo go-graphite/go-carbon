@@ -24,6 +24,8 @@ func (c *ContinuationCodec) StateKey(suffix []byte) bool {
 		return true
 	case len(suffix) == continuationFileKeyLen && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'h':
 		return true
+	case len(suffix) == continuationFileKeyLen && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'w':
+		return true
 	case len(suffix) == continuationFileKeyLen+2 && suffix[0] == 'f' && suffix[continuationFileKeyLen-1] == 'H':
 		return true
 	}

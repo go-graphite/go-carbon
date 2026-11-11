@@ -78,6 +78,7 @@ func (s *Store) updateContinuationFrom(ctx context.Context, m Metadata, state *m
 // state. The caller holds its stripe until the enclosing batch commits.
 func (s *Store) prepareContinuationUpdate(ctx context.Context, batch *pebble.Batch, m Metadata, state *metricState, cache bool, input []Point, retention int, maintenance *ContinuationMaintenance) (Metadata, *stateView, *SidecarSummary, bool, error) {
 	io := s.newContinuationIO(ctx, batch, batch, m)
+	io.indexRevision = m.Revision + 1
 	if cache {
 		io.state = s.newStateView(state, m)
 	}

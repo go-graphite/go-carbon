@@ -37,11 +37,13 @@ type nativeCombinePiece struct {
 	Class    NativeCombineClass
 	Deferred bool
 	Skipped  *NativeSkip `json:",omitempty"`
+	InPlace  bool        `json:",omitempty"`
 }
 
 type nativeCombinePrepared struct {
 	nativeCombinePiece
 	Summary SidecarSummary
+	Patch   []RelayoutKV
 }
 
 func nativeCombineIntentKey(identity string) []byte { return []byte("COMBINE/intent/" + identity) }
@@ -194,7 +196,7 @@ func (s *Store) nativeCombineImport(ctx context.Context, request NativeRange, in
 	// Neither history retirement nor the durability barrier holds a writer
 	// stripe. Published IDs are excluded from all hidden-ID cleanup ranges.
 	for _, piece := range pieces {
-		if piece == nil || piece.Old.ID == 0 {
+		if piece == nil || piece.Old.ID == 0 || piece.InPlace {
 			continue
 		}
 		if err := s.retireNativeCombine(ctx, Metadata(piece.Old)); err != nil {
@@ -457,6 +459,7 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 		if err := s.validateNativeWindowRecord(ctx, record, request.Window); err != nil {
 			return err
 		}
+		s.checkContinuationIndexes(&record)
 		m := Metadata{MetricConfig: record.Config, ID: first + uint64(i), Generation: 1, Revision: 1, LastUpdate: s.nextActivity(time.Time{}), Continuation: record.Continuation}
 		if s.incrementalSource != "" {
 			m.FileMigration = FileReclaimed
@@ -650,6 +653,21 @@ func (s *Store) publishNativeCombineName(ctx context.Context, identity string, p
 	}
 	b := s.db.NewBatch()
 	defer b.Close()
+	if p.InPlace {
+		kv := s.newContinuationIO(ctx, s.db, b, Metadata(p.Old))
+		kv.indexRevision = p.Meta.Revision
+		for _, write := range p.Patch {
+			var err error
+			if write.Value == nil {
+				err = kv.Delete(write.Key)
+			} else {
+				err = kv.Set(write.Key, write.Value)
+			}
+			if err != nil {
+				return false, err
+			}
+		}
+	}
 	for _, entry := range []struct{ key, value []byte }{{catalogKey(p.Meta.Name), encoded}, {revisionKey(Metadata(p.Meta)), revisionBytes(Metadata(p.Meta))}} {
 		if err := b.Set(entry.key, entry.value, nil); err != nil {
 			return false, err

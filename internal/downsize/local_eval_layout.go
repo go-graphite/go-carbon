@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
+	"github.com/go-graphite/go-carbon/internal/whisperio"
 )
 
 // Keep the original physical headers, descriptors and encoded values in proof
@@ -16,11 +17,15 @@ import (
 func evalRecordLayoutDigest(record store.TransferMetric) string {
 	h := sha256.New()
 	var length [8]byte
+	codec := &whisperio.ContinuationCodec{}
 	for _, kv := range record.Keys {
 		if bytes.Equal(kv.Key, store.SidecarSummaryKey) {
 			continue
 		}
-		for _, field := range [][]byte{kv.Key, kv.Value} {
+		// Import rebinds the optional seek index to the receiving revision.
+		// Compare its anchors and bounds, while normalizing only that revision.
+		value := codec.BindIndex(kv.Key, kv.Value, 0)
+		for _, field := range [][]byte{kv.Key, value} {
 			binary.BigEndian.PutUint64(length[:], uint64(len(field)))
 			h.Write(length[:])
 			h.Write(field)

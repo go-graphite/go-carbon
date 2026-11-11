@@ -165,15 +165,15 @@ func (s *NativeSource) WriteWindow(ctx context.Context, names []string, out io.W
 		}
 		m := metas[i]
 		size := nativeSize(m.MetricConfig)
+		if window != nil && !size.exceedsLimit() {
+			return s.store.nativeWindowTransfer(ctx, s.view, m, *window)
+		}
 		if err := s.store.visitTransferKeys(ctx, s.view, m, size.add, measure); err != nil {
 			return TransferMetric{}, err
 		}
 		if size.exceedsLimit() {
 			size.Reason = "name limit"
 			return TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation, NativeSkip: &size}, nil
-		}
-		if window != nil {
-			return s.store.nativeWindowTransfer(ctx, s.view, m, *window)
 		}
 		walk.arena.free = walk.arena.slab
 		return s.store.transferFromLimit(ctx, s.view, m, nativeMetricBytes, walk)

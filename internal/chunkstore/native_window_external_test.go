@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"runtime/pprof"
 	"slices"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ func seedWindowSnapshot(t testing.TB, s *store.Store, snap store.Snapshot, conti
 		return
 	}
 	kv := largeContinuationMemory{}
+	snap.Metadata.Revision = 1
 	if err := (&whisperio.ContinuationCodec{}).RestoreArchives(context.Background(), kv, snap, clock); err != nil {
 		t.Fatal(err)
 	}
@@ -298,6 +300,7 @@ func BenchmarkNativeWindowHeavy(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer pin.Close()
+	rates := make(map[string]float64)
 	for _, mode := range []string{"full", "1h"} {
 		b.Run(mode, func(b *testing.B) {
 			b.StopTimer()
@@ -322,8 +325,11 @@ func BenchmarkNativeWindowHeavy(b *testing.B) {
 				done := make(chan error, 1)
 				b.StartTimer()
 				start := time.Now()
-				go func() { err := pin.WriteWindow(ctx, names, output, window); output.CloseWithError(err); done <- err }()
-				receipt, err := target.NativeImport(ctx, windowRange(names, window), input)
+				var receipt store.NativeReceipt
+				pprof.Do(ctx, pprof.Labels("copy-mode", mode), func(ctx context.Context) {
+					go func() { err := pin.WriteWindow(ctx, names, output, window); output.CloseWithError(err); done <- err }()
+					receipt, err = target.NativeImport(ctx, windowRange(names, window), input)
+				})
 				input.CloseWithError(err)
 				exportErr := <-done
 				elapsed += time.Since(start)
@@ -337,9 +343,17 @@ func BenchmarkNativeWindowHeavy(b *testing.B) {
 				wireBytes += receipt.Bytes
 				closeTarget()
 			}
-			b.ReportMetric(float64(nameCount*b.N)/elapsed.Seconds(), "names/s")
+			rates[mode] = float64(nameCount*b.N) / elapsed.Seconds()
+			b.ReportMetric(rates[mode], "names/s")
 			b.ReportMetric(float64(wireBytes)/float64(nameCount*b.N), "wire-B/name")
 		})
+	}
+	if full, window := rates["full"], rates["1h"]; full > 0 && window > 0 {
+		ratio := window / full
+		b.ReportMetric(ratio, "window/full")
+		if ratio < 10 {
+			b.Fatalf("1h window %.2f names/s / full %.2f names/s = %.2fx; require >=10x", window, full, ratio)
+		}
 	}
 }
 
