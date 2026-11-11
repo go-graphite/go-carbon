@@ -36,6 +36,8 @@ func Main(args []string) error {
 		return ringplan.Main(append([]string{"--mode", args[0]}, args[1:]...))
 	case "plan":
 		flags := flag.NewFlagSet("resize plan", flag.ContinueOnError)
+		from := flags.String("from", "", "native copy window start (Unix seconds or RFC3339)")
+		until := flags.String("until", "", "native copy window end (exclusive)")
 		spec := flags.String("spec", "", "current/desired members, hashes and target placements")
 		out := flags.String("out", "", "committed local plan directory")
 		apply := flags.Bool("apply", false, "write the committed plan; default only prints")
@@ -43,7 +45,11 @@ func Main(args []string) error {
 		if err := flags.Parse(args[1:]); err != nil {
 			return err
 		}
-		manifest, err := ringplan.Resize(ctx, *spec, *out, *apply, *workers)
+		window, err := parseNativeWindow(*from, *until)
+		if err != nil {
+			return err
+		}
+		manifest, err := ringplan.Resize(ctx, *spec, *out, *apply, *workers, window)
 		if err != nil {
 			return err
 		}

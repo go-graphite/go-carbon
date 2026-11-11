@@ -365,6 +365,9 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 	if err != nil {
 		return err
 	}
+	if !SameNativeWindow(stream.Window, intent.Request.Window) {
+		return ErrFormat
+	}
 	stream.metricLimit = nativeMetricBytes
 	request := intent.Request
 	expected := len(request.Names)
@@ -425,6 +428,10 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 		if !ok || seen[position] || record.Version.Name != record.Config.Name || request.Candidates != nil && !nativeBit(request.Candidates, position) {
 			return ErrFormat
 		}
+		for _, skip := range record.WindowSkipped {
+			skip.Ordinal = position
+			intent.Receipt.WindowSkipped = append(intent.Receipt.WindowSkipped, skip)
+		}
 		seen[position], intent.Positions[i] = true, position
 		if record.Version.ID == 0 && record.Version.Generation == 0 && record.Version.Revision == 0 && len(record.Keys) == 0 && len(record.Config.Retentions) == 0 {
 			continue
@@ -446,6 +453,9 @@ func (s *Store) stageNativeCombine(ctx context.Context, intent *nativeCombineInt
 			skip.Ordinal = position
 			intent.Receipt.Skipped = append(intent.Receipt.Skipped, *skip)
 			continue
+		}
+		if err := s.validateNativeWindowRecord(ctx, record, request.Window); err != nil {
+			return err
 		}
 		m := Metadata{MetricConfig: record.Config, ID: first + uint64(i), Generation: 1, Revision: 1, LastUpdate: s.nextActivity(time.Time{}), Continuation: record.Continuation}
 		if s.incrementalSource != "" {

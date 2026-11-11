@@ -930,6 +930,9 @@ auth-jwt-secret-file = ""
 # apply. Requires a secret path. Other initial errors remain fatal. Restart to
 # apply; the default preserves strict startup on missing secrets.
 wait-for-auth-secret = false
+# Native gap copy: store-copy run --engine bulk --bulk-only --bulk-combine
+# --from UNIX_OR_RFC3339 --until UNIX_OR_RFC3339 (exclusive). No daemon option;
+# see tool/store-copy/README.md for archive boundaries and resume scope.
 # Whole-store checkpoint/copy API: /admin/store-copy on this listener, protected
 # by the same JWT header with namespaces=["*"] and ops=["admin"] (or root "*").
 # Requires input-log.enabled; refuses incomplete conversion, tags, expiration

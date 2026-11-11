@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	"github.com/go-graphite/go-carbon/internal/downsize/ringplan"
 )
 
@@ -24,6 +25,7 @@ type topology struct {
 	Nodes    []member
 }
 type specification struct {
+	NativeWindow  *chunkstore.NativeWindow      `json:"native_window,omitempty"`
 	Placements    map[string]ringplan.Placement `json:"placements,omitempty"`
 	Version       int
 	Cluster, Site string

@@ -66,7 +66,7 @@ func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Sn
 				}
 				sourceWalk.arena.free = sourceWalk.arena.slab
 				targetWalk.arena.free = targetWalk.arena.slab
-				p, keys, err := s.prepareNativeCombineRecord(workctx, view, Metadata(intent.Raw[task.input]), intent.Positions[task.input], first+uint64(task.index), sourceWalk, targetWalk)
+				p, keys, err := s.prepareNativeCombineRecord(workctx, view, Metadata(intent.Raw[task.input]), intent.Positions[task.input], first+uint64(task.index), sourceWalk, targetWalk, intent.Request.Window)
 				var skip *NativeSkip
 				if errors.As(err, &skip) {
 					skip.Ordinal = p.Position
@@ -121,7 +121,7 @@ func (s *Store) prepareNativeCombineRecords(ctx context.Context, view *pebble.Sn
 	return nil
 }
 
-func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Snapshot, raw Metadata, position int, destination uint64, sourceWalk, targetWalk *transferReader) (nativeCombinePrepared, []RelayoutKV, error) {
+func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Snapshot, raw Metadata, position int, destination uint64, sourceWalk, targetWalk *transferReader, window *NativeWindow) (nativeCombinePrepared, []RelayoutKV, error) {
 	p := nativeCombinePrepared{nativeCombinePiece: nativeCombinePiece{Position: position, Meta: nativeCombineMetadata(raw)}}
 	source, err := s.nativeTransferRecord(ctx, view, raw, sourceWalk)
 	if err != nil {
@@ -143,7 +143,13 @@ func (s *Store) prepareNativeCombineRecord(ctx context.Context, view *pebble.Sna
 		if err := validateNativeMemory(target); err != nil {
 			return p, nil, err
 		}
-		result, class, err := s.nativeCombineRecord(ctx, source, target)
+		var result TransferMetric
+		var class NativeCombineClass
+		if window == nil {
+			result, class, err = s.nativeCombineRecord(ctx, source, target)
+		} else {
+			result, class, err = s.nativeCombineWindowRecord(ctx, source, target, *window)
+		}
 		if err != nil {
 			return p, nil, err
 		}

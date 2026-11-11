@@ -40,13 +40,14 @@ func transferVersion(m Metadata) TransferVersion {
 // TransferMetric carries generation-local keys. Exact blocks and continuation
 // descriptors are copied verbatim; store-local identities never cross the wire.
 type TransferMetric struct {
-	Config       MetricConfig
-	Version      TransferVersion
-	Continuation bool
-	Keys         []RelayoutKV
-	PointDigest  string
-	Counts       []int
-	NativeSkip   *NativeSkip `json:",omitempty"`
+	WindowSkipped []NativeWindowSkip `json:",omitempty"`
+	Config        MetricConfig
+	Version       TransferVersion
+	Continuation  bool
+	Keys          []RelayoutKV
+	PointDigest   string
+	Counts        []int
+	NativeSkip    *NativeSkip `json:",omitempty"`
 }
 
 // TransferProof describes the complete staged result before durable publication.

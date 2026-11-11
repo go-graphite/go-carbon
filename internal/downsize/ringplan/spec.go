@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-graphite/go-carbon/internal/chunkstore"
 	hashing "github.com/go-graphite/go-carbon/internal/downsize/buckyhash"
 )
 
@@ -43,15 +44,16 @@ type input struct {
 }
 
 type specification struct {
-	Placements       map[string]Placement `json:"placements,omitempty"`
-	Version          int                  `json:"version"`
-	Cluster          string               `json:"cluster"`
-	Site             string               `json:"site"`
-	Old              topology             `json:"old"`
-	New              topology             `json:"new"`
-	Inputs           []input              `json:"inputs"`
-	AllowUnowned     bool                 `json:"allow_unowned,omitempty"`
-	PartialInventory bool                 `json:"partial_inventory,omitempty"`
+	NativeWindow     *chunkstore.NativeWindow `json:"native_window,omitempty"`
+	Placements       map[string]Placement     `json:"placements,omitempty"`
+	Version          int                      `json:"version"`
+	Cluster          string                   `json:"cluster"`
+	Site             string                   `json:"site"`
+	Old              topology                 `json:"old"`
+	New              topology                 `json:"new"`
+	Inputs           []input                  `json:"inputs"`
+	AllowUnowned     bool                     `json:"allow_unowned,omitempty"`
+	PartialInventory bool                     `json:"partial_inventory,omitempty"`
 }
 
 type ring struct {
@@ -159,6 +161,9 @@ func loadSpec(path string) (specification, *ring, *ring, string, error) {
 	}
 	if s.Version != version || s.Cluster == "" || s.Site == "" {
 		return s, nil, nil, "", errors.New("spec needs version=1, cluster and site")
+	}
+	if err := s.NativeWindow.Validate(); err != nil {
+		return s, nil, nil, "", err
 	}
 	old, err := newRing(&s.Old)
 	if err != nil {

@@ -63,6 +63,13 @@ func (s *NativeSource) Close() error {
 	return s.view.Close()
 }
 func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer) error {
+	return s.WriteWindow(ctx, names, out, nil)
+}
+
+func (s *NativeSource) WriteWindow(ctx context.Context, names []string, out io.Writer, window *NativeWindow) error {
+	if err := window.Validate(); err != nil {
+		return err
+	}
 	ctx, cancel := s.store.NativeTransferContext(ctx)
 	defer cancel()
 	release, err := s.store.admitNativeExport(ctx)
@@ -152,7 +159,7 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 	}
 	s.store.transferExport.requests.Add(1)
 	s.store.transferExport.metrics.Add(uint64(len(names)))
-	return writeTransferStream2(out, len(metas), func(i int) (TransferMetric, error) {
+	return writeTransferStreamWindow(out, len(metas), window, func(i int) (TransferMetric, error) {
 		if metas[i].ID == 0 {
 			return TransferMetric{Config: metas[i].MetricConfig, Version: TransferVersion{Name: metas[i].Name}}, nil
 		}
@@ -164,6 +171,9 @@ func (s *NativeSource) Write(ctx context.Context, names []string, out io.Writer)
 		if size.exceedsLimit() {
 			size.Reason = "name limit"
 			return TransferMetric{Config: m.MetricConfig, Version: transferVersion(m), Continuation: m.Continuation, NativeSkip: &size}, nil
+		}
+		if window != nil {
+			return s.store.nativeWindowTransfer(ctx, s.view, m, *window)
 		}
 		walk.arena.free = walk.arena.slab
 		return s.store.transferFromLimit(ctx, s.view, m, nativeMetricBytes, walk)

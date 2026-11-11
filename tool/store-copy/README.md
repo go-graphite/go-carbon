@@ -169,3 +169,56 @@ GRAPHITE_NATIVE_CACHE_EVAL=/private/evidence TMPDIR=/private/scratch \
 `GET /v1/native/stats` reports native wire/SST bytes, build/ingest time and creation
 lock wait/hold/max-hold. CPU/mutex/block profiles and Linux device/NIC/CPU counters
 must establish what binds before claiming sustained physical throughput.
+
+## Time-window gap fills
+
+Native export, transfer and combine accept an optional **[from, until)** window
+of archive timestamps. Both endpoints are required, in Unix seconds or whole
+second RFC3339. Use the target-wins engine for existing names:
+
+```sh
+store-copy plan --spec gap-spec.json --out gap-plan --apply \
+  --from 2026-01-01T00:00:00Z --until 2026-01-01T01:00:00Z
+store-copy run --plan gap-plan --state gap-window.jsonl \
+  --engine bulk --bulk-only --combine-existing --apply
+```
+
+Alternatively supply `--from` and `--until` on `run` with an existing range plan
+and a separate gap-fill journal. The window is hashed into new plans and range
+identities, checksummed into v3 transfer headers, and saved in the journal domain.
+Resumes inherit saved endpoints; changing them requires a separate operation.
+All peers must advertise `NativeTimeWindow`. Windowed runs require `--bulk-only`;
+metric fallback and whole-store replacement are refused.
+Without a window, the original v2 protocol and full-retention behavior remain.
+
+Each archive keeps the same normalized, ring-selected source values as the full
+native copy. Equal target timestamps win, including signed zero. Target points
+outside the window retain their exact timestamp and IEEE-754 value bits, including
+NaN payloads. A ring alias that would evict an outside target point fails closed. Sources with
+newer ring owners a full retention span beyond `from` also fail closed, since
+those omitted owners could invalidate target timestamps inside an expired window.
+An overlapping leading bucket has its timestamp before `from` and is skipped.
+A coarse bucket starting inside the window but ending after `until` is copied
+only when its entire source interval has elapsed and every immediate finer
+sample is present and non-NaN. Its stored coarse value stays authoritative;
+it is never recomputed. Other partial boundary buckets are skipped. Receipts
+persist `WindowSkipped` (ordinal, archive, timestamp, reason), also emitted as
+`boundary_skipped`; inspect these before declaring the gap covered.
+
+Only window points go over the wire. The source still checks retained groups for
+ring ownership and integrity; the receiver may read/reassemble the target history.
+Existing per-name and worker memory limits continue to apply. This reduces network
+bytes, without promising throughput proportional to the byte reduction.
+
+Local Apple M4 Max benchmark (32 names, 2M physical points per archive on both
+sides, real target-wins publication, in-memory Pebble, three 1× runs):
+
+| Mode | Median names/s | Wire bytes/name |
+| --- | ---: | ---: |
+| Full retention | 17.48 | 1,060,362 |
+| 1-hour window | 17.80 | 2,201 |
+
+The throughput ratio is 1.02×; wire reduction is 481.8×. This measures the existing
+heavy synthetic fixture, not production disk/NIC throughput. Run with
+`go test -p 1 -parallel 1 ./internal/chunkstore -run '^$' -bench
+'^BenchmarkNativeWindowHeavy$' -benchtime=1x -count=3`.

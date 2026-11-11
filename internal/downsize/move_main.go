@@ -24,6 +24,8 @@ import (
 )
 
 type options struct {
+	from, until                                                                      string
+	nativeWindow                                                                     *chunkstore.NativeWindow
 	engine                                                                           string
 	bulkOnly                                                                         bool
 	bulkCombine                                                                      bool
@@ -78,6 +80,8 @@ func event(kind string, fields map[string]any) {
 func MoveMain(args []string) error {
 	flags := flag.NewFlagSet("resize range", flag.ContinueOnError)
 	o := options{backlog: defaultBacklogPolicy()}
+	flags.StringVar(&o.from, "from", "", "native copy window start, Unix seconds or RFC3339 (inclusive)")
+	flags.StringVar(&o.until, "until", "", "native copy window end, Unix seconds or RFC3339 (exclusive)")
 	flags.StringVar(&o.plan, "plan", "", "committed ds-ring plan directory")
 	flags.StringVar(&o.engine, "engine", "metric", "metric or bulk (native absent-name SST engine; existing plan/journal)")
 	flags.BoolVar(&o.bulkOnly, "bulk-only", false, "finish native absence pass and leave deferred combines in the same journal")
@@ -126,6 +130,9 @@ func MoveMain(args []string) error {
 	return nil
 }
 func run(ctx context.Context, o options) error {
+	if (o.from != "" || o.until != "") && (o.engine != "bulk" || !o.bulkOnly) {
+		return errors.New("time windows require --engine bulk --bulk-only")
+	}
 	if (o.deferredOnly || o.deferredRange != "") && (o.engine != "bulk" || !o.bulkCombine || !o.bulkOnly) {
 		return errors.New("deferred scope requires --engine bulk --combine-existing --bulk-only")
 	}
@@ -168,6 +175,9 @@ func run(ctx context.Context, o options) error {
 	p, err := readPlan(o.plan)
 	if err != nil {
 		return err
+	}
+	if p.Spec.NativeWindow != nil {
+		return errors.New("windowed plans require the native bulk engine")
 	}
 	if o.reconcile && (len(p.Whole) > 0 || p.Spec.AllowUnowned || p.Spec.Old.Replicas > 1 || p.Spec.New.Replicas > 1) {
 		return errors.New("--reconcile requires a single-copy retired-source range plan")

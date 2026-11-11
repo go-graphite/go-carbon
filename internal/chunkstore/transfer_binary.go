@@ -34,6 +34,13 @@ func WriteTransfer2(w io.Writer, records []TransferMetric) error {
 }
 
 func writeTransferStream2(w io.Writer, count int, next func(int) (TransferMetric, error)) error {
+	return writeTransferStreamWindow(w, count, nil, next)
+}
+
+func writeTransferStreamWindow(w io.Writer, count int, window *NativeWindow, next func(int) (TransferMetric, error)) error {
+	if err := window.Validate(); err != nil {
+		return err
+	}
 	h := sha256.New()
 	// Sparse records contain many tiny lengths and descriptors. Coalesce them
 	// before both hashing and writing, rather than updating SHA for each field.
@@ -48,7 +55,13 @@ func writeTransferStream2(w io.Writer, count int, next func(int) (TransferMetric
 	u32 := func(n uint32) { binary.BigEndian.PutUint32(data[:4], n); write(data[:4]) }
 	u64 := func(n uint64) { binary.BigEndian.PutUint64(data[:], n); write(data[:]) }
 	blob := func(v []byte) { u32(uint32(len(v))); write(v) }
-	write([]byte("BKTFR002"))
+	if window == nil {
+		write([]byte("BKTFR002"))
+	} else {
+		write([]byte("BKTFR003"))
+		u64(uint64(window.From))
+		u64(uint64(window.Until))
+	}
 	u32(uint32(count))
 	for i := range count {
 		r, nextErr := next(i)
@@ -93,6 +106,14 @@ func writeTransferStream2(w io.Writer, count int, next func(int) (TransferMetric
 			u64(uint64(skip.ArchiveSlots))
 			u64(uint64(skip.MemoryBytes))
 			blob([]byte(skip.Reason))
+		}
+		if window != nil {
+			u32(uint32(len(r.WindowSkipped)))
+			for _, skip := range r.WindowSkipped {
+				u32(uint32(skip.Archive))
+				u64(uint64(skip.Timestamp))
+				blob([]byte(skip.Reason))
+			}
 		}
 	}
 	if err != nil {
