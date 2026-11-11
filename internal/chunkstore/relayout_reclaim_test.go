@@ -145,8 +145,21 @@ func TestRelayoutReclaimHalfHeadroomAndLiveThreshold(t *testing.T) {
 		}
 	}
 	before := s.RelayoutStats()
-	if before.Reclaims < 3 || before.UnreclaimedBytes == 0 {
+	if before.Reclaims < 3 {
 		t.Fatalf("no capacity-triggered batches: %+v", before)
+	}
+	// Pressure sampling can leave the last metric exactly on a reclaim boundary.
+	// Seed a known pending group for the live-threshold check below.
+	if err := s.reclaimRelayout(context.Background(), true, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetRelayoutLimits(100, before.MaxCompactionDebt); err != nil {
+		t.Fatal(err)
+	}
+	m := createTestMetric(t, s, "budget.live")
+	moveReclaimMetric(t, s, codec, m)
+	if pending := s.RelayoutStats().UnreclaimedBytes; pending != 20 {
+		t.Fatalf("live threshold fixture: pending=%d, want 20", pending)
 	}
 	// A live setting change must apply even while the shared byte pacer waits.
 	s.relayout.rate.Store(1)
