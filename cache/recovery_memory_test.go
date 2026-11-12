@@ -16,14 +16,19 @@ import (
 
 func writeMemoryCheckpoint(t *testing.T, dir, root string, names int) {
 	t.Helper()
+	data := make([]points.Point, 11)
+	for i := range data {
+		data[i] = points.Point{Timestamp: 1700000000 + int64(i), Value: float64(i)}
+	}
+	writeMemoryCheckpointData(t, dir, root, names, data)
+}
+
+func writeMemoryCheckpointData(t *testing.T, dir, root string, names int, data []points.Point) {
+	t.Helper()
 	builder := recovery.NewBuilder(func(string) bool { return true })
 	writer, err := recovery.NewWriterFormat(filepath.Join(dir, recovery.CacheName(recovery.FormatBlocks, "1.2.bin")), 0, 1<<20, builder, recovery.FormatBlocks)
 	if err != nil {
 		t.Fatal(err)
-	}
-	data := make([]points.Point, 11)
-	for i := range data {
-		data[i] = points.Point{Timestamp: 1700000000 + int64(i), Value: float64(i)}
 	}
 	prefix := strings.Repeat("long_prefix.", 30)
 	if err := writer.WriteSegments(1024, 4, func(part int, segment *recovery.Segment) error {

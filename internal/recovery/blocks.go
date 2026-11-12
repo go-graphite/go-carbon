@@ -689,6 +689,7 @@ func (in *Index) VisitMetrics(visit func(slot uint64, name string) error) error 
 	}
 	heads := in.headSlots()
 	var cur []byte
+	released := 0
 	for i := range in.names.blocks {
 		b := &in.names.blocks[i]
 		id := in.names.first[i]
@@ -718,6 +719,15 @@ func (in *Index) VisitMetrics(visit func(slot uint64, name string) error) error 
 				cur = append(cur[:s], b.data[pos:pos+int(l)]...)
 				pos += int(l)
 			}
+		}
+		if in.mappedCache && in.v3 {
+			// Each callback has finished copying its points. Drop complete file
+			// pages once per block, rather than retaining the entire dump beside
+			// the growing cache or issuing one syscall per metric. Other readers
+			// can still fault these immutable bytes back in.
+			end := int(b.base) + int(b.starts[len(b.starts)-1])
+			discardMappedPages(in.source[0][released:end])
+			released = end
 		}
 	}
 	// Metrics without dump records, and any slot the pass above missed.

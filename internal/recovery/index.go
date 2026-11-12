@@ -461,6 +461,9 @@ type Index struct {
 	slots, metrics, points      uint64
 	recordCounts, recordOffsets [2]uint64
 	newCount, newOffset         uint64
+	// Set only by Bundle, whose cache source is an immutable file mapping.
+	// OpenFormat also accepts Go buffers, which must never receive madvise.
+	mappedCache bool
 }
 
 func Open(index, cache, wal []byte) (*Index, error) {

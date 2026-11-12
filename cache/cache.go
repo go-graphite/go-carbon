@@ -152,6 +152,8 @@ type Shard struct {
 	log shardLog
 	// claimData decodes saved points a claim appends, under mu.
 	claimData []points.Point
+	// claimEncoded is reusable encoding scratch, also protected by mu.
+	claimEncoded []byte
 	// bytesQuarters tracks the lower quartile of popped items' compact
 	// lengths, in quarter bytes. A new item starts with that capacity:
 	// popping deletes the item, so every writeout would otherwise regrow its

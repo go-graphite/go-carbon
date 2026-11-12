@@ -3,6 +3,7 @@ package cache
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -339,7 +340,18 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 		return err
 	}
 	values := newItem(name, 0)
-	values.compact.appendPoints(data)
+	// Grow one bounded scratch buffer per shard, not a succession of private
+	// buffers for every saved metric. Only the final encoding is retained by
+	// the item. Copy all encoder state, including its unfinished word; buf is
+	// detached before the shard reuses scratch for the next claim.
+	encoded := compactPoints{buf: shard.claimEncoded[:0]}
+	encoded.appendPoints(data)
+	values.compact = encoded
+	values.compact.buf = slices.Clone(encoded.buf)
+	shard.claimEncoded = encoded.buf[:0]
+	if cap(shard.claimEncoded) > maxClaimEncodeScratch {
+		shard.claimEncoded = nil
+	}
 	if cap(shard.claimData) > maxClaimScratch {
 		shard.claimData = nil
 	}
@@ -377,6 +389,10 @@ func (c *Cache) claimLocked(r *pendingRecovery, shard *Shard, name string, slot 
 
 // maxClaimScratch bounds the decode buffer a shard keeps between claims.
 const maxClaimScratch = 4096
+
+// At most 64MiB of encoding scratch across the 1024 cache shards. Larger
+// individual metrics still restore correctly, without retaining their scratch.
+const maxClaimEncodeScratch = 64 << 10
 
 // PendingOutstanding reports saved metrics not yet confirmed on disk.
 func (c *Cache) PendingOutstanding() uint64 {
