@@ -9,6 +9,17 @@ import (
 	"github.com/cockroachdb/pebble"
 )
 
+// An iterator pins native SST index blocks even when they exceed a cache shard's
+// capacity and cannot be cached. Per-request render fan-out is not a store-wide
+// bound: thousands of cold requests used to allocate a private 158 MiB index
+// each. Admit before opening a view and retain the slot until all iterators and
+// value handles close. Queued callers hold no Pebble buffers. Block loading is
+// separately bounded for writeout and background readers as well.
+const (
+	maxConcurrentStoreReads = 32
+	maxConcurrentBlockLoads = 16
+)
+
 // Now is the clock Fetch chooses archives and clamps ranges by.
 func (s *Store) Now() time.Time { return s.now() }
 
@@ -31,6 +42,10 @@ func (s *Store) fetch(ctx context.Context, name string, fromTime, untilTime int,
 	if !s.catalogMembership.mayContain(name) {
 		return nil, ErrNotFound
 	}
+	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+		return nil, err
+	}
+	defer s.readSlots.Release(1)
 	// The metadata cache answers only for state committed before the view
 	// opens, judged by the epoch captured first (see stateCache).
 	cache := s.stateCache

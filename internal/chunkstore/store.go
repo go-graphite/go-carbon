@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/fifo"
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 
 	"github.com/cockroachdb/pebble"
@@ -215,6 +216,7 @@ func (o Options) WithFS(fs vfs.FS) Options {
 }
 
 type Store struct {
+	readSlots             *fifo.Semaphore
 	nativeCounters        nativeCounters
 	nativeReady           func() error // installed before listeners; native/shared ownership only
 	nativePendingSnapshot func() (map[string]struct{}, error)
@@ -458,7 +460,7 @@ func Open(dir string, options Options) (*Store, error) {
 	if options.MemTableSize == 0 {
 		options.MemTableSize = 64 << 20
 	}
-	s := &Store{now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
+	s := &Store{readSlots: fifo.NewSemaphore(maxConcurrentStoreReads), now: options.Now, writeOptions: pebble.Sync, exactBlocks: options.ExactBlocks, fileReadMu: new([32768]sync.RWMutex), deferredSync: deferredSync, fsStats: counting, compactionPacing: pacing}
 	s.maintenanceWait = options.MaintenanceWait
 	s.maintenanceCtx, s.maintenanceStop = context.WithCancel(context.Background())
 	// Flush pacing starts once the store is open: WAL recovery and WAL moves
@@ -497,6 +499,7 @@ func Open(dir string, options Options) (*Store, error) {
 	s.referenceFormat.Store(format >= 12)
 	s.compactionWorkers.Store(int64(max(1, options.CompactionWorkers)))
 	opts := &pebble.Options{MemTableSize: options.MemTableSize, Comparer: storeComparer, Merger: chunkMerger, FS: fs,
+		LoadBlockSema:            fifo.NewSemaphore(maxConcurrentBlockLoads),
 		MaxConcurrentCompactions: func() int { return int(s.compactionWorkers.Load()) },
 		EventListener:            &pebble.EventListener{WriteStallBegin: s.writeStallBegin, WriteStallEnd: s.writeStallEnd, TableCreated: pacing.tableCreated},
 	}
@@ -1581,6 +1584,10 @@ func (s *Store) Metadata(ctx context.Context, name string) (Metadata, error) {
 	if !s.catalogMembership.mayContain(name) {
 		return Metadata{}, ErrNotFound
 	}
+	if err := s.readSlots.Acquire(ctx, 1); err != nil {
+		return Metadata{}, err
+	}
+	defer s.readSlots.Release(1)
 	// Like Fetch, read at one committed view without waiting for a writer's
 	// stripe. The epoch prevents a cached state newer than that view from
 	// being used, and prevents a concurrent mutation from accepting a fill.
