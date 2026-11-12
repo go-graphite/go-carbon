@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"time"
@@ -31,8 +32,15 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 	}
 	slices.Sort(stripes)
 	stripes = slices.Compact(stripes)
-	// A consistent view collects keys without excluding writers. Validation
-	// below uses a new view after acquiring the mutation stripes.
+	// Capture before opening the preparation view. If a stripe has not
+	// mutated by the time we own it, that view's validated metadata is still
+	// current. Avoid doing the same cold catalog/revision IO under the stripe.
+	epochs := make([]uint64, len(stripes))
+	for i, stripe := range stripes {
+		epochs[i] = s.mutationEpoch[stripe].Load()
+	}
+	// A consistent view collects keys without excluding writers. A changed or
+	// saturated stripe requires a fresh validation view after acquiring it.
 	b := s.db.NewBatch()
 	defer b.Close()
 	spans, results, err := s.prepareExpirationDeletes(ctx, b, expected)
@@ -50,8 +58,10 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 			_ = view.Close()
 		}
 	}()
-	for _, stripe := range stripes {
+	stable := make(map[uint64]bool, len(stripes))
+	for i, stripe := range stripes {
 		s.metricMu[stripe].Lock()
+		stable[stripe] = epochs[i] != math.MaxUint64 && epochs[i] == s.mutationEpoch[stripe].Load()
 	}
 	for _, m := range expected {
 		s.beginStateMutation(m.Name)
@@ -66,13 +76,19 @@ func (s *Store) DeleteBatchIfUnchanged(ctx context.Context, expected []Metadata)
 	}()
 	removed := make([]Metadata, 0, len(expected))
 	changed := false
-	view = s.db.NewReadView()
-	reader.reader = view
 	for i, want := range expected {
 		if spans[i].end == 0 {
 			continue
 		}
-		m, err := reader.metadata(want.Name)
+		m := spans[i].meta
+		var err error
+		if !stable[s.metricStripe(want.Name)] {
+			if view == nil {
+				view = s.db.NewReadView()
+				reader.reader = view
+			}
+			m, err = reader.metadata(want.Name)
+		}
 		if errors.Is(err, ErrNotFound) {
 			results[i] = err
 			changed = true
@@ -161,7 +177,10 @@ func expirationMatches(m, want Metadata) bool {
 	return m.ID == want.ID && m.Generation == want.Generation && m.Revision == want.Revision && m.FileMigration != FileCleanupPending
 }
 
-type expirationSpan struct{ start, end int }
+type expirationSpan struct {
+	start, end int
+	meta       Metadata
+}
 
 const expirationStripesPerPartition = 8
 
@@ -193,6 +212,7 @@ func (s *Store) prepareExpirationDeletes(ctx context.Context, batch *pebble.Batc
 			continue
 		}
 		spans[i].start = batch.Len()
+		spans[i].meta = m
 		if err := s.appendExpirationDelete(ctx, batch, &reader, m); err != nil {
 			return nil, nil, err
 		}
