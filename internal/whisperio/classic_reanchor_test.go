@@ -109,16 +109,21 @@ func TestClassicReanchorOnlyConflictingArchive(t *testing.T) {
 	r := []store.Retention{{Step: 10, Count: 60}, {Step: 60, Count: 60}}
 	kv, m := absoluteClassicImage(t, r, [][]store.Point{{{Timestamp: 999780, Value: 6}, {Timestamp: 999990, Value: 3}}, {{Timestamp: 999600, Value: 123}, {Timestamp: 999960, Value: 456}}})
 	codec := &ContinuationCodec{}
-	if err := codec.Update(context.Background(), kv, m, []store.Point{{Timestamp: 999800, Value: 1}}, 0, classicTestClock, nil); err != nil {
+	if err := codec.Update(context.Background(), kv, m, []store.Point{{Timestamp: 999800, Value: 1}}, 600, classicTestClock, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := map[string][]byte{}
 	for k, v := range kv {
 		before[k] = bytes.Clone(v)
 	}
-	if err := codec.Update(context.Background(), kv, m, []store.Point{{Timestamp: 999980, Value: 9}}, 0, classicTestClock, nil); err != nil {
+	stats := ClassicReanchors()
+	if err := codec.Update(context.Background(), kv, m, []store.Point{{Timestamp: 999980, Value: 9}}, 600, classicTestClock, nil); err != nil {
 		t.Fatal(err)
 	}
+	if ClassicReanchors().ReanchoredArchives-stats.ReanchoredArchives != 1 {
+		t.Fatal("expected a fine-archive re-anchor")
+	}
+	requireClassicPoints(t, codec, kv, m, []store.Point{{Timestamp: 999780, Value: 6}, {Timestamp: 999990, Value: 3}, {Timestamp: 999980, Value: 9}})
 	for k, v := range before {
 		if len(k) == 20 && k[9] == 'p' && k[11] == 1 && !bytes.Equal(v, kv[k]) {
 			t.Fatal("sibling archive changed")
@@ -128,6 +133,49 @@ func TestClassicReanchorOnlyConflictingArchive(t *testing.T) {
 		if len(k) == 20 && k[9] == 'p' && k[11] == 1 && before[k] == nil {
 			t.Fatal("sibling group added")
 		}
+	}
+}
+
+func TestClassicReanchorUnbufferedWrites(t *testing.T) {
+	kv, snap := mixedClassicFixture(t)
+	codec := &ContinuationCodec{keepTailReads: true}
+	input := []store.Point{{Timestamp: 999980, Value: 9}}
+	if err := codec.Update(context.Background(), kv, snap.Metadata, input, -1, classicTestClock, nil); err != nil {
+		t.Fatal(err)
+	}
+	requireClassicPoints(t, codec, kv, snap.Metadata, append(snap.Archives[0].Points, input...))
+}
+
+func TestClassicReanchorPropagationConflict(t *testing.T) {
+	ctx := context.Background()
+	clock := func() time.Time { return time.Unix(1000400, 0) }
+	kv, m := absoluteClassicImage(t, []store.Retention{{Step: 10, Count: 60}, {Step: 60, Count: 60}}, [][]store.Point{{{Timestamp: 1000020, Value: 123}}, {{Timestamp: 997800, Value: 17}}})
+	codec := &ContinuationCodec{}
+	if err := codec.Update(ctx, kv, m, []store.Point{{Timestamp: 999600, Value: 1}}, 3600, clock, nil); err != nil {
+		t.Fatal(err)
+	}
+	var input []store.Point
+	for i := 0; i < 6; i++ {
+		input = append(input, store.Point{Timestamp: 1000200 + int64(i*10), Value: 2})
+	}
+	before := ClassicReanchors()
+	if err := codec.Update(ctx, kv, m, input, -1, clock, nil); err != nil {
+		t.Fatal(err)
+	}
+	if ClassicReanchors().ReanchoredArchives-before.ReanchoredArchives != 1 {
+		t.Fatal("coarse propagation did not repair")
+	}
+	got, err := codec.Snapshot(ctx, kv, m, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []store.Point{{Timestamp: 997800, Value: 17}, {Timestamp: 999600, Value: 1}, {Timestamp: 1000200, Value: 12}} {
+		if !slices.Contains(got.Archives[1].Points, want) {
+			t.Fatalf("coarse point lost: %+v in %+v", want, got.Archives[1].Points)
+		}
+	}
+	if !slices.Contains(got.Archives[0].Points, store.Point{Timestamp: 1000020, Value: 123}) {
+		t.Fatal("retry lost unrelated fine history")
 	}
 }
 

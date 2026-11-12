@@ -873,7 +873,8 @@ func (f *continuationFile) writeAt(data []byte, offset int64) (int, error) {
 					// The caller discards this private attempt, re-anchors only
 					// this archive, and retries with freshly calculated offsets.
 					if (int64(timestamp)-old)%(int64(a.Step)*int64(a.Count)) != 0 {
-						return used, &classicSlotConflict{archive: archive}
+						f.fs.classicConflict = &classicSlotConflict{archive: archive}
+						return used, f.fs.classicConflict
 					}
 				}
 				if timestamp == 0 {

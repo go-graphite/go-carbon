@@ -28,6 +28,7 @@ type continuationFiles struct {
 	// Ordinary updates must not overwrite a timestamp from a different ring
 	// position in an old, incorrectly anchored classic image.
 	guardClassicWrites    bool
+	classicConflict       *classicSlotConflict
 	keepDuplicatePlanning bool
 	sidecarDirty          bool
 	kv                    store.ContinuationIO
