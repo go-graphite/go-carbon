@@ -598,6 +598,20 @@ func (s *Store) cleanupNativeIntent(identity string) error {
 
 func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions []int, summaries []SidecarSummary, receipt *NativeReceipt, tables *nativeTables) error {
 	waitBegan := time.Now()
+	// Match Create's stripe -> allocation order. Create checks absence before
+	// taking mu, so publication must also serialize on the affected names.
+	names := make([]string, 0, len(metas))
+	for _, m := range metas {
+		if m.ID != 0 {
+			names = append(names, m.Name)
+		}
+	}
+	unlockNames := s.lockTransfer(names)
+	defer func() {
+		if unlockNames != nil {
+			unlockNames()
+		}
+	}()
 	s.mu.Lock()
 	lockedBegan := time.Now()
 	s.nativeCounters.publishWait.Add(uint64(lockedBegan.Sub(waitBegan)))
@@ -664,6 +678,8 @@ func (s *Store) publishNative(ctx context.Context, metas []Metadata, positions [
 	}
 	s.mu.Unlock()
 	locked = false
+	unlockNames()
+	unlockNames = nil
 	held := uint64(time.Since(lockedBegan))
 	s.nativeCounters.publishHold.Add(held)
 	for old := s.nativeCounters.maxPublishHold.Load(); held > old; old = s.nativeCounters.maxPublishHold.Load() {
