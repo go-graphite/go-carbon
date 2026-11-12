@@ -3,6 +3,7 @@ package carbonserver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -75,7 +76,7 @@ func TestFetchWorkersMatchSerial(t *testing.T) {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
 			l.maxFetchDataGoroutines = limit
 			for _, n := range []int{0, 1, len(files)} {
-				got, err := l.fetchData("fetch.*", "alias", files[:n], leafs[:n], nil, 1789999872, 1790000000)
+				got, err := l.fetchData(context.Background(), "fetch.*", "alias", files[:n], leafs[:n], nil, 1789999872, 1790000000)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -126,7 +127,7 @@ func TestFetchWorkersBoundConcurrency(t *testing.T) {
 	defer once.Do(func() { close(release) })
 	done := make(chan int, 1)
 	go func() {
-		got, _ := l.fetchData("fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
+		got, _ := l.fetchData(context.Background(), "fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
 		done <- len(got)
 	}()
 	timer := time.NewTimer(2 * time.Second)
@@ -149,6 +150,59 @@ func TestFetchWorkersBoundConcurrency(t *testing.T) {
 	}
 }
 
+// One expanded target must not keep reading and retaining every series after
+// its frontend times out. Reads already in progress may finish; queued ones
+// must not start, and the cancelled result must not be emitted or cached.
+func TestFetchWorkersCancelExpandedTarget(t *testing.T) {
+	for _, workers := range []int{1, 3} {
+		t.Run(fmt.Sprint(workers), func(t *testing.T) {
+			l, files, leafs := fetchWorkersFixture(t, 17)
+			l.maxFetchDataGoroutines = workers
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			entered := make(chan struct{}, len(files))
+			release := make(chan struct{})
+			var once sync.Once
+			defer once.Do(func() { close(release) })
+			l.cacheGet = func(string) []points.Point {
+				entered <- struct{}{}
+				<-release
+				return nil
+			}
+			done := make(chan error, 1)
+			go func() {
+				got, err := l.fetchData(ctx, "fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
+				if len(got) != 0 {
+					err = fmt.Errorf("cancelled render retained %d responses", len(got))
+				}
+				done <- err
+			}()
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			for range workers {
+				select {
+				case <-entered:
+				case <-timer.C:
+					t.Fatal("fetch workers did not start")
+				}
+			}
+			cancel()
+			once.Do(func() { close(release) })
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("fetch error = %v, want cancellation", err)
+				}
+				if len(entered) != 0 {
+					t.Fatalf("started %d additional reads after cancellation", len(entered))
+				}
+			case <-timer.C:
+				t.Fatal("cancelled fetch did not finish")
+			}
+		})
+	}
+}
+
 func BenchmarkFetchWorkers(b *testing.B) {
 	for _, count := range []int{1, 32, 256} {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
@@ -158,7 +212,7 @@ func BenchmarkFetchWorkers(b *testing.B) {
 			b.ResetTimer()
 			b.RunParallel(func(pb *testing.PB) {
 				for pb.Next() {
-					got, err := l.fetchData("fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
+					got, err := l.fetchData(context.Background(), "fetch.*", "", files, leafs, nil, 1789999872, 1790000000)
 					if err != nil || len(got) != count {
 						b.Fatal("incomplete fetch", len(got), err)
 					}
