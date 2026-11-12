@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +38,7 @@ func (*pausedExpirationCodec) Update(_ context.Context, io ContinuationIO, _ Met
 // Finish a mutation while key collection is paused, pinning the optimistic
 // window instead of depending on the scheduler to race the two operations.
 func TestExpirationPreparationRevalidatesConcurrentMutation(t *testing.T) {
-	for _, action := range []string{"update", "recreate"} {
+	for _, action := range []string{"update", "recreate", "saturated-update", "saturated-recreate"} {
 		t.Run(action, func(t *testing.T) {
 			codec := &pausedExpirationCodec{entered: make(chan struct{}), release: make(chan struct{})}
 			s, now := openTestStore(t, "/store", Options{fs: vfs.NewMem(), ExactBlocks: true, TimeBuckets: true, Continuation: codec, MetadataCacheSize: 4 << 20})
@@ -44,6 +46,9 @@ func TestExpirationPreparationRevalidatesConcurrentMutation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			old, peer := createTestMetric(t, s, "changed"), createTestMetric(t, s, "unchanged")
+			if strings.HasPrefix(action, "saturated-") {
+				s.mutationEpoch[s.metricStripe(old.Name)].Store(math.MaxUint64)
+			}
 			done := make(chan error, 1)
 			go func() {
 				outcomes, err := s.DeleteBatchIfUnchanged(ctx, []Metadata{old, peer})
@@ -60,7 +65,7 @@ func TestExpirationPreparationRevalidatesConcurrentMutation(t *testing.T) {
 			mutated := make(chan error, 1)
 			go func() {
 				var err error
-				if action == "update" {
+				if strings.HasSuffix(action, "update") {
 					err = s.UpdateMany(ctx, old.Name, []Point{{Timestamp: int64(now), Value: 7}})
 				} else if err = s.Delete(ctx, old.Name); err == nil {
 					_, err = s.Create(ctx, old.MetricConfig)
@@ -87,7 +92,7 @@ func TestExpirationPreparationRevalidatesConcurrentMutation(t *testing.T) {
 			if err != nil || fresh.ID == old.ID && fresh.Generation == old.Generation && fresh.Revision == old.Revision {
 				t.Fatalf("lost mutation: %+v %v", fresh, err)
 			}
-			if action == "update" {
+			if strings.HasSuffix(action, "update") {
 				io := s.newContinuationIO(ctx, s.db, nil, fresh)
 				value, err := io.Get(ContinuationBucketKey(7, []byte("new")))
 				io.Close()

@@ -1,5 +1,59 @@
 # Measuring shared-store expiration
 
+## HTTP read latency during a large sweep
+
+`BenchmarkExpirationHTTPReadLatency` runs real HTTP render (exact and glob),
+find and info requests against a two-million-name store while the production
+expiration driver deletes 500000 old metrics. Its 600 requests/second use
+absolute arrivals, include scheduling/queueing delay, and check live responses
+against pre-delete responses. Only unordered series records are sorted; values,
+timestamps and absence flags must match exactly. Discovery refresh runs every
+30s, including during deletion. The fixture is intentionally sparse: it isolates
+catalog/revision IO rather than representing a production store's chunk density.
+Use the continuation benchmark below for dense history and concurrent ingestion.
+
+```sh
+export GOTOOLCHAIN=go1.27.0 GOFLAGS=-mod=vendor GOMAXPROCS=4
+export EXPIRATION_SCALE_DIR="$HOME/expiration-benchmark/seed"
+mkdir -p "$EXPIRATION_SCALE_DIR"
+for increment in 1 2; do
+    EXPIRATION_SCALE_ADD=1000000 go test ./internal/chunkstore \
+        -run '^TestPrepareExpirationScaleStore$' -count=1 -timeout=5m
+done
+go test -c ./carbon -o "$HOME/expiration-benchmark/carbon.test"
+# Each benchmark consumes its copy. Never use a production store directory.
+cp -R "$EXPIRATION_SCALE_DIR" "$HOME/expiration-benchmark/http-run"
+EXPIRATION_READ_DIR="$HOME/expiration-benchmark/http-run" \
+EXPIRATION_READ_UNCACHED=1 EXPIRATION_READ_SECONDS=30 \
+EXPIRATION_READ_DELETE_RATE=5000 \
+    "$HOME/expiration-benchmark/carbon.test" -test.run '^$' \
+    -test.bench '^BenchmarkExpirationHTTPReadLatency$' -test.benchtime=1x \
+    -test.timeout=8m -test.cpuprofile=http.cpu \
+    -test.mutexprofile=http.mutex -test.blockprofile=http.block
+```
+
+`EXPIRATION_READ_DELETE_WORKERS` defaults to4, `EXPIRATION_READ_DELETES` to500000,
+and `EXPIRATION_READ_DELETE_RATE` to50000. `EXPIRATION_READ_UNCACHED=1` exercises
+storage on every render; unset it to exercise the warmed query cache too. The
+off/on/recovery phases report p50/p99 by request kind, offered/completed traffic,
+SST read calls/bytes, deletes/second and the on/off p99 ratio. The deletion phase
+includes finishing the catalog scan after reaching the delete cap. A guarded or
+incomplete sweep fails. Delete disposable fixtures and binaries after measurement.
+
+Compare identical fixtures and interleave controls on shared machines. Repeated
+local passes are evidence for a canary, not a production latency guarantee.
+The rollout gate is on/off p99 <=1.2x with >=2000 deletes/second, followed by a
+read-heavy production canary under an independent host-local watchdog.
+
+Expiration reuses metadata collected with the prepared point deletes only if
+the corresponding mutation stripe's counter is unchanged when locked. A changed
+or saturated counter forces fresh metadata validation. This removes duplicate
+cold catalog/revision seeks without weakening generation/revision fencing.
+Reads take no mutation stripes. Existing partitioned 32-name batches, paced
+budget, L0/compaction-debt/write-stall guards and query-cache TTL remain intact.
+
+## Concurrent ingestion and dense history
+
 `BenchmarkExpirationContention` runs the expiration driver against a generated
 Pebble store while eight writers offer 5400 one-point updates/second and eight
 readers offer 600 five-minute fetches/second. Arrivals use absolute schedules,
