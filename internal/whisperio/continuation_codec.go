@@ -651,7 +651,10 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 	}
 	base := kv
 	var buffer *continuationPointBuffer
-	coalesce := coalescePointWrites && len(m.Retentions) > 1 && len(input) >= 2*(m.Retentions[1].Step/m.Retentions[0].Step)
+	// Even a batch shorter than one rollup interval can repeatedly update the
+	// same 128-point group. Flushing each intermediate value multiplies encode
+	// and commit work precisely when writeout batches are small.
+	coalesce := coalescePointWrites && len(m.Retentions) > 1 && len(input) > 1
 	if coalesce || !c.keepTailReads {
 		buffer = &continuationPointBuffer{ContinuationIO: kv, cacheReads: !c.keepTailReads, writeThrough: !coalesce}
 		kv = buffer
