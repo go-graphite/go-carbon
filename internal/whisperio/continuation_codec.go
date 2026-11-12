@@ -645,6 +645,7 @@ func (c *ContinuationCodec) Update(ctx context.Context, kv store.ContinuationIO,
 	timer.Enter(stagetime.Load)
 	fs := newContinuationFiles(kv, false).withClock(clock)
 	fs.reuseBlockKeys = c.ReuseBlockKeys
+	fs.guardClassicWrites = true
 	fs.keepDuplicatePlanning = c.keepDuplicatePlanning
 	fs.timer = timer
 	if err := fs.prefetchNames(); err != nil {

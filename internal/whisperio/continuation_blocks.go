@@ -865,6 +865,17 @@ func (f *continuationFile) writeAt(data []byte, offset int64) (int, error) {
 				count := min(limit-position, 12-within)
 				copy(record[within:within+count], data[used:used+count])
 				timestamp := binary.BigEndian.Uint32(record[:4])
+				if f.fs.guardClassicWrites && timestamp != 0 && group.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0 {
+					old := group.Points[slot].Timestamp
+					// A healthy circular slot can change its value or advance by
+					// whole archive retentions. Any other timestamp displacement
+					// means the physical image disagrees with Whisper's anchor.
+					// Return an error so the store discards the entire indexed
+					// batch and the persister requeues it, preserving history.
+					if (int64(timestamp)-old)%(int64(a.Step)*int64(a.Count)) != 0 {
+						return used, fmt.Errorf("classic archive %d slot %d: unrelated physical history (%d replaced by %d); repair archive anchors before writing", archive, groupIndex*128+slot, old, timestamp)
+					}
+				}
 				if timestamp == 0 {
 					group.Present[slot/64] &^= uint64(1) << uint(slot%64)
 					group.Points[slot] = store.Point{}
