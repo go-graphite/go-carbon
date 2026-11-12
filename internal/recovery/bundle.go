@@ -326,6 +326,13 @@ func OpenBundle(dir, root string) (_ *Bundle, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// Validation has touched every source byte. Do not retain a resident second
+	// copy of the checkpoint while restore builds the live cache. These remain
+	// valid read-only mappings: pending readers fault unchanged bytes back in.
+	for _, data := range b.maps {
+		discardMappedPages(data)
+	}
+	b.index.mappedCache = true
 	b.cleanup = runtime.AddCleanup(b, func(m mappings) { _ = m.close() }, b.maps)
 	return b, nil
 }
@@ -368,6 +375,7 @@ func (b *Bundle) ReadCompactAs(slot uint64, name string, tail []points.Point, he
 // VisitMetrics visits every saved metric once; see Index.VisitMetrics.
 func (b *Bundle) VisitMetrics(visit func(slot uint64, name string) error) error {
 	defer runtime.KeepAlive(b)
+	defer discardMappedPages(b.maps[0]) // also on cancellation or callback error
 	return b.index.VisitMetrics(visit)
 }
 

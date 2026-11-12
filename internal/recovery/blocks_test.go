@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"math/rand/v2"
@@ -753,6 +754,64 @@ func TestBlocksIndexRunsAcrossBlocks(t *testing.T) {
 		if err != nil || !samePoints(p.Data, c.want(name)) {
 			t.Fatal("read", name, err)
 		}
+	}
+}
+
+// Residency hints must preserve borrowed records, cross-block chains and
+// concurrent pending reads, including after an interrupted visit and retirement.
+func TestBlocksMappedPagesRemainReadable(t *testing.T) {
+	smallBlocks(t, 16<<10, 16<<10)
+	r := rand.New(rand.NewPCG(13, 7))
+	c := randomBlocksCase(r, 200, 4)
+	for _, name := range c.names {
+		c.records[name] = append(c.records[name], randomSeries(r, 300))
+	}
+	dir, root := t.TempDir(), t.TempDir()
+	writeBlocksCheckpoint(t, dir, root, c, 4)
+	b, err := OpenBundle(dir, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	check := func(slot uint64, name string) error {
+		p, err := b.Read(slot)
+		if err != nil {
+			return err
+		}
+		if !samePoints(p.Data, c.want(name)) {
+			return fmt.Errorf("changed points: %s", name)
+		}
+		return nil
+	}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			for _, name := range c.names {
+				slot, ok, err := b.Find(name)
+				if err != nil || !ok {
+					t.Errorf("find %s: %v", name, err)
+					return
+				}
+				if err := check(slot, name); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		})
+	}
+	stop := errors.New("stop visit")
+	if err := b.VisitMetrics(func(uint64, string) error { return stop }); !errors.Is(err, stop) {
+		t.Error(err)
+	}
+	if err := b.VisitMetrics(check); err != nil {
+		t.Error(err)
+	}
+	wg.Wait()
+	if err := b.Retire(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.VisitMetrics(check); err != nil {
+		t.Fatal("retired mapping:", err)
 	}
 }
 
