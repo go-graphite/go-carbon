@@ -85,3 +85,15 @@ func (s *TransferSource) ExportTransferLimit(ctx context.Context, names []string
 func (s *TransferSource) Snapshot(ctx context.Context, name string) (Snapshot, error) {
 	return s.store.Snapshot(ctx, name)
 }
+
+// ListCatalogPage exposes the same discovery catalogue as the live read API.
+// The source retains the exclusive database lock for the entire enumeration.
+func (s *TransferSource) ListCatalogPage(ctx context.Context, prefix, after string, limit int) ([]Metadata, error) {
+	return s.store.ListCatalogPage(ctx, prefix, after, limit)
+}
+
+// PinNativeMergeSource reuses the committed-history native export path on an
+// exclusively owned read-only source. Close the pin before closing the source.
+func (s *TransferSource) PinNativeMergeSource(session string) (*NativeSource, error) {
+	return s.store.PinNativeMergeSource(session)
+}
