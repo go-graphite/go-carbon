@@ -114,6 +114,11 @@ func TestMigrationCollectorReportsStoreAndMigration(t *testing.T) {
 			t.Fatalf("%s = %v, want %v", name, values[name], want)
 		}
 	}
+	for name, want := range map[string]uint64{"store_classic_reanchored_archives_total": whisperio.ClassicReanchors().ReanchoredArchives, "store_classic_alias_drops_total": whisperio.ClassicReanchors().AliasDrops} {
+		if got, ok := values[name]; !ok || got != float64(want) {
+			t.Fatalf("%s=%v, want %d", name, got, want)
+		}
+	}
 	m.phase = "shared"
 	values = gather(app)
 	if values["store_migration_running"] != 0 || values["store_migration_converted_total"] != 5 {

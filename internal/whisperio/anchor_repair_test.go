@@ -12,7 +12,7 @@ import (
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
 )
 
-func absoluteAnchorFixture(t *testing.T, points []store.Point) (mapContinuationIO, store.Snapshot) {
+func absoluteAnchorFixture(t testing.TB, points []store.Point) (mapContinuationIO, store.Snapshot) {
 	t.Helper()
 	r := store.Retention{Step: 10, Count: 60}
 	snap := store.Snapshot{Metadata: store.Metadata{MetricConfig: store.MetricConfig{Name: "anchor", Retentions: []store.Retention{r}, AggregationMethod: store.Sum}}, Archives: []store.Archive{{Retention: r, Points: points}}}

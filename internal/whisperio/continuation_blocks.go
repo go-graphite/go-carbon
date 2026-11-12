@@ -870,10 +870,10 @@ func (f *continuationFile) writeAt(data []byte, offset int64) (int, error) {
 					// A healthy circular slot can change its value or advance by
 					// whole archive retentions. Any other timestamp displacement
 					// means the physical image disagrees with Whisper's anchor.
-					// Return an error so the store discards the entire indexed
-					// batch and the persister requeues it, preserving history.
+					// The caller discards this private attempt, re-anchors only
+					// this archive, and retries with freshly calculated offsets.
 					if (int64(timestamp)-old)%(int64(a.Step)*int64(a.Count)) != 0 {
-						return used, fmt.Errorf("classic archive %d slot %d: unrelated physical history (%d replaced by %d); repair archive anchors before writing", archive, groupIndex*128+slot, old, timestamp)
+						return used, &classicSlotConflict{archive: archive}
 					}
 				}
 				if timestamp == 0 {
