@@ -72,10 +72,21 @@ func nativeReadInUse(t *testing.T) uint64 {
 		if e != nil {
 			t.Fatal(e)
 		}
+		var trims float64
 		for _, m := range ms {
 			if m.GetName() == "malloc_inuse_bytes" {
 				return uint64(m.GetMetric()[0].GetGauge().GetValue())
 			}
+			if m.GetName() == "malloc_trims_total" {
+				trims = m.GetMetric()[0].GetCounter().GetValue()
+			}
+		}
+		// Linux cgo also covers musl and older glibc, which lack mallinfo2.
+		// Two trim iterations guarantee the first stats read has completed.
+		// Keep the RSS and admission assertions on those platforms.
+		if trims >= 2 {
+			t.Log("mallinfo2 unavailable; checking RSS and reader admission")
+			return 0
 		}
 		time.Sleep(time.Millisecond)
 	}
