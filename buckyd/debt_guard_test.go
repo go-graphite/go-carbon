@@ -2,6 +2,7 @@ package buckyd
 
 import (
 	"net/http/httptest"
+	"runtime"
 	"testing"
 
 	"github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -62,5 +63,18 @@ func TestSetMaxTransfersLive(t *testing.T) {
 	s.SetMaxTransfers(0)
 	if s.MaxTransfers() != defaultMaxTransfers() {
 		t.Fatal("zero did not select the CPU default")
+	}
+}
+
+// The default never throttles copies below 128 concurrent transfers and
+// grows with the CPU count past that.
+func TestMaxTransfersDefault(t *testing.T) {
+	for cpus, want := range map[int]int{1: 128, 8: 128, 32: 128, 64: 128, 128: 128, 192: 192, 384: 384} {
+		if got := maxTransfersFor(cpus); got != want {
+			t.Errorf("maxTransfersFor(%d) = %d, want %d", cpus, got, want)
+		}
+	}
+	if got := defaultMaxTransfers(); got < 128 || got < runtime.NumCPU() {
+		t.Fatalf("defaultMaxTransfers() = %d on %d CPUs", got, runtime.NumCPU())
 	}
 }

@@ -408,3 +408,16 @@ func TestPlanFreeCopyEndToEndTargetWins(t *testing.T) {
 		}
 	}
 }
+
+// store-copy fills the transfer slots both ends advertise instead of a fixed
+// guess: the old 64 ceiling held copies at a fraction of the hosts' caps.
+func TestDefaultCopyStreams(t *testing.T) {
+	for _, tc := range []struct{ source, target, want int }{
+		{128, 128, 128}, {128, 192, 128}, {192, 128, 128}, {59, 128, 59},
+		{0, 160, 160}, {160, 0, 160}, {0, 0, 64},
+	} {
+		if got := defaultCopyStreams(tc.source, tc.target); got != tc.want {
+			t.Errorf("defaultCopyStreams(%d, %d) = %d, want %d", tc.source, tc.target, got, tc.want)
+		}
+	}
+}

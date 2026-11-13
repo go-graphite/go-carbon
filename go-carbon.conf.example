@@ -970,7 +970,7 @@ replicas = 1
 pprof = ""
 pyroscope = ""
 # Bounds concurrent exports/imports and encoded/decoded import size.
-max_transfers = 0 # auto: available CPU concurrency, capped at 64; explicit positive values remain ceilings
+max_transfers = 0 # auto: max(128, CPUs); store-copy defaults its streams to the smaller of both ends; explicit positive values remain ceilings
 max_body_bytes = 167772160
 # Archive-anchor maintenance (/v1/maintenance/archive-anchors) is admitted
 # separately from transfers: at most max-maintenance-requests requests at once

@@ -57,7 +57,7 @@ func PlanFreeCopyMain(ctx context.Context, args []string) error {
 	flags.StringVar(&o.engine, "engine", "metric", "metric (importer). bulk is not wired to plan-free copy yet")
 	flags.StringVar(&o.tokenEnv, "token-env", "BUCKYD_TOKEN", "environment variable holding the buckyd JWT")
 	flags.BoolVar(&o.debtGuard, "debt-guard", false, "let the target pause imports on a configured transfer-max-compaction-debt (429); off by default, which keeps only its hard limits (write stalls, L0 stop margin)")
-	flags.IntVar(&o.streams, "streams", 0, "parallel transfers; 0 uses min(64, source and target MaxTransfers)")
+	flags.IntVar(&o.streams, "streams", 0, "parallel transfers; 0 uses the smaller of the source and target max_transfers (each stream holds one transfer slot on both)")
 	flags.Int64Var(&o.maxBytes, "max-batch-bytes", 64<<20, "batch byte cap (real exported bytes); capped by the target max_body_bytes. A single name may use the whole max_body_bytes")
 	flags.IntVar(&o.maxNames, "max-batch-names", 8192, "names per batch cap (at most 10000)")
 	flags.IntVar(&o.maxFailures, "max-failures", 1000, "abort after this many per-name failures (they are journaled and retried by a rerun)")
@@ -72,6 +72,23 @@ func PlanFreeCopyMain(ctx context.Context, args []string) error {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 	return planFreeCopy(ctx, o)
+}
+
+// defaultCopyStreams fills every transfer slot both ends advertise: each
+// stream holds one slot on the source (export) and one on the target
+// (import), so the smaller cap is the most that can run at once. Guessing
+// lower left copies throttled on idle hosts; guessing higher only queues
+// on 429s. Builds that advertise no cap get 64.
+func defaultCopyStreams(source, target int) int {
+	switch {
+	case source > 0 && target > 0:
+		return min(source, target)
+	case source > 0:
+		return source
+	case target > 0:
+		return target
+	}
+	return 64
 }
 
 type copyStatus struct {
@@ -146,12 +163,7 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		return fmt.Errorf("target max_body_bytes %d is below the export minimum", target.MaxBodyBytes)
 	}
 	if o.streams == 0 {
-		o.streams = 64
-		for _, limit := range []int{source.MaxTransfers, target.MaxTransfers} {
-			if limit > 0 {
-				o.streams = min(o.streams, limit)
-			}
-		}
+		o.streams = defaultCopyStreams(source.MaxTransfers, target.MaxTransfers)
 	}
 	journal, err := openCopyJournal(o.state, identity)
 	if err != nil {

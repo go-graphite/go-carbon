@@ -897,9 +897,15 @@ func (s *Service) acquireTransfer() bool {
 
 func (s *Service) releaseTransfer() { s.transferActive.Add(-1) }
 
-func defaultMaxTransfers() int {
-	return min(64, max(1, runtime.NumCPU()-max(2, runtime.NumCPU()/12)))
-}
+func defaultMaxTransfers() int { return maxTransfersFor(runtime.NumCPU()) }
+
+// maxTransfersFor is the max_transfers default: at least 128, and one per CPU
+// on larger hosts. A transfer spends most of its time on Pebble reads, the
+// network and the importer's commit path rather than on its own CPU, so a cap
+// derived from the CPU count (16-64) throttled copies while the host was idle.
+// The store's own guards still pause admission under real pressure: write
+// stalls, L0 close to the stop-writes threshold and free memory.
+func maxTransfersFor(cpus int) int { return max(128, cpus) }
 
 // SetMaxTransfers changes the concurrent transfer cap live; zero or negative
 // selects the CPU-derived default. Lowering it admits nothing new until the
