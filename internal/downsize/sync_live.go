@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -38,10 +39,22 @@ type syncLiveBackend struct {
 	client *http.Client
 	copy   func(context.Context, copyOptions) error
 	bytes  atomic.Int64 // response bytes read for verification
-	waits  atomic.Int64 // retries while a store was unavailable or busy
+	waits  atomic.Int64 // retries while a store was unavailable
+	busy   atomic.Int64 // retries after 429 (all transfer slots taken)
 }
 
-func (b *syncLiveBackend) syncStats() (int64, int64) { return b.bytes.Load(), b.waits.Load() }
+func (b *syncLiveBackend) syncStats() (int64, int64, int64) {
+	return b.bytes.Load(), b.waits.Load(), b.busy.Load()
+}
+
+// syncBusyDelay is the pause before retrying a 429: a store answers 429 when
+// all its transfer slots are taken, and a slot frees within one request's
+// time, so the retry comes soon (25 ms doubling to 1 s) with full jitter so
+// parallel streams do not retry in step.
+func syncBusyDelay(busy int) time.Duration {
+	ceiling := min(25*time.Millisecond<<min(busy, 6), time.Second)
+	return ceiling/2 + rand.N(ceiling/2+1)
+}
 
 func newSyncLiveBackend(o syncLiveOptions) *syncLiveBackend {
 	m := &mover{options: options{engine: "metric", tokenEnv: o.tokenEnv, tick: 2 * time.Second, transferIdle: defaultTransferIdle},
@@ -67,10 +80,12 @@ func (e *syncHTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.sta
 
 // wait retries transport errors and 429/5xx answers until the store has
 // failed for --host-wait without one success: a restart or a busy store is
-// waited out inside the tool.
+// waited out inside the tool. A 429 is retried after syncBusyDelay; other
+// failures back off from 2 s to 30 s.
 func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call func() error) error {
 	delay := 2 * time.Second
 	var since time.Time
+	busy := 0
 	for attempt := 1; ; attempt++ {
 		err := call()
 		if err == nil || ctx.Err() != nil {
@@ -93,6 +108,14 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 		if time.Since(since) > b.o.hostWait {
 			return fmt.Errorf("%s %s: %w for %s: %w", what, store, errSyncStoreDown, b.o.hostWait, err)
 		}
+		if status == http.StatusTooManyRequests {
+			b.busy.Add(1)
+			if err := sleepContext(ctx, syncBusyDelay(busy)); err != nil {
+				return err
+			}
+			busy++
+			continue
+		}
 		b.waits.Add(1)
 		event("sync_host_wait", map[string]any{"what": what, "store": store, "attempt": attempt, "delay_seconds": delay.Seconds(), "error": err.Error()})
 		if err := sleepContext(ctx, delay); err != nil {
@@ -110,7 +133,7 @@ func (b *syncLiveBackend) List(ctx context.Context, store, prefix, after string,
 	var page []string
 	err := b.wait(ctx, "list", store, func() error {
 		page = nil
-		_, err := b.m.request(ctx, store, "/v1/transfer/list?"+query.Encode(), nil, &page)
+		_, err := b.m.requestOnce(ctx, store, "/v1/transfer/list?"+query.Encode(), nil, &page)
 		return err
 	})
 	return page, err
@@ -155,7 +178,7 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 	var reply []syncDigestWire
 	err := b.wait(ctx, "digest", store, func() error {
 		reply = nil
-		_, err := b.m.request(ctx, store, "/v1/transfer/digest", request, &reply)
+		_, err := b.m.requestOnce(ctx, store, "/v1/transfer/digest", request, &reply)
 		return err
 	})
 	var api *apiError
