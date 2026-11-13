@@ -55,6 +55,7 @@ type migrationSnapshot struct {
 	cacheMetrics                          int32
 	cacheBytes                            int64
 	cachePointBytes                       int64
+	realtimeIndexPending                  int
 	recoveryWindow, recoveryRemaining     int64
 	recoveryCeiling                       int64
 	recoveryRejections                    uint64
@@ -178,7 +179,7 @@ var migrationMetricSpecs = func() []metricSpec {
 		counter("pebble_transfer_batch_entries_total", "Metrics imported through batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchEntries) }),
 		counter("pebble_transfer_batch_bytes_total", "Bytes of batch-committed transfers.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferBatchBytes) }),
 		counter("pebble_transfer_merge_appended_total", "Imported names already on this store merged by appending its newer points to the copy, without re-encoding the copy's history.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppended) }),
-		counter("pebble_transfer_merge_appended_classic_total", "Of pebble_transfer_merge_appended_total, names whose copy is classic (uncompressed) and was merged by writing only the ring slots that differ.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppendedClassic) }),
+		counter("pebble_transfer_merge_appended_classic_total", "Of pebble_transfer_merge_appended_total, names merged into a classic (uncompressed) source or target by writing only the ring slots that differ.", func(s *migrationSnapshot) float64 { return float64(s.stats.transferMergeAppendedClassic) }),
 		counter("pebble_flush_bytes_total", "Bytes written by memtable flushes.", func(s *migrationSnapshot) float64 { return float64(s.stats.flushBytes) }),
 		counter("pebble_compaction_write_bytes_total", "Bytes written by compactions.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionWriteBytes) }),
 		gauge("pebble_compaction_rate_bytes", "Compaction output budget in bytes per second; 0 disables pacing.", func(s *migrationSnapshot) float64 { return float64(s.stats.compactionRate) }),
@@ -324,6 +325,8 @@ var migrationMetricSpecs = func() []metricSpec {
 			value: func(s *migrationSnapshot) float64 { return float64(s.workingReserved) }},
 		metricSpec{desc: prometheus.NewDesc("cache_points", "Points held in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cachePoints) }},
+		metricSpec{desc: prometheus.NewDesc("cache_realtime_index_pending", "Distinct names waiting for realtime index insertion, including the current batch.", nil, nil), kind: prometheus.GaugeValue, cache: true,
+			value: func(s *migrationSnapshot) float64 { return float64(s.realtimeIndexPending) }},
 		metricSpec{desc: prometheus.NewDesc("cache_metrics", "Metrics with points in the write cache.", nil, nil), kind: prometheus.GaugeValue, cache: true,
 			value: func(s *migrationSnapshot) float64 { return float64(s.cacheMetrics) }},
 		metricSpec{desc: prometheus.NewDesc("cache_estimated_bytes", "Estimated owned write-cache memory: names, items, buffer capacities, indexes, in-flight points, input-log tracking and queue scratch. Excludes mapped recovery files and the input-log encoder.", nil, nil), kind: prometheus.GaugeValue, cache: true,
@@ -600,6 +603,7 @@ func (c *migrationCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	if cache != nil {
 		s.cache, s.cachePoints, s.cacheMetrics = true, cache.Size(), cache.Len()
+		s.realtimeIndexPending = cache.RealtimeIndexPending()
 		s.cacheBytes = cache.EstimatedBytes()
 		s.cachePointBytes = cache.PointBytes()
 		s.recoveryWindow, s.recoveryRemaining, s.recoveryRejections = cache.RecoveryCapacity()

@@ -277,9 +277,20 @@ func planFreeCopy(ctx context.Context, o copyOptions) error {
 		return err
 	}
 	if n := c.skippedCount(); n > 0 {
-		return fmt.Errorf("%d names still skipped after a final retry (listed in %s); rerun the same command to retry them", n, skippedFile)
+		return &copySkippedError{count: n, path: skippedFile}
 	}
 	return nil
+}
+
+// copySkippedError means the engine completed its final per-name retry.
+// Callers can report the remaining names without restarting the whole engine.
+type copySkippedError struct {
+	count int
+	path  string
+}
+
+func (e *copySkippedError) Error() string {
+	return fmt.Sprintf("%d names still skipped after a final retry (listed in %s); rerun the same command to retry them", e.count, e.path)
 }
 
 func copyIdentity(o copyOptions) (string, error) {

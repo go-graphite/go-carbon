@@ -52,10 +52,8 @@ func (listener *CarbonserverListener) ReloadQuotas(quotas []*Quota) error {
 }
 
 func (listener *CarbonserverListener) refreshQuotaRules() {
-	if listener.getMetricStore() != nil {
-		listener.metricStoreIndexMu.Lock()
-		defer listener.metricStoreIndexMu.Unlock()
-	}
+	listener.metricStoreIndexMu.Lock()
+	defer listener.metricStoreIndexMu.Unlock()
 	index := listener.CurrentFileIndex()
 	if index == nil || index.trieIdx == nil {
 		// Initial publication uses the new snapshot.

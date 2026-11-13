@@ -118,13 +118,17 @@ func (ti *trieIndex) readSnapshotOverlay(cache string) (_ *trieIndex, base strin
 		if err != nil {
 			return nil, "", err
 		}
+		var node *trieNode
 		if v2 != nil {
-			_, err = pending.insertMutableBytes(borrowed, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
+			node, err = pending.insertMutableBytes(borrowed, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
 		} else {
-			_, err = pending.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
+			node, err = pending.insert(entry.Path, entry.LogicalSize, entry.PhysicalSize, entry.DataPoints, entry.FirstSeenAt)
 		}
 		if err != nil {
 			return nil, "", err
+		}
+		if node != nil {
+			node.pending.Store(true)
 		}
 		count++
 	}

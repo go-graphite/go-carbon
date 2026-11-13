@@ -292,6 +292,7 @@ type trieIndex struct {
 	snapshot      *indexSnapshot
 	recoveryID    string
 	builder       *trieBulkBuilder
+	insertCursor  *trieBulkBuilder // directory cursor only; child publication remains atomic
 	root          *trieNode
 	fileExt       string
 	fileCount     int64
@@ -322,6 +323,9 @@ type trieNode struct {
 	c         []byte // TODO: look for a more compact/compressed formats
 	childrens *[]*trieNode
 	gen       uint8
+	// Fits in the padding before meta. A realtime name remains pending until a
+	// scan observes its file, even if persistence already removed its cache item.
+	pending atomic.Bool
 
 	// Directory metadata can be added by a quota reload while receivers read it.
 	meta atomic.Value // *dirMeta or *fileMeta, published once

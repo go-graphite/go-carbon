@@ -13,8 +13,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
-	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -36,14 +37,51 @@ type syncLiveOptions struct {
 }
 
 type syncLiveBackend struct {
-	o         syncLiveOptions
-	m         *mover
-	client    *http.Client
-	copy      func(context.Context, copyOptions) error
-	listLimit atomic.Int64 // learned catalog page cap after a truncated JSON response
-	bytes     atomic.Int64 // response bytes read for verification
-	waits     atomic.Int64 // retries while a store was unavailable
-	busy      atomic.Int64 // retries after 429 (all transfer slots taken)
+	o          syncLiveOptions
+	m          *mover
+	client     *http.Client
+	copy       func(context.Context, copyOptions) error
+	listLimit  atomic.Int64 // learned catalog page cap after a truncated JSON response
+	infoLimits sync.Map     // store -> *atomic.Int64, learned metadata request cap
+	bytes      atomic.Int64 // response bytes read for verification
+	waits      atomic.Int64 // retries while a store was unavailable
+	busy       atomic.Int64 // retries after 429 (all transfer slots taken)
+	timings    sync.Map     // phase + store -> *syncIOTime
+}
+
+// syncIOTime reports cumulative request time, including retries. Concurrent
+// calls overlap, so these seconds measure work, not elapsed phase time.
+type syncIOTime struct {
+	calls atomic.Int64
+	nanos atomic.Int64
+}
+type syncIOTiming struct {
+	Operation string  `json:"operation"`
+	Store     string  `json:"store"`
+	Calls     int64   `json:"calls"`
+	Seconds   float64 `json:"seconds"`
+}
+
+func (b *syncLiveBackend) recordTime(operation, store string) func() {
+	started := time.Now()
+	v, _ := b.timings.LoadOrStore([2]string{operation, store}, &syncIOTime{})
+	t := v.(*syncIOTime)
+	return func() { t.nanos.Add(int64(time.Since(started))); t.calls.Add(1) }
+}
+func (b *syncLiveBackend) syncTimings() []syncIOTiming {
+	var out []syncIOTiming
+	b.timings.Range(func(key, value any) bool {
+		k, v := key.([2]string), value.(*syncIOTime)
+		out = append(out, syncIOTiming{k[0], k[1], v.calls.Load(), float64(v.nanos.Load()) / float64(time.Second)})
+		return true
+	})
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Operation != out[j].Operation {
+			return out[i].Operation < out[j].Operation
+		}
+		return out[i].Store < out[j].Store
+	})
+	return out
 }
 
 func (b *syncLiveBackend) syncStats() (int64, int64, int64) {
@@ -86,6 +124,7 @@ func (e *syncHTTPError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.sta
 // waited out inside the tool. A 429 is retried after syncBusyDelay; other
 // failures back off from 2 s to 30 s.
 func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call func() error) error {
+	defer b.recordTime(what, store)()
 	delay := 2 * time.Second
 	var since time.Time
 	busy := 0
@@ -213,52 +252,82 @@ func (b *syncLiveBackend) Digest(ctx context.Context, store string, names []stri
 	return out, nil
 }
 
-// Info returns retentions for the names carbonserver knows. One unknown name
-// fails a whole v3 info request with 404, so a 404 batch is split in halves.
+// Info returns retentions for the names carbonserver knows. A batch 404 does
+// not identify the missing name. Fall back to exact-name requests once,
+// skipping each absent name without recursively splitting healthy neighbors.
 func (b *syncLiveBackend) Info(ctx context.Context, store string, names []string) (map[string][]syncArchive, error) {
 	base, err := b.carbon(store)
 	if err != nil {
 		return nil, err
 	}
+	value, _ := b.infoLimits.LoadOrStore(store, &atomic.Int64{})
+	cap := value.(*atomic.Int64)
 	out := map[string][]syncArchive{}
 	var walk func([]string) error
 	walk = func(names []string) error {
-		body, err := (&protov3.MultiGlobRequest{Metrics: names}).MarshalVT()
-		if err != nil {
-			return err
-		}
-		var data []byte
-		err = b.wait(ctx, "info", store, func() error {
-			data, err = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
-			return err
-		})
-		var httpErr *syncHTTPError
-		if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
-			if len(names) == 1 {
-				return nil
+		for cursor := 0; cursor < len(names); {
+			count := len(names) - cursor
+			if learned := cap.Load(); learned > 0 {
+				count = min(count, int(learned))
 			}
-			if err := walk(names[:len(names)/2]); err != nil {
-				return err
+			var data []byte
+			err := b.wait(ctx, "info", store, func() error {
+				for {
+					body, err := (&protov3.MultiGlobRequest{Metrics: names[cursor : cursor+count]}).MarshalVT()
+					if err != nil {
+						return err
+					}
+					data, err = b.post(ctx, base+"/info/?format=carbonapi_v3_pb", body)
+					if ctx.Err() != nil || count <= 1 || !syncInfoTooLarge(err) {
+						return err
+					}
+					// A slow batch can outlive the server's write deadline. Retry
+					// this cursor with fewer names, retaining every unprocessed name.
+					count /= 2
+					for old := cap.Load(); old == 0 || int64(count) < old; old = cap.Load() {
+						if cap.CompareAndSwap(old, int64(count)) {
+							break
+						}
+					}
+					event("sync_info_batch_reduced", map[string]any{"store": store, "limit": count, "error": err.Error()})
+				}
+			})
+			var httpErr *syncHTTPError
+			if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
+				if count > 1 {
+					for _, name := range names[cursor : cursor+count] {
+						if err := walk([]string{name}); err != nil {
+							return err
+						}
+					}
+				}
+			} else {
+				if err != nil {
+					return err
+				}
+				var resp protov3.MultiMetricsInfoResponse
+				if err := resp.UnmarshalVT(data); err != nil {
+					return fmt.Errorf("decode info from %s: %w", base, err)
+				}
+				for _, m := range resp.Metrics {
+					archives := make([]syncArchive, 0, len(m.Retentions))
+					for _, r := range m.Retentions {
+						archives = append(archives, syncArchive{Step: r.SecondsPerPoint, Points: r.NumberOfPoints})
+					}
+					out[m.Name] = archives
+				}
 			}
-			return walk(names[len(names)/2:])
-		}
-		if err != nil {
-			return err
-		}
-		var resp protov3.MultiMetricsInfoResponse
-		if err := resp.UnmarshalVT(data); err != nil {
-			return fmt.Errorf("decode info from %s: %w", base, err)
-		}
-		for _, m := range resp.Metrics {
-			archives := make([]syncArchive, 0, len(m.Retentions))
-			for _, r := range m.Retentions {
-				archives = append(archives, syncArchive{Step: r.SecondsPerPoint, Points: r.NumberOfPoints})
-			}
-			out[m.Name] = archives
+			cursor += count
 		}
 		return nil
 	}
 	return out, walk(names)
+}
+
+func syncInfoTooLarge(err error) bool {
+	var timeout net.Error
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		(errors.As(err, &timeout) && timeout.Timeout())
 }
 
 func (b *syncLiveBackend) Fetch(ctx context.Context, store string, names []string, from, until int64) (map[string]syncSeries, error) {
@@ -316,6 +385,7 @@ func (b *syncLiveBackend) copyOptions(source, target, names, journal string, max
 // aborts (a store restarting) are rerun from its journal up to
 // --copy-attempts; names still failing are reported, not fatal.
 func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names []string, journal string) (syncCopyResult, error) {
+	defer b.recordTime("copy", source)()
 	namesPath := journal[:len(journal)-len(".jsonl")] + ".names"
 	probeNames := journal + ".probe.names"
 	if err := os.WriteFile(probeNames, []byte(names[0]+"\n"), 0o644); err != nil {
@@ -339,13 +409,15 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 		if err == nil || ctx.Err() != nil {
 			break
 		}
-		event("sync_copy_retry", map[string]any{"level": "warn", "source": source, "attempt": attempt, "error": err.Error()})
-		if strings.Contains(err.Error(), "names failed") {
-			if attempt >= 2 {
-				break // per-name failures retried once: report them
-			}
-			continue
+		var skipped *copySkippedError
+		if errors.As(err, &skipped) {
+			// The engine has already retried individual failures once. Keep
+			// its completed ranges and report the residual names immediately.
+			event("sync_copy_skipped", map[string]any{"level": "warn", "source": source, "names": skipped.count, "error": err.Error()})
+			break
 		}
+		event("sync_copy_retry", map[string]any{"level": "warn", "source": source, "attempt": attempt, "error": err.Error()})
+
 		if attempt < b.o.copyAttempts {
 			if err := sleepContext(ctx, time.Duration(attempt)*30*time.Second); err != nil {
 				return syncCopyResult{}, err

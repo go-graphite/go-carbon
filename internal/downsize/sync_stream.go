@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Stores hold tens of millions of names, so discovery never keeps a catalog
@@ -344,24 +346,94 @@ func firstSource(mask uint64, forbid map[string]bool, from []string) int {
 	return -1
 }
 
-// dropShort removes names whose every archive keeps at most 3 days, by the
-// holder's retentions. Names the holder does not index yet are kept.
-func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, short []string, err error) {
-	for start := 0; start < len(names); start += s.o.batch {
-		chunk := names[start:min(start+s.o.batch, len(names))]
-		info, err := s.b.Info(ctx, s.o.from[src], chunk)
-		if err != nil {
-			return nil, nil, fmt.Errorf("info %s: %w", s.o.from[src], err)
+// dropShort checks bounded parallel batches and journals each completed batch.
+// Missing source metadata is distinct from short retention, so another source
+// can still supply a name that disappeared since discovery.
+func (s *syncer) dropShort(ctx context.Context, src int, names []string) (keep, short, absent []string, err error) {
+	type key struct {
+		first, last string
+		count       int
+	}
+	cached := map[key]syncRow{}
+	for _, r := range s.j.find(func(r syncRow) bool { return r.Kind == "prechecked" && r.Source == s.o.from[src] }) {
+		cached[key{r.First, r.Last, r.Names}] = r
+	}
+	count := (len(names) + s.o.batch - 1) / s.o.batch
+	rows := make([]syncRow, count)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var once sync.Once
+	var firstErr error
+	fail := func(e error) { once.Do(func() { firstErr = e; cancel() }) }
+	for worker := 0; worker < min(s.o.streams, count); worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				chunk := names[i*s.o.batch : min((i+1)*s.o.batch, len(names))]
+				k := key{chunk[0], chunk[len(chunk)-1], len(chunk)}
+				if r, ok := cached[k]; ok {
+					rows[i] = r
+					s.prog.done.Add(int64(len(chunk)))
+					continue
+				}
+				info, e := s.b.Info(ctx, s.o.from[src], chunk)
+				if e != nil {
+					fail(e)
+					return
+				}
+				r := syncRow{Kind: "prechecked", Source: s.o.from[src], First: k.first, Last: k.last, Names: k.count}
+				for _, n := range chunk {
+					if _, ok := info[n]; !ok {
+						r.Absent = append(r.Absent, n)
+					} else if !s.o.includeShort && syncShort(info[n]) {
+						r.Short = append(r.Short, n)
+					}
+				}
+				if e := s.j.append(r); e != nil {
+					fail(e)
+					return
+				}
+				rows[i] = r
+				s.prog.done.Add(int64(len(chunk)))
+			}
+		}()
+	}
+feed:
+	for i := range rows {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			break feed
 		}
-		for _, n := range chunk {
-			if syncShort(info[n]) {
-				short = append(short, n)
-			} else {
+	}
+	close(jobs)
+	wg.Wait()
+	if firstErr != nil {
+		return nil, nil, nil, firstErr
+	}
+	if ctx.Err() != nil {
+		return nil, nil, nil, ctx.Err()
+	}
+	for i, r := range rows {
+		skip := map[string]bool{}
+		for _, n := range r.Short {
+			skip[n] = true
+			short = append(short, n)
+		}
+		for _, n := range r.Absent {
+			skip[n] = true
+			absent = append(absent, n)
+		}
+		for _, n := range names[i*s.o.batch : min((i+1)*s.o.batch, len(names))] {
+			if !skip[n] {
 				keep = append(keep, n)
 			}
 		}
 	}
-	return keep, short, nil
+	return keep, short, absent, nil
 }
 
 func (s *syncer) copyMissing(ctx context.Context) error {
@@ -394,29 +466,59 @@ func (s *syncer) copyMissing(ctx context.Context) error {
 		if len(names) == 0 {
 			continue
 		}
-		keep, shortNames, err := s.dropShort(ctx, src, names)
-		if err != nil {
-			return err
-		}
-		for _, n := range shortNames {
-			short[n] = true
-		}
-		res := syncCopyResult{}
-		if len(keep) > 0 {
-			if res, err = s.copyFrom(ctx, "missing", 0, src, keep, shortNames...); err != nil {
+		absentSource := map[string]bool{}
+		// Copy each bounded wave as soon as its precheck finishes. Preparation
+		// for a huge catalog must not delay all imports until the last name.
+		wave := s.o.batch * s.o.streams
+		for start, group := 0, 1; start < len(names); start, group = start+wave, group+1 {
+			chunk := names[start:min(start+wave, len(names))]
+			s.prog.begin("precheck", len(chunk))
+			checkedAt := time.Now()
+			keep, shortNames, absent, err := s.dropShort(ctx, src, chunk)
+			if err != nil {
 				return err
 			}
-		} else if err := s.j.append(syncRow{Kind: "copied", Phase: "missing", Source: source, Short: shortNames}); err != nil {
-			return err
+			for _, n := range shortNames {
+				short[n] = true
+			}
+			for _, n := range absent {
+				absentSource[n] = true
+			}
+			event("sync_prechecked", map[string]any{"source": source, "names": len(chunk), "keep": len(keep), "short": len(shortNames), "absent": len(absent), "group": group, "seconds": time.Since(checkedAt).Seconds(), "names_per_second": float64(len(chunk)) / time.Since(checkedAt).Seconds()})
+			s.prog.begin("copy", len(keep))
+			res := syncCopyResult{}
+			completed := s.j.find(func(r syncRow) bool {
+				return r.Kind == "copied" && r.Phase == "missing-batch" && r.Source == source && r.Round == group && len(keep) > 0 && r.Names == len(keep) && r.First == keep[0] && r.Last == keep[len(keep)-1]
+			})
+			if len(completed) > 0 {
+				r := completed[len(completed)-1]
+				res = syncCopyResult{Copied: r.Copied, Failed: r.Failed, Forbidden: r.Forbidden}
+			} else if len(keep) > 0 {
+				if res, err = s.copyFrom(ctx, "missing-batch", group, src, keep, shortNames...); err != nil {
+					return err
+				}
+			}
+			s.applyCopy(keep, nil, res.Copied, res.Failed, res.Forbidden)
+			work += len(chunk)
+			s.prog.done.Store(int64(len(keep)))
+			if res.Forbidden {
+				break
+			}
 		}
-		s.applyCopy(names, shortNames, res.Copied, res.Failed, res.Forbidden)
-		work += len(names)
-		s.prog.done.Add(int64(len(names)))
+		for i := range missing {
+			if absentSource[missing[i].name] {
+				missing[i].mask &^= 1 << uint(src)
+			}
+		}
 	}
 	s.sum.Short = len(short)
 	for _, m := range missing {
 		if !s.copied[m.name] && !short[m.name] && !s.failedCp[m.name] && firstSource(m.mask, s.forbid, s.o.from) < 0 {
-			s.addResidual(syncHole{Name: m.name, Source: s.sourcesOf(m.mask)}, "missing_only_on_forbidden_source")
+			reason := "missing_only_on_forbidden_source"
+			if m.mask == 0 {
+				reason = "missing_on_all_sources"
+			}
+			s.addResidual(syncHole{Name: m.name, Source: s.sourcesOf(m.mask)}, reason)
 		}
 	}
 	s.endPhase("copy", work)

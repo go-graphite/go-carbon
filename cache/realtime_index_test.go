@@ -5,6 +5,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/points"
 )
 
@@ -138,5 +139,56 @@ func TestRealtimeIndexConcurrentFilterReplacement(t *testing.T) {
 	wg.Wait()
 	if c.Size() != 1000 {
 		t.Fatal("filter replacement lost points")
+	}
+}
+
+func TestRealtimeQueueIgnoresBloomFalsePositives(t *testing.T) {
+	for _, bloom := range []uint64{0, 100} {
+		c := New()
+		c.SetBloomSize(bloom)
+		q := helper.NewMetricQueue()
+		c.SetNewMetricsQueue(q)
+		checks := 0
+		c.SetMetricExists(func(string) bool { checks++; return false })
+		if f := c.newMetricCf.Load(); f != nil {
+			f.Add(helper.HashString("unknown.metric"))
+		}
+		for i := range 100 {
+			c.Add(points.OnePoint("unknown.metric", 1, int64(i)))
+		}
+		if q.Len() != 1 || checks != 1 || c.stat.droppedRealtimeIndex != 0 {
+			t.Fatalf("pending=%d checks=%d drops=%d", q.Len(), checks, c.stat.droppedRealtimeIndex)
+		}
+		c.Pop("unknown.metric")
+		c.Add(points.OnePoint("unknown.metric", 2, 101))
+		if q.Len() != 1 {
+			t.Fatal("cache eviction duplicated pending name")
+		}
+	}
+}
+
+func BenchmarkRealtimeProducer(b *testing.B) {
+	for _, mode := range []string{"channel-bloom", "pending"} {
+		for _, scenario := range []string{"cached", "evicted"} {
+			b.Run(mode+"/"+scenario, func(b *testing.B) {
+				c := New()
+				c.SetMaxSize(0)
+				c.SetBloomSize(1000000)
+				if mode == "pending" {
+					c.SetNewMetricsQueue(helper.NewMetricQueue())
+				} else {
+					c.SetNewMetricsChan(make(chan string, 1))
+				}
+				c.AddPoint([]byte("benchmark.metric"), 1, 1)
+				b.ReportAllocs()
+				b.ResetTimer()
+				for i := range b.N {
+					c.AddPoint([]byte("benchmark.metric"), 1, int64(i))
+					if scenario == "evicted" {
+						c.Pop("benchmark.metric")
+					}
+				}
+			})
+		}
 	}
 }

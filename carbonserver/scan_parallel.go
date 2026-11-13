@@ -395,10 +395,17 @@ func (s *parallelScan) commit(r *scanRange) {
 		u.scanFailed = true
 	}
 	for _, m := range r.newMetrics {
-		if _, err := u.trieIdx.insert(m.path, m.logical, m.physical, m.dataPoints, m.firstSeenAt); err != nil {
+		u.listener.metricStoreIndexMu.Lock()
+		node, err := u.trieIdx.insert(m.path, m.logical, m.physical, m.dataPoints, m.firstSeenAt)
+		if node != nil {
+			node.pending.Store(false)
+		}
+		u.listener.metricStoreIndexMu.Unlock()
+		if err != nil {
 			u.listener.logTrieInsertError(u.logger, "updateFileList.trie: failed to index path", m.path, err)
 		}
 	}
+
 	if s.out != nil {
 		err := r.outputErr
 		if err == nil && !u.scanFailed {

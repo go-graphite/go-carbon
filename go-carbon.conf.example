@@ -1125,11 +1125,13 @@ trie-index = false
 # Currently only trie-index is supported. (EXPERIMENTAL)
 concurrent-index = false
 
-# Set to larger than 0 to enable realtime indexing of new metrics,
-# The value controls how many new metrics could be buffered at once. Suitable to
-# adjust it higher if there are high number of new metrics being produced.
-# Currently only trie-index is supported. 
-# (EXPERIMENTAL)
+# Set to any positive value to enable realtime indexing (0 disables it).
+# Requires trie-index and concurrent-index. The value is no longer a capacity:
+# pending names grow with available memory and duplicate names coalesce.
+# cache.realtimeIndexPending (Prometheus: cache_realtime_index_pending) reports
+# outstanding names. Bloom filtering is unnecessary and is skipped in this mode. An independent consumer
+# inserts batches during scans; valid names are never dropped on queue overflow.
+# Discovery caches refresh affected namespaces within one second of insertion.
 realtime-index = 0
 
 # Maximum inflight requests allowed in go-carbon. Default is 0 which means no limit.

@@ -83,12 +83,12 @@ func TestSnapshotOverlayCheckpoint(t *testing.T) {
 	cache, root, _ := snapshotFixture(t)
 	first := overlayListener(t, cache, root)
 	first.insertRealtimeMetric(first.CurrentFileIndex().trieIdx, "new.persisted")
-	first.newMetricsChan <- "new.queued"
+	first.newMetricsQueue.Add("new.queued")
 	id, err := first.CheckpointReadIndex()
 	if err != nil || id == "" {
 		t.Fatal(id, err)
 	}
-	if len(first.newMetricsChan) != 0 {
+	if first.newMetricsQueue.Len() != 0 {
 		t.Fatal("queued notification not checkpointed")
 	}
 	next := overlayListener(t, cache, root)
@@ -315,7 +315,7 @@ func TestCompletedSnapshotInstallsWhenShutdownStarts(t *testing.T) {
 	}
 	// A notification handled during the first conversion must survive without
 	// walking the entire old trie again.
-	l.newMetricsChan <- "during.scan"
+	l.newMetricsQueue.Add("during.scan")
 	u.drainRealtimeMetrics()
 	u.pruneRealtimeMetrics()
 	u.closeFileListCaches()

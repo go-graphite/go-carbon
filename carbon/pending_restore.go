@@ -10,6 +10,7 @@ import (
 	"github.com/go-graphite/go-carbon/internal/phasecpu"
 
 	"github.com/go-graphite/go-carbon/cache"
+	"github.com/go-graphite/go-carbon/helper"
 	"github.com/go-graphite/go-carbon/internal/recovery"
 	"github.com/lomik/zapwriter"
 	"go.uber.org/zap"
@@ -23,7 +24,7 @@ func (app *App) pendingReadsCompatible() bool {
 		(c.Whisper.Compressed || c.Whisper.Schemas.AnyCompressed())
 }
 
-func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics chan string) (bool, error) {
+func (app *App) restoreWithPendingReads(core *cache.Cache, newMetrics *helper.MetricQueue) (bool, error) {
 	if !app.pendingReadsCompatible() {
 		return false, nil
 	}
