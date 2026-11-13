@@ -113,6 +113,46 @@ func (f *continuationFile) classicGroup(archive int, a whisper.StorageArchiveLay
 	return f.pointBlock(continuationBodyKey(f.data.id, 'p', archive, 0, groupIndex))
 }
 
+// readClassicGroup decodes into caller-owned scratch. ReadAt consumes a group
+// immediately, so allocating an escaping PointBlock for every 128 slots needlessly
+// turns full-history reads into allocator and GC work. Referenced and buffered
+// groups keep their existing resolution and ownership rules.
+func (f *continuationFile) readClassicGroup(archive int, a whisper.StorageArchiveLayout, index int, dst *store.PointBlock) error {
+	if f.data.references {
+		block, err := f.classicGroup(archive, a, index, false)
+		if err == nil {
+			*dst = *block
+		}
+		return err
+	}
+	if _, buffered := f.fs.kv.(*continuationPointBuffer); buffered {
+		block, err := f.classicGroup(archive, a, index, false)
+		if err == nil {
+			*dst = *block
+		}
+		return err
+	}
+	*dst = store.PointBlock{}
+	if skipUnallocatedGroups && !f.classicGroupAllocated(a, index) {
+		unallocatedGroupSkips.Add(1)
+		return nil
+	}
+	read := f.fs.kv.Get
+	if f.sidecar {
+		read = f.fs.probe
+	}
+	start := f.fs.timer.Nested(stagetime.TailRead)
+	value, err := read(continuationBodyKey(f.data.id, 'p', archive, 0, index))
+	f.fs.timer.Unnest(stagetime.TailRead, start)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return store.DecodePointBlock(value, dst)
+}
+
 func (f *continuationFile) setPointBlock(key []byte, block *store.PointBlock) error {
 	if err := f.trackClassicWindow(key, block); err != nil {
 		return err
@@ -705,6 +745,7 @@ func (f *continuationFile) ReadAt(data []byte, offset int64) (int, error) {
 	}
 	position, written := int(offset), 0
 	var points []whisper.TimeSeriesPoint
+	var scratch store.PointBlock
 	for int64(position) < end {
 		if position < len(f.data.header) {
 			count := min(int(end)-position, len(f.data.header)-position)
@@ -732,7 +773,7 @@ func (f *continuationFile) ReadAt(data []byte, offset int64) (int, error) {
 			position, written = position+count, written+count
 		} else {
 			groupIndex := (position - a.Offset) / (128 * 12)
-			group, err := f.classicGroup(archive, a, groupIndex, false)
+			err := f.readClassicGroup(archive, a, groupIndex, &scratch)
 			if err != nil {
 				return written, err
 			}
@@ -741,8 +782,8 @@ func (f *continuationFile) ReadAt(data []byte, offset int64) (int, error) {
 				slot := ((position - a.Offset) / 12) % 128
 				within := (position - a.Offset) % 12
 				var record [12]byte
-				if group.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0 {
-					point := group.Points[slot]
+				if scratch.Present[slot/64]&(uint64(1)<<uint(slot%64)) != 0 {
+					point := scratch.Points[slot]
 					binary.BigEndian.PutUint32(record[:4], uint32(point.Timestamp))
 					binary.BigEndian.PutUint64(record[4:], math.Float64bits(point.Value))
 				}
