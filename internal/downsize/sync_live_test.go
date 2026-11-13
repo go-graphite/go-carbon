@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -15,9 +16,10 @@ import (
 )
 
 // TestSyncLiveCarbonserver: v3 info fails a whole request with 404 when one
-// name is unknown, so the backend splits; multi-fetch decodes per name.
+// name is unknown; fallback requests each name exactly once.
 func TestSyncLiveCarbonserver(t *testing.T) {
 	known := map[string]bool{"a": true, "c": true}
+	var requests [][]string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		switch r.URL.Path {
@@ -27,6 +29,7 @@ func TestSyncLiveCarbonserver(t *testing.T) {
 				http.Error(w, err.Error(), 400)
 				return
 			}
+			requests = append(requests, req.Metrics)
 			var resp protov3.MultiMetricsInfoResponse
 			for _, n := range req.Metrics {
 				if !known[n] {
@@ -62,6 +65,9 @@ func TestSyncLiveCarbonserver(t *testing.T) {
 	}
 	if len(info) != 2 || info["a"][0].Step != 60 || info["c"] == nil {
 		t.Fatalf("info %+v", info)
+	}
+	if want := [][]string{{"a", "b", "c", "d"}, {"a"}, {"b"}, {"c"}, {"d"}}; !reflect.DeepEqual(requests, want) {
+		t.Fatalf("info requests %v, want %v", requests, want)
 	}
 	got, err := b.Fetch(context.Background(), store, []string{"a", "b"}, 120, 240)
 	if err != nil {
