@@ -402,8 +402,8 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 	began = time.Now()
 	stage := s.stageTransfer(first, records, metas)
 	if limit := s.transferBatchLimit(); len(stage.keys) > 0 && stage.bytes <= limit {
-		// Normal-size transfers commit as one NoSync batch: Pebble applies
-		// batches concurrently, while ingestion runs one SST set at a time.
+		// Normal-size transfers use bounded NoSync batches: Pebble writes
+		// each WAL record under the same commit mutex as foreground updates.
 		// The final WAL barrier below makes the data durable together with
 		// the receipts published after it.
 		batch, err := s.writeTransferBatch(ctx, stage)
@@ -417,15 +417,14 @@ func (s *Store) ImportTransfer(ctx context.Context, records []TransferMetric) ([
 			}
 		}
 		began = time.Now()
-		err = errors.Join(ctx.Err(), batch.Commit(pebble.NoSync))
-		size := uint64(len(batch.Repr()))
+		commits, size, err := s.commitTransferBatch(ctx, batch, 1<<20)
 		err = errors.Join(err, batch.Close())
 		s.transferApply.ingest.Add(uint64(time.Since(began)))
 		if err != nil {
 			return nil, err
 		}
 		s.pendingSync.Store(true)
-		s.transferBatchStats.commits.Add(1)
+		s.transferBatchStats.commits.Add(commits)
 		s.transferBatchStats.entries.Add(uint64(len(records)))
 		s.transferBatchStats.bytes.Add(size)
 	} else if err := s.ingestTransferStage(ctx, first, stage, len(records), needsFloatFormat, began); err != nil {

@@ -105,7 +105,7 @@ func (s *Store) stageTransfer(first uint64, records []TransferMetric, metas []Me
 	return &transferStage{keys: keys, bytes: size, capture: capture, verify: verify}
 }
 
-// transferBatchLimit is the largest staged transfer committed as one batch.
+// transferBatchLimit is the largest staged transfer committed through the WAL.
 // Pebble ingests one SST set at a time (a capacity-1 semaphore) and places
 // each table by scanning every file of every level under db.mu, so a
 // 256-name transfer of ~93 bucket tables serialized all imports on one core.
@@ -134,6 +134,63 @@ func (s *Store) writeTransferBatch(ctx context.Context, stage *transferStage) (*
 		return nil, errors.Join(err, b.Close())
 	}
 	return b, nil
+}
+
+// commitTransferBatch bounds normal WAL records so an import releases Pebble's
+// shared commit mutex between chunks. A single key may exceed limit: splitting
+// a value would change its encoding. All keys were verified before this call
+// and use unpublished IDs; publication and its final durability barrier happen
+// only after every chunk succeeds.
+func (s *Store) commitTransferBatch(ctx context.Context, batch *pebble.Batch, limit int) (commits, size uint64, err error) {
+	commit := func(b *pebble.Batch) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := b.Commit(pebble.NoSync); err != nil {
+			return err
+		}
+		commits++
+		size += uint64(len(b.Repr()))
+		return nil
+	}
+	if len(batch.Repr()) <= limit {
+		err = commit(batch)
+		return commits, size, err
+	}
+	chunk := s.db.NewBatch()
+	defer chunk.Close()
+	r := batch.Reader()
+	for {
+		kind, key, value, ok, readErr := r.Next()
+		if readErr != nil {
+			return commits, size, readErr
+		}
+		if !ok {
+			break
+		}
+		if kind != pebble.InternalKeyKindSet {
+			return commits, size, errors.New("unexpected staged transfer batch operation")
+		}
+		// One kind byte and two length varints conservatively bound the
+		// encoded entry overhead, including at the varint boundaries.
+		entryBytes := 1 + 2*binary.MaxVarintLen32 + len(key) + len(value)
+		if chunk.Count() > 0 && len(chunk.Repr())+entryBytes > limit {
+			if err := commit(chunk); err != nil {
+				return commits, size, err
+			}
+			chunk.Reset()
+		}
+		if err := ctx.Err(); err != nil {
+			return commits, size, err
+		}
+		if err := chunk.Set(key, value, nil); err != nil {
+			return commits, size, err
+		}
+	}
+	if chunk.Count() > 0 {
+		err = commit(chunk)
+	}
+	return commits, size, err
 }
 
 func (s *Store) verifyTransferBatch(ctx context.Context, b *pebble.Batch, stage *transferStage) error {
