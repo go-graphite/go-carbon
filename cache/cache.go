@@ -496,6 +496,24 @@ func (c *Cache) NotConfirmedLength() int32 {
 	return l
 }
 
+// BacklogPoints counts queued and in-flight points without resetting statistics.
+// Shards are sampled separately; immutable, unclaimed recovery sources are not
+// included. Legacy restore admits every point to these queues before opening input.
+func (c *Cache) BacklogPoints() int64 {
+	var count int64
+	for _, shard := range c.data {
+		shard.mu.RLock()
+		count += shard.size.Load()
+		for _, batch := range shard.notConfirmed[:shard.notConfirmedUsed] {
+			if batch != nil {
+				count += int64(len(batch.Data))
+			}
+		}
+		shard.mu.RUnlock()
+	}
+	return count
+}
+
 // IsEmpty reports whether the cache has neither queued nor in-flight points.
 func (c *Cache) IsEmpty() bool {
 	if r := c.pending.Load(); r != nil && r.remaining.Load() != 0 {

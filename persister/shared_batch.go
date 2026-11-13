@@ -5,7 +5,6 @@ import (
 	"errors"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	store "github.com/go-graphite/go-carbon/internal/chunkstore"
@@ -115,7 +114,7 @@ func (p *Whisper) storeSharedBatch(metrics []string) {
 			return
 		}
 		for _, batch := range values {
-			atomic.AddUint32(&p.committedPoints, uint32(len(batch.Data)))
+			p.recordCommittedPoints(len(batch.Data))
 			p.recordUpdate()
 			if p.confirm != nil {
 				if guarded, ok := p.metricStore.(interface{ SharedWriteGuard(string) func() }); ok {
