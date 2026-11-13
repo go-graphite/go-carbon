@@ -568,9 +568,8 @@ func testMetadataPrewarmCheckpointMatchesReads(t *testing.T, legacy bool) {
 	}
 }
 
-// The stop-time save runs however full the cache is (misc-1202, 13 Nov 2026,
-// came up cold after a cancel at half of max-size); only its deadline stops
-// it, loudly.
+// The stop-time save runs even when the cache is full; only its deadline
+// stops it, with a logged error and a failure counter.
 func TestMetadataPrewarmCheckpointSavePressure(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
