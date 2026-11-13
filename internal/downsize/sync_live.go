@@ -31,16 +31,19 @@ type syncLiveOptions struct {
 	tokenEnv     string
 	hostWait     time.Duration
 	copyAttempts int
+	copyBytes    int64
+	copyIdle     time.Duration
 }
 
 type syncLiveBackend struct {
-	o      syncLiveOptions
-	m      *mover
-	client *http.Client
-	copy   func(context.Context, copyOptions) error
-	bytes  atomic.Int64 // response bytes read for verification
-	waits  atomic.Int64 // retries while a store was unavailable
-	busy   atomic.Int64 // retries after 429 (all transfer slots taken)
+	o         syncLiveOptions
+	m         *mover
+	client    *http.Client
+	copy      func(context.Context, copyOptions) error
+	listLimit atomic.Int64 // learned catalog page cap after a truncated JSON response
+	bytes     atomic.Int64 // response bytes read for verification
+	waits     atomic.Int64 // retries while a store was unavailable
+	busy      atomic.Int64 // retries after 429 (all transfer slots taken)
 }
 
 func (b *syncLiveBackend) syncStats() (int64, int64, int64) {
@@ -126,15 +129,28 @@ func (b *syncLiveBackend) wait(ctx context.Context, what, store string, call fun
 }
 
 func (b *syncLiveBackend) List(ctx context.Context, store, prefix, after string, limit int) ([]string, error) {
+	if learned := b.listLimit.Load(); learned > 0 {
+		limit = min(limit, int(learned))
+	}
 	query := url.Values{"after": {after}, "limit": {strconv.Itoa(limit)}}
 	if prefix != "" {
 		query.Set("prefix", prefix)
 	}
 	var page []string
 	err := b.wait(ctx, "list", store, func() error {
-		page = nil
-		_, err := b.m.requestOnce(ctx, store, "/v1/transfer/list?"+query.Encode(), nil, &page)
-		return err
+		for {
+			page = nil
+			_, err := b.m.requestOnce(ctx, store, "/v1/transfer/list?"+query.Encode(), nil, &page)
+			if !errors.Is(err, io.ErrUnexpectedEOF) || limit <= 1 {
+				return err
+			}
+			// A count-bounded long-name page can exceed the decoder byte cap.
+			// Retry the same cursor and remember the smaller page size.
+			limit /= 2
+			b.listLimit.Store(int64(limit))
+			query.Set("limit", strconv.Itoa(limit))
+			event("sync_list_page_reduced", map[string]any{"store": store, "limit": limit, "error": err.Error()})
+		}
 	})
 	return page, err
 }
@@ -282,9 +298,16 @@ func (b *syncLiveBackend) Fetch(ctx context.Context, store string, names []strin
 }
 
 func (b *syncLiveBackend) copyOptions(source, target, names, journal string, maxFailures int) copyOptions {
-	return copyOptions{from: source, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
-		streams: b.o.copyStreams, maxBytes: 64 << 20, maxNames: 8192, maxFailures: maxFailures,
-		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transportRetries: 10, transferIdle: defaultTransferIdle}
+	maxBytes, idle := b.o.copyBytes, b.o.copyIdle
+	if maxBytes == 0 {
+		maxBytes = copyDefaultBatchBytes
+	}
+	if idle == 0 {
+		idle = defaultTransferIdle
+	}
+	return copyOptions{froms: []string{source}, to: target, names: names, state: journal, engine: "metric", tokenEnv: b.o.tokenEnv,
+		streams: b.o.copyStreams, maxBytes: maxBytes, maxNames: 8192, maxFailures: maxFailures,
+		tick: 2 * time.Second, maxBackoff: 30 * time.Second, transportRetries: 10, transferIdle: idle}
 }
 
 // Copy runs the copy engine over a name list. A one-name probe first detects
@@ -332,7 +355,7 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 	if ctx.Err() != nil {
 		return syncCopyResult{}, ctx.Err()
 	}
-	failed, err := copyJournalFailures(journal, names)
+	failed, err := copyJournalFailures(journal, source, names)
 	if err != nil {
 		return syncCopyResult{}, err
 	}
@@ -358,7 +381,7 @@ func journalStatus(path string, status int) bool {
 
 // copyJournalFailures returns the names not covered by a done range of the
 // copy journal: failed names and names an aborted run never reached.
-func copyJournalFailures(path string, names []string) ([]string, error) {
+func copyJournalFailures(path, source string, names []string) ([]string, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return names, nil
@@ -373,13 +396,13 @@ func copyJournalFailures(path string, names []string) ([]string, error) {
 	for scanner.Scan() {
 		var row copyRow
 		if json.Unmarshal(scanner.Bytes(), &row) == nil && row.Kind == "done" {
-			j.ranges = append(j.ranges, copyRange{row.First, row.Last})
+			j.ranges = append(j.ranges, copyRange{Source: row.Source, First: row.First, Last: row.Last})
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
-	cover := j.cover()
+	cover := j.cover(source)
 	var failed []string
 	for _, n := range names { // names are byte-sorted (namesFile sorts)
 		if !cover(n) {

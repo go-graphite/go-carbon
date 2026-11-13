@@ -378,3 +378,16 @@ The throughput ratio is 1.02×; wire reduction is 481.8×. This measures the exi
 heavy synthetic fixture, not production disk/NIC throughput. Run with
 `go test -p 1 -parallel 1 ./internal/chunkstore -run '^$' -bench
 '^BenchmarkNativeWindowHeavy$' -benchtime=1x -count=3`.
+
+Sync also accepts `--max-batch-bytes` and `--transfer-idle-timeout` and
+forwards them to every missing-name and hole-fill transfer, including probes
+and retries. For example, resume a busy target with smaller batches:
+
+```sh
+store-copy sync --from http://source:4242 --to http://target:4242 \
+  --state ./sync-state --max-batch-bytes=16777216 --transfer-idle-timeout=80s
+```
+
+If a long-name catalog page exceeds the HTTP decoder byte limit, discovery
+retries the same cursor with fewer names and retains the smaller page size.
+Existing sync and single-source copy journals remain reusable.
