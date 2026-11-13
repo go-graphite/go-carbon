@@ -168,7 +168,7 @@ func (s *syncer) verifyNames(ctx context.Context, row *syncRow, names []string) 
 		switch {
 		case !ok:
 			row.Unindexed = append(row.Unindexed, n)
-		case syncShort(archives):
+		case !s.o.includeShort && syncShort(archives):
 			row.Short = append(row.Short, n)
 		default:
 			eligible = append(eligible, n)

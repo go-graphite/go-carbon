@@ -3,6 +3,7 @@ package downsize
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -451,5 +452,44 @@ func TestSyncPrefixScopesTheRun(t *testing.T) {
 	}
 	if _, ok := dst.points["c.peerhole"][60][holes[0]]; ok {
 		t.Fatal("name outside the prefix filled")
+	}
+}
+
+func TestSyncShortRetentionRecovery(t *testing.T) {
+	for _, include := range []bool{false, true} {
+		t.Run(fmt.Sprintf("include=%t", include), func(t *testing.T) {
+			f := newFakeSync()
+			schema := []syncArchive{{Step: 60, Points: 2 * 1440}}
+			hole := (syncTestNow - 3600) / 60 * 60
+			f.put(syncT, "existing", schema, hole)
+			f.put(syncD1, "existing", schema)
+			f.put(syncD1, "missing", schema)
+			// Copying a peer must preserve a finite target value.
+			f.store(syncT).points["existing"][60][hole-60] = 12345
+			o := syncOptions{to: syncT, from: []string{syncD1}, state: t.TempDir(), streams: 2, batch: 2, maxRounds: 4,
+				includeShort: include, windows: syncRanges{{Name: "gap", From: hole - 120, Until: hole + 120}},
+				now: func() time.Time { return time.Unix(syncTestNow, 0) }}
+			if err := runSync(context.Background(), o, f); err != nil {
+				t.Fatal(err)
+			}
+			_, filled := f.store(syncT).points["existing"][60][hole]
+			_, copied := f.store(syncT).archives["missing"]
+			if filled != include || copied != include {
+				t.Fatalf("filled=%t copied=%t, include=%t", filled, copied, include)
+			}
+			if got := f.store(syncT).points["existing"][60][hole-60]; got != 12345 {
+				t.Fatalf("overwrote target value: %v", got)
+			}
+			if include {
+				f.copies = nil
+				o.state = t.TempDir()
+				if err := runSync(context.Background(), o, f); err != nil {
+					t.Fatal(err)
+				}
+				if len(f.copies) != 0 {
+					t.Fatalf("fresh verification copied again: %v", f.copies)
+				}
+			}
+		})
 	}
 }

@@ -84,18 +84,19 @@ type syncBackend interface {
 }
 
 type syncOptions struct {
-	to          string
-	from        []string
-	ring, state string
-	prefix      string
-	streams     int
-	batch       int
-	maxRounds   int
-	settle      time.Duration
-	windows     syncRanges
-	sampleEvery int
-	progress    time.Duration
-	now         func() time.Time
+	to           string
+	from         []string
+	ring, state  string
+	prefix       string
+	streams      int
+	batch        int
+	maxRounds    int
+	settle       time.Duration
+	windows      syncRanges
+	sampleEvery  int
+	includeShort bool
+	progress     time.Duration
+	now          func() time.Time
 }
 
 type syncOrigins []string
@@ -126,6 +127,7 @@ func SyncMain(ctx context.Context, args []string) error {
 	flags.DurationVar(&o.settle, "settle", 10*time.Minute, "ignore the newest points: replicas may still be writing them")
 	flags.Var(&o.windows, "window", "hole-prone range [name:]from:until in Unix seconds (restart/cutover/copy windows); repeat or space-separate. Every name is checked over every window")
 	flags.IntVar(&o.sampleEvery, "sample-every", 64, "with --window: also check 1 in N names over full history, every archive (1 = all, 0 = none). Without --window every name is checked over full history")
+	flags.BoolVar(&o.includeShort, "include-short-retention", false, "also compare and fill names whose archives all retain at most 3 days")
 	flags.DurationVar(&o.progress, "progress-interval", 30*time.Second, "progress line interval")
 	flags.IntVar(&live.carbonPort, "carbonserver-port", 8080, "carbonserver port on every store (reads for verify)")
 	flags.IntVar(&live.copyStreams, "copy-streams", 0, "parallel copy transfers; 0 uses the copy default")
@@ -356,7 +358,13 @@ func runSync(ctx context.Context, o syncOptions, b syncBackend) error {
 	if err := os.MkdirAll(o.state, 0o755); err != nil {
 		return err
 	}
-	identity, err := json.Marshal(map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "windows": o.windows.String(), "sample_every": o.sampleEvery})
+	identityFields := map[string]any{"to": o.to, "from": o.from, "ring": o.ring, "prefix": o.prefix, "windows": o.windows.String(), "sample_every": o.sampleEvery}
+	// Keep old default journals resumable, but never reuse skipped comparisons
+	// when a recovery opts into short-retention names.
+	if o.includeShort {
+		identityFields["include_short_retention"] = true
+	}
+	identity, err := json.Marshal(identityFields)
 	if err != nil {
 		return err
 	}
