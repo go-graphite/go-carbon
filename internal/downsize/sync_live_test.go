@@ -106,7 +106,7 @@ func TestSyncLiveCopyForbiddenProbe(t *testing.T) {
 		}
 		defer j.close()
 		_ = j.failed("http://s:4242", "a", http.StatusForbidden, "source is neither a ring node nor a configured transfer source")
-		return &apiError{Status: 0, Message: "1 names failed"}
+		return &apiError{Status: 0, Message: "source probe rejected"}
 	}
 	res, err := b.Copy(context.Background(), "http://s:4242", "http://t:4242", []string{"a", "b"}, journal)
 	if err != nil {
@@ -202,5 +202,37 @@ func TestSyncCopyRealEngine(t *testing.T) {
 	res, err := b.Copy(context.Background(), src, dst, []string{"a", "b"}, journal)
 	if err != nil || res.Copied != 2 || len(res.Failed) != 0 {
 		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestSyncLiveCopyFinalSkipsAreNotEngineAborts(t *testing.T) {
+	dir := t.TempDir()
+	journal := filepath.Join(dir, "copy.jsonl")
+	if err := os.WriteFile(filepath.Join(dir, "copy.names"), []byte("a\nb\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b := newSyncLiveBackend(syncLiveOptions{copyAttempts: 6})
+	calls := 0
+	b.copy = func(_ context.Context, o copyOptions) error {
+		calls++
+		if calls == 1 {
+			return nil
+		} // source probe
+		j, err := openCopyJournal(o.state, "test")
+		if err != nil {
+			return err
+		}
+		defer j.close()
+		if err := j.done("http://s:4242", "a", "a", 1, 10, time.Millisecond); err != nil {
+			return err
+		}
+		if err := j.failed("http://s:4242", "b", http.StatusNotFound, "source export: not found"); err != nil {
+			return err
+		}
+		return &copySkippedError{count: 1, path: o.state + ".skipped"}
+	}
+	res, err := b.Copy(context.Background(), "http://s:4242", "http://t:4242", []string{"a", "b"}, journal)
+	if err != nil || calls != 2 || res.Copied != 1 || len(res.Failed) != 1 || res.Failed[0] != "b" {
+		t.Fatalf("calls=%d result=%+v err=%v", calls, res, err)
 	}
 }

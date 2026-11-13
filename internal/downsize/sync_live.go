@@ -14,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -341,13 +340,15 @@ func (b *syncLiveBackend) Copy(ctx context.Context, source, target string, names
 		if err == nil || ctx.Err() != nil {
 			break
 		}
-		event("sync_copy_retry", map[string]any{"level": "warn", "source": source, "attempt": attempt, "error": err.Error()})
-		if strings.Contains(err.Error(), "names failed") {
-			if attempt >= 2 {
-				break // per-name failures retried once: report them
-			}
-			continue
+		var skipped *copySkippedError
+		if errors.As(err, &skipped) {
+			// The engine has already retried individual failures once. Keep
+			// its completed ranges and report the residual names immediately.
+			event("sync_copy_skipped", map[string]any{"level": "warn", "source": source, "names": skipped.count, "error": err.Error()})
+			break
 		}
+		event("sync_copy_retry", map[string]any{"level": "warn", "source": source, "attempt": attempt, "error": err.Error()})
+
 		if attempt < b.o.copyAttempts {
 			if err := sleepContext(ctx, time.Duration(attempt)*30*time.Second); err != nil {
 				return syncCopyResult{}, err

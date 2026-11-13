@@ -254,6 +254,10 @@ func TestPlanFreeCopySendsOversizedNameAloneAndSkipsImpossibleOne(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "1 names still skipped") {
 		t.Fatal("want one skipped name, got", err)
 	}
+	var skipped *copySkippedError
+	if !errors.As(err, &skipped) || skipped.count != 1 || skipped.path != o.state+".skipped" {
+		t.Fatalf("final skip result lost its type or report path: %v", err)
+	}
 	if list, _ := os.ReadFile(o.state + ".skipped"); !strings.Contains(string(list), "\tx.00015\t413\t") {
 		t.Fatalf("skipped list lacks x.00015: %q", list)
 	}
