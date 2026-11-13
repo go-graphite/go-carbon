@@ -679,7 +679,7 @@ func (c *ContinuationCodec) updateAttempt(ctx context.Context, kv store.Continua
 		if buffer != nil {
 			buffer.ContinuationIO = *attempt
 		} else {
-			fs.kv, fs.prober = *attempt, nil
+			fs.kv, fs.prober = *attempt, *attempt
 		}
 	}
 	timer.Enter(stagetime.Decode)

@@ -57,6 +57,27 @@ func (o *continuationOverlay) Get(key []byte) ([]byte, error) {
 	return o.base.Get(key)
 }
 
+// Probe reads key like Get. A key the overlay neither holds nor hides goes to
+// the base's Probe, so an update staged in an overlay keeps reading usually
+// absent keys (a classic group's reference alias, say) through the store's
+// shared iterator instead of a fresh lookup that opens a table in every level.
+func (o *continuationOverlay) Probe(key []byte) ([]byte, error) {
+	if v, ok := o.values[string(key)]; ok {
+		return bytes.Clone(v), nil
+	}
+	if o.hidden(key) {
+		return nil, store.ErrNotFound
+	}
+	if p, ok := o.base.(store.ContinuationProber); ok && overlayProbes {
+		return p.Probe(key)
+	}
+	return o.base.Get(key)
+}
+
+// overlayProbes lets an overlay forward Probe to its base. Tests clear it to
+// run the fresh-lookup path as the oracle.
+var overlayProbes = true
+
 func (o *continuationOverlay) Set(key, value []byte) error {
 	o.values[string(key)] = bytes.Clone(value)
 	delete(o.deleted, string(key))
