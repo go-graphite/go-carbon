@@ -50,6 +50,8 @@ type ContinuationCodec struct {
 	// keepTailReads retains the previous read-per-propagation path as an
 	// oracle for tests and benchmarks.
 	keepTailReads bool
+	// keepClassicSnapshotReads retains the Whisper byte reader as a test oracle.
+	keepClassicSnapshotReads bool
 }
 
 // foldsImportedSidecars is disabled only by legacy-oracle tests.
@@ -811,6 +813,9 @@ func (c *ContinuationCodec) Snapshot(ctx context.Context, kv store.ContinuationI
 		return store.Snapshot{}, err
 	}
 	defer w.Close()
+	if !w.IsCompressed() && !c.keepClassicSnapshotReads && reflect.DeepEqual(w.StorageLayout(), fs.files["main.wsp"].layout) {
+		return classicContinuationSnapshot(ctx, fs, m)
+	}
 	if w.IsCompressed() {
 		if err := w.MergeOutOfOrder(); err != nil {
 			return store.Snapshot{}, err
