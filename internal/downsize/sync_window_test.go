@@ -96,7 +96,7 @@ func TestSyncWindowNativeDifferential(t *testing.T) {
 	}
 	backend := newSyncLiveBackend(syncLiveOptions{})
 	w := syncRange{Name: "gap", From: testMetricNow - 10, Until: testMetricNow}
-	presence, err := backend.WindowPresence(ctx, donor.URL, []string{"new", "overlap"}, w)
+	presence, err := backend.WindowPresence(ctx, donor.URL, []string{"overlap", "new"}, w)
 	if err != nil || presence["new"][0].Count == 0 {
 		t.Fatal(presence, err)
 	}

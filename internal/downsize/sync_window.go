@@ -308,14 +308,19 @@ func (b *syncLiveBackend) WindowPresence(ctx context.Context, source string, nam
 			if stream.Window == nil || stream.Window.From != w.From || stream.Window.Until != w.Until || stream.Count != len(subset) {
 				return fmt.Errorf("window export scope mismatch")
 			}
+			expected := make(map[string]bool, len(subset))
+			for _, n := range subset {
+				expected[n] = true
+			}
 			for i := 0; i < stream.Count; i++ {
 				record, err := stream.Next()
 				if err != nil {
 					return err
 				}
-				if record.Config.Name != subset[i] {
+				if !expected[record.Config.Name] {
 					return fmt.Errorf("window export name mismatch")
 				}
+				delete(expected, record.Config.Name)
 				if record.NativeSkip != nil {
 					return fmt.Errorf("window export skipped %s: %s", record.Config.Name, record.NativeSkip.Reason)
 				}
