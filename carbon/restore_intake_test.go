@@ -145,10 +145,23 @@ func TestLegacyRestoreIntakeLifecycle(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	started := time.Now()
-	app.Stop()
-	if time.Since(started) > 3*time.Second {
+	// Check the prefix worker itself: journal flush/close can take longer than
+	// cancellation on a busy disk and is a separate shutdown operation.
+	drainDone := app.legacyDrainDone
+	stopped := make(chan struct{})
+	go func() {
+		app.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-drainDone:
+	case <-time.After(3 * time.Second):
 		t.Fatal("stop waited for a finite prefix with the persister stopping")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(30 * time.Second):
+		t.Fatal("shutdown did not finish after prefix cancellation")
 	}
 }
 
